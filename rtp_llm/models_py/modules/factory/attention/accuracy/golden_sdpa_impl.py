@@ -141,7 +141,7 @@ class GoldenSDPAImpl(FMHAImplBase):
         scores = torch.matmul(q, k.transpose(-1, -2)) * self.scale
         probabilities = torch.softmax(scores, dim=-1)
         contribution_sq = torch.matmul(probabilities.square(), v.square())
-        return contribution_sq.clamp_min(0).sqrt().mean(-1).squeeze(-1)
+        return contribution_sq.clamp_min(0).mean(-1).sqrt().squeeze(-1)
 
     def _sdpa(
         self,

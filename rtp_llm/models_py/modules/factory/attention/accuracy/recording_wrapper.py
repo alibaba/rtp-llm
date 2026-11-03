@@ -16,10 +16,16 @@ class RecordingWrapper(FMHAImplBase):
         inner_impl: FMHAImplBase,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
+        record_inputs: bool = True,
+        record_output: bool = True,
+        record_reference: bool = True,
     ) -> None:
         self.inner = inner_impl
         self.attn_configs = attn_configs
         self.attn_inputs = attn_inputs
+        self.record_inputs = record_inputs
+        self.record_output = record_output
+        self.record_reference = record_reference
         self.layer_records: Dict[int, AttentionLayerRecord] = {}
 
     def forward(
@@ -28,30 +34,36 @@ class RecordingWrapper(FMHAImplBase):
         kv_cache: Optional[LayerKVCache],
         layer_idx: int = 0,
     ) -> torch.Tensor:
-        q, k, v = self._split(qkv)
-        q = q.detach().clone()
-        k = k.detach().clone()
-        v = v.detach().clone()
+        q = k = v = None
+        if self.record_inputs:
+            q, k, v = self._split(qkv)
+            q = q.detach().clone()
+            k = k.detach().clone()
+            v = v.detach().clone()
         out = self.inner.forward(qkv, kv_cache, layer_idx)
-        # impls return either [T, Hq, D] (paged) or [T, Hq*D] (FMHAv2/XQA)
-        # the record copy is always flattened to packed [T, Hq*D]
-        # But the model still gets inner's raw out
-        out_rec = out.reshape(out.shape[0], -1)
         reference_contribution = getattr(
             self.inner, "last_attention_contribution", None
         )
-        self.layer_records[layer_idx] = AttentionLayerRecord(
-            layer_idx=layer_idx,
-            q=q,
-            k=k,
-            v=v,
-            output=out_rec.detach().clone(),
-            reference_contribution=(
-                reference_contribution.detach().clone()
-                if reference_contribution is not None
+        if self.record_inputs or self.record_output or self.record_reference:
+            # impls return either [T, Hq, D] (paged) or [T, Hq*D] (FMHAv2/XQA)
+            # the record copy is always flattened to packed [T, Hq*D].
+            out_rec = (
+                out.reshape(out.shape[0], -1).detach().clone()
+                if self.record_output
                 else None
-            ),
-        )
+            )
+            self.layer_records[layer_idx] = AttentionLayerRecord(
+                layer_idx=layer_idx,
+                q=q,
+                k=k,
+                v=v,
+                output=out_rec,
+                reference_contribution=(
+                    reference_contribution.detach().clone()
+                    if self.record_reference and reference_contribution is not None
+                    else None
+                ),
+            )
         return out
 
     def _split(

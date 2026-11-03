@@ -3,6 +3,22 @@
 #include <limits>
 
 namespace rtp_llm {
+std::vector<int> CudaGraphRunner::defaultDecodeBatchSizesToCapture(int max_batch_size) {
+    std::vector<int> buckets;
+    for (int batch : {1, 8, 16, 24, 32}) {
+        if (batch <= max_batch_size) {
+            buckets.push_back(batch);
+        }
+    }
+    for (int64_t batch = 48; batch <= max_batch_size; batch += 16) {
+        buckets.push_back(static_cast<int>(batch));
+    }
+    if (max_batch_size > 0 && (buckets.empty() || buckets.back() != max_batch_size)) {
+        buckets.push_back(max_batch_size);
+    }
+    return buckets;
+}
+
 void CudaGraphRunner::replayDecode(int bs) {
     replayGraph(bs);
 }
@@ -29,24 +45,8 @@ std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
         return decode_capture_batch_sizes_;
     }
 
-    // Otherwise, use default logic
-    std::vector<int> capture_bs;
-    int              max_generate_batch_size = max_bs_;
-    RTP_LLM_LOG_INFO("max_generate_batch_size for cuda graph: %d", max_generate_batch_size);
-    // Add key batch sizes up to 32
-    for (int i : {1, 8, 16, 24, 32}) {
-        if (i <= max_generate_batch_size) {
-            capture_bs.push_back(i);
-        }
-    }
-    // Add range from 48 to max_generate_batch_size, stepping by 16
-    for (int64_t i = 48; i <= max_generate_batch_size; i += 16) {
-        capture_bs.push_back(static_cast<int>(i));
-    }
-    if (capture_bs[capture_bs.size() - 1] != max_generate_batch_size) {
-        capture_bs.push_back(max_generate_batch_size);
-    }
-    return capture_bs;
+    RTP_LLM_LOG_INFO("max_generate_batch_size for cuda graph: %d", static_cast<int>(max_bs_));
+    return defaultDecodeBatchSizesToCapture(static_cast<int>(max_bs_));
 }
 
 void CudaGraphRunner::captureDecodeOneBatchSize(int bs) {

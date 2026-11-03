@@ -64,16 +64,18 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                int                                    propose_model_index,
                                std::function<void()>                  profile_step_start,
                                std::function<void()>                  profile_step_finish,
-                               bool                                   allow_cuda_graph):
+                               bool                                   allow_cuda_graph,
+                               bool                                   accuracy_check_mode):
     Executor(),
     cache_manager_(cache_manager),
     warm_up_(warm_up),
+    accuracy_check_mode_(accuracy_check_mode),
     use_all_gather_(params.moe_config.use_all_gather && !params.moe_config.use_deepep_low_latency),
-    metrics_reporter_(params.metrics_reporter),
+    metrics_reporter_(accuracy_check_mode ? nullptr : params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
-        params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
+        params.parallelism_config.tp_rank == 0 && !warm_up && !accuracy_check_mode ? metrics_reporter_ : nullptr)),
     wall_tps_reporter_(WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
-        params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
+        params.parallelism_config.tp_rank == 0 && !warm_up && !accuracy_check_mode ? metrics_reporter_ : nullptr)),
     is_propose_(is_propose),
     propose_model_index_(propose_model_index),
     profile_step_start_(std::move(profile_step_start)),
@@ -90,7 +92,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     // First instance() call may carry the arg+env resolved engine config; a
     // null/disabled config leaves the recorder Disabled.
     auto& recorder = ExecutionRecorder::instance(&params.profiling_debug_logging_config);
-    if (!warm_up_ && !is_propose_ && recorder.needsConfiguration()) {
+    if (!warm_up_ && !is_propose_ && !accuracy_check_mode_ && recorder.needsConfiguration()) {
         ExecutionRecorder::Json metadata{{"tp_size", parallelism_config_.tp_size},
                                          {"dp_size", parallelism_config_.dp_size},
                                          {"world_size", parallelism_config_.world_size},
@@ -177,6 +179,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         role_type_,
         warm_up_,
         params.model_config_.hidden_state_capture_layer_ids);
+    if (accuracy_check_mode) {
+        model_init_params.hidden_state_capture_layer_ids.clear();
+    }
     model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
@@ -217,8 +222,14 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
             params.py_model.attr("configure_dynamic_decode")(params.hw_kernel_config.enable_dynamic_decode_backend
                                                              && !warm_up && allow_cuda_graph);
         }
-        model_.reset(new PyWrappedModel(
-            model_init_params, params.py_model, false, false, DSparkModelRole::NONE, allow_cuda_graph));
+        model_.reset(new PyWrappedModel(model_init_params,
+                                        params.py_model,
+                                        false,
+                                        false,
+                                        DSparkModelRole::NONE,
+                                        allow_cuda_graph,
+                                        false,
+                                        !accuracy_check_mode));
     } else if (test_model_factory) {
         RTP_LLM_LOG_INFO("init executor with test model factory");
         model_ = test_model_factory(model_init_params);
@@ -232,18 +243,20 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                   cache_manager->cacheConfig()) :
                                    CacheConfig();
 
-    const int async_worker_count =
-        tp_rank_ > 0 || warm_up_ || is_propose_ ? 0 : params.runtime_config.output_dispatcher_worker_count;
+    const int async_worker_count = tp_rank_ > 0 || warm_up_ || is_propose_ || accuracy_check_mode ?
+                                       0 :
+                                       params.runtime_config.output_dispatcher_worker_count;
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.model_config_,
                                                                  params.pd_sep_config,
                                                                  params.profiling_debug_logging_config,
                                                                  cache_config,
                                                                  warm_up_,
                                                                  async_worker_count));
-    LogitsProcessorFactory::init(params.model_config_,
-                                 params.grammar_config,
-                                 params.sp_config.tree_decode_config,
-                                 params.parallelism_config.tp_rank == 0 && !warm_up_ ? metrics_reporter_ : nullptr);
+    LogitsProcessorFactory::init(
+        params.model_config_,
+        params.grammar_config,
+        params.sp_config.tree_decode_config,
+        params.parallelism_config.tp_rank == 0 && !warm_up_ && !accuracy_check_mode_ ? metrics_reporter_ : nullptr);
     cudaProfilerBegin();
 }
 
@@ -287,7 +300,8 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
     }
 
     auto&      execution_recorder = ExecutionRecorder::instance();
-    const bool record_owner       = execution_recorder.enabled() && !warm_up_ && !is_propose_ && tp_rank_ == 0;
+    const bool record_owner =
+        execution_recorder.enabled() && !warm_up_ && !is_propose_ && !accuracy_check_mode_ && tp_rank_ == 0;
     // dp>1 idle steps fill batches with fake streams (mayAddFakeStream); a
     // fake-only batch carries no request slots and would drain the recorder's
     // total-bytes budget with is_fake lines, exactly like an idle alignment
@@ -558,6 +572,9 @@ bool NormalExecutor::updateEplbConfig(const EPLBConfig& config) {
 }
 
 bool NormalExecutor::useStreamAsync() const {
+    if (accuracy_check_mode_) {
+        return false;
+    }
     static const bool enabled = []() {
         return readEnvFlagOnce("RTP_LLM_STREAM_ASYNC", "normal-stream-async", "useStreamAsync");
     }();

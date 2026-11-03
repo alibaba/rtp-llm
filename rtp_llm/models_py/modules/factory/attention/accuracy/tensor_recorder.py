@@ -111,7 +111,10 @@ class TensorRecorder:
             )
             self._factory = (
                 lambda attn_configs, attention_inputs, parallelism_config: impl_cls(
-                    attn_configs, attention_inputs, parallelism_config
+                    attn_configs,
+                    attention_inputs,
+                    parallelism_config,
+                    **self._implementation_kwargs(impl_cls),
                 )
             )
         self.model.prepare_fmha_impl = self._recording_prepare
@@ -189,7 +192,12 @@ class TensorRecorder:
         viable = []
         for impl_cls in supported:
             try:
-                impl_cls(attn_configs, attention_inputs, parallelism_config)
+                impl_cls(
+                    attn_configs,
+                    attention_inputs,
+                    parallelism_config,
+                    **self._implementation_kwargs(impl_cls),
+                )
                 viable.append(impl_cls.__name__)
             except Exception as e:
                 logging.error(
@@ -200,5 +208,18 @@ class TensorRecorder:
             self._factory(attn_configs, attention_inputs, parallelism_config),
             attn_configs,
             attention_inputs,
+            **self._recording_options(),
         )
         return self._wrapper
+
+    def _recording_options(self) -> Dict[str, bool]:
+        return {
+            "record_inputs": True,
+            "record_output": True,
+            "record_reference": True,
+        }
+
+    def _implementation_kwargs(self, impl_cls: type[FMHAImplBase]) -> dict[str, Any]:
+        if impl_cls.accepts_fmha_config:
+            return {"fmha_config": self.model.fmha_config}
+        return {}

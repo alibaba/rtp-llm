@@ -2,14 +2,22 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <exception>
 #include <future>
 #include <memory>
 #include <string>
 #include <thread>
 #include "torch/all.h"
+#if USING_CUDA
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#endif
 
 #define private public
 #define protected public
+#if USING_CUDA
+#include "rtp_llm/cpp/normal_engine/accuracy/AccuracyChecker.h"
+#endif
+#include "rtp_llm/cpp/normal_engine/accuracy/AttentionAccuracyCheckResourceRelease.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 #undef protected
@@ -237,6 +245,101 @@ TEST_P(EngineStopTest, SystemPromptsDoNotConsumeProfilingWindow) {
 }
 
 INSTANTIATE_TEST_SUITE_P(SerialAndParallel, EngineStopTest, ::testing::Values(0, 2));
+
+TEST(AccuracyCheckExecutorTest, DisablesProductionSideEffects) {
+    CustomConfig config;
+    config.output_dispatcher_worker_count = 2;
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params               = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    NormalExecutor::test_model_factory = [vocab = model_config.vocab_size](const GptModelInitParams&) {
+        return std::make_unique<MockModel>(vocab);
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } factory_reset_guard;
+
+    NormalExecutor executor(params, nullptr, false, false, 0, nullptr, nullptr, false, true);
+    EXPECT_FALSE(executor.useStreamAsync());
+    EXPECT_EQ(executor.metrics_reporter_, nullptr);
+    EXPECT_EQ(executor.model_inputs_logger_, nullptr);
+    EXPECT_EQ(executor.batch_stream_processor_->output_dispatcher_->thread_pool_, nullptr);
+}
+
+#if USING_CUDA
+TEST(DecodeCaptureBucketsTest, PreservesDefaultGraphShapesAndFinalCapacity) {
+    EXPECT_EQ(CudaGraphRunner::defaultDecodeBatchSizesToCapture(1), std::vector<int>({1}));
+    EXPECT_EQ(CudaGraphRunner::defaultDecodeBatchSizesToCapture(7), std::vector<int>({1, 7}));
+    EXPECT_EQ(CudaGraphRunner::defaultDecodeBatchSizesToCapture(8), std::vector<int>({1, 8}));
+    EXPECT_EQ(CudaGraphRunner::defaultDecodeBatchSizesToCapture(33), std::vector<int>({1, 8, 16, 24, 32, 33}));
+    EXPECT_EQ(CudaGraphRunner::defaultDecodeBatchSizesToCapture(48), std::vector<int>({1, 8, 16, 24, 32, 48}));
+    EXPECT_EQ(CudaGraphRunner::defaultDecodeBatchSizesToCapture(65), std::vector<int>({1, 8, 16, 24, 32, 48, 64, 65}));
+}
+
+TEST(AccuracyCheckCacheTest, RejectsZeroBlockSize) {
+    KVCacheConfig kv_cache_config;
+    EXPECT_THROW(AccuracyChecker::computeTemporaryBlockNum(0, kv_cache_config), std::exception);
+}
+#endif
+
+TEST(AccuracyCheckResourceReleaseTest, ReleasesExecutorOwnedTemporaryKvCacheBeforeCudaCleanup) {
+    struct TemporaryCache {};
+    struct TemporaryExecutor {
+        explicit TemporaryExecutor(std::shared_ptr<TemporaryCache> cache): cache(std::move(cache)) {}
+
+        std::shared_ptr<TemporaryCache> cache;
+    };
+
+    auto cache                       = std::make_shared<TemporaryCache>();
+    auto weak_cache                  = std::weak_ptr<TemporaryCache>(cache);
+    auto executor                    = std::make_unique<TemporaryExecutor>(cache);
+    int  synchronize_count           = 0;
+    int  empty_cache_count           = 0;
+    bool cache_released_before_sync  = false;
+    bool cache_released_before_empty = false;
+
+    attention_accuracy_check::releaseResources(
+        executor,
+        cache,
+        [&]() {
+            ++synchronize_count;
+            cache_released_before_sync = weak_cache.expired();
+        },
+        [&]() {
+            ++empty_cache_count;
+            cache_released_before_empty = weak_cache.expired();
+        });
+
+    EXPECT_EQ(executor, nullptr);
+    EXPECT_EQ(cache, nullptr);
+    EXPECT_EQ(synchronize_count, 1);
+    EXPECT_EQ(empty_cache_count, 1);
+    EXPECT_TRUE(cache_released_before_sync);
+    EXPECT_TRUE(cache_released_before_empty);
+}
+
+#if USING_CUDA
+TEST(AccuracyCheckPromptTest, IsDeterministicAndLengthDependent) {
+    ModelConfig       model_config;
+    RuntimeConfig     runtime_config;
+    ParallelismConfig parallelism_config;
+    model_config.vocab_size     = 1024;
+    model_config.embedding_size = 512;
+    AccuracyChecker checker(model_config, runtime_config, parallelism_config);
+
+    const auto first  = checker.makeCheckPrompt(128);
+    const auto second = checker.makeCheckPrompt(128);
+    const auto longer = checker.makeCheckPrompt(129);
+
+    EXPECT_TRUE(torch::equal(first, second));
+    EXPECT_FALSE(torch::equal(first.slice(0, 0, 128), longer.slice(0, 0, 128)));
+    EXPECT_GE(first.min().item<int32_t>(), 0);
+    EXPECT_LT(first.max().item<int32_t>(), 512);
+}
+#endif
 
 }  // namespace
 }  // namespace rtp_llm

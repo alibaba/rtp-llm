@@ -7,10 +7,10 @@ import torch
 @dataclass
 class AttentionLayerRecord:
     layer_idx: int
-    q: torch.Tensor  # packed [T, head_num, head_dim]
-    k: torch.Tensor  # packed [T, kv_head_num, head_dim]
-    v: torch.Tensor  # packed [T, kv_head_num, head_dim]
-    output: torch.Tensor  # packed [T, head_num * head_dim]
+    q: Optional[torch.Tensor]  # packed [T, head_num, head_dim]
+    k: Optional[torch.Tensor]  # packed [T, kv_head_num, head_dim]
+    v: Optional[torch.Tensor]  # packed [T, kv_head_num, head_dim]
+    output: Optional[torch.Tensor]  # packed [T, head_num * head_dim]
     # Golden-only [batch, head_num] contribution RMS used by the decode gate.
     reference_contribution: Optional[torch.Tensor] = None
 
