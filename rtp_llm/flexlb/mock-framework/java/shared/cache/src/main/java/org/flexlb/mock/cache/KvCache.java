@@ -3,7 +3,9 @@ package org.flexlb.mock.cache;
 import java.util.*;
 import static org.flexlb.mock.cache.BlockPool.Kind.*;
 
-/** RTP Full-KV storage. Local tier copies are instantaneous under this owner's monitor. */
+/**
+ * RTP Full-KV storage. Local tier copies are instantaneous under this owner's monitor.
+ */
 public final class KvCache implements AutoCloseable {
     public enum Failure { PERMANENT, RETRYABLE }
     public enum EvictionPolicy { LRU, LFU, FIFO }
@@ -26,7 +28,9 @@ public final class KvCache implements AutoCloseable {
     private java.util.function.Consumer<CacheMetadata.Change> metadataObserver;
     private Runnable capacityChanged = () -> {};
 
-    /** The observer must only signal; it must never acquire an Engine scheduling lock. */
+    /**
+     * The observer must only signal; it must never acquire an Engine scheduling lock.
+     */
     public synchronized void onCapacityChange(Runnable observer) { capacityChanged = Objects.requireNonNull(observer); }
 
     public KvCache(int blockSize, int blocks, int reserve, EvictionPolicy policy) {
@@ -41,13 +45,15 @@ public final class KvCache implements AutoCloseable {
         this.blockSize = blockSize; this.reserve = reserve; this.deviceCache = deviceCache;
         this.deviceWatermark = deviceWatermark; this.hostWatermark = hostWatermark;
     }
+    public synchronized long maxRequestTokens() { return (long) (device.snapshot().total() - reserve) * blockSize; }
+
     public synchronized Admission acquire(long requiredTokens, List<Long> keys) {
         if (closed) throw new IllegalStateException("Cache is closed");
         validate(keys);
         long blockDemand = blocksFor(requiredTokens);
         if (keys.size() > requiredTokens / blockSize) throw new IllegalArgumentException("Keys exceed complete input blocks");
         tree.validatePath(keys);
-        if (blockDemand > device.snapshot().total() - reserve) return rejected(Failure.PERMANENT);
+        if (requiredTokens > maxRequestTokens()) return rejected(Failure.PERMANENT);
         int demand = (int) blockDemand;
         var matched = tree.match(keys);
         matched.forEach(tree::pin);
@@ -78,7 +84,9 @@ public final class KvCache implements AutoCloseable {
         balance();
         return new Admission(lease, null, device.generation());
     }
-    /** Snapshot and subscription share the cache monitor. Observers must only enqueue, never block. */
+    /**
+     * Snapshot and subscription share the cache monitor. Observers must only enqueue, never block.
+     */
     public synchronized CacheMetadata.SnapshotKeys metadataKeys(CacheMetadata.Medium medium) { return tree.metadataKeys(medium); }
     public synchronized CacheMetadata.Snapshot metadata() { return tree.metadata(); }
     public synchronized AutoCloseable observeMetadata(java.util.function.Consumer<CacheMetadata.Change> observer) {
@@ -122,7 +130,9 @@ public final class KvCache implements AutoCloseable {
                 return null;
             }
         }
-        /** Publication does not release request ownership. Only complete immutable blocks are accepted. */
+        /**
+         * Publication does not release request ownership. Only complete immutable blocks are accepted.
+         */
         public boolean publish(List<Long> keys, long validTokens) {
             synchronized (KvCache.this) {
                 if (terminal) return false;

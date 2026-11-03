@@ -20,14 +20,14 @@ class RtpConfigTest {
         var values = (ObjectNode) root.path("component").path("config");
         var defaults = load(root);
         try (var cache = new org.flexlb.mock.cache.KvCache(16, 8, 0, org.flexlb.mock.cache.KvCache.EvictionPolicy.LRU);
-             var scheduler = RtpScheduler.factory(defaults).create(new Object(), cache)) {
+             var scheduler = RtpScheduler.factory(defaults).create(new Object(), cache, new org.flexlb.mock.engine.TaskHistory())) {
             assertInstanceOf(RtpScheduler.class, scheduler);
             assertEquals("fifo", defaults.effective().path("mock.scheduler.mode").asText());
         }
         values.put("mock.scheduler.mode", "group");
         var grouped = load(root);
         try (var cache = new org.flexlb.mock.cache.KvCache(16, 8, 0, org.flexlb.mock.cache.KvCache.EvictionPolicy.LRU);
-             var scheduler = RtpScheduler.factory(grouped).create(new Object(), cache)) {
+             var scheduler = RtpScheduler.factory(grouped).create(new Object(), cache, new org.flexlb.mock.engine.TaskHistory())) {
             assertInstanceOf(RtpGroupScheduler.class, scheduler);
             assertEquals("group", grouped.effective().path("mock.scheduler.mode").asText());
         }

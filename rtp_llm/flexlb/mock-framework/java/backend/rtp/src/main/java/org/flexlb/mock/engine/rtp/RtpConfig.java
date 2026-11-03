@@ -14,13 +14,14 @@ import org.flexlb.mock.cache.KvCache.EvictionPolicy;
 import org.flexlb.mock.cache.KvCache.Watermark;
 import org.flexlb.mock.api.model.DecodeSpec;
 
-/** Native RTP names/units stay native; resolved pool capacity excludes the native null block. */
+/**
+ * Native RTP names/units stay native; resolved pool capacity excludes the native null block.
+ */
 public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, int reserveBlocks, EvictionPolicy evictionPolicy,
                         boolean reuseCache, boolean deviceCache, int hostBlocks, EvictionPolicy hostPolicy,
                         Watermark deviceWatermark, Watermark hostWatermark, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
                         int maxGenerateBatchSize, int maxInitedKvStreams, int maxUncachedBatchTokens, int cpSize, boolean cpEnabled, int tpSize, int dpSize,
                         JsonNode business, ComputeModel compute, long cacheKeySeed) {
-    public static final int REQUEST_LIMIT = 1024;
     private static final ObjectMapper JSON = new ObjectMapper();
 
     public RtpConfig {
@@ -93,7 +94,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             nativeBool(config, "disable_decode_first_malloc_device_reuse", false),
             nativeInt(config, "max_seq_len", null, 1, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_size", 0, 0, Integer.MAX_VALUE),
-            nativeInt(config, "concurrency_limit", 32, 1, REQUEST_LIMIT),
+            nativeInt(config, "concurrency_limit", 32, 1, Integer.MAX_VALUE),
             nativeInt(config, "max_inited_kv_cache_streams", 0, 0, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_without_cache", 0, 0, Integer.MAX_VALUE),
             cpSize, cpEnabled, tpSize, dpSize,

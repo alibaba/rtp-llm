@@ -1,8 +1,5 @@
 package org.flexlb.mock.engine.rtp;
 
-import org.flexlb.mock.admission.RpcErrors;
-import org.flexlb.mock.admission.TaskHistory;
-
 import java.util.*;
 import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.compute.*;
@@ -16,7 +13,7 @@ import static org.flexlb.mock.engine.rtp.RtpSchedulerBase.Phase.*;
  */
 abstract class RtpSchedulerBase implements Scheduler {
     enum Phase { QUEUED, CAPACITY, LOADING, TRANSFERRING, TRANSFERRED, RUNNING, OUTPUT, FORWARD, READY }
-    private final TaskHistory history = new TaskHistory();
+    private final TaskHistory history;
     private final Object lock;
     protected final RtpConfig config;
     private final KvCache cache;
@@ -61,7 +58,8 @@ abstract class RtpSchedulerBase implements Scheduler {
     private record Batch(List<Member> members) {}
     private record Notice(Runnable action, boolean terminal) {}
 
-    RtpSchedulerBase(Object lock, RtpConfig config, KvCache cache) {
+    RtpSchedulerBase(Object lock, RtpConfig config, KvCache cache, TaskHistory history) {
+        this.history = Objects.requireNonNull(history);
         this.lock = Objects.requireNonNull(lock);
         this.config = Objects.requireNonNull(config);
         this.cache = Objects.requireNonNull(cache);
@@ -70,11 +68,12 @@ abstract class RtpSchedulerBase implements Scheduler {
 
     @Override public Request input(Input input, Listener listener) {
         if (closed) throw new RequestFailure(CLOSED, "Engine is closing");
-        long length = (long) input.tokens() + (prefill() ? 1 : input.maxNewTokens());
-        if (prefill() ? length > config.maxSeqLen() : length >= config.maxSeqLen())
-            throw new RequestFailure(INVALID, "Request exceeds scheduling limits");
+        int reserve = config.compute().kvReserveTokens();
+        if (input.tokens() >= config.maxSeqLen() || (long) input.tokens() + reserve > config.maxSeqLen())
+            throw new RequestFailure(INVALID, "Prompt and speculative reserve exceed the context limit");
+        if (input.tokens() > cache.maxRequestTokens())
+            throw new RequestFailure(RequestFailure.Reason.CAPACITY, "Prompt exceeds the maximum KV capacity");
         if (active.containsKey(input.identity())) throw new RequestFailure(DUPLICATE, "Active request identity already exists");
-        if (owned.size() >= RtpConfig.REQUEST_LIMIT) throw new RequestFailure(OVERLOADED, "Request/delivery limit reached");
         var entry = new Entry(input, Objects.requireNonNull(listener));
         active.put(input.identity(), entry);
         owned.add(entry);
@@ -96,6 +95,7 @@ abstract class RtpSchedulerBase implements Scheduler {
             entry.timingStarted = System.nanoTime();
             entry.waitNanos = 0; entry.canRun = entry.firstRunning = 0;
             entry.state.transferred(1);
+            if (entry.state.snapshot().generated() >= outputLimit(entry)) { emit(entry, 0, true); return; }
             entry.phase = QUEUED; entry.enqueuedAt = entry.timingStarted; waiting.addLast(entry);
             return;
         }
@@ -223,6 +223,11 @@ abstract class RtpSchedulerBase implements Scheduler {
         return sum <= budget && longest * (selected.size() + 1L) <= budget;
     }
 
+    private int outputLimit(Entry entry) {
+        return Math.min(entry.input.maxNewTokens(),
+            config.maxSeqLen() - config.compute().kvReserveTokens() - entry.input.tokens());
+    }
+
     private int workTokens(Entry entry) {
         if (!live(entry) || entry.outputPending) return 0;
         if (!entry.listener.writable()) { entry.phase = OUTPUT; return 0; }
@@ -230,7 +235,7 @@ abstract class RtpSchedulerBase implements Scheduler {
         if (entry.nextStep == null)
             entry.nextStep = config.compute().prepare(config.role(), new ComputeModel.Request(
                 Long.toString(entry.input.requestId()), progress.iterations(), entry.input.tokens(), progress.generated(),
-                entry.input.minNewTokens(), entry.input.maxNewTokens(), config.maxSeqLen(), entry.input.ignoreEos()));
+                entry.input.minNewTokens(), entry.input.maxNewTokens(), config.maxSeqLen() - config.compute().kvReserveTokens(), entry.input.ignoreEos()));
         if (prefill()) return entry.input.tokens();
         return entry.nextStep.verifyTokens();
     }
@@ -466,11 +471,9 @@ abstract class RtpSchedulerBase implements Scheduler {
         return active.values().stream().filter(entry -> !entry.state.terminating())
             .mapToLong(entry -> entry.input.deadline()).min().orElse(Long.MAX_VALUE);
     }
-    @Override public Status status(long latestFinishedVersion) {
+    @Override public List<Task> tasks() {
         long now = System.nanoTime();
-        var tasks = active.values().stream().map(entry -> task(entry, now, -1, null)).toList();
-        var counts = queues();
-        return history.snapshot(latestFinishedVersion, tasks, counts.waiting(), counts.running());
+        return active.values().stream().map(entry -> task(entry, now, -1, null)).toList();
     }
     private Task task(Entry entry, long now, long endTimeMillis, RequestFailure failure) {
         var progress = entry.state.snapshot();
@@ -479,11 +482,9 @@ abstract class RtpSchedulerBase implements Scheduler {
         // Native runtime metadata publishes final timings only on dequeue. Live execution is -1.
         long waitMillis = finished ? entry.waitNanos / 1_000_000 : 0;
         long executionMillis = finished ? Math.max(0, (now - entry.timingStarted) / 1_000_000 - waitMillis) : -1;
-        long code = failure == null ? 0 : RpcErrors.code(failure);
-        if (failure != null && code == 0) code = RpcErrors.status(failure).getCode().value();
         return new Task(entry.input.requestId(), entry.input.groupId(), entry.input.tokens(), entry.reused,
             entry.input.priority(), phase, progress.iterations(), waitMillis, executionMillis,
-            endTimeMillis, code, failure == null ? "" : Objects.toString(failure.getMessage(), ""), entry.admittedAt != Long.MIN_VALUE);
+            endTimeMillis, failure, entry.admittedAt != Long.MIN_VALUE);
     }
     private ReportedPhase reportedPhase(Entry entry) {
         return entry.phase == FORWARD || entry.phase == RUNNING || !prefill() && entry.phase == OUTPUT

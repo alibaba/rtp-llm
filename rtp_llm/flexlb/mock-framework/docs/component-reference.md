@@ -49,8 +49,8 @@ RTP 请求公共支持范围集中在 `RequestValidation`，本地单 token、P/
 
 ### 执行和 P/D 交接
 
-- P 的 `GenerateStreamCall(max_new_tokens=1)` 走 LocalPrefill，不启用 D。请求经过 FIFO→选中时分配 KV→共享 Compute→真实等待→编码输出→释放；排队不占 KV。
-- 多 token P/D 要求 `can_use_pd_separation=true` 且恰好一个有效 DECODE 地址。PrefillGeneration 先向 D ALLOCATE，确认后启动 P，随后 LOAD、发 P 首 token、等待 LOAD 确认、发 GENERATE 并转发 D 输出。
+- P 的 `GenerateStreamCall(max_new_tokens=1)` 由 PrefillAdmission 处理，不启用 D。请求经过 FIFO→选中时分配 KV→共享 Compute→真实等待→编码输出→释放；排队不占 KV。
+- 多 token P/D 要求 `can_use_pd_separation=true` 且恰好一个有效 DECODE 地址。PrefillAdmission 先向 D ALLOCATE，确认后启动 P，随后 LOAD、发 P 首 token、等待 LOAD 确认、发 GENERATE 并转发 D 输出。
 - D 的 DecodeAdmission 处理原生协议，RtpScheduler 管理资源和队列，只有 GENERATE 后进入计算队列；每个 Engine 一轮一个 Forward，按配置合并多个请求。初始 KV 分配遇临时不足等待容量变化；生成期间每轮先增长 KV，失败则终止，成功后才执行与提交输出。
 
 PD 只执行调度器之间的交接，不模拟 KV 数据传输。P/D 只使用原生 RemoteGenerate TCP 连接，不注册自定义回调服务，也不跨节点比对 prompt、块布局或 cache keys。P 必须等自身 Scheduler 报告首轮 Forward 完成后才发送 LOAD；D 对已分配的请求执行零耗时异步传输事件，完成后回复 LOAD ACK。P 收到 ACK 才释放源 KV，然后发送 GENERATE 或 PREFILL_COMPLETE，D Scheduler 决定开始计算或结束。两端块大小各自独立，KV 的申请、持有、释放及 finished 记录仍归各自 Scheduler 管理。
@@ -65,9 +65,9 @@ PD 只执行调度器之间的交接，不模拟 KV 数据传输。P/D 只使用
 
 P/D 都按实际 Forward 计时，token 是重复输入末 token 的模拟载荷，不做词表推理。Engine RPC 始终返回本轮新增 token，`aux.output_len` 始终累计；用户侧 incremental/累计展示由 Frontend 处理。P 首 token 计入总长度，非推测模式 D 执行 N−1 轮。Client TTFT 必须来自实际接收，不能使用 Engine aux 或计算耗时替代。
 
-请求总预算取 timeout_ms 和 RPC deadline 较早者，不逐阶段重置；取消、超时和关闭只释放一次，旧回调不能影响复用身份的新请求。602/603/605 使用原生 ErrorDetailsPB。P 转发采用受控拉取/有限 Inbox，遵守发送就绪；共享连接不随单请求取消关闭。Mock 保护上限是 1024 活动请求，TaskHistory 保留 1024 项。旧游标越过历史窗口时，按 real 的恢复方式继续返回完整当前状态、仍保留的完成记录和推进后的游标，不以 OUT_OF_RANGE 阻断健康同步；超前游标不倒退。每次缺口读取在组件日志中记录 `finished_history_gap`，包含 requested_version、dropped_through、latest_version、retained，不能把这段完成记录当成完整请求历史。生产 proto 没有历史完整性字段，缺口证据保存在实验组件日志；需要完整逐请求证据时不能依赖 WorkerStatus 的有限窗口。real 当前为 1000 条/5s 保留，Mock 的 1024 条是明确的模拟边界，不宣称保留策略完全相同。
+请求总预算取 timeout_ms 和 RPC deadline 较早者，不逐阶段重置；取消、超时和关闭只释放一次，旧回调不能影响复用身份的新请求。602/603/605 使用原生 ErrorDetailsPB。P 转发采用受控拉取/有限 Inbox，遵守发送就绪；共享连接不随单请求取消关闭。活动请求由配置的并发、队列和 KV 容量约束，不再额外写死 1024 请求上限；TaskHistory 保留 1024 项。旧游标越过历史窗口时，按 real 的恢复方式继续返回完整当前状态、仍保留的完成记录和推进后的游标，不以 OUT_OF_RANGE 阻断健康同步；超前游标不倒退。每次缺口读取在组件日志中记录 `finished_history_gap`，包含 requested_version、dropped_through、latest_version、retained，不能把这段完成记录当成完整请求历史。生产 proto 没有历史完整性字段，缺口证据保存在实验组件日志；需要完整逐请求证据时不能依赖 WorkerStatus 的有限窗口。real 当前为 1000 条/5s 保留，Mock 的 1024 条是明确的模拟边界，不宣称保留策略完全相同。
 
-WorkerStatus 报真实等待/执行任务、finished/version，available_concurrency 保持生产默认 0，KV 以 token 为单位；CacheStatus 提供 block size 与版本。D 当前要求 input+max_new_tokens<max_seq_len，未实现完整真实截断。显式投机按 RTP reserveStep 预留，成功且 reuse 与缓存层开启时写回完整 prompt 块；失败不提交，生成内容不额外建索引。没有完整动态 batch、GPU 或混合 KV 布局模拟。
+WorkerStatus 报真实等待/执行任务、finished/version，available_concurrency 保持生产默认 0，KV 以 token 为单位；CacheStatus 提供 block size 与版本。输入必须为输出和显式投机预留留下合法上下文空间；生成上限取 max_new_tokens 与剩余上下文空间的较小值。无法容纳在单实例 KV 总容量中的输入直接拒绝，不进入永远无法满足的容量等待。显式投机按 RTP reserveStep 预留，成功且 reuse 与缓存层开启时写回完整 prompt 块；失败不提交，生成内容不额外建索引。没有完整动态 batch、GPU 或混合 KV 布局模拟。
 
 ## Block 容量与 RTP 缓存
 
@@ -130,7 +130,7 @@ Embedding Device/Host 按逻辑 rows*hidden_size*BF16(2 bytes) 计费，各自 L
 
 Client 按 Master 的 V-only route 选 V，读取元数据、准备特征 token，再带 selected_vit 请求完整 P/D 路由；Master 切换使 pin 失效时重新取一次 V 路由。P 在输入准备完成后才把规范化 token 序列交给 KV/Scheduler，并用同一输入准备 D ALLOCATE 和 PD 交接。P 的输入准备发生在调度锁外，受原请求 deadline/取消约束；这段准备暂不计入 P Scheduler 的队列快照，但计入 Client 端到端耗时。D 接收已准备输入，不重复编码。
 
-本地单 token 的输入准备由 RpcService 负责，P/D 单请求和 Master batch 由 PrefillGeneration 负责；LocalPrefill 的单个与批量提交只接受已准备输入，拒绝尚带媒体内容的请求，不调用 V。本地入口保留准备前的请求开始时间；各路径沿用原请求 deadline，不在准备完成后重置超时预算。
+PrefillAdmission 统一管理本地单 token、P/D 单请求和 Master batch 的协议会话、媒体准备与取消。准备中的 Session 登记在接入层，准备完成后才提交 Scheduler；Scheduler 只接收已准备输入，不调用 V。EngineLoop 和 Scheduler 共用实例的 TaskHistory，接入层把准备中失败也写入同一完成游标；状态编码仍由 RpcTasks 负责。本地入口保留准备前的请求开始时间；各路径沿用原请求 deadline，不在准备完成后重置超时预算。
 
 VP 同 JVM 和跨进程都走 TCP gRPC，只传 shape/dtype、split_size 和逐行 INT32 hash，不生成 embedding payload，也不伪造 RDMA lease。Mock P 校验形状、长度和展开 span 后使用；此响应不能交给真实 tensor 解码器，VP 网络带宽和 GPU 内存复制不在模拟范围内。
 
@@ -373,3 +373,7 @@ CP 启用时 cp_force_single_prefill 默认 true；显式 false 才允许同轮�
 KVCM 元数据仍只上报逻辑 KV。心跳独立于串行数据任务，大快照上传不阻塞心跳；快照保留原始 key 版本和请求体，成功 ACK 后才推进版本。重注册重建快照；重试尊重服务端 retry_after_ms 并退避，退出等待线程停止后发送 HOST_DOWN。
 
 下载模式按实际文件字节和几何参数生成模拟特征身份；相同字节从不同 URL 下载得到相同 hash。跳过下载时仍按媒体 key 生成模拟身份。URL 缓存的驻留和失效策略保持原有行为；此身份不是模型 embedding 的精确计算。文件大小遵守 mm_image_max_file_size_kb；下载仍在异步准备阶段执行。
+
+接入层与执行层共享完成记录，但不共享协议类型。Scheduler.Task 使用 RequestFailure 表示失败，RpcTasks 转换为原生 ErrorDetailsPB，并保留 main 的 request_id_str、prefix_length_valid。main 的图片展开 span、hash token 和 PD 报文保持原协议。Client 接受已有 token 后的空终止帧（长度不变、finished=true），仍拒绝空非终止帧和不连续的增量。
+
+KVCM 心跳与串行数据上报独立执行；回复会扫描全部 item 的重新注册/快照提示，旧注册代次的心跳反馈不会作用到新注册。快照仍保留同一版本与报文直到 ACK，随后才推进版本、发送增量；失败重试保留 retry_after_ms 约束。

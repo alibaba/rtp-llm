@@ -6,7 +6,9 @@ import java.util.concurrent.TimeUnit;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
 
-/** Always TCP, including when V shares the caller's JVM. Channels belong to this caller. */
+/**
+ * Always TCP, including when V shares the caller's JVM. Channels belong to this caller.
+ */
 public final class MediaClient implements AutoCloseable {
     private final Map<String,ManagedChannel> channels=new HashMap<>();
     private boolean closed;
@@ -15,11 +17,12 @@ public final class MediaClient implements AutoCloseable {
         return channels.computeIfAbsent(address,a->ManagedChannelBuilder.forTarget(a).usePlaintext().build());
     }
     public MultimodalOutputPB fetch(GenerateInputPB input,long deadline) {
-        long remaining=deadline==Long.MAX_VALUE?TimeUnit.MINUTES.toNanos(2):deadline-System.nanoTime();
+        long remaining=deadline==Long.MAX_VALUE?Long.MAX_VALUE:deadline-System.nanoTime();
         if(remaining<=0) throw Status.DEADLINE_EXCEEDED.withDescription("Request expired preparing vision input").asRuntimeException();
         checkActive();
-        var result=MultimodalRpcServiceGrpc.newBlockingStub(channel(MediaInput.address(input))).withDeadlineAfter(remaining,TimeUnit.NANOSECONDS)
-            .remoteMultimodalEmbedding(MediaInput.media(input));
+        var stub=MultimodalRpcServiceGrpc.newBlockingStub(channel(MediaInput.address(input)));
+        if(deadline!=Long.MAX_VALUE) stub=stub.withDeadlineAfter(remaining,TimeUnit.NANOSECONDS);
+        var result=stub.remoteMultimodalEmbedding(MediaInput.media(input));
         checkActive();
         return result;
     }

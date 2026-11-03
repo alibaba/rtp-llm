@@ -2,7 +2,6 @@ package org.flexlb.mock.admission;
 
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
-import io.grpc.stub.ServerCallStreamObserver;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import org.flexlb.engine.grpc.EngineRpcService.*;
@@ -10,14 +9,14 @@ import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.cache.KvCache;
 import org.flexlb.mock.engine.Scheduler;
 
-/** Native RPC adapter; P and D owners manage request state and KV independently. */
+/**
+ * Native RPC adapter; P and D owners manage request state and KV independently.
+ */
 public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implements AutoCloseable {
     private final AdmissionConfig config;
     private final KvCache cache;
-    private final LocalPrefill requests;
-    private final org.flexlb.mock.multimodal.MediaClient vision;
+    private final PrefillAdmission prefill;
     private final DecodeAdmission decode;
-    private final PrefillGeneration generation;
     private final boolean groups;
     private final AtomicLong statusVersion = new AtomicLong();
     private volatile boolean closed;
@@ -30,15 +29,13 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
         this.config = config;
         this.groups = groups;
         this.cache = cache;
-        requests = config.role() == org.flexlb.mock.api.model.Types.Role.prefill ? new LocalPrefill(config, cache, schedulers) : null;
-        vision = requests == null ? null : new org.flexlb.mock.multimodal.MediaClient();
-        decode = requests == null ? new DecodeAdmission(config, cache, schedulers) : null;
-        generation = requests == null ? null : new PrefillGeneration(config, requests);
+        prefill = config.role() == org.flexlb.mock.api.model.Types.Role.prefill ? new PrefillAdmission(config, cache, schedulers) : null;
+        decode = prefill == null ? new DecodeAdmission(config, cache, schedulers) : null;
     }
     public void close() {
         closed = true;
         RuntimeException failure = null;
-        for (AutoCloseable component : new AutoCloseable[]{generation, vision, requests, decode}) {
+        for (AutoCloseable component : new AutoCloseable[]{prefill, decode}) {
             if (component == null) continue;
             try { component.close(); }
             catch (Exception error) {
@@ -50,84 +47,47 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
     }
     public void checkHealthy() {
         if (closed) throw new IllegalStateException("Engine closed");
-        if (requests == null) decode.checkHealthy(); else requests.checkHealthy();
+        if (prefill == null) decode.checkHealthy(); else prefill.checkHealthy();
     }
     public java.util.List<io.prometheus.client.Collector.MetricFamilySamples> collectMetrics() {
-        return requests == null ? decode.collectMetrics() : requests.collectMetrics();
+        return prefill == null ? decode.collectMetrics() : prefill.collectMetrics();
     }
-    public String scrapeMetrics() { return requests == null ? decode.scrapeMetrics() : requests.scrapeMetrics(); }
+    public String scrapeMetrics() { return prefill == null ? decode.scrapeMetrics() : prefill.scrapeMetrics(); }
 
     @Override public StreamObserver<GenerateRequestPB> remoteGenerate(StreamObserver<GenerateOutputsPB> observer) {
         return decode == null ? super.remoteGenerate(observer) : decode.open(observer);
     }
 
     @Override public void enqueueBatch(EnqueueBatchRequestPB request, StreamObserver<EnqueueBatchResponsePB> response) {
-        if (generation == null || !groups) { super.enqueueBatch(request, response); return; }
-        PrefillBatch.enqueue(generation, request, response);
+        if (prefill == null || !groups) { super.enqueueBatch(request, response); return; }
+        PrefillBatch.enqueue(prefill, request, response);
     }
 
     @Override public void enqueueGroup(EnqueueGroupRequestPB request, StreamObserver<EnqueueBatchResponsePB> response) {
-        if (generation == null || !groups) { super.enqueueGroup(request, response); return; }
+        if (prefill == null || !groups) { super.enqueueGroup(request, response); return; }
         var slot = EnqueueBatchDpSlotPB.newBuilder().setDpRank(request.getDpRank());
         for (var item : request.getRequestsList()) {
             var external = EnqueueBatchExternalInputPB.newBuilder();
             if (item.hasInput()) external.setInput(item.getInput());
             slot.addRequests(external);
         }
-        PrefillBatch.enqueue(generation, EnqueueBatchRequestPB.newBuilder().setBatchId(request.getBatchId())
+        PrefillBatch.enqueue(prefill, EnqueueBatchRequestPB.newBuilder().setBatchId(request.getBatchId())
             .setFetchAttachTimeoutMs(request.getFetchAttachTimeoutMs()).addDpSlots(slot).build(), response);
     }
 
     @Override public void fetchResponse(FetchRequestPB request, StreamObserver<GenerateOutputsPB> response) {
-        if (generation == null) { super.fetchResponse(request, response); return; }
-        generation.fetch(request.getRequestId(), response);
+        if (prefill == null) { super.fetchResponse(request, response); return; }
+        prefill.fetch(request.getRequestId(), response);
     }
 
     @Override public void cancel(CancelRequestPB request, StreamObserver<CancelResponsePB> response) {
-        if (generation == null) { super.cancel(request, response); return; }
-        reply(response, () -> CancelResponsePB.newBuilder().setStatus(generation.cancel(request.getRequestId())).build());
+        if (prefill == null) { super.cancel(request, response); return; }
+        reply(response, () -> CancelResponsePB.newBuilder().setStatus(prefill.cancel(request.getRequestId())).build());
     }
 
     @Override public void generateStreamCall(GenerateInputPB request, StreamObserver<GenerateOutputsPB> observer) {
-        if (requests == null) { super.generateStreamCall(request, observer); return; }
-        if (request.getGenerateConfig().getMaxNewTokens() > 1) { generation.generate(request, observer); return; }
-        var response = (ServerCallStreamObserver<GenerateOutputsPB>) observer;
-        // Cancellation can happen before submit returns; capture the exact session, never just its reusable id.
-        var session = new java.util.concurrent.atomic.AtomicReference<LocalPrefill.Session>();
-        var context = io.grpc.Context.current();
-        Runnable cancel = () -> {
-            var current = session.get();
-            if (current != null) {
-                if (context.getDeadline() != null && context.getDeadline().isExpired()) current.expire();
-                else current.cancel();
-            }
-        };
-        response.setOnCancelHandler(cancel);
-        LocalPrefill.Session accepted;
-        long started = System.nanoTime();
-        long deadline = Long.MAX_VALUE;
-        if (context.getDeadline() != null) {
-            long now = System.nanoTime(), remaining = context.getDeadline().timeRemaining(java.util.concurrent.TimeUnit.NANOSECONDS);
-            try { deadline = Math.addExact(now, remaining); }
-            catch (ArithmeticException overflow) { deadline = remaining < 0 ? Long.MIN_VALUE : Long.MAX_VALUE; }
-        }
-        try {
-            requests.validate(request, false);
-            if (request.getGenerateConfig().getTimeoutMs() > 0)
-                deadline = Math.min(deadline, RpcTasks.after(started,
-                    java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(request.getGenerateConfig().getTimeoutMs())));
-            var prepared = vision.prepare(request, deadline);
-            accepted = requests.submit(prepared, deadline, false, started);
-        }
-        catch (io.grpc.StatusRuntimeException error) { response.onError(error); return; }
-        session.set(accepted);
-        if (response.isCancelled()) cancel.run();
-        accepted.completion().thenAccept(result -> {
-            if (response.isCancelled()) return;
-            if (!result.status().isOk()) { response.onError(RpcErrors.failure(result.status(), result.engineCode())); return; }
-            try { response.onNext(result.output()); response.onCompleted(); }
-            catch (RuntimeException error) { accepted.cancel(); }
-        });
+        if (prefill == null) { super.generateStreamCall(request, observer); return; }
+        prefill.generate(request, observer);
     }
 
     @Override public void checkHealth(EmptyPB request, StreamObserver<CheckHealthResponsePB> response) {
@@ -140,10 +100,9 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
             String role = config.role().name().toUpperCase(java.util.Locale.ROOT);
             long micros = Math.multiplyExact(System.currentTimeMillis(), 1000);
             long version = statusVersion.updateAndGet(previous -> Math.max(previous + 1, micros));
-            var tasks = requests == null ? decode.snapshot(request.getLatestFinishedVersion()) : requests.snapshot(request.getLatestFinishedVersion());
+            var tasks = prefill == null ? decode.snapshot(request.getLatestFinishedVersion()) : prefill.snapshot(request.getLatestFinishedVersion());
             return WorkerStatusPB.newBuilder().setRole("RoleType." + role)
-                .setRoleType(RoleTypePB.valueOf("ROLE_TYPE_" + role)).setAlive(true)
-                .setKvCacheGroupMode(KvCacheGroupModePB.KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY)
+                .setRoleType(RoleTypePB.valueOf("ROLE_TYPE_" + role)).setAlive(true).setKvCacheGroupMode(KvCacheGroupModePB.KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY)
                 .setBlockSize(config.blockSize()).setBlockHashLookaheadTokens(0).setCacheMatchRollbackBlocks(0)
                 .setDpSize(config.dpSize()).setDpRank(0).setTpSize(config.tpSize()).setPrecision("FP16")
                 .setStatusVersion(version).setMaxSeqLen(config.maxSeqLen()).setMaxBatchTokensSize(config.maxBatchTokens())

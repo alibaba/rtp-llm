@@ -5,7 +5,9 @@ import org.flexlb.mock.engine.RequestFailure;
 import static org.flexlb.mock.engine.RequestFailure.Reason.*;
 import org.flexlb.engine.grpc.EngineRpcService.ErrorDetailsPB;
 
-/** Native C++ grpc::Status.error_details wire encoding, shared by P and D. */
+/**
+ * Native C++ grpc::Status.error_details wire encoding, shared by P and D.
+ */
 public final class RpcErrors {
     private RpcErrors() {}
     private static final Metadata.Key<byte[]> DETAILS = Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER);
@@ -27,6 +29,13 @@ public final class RpcErrors {
             default -> INTERNAL;
         };
         return new RequestFailure(reason, status.getDescription(), failure(status, code));
+    }
+    static RequestFailure scheduling(Throwable error) {
+        if (error instanceof RequestFailure failure) return failure;
+        var status = Status.fromThrowable(error);
+        long code = code(new RequestFailure(INTERNAL, status.getDescription(), error));
+        if (code == 0 && status.getCode() == Status.Code.DEADLINE_EXCEEDED) code = 603;
+        return scheduling(status, code);
     }
     public static Status status(RequestFailure failure) {
         if (failure == null) return Status.OK;

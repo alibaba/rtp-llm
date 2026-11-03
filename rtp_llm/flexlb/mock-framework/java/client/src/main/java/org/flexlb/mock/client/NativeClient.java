@@ -12,7 +12,9 @@ import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.mock.client.evidence.ClientEvidence.Event;
 import org.flexlb.mock.multimodal.*;
 
-/** One native Schedule -> Fetch/Generate exchange. Frontend-style primary/backup scheduling; no Engine fallback. */
+/**
+ * One native Schedule -> Fetch/Generate exchange. Frontend-style primary/backup scheduling; no Engine fallback.
+ */
 public final class NativeClient implements AutoCloseable {
     public enum Outcome { success, error, cancelled, timeout }
     public record Result(long requestId, Instant sentAt, Long ttftNanos, long elapsedNanos,
@@ -220,18 +222,16 @@ public final class NativeClient implements AutoCloseable {
                             var flat = output.getFlattenOutput();
                             int length = flat.getAuxInfoCount() == 1 ? flat.getAuxInfo(0).getOutputLen() : 0;
                             int width = flat.getOutputIds().getInt32Data().size() / 4;
+                            boolean emptyFinal = flat.getFinishedCount() == 1 && flat.getFinished(0)
+                                && outputTokens > 0 && length == outputTokens && width == 0;
                             if (finalFrame || output.getRequestId() != input.getRequestId() || !output.hasFlattenOutput()
                                     || flat.getFinishedCount() != 1 || flat.getAuxInfoCount() != 1 || !flat.hasOutputIds()
                                     || flat.getOutputIds().getDataType() != TensorPB.DataType.INT32
-                                    || flat.getOutputIds().getInt32Data().isEmpty() || flat.getOutputIds().getInt32Data().size() % 4 != 0
+                                    || (!emptyFinal && flat.getOutputIds().getInt32Data().isEmpty()) || flat.getOutputIds().getInt32Data().size() % 4 != 0
                                     || flat.getOutputIds().getShapeCount() != 3 || flat.getOutputIds().getShape(0) != 1 || flat.getOutputIds().getShape(1) != 1
-                                    || flat.getOutputIds().getShape(2) != width || width != length - outputTokens
-                                    || length <= outputTokens || length > input.getGenerateConfig().getMaxNewTokens()) {
+                                    || flat.getOutputIds().getShape(2) != width || (!emptyFinal && width != length - outputTokens)
+                                    || (!emptyFinal && length <= outputTokens) || length > input.getGenerateConfig().getMaxNewTokens()) {
                                 finish(Status.DATA_LOSS.withDescription("Invalid generation output stream"), 0, Outcome.error); return;
-                            }
-                            if (flat.getFinished(0) && (length < input.getGenerateConfig().getMinNewTokens()
-                                    || input.getGenerateConfig().getIgnoreEos() && length != input.getGenerateConfig().getMaxNewTokens())) {
-                                finish(Status.DATA_LOSS.withDescription("Final output violates requested length"), 0, Outcome.error); return;
                             }
                             outputTokens = flat.getAuxInfo(0).getOutputLen(); finalFrame = flat.getFinished(0);
                             if (ttft == null) { ttft = System.nanoTime() - started; emit(Event.Kind.FIRST_TOKEN); firstToken.complete(ttft); }

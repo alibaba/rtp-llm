@@ -7,7 +7,9 @@ import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.cache.KvCache;
 
-/** Native ALLOCATE/LOAD/GENERATE protocol. Queue membership and progress stay behind Scheduler. */
+/**
+ * Native ALLOCATE/LOAD/GENERATE protocol. Queue membership and progress stay behind Scheduler.
+ */
 final class DecodeAdmission implements AutoCloseable {
     private final AdmissionConfig config;
     private final EngineLoop engine;
@@ -18,7 +20,7 @@ final class DecodeAdmission implements AutoCloseable {
 
     DecodeAdmission(AdmissionConfig config, KvCache cache, Scheduler.Factory schedulers) {
         this.config = config;
-        engine = new EngineLoop(this, schedulers.create(this, cache), cache, config.compute(), config.role(), config.id());
+        engine = new EngineLoop(this, schedulers, new TaskHistory(), cache, config.compute(), config.role(), config.id());
     }
 
     StreamObserver<GenerateRequestPB> open(StreamObserver<GenerateOutputsPB> observer) {
@@ -78,7 +80,7 @@ final class DecodeAdmission implements AutoCloseable {
                 call.input = frame.getInput();
                 call.client = frame.getClientId();
                 call.request = engine.input(RpcTasks.input(call.input, call.client + "/" + call.input.getRequestId(),
-                    call.started, call.rpcDeadline, false, config.blockSize(), config.cacheKeySeed()), call);
+                    call.started, RpcTasks.deadline(call.input, call.started, call.rpcDeadline), false, config.blockSize(), config.cacheKeySeed()), call);
                 return;
             }
             if (frame.getRequestId() != call.input.getRequestId()

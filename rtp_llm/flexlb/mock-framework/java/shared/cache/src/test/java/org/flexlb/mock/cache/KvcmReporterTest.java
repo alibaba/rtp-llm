@@ -84,4 +84,35 @@ class KvcmReporterTest {
             } finally { release.countDown(); server.stop(0); }
         }
     }
+    @ParameterizedTest @ValueSource(booleans = {false, true})
+    void scansLaterRecoveryItemsEvenWhenAnEarlierStatusFailed(boolean headerFailure) throws Exception {
+        var registrations = new AtomicInteger(); var inject = new AtomicBoolean(true);
+        var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        try (var threads = Executors.newVirtualThreadPerTaskExecutor(); var cache = new KvCache(1, 8, 0, KvCache.EvictionPolicy.LRU)) {
+            server.setExecutor(threads);
+            server.createContext("/api/", exchange -> {
+                try (exchange) {
+                    var request = JSON.readTree(exchange.getRequestBody());
+                    if (request.has("model_deployment")) registrations.incrementAndGet();
+                    var response = JSON.createObjectNode();
+                    response.putObject("header").putObject("status").put("code", 1);
+                    if (request.path("events").path(0).path("event_type").asText().equals("EVENT_HEARTBEAT")
+                            && inject.compareAndSet(true, false)) {
+                        response.with("header").with("status").put("code", headerFailure ? 5 : 1);
+                        var items = response.putArray("item_results");
+                        items.addObject().putObject("status").put("code", 5);
+                        items.addObject().putObject("status").put("code", 8);
+                    }
+                    byte[] bytes = JSON.writeValueAsBytes(response);
+                    exchange.sendResponseHeaders(200, bytes.length); exchange.getResponseBody().write(bytes);
+                }
+            }); server.start();
+            try (var reporter = new KvcmReporter(new KvcmReporter.Configuration(
+                    URI.create("http://127.0.0.1:" + server.getAddress().getPort()), true, 600000),
+                    new KvcmReporter.Identity("instance", "group", "127.0.0.1:9000", "model", "FP16", false, 1, 1, 1, "full"), cache)) {
+                await(() -> registrations.get() == 2 && Boolean.TRUE.equals(reporter.status().get("registered")));
+            }
+        } finally { server.stop(0); }
+    }
+
 }

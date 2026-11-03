@@ -128,7 +128,7 @@ class NativeClientTest {
         }
     }
 
-    @Test void finalLengthMustRespectIgnoreEosAndMinimumButAllowsAnActualEos() throws Exception {
+    @Test void finishedOutputMayBeContextBoundedDespiteIgnoreEosOrMinimum() throws Exception {
         for (int mode = 0; mode < 3; mode++) try (var h = new Harness()) {
             h.output = (id, response) -> {
                 response.onNext(token(id, 1, false)); response.onNext(token(id, 2, true)); response.onCompleted();
@@ -137,7 +137,7 @@ class NativeClientTest {
             input.getGenerateConfigBuilder().setIgnoreEos(mode == 0).setMinNewTokens(mode == 1 ? 3 : 0);
             request.setGenerateInput(input.build().toByteString());
             var result = h.result(h.client.send(request.build(), Duration.ofSeconds(2)));
-            assertEquals(mode == 2 ? NativeClient.Outcome.success : NativeClient.Outcome.error, result.outcome());
+            assertEquals(NativeClient.Outcome.success, result.outcome());
         }
     }
     @Test void enqueuedRouteAlwaysFetchesAndConsumesToFinalCompletion() throws Exception {
@@ -376,6 +376,22 @@ class NativeClientTest {
             while (first.schedules.get() < 2 && System.nanoTime() < deadline) Thread.sleep(5);
             assertEquals(2, first.schedules.get()); call.cancel();
             assertEquals("cancelled", outcome(call)); assertEquals(1, backup.schedules.get());
+        }
+    }
+
+    @Test void emptyTerminalAfterFirstTokenIsValidButEmptyNonterminalIsNot() throws Exception {
+        for (boolean finished : new boolean[]{true, false}) try (var h = new Harness()) {
+            h.output = (id, response) -> {
+                response.onNext(token(id, 1, false));
+                var last = token(id, 1, finished).toBuilder();
+                last.getFlattenOutputBuilder().setOutputIds(TensorPB.newBuilder().setDataType(TensorPB.DataType.INT32)
+                    .addShape(1).addShape(1).addShape(0));
+                last.getFlattenOutputBuilder().getAuxInfoBuilder(0).setStepOutputLen(0);
+                response.onNext(last.build()); response.onCompleted();
+            };
+            var result = h.result(h.client.send(request(1), Duration.ofSeconds(2)));
+            assertEquals(finished ? NativeClient.Outcome.success : NativeClient.Outcome.error, result.outcome());
+            assertEquals(1, result.outputTokens());
         }
     }
 

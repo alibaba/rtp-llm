@@ -154,7 +154,11 @@ class PdGenerationTest {
                 var error = assertThrows(StatusRuntimeException.class, () -> rpc.generateStreamCall(request).hasNext());
                 assertEquals(id == 1 ? Status.Code.UNAVAILABLE : Status.Code.DEADLINE_EXCEEDED, error.getStatus().getCode());
                 assertEquals(0, p.status().getRunningTaskInfoCount());
-                assertEquals(0, p.status().getFinishedTaskListCount());
+                assertEquals(id, p.status().getFinishedTaskListCount());
+                var finished = p.status().getFinishedTaskList(id - 1);
+                assertEquals(id, finished.getRequestId());
+                assertEquals(TaskPhase.TASK_PHASE_PENDING, finished.getPhase());
+                assertEquals(id == 1 ? Status.Code.UNAVAILABLE.value() : 603, finished.getErrorInfo().getErrorCode());
                 assertEquals(32, p.status().getAvailableKvCache());
             }
             assertEquals(2, calls.get());
@@ -514,7 +518,7 @@ class PdGenerationTest {
         try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1,
                 Map.of("decode", Map.of("draft.tokens", 2147483646, "acceptance.rate", 0)));
                 var call = new Call(p, input(d, 1, 5, 4, 2000, true))) {
-            assertEquals(602, code(call.error(Status.Code.RESOURCE_EXHAUSTED)));
+            assertEquals(605, code(call.error(Status.Code.INVALID_ARGUMENT)));
             assertEquals(0, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
             await(() -> d.status().getAvailableKvCache() == 16);
             assertTrue(d.status().getAlive());
@@ -653,7 +657,9 @@ class PdGenerationTest {
         try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1); var holder = d.node.cache().acquire(12, List.of()).lease();
                 var call = new Call(p, input(d, 1, 5, 4, 2500, true))) {
             await(() -> d.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 1);
-            assertEquals(0, p.status().getRunningTaskInfoCount()); assertEquals(16, p.status().getAvailableKvCache());
+            assertEquals(1, p.status().getRunningTaskInfoCount());
+            assertEquals(TaskPhase.TASK_PHASE_PENDING, p.status().getRunningTaskInfo(0).getPhase());
+            assertEquals(16, p.status().getAvailableKvCache());
             assertEquals(0, metric(p, "rtp_llm_requests_started_total", "")); holder.close();
             for (int n = 1; n <= 4; n++) call.output(n, n == 4, 1);
             assertEquals("completed", call.next());
@@ -823,7 +829,7 @@ class PdGenerationTest {
             var ack = enqueue(p, 2000, input(d, 711, 5, 3, 2000, true), input(d, 712, 50, 3, 2000, true));
             assertEquals(1, ack.getSuccessesCount()); assertEquals(711, ack.getSuccesses(0).getRequestId());
             assertEquals(1, ack.getErrorsCount()); assertEquals(602, ack.getErrors(0).getErrorInfo().getErrorCode());
-            await(() -> p.status().getFinishedTaskListCount() == 1 && d.status().getFinishedTaskListCount() == 2);
+            await(() -> p.status().getFinishedTaskListCount() == 2 && d.status().getFinishedTaskListCount() == 1);
             assertEquals(1, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
             assertEquals(32, p.status().getAvailableKvCache()); assertEquals(16, d.status().getAvailableKvCache());
         }
@@ -844,7 +850,7 @@ class PdGenerationTest {
             assertEquals(1, ack.getSuccessesCount()); assertEquals(1, ack.getErrorsCount());
             assertEquals(pending, ack.getErrors(0).getRequestId());
             assertEquals(8429, ack.getErrors(0).getErrorInfo().getErrorCode());
-            await(() -> p.status().getFinishedTaskListCount() == 1 && d.status().getFinishedTaskListCount() == 2);
+            await(() -> p.status().getFinishedTaskListCount() == 2 && d.status().getFinishedTaskListCount() == 2);
             assertEquals(1, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
             assertEquals(8, d.status().getAvailableKvCache());
             holder.close(); assertEquals(16, d.status().getAvailableKvCache());
@@ -858,8 +864,23 @@ class PdGenerationTest {
             var ack = enqueue(p, 2000, input(d, 731, 5, 3, 2000, true), input(d, 732, 8, 3, 2000, true));
             assertEquals(1, ack.getSuccessesCount()); assertEquals(731, ack.getSuccesses(0).getRequestId());
             assertEquals(1, ack.getErrorsCount()); assertEquals(605, ack.getErrors(0).getErrorInfo().getErrorCode());
-            await(() -> p.status().getFinishedTaskListCount() == 1 && d.status().getFinishedTaskListCount() == 2);
+            await(() -> p.status().getFinishedTaskListCount() == 2 && d.status().getFinishedTaskListCount() == 2);
             assertEquals(32, p.status().getAvailableKvCache()); assertEquals(32, d.status().getAvailableKvCache());
+        }
+    }
+
+    @Test void contextLimitFinishesBeforeRequestedLengthIncludingFirstTokenOnlyDecode() throws Exception {
+        for (int sequence : List.of(6, 9)) try (var p = node("prefill", 16, 0);
+                var d = node("decode", 16, 0, Map.of("settings", Map.of("max_seq_len", sequence),
+                    "mock.compute", Map.of("decode", Map.of("draft.tokens", 2, "acceptance.rate", 1))))) {
+            var request = input(d, sequence, 3, 100, 3000, true).toBuilder();
+            request.getGenerateConfigBuilder().setIgnoreEos(true).setMinNewTokens(50);
+            try (var call = new Call(p, request.build())) {
+                call.output(1, false, 1);
+                if (sequence == 6) call.output(1, true, 0);
+                else call.output(3, true, 2);
+                assertEquals("completed", call.next());
+            }
         }
     }
 

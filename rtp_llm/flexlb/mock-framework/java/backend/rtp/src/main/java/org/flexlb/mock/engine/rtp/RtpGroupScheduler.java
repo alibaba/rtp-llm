@@ -2,6 +2,7 @@ package org.flexlb.mock.engine.rtp;
 
 import java.util.*;
 import org.flexlb.mock.cache.KvCache;
+import org.flexlb.mock.engine.TaskHistory;
 import org.flexlb.mock.engine.RequestFailure;
 import static org.flexlb.mock.engine.RequestFailure.Reason.*;
 
@@ -13,7 +14,7 @@ final class RtpGroupScheduler extends RtpSchedulerBase {
     private final Map<Entry, ArrayDeque<Entry>> memberships = new IdentityHashMap<>();
     private boolean preferGroup;
 
-    RtpGroupScheduler(Object lock, RtpConfig config, KvCache cache) { super(lock, config, cache); }
+    RtpGroupScheduler(Object lock, RtpConfig config, KvCache cache, TaskHistory history) { super(lock, config, cache, history); }
 
     @Override public List<InputResult> input(List<InputItem> batch) {
         if (closed) throw new RequestFailure(CLOSED, "Engine is closing");

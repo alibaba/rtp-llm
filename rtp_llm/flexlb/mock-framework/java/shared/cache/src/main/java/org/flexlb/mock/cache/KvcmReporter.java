@@ -63,6 +63,8 @@ public final class KvcmReporter implements AutoCloseable {
     private final AtomicBoolean snapshotRequired = new AtomicBoolean(true);
     private final AutoCloseable observation;
     private long snapshotVersion = -1, lastSnapshot;
+    private final Object registrationLock = new Object();
+    private long registrationGeneration;
     private volatile boolean registered, closed, remoteEnabled;
     private volatile String failure = "", heartbeatFailure = "";
 
@@ -176,13 +178,6 @@ public final class KvcmReporter implements AutoCloseable {
         if (value.isObject()) return code(value.has("code") ? value.path("code") : value.path("status"));
         return value.asText();
     }
-    private void checkCode(JsonNode value) {
-        String code = code(value);
-        if (Set.of("8", "9", "10", "INSTANCE_NOT_EXIST", "SERVER_NOT_LEADER", "NODE_NOT_REGISTERED").contains(code))
-            registrationRequired.set(true);
-        if (Set.of("14", "SNAPSHOT_REQUIRED").contains(code)) snapshotRequired.set(true);
-        if (!Set.of("1", "OK").contains(code)) throw new IllegalStateException("KVCM rejected metadata: " + code);
-    }
     private void accepted(JsonNode response, boolean heartbeat) {
         var retry = response.has("retry_after_ms") ? response.path("retry_after_ms") : response.path("retryAfterMs");
         if (!retry.isMissingNode()) {
@@ -193,12 +188,23 @@ public final class KvcmReporter implements AutoCloseable {
             long next = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.min(300000, millis));
             retryAt.accumulateAndGet(next, Math::max);
         }
-        checkCode(response.path("header").path("status"));
+        var status = response.path("header").path("status");
+        if (!status.isObject() || !status.has("code")) throw new IllegalStateException("Invalid KVCM status");
         var items = response.has("item_results") ? response.path("item_results") : response.path("itemResults");
         if (!items.isMissingNode() && !items.isArray()) throw new IllegalStateException("Invalid KVCM item results");
-        for (var item : items) checkCode(item);
-        if (response.path("snapshot_required").asBoolean() || response.path("snapshotRequired").asBoolean())
-            snapshotRequired.set(true);
+        var hint = response.has("snapshot_required") ? response.path("snapshot_required") : response.path("snapshotRequired");
+        if (!hint.isMissingNode() && !hint.isBoolean()) throw new IllegalStateException("Invalid KVCM snapshot hint");
+        var codes = new ArrayList<String>(); codes.add(code(status));
+        for (var item : items) codes.add(code(item));
+        boolean ok = true, registration = false, snapshot = hint.asBoolean();
+        for (String value : codes) {
+            ok &= Set.of("1", "OK").contains(value);
+            registration |= Set.of("8", "9", "10", "INSTANCE_NOT_EXIST", "SERVER_NOT_LEADER", "NODE_NOT_REGISTERED").contains(value);
+            snapshot |= Set.of("14", "SNAPSHOT_REQUIRED").contains(value);
+        }
+        if (registration) registrationRequired.set(true);
+        if (snapshot) snapshotRequired.set(true);
+        if (!ok) throw new IllegalStateException("KVCM rejected metadata: " + codes);
         if (heartbeat) {
             var extra = response.has("extra_info") ? response.path("extra_info") : response.path("extraInfo");
             if (extra.isTextual()) try {
@@ -209,9 +215,17 @@ public final class KvcmReporter implements AutoCloseable {
         }
     }
     private void heartbeat() {
-        if (closed || !registered || registrationRequired.get()) return;
+        long generation;
+        synchronized (registrationLock) {
+            if (closed || !registered || registrationRequired.get()) return;
+            generation = registrationGeneration;
+        }
         try {
-            accepted(post("/api/reportEvent", control("HEARTBEAT")), true);
+            var response = post("/api/reportEvent", control("HEARTBEAT"));
+            synchronized (registrationLock) {
+                if (generation != registrationGeneration || !registered || registrationRequired.get()) return;
+                accepted(response, true);
+            }
             heartbeatFailure = "";
         } catch (Exception error) {
             heartbeatFailure = error.toString();
@@ -220,8 +234,11 @@ public final class KvcmReporter implements AutoCloseable {
     }
     private void tick() {
         if (closed) return;
-        if (registrationRequired.getAndSet(false)) {
-            registered = false; pendingSnapshot = null; snapshotRequired.set(true);
+        synchronized (registrationLock) {
+            if (registrationRequired.getAndSet(false)) {
+                registrationGeneration++;
+                registered = false; pendingSnapshot = null; snapshotRequired.set(true);
+            }
         }
         if (System.nanoTime() < retryAt.get()) return;
         try {

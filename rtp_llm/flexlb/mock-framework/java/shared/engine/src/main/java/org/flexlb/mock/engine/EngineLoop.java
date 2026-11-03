@@ -8,12 +8,15 @@ import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.cache.KvCache;
 import org.flexlb.mock.compute.*;
 
-/** Event/deadline driven execution. Only short state transitions hold the scheduling lock. */
+/**
+ * Event/deadline driven execution. Only short state transitions hold the scheduling lock.
+ */
 public final class EngineLoop implements AutoCloseable {
     private final Object lock;
     private final java.util.concurrent.locks.ReentrantLock signal = new java.util.concurrent.locks.ReentrantLock();
     private final java.util.concurrent.locks.Condition changed = signal.newCondition();
     private final Scheduler scheduler;
+    private final TaskHistory finished;
     private final KvCache cache;
     private final ComputeModel model;
     private final Role role;
@@ -32,9 +35,10 @@ public final class EngineLoop implements AutoCloseable {
         Pending(Scheduler.Work work) { this.work = work; }
     }
 
-    public EngineLoop(Object lock, Scheduler scheduler, KvCache cache, ComputeModel model, Role role, String identity) {
+    public EngineLoop(Object lock, Scheduler.Factory schedulers, TaskHistory finished, KvCache cache, ComputeModel model, Role role, String identity) {
         this.lock = Objects.requireNonNull(lock);
-        this.scheduler = Objects.requireNonNull(scheduler);
+        this.finished = Objects.requireNonNull(finished);
+        this.scheduler = Objects.requireNonNull(schedulers.create(lock, cache, finished));
         this.cache = Objects.requireNonNull(cache);
         this.model = Objects.requireNonNull(model);
         this.role = Objects.requireNonNull(role);
@@ -63,7 +67,12 @@ public final class EngineLoop implements AutoCloseable {
         return () -> change(() -> { use.close(); return null; });
     }
     public Scheduler.Status status(long latestFinishedVersion) {
-        synchronized (lock) { checkFailure(); return scheduler.status(latestFinishedVersion); }
+        synchronized (lock) {
+            checkFailure();
+            var counts = scheduler.queues();
+            var tasks = scheduler.tasks();
+            return finished.snapshot(latestFinishedVersion, tasks, counts.waiting(), counts.running());
+        }
     }
     public void checkHealthy() { synchronized (lock) { ensureOpen(); } }
     public List<io.prometheus.client.Collector.MetricFamilySamples> collectMetrics() {
@@ -79,7 +88,9 @@ public final class EngineLoop implements AutoCloseable {
         }
     }
 
-    /** A signal is retained even if it arrives before the worker starts waiting. */
+    /**
+     * A signal is retained even if it arrives before the worker starts waiting.
+     */
     public void wake() {
         signal.lock();
         try { dirty = true; changed.signal(); } finally { signal.unlock(); }

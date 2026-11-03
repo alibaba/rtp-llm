@@ -65,9 +65,9 @@ Python async 只表达非阻塞等待，不代表任意 step 可以脱离 Runner
 
 RTP 和 vLLM 的设计目标是复用请求事实、资源机制、EngineLoop、Forward、输出和生命周期工具；各自的 Scheduler 拥有队列模型、准入、组批、抢占恢复和结果后的状态转换。替换调度策略不应修改 Compute 或 EngineLoop。原生协议和计算模型参数仍在各自接入/配置边界适配，不宣称两个真实后端只有调度差异。
 
-当前已打通 Java 装配入口 `RtpNode.start(config, Scheduler.Factory)`，指定监听端口时使用 `start(config, rpcPort, controlPort, factory)`。工厂的 `create(lock, cache)` 为每个实例创建一个新 Scheduler，收到协议接入层与 EngineLoop 共用的调度锁，以及本实例独占的 RTP Full-KV 管理器 KvCache。工厂不关闭缓存；节点在关闭或调度器创建失败时回收它。默认入口只在 RtpNode 选择 RTP 工厂，LocalPrefill/DecodeAdmission 不再创建或引用 RtpScheduler，公共执行层不识别 RTP 配置。
+当前已打通 Java 装配入口 `RtpNode.start(config, Scheduler.Factory)`，指定监听端口时使用 `start(config, rpcPort, controlPort, factory)`。工厂的 `create(lock, cache, finished)` 为每个实例创建一个新 Scheduler，收到协议接入层与 EngineLoop 共用的调度锁，本实例独占的 RTP Full-KV 管理器 KvCache，以及共享的 TaskHistory 完成记录。工厂不关闭缓存；节点在关闭或调度器创建失败时回收它。默认入口只在 RtpNode 选择 RTP 工厂，PrefillAdmission/DecodeAdmission 不再创建或引用 RtpScheduler，公共执行层不识别 RTP 配置。
 
-P 接入层保留原生报文、模型上下文及生成参数校验，单批 token 预算等调度策略由 Scheduler 判定。RTP 默认策略仍拒绝超出单批预算的 Prefill，并返回原有 INVALID_ARGUMENT/605；替换 Scheduler 不会被接入层的重复策略校验拦截。请求数量保护上限统一来自 RtpConfig，不再由接入层读取具体调度器的常量。
+P 接入层负责原生报文、生成参数、媒体准备和会话取消；上下文空间、单批 token 预算及 KV 准入由 Scheduler 判定。合法单请求超过单批预算时仍可单独执行，超出上下文或单实例 KV 总容量则在准入时拒绝。请求数量由配置的并发与 KV 容量约束，不额外写死活动请求数上限。
 
 本批仅完成装配与公共组件边界；vLLM Scheduler 尚未实现，Python 后端选择和对应 Case 接线留到后续。没有自动插件扫描、空后端占位或静默回退到 RTP。
 
@@ -295,7 +295,7 @@ Java 产生指标，公共构建暴露 `/metrics`，内部镜像使用 KMonitor 
 
 ### 落地顺序与待定边界
 
-1. 从 LocalPrefill/DecodeAdmission 分离协议、调度域和公共执行组件，保留现有超时、取消、P/D 交接及清理行为；先让 RTP 使用公共 Engine。
+1. 从 PrefillAdmission/DecodeAdmission 分离协议、调度域和公共执行组件，保留现有超时、取消、P/D 交接及清理行为；先让 RTP 使用公共 Engine。
 2. 把队列、容量等待、选批和完成后的重新入队一起移入 Scheduler，不能只抽 `advance()`。用第二种明确的调度行为验证边界，再按选定版本实现 vLLM 策略；当前 RTP 有界合批不等于完整 RTP/vLLM 调度。
 3. 将 Case 级接口与 Prometheus 查询迁移到 Python，保留实例协议、Java 指标产生及既有校验。迁移完成后删除旧查询服务和重复定义，不长期维护两条调用链。
 4. Engine 两种放置方式、动态上下线和发现更新已接通；Client 已接通上述第一批能力，生成输入文件、图片元数据和有界分片已接通，后续按剩余边界推进采集格式转换和请求执行记录。每批改动同时补齐对应调用方、配置、测试和文档，避免旧入口继续承载另一套语义。
@@ -357,7 +357,7 @@ multimodal 供 Client、P 接入层和 ViT 共用媒体标识、输入转换及 
 
 KvTransfer 是接入层使用的零耗时异步 PD 传输执行器，放在 admission 包内，不作为公共调度接口。传输开始与完成仍通过 EngineLoop 交给 Scheduler 处理；移动执行器不改变资源使用权和 LOAD ACK 顺序。KvCache/BlockTree 目前固定为 RTP Full-KV，保留已有模块，不声明仅替换 Scheduler 就能兼容任意后端，也不增加缓存抽象或新模块。
 
-共享指代码复用，不是不同实例共享资源。本批按职责重写 LocalPrefill/DecodeAdmission：它们保留原生校验、ALLOCATE/LOAD/GENERATE 协议状态和响应编码，通过公共 Scheduler.Request 句柄与 EngineLoop 交互；RpcTasks 只转换输入与状态编码，RpcErrors 负责原生错误码；上报阶段、准入等待时间、持续 running、资源生命周期和执行结果提交由 RtpSchedulerBase 统一处理。RtpScheduler 负责普通 FIFO 准入，RtpGroupScheduler 单独负责显式组调度；两者共用基类，无 gRPC/protobuf/执行器依赖。
+共享指代码复用，不是不同实例共享资源。本批按职责重写 PrefillAdmission/DecodeAdmission：它们保留原生校验、ALLOCATE/LOAD/GENERATE 协议状态和响应编码，通过公共 Scheduler.Request 句柄与 EngineLoop 交互；RpcTasks 只转换输入与状态编码，RpcErrors 负责原生错误码；上报阶段、准入等待时间、持续 running、资源生命周期和执行结果提交由 RtpSchedulerBase 统一处理。RtpScheduler 负责普通 FIFO 准入，RtpGroupScheduler 单独负责显式组调度；两者共用基类，无 gRPC/protobuf/执行器依赖。
 
 RequestState 是共享的请求进度、终态和资源清理机制。调度器决定何时申请和成功发布缓存；公共机制确保终态只通知一次、发布失败也尝试释放、取消请求不能再提交进度。Forward 持有资源使用权，终止请求不会提前释放仍被使用的块；EngineLoop 对执行对象做身份校验，晚到回调不能影响下一次执行。当前模拟 Forward 使用可取消计时；单成员取消保留整批执行，全部成员终止或关闭 Engine 时才取消计时并释放使用权。
 

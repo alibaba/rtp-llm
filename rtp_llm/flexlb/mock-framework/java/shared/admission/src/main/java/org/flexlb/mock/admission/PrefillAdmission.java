@@ -7,13 +7,22 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
-import org.flexlb.mock.engine.RequestState;
+import org.flexlb.mock.engine.*;
+import org.flexlb.mock.cache.KvCache;
+import org.flexlb.mock.multimodal.MediaInput;
+import org.flexlb.mock.api.model.Types.Role;
 
-/** P owns one end-to-end native request; the local Forward owner retains KV only through LOAD. */
-final class PrefillGeneration implements AutoCloseable {
+/**
+ * P protocol sessions, input preparation and output delivery. Scheduler owns local execution and KV.
+ */
+final class PrefillAdmission implements AutoCloseable {
     private final AdmissionConfig config;
-    private final LocalPrefill requests;
-    private final org.flexlb.mock.multimodal.MediaClient vision = new org.flexlb.mock.multimodal.MediaClient();
+    private final Object executionLock = new Object();
+    private final EngineLoop engine;
+    private final TaskHistory finished = new TaskHistory();
+    // Local request lifetime; output/Fetch sessions may outlive these entries. Guarded by executionLock.
+    private final Map<Long, Session> sessions = new LinkedHashMap<>();
+    private final org.flexlb.mock.multimodal.MediaClient vision;
     private final RpcChannels channels = new RpcChannels();
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
     private final ScheduledThreadPoolExecutor deadlines = new ScheduledThreadPoolExecutor(1,
@@ -24,23 +33,247 @@ final class PrefillGeneration implements AutoCloseable {
     private static final long REGISTRY_TTL = TimeUnit.MINUTES.toNanos(10);
     private final Map<Long, Fence> fences = new LinkedHashMap<>();
     private long nextOutputSweep;
-    private boolean closed;
+    private volatile boolean closed;
 
-    PrefillGeneration(AdmissionConfig config, LocalPrefill requests) {
-        this.config = config; this.requests = requests; deadlines.setRemoveOnCancelPolicy(true);
+    PrefillAdmission(AdmissionConfig config, KvCache cache, Scheduler.Factory schedulers) {
+        this.config = config;
+        engine = new EngineLoop(executionLock, schedulers, finished, cache, config.compute(), config.role(), config.id());
+        vision = new org.flexlb.mock.multimodal.MediaClient();
+        deadlines.setRemoveOnCancelPolicy(true);
     }
+
+    record Result(GenerateOutputsPB output, Status status, long engineCode) {}
+    final class Session implements Scheduler.Listener {
+        GenerateInputPB input;
+        final long started, deadline;
+        final long id;
+        boolean ended;
+        final boolean retained;
+        final CompletableFuture<Result> result = new CompletableFuture<>();
+        final CompletableFuture<Result> termination = new CompletableFuture<>();
+        Scheduler.Request request;
+
+        Session(GenerateInputPB input, boolean retained, long started, long deadline) {
+            this.input = input; this.retained = retained; this.started = started; this.deadline = deadline;
+            id = input.getRequestId();
+            synchronized (executionLock) {
+                if (closed) throw Status.UNAVAILABLE.withDescription("Prefill node closing").asRuntimeException();
+                engine.checkHealthy();
+                if (sessions.containsKey(id)) throw Status.ALREADY_EXISTS.withDescription("Active request identity already exists").asRuntimeException();
+                sessions.put(id, this);
+            }
+        }
+        CompletionStage<Result> completion() { return result.minimalCompletionStage(); }
+        void cancel() { finish(Status.CANCELLED.withDescription("Client cancelled local generation"), 0); }
+        void preempt() { finish(Status.RESOURCE_EXHAUSTED.withDescription("Preempted by a higher-priority request"), 8429); }
+        void expire() { finish(Status.DEADLINE_EXCEEDED.withDescription("RPC deadline expired"), 603); }
+        private void finish(Status status, long code) { finish(RpcErrors.scheduling(status, code)); }
+        private void fail(Throwable error) { finish(RpcErrors.scheduling(error)); }
+        private void finish(RequestFailure failure) {
+            synchronized (executionLock) {
+                if (ended) return;
+                if (request != null) { engine.finish(request, failure); return; }
+                var task = RpcTasks.pending(input);
+                finished.add(new Scheduler.Task(id, task.batchId(), task.inputLength(), 0, task.priority(),
+                    Scheduler.ReportedPhase.PENDING, 0, 0, 0, System.currentTimeMillis(), failure, false));
+                ended = true;
+                sessions.remove(id, this);
+            }
+            complete(null, failure);
+        }
+        private Result success(Scheduler.Request request, boolean finished) {
+            return new Result(LocalResponse.token(input, LocalResponse.sampledToken(input), 1, 1, request.reused(), System.nanoTime() - request.input().started(), finished, false), Status.OK, 0);
+        }
+        @Override public void output(Scheduler.Request request, Scheduler.Output output) {
+            if (retained) result.complete(success(request, output.finished()));
+        }
+        @Override public void terminal(Scheduler.Request request, RequestFailure failure) {
+            synchronized (executionLock) {
+                if (ended) return;
+                ended = true;
+                sessions.remove(id, this);
+            }
+            complete(request, failure);
+        }
+        private void complete(Scheduler.Request request, RequestFailure failure) {
+            var ended = failure == null ? success(request, true) : new Result(null, RpcErrors.status(failure), RpcErrors.code(failure));
+            result.complete(ended);
+            termination.complete(ended);
+        }
+    }
+
+    Session submit(GenerateInputPB input) { return submit(input, Long.MAX_VALUE); }
+    Session submit(GenerateInputPB input, long rpcDeadline) { return submit(input, rpcDeadline, false); }
+    Session submit(GenerateInputPB input, long rpcDeadline, boolean retained) {
+        return submit(input, rpcDeadline, retained, System.nanoTime());
+    }
+    Session submit(GenerateInputPB prepared, long rpcDeadline, boolean retained, long started) {
+        var input = prepared;
+        validate(input, retained);
+        requirePrepared(input);
+        var session = new Session(input, retained, started, RpcTasks.deadline(input, started, rpcDeadline));
+        return submit(session, prepared);
+    }
+    Session submit(Session session, GenerateInputPB prepared) {
+        try {
+            requirePrepared(prepared);
+            synchronized (executionLock) {
+                requirePending(session, prepared);
+                session.input = prepared;
+                session.request = engine.input(RpcTasks.input(prepared, Long.toString(session.input.getRequestId()), session.started,
+                    session.deadline, session.retained, config.blockSize(), config.cacheKeySeed()), session);
+            }
+        } catch (RuntimeException error) {
+            var nativeError = error instanceof RequestFailure f ? rpcFailure(f) : error;
+            session.fail(nativeError);
+            throw nativeError;
+        }
+        return session;
+    }
+
+    record Submission(GenerateInputPB prepared, long deadline, Session session) {
+        Submission(GenerateInputPB input, long deadline) { this(input, deadline, null); }
+        GenerateInputPB input() { return prepared; }
+    }
+    record Admission(Session session, RuntimeException failure) {}
+
+    List<Admission> submit(List<Submission> batch) {
+        var items = new ArrayList<Scheduler.InputItem>();
+        var admittedSessions = new ArrayList<Session>();
+        var positions = new ArrayList<Integer>();
+        var results = new ArrayList<Admission>(Collections.nCopies(batch.size(), null));
+        synchronized (executionLock) {
+            for (int i = 0; i < batch.size(); i++) {
+                var item = batch.get(i);
+                Session session = item.session();
+                try {
+                    if (session == null) validate(item.input(), true);
+                    requirePrepared(item.input());
+                    long started = System.nanoTime();
+                    if (session == null) session = new Session(item.input(), true, started,
+                        RpcTasks.deadline(item.input(), started, item.deadline()));
+                    requirePending(session, item.input());
+                    var input = RpcTasks.input(item.prepared(), Long.toString(session.id),
+                        session.started, session.deadline, true, config.blockSize(), config.cacheKeySeed());
+                    session.input = item.input();
+                    admittedSessions.add(session); positions.add(i); items.add(new Scheduler.InputItem(input, session));
+                } catch (RuntimeException error) {
+                    var failure = error instanceof RequestFailure f ? rpcFailure(f) : error;
+                    if (session != null) session.fail(failure);
+                    results.set(i, new Admission(null, failure));
+                }
+            }
+            if (!items.isEmpty()) {
+                List<Scheduler.InputResult> admitted;
+                try { admitted = engine.input(items); }
+                catch (RuntimeException error) {
+                    admittedSessions.forEach(session -> session.fail(error));
+                    throw error;
+                }
+                for (int i = 0; i < admitted.size(); i++) {
+                    var result = admitted.get(i); var session = admittedSessions.get(i);
+                    if (result.failure() == null) {
+                        session.request = result.request(); results.set(positions.get(i), new Admission(session, null));
+                    } else {
+                        var failure = rpcFailure(result.failure());
+                        session.fail(failure);
+                        results.set(positions.get(i), new Admission(null, failure));
+                    }
+                }
+            }
+        }
+        return List.copyOf(results);
+    }
+
+    private void requirePending(Session session, GenerateInputPB input) {
+        if (session.ended || session.request != null || sessions.get(session.id) != session)
+            throw new RequestFailure(RequestFailure.Reason.CANCELLED, "Admission already ended");
+        if (session.id != input.getRequestId()) throw new IllegalArgumentException("Admission identity changed");
+    }
+
+    private static io.grpc.StatusRuntimeException rpcFailure(RequestFailure failure) {
+        return failure.reason() == RequestFailure.Reason.INVALID
+            ? RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription(failure.getMessage()), 605) : RpcErrors.failure(failure);
+    }
+
+    private static void requirePrepared(GenerateInputPB input) {
+        if (org.flexlb.mock.multimodal.MediaInput.present(input))
+            throw Status.INVALID_ARGUMENT.withDescription("Prepare multimodal input before Scheduler submission").asRuntimeException();
+    }
+
+    void validate(GenerateInputPB input, boolean retained) {
+        if (config.role() != Role.prefill || (retained ? input.getGenerateConfig().getMaxNewTokens() < 1 : input.getGenerateConfig().getMaxNewTokens() != 1))
+            throw Status.UNIMPLEMENTED.withDescription("Local generation supports one token; transfer prepares only the Prefill token").asRuntimeException();
+        var generation = input.getGenerateConfig();
+        RequestValidation.supported(input);
+        if (input.getTokenIdsCount() < 1
+                || generation.getTimeoutMs() < 0 || generation.getMinNewTokens() < 0 || generation.getMinNewTokens() > generation.getMaxNewTokens()
+                || generation.getNumBeams() < 0 || generation.getNumReturnSequences() < 0)
+            throw RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid input length or local generation settings"), 605);
+    }
+
+    RequestState.Use beginTransfer(Session session) {
+        try { return engine.beginTransfer(session.request); }
+        catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
+    }
+    void transferCompleted(Session session, TransferResult result) {
+        try { engine.transferCompleted(session.request, result); }
+        catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
+    }
+    void transferred(Session session) {
+        try { engine.control(session.request, Control.TRANSFER_ACKNOWLEDGED); }
+        catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
+    }
+    Scheduler.Status snapshot(long latestFinished) {
+        synchronized (executionLock) {
+            var execution = engine.status(latestFinished);
+            var tasks = new ArrayList<>(execution.tasks());
+            sessions.values().stream().filter(session -> session.request == null)
+                .forEach(session -> tasks.add(RpcTasks.pending(session.input)));
+            return new Scheduler.Status(tasks, execution.finished(), execution.finishedVersion(), execution.waiting(), execution.running());
+        }
+    }
+    void checkHealthy() { engine.checkHealthy(); }
+    java.util.List<io.prometheus.client.Collector.MetricFamilySamples> collectMetrics() { return engine.collectMetrics(); }
+    String scrapeMetrics() { return engine.scrapeMetrics(); }
 
     void generate(GenerateInputPB input, StreamObserver<GenerateOutputsPB> observer) {
         var response = (ServerCallStreamObserver<GenerateOutputsPB>) observer;
-        try { start(input, response, 0); }
-        catch (StatusRuntimeException error) { response.onError(error); }
+        if (input.getGenerateConfig().getMaxNewTokens() > 1) {
+            try { start(input, response, 0); }
+            catch (RuntimeException error) { response.onError(error); }
+            return;
+        }
+        Session session;
+        var context = Context.current();
+        try {
+            validate(input, false);
+            long started = System.nanoTime();
+            session = new Session(input, false, started, RpcTasks.deadline(input, started, rpcDeadline()));
+        } catch (RuntimeException error) { response.onError(error instanceof RequestFailure f ? rpcFailure(f) : error); return; }
+        response.setOnCancelHandler(() -> {
+            if (context.getDeadline() != null && context.getDeadline().isExpired()) session.expire();
+            else session.cancel();
+        });
+        try {
+            if (response.isCancelled()) session.cancel();
+            else submit(session, vision.prepare(input, session.deadline));
+        } catch (RuntimeException error) {
+            session.fail(error);
+        }
+        session.completion().thenAccept(result -> {
+            if (response.isCancelled()) return;
+            if (!result.status().isOk()) { response.onError(RpcErrors.failure(result.status(), result.engineCode())); return; }
+            try { response.onNext(result.output()); response.onCompleted(); }
+            catch (RuntimeException error) { session.cancel(); }
+        });
     }
 
     private Call start(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, long attachMillis) {
         return start(input, response, attachMillis, false);
     }
     private Call start(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, long attachMillis, boolean grouped) {
-        requests.validate(input, true);
+        validate(input, true);
         // Batch admission already selects the PD protocol, even for a single output token.
         if (!grouped && !input.getGenerateConfig().getCanUsePdSeparation())
             throw Status.UNIMPLEMENTED.withDescription("Non-separated multi-token generation is not supported").asRuntimeException();
@@ -54,17 +287,10 @@ final class PrefillGeneration implements AutoCloseable {
             sweepFences();
             if (response == null && fences.containsKey(input.getRequestId()) && fences.get(input.getRequestId()).preempted()) throw preempted();
             if (active.containsKey(input.getRequestId())) throw Status.ALREADY_EXISTS.withDescription("Active Prefill request id").asRuntimeException();
-            if (active.size() >= TaskHistory.LIMIT)
-                throw Status.RESOURCE_EXHAUSTED.withDescription("Mock P/D request registry full").asRuntimeException();
             long now = System.nanoTime();
             if (now >= nextOutputSweep) {
                 outputs.entrySet().removeIf(e -> e.getValue().expired() || e.getValue().discardable());
                 nextOutputSweep = now + TimeUnit.SECONDS.toNanos(1);
-            }
-            if (outputs.size() >= 65536) {
-                var oldest = outputs.entrySet().stream().filter(e -> e.getValue().finished()).findFirst();
-                if (oldest.isEmpty()) throw Status.RESOURCE_EXHAUSTED.withDescription("Mock output registry full").asRuntimeException();
-                outputs.remove(oldest.get().getKey());
             }
             if (outputs.containsKey(input.getRequestId())) throw Status.ALREADY_EXISTS.withDescription("Retained output request id").asRuntimeException();
             call = new Call(input, response, host + ":" + target.getGrpcPort(), attachMillis, grouped);
@@ -99,21 +325,21 @@ final class PrefillGeneration implements AutoCloseable {
         return List.copyOf(results);
     }
     private void submitGroup(List<Call> calls) {
-        var live = new ArrayList<Call>(); var inputs = new ArrayList<LocalPrefill.Submission>();
+        var live = new ArrayList<Call>(); var inputs = new ArrayList<Submission>();
         for (var call : calls) synchronized (call) {
             if (!call.terminal && !call.prepared.isCompletedExceptionally()) {
-                live.add(call); inputs.add(new LocalPrefill.Submission(call.input, call.deadline));
+                live.add(call); inputs.add(new Submission(call.media, call.deadline, call.source));
             }
         }
         if (live.isEmpty()) return;
-        var results = requests.submit(inputs);
+        var results = submit(inputs);
         for (int i = 0; i < live.size(); i++) {
             var call = live.get(i); var result = results.get(i);
             synchronized (call) {
                 if (result.failure() != null) call.finish(result.failure());
                 else if (call.terminal) result.session().cancel();
                 else {
-                    call.source = result.session(); call.batchSource.complete(result.session());
+                    call.batchSource.complete(result.session());
                 }
             }
         }
@@ -151,7 +377,7 @@ final class PrefillGeneration implements AutoCloseable {
             if (call.terminal) return CancelStatusPB.CANCEL_STATUS_NOT_FOUND;
             call.priorityPreempted = true;
             synchronized (this) { remember(id, true); }
-            if (call.source != null) call.source.preempt();
+            call.source.preempt();
             call.finish(preempted());
             return CancelStatusPB.CANCEL_STATUS_ACCEPTED;
         }
@@ -178,11 +404,12 @@ final class PrefillGeneration implements AutoCloseable {
         final BufferedOutput output;
         final boolean deferred;
         final CompletableFuture<Void> admitted = new CompletableFuture<>(), prepared = new CompletableFuture<>();
-        final CompletableFuture<LocalPrefill.Session> batchSource;
+        final CompletableFuture<Session> batchSource;
         final String target;
-        final long started = System.nanoTime(), deadline;
+        final long started, deadline;
         final Context.CancellableContext context;
-        LocalPrefill.Session source;
+        GenerateInputPB media;
+        final Session source;
         RequestState.Use transferUse;
         Future<?> worker;
         ScheduledFuture<?> timeout;
@@ -192,8 +419,9 @@ final class PrefillGeneration implements AutoCloseable {
             batchSource = grouped ? new CompletableFuture<>() : null;
             output = new BufferedOutput(workers, attachMillis > 0 ? attachMillis : TimeUnit.MINUTES.toMillis(10));
             context = (deferred ? Context.ROOT : Context.current()).withCancellation();
-            deadline = Math.min(deferred ? Long.MAX_VALUE : rpcDeadline(), input.getGenerateConfig().getTimeoutMs() <= 0 ? Long.MAX_VALUE
-                : started + TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs()));
+            started = System.nanoTime();
+            deadline = RpcTasks.deadline(input, started, deferred ? Long.MAX_VALUE : rpcDeadline());
+            source = new Session(input, true, started, deadline);
         }
         void attach(ServerCallStreamObserver<GenerateOutputsPB> response) {
             output.attach(response, () -> finish(Status.CANCELLED.asRuntimeException()));
@@ -201,9 +429,12 @@ final class PrefillGeneration implements AutoCloseable {
         void run() { context.run(this::exchange); }
         void exchange() {
             try {
-                input = vision.prepare(input, deadline);
+                checkActive();
+                media = vision.prepare(input, deadline);
+                checkActive();
+                input = media;
                 var inbox = new Inbox(error -> {
-                    synchronized (this) { if (source != null && !source.result.isDone()) finish(error); }
+                    synchronized (this) { if (!source.result.isDone()) finish(error); }
                 });
                 var stub = RpcServiceGrpc.newStub(channels.get(target));
                 if (deadline != Long.MAX_VALUE) stub = stub.withDeadlineAfter(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
@@ -212,8 +443,7 @@ final class PrefillGeneration implements AutoCloseable {
                 allocationInput.getGenerateConfigBuilder().clearGroupTimeout();
                 if (deadline != Long.MAX_VALUE) allocationInput.getGenerateConfigBuilder().setTimeoutMs((int) Math.min(Integer.MAX_VALUE,
                     Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()))));
-                stream.onNext(GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE).setRequestId(input.getRequestId()).setClientId(config.id())
-                    .setInput(allocationInput).build());
+                stream.onNext(GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE).setRequestId(input.getRequestId()).setClientId(config.id()).setInput(allocationInput).build());
                 var allocated = inbox.next();
                 if (allocated == null || allocated.hasFlattenOutput() || allocated.hasErrorInfo() && allocated.getErrorInfo().getErrorCodeValue() != 0)
                     throw Status.DATA_LOSS.withDescription("Invalid ALLOCATE acknowledgement").asRuntimeException();
@@ -224,7 +454,7 @@ final class PrefillGeneration implements AutoCloseable {
                 synchronized (this) {
                     if (terminal) return;
                     if (batchSource == null)
-                        source = requests.submit(input, deadline, true);
+                        submit(source, media);
                     admitted.complete(null);
                 }
                 if (inbox.failure != null) throw Status.fromThrowable(inbox.failure)
@@ -233,7 +463,7 @@ final class PrefillGeneration implements AutoCloseable {
                 if (!first.status().isOk()) throw RpcErrors.failure(first.status(), first.engineCode());
                 synchronized (this) {
                     if (terminal) return;
-                    transferUse = requests.beginTransfer(source);
+                    transferUse = beginTransfer(source);
                 }
                 stream.onNext(frame(RemoteStage.LOAD));
                 long ttft = System.nanoTime() - started;
@@ -245,8 +475,8 @@ final class PrefillGeneration implements AutoCloseable {
                     throw Status.DATA_LOSS.withDescription("Invalid LOAD acknowledgement").asRuntimeException();
                 synchronized (this) {
                     if (terminal) return;
-                    requests.transferCompleted(source, new TransferResult(prefillFinished, null));
-                    requests.transferred(source);
+                    transferCompleted(source, new TransferResult(prefillFinished, null));
+                    transferred(source);
                     transferUse.close(); transferUse = null;
                 }
                 if (prefillFinished) stream.onNext(frame(RemoteStage.PREFILL_COMPLETE));
@@ -271,7 +501,16 @@ final class PrefillGeneration implements AutoCloseable {
             catch (ExecutionException error) { finish(Status.INTERNAL.withCause(error.getCause()).asRuntimeException()); }
             catch (RuntimeException error) { finish(error); }
         }
-        GenerateRequestPB frame(RemoteStage stage) { return GenerateRequestPB.newBuilder().setStage(stage).setRequestId(input.getRequestId()).setClientId(config.id()).build(); }
+        synchronized void checkActive() {
+            if (terminal || context.isCancelled() || Thread.currentThread().isInterrupted())
+                throw Status.CANCELLED.withDescription("Prefill request cancelled before downstream preparation").asRuntimeException();
+            if (System.nanoTime() >= deadline)
+                throw Status.DEADLINE_EXCEEDED.withDescription("Prefill request expired before downstream preparation").asRuntimeException();
+        }
+        GenerateRequestPB frame(RemoteStage stage) {
+            var frame = GenerateRequestPB.newBuilder().setStage(stage).setRequestId(input.getRequestId()).setClientId(config.id());
+            return frame.build();
+        }
         void send(GenerateOutputsPB value) { output.add(value); }
         synchronized void finish(Throwable error) {
             if (terminal) return;
@@ -282,13 +521,11 @@ final class PrefillGeneration implements AutoCloseable {
             if (batchSource != null) batchSource.completeExceptionally(failure);
             if (!admitted.isDone()) admitted.completeExceptionally(failure);
             context.cancel(null);
-            if (source != null) {
-                if (error != null && Status.fromThrowable(error).getCode() == Status.Code.DEADLINE_EXCEEDED) source.expire();
-                else source.cancel();
-            }
+            if (error != null) source.fail(error);
+            else source.cancel();
             if (transferUse != null) { transferUse.close(); transferUse = null; }
             if (worker != null) worker.cancel(true);
-            synchronized (PrefillGeneration.this) {
+            synchronized (PrefillAdmission.this) {
                 active.remove(input.getRequestId(), this);
                 if (deferred) {
                     var old = fences.get(input.getRequestId());
@@ -324,6 +561,11 @@ final class PrefillGeneration implements AutoCloseable {
         synchronized (this) { closed = true; owned = List.copyOf(active.values()); }
         for (var call : owned) call.finish(Status.UNAVAILABLE.withDescription("Prefill node closed").asRuntimeException());
         synchronized (this) { outputs.clear(); }
-        workers.shutdownNow(); deadlines.shutdownNow(); vision.close(); channels.close();
+        List<Session> preparing;
+        synchronized (executionLock) {
+            preparing = sessions.values().stream().filter(session -> session.request == null).toList();
+        }
+        for (var session : preparing) session.finish(Status.UNAVAILABLE.withDescription("Prefill node closed"), 0);
+        workers.shutdownNow(); deadlines.shutdownNow(); vision.close(); channels.close(); engine.close();
     }
 }
