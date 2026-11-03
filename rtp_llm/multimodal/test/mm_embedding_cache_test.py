@@ -2,6 +2,7 @@ import concurrent.futures
 import gc
 import random
 import threading
+import time
 import unittest
 import weakref
 from contextlib import contextmanager
@@ -1324,6 +1325,63 @@ class ShardedEmbeddingCacheTest(unittest.TestCase):
             gpu_max_bytes=0, cpu_max_bytes=10, shards=3
         )
         self.assertEqual(cache.stats()["cpu_max_bytes"], 10)
+
+
+class AsyncPublicationTest(unittest.TestCase):
+    def test_complete_publishes_result_before_insertion(self):
+        cache = MMEmbeddingCache(0, 64, async_publication=True)
+        try:
+            state, entry = cache.try_acquire("a")
+            self.assertEqual(state, "miss")
+            self.assertTrue(entry.complete(torch.tensor([1.0])))
+            # The result is visible immediately; insertion is deferred.
+            self.assertEqual(entry.wait().tolist(), [1.0])
+            cache.flush()
+            self.assertIs(cache.peek("a"), entry)
+            self.assertEqual(cache.stats()["resident_entries"], 1)
+        finally:
+            cache.close()
+
+    def test_failed_publication_does_not_poison_result(self):
+        cache = MMEmbeddingCache(0, 64, async_publication=True)
+        try:
+            _, entry = cache.try_acquire("a")
+            with patch.object(
+                cache, "_on_complete_sync", side_effect=RuntimeError("boom")
+            ):
+                self.assertTrue(entry.complete(torch.tensor([2.0])))
+                cache.flush()
+            self.assertEqual(entry.wait().tolist(), [2.0])
+            self.assertIsNone(cache.peek("a"))
+            self.assertIsNone(entry.error)
+        finally:
+            cache.close()
+
+    def test_full_queue_drops_without_blocking(self):
+        cache = MMEmbeddingCache(0, 64, async_publication=True, publish_queue_size=1)
+        release = threading.Event()
+        original = cache._on_complete_sync
+
+        def blocked(*args):
+            release.wait(5)
+            return original(*args)
+
+        try:
+            with patch.object(cache, "_on_complete_sync", side_effect=blocked):
+                _, first = cache.try_acquire("a")
+                first.complete(torch.tensor([1.0]))
+                deadline = time.monotonic() + 5
+                while cache._publish_pending == 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                _, second = cache.try_acquire("b")
+                second.complete(torch.tensor([2.0]))
+                self.assertEqual(second.wait().tolist(), [2.0])
+                self.assertGreaterEqual(cache.stats()["publish_drop"], 1)
+                release.set()
+                cache.flush()
+        finally:
+            release.set()
+            cache.close()
 
 
 if __name__ == "__main__":

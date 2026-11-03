@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import queue
 import sys
 import threading
 import time
@@ -534,6 +535,7 @@ class MMEmbeddingCacheEntry:
         self._on_read = on_read
         self.result: Optional[Any] = None
         self.error: Optional[Exception] = None
+        self._pending_before_publish: Optional[Callable[[], None]] = None
         self.generation = uuid.uuid4().hex
         # Error telemetry may be observed from several places (the producer
         # callback, a cache waiter, and an RPC handler). Keep one atomic claim
@@ -609,13 +611,34 @@ class MMEmbeddingCacheEntry:
             raise self.error
 
     def complete(
-        self, result: Any, *, before_publish: Optional[Callable[[], None]] = None
+        self,
+        result: Any,
+        *,
+        before_publish: Optional[Callable[[], None]] = None,
+        defer: bool = False,
     ) -> bool:
         with self._state_lock:
             if self._terminal:
                 return False
             self._terminal = True
             self.result = result
+            self._pending_before_publish = before_publish
+        if defer:
+            # Publish the result to waiters immediately; the cache insertion is
+            # best-effort and runs on the cache's publication thread. A failed
+            # insertion must never turn a successful computation into an error.
+            self._event.set()
+            try:
+                if self._on_complete is not None:
+                    self._on_complete(self, result)
+            except Exception as error:
+                logging.warning("ViT cache publication enqueue failed: %s", error)
+                try:
+                    if self._on_fail is not None:
+                        self._on_fail(self, error)
+                except Exception:
+                    logging.exception("Failed to remove unqueued ViT cache entry")
+            return True
         try:
             if self._on_complete is not None:
                 self._on_complete(self, result)
@@ -1073,6 +1096,8 @@ class MMEmbeddingCache:
         cpu_max_bytes: int,
         report_metrics: bool = False,
         on_cpu_evict: Optional[Callable[[str, MMEmbeddingCacheEntry], None]] = None,
+        async_publication: bool = False,
+        publish_queue_size: int = 1024,
     ):
         self._on_cpu_evict = on_cpu_evict
         self._validate_limits(gpu_max_bytes, cpu_max_bytes)
@@ -1107,7 +1132,20 @@ class MMEmbeddingCache:
             "demotion": 0,
             "promotion": 0,
             "transfer_error": 0,
+            "publish_drop": 0,
         }
+        self._publish_queue: Optional["queue.Queue"] = None
+        self._publish_thread: Optional[threading.Thread] = None
+        self._publish_pending = 0
+        self._publish_cond = threading.Condition()
+        if async_publication:
+            self._publish_queue = queue.Queue(maxsize=max(1, publish_queue_size))
+            self._publish_thread = threading.Thread(
+                target=self._publish_worker,
+                name="mm-cache-publish",
+                daemon=True,
+            )
+            self._publish_thread.start()
 
     @staticmethod
     def _validate_limits(gpu_max_bytes: int, cpu_max_bytes: int) -> None:
@@ -1458,6 +1496,98 @@ class MMEmbeddingCache:
     def _on_complete(
         self, cache_key: str, entry: MMEmbeddingCacheEntry, result: Any
     ) -> None:
+        if self._publish_queue is not None:
+            self._enqueue_publication(
+                cache_key, entry, result, entry._pending_before_publish
+            )
+            return
+        self._on_complete_sync(cache_key, entry, result)
+
+    def _drop_pending_entry(
+        self, cache_key: str, entry: MMEmbeddingCacheEntry
+    ) -> None:
+        """Remove an unqueued PENDING entry without taking the transfer lock."""
+        with self._lock:
+            if self._entries.get(cache_key) is entry:
+                self._entries.pop(cache_key, None)
+
+    def _enqueue_publication(
+        self,
+        cache_key: str,
+        entry: MMEmbeddingCacheEntry,
+        result: Any,
+        before_publish: Optional[Callable[[], None]],
+    ) -> None:
+        with self._publish_cond:
+            if self._publish_pending >= self._publish_queue.maxsize:
+                drop = True
+            else:
+                self._publish_pending += 1
+                drop = False
+        if drop:
+            with self._lock:
+                self._stats["publish_drop"] += 1
+            logging.warning(
+                "ViT cache publication queue full; dropping %s", cache_key
+            )
+            self._drop_pending_entry(cache_key, entry)
+            return
+        try:
+            self._publish_queue.put_nowait(
+                (cache_key, entry, result, before_publish)
+            )
+        except queue.Full:
+            with self._publish_cond:
+                self._publish_pending -= 1
+                self._publish_cond.notify_all()
+            with self._lock:
+                self._stats["publish_drop"] += 1
+            logging.warning(
+                "ViT cache publication queue full; dropping %s", cache_key
+            )
+            self._drop_pending_entry(cache_key, entry)
+
+    def _publish_worker(self) -> None:
+        while True:
+            item = self._publish_queue.get()
+            if item is None:
+                break
+            cache_key, entry, result, before_publish = item
+            try:
+                self._on_complete_sync(cache_key, entry, result)
+                if before_publish is not None:
+                    before_publish()
+            except Exception:
+                logging.warning(
+                    "ViT cache publication failed for %s", cache_key, exc_info=True
+                )
+                self._remove_if_same(cache_key, entry)
+            finally:
+                with self._publish_cond:
+                    self._publish_pending -= 1
+                    self._publish_cond.notify_all()
+
+    def flush(self) -> None:
+        """Wait for queued cache publications to finish (tests/shutdown)."""
+        if self._publish_queue is None:
+            return
+        with self._publish_cond:
+            while self._publish_pending:
+                self._publish_cond.wait()
+
+    def close(self) -> None:
+        """Stop the publication thread after draining queued work."""
+        if self._publish_queue is None:
+            return
+        self._publish_queue.put(None)
+        if self._publish_thread is not None:
+            self._publish_thread.join(timeout=10)
+        self._publish_queue = None
+        self._publish_thread = None
+
+    def _on_complete_sync(
+        self, cache_key: str, entry: MMEmbeddingCacheEntry, result: Any
+    ) -> None:
         entry.original_devices = _map_tensors(result, lambda tensor: tensor.device)
         entry.ready_events = self._record_ready_events(result)
         gpu_bytes, cpu_bytes = _compact_tensor_tier_bytes(
@@ -1602,7 +1732,11 @@ class MMEmbeddingCache:
         *,
         before_publish: Optional[Callable[[], None]] = None,
     ) -> bool:
-        return entry.complete(result, before_publish=before_publish)
+        return entry.complete(
+            result,
+            before_publish=before_publish,
+            defer=self._publish_queue is not None,
+        )
 
     def fail(
         self, cache_key: str, entry: MMEmbeddingCacheEntry, error: Exception
@@ -1781,6 +1915,7 @@ class ShardedMMEmbeddingCache:
         shards: int = 8,
         report_metrics: bool = False,
         on_cpu_evict: Optional[Callable[[str, MMEmbeddingCacheEntry], None]] = None,
+        async_publication: bool = False,
     ):
         if shards < 1:
             raise ValueError("embedding cache shards must be positive")
@@ -1790,6 +1925,7 @@ class ShardedMMEmbeddingCache:
                 cpu_bytes,
                 report_metrics=report_metrics,
                 on_cpu_evict=on_cpu_evict,
+                async_publication=async_publication,
             )
             for gpu_bytes, cpu_bytes in zip(
                 _split_budget(gpu_max_bytes, shards),
@@ -1871,6 +2007,14 @@ class ShardedMMEmbeddingCache:
     def clear(self, error: Optional[Exception] = None) -> None:
         for shard in self._shards:
             shard.clear(error)
+
+    def flush(self) -> None:
+        for shard in self._shards:
+            shard.flush()
+
+    def close(self) -> None:
+        for shard in self._shards:
+            shard.close()
 
     def resize(self, gpu_max_bytes: int, cpu_max_bytes: int) -> None:
         for shard, gpu_bytes, cpu_bytes in zip(

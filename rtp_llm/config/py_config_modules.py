@@ -358,6 +358,9 @@ class VitConfig:
         self.mm_hash_key_cache_max_bytes: int = (
             VitConfig.DEFAULT_MM_HASH_KEY_CACHE_MAX_BYTES
         )
+        # Publish cache insertions on a background thread so a slow pool
+        # eviction/copy never blocks the request that produced the embedding.
+        self.mm_cache_async_publish: bool = True
         self.mm_remote_cache_enable: bool = False
         self.mm_remote_cache_max_object_bytes: int = 256 * 1024**2
         self.mm_remote_cache_max_inflight_bytes: int = 1024**3

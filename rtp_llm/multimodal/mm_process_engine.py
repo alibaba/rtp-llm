@@ -359,6 +359,7 @@ class MMProcessEngine:
             cpu_max_bytes=self.vit_config.mm_cache_cpu_max_bytes,
             shards=max(1, cache_shards),
             report_metrics=True,
+            async_publication=self.vit_config.mm_cache_async_publish,
             on_cpu_evict=(
                 self._remote_embedding_cache.submit_eviction
                 if self._remote_embedding_cache is not None
@@ -1833,6 +1834,7 @@ class MMProcessEngine:
         self.preprocess_executor.shutdown()
         self._scheduler.close()
         self._shutdown_greennet_loop()
+        self._embedding_cache.close()
         self._embedding_cache.clear(RuntimeError("MMProcessEngine stopped"))
         self._hash_key_cache.clear()
         if self._remote_embedding_cache is not None:
