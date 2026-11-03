@@ -444,7 +444,7 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"9,0,BLOCKED", "9,8,BLOCKED", "9,9,SUCCESS", "4,0,BLOCKED", "4,2,SUCCESS", "0,0,SUCCESS"})
+    @CsvSource({"9,0,BLOCKED", "9,8,BLOCKED", "9,9,SUCCESS", "4,0,SUCCESS", "4,2,SUCCESS", "0,0,SUCCESS"})
     void countFullWorkerStillDefinesCacheEligibility(int leaderHit, int availableHit, PlacementResult.Status expected) {
         configureEngineQueueAdmission();
         publish("10.0.0.2", 8080);
@@ -476,7 +476,7 @@ class CostBasedPrefillSelectionMetricTest {
             leases.clear();
             org.mockito.Mockito.doReturn(Map.of(a.ipPort(), leaderHit)).when(cache).findMatchingEngines(any(), any(), any());
             try (var selected = select()) {
-                if (leaderHit > 0) { assertEquals(a, selected.prefillEp(), "released cache capacity resumes selection"); }
+                if (leaderHit > 5) { assertEquals(a, selected.prefillEp(), "released hot cache capacity resumes selection"); }
             }
         } finally { for (var lease : leases) { a.ownership.release(lease, null); } }
     }
@@ -555,6 +555,58 @@ class CostBasedPrefillSelectionMetricTest {
             assertEquals(900, second.hitCache());
             assertEquals(Set.of(a, b), Set.of(first.prefillEp(), second.prefillEp()));
         }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"32768,true", "20000,true", "19999,false"})
+    void coldRequestsIgnoreWeakHitsInSelectionEstimateAndReservation(long input, boolean cold) {
+        configureEngineQueueAdmission();
+        config.getRouter().getRoles().getPrefill().getTokenBalance().setMinPrefixHitPercent(5);
+        publish("10.0.0.2", 8080);
+        var a = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
+        var b = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
+        context.data().setRequest(context.data().getRequest().toBuilder()
+                .seqLen(input).blockCacheKeys(List.of(1L)).cacheKeyBlockSize(1000L).build());
+        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(a.ipPort(), 1));
+        // Just one token of extra work must outweigh any weak cache match on A.
+        try (var load = a.ownership.planTokenWork(1L); var selected = select()) {
+            assertEquals(cold ? b : a, selected.prefillEp());
+            assertEquals(cold ? 0L : 1000L, selected.hitCache());
+            var estimate = strategy.estimateQueuedWork(context.data().getRequest(), RoleType.PREFILL, null);
+            assertEquals(cold ? 0L : 1000L, estimate.hitTokens());
+            assertEquals(cold ? input : input - 1000L, estimate.workMs());
+            var endpoint = selected.prefillEp();
+            var lease = endpoint.ownership.reserveUnqueuedRoute(selected, 1L, 0L).reservation();
+            assertTrue(lease != null);
+            assertEquals(cold ? input : input - 1000L, endpoint.ownership.tokenWorkload().pendingTokens());
+            endpoint.ownership.release(lease, null);
+            assertEquals(0L, endpoint.ownership.tokenWorkload().pendingTokens());
+        }
+        assertEquals(0L, a.ownership.tokenWorkload().plannedTokens());
+        assertEquals(0L, b.ownership.tokenWorkload().plannedTokens());
+    }
+
+    @Test
+    void weakHitFullWorkerCannotBlockAnIdleZeroHitWorker() {
+        configureEngineQueueAdmission();
+        config.getRouter().getRoles().getPrefill().getTokenBalance().setMinPrefixHitPercent(5);
+        publish("10.0.0.2", 8080);
+        var a = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
+        var b = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
+        updateEngineQueue(a, 1, 0);
+        var busy = mock(RequestRoute.class);
+        when(busy.requestId()).thenReturn(9000L);
+        when(busy.seqLen()).thenReturn(2_100_000L);
+        var lease = a.ownership.reserveUnqueuedRoute(busy, 1, 0).reservation();
+        try {
+            context.data().setRequest(context.data().getRequest().toBuilder()
+                    .seqLen(32768L).blockCacheKeys(List.of(1L)).cacheKeyBlockSize(1024L).build());
+            when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(a.ipPort(), 1));
+            try (var selected = select()) {
+                assertEquals(b, selected.prefillEp());
+                assertEquals(0L, selected.hitCache());
+            }
+        } finally { a.ownership.release(lease, null); }
     }
 
     private void configureEngineQueueAdmission() {

@@ -881,7 +881,8 @@ public final class PrefillState {
         for (TerminalObservation terminal : reduction.terminals.values()) {
             if (removeEntry(terminal.owner) && tokenWorkload != null && terminal.errorCode() == 0L
                     && terminal.preemptionProgress() != PriorityPreemptionProgress.CANCELED) {
-                tokenWorkload.complete(terminal.computeTokens());
+                tokenWorkload.complete(terminal.owner.route.coldTokenBalance()
+                        ? computeTokens(terminal.owner.route) : terminal.computeTokens());
             }
         }
         for (var phase : reduction.individualPhases.entrySet()) {

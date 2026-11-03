@@ -45,7 +45,7 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
         coldTokenBalance = cold;
     }
 
-    boolean coldTokenBalance() { return coldTokenBalance; }
+    public boolean coldTokenBalance() { return coldTokenBalance; }
     private org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation tokenPlan;
 
     public void reserveTokenPlan(org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation plan) {
