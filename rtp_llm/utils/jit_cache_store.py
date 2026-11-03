@@ -87,6 +87,7 @@ def extract_zstd_tar(archive: Path, target: Path) -> None:
         kwargs = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
         tar.extractall(target, members=_safe_members(tar, target), **kwargs)
     validate_deepjit_snapshot(target)
+    validate_triton_snapshot(target)
     for name, ns in json.loads((target / MTIME_MANIFEST).read_text()).items():
         os.utime(_safe_path(target, name), ns=(ns, ns))
     (target / MTIME_MANIFEST).unlink()
@@ -94,6 +95,31 @@ def extract_zstd_tar(archive: Path, target: Path) -> None:
         with suppress(OSError):
             if not path.is_symlink():
                 path.chmod(0o777 if path.is_dir() else 0o666)
+
+
+def validate_triton_snapshot(root: Path) -> None:
+    """Reject metadata-only kernel hits before a staged restore becomes live."""
+    for group in (root / "triton").rglob("__grp__*.json"):
+        children = json.loads(group.read_text()).get("child_paths")
+        if not isinstance(children, dict) or not children:
+            raise ValueError(f"invalid Triton cache group: {group}")
+        metadata = group.name.removeprefix("__grp__")
+        # PPU identifies as CUDA, but needs hgbin. Its cubin is only a symlink
+        # alias and is intentionally not archived. Intermediate IR is optional.
+        binary_suffixes = (
+            (".hgbin",)
+            if any(name.endswith(".hgbin") for name in children)
+            else (".cubin", ".hsaco")
+        )
+        binaries = [name for name in children if name.endswith(binary_suffixes)]
+        if metadata not in children or not binaries:
+            raise ValueError(f"incomplete Triton cache group: {group}")
+        for name in (metadata, *binaries):
+            if Path(name).name != name or name in (".", ".."):
+                raise ValueError(f"unsafe Triton cache child: {name}")
+            path = group.parent / name
+            if not path.is_file() or path.stat().st_size == 0:
+                raise ValueError(f"missing Triton cache artifact: {path}")
 
 
 def acquire_flock(path: Path, blocking: bool = True, create: bool = True) -> int | None:

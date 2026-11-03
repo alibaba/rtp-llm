@@ -101,7 +101,9 @@ class JitCacheCompileTest(unittest.TestCase):
                 name: path.read_bytes()
                 for name, path in producer._snapshot_files().items()
             }
-            self.assertTrue(any(name.endswith(".cubin") for name in compiled))
+            self.assertTrue(
+                any(name.endswith((".cubin", ".hgbin")) for name in compiled)
+            )
             shutil.rmtree(producer.scope.root)  # this test owns the entire scope
             consumer = jit.start_from_config(config)
             self.assertIsNotNone(

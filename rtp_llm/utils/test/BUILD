@@ -46,6 +46,20 @@ py_test(
 )
 
 py_test(
+    name = "jit_cache_compile_ppu_test",
+    size = "large",
+    srcs = ["jit_cache_compile_test.py"],
+    main = "jit_cache_compile_test.py",
+    deps = ["//rtp_llm:jit_cache_manager_lib", ":triton"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    tags = ["PPU-ZW810E", "no-cache"],
+    exec_properties = {"gpu": "PPU-ZW810E"},
+)
+
+py_test(
     name = "jit_cache_deep_gemm_test",
     srcs = ["jit_cache_deep_gemm_test.py"],
     deps = ["//rtp_llm:jit_cache_manager_lib"],

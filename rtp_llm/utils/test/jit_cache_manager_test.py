@@ -120,6 +120,98 @@ class JitCacheTestBase(unittest.TestCase):
         return snap_store.publish_snapshot(generation)
 
 
+class TritonSnapshotTest(JitCacheTestBase):
+    def kernel_files(self, binary="hgbin"):
+        # PPU's metadata target is CUDA; binary selection must use the group.
+        children = {
+            name: f"/original/triton/hash/{name}"
+            for name in ("kernel.json", f"kernel.{binary}", "kernel.ttir")
+        }
+        if binary == "hgbin":
+            children["kernel.cubin"] = "/original/triton/hash/kernel.cubin"
+        return {
+            "triton/hash/__grp__kernel.json": json.dumps(
+                {"child_paths": children}
+            ).encode(),
+            "triton/hash/kernel.json": b'{"target": {"backend": "cuda"}}',
+            f"triton/hash/kernel.{binary}": b"compiled-binary",
+        }
+
+    def test_ppu_binary_survives_snapshot_restore_without_symlink_or_ir(self):
+        component = replace(
+            next(c for c in jit.COMPONENTS if c.name == "triton"),
+            local_dir=self.root / "local" / "triton",
+        )
+        expected = self.kernel_files()
+        for name, data in expected.items():
+            path = component.local_dir.parent / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        (component.local_dir / "hash/kernel.cubin").symlink_to("kernel.hgbin")
+        (component.local_dir / "hash/kernel.ttir").write_text("optional IR")
+        manager = jit.JitCacheManager(
+            jit.Scope("test", component.local_dir.parent, (component,)), ""
+        )
+        manager.on_any_event(
+            types.SimpleNamespace(
+                is_directory=False,
+                event_type="closed",
+                src_path=str(component.local_dir / "hash/kernel.hgbin"),
+            )
+        )
+        self.assertTrue(manager._dirty.is_set())
+        files = manager._snapshot_files()
+        self.assertEqual(set(files), set(expected))
+        snap_store = self.make_store()
+        snap_store.publish_snapshot(files)
+        restored = snap_store.prepare_restore(self.root / "staging")
+        self.assertIsNotNone(restored)
+        self.assertEqual(contents(restored.staging), expected)
+
+    def test_cuda_and_rocm_binaries_restore_without_intermediate_ir(self):
+        for binary in ("cubin", "hsaco"):
+            with self.subTest(binary=binary):
+                snap_store = self.make_store(binary)
+                expected = self.kernel_files(binary)
+                self.publish(snap_store, expected)
+                restored = snap_store.prepare_restore(self.root / (binary + "-staging"))
+                self.assertIsNotNone(restored)
+                self.assertEqual(contents(restored.staging), expected)
+
+    def test_incomplete_latest_snapshot_falls_back_to_complete_snapshot(self):
+        snap_store = self.make_store()
+        expected = self.kernel_files()
+        self.publish(snap_store, expected)
+        good = snapshots(snap_store)[0]
+        broken = {n: v for n, v in expected.items() if not n.endswith(".hgbin")}
+        self.publish(snap_store, broken)
+        restored = snap_store.prepare_restore(self.root / "staging")
+        self.assertEqual(restored.snapshot, good)
+        self.assertEqual(contents(restored.staging), expected)
+
+    def test_missing_or_empty_binary_falls_back_to_cold_start(self):
+        for binary in ("hgbin", "cubin", "hsaco"):
+            for empty in (False, True):
+                with self.subTest(binary=binary, empty=empty):
+                    snap_store = self.make_store(f"{binary}-{empty}")
+                    files = self.kernel_files(binary)
+                    key = f"triton/hash/kernel.{binary}"
+                    if empty:
+                        files[key] = b""
+                    else:
+                        del files[key]
+                    self.publish(snap_store, files)
+                    self.assertIsNone(snap_store.prepare_restore(self.root / "staging"))
+                    self.assertFalse(list((self.root / "staging").iterdir()))
+
+    def test_ppu_alias_cannot_substitute_for_missing_hgbin(self):
+        files = self.kernel_files()
+        files["triton/hash/kernel.cubin"] = files.pop("triton/hash/kernel.hgbin")
+        snap_store = self.make_store()
+        self.publish(snap_store, files)
+        self.assertIsNone(snap_store.prepare_restore(self.root / "staging"))
+
+
 class WrapperCacheSetupTest(JitCacheTestBase):
     def test_local_fallback_does_not_use_remote_snapshot_root(self):
         os.environ["REMOTE_JIT_DIR"] = str(self.root / "remote")
