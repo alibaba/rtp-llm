@@ -65,6 +65,12 @@ class AscendW8A8MXFP8Executor(FusedMoeExpertExecutor):
         checker.check(is_ascend())
         checker.check(torch.npu.is_available())
 
+    @property
+    def topk_ids_dtype(self) -> torch.dtype:
+        # The MoE layer builds topk_ids in this dtype (generic_moe);
+        # npu_moe_init_routing_v2 requires int32 expert_idx.
+        return torch.int32
+
     def __init__(
         self,
         config: MoEConfigAdapter,
