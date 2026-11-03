@@ -17,6 +17,9 @@ final class PrefillAdmission implements AutoCloseable {
     private final AdmissionConfig config;
     private final Object executionLock = new Object();
     private final EngineLoop engine;
+    private final TaskHistory finished = new TaskHistory();
+    // Local request lifetime; output/Fetch sessions may outlive these entries. Guarded by executionLock.
+    private final Map<Long, Session> sessions = new LinkedHashMap<>();
     private final org.flexlb.mock.multimodal.MediaClient vision;
     private final RpcChannels channels = new RpcChannels();
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
@@ -29,11 +32,11 @@ final class PrefillAdmission implements AutoCloseable {
     private static final long REGISTRY_TTL = TimeUnit.MINUTES.toNanos(10);
     private final Map<Long, Fence> fences = new LinkedHashMap<>();
     private long nextOutputSweep;
-    private boolean closed;
+    private volatile boolean closed;
 
     PrefillAdmission(AdmissionConfig config, KvCache cache, Scheduler.Factory schedulers) {
         this.config = config;
-        engine = new EngineLoop(executionLock, schedulers, cache, config.compute(), config.role(), config.id());
+        engine = new EngineLoop(executionLock, schedulers, finished, cache, config.compute(), config.role(), config.id());
         vision = new org.flexlb.mock.multimodal.MediaClient(config.imageToken());
         deadlines.setRemoveOnCancelPolicy(true);
     }
@@ -42,7 +45,8 @@ final class PrefillAdmission implements AutoCloseable {
     final class Session implements Scheduler.Listener {
         GenerateInputPB input;
         final long started, deadline;
-        final EngineLoop.Admission admission;
+        final long id;
+        boolean ended;
         final boolean retained;
         final CompletableFuture<Result> result = new CompletableFuture<>();
         final CompletableFuture<Result> termination = new CompletableFuture<>();
@@ -50,8 +54,13 @@ final class PrefillAdmission implements AutoCloseable {
 
         Session(GenerateInputPB input, boolean retained, long started, long deadline) {
             this.input = input; this.retained = retained; this.started = started; this.deadline = deadline;
-            try { admission = engine.beginAdmission(Long.toString(input.getRequestId()), RpcTasks.pending(input)); }
-            catch (RequestFailure failure) { throw rpcFailure(failure); }
+            id = input.getRequestId();
+            synchronized (executionLock) {
+                if (closed) throw Status.UNAVAILABLE.withDescription("Prefill node closing").asRuntimeException();
+                engine.checkHealthy();
+                if (sessions.containsKey(id)) throw Status.ALREADY_EXISTS.withDescription("Active request identity already exists").asRuntimeException();
+                sessions.put(id, this);
+            }
         }
         CompletionStage<Result> completion() { return result.minimalCompletionStage(); }
         void cancel() { finish(Status.CANCELLED.withDescription("Client cancelled local generation"), 0); }
@@ -61,10 +70,15 @@ final class PrefillAdmission implements AutoCloseable {
         private void fail(Throwable error) { finish(RpcErrors.scheduling(error)); }
         private void finish(RequestFailure failure) {
             synchronized (executionLock) {
+                if (ended) return;
                 if (request != null) { engine.finish(request, failure); return; }
-                engine.finishAdmission(admission, failure);
+                var task = RpcTasks.pending(input);
+                finished.add(new Scheduler.Task(id, task.batchId(), task.inputLength(), 0, task.priority(),
+                    Scheduler.ReportedPhase.PENDING, 0, 0, 0, System.currentTimeMillis(), failure));
+                ended = true;
+                sessions.remove(id, this);
             }
-            terminal(null, failure);
+            complete(null, failure);
         }
         private Result success(Scheduler.Request request, boolean finished) {
             return new Result(LocalResponse.token(input, LocalResponse.sampledToken(input), 1, 1, request.reused(), System.nanoTime() - request.input().started(), finished, false), Status.OK, 0);
@@ -73,6 +87,14 @@ final class PrefillAdmission implements AutoCloseable {
             if (retained) result.complete(success(request, output.finished()));
         }
         @Override public void terminal(Scheduler.Request request, RequestFailure failure) {
+            synchronized (executionLock) {
+                if (ended) return;
+                ended = true;
+                sessions.remove(id, this);
+            }
+            complete(request, failure);
+        }
+        private void complete(Scheduler.Request request, RequestFailure failure) {
             var ended = failure == null ? success(request, true) : new Result(null, RpcErrors.status(failure), RpcErrors.code(failure));
             result.complete(ended);
             termination.complete(ended);
@@ -98,8 +120,9 @@ final class PrefillAdmission implements AutoCloseable {
         try {
             requirePrepared(prepared.input());
             synchronized (executionLock) {
+                requirePending(session, prepared.input());
                 session.input = prepared.input();
-                session.request = engine.input(session.admission, RpcTasks.input(prepared, Long.toString(session.input.getRequestId()), session.started,
+                session.request = engine.input(RpcTasks.input(prepared, Long.toString(session.input.getRequestId()), session.started,
                     session.deadline, session.retained, config.blockSize(), config.cacheKeySeed()), session);
             }
         } catch (RuntimeException error) {
@@ -116,47 +139,58 @@ final class PrefillAdmission implements AutoCloseable {
     }
     record Admission(Session session, RuntimeException failure) {}
 
-    synchronized List<Admission> submit(List<Submission> batch) {
-        var sessions = new ArrayList<Session>();
+    List<Admission> submit(List<Submission> batch) {
         var items = new ArrayList<Scheduler.InputItem>();
+        var admittedSessions = new ArrayList<Session>();
         var positions = new ArrayList<Integer>();
         var results = new ArrayList<Admission>(Collections.nCopies(batch.size(), null));
-        for (int i = 0; i < batch.size(); i++) {
-            var item = batch.get(i);
-            Session session = item.session();
-            try {
-                if (session == null) validate(item.input(), true);
-                requirePrepared(item.input());
-                long started = System.nanoTime();
-                if (session == null) session = new Session(item.input(), true, started,
-                    RpcTasks.deadline(item.input(), started, item.deadline()));
-                session.input = item.input();
-                var input = RpcTasks.input(item.prepared(), Long.toString(item.input().getRequestId()),
-                    session.started, session.deadline, true, config.blockSize(), config.cacheKeySeed());
-                sessions.add(session); positions.add(i); items.add(new Scheduler.InputItem(input, session));
-            } catch (RuntimeException failure) {
-                if (session != null) session.fail(failure);
-                results.set(i, new Admission(null, failure));
-            }
-        }
-        List<Scheduler.InputResult> admitted;
         synchronized (executionLock) {
-            try { admitted = engine.input(sessions.stream().map(s -> s.admission).toList(), items); }
-            catch (RuntimeException error) {
-                sessions.forEach(s -> s.fail(error));
-                throw error;
+            for (int i = 0; i < batch.size(); i++) {
+                var item = batch.get(i);
+                Session session = item.session();
+                try {
+                    if (session == null) validate(item.input(), true);
+                    requirePrepared(item.input());
+                    long started = System.nanoTime();
+                    if (session == null) session = new Session(item.input(), true, started,
+                        RpcTasks.deadline(item.input(), started, item.deadline()));
+                    requirePending(session, item.input());
+                    var input = RpcTasks.input(item.prepared(), Long.toString(session.id),
+                        session.started, session.deadline, true, config.blockSize(), config.cacheKeySeed());
+                    session.input = item.input();
+                    admittedSessions.add(session); positions.add(i); items.add(new Scheduler.InputItem(input, session));
+                } catch (RuntimeException error) {
+                    var failure = error instanceof RequestFailure f ? rpcFailure(f) : error;
+                    if (session != null) session.fail(failure);
+                    results.set(i, new Admission(null, failure));
+                }
             }
-            for (int i = 0; i < admitted.size(); i++) {
-                var result = admitted.get(i); var session = sessions.get(i);
-                if (result.failure() == null) {
-                    session.request = result.request(); results.set(positions.get(i), new Admission(session, null));
-                } else {
-                    session.fail(rpcFailure(result.failure()));
-                    results.set(positions.get(i), new Admission(null, rpcFailure(result.failure())));
+            if (!items.isEmpty()) {
+                List<Scheduler.InputResult> admitted;
+                try { admitted = engine.input(items); }
+                catch (RuntimeException error) {
+                    admittedSessions.forEach(session -> session.fail(error));
+                    throw error;
+                }
+                for (int i = 0; i < admitted.size(); i++) {
+                    var result = admitted.get(i); var session = admittedSessions.get(i);
+                    if (result.failure() == null) {
+                        session.request = result.request(); results.set(positions.get(i), new Admission(session, null));
+                    } else {
+                        var failure = rpcFailure(result.failure());
+                        session.fail(failure);
+                        results.set(positions.get(i), new Admission(null, failure));
+                    }
                 }
             }
         }
         return List.copyOf(results);
+    }
+
+    private void requirePending(Session session, GenerateInputPB input) {
+        if (session.ended || session.request != null || sessions.get(session.id) != session)
+            throw new RequestFailure(RequestFailure.Reason.CANCELLED, "Admission already ended");
+        if (session.id != input.getRequestId()) throw new IllegalArgumentException("Admission identity changed");
     }
 
     private static io.grpc.StatusRuntimeException rpcFailure(RequestFailure failure) {
@@ -192,7 +226,15 @@ final class PrefillAdmission implements AutoCloseable {
         try { engine.control(session.request, Control.TRANSFER_ACKNOWLEDGED); }
         catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
     }
-    Scheduler.Status snapshot(long latestFinished) { return engine.status(latestFinished); }
+    Scheduler.Status snapshot(long latestFinished) {
+        synchronized (executionLock) {
+            var execution = engine.status(latestFinished);
+            var tasks = new ArrayList<>(execution.tasks());
+            sessions.values().stream().filter(session -> session.request == null)
+                .forEach(session -> tasks.add(RpcTasks.pending(session.input)));
+            return new Scheduler.Status(tasks, execution.finished(), execution.finishedVersion(), execution.waiting(), execution.running());
+        }
+    }
     void checkHealthy() { engine.checkHealthy(); }
     java.util.List<io.prometheus.client.Collector.MetricFamilySamples> collectMetrics() { return engine.collectMetrics(); }
     String scrapeMetrics() { return engine.scrapeMetrics(); }
@@ -530,6 +572,11 @@ final class PrefillAdmission implements AutoCloseable {
         synchronized (this) { closed = true; owned = List.copyOf(active.values()); }
         for (var call : owned) call.finish(Status.UNAVAILABLE.withDescription("Prefill node closed").asRuntimeException());
         synchronized (this) { outputs.clear(); }
+        List<Session> preparing;
+        synchronized (executionLock) {
+            preparing = sessions.values().stream().filter(session -> session.request == null).toList();
+        }
+        for (var session : preparing) session.finish(Status.UNAVAILABLE.withDescription("Prefill node closed"), 0);
         workers.shutdownNow(); deadlines.shutdownNow(); vision.close(); channels.close(); engine.close();
     }
 }

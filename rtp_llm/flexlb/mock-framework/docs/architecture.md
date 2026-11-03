@@ -133,11 +133,11 @@ EnqueueBatch/EnqueueGroup 先并行准备各成员 D 资源，收齐准备结果
 
 ### 请求观测与接入交接
 
-对外只有一次 GetWorkerStatus。EngineLoop 在同一调度锁内合并接入阶段与执行阶段：准备中的请求保留 Admission 句柄，以 PENDING 上报；提交成功时原子移除该句柄，改由 Scheduler.tasks() 按需返回执行事实。状态查询不驱动执行，Scheduler 不向 EngineLoop 逐次回报阶段变化，也不需要使用共享状态机。RTP 将自己的内部状态映射为 RECEIVED/KV_ALLOCATED/RUNNING；其他后端负责自己的映射。
+对外只有一次 GetWorkerStatus。PrefillAdmission 在同一执行锁内合并接入阶段与执行阶段：准备中的 Session 以 PENDING 上报；提交成功后持有 Scheduler.Request，由 Scheduler.tasks() 按需返回执行事实。Loop 不持有接入登记表，不过滤 Batch 成员，也不映射逐项结果。状态查询不驱动执行，Scheduler 不向 EngineLoop 逐次回报阶段变化，也不需要使用共享状态机。RTP 将自己的内部状态映射为 RECEIVED/KV_ALLOCATED/RUNNING；其他后端负责自己的映射。
 
 接入层在接受有效请求时固定 started 和绝对 deadline，单请求、多模态准备和显式组提交沿用同一预算。取消与提交使用同一执行锁，旧句柄不能删除或结束同身份的新请求。显式组中已取消的成员不再提交，其他合法成员继续准入。
 
-TaskHistory 位于共享 engine 模块，每个 Engine 只有一份 finished 版本序列，由 EngineLoop 创建并传给 Scheduler.Factory。提交前失败由接入句柄发布，提交后由 Scheduler 在本地终态和资源清理条件满足时发布；不另外维护一份活动执行状态。错误保留 RequestFailure，到 RpcTasks 编码时才转换原生协议错误。准备中的任务不计入 Scheduler waiting/running，不占 KV；协议输出容器和 Fetch 保留结果同样不计入执行负载。P 交接完成后的本地 finished 与其继续代理 D 输出的会话结束是两个边界，后续网络结束不重复发布 P 的本地终态。
+TaskHistory 位于共享 engine 模块，每个 Engine 只有一份 finished 版本序列，由接入层创建，经 EngineLoop 传给 Scheduler.Factory。提交前失败由接入 Session 发布，提交后由 Scheduler 在本地终态和资源清理条件满足时发布；不另外维护一份活动执行状态。错误保留 RequestFailure，到 RpcTasks 编码时才转换原生协议错误。准备中的任务不计入 Scheduler waiting/running，不占 KV；协议输出容器和 Fetch 保留结果同样不计入执行负载。P 交接完成后的本地 finished 与其继续代理 D 输出的会话结束是两个边界，后续网络结束不重复发布 P 的本地终态。
 
 ### PD 数据就绪与资源生命周期
 
