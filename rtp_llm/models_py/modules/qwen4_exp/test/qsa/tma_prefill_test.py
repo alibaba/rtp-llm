@@ -517,6 +517,45 @@ class TmaPrefillTest(unittest.TestCase):
             )
         torch.testing.assert_close(actual, torch.cat(outputs), atol=0, rtol=0)
 
+    def test_batched_paged_host_plan_avoids_unused_request_views(self):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa import sparse_gqa_impl
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.fmha_plans import _PrefillRequests
+
+        lengths, prefixes = [129, 257], [128, 128]
+        q, backing, cache, table, ids, scale, cu, pd = self._paged_batch_case(
+            12, lengths, prefixes, True
+        )
+        impl = object.__new__(sparse_gqa_impl.SparseGqaFmhaImpl)
+        impl.head_num, impl.kv_head_num, impl.head_dim, impl.q_width = 12, 1, 256, 3072
+        impl.kv_width = 256
+        impl.is_prefill, impl.is_target_verify, impl._is_mtp_draft = True, False, False
+        impl.attn_configs = SimpleNamespace(
+            indexer_topk=512, kernel_tokens_per_block=128
+        )
+        impl.attn_inputs = SimpleNamespace(
+            input_lengths=torch.tensor(lengths, dtype=torch.int32),
+            prefix_lengths=torch.tensor(prefixes, dtype=torch.int32),
+            cu_seqlens_device=cu,
+            kv_cache_kernel_block_id_device=table,
+            is_s_padded=False,
+        )
+        qkv = torch.empty(386, 14 * 256, device=q.device, dtype=q.dtype)
+        layer = SimpleNamespace(kv_cache_base=backing, kv_scale_base=scale)
+        plan = impl._prepare_incremental_prefill_inputs(qkv, layer, ids)
+        with patch.object(
+            _PrefillRequests,
+            "__getitem__",
+            side_effect=AssertionError("batched prefill materialized fallback views"),
+        ):
+            actual = impl._forward_ragged_paged(q, layer, plan, trusted_selected=True)
+        expected = self._paged_batch_reference(
+            q, cache, table, ids, lengths, prefixes, scale
+        )
+        torch.testing.assert_close(actual, expected, atol=0.0078125, rtol=0.008)
+        # A general reader still consumes the same request-local views.
+        fallback = impl._forward_ragged_paged(q, layer, plan)
+        torch.testing.assert_close(fallback, expected, atol=0.0078125, rtol=0.008)
+
     def test_long_prefix_fp8_value_scales_preserve_bf16_range(self):
         q, backing, cache, table, selected, scale = self._paged_case(
             12, 1024, 129, True

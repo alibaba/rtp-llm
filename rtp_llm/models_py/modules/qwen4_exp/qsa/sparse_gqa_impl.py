@@ -772,7 +772,8 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         block_table = plan.block_table
         page_size = int(plan.page_size)
         requests = plan.requests
-        max_rows = max(int(req.end) - int(req.start) for req in requests)
+        lengths = plan.lengths_host
+        max_rows = max(lengths)
         batch_rows = self._is_mtp_draft and len(requests) > 1 and max_rows <= 4
         if batch_rows:
             # The draft's short, ragged windows share a single paged launch.
@@ -824,7 +825,11 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 .index_select(0, packed_positions)
             )
 
-        if trusted_selected and self.attn_configs.indexer_topk == 512:
+        if (
+            trusted_selected
+            and self.attn_configs.indexer_topk == 512
+            and len(requests) > 1
+        ):
             from .tma_prefill import try_ragged_paged_qsa_prefill
 
             output = try_ragged_paged_qsa_prefill(
@@ -832,8 +837,8 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 kv_cache.kv_cache_base,
                 block_table,
                 plan.selected_indices,
-                [int(req.end) - int(req.start) for req in requests],
-                [req.prefix for req in requests],
+                lengths,
+                plan.prefixes_host,
                 plan.cu_seqlens,
                 plan.prefixes_device,
                 page_size=page_size,

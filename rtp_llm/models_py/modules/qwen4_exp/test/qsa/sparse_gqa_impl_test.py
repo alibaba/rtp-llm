@@ -864,6 +864,22 @@ class SparseGqaImplForwardTest(unittest.TestCase):
         plan = impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
         self.assertEqual(plan.requests[0].kv_lens.tolist(), [[3, 4]])
 
+    def test_incremental_plan_preserves_host_snapshot_and_request_access(self):
+        impl, qkv, cache, selected = self._incremental_plan_case()
+        plan = impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
+        impl.attn_inputs.input_lengths.copy_(torch.tensor([2, 3], dtype=torch.int32))
+        impl.attn_inputs.prefix_lengths.fill_(1)
+        self.assertEqual(plan.lengths_host, (3, 2))
+        self.assertEqual(plan.prefixes_host, (3, 7))
+        self.assertEqual(len(plan.requests), 2)
+        first, last = plan.requests[:]
+        self.assertIs(plan.requests[-1], last)
+        self.assertIs(plan.requests[0], first)
+        self.assertEqual(first.kv_lens.tolist(), [[4, 5, 6]])
+        self.assertEqual(last.kv_lens.tolist(), [[8, 9]])
+        with self.assertRaises(IndexError):
+            _ = plan.requests[2]
+
     def test_incremental_plan_accepts_strided_and_duplicate_selection(self):
         impl, qkv, cache, _ = self._incremental_plan_case()
         storage = torch.full((5, 12), -99, device=_DEV, dtype=torch.int32)

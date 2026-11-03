@@ -6,7 +6,12 @@ import torch
 
 from rtp_llm.ops.compute_ops import LayerKVCache
 
-from .fmha_plans import IncrementalPrefillInputs, PagedInputs, PrefillRequest
+from .fmha_plans import (
+    IncrementalPrefillInputs,
+    PagedInputs,
+    PrefillRequest,
+    _PrefillRequests,
+)
 from .fmha_validation import _validate_main_cache_layout
 
 
@@ -387,20 +392,15 @@ def _try_prepare_host_incremental_prefill(
         cache_blocks,
         bool(self.attn_inputs.is_s_padded),
     )
-    requests = []
-    start = 0
-    for length, prefix in zip(lens, prefix_host):
-        end = start + length
-        requests.append(
+    requests = (
+        [
             PrefillRequest(
-                start,
-                end,
-                visible[None, start:end],
-                selected[None, start:end].contiguous(),
-                int(prefix),
+                0, tokens, visible[None], selected[None].contiguous(), prefix_host[0]
             )
-        )
-        start = end
+        ]
+        if batch == 1
+        else _PrefillRequests(lens, prefix_host, visible, selected)
+    )
     return IncrementalPrefillInputs(
         batch, tokens, table, page_size, requests, selected, pd, cu
     )
