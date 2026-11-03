@@ -1,13 +1,9 @@
 import random
-import sys
 import unittest
 
 import pytest
 
 pytestmark = [pytest.mark.gpu(type="H20")]
-
-# Add RTP-LLM to path if needed
-sys.path.append("/data2/baowending.bwd/new/RTP-LLM/github-opensource/")
 
 import numpy as np
 import torch

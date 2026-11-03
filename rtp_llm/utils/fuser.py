@@ -108,8 +108,7 @@ class MountRwMode(Enum):
     RWMODE_RW = 2  # 读写模式
 
 
-# Fuser is a wrapper class for c2 sidecar fuse.
-# see documents at https://aliyuque.antfin.com/owt27z/ohohhg/xyardt2bwbyfmhn5
+# Wrap the sidecar HTTP API for mounting and unmounting paths.
 class Fuser:
     def __init__(self) -> None:
         from rtp_llm.aios.kmonitor.python_client.kmonitor.utils.hippo_helper import (

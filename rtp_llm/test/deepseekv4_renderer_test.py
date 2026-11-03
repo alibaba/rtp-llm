@@ -40,12 +40,6 @@ DSV4_ENCODING_PATH = Path(
         "/mnt/nas1/hf/DeepSeek-V4-Flash/encoding/encoding_dsv4.py",
     )
 )
-VLLM_DSV4_ENCODING_PATH = Path(
-    os.environ.get(
-        "VLLM_DSV4_ENCODING_PATH",
-        "/data0/baowending.bwd/vllm/vllm/tokenizers/deepseek_v4_encoding.py",
-    )
-)
 
 
 def _load_module(name: str, path: Path):

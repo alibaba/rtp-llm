@@ -1,9 +1,7 @@
-# https://docker.alibaba-inc.com/#/dockerImage/3124085/detail
-
 ARG FROM_IMAGE
 FROM $FROM_IMAGE
 
-MAINTAINER liukan.lk
+LABEL maintainer="RTP-LLM contributors"
 
 RUN --mount=type=secret,id=id --mount=type=secret,id=secret cd /tmp/ && \
     osscmd multiget --thread_num=30 oss://search-ad/pkg/cuda_12.6.3_560.35.05_linux.run 1.run --id=$(cat /run/secrets/id) --key=$(cat /run/secrets/secret) --host=oss-cn-hangzhou-zmf-internal.aliyuncs.com && \

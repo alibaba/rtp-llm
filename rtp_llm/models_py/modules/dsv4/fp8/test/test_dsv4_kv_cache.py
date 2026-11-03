@@ -78,35 +78,39 @@ _kernel.fp8_gemm = _mock_fp8_gemm
 _kernel.fp4_gemm = _mock_fp4_gemm
 sys.modules["kernel"] = _kernel
 
-# Add official model path
-OFFICIAL_DIR = "/home/tanboyu.tby/cuda_study/models/DeepSeek/official"
+# Configure the original reference implementation used for parity tests.
+OFFICIAL_DIR = os.environ.get("DSV4_OFFICIAL_DIR", "")
+if not OFFICIAL_DIR:
+    raise RuntimeError(
+        "Set DSV4_OFFICIAL_DIR to the original DeepSeek V4 reference directory containing model.py"
+    )
+OFFICIAL_DIR = os.path.abspath(OFFICIAL_DIR)
+if not os.path.isfile(os.path.join(OFFICIAL_DIR, "model.py")):
+    raise FileNotFoundError(
+        f"DSV4_OFFICIAL_DIR does not contain model.py: {OFFICIAL_DIR}"
+    )
 sys.path.insert(0, OFFICIAL_DIR)
-_OFFICIAL_MODEL_AVAILABLE = os.path.exists(os.path.join(OFFICIAL_DIR, "model.py"))
-pytestmark = pytest.mark.skipif(
-    not _OFFICIAL_MODEL_AVAILABLE,
-    reason="official DeepSeek model.py is not available in this environment",
-)
 
-if _OFFICIAL_MODEL_AVAILABLE:
-    # Set official model's world_size before importing
-    import model as _official_model
+# Set official model's world_size before importing
+import model as _official_model
 
-    _official_model.world_size = 1
+if os.path.realpath(_official_model.__file__) != os.path.realpath(
+    os.path.join(OFFICIAL_DIR, "model.py")
+):
+    raise RuntimeError(
+        "DeepSeek V4 reference model was loaded from a different directory"
+    )
 
-    # Import official implementation
-    from model import Attention as OfficialAttention
-    from model import Compressor as OfficialCompressor
-    from model import Indexer as OfficialIndexer
-    from model import ModelArgs as OfficialArgs
+_official_model.world_size = 1
 
-    # Monkey-patch module-level functions that need CUDA (defined in model.py, not kernel)
-    _official_model.rotate_activation = _mock_rotate_activation
-else:
-    _official_model = None
-    OfficialAttention = None
-    OfficialCompressor = None
-    OfficialIndexer = None
-    OfficialArgs = None
+# Import official implementation
+from model import Attention as OfficialAttention
+from model import Compressor as OfficialCompressor
+from model import Indexer as OfficialIndexer
+from model import ModelArgs as OfficialArgs
+
+# Monkey-patch module-level functions that need CUDA (defined in model.py, not kernel)
+_official_model.rotate_activation = _mock_rotate_activation
 
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8 as OurAttention
 from rtp_llm.models_py.modules.dsv4.fp8.attention import _get_window_topk_idxs

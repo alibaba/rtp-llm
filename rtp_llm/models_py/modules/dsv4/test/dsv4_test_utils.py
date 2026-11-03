@@ -67,16 +67,28 @@ _kernel.fp8_gemm = _mock_fp8_gemm
 _kernel.fp4_gemm = _mock_fp4_gemm
 sys.modules["kernel"] = _kernel
 
-# Add official model path.  CI/dev boxes can override this; otherwise keep the
-# original author path and allow PYTHONPATH to provide ``model.py``.
-OFFICIAL_DIR = os.environ.get(
-    "DSV4_OFFICIAL_DIR", "/home/tanboyu.tby/cuda_study/models/DeepSeek/official"
-)
-if OFFICIAL_DIR:
-    sys.path.insert(0, OFFICIAL_DIR)
+# Configure the original reference implementation used for parity tests.
+OFFICIAL_DIR = os.environ.get("DSV4_OFFICIAL_DIR", "")
+if not OFFICIAL_DIR:
+    raise RuntimeError(
+        "Set DSV4_OFFICIAL_DIR to the original DeepSeek V4 reference directory containing model.py"
+    )
+OFFICIAL_DIR = os.path.abspath(OFFICIAL_DIR)
+if not os.path.isfile(os.path.join(OFFICIAL_DIR, "model.py")):
+    raise FileNotFoundError(
+        f"DSV4_OFFICIAL_DIR does not contain model.py: {OFFICIAL_DIR}"
+    )
+sys.path.insert(0, OFFICIAL_DIR)
 
 # Set official model's world_size before importing
 import model as _official_model
+
+if os.path.realpath(_official_model.__file__) != os.path.realpath(
+    os.path.join(OFFICIAL_DIR, "model.py")
+):
+    raise RuntimeError(
+        "DeepSeek V4 reference model was loaded from a different directory"
+    )
 
 _official_model.world_size = 1
 
