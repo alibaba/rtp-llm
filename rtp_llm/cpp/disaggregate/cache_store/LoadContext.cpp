@@ -114,7 +114,7 @@ std::string SyncContext::getErrorInfoString() const {
     return error_info_.ToString();
 }
 
-const ErrorInfo& SyncContext::getErrorInfo() const {
+ErrorInfo SyncContext::getErrorInfo() const {
     std::unique_lock<std::mutex> lock(mutex_);
     return error_info_;
 }
@@ -162,6 +162,38 @@ void LoadContext::load(const std::vector<std::shared_ptr<RequestBlockBuffer>>& r
         }
     }
     call(batches, timeout_ms, check_cancel_func);
+}
+
+ErrorInfo LoadContext::waitDoneWithConnectRetry(int64_t retries) {
+    waitDone();
+    auto error = getErrorInfo();
+    // RDMA combines all blocks for one peer in one load. Its connection errors
+    // complete before the transfer starts, so retry only that peer's buffers.
+    for (int64_t attempt = 0; combine_load_ && attempt < retries
+                              && (error.code() == ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED
+                                  || error.code() == ErrorCode::CACHE_STORE_LOAD_RDMA_CONNECT_FAILED);
+         ++attempt) {
+        if (check_cancel_func_ && check_cancel_func_()) {
+            return ErrorInfo(ErrorCode::CANCELLED, ErrorCodeToString(ErrorCode::CANCELLED));
+        }
+        const auto remaining_ms = deadline_ms_ - autil::TimeUtility::currentTimeInMilliSeconds();
+        if (remaining_ms <= 0) {
+            return ErrorInfo(ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT,
+                             ErrorCodeToString(ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT));
+        }
+        auto retry = std::make_shared<LoadContext>(cache_store_.lock(), combine_load_);
+        retry->load(request_block_buffers_,
+                    peer_ip_,
+                    port_,
+                    rdma_port_,
+                    remaining_ms,
+                    check_cancel_func_,
+                    partition_count_,
+                    partition_id_);
+        retry->waitDone();
+        error = retry->getErrorInfo();
+    }
+    return error;
 }
 
 bool LoadContext::doCall(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer, int64_t timeout_ms) {

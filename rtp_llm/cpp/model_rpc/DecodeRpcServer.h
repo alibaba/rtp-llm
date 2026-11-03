@@ -73,7 +73,7 @@ private:
     void
     reportEarlyFinishTask(DecodeGenerateContext& decode_context, int64_t error_code, const std::string& error_message);
 
-    ErrorInfo              loadCache(const LoadKVCacheContext& load_context);
+    ErrorInfo              loadCache(const LoadKVCacheContext& load_context, int64_t connect_retries = 0);
     ErrorInfo              loadCacheForAllRank(DecodeGenerateContext& decode_context);
     ErrorInfo              loadCacheAsyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
     ErrorInfo              loadCacheSyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);

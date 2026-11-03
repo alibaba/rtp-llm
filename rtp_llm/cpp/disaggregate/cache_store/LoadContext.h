@@ -28,7 +28,7 @@ public:
     void waitDone();
 
     bool             success() const;
-    const ErrorInfo& getErrorInfo() const;
+    ErrorInfo        getErrorInfo() const;
     std::string      getErrorInfoString() const;
 
     void
@@ -67,6 +67,8 @@ public:
               CheckCancelFunc                                         check_cancel_func,
               int                                                     partition_count,
               int                                                     partition_id);
+
+    ErrorInfo waitDoneWithConnectRetry(int64_t retries);
 
 protected:
     bool doCall(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer, int64_t timeout_ms) override;

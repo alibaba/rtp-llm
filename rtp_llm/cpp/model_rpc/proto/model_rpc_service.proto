@@ -398,6 +398,7 @@ message BroadcastLoadRequestPB {
     int32 partition_id = 11;
     repeated IntVector group_block_ids = 12;
     int32 prefill_cp_size = 13;
+    bool retry_rdma_connect = 14;
 }
 
 message BroadcastLoadResponsePB {
