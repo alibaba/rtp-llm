@@ -129,6 +129,7 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
         if(result.build().getSerializedSize()>4*1024*1024) { response.onError(Status.RESOURCE_EXHAUSTED.withDescription("V cache snapshot exceeds RPC limit").asRuntimeException());return; }
         response.onNext(result.build());response.onCompleted();
     }
+    java.util.List<io.prometheus.client.Collector.MetricFamilySamples> collectMetrics() { return metrics.collect(scheduler,cache,preparation); }
     String metrics() { return metrics.scrape(scheduler,cache,preparation); }
     void checkHealthy() { scheduler.checkHealthy(); }
     @Override public void close() { closed=true;scheduler.close();preparation.close();cache.close();replies.shutdownNow(); }

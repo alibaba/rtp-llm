@@ -15,7 +15,7 @@ final class VitMetrics {
                 "py_rtp_vit_embedding_cache_inflight_qps", "py_rtp_vit_embedding_cache_eviction_qps",
                 "py_rtp_vit_embedding_overload_qps")) events.observe(name, 0);
     }
-    String scrape(VitScheduler scheduler, VitCache cache, VitPreparation preparation) {
+    List<Collector.MetricFamilySamples> collect(VitScheduler scheduler, VitCache cache, VitPreparation preparation) {
         var state = new TreeMap<>(scheduler.snapshot()); state.putAll(cache.snapshot());
         state.put("py_rtp_vit_preprocess_queue_size",(double)preparation.preparing());
         var gauges = new Collector() {
@@ -30,6 +30,15 @@ final class VitMetrics {
         };
         var snapshot = new CollectorRegistry(); gauges.register(snapshot);
         var tags = MetricTags.fromEnvironment(System.getenv());
-        return MetricTags.scrape(registry, tags) + MetricTags.scrape(snapshot, tags);
+        var result = new ArrayList<>(MetricTags.collect(registry, tags));
+        result.addAll(MetricTags.collect(snapshot, tags));
+        return List.copyOf(result);
+    }
+    String scrape(VitScheduler scheduler, VitCache cache, VitPreparation preparation) {
+        var text = new java.io.StringWriter();
+        try { io.prometheus.client.exporter.common.TextFormat.write004(text,
+            Collections.enumeration(collect(scheduler, cache, preparation))); }
+        catch (java.io.IOException impossible) { throw new java.io.UncheckedIOException(impossible); }
+        return text.toString();
     }
 }

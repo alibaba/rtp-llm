@@ -527,6 +527,7 @@ abstract class RtpSchedulerBase implements Scheduler {
                 active.values().stream().filter(e -> !e.state.terminating() && e.phase == CACHE_LOADING).count());
         }
     }
+    @Override public List<io.prometheus.client.Collector.MetricFamilySamples> collectMetrics() { return metrics.collect(); }
     @Override public String scrapeMetrics() { return metrics.scrape(); }
     @Override public void close() {
         if (closed) return;
