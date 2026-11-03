@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/accuracy/AccuracyChecker.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <functional>
 #include <list>
 #include <memory>
@@ -74,8 +75,8 @@ struct RecordingSession {
     }
 };
 
-// Build a stream and its release guard for each active sequence
-// rank0 only; rank>0 builds nothing and forwards via tpSync
+// Only TP rank 0 builds request streams and their release guards.
+// All TP ranks execute their model shards using synchronized inputs.
 bool buildBatch(bool                                                            root,
                 const std::vector<size_t>&                                      active_seq_ids,
                 const std::function<absl::StatusOr<GenerateStreamPtr>(size_t)>& make_stream,
@@ -144,18 +145,21 @@ const std::vector<AccuracyScenario>& AccuracyChecker::defaultScenarios() {
 
 AccuracyChecker::AccuracyChecker(const ModelConfig&       model_config,
                                  const RuntimeConfig&     runtime_config,
-                                 const ParallelismConfig& parallelism_config,
-                                 bool                     decode_gate):
+                                 const ParallelismConfig& parallelism_config):
     model_config_(model_config),
     runtime_config_(runtime_config),
-    parallelism_config_(parallelism_config),
-    decode_gate_(decode_gate) {}
+    parallelism_config_(parallelism_config) {}
 
 torch::Tensor AccuracyChecker::makeCheckPrompt(size_t len) {
     int64_t token_size = model_config_.embedding_size ?
                              std::min(model_config_.embedding_size, model_config_.vocab_size) :
                              model_config_.vocab_size;
-    return torch::randint(0, token_size, {(int64_t)len}, torch::kInt32);
+    RTP_LLM_CHECK_WITH_INFO(token_size > 0, "accuracy check prompt token range must be positive");
+    // Keep qualification reproducible across restarts and avoid consuming the
+    // serving RNG state. The affine sequence varies with length while staying
+    // entirely inside the configured token range.
+    auto positions = torch::arange(0, static_cast<int64_t>(len), torch::kInt64);
+    return ((positions * 131 + static_cast<int64_t>(len) * 17 + 1) % token_size).to(torch::kInt32);
 }
 
 std::shared_ptr<GenerateInput> AccuracyChecker::wrapAccuracyInput(torch::Tensor input_ids, bool need_release) {
@@ -265,7 +269,7 @@ absl::StatusOr<GenerateStreamPtr> AccuracyChecker::makeForkStream(
     RTP_LLM_CHECK_WITH_INFO(cache_resource.getKVBlockUpdateMapping().empty(),
                             "accuracy check: stale block-update mapping before boundary copy");
 
-    // Allocate own blocks for the remainder (decode: one tail; prefix: the chunk blocks)
+    // Allocate independent KV blocks for the fork.
     RETURN_IF_STATUS_ERROR(stream->incrKVBlock());
     const size_t need_blocks = (stream->seqLength() + block_size - 1) / block_size;
     RTP_LLM_CHECK_WITH_INFO(stream->kvCache().blocks(0, cache_tag).size() == need_blocks,
@@ -319,8 +323,7 @@ bool AccuracyChecker::runCheck(const AccuracyScenario& scenario, const std::stri
     const size_t max_batch_tokens = static_cast<size_t>(runtime_config_.fifo_scheduler_config.max_batch_tokens_size);
     const size_t batch_tokens     = max_plain_len * scenario.seqs.size();
     const bool   batch_tokens_check_flag = (max_batch_tokens == 0) || (batch_tokens < max_batch_tokens);
-    // PyTorch SDPA may produce incorrect results for sequences longer than 65536 tokens
-    // The fix is expected in torch 2.14
+    // Golden SDPA is capped at 65536 KV tokens; longer scenarios are skipped.
     const bool sequence_length_check_flag =
         (max_seq_len <= static_cast<size_t>(model_config_.max_seq_len)) && (max_seq_len <= 65536);
     if (!worldAll(batch_size_check_flag && batch_tokens_check_flag && sequence_length_check_flag)) {
@@ -342,8 +345,8 @@ absl::StatusOr<std::vector<std::string>> AccuracyChecker::listCandidates(const p
                                                                          const std::string& phase) {
     std::vector<std::string> candidates;
     bool                     list_candidates_flag = true;
+    py::gil_scoped_acquire   gil;
     try {
-        py::gil_scoped_acquire gil;
         candidates = recorder.attr("list_candidates")(phase).cast<std::vector<std::string>>();
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("accuracy check list_candidates(%s) failed: %s", phase.c_str(), e.what());
@@ -368,8 +371,8 @@ absl::Status AccuracyChecker::forward(const py::object&                     reco
     const std::string scenario_name = scenario_base_name + "::" + impl_name + "::" + phase;
     bool              setup_flag    = build_streams_flag;
     if (setup_flag) {
+        py::gil_scoped_acquire gil;
         try {
-            py::gil_scoped_acquire gil;
             recorder.attr("start_run")(scenario_base_name, impl_name, phase, active_seq_ids);
         } catch (const std::exception& e) {
             RTP_LLM_LOG_ERROR("accuracy check start_run failed at %s: %s", scenario_name.c_str(), e.what());
@@ -398,7 +401,15 @@ absl::Status AccuracyChecker::forward(const py::object&                     reco
         forward_flag = executor_->process(ScheduleOutput{streams}).ok();
         if (forward_flag) {
             py::gil_scoped_acquire gil;
-            recorder.attr("stop_run")(scenario_name);
+            try {
+                recorder.attr("stop_run")(scenario_name);
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_ERROR("accuracy check stop_run failed at %s: %s", scenario_name.c_str(), e.what());
+                forward_flag = false;
+            } catch (...) {
+                RTP_LLM_LOG_ERROR("accuracy check stop_run failed at %s: unknown", scenario_name.c_str());
+                forward_flag = false;
+            }
         }
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("accuracy check failed at %s: %s", scenario_name.c_str(), e.what());
@@ -406,6 +417,12 @@ absl::Status AccuracyChecker::forward(const py::object&                     reco
     } catch (...) {
         RTP_LLM_LOG_ERROR("accuracy check failed at %s: unknown", scenario_name.c_str());
         forward_flag = false;
+    }
+    if (!forward_flag && parallelism_config_.world_size > 1) {
+        // Peers may still be inside model TP collectives. Do not enter a
+        // different WORLD collective; let the worker supervisor stop the group.
+        RTP_LLM_LOG_ERROR("accuracy check distributed forward failed at %s; terminating worker", scenario_name.c_str());
+        std::_Exit(70);
     }
     return abortIfFailed(forward_flag, scenario_name);
 }
@@ -430,14 +447,25 @@ absl::Status AccuracyChecker::runScenario(const py::object& recorder, const Accu
         return absl::OkStatus();
     }
 
-    // rank0 builds one prompt per sequence (prefix + chunk); rank>0 keeps prompts empty
+    // TP rank 0 builds one prompt per sequence (prefix + chunk); other TP ranks keep prompts empty.
     std::vector<torch::Tensor> prompts;
+    bool                       prompts_flag = true;
     if (root) {
-        prompts.reserve(batch_size);
-        for (size_t seq_id = 0; seq_id < batch_size; ++seq_id) {
-            prompts.push_back(makeCheckPrompt(scenario.seqs[seq_id].prefix_len + scenario.seqs[seq_id].chunk_len));
+        try {
+            prompts.reserve(batch_size);
+            for (size_t seq_id = 0; seq_id < batch_size; ++seq_id) {
+                prompts.push_back(makeCheckPrompt(scenario.seqs[seq_id].prefix_len + scenario.seqs[seq_id].chunk_len));
+            }
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR(
+                "accuracy check prompt construction failed at %s: %s", scenario_base_name.c_str(), e.what());
+            prompts_flag = false;
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("accuracy check prompt construction failed at %s: unknown", scenario_base_name.c_str());
+            prompts_flag = false;
         }
     }
+    RETURN_IF_STATUS_ERROR(abortIfFailed(prompts_flag, "prompt-construction " + scenario_base_name));
     std::vector<size_t> all_seq_ids(batch_size);
     for (size_t seq_id = 0; seq_id < batch_size; ++seq_id) {
         all_seq_ids[seq_id] = seq_id;
@@ -475,7 +503,7 @@ absl::Status AccuracyChecker::runScenario(const py::object& recorder, const Accu
             forward(recorder, scenario_base_name, impl_name, "plain", plain_streams, all_seq_ids, build_plain_flag));
     }
 
-    // phase prefix: sequences with a prefix, each fork referencing its golden history kv blocks and run paged attention
+    // phase prefix: each fork copies its golden history KV blocks and runs paged attention.
     std::vector<size_t> prefix_seq_ids;
     for (size_t seq_id = 0; seq_id < batch_size; ++seq_id) {
         if (scenario.seqs[seq_id].prefix_len > 0) {
@@ -536,7 +564,7 @@ absl::Status AccuracyChecker::runScenario(const py::object& recorder, const Accu
 
     // decode: teacher forcing over a shrinking active set, one batched forward per step
     if (max_decode > 0) {
-        // Capture t0 (each active seq's first decode token, from the plain prefill) before golden decodes
+        // TP rank 0 collects t0 (each active sequence's first decode token) from the plain prefill.
         std::vector<std::vector<int>> golden_decode_tokens(batch_size);
         bool                          t0_capture_flag = true;
         if (root) {
@@ -545,6 +573,7 @@ absl::Status AccuracyChecker::runScenario(const py::object& recorder, const Accu
                     continue;
                 }
                 try {
+                    golden_streams[seq_id]->waitPendingAsyncBookkeeping();
                     auto tokens = golden_streams[seq_id]->currentExecuteTokens(0);
                     if (tokens.empty()) {
                         RTP_LLM_LOG_ERROR("accuracy check: golden seq %zu produced no token for t0", seq_id);
@@ -564,7 +593,7 @@ absl::Status AccuracyChecker::runScenario(const py::object& recorder, const Accu
         }
         RETURN_IF_STATUS_ERROR(abortIfFailed(t0_capture_flag, "t0-capture"));
 
-        // golden decodes its trajectory over the (maybe shrinking) active set and collects per-sequence tokens
+        // All TP ranks run golden decode over the shrinking active set; TP rank 0 collects tokens.
         for (size_t step = 0; step < max_decode; ++step) {
             std::vector<size_t> active_seq_ids;
             for (size_t seq_id = 0; seq_id < batch_size; ++seq_id) {
@@ -575,6 +604,7 @@ absl::Status AccuracyChecker::runScenario(const py::object& recorder, const Accu
             bool golden_block_flag = true;
             if (root) {
                 for (size_t seq_id : active_seq_ids) {
+                    golden_streams[seq_id]->waitPendingAsyncBookkeeping();
                     if (!golden_streams[seq_id]->incrKVBlock().ok()) {
                         RTP_LLM_LOG_ERROR(
                             "accuracy check: golden seq %zu incrKVBlock failed at decode step %zu", seq_id, step);
@@ -595,17 +625,30 @@ absl::Status AccuracyChecker::runScenario(const py::object& recorder, const Accu
                                            golden_decode_streams,
                                            active_seq_ids,
                                            golden_block_flag));
-            // append active_seqs golden tokens on rank0
+            // Append golden tokens for the active sequences on TP rank 0.
             if (root) {
-                for (size_t seq_id : active_seq_ids) {
-                    if (golden_decode_tokens[seq_id].size() < scenario.seqs[seq_id].decode_steps) {
-                        auto tokens = golden_streams[seq_id]->currentExecuteTokens(0);
-                        if (!tokens.empty()) {
-                            golden_decode_tokens[seq_id].push_back(tokens[0]);
+                try {
+                    for (size_t seq_id : active_seq_ids) {
+                        if (golden_decode_tokens[seq_id].size() < scenario.seqs[seq_id].decode_steps) {
+                            golden_streams[seq_id]->waitPendingAsyncBookkeeping();
+                            auto tokens = golden_streams[seq_id]->currentExecuteTokens(0);
+                            if (!tokens.empty()) {
+                                golden_decode_tokens[seq_id].push_back(tokens[0]);
+                            }
                         }
                     }
+                } catch (const std::exception& e) {
+                    RTP_LLM_LOG_ERROR("accuracy check golden token capture failed at decode step %zu: %s",
+                                      step,
+                                      e.what());
+                    golden_block_flag = false;
+                } catch (...) {
+                    RTP_LLM_LOG_ERROR(
+                        "accuracy check golden token capture failed at decode step %zu: unknown", step);
+                    golden_block_flag = false;
                 }
             }
+            RETURN_IF_STATUS_ERROR(abortIfFailed(golden_block_flag, "golden-token-capture"));
         }
         // check all golden decode completely
         bool golden_decode_flag = true;
@@ -671,11 +714,11 @@ absl::Status AccuracyChecker::runScenario(const py::object& recorder, const Accu
     return absl::OkStatus();
 }
 
-size_t AccuracyChecker::computeTemporaryBlockNum(const ModelConfig&                   model_config,
+size_t AccuracyChecker::computeTemporaryBlockNum(const size_t                         block_size,
                                                  const KVCacheConfig&                 kv_cache_config,
                                                  const std::vector<AccuracyScenario>& scenarios) {
-    const size_t block_size      = model_config.attn_config.tokens_per_block;
-    size_t       max_peak_blocks = 0;
+    RTP_LLM_CHECK_WITH_INFO(block_size > 0, "accuracy check cache block size must be positive");
+    size_t max_peak_blocks = 0;
     for (const auto& scenario : scenarios) {
         size_t plain_peak_blocks    = 0;
         size_t golden_decode_blocks = 0;
@@ -717,33 +760,47 @@ absl::Status AccuracyChecker::runAll(Executor*                            execut
 
     RecordingSession session;
     bool             recorder_ready = true;
-    try {
+    {
         py::gil_scoped_acquire gil;
-        auto                   recorder_module =
-            py::module::import(decode_gate_ ? "rtp_llm.models_py.modules.factory.attention.dispatch.gate_recorder" :
-                                              "rtp_llm.models_py.modules.factory.attention.accuracy.tensor_recorder");
-        session.recorder_ =
-            recorder_module.attr(decode_gate_ ? "GateRecorder" : "TensorRecorder")(py_model->getPyModel());
-    } catch (const std::exception& e) {
-        recorder_ready = false;
-        RTP_LLM_LOG_ERROR("accuracy recorder initialization failed: %s", e.what());
+        try {
+            auto recorder_module = py::module::import(
+                "rtp_llm.models_py.modules.factory.attention.dispatch.gate_recorder");
+            session.recorder_ = recorder_module.attr("GateRecorder")(py_model->getPyModel());
+        } catch (const std::exception& e) {
+            recorder_ready = false;
+            RTP_LLM_LOG_ERROR("accuracy recorder initialization failed: %s", e.what());
+        }
     }
     RETURN_IF_STATUS_ERROR(abortIfFailed(recorder_ready, "recorder-init"));
 
     const int64_t record_begin_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    try {
-        for (const auto& scenario : scenarios) {
+    for (const auto& scenario : scenarios) {
+        bool scenario_ok = true;
+        try {
             RETURN_IF_STATUS_ERROR(runScenario(session.recorder_, scenario));
+        } catch (const std::exception& e) {
+            scenario_ok = false;
+            RTP_LLM_LOG_ERROR("accuracy check scenario threw: %s", e.what());
+        } catch (...) {
+            scenario_ok = false;
+            RTP_LLM_LOG_ERROR("accuracy check scenario threw: unknown");
         }
-        if (decode_gate_) {
-            py::gil_scoped_acquire gil;
-            session.recorder_.attr("finalize")();
-        }
-    } catch (const std::exception& e) {
-        return absl::InternalError(std::string("accuracy check scenario threw: ") + e.what());
-    } catch (...) {
-        return absl::InternalError("accuracy check scenario threw: unknown");
+        RETURN_IF_STATUS_ERROR(abortIfFailed(scenario_ok, "scenario-exception"));
     }
+    bool finalize_ok = true;
+    {
+        py::gil_scoped_acquire gil;
+        try {
+            session.recorder_.attr("finalize")();
+        } catch (const std::exception& e) {
+            finalize_ok = false;
+            RTP_LLM_LOG_ERROR("accuracy check finalize failed: %s", e.what());
+        } catch (...) {
+            finalize_ok = false;
+            RTP_LLM_LOG_ERROR("accuracy check finalize failed: unknown");
+        }
+    }
+    RETURN_IF_STATUS_ERROR(abortIfFailed(finalize_ok, "finalize"));
     const int64_t record_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - record_begin_us;
     RTP_LLM_LOG_INFO("accuracy check: recording completed in %.3f seconds", record_time_us / 1000000.0);
 

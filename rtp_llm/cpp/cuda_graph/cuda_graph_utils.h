@@ -6,7 +6,6 @@
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <torch/version.h>
 
-#include <cstdint>
 #include <string>
 
 namespace rtp_llm {

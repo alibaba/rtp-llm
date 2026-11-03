@@ -141,7 +141,7 @@ class GoldenSDPAImpl(FMHAImplBase):
         scores = torch.matmul(q, k.transpose(-1, -2)) * self.scale
         probabilities = torch.softmax(scores, dim=-1)
         contribution_sq = torch.matmul(probabilities.square(), v.square())
-        return contribution_sq.clamp_min(0).sqrt().mean(-1).squeeze(-1)
+        return contribution_sq.clamp_min(0).mean(-1).sqrt().squeeze(-1)
 
     def _sdpa(
         self,
@@ -152,11 +152,8 @@ class GoldenSDPAImpl(FMHAImplBase):
         causal: bool,
     ) -> torch.Tensor:
         # q [Lq,Hq,D], k/v [Lk,Hkv,D] -> [1,H,L,D]
-        # NOTE: cuda12.9 torch=2.8.0; torch<2.13 SDPA returns WRONG results for >64K token inputs,
-        # so each segment's kv seqlen must stay <= 65536
-        assert (
-            k.shape[0] <= 65536
-        ), "golden SDPA requires kv seqlen <= 64K on torch<2.13"
+        # Limit each golden SDPA segment to 65536 KV tokens.
+        assert k.shape[0] <= 65536, "golden SDPA requires kv seqlen <= 64K"
         q = q.transpose(0, 1).unsqueeze(0)
         k = k.transpose(0, 1).unsqueeze(0)
         v = v.transpose(0, 1).unsqueeze(0)

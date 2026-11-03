@@ -34,8 +34,7 @@ class AccuracyChecker {
 public:
     AccuracyChecker(const ModelConfig&       model_config,
                     const RuntimeConfig&     runtime_config,
-                    const ParallelismConfig& parallelism_config,
-                    bool                     decode_gate = false);
+                    const ParallelismConfig& parallelism_config);
 
     static const std::vector<AccuracyScenario>& defaultScenarios();
 
@@ -46,7 +45,7 @@ public:
 
     // Sizes the temporary KV pool for peak block usage across all scenarios, plus a safety margin
     // The scenarios must match those passed to runAll()
-    static size_t computeTemporaryBlockNum(const ModelConfig&                   model_config,
+    static size_t computeTemporaryBlockNum(size_t                               block_size,
                                            const KVCacheConfig&                 kv_cache_config,
                                            const std::vector<AccuracyScenario>& scenarios = defaultScenarios());
 
@@ -73,7 +72,6 @@ private:
     const ModelConfig&       model_config_;
     const RuntimeConfig&     runtime_config_;
     const ParallelismConfig& parallelism_config_;
-    bool                     decode_gate_;
 
     // Borrowed only during runAll()
     Executor*        executor_         = nullptr;

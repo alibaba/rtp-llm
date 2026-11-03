@@ -7,9 +7,9 @@ from typing import Dict, List, Optional
 
 # select_stable thresholds
 # Level 1: only switch if the winner's improvement meets this ratio.
-STABLE_THRESHOLD = 0.05
+_STABLE_THRESHOLD = 0.05
 # Level 2: survivors within this margin of each other -> tiebreak by registry order
-STABLE_CLUSTER_MARGIN = 0.05
+_STABLE_CLUSTER_MARGIN = 0.05
 
 
 # kv grid: log2-equispaced; equal weighting is a log-uniform prior
@@ -38,19 +38,15 @@ def select_stable(
     matrix: Dict[str, List[float]],
     registry_order: List[str],
     default_backend: Optional[str] = None,
-    threshold: float = STABLE_THRESHOLD,
-    cluster_margin: float = STABLE_CLUSTER_MARGIN,
 ) -> Optional[str]:
     """Two-level deterministic selection: threshold filter + registry-order tiebreaker.
 
     Level 1 (threshold filter): only keep backends that are significantly faster
-    than the default_backend (improvement >= threshold). If none pass, return
+    than the default_backend (improvement >= 5%). If none pass, return
     default_backend (no switch).
 
-    Level 2 (cluster tiebreaker): among survivors, if mutual differences are
-    within cluster_margin, pick the one with highest priority in registry_order
-    (deterministic, noise-immune). Only when a backend is clearly faster than
-    all others (gap > cluster_margin) does it win outright.
+    Level 2 (cluster tiebreaker): among survivors, consider backends less than 5%
+    slower than the fastest and pick the highest priority in registry_order.
 
     Registry order makes ties deterministic for a given timing matrix. Timing
     noise near either threshold can still change the winner between runs.
@@ -66,7 +62,7 @@ def select_stable(
         survivors = {
             impl: cost
             for impl, cost in means.items()
-            if (baseline_cost - cost) / baseline_cost >= threshold
+            if (baseline_cost - cost) / baseline_cost >= _STABLE_THRESHOLD
         }
     else:
         # No baseline available: all candidates are survivors
@@ -86,7 +82,7 @@ def select_stable(
     cluster = [
         impl
         for impl, cost in survivors.items()
-        if best_cost == 0 or (cost - best_cost) / best_cost < cluster_margin
+        if best_cost == 0 or (cost - best_cost) / best_cost < _STABLE_CLUSTER_MARGIN
     ]
 
     # Deterministic tiebreaker: pick the highest-priority one in registration order
