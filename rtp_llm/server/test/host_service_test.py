@@ -22,6 +22,7 @@ class TestMasterService(unittest.TestCase):
         with patch("rtp_llm.server.host_service.threading.Thread") as mock_thread_cls:
             mock_thread_cls.return_value.start = MagicMock()
             svc = MasterService(vip)
+        self.addCleanup(svc._probe_executor.shutdown, wait=True)
         return svc, {}
 
     def _refresh(
@@ -50,6 +51,93 @@ class TestMasterService(unittest.TestCase):
         self.assertEqual(svc.get_queue_length(), 7)
         self.assertIsNone(svc.get_slave_addr())
         mock_post.assert_called_once()
+
+    @patch("rtp_llm.server.host_service.kmonitor.report")
+    @patch("requests.post")
+    def test_explicit_readiness_controls_initial_selection_and_recovery(
+        self, mock_post: MagicMock, _mock_kmonitor: MagicMock
+    ):
+        addr = "10.0.0.1:8000"
+        vip = MagicMock(domain="master.vip")
+        vip.get_hosts.return_value = [Host("10.0.0.1", "8000")]
+        svc, host_health_map = self._make_service(vip)
+
+        for value in (False, None, 0, 1, "false", "true", [], {}):
+            with self.subTest(ready=value):
+                mock_post.return_value = _json_response(
+                    {"real_master_host": addr, "ready": value}
+                )
+                self._refresh(svc, host_health_map)
+                self.assertIsNone(svc.get_master_addr())
+                self.assertIsNone(svc.get_slave_addr())
+                self.assertEqual(
+                    svc.get_host_health_status()[addr]["health"], "unhealthy"
+                )
+
+        mock_post.return_value = _json_response(
+            {"real_master_host": addr, "ready": True, "queue_length": 7}
+        )
+        self._refresh(svc, host_health_map)
+        self.assertEqual(svc.get_master_addr(), addr)
+        self.assertEqual(svc.get_queue_length(), 7)
+        self.assertEqual(svc.get_host_health_status()[addr]["consecutive_failures"], 0)
+
+    @patch("rtp_llm.server.host_service.kmonitor.report")
+    @patch("requests.post")
+    def test_not_ready_immediately_withdraws_cached_master_and_recovers_legacy_peer(
+        self, mock_post: MagicMock, _mock_kmonitor: MagicMock
+    ):
+        addr = "10.0.0.1:8000"
+        vip = MagicMock(domain="master.vip")
+        vip.get_hosts.return_value = [Host("10.0.0.1", "8000")]
+        svc, host_health_map = self._make_service(vip)
+        mock_post.return_value = _json_response(
+            {"real_master_host": addr, "ready": True}
+        )
+        self._refresh(svc, host_health_map)
+        self.assertEqual(svc.get_master_addr(), addr)
+
+        mock_post.return_value = _json_response(
+            {"real_master_host": addr, "ready": False}
+        )
+        self._refresh(svc, host_health_map)
+        self.assertIsNone(svc.get_master_addr())
+        self.assertEqual(svc.get_queue_length(), 0)
+        self.assertEqual(svc.get_host_health_status()[addr]["consecutive_failures"], 1)
+
+        mock_post.return_value = _json_response({"real_master_host": addr})
+        self._refresh(svc, host_health_map)
+        self.assertEqual(svc.get_master_addr(), addr)
+
+    @patch("rtp_llm.server.host_service.kmonitor.report")
+    @patch("requests.post")
+    def test_not_ready_hosts_are_excluded_from_master_and_slave_fallbacks(
+        self, mock_post: MagicMock, _mock_kmonitor: MagicMock
+    ):
+        hosts = [Host(f"10.0.0.{i}", "8000") for i in range(1, 5)]
+        vip = MagicMock(domain="master.vip")
+        vip.get_hosts.return_value = hosts
+        svc, host_health_map = self._make_service(vip)
+
+        def response(url, **_kwargs):
+            return _json_response(
+                {
+                    "real_master_host": "10.0.0.99:8000",
+                    "ready": "10.0.0.4:8000" in url,
+                }
+            )
+
+        mock_post.side_effect = response
+        self._refresh(svc, host_health_map)
+        self.assertEqual(svc.get_master_addr(), "10.0.0.4:8000")
+        self.assertIsNone(svc.get_slave_addr())
+        self.assertEqual(mock_post.call_count, 4)
+
+        mock_post.return_value = _json_response({"ready": False})
+        mock_post.side_effect = None
+        self._refresh(svc, host_health_map)
+        self.assertIsNone(svc.get_master_addr())
+        self.assertIsNone(svc.get_slave_addr())
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
     @patch("requests.post")
