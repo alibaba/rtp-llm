@@ -209,12 +209,13 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         settings.fieldNames().forEachRemaining(name -> {
             if (!java.util.Set.of("checkpoint_path", "seq_size_per_block").contains(name)) throw new IllegalArgumentException("Unknown Client setting: " + name);
         });
+        var model = org.flexlb.mock.runtime.EngineConfig.model(settings);
         int imageToken = org.flexlb.mock.runtime.EngineConfig.imageToken(
-            org.flexlb.mock.runtime.EngineConfig.model(settings), org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN);
+            model, org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN);
         int blockSize = settings.path("seq_size_per_block").asInt(0);
         if (settings.has("seq_size_per_block") && (!settings.path("seq_size_per_block").isIntegralNumber() || !settings.path("seq_size_per_block").canConvertToInt() || blockSize < 1))
             throw new IllegalArgumentException("Client seq_size_per_block must be positive int32");
-        long seed = org.flexlb.mock.runtime.EngineConfig.cacheKeySeed(settings);
+        long seed = org.flexlb.mock.cache.CacheSequence.cacheKeySeed(model, System.getenv());
         var directory = Path.of(required("MOCK_OUTPUT_DIR"));
         try (var node = new ClientNode(required("MOCK_NODE_ID"), Path.of(required("MOCK_TOPOLOGY_FILE")), directory, imageToken, blockSize, seed)) {
             var hook = new Thread(node::close, "client-shutdown"); Runtime.getRuntime().addShutdownHook(hook);

@@ -30,7 +30,7 @@ class NativeVisionTest {
             "text_config", Map.of("hidden_size", 4), "vision_config", Map.of("patch_size", 14,
                 "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024)));
         var config=role.equals("vit")?Map.of("checkpoint_path",model.toString(),"mock.vit.skip.download",true,"mm_cache_gpu_max_bytes",1024,"mock.compute",Map.of("forward",Map.of("expression","5")))
-            :Map.of("checkpoint_path",model.toString(),"seq_size_per_block",2,"max_seq_len",128,"test_block_num",32,"reserve_block_ratio",0,"reuse_cache",true,"mock.compute",Map.of("forward",Map.of("expression","1")));
+            :Map.of("mock.scheduler.mode","group","checkpoint_path",model.toString(),"seq_size_per_block",2,"max_seq_len",128,"test_block_num",32,"reserve_block_ratio",0,"reuse_cache",true,"mock.compute",Map.of("forward",Map.of("expression","1")));
         var path=directory.resolve(role+"-0");Files.createDirectories(path);
         new ObjectMapper().writeValue(path.resolve("config.json").toFile(),Map.of("id",role+"-0","component_role",role,"component",role.equals("vit")?Map.of("config",config):Map.of("engine","rtp","config",config),"environment",Map.of()));
         return host.create(new EngineHostApi.Create(role+"-0",port(),port()));

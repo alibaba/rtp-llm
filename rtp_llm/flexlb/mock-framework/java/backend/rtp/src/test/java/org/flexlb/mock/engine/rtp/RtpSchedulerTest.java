@@ -545,4 +545,43 @@ class RtpSchedulerTest {
         }
     }
 
+    @Test void cpSinglePrefillPolicyAppliesToOrdinaryAndExplicitGroupAdmission() throws Exception {
+        for (String mode : List.of("fifo", "group")) for (boolean single : List.of(true, false)) {
+            var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration("prefill"));
+            ((ObjectNode) root.path("component").path("config"))
+                .put("seq_size_per_block", 2).put("max_batch_tokens_size", 100)
+                .put("cp_rotate_method", "ALL_GATHER").put("tp_size", 2)
+                .put("cp_force_single_prefill", single).put("mock.scheduler.mode", mode);
+            var config = RtpConfig.load(root);
+            try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+                 var scheduler = RtpScheduler.factory(config).create(new Object(), cache, new TaskHistory())) {
+                if (mode.equals("group")) scheduler.input(batch(sized(1, 5), sized(2, 5)));
+                else { scheduler.input(sized(1, 5), new Listener()); scheduler.input(sized(2, 5), new Listener()); }
+                assertEquals(single ? 1 : 2, ids(scheduler.schedule()).size());
+            }
+        }
+    }
+
+    @Test void uncachedAdmissionQuotaIncludesCpPadding() throws Exception {
+        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration("prefill"));
+        ((ObjectNode) root.path("component").path("config"))
+            .put("seq_size_per_block", 2).put("max_batch_tokens_size", 100).put("max_batch_tokens_without_cache", 6)
+            .put("cp_rotate_method", "ALL_GATHER").put("tp_size", 2).put("cp_force_single_prefill", false);
+        var config = RtpConfig.load(root);
+        try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+            scheduler.input(sized(1, 5), new Listener()); scheduler.input(sized(2, 5), new Listener());
+            assertEquals(List.of(1L), ids(scheduler.schedule()));
+        }
+    }
+
+    @Test void automaticTokenBudgetDoesNotSilentlyDisableBatching() throws Exception {
+        var config = config("prefill", "1", 2);
+        try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+            scheduler.input(sized(1, 5), new Listener()); scheduler.input(sized(2, 5), new Listener());
+            assertEquals(List.of(1L, 2L), ids(scheduler.schedule()));
+        }
+    }
+
 }
