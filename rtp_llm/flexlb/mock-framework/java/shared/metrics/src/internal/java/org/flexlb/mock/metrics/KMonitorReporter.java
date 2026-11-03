@@ -19,8 +19,7 @@ public final class KMonitorReporter implements MetricReporter {
         KMonitorConfig.setSinkAddress(host + ":" + port);
         KMonitorConfig.setKMonitorServiceName(env.getOrDefault("kmonitorServiceName", ""));
         KMonitorConfig.setKMonitorTenantName(env.getOrDefault("kmonitorTenant", "default"));
-        KMonitorConfig.setGlobalTags(new ImmutableMetricTags(MetricTags.fromEnvironment(env)));
-        KMonitorConfig.setFlumeSinkEnable(true);
+        MetricTags.fromEnvironment(env); // Validate native tags before starting the SDK.
         KMonitorConfig.setPrometheusExport(false);
         // SDK built-ins describe this JVM, not each simulated Engine.
         KMonitorConfig.setSystemMetricsEnabled(false);
@@ -41,6 +40,8 @@ public final class KMonitorReporter implements MetricReporter {
         try {
             KMonitorFactory.start();
             if (!KMonitorFactory.isStarted()) throw new IllegalStateException("KMonitor SDK failed to start");
+            // Match native FlexMonitorFactory: install global tags after start, before creating the monitor.
+            KMonitorFactory.addGlobalTags(new ImmutableMetricTags(MetricTags.fromEnvironment(env)));
             monitor = Objects.requireNonNull(KMonitorFactory.getKMonitor("rtp_llm"), "KMonitor instance unavailable");
         } catch (RuntimeException | Error error) { KMonitorFactory.stop(); throw error; }
         Runtime.getRuntime().addShutdownHook(new Thread(KMonitorFactory::stop, "mock-kmonitor-close"));
