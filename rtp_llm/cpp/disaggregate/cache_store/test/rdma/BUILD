@@ -11,9 +11,9 @@ package(default_visibility = ["//visibility:public"])
 
 cc_test = cc_test_wrapper
 
-cc_import(
+alias(
     name = "cuda13_torch_nvshmem",
-    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+    actual = "@//:cuda13_torch_nvshmem",
 )
 
 cuda13_torch_link_deps = select({

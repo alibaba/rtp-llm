@@ -101,6 +101,21 @@ def _cache_key(package_name, version, source_path):
     return "%s_python-%s-%s__%s" % (package_name, version, py_tag, variant)
 
 
+# Sibling top-level directories a wheel ships next to the package that must
+# travel with it: native libs, and DeepGEMM's deep_gemm_sm120 JIT overlay
+# (located via library_root.parent_path() / "deep_gemm_sm120").
+_COMPANION_SUFFIXES = (".libs", "_libs", "_sm120")
+
+
+def _companion_dirs(package_name, source_path):
+    parent = Path(source_path).parent
+    return [
+        parent / f"{package_name}{suffix}"
+        for suffix in _COMPANION_SUFFIXES
+        if (parent / f"{package_name}{suffix}").is_dir()
+    ]
+
+
 def copy_package_with_lock(package_name, cache_dir):
     """
     Copy a Python package to cache directory with version in name.
@@ -126,9 +141,17 @@ def copy_package_with_lock(package_name, cache_dir):
     # Lock file for this specific package and version
     lock_file = Path(cache_dir) / f".{cache_key}.lock"
     completion_marker = target_base / ".copy_complete"
+    companions = _companion_dirs(package_name, source_path)
+
+    def _cached():
+        return (
+            completion_marker.exists()
+            and target_package_path.exists()
+            and all((target_site_packages / c.name).exists() for c in companions)
+        )
 
     # Check if already copied and complete
-    if completion_marker.exists() and target_package_path.exists():
+    if _cached():
         logging.info(
             f"[Package Copy] {package_name} v{version} already cached at {target_base}"
         )
@@ -137,7 +160,7 @@ def copy_package_with_lock(package_name, cache_dir):
     # Use file lock to prevent concurrent copies
     with FileLock(str(lock_file), timeout=300):
         # Double check after acquiring lock
-        if completion_marker.exists() and target_package_path.exists():
+        if _cached():
             logging.info(
                 f"[Package Copy] {package_name} v{version} already cached (confirmed after lock)"
             )
@@ -161,18 +184,14 @@ def copy_package_with_lock(package_name, cache_dir):
             else:
                 shutil.copy2(source_path, target_package_path)
 
-            # Also copy .libs directory if it exists (for torch, flashinfer, etc.)
-            source_parent = Path(source_path).parent
-            libs_dirs = [f"{package_name}.libs", f"{package_name}_libs"]
-            for libs_dir_name in libs_dirs:
-                libs_source = source_parent / libs_dir_name
-                if libs_source.exists() and libs_source.is_dir():
-                    libs_target = target_site_packages / libs_dir_name
-                    if not libs_target.exists():
-                        logging.info(
-                            f"[Package Copy] Copying {libs_dir_name} directory..."
-                        )
-                        shutil.copytree(libs_source, libs_target, symlinks=True)
+            # Also copy companion directories (.libs, *_sm120 overlay, ...).
+            for companion in companions:
+                companion_target = target_site_packages / companion.name
+                if not companion_target.exists():
+                    logging.info(
+                        f"[Package Copy] Copying {companion.name} directory..."
+                    )
+                    shutil.copytree(companion, companion_target, symlinks=True)
 
             # Verify copy
             if not target_package_path.exists():
