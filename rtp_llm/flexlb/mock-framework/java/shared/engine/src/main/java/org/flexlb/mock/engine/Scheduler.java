@@ -9,10 +9,10 @@ import org.flexlb.mock.compute.SimulatedCompute;
 
 /** Called under the EngineLoop lock. Queues, reservations and result commits belong to the implementation. */
 public interface Scheduler extends AutoCloseable {
-    /** Create one fresh policy per Engine, sharing its exact domain lock and instance-owned cache. */
+    /** Create one fresh policy per Engine, sharing its domain lock, cache and terminal log. Internal state transitions remain backend-owned. */
     @FunctionalInterface
     interface Factory {
-        Scheduler create(Object lock, KvCache cache);
+        Scheduler create(Object lock, KvCache cache, TaskHistory finished);
     }
 
     record Input(String identity, long requestId, long groupId, int tokens, int maxNewTokens, int priority,
@@ -48,7 +48,7 @@ public interface Scheduler extends AutoCloseable {
     enum ReportedPhase { PENDING, RECEIVED, KV_ALLOCATED, RUNNING }
     record Task(long requestId, long batchId, int inputLength, int prefixLength, int priority,
                 ReportedPhase phase, int iterations, long waitingMillis, long executionMillis,
-                long endTimeMillis, long errorCode, String errorMessage) {}
+                long endTimeMillis, RequestFailure failure) {}
     record Status(List<Task> tasks, List<Task> finished, long finishedVersion, int waiting, int running) {
         public Status { tasks = List.copyOf(tasks); finished = List.copyOf(finished); }
     }
@@ -72,7 +72,8 @@ public interface Scheduler extends AutoCloseable {
     void transferCompleted(Request request, TransferResult result);
     void finish(Request request, RequestFailure failure);
     RequestState.Use beginTransfer(Request request);
-    Status status(long latestFinishedVersion);
+    /** Current execution facts; no protocol lifecycle or finished cursor. Called under the EngineLoop lock. */
+    List<Task> tasks();
     long nextDeadline();
     List<Request> requests();
     QueueSnapshot queues();

@@ -132,7 +132,7 @@ class RtpRemoteSchedulerTest {
     @Test void engineLoopIsWokenByReadCompletionWithoutNewTraffic() throws Exception {
         var config = config(2, 0); var remote = new Backend(); var lock = new Object();
         try (var cache = cache(remote);
-             var loop = new EngineLoop(lock, new RtpScheduler(lock, config, cache), cache, config.compute(), config.role(), config.id())) {
+             var loop = new EngineLoop(lock, RtpScheduler.factory(config), cache, config.compute(), config.role(), config.id())) {
             var listener = new Listener();
             loop.input(input(1, true, Long.MAX_VALUE), listener);
             assertTrue(remote.entered.await(2, TimeUnit.SECONDS)); assertFalse(listener.output.isDone());
@@ -145,7 +145,7 @@ class RtpRemoteSchedulerTest {
     @Test void deadlineTerminatesLoadingWithoutWaitingForAnUncooperativeRead() throws Exception {
         var config = config(2, 0); var remote = new Backend(); remote.ignoreInterrupt = true; var lock = new Object();
         try (var cache = cache(remote);
-             var loop = new EngineLoop(lock, new RtpScheduler(lock, config, cache), cache, config.compute(), config.role(), config.id())) {
+             var loop = new EngineLoop(lock, RtpScheduler.factory(config), cache, config.compute(), config.role(), config.id())) {
             var listener = new Listener();
             loop.input(input(1, true, System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(300)), listener);
             assertTrue(remote.entered.await(2, TimeUnit.SECONDS));
@@ -192,7 +192,7 @@ class RtpRemoteSchedulerTest {
         };
         remote.release.countDown();
         try (var cache = cache(remote);
-             var loop = new EngineLoop(lock, new RtpScheduler(lock, config, cache), cache, config.compute(), config.role(), config.id())) {
+             var loop = new EngineLoop(lock, RtpScheduler.factory(config), cache, config.compute(), config.role(), config.id())) {
             var listener = new Listener(); loop.input(input(1, true, Long.MAX_VALUE), listener);
             assertNull(listener.terminal.get(2, TimeUnit.SECONDS));
             assertTrue(writing.await(2, TimeUnit.SECONDS));
@@ -203,11 +203,12 @@ class RtpRemoteSchedulerTest {
 
     @Test void nativeLoadingReuseTransferAndTimingMetricsFollowTheSameLifecycle() throws Exception {
         var config = config(2, 0); var remote = new Backend();
-        try (var cache = cache(remote); var scheduler = new RtpScheduler(new Object(), config, cache)) {
+        var finishedLog = new org.flexlb.mock.engine.TaskHistory();
+        try (var cache = cache(remote); var scheduler = new RtpScheduler(new Object(), config, cache, finishedLog)) {
             var value = input(1, true, Long.MAX_VALUE);
             scheduler.input(value, new Listener()); assertNull(scheduler.schedule());
             assertTrue(remote.entered.await(2, TimeUnit.SECONDS));
-            var live = scheduler.status(0).tasks().getFirst();
+            var live = scheduler.tasks().getFirst();
             assertEquals(Scheduler.ReportedPhase.KV_ALLOCATED, live.phase());
             assertEquals(-1, live.executionMillis()); assertEquals(0, live.waitingMillis());
             String loading = scheduler.scrapeMetrics();
@@ -221,7 +222,7 @@ class RtpRemoteSchedulerTest {
             var work = scheduler.schedule(); complete(scheduler, work, config);
             long afterForward = System.nanoTime();
             await(() -> cache.transferState().writes() == 0 && cache.transferState().reads() == 0);
-            var finished = scheduler.status(0).finished().getFirst();
+            var finished = finishedLog.snapshot(0, List.of(), 0, 0).finished().getFirst();
             assertTrue(finished.waitingMillis() >= (beforeForward - value.started()) / 1_000_000);
             assertTrue(finished.executionMillis() <= (afterForward - beforeForward) / 1_000_000 + 1);
             String text = scheduler.scrapeMetrics();
@@ -264,14 +265,15 @@ class RtpRemoteSchedulerTest {
 
     @Test void cancellingDuringLoadingKeepsNativeLegacyWaitBoundary() throws Exception {
         var config = config(2, 0); var remote = new Backend(); remote.ignoreInterrupt = true;
-        try (var cache = cache(remote); var scheduler = new RtpScheduler(new Object(), config, cache)) {
+        var finishedLog = new org.flexlb.mock.engine.TaskHistory();
+        try (var cache = cache(remote); var scheduler = new RtpScheduler(new Object(), config, cache, finishedLog)) {
             var value = input(1, true, Long.MAX_VALUE);
             var request = scheduler.input(value, new Listener()); assertNull(scheduler.schedule());
             assertTrue(remote.entered.await(2, TimeUnit.SECONDS));
             long loadingObserved = System.nanoTime(); Thread.sleep(25);
             scheduler.finish(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel while loading"));
             drain(scheduler);
-            var task = scheduler.status(0).finished().getFirst();
+            var task = finishedLog.snapshot(0, List.of(), 0, 0).finished().getFirst();
             assertTrue(task.waitingMillis() <= (loadingObserved - value.started()) / 1_000_000 + 1);
             assertTrue(task.executionMillis() >= 20, "Native terminal time minus frozen wait includes a cancelled load");
             var text = scheduler.scrapeMetrics();

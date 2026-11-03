@@ -113,7 +113,7 @@ class RtpSchedulerTest {
     @Test void closingEngineDefersCleanupUntilOutstandingReadReturns() throws Exception {
         Object lock = new Object(); var config = config("prefill", "1", 1); var listener = new Listener();
         try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU);
-             var engine = new EngineLoop(lock, new RtpScheduler(lock, config, cache), cache, config.compute(), config.role(), config.id())) {
+             var engine = new EngineLoop(lock, RtpScheduler.factory(config), cache, config.compute(), config.role(), config.id())) {
             var request = engine.input(input(1, true), listener);
             listener.output.get(2, TimeUnit.SECONDS);
             var read = engine.beginTransfer(request);
@@ -170,7 +170,7 @@ class RtpSchedulerTest {
             }
         };
         try (var cache = new KvCache(config.blockSize(), 12, 0, KvCache.EvictionPolicy.LRU);
-             var engine = new EngineLoop(lock, new RtpScheduler(lock, config, cache), cache, config.compute(), config.role(), config.id())) {
+             var engine = new EngineLoop(lock, RtpScheduler.factory(config), cache, config.compute(), config.role(), config.id())) {
             engine.input(input(1, false), slow);
             assertTrue(blocked.await(2, TimeUnit.SECONDS));
             engine.input(input(2, false), next);
@@ -201,7 +201,7 @@ class RtpSchedulerTest {
             var waiting = scheduler.input(input(2, false), new Listener());
             var work = scheduler.schedule();
             assertEquals(1, work.batch().dps().getFirst().requests().size());
-            assertEquals(Scheduler.ReportedPhase.RECEIVED, scheduler.status(0).tasks().stream().filter(task -> task.requestId() == waiting.input().requestId()).findFirst().orElseThrow().phase()); assertEquals(9, cache.snapshot(0, false).availableBlocks());
+            assertEquals(Scheduler.ReportedPhase.RECEIVED, scheduler.tasks().stream().filter(task -> task.requestId() == waiting.input().requestId()).findFirst().orElseThrow().phase()); assertEquals(9, cache.snapshot(0, false).availableBlocks());
             complete(scheduler, work, config); drain(scheduler);
             complete(scheduler, scheduler.schedule(), config); drain(scheduler);
             assertEquals(12, cache.snapshot(0, false).availableBlocks());
@@ -226,7 +226,7 @@ class RtpSchedulerTest {
             }
         };
         try (var cache = new KvCache(config.blockSize(), 12, 0, KvCache.EvictionPolicy.LRU);
-             var engine = new EngineLoop(lock, new RtpScheduler(lock, config, cache), cache, config.compute(), config.role(), config.id())) {
+             var engine = new EngineLoop(lock, RtpScheduler.factory(config), cache, config.compute(), config.role(), config.id())) {
             var request = engine.input(input(1, false), listener);
             assertTrue(blocked.await(2, TimeUnit.SECONDS));
             engine.finish(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel"));
@@ -250,7 +250,7 @@ class RtpSchedulerTest {
         };
         var lock = new Object();
         try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU);
-             var loop = new EngineLoop(lock, new RtpScheduler(lock, config, cache), cache, config.compute(), config.role(), config.id())) {
+             var loop = new EngineLoop(lock, RtpScheduler.factory(config), cache, config.compute(), config.role(), config.id())) {
             loop.input(input(1, false), listener);
             assertTrue(entered.await(2, TimeUnit.SECONDS));
             var status = loop.status(0);
@@ -266,19 +266,19 @@ class RtpSchedulerTest {
         try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             scheduler.input(input(1, true), new Listener());
-            var before = scheduler.status(0);
-            assertEquals(Scheduler.ReportedPhase.RECEIVED, before.tasks().getFirst().phase());
+            var before = scheduler.tasks();
+            assertEquals(Scheduler.ReportedPhase.RECEIVED, before.getFirst().phase());
             assertEquals(8, cache.snapshot(0, false).availableBlocks(), "A status query must not allocate");
             var work = scheduler.schedule();
             complete(scheduler, work, config); drain(scheduler);
-            var ready = scheduler.status(0).tasks().getFirst();
+            var ready = scheduler.tasks().getFirst();
             assertEquals(Scheduler.ReportedPhase.KV_ALLOCATED, ready.phase());
             Thread.sleep(20);
-            var later = scheduler.status(0).tasks().getFirst();
+            var later = scheduler.tasks().getFirst();
             assertEquals(ready.waitingMillis(), later.waitingMillis());
             assertEquals(-1, ready.executionMillis());
             assertEquals(-1, later.executionMillis());
-            assertEquals(Scheduler.ReportedPhase.RECEIVED, before.tasks().getFirst().phase(), "Snapshots must not change later");
+            assertEquals(Scheduler.ReportedPhase.RECEIVED, before.getFirst().phase(), "Snapshots must not change later");
         }
     }
 
@@ -317,8 +317,9 @@ class RtpSchedulerTest {
 
     @Test void decodeGrowthFailureReleasesOnlyItsLeaseAndUnblocksWaitingAdmission() throws Exception {
         var config = config("decode", "1", 2);
+        var finishedLog = new org.flexlb.mock.engine.TaskHistory();
         try (var cache = new KvCache(config.blockSize(), 7, 0, KvCache.EvictionPolicy.LRU);
-             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+             var scheduler = new RtpScheduler(new Object(), config, cache, finishedLog)) {
             var first = new Listener(); var second = new Listener(); var waiting = new Listener();
             var a = scheduler.input(input(1, false), first);
             var b = scheduler.input(input(2, false), second);
@@ -351,7 +352,7 @@ class RtpSchedulerTest {
             scheduler.finish(c, new RequestFailure(RequestFailure.Reason.CANCELLED, "test")); drain(scheduler);
             assertEquals(7, cache.snapshot(0, false).freeBlocks());
             assertTrue(scheduler.requests().isEmpty());
-            assertEquals(3, scheduler.status(0).finished().size());
+            assertEquals(3, finishedLog.snapshot(0, List.of(), 0, 0).finished().size());
         }
     }
 
@@ -359,7 +360,7 @@ class RtpSchedulerTest {
         var config = config("prefill", "1", 2); var lock = new Object();
         try (var cache = new KvCache(config.blockSize(), 3, 0, KvCache.EvictionPolicy.LRU);
              var owner = cache.acquire(6, List.of()).lease();
-             var engine = new EngineLoop(lock, new RtpScheduler(lock, config, cache), cache, config.compute(), config.role(), config.id())) {
+             var engine = new EngineLoop(lock, RtpScheduler.factory(config), cache, config.compute(), config.role(), config.id())) {
             var expired = new Listener(); var cancelled = new Listener();
             long now = System.nanoTime();
             engine.input(new Scheduler.Input("1", 1, 0, 5, 3, 0, now,

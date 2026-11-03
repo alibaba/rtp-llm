@@ -12,7 +12,11 @@ final class RtpGroupScheduler extends RtpSchedulerBase {
     private boolean preferGroup;
 
     RtpGroupScheduler(Object lock, RtpConfig config, KvCache cache) {
-        super(lock, config, cache);
+        this(lock, config, cache, new org.flexlb.mock.engine.TaskHistory());
+    }
+
+    RtpGroupScheduler(Object lock, RtpConfig config, KvCache cache, org.flexlb.mock.engine.TaskHistory finished) {
+        super(lock, config, cache, finished);
         if (cache.remoteEnabled()) throw new IllegalArgumentException("Remote KV requires mock.scheduler.mode=fifo");
     }
 

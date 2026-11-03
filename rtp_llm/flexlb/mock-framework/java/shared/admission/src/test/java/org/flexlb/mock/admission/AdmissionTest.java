@@ -29,7 +29,7 @@ class AdmissionTest {
             throw new RequestFailure(RequestFailure.Reason.OVERLOADED, "injected scheduler admission");
         }
         @Override public long nextDeadline() { locked(); return Long.MAX_VALUE; }
-        @Override public Status status(long latest) { locked(); return new Status(List.of(), List.of(), latest, 0, 0); }
+        @Override public List<Task> tasks() { locked(); return List.of(); }
         @Override public void transferCompleted(Request request, TransferResult result) { fail("No admitted transfer"); }
         @Override public void maintain() { locked(); }
         @Override public Work schedule() { locked(); return null; }
@@ -54,7 +54,7 @@ class AdmissionTest {
             var created = new AtomicReference<RejectingScheduler>();
             try (var cache = new KvCache(2, 8, 0, KvCache.EvictionPolicy.LRU);
                  var service = new RpcService(new AdmissionConfig("test", role, 2, 1, 4096, 0, compute, -200, 0L), cache,
-                     (lock, supplied) -> {
+                     (lock, supplied, finished) -> {
                          assertSame(cache, supplied);
                          assertNull(created.get(), "One scheduler per instance");
                          var scheduler = new RejectingScheduler(lock); created.set(scheduler); return scheduler;

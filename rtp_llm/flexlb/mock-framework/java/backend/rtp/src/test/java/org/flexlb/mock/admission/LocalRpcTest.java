@@ -48,14 +48,14 @@ class LocalRpcTest {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
             try {
                 var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS);
-                var outputs = rpc.generateStreamCall(LocalPrefillTest.input(1, 0, true));
+                var outputs = rpc.generateStreamCall(PrefillAdmissionTest.input(1, 0, true));
                 var first = outputs.next(); assertFalse(outputs.hasNext());
                 var flatten = first.getFlattenOutput(); assertTrue(flatten.getFinished(0));
                 assertEquals(List.of(1L, 1L, 1L), flatten.getOutputIds().getShapeList());
                 assertEquals(TensorPB.DataType.INT32, flatten.getOutputIds().getDataType());
                 assertEquals(5, ByteBuffer.wrap(flatten.getOutputIds().getInt32Data().toByteArray()).order(ByteOrder.LITTLE_ENDIAN).getInt());
                 assertEquals(1, flatten.getAuxInfo(0).getOutputLen());
-                var reused = rpc.generateStreamCall(LocalPrefillTest.input(2, 0, true)).next();
+                var reused = rpc.generateStreamCall(PrefillAdmissionTest.input(2, 0, true)).next();
                 assertEquals(4, reused.getFlattenOutput().getAuxInfo(0).getTotalReuseLen());
                 assertEquals(16, rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
                 var text = metrics(node);
@@ -76,7 +76,7 @@ class LocalRpcTest {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
             try {
                 var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS);
-                var error = assertThrows(StatusRuntimeException.class, () -> rpc.generateStreamCall(LocalPrefillTest.input(1, 30, true)).hasNext());
+                var error = assertThrows(StatusRuntimeException.class, () -> rpc.generateStreamCall(PrefillAdmissionTest.input(1, 30, true)).hasNext());
                 assertEquals(Status.Code.DEADLINE_EXCEEDED, error.getStatus().getCode());
                 var raw = error.getTrailers().get(Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER));
                 assertEquals(603, ErrorDetailsPB.parseFrom(raw).getErrorCode());
@@ -97,7 +97,7 @@ class LocalRpcTest {
                 read.checkHealth(EmptyPB.getDefaultInstance());
                 var done = new CountDownLatch(1);
                 var frames = new java.util.concurrent.atomic.AtomicInteger();
-                context.run(() -> RpcServiceGrpc.newStub(channel).generateStreamCall(LocalPrefillTest.input(1, 0, true), new StreamObserver<>() {
+                context.run(() -> RpcServiceGrpc.newStub(channel).generateStreamCall(PrefillAdmissionTest.input(1, 0, true), new StreamObserver<>() {
                     @Override public void onNext(GenerateOutputsPB output) { frames.incrementAndGet(); }
                     @Override public void onError(Throwable error) { done.countDown(); }
                     @Override public void onCompleted() { done.countDown(); }
@@ -129,7 +129,7 @@ class LocalRpcTest {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
             try {
                 var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS);
-                var input = LocalPrefillTest.input(1, 0, true);
+                var input = PrefillAdmissionTest.input(1, 0, true);
                 var pd = input.toBuilder().setGenerateConfig(input.getGenerateConfig().toBuilder().setMaxNewTokens(8).setCanUsePdSeparation(true)).build();
                 var unsupported = assertThrows(StatusRuntimeException.class, () -> rpc.generateStreamCall(pd).hasNext());
                 assertEquals(Status.Code.INVALID_ARGUMENT, unsupported.getStatus().getCode());
@@ -159,7 +159,7 @@ class LocalRpcTest {
                 var done = new CountDownLatch(1);
                 var failure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
                 RpcServiceGrpc.newStub(channel).withDeadlineAfter(500, TimeUnit.MILLISECONDS)
-                    .generateStreamCall(LocalPrefillTest.input(77, 0, true), new StreamObserver<>() {
+                    .generateStreamCall(PrefillAdmissionTest.input(77, 0, true), new StreamObserver<>() {
                         @Override public void onNext(GenerateOutputsPB output) { }
                         @Override public void onError(Throwable error) { failure.set(error); done.countDown(); }
                         @Override public void onCompleted() { done.countDown(); }

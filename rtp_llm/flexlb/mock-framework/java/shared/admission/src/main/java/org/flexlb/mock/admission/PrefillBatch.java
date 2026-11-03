@@ -8,7 +8,7 @@ import org.flexlb.engine.grpc.EngineRpcService.*;
 
 /** Single-DP native envelope; admission is acknowledged independently of Fetch. */
 final class PrefillBatch {
-    static void enqueue(PrefillGeneration generation, EnqueueBatchRequestPB request, StreamObserver<EnqueueBatchResponsePB> observer) {
+    static void enqueue(PrefillAdmission generation, EnqueueBatchRequestPB request, StreamObserver<EnqueueBatchResponsePB> observer) {
         var seen = new HashSet<Long>();
         boolean duplicate = false;
         int size = 0;

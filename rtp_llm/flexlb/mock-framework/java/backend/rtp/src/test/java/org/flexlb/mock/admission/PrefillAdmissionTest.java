@@ -17,7 +17,7 @@ import org.flexlb.mock.cache.KvCache;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-class LocalPrefillTest {
+class PrefillAdmissionTest {
     @TempDir Path directory;
     static GenerateInputPB input(long id, int timeout, boolean reuse) {
         return GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(List.of(1, 2, 3, 4, 5))
@@ -35,12 +35,12 @@ class LocalPrefillTest {
     @Test void singleAndBatchSubmissionRejectUnpreparedMediaWithoutAdmission() throws Exception {
         var config = config("1", true);
         try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU);
-             var engine = new LocalPrefill(config.endpoint(), cache, RtpScheduler.factory(config))) {
+             var engine = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config))) {
             var raw = input(1, 0, true).toBuilder()
                 .addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl("image")).build();
             var error = assertThrows(io.grpc.StatusRuntimeException.class, () -> engine.submit(raw));
             assertEquals(Status.Code.INVALID_ARGUMENT, error.getStatus().getCode());
-            var batch = engine.submit(List.of(new LocalPrefill.Submission(raw, Long.MAX_VALUE)));
+            var batch = engine.submit(List.of(new PrefillAdmission.Submission(raw, Long.MAX_VALUE)));
             assertNull(batch.getFirst().session());
             assertEquals(Status.Code.INVALID_ARGUMENT, Status.fromThrowable(batch.getFirst().failure()).getCode());
             assertEquals(8, cache.snapshot(0, false).availableBlocks());
@@ -51,7 +51,7 @@ class LocalPrefillTest {
 
     @Test void forwardsThenCommitsCompleteBlocksAndReportsCacheReuse() throws Exception {
         var config = config("totalComputeTokens");
-        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new LocalPrefill(config.endpoint(), cache, RtpScheduler.factory(config))) {
+        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config))) {
             assertTrue(engine.snapshot(-1).finished().isEmpty());
             var first = engine.submit(input(1, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
             assertTrue(first.status().isOk());
@@ -68,7 +68,7 @@ class LocalPrefillTest {
 
     @Test void queuedTimeoutNeverOwnsKvAndDoesNotResetItsBudget() throws Exception {
         var config = config("500");
-        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new LocalPrefill(config.endpoint(), cache, RtpScheduler.factory(config))) {
+        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config))) {
             var first = engine.submit(input(1, 0, true));
             var queued = engine.submit(input(2, 25, true));
             var result = queued.completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
@@ -84,7 +84,7 @@ class LocalPrefillTest {
 
     @Test void cancellationReleasesLeaseAndCannotCommitLaterOrCancelNewSameId() throws Exception {
         var config = config("500");
-        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new LocalPrefill(config.endpoint(), cache, RtpScheduler.factory(config))) {
+        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config))) {
             var old = engine.submit(input(1, 0, true)); old.cancel();
             assertEquals(Status.Code.CANCELLED, old.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
             assertTrue(cache.snapshot(-1, true).keys().isEmpty());
@@ -102,7 +102,7 @@ class LocalPrefillTest {
     @Test void runningTimeoutAndShutdownReleaseAllResources() throws Exception {
         var config = config("500");
         try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU)) {
-            var engine = new LocalPrefill(config.endpoint(), cache, RtpScheduler.factory(config));
+            var engine = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config));
             try {
                 var timed = engine.submit(input(1, 25, true));
                 assertEquals(Status.Code.DEADLINE_EXCEEDED, timed.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
@@ -119,7 +119,7 @@ class LocalPrefillTest {
 
     @Test void allocationAndFormulaFailureDoNotLeakOrBlockTheNextRequest() throws Exception {
         var config = config("sqrt(-1)");
-        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new LocalPrefill(config.endpoint(), cache, RtpScheduler.factory(config))) {
+        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config))) {
             assertEquals(Status.Code.INTERNAL, engine.submit(input(1, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
             assertEquals(8, cache.snapshot(-1, false).availableBlocks());
             try (var owner = cache.acquire(6L * config.blockSize(), List.of()).lease()) {
@@ -135,7 +135,7 @@ class LocalPrefillTest {
 
     @Test void completionCancellationRaceHasOneTerminalAndConservesCapacity() throws Exception {
         var config = config("0");
-        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new LocalPrefill(config.endpoint(), cache, RtpScheduler.factory(config))) {
+        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config))) {
             for (int i = 0; i < 100; i++) {
                 var session = engine.submit(input(i, 0, true)); session.cancel();
                 var result = session.completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
@@ -152,7 +152,7 @@ class LocalPrefillTest {
 
     @Test void noCacheReuseForLastPromptTokenAndPerRequestSwitchIsHonored() throws Exception {
         var config = config("0");
-        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new LocalPrefill(config.endpoint(), cache, RtpScheduler.factory(config))) {
+        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config))) {
             var exact = input(1, 0, true).toBuilder().clearTokenIds().addAllTokenIds(List.of(1, 2, 3, 4)).build();
             engine.submit(exact).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
             var reused = engine.submit(exact.toBuilder().setRequestId(2).build()).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
@@ -164,7 +164,7 @@ class LocalPrefillTest {
 
     @Test void disabledReuseDoesNotPublishNewCacheKeys() throws Exception {
         var config = config("0");
-        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new LocalPrefill(config.endpoint(), cache, RtpScheduler.factory(config))) {
+        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config))) {
             assertTrue(engine.submit(input(1, 0, false)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().isOk());
             assertTrue(cache.snapshot(-1, true).keys().isEmpty());
             assertEquals(8, cache.snapshot(-1, false).freeBlocks());
@@ -173,7 +173,7 @@ class LocalPrefillTest {
 
     @Test void boundedFinishedHistoryDoesNotBlockCurrentStateOrCursorRecovery() throws Exception {
         var config = config("0");
-        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new LocalPrefill(config.endpoint(), cache, RtpScheduler.factory(config))) {
+        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config))) {
             for (int i = 0; i <= RtpConfig.REQUEST_LIMIT; i++)
                 engine.submit(input(i, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
             var snapshot = engine.snapshot(0);
@@ -186,7 +186,7 @@ class LocalPrefillTest {
 
     @Test void activeIdsAndRequestLimitRejectWithoutAllocatingWaitingKv() throws Exception {
         var config = config("3600000");
-        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new LocalPrefill(config.endpoint(), cache, RtpScheduler.factory(config))) {
+        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config))) {
             engine.submit(input(0, 0, true));
             var duplicate = assertThrows(io.grpc.StatusRuntimeException.class, () -> engine.submit(input(0, 0, true)));
             assertEquals(Status.Code.ALREADY_EXISTS, duplicate.getStatus().getCode());
@@ -198,6 +198,41 @@ class LocalPrefillTest {
             engine.close(); assertEquals(8, cache.snapshot(-1, false).availableBlocks());
         }
     }
+    @Test void pendingCancellationAndSubmissionHaveOneOwnerAndCannotAffectReusedIdentity() throws Exception {
+        var config = config("0");
+        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU);
+             var engine = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config));
+             var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+            for (int i = 0; i < 30; i++) {
+                var raw = input(i, 0, true);
+                var session = engine.new Session(raw, false, System.nanoTime(), Long.MAX_VALUE);
+                assertEquals(org.flexlb.mock.engine.Scheduler.ReportedPhase.PENDING,
+                    engine.snapshot(0).tasks().getFirst().phase());
+                var gate = new CountDownLatch(1);
+                var submit = workers.submit(() -> {
+                    gate.await();
+                    try { engine.submit(session, org.flexlb.mock.multimodal.MediaInput.text(raw)); }
+                    catch (io.grpc.StatusRuntimeException expected) { assertEquals(Status.Code.CANCELLED, expected.getStatus().getCode()); }
+                    return null;
+                });
+                var cancel = workers.submit(() -> { gate.await(); session.cancel(); return null; });
+                gate.countDown(); submit.get(2, TimeUnit.SECONDS); cancel.get(2, TimeUnit.SECONDS);
+                session.termination.get(2, TimeUnit.SECONDS);
+                assertEquals(i + 1, engine.snapshot(0).finished().size());
+                assertTrue(engine.snapshot(0).tasks().isEmpty());
+            }
+            var old = engine.new Session(input(99, 0, true), false, System.nanoTime(), Long.MAX_VALUE);
+            old.cancel();
+            var fresh = engine.new Session(input(99, 0, true), false, System.nanoTime(), Long.MAX_VALUE);
+            old.cancel();
+            assertEquals(99, engine.snapshot(0).tasks().getFirst().requestId());
+            engine.submit(fresh, org.flexlb.mock.multimodal.MediaInput.text(input(99, 0, true)));
+            assertTrue(fresh.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().isOk());
+            assertEquals(32, engine.snapshot(0).finished().size());
+            assertEquals(8, cache.snapshot(0, false).availableBlocks());
+        }
+    }
+
     @Test void hostOnlyPrefillReusesLocalKvWithoutALoadingStage() throws Exception {
         var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration("prefill"));
         var settings = (ObjectNode) root.path("component").path("config");
@@ -205,7 +240,7 @@ class LocalPrefillTest {
             .put("enable_memory_cache", true).put("mock.cache.memory.blocks", 8);
         var path = directory.resolve("host.json"); json.writeValue(path.toFile(), root); var config = RtpConfig.load(path);
         try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU, false, 8, KvCache.EvictionPolicy.LRU, null, null);
-             var engine = new LocalPrefill(config.endpoint(), cache, RtpScheduler.factory(config))) {
+             var engine = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config))) {
             assertTrue(engine.submit(input(1, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().isOk());
             assertEquals(6, cache.hostSnapshot().free()); assertEquals(8, cache.snapshot(-1, false).freeBlocks());
             var reused = engine.submit(input(2, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);

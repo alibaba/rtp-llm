@@ -30,7 +30,7 @@ class EngineLoopTest {
         public boolean cancelled(Work work) { return cancelled == work; }
         public void maintain() {}
         public long nextDeadline() { return Long.MAX_VALUE; }
-        public Status status(long latest) { return new Status(List.of(), List.of(), latest, 0, 0); }
+        public List<Task> tasks() { return List.of(); }
         public void transferCompleted(Request request, TransferResult result) { throw new UnsupportedOperationException(); }
         public List<Runnable> takeNotifications() { var result = List.copyOf(notices); notices.clear(); return result; }
         public void close() { queue.clear(); }
@@ -44,7 +44,7 @@ class EngineLoopTest {
         public RequestState.Use beginTransfer(Request request) { throw new UnsupportedOperationException(); }
     }
     private EngineLoop engine(Object lock, Policy policy, String expression) {
-        return new EngineLoop(lock, policy, new org.flexlb.mock.cache.KvCache(1, 1, 0, org.flexlb.mock.cache.KvCache.EvictionPolicy.LRU), new ComputeModel(new ComputeSpec(new ComputeSpec.Forward(expression, null), null, null)), Role.prefill, "test");
+        return new EngineLoop(lock, (domain, cache, finished) -> policy, new org.flexlb.mock.cache.KvCache(1, 1, 0, org.flexlb.mock.cache.KvCache.EvictionPolicy.LRU), new ComputeModel(new ComputeSpec(new ComputeSpec.Forward(expression, null), null, null)), Role.prefill, "test");
     }
 
     @Test void healthChecksDoNotCollectWindowMetricsAndExposeLoopFailures() throws Exception {
@@ -201,7 +201,7 @@ class EngineLoopTest {
                     lease.close(); super.computeCompleted(work, result);
                 }
             };
-            try (var loop = new EngineLoop(policy, policy, cache, new ComputeModel(new ComputeSpec(new ComputeSpec.Forward("1", null), null, null)), Role.prefill, "capacity")) {
+            try (var loop = new EngineLoop(policy, (domain, storage, finished) -> policy, cache, new ComputeModel(new ComputeSpec(new ComputeSpec.Forward("1", null), null, null)), Role.prefill, "capacity")) {
                 loop.wake();
                 assertTrue(tried.await(2, TimeUnit.SECONDS));
                 Thread.sleep(100);
