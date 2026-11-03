@@ -373,6 +373,7 @@ py_library(
     srcs = glob([
         "vipserver/*.py",
     ]),
+    deps = [":requests"],
 )
 
 filegroup(

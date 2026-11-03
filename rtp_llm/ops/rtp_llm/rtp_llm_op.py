@@ -32,7 +32,7 @@ class RtpLLMOp:
         self.token_processor = token_processor
         self.mm_process_engine = mm_process_engine
 
-    def start(self):
+    def start(self, defer_service_start: bool = False):
         self.weight = self.model.weight
         logging.info("engine_config: %s", self.engine_config.to_string())
         from rtp_llm.telemetry.config import load_trace_config
@@ -48,7 +48,20 @@ class RtpLLMOp:
             self.token_processor,
             self.mm_process_engine,
             trace_config,
+            defer_service_start,
         )
+
+    def gpu_cache_tensors(self):
+        """Return all owning GPU KV allocations, including speculative caches."""
+        return self.ft_op.gpu_cache_tensors()
+
+    def start_service(self):
+        """Start serving sockets after a control-plane pre-service barrier."""
+        self.ft_op.start_rpc_server()  # type: ignore
+
+    def update_runtime_endpoints(self, runtime_config):
+        """Update deferred RPC/cache peer endpoints after template restore."""
+        self.ft_op.update_runtime_endpoints(runtime_config)  # type: ignore
 
     def stop(self):
         self.ft_op.stop()  # type: ignore

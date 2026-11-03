@@ -1828,6 +1828,5 @@ class TipcTest(JitCacheTestBase):
             with self.subTest(name=name):
                 self.assertNotEqual(base, build_args({name: "/toolchain/compiler"}))
 
-
 if __name__ == "__main__":
     unittest.main()

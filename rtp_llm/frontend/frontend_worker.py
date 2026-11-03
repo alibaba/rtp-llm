@@ -18,7 +18,10 @@ from pydantic import BaseModel
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.distribute.distributed_server import get_dp_rpc_addresses
+from rtp_llm.distribute.distributed_server import (
+    get_dp_addrs_from_world_info,
+    get_frontend_world_info,
+)
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
@@ -32,6 +35,10 @@ from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
 from rtp_llm.utils.prompt_logits_utils import build_prompt_logits_dict
+from rtp_llm.utils.scr_template_utils import (
+    register_backend_visitor_template_hook,
+    register_server_config_template_hook,
+)
 
 
 class PipelineResponse(BaseModel):
@@ -81,7 +88,18 @@ class FrontendWorker:
         # Create engine_config from config (ports from server_config/distribute_config)
         engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
 
-        addresses = get_dp_rpc_addresses(py_env_configs)
+        # Get world_info from config
+        world_info = get_frontend_world_info(
+            server_config=py_env_configs.server_config,
+            distribute_config=py_env_configs.distribute_config,
+            parallelism_config=py_env_configs.parallelism_config,
+        )
+
+        # Get addresses from distribute_info
+        addresses = get_dp_addrs_from_world_info(
+            world_info=world_info,
+            parallelism_config=engine_config.parallelism_config,
+        )
 
         vit_separation = None
         if py_env_configs.vit_config:
@@ -105,6 +123,12 @@ class FrontendWorker:
             prefill_cp_config=py_env_configs.prefill_cp_config,
         )
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
+        self._py_env_configs = py_env_configs
+        # Refresh ServerConfig.ip before the visitor hook reads it during fixup.
+        register_server_config_template_hook(py_env_configs)
+        register_backend_visitor_template_hook(
+            self.backend_rpc_server_visitor, py_env_configs, world_info
+        )
         self.generate_env_config = py_env_configs.generate_env_config
         self.server_config = py_env_configs.server_config
 
