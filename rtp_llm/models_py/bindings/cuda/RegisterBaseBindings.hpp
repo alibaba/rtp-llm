@@ -126,22 +126,6 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("norm_eps"),
                   py::arg("hc_eps"));
 
-    rtp_ops_m.def("fuse_hy4_ihc_post_pre",
-                  &fuse_hy4_ihc_post_pre,
-                  "AOT fused HY4 iHC post followed by next pre/RMSNorm kernel",
-                  py::arg("block_output"),
-                  py::arg("residual"),
-                  py::arg("post_gate"),
-                  py::arg("next_fn_weight"),
-                  py::arg("next_scale"),
-                  py::arg("next_base"),
-                  py::arg("ihc_norm_eps"),
-                  py::arg("hc_eps"),
-                  py::arg("magnitude"),
-                  py::arg("rms_weight"),
-                  py::arg("rms_eps"),
-                  py::arg("cast_bfloat_for_norm") = true);
-
     rtp_ops_m.def("per_token_group_quant_int8",
                   &per_token_group_quant_int8,
                   "Int8 Gemm Per Token Group",
