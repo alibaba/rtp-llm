@@ -10,7 +10,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
+import org.flexlb.cache.primitive.LongObjectMap;
+import org.flexlb.cache.primitive.SmallOwnerSet;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -27,7 +28,7 @@ public class GlobalCacheIndex {
     /**
      * Core storage structure: block_hash_id -> Set<engine_ip:engine_port>
      */
-    private final ConcurrentHashMap<Long, Set<String>> blockToEnginesMap = new ConcurrentHashMap<>();
+    private final LongObjectMap<Set<String>> blockToEnginesMap = new LongObjectMap<>();
 
     /**
      * Serializes index mutations and mapping-count updates
@@ -66,7 +67,7 @@ public class GlobalCacheIndex {
                 pollTrace.record(Stage.CACHE_INDEX_LOCK_ACQUIRED);
             }
             Set<String> engines = blockToEnginesMap.computeIfAbsent(
-                    blockCacheKey, k -> ConcurrentHashMap.newKeySet());
+                    blockCacheKey, k -> new SmallOwnerSet());
 
             boolean added = engines.add(engineIpPort);
             if (added) {
