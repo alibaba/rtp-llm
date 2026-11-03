@@ -69,7 +69,7 @@ class RealTensorSource(TensorSource):
 class StubDevice:
     """No-op stand-in for load_config.exported_device (identity hooks)."""
 
-    def maybe_rewrite_weight_by_key(self, key, weight):
+    def maybe_rewrite_weight_by_key(self, key, weight, use_swizzle_a=None):
         return weight
 
     def shuffle_moe_weight(self, x, datatype, name):
