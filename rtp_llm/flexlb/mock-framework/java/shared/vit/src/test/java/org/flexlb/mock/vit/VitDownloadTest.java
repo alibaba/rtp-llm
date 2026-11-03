@@ -20,13 +20,14 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class VitDownloadTest {
     @TempDir Path directory;
-    private VitConfig config(int concurrency,int waiting) throws Exception {
+    private VitConfig config(int concurrency,int waiting) throws Exception { return config(concurrency, waiting, 1); }
+    private VitConfig config(int concurrency,int waiting,int maxFileSizeKb) throws Exception {
         var json=new ObjectMapper();
         json.writeValue(directory.resolve("config.json").toFile(),Map.of("image_token_id",1000,
             "text_config",Map.of("hidden_size",4),"vision_config",Map.of("patch_size",14,"downsample_ratio",3,"min_pixels",0,"max_image_tokens",1024)));
         return VitConfig.load(json.valueToTree(Map.of("id","v","component_role","vit","component",Map.of("config",Map.of(
             "checkpoint_path",directory.toString(),"vit_concurrency",concurrency,"vit_max_queue_size",waiting,
-            "gpu_max_batch_size",4,"gpu_batch_wait_ms",0,"mm_image_max_file_size_kb",1,
+            "gpu_max_batch_size",4,"gpu_batch_wait_ms",0,"mm_image_max_file_size_kb",maxFileSizeKb,
             "download_headers","{\"X-Media-Test\":\"present\"}","mock.compute.forward.expression","5")))));
     }
     private static byte[] png() throws Exception {
@@ -141,7 +142,7 @@ class VitDownloadTest {
                 try {
                     var rpc=MultimodalRpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3,TimeUnit.SECONDS);
                     for(String path:List.of("/missing","/large","/bad","/timeout")) {
-                        var request=input(server,path).toBuilder().setTimeoutMs(150).build();
+                        var request=input(server,path).toBuilder().setTimeoutMs(path.equals("/timeout") ? 150 : 1500).build();
                         var error=assertTimeoutPreemptively(java.time.Duration.ofSeconds(2),
                             ()->assertThrows(StatusRuntimeException.class,()->rpc.withDeadlineAfter(3,TimeUnit.SECONDS).remoteMultimodalEmbedding(request)));
                         var expected=path.equals("/missing")?Status.Code.UNAVAILABLE:path.equals("/timeout")?Status.Code.DEADLINE_EXCEEDED:Status.Code.INVALID_ARGUMENT;
@@ -161,4 +162,57 @@ class VitDownloadTest {
             } finally { stalled.countDown();server.stop(0); }
         }
     }
+    @Test void downloadedContentIdentityFollowsBytesAcrossUrlsAndRedirects() throws Exception {
+        var image = new BufferedImage(56, 28, BufferedImage.TYPE_INT_RGB);
+        var png = new ByteArrayOutputStream(); ImageIO.write(image, "png", png);
+        var gif = new ByteArrayOutputStream(); ImageIO.write(image, "gif", gif);
+        image.setRGB(0, 0, 0xffffff);
+        var different = new ByteArrayOutputStream(); ImageIO.write(image, "png", different);
+        var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            try (exchange) {
+                String path = exchange.getRequestURI().getPath();
+                if (path.equals("/redirect")) {
+                    exchange.getResponseHeaders().add("Location", "/png"); exchange.sendResponseHeaders(302, -1); return;
+                }
+                byte[] bytes = (path.equals("/png") || path.equals("/copy")) ? png.toByteArray() : path.equals("/gif") ? gif.toByteArray() : different.toByteArray();
+                exchange.sendResponseHeaders(200, bytes.length); exchange.getResponseBody().write(bytes);
+            }
+        }); server.start();
+        try (var node = VitNode.start(config(2, 1), 0, 0)) {
+            var channel = VitTest.channel(node);
+            try {
+                var rpc = MultimodalRpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS);
+                var first = rpc.remoteMultimodalEmbedding(input(server, "/png"));
+                var copied = rpc.remoteMultimodalEmbedding(input(server, "/copy"));
+                var second = rpc.remoteMultimodalEmbedding(input(server, "/gif"));
+                var redirected = rpc.remoteMultimodalEmbedding(input(server, "/redirect"));
+                var changed = rpc.remoteMultimodalEmbedding(input(server, "/changed"));
+                assertEquals(first.getMultimodalFeatureHash(), copied.getMultimodalFeatureHash());
+                assertNotEquals(first.getMultimodalFeatureHash(), second.getMultimodalFeatureHash());
+                assertEquals(first.getMultimodalFeatureHash(), redirected.getMultimodalFeatureHash());
+                assertNotEquals(first.getMultimodalFeatureHash(), changed.getMultimodalFeatureHash());
+                assertTrue(first.getMultimodalEmbedding().getBf16Data().isEmpty());
+            } finally { channel.shutdownNow().awaitTermination(2, TimeUnit.SECONDS); }
+        } finally { server.stop(0); }
+    }
+
+    @Test void nativeFileLimitCanAllowImagesBeyondTheOldTenMiBCap() throws Exception {
+        byte[] bytes = Arrays.copyOf(png(), 10 * 1024 * 1024 + 1);
+        var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            try (exchange) {
+                exchange.sendResponseHeaders(200, bytes.length); exchange.getResponseBody().write(bytes);
+            }
+        }); server.start();
+        try (var node = VitNode.start(config(1, 0, 11000), 0, 0)) {
+            var channel = VitTest.channel(node);
+            try {
+                var output = MultimodalRpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS)
+                    .remoteMultimodalEmbedding(input(server, "/image"));
+                assertEquals(5, output.getMultimodalEmbedding().getShape(0));
+            } finally { channel.shutdownNow().awaitTermination(2, TimeUnit.SECONDS); }
+        } finally { server.stop(0); }
+    }
+
 }

@@ -396,7 +396,9 @@ final class PrefillAdmission implements AutoCloseable {
         void run() { context.run(this::exchange); }
         void exchange() {
             try {
+                checkActive();
                 media = vision.prepare(input, deadline);
+                checkActive();
                 input = media.input();
                 var inbox = new Inbox(error -> {
                     synchronized (this) { if (!source.result.isDone()) finish(error); }
@@ -466,6 +468,12 @@ final class PrefillAdmission implements AutoCloseable {
             } catch (InterruptedException error) { Thread.currentThread().interrupt(); finish(Status.CANCELLED.withCause(error).asRuntimeException()); }
             catch (ExecutionException error) { finish(Status.INTERNAL.withCause(error.getCause()).asRuntimeException()); }
             catch (RuntimeException error) { finish(error); }
+        }
+        synchronized void checkActive() {
+            if (terminal || context.isCancelled() || Thread.currentThread().isInterrupted())
+                throw Status.CANCELLED.withDescription("Prefill request cancelled before downstream preparation").asRuntimeException();
+            if (System.nanoTime() >= deadline)
+                throw Status.DEADLINE_EXCEEDED.withDescription("Prefill request expired before downstream preparation").asRuntimeException();
         }
         GenerateRequestPB frame(RemoteStage stage) {
             var frame = GenerateRequestPB.newBuilder().setStage(stage).setRequestId(input.getRequestId()).setClientId(config.id());
