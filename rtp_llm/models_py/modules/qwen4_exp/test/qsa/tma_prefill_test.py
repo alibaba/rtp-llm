@@ -674,6 +674,111 @@ class TmaPrefillTest(unittest.TestCase):
         fallback = impl._forward_ragged_paged(q, layer, plan)
         torch.testing.assert_close(fallback, expected, atol=0.0078125, rtol=0.008)
 
+    def test_fp8_staging_preserves_values_and_scale_bits(self):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.prefill_staging import (
+            stage_paged_kv,
+        )
+
+        lengths, prefixes = [129, 257], [1024, 1152]
+        q, backing, cache, table, _, scale, cu, pd = self._paged_batch_case(
+            12, lengths, prefixes, True
+        )
+        original = backing.view(torch.uint8).clone()
+        original_scale = scale.view(torch.int32).clone()
+        staged, mapped, scales = stage_paged_kv(
+            backing, table, scale, max(prefixes) + max(lengths), 128, cu, pd
+        )
+        torch.testing.assert_close(
+            staged[0], torch.zeros_like(staged[0]), atol=0, rtol=0
+        )
+        for row, (length, prefix) in enumerate(zip(lengths, prefixes)):
+            positions = torch.arange(prefix + length, device=q.device)
+            source = table[row, positions // 128].long()
+            dest = mapped[row, positions // 128].long()
+            offsets = positions % 128
+            view = staged.view(-1, 2, 1, 128, 256)
+            for kv in (0, 1):
+                torch.testing.assert_close(
+                    view[dest, kv, 0, offsets],
+                    cache[source, kv, 0, offsets].to(torch.bfloat16),
+                    atol=0,
+                    rtol=0,
+                )
+                torch.testing.assert_close(
+                    scales[dest, kv, 0, offsets].view(torch.int32),
+                    scale[source, kv, 0, offsets].view(torch.int32),
+                    atol=0,
+                    rtol=0,
+                )
+        torch.testing.assert_close(backing.view(torch.uint8), original, atol=0, rtol=0)
+        torch.testing.assert_close(
+            scale.view(torch.int32), original_scale, atol=0, rtol=0
+        )
+        # Missing pages stay mapped to the zero sentinel without reading the pool.
+        table[:, :3] = torch.tensor([0, -1, backing.shape[0]], device=q.device)
+        staged, mapped, _ = stage_paged_kv(
+            backing, table, scale, max(prefixes) + max(lengths), 128, cu, pd
+        )
+        self.assertTrue((mapped[:, :3] == 0).all())
+        self.assertTrue((staged[0] == 0).all())
+
+    def test_staged_fp8_graph_refreshes_partition_pages_and_scales(self):
+        for heads in (6, 12):
+            with self.subTest(heads=heads):
+                lengths, prefixes = [129, 257], [1024, 1152]
+                q, backing, cache, table, ids, scale, cu, pd = self._paged_batch_case(
+                    heads, lengths, prefixes, True
+                )
+
+                def run():
+                    return try_ragged_paged_qsa_prefill(
+                        q,
+                        backing,
+                        table,
+                        ids,
+                        lengths,
+                        prefixes,
+                        cu,
+                        pd,
+                        page_size=128,
+                        kv_head_num=1,
+                        kv_scale=scale,
+                    )
+
+                run()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    actual = run()
+                ids.fill_(-1)
+                graph.replay()
+                self.assertTrue((actual == 0).all())
+                updated_lengths, updated_prefixes = lengths[::-1], prefixes[::-1]
+                cu.copy_(
+                    torch.tensor([0, 257, 386], device=q.device, dtype=torch.int32)
+                )
+                pd.copy_(pd.flip(0))
+                table.copy_(table.flip(0))
+                table[:, :2].copy_(table[:, :2].flip(1))
+                q.mul_(0.75)
+                scale[:, 1].mul_(-0.5)
+                ids.copy_(
+                    torch.cat(
+                        [
+                            make_selection(p + s)[0, p:]
+                            for p, s in zip(updated_prefixes, updated_lengths)
+                        ]
+                    )
+                )
+                graph.replay()
+                expected = self._paged_batch_reference(
+                    q, cache, table, ids, updated_lengths, updated_prefixes, scale
+                )
+                torch.testing.assert_close(actual, expected, atol=0.0078125, rtol=0.008)
+                normal = actual.clone()
+                scale[:, 1].mul_(2.0**17)
+                graph.replay()
+                torch.testing.assert_close(actual, normal * (2.0**17), atol=0, rtol=0)
+
     def test_long_prefix_fp8_value_scales_preserve_bf16_range(self):
         q, backing, cache, table, selected, scale = self._paged_case(
             12, 1024, 129, True
@@ -1094,6 +1199,85 @@ class TmaPrefillTest(unittest.TestCase):
                             )
                     self.assertEqual(len(hashes), 4)
                     self.assertEqual(len(set(hashes)), 1)
+
+    def test_prefill_validator_table_geometry_reuses_compiled_kernel(self):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa import prefill_validation
+
+        kernel = prefill_validation._validate_packed_inputs
+        run = kernel.run
+        hashes = []
+
+        def record(*args, **kwargs):
+            compiled = run(*args, **kwargs)
+            hashes.append(compiled.hash)
+            return compiled
+
+        lengths, prefixes = [229, 239, 259], [512] * 3
+        q, backing, _, original, ids, _, cu, pd = self._paged_batch_case(
+            12, lengths, prefixes, True
+        )
+        ld = torch.tensor(lengths, device=q.device, dtype=torch.int32)
+        expected = torch.cat(
+            [
+                p + torch.arange(1, s + 1, device=q.device, dtype=torch.int32)
+                for p, s in zip(prefixes, lengths)
+            ]
+        )
+        with patch.object(kernel, "run", side_effect=record):
+            for capacity, padding in ((8, 0), (16, 0), (31, 3), (64, 3)):
+                table = torch.zeros(
+                    (3, capacity + padding), dtype=torch.int32, device=q.device
+                )[:, :capacity]
+                copied = min(capacity, original.shape[1])
+                table[:, :copied].copy_(original[:, :copied])
+                actual = prefill_validation.validate_prefill_inputs(
+                    ids, cu, ld, pd, table, 128, backing.shape[0], False
+                )
+                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        self.assertEqual(len(hashes), 4)
+        self.assertEqual(len(set(hashes)), 1)
+
+    def test_staged_preparation_reuses_kernel_across_table_geometry(self):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa import prefill_staging
+
+        kernel = prefill_staging._prepare_paged_kv
+        run = kernel.run
+        hashes = []
+
+        def record(*args, **kwargs):
+            compiled = run(*args, **kwargs)
+            hashes.append(compiled.hash)
+            return compiled
+
+        lengths, prefixes = [229, 239, 259], [1024] * 3
+        q, backing, cache, original, ids, scale, cu, pd = self._paged_batch_case(
+            12, lengths, prefixes, True
+        )
+        expected = self._paged_batch_reference(
+            q, cache, original, ids, lengths, prefixes, scale
+        )
+        with patch.object(kernel, "run", side_effect=record):
+            for capacity, padding in ((16, 0), (31, 0), (64, 3), (128, 3)):
+                table = torch.zeros(
+                    (3, capacity + padding), dtype=torch.int32, device=q.device
+                )[:, :capacity]
+                table[:, : original.shape[1]].copy_(original)
+                actual = try_ragged_paged_qsa_prefill(
+                    q,
+                    backing,
+                    table,
+                    ids,
+                    lengths,
+                    prefixes,
+                    cu,
+                    pd,
+                    page_size=128,
+                    kv_head_num=1,
+                    kv_scale=scale,
+                )
+                torch.testing.assert_close(actual, expected, atol=0.0078125, rtol=0.008)
+        self.assertEqual(len(hashes), 4)
+        self.assertEqual(len(set(hashes)), 1)
 
     def test_runtime_lengths_reuse_compiled_pipeline(self):
         try:

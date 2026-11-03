@@ -5,7 +5,7 @@ import triton
 import triton.language as tl
 
 
-@triton.jit(do_not_specialize=["B", "N", "K", "WIDTH", "PAGES"])
+@triton.jit(do_not_specialize=["B", "N", "K", "WIDTH", "PAGES", "TABLE_ROW"])
 def _validate_packed_inputs(
     Ids,
     Cu,
@@ -21,7 +21,7 @@ def _validate_packed_inputs(
     PAGES,
     IDS_ROW: tl.constexpr,
     IDS_COL: tl.constexpr,
-    TABLE_ROW: tl.constexpr,
+    TABLE_ROW,
     TABLE_COL: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     PADDED: tl.constexpr,

@@ -86,6 +86,7 @@ def _batched_paged_prefill(
     SCALE_PAGE: gl.constexpr,
     SCALE_KV: gl.constexpr,
     FP8: gl.constexpr,
+    SCALED: gl.constexpr,
     CACHE_ROWS: gl.constexpr,
     G: gl.constexpr,
     QM: gl.constexpr,
@@ -127,6 +128,7 @@ def _batched_paged_prefill(
         SCALE_PAGE,
         SCALE_KV,
         FP8,
+        SCALED,
         CACHE_ROWS,
         FRONTIER,
     )
@@ -140,21 +142,29 @@ def run_prefill(
     dim = 256
     longest = max(lengths)
     bound = max(prefix_host) + longest
+    scaled = cache.dtype == torch.float8_e4m3fn
     qm, group = (
         (16, 12) if heads == 12 and longest <= 512 else (32, 4 if heads == 12 else 6)
     )
     words = triton.cdiv(bound, 32)
     membership = torch.empty((tokens, words), dtype=torch.int32, device=q.device)
-    _build_paged_membership[(tokens,)](
-        selected,
-        membership,
-        cu,
-        prefixes,
-        len(lengths),
-        words,
-        16 if bound <= 512 else 128,
-        num_warps=4,
-    )
+    if scaled and bound >= 1024:
+        from .prefill_staging import stage_paged_kv
+
+        cache, table, scale = stage_paged_kv(
+            cache, table, scale, bound, page_size, cu, prefixes, selected, membership
+        )
+    else:
+        _build_paged_membership[(tokens,)](
+            selected,
+            membership,
+            cu,
+            prefixes,
+            len(lengths),
+            words,
+            16 if bound <= 512 else 128,
+            num_warps=4,
+        )
     fp8 = cache.dtype == torch.float8_e4m3fn
     cache_rows = cache.stride(0) // dim
     descriptor = TensorDescriptor(
@@ -189,12 +199,13 @@ def run_prefill(
         0 if scale is None else scale.stride(0),
         0 if scale is None else scale.stride(1),
         fp8,
+        scaled,
         cache_rows,
         group,
         qm,
         q.stride(0),
         output.stride(0),
-        (not fp8 or heads == 6) and bound <= 2048,
+        (not scaled or heads == 6) and bound <= 2048,
         heads == 12 or bound > 2048,
         num_warps=4,
     )

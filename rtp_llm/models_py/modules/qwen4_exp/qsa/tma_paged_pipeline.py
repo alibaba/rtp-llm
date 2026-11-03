@@ -50,7 +50,8 @@ def _producer(
     PAGE_SIZE: gl.constexpr,
     SCALE_PAGE: gl.constexpr,
     SCALE_KV: gl.constexpr,
-    FP8: gl.constexpr,
+    RAW_FP8: gl.constexpr,
+    SCALED: gl.constexpr,
     CACHE_ROWS: gl.constexpr,
     FRONTIER: gl.constexpr,
 ):
@@ -61,7 +62,7 @@ def _producer(
         iteration = operand // SLOTS
         if operand >= SLOTS:
             mbarrier.wait(empty.index(slot), (iteration - 1) & 1)
-        mbarrier.expect(full.index(slot), KN * D * (1 if FP8 else 2))
+        mbarrier.expect(full.index(slot), KN * D * (1 if RAW_FP8 else 2))
         kt = tiles - 1 - operand // 2 if FRONTIER else operand // 2
         physical, page_valid, page_offset = _page(
             Table, kt, KN, PAGE_SIZE, WIDTH, PAGES
@@ -110,7 +111,8 @@ def _attention_step(
     PAGE_SIZE: gl.constexpr,
     SCALE_PAGE: gl.constexpr,
     SCALE_KV: gl.constexpr,
-    FP8: gl.constexpr,
+    RAW_FP8: gl.constexpr,
+    SCALED: gl.constexpr,
     CACHE_ROWS: gl.constexpr,
     iteration,
     tiles,
@@ -128,7 +130,7 @@ def _attention_step(
     )
     lhs: gl.constexpr = DotOperandLayout(0, mma, 2)
     rhs: gl.constexpr = DotOperandLayout(1, mma, 2)
-    raw_rhs: gl.constexpr = DotOperandLayout(1, mma, 4 if FP8 else 2)
+    raw_rhs: gl.constexpr = DotOperandLayout(1, mma, 4 if RAW_FP8 else 2)
     kt = tiles - 1 - iteration if FRONTIER else iteration
     physical, page_valid, page_offset = _page(Table, kt, KN, PAGE_SIZE, WIDTH, PAGES)
     if PIPE:
@@ -141,14 +143,14 @@ def _attention_step(
         vs = 1
         kp = iteration & 1
         vp = iteration & 1
-        mbarrier.expect(full.index(ks), KN * D * (1 if FP8 else 2))
+        mbarrier.expect(full.index(ks), KN * D * (1 if RAW_FP8 else 2))
         tma.async_copy_global_to_shared(
             K,
             [physical * CACHE_ROWS + page_offset, 0],
             full.index(ks),
             buf.index(ks),
         )
-        mbarrier.expect(full.index(vs), KN * D * (1 if FP8 else 2))
+        mbarrier.expect(full.index(vs), KN * D * (1 if RAW_FP8 else 2))
         tma.async_copy_global_to_shared(
             V,
             [physical * CACHE_ROWS + PAGE_SIZE + page_offset, 0],
@@ -156,7 +158,7 @@ def _attention_step(
             buf.index(vs),
         )
     mbarrier.wait(full.index(ks), kp, deps=[buf])
-    if FP8 and G == 6:
+    if RAW_FP8 and G == 6:
         k0 = buf.index(ks).slice(0, 128, dim=1).permute((1, 0)).load(raw_rhs)
         k0 = gl.convert_layout(k0.to(gl.bfloat16), rhs)
         scores = mma_v2(q0, k0, gl.full((QM, KN), 0.0, gl.float32, mma))
@@ -165,12 +167,12 @@ def _attention_step(
         scores = mma_v2(q1, k1, scores)
     else:
         k = buf.index(ks).permute((1, 0)).load(raw_rhs)
-        if FP8:
+        if RAW_FP8:
             k = gl.convert_layout(k.to(gl.bfloat16), rhs)
         # FP8 values are exactly representable in BF16; keep Q unquantized.
         scores = mma_v2(q0, k, gl.full((QM, KN), 0.0, gl.float32, mma))
     column = kt * KN + c
-    if FP8:
+    if SCALED:
         ks_value = gl.load(
             Scales + physical.to(gl.int64) * SCALE_PAGE + page_offset + c,
             page_valid & ((column < Prefix + S) if CHECK_LENGTH else True),
@@ -197,7 +199,7 @@ def _attention_step(
     alpha = gl.exp2(maximum - safe_max)
     p = gl.exp2(scores - safe_max[:, None])
     # Retain the BF16 rounding residual while using warp MMA for both PV terms.
-    if FP8:
+    if SCALED:
         vs_value = gl.load(
             Scales + physical.to(gl.int64) * SCALE_PAGE + SCALE_KV + page_offset + c,
             page_valid & ((column < Prefix + S) if CHECK_LENGTH else True),
@@ -217,7 +219,7 @@ def _attention_step(
         maximum = next_max
     mbarrier.wait(full.index(vs), vp, deps=[buf])
     v = buf.index(vs).load(raw_rhs)
-    if FP8:
+    if RAW_FP8:
         v = gl.convert_layout(v.to(gl.bfloat16), rhs)
     vr = gl.arange(0, KN, layout=SliceLayout(1, rhs))
     if CHECK_LENGTH:
@@ -270,7 +272,8 @@ def _consumer(
     PAGE_SIZE: gl.constexpr,
     SCALE_PAGE: gl.constexpr,
     SCALE_KV: gl.constexpr,
-    FP8: gl.constexpr,
+    RAW_FP8: gl.constexpr,
+    SCALED: gl.constexpr,
     CACHE_ROWS: gl.constexpr,
     FRONTIER: gl.constexpr,
 ):
@@ -278,13 +281,11 @@ def _consumer(
         version=[2, 0], warps_per_cta=[WM, 4 // WM], instr_shape=[16, 8]
     )
     lhs: gl.constexpr = DotOperandLayout(0, mma, 2)
-    rhs: gl.constexpr = DotOperandLayout(1, mma, 2)
-    raw_rhs: gl.constexpr = DotOperandLayout(1, mma, 4 if FP8 else 2)
     load_layout: gl.constexpr = BlockedLayout([1, 4], [4, 8], [4, 1], [1, 0])
     tile = Tile
     group = gl.program_id(0 if G == 4 else 1)
     rr = gl.arange(0, QM, layout=SliceLayout(1, load_layout))
-    if FP8 and G == 6:
+    if RAW_FP8 and G == 6:
         dd = gl.arange(0, D // 2, layout=SliceLayout(0, load_layout))
         pp = tile * POSITIONS + rr // G
         hh = group * G + rr % G
@@ -352,7 +353,8 @@ def _consumer(
                 PAGE_SIZE,
                 SCALE_PAGE,
                 SCALE_KV,
-                FP8,
+                RAW_FP8,
+                SCALED,
                 CACHE_ROWS,
                 0,
                 tiles,
@@ -393,7 +395,8 @@ def _consumer(
                 PAGE_SIZE,
                 SCALE_PAGE,
                 SCALE_KV,
-                FP8,
+                RAW_FP8,
+                SCALED,
                 CACHE_ROWS,
                 iteration,
                 tiles,
@@ -435,7 +438,8 @@ def _consumer(
                 PAGE_SIZE,
                 SCALE_PAGE,
                 SCALE_KV,
-                FP8,
+                RAW_FP8,
+                SCALED,
                 CACHE_ROWS,
                 iteration,
                 tiles,
@@ -488,7 +492,8 @@ def _execute_prefill(
     PAGE_SIZE: gl.constexpr,
     SCALE_PAGE: gl.constexpr,
     SCALE_KV: gl.constexpr,
-    FP8: gl.constexpr,
+    RAW_FP8: gl.constexpr,
+    SCALED: gl.constexpr,
     CACHE_ROWS: gl.constexpr,
     FRONTIER: gl.constexpr,
 ):
@@ -540,7 +545,8 @@ def _execute_prefill(
                         PAGE_SIZE,
                         SCALE_PAGE,
                         SCALE_KV,
-                        FP8,
+                        RAW_FP8,
+                        SCALED,
                         CACHE_ROWS,
                         FRONTIER,
                     ),
@@ -568,7 +574,8 @@ def _execute_prefill(
                         PAGE_SIZE,
                         SCALE_PAGE,
                         SCALE_KV,
-                        FP8,
+                        RAW_FP8,
+                        SCALED,
                         CACHE_ROWS,
                         FRONTIER,
                     ),
@@ -611,7 +618,8 @@ def _execute_prefill(
             PAGE_SIZE,
             SCALE_PAGE,
             SCALE_KV,
-            FP8,
+            RAW_FP8,
+            SCALED,
             CACHE_ROWS,
             FRONTIER,
         )
@@ -636,7 +644,8 @@ def _paged_prefill(
     PAGE_SIZE: gl.constexpr,
     SCALE_PAGE: gl.constexpr,
     SCALE_KV: gl.constexpr,
-    FP8: gl.constexpr,
+    RAW_FP8: gl.constexpr,
+    SCALED: gl.constexpr,
     CACHE_ROWS: gl.constexpr,
     G: gl.constexpr,
     QM: gl.constexpr,
@@ -679,7 +688,8 @@ def _paged_prefill(
         PAGE_SIZE,
         SCALE_PAGE,
         SCALE_KV,
-        FP8,
+        RAW_FP8,
+        SCALED,
         CACHE_ROWS,
         FRONTIER,
     )
@@ -689,23 +699,36 @@ def run_prefill(q, cache, table, selected, prefix, page_size, scale):
     from .tma_prefill import _build_membership
 
     _, heads, tokens, dim = q.shape
-    pages = cache.shape[0]
-    fp8 = cache.dtype == torch.float8_e4m3fn
+    scaled = cache.dtype == torch.float8_e4m3fn
     qm, group = (
         (16, 12) if heads == 12 and tokens <= 512 else (32, 4 if heads == 12 else 6)
     )
     words = triton.cdiv(prefix + tokens, 32)
     membership = torch.empty((tokens, words), device=q.device, dtype=torch.int32)
-    _build_membership[(tokens,)](
-        selected,
-        membership,
-        prefix + tokens,
-        words,
-        16 if prefix + tokens <= 512 else 128,
-        num_warps=4,
-    )
-    # Widen KV tiles for short queries over a long FP8 prefix.
-    key_tile = 64 if fp8 and heads == 12 and tokens <= 512 and prefix >= 1024 else 32
+    if scaled and prefix + tokens >= 1024:
+        from .prefill_staging import stage_paged_kv
+
+        cache, table, scale = stage_paged_kv(
+            cache,
+            table,
+            scale,
+            prefix + tokens,
+            page_size,
+            selected=selected,
+            membership=membership,
+        )
+    else:
+        _build_membership[(tokens,)](
+            selected,
+            membership,
+            prefix + tokens,
+            words,
+            16 if prefix + tokens <= 512 else 128,
+            num_warps=4,
+        )
+    pages = cache.shape[0]
+    fp8 = cache.dtype == torch.float8_e4m3fn
+    key_tile = 32
     layout = NVMMASharedLayout(128, 8 if fp8 else 16)
     cache_rows = cache.stride(0) // dim
     # Flatten the row-padded HND pool into a 2D descriptor. Page lookup skips
@@ -719,7 +742,7 @@ def run_prefill(q, cache, table, selected, prefix, page_size, scale):
     grid = (triton.cdiv(tokens, qm // group), heads // group)
     if group == 4:
         grid = grid[::-1]
-    pipe = (not fp8 or heads == 6) and prefix + tokens <= 2048
+    pipe = (not scaled or heads == 6) and prefix + tokens <= 2048
     _paged_prefill[grid](
         q,
         descriptor,
@@ -736,6 +759,7 @@ def run_prefill(q, cache, table, selected, prefix, page_size, scale):
         0 if scale is None else scale.stride(0),
         0 if scale is None else scale.stride(1),
         fp8,
+        scaled,
         cache_rows,
         group,
         qm,
@@ -744,7 +768,7 @@ def run_prefill(q, cache, table, selected, prefix, page_size, scale):
         output.stride(2),
         pipe,
         True,
-        fp8 or heads == 12 or not pipe,
+        scaled or heads == 12 or not pipe,
         key_tile,
         num_warps=4,
     )
