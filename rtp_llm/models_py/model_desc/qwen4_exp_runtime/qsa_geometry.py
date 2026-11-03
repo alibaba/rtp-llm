@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
 
 from .qsa_cache_views import _block_table, _typed_2d_pool, _validate_required_blocks
 from .qsa_plans import IncrementalPrefillPlan, TargetVerifyPlan
+from .qsa_step_plan import get_prefill_step_plan
 from .step_metadata import (
     cached_indexer_padding,
     cached_query_geometry,
@@ -325,6 +326,15 @@ def _draft_incremental_prefill_geometry(
         )
 
     checks.verify()
+    step = get_prefill_step_plan(
+        self,
+        indexer=indexer,
+        token_count=token_count,
+        device=device,
+        rope_config=rope_config,
+        draft=draft,
+        draft_prefix_reuse=draft_prefix_reuse,
+    )
     return IncrementalPrefillPlan(
         **{
             "lengths": lengths,
@@ -352,6 +362,7 @@ def _draft_incremental_prefill_geometry(
             "state_table": state_table,
             "rope_cos": rope_cos,
             "rope_sin": rope_sin,
+            "step": step,
         }
     )
 

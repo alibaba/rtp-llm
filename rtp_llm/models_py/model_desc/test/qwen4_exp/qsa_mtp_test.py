@@ -157,6 +157,29 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
         self.assertTrue(torch.equal(self.kv_base, kv_before))
         self.assertTrue(torch.equal(self.state_base, state_before))
 
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for target verification")
+    def test_target_verify_graph_capture_accepts_synthetic_block_tables(self):
+        self.kv_base = self.kv_base.cuda()
+        self.state_base = self.state_base.cuda()
+        self.indexer.k_norm_gamma = self.indexer.k_norm_gamma.cuda()
+        context = self._target_verify_context(q_len=self.RATIO)
+        for inputs in (
+            context.main_inputs,
+            context.indexer_kv_inputs,
+            context.indexer_state_inputs,
+        ):
+            inputs.is_cuda_graph = True
+            inputs.prefix_lengths = inputs.prefix_lengths.cpu()
+        context.indexer_kv_inputs.kv_cache_kernel_block_id_device.zero_()
+        context.indexer_state_inputs.kv_cache_block_id_device.zero_()
+
+        context.validate_before_projection(
+            indexer=self._decode_indexer(),
+            token_count=self.RATIO,
+            device=self.kv_base.device,
+        )
+        torch.cuda.synchronize()
+
     @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
     def test_target_verify_uses_prefix_for_every_query_row(self):
         self.kv_base = self.kv_base.cuda()

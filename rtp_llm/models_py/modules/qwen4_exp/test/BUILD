@@ -43,6 +43,17 @@ py_library(
 )
 
 models_py_test(
+    name = "qsa_step_plan_test",
+    src = "qsa_step_plan_test.py",
+)
+
+models_py_test(
+    name = "indexer_prefix_reuse_triton_test",
+    src = "indexer_prefix_reuse_triton_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
     name = "qwen4_profiler_ranges_test",
     src = "qwen4_profiler_ranges_test.py",
     gpus = 0,

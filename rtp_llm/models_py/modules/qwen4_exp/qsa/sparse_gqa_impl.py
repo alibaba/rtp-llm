@@ -29,6 +29,9 @@ import torch
 
 from rtp_llm.config.cuda_graph import CudaGraphSelectionMode
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+    lookup_prefill_step_plan,
+)
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     AttentionImpl,
@@ -814,24 +817,51 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             # The draft's short, ragged windows share a single paged launch.
             # Invalid padded rows cannot read KV: their visible length is zero
             # and every selected index is -1. Restore packed order afterwards.
-            row_map = []
-            valid = []
-            packed_positions = []
-            for req_idx, request in enumerate(requests):
-                start, end = int(request.start), int(request.end)
-                length = end - start
-                for row in range(max_rows):
-                    row_map.append(start + min(row, length - 1))
-                    valid.append(row < length)
-                    if row < length:
-                        packed_positions.append(req_idx * max_rows + row)
-            row_map = torch.tensor(row_map, dtype=torch.long, device=q.device)
-            valid = torch.tensor(valid, dtype=torch.bool, device=q.device).view(
-                len(requests), max_rows
-            )
-            packed_positions = torch.tensor(
-                packed_positions, dtype=torch.long, device=q.device
-            )
+            # The frozen step plan already carries this step's padding map,
+            # validity mask and padded KV lengths; without one they are
+            # rebuilt inline exactly as before.
+            step = lookup_prefill_step_plan(self.attn_inputs, tokens)
+            if (
+                step is not None
+                and step.selection_row_map is not None
+                and step.selection_valid is not None
+                and step.selection_valid_rows is not None
+                and step.padded_kv_lens is not None
+                and step.max_len == max_rows
+                and step.batch_size == len(requests)
+                and step.lengths
+                == [int(req.end) - int(req.start) for req in requests]
+                and step.prefix_values
+                == self.attn_inputs.prefix_lengths.tolist()
+            ):
+                row_map = step.selection_row_map
+                valid = step.selection_valid
+                packed_positions = step.selection_valid_rows
+                kv_lens = step.padded_kv_lens
+            else:
+                row_map = []
+                valid = []
+                packed_positions = []
+                for req_idx, request in enumerate(requests):
+                    start, end = int(request.start), int(request.end)
+                    length = end - start
+                    for row in range(max_rows):
+                        row_map.append(start + min(row, length - 1))
+                        valid.append(row < length)
+                        if row < length:
+                            packed_positions.append(req_idx * max_rows + row)
+                row_map = torch.tensor(row_map, dtype=torch.long, device=q.device)
+                valid = torch.tensor(valid, dtype=torch.bool, device=q.device).view(
+                    len(requests), max_rows
+                )
+                packed_positions = torch.tensor(
+                    packed_positions, dtype=torch.long, device=q.device
+                )
+                row_offsets = torch.arange(
+                    1, max_rows + 1, dtype=torch.int32, device=q.device
+                )
+                kv_lens = plan.prefixes_device.unsqueeze(1) + row_offsets
+                kv_lens = torch.where(valid, kv_lens, 0)
             query = q.index_select(0, row_map).view(
                 len(requests), max_rows, self.head_num, self.head_dim
             )
@@ -839,11 +869,6 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             selected = plan.selected_indices.index_select(0, row_map)
             selected = selected.view(len(requests), max_rows, -1)
             selected = torch.where(valid.unsqueeze(-1), selected, -1)
-            row_offsets = torch.arange(
-                1, max_rows + 1, dtype=torch.int32, device=q.device
-            )
-            kv_lens = plan.prefixes_device.unsqueeze(1) + row_offsets
-            kv_lens = torch.where(valid, kv_lens, 0)
             output = sparse_paged_gqa_attn(
                 query,
                 kv_cache.kv_cache_base,
