@@ -10,6 +10,7 @@ from triton.experimental.gluon.language import (
     NVMMADistributedLayout,
     NVMMASharedLayout,
     SliceLayout,
+    num_warps,
 )
 from triton.experimental.gluon.language.nvidia.hopper import (
     fence_async_shared,
@@ -126,7 +127,7 @@ def _attention_step(
     FRONTIER: gl.constexpr,
 ):
     mma: gl.constexpr = NVMMADistributedLayout(
-        version=[2, 0], warps_per_cta=[WM, 4 // WM], instr_shape=[16, 8]
+        version=[2, 0], warps_per_cta=[WM, num_warps() // WM], instr_shape=[16, 8]
     )
     lhs: gl.constexpr = DotOperandLayout(0, mma, 2)
     rhs: gl.constexpr = DotOperandLayout(1, mma, 2)
@@ -278,10 +279,10 @@ def _consumer(
     FRONTIER: gl.constexpr,
 ):
     mma: gl.constexpr = NVMMADistributedLayout(
-        version=[2, 0], warps_per_cta=[WM, 4 // WM], instr_shape=[16, 8]
+        version=[2, 0], warps_per_cta=[WM, num_warps() // WM], instr_shape=[16, 8]
     )
     lhs: gl.constexpr = DotOperandLayout(0, mma, 2)
-    load_layout: gl.constexpr = BlockedLayout([1, 4], [4, 8], [4, 1], [1, 0])
+    load_layout: gl.constexpr = BlockedLayout([1, 4], [4, 8], [num_warps(), 1], [1, 0])
     tile = Tile
     group = gl.program_id(0 if G == 4 else 1)
     rr = gl.arange(0, QM, layout=SliceLayout(1, load_layout))
@@ -731,6 +732,11 @@ def run_prefill(q, cache, table, selected, prefix, page_size, scale):
         )
     pages = cache.shape[0]
     fp8 = cache.dtype == torch.float8_e4m3fn
+    if scaled and not fp8 and heads == 12 and tokens <= 512:
+        # These staged tiles fit two CTAs per SM. Widen the query tile once
+        # the current grid exceeds that resident capacity.
+        capacity = 2 * torch.cuda.get_device_properties(q.device).multi_processor_count
+        qm = 64 if tokens > 2 * capacity else (32 if tokens > capacity else 16)
     key_tile = 32
     layout = NVMMASharedLayout(128, 8 if fp8 else 16)
     cache_rows = cache.stride(0) // dim
@@ -745,11 +751,11 @@ def run_prefill(q, cache, table, selected, prefix, page_size, scale):
     grid = (triton.cdiv(tokens, qm // group), heads // group)
     if group == 4:
         grid = grid[::-1]
-    # Compact staged operands let small single-request queries overlap loads
-    # with compute using two operand slots and a bounded register budget.
+    # Compact staged operands let eight compute warps overlap loads using two
+    # operand slots while keeping the complete CTA within its register budget.
     compact_pipe = scaled and not fp8 and heads == 6 and tokens <= 512
     pipe = compact_pipe or ((not scaled or heads == 6) and prefix + tokens <= 2048)
-    launch_options = {"maxnreg": 232} if compact_pipe else {}
+    launch_options = {"maxnreg": 168} if compact_pipe else {}
     _paged_prefill[grid](
         q,
         descriptor,
@@ -778,7 +784,7 @@ def run_prefill(q, cache, table, selected, prefix, page_size, scale):
         scaled or heads == 12 or not pipe,
         key_tile,
         2 if compact_pipe else 0,
-        num_warps=4,
+        num_warps=8 if compact_pipe else 4,
         **launch_options,
     )
     return output

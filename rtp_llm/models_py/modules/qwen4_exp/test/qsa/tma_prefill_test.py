@@ -300,6 +300,12 @@ class TmaPrefillTest(unittest.TestCase):
         return (scores.softmax(-1).nan_to_num(0) @ v.double()).to(q.dtype)
 
     def test_paged_cache_padding_scales_and_graph_updates(self):
+        capacity = 2 * torch.cuda.get_device_properties().multi_processor_count
+        tile_boundaries = tuple(
+            (1024 - tokens, tokens)
+            for tokens in (capacity, capacity + 1, 2 * capacity, 2 * capacity + 1)
+            if 128 <= tokens <= 512
+        )
         for heads in (6, 12):
             for fp8 in (False, True):
                 for prefix, tokens in (
@@ -310,7 +316,7 @@ class TmaPrefillTest(unittest.TestCase):
                     (3072, 257),
                     (1024, 513),
                     (3072, 1024),
-                ):
+                ) + tile_boundaries:
                     with self.subTest(
                         heads=heads, fp8=fp8, prefix=prefix, tokens=tokens
                     ):
