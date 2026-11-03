@@ -566,12 +566,12 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         Test incremental streaming of string parameter values.
         Long string values should be streamed incrementally as chunks arrive.
         """
-        # Simulate: <parameter=location>\n/Users/dingyang/Develop\n</parameter>
+        # Simulate: <parameter=location>\n/tests/testuser/project\n</parameter>
         chunks = [
             "<tool_call><function=get_weather>",
-            "<parameter=location>\n/Users",
-            "/dingyang/",
-            "Develop",
+            "<parameter=location>\n/tests",
+            "/testuser/",
+            "project",
             "\n</parameter>",
             "</function></tool_call>",
         ]
@@ -587,7 +587,7 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         self.assertEqual(result.calls[0].parameters, "")
         all_calls.extend(result.calls)
 
-        # Chunk 1: <parameter=location>\n/Users
+        # Chunk 1: <parameter=location>\n/tests
         # Note: Opening quote is delayed until first content arrives (null handling)
         result = detector.parse_streaming_increment(chunks[1], self.tools)
         self.assertEqual(len(result.calls), 4)
@@ -598,21 +598,21 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         self.assertEqual(
             result.calls[2].parameters, '"'
         )  # Opening quote with first content
-        self.assertEqual(result.calls[3].parameters, "/Users")  # First content chunk
+        self.assertEqual(result.calls[3].parameters, "/tests")  # First content chunk
         all_calls.extend(result.calls)
 
-        # Chunk 2: /dingyang/
+        # Chunk 2: /testuser/
         result = detector.parse_streaming_increment(chunks[2], self.tools)
         self.assertEqual(len(result.calls), 1)
         self.assertEqual(
-            result.calls[0].parameters, "/dingyang/"
+            result.calls[0].parameters, "/testuser/"
         )  # Second content chunk
         all_calls.extend(result.calls)
 
-        # Chunk 3: Develop
+        # Chunk 3: project
         result = detector.parse_streaming_increment(chunks[3], self.tools)
         self.assertEqual(len(result.calls), 1)
-        self.assertEqual(result.calls[0].parameters, "Develop")  # Third content chunk
+        self.assertEqual(result.calls[0].parameters, "project")  # Third content chunk
         all_calls.extend(result.calls)
 
         # Chunk 4: \n</parameter>
@@ -632,9 +632,9 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         # Verify final structure
         param_calls = [tc for tc in all_calls if tc.parameters]
         params_str = "".join(tc.parameters for tc in param_calls)
-        self.assertEqual(params_str, '{"location": "/Users/dingyang/Develop"}')
+        self.assertEqual(params_str, '{"location": "/tests/testuser/project"}')
         params = json.loads(params_str)
-        self.assertEqual(params["location"], "/Users/dingyang/Develop")
+        self.assertEqual(params["location"], "/tests/testuser/project")
 
     def test_incremental_string_parameter_with_special_chars(self):
         """
@@ -1214,7 +1214,7 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
     def test_partial_end_tag_buffering(self):
         """
         Test that partial end tags like "</para" are buffered correctly.
-        When streaming "/Users/path</para", we can't know if "</para" is:
+        When streaming "/tests/path</para", we can't know if "</para" is:
         1. Start of closing tag "</parameter>" - should stop and close
         2. Just content that continues - should emit and continue
         We buffer "</para" and wait for next chunk to decide.
@@ -1222,7 +1222,7 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         # Scenario: Content ends with "</para" which completes to "</parameter>" (the closing tag)
         chunks = [
             "<tool_call><function=read_file>",
-            "<parameter=file_path>\n/Users/dingyang/Develop\n</para",  # Partial end tag
+            "<parameter=file_path>\n/tests/testuser/project\n</para",  # Partial end tag
             "meter>",  # Completes the closing tag
             "</function></tool_call>",
         ]
@@ -1247,7 +1247,7 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         all_calls.extend(result.calls)
 
         # Chunk 1: Parameter starts with path, ends with partial end tag "</para"
-        # Should emit: "{", "file_path": , ", "/Users/dingyang/Develop"
+        # Should emit: "{", "file_path": , ", "/tests/testuser/project"
         # Should buffer: "</para" (not emitted)
         # Note: Opening quote is delayed until first content arrives
         result = detector.parse_streaming_increment(chunks[1], tools)
@@ -1255,7 +1255,7 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         self.assertEqual(result.calls[0].parameters, "{")
         self.assertEqual(result.calls[1].parameters, '"file_path": ')  # No quote yet
         self.assertEqual(result.calls[2].parameters, '"')  # Opening quote
-        self.assertEqual(result.calls[3].parameters, "/Users/dingyang/Develop")
+        self.assertEqual(result.calls[3].parameters, "/tests/testuser/project")
         all_calls.extend(result.calls)
 
         # Chunk 2: Continues with "meter>" which completes "</parameter>"
@@ -1274,12 +1274,12 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
             self.assertEqual(param_calls_chunk3[0].parameters, "}")
         all_calls.extend(result.calls)
 
-        # Verify final result - should be just "/Users/dingyang/Develop"
+        # Verify final result - should be just "/tests/testuser/project"
         param_calls = [call for call in all_calls if call.parameters]
         params_str = "".join(tc.parameters for tc in param_calls)
-        self.assertEqual(params_str, '{"file_path": "/Users/dingyang/Develop"}')
+        self.assertEqual(params_str, '{"file_path": "/tests/testuser/project"}')
         params = json.loads(params_str)
-        self.assertEqual(params["file_path"], "/Users/dingyang/Develop")
+        self.assertEqual(params["file_path"], "/tests/testuser/project")
 
     def test_case1_four_serial_tool_calls(self):
         """
@@ -1287,20 +1287,20 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         Tool Calls:
         ============================================================
         [0] name: read_file
-            arguments: {"file_path": "/Users/dingyang/Develop/github/memos/plugin/markdown/markdown.go"}
+            arguments: {"file_path": "/tests/testuser/project/source/model/plugin/markdown/markdown.go"}
         [1] name: search_codebase
             arguments: {"query": "natural language processing NLP AI features", "key_words": "NLP,AI,processing"}
         [2] name: search_file
-            arguments: {"query": "*.go", "path": "/Users/dingyang/Develop/github/memos/plugin"}
+            arguments: {"query": "*.go", "path": "/tests/testuser/project/source/model/plugin"}
         """
         chunks = [
             "<tool_call>",
             "\n<",
             "function=read_file>\n<",
             "parameter=file",
-            "_path>\n/Users/ding",
-            "yang/Develop/github/m",
-            "emos/plugin",
+            "_path>\n/tests/test",
+            "user/project/source/m",
+            "odel/plugin",
             "/mark",
             "down",
             "/mark",
@@ -1327,8 +1327,8 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
             ">\n*.",
             "go\n</parameter>\n",
             "<parameter=path",
-            ">\n/Users/dingyang",
-            "/Develop/github/memos",
+            ">\n/tests/testuser",
+            "/project/source/model",
             "/plugin",
             "\n</parameter>\n</",
             "function>\n</tool_call>",
@@ -1363,7 +1363,7 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
 
         self.assertEqual(
             tool0_params["file_path"],
-            "/Users/dingyang/Develop/github/memos/plugin/markdown/markdown.go",
+            "/tests/testuser/project/source/model/plugin/markdown/markdown.go",
         )
         self.assertEqual(
             tool1_params["query"], "natural language processing NLP AI features"
@@ -1371,7 +1371,7 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         self.assertEqual(tool1_params["key_words"], "NLP,AI,processing")
         self.assertEqual(tool2_params["query"], "*.go")
         self.assertEqual(
-            tool2_params["path"], "/Users/dingyang/Develop/github/memos/plugin"
+            tool2_params["path"], "/tests/testuser/project/source/model/plugin"
         )
 
     def test_case2_four_serial_tool_calls(self):
@@ -1380,31 +1380,31 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         Tool Calls:
         ============================================================
         [0] name: read_file
-            arguments: {"file_path": "/Users/dingyang/Develop/github/memos/web/src/components/MemoEditor.tsx"}
+            arguments: {"file_path": "/tests/testuser/project/source/model/web/src/components/MemoEditor.tsx"}
         [1] name: read_file
-            arguments: {"file_path": "/Users/dingyang/Develop/github/memos/web/src/components/MemoView.tsx"}
+            arguments: {"file_path": "/tests/testuser/project/source/model/web/src/components/MemoView.tsx"}
         [2] name: search_codebase
             arguments: {"query": "natural language processing AI features", "key_words": "NLP,AI,processing"}
         [3] name: list_dir
-            arguments: {"relative_workspace_path": "/Users/dingyang/Develop/github/memos/plugin"}
+            arguments: {"relative_workspace_path": "/tests/testuser/project/source/model/plugin"}
         """
         chunks = [
             "<tool_call>",
             "\n<",
             "function=read_file>\n<",
             "parameter=file",
-            "_path>\n/Users/ding",
-            "yang/Develop/github/m",
-            "emos/web",
+            "_path>\n/tests/test",
+            "user/project/source/m",
+            "odel/web",
             "/src/components/MemoEditor",
             ".ts",
             "x\n</parameter>\n",
             "</function>\n</tool_call>\n",
             "<tool_call>\n<function=read",
             "_file>\n<parameter=file",
-            "_path>\n/Users/ding",
-            "yang/Develop/github/m",
-            "emos/web/src/components/M",
+            "_path>\n/tests/test",
+            "user/project/source/m",
+            "odel/web/src/components/M",
             "emoView",
             ".ts",
             "x\n</parameter>\n",
@@ -1425,9 +1425,9 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
             "function>\n</tool_call>",
             "\n<tool_call>\n<function=list",
             "_dir>\n<parameter=",
-            "relative_workspace_path>\n/Users",
-            "/dingyang/Develop",
-            "/github/memos/plugin",
+            "relative_workspace_path>\n/tests",
+            "/testuser/project",
+            "/source/model/plugin",
             "\n</parameter>\n</",
             "function>\n</tool_call>",
         ]
@@ -1466,11 +1466,11 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
 
         self.assertEqual(
             tool0_params["file_path"],
-            "/Users/dingyang/Develop/github/memos/web/src/components/MemoEditor.tsx",
+            "/tests/testuser/project/source/model/web/src/components/MemoEditor.tsx",
         )
         self.assertEqual(
             tool1_params["file_path"],
-            "/Users/dingyang/Develop/github/memos/web/src/components/MemoView.tsx",
+            "/tests/testuser/project/source/model/web/src/components/MemoView.tsx",
         )
         self.assertEqual(
             tool2_params["query"], "natural language processing AI features"
@@ -1478,7 +1478,7 @@ class TestQwen3CoderDetectorMTP(unittest.TestCase):
         self.assertEqual(tool2_params["key_words"], "NLP,AI,processing")
         self.assertEqual(
             tool3_params["relative_workspace_path"],
-            "/Users/dingyang/Develop/github/memos/plugin",
+            "/tests/testuser/project/source/model/plugin",
         )
 
     def test_case3_for_five_params(self):

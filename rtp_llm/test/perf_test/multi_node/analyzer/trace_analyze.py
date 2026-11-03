@@ -9,6 +9,7 @@ Chrome Trace (Perfetto UI) 格式的性能追踪分析脚本
 4. 按照kernel首次出现的时间顺序打印成表格
 """
 
+import argparse
 import csv
 import json
 import os
@@ -352,16 +353,18 @@ def print_excel_copyable_format(kernel_stats: List[Dict]):
 
 
 def main():
-    # 默认trace文件路径
-    default_trace_file = "/home/wangyin.yx/workspace/misc/trace/traces/normal_profiler_wr0_b256_s2048_prefill0_6.json"
-
-    # 从命令行获取文件路径，如果没有提供则使用默认路径
-    trace_file = sys.argv[1] if len(sys.argv) > 1 else default_trace_file
-
-    # 最小出现次数阈值
-    min_occurrences = 20
-    if len(sys.argv) > 2:
-        min_occurrences = int(sys.argv[2])
+    parser = argparse.ArgumentParser(description="Analyze a Chrome Trace JSON file.")
+    parser.add_argument("trace_file", help="Path to the trace JSON file")
+    parser.add_argument(
+        "min_occurrences",
+        nargs="?",
+        type=int,
+        default=20,
+        help="Minimum kernel occurrence count (default: 20)",
+    )
+    args = parser.parse_args()
+    trace_file = args.trace_file
+    min_occurrences = args.min_occurrences
 
     try:
         # 1. 加载trace文件
