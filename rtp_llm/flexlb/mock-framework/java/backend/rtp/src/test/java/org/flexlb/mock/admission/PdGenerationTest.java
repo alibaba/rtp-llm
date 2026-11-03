@@ -27,6 +27,8 @@ class PdGenerationTest {
     private Harness node(String role, int blocks, int millis, Map<String, Object> models) throws Exception {
         var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration(role));
         ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", 2).put("reuse_cache", true);
+        // This suite exercises native batch admission as well as individual PD calls.
+        if (role.equals("prefill")) ((ObjectNode) root.path("component").path("config")).put("mock.scheduler.mode", "group");
         ((ObjectNode) root.path("component").path("config")).put("test_block_num", blocks + 1);
         ((ObjectNode) root.path("component").path("config").path("mock.compute").path("forward")).put("expression", Integer.toString(millis));
         models.forEach((key, value) -> {

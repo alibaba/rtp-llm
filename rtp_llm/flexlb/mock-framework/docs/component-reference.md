@@ -230,7 +230,7 @@ real 默认值和映射以 `rtp_llm/server/server_args`、`rtp_llm/config/engine
 
 | 参数 | 含义 |
 | --- | --- |
-| mock.scheduler.mode | P 调度方式，默认 `group` 保留显式组语义；`fifo` 按单请求入队、自主组 Forward batch，拒绝 `EnqueueBatch`/`EnqueueGroup`。ENV 为 `MOCK_SCHEDULER_MODE`；D 始终使用普通调度。 |
+| mock.scheduler.mode | P 调度方式，默认 `fifo` 按单请求入队、自主组 Forward batch，拒绝 `EnqueueBatch`/`EnqueueGroup`；`group` 显式启用组语义。ENV 为 `MOCK_SCHEDULER_MODE`；D 始终使用普通调度。 |
 | mock.cache.memory.blocks | P/D Host 逻辑块预算，默认 0；不是 real 的 memory_cache_size_mb。本模型不加载层/head/dtype 来计算每块字节数，所以忽略 memory_cache_size_mb，不能把 MB 当块数。 |
 | mock.vit.skip.download | 默认 false；本地显式设 true 后用输入宽高跳过 HTTP 读取，其他队列、计算、缓存链路相同。 |
 | mock.vit.patch.size / mock.vit.spatial.merge.size / mock.vit.hidden.size | V 简化几何模型，默认 14 / 2 / 4096，不冒充 real 的模型加载配置。 |

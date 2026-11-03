@@ -184,7 +184,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
         native = json.loads(config['FLEXLB_CONFIG'])
         native['scheduler']['decision'] = {'type': 'FIXED_WINDOW', 'maxRequests': 2, 'maxCollectionWaitMs': 20}
         config['FLEXLB_CONFIG'] = json.dumps(native)
-    engine = {'engine': 'rtp', 'config': {'seq_size_per_block': 16, 'test_block_num': 256,
+    engine = {'engine': 'rtp', 'config': {'mock.scheduler.mode': 'group' if batched else 'fifo', 'seq_size_per_block': 16, 'test_block_num': 256,
         'reserve_block_ratio': 0, 'max_seq_len': 4096, 'mock.compute.forward.expression': '1 + batchSize'}}
     from helpers.input import write_inputs, pb
     source = tmp_path / 'traffic.binpb.zst'

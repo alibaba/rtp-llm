@@ -84,7 +84,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     if batched:
         native['scheduler']['decision'] = {'type': 'FIXED_WINDOW', 'maxRequests': 2, 'maxCollectionWaitMs': 20}
     master_config = configuration(); master_config['FLEXLB_CONFIG'] = json.dumps(native)
-    engine_config = {'seq_size_per_block': 16, 'test_block_num': 9, 'reserve_block_ratio': 0,
+    engine_config = {'mock.scheduler.mode': 'group' if batched else 'fifo', 'seq_size_per_block': 16, 'test_block_num': 9, 'reserve_block_ratio': 0,
                      'max_seq_len': 4096, 'mock.compute.forward.expression': '1 + batchSize'}
     meta = native_kvcm() if kvcm else None
     if kvcm:
