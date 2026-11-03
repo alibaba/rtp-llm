@@ -623,6 +623,20 @@ class KimiK3RendererTest(unittest.TestCase):
 
                 self.assertEqual(config.max_new_tokens, expected)
 
+    def test_openai_extra_configs_preserves_explicit_completion_limit(self) -> None:
+        renderer = KimiK3Renderer.__new__(KimiK3Renderer)
+        for value, expected in ((0, 0), (50, 50), (1048576, 131072)):
+            with self.subTest(value=value):
+                request = ChatCompletionRequest(
+                    messages=[], extra_configs=GenerateConfig(max_new_tokens=value)
+                )
+                config = request.extra_configs.model_copy(deep=True)
+
+                renderer.apply_chat_completion_constraints(request, config)
+
+                self.assertEqual(config.max_new_tokens, expected)
+                self.assertEqual(config.is_prefill_only(), value == 0)
+
     def test_openai_completion_limit_rejects_explicit_non_positive_values(
         self,
     ) -> None:

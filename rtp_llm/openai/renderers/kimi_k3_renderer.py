@@ -1342,6 +1342,11 @@ class KimiK3Renderer(CustomChatRenderer):
                 setattr(generate_config, name, getattr(request, name))
         if "n" in specified_fields:
             generate_config.num_return_sequences = request.n
+        if (
+            request.extra_configs is not None
+            and "max_new_tokens" in request.extra_configs.model_fields_set
+        ):
+            specified_fields.add("max_new_tokens")
         apply_kimi_k3_request_contract(
             generate_config,
             specified_fields=specified_fields,
