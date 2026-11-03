@@ -112,7 +112,8 @@ def validate_hw_kernel_group_args(
 
 
 def init_hw_kernel_group_args(parser, hw_kernel_config):
-    parser.add_argument(
+    hw_kernel_group = parser.add_argument_group("硬件/Kernel 特定优化")
+    hw_kernel_group.add_argument(
         "--enable_dynamic_decode_backend",
         env_name="ENABLE_DYNAMIC_DECODE_BACKEND",
         bind_to=(hw_kernel_config, "enable_dynamic_decode_backend"),
@@ -123,7 +124,6 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     ##############################################################################################################
     # 硬件/Kernel 特定优化
     ##############################################################################################################
-    hw_kernel_group = parser.add_argument_group("硬件/Kernel 特定优化")
 
     hw_kernel_group.add_argument(
         "--enable_cuda_graph",

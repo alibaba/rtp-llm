@@ -1346,6 +1346,37 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
         }
         return false;
     }
+    if (!is_prefill_cuda_graph_mode_ && !is_target_verify_) {
+        const auto max_kv_length = graph_it->second.mem_hold_.decode_gate_max_kv_length;
+        if (max_kv_length > 0) {
+            const auto& sequence_lengths = inputs.attention_inputs.sequence_lengths;
+            if (!sequence_lengths.defined() || sequence_lengths.is_cuda() || sequence_lengths.dim() != 1
+                || sequence_lengths.scalar_type() != torch::kInt32 || sequence_lengths.numel() == 0) {
+                if (observe_fallback) {
+                    RTP_LLM_LOG_WARNING(
+                        "dynamic decode graph envelope metadata is invalid for graph key %d, fallback to normal run",
+                        graph_key);
+                }
+                return false;
+            }
+            const auto replay_kv_length = sequence_lengths.max().item<int64_t>() + 1;
+            if (replay_kv_length <= 0 || replay_kv_length > max_kv_length) {
+                if (observe_fallback) {
+                    const FallbackTick tick = tickFallback(decode_gate_envelope_fallback_count_);
+                    if (tick.should_log) {
+                        RTP_LLM_LOG_WARNING(
+                            "dynamic decode graph fallback graph_key=%d kv=%lld max_validated_kv=%lld "
+                            "fallback_count=%llu",
+                            graph_key,
+                            static_cast<long long>(replay_kv_length),
+                            static_cast<long long>(max_kv_length),
+                            static_cast<unsigned long long>(tick.count));
+                    }
+                }
+                return false;
+            }
+        }
+    }
 
     if (isGenerationPrefillCudaGraph()) {
         const auto& captured_bert_inputs = graph_it->second.mem_hold_.py_model_inputs_.bert_embedding_inputs;

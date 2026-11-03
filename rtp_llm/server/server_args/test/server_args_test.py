@@ -17,6 +17,14 @@ from rtp_llm.utils.backend_registry import register_backend_hook
 
 
 class CustomAllReduceArgumentsTest(TestCase):
+    def test_dynamic_decode_backend_parser_and_default(self):
+        from rtp_llm.server.server_args import server_args
+
+        enabled = server_args.setup_args(["--enable_dynamic_decode_backend", "1"])
+        disabled = server_args.setup_args([])
+        self.assertTrue(enabled.py_hw_kernel_config.enable_dynamic_decode_backend)
+        self.assertFalse(disabled.py_hw_kernel_config.enable_dynamic_decode_backend)
+
     def test_explicit_cli_value_is_preserved_for_python_collectives(self):
         from rtp_llm.server.server_args import server_args
 

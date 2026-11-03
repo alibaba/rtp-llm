@@ -61,9 +61,7 @@ class GptModelBase(nn.Module):
         self._mtp_aux_capture_layer_ids = tuple(
             config.capture_aux_hidden_layer_ids or ()
         )
-        self._mtp_aux_capture_layer_id_set = frozenset(
-            self._mtp_aux_capture_layer_ids
-        )
+        self._mtp_aux_capture_layer_id_set = frozenset(self._mtp_aux_capture_layer_ids)
         self._mtp_target_hidden_states: Optional[torch.Tensor] = None
         self._mtp_target_graph_buffer: Optional[torch.Tensor] = None
         self._mtp_target_prompt_buffer: Optional[torch.Tensor] = None
@@ -72,6 +70,42 @@ class GptModelBase(nn.Module):
         self._mtp_aux_capture_index = 0
 
         self._capture_context = CaptureContext.unsupported()
+        self._decode_gate = None
+        self._decode_gate_envelope = None
+        self._dynamic_decode_enabled = False
+        self.decode_backend_plan = {}
+
+    def set_decode_backend_gate(self, names, envelope=None) -> None:
+        from rtp_llm.models_py.modules.factory.attention.attn_factory import (
+            DECODE_MHA_IMPS,
+        )
+
+        self.decode_backend_plan.clear()
+        if names is None:
+            self._decode_gate = None
+            self._decode_gate_envelope = None
+            return
+        registry = {cls.__name__: cls for cls in DECODE_MHA_IMPS}
+        if not names or any(name not in registry for name in names):
+            raise ValueError("decode gate contains no backend or an unknown backend")
+        self._decode_gate = frozenset(registry[name] for name in names)
+        self._decode_gate_envelope = envelope
+
+    def configure_dynamic_decode(self, enabled: bool) -> None:
+        if enabled and not self._decode_gate:
+            raise RuntimeError(
+                "dynamic decode cannot start before precision qualification"
+            )
+        if enabled and self._decode_gate_envelope is None:
+            raise RuntimeError(
+                "dynamic decode cannot start before envelope qualification"
+            )
+        if enabled and getattr(self.config, "headwise_config", None) is not None:
+            raise NotImplementedError(
+                "dynamic decode precision gate does not qualify headwise attention"
+            )
+        self._dynamic_decode_enabled = enabled
+        self.decode_backend_plan.clear()
 
     def _init_capture_context(
         self,
@@ -124,6 +158,85 @@ class GptModelBase(nn.Module):
         cuda_graph_selection_mode: Optional[str] = None,
     ) -> AttentionImpl | dict[str, AttentionImpl]:
         attention_inputs = get_attention_inputs_value(inputs)
+        if getattr(self, "_dynamic_decode_enabled", False) and is_cuda_graph:
+            from rtp_llm.config.cuda_graph import CudaGraphSelectionMode
+            from rtp_llm.models_py.modules.factory.attention.dispatch.backend_selector import (
+                instantiate_decode_backend,
+                select_decode_backend,
+            )
+
+            mode = CudaGraphSelectionMode(
+                cuda_graph_selection_mode or CudaGraphSelectionMode.DECODE_GRAPH
+            )
+            primary = (
+                next(iter(attention_inputs.values()))
+                if isinstance(attention_inputs, Mapping)
+                else attention_inputs
+            )
+            envelope = self._decode_gate_envelope
+            if mode == CudaGraphSelectionMode.DECODE_GRAPH and not primary.is_prefill:
+                if isinstance(attention_inputs, Mapping) and len(attention_inputs) != 1:
+                    raise RuntimeError(
+                        "dynamic decode does not support multiple cache groups"
+                    )
+                primary.headwise_config = getattr(self.config, "headwise_config", None)
+                primary.is_cuda_graph = True
+                batch = primary.input_lengths.numel()
+                sequence_lengths = getattr(primary, "sequence_lengths", None)
+                kv_length = (
+                    int(sequence_lengths.max().item()) + 1
+                    if isinstance(sequence_lengths, torch.Tensor)
+                    and sequence_lengths.numel() > 0
+                    else 0
+                )
+                # Capture fills sequence_lengths with a model max_seq_len
+                # sentinel, which is not the replay KV length. Qualify the graph
+                # by batch here, then enforce the validated KV ceiling on each
+                # replay through decode_gate_max_kv_length published below.
+                capture_in_envelope = (
+                    envelope is not None and batch in envelope.batch_sizes
+                )
+                if not capture_in_envelope:
+                    if envelope is None:
+                        logging.warning(
+                            "dynamic decode fallback batch=%d kv=%d: "
+                            "no validated envelope",
+                            batch,
+                            kv_length,
+                        )
+                    else:
+                        logging.warning(
+                            "dynamic decode fallback batch=%d kv=%d outside validated "
+                            "envelope batches=%s max_kv=%d max_steps=%d calibration=%s",
+                            batch,
+                            kv_length,
+                            envelope.batch_sizes,
+                            envelope.max_kv_length,
+                            envelope.max_decode_steps,
+                            envelope.calibration_id,
+                        )
+                elif batch not in self.decode_backend_plan:
+                    self.decode_backend_plan[batch] = select_decode_backend(
+                        self,
+                        primary,
+                        self._decode_gate,
+                        envelope.max_kv_length if envelope is not None else 0,
+                    )
+                if capture_in_envelope and batch in self.decode_backend_plan:
+                    cls = self.decode_backend_plan[batch]
+                    instance = instantiate_decode_backend(self, primary, cls)
+                    instance.decode_gate_max_kv_length = envelope.max_kv_length
+                    logging.info(
+                        "dynamic decode capture batch=%d backend=%s "
+                        "validated_kv=%d capture_kv=%d",
+                        batch,
+                        cls.__name__,
+                        envelope.max_kv_length,
+                        kv_length,
+                    )
+                    if isinstance(attention_inputs, Mapping):
+                        return {next(iter(attention_inputs)): instance}
+                    return instance
         if isinstance(attention_inputs, Mapping):
             fmha_group_tags = self._get_fmha_group_tags()
             selected_group_inputs = (
@@ -243,9 +356,7 @@ class GptModelBase(nn.Module):
             : self._mtp_aux_capture_rows
         ]
 
-    def get_mtp_target_hidden_states(
-        self, num_tokens: int
-    ) -> Optional[torch.Tensor]:
+    def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         hidden = self._mtp_target_hidden_states
         if hidden is None:
             return None
