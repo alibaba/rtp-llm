@@ -125,7 +125,12 @@ def _tensor_fingerprint(tensor: Any) -> tuple[int, int] | None:
 # validation all need those values; a device source is read back exactly once
 # per step and every later read of the same (inputs object, attribute) pair
 # reuses the mirror without synchronizing.
-_MIRROR_CACHE_LIMIT = 8
+# One model step's working set is up to 12 source tensors (target + MTP
+# draft forward, each with three cache-region inputs objects carrying
+# prefix_lengths/input_lengths); a handful of recent steps makes the bound
+# below comfortably exceed it, so the layers of one step never evict each
+# other's mirrors.
+_MIRROR_CACHE_LIMIT = 64
 _MIRROR_CACHE: "OrderedDict[tuple, tuple[Any, torch.Tensor, tuple]]" = OrderedDict()
 _MIRROR_STATS = {"readbacks": 0}
 
