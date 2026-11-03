@@ -237,6 +237,44 @@ class PrefillAdmissionTest {
         }
     }
 
+    @Test void cancelledPreparedMemberIsExcludedFromTheExplicitBatch() throws Exception {
+        var config = config("0", true);
+        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU);
+             var admission = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config))) {
+            var cancelled = admission.new Session(input(1, 0, true), true, System.nanoTime(), Long.MAX_VALUE);
+            var ready = admission.new Session(input(2, 0, true), true, System.nanoTime(), Long.MAX_VALUE);
+            cancelled.cancel();
+            var batch = admission.submit(List.of(
+                new PrefillAdmission.Submission(org.flexlb.mock.multimodal.MediaInput.text(input(1, 0, true)), Long.MAX_VALUE, cancelled),
+                new PrefillAdmission.Submission(org.flexlb.mock.multimodal.MediaInput.text(input(2, 0, true)), Long.MAX_VALUE, ready)));
+            assertEquals(Status.Code.CANCELLED, Status.fromThrowable(batch.get(0).failure()).getCode());
+            assertSame(ready, batch.get(1).session());
+            assertTrue(ready.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().isOk());
+            assertEquals(1, LocalRpcTest.sample(admission.scrapeMetrics(), "rtp_llm_requests_started_total", ""));
+            assertEquals(1, admission.snapshot(0).finished().size());
+            ready.cancel(); ready.termination.get(2, TimeUnit.SECONDS);
+            assertEquals(2, admission.snapshot(0).finished().size());
+            assertEquals(8, cache.snapshot(0, false).availableBlocks());
+        }
+    }
+
+    @Test void closingPendingAdmissionPublishesOnceAndRejectsLateSubmission() throws Exception {
+        var config = config("0");
+        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU);
+             var admission = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config))) {
+            var pending = admission.new Session(input(1, 0, true), false, System.nanoTime(), Long.MAX_VALUE);
+            admission.close();
+            assertEquals(Status.Code.UNAVAILABLE, pending.termination.get(2, TimeUnit.SECONDS).status().getCode());
+            assertTrue(admission.snapshot(0).tasks().isEmpty());
+            assertEquals(1, admission.snapshot(0).finished().size());
+            assertThrows(io.grpc.StatusRuntimeException.class,
+                () -> admission.submit(pending, org.flexlb.mock.multimodal.MediaInput.text(input(1, 0, true))));
+            pending.cancel(); admission.close();
+            assertEquals(1, admission.snapshot(0).finished().size());
+            assertEquals(8, cache.snapshot(0, false).availableBlocks());
+        }
+    }
+
     @Test void hostOnlyPrefillReusesLocalKvWithoutALoadingStage() throws Exception {
         var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration("prefill"));
         var settings = (ObjectNode) root.path("component").path("config");

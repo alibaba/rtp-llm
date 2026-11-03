@@ -113,7 +113,7 @@ class RtpSchedulerTest {
     @Test void closingEngineDefersCleanupUntilOutstandingReadReturns() throws Exception {
         Object lock = new Object(); var config = config("prefill", "1", 1); var listener = new Listener();
         try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU);
-             var engine = new EngineLoop(lock, RtpScheduler.factory(config), cache, config.compute(), config.role(), config.id())) {
+             var engine = new EngineLoop(lock, RtpScheduler.factory(config), new org.flexlb.mock.engine.TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             var request = engine.input(input(1, true), listener);
             listener.output.get(2, TimeUnit.SECONDS);
             var read = engine.beginTransfer(request);
@@ -170,7 +170,7 @@ class RtpSchedulerTest {
             }
         };
         try (var cache = new KvCache(config.blockSize(), 12, 0, KvCache.EvictionPolicy.LRU);
-             var engine = new EngineLoop(lock, RtpScheduler.factory(config), cache, config.compute(), config.role(), config.id())) {
+             var engine = new EngineLoop(lock, RtpScheduler.factory(config), new org.flexlb.mock.engine.TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             engine.input(input(1, false), slow);
             assertTrue(blocked.await(2, TimeUnit.SECONDS));
             engine.input(input(2, false), next);
@@ -226,7 +226,7 @@ class RtpSchedulerTest {
             }
         };
         try (var cache = new KvCache(config.blockSize(), 12, 0, KvCache.EvictionPolicy.LRU);
-             var engine = new EngineLoop(lock, RtpScheduler.factory(config), cache, config.compute(), config.role(), config.id())) {
+             var engine = new EngineLoop(lock, RtpScheduler.factory(config), new org.flexlb.mock.engine.TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             var request = engine.input(input(1, false), listener);
             assertTrue(blocked.await(2, TimeUnit.SECONDS));
             engine.finish(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel"));
@@ -250,7 +250,7 @@ class RtpSchedulerTest {
         };
         var lock = new Object();
         try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU);
-             var loop = new EngineLoop(lock, RtpScheduler.factory(config), cache, config.compute(), config.role(), config.id())) {
+             var loop = new EngineLoop(lock, RtpScheduler.factory(config), new org.flexlb.mock.engine.TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             loop.input(input(1, false), listener);
             assertTrue(entered.await(2, TimeUnit.SECONDS));
             var status = loop.status(0);
@@ -360,7 +360,7 @@ class RtpSchedulerTest {
         var config = config("prefill", "1", 2); var lock = new Object();
         try (var cache = new KvCache(config.blockSize(), 3, 0, KvCache.EvictionPolicy.LRU);
              var owner = cache.acquire(6, List.of()).lease();
-             var engine = new EngineLoop(lock, RtpScheduler.factory(config), cache, config.compute(), config.role(), config.id())) {
+             var engine = new EngineLoop(lock, RtpScheduler.factory(config), new org.flexlb.mock.engine.TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             var expired = new Listener(); var cancelled = new Listener();
             long now = System.nanoTime();
             engine.input(new Scheduler.Input("1", 1, 0, 5, 3, 0, now,

@@ -132,7 +132,7 @@ class RtpRemoteSchedulerTest {
     @Test void engineLoopIsWokenByReadCompletionWithoutNewTraffic() throws Exception {
         var config = config(2, 0); var remote = new Backend(); var lock = new Object();
         try (var cache = cache(remote);
-             var loop = new EngineLoop(lock, RtpScheduler.factory(config), cache, config.compute(), config.role(), config.id())) {
+             var loop = new EngineLoop(lock, RtpScheduler.factory(config), new org.flexlb.mock.engine.TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             var listener = new Listener();
             loop.input(input(1, true, Long.MAX_VALUE), listener);
             assertTrue(remote.entered.await(2, TimeUnit.SECONDS)); assertFalse(listener.output.isDone());
@@ -145,7 +145,7 @@ class RtpRemoteSchedulerTest {
     @Test void deadlineTerminatesLoadingWithoutWaitingForAnUncooperativeRead() throws Exception {
         var config = config(2, 0); var remote = new Backend(); remote.ignoreInterrupt = true; var lock = new Object();
         try (var cache = cache(remote);
-             var loop = new EngineLoop(lock, RtpScheduler.factory(config), cache, config.compute(), config.role(), config.id())) {
+             var loop = new EngineLoop(lock, RtpScheduler.factory(config), new org.flexlb.mock.engine.TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             var listener = new Listener();
             loop.input(input(1, true, System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(300)), listener);
             assertTrue(remote.entered.await(2, TimeUnit.SECONDS));
@@ -192,7 +192,7 @@ class RtpRemoteSchedulerTest {
         };
         remote.release.countDown();
         try (var cache = cache(remote);
-             var loop = new EngineLoop(lock, RtpScheduler.factory(config), cache, config.compute(), config.role(), config.id())) {
+             var loop = new EngineLoop(lock, RtpScheduler.factory(config), new org.flexlb.mock.engine.TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             var listener = new Listener(); loop.input(input(1, true, Long.MAX_VALUE), listener);
             assertNull(listener.terminal.get(2, TimeUnit.SECONDS));
             assertTrue(writing.await(2, TimeUnit.SECONDS));
