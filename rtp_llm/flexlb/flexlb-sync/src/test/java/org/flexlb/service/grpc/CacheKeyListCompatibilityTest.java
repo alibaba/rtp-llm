@@ -1,8 +1,9 @@
 package org.flexlb.service.grpc;
 
-import java.util.Set;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.Test;
+
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 

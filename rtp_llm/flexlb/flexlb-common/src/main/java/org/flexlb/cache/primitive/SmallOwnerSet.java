@@ -6,7 +6,11 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
 
-/** Readers see immutable owner arrays published by index mutations. */
+/**
+
+ * Readers see immutable owner arrays published by index mutations.
+
+ */
 public final class SmallOwnerSet extends AbstractSet<String> {
     private volatile String[] owners = new String[0];
 

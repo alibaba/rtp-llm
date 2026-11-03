@@ -1,10 +1,15 @@
 package org.flexlb.cache.primitive;
 
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
+
 import java.util.Collection;
 import java.util.Set;
 
-/** Primitive key storage. Mutations require the owning generation's cache mutation lock. */
+/**
+
+ * Primitive key storage. Mutations require the owning generation's cache mutation lock.
+
+ */
 public final class LongKeySet extends LongOpenHashSet {
     public LongKeySet() { super(); }
     public LongKeySet(int expected) { super(expected); }

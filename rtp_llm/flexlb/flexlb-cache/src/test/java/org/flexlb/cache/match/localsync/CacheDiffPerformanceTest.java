@@ -1,6 +1,5 @@
 package org.flexlb.cache.match.localsync;
 
-import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;

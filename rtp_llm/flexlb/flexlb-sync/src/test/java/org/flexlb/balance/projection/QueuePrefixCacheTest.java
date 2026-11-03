@@ -1,13 +1,26 @@
 package org.flexlb.balance.projection;
 
-import java.util.*;
-import java.util.concurrent.atomic.AtomicInteger;
+import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.prediction.*;
-import org.flexlb.balance.scheduler.*;
-import org.flexlb.balance.delivery.*;
+import org.flexlb.balance.prediction.PrefillBatchFeatures;
+import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
+import org.flexlb.balance.scheduler.RequestRegistry;
+import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.junit.jupiter.api.Test;
-import static org.junit.jupiter.api.Assertions.*;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Random;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 class QueuePrefixCacheTest {

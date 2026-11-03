@@ -1,5 +1,6 @@
 package org.flexlb.service.grpc;
 
+import org.flexlb.cache.primitive.LongKeySet;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatus.EngineObservation;
@@ -13,7 +14,6 @@ import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 
 import java.util.HashMap;
-import org.flexlb.cache.primitive.LongKeySet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;

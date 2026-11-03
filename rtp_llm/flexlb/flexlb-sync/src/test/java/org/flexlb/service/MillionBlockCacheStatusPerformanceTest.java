@@ -4,15 +4,15 @@ import ch.qos.logback.classic.Level;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.cache.match.localsync.EngineLocalView;
 import org.flexlb.cache.match.localsync.GlobalCacheIndex;
 import org.flexlb.cache.match.localsync.KvCacheManager;
-import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
-import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService.CacheStatusPB;
 import org.flexlb.engine.grpc.EngineRpcService.CacheVersionPB;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.flexlb.service.grpc.EngineStatusConverter;
@@ -40,7 +40,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Loopback uses real Netty/protobuf and the production converter and cache indexes. */
+/**
+
+ * Loopback uses real Netty/protobuf and the production converter and cache indexes.
+
+ */
 @Tag("performance-regression")
 class MillionBlockCacheStatusPerformanceTest {
     private static final String ADDRESS = "127.0.0.1:8000";

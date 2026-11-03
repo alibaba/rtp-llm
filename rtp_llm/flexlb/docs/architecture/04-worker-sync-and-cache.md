@@ -159,11 +159,15 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
 
 ### LOCAL_SYNC 两级索引
 
-- **大表** `GlobalCacheIndex`：`ConcurrentHashMap<Long blockHash, Set<String engineIpPort>>`，
+- **大表** `GlobalCacheIndex`：`LongObjectMap<Set<String>>` 保存 primitive block hash，owner 用 `SmallOwnerSet` 保存，
   变更加单把 `ReentrantLock`。`batchCalculatePrefixMatchLength`：按序遍历请求 block 链，
   用候选集过滤 + 首个未命中即淘汰该引擎（早停），返回每引擎的前缀匹配块数。
 - **小表** `EngineLocalView`：`ConcurrentHashMap<String engineIpPort, Set<Long>>`。
-  `calculateDiff` 在专用 ForkJoinPool 上并行算 added/removed，diff 大小回馈动态间隔服务。
+  每个 worker 的 key 集合使用 `LongKeySet`，写入持有 generation 的 `cacheMutationLock`。
+  `calculateDiff` 在专用 ForkJoinPool 上并行扫描 added/removed，diff 大小回馈动态间隔服务。
+  primitive 索引表在分片内同步读取和扩容，owner 数组通过 volatile 发布。
+  旧 map 协议使用 `PackedBooleanCacheMap`，按近期快照大小预估容量，上限 4M key。
+  protobuf 3.25.1 的生成代码在构建阶段接入存储适配器，兼容测试覆盖只读消息和 Builder 复制。
 - `KvCacheManager`：门面——`findMatchingEngines`（候选来自 `WorkerStatusProvider`）、
   `updateEngineCache`（diff 后双表应用）、`removeEngineCache`、`clear`。
 - `WorkerDirectory` 在对应 worker generation 完成退役后，通过 `LocalSyncCacheMatchProvider`

@@ -2,14 +2,14 @@ package org.flexlb.cache.match.localsync;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.DiffResult;
+import org.flexlb.cache.primitive.LongKeySet;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.WorkerRegistryConfig;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
 import java.util.Collections;
-import org.flexlb.cache.primitive.LongKeySet;
-import org.flexlb.config.ConfigService;
-import org.flexlb.config.WorkerRegistryConfig;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;

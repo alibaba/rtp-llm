@@ -190,6 +190,10 @@ UniConfig / Nacos 的 v3 部分更新示例：
 - `router`：角色 availability、execution estimator、selector、cache affinity 和
   group selector。
 - `workerRegistry`：worker health 与 cache-status 刷新策略。
+  `executors.cacheStatusThreads` 默认 32，`executors.cacheDiffParallelism` 默认 8，
+  diff 实际并行度还受可用 CPU 数限制，均在执行器创建时读取。
+- `engineGrpc.executorThreads` 默认 32，`executorQueueCapacity` 默认 10000，
+  `eventLoopThreads` 默认 8，分别控制客户端回调线程、队列和 I/O 线程。
 - `observability.cacheHit`：recent-key window、指标和理论命中日志。理论命中查询、历史池更新、
   指标与请求日志由独立单线程按入队顺序处理；请求线程仅提交任务。
   后台任务直接读取路由完成后保持不变的请求字段；日志与指标开关在执行时从配置服务读取。
