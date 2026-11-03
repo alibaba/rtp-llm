@@ -54,6 +54,10 @@ public:
                                      bool                               enable_storage_backend = true,
                                      std::optional<int64_t>             request_id             = {},
                                      bool                               skip_linear            = false);
+    // Read-only admission estimate. Count physical DEVICE blocks that a later
+    // match can reuse, without taking references or starting lower-tier loads.
+    size_t reusableDeviceBlocksLocked(const CacheKeysType&               cache_keys,
+                                      const std::function<bool(size_t)>& valid_prefix = {}) const;
     BlockIndicesType     matchedBlocksForGroup(std::string_view                      group_tag,
                                                const std::vector<MultiNodeResource>& matched_resources) const;
     bool                 abortPendingLoad(const std::shared_ptr<AsyncContext>& context);

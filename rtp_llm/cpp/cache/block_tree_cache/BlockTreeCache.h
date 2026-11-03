@@ -138,6 +138,8 @@ public:
                                bool                               enable_storage_backend = true,
                                std::optional<int64_t>             request_id             = {},
                                bool                               skip_linear            = false);
+    size_t reusableDeviceBlocks(const CacheKeysType&               cache_keys,
+                                const std::function<bool(size_t)>& valid_prefix = {}) const;
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier);

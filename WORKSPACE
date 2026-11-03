@@ -6,13 +6,11 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 # checksum so the image cannot silently pick up an incompatible ATOM main.
 http_archive(
     name = "atom_source",
-    sha256 = "b00d4b49c4d4b7ca1b40b26aaca7af20819bd950ade5381711cb2e473264d502",
-    strip_prefix = "ATOM-bdec681249254846f73b833d1a5112f86730ca34",
+    sha256 = "62c375d2b9edb6e130de52abd912c30ae48278470b0761208084146632f520b7",
+    strip_prefix = "ATOM-9af739efc20572c998cad401efea025a9057bed8",
     type = "tar.gz",
     build_file = "//:BUILD.atom",
-    patches = ["//patches/atom:qwen4_exp_block_fp8_ple_bf16.patch"],
-    patch_args = ["-p1"],
-    urls = ["https://codeload.github.com/ROCm/ATOM/tar.gz/bdec681249254846f73b833d1a5112f86730ca34"],
+    urls = ["https://codeload.github.com/junna2016/ATOM/tar.gz/9af739efc20572c998cad401efea025a9057bed8"],
 )
 
 http_archive(

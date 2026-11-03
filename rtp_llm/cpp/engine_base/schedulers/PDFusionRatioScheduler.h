@@ -57,6 +57,7 @@ private:
     // round; this keeps the single slot reachable by the block-holding
     // candidates instead of a retry-failing fresh one.
     void      prioritizeBlockHoldingWaitingStreams();
+    int64_t   reusableDeviceBlocks(const GenerateStreamPtr& stream) const;
 
     struct AdmissionPeakState;
     void buildAdmissionPeakState();
