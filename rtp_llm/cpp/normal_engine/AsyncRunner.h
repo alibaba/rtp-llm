@@ -5,6 +5,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <thread>
 #include <ATen/ThreadLocalState.h>
 #include <torch/torch.h>
@@ -20,6 +21,7 @@ public:
     AsyncRunner& operator=(const AsyncRunner&) = delete;
 
     void launch(std::function<void()> fn);
+    void launch(std::string task_name, std::function<void()> fn);
     void sync(const torch::Stream& wait_stream);
 
 private:
@@ -37,6 +39,7 @@ private:
     struct Task {
         std::function<void()> fn;
         at::ThreadLocalState  tls_state;
+        std::string           name;
     };
     std::optional<Task> pending_task_;
     std::exception_ptr  pending_exception_;

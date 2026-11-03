@@ -52,6 +52,35 @@ TEST_F(SamplerTest, testFixedGreedySamplingBuffersRejectGrow) {
     EXPECT_THROW(sampler.ensureGreedySamplingBuffers(2), rtp_llm::RTPException);
 }
 
+TEST_F(SamplerTest, testCaptureOriginalProbabilitiesKeepsFilteredSampling) {
+    // softmax(log(0.1, 0.2, 0.3, 0.4)) is the independent numerical oracle.
+    // top-k=1 must still give rejection sampling a point mass at token 3.
+    SamplerInputs inputs{};
+    inputs.logits               = torch::tensor({{0.1f, 0.2f, 0.3f, 0.4f}}).log().to(torch::kCUDA);
+    inputs.token_ids            = torch::tensor({{1, -1}}, torch::kInt32);
+    inputs.input_lengths        = torch::tensor({1}, torch::kInt32);
+    inputs.sequence_lengths     = torch::tensor({1}, torch::kInt32);
+    inputs.vocab_size           = 4;
+    inputs.step                 = 1;
+    inputs.batch_size           = 1;
+    inputs.batch_size_out       = 1;
+    inputs.num_beams_in         = torch::tensor({1L}, torch::kLong);
+    inputs.num_beams_out        = torch::tensor({1L}, torch::kLong);
+    inputs.top_k                = torch::tensor({1}, torch::kInt32).pin_memory();
+    inputs.top_p                = torch::tensor({1.0f}).pin_memory();
+    inputs.temperature          = torch::tensor({1.0f}).pin_memory();
+    inputs.all_probs            = torch::zeros({1, 4}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    inputs.generator.resize(1);
+    inputs.capture_original_probs = true;
+
+    auto output = sampler_->forward(inputs);
+    ASSERT_TRUE(output.original_all_probs.defined());
+    EXPECT_EQ(output.token_ids.cpu()[0][1].item<int32_t>(), 3);
+    EXPECT_TRUE(torch::allclose(output.all_probs.cpu(), torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}}), 1e-6, 1e-6));
+    EXPECT_TRUE(torch::allclose(
+        output.original_all_probs.cpu(), torch::tensor({{0.1f, 0.2f, 0.3f, 0.4f}}), 1e-6, 1e-6));
+}
+
 TEST_F(SamplerTest, testMixedDynamicBeamTransitionsUseIndependentOutput) {
     constexpr size_t batch_size     = 4;
     constexpr size_t batch_size_out = 4;
