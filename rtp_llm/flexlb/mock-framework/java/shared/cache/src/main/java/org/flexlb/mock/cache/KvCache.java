@@ -79,6 +79,7 @@ public final class KvCache implements AutoCloseable {
         return new Admission(lease, null, device.generation());
     }
     /** Snapshot and subscription share the cache monitor. Observers must only enqueue, never block. */
+    public synchronized CacheMetadata.SnapshotKeys metadataKeys(CacheMetadata.Medium medium) { return tree.metadataKeys(medium); }
     public synchronized CacheMetadata.Snapshot metadata() { return tree.metadata(); }
     public synchronized AutoCloseable observeMetadata(java.util.function.Consumer<CacheMetadata.Change> observer) {
         if (closed) throw new IllegalStateException("Cache is closed");
