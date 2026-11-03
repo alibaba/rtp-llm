@@ -206,42 +206,6 @@ class ProducerMetadataCPU(unittest.TestCase):
                     self.assertIs(value, source)
                 self.assertIsNone(actual[-1])
 
-    def test_product_default_gate_excludes_unsharded_cp_and_single_request(self):
-        tree = ast.parse((ROOT / "attention_v41.py").read_text())
-        cls = next(
-            n
-            for n in tree.body
-            if isinstance(n, ast.ClassDef) and n.name == "AttentionV41FP8"
-        )
-        fn = next(
-            n
-            for n in cls.body
-            if isinstance(n, ast.FunctionDef) and n.name == "_produce_global"
-        )
-        gate = next(
-            n.test
-            for n in fn.body
-            if isinstance(n, ast.If) and "kv_cache_sharded" in ast.unparse(n.test)
-        )
-        code = compile(ast.Expression(gate), "producer_gate", "eval")
-        scope = dict(
-            prefill=True,
-            main_pool=object(),
-            index_pool=object(),
-            cp=SimpleNamespace(cp_size=4, kv_cache_sharded=True),
-            lengths_host=[1, 1],
-            projected_tiles=None,
-            tile_metadata=False,
-        )
-        self.assertTrue(eval(code, scope))
-        for change in (
-            dict(cp=SimpleNamespace(cp_size=4, kv_cache_sharded=False)),
-            dict(cp=SimpleNamespace(cp_size=1, kv_cache_sharded=True)),
-            dict(lengths_host=[1]),
-        ):
-            self.assertFalse(eval(code, {**scope, **change}))
-        self.assertTrue(eval(code, {**scope, "projected_tiles": object()}))
-
     def test_existing_forward_boundary_discards_counts_and_bounds(self):
         shared = {
             "layers": {0: object(), 8: object()},

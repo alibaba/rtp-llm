@@ -284,9 +284,10 @@ class CPStreamPlanCPU(unittest.TestCase):
                                         offset += count
                                 self.assertEqual(offset, counts[peer])
                                 packet.append(part)
-                            torch.testing.assert_close(
-                                send, packet[rank], rtol=0, atol=0
-                            )
+                            if owner is None or owner == rank:
+                                torch.testing.assert_close(
+                                    send, packet[rank], rtol=0, atol=0
+                                )
                             buffer.copy_(
                                 packet[owner]
                                 if owner is not None

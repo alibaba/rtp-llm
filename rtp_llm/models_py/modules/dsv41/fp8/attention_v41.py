@@ -157,30 +157,22 @@ def _prefill_projected_x_groups(x, cp_ctx, groups, weights):
         assert end > start and end - start <= _PRODUCE_GLOBAL_TILE_ROWS
         packet_rows = max(counts)
         assert 0 < packet_rows <= limit
-        send = torch.zeros((packet_rows, width), device=x.device, dtype=torch.float32)
-        offsets = [0] * cp_ctx.cp_size
+        owners = [rank for rank, count in enumerate(counts) if count]
+        collective_owner = owners[0] if len(owners) == 1 else None
+        send = torch.empty((packet_rows, width), device=x.device, dtype=torch.float32)
         local_views = []
         for owner, source, rows, _ in pieces:
             if owner == cp_ctx.cp_rank:
                 local_views.append(x[source : source + rows])
-            offsets[owner] += rows
-        assert tuple(offsets) == counts
         if local_views:
             local_rows = counts[cp_ctx.cp_rank]
-            packed = torch.empty(
-                (local_rows, x.shape[1]), device=x.device, dtype=x.dtype
-            )
-            targets = []
-            cursor = 0
-            for view in local_views:
-                targets.append(packed[cursor : cursor + view.shape[0]])
-                cursor += view.shape[0]
-            assert cursor == local_rows
-            torch._foreach_copy_(targets, local_views)
+            packed = torch.cat(local_views)
+            assert packed.shape[0] == local_rows
             rtp_llm_ops.cublas_gemm_bf16_bf16_fp32_packed(packed, weights, send)
-            del packed, targets, local_views
-        owners = [rank for rank, count in enumerate(counts) if count]
-        collective_owner = owners[0] if len(owners) == 1 else None
+            del packed, local_views
+        # All-gather reads every rank's padding; broadcast reads only its owner.
+        if collective_owner is None:
+            send[counts[cp_ctx.cp_rank] :].zero_()
         exchanged = torch.empty(
             (
                 (1 if collective_owner is not None else cp_ctx.cp_size) * packet_rows,
@@ -202,7 +194,8 @@ def _prefill_projected_x_groups(x, cp_ctx, groups, weights):
         gathered = _wait_prefill_x_gather(pending)
         del pending, send, exchanged
         offsets = [0] * cp_ctx.cp_size
-        source_views, target_views = [], []
+        source_views = []
+        copy_start = filled
         for owner, _, rows, destination in pieces:
             assert destination == emitted + filled
             base = 0 if collective_owner is not None else owner * packet_rows
@@ -219,19 +212,19 @@ def _prefill_projected_x_groups(x, cp_ctx, groups, weights):
                         + count
                     ]
                 )
-                target_views.append(slab[filled : filled + count])
                 copied += count
                 filled += count
                 if filled == _PRODUCE_GLOBAL_TILE_ROWS:
-                    torch._foreach_copy_(target_views, source_views)
-                    source_views, target_views = [], []
+                    torch.cat(source_views, out=slab[copy_start:filled])
+                    source_views = []
                     yield emitted, slab
                     emitted += filled
                     filled = 0
+                    copy_start = 0
             offsets[owner] += rows
         if source_views:
-            torch._foreach_copy_(target_views, source_views)
-        del source_views, target_views, gathered
+            torch.cat(source_views, out=slab[copy_start:filled])
+        del source_views, gathered
         assert end == emitted + filled
     assert emitted + filled == cp_ctx.seq_len_full
     if filled:
@@ -1338,70 +1331,6 @@ class AttentionV41FP8(AttentionFP8):
                 cp.input_lengths_global,
                 key_counts,
             )
-        if (
-            not tile_metadata
-            and prefill
-            and main_pool is not None
-            and index_pool is not None
-            and cp is not None
-            and cp.cp_size > 1
-            and getattr(cp, "kv_cache_sharded", False)
-            and len(lengths_host) >= 2
-        ):
-            from . import _v41_producer_metadata
-
-            regions = (self._global_region(), INDEXER_KV)
-            if ratio == 2:
-                regions += (CSA_STATE,)
-            layouts = []
-            for region in regions:
-                pool = self._source_pool(region)
-                if pool is None or self._block_tables_by_type is None:
-                    break
-                tpb = require_pool_tokens_per_block(self._kv_cache, region=region)
-                layouts.append(
-                    _v41_producer_metadata.SlotLayout(
-                        self._block_tables_by_type[region],
-                        self._source_entries(region, pool),
-                        tpb,
-                        self._kv_cache.get_seq_size_per_block(self._global_region()),
-                        cp.cp_size,
-                        cp.cp_rank,
-                    )
-                )
-            producer_meta = _v41_producer_metadata.prepare_raw(
-                cp,
-                positions,
-                req_ids,
-                starts,
-                lengths,
-                ratio,
-                self._slots,
-                (self._global_region(), INDEXER_KV, CSA_STATE),
-                tile_rows=tile_rows,
-                slot_layouts=tuple(layouts),
-            )
-            if producer_meta is not None:
-                starts, lengths = producer_meta.starts, producer_meta.lengths
-                score_cache = self._shared_attention.setdefault(
-                    "prefill_score_bounds", {}
-                )
-                counts_key = ("producer_key_counts", ratio)
-                cached = score_cache.get(
-                    ("batch_key_counts", ratio), score_cache.get(counts_key)
-                )
-                if not (
-                    isinstance(cached, tuple)
-                    and len(cached) == 3
-                    and cached[0] is cp.prefix_lengths
-                    and cached[1] is cp.input_lengths_global
-                ):
-                    cached = (
-                        cp.prefix_lengths,
-                        cp.input_lengths_global,
-                        producer_meta.key_counts,
-                    )
-                score_cache[counts_key] = cached
         if producer_meta is None and not tile_metadata:
             # Unsupported descriptors preserve the old dtype and callback path.
             starts, lengths = starts.long(), lengths.long()
