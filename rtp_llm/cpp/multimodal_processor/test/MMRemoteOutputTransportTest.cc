@@ -474,8 +474,8 @@ TEST(MMRemoteOutputTransportTest, expiredGrpcBudgetReturnsTimeoutBeforeConnectin
         MultimodalInputsPB request;
         auto               result = client->request("127.0.0.1:1", request, budget);
         ASSERT_FALSE(result.ok());
-        EXPECT_EQ(result.error().code(), ErrorCode::GENERATE_TIMEOUT);
-        EXPECT_EQ(result.error().ToString(), "vit rpc budget exhausted before the call");
+        EXPECT_EQ(result.status().code(), ErrorCode::GENERATE_TIMEOUT);
+        EXPECT_EQ(result.status().ToString(), "vit rpc budget exhausted before the call");
     }
 }
 
