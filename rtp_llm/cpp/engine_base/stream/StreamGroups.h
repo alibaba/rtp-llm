@@ -21,6 +21,8 @@ public:
     };
     using TokenCountsByPriority = std::map<int32_t, TokenCounts>;
 
+    StreamGroups() = default;
+
     StreamGroups(const std::list<GenerateStreamPtr>& streams) {
         for (auto& stream : streams) {
             // A cache snapshot is published only for an established decode

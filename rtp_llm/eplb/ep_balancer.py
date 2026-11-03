@@ -21,6 +21,7 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelWeightInfo,
 )
 from rtp_llm.model_loader.tensor_source import DatabaseTensorSource
+from rtp_llm.ops import EplbMode
 from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.model_weight import W
 
@@ -87,7 +88,24 @@ class ExpertBalancer:
         self.num_groups = self._load_config.moe_n_group
         self.num_nodes = self._load_config.num_nodes
         self.num_gpu = self._load_config.ep_size
-        self.moe_layer_index = self._load_config.moe_layer_index
+        balance_plan_enabled = model_config is None or model_config.eplb_config.eplb_mode in (
+            EplbMode.EPLB,
+            EplbMode.ALL,
+        )
+        if (
+            balance_plan_enabled
+            and self.num_groups % self.num_nodes == 0
+            and self.num_gpu % self.num_nodes != 0
+        ):
+            raise ValueError(
+                f"hierarchical EPLB requires ep_size {self.num_gpu} "
+                f"to be divisible by num_nodes {self.num_nodes}"
+            )
+        self.moe_layer_index = [
+            layer_id
+            for layer_id in self._load_config.moe_layer_index
+            if layer_id in self._load_config.layer_range
+        ]
         self.num_experts = self._load_config.expert_num
 
         self.time_prefix = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")

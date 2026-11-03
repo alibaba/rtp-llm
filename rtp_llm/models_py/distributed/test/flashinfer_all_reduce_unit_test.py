@@ -53,7 +53,15 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
     def test_collective_init_no_longer_forwards_custom_ar_config(self):
         communicator_module = MagicMock()
         group = object()
-        config = SimpleNamespace(tp_size=2, local_rank=0, local_world_size=2)
+        config = SimpleNamespace(
+            tp_size=2,
+            dp_size=1,
+            pp_size=1,
+            world_size=2,
+            world_rank=0,
+            local_rank=0,
+            local_world_size=2,
+        )
 
         with patch.object(
             collective, "_get_flashinfer_allreduce", return_value=communicator_module

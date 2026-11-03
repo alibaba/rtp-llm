@@ -1,0 +1,60 @@
+#pragma once
+
+#include <cstdint>
+#include <memory>
+#include <string>
+
+#include <torch/torch.h>
+
+namespace rtp_llm {
+
+inline const std::string kPPDeviceGroupName = "pp.device";
+inline const std::string kPPCpuGroupName    = "pp.cpu";
+inline const std::string kPPResultGroupName = "pp.result";
+
+class P2PWork;
+
+class PPCommTicket {
+public:
+    explicit PPCommTicket(std::unique_ptr<P2PWork> work);
+
+    ~PPCommTicket();
+
+    /**
+     * Delegates to Work: CPU waits for completion; CUDA orders the current stream after communication.
+     * The work retains its tensor until ticket destruction, independently of wait().
+     */
+    void wait();
+
+    /** Check without blocking whether the ticket can be released; completion errors propagate as exceptions. */
+    bool tryComplete();
+
+private:
+    std::unique_ptr<P2PWork> work_;
+};
+
+class PPTransport {
+public:
+    virtual ~PPTransport() = default;
+
+    virtual std::unique_ptr<PPCommTicket> asyncSend(const torch::Tensor& tensor, const std::string& group_name) = 0;
+    virtual std::unique_ptr<PPCommTicket> asyncReceive(torch::Tensor& tensor, const std::string& group_name)    = 0;
+};
+
+/** Send to the next PP rank and receive from the previous rank using an explicitly selected group. */
+class TorchDistributedPPTransport final: public PPTransport {
+public:
+    TorchDistributedPPTransport(int64_t previous_rank, int64_t next_rank);
+
+    TorchDistributedPPTransport(const TorchDistributedPPTransport&)            = delete;
+    TorchDistributedPPTransport& operator=(const TorchDistributedPPTransport&) = delete;
+
+    std::unique_ptr<PPCommTicket> asyncSend(const torch::Tensor& tensor, const std::string& group_name) override;
+    std::unique_ptr<PPCommTicket> asyncReceive(torch::Tensor& tensor, const std::string& group_name) override;
+
+private:
+    int64_t previous_rank_;
+    int64_t next_rank_;
+};
+
+}  // namespace rtp_llm

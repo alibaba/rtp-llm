@@ -203,8 +203,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_NoReuseCache_DirectlyRunning
     auto result = scheduler->schedule();
 
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 1);
-    EXPECT_EQ(result.value().front(), stream);
+    ASSERT_EQ(result.value().streams.size(), 1);
+    EXPECT_EQ(result.value().streams.front(), stream);
     EXPECT_EQ(scheduler->loading_cache_streams_.size(), 0);
     EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
     EXPECT_EQ(scheduler->runningStreamsSize(), 1);
@@ -220,7 +220,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_WithAllocatorReadiness_Enter
     auto result = scheduler->schedule();
 
     ASSERT_TRUE(result.ok());
-    EXPECT_TRUE(result.value().empty());
+    EXPECT_TRUE(result.value().streams.empty());
     EXPECT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
     EXPECT_EQ(stream->streamCacheResource().allocator_load_context_, context);
     EXPECT_EQ(scheduler->loading_cache_streams_.size(), 1);
@@ -242,8 +242,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorSuccess_Mo
 
     auto second = scheduler->schedule();
     ASSERT_TRUE(second.ok());
-    ASSERT_EQ(second.value().size(), 1);
-    EXPECT_EQ(second.value().front(), stream);
+    ASSERT_EQ(second.value().streams.size(), 1);
+    EXPECT_EQ(second.value().streams.front(), stream);
     EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(stream->streamCacheResource().allocator_load_context_, nullptr);
     EXPECT_EQ(scheduler->loading_cache_streams_.size(), 0);
@@ -266,7 +266,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorFailure_Ev
 
     auto second = scheduler->schedule();
     ASSERT_TRUE(second.ok());
-    EXPECT_TRUE(second.value().empty());
+    EXPECT_TRUE(second.value().streams.empty());
     EXPECT_TRUE(stream->isFinished());
     EXPECT_TRUE(stream->hasError());
     EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
@@ -298,8 +298,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_PrefillAllocatorFai
 
     auto second = scheduler->schedule();
     ASSERT_TRUE(second.ok());
-    ASSERT_EQ(second.value().size(), 1);
-    EXPECT_EQ(second.value().front(), stream);
+    ASSERT_EQ(second.value().streams.size(), 1);
+    EXPECT_EQ(second.value().streams.front(), stream);
     EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
     EXPECT_FALSE(stream->hasError());
     EXPECT_FALSE(stream->streamCacheResource().isResourceReleased());
@@ -329,7 +329,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPendingAllocatorLoads_RespectAdmissionBa
     auto result = scheduler->schedule();
 
     ASSERT_TRUE(result.ok());
-    EXPECT_TRUE(result.value().empty());
+    EXPECT_TRUE(result.value().streams.empty());
     EXPECT_EQ(scheduler->loading_cache_streams_.size(), 2);
     EXPECT_EQ(scheduler->waitingStreamsSize(), 1);
     EXPECT_EQ(scheduler->runningStreamsSize(), 0);
@@ -354,8 +354,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_ReturningFromLoadingCache_Sk
 
     auto second = scheduler->schedule();
     ASSERT_TRUE(second.ok());
-    ASSERT_EQ(second.value().size(), 1);
-    EXPECT_EQ(second.value().front(), stream);
+    ASSERT_EQ(second.value().streams.size(), 1);
+    EXPECT_EQ(second.value().streams.front(), stream);
     EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(initial_malloc_calls_, 1);
 }
@@ -410,14 +410,14 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testRetryableKVShortageDoesNotSpinAndIsPolle
 
     auto first = scheduler->schedule();
     ASSERT_TRUE(first.ok());
-    EXPECT_TRUE(first.value().empty());
+    EXPECT_TRUE(first.value().streams.empty());
     EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
     EXPECT_EQ(initial_malloc_calls_, 1u);
     EXPECT_FALSE(scheduler->waitPredicate());
 
-    std::promise<absl::StatusOr<std::list<GenerateStreamPtr>>> promise;
-    auto                                                       future = promise.get_future();
-    std::thread schedule_thread([&] { promise.set_value(scheduler->schedule()); });
+    std::promise<absl::StatusOr<ScheduleOutput>> promise;
+    auto                                         future = promise.get_future();
+    std::thread                                  schedule_thread([&] { promise.set_value(scheduler->schedule()); });
 
     EXPECT_EQ(future.wait_for(std::chrono::milliseconds(2)), std::future_status::timeout);
     const auto wait_status = future.wait_for(std::chrono::milliseconds(250));
@@ -429,7 +429,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testRetryableKVShortageDoesNotSpinAndIsPolle
     ASSERT_EQ(wait_status, std::future_status::ready);
     auto second = future.get();
     ASSERT_TRUE(second.ok());
-    EXPECT_TRUE(second.value().empty());
+    EXPECT_TRUE(second.value().streams.empty());
     EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
     EXPECT_EQ(initial_malloc_calls_, 2u);
 }
@@ -441,13 +441,13 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvictDoneStreams_HandlesExternalError) {
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
     auto first = scheduler->schedule();
     ASSERT_TRUE(first.ok());
-    ASSERT_EQ(first.value().size(), 1);
+    ASSERT_EQ(first.value().streams.size(), 1);
 
     stream->reportError(ErrorCode::CANCELLED, "cancelled by RPC");
     auto second = scheduler->schedule();
 
     ASSERT_TRUE(second.ok());
-    EXPECT_TRUE(second.value().empty());
+    EXPECT_TRUE(second.value().streams.empty());
     EXPECT_TRUE(stream->isFinished());
     EXPECT_EQ(scheduler->runningStreamsSize(), 0);
 }
@@ -466,8 +466,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testMixedAllocatorReadinessAndDirectStreams)
     auto result = scheduler->schedule();
 
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 1);
-    EXPECT_EQ(result.value().front(), direct_stream);
+    ASSERT_EQ(result.value().streams.size(), 1);
+    EXPECT_EQ(result.value().streams.front(), direct_stream);
     EXPECT_EQ(loading_stream->getStatus(), StreamState::LOADING_CACHE);
     EXPECT_EQ(direct_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(scheduler->loading_cache_streams_.size(), 1);
@@ -489,7 +489,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorPending_St
     auto second = scheduler->schedule();
 
     ASSERT_TRUE(second.ok());
-    EXPECT_TRUE(second.value().empty());
+    EXPECT_TRUE(second.value().streams.empty());
     EXPECT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
     EXPECT_EQ(stream->streamCacheResource().allocator_load_context_, context);
     EXPECT_EQ(scheduler->loading_cache_streams_.size(), 1);
@@ -517,8 +517,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleOrdering_LoadDoneRejoinsWaitingT
 
     auto second = scheduler->schedule();
     ASSERT_TRUE(second.ok());
-    ASSERT_EQ(second.value().size(), 1);
-    EXPECT_EQ(second.value().front(), older_waiter);
+    ASSERT_EQ(second.value().streams.size(), 1);
+    EXPECT_EQ(second.value().streams.front(), older_waiter);
     EXPECT_EQ(older_waiter->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(completed_stream->getStatus(), StreamState::WAITING);
     EXPECT_EQ(completed_stream->streamCacheResource().allocator_load_context_, nullptr);
@@ -544,7 +544,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingGroupDoesNotBlockOrdinaryWaitingS
 
     auto group_result = scheduler->schedule();
     ASSERT_TRUE(group_result.ok());
-    EXPECT_TRUE(group_result.value().empty());
+    EXPECT_TRUE(group_result.value().streams.empty());
     EXPECT_EQ(direct_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(loading_stream->getStatus(), StreamState::LOADING_CACHE);
     ASSERT_EQ(scheduler->loading_cache_group_queue_.size(), 1);
@@ -553,7 +553,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingGroupDoesNotBlockOrdinaryWaitingS
     ASSERT_TRUE(scheduler->enqueue(waiting_stream).ok());
     auto waiting_result = scheduler->schedule();
     ASSERT_TRUE(waiting_result.ok());
-    ASSERT_EQ(waiting_result.value().size(), 1);
+    ASSERT_EQ(waiting_result.value().streams.size(), 1);
     EXPECT_EQ(waiting_stream->getStatus(), StreamState::RUNNING);
     ASSERT_EQ(scheduler->loading_cache_group_queue_.size(), 1);
     EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
@@ -578,8 +578,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testOrdinaryCacheLoadDoesNotStarveWaitingGro
     ASSERT_TRUE(context->completeTransfers(1, true));
     auto result = scheduler->schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 1);
-    EXPECT_EQ(result.value().front(), loading_stream);
+    ASSERT_EQ(result.value().streams.size(), 1);
+    EXPECT_EQ(result.value().streams.front(), loading_stream);
     EXPECT_EQ(scheduler->waiting_group_queue_.size(), 1);
     EXPECT_TRUE(scheduler->loading_cache_group_queue_.empty());
     EXPECT_EQ(group_stream_1->getStatus(), StreamState::WAITING);
@@ -589,7 +589,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testOrdinaryCacheLoadDoesNotStarveWaitingGro
     loading_stream->reportEvent(StreamEvents::GenerateDone);
     auto group_result = scheduler->schedule();
     ASSERT_TRUE(group_result.ok());
-    ASSERT_EQ(group_result.value().size(), 2);
+    ASSERT_EQ(group_result.value().streams.size(), 2);
     EXPECT_EQ(group_stream_1->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(group_stream_2->getStatus(), StreamState::RUNNING);
 }
@@ -608,13 +608,13 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPreparedGroupFinishesLoadingInOneRound) 
     });
     auto first_result = scheduler->schedule();
     ASSERT_TRUE(first_result.ok());
-    EXPECT_TRUE(first_result.value().empty());
+    EXPECT_TRUE(first_result.value().streams.empty());
     EXPECT_EQ(scheduler->loading_cache_group_queue_.size(), 1);
 
     ASSERT_TRUE(scheduler->enqueue(waiting_stream).ok());
     auto second_result = scheduler->schedule();
     ASSERT_TRUE(second_result.ok());
-    EXPECT_EQ(second_result.value().size(), 2);
+    EXPECT_EQ(second_result.value().streams.size(), 2);
     EXPECT_EQ(direct_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(loading_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(waiting_stream->getStatus(), StreamState::WAITING);
@@ -625,7 +625,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPreparedGroupFinishesLoadingInOneRound) 
     loading_stream->reportEvent(StreamEvents::GenerateDone);
     auto third_result = scheduler->schedule();
     ASSERT_TRUE(third_result.ok());
-    ASSERT_EQ(third_result.value().size(), 1);
+    ASSERT_EQ(third_result.value().streams.size(), 1);
     EXPECT_EQ(waiting_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
 }
@@ -648,21 +648,21 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testReadyLoadingGroupDrainsNormalLaneBeforeD
     ASSERT_TRUE(scheduler->enqueue(normal_stream).ok());
     auto normal_result = scheduler->schedule();
     ASSERT_TRUE(normal_result.ok());
-    ASSERT_EQ(normal_result.value().size(), 1);
+    ASSERT_EQ(normal_result.value().streams.size(), 1);
     EXPECT_EQ(normal_stream->getStatus(), StreamState::RUNNING);
 
     ASSERT_TRUE(context->completeTransfers(1, true));
     ASSERT_TRUE(scheduler->enqueue(normal_tail).ok());
     auto drain_result = scheduler->schedule();
     ASSERT_TRUE(drain_result.ok());
-    ASSERT_EQ(drain_result.value().size(), 1);
+    ASSERT_EQ(drain_result.value().streams.size(), 1);
     EXPECT_EQ(normal_tail->getStatus(), StreamState::WAITING);
     ASSERT_EQ(scheduler->loading_cache_group_queue_.size(), 1);
 
     normal_stream->reportEvent(StreamEvents::GenerateDone);
     auto group_result = scheduler->schedule();
     ASSERT_TRUE(group_result.ok());
-    ASSERT_EQ(group_result.value().size(), 2);
+    ASSERT_EQ(group_result.value().streams.size(), 2);
     EXPECT_EQ(direct_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(loading_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(normal_tail->getStatus(), StreamState::WAITING);
@@ -685,12 +685,12 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testOrdinaryCacheCompletionDoesNotMixIntoRun
     ASSERT_EQ(scheduler->enqueueGroup({group_stream_1, group_stream_2}).first, std::vector<bool>({true, true}));
     auto group_result = scheduler->schedule();
     ASSERT_TRUE(group_result.ok());
-    ASSERT_EQ(group_result.value().size(), 2);
+    ASSERT_EQ(group_result.value().streams.size(), 2);
 
     ASSERT_TRUE(context->completeTransfers(1, true));
     auto isolated_result = scheduler->schedule();
     ASSERT_TRUE(isolated_result.ok());
-    ASSERT_EQ(isolated_result.value().size(), 2);
+    ASSERT_EQ(isolated_result.value().streams.size(), 2);
     EXPECT_EQ(ordinary_loading->getStatus(), StreamState::LOADING_CACHE);
     EXPECT_EQ(scheduler->loading_cache_streams_.size(), 1);
 
@@ -698,7 +698,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testOrdinaryCacheCompletionDoesNotMixIntoRun
     group_stream_2->reportEvent(StreamEvents::GenerateDone);
     auto ordinary_result = scheduler->schedule();
     ASSERT_TRUE(ordinary_result.ok());
-    ASSERT_EQ(ordinary_result.value().size(), 1);
+    ASSERT_EQ(ordinary_result.value().streams.size(), 1);
     EXPECT_EQ(ordinary_loading->getStatus(), StreamState::RUNNING);
 }
 
@@ -721,14 +721,14 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testOrdinaryLoadingReleasesInitedLimitBefore
     ASSERT_TRUE(context->completeTransfers(1, true));
     auto ordinary_result = scheduler->schedule();
     ASSERT_TRUE(ordinary_result.ok());
-    ASSERT_EQ(ordinary_result.value().size(), 1);
+    ASSERT_EQ(ordinary_result.value().streams.size(), 1);
     EXPECT_EQ(ordinary_loading->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(group_stream->getStatus(), StreamState::WAITING);
 
     ordinary_loading->reportEvent(StreamEvents::GenerateDone);
     auto group_result = scheduler->schedule();
     ASSERT_TRUE(group_result.ok());
-    ASSERT_EQ(group_result.value().size(), 1);
+    ASSERT_EQ(group_result.value().streams.size(), 1);
     EXPECT_EQ(group_stream->getStatus(), StreamState::RUNNING);
 }
 
@@ -749,14 +749,14 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testGroupedSurvivorContinuesLoadingAfterPeer
 
     auto first_result = scheduler->schedule();
     ASSERT_TRUE(first_result.ok());
-    EXPECT_TRUE(first_result.value().empty());
+    EXPECT_TRUE(first_result.value().streams.empty());
     ASSERT_EQ(direct_stream->getStatus(), StreamState::RUNNING);
     ASSERT_EQ(loading_stream->getStatus(), StreamState::LOADING_CACHE);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(3));
     auto second_result = scheduler->schedule();
     ASSERT_TRUE(second_result.ok());
-    EXPECT_TRUE(second_result.value().empty());
+    EXPECT_TRUE(second_result.value().streams.empty());
     ASSERT_EQ(direct_stream->getStatus(), StreamState::FINISHED);
     ASSERT_EQ(direct_stream->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
     ASSERT_EQ(loading_stream->getStatus(), StreamState::LOADING_CACHE);
@@ -768,7 +768,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testGroupedSurvivorContinuesLoadingAfterPeer
     ASSERT_TRUE(context->completeTransfers(1, true));
     auto final_result = scheduler->schedule();
     ASSERT_TRUE(final_result.ok());
-    ASSERT_EQ(final_result.value().size(), 1);
+    ASSERT_EQ(final_result.value().streams.size(), 1);
     EXPECT_EQ(loading_stream->getStatus(), StreamState::RUNNING);
     EXPECT_TRUE(scheduler->loading_cache_group_queue_.empty());
 }
@@ -784,7 +784,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingGroupCompletionIsPolledWithoutExt
     });
     auto first = scheduler->schedule();
     ASSERT_TRUE(first.ok());
-    EXPECT_TRUE(first.value().empty());
+    EXPECT_TRUE(first.value().streams.empty());
     ASSERT_EQ(scheduler->loading_cache_group_queue_.size(), 1);
     EXPECT_TRUE(scheduler->loading_cache_streams_.empty());
     EXPECT_EQ(scheduler->runningStreamsSize(), 0);
@@ -792,9 +792,9 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingGroupCompletionIsPolledWithoutExt
     EXPECT_FALSE(scheduler->waitPredicate());
 
     ASSERT_TRUE(context->completeTransfers(1, true));
-    std::promise<absl::StatusOr<std::list<GenerateStreamPtr>>> promise;
-    auto                                                       future = promise.get_future();
-    std::thread schedule_thread([&] { promise.set_value(scheduler->schedule()); });
+    std::promise<absl::StatusOr<ScheduleOutput>> promise;
+    auto                                         future = promise.get_future();
+    std::thread                                  schedule_thread([&] { promise.set_value(scheduler->schedule()); });
 
     const auto wait_status = future.wait_for(std::chrono::milliseconds(250));
     if (wait_status != std::future_status::ready) {
@@ -804,8 +804,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingGroupCompletionIsPolledWithoutExt
     ASSERT_EQ(wait_status, std::future_status::ready);
     auto result = future.get();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 1);
-    EXPECT_EQ(result.value().front(), stream);
+    ASSERT_EQ(result.value().streams.size(), 1);
+    EXPECT_EQ(result.value().streams.front(), stream);
     EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
 }
 
@@ -818,7 +818,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionAllocatorLoadingLifecyclePromote
 
     auto loading = scheduler->schedule();
     ASSERT_TRUE(loading.ok());
-    ASSERT_TRUE(loading.value().empty());
+    ASSERT_TRUE(loading.value().streams.empty());
     ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
     ASSERT_EQ(stream->streamCacheResource().allocator_load_context_, context);
     ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1);
@@ -829,8 +829,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionAllocatorLoadingLifecyclePromote
     EXPECT_TRUE(context->completeTransfers(1, true));
     auto prefill = scheduler->schedule();
     ASSERT_TRUE(prefill.ok());
-    ASSERT_EQ(prefill.value().size(), 1);
-    ASSERT_EQ(prefill.value().front(), stream);
+    ASSERT_EQ(prefill.value().streams.size(), 1);
+    ASSERT_EQ(prefill.value().streams.front(), stream);
     ASSERT_EQ(stream->getStatus(), StreamState::RUNNING);
     ASSERT_EQ(stream->streamCacheResource().allocator_load_context_, nullptr);
     ASSERT_EQ(scheduler->loading_cache_streams_.size(), 0);
@@ -842,8 +842,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionAllocatorLoadingLifecyclePromote
     stream->setSeqLength(stream->seqLength() + 1);
     auto decode = scheduler->schedule();
     ASSERT_TRUE(decode.ok());
-    ASSERT_EQ(decode.value().size(), 1);
-    ASSERT_EQ(decode.value().front(), stream);
+    ASSERT_EQ(decode.value().streams.size(), 1);
+    ASSERT_EQ(decode.value().streams.front(), stream);
     ASSERT_EQ(scheduler->runningStreamsSize(), 1);
     ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 0);
     ASSERT_EQ(initial_malloc_calls_, 1);
@@ -866,7 +866,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionPendingAllocatorLoadsCountToward
 
     auto first = scheduler->schedule();
     ASSERT_TRUE(first.ok());
-    ASSERT_TRUE(first.value().empty());
+    ASSERT_TRUE(first.value().streams.empty());
     ASSERT_EQ(scheduler->loading_cache_streams_.size(), 2);
     ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
     ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 0);
@@ -877,7 +877,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionPendingAllocatorLoadsCountToward
 
     auto second = scheduler->schedule();
     ASSERT_TRUE(second.ok());
-    ASSERT_TRUE(second.value().empty());
+    ASSERT_TRUE(second.value().streams.empty());
     ASSERT_EQ(scheduler->loading_cache_streams_.size(), 2);
     ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
     ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 0);
