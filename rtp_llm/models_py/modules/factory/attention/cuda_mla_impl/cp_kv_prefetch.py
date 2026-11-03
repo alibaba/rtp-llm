@@ -11,6 +11,7 @@ from rtp_llm.config.prefill_optimization import (
 from rtp_llm.models_py import prefill_optimization as _prefill_optimization
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.distributed.pynccl_cp import (
+    all_gather,
     all_gather_kv_overlap,
     registered_kv_overlap_buffers,
 )

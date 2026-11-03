@@ -122,6 +122,52 @@ class PrefillRollbackTest(unittest.TestCase):
         self.assertEqual(out.shape, (12, 8))
         gather.assert_called_once_with(out, data, group="tp")
 
+    def test_compatibility_prefetch_new_rows_uses_ordinary_collective(self):
+        # Exercise the retained compatibility method directly, including a
+        # rank with no owned new rows. Normal rollback disables its activation.
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+            cp_kv_prefetch as kv,
+        )
+
+        for count in (0, 2):
+            with self.subTest(count=count):
+                gathered = torch.arange(4 * 576).reshape(4, 576).to(torch.bfloat16)
+                restore = torch.tensor([3, 0])
+                pipeline = SimpleNamespace(
+                    owners=[None, 1],
+                    new_slots={"hbm": torch.zeros((1, count), dtype=torch.int32)},
+                    plan={"new_max": 2, "new_restore": restore},
+                    buffers=[torch.empty(2, 576), torch.empty(2, 576)],
+                    device=torch.device("cpu"),
+                    cache=SimpleNamespace(host_layers=[]),
+                    new_lengths=torch.tensor([count], dtype=torch.int32),
+                    new_starts=torch.tensor([0], dtype=torch.int32),
+                    ready=[Mock(), Mock()],
+                    prefetch=Mock(),
+                )
+                cache = SimpleNamespace(
+                    kv_cache_base=torch.zeros(1, 576, dtype=torch.uint8)
+                )
+                with patch.object(
+                    kv, "all_gather", return_value=gathered
+                ) as gather, patch.object(
+                    kv.rtp_llm_ops, "cp_gather_and_upconvert_fp8_kv_cache_v2"
+                ) as upconvert:
+                    result = kv.CrossLayerKvPrefetch.prepare(pipeline, 1, cache)
+                gather.assert_called_once()
+                self.assertEqual(
+                    gather.call_args.kwargs,
+                    {"group": kv.Group.TP, "role": "mla_new_rows"},
+                )
+                self.assertEqual(tuple(gather.call_args.args[0].shape), (2, 576))
+                self.assertEqual(upconvert.call_count, int(count > 0))
+                torch.testing.assert_close(
+                    pipeline.pending_new, gathered[restore], rtol=0, atol=0
+                )
+                pipeline.prefetch.assert_called_once_with(2)
+                self.assertIs(result[0], pipeline.buffers[1])
+                self.assertIs(result[1], pipeline.ready[1])
+
     def test_cross_layer_disabled(self):
         fake = SimpleNamespace(overlap_kv=False)
         self.assertIsNone(cp.SparseMlaCpImpl.begin_cross_layer_prefetch(fake, object()))

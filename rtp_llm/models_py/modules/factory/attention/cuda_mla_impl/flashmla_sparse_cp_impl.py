@@ -2669,6 +2669,8 @@ class SparseMlaCpImpl(SparseMlaImpl):
         leaving this context. Cross-layer mode owns independent future slots
         and drains at the MoE window boundary and forward cleanup instead.
         """
+        # New-KV prefetch consumes its ready event before either fallback.
+        compute = torch.cuda.current_stream(q.device)
         stream = self._kv_overlap_stream
         assert stream is not None
         pipeline = getattr(self, "_cross_layer_prefetch", None)
@@ -2711,7 +2713,6 @@ class SparseMlaCpImpl(SparseMlaImpl):
             # would serialize the next layer's prefetch before O projection.
             yield pipeline.prepare(layer_id, kv_cache)
             return
-        compute = torch.cuda.current_stream(q.device)
         fused_kv = self.fmha_impl._allocate_fused_kv()
         # Pack before releasing independent compute. Otherwise Q BMM can use
         # every SM while packing is still queued, delaying NCCL until Q ends.
