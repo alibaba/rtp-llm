@@ -9,8 +9,8 @@ Wheel naming follows vllm convention:
   rtp_llm-{VERSION}+{PLATFORM}-cp{PY}-cp{PY}-{PLATFORM_TAG}.whl
 
 Examples:
-  rtp_llm-0.2.0+cu126-cp310-cp310-manylinux_2_28_x86_64.whl
-  rtp_llm-0.2.0+rocm62-cp310-cp310-linux_x86_64.whl
+  rtp_llm-0.2.0+cu126-cp310-cp310-linux_x86_64.whl
+  rtp_llm-0.2.0+rocm72-cp310-cp310-linux_x86_64.whl
 """
 
 import datetime

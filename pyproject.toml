@@ -65,7 +65,12 @@ dev = [
 ]
 docs = [
     "sphinx>=5.0",
-    "sphinx-rtd-theme",
+    "sphinx-book-theme",
+    "sphinx-tabs",
+    "myst-parser",
+    "sphinx-copybutton",
+    "sphinxcontrib-mermaid",
+    "nbsphinx",
 ]
 
 [tool.setuptools]

@@ -19,8 +19,9 @@ from typing import List
 def build_perf_params(pytest_module, perf_tests: dict):
     """Build pytest.param list from a PERF_TESTS dict.
 
-    Caller passes the dict (typically from rtp_llm.test.perf_test.perf_defs which
-    lives in internal_source). Keeps framework decoupled from data location.
+    Caller passes the suite's PERF_TESTS dict, for example from
+    ``internal_source/rtp_llm/test/perf_test/suites/test_perf_qwen35.py``.
+    Keeps framework decoupled from data location.
     """
     params = []
     for test_name, config in perf_tests.items():
