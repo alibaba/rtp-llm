@@ -268,7 +268,7 @@ cc_test(
     name = "local_rpc_server_test_native_a10",
     srcs = ["LocalRpcServerTest.cc"],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + ["@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter"],
     env = {},
     exec_properties = {'gpu':'A10'},
     tags = ["A10"],
