@@ -525,10 +525,12 @@ class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
         request_min_pixels = int(mm_input.mm_preprocess_config.min_pixels)
         request_max_pixels = int(mm_input.mm_preprocess_config.max_pixels)
         if mm_input.mm_type != MMUrlType.VIDEO:
+            # Request bounds count one image. The resize budget includes the
+            # temporal patch copies used to encode a still image.
             if request_min_pixels > 0:
-                min_pixels = request_min_pixels
+                min_pixels = request_min_pixels * temporal_patch_size
             if request_max_pixels > 0:
-                max_pixels = min(max_pixels, request_max_pixels)
+                max_pixels = min(max_pixels, request_max_pixels * temporal_patch_size)
             if min_pixels > max_pixels:
                 raise ValueError(
                     "GLM-5.3-Flash min_pixels must not exceed the effective max_pixels"
