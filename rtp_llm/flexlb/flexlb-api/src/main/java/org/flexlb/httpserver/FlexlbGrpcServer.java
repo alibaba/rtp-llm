@@ -120,6 +120,7 @@ public class FlexlbGrpcServer {
                         new GrpcTraceInterceptor(), grpcServerTimingInterceptor, grpcQosHeaderInterceptor))
                 .maxInboundMessageSize(org.flexlb.constant.GrpcConstants.MAX_MESSAGE_SIZE)
                 .flowControlWindow(4 * 1024 * 1024)
+                .permitKeepAliveTime(30, TimeUnit.SECONDS)
                 .build()
                 .start();
 

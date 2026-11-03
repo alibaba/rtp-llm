@@ -70,10 +70,18 @@ bool NormalGenerateStream::consumerReadyWithoutLock() const {
     return hasErrorWithoutLock() || !generate_outputs_.empty() || consumerFinishedWithoutLock();
 }
 
-GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info) {
-    size_t          output_len = seqLength() - last_output_pos_;
+GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info, size_t output_end) {
+    size_t          output_len = output_end - last_output_pos_;
     GenerateOutputs generate_results;
     generate_results.request_id = request_id_;
+
+    auto output_all_probs = all_probs_;
+    if (output_all_probs.defined() && output_all_probs.dim() == 3 && update_info.speculative_token_begin >= 0) {
+        const int64_t row = static_cast<int64_t>(output_end) - update_info.speculative_token_begin - 1;
+        RTP_LLM_CHECK_WITH_INFO(row >= 0 && row < output_all_probs.size(1),
+                               "MTP probabilities do not cover output position");
+        output_all_probs = output_all_probs.select(1, row);
+    }
 
     // CompleteTokenIds has already applied this step, so currentBatchSize is the output row count.
     for (int i = 0; i < currentBatchSize(); i++) {
@@ -145,7 +153,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.prompt_logits = update_info.prompt_logits;
         }
 
-        generate_output.finished = isSubGenerateDoneWithoutLock(i);
+        generate_output.finished = output_end == static_cast<size_t>(seqLength()) && isSubGenerateDoneWithoutLock(i);
         if (generate_input_->generate_config->aux_info) {
             generate_output.aux_info.iter_count   = iter_count_;
             generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
@@ -154,7 +162,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.aux_info.input_len                = generate_input_->promptLength();
             generate_output.aux_info.prefix_len               = generate_input_->prefix_length;
             // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
-            generate_output.aux_info.output_len       = seqLength() - generate_input_->inputLength();
+            generate_output.aux_info.output_len       = output_end - generate_input_->inputLength();
             generate_output.aux_info.step_output_len  = output_len;
             generate_output.aux_info.reuse_len        = initialReuseLength();
             generate_output.aux_info.pd_sep           = queryPdSep();
@@ -184,7 +192,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             if (!update_info.all_probs.defined()) {
                 throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
             }
-            generate_output.aux_info.all_probs = all_probs_.narrow(0, i, 1).clone();
+            generate_output.aux_info.all_probs = output_all_probs.narrow(0, i, 1).clone();
         }
         // hidden_states post process
         if (generate_output.finished && generate_input_->generate_config->return_hidden_states
@@ -297,13 +305,15 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     RTP_LLM_LOG_DEBUG("stream [%s] enqueue generate output", streamLogTag().c_str());
-    enqueueGenerateOutput(prepareGenerateOutput(update_info));
-
-    if (hasErrorWithoutLock()) {
-        return;
-    }
-
-    last_output_pos_ = seqLength();
+    const bool split_output = isStreaming() && update_info.speculative_token_begin >= 0;
+    do {
+        const size_t output_end = split_output ? last_output_pos_ + 1 : seqLength();
+        enqueueGenerateOutput(prepareGenerateOutput(update_info, output_end));
+        if (hasErrorWithoutLock()) {
+            return;
+        }
+        last_output_pos_ = output_end;
+    } while (last_output_pos_ < static_cast<size_t>(seqLength()));
 }
 
 GenerationPrefillCudaGraphStatus NormalGenerateStream::generationPrefillCudaGraphStatus() const {

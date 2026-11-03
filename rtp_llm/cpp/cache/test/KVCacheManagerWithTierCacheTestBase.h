@@ -44,18 +44,18 @@ using block_tree_cache_test::ScriptedPerRankBlockTransferEngine;
 inline constexpr int                  kDsv4GroupCount = 7;
 inline constexpr std::chrono::seconds kTransferWaitTimeout{30};
 inline const std::vector<std::string> kDsv4Tags = {
-    "swa_kv", "csa_kv", "indexer_kv", "indexer_state", "csa_state", "hca_kv", "hca_state"};
+    "csa_kv", "csa_state", "hca_kv", "hca_state", "indexer_kv", "indexer_state", "swa_kv"};
 inline const std::vector<CacheGroupType> kDsv4Types = {
-    CacheGroupType::SWA,
-    CacheGroupType::FULL,
     CacheGroupType::FULL,
     CacheGroupType::SWA,
+    CacheGroupType::FULL,
     CacheGroupType::SWA,
     CacheGroupType::FULL,
+    CacheGroupType::SWA,
     CacheGroupType::SWA,
 };
-inline const std::vector<std::string> kDsv4SwaGroupTags  = {"swa_kv", "indexer_state", "csa_state"};
-inline const std::vector<std::string> kDsv4FullGroupTags = {"csa_kv", "indexer_kv", "hca_kv"};
+inline const std::vector<std::string> kDsv4SwaGroupTags  = {"csa_state", "indexer_state", "swa_kv"};
+inline const std::vector<std::string> kDsv4FullGroupTags = {"csa_kv", "hca_kv", "indexer_kv"};
 
 enum class TierLayout {
     HOST_ONLY,

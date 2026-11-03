@@ -32,7 +32,6 @@ class DeepSeekV41DSparkContractTest(contract.DeepSeekV41ContractTest):
         self.assertGreater(rounds, 0, "No DSpark draft/verify round")
         self.assertTrue(accepted, "Missing per-position acceptance counters")
         self.assertTrue(all(0 <= count <= rounds for count in accepted))
-        self.assertGreater(sum(accepted), 0, "No accepted speculative tokens")
         self.observed[-1].update(
             speculative_draft_rounds=rounds,
             speculative_accepted_tokens_per_pos=accepted,
@@ -41,6 +40,15 @@ class DeepSeekV41DSparkContractTest(contract.DeepSeekV41ContractTest):
 
     def test_graph_engram_and_prefix_reuse(self):
         super().test_graph_engram_and_prefix_reuse()
+        # A short completion may reject every draft and still be correct.
+        # The workload as a whole must demonstrate actual draft acceptance.
+        self.assertTrue(
+            any(
+                sum(item["speculative_accepted_tokens_per_pos"]) > 0
+                for item in self.observed
+            ),
+            "No request accepted speculative tokens",
+        )
         self.assertTrue(
             any(item["speculative_draft_rounds"] > 1 for item in self.observed),
             "No request exercised repeated DSpark draft/verify rounds",

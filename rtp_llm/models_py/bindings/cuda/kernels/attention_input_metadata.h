@@ -10,6 +10,8 @@ void invokeBuildAttentionInputMetadata(const at::Tensor& input_lengths,
                                        at::Tensor&       cu_seqlens,
                                        at::Tensor&       cu_kv_seqlens,
                                        at::Tensor&       padding_offset,
-                                       cudaStream_t      stream);
+                                       cudaStream_t      stream,
+                                       const at::Tensor& valid_token_mask = {},
+                                       int64_t           valid_tokens     = 0);
 
 }  // namespace rtp_llm
