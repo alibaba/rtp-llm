@@ -88,7 +88,11 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
 }
 
 void EmbeddingExecutor::init_position_ids(int max_seq_len) {
-    max_position_ids_tensor_ = torch::arange(max_seq_len, torch::kInt32);
+    const int position_id_len_factor = model_config_.attn_config.rope_config.index_factor;
+    RTP_LLM_CHECK_WITH_INFO(position_id_len_factor > 0, "position id length factor must be positive");
+    // Text tokens use the same position on every mRoPE axis, in token-major order.
+    max_position_ids_tensor_ =
+        torch::arange(max_seq_len, torch::kInt32).unsqueeze(1).repeat({1, position_id_len_factor});
 }
 
 namespace {
@@ -115,10 +119,11 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     calcTokenNum(streams, token_num, batch_size);
     GptModelInputs model_input;
     auto           i32_options = torch::TensorOptions(torch::kInt32).pinned_memory(true);
+    const int      position_id_len_factor = model_config_.attn_config.rope_config.index_factor;
 
     model_input.combo_tokens          = torch::empty({token_num}, i32_options);
     model_input.combo_tokens_type_ids = torch::empty({token_num}, i32_options);
-    model_input.combo_position_ids    = torch::empty({token_num}, i32_options);
+    model_input.combo_position_ids    = torch::empty({token_num * position_id_len_factor}, i32_options);
     model_input.input_lengths         = torch::empty({batch_size}, i32_options);
     model_input.sequence_lengths      = torch::empty({0}, i32_options);
     model_input.prefix_lengths        = torch::zeros({batch_size}, i32_options);
@@ -200,9 +205,9 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
                                     int(seqLen),
                                     int(position_bias),
                                     (int)max_position_ids_tensor_.size(0));
-            memcpy(merged_positon_ids + token_idx + length_idx,
-                   max_position_ids_tensor_.data_ptr<int32_t>() + position_bias,
-                   seqLen * sizeof(int32_t));
+            memcpy(merged_positon_ids + (token_idx + length_idx) * position_id_len_factor,
+                   max_position_ids_tensor_.data_ptr<int32_t>() + position_bias * position_id_len_factor,
+                   seqLen * position_id_len_factor * sizeof(int32_t));
             length_idx += seqLen;
         }
 
