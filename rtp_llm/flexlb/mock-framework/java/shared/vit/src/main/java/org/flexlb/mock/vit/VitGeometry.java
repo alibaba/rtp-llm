@@ -10,7 +10,8 @@ import org.flexlb.mock.multimodal.MediaInput;
 
 /** V-owned image geometry, logical output size and simulated feature hashes. */
 final class VitGeometry {
-    record Image(String key, int width, int height, int rows) {
+    record Image(String key, int width, int height, int rows, String featureIdentity) {
+        Image(String key, int width, int height, int rows) { this(key, width, height, rows, key); }
         public long bytes(int hidden, int dtypeBytes) { return Math.multiplyExact(Math.multiplyExact((long) rows, hidden), dtypeBytes); }
     }
     static ByteString hashes(String key, int rows) {
@@ -26,7 +27,7 @@ final class VitGeometry {
         return ByteString.copyFrom(output.array());
     }
 
-    /** The DSV4.1 grid planner, without pixel decode or tensor materialization. */
+    /** The DSV4.1 grid planner, without tensor materialization. */
     static int rows(int width, int height, int patch, int downsample, int minPixels, int maxTokens) {
         if ((long) width * height < minPixels) {
             double scale = Math.sqrt((double) minPixels / ((long) width * height));

@@ -8,9 +8,10 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import static org.flexlb.mock.cache.CacheMetadata.Medium.*;
 
-/** KVCM Meta reporting only. Cache locks enqueue immutable changes; all HTTP runs here. */
+/** KVCM Meta reporting only. Cache locks enqueue immutable changes; data reports are serial, with independent heartbeats. */
 public final class KvcmReporter implements AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final int QUEUE_CAPACITY = 100000, BATCH_SIZE = 1000;
@@ -45,12 +46,21 @@ public final class KvcmReporter implements AutoCloseable {
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofMillis(500)).build();
     private final ScheduledExecutorService worker = Executors.newSingleThreadScheduledExecutor(
         Thread.ofVirtual().name("kvcm-metadata").factory());
+    // Only the data worker owns registration, pending snapshots, ACKs and backoff.
+    private final ScheduledExecutorService heartbeats = Executors.newSingleThreadScheduledExecutor(
+        Thread.ofVirtual().name("kvcm-heartbeat").factory());
+    private record PendingSnapshot(long version, String body) {}
+    private PendingSnapshot pendingSnapshot;
+    private long nextSnapshot;
+    private int failures;
+    private final AtomicBoolean registrationRequired = new AtomicBoolean();
+    private final AtomicLong retryAt = new AtomicLong();
     private final ArrayBlockingQueue<CacheMetadata.Change> changes = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private final AtomicBoolean snapshotRequired = new AtomicBoolean(true);
     private final AutoCloseable observation;
-    private long snapshotVersion = -1, lastSnapshot, lastHeartbeat, retryAt;
+    private long snapshotVersion = -1, lastSnapshot;
     private volatile boolean registered, closed, remoteEnabled;
-    private volatile String failure = "";
+    private volatile String failure = "", heartbeatFailure = "";
 
     public KvcmReporter(Configuration config, Identity identity, KvCache cache) {
         this.config = Objects.requireNonNull(config); this.identity = Objects.requireNonNull(identity);
@@ -60,6 +70,7 @@ public final class KvcmReporter implements AutoCloseable {
                 if (!changes.offer(change)) snapshotRequired.set(true);
         }) : () -> {};
         worker.scheduleWithFixedDelay(this::tick, 0, 20, TimeUnit.MILLISECONDS);
+        heartbeats.scheduleWithFixedDelay(this::heartbeat, 0, 1, TimeUnit.SECONDS);
     }
     private ObjectNode registration() {
         var root = JSON.createObjectNode().put("instance_group", identity.group()).put("instance_id", identity.instance())
@@ -86,12 +97,32 @@ public final class KvcmReporter implements AutoCloseable {
         block.putArray("specs").addObject().put("name", identity.spec())
             .put("uri", "event_report://" + identity.address() + "/hbm");
     }
-    private ObjectNode snapshot(CacheMetadata.Snapshot snapshot) {
-        var root = report(); var blocks = ((ArrayNode) root.path("events")).addObject().put("event_type", "EVENT_BLOCK_SNAPSHOT")
-            .putObject("block_snapshot").put("key_count", snapshot.keys(HBM).size()).putArray("blocks");
-        for (long key : new TreeSet<>(snapshot.keys(HBM)))
-            spec(blocks.addObject().put("block_key", Long.toString(key)).put("medium", "hbm"));
-        return root;
+    private PendingSnapshot snapshot() throws java.io.IOException {
+        var snapshot = cache.metadataKeys(HBM);
+        var text = new java.io.StringWriter();
+        try (var out = JSON.getFactory().createGenerator(text)) {
+            out.writeStartObject();
+            out.writeStringField("trace_id", UUID.randomUUID().toString());
+            out.writeStringField("instance_id", identity.instance());
+            out.writeStringField("host_ip_port", identity.address());
+            out.writeStringField("storage_type", "ST_EVENT_REPORT_L1P5");
+            out.writeArrayFieldStart("events"); out.writeStartObject();
+            out.writeStringField("event_type", "EVENT_BLOCK_SNAPSHOT");
+            out.writeObjectFieldStart("block_snapshot");
+            out.writeNumberField("key_count", snapshot.keys().length);
+            out.writeArrayFieldStart("blocks");
+            for (long key : snapshot.keys()) {
+                out.writeStartObject(); out.writeStringField("block_key", Long.toString(key));
+                out.writeStringField("medium", "hbm");
+                out.writeArrayFieldStart("specs"); out.writeStartObject();
+                out.writeStringField("name", identity.spec());
+                out.writeStringField("uri", "event_report://" + identity.address() + "/hbm");
+                out.writeEndObject(); out.writeEndArray(); out.writeEndObject();
+            }
+            out.writeEndArray(); out.writeEndObject(); out.writeEndObject();
+            out.writeEndArray(); out.writeEndObject();
+        }
+        return new PendingSnapshot(snapshot.version(), text.toString());
     }
     private ObjectNode mutations() {
         // Native Meta groups ADD before DELETE. Send only the final transition per key in a batch.
@@ -115,10 +146,13 @@ public final class KvcmReporter implements AutoCloseable {
     }
     private JsonNode post(URI target, String path, ObjectNode request) throws Exception {
         request.put("trace_id", UUID.randomUUID().toString());
+        return post(target, path, JSON.writeValueAsString(request), 1500);
+    }
+    private JsonNode post(URI target, String path, String request, int timeoutMillis) throws Exception {
         try {
             var response = http.send(HttpRequest.newBuilder(URI.create(target.toString().replaceAll("/$", "") + path))
-                .timeout(Duration.ofMillis(1500)).header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(request))).build(), HttpResponse.BodyHandlers.ofString());
+                .timeout(Duration.ofMillis(timeoutMillis)).header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(request)).build(), HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200 || response.body().length() > 1048576)
                 throw new IllegalStateException("Invalid KVCM HTTP response: " + response.statusCode());
             var body = JSON.readTree(response.body());
@@ -141,10 +175,20 @@ public final class KvcmReporter implements AutoCloseable {
     private void checkCode(JsonNode value) {
         String code = code(value);
         if (Set.of("8", "9", "10", "INSTANCE_NOT_EXIST", "SERVER_NOT_LEADER", "NODE_NOT_REGISTERED").contains(code))
-            registered = false;
+            registrationRequired.set(true);
+        if (Set.of("14", "SNAPSHOT_REQUIRED").contains(code)) snapshotRequired.set(true);
         if (!Set.of("1", "OK").contains(code)) throw new IllegalStateException("KVCM rejected metadata: " + code);
     }
     private void accepted(JsonNode response, boolean heartbeat) {
+        var retry = response.has("retry_after_ms") ? response.path("retry_after_ms") : response.path("retryAfterMs");
+        if (!retry.isMissingNode()) {
+            long millis;
+            try { millis = Long.parseLong(retry.asText()); }
+            catch (NumberFormatException error) { throw new IllegalStateException("Invalid KVCM retry delay", error); }
+            if (millis < 0) throw new IllegalStateException("Invalid KVCM retry delay");
+            long next = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.min(300000, millis));
+            retryAt.accumulateAndGet(next, Math::max);
+        }
         checkCode(response.path("header").path("status"));
         var items = response.has("item_results") ? response.path("item_results") : response.path("itemResults");
         if (!items.isMissingNode() && !items.isArray()) throw new IllegalStateException("Invalid KVCM item results");
@@ -160,51 +204,78 @@ public final class KvcmReporter implements AutoCloseable {
             } catch (java.io.IOException ignored) { /* Advisory control cannot invalidate an event ACK. */ }
         }
     }
+    private void heartbeat() {
+        if (closed || !registered || registrationRequired.get()) return;
+        try {
+            accepted(post("/api/reportEvent", control("HEARTBEAT")), true);
+            heartbeatFailure = "";
+        } catch (Exception error) {
+            heartbeatFailure = error.toString();
+            if (error instanceof InterruptedException) Thread.currentThread().interrupt();
+        }
+    }
     private void tick() {
-        if (closed || System.nanoTime() < retryAt) return;
+        if (closed) return;
+        if (registrationRequired.getAndSet(false)) {
+            registered = false; pendingSnapshot = null; snapshotRequired.set(true);
+        }
+        if (System.nanoTime() < retryAt.get()) return;
         try {
             if (!registered) {
                 accepted(post("/api/registerInstance", registration()), false);
                 accepted(post("/api/reportEvent", control("NODE_REGISTER")), true);
-                registered = true; snapshotRequired.set(true); lastHeartbeat = 0;
-            }
-            if (System.nanoTime() - lastHeartbeat >= TimeUnit.SECONDS.toNanos(1)) {
-                accepted(post("/api/reportEvent", control("HEARTBEAT")), true); lastHeartbeat = System.nanoTime();
+                registered = true; pendingSnapshot = null; snapshotRequired.set(true);
+                nextSnapshot = Math.max(nextSnapshot, System.nanoTime()
+                    + TimeUnit.MILLISECONDS.toNanos(Math.floorMod(identity.address().hashCode(), 1000)));
             }
             if (config.events()) {
-                if (System.nanoTime() - lastSnapshot >= TimeUnit.MILLISECONDS.toNanos(config.snapshotMillis()))
+                if (pendingSnapshot == null && System.nanoTime() - lastSnapshot >= TimeUnit.MILLISECONDS.toNanos(config.snapshotMillis()))
                     snapshotRequired.set(true);
-                if (snapshotRequired.getAndSet(false)) {
-                    var snapshot = cache.metadata();
-                    accepted(post("/api/reportEvent", snapshot(snapshot)), false);
-                    snapshotVersion = snapshot.version(); lastSnapshot = System.nanoTime();
+                if (pendingSnapshot != null || snapshotRequired.get()) {
+                    if (System.nanoTime() < nextSnapshot) return;
+                    if (pendingSnapshot == null) {
+                        snapshotRequired.set(false);
+                        pendingSnapshot = snapshot();
+                    }
+                    try {
+                        accepted(post(config.endpoint().get(), "/api/reportEvent", pendingSnapshot.body(), 30000), false);
+                    } finally { nextSnapshot = System.nanoTime() + TimeUnit.SECONDS.toNanos(1); }
+                    snapshotVersion = pendingSnapshot.version();
+                    pendingSnapshot = null; lastSnapshot = System.nanoTime();
                 } else {
                     var report = mutations();
                     if (!report.path("events").isEmpty()) accepted(post("/api/reportEvent", report), false);
                 }
             }
-            failure = "";
+            failures = 0; failure = "";
         } catch (Exception error) {
-            snapshotRequired.set(true); failure = error.toString();
-            retryAt = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(500);
+            if (pendingSnapshot == null) snapshotRequired.set(true);
+            failure = error.toString();
+            retryAt.accumulateAndGet(System.nanoTime() + retryDelay(failures++), Math::max);
             if (error instanceof InterruptedException) Thread.currentThread().interrupt();
         }
     }
+    private static long retryDelay(int failures) {
+        long base = Math.min(16000, 500L << Math.min(failures, 5));
+        return TimeUnit.MILLISECONDS.toNanos(ThreadLocalRandom.current().nextLong(base / 2, base + 1));
+    }
     public Map<String, Object> status() {
-        return Map.of("payload_io", false, "registered", registered, "remote_enabled", remoteEnabled,
-            "last_error", failure, "pending_events", changes.size());
+        return Map.of("payload_io", false, "registered", registered && !registrationRequired.get(), "remote_enabled", remoteEnabled,
+            "last_error", failure.isEmpty() ? heartbeatFailure : failure, "pending_events", changes.size());
     }
     @Override public synchronized void close() {
         if (closed) return;
         closed = true;
         try { observation.close(); } catch (Exception error) { throw new IllegalStateException(error); }
         // Complete an in-flight registration before sending HOST_DOWN; interrupt only on timeout.
+        heartbeats.shutdownNow();
         worker.shutdown();
         try {
             if (!worker.awaitTermination(3, TimeUnit.SECONDS)) {
                 worker.shutdownNow();
                 if (!worker.awaitTermination(3, TimeUnit.SECONDS)) throw new IllegalStateException("KVCM reporter did not stop");
             }
+            if (!heartbeats.awaitTermination(3, TimeUnit.SECONDS)) throw new IllegalStateException("KVCM heartbeat worker did not stop");
             URI endpoint = config.endpoint().current();
             if (registered && endpoint != null) try { accepted(post(endpoint, "/api/reportEvent", control("HOST_DOWN")), false); }
             catch (Exception error) { failure = error.toString(); }

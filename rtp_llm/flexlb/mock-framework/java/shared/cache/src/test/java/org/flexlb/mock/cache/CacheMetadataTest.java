@@ -16,10 +16,14 @@ class CacheMetadataTest {
                 lease.publish(List.of(11L), 1); lease.close();
                 var initial = cache.metadata();
                 assertEquals(Map.of(11L, HBM), initial.blocks());
+                var keys = cache.metadataKeys(HBM);
+                assertEquals(initial.version(), keys.version()); assertArrayEquals(new long[]{11L}, keys.keys());
                 // Force device eviction to Host while the logical reusable prefix survives.
                 try (var pressure = cache.acquire(3, List.of()).lease()) {
                     assertNotNull(pressure);
                     assertEquals(Map.of(11L, HOST), cache.metadata().blocks());
+                    assertEquals(0, cache.metadataKeys(HBM).keys().length);
+                    assertArrayEquals(new long[]{11L}, keys.keys());
                     assertEquals(Set.of(11L), cache.snapshot(-1, true).keys());
                     assertTrue(cache.metadata().version() > initial.version());
                 }

@@ -110,6 +110,11 @@ final class BlockTree {
         nodes.forEach((key, node) -> blocks.put(key, medium(node.host)));
         return new CacheMetadata.Snapshot(version, blocks);
     }
+    CacheMetadata.SnapshotKeys metadataKeys(CacheMetadata.Medium medium) {
+        long[] keys = nodes.values().stream().filter(node -> medium(node.host) == medium)
+            .mapToLong(node -> node.key).toArray();
+        return new CacheMetadata.SnapshotKeys(version, keys);
+    }
     Set<Long> keys() { return Set.copyOf(nodes.keySet()); }
     void clear() {
         if (nodes.values().stream().anyMatch(n -> n.pins != 0)) throw new IllegalStateException("Cannot clear a pinned tree");

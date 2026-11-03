@@ -7,6 +7,8 @@ import java.net.http.*;
 import java.time.Duration;
 import java.util.concurrent.*;
 import java.nio.*;
+import java.security.*;
+import java.util.HexFormat;
 import javax.imageio.ImageIO;
 import javax.imageio.stream.MemoryCacheImageInputStream;
 import org.flexlb.engine.grpc.EngineRpcService.MultimodalInputPB;
@@ -24,6 +26,7 @@ final class VitImageSource implements AutoCloseable {
 
     VitGeometry.Image prepare(MultimodalInputPB media, long deadline) throws IOException {
         int width, height;
+        String identity=MediaInput.key(media);
         if(config.skipDownload()) {
             width=media.getMmPreprocessConfig().getWidth(); height=media.getMmPreprocessConfig().getHeight();
         } else {
@@ -36,10 +39,18 @@ final class VitImageSource implements AutoCloseable {
                 metrics.events.observe("rtp_llm_vit_image_fetch_rt_us",millis*1000);
             }
             int[] size=dimensions(bytes); width=size[0]; height=size[1];
+            identity=contentIdentity(bytes);
         }
         VitGeometry.dimensions(width,height);
         return new VitGeometry.Image(MediaInput.key(media),width,height,
-            VitGeometry.rows(width,height,config.patch(),config.merge(),config.minPixels(),config.maxTokens()));
+            VitGeometry.rows(width,height,config.patch(),config.merge(),config.minPixels(),config.maxTokens()),identity);
+    }
+
+    private String contentIdentity(byte[] bytes) {
+        try {
+            String digest=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+            return digest+":"+config.patch()+":"+config.merge()+":"+config.minPixels()+":"+config.maxTokens()+":"+config.hidden();
+        } catch(NoSuchAlgorithmException error) { throw new AssertionError(error); }
     }
 
     private byte[] download(String url,long deadline) {
@@ -48,9 +59,7 @@ final class VitImageSource implements AutoCloseable {
         catch(IllegalArgumentException error) { throw MediaInput.invalid("Invalid image URL"); }
         if(uri.getHost()==null || (!"http".equalsIgnoreCase(uri.getScheme()) && !"https".equalsIgnoreCase(uri.getScheme())))
             throw MediaInput.invalid("Image download requires an HTTP(S) URL");
-        long limit=10L*1024*1024;
-        if(config.maxFileSizeKb()>0) limit=Math.min(limit,config.maxFileSizeKb()*1024L);
-        final long maxBytes=limit;
+        final long maxBytes=config.maxFileSizeKb()>0 ? config.maxFileSizeKb()*1024L : Integer.MAX_VALUE-8L;
         for(int attempt=0; ; attempt++) {
             check(deadline);
             var message=HttpRequest.newBuilder(uri).timeout(Duration.ofNanos(Math.max(1,deadline-System.nanoTime())))

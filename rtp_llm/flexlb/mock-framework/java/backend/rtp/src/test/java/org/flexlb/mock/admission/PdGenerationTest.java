@@ -201,6 +201,42 @@ class PdGenerationTest {
         } finally { vision.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
     }
 
+    @Test void cancelledVisionWaitCannotAllocateDecodeEvenWhenVisionCompletesLate() throws Exception {
+        var entered = new CountDownLatch(1); var cancelled = new CountDownLatch(1);
+        var observer = new java.util.concurrent.atomic.AtomicReference<StreamObserver<MultimodalOutputPB>>();
+        var allocations = new java.util.concurrent.atomic.AtomicInteger();
+        var vision = io.grpc.netty.NettyServerBuilder.forPort(0)
+            .addService(new org.flexlb.engine.grpc.MultimodalRpcServiceGrpc.MultimodalRpcServiceImplBase() {
+                @Override public void remoteMultimodalEmbedding(MultimodalInputsPB input, StreamObserver<MultimodalOutputPB> response) {
+                    ((io.grpc.stub.ServerCallStreamObserver<MultimodalOutputPB>) response).setOnCancelHandler(cancelled::countDown);
+                    observer.set(response); entered.countDown();
+                }
+            }).build().start();
+        var decode = io.grpc.netty.NettyServerBuilder.forPort(0).addService(new RpcServiceGrpc.RpcServiceImplBase() {
+            @Override public StreamObserver<GenerateRequestPB> remoteGenerate(StreamObserver<GenerateOutputsPB> response) {
+                return new StreamObserver<>() {
+                    public void onNext(GenerateRequestPB input) { allocations.incrementAndGet(); }
+                    public void onError(Throwable error) {}
+                    public void onCompleted() { response.onCompleted(); }
+                };
+            }
+        }).build().start();
+        try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1)) {
+            var request = image(input(d, 9001, 4, 3, 3000, true), vision.getPort()).toBuilder();
+            request.getGenerateConfigBuilder().getRoleAddrsBuilder(0).setGrpcPort(decode.getPort());
+            try (var call = new Call(p, request.build())) { assertTrue(entered.await(2, TimeUnit.SECONDS)); }
+            assertTrue(cancelled.await(2, TimeUnit.SECONDS), "P cancellation must reach its active ViT RPC");
+            try {
+                observer.get().onNext(MultimodalOutputPB.getDefaultInstance()); observer.get().onCompleted();
+            } catch (StatusRuntimeException expected) { assertEquals(Status.Code.CANCELLED, expected.getStatus().getCode()); }
+            assertEquals(0, allocations.get());
+            assertEquals(0, p.status().getRunningTaskInfoCount());
+        } finally {
+            vision.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+            decode.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+        }
+    }
+
     @Test void allGenerationPathsRejectTheSameUnsupportedInputsBeforeAdmission() throws Exception {
         try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1)) {
             var modes = List.<java.util.function.Consumer<GenerateConfigPB.Builder>>of(
