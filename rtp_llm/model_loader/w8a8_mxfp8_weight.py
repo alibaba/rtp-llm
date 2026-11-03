@@ -44,6 +44,7 @@ _FP8_DTYPES = (
 _VERIFIED_W8A8_MXFP8_WEIGHTS = frozenset(
     [
         W.attn_qkv_w,
+        W.attn_gate_w,
         W.attn_o_w,
         W.ffn_w1,
         W.ffn_w2,
@@ -158,24 +159,31 @@ class AscendW8A8MXFP8Weight(PerBlockFp8Weight):
         name = src_weight_info.name
         if name not in cls.w8a8_weight_list or name in [W.mla_kc, W.mla_vc]:
             return False
-        if name not in _VERIFIED_W8A8_MXFP8_WEIGHTS:
-            raise ValueError(
-                f"AscendW8A8MXFP8 does not support weight {name!r} yet "
-                "(layout normalization is only verified for transpose-family "
-                "weights)"
-            )
+        unverified = name not in _VERIFIED_W8A8_MXFP8_WEIGHTS
         # FLOAT-marked modules keep bf16 loading. Concrete names and MoE
         # expert templates are resolvable here; {i} templates are shared by
         # all layers, so partial-quant layers are decided per layer at load
         # time (_is_bf16_fallback).
+        # Exclude (FLOAT-marked) check must precede the unverified raise
+        # below: such weights (e.g. qwen3.5 linear_attn.out_proj) stay on
+        # the bf16 path and never enter fp8 loading.
         if quant_config.exclude_modules and hasattr(src_weight_info, "weights"):
             for ckpt_w in src_weight_info.weights:
                 if "{i}" in ckpt_w.name and "{expert_id}" not in ckpt_w.name:
+                    if unverified and _template_matches_excludes(
+                        ckpt_w.name, quant_config.exclude_modules
+                    ):
+                        return False  # unverified layout + FLOAT layers → bf16
                     continue
                 if _template_matches_excludes(
                     ckpt_w.name, quant_config.exclude_modules
                 ):
                     return False
+        if unverified:
+            raise ValueError(
+                f"AscendW8A8MXFP8 does not support weight {name!r} yet "
+                "(quantized weight with unverified layout)"
+            )
         return True
 
     def __init__(
