@@ -631,3 +631,55 @@ TEST_F(CudaSamplerTest, testDoSample) {
                             step,
                             10);
 }
+
+TEST_F(CudaSamplerTest, testJointTopKTopPReturnedProbabilities) {
+    constexpr int64_t  batch_size = 4;
+    constexpr int64_t  vocab_size = 22;
+    std::vector<float> distribution(vocab_size, 0.0185f);
+    distribution[0]                          = 0.6f;
+    distribution[1]                          = 0.03f;
+    auto                       probabilities = cudaTensor(distribution, {1, vocab_size}).repeat({batch_size, 1});
+    auto                       logits        = probabilities.log();
+    auto                       tokens        = cudaIntTensor({0, 0, 0, 0}, {batch_size, 1});
+    auto                       lengths       = pinnedIntTensor({0, 0, 0, 0});
+    auto                       cumulative    = cudaTensor({0, 0, 0, 0}, {batch_size});
+    auto                       returned      = torch::zeros_like(probabilities);
+    auto                       top_k         = pinnedIntTensor({2, 2, 0, 1});
+    auto                       top_p         = pinnedFloatTensor({0.95f, 0.5f, 1.0f, 0.95f});
+    auto                       temperature   = pinnedFloatTensor({1, 1, 1, 1});
+    std::vector<at::Generator> generators;
+    for (int64_t i = 0; i < batch_size; ++i) {
+        generators.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+        generators.back().set_current_seed(100 + i);
+    }
+    GreedyParams params({logits,
+                         lengths,
+                         lengths,
+                         tokens,
+                         0,
+                         top_k,
+                         top_p,
+                         temperature,
+                         nullopt,
+                         nullopt,
+                         cumulative,
+                         nullopt,
+                         false,
+                         returned,
+                         nullopt,
+                         nullopt,
+                         nullopt,
+                         generators});
+    execSampleGreedy(params);
+    check_cuda_error();
+
+    auto expected  = torch::zeros({batch_size, vocab_size}, torch::kFloat32);
+    expected[0][0] = 20.0f / 21.0f;
+    expected[0][1] = 1.0f / 21.0f;
+    expected[1][0] = 1.0f;
+    expected[2].copy_(torch::tensor(distribution, torch::kFloat32));
+    expected[3][0] = 1.0f;
+    ASSERT_TRUE(torch::allclose(returned.cpu(), expected, 1e-5, 1e-6));
+    assertCumLogProbMatches(
+        toHostFloat(cumulative), toHostFloat(returned), toHostInt(tokens), {0, 0, 0, 0}, batch_size, 0, vocab_size);
+}

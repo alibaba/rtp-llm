@@ -1598,6 +1598,31 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             else:
                 self.assertEqual(metric_types[name], _KMONITOR_GAUGE)
 
+    def test_linear_prefill_restores_host_metadata_from_device_inputs(self) -> None:
+        owner = self
+
+        class HostMetadataModel(CacheStoreForwardModel):
+            def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:
+                attention = inputs.attention_inputs["linear"]
+                owner.assertEqual(attention.cu_seqlens.device.type, "cpu")
+                owner.assertEqual(attention.cu_seqlens.tolist(), [0, 4])
+                owner.assertEqual(attention.prefix_lengths.device.type, "cpu")
+                owner.assertEqual(attention.prefix_lengths.tolist(), [0])
+                owner.assertEqual(attention.kv_cache_kernel_block_id.device.type, "cpu")
+                owner.assertEqual(
+                    attention.kv_cache_kernel_block_id.tolist(), [[3, 4, 5, 6]]
+                )
+                owner.assertTrue(attention.cu_seqlens_device.is_cuda)
+                owner.assertTrue(attention.prefix_lengths_device.is_cuda)
+                owner.assertTrue(attention.kv_cache_kernel_block_id_device.is_cuda)
+                return super()._forward_one(inputs)
+
+        for scenario in ("linear_host_input_prefill", "linear_device_input_prefill"):
+            with self.subTest(scenario=scenario):
+                model = HostMetadataModel()
+                run_scenario(model, scenario)
+                self.assertEqual(model.forward_calls, 1)
+
     def test_multi_tag_uses_each_tag_local_physical_block_table(self) -> None:
         model = CacheStoreForwardModel()
         result = run_scenario(model, "multi_tag")

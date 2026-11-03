@@ -4,12 +4,13 @@ import unittest
 from types import SimpleNamespace
 
 import torch
-
+from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionTokenLogprob,
     ChatMessage,
+    FinisheReason,
     RoleEnum,
 )
 from rtp_llm.openai.renderers.custom_renderer import (
@@ -26,7 +27,7 @@ from rtp_llm.openai.renderers.kimi_k3_renderer import (
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolBaseRenderer,
 )
-from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput
+from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
 
 
 class _Tokenizer:
@@ -212,6 +213,136 @@ class MtpReasoningRendererLogprobsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [round(math.exp(item.logprob), 2) for item in content], [0.7, 0.85, 0.7]
         )
+
+
+class StopSetLogprobsRendererTest(unittest.IsolatedAsyncioTestCase):
+    class Tokenizer:
+        def decode(self, ids):
+            return "".join(
+                {1: "A", 2: "B", 3: "C", 4: "D", 5: "E", 6: "F", 9: "<eos>"}[int(i)]
+                for i in ids
+            )
+
+    def setUp(self):
+        self.renderer = CustomChatRenderer(
+            self.Tokenizer(),
+            RendererParams("test", 128, 9, [[2, 3, 4]]),
+            GenerateEnvConfig(),
+        )
+        self.renderer.add_extra_stop_word_ids([[5, 6]])
+
+    async def _render(self, token_ids, split, stop_ids, stop_strings, streaming=True):
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="test")],
+            stream=streaming,
+            logprobs=True,
+            top_logprobs=0,
+        )
+        config = GenerateConfig(
+            max_new_tokens=32,
+            stop_words_list=stop_ids,
+            stop_words_str=stop_strings,
+            is_streaming=streaming,
+        )
+
+        async def source():
+            offset = 0
+            for chunk in (
+                [token_ids] if not streaming else (token_ids[:split], token_ids[split:])
+            ):
+                if not chunk:
+                    continue
+                output = GenerateOutput()
+                output.output_ids = torch.tensor([chunk], dtype=torch.int32)
+                output.all_probs = torch.zeros((len(chunk), 10), dtype=torch.float32)
+                for row, token_id in enumerate(chunk):
+                    probability = 0.5 + 0.01 * (offset + row + 1)
+                    output.all_probs[row, token_id] = probability
+                    output.all_probs[row, 0] = 1 - probability
+                output.aux_info = AuxInfo()
+                output.aux_info.input_len = 4
+                offset += len(chunk)
+                output.aux_info.output_len = offset
+                yield GenerateOutputs(generate_outputs=[output])
+
+        outputs = source()
+        if not streaming:
+            outputs = await self.renderer._merge_non_streaming_outputs(outputs)
+        responses = [
+            response
+            async for response in self.renderer.render_response_stream(
+                outputs, request, config
+            )
+        ]
+        text, probabilities = "", []
+        for response in responses:
+            for choice in response.choices:
+                text += choice.delta.content or ""
+                if choice.logprobs is not None:
+                    probabilities.extend(choice.logprobs.content)
+        return text, probabilities, responses[-1].choices[0].finish_reason
+
+    async def test_forced_stop_set_replaces_stale_default_and_extra_ids(self):
+        # Endpoint force_stop_words replaces the effective request set. Renderer
+        # construction-time default/extra IDs must no longer stop this request.
+        for streaming in (False, True):
+            for split in range(1, 8):
+                with self.subTest(streaming=streaming, split=split):
+                    text, probabilities, reason = await self._render(
+                        [1, 2, 3, 4, 5, 6, 1, 9], split, [], [], streaming
+                    )
+                    self.assertEqual(text, "ABCDEFA")
+                    self.assertEqual(
+                        [item.token for item in probabilities], list("ABCDEFA")
+                    )
+                    self.assertEqual(reason, FinisheReason.stop)
+
+    async def test_effective_stop_id_prefixes_are_held_at_every_split(self):
+        # ID-only extra_configs stops need buffering even if no equivalent
+        # request string was supplied, including stops split across frames.
+        for stop_strings in ([], ["BCD"]):
+            for streaming in (False, True):
+                for split in range(1, 4):
+                    with self.subTest(
+                        strings=stop_strings, streaming=streaming, split=split
+                    ):
+                        text, probabilities, reason = await self._render(
+                            [1, 2, 3, 4], split, [[2, 3, 4]], stop_strings, streaming
+                        )
+                        self.assertEqual(text, "A")
+                        self.assertEqual([item.token for item in probabilities], ["A"])
+                        self.assertAlmostEqual(
+                            probabilities[0].logprob, math.log(0.51), places=5
+                        )
+                        self.assertEqual(reason, FinisheReason.stop)
+
+    async def test_request_stop_ids_use_the_resolved_set(self):
+        for split in range(1, 4):
+            with self.subTest(split=split):
+                text, probabilities, _ = await self._render(
+                    [1, 2, 3, 4], split, [[3, 4]], ["CD"]
+                )
+                self.assertEqual(text, "AB")
+                self.assertEqual([item.token for item in probabilities], ["A", "B"])
+
+    async def test_unmatched_prefix_releases_tokens_with_original_probabilities(self):
+        text, probabilities, _ = await self._render(
+            [1, 2, 3, 1, 9], 3, [[2, 3, 4]], ["BCD"]
+        )
+        self.assertEqual(text, "ABCA")
+        self.assertEqual([item.token for item in probabilities], list("ABCA"))
+        self.assertEqual(
+            [round(math.exp(item.logprob), 2) for item in probabilities],
+            [0.51, 0.52, 0.53, 0.54],
+        )
+
+    async def test_effective_stops_are_isolated_between_requests(self):
+        await self._render([1, 2, 3, 4, 9], 2, [], [])
+        text, probabilities, _ = await self._render(
+            [1, 2, 3, 4], 2, [[2, 3, 4]], ["BCD"]
+        )
+        self.assertEqual(text, "A")
+        self.assertEqual([item.token for item in probabilities], ["A"])
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
@@ -68,6 +69,33 @@ GroupBase makeRpcGroup(std::string tag) {
     return group;
 }
 
+class LinearTransferTestEngine final: public EngineBase {
+public:
+    explicit LinearTransferTestEngine(CacheConfig config): EngineBase(EngineInitParams()) {
+        resource_context_.cache_manager = std::make_shared<KVCacheManager>(config);
+    }
+    std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
+        return nullptr;
+    }
+    void         enqueue(std::shared_ptr<GenerateStream>&) override {}
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("not used by LINEAR transfer tests");
+    }
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+};
+
+CacheConfig makeLinearTransferConfig(bool segmented) {
+    auto spec =
+        std::dynamic_pointer_cast<LinearKVCacheSpec>(test::makeLinearSpec("linear", 64, DataType::TYPE_FP16, 8, 2));
+    spec->head_sharded_transfer_ = segmented;
+    return test::makeSingleGroupCacheConfig(spec, CacheGroupType::LINEAR, 1, 8);
+}
+
 // Tokens per logical (cache-key sized) block, and the CP-scaled tokens per block
 // of a compacted fixed/state group under prefill CP=2 (cp.scale_seq_size).
 constexpr size_t kBaseSeqSizePerBlock    = 64;
@@ -93,6 +121,8 @@ KeyOffsetPairs keyOffsetPairs(const std::vector<CacheStoreBlockPair>& plan) {
 }
 
 }  // namespace
+
+class LinearTransferRpcServerTest: public DeviceTestBase {};
 
 TEST(DecodeRpcServerTest, TimeoutLearnedAfterConstructionKeepsAbsoluteDeadline) {
     DecodeRpcContext             rpc_context{nullptr};
@@ -254,6 +284,74 @@ TEST(DecodeRpcServerTest, LinearHeadPartitionsSplitSourceForLargerDecodeTp) {
     EXPECT_EQ(partition.local_partition_id, 0);
     EXPECT_EQ(partition.remote_partition_count, 2);
     EXPECT_EQ(partition.remote_partition_id, 1);
+}
+
+TEST_F(LinearTransferRpcServerTest, LegacyLinearRejectsAsymmetricPartitionsInMainAndMtp) {
+    struct Case {
+        int prefill_tp;
+        int decode_tp;
+    };
+    for (const auto& test_case : {Case{1, 2}, Case{2, 4}, Case{2, 1}, Case{4, 2}}) {
+        for (const bool in_mtp : {false, true}) {
+            SCOPED_TRACE(testing::Message()
+                         << test_case.prefill_tp << "->" << test_case.decode_tp << " mtp=" << in_mtp);
+            auto config = in_mtp ? test::makeSimpleMhaCacheConfig(1, 8, 64, DataType::TYPE_FP16) :
+                                   makeLinearTransferConfig(false);
+            std::unique_ptr<ProposeModelEngineInitParams> propose;
+            if (in_mtp) {
+                config.mtp_sub_configs.push_back(std::make_shared<CacheConfig>(makeLinearTransferConfig(false)));
+                auto modules = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+                modules->push_back(std::make_unique<EngineInitParams>());
+                propose = std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_MTP, 1, std::move(modules));
+            }
+            DecodeRpcServer server;
+            server.engine_                   = std::make_shared<LinearTransferTestEngine>(config);
+            server.propose_maga_init_params_ = propose.get();
+            std::vector<std::string> peers;
+            for (int rank = 0; rank < test_case.prefill_tp; ++rank) {
+                peers.push_back("rank" + std::to_string(rank) + ":1:2");
+            }
+            for (int rank = 0; rank < test_case.decode_tp; ++rank) {
+                server.maga_init_params_.parallelism_config.tp_size = test_case.decode_tp;
+                server.maga_init_params_.parallelism_config.tp_rank = rank;
+                GroupBlockIds blocks;
+                for (const auto& tag : config.topology().groupTags()) {
+                    blocks.tag_to_index_.emplace(tag, blocks.rows_.size());
+                    blocks.rows_.push_back(std::make_shared<BlockIds>());
+                }
+                const auto result = server.loadCache(makeLoadContext("request", peers, {}, std::move(blocks), 1));
+                EXPECT_EQ(result.error_info.code(), ErrorCode::INVALID_PARAMS);
+                EXPECT_NE(result.error_info.ToString().find("LINEAR"), std::string::npos);
+                EXPECT_EQ(result.loaded_cache_block_count, 0u);
+            }
+        }
+    }
+}
+
+TEST_F(LinearTransferRpcServerTest, LegacyLinearKeepsSymmetricPartitionsAndSegmentedLinearKeepsAsymmetricOnes) {
+    for (const bool segmented : {false, true}) {
+        for (const int prefill_tp : {1, 2, 4}) {
+            DecodeRpcServer server;
+            server.engine_ = std::make_shared<LinearTransferTestEngine>(makeLinearTransferConfig(segmented));
+            std::vector<std::string> peers;
+            for (int rank = 0; rank < prefill_tp; ++rank) {
+                peers.push_back("rank" + std::to_string(rank) + ":1:2");
+            }
+            for (const int decode_tp : {1, 2, 4}) {
+                if (!segmented && prefill_tp != decode_tp) {
+                    continue;
+                }
+                for (int rank = 0; rank < decode_tp; ++rank) {
+                    SCOPED_TRACE(testing::Message()
+                                 << prefill_tp << "->" << decode_tp << " rank=" << rank << " segmented=" << segmented);
+                    EXPECT_TRUE(server
+                                    .validateLinearCacheTransferPartitions(
+                                        DecodeRpcServer::prefillPeerPartitions(peers, decode_tp, rank))
+                                    .ok());
+                }
+            }
+        }
+    }
 }
 
 TEST(DecodeRpcServerTest, LinearHeadPartitionsMergeSourcesForSmallerDecodeTp) {

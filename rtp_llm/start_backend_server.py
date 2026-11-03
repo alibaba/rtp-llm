@@ -45,12 +45,24 @@ def _install_hot_hook_runtime(role: str) -> None:
         logging.error("failed to install RTP hot hook runtime for %s: %s", role, e)
 
 
-def _send_pipe_status(pipe_writer, status: str, message: str, error_trace: str = ""):
+def _send_pipe_status(
+    pipe_writer,
+    status: str,
+    message: str,
+    error_trace: str = "",
+    *,
+    max_seq_len: Optional[int] = None,
+):
     if pipe_writer is None:
         return
     try:
         pipe_writer.send(
-            {"status": status, "message": message, "traceback": error_trace}
+            {
+                "status": status,
+                "message": message,
+                "traceback": error_trace,
+                "max_seq_len": max_seq_len,
+            }
         )
         pipe_writer.close()
     except Exception as e:
@@ -107,10 +119,12 @@ def local_rank_start(
         signal.signal(signal.SIGINT, signal_handler)
         logging.info("Backend server initialized successfully, sending ready status")
 
+        assert backend_manager.engine is not None
         _send_pipe_status(
             pipe_writer,
             "success",
             f"Backend server started successfully on rank {py_env_configs.parallelism_config.local_rank}",
+            max_seq_len=backend_manager.engine.config.max_seq_len,
         )
         pipe_writer = None  # success closed it
 
@@ -205,9 +219,9 @@ def _wait_for_ranks_startup(
     processes: List[BaseProcess],
     rank_pipe_readers: List[Connection],
     local_world_size: int,
-):
+) -> Optional[int]:
     """
-    Wait for all ranks to report startup status via pipe.
+    Wait for all ranks and return their common resolved model length.
 
     Args:
         processes: List of rank processes
@@ -223,6 +237,7 @@ def _wait_for_ranks_startup(
 
     # Track which ranks have reported
     ranks_received = [False] * local_world_size
+    max_seq_lens = []
     poll_timeout = 0.5  # seconds per poll
     max_wait_time = 3600  # Maximum 1 hour wait
     start_time = time.time()
@@ -268,6 +283,7 @@ def _wait_for_ranks_startup(
                     raise
                 ranks_received[i] = True
                 if data.get("status") == "success":
+                    max_seq_lens.append(data.get("max_seq_len"))
                     logging.info(
                         f"Rank {i} started successfully: {data.get('message', '')}"
                     )
@@ -281,7 +297,12 @@ def _wait_for_ranks_startup(
                 break
             time.sleep(5)
 
+        if len(set(max_seq_lens)) != 1:
+            raise ValueError(
+                f"Backend ranks have inconsistent max_seq_len: {max_seq_lens}"
+            )
         logging.info(f"All {local_world_size} ranks started successfully")
+        return max_seq_lens[0]
     finally:
         _close_readers(rank_pipe_readers)
 
@@ -308,7 +329,9 @@ def multi_rank_start(
             return processes
 
         # Wait for all ranks to report startup status
-        _wait_for_ranks_startup(processes, rank_pipe_readers, local_world_size)
+        max_seq_len = _wait_for_ranks_startup(
+            processes, rank_pipe_readers, local_world_size
+        )
 
         manager = ProcessManager(
             shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
@@ -321,6 +344,7 @@ def multi_rank_start(
             pipe_writer,
             "success",
             f"All {local_world_size} backend ranks started successfully",
+            max_seq_len=max_seq_len,
         )
         pipe_writer = None  # success closed it; a later abort speaks via exit code
     except BaseException as e:

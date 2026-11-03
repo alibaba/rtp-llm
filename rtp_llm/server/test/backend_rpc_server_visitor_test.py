@@ -9,7 +9,12 @@ from rtp_llm.config.exceptions import (
     ExceptionType,
     FtRuntimeException,
 )
-from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleAddr, RoleType
+from rtp_llm.config.generate_config import (
+    GenerateConfig,
+    ReturnAllProbsMode,
+    RoleAddr,
+    RoleType,
+)
 from rtp_llm.ops import SpeculativeType
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
@@ -98,12 +103,7 @@ class BackendRPCServerVisitorSpeculativeTest(unittest.TestCase):
     def _check_request(self, sp_type, **request_options):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.sp_config = SimpleNamespace(model_type="draft", type=sp_type)
-        generate_config = SimpleNamespace(
-            force_disable_sp_run=False,
-            num_return_sequences=1,
-            num_beams=1,
-            return_all_probs=ReturnAllProbsMode.DEFAULT,
-        )
+        generate_config = GenerateConfig(return_all_probs=ReturnAllProbsMode.DEFAULT)
         for key, value in request_options.items():
             setattr(generate_config, key, value)
         visitor.check_sp_supported(_FakeInput(generate_config=generate_config))
@@ -122,6 +122,32 @@ class BackendRPCServerVisitorSpeculativeTest(unittest.TestCase):
         for mode in (ReturnAllProbsMode.DEFAULT, ReturnAllProbsMode.ORIGINAL):
             with self.subTest(mode=mode):
                 self._check_request(SpeculativeType.NONE, return_all_probs=mode)
+
+    def test_speculative_rejects_dynamic_beams(self):
+        for sp_type in (
+            SpeculativeType.MTP,
+            SpeculativeType.EAGLE,
+            SpeculativeType.EAGLE3,
+            SpeculativeType.DSPARK,
+        ):
+            for beams in ([2, 1], [1, 2]):
+                for mode in (ReturnAllProbsMode.DEFAULT, ReturnAllProbsMode.ORIGINAL):
+                    with self.subTest(sp_type=sp_type, beams=beams, mode=mode):
+                        with self.assertRaises(FtRuntimeException) as ctx:
+                            self._check_request(
+                                sp_type,
+                                variable_num_beams=beams,
+                                return_all_probs=mode,
+                            )
+                        self.assertEqual(
+                            ctx.exception.exception_type,
+                            ExceptionType.UNSUPPORTED_OPERATION,
+                        )
+
+    def test_speculative_accepts_dynamic_single_beam(self):
+        for beams in ([1], [1, 1]):
+            with self.subTest(beams=beams):
+                self._check_request(SpeculativeType.MTP, variable_num_beams=beams)
 
     def test_mtp_still_rejects_multiple_sequences_or_beams(self):
         for option in ("num_return_sequences", "num_beams"):

@@ -427,17 +427,24 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
 
 void CacheConfigCreator::configureDecodeLinearPool(CacheConfig&             config,
                                                    const ParallelismConfig& parallelism_config,
-                                                   const RuntimeConfig&     runtime_config) {
-    if (!runtime_config.enable_linear_replay || parallelism_config.role_type != RoleType::DECODE) {
+                                                   const RuntimeConfig&     runtime_config,
+                                                   const KVCacheConfig&     kv_cache_config) {
+    if (!runtime_config.enable_linear_replay || !config.linear_replay.enabled()
+        || parallelism_config.role_type != RoleType::DECODE) {
         return;
     }
     auto groups = config.topology().groups();
     bool changed = false;
     for (auto& group : groups) {
         if (group.policy.group_type != CacheGroupType::LINEAR
-            || group.policy.memory_placement != CacheMemoryPlacement::DEVICE || group.policy.explicit_block_num > 0) {
+            || group.policy.memory_placement != CacheMemoryPlacement::DEVICE || group.policy.explicit_block_num > 0
+            || !config.linear_replay.containsGroup(static_cast<int>(config.topology().groupIdForTag(group.tag)))
+            || kv_cache_config.reuse_cache) {
             continue;
         }
+        // Initial malloc precedes replay activation and still retains reusable
+        // checkpoints. Only groups using tails from their first allocation fit
+        // a pool bounded solely by decode concurrency.
         constexpr uint64_t kTailBlocksPerStream = 2;
         constexpr uint64_t kReserveStreams = 4;
         RTP_LLM_CHECK_WITH_INFO(runtime_config.max_generate_batch_size > 0,

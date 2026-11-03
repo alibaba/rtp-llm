@@ -138,6 +138,7 @@ void StreamCacheResource::releaseResource() {
     batch_kv_cache_resource_->clearBlocks();
     stream_->clearLinearReplayWindow();
     linear_replay_.lease.reset();
+    linear_replay_.waiting_for_slot = false;
     linear_replay_.clearInitialState();
     resource_released_ = true;
 }
@@ -222,6 +223,12 @@ absl::Status StreamCacheResource::initKVBlock() {
     // Follow-up allocations (incrKVBlock) use enableCacheLookup().
     if (fake_inited_) {
         return absl::InternalError("fake inited not allow to incr block");
+    }
+
+    if (linear_replay_.waiting_for_slot) {
+        // KV and any asynchronous prefix load have already been committed. A
+        // lease retry must preserve that allocation and its published reuse lengths.
+        return prepareLinearReplayResources();
     }
 
     MallocInfo malloc_info;
@@ -494,8 +501,12 @@ absl::Status StreamCacheResource::prepareLinearReplayResources(bool prepare_tail
     if (!linear_replay_.lease) {
         linear_replay_.lease = manager->acquireLinearReplaySlot();
         if (!linear_replay_.lease) {
-            return absl::ResourceExhaustedError("LINEAR replay log slots exhausted");
+            // Terminal streams can still own a lease through pending bookkeeping
+            // or an incomplete last-use event. Retry without reusing their slot.
+            linear_replay_.waiting_for_slot = true;
+            return absl::UnavailableError("LINEAR replay log slots are temporarily unavailable");
         }
+        linear_replay_.waiting_for_slot = false;
         const int processed = std::max(0, stream_->seqLength() - 1);
         linear_replay_.initial_block_ids.assign(config.groupNums(), -1);
         if (processed > 0) {

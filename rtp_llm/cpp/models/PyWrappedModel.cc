@@ -455,6 +455,18 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     const auto cuda_i32 = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
     const auto host_i32 = torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true);
 
+    // LINEAR prefill plans convolution and checkpoint metadata on the host.
+    // Keep the device mirrors above for kernels and the decode/verify fast path.
+    const bool linear_prefill =
+        context_batch_size > 0 && !inputs.is_target_verify && kv_cache_layer_layout_.has_value()
+        && std::any_of(kv_cache_layer_layout_->topology().groups().begin(),
+                       kv_cache_layer_layout_->topology().groups().end(),
+                       [](const auto& group) { return group.policy.group_type == CacheGroupType::LINEAR; });
+    if (linear_prefill && py_attn_inputs.input_lengths.is_cuda()) {
+        py_attn_inputs.input_lengths  = normalize_i32(py_attn_inputs.input_lengths.cpu());
+        py_attn_inputs.prefix_lengths = normalize_i32(py_attn_inputs.prefix_lengths.cpu());
+    }
+
     if (context_batch_size > 0 && py_attn_inputs.input_lengths.is_cuda()) {
         py_attn_inputs.total_tokens = static_cast<int>(token_count);
         int64_t prefix_sum = 0;
@@ -591,6 +603,13 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
         return rows.is_cuda() ? rows.cpu() : rows;
     };
 
+    auto host_attention_table = [&](const torch::Tensor& table, CacheGroupType type) {
+        return type == CacheGroupType::LINEAR && py_attn_inputs.is_prefill && !py_attn_inputs.is_target_verify
+                       && table.is_cuda() ?
+                   table.cpu() :
+                   table;
+    };
+
     if (inputs.kv_cache_kernel_block_id.dim() == 2) {
         RTP_LLM_CHECK_WITH_INFO(!kv_cache_layer_layout_.has_value()
                                     || kv_cache_layer_layout_->topology().hasSingleGlobalGroup(),
@@ -602,9 +621,11 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
                                     "tagged 2-D KV block tables require one known cache group");
             kv_cache_layer_layout_->topology().group(inputs.kv_cache_group_tags.front());
         }
-        py_attn_inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id;
-        py_attn_inputs.kv_cache_kernel_block_id_device =
-            tensorHoldHostAndToCuda(py_attn_inputs.kv_cache_kernel_block_id);
+        const auto group_type                   = kv_cache_layer_layout_.has_value() ?
+                                                      kv_cache_layer_layout_->topology().groups().front().policy.group_type :
+                                                      CacheGroupType::FULL;
+        py_attn_inputs.kv_cache_kernel_block_id = host_attention_table(inputs.kv_cache_kernel_block_id, group_type);
+        py_attn_inputs.kv_cache_kernel_block_id_device = tensorHoldHostAndToCuda(inputs.kv_cache_kernel_block_id);
         if (inputs.kv_cache_block_id.defined()) {
             RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_block_id.dim() == 2,
                                     "kv_cache_block_id must be 2-D when kernel block table is 2-D");
@@ -652,8 +673,9 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
     for (const auto& group : model_groups) {
         const auto payload_row  = std::find(group_tags.begin(), group_tags.end(), group.tag) - group_tags.begin();
         auto       group_inputs = py_attn_inputs;
-        group_inputs.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id[payload_row];
-        group_inputs.kv_cache_kernel_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_kernel_block_id);
+        const auto kernel_table = inputs.kv_cache_kernel_block_id[payload_row];
+        group_inputs.kv_cache_kernel_block_id        = host_attention_table(kernel_table, group.policy.group_type);
+        group_inputs.kv_cache_kernel_block_id_device = tensorHoldHostAndToCuda(kernel_table);
         if (inputs.kv_cache_block_id.defined()) {
             group_inputs.kv_cache_block_id = inputs.kv_cache_block_id[payload_row];
             if (group_inputs.cache_store_inputs.has_value()) {

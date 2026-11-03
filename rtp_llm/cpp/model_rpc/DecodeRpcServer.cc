@@ -186,6 +186,34 @@ bool DecodeRpcServer::hasLinearCacheTransfer() const {
     return false;
 }
 
+ErrorInfo DecodeRpcServer::validateLinearCacheTransferPartitions(
+    const std::map<std::string, AsymmetricTPContext>& partitions) const {
+    const bool asymmetric = std::any_of(partitions.begin(), partitions.end(), [](const auto& entry) {
+        return entry.second.local_partition_count != 1 || entry.second.remote_partition_count != 1;
+    });
+    if (!asymmetric) {
+        return ErrorInfo::OkStatus();
+    }
+    const auto has_legacy_linear = [](const CacheConfig& config) {
+        const auto& groups = config.topology().groups();
+        return std::any_of(groups.begin(), groups.end(), [](const auto& group) {
+            const auto* spec = dynamic_cast<const LinearKVCacheSpec*>(group.spec.get());
+            return spec != nullptr && !spec->usesHeadShardedTransfer();
+        });
+    };
+    const auto cache_manager = engine_->resourceContext().cache_manager;
+    bool       legacy_linear = has_legacy_linear(cache_manager->cacheConfig());
+    for (const auto& module : makeMTPModuleLoadPlan(propose_maga_init_params_)) {
+        legacy_linear |=
+            has_legacy_linear(cache_manager->getMTPModuleCacheConfig(static_cast<int>(module.module_index)));
+    }
+    if (legacy_linear) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS,
+                         "non-segmented LINEAR KV transfer requires symmetric Prefill/Decode attention TP");
+    }
+    return ErrorInfo::OkStatus();
+}
+
 std::map<std::string, AsymmetricTPContext>
 DecodeRpcServer::prefillPeerPartitions(const std::vector<std::string>& peer_addrs,
                                       int attention_tp,
@@ -573,8 +601,8 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         // DECODE_RETRY_{TIMES,TIMEOUT_MS} limits bound re-execution after stage errors; applying
         // them here rejects healthy queued requests (the production default is only 100 ms).
         // Capacity wait therefore follows the request's own deadline/cancellation.  Timed wakeups
-        // only service those stop conditions; a new allocator attempt is made exclusively after
-        // the resource generation changes, avoiding the old 1 ms malloc storm.
+        // service those stop conditions. Replay slot retirement also needs a bounded retry to
+        // poll its completion event; ordinary KV pressure still waits for a generation change.
         while (!cache_manager->waitForAllocationChange(
             observed_generation, wait_ms, allocation_attempts > 1 ? wait_ms : 0)) {
             const auto now_request_cost_ms    = (currentTimeUs() - decode_context.request_begin_time_us) / 1000;
@@ -582,6 +610,9 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
             if (decode_context.isRequestCancelled()
                 || (decode_context.request_timeout_ms > 0
                     && now_request_cost_ms >= decode_context.request_timeout_ms)) {
+                break;
+            }
+            if (generate_stream->streamCacheResource().waitingForLinearReplaySlot()) {
                 break;
             }
             if (decode_context.request_timeout_ms > 0) {
@@ -1225,6 +1256,10 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         || (has_linear_groups && !is_page_level_rr && legacy_partitions.empty())) {
         return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
                           "cache load has no compatible source partitions"), 0};
+    }
+    const auto linear_transfer_status = validateLinearCacheTransferPartitions(head_partitions);
+    if (!linear_transfer_status.ok()) {
+        return {linear_transfer_status, 0};
     }
     auto layerGroupTags = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
         std::vector<std::string> layer_tags;

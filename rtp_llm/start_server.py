@@ -158,6 +158,10 @@ def start_backend_server_impl(
                     logging.info(
                         f"Backend server started successfully: {status_msg.get('message', '')}"
                     )
+                    if py_env_configs.model_args.max_seq_len is None:
+                        py_env_configs.model_args.max_seq_len = status_msg.get(
+                            "max_seq_len"
+                        )
                     startup_status["ready"] = True
                     pipe_reader.close()
                     return True

@@ -780,7 +780,7 @@ class BackendRPCServerVisitor:
         # speculative decoding does not support num_return_sequences > 1 or num_beams > 1
         if (
             input.generate_config.num_return_sequences > 1
-            or input.generate_config.num_beams > 1
+            or input.generate_config.has_num_beams()
         ):
             raise FtRuntimeException(
                 ExceptionType.UNSUPPORTED_OPERATION,

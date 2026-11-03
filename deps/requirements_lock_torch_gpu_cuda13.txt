@@ -165,6 +165,7 @@ apache-tvm-ffi==0.1.12 \
     --hash=sha256:f69d28a95648c4e864a53f1bfe099b7547dfbc60d520180fc0eb0ec72245151f
     # via
     #   -r deps/requirements_torch_gpu_cuda13.txt
+    #   cuda-linear-attention
     #   flashinfer-python
     #   tilelang
     #   tokenspeed-mla
@@ -236,6 +237,10 @@ av==16.1.0 \
     --hash=sha256:f42e1a68ec2aebd21f7eb6895be69efa6aa27eec1670536876399725bbda4b99 \
     --hash=sha256:f49243b1d27c91cd8c66fdba90a674e344eb8eb917264f36117bf2b6879118fd
     # via -r deps/requirements_base.txt
+backports-strenum==1.3.1 \
+    --hash=sha256:77c52407342898497714f0596e86188bb7084f89063226f4ba66863482f42414 \
+    --hash=sha256:cdcfe36dc897e2615dc793b7d3097f54d359918fc448754a517e6f23044ccf83
+    # via -r deps/requirements_torch_gpu_cuda13.txt
 bitsandbytes==0.46.0 \
     --hash=sha256:010709b56c85b0355f47fefbb37fe9058e8b18b9bf275bd576c5bd95a0d14d0c \
     --hash=sha256:121820a6df80ae3b7e361f7ef193279c3204c361a7e21eb43b5ffa7293403979 \
@@ -561,6 +566,9 @@ cuda-bindings==13.0.3 \
     # via
     #   cuda-python
     #   torch
+cuda-linear-attention @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/cuda_linear_attention/cuda_linear_attention-0.1.dev88+dcce4719.cu132-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:aad30390809c5d4b4e017a779f046e383407c0add52f700b43917e7c5ecdc4d4
+    # via -r deps/requirements_torch_gpu_cuda13.txt
 cuda-pathfinder==1.3.2 \
     --hash=sha256:7bd2774bc6be93aea226d579f415a63803b2b2c062207ed06c1d6dfc9cfacc3c
     # via
@@ -624,6 +632,7 @@ einops==0.8.1 \
     # via
     #   -r deps/requirements_base.txt
     #   flash-attn
+    #   flash-linear-attention
     #   flashinfer-python
 exceptiongroup==1.3.0 \
     --hash=sha256:4d111e6e0c13d0644cad6ddaa7ed0261a0b36971f6d23e7ec9b4b9097da78a10 \
@@ -653,6 +662,11 @@ filelock==3.20.0 \
 flash-attn @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash-attn/flash_attn-2.8.3.post1%2Bcu13torch2.11cxx11abitrue.r1-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:a45ff2133f720c0042971de1f3a1c987176d19b7305e440abeb04c33a813fad0
     # via -r deps/requirements_torch_gpu_cuda13.txt
+flash-linear-attention @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_linear_attention/flash_linear_attention-0.5.0+rtp.3a9ce1c.6-py3-none-any.whl \
+    --hash=sha256:20db1cc279f59abf8f18d20cc9fa575eeb152cf781cc4bff78e5a1d8a77141de
+    # via
+    #   -r deps/requirements_torch_gpu_cuda13.txt
+    #   cuda-linear-attention
 flash-mla @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_mla/flash_mla-1.0.0%2B3ca6856.cu132-cp310-cp310-linux_x86_64.whl#sha256=53dc99022a69667ad20059809db1e91b7b5f8546f95d4d613cea173332deaf58 \
     --hash=sha256:53dc99022a69667ad20059809db1e91b7b5f8546f95d4d613cea173332deaf58
     # via -r deps/requirements_torch_gpu_cuda13.txt
@@ -1946,6 +1960,7 @@ nvidia-cutlass-dsl==4.5.3 \
     --hash=sha256:c14ca121c2a4ce53ca4d5ee5d939e4181b97054b55ea7bb84aa9f99b98960060
     # via
     #   -r deps/requirements_torch_gpu_cuda13.txt
+    #   cuda-linear-attention
     #   flashinfer-python
     #   tokenspeed-mla
 nvidia-cutlass-dsl-libs-base==4.5.3 \
@@ -3552,6 +3567,7 @@ torch @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%
     #   fast-hadamard-transform
     #   fast-safetensors
     #   flash-attn
+    #   flash-linear-attention
     #   flashinfer-python
     #   rtp-kernel
     #   sentence-transformers
@@ -3609,6 +3625,7 @@ transformers==5.2.0 \
     # via
     #   --override deps/requirements_cuda13_overrides.txt
     #   -r deps/requirements_base.txt
+    #   flash-linear-attention
     #   sentence-transformers
     #   xgrammar
 triton==3.6.0 \

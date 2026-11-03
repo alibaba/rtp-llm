@@ -150,6 +150,11 @@ public:
         return is_mtp_eagle_;
     }
 
+    void setCacheLayout(CacheConfig config, const ParallelismConfig& parallelism) {
+        resource_context_.cache_manager =
+            std::make_shared<KVCacheManager>(config, false, nullptr, KVCacheConfig{}, parallelism);
+    }
+
 private:
     bool is_mtp_eagle_;
 };
@@ -214,6 +219,9 @@ public:
         maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded = true;
     }
 
+    void setCacheLayoutForTest(CacheConfig config) {
+        std::static_pointer_cast<TestEngineBase>(engine_)->setCacheLayout(config, maga_init_params_.parallelism_config);
+    }
 };
 
 class PrefillRpcServerTest: public DeviceTestBase {
@@ -1360,11 +1368,52 @@ TEST_F(PrefillRpcServerTest, allocateRequestCarriesKvShardCountWithoutQueryCP) {
 
     TestPrefillRpcServer server;
     server.setPrefillKvShardsForTest(2);
+    auto config                   = test::makeSimpleHybridMhaCacheConfig(4, 8, 64, DataType::TYPE_FP16);
+    config.local_kv_cache_sharded = true;
+    server.setCacheLayoutForTest(config);
     auto alloc_request = server.buildAllocateRequest(*context);
 
     EXPECT_EQ(alloc_request.prefill_cp_size(), 2);
     EXPECT_EQ(alloc_request.prefill_tp_size(), 2);
     EXPECT_EQ(alloc_request.peer_addrs_size(), 2);
+}
+
+TEST_F(PrefillRpcServerTest, allocateRequestDoesNotAdvertiseRawShardingWithoutPhysicalLayout) {
+    for (const bool hybrid : {false, true}) {
+        SCOPED_TRACE(hybrid);
+        GenerateInputPB request;
+        request.set_request_id(1);
+        request.add_token_ids(10);
+        auto context                              = makeContext(&request);
+        context->prefill_worker_cache_store_addrs = {"rank0:1", "rank1:1"};
+
+        TestPrefillRpcServer server;
+        server.setPrefillKvShardsForTest(2);
+        auto config = hybrid ? test::makeSimpleHybridMhaCacheConfig(4, 8, 64, DataType::TYPE_FP16) :
+                               test::makeSimpleMhaCacheConfig(1, 8, 64, DataType::TYPE_FP16);
+        ASSERT_FALSE(config.local_kv_cache_sharded);
+        server.setCacheLayoutForTest(config);
+
+        const auto alloc_request = server.buildAllocateRequest(*context);
+        EXPECT_EQ(alloc_request.prefill_cp_size(), 0);
+        EXPECT_EQ(alloc_request.prefill_tp_size(), 2);
+        EXPECT_EQ(alloc_request.peer_addrs_size(), 2);
+    }
+}
+
+TEST_F(PrefillRpcServerTest, allocateRequestRequiresAllPhysicalShardPeers) {
+    GenerateInputPB request;
+    request.set_request_id(1);
+    auto context                              = makeContext(&request);
+    context->prefill_worker_cache_store_addrs = {"rank0:1"};
+
+    TestPrefillRpcServer server;
+    server.setPrefillKvShardsForTest(2);
+    auto config                   = test::makeSimpleMhaCacheConfig(1, 8, 64, DataType::TYPE_FP16);
+    config.local_kv_cache_sharded = true;
+    server.setCacheLayoutForTest(config);
+
+    EXPECT_THROW(server.buildAllocateRequest(*context), std::exception);
 }
 
 TEST_F(PrefillRpcServerTest, allocateRequestWithTpOneShardingKeepsLegacyPeerContract) {

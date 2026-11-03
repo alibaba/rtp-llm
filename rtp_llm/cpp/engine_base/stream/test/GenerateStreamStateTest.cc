@@ -168,6 +168,70 @@ TEST_F(GenerateStreamStateTest, testMallocRetryMetricsIndependentOfTerminalOutco
     }
 }
 
+TEST_F(GenerateStreamStateTest, RetryableDecodeInitWaitsAndRemainsCancellable) {
+    for (const auto error : {ErrorCode::CANCELLED, ErrorCode::GENERATE_TIMEOUT}) {
+        auto stream    = createStream({1, 2, 3}, false, RoleType::DECODE);
+        auto allocator = installRetryableInitMalloc();
+        stream->reportEvent(StreamEvents::CanRun);
+        EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
+        EXPECT_FALSE(stream->hasError());
+        EXPECT_FALSE(stream->hasEvent(StreamEvents::LoadInitiated));
+        stream->reportError(error, "stop waiting for resources");
+        EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+        EXPECT_EQ(stream->generate_status_->error_info.code(), error);
+        EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
+    }
+}
+
+TEST_F(GenerateStreamStateTest, ReplaySlotShortageWaitsDuringInitWaitingIncrAndRunningIncr) {
+    for (const int phase : {0, 1, 2}) {
+        const bool load_initiated = phase != 0;
+        auto       stream         = createStream({1, 2, 3, 4}, false, RoleType::DECODE);
+        auto       config         = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
+        config.linear_replay = LinearReplayPlan::create({static_cast<int>(config.topology().groupIdForTag("linear"))},
+                                                        1,
+                                                        4,
+                                                        {1, 1},
+                                                        {1, 1},
+                                                        false,
+                                                        DataType::TYPE_FP16,
+                                                        1);
+        cache_manager_       = std::make_shared<KVCacheManager>(config, false, nullptr);
+        ASSERT_TRUE(cache_manager_->init());
+        auto& resource                           = stream->streamCacheResource();
+        resource.resource_context_.cache_manager = cache_manager_;
+        resource.init(1);
+        stream->setIsContextStream(false);
+        stream->reportEvent(StreamEvents::CanRun);
+        if (load_initiated) {
+            // PD allocates KV while still a context stream, then publishes LoadInitiated.
+            stream->setIsContextStream(true);
+            ASSERT_TRUE(resource.initKVBlock().ok());
+            stream->reportEvent(StreamEvents::LoadInitiated);
+            stream->setIsContextStream(false);
+            if (phase == 2) {
+                stream->generate_status_->status = StreamState::RUNNING;
+            }
+        }
+        auto held = cache_manager_->acquireLinearReplaySlot();
+        ASSERT_NE(held, nullptr);
+        const auto generation = held->generation;
+        EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
+        EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
+        EXPECT_FALSE(stream->hasError());
+        EXPECT_FALSE(resource.isResourceReleased());
+        EXPECT_TRUE(resource.waitingForLinearReplaySlot());
+        held.reset();
+        if (!load_initiated) {
+            // DECODE leaves the first successful init in WAITING until enqueue/load completion.
+            EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
+        }
+        EXPECT_EQ(stream->moveToNext(), StreamState::RUNNING);
+        ASSERT_NE(resource.linearReplayLease(), nullptr);
+        EXPECT_GT(resource.linearReplayLease()->generation, generation);
+    }
+}
+
 TEST_F(GenerateStreamStateTest, testDirectStateManipulation) {
     auto stream = createStream();
     // WAITING -> LOADING_CACHE via direct manipulation

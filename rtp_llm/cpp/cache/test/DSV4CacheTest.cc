@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/LinearCacheManager.h"
 #include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -486,7 +487,7 @@ TEST(CacheConfigCreatorTest, LinearReplayAndDecodePoolAreDisabledByDefault) {
     speculative.gen_num_per_cycle = 3;
 
     EXPECT_FALSE(runtime.enable_linear_replay);
-    CacheConfigCreator::configureDecodeLinearPool(config, parallelism, runtime);
+    CacheConfigCreator::configureDecodeLinearPool(config, parallelism, runtime, KVCacheConfig{});
     CacheConfigCreator::configureLinearReplay(config, model, parallelism, runtime, speculative, true);
 
     EXPECT_EQ(config.group("linear").policy.explicit_block_num, original_policy.explicit_block_num);
@@ -497,7 +498,7 @@ TEST(CacheConfigCreatorTest, LinearReplayAndDecodePoolAreDisabledByDefault) {
     EXPECT_EQ(config.linear_replay.reserve_bytes, 0u);
 }
 
-TEST(CacheConfigCreatorTest, DecodeLinearPoolUsesConcurrencyForEveryDeviceLinearGroup) {
+TEST(CacheConfigCreatorTest, DecodeLinearPoolUsesConcurrencyForReplayTailOnlyGroups) {
     auto linear = makeTestGroup(std::make_shared<LinearKVCacheSpec>("linear_a", 16, 16, 1),
                                 CacheGroupType::LINEAR,
                                 {0});
@@ -517,7 +518,10 @@ TEST(CacheConfigCreatorTest, DecodeLinearPoolUsesConcurrencyForEveryDeviceLinear
     RuntimeConfig runtime;
     runtime.enable_linear_replay    = true;
     runtime.max_generate_batch_size = 7;
-    CacheConfigCreator::configureDecodeLinearPool(config, parallelism, runtime);
+    config.linear_replay.group_ids  = {static_cast<int>(config.topology().groupIdForTag("linear_a"))};
+    KVCacheConfig kv_cache;
+    kv_cache.reuse_cache = false;
+    CacheConfigCreator::configureDecodeLinearPool(config, parallelism, runtime, kv_cache);
     EXPECT_EQ(config.group("linear_a").policy.explicit_block_num, 22u);  // 2 * (7 + 4)
     EXPECT_TRUE(config.group("linear_a").policy.charge_to_paged_budget);
     EXPECT_EQ(config.group("linear_b").policy.explicit_block_num, 19u);
@@ -525,8 +529,43 @@ TEST(CacheConfigCreatorTest, DecodeLinearPoolUsesConcurrencyForEveryDeviceLinear
 
     parallelism.role_type = RoleType::PREFILL;
     runtime.max_generate_batch_size = 15;
-    CacheConfigCreator::configureDecodeLinearPool(config, parallelism, runtime);
+    CacheConfigCreator::configureDecodeLinearPool(config, parallelism, runtime, KVCacheConfig{});
     EXPECT_EQ(config.group("linear_a").policy.explicit_block_num, 22u);
+}
+
+TEST(CacheConfigCreatorTest, DecodeLinearPoolPreservesCheckpointCapacityAndRequiresResolvedReplay) {
+    for (const int step : {1, 5, 15}) {
+        for (const bool reuse : {false, true}) {
+            for (const bool replay : {false, true}) {
+                auto linear = makeTestGroup(
+                    std::make_shared<LinearKVCacheSpec>("linear", 16, 16, 1), CacheGroupType::LINEAR, {0});
+                CacheConfig config;
+                config.layer_num   = 1;
+                config.linear_step = step;
+                config.setTopology({linear}, {{0, {"linear"}}});
+                if (replay) {
+                    config.linear_replay.group_ids = {0};
+                }
+                ParallelismConfig parallelism;
+                parallelism.role_type = RoleType::DECODE;
+                RuntimeConfig runtime;
+                runtime.enable_linear_replay    = true;
+                runtime.max_generate_batch_size = 1;
+                KVCacheConfig kv_cache;
+                kv_cache.reuse_cache = reuse;
+                CacheConfigCreator::configureDecodeLinearPool(config, parallelism, runtime, kv_cache);
+                EXPECT_EQ(config.group("linear").policy.explicit_block_num, replay && !reuse ? 10u : 0u);
+                config.finalizeBlockNums(256, runtime);
+                // Exercise the same physical checkpoint demand used by first malloc.
+                // At step=15 this prompt still needs twelve checkpoints, beyond the
+                // nine usable blocks in the old fixed pool (one block is null).
+                LinearCacheManager manager(config.group("linear"), nullptr, 0, step);
+                const auto         need = manager.getNeedBlocks(2880, 2880, 0, 0, reuse);
+                EXPECT_LE(need.common_blocks + need.extra_blocks,
+                          static_cast<int>(config.group("linear").block_num) - 1);
+            }
+        }
+    }
 }
 
 TEST(CacheConfigCreatorTest, ReplaySelectsTargetLinearGroupsAndReservesLogMemory) {

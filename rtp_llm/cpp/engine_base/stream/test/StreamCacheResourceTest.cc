@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/mock/MockCoordinatorCacheManager.h"
@@ -34,6 +35,7 @@
 #include <condition_variable>
 #include <functional>
 #include <memory>
+#include <numeric>
 #include <limits>
 #include <thread>
 
@@ -449,6 +451,150 @@ TEST_F(StreamCacheResourceTest, CancelledReplayRoundRetainsLeaseUntilBookkeeping
     auto replacement = cache_manager_->acquireLinearReplaySlot();
     ASSERT_NE(replacement, nullptr);
     EXPECT_GT(replacement->generation, generation);
+}
+
+TEST_F(StreamCacheResourceTest, ReplayFirstMallocPreservesLongPromptCheckpointsWhenReuseIsEnabled) {
+    auto config          = test::makeSimpleHybridMhaCacheConfig(4, 128, 2, DataType::TYPE_FP16, 2);
+    config.linear_step   = 5;
+    config.linear_replay = LinearReplayPlan::create({static_cast<int>(config.topology().groupIdForTag("linear"))},
+                                                    1,
+                                                    4,
+                                                    {1, 1},
+                                                    {1, 1},
+                                                    false,
+                                                    DataType::TYPE_FP16,
+                                                    1);
+    ParallelismConfig parallelism;
+    parallelism.role_type = RoleType::DECODE;
+    RuntimeConfig runtime;
+    runtime.enable_linear_replay    = true;
+    runtime.max_generate_batch_size = 1;
+    KVCacheConfig kv_cache;
+    kv_cache.reuse_cache = true;
+    CacheConfigCreator::configureDecodeLinearPool(config, parallelism, runtime, kv_cache);
+    config.finalizeBlockNums(128, runtime);
+    std::vector<int> prompt(120);
+    std::iota(prompt.begin(), prompt.end(), 1);
+    prepareResourceWithCacheConfig(config, prompt, true, RoleType::DECODE, kv_cache);
+    // 60 logical LINEAR pages retain at least 12 checkpoints at step=5,
+    // exceeding the old fixed ten-block pool before replay is even prepared.
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    const auto& ids = resource.kvCache().blocks(0, "linear");
+    EXPECT_GT(std::count_if(ids.begin(), ids.end(), [](int block) { return block > 0; }), 10);
+    stream_->generate_status_->status = StreamState::FINISHED;
+    resource.releaseResource();
+
+    auto input             = std::make_shared<GenerateInput>();
+    input->input_ids       = torch::tensor(std::vector<int32_t>(prompt.begin(), prompt.end()), torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->generate_config->reuse_cache = true;
+    ModelConfig model;
+    model.max_seq_len                  = 2048;
+    model.attn_config.tokens_per_block = 2;
+    auto reused =
+        std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, resource.resourceContext(), nullptr);
+    ASSERT_TRUE(reused->streamCacheResource().initKVBlock().ok());
+    ASSERT_TRUE(reused->streamCacheResource().waitForAllocatorLoad().ok());
+    EXPECT_GT(reused->reuseLength(), 0);
+}
+
+TEST_F(StreamCacheResourceTest, ReplaySlotShortageRetriesWithoutRemallocatingOrLosingReuse) {
+    auto config          = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
+    config.linear_replay = LinearReplayPlan::create({static_cast<int>(config.topology().groupIdForTag("linear"))},
+                                                    1,
+                                                    4,
+                                                    {1, 1},
+                                                    {1, 1},
+                                                    false,
+                                                    DataType::TYPE_FP16,
+                                                    1);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, false, RoleType::DECODE);
+    auto held = cache_manager_->acquireLinearReplaySlot();
+    ASSERT_NE(held, nullptr);
+    const auto generation = held->generation;
+    stream_->setIsContextStream(false);
+    auto& resource = stream_->streamCacheResource();
+
+    EXPECT_TRUE(absl::IsUnavailable(resource.initKVBlock()));
+    EXPECT_TRUE(resource.waitingForLinearReplaySlot());
+    const auto blocks = resource.kvCache().blocks(0, "linear");
+    ASSERT_GT(resource.curBlocksNum(), 0);
+    stream_->setReuseLength(2);
+    stream_->setInitialReuseLength(2);
+    EXPECT_TRUE(absl::IsUnavailable(resource.initKVBlock()));
+    EXPECT_EQ(resource.kvCache().blocks(0, "linear"), blocks);
+    EXPECT_EQ(stream_->reuseLength(), 2);
+    EXPECT_EQ(stream_->initialReuseLength(), 2);
+
+    held.reset();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    EXPECT_FALSE(resource.waitingForLinearReplaySlot());
+    ASSERT_NE(resource.linearReplayLease(), nullptr);
+    EXPECT_GT(resource.linearReplayLease()->generation, generation);
+    EXPECT_EQ(stream_->reuseLength(), 2);
+    EXPECT_EQ(stream_->initialReuseLength(), 2);
+}
+
+TEST_F(StreamCacheResourceTest, CancelledReplayBatchBackpressuresReplacementsUntilBookkeepingReleasesLeases) {
+    auto config          = test::makeSimpleHybridMhaCacheConfig(4, 32, 2, DataType::TYPE_FP16, 2);
+    config.linear_replay = LinearReplayPlan::create({static_cast<int>(config.topology().groupIdForTag("linear"))},
+                                                    2,
+                                                    4,
+                                                    {1, 1},
+                                                    {1, 1},
+                                                    false,
+                                                    DataType::TYPE_FP16,
+                                                    1);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, false, RoleType::DECODE);
+    const auto make_stream = [&]() {
+        ModelConfig model;
+        model.max_seq_len                  = 2048;
+        model.attn_config.tokens_per_block = 2;
+        auto input                         = std::make_shared<GenerateInput>();
+        input->input_ids                   = torch::tensor(std::vector<int32_t>{1, 2, 3, 4, 5, 6}, torch::kInt32);
+        input->generate_config             = std::make_shared<GenerateConfig>();
+        return std::make_shared<NormalGenerateStream>(
+            input, model, RuntimeConfig{}, stream_->streamCacheResource().resourceContext(), nullptr);
+    };
+    std::vector<GenerateStreamPtr>     cancelled{stream_, make_stream()};
+    std::vector<GenerateStreamPtr>     replacements;
+    std::vector<int64_t>               generations;
+    std::vector<std::shared_ptr<void>> pending_guards;
+    for (size_t i = 0; i < cancelled.size(); ++i) {
+        const auto& stream = cancelled[i];
+        ASSERT_TRUE(stream->streamCacheResource().initKVBlock().ok());
+        stream->setSeqLength(7);
+        stream->setIsContextStream(false);
+        ASSERT_TRUE(stream->streamCacheResource().incrKVBlock().ok());
+        generations.push_back(stream->streamCacheResource().linearReplayLease()->generation);
+        stream->incPendingAsyncBookkeeping();
+        pending_guards.emplace_back(nullptr, [stream](void*) { stream->decPendingAsyncBookkeepingAndMaybeRelease(); });
+        stream->reportError(i == 0 ? ErrorCode::CANCELLED : ErrorCode::GENERATE_TIMEOUT, "stop full replay batch");
+        EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+        EXPECT_FALSE(stream->streamCacheResource().isResourceReleased());
+    }
+    for (size_t i = 0; i < cancelled.size(); ++i) {
+        auto replacement = make_stream();
+        replacement->setIsContextStream(false);
+        auto& resource = replacement->streamCacheResource();
+        EXPECT_TRUE(absl::IsUnavailable(resource.initKVBlock()));
+        EXPECT_TRUE(absl::IsUnavailable(resource.initKVBlock()));
+        EXPECT_FALSE(replacement->hasError());
+        EXPECT_GT(resource.curBlocksNum(), 0);
+        replacements.push_back(std::move(replacement));
+    }
+    for (size_t i = 0; i < cancelled.size(); ++i) {
+        pending_guards[i].reset();
+        EXPECT_TRUE(cancelled[i]->streamCacheResource().isResourceReleased());
+        auto& resource = replacements[i]->streamCacheResource();
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        ASSERT_NE(resource.linearReplayLease(), nullptr);
+        EXPECT_GT(resource.linearReplayLease()->generation, generations[i]);
+        if (i + 1 < replacements.size()) {
+            EXPECT_TRUE(absl::IsUnavailable(replacements[i + 1]->streamCacheResource().initKVBlock()));
+        }
+    }
 }
 
 TEST_F(StreamCacheResourceTest, PendingReplayBookkeepingRetainsFutureDestinationPages) {

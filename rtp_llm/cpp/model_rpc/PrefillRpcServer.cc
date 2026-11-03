@@ -1,6 +1,7 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include <exception>
 #include "autil/Scope.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -418,17 +419,17 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
     }
     alloc_request.set_prefill_tp_size(
         static_cast<int32_t>(maga_init_params_.parallelism_config.get_attn_tp_size()));
-    // KV page sharding is independent of whether queries use Prefill CP.
-    // Decode needs the physical source shard count to pull every cache page.
-    if (maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded
-        && maga_init_params_.parallelism_config.tp_size > 1) {
-        const auto tp_size = maga_init_params_.parallelism_config.tp_size;
-        RTP_LLM_CHECK_WITH_INFO(alloc_request.peer_addrs_size() == tp_size,
+    // Advertise the resolved physical layout, which may be independent of Query CP.
+    // A raw sharding flag alone does not mean that this cache owns PageRR shards.
+    const auto cp_mapper = engine_->resourceContext().cache_manager->cpSlotMapper();
+    if (cp_mapper && cp_mapper->isSharded()) {
+        const auto shard_count = cp_mapper->cpSize();
+        RTP_LLM_CHECK_WITH_INFO(alloc_request.peer_addrs_size() == shard_count,
                                 "sharded Prefill KV requires one rank-ordered cache-store peer per TP rank, "
-                                "got peers=%d TP=%ld",
+                                "got peers=%d shards=%d",
                                 alloc_request.peer_addrs_size(),
-                                tp_size);
-        alloc_request.set_prefill_cp_size(static_cast<int32_t>(tp_size));
+                                shard_count);
+        alloc_request.set_prefill_cp_size(static_cast<int32_t>(shard_count));
     }
     return alloc_request;
 }

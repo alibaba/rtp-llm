@@ -562,9 +562,18 @@ struct Scenario {
     bool                             increment_request_ids_each_forward{false};
 };
 
-Scenario makeMultiTagScenario() {
+Scenario makeMultiTagScenario(bool linear_prefill = false) {
     // Payload rows deliberately differ from topology order.
     auto config = makeCacheConfig({{"linear", 1, 24}, {"full", 2, 16}});
+    if (linear_prefill) {
+        auto groups = config.topology().groups();
+        for (auto& group : groups) {
+            if (group.tag == "linear") {
+                group.policy.group_type = CacheGroupType::LINEAR;
+            }
+        }
+        config.setTopology(std::move(groups), config.topology().layers());
+    }
     auto layout = makeLayout(config);
     auto inputs = makeInputs(/*input_lengths=*/{4},
                              /*request_ids=*/{101},
@@ -820,8 +829,15 @@ Scenario makeScenario(const std::string& name) {
         }
         return scenario;
     }
-    if (name == "multi_tag") {
-        return makeMultiTagScenario();
+    if (name == "multi_tag" || name == "linear_device_input_prefill" || name == "linear_host_input_prefill") {
+        auto scenario = makeMultiTagScenario(name != "multi_tag");
+        if (name == "linear_device_input_prefill") {
+            scenario.inputs.input_lengths            = scenario.inputs.input_lengths.cuda();
+            scenario.inputs.prefix_lengths           = scenario.inputs.prefix_lengths.cuda();
+            scenario.inputs.kv_cache_block_id        = scenario.inputs.kv_cache_block_id.cuda();
+            scenario.inputs.kv_cache_kernel_block_id = scenario.inputs.kv_cache_kernel_block_id.cuda();
+        }
+        return scenario;
     }
     if (name == "micro_batch") {
         return makeMicroBatchScenario();

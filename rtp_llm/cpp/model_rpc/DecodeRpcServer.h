@@ -128,6 +128,7 @@ private:
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
     static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);
     bool hasLinearCacheTransfer() const;
+    ErrorInfo validateLinearCacheTransferPartitions(const std::map<std::string, AsymmetricTPContext>& partitions) const;
     static std::map<std::string, AsymmetricTPContext>
     prefillPeerPartitions(const std::vector<std::string>& peer_addrs,
                           int attention_tp,

@@ -64,10 +64,7 @@ void GenerateStateMachine::handleWaiting() {
         }
         auto result = stream_cache_resource_->initKVBlock();
         if (!result.ok()) {
-            const auto role_type              = stream_cache_resource_->resourceContext().role_type;
-            const bool retryable_prefill_init = (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL)
-                                                && stream_cache_resource_->isContextStream();
-            if (absl::IsUnavailable(result) && retryable_prefill_init) {
+            if (absl::IsUnavailable(result)) {
                 stream_cache_resource_->reportMallocRetry();
                 return;
             }
@@ -107,6 +104,10 @@ void GenerateStateMachine::handleWaiting() {
     // cache block tables aligned with the growing sequence length.
     auto result = stream_cache_resource_->incrKVBlock();
     if (!result.ok()) {
+        if (absl::IsUnavailable(result)) {
+            stream_cache_resource_->reportMallocRetry();
+            return;
+        }
         error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
         status.store(StreamState::FINISHED, std::memory_order_release);
         releaseResource();
@@ -194,6 +195,11 @@ void GenerateStateMachine::handleRunning() {
     }
     auto result = stream_cache_resource_->incrKVBlock(seq_len_override);
     if (!result.ok()) {
+        if (absl::IsUnavailable(result)) {
+            stream_cache_resource_->reportMallocRetry();
+            status.store(StreamState::WAITING, std::memory_order_release);
+            return;
+        }
         // Report Error event so moveToNext() won't be called again on this stream
         reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "incrKVBlock failed: LACK MEM");
         status.store(StreamState::FINISHED, std::memory_order_release);

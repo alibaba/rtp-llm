@@ -1864,6 +1864,57 @@ TEST_F(GenerateStreamTest, testMultimodalContextPrefillWindows) {
     }
 }
 
+TEST_F(GenerateStreamTest, testMultimodalContextsKeepDiagnosticChunkingValidation) {
+    struct DiagnosticCase {
+        const char*            reason;
+        ChunkedInputConfigurer configure;
+    };
+    const DiagnosticCase cases[] = {
+        {"return_logits", [](GenerateInput&, GenerateConfig& config) { config.return_logits = true; }},
+        {"return_prompt_logits", [](GenerateInput&, GenerateConfig& config) { config.return_prompt_logits = true; }},
+        {"calculate_loss", [](GenerateInput&, GenerateConfig& config) { config.calculate_loss = 1; }},
+        {"return_hidden_states", [](GenerateInput&, GenerateConfig& config) { config.return_hidden_states = true; }},
+        {"return_all_hidden_states",
+         [](GenerateInput&, GenerateConfig& config) { config.return_all_hidden_states = true; }},
+        {"custom_output", [](GenerateInput& input, GenerateConfig&) { input.custom_output_token_position = 3; }},
+    };
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION, RoleType::DECODE}) {
+        for (const int length : {7, 8, 9}) {
+            for (const int returns : {1, 2}) {
+                for (const auto& diagnostic : cases) {
+                    SCOPED_TRACE(testing::Message() << "role=" << static_cast<int>(role) << ", length=" << length
+                                                    << ", returns=" << returns << ", diagnostic=" << diagnostic.reason);
+                    auto input                                   = std::make_shared<GenerateInput>();
+                    input->input_ids                             = torch::arange(length, torch::kInt32);
+                    input->generate_config                       = std::make_shared<GenerateConfig>();
+                    input->generate_config->num_return_sequences = returns;
+                    input->multimodal_features                   = std::vector<torch::Tensor>{torch::zeros({2, 4})};
+                    diagnostic.configure(*input, *input->generate_config);
+                    ModelConfig model;
+                    model.max_seq_len = 64;
+                    model.vocab_size  = 64;
+                    for (const int chunk_size : {0, 8}) {
+                        RuntimeConfig runtime;
+                        runtime.fifo_scheduler_config.prefill_chunk_size = chunk_size;
+                        ResourceContext resource;
+                        resource.role_type = role;
+                        auto stream = std::make_shared<NormalGenerateStream>(input, model, runtime, resource, nullptr);
+                        const bool rejected = chunk_size > 0 && role != RoleType::DECODE;
+                        EXPECT_EQ(stream->hasError(), rejected);
+                        EXPECT_FALSE(stream->chunkedPrefillEnabled());
+                        if (rejected) {
+                            EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                            EXPECT_EQ(stream->stopReason(),
+                                      "chunked prefill incompatible: " + std::string(diagnostic.reason));
+                            EXPECT_EQ(stream->curBlocksNum(), 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST_F(GenerateStreamTest, testBidirectionalMultimodalContextRequiresUnchunkedPrefill) {
     for (const int input_length : {7, 9}) {
         auto input                 = std::make_shared<GenerateInput>();
@@ -1880,8 +1931,8 @@ TEST_F(GenerateStreamTest, testBidirectionalMultimodalContextRequiresUnchunkedPr
         resource.role_type = RoleType::PDFUSION;
         auto stream        = std::make_shared<NormalGenerateStream>(input, model, runtime, resource, nullptr);
         EXPECT_FALSE(stream->chunkedPrefillEnabled());
-        EXPECT_EQ(stream->hasError(), input_length > 8);
-        if (input_length > 8) {
+        EXPECT_TRUE(stream->hasError());
+        if (stream->hasError()) {
             EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
             EXPECT_EQ(stream->stopReason(), "chunked prefill incompatible: non_causal_attention");
         }

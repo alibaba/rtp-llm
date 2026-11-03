@@ -67,6 +67,9 @@ public:
     std::shared_ptr<LinearReplayLease>     linearReplayLease() const {
         return linear_replay_.lease;
     }
+    bool waitingForLinearReplaySlot() const {
+        return linear_replay_.waiting_for_slot;
+    }
     std::shared_ptr<LinearReplayBlockHold> holdLinearReplayBlocks();
     void                        fakeInitKVBlock(size_t reserved_blocks = 0);
     int                         tryReleaseKVBlock(size_t nums);
@@ -194,6 +197,7 @@ private:
         std::vector<int32_t>                      initial_block_ids;
         std::shared_ptr<const LinearReplayWindow> window;
         int64_t                                   epoch = 0;
+        bool                                      waiting_for_slot = false;
 
         void clearInitialState() {
             initial_block_ids.clear();

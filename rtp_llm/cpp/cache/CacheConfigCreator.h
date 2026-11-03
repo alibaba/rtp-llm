@@ -43,11 +43,12 @@ public:
                                     bool                                             is_mtp             = false,
                                     bool                                             is_eagle           = false);
 
-    // Bound Decode LINEAR pools by the scheduler concurrency before computing
-    // the remaining paged-cache budget. Explicit group capacities take priority.
+    // Bound replay-only Decode LINEAR tails before computing the remaining
+    // paged-cache budget. Checkpoint-retaining groups keep ordinary capacity.
     static void configureDecodeLinearPool(CacheConfig&             config,
                                           const ParallelismConfig& parallelism_config,
-                                          const RuntimeConfig&     runtime_config);
+                                          const RuntimeConfig&     runtime_config,
+                                          const KVCacheConfig&     kv_cache_config);
     static void configureLinearReplay(CacheConfig&                                      config,
                                       const ModelConfig&                                model_config,
                                       const ParallelismConfig&                          parallelism_config,
