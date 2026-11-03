@@ -983,6 +983,15 @@ TEST_F(FIFOSchedulerTest, testCheckInputLengthIgnoresBatchSizeFanOut) {
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
     {
+        auto empty = makeStream({}, model_config, runtime_config, resource_context);
+        EXPECT_FALSE(scheduler.enqueue(empty).ok());
+        EXPECT_EQ(empty->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+        auto grouped_empty = makeStream({}, model_config, runtime_config, resource_context);
+        EXPECT_FALSE(scheduler.enqueueGroup({grouped_empty}).first.front());
+        EXPECT_EQ(grouped_empty->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    }
+
+    {
         // num_return_sequences fan-out: input_len 7 * batch 20 = 140 > 100, but accepted.
         std::shared_ptr<GenerateInput> query         = make_shared<GenerateInput>();
         query->input_ids                             = torch::tensor({1, 2, 3, 4, 5, 6, 7}, torch::kInt32);
