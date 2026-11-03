@@ -127,13 +127,6 @@ void setGraphCaptureEnabled(bool enabled) {
 #endif
 }
 
-bool isGraphCaptureEnabled() {
-#if USING_ASCEND
-    return g_ascend_graph_capture_enabled;
-#else
-    return false;
-#endif
-}
 
 }  // namespace ascend_graph
 }  // namespace rtp_llm

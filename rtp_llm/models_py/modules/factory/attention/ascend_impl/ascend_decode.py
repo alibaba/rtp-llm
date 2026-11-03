@@ -137,19 +137,17 @@ class AscendDecodeImpl(FMHAImplBase):
         """Called by AscendGraphRunner::prepareInputs() before each replay."""
         self.attn_inputs = attn_inputs
         self.fmha_impl.prepare(attn_inputs)
-        # The capture buffer's sequence_lengths is sized [max_bs]; padded rows
-        # were zeroed by the C++ runner. The FIA graph-task update must carry
-        # exactly as many context lengths as the captured batch size of the
-        # replayed graph instance, otherwise the update is dropped and FIA
-        # keeps the capture-time kvlen.
-        seq = attn_inputs.sequence_lengths
-        valid = int((seq != 0).sum().item()) if seq.numel() else 0
-        valid = max(valid, 1)
+        # The runner always passes the captured graph batch size (the bucket
+        # key). Use it as the authoritative valid-row count: deriving the
+        # count from (sequence_lengths != 0) misclassifies real rows whose
+        # sequence_length is legitimately 0 (batch-decode admission) and
+        # would silently replace their context with the padding value.
+        # Padded request rows contribute ctx = 1 (no-op read of block 0).
         if graph_bs is None:
-            graph_bs = valid
-        seq_lens = seq[:valid]
+            raise RuntimeError("prepare_cuda_graph requires the captured graph batch size")
+        seq = attn_inputs.sequence_lengths
+        seq_lens = seq[:graph_bs]
         ctx_list = (seq_lens.to(torch.int32) + 1).tolist()
-        # pad rows up to the captured graph batch size (ctx=1 is a no-op read)
         ctx_list = ctx_list[:graph_bs] + [1] * max(0, graph_bs - len(ctx_list))
         self.fmha_impl.update_graph_fia(ctx_list, graph_bs)
 
@@ -238,6 +236,7 @@ class AscendDecodeAttnOp:
         if getattr(attn_inputs, "is_cuda_graph", False):
             self.block_table = attn_inputs.kv_cache_kernel_block_id_device
             if self.block_table is not None:
+                self.block_table = self.block_table.clamp(min=0)
                 if self.block_table.ndim != 2:
                     self.block_table = self.block_table.reshape(-1, self.block_table.shape[-1])
             seq_plus1 = attn_inputs.sequence_lengths_plus_1_device
@@ -344,14 +343,8 @@ class AscendDecodeAttnOp:
             ev.record(torch.npu.current_stream())
 
     def update_graph_fia(self, ctx_list, batch_size):
-        import os as _os
         handles = self._graph_handles.get(batch_size)
         if not handles:
-            return
-        if _os.environ.get("RTP_LLM_SKIP_FIA_UPDATE"):
-            stream = torch.npu.current_stream()
-            for ev in self._graph_events.get(batch_size, []):
-                ev.record(stream)
             return
         events = self._graph_events.get(batch_size, [])
         if AscendDecodeAttnOp._shared_update_stream is None:

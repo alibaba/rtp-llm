@@ -1,15 +1,23 @@
 import torch
-import torch_npu
+
+try:
+    import torch_npu
+except ImportError:  # allow import on non-Ascend hosts (e.g. CPU-only CI tests)
+    torch_npu = None
 
 from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_rope import apply_rope_pos_ids_nhd
 from rtp_llm.ops import AttentionConfigs, RopeStyle, check_rope_cache, get_rope_cache_once
+
+
+def _npu_available() -> bool:
+    return torch_npu is not None and torch.npu.is_available()
 
 
 def _gen_base_halves_cache(rope_dim: int, rope_theta: float, max_pos: int) -> torch.Tensor:
     """Python-side halves [cos|sin] cache, mirroring C++ genBaseCache
     (non-interleaved). MRoPE reuses the base rotary formula: the three-axis
     positions index into this cache per frequency slot."""
-    device = torch.device("npu") if torch.npu.is_available() else torch.device("cpu")
+    device = torch.device("npu") if _npu_available() else torch.device("cpu")
     inv_freq = 1.0 / (
         rope_theta
         ** (torch.arange(0, rope_dim, 2, device=device, dtype=torch.float32) / rope_dim)
@@ -46,7 +54,7 @@ def mrope_interleaved_axis_of_freq(mrope_section, rotary_pairs: int, device) -> 
     return axes.to(device)
 
 
-def apply_mrope_interleaved(query, key, positions, mrope_section, cos_sin_cache):
+def apply_mrope_interleaved(query, key, positions, mrope_section, cos_sin_cache, axes=None):
     """Interleaved MRoPE (mrope_interleaved=true, Qwen3-VL/Qwen3.5) following
     the repo-wide contract: THW slot-cycling axis assignment (see
     mrope_interleaved_axis_of_freq) and lo/hi half-split pairing within
@@ -56,7 +64,8 @@ def apply_mrope_interleaved(query, key, positions, mrope_section, cos_sin_cache)
     """
     rope_dim = cos_sin_cache.shape[-1]
     half = rope_dim // 2
-    axes = mrope_interleaved_axis_of_freq(mrope_section, half, positions.device)
+    if axes is None:
+        axes = mrope_interleaved_axis_of_freq(mrope_section, half, positions.device)
     pos = positions.long()[:, axes]                      # [T, half]
     freq_idx = torch.arange(half, device=pos.device)
     cos = cos_sin_cache[pos, freq_idx].unsqueeze(1)      # [T, 1, half]
@@ -133,6 +142,10 @@ class AscendRotaryEmbeddingOp:
         self.num_heads = attn_config.head_num
         self.num_kv_heads = attn_config.kv_head_num
         self.params = None
+        # Per-device cached axis map: built on first (eager) use, reused
+        # during aclgraph capture/replay so no host->device copy happens
+        # inside the capture region.
+        self._mrope_axes_cache = {}
 
     def set_params(self, params):
         self.params = params
@@ -182,6 +195,8 @@ class AscendRotaryEmbeddingOp:
 
         # Non-interleaved MRoPE: torch_npu.npu_mrope fast path.
         if not self.mrope_interleaved:
+            if torch_npu is None:
+                raise RuntimeError("non-interleaved MRoPE requires torch_npu")
             pos_t = positions.t().to(torch.int64).contiguous()          # (3, T)
             q2 = query.reshape(query.shape[0], -1)
             k2 = key.reshape(key.shape[0], -1)
@@ -199,7 +214,12 @@ class AscendRotaryEmbeddingOp:
         # Interleaved MRoPE (mrope_interleaved=true): repo-wide contract —
         # THW slot-cycling axis assignment + lo/hi half-split pairing, same
         # math as the CUDA/ROCm kernels (see apply_mrope_interleaved).
-        apply_mrope_interleaved(query, key, positions, self.mrope_section, self.cos_sin_cache)
+        axes = self._mrope_axes_cache.get(query.device)
+        if axes is None:
+            axes = mrope_interleaved_axis_of_freq(
+                self.mrope_section, self.cos_sin_cache.shape[-1] // 2, query.device)
+            self._mrope_axes_cache[query.device] = axes
+        apply_mrope_interleaved(query, key, positions, self.mrope_section, self.cos_sin_cache, axes=axes)
 
     def _prepare_warmup_cache_indices(self, num_tokens, device):
         batch_indices = torch.zeros(num_tokens, dtype=torch.int32, device=device)

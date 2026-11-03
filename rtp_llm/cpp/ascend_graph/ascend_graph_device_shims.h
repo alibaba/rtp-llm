@@ -80,9 +80,9 @@ void graphCaptureEnd(c10_npu::NPUGraph& graph);
 void graphReplay(c10_npu::NPUGraph& graph);
 #endif
 
-// In-graph capture flag (used by Python kernels to detect capture mode).
+// Capture-state flag toggled by AscendGraphCaptureGuard. Currently
+// write-only debug state (no readers); kept for on-device debugging.
 void setGraphCaptureEnabled(bool enabled);
-bool isGraphCaptureEnabled();
 
 }  // namespace ascend_graph
 }  // namespace rtp_llm

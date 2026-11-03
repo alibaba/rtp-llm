@@ -122,6 +122,30 @@ std::vector<int> AscendGraphRunner::getDecodeBatchSizesToCapture() {
         RTP_LLM_LOG_INFO("Using decode capture batch sizes from Python: %zu sizes",
                          decode_capture_batch_sizes_.size());
         std::sort(decode_capture_batch_sizes_.begin(), decode_capture_batch_sizes_.end());
+        // The capture buffers are sized for max_context_batch_size rows: a
+        // bucket larger than that would be captured with fewer rows than its
+        // nominal key, and the Python-side FIA handle/event registry keys by
+        // the ACTUAL row count — the keys would diverge and every later
+        // update/sanity-replay lookup by the nominal key would miss. Drop
+        // out-of-range buckets (and duplicates) up front and fail fast if
+        // nothing remains.
+        decode_capture_batch_sizes_.erase(
+            std::remove_if(decode_capture_batch_sizes_.begin(), decode_capture_batch_sizes_.end(),
+                           [this](int bs) {
+                               if (bs > max_bs_) {
+                                   RTP_LLM_LOG_WARNING("Ascend graph: capture bucket %d exceeds max_context_batch_size %d, dropping it.",
+                                                       bs, max_bs_);
+                                   return true;
+                               }
+                               return false;
+                           }),
+            decode_capture_batch_sizes_.end());
+        decode_capture_batch_sizes_.erase(
+            std::unique(decode_capture_batch_sizes_.begin(), decode_capture_batch_sizes_.end()),
+            decode_capture_batch_sizes_.end());
+        RTP_LLM_CHECK_WITH_INFO(!decode_capture_batch_sizes_.empty(),
+                                "AscendGraphRunner: no valid decode capture batch sizes remain after filtering against max_context_batch_size=%d",
+                                max_bs_);
         return decode_capture_batch_sizes_;
     }
 
