@@ -1188,6 +1188,39 @@ TEST_F(MtpExecutorTest, LinearReplayAdmissionSkipsTerminalRequests) {
     ASSERT_TRUE(components.executor->process({cancelled, finished}).ok());
 }
 
+TEST_F(MtpExecutorTest, CancelledDpBatchRefillsRequiredAlignmentPhases) {
+    for (const auto role : {RoleType::PREFILL, RoleType::DECODE, RoleType::PDFUSION}) {
+        MtpExecutorTestConfig config;
+        config.role_type                                 = role;
+        auto components                                  = createMtpExecutorComponents(config);
+        components.executor->parallelism_config_.dp_size = 2;
+        auto cancelled                                   = createContextStream(
+            components.model_config, components.runtime_config, components.resource_context, {0, 1}, 1);
+        cancelled->reportError(ErrorCode::CANCELLED, "cancel after engine fake fill");
+        cancelled->releaseResource();
+        std::list<GenerateStreamPtr> prefill;
+        std::list<GenerateStreamPtr> decode;
+        components.executor->prepareStreams({cancelled}, prefill, decode);
+        EXPECT_EQ(prefill.size(), role == RoleType::DECODE ? 0 : 1);
+        EXPECT_EQ(decode.size(), role == RoleType::PREFILL ? 0 : 1);
+        for (const auto& phase : {prefill, decode}) {
+            for (const auto& stream : phase) {
+                EXPECT_NE(stream, cancelled);
+                EXPECT_TRUE(stream->isFakeStream());
+                ASSERT_NE(stream->getSPOutputBuffer(), nullptr);
+                EXPECT_EQ(stream->getSPOutputBuffer()->propose_step, config.gen_num_per_cycle);
+            }
+        }
+        // FFN attention/service ranks already align through their empty path.
+        components.executor->enable_ffn_disaggregate_ = true;
+        prefill.clear();
+        decode.clear();
+        components.executor->prepareStreams({cancelled}, prefill, decode);
+        EXPECT_TRUE(prefill.empty());
+        EXPECT_TRUE(decode.empty());
+    }
+}
+
 TEST_F(MtpExecutorTest, LinearReplayGatherPreservesCancelledBatchRows) {
     auto linear      = test::makeLinearSpec("linear", 16, TYPE_FP16, 1, 1);
     auto full        = test::makeMhaSpec("full", 16, TYPE_FP16, 1, 1);

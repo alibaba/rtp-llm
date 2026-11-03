@@ -764,6 +764,17 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     is_dspark_                  = propose_params->sp_type == SP_TYPE_DSPARK;
     dspark_prefill_commit_only_ = is_dspark_ && role_type_ == RoleType::PREFILL;
 
+    make_dp_alignment_stream_ = [this, model_config = params.model_config_, runtime_config = params.runtime_config](
+                                    bool is_context) {
+        ResourceContext resource_context;
+        resource_context.cache_manager = cache_manager_;
+        resource_context.role_type     = role_type_;
+        return is_context ?
+                   createMinFakePrefillStream(1, model_config, runtime_config, resource_context) :
+                   createMinFakeDecodeStream(
+                       propose_step_, model_config, runtime_config, resource_context, draft_vocab_size_, is_dspark_);
+    };
+
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
 
     if (is_dspark_) {
@@ -2677,6 +2688,35 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
     };
     reject_mixed_execution_modes(prefill_streams);
     reject_mixed_execution_modes(decode_streams);
+
+    // Cancellation/compatibility rejection can empty a phase after the engine
+    // inserted alignment streams. Every DP root must still execute both required
+    // model phases, without reusing a cancelled request's released KV blocks.
+    if (parallelism_config_.dp_size > 1 && !enable_ffn_disaggregate_ && isTpRank0()) {
+        const auto fill_empty_phase = [&](bool is_context, std::list<GenerateStreamPtr>& phase) {
+            if (!phase.empty()) {
+                return;
+            }
+            auto fake = make_dp_alignment_stream_(is_context);
+            fake->setReturnAllProbs(ReturnAllProbsMode::DEFAULT);
+            if (!fake->getSPOutputBuffer()) {
+                auto buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+                buffer->tokens = torch::zeros({1, static_cast<int64_t>(is_dspark_ ? 1 : 2)}, torch::kInt32);
+                fake->setSPOutputBuffer(buffer);
+            }
+            fake->getSPOutputBuffer()->propose_step = propose_step_;
+            if (!is_context) {
+                fake->setScoreLen(propose_step_ + 1);
+            }
+            phase.push_back(std::move(fake));
+        };
+        if (role_type_ == RoleType::PREFILL || role_type_ == RoleType::PDFUSION) {
+            fill_empty_phase(true, prefill_streams);
+        }
+        if (role_type_ == RoleType::DECODE || role_type_ == RoleType::PDFUSION) {
+            fill_empty_phase(false, decode_streams);
+        }
+    }
 }
 
 absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {

@@ -269,6 +269,7 @@ private:
 
     GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role);
 
+    std::function<GenerateStreamPtr(bool)>                                   make_dp_alignment_stream_;
     std::unique_ptr<ModelBase>                                               model_;
     std::unique_ptr<Sampler>                                                 sampler_;
     std::unique_ptr<MtpBatchStreamProcessor>                                 batch_stream_processor_;
