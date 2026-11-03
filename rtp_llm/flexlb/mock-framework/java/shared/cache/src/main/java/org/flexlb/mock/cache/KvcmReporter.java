@@ -8,6 +8,7 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.LongSupplier;
 import static org.flexlb.mock.cache.CacheMetadata.Medium.*;
 
 /** KVCM Meta reporting only. Cache locks enqueue immutable changes; snapshots and heartbeats never block mutation reports. */
@@ -42,6 +43,9 @@ public final class KvcmReporter implements AutoCloseable {
     private final Configuration config;
     private final Identity identity;
     private final KvCache cache;
+    private final LongSupplier ackClock;
+    private long normalAckDeadline;
+    private boolean heartbeatSnapshotHint;
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofMillis(1500)).build();
     private final ScheduledExecutorService worker = Executors.newSingleThreadScheduledExecutor(
         Thread.ofVirtual().name("kvcm-metadata").factory());
@@ -64,6 +68,10 @@ public final class KvcmReporter implements AutoCloseable {
     private volatile String failure = "", heartbeatFailure = "", snapshotFailure = "";
 
     public KvcmReporter(Configuration config, Identity identity, KvCache cache) {
+        this(config, identity, cache, System::nanoTime);
+    }
+    KvcmReporter(Configuration config, Identity identity, KvCache cache, LongSupplier ackClock) {
+        this.ackClock = Objects.requireNonNull(ackClock);
         this.config = Objects.requireNonNull(config); this.identity = Objects.requireNonNull(identity);
         this.cache = Objects.requireNonNull(cache);
         observation = config.events() ? cache.observeMetadata(change -> {
@@ -174,20 +182,25 @@ public final class KvcmReporter implements AutoCloseable {
         if (value.isObject()) return code(value.has("code") ? value.path("code") : value.path("status"));
         return value.asText();
     }
-    private void checkCode(JsonNode value) {
-        String code = code(value);
-        if (Set.of("8", "9", "10", "INSTANCE_NOT_EXIST", "SERVER_NOT_LEADER", "NODE_NOT_REGISTERED").contains(code))
-            registrationRequired.set(true);
-        if (Set.of("14", "SNAPSHOT_REQUIRED").contains(code)) snapshotRequired.set(true);
-        if (!Set.of("1", "OK").contains(code)) throw new IllegalStateException("KVCM rejected metadata: " + code);
-    }
-    private void accepted(JsonNode response, boolean heartbeat) {
-        checkCode(response.path("header").path("status"));
+    private boolean accepted(JsonNode response, boolean heartbeat) {
+        var status = response.path("header").path("status");
+        if (!status.isObject() || !status.has("code")) throw new IllegalStateException("Invalid KVCM status");
         var items = response.has("item_results") ? response.path("item_results") : response.path("itemResults");
         if (!items.isMissingNode() && !items.isArray()) throw new IllegalStateException("Invalid KVCM item results");
-        for (var item : items) checkCode(item);
-        if (response.path("snapshot_required").asBoolean() || response.path("snapshotRequired").asBoolean())
-            snapshotRequired.set(true);
+        var hint = response.has("snapshot_required") ? response.path("snapshot_required") : response.path("snapshotRequired");
+        if (!hint.isMissingNode() && !hint.isBoolean()) throw new IllegalStateException("Invalid KVCM snapshot hint");
+        var codes = new ArrayList<String>();
+        codes.add(code(status));
+        for (var item : items) codes.add(code(item));
+        boolean ok = true, registration = false, snapshot = hint.asBoolean();
+        for (String value : codes) {
+            ok &= Set.of("1", "OK").contains(value);
+            registration |= Set.of("8", "9", "10", "INSTANCE_NOT_EXIST", "SERVER_NOT_LEADER", "NODE_NOT_REGISTERED").contains(value);
+            snapshot |= Set.of("14", "SNAPSHOT_REQUIRED").contains(value);
+        }
+        // Consume all recovery signals before reporting any individual failure.
+        if (registration) { registrationRequired.set(true); normalAckDeadline = 0; }
+        if (!ok) throw new IllegalStateException("KVCM rejected metadata: " + codes);
         if (heartbeat) {
             var extra = response.has("extra_info") ? response.path("extra_info") : response.path("extraInfo");
             if (extra.isTextual()) try {
@@ -196,21 +209,37 @@ public final class KvcmReporter implements AutoCloseable {
                 if (flag != null && flag.isBoolean()) remoteEnabled = flag.booleanValue();
             } catch (java.io.IOException ignored) { /* Advisory control cannot invalidate an event ACK. */ }
         }
+        return snapshot;
     }
-    private void feedback(JsonNode response, boolean heartbeat, long expectedGeneration) {
+    private void feedback(JsonNode response, boolean heartbeat, boolean normalAck, long expectedGeneration) {
         synchronized (registrationLock) {
-            if (generation == expectedGeneration && registered && !registrationRequired.get())
-                accepted(response, heartbeat);
+            if (generation != expectedGeneration || !registered || registrationRequired.get()) return;
+            boolean hint = accepted(response, heartbeat);
+            if (normalAck) {
+                normalAckDeadline = ackClock.getAsLong() + TimeUnit.SECONDS.toNanos(60);
+                if (config.events() && hint && (!heartbeat || !heartbeatSnapshotHint)) snapshotRequired.set(true);
+            }
+            if (heartbeat) heartbeatSnapshotHint = hint;
+        }
+    }
+    private void recoverAfterMissingAck(long expectedGeneration) {
+        synchronized (registrationLock) {
+            if (generation == expectedGeneration && normalAckDeadline != 0
+                    && ackClock.getAsLong() - normalAckDeadline >= 0) {
+                normalAckDeadline = 0;
+                registrationRequired.set(true);
+            }
         }
     }
     private void heartbeat() {
         long current = generation;
         if (closed || !registered || registrationRequired.get()) return;
         try {
-            feedback(post("/api/reportEvent", control("HEARTBEAT")), true, current);
+            feedback(post("/api/reportEvent", control("HEARTBEAT")), true, true, current);
             heartbeatFailure = "";
         } catch (Exception error) {
             heartbeatFailure = error.toString();
+            recoverAfterMissingAck(current);
             if (error instanceof InterruptedException) Thread.currentThread().interrupt();
         }
     }
@@ -225,7 +254,7 @@ public final class KvcmReporter implements AutoCloseable {
             String body = snapshot();
             synchronized (snapshotSendLock) {
                 if (closed || current != generation || !registered || registrationRequired.get()) return;
-                feedback(post(config.endpoint().get(), "/api/reportEvent", body, 30000), false, current);
+                feedback(post(config.endpoint().get(), "/api/reportEvent", body, 30000), false, false, current);
             }
             snapshotFailure = "";
         } catch (Exception error) {
@@ -240,6 +269,8 @@ public final class KvcmReporter implements AutoCloseable {
             if (registrationRequired.getAndSet(false)) {
                 registered = false;
                 generation++;
+                normalAckDeadline = 0;
+                heartbeatSnapshotHint = false;
             }
         }
         if (System.nanoTime() < retryAt) return;
@@ -260,7 +291,7 @@ public final class KvcmReporter implements AutoCloseable {
             if (config.events() && !registrationRequired.get()) {
                 var report = mutations();
                 if (!report.path("events").isEmpty())
-                    feedback(post("/api/reportEvent", report), false, generation);
+                    feedback(post("/api/reportEvent", report), false, true, generation);
             }
             failures = 0; failure = "";
         } catch (Exception error) {

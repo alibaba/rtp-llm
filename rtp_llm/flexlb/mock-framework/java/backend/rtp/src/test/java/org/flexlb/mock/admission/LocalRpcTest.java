@@ -143,8 +143,8 @@ class LocalRpcTest {
                 var bytes = error.getTrailers().get(Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER));
                 assertEquals(602, ErrorDetailsPB.parseFrom(bytes).getErrorCode());
                 var text = metrics(node);
-                assertEquals(1, sample(text, "rtp_llm_requests_started_total", ""));
-                assertEquals(1, sample(text, "rtp_llm_framework_requests_total", "outcome=\"error\""));
+                assertEquals(0, sample(text, "rtp_llm_requests_started_total", ""), "Permanently oversized prompts never enter Scheduler");
+                assertEquals(0, sample(text, "rtp_llm_framework_requests_total", "outcome=\"error\""));
                 assertEquals(0, sample(text, "rtp_llm_cache_lookup_tokens_total", ""));
             } finally { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
         }

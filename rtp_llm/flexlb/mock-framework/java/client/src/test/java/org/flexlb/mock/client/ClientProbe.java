@@ -18,6 +18,9 @@ import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 /** Network fixture for the real production protobuf; this is not the production Master. */
 public final class ClientProbe {
     public static Map<String, Object> exercise(String prefill, String decode) throws Exception {
+        return exercise(prefill, decode, 3);
+    }
+    public static Map<String, Object> exercise(String prefill, String decode, int expectedTokens) throws Exception {
         var p = ManagedChannelBuilder.forTarget(prefill).usePlaintext().build();
         var pRoute = endpoint("PREFILL", prefill); var dRoute = endpoint("DECODE", decode);
         var schedules = new AtomicInteger();
@@ -54,7 +57,7 @@ public final class ClientProbe {
                     .setGenerateInput(input.toByteString()).build();
                 var call = client.send(request, Duration.ofSeconds(3));
                 var result = call.completion().toCompletableFuture().get(4, TimeUnit.SECONDS);
-                if (result.outcome() != NativeClient.Outcome.success || result.outputTokens() != 3 || result.ttftNanos() == null || result.ttftNanos() <= 0)
+                if (result.outcome() != NativeClient.Outcome.success || result.outputTokens() != expectedTokens || result.ttftNanos() == null || result.ttftNanos() <= 0)
                     throw new IllegalStateException("Native Client failed: " + result);
                 results.put(id == 1501 ? "generate" : "fetch", result);
             }
