@@ -206,6 +206,17 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     return reuse_blocks_len;
 }
 
+KVCacheAllocationContext HybridKVCacheAllocator::allocationContext(const MallocInfo& malloc_info, int batch_id) const {
+    KVCacheAllocationContext context;
+    context.input_token_length = malloc_info.input_token_length;
+    if (malloc_info.reuse_cache && malloc_info.batch_kv_cache_resource) {
+        const int reuse_blocks = malloc_info.batch_kv_cache_resource->cacheResource(batch_id).reuseBlockNum();
+        const int cp_scale     = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ? cp_slot_mapper_->cpSize() : 1;
+        context.linear_prefill_read_state_pos = reuse_blocks > 0 ? reuse_blocks * cp_scale - 1 : -1;
+    }
+    return context;
+}
+
 MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
     auto&     kv_resource = malloc_info.batch_kv_cache_resource;
     const int batch_size  = kv_resource->batchSize();
@@ -281,8 +292,8 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                                        config_.group_types[static_cast<size_t>(gid)] :
                                        CacheGroupType::FULL;
         const int  group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, group_type, common_seq_len);
-        if (!kv_cache_groups_[static_cast<size_t>(gid)]->initMalloc(
-                block_ids_0, group_seq_len, malloc_info.reuse_cache)) {
+        if (!kv_cache_groups_[static_cast<size_t>(gid)]->initMallocForRequest(
+                block_ids_0, group_seq_len, malloc_info.reuse_cache, allocationContext(malloc_info, 0))) {
             rollbackInitMalloc(*kv_resource, referenced_blocks, original_sizes);
             return {false, 0};
         }
@@ -322,8 +333,11 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
                                            config_.group_types[static_cast<size_t>(gid)] :
                                            CacheGroupType::FULL;
             const int  group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, group_type, raw_seq_len);
-            if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
-                    block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step)) {
+            if (!kv_cache_groups_[static_cast<size_t>(gid)]->mallocForRequest(block_ids,
+                                                                              group_seq_len,
+                                                                              malloc_info.reuse_cache,
+                                                                              reserve_step,
+                                                                              allocationContext(malloc_info, b))) {
                 all_success  = false;
                 failed_batch = b;
                 failed_group = gid;
@@ -792,8 +806,13 @@ int HybridKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
                                           CacheGroupType::FULL;
         const int  group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, group_type, raw_common_seq_len);
         const int  group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, group_type, raw_seq_len);
-        const auto need             = kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocks(
-            group_common_seq, group_seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
+        const auto need =
+            kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocksForRequest(group_common_seq,
+                                                                                group_seq_len,
+                                                                                reserve_step,
+                                                                                reuse_blocks_len,
+                                                                                reuse_enabled,
+                                                                                allocationContext(malloc_info, 0));
         common_blocks_total += need.common_blocks;
         extra_blocks_total += need.extra_blocks;
     }

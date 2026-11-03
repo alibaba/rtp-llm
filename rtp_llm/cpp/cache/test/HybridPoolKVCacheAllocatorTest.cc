@@ -1975,6 +1975,94 @@ TEST_F(HybridPoolKVCacheAllocatorTest, SharedArenaRegistersOneOwnerWithTransport
     EXPECT_EQ(memory->reg_alignments[0], 0u);
 }
 
+TEST_F(HybridPoolKVCacheAllocatorTest, LegacyReuseCannotPublishUnwrittenHistoryAfterEviction) {
+    for (int cp_size : {1, 2, 4}) {
+        for (int step : {1, 2, 4}) {
+            SCOPED_TRACE(testing::Message() << cp_size << "/" << step);
+            auto config                                  = makeTinyMultiPoolHybridConfig(32, 32);
+            config.enable_linear_attention_request_cache = false;
+            config.linear_step                           = step;
+            auto allocator                               = makeAllocator(config);
+            ASSERT_TRUE(allocator->init());
+            allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, cp_size, 4));
+            auto storage = allocator->groupBlockPools()[0]->allLayerCacheBase()[0];
+            storage.fill_(-11);  // Distinguish unwritten allocations from computed states.
+
+            auto seed        = makeBatchResource(1, config);
+            auto seed_tokens = makeCompleteTokenIds(1, 33, 4);
+            initCacheKeys(seed, seed_tokens, 4);
+            MallocInfo seed_info{seed, seed_tokens};
+            seed_info.input_token_length  = 33;
+            seed_info.reuse_cache         = true;
+            seed_info.enable_device_cache = false;
+            ASSERT_TRUE(allocator->malloc(seed_info).success);
+            for (auto block : seed->blocks(0, 0)) {
+                if (!isNullBlockIdx(block)) {
+                    storage[block].fill_(37);
+                }
+            }
+            allocator->insertIntoCache(InsertInfo{seed, seed_tokens, false, 33});
+            allocator->free(FreeInfo{seed, seed_tokens});
+
+            auto reuse        = makeBatchResource(1, config);
+            auto reuse_tokens = makeCompleteTokenIds(1, 37, 4);
+            initCacheKeys(reuse, reuse_tokens, 4);
+            MallocInfo reuse_info{reuse, reuse_tokens};
+            reuse_info.input_token_length  = 37;
+            reuse_info.reuse_cache         = true;
+            reuse_info.enable_device_cache = true;
+            const auto result              = allocator->malloc(reuse_info);
+            ASSERT_TRUE(result.success);
+            ASSERT_EQ(result.reuse_len, 32);
+            const auto matched_state = reuse->blocks(0, 0)[7];
+            ASSERT_TRUE(storage[matched_state].eq(37).all().item<bool>());
+            for (int pos = 0; pos < 7; ++pos) {
+                EXPECT_TRUE(isNullBlockIdx(reuse->blocks(0, 0)[pos])) << "uncomputed prefix position=" << pos;
+            }
+            // A forward starting at token 32 cannot reconstruct earlier states.
+            for (size_t pos = 8; pos < reuse->blocks(0, 0).size(); ++pos) {
+                const auto block = reuse->blocks(0, 0)[pos];
+                if (!isNullBlockIdx(block)) {
+                    storage[block].fill_(53);
+                }
+            }
+
+            // While the request owns its matched state, pressure removes the
+            // original cached checkpoints. A subsequent insertion must not
+            // replace them with allocations that the forward never wrote.
+            auto shared = allocator->sharedBlockCache();
+            shared->evictAndFree(1024);
+            const auto shorter_key = reuse->cacheKeys(0)[3];
+            ASSERT_TRUE(isNullBlockIdx(shared->matchGroup(shorter_key, 0)));
+            allocator->insertIntoCache(InsertInfo{reuse, reuse_tokens, false, 37});
+            EXPECT_TRUE(isNullBlockIdx(shared->matchGroup(shorter_key, 0)));
+            EXPECT_EQ(shared->matchGroup(reuse->cacheKeys(0)[7], 0), matched_state);
+            allocator->free(FreeInfo{reuse, reuse_tokens});
+
+            auto probe        = makeBatchResource(1, config);
+            auto probe_tokens = makeCompleteTokenIds(1, 17, 4);
+            initCacheKeys(probe, probe_tokens, 4);
+            MallocInfo probe_info{probe, probe_tokens};
+            probe_info.input_token_length  = 17;
+            probe_info.reuse_cache         = true;
+            probe_info.enable_device_cache = true;
+            const auto probe_result        = allocator->malloc(probe_info);
+            ASSERT_TRUE(probe_result.success);
+            EXPECT_EQ(probe_result.reuse_len, 0);
+            if (probe_result.reuse_len > 0) {
+                const auto block = probe->blocks(0, 0)[probe_result.reuse_len / 4 - 1];
+                EXPECT_TRUE(storage[block].eq(37).all().item<bool>());
+            }
+            allocator->free(FreeInfo{probe, probe_tokens});
+            shared->evictAndFree(1024);
+            for (const auto& pool : allocator->groupBlockPools()) {
+                EXPECT_EQ(pool->requestRefBlocksNum(), 0u);
+                EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+            }
+        }
+    }
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 

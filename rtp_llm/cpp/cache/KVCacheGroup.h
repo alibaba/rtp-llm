@@ -22,6 +22,12 @@ struct NeedBlocksInfo {
     int extra_blocks  = 0;  // extra blocks per batch
 };
 
+// LINEAR state positions are logical coordinates, including under CP.
+struct KVCacheAllocationContext {
+    int input_token_length            = -1;
+    int linear_prefill_read_state_pos = -1;
+};
+
 class KVCacheGroup {
 public:
     KVCacheGroup(const LayerIdsType& layer_ids,
@@ -45,6 +51,22 @@ public:
     virtual bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     virtual bool initMalloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false) {
         return malloc(block_ids, seq_len, enable_reuse_cache, 0);
+    }
+    virtual bool mallocForRequest(
+        BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step, const KVCacheAllocationContext&) {
+        return malloc(block_ids, seq_len, enable_reuse_cache, reserve_step);
+    }
+    virtual bool
+    initMallocForRequest(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, const KVCacheAllocationContext&) {
+        return initMalloc(block_ids, seq_len, enable_reuse_cache);
+    }
+    virtual NeedBlocksInfo getNeedBlocksForRequest(int  common_seq_len,
+                                                   int  seq_len,
+                                                   int  reserve_step,
+                                                   int  reuse_blocks_len,
+                                                   bool reuse_enabled,
+                                                   const KVCacheAllocationContext&) const {
+        return getNeedBlocks(common_seq_len, seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
     }
     // TODO, match的时候热度不增加，最终匹配成功的时候再去增加热度。
     virtual MatchResult match(const CacheKeysType& cache_keys)                                                   = 0;

@@ -38,6 +38,7 @@ public:
                                int                            reserve_step) const override;
 
 protected:
+    KVCacheAllocationContext allocationContext(const MallocInfo& malloc_info, int batch_id) const;
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) override;
     int          getNeedBlocks(const MallocInfo& malloc_info) const override;

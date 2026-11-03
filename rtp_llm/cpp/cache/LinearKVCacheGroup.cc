@@ -22,8 +22,17 @@ int LinearKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reser
     return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ + extra_blocks - current_blocks, 0);
 }
 
-bool LinearKVCacheGroup::shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const {
+bool LinearKVCacheGroup::shouldMaterializeBlock(
+    int pos, int seq_len, int reserve_step, bool enable_reuse_cache, const KVCacheAllocationContext& context) const {
     if (pos < 0) {
+        return false;
+    }
+
+    // A reused checkpoint is the first state the forward can read. Earlier
+    // missing states will never be computed, including disk checkpoints. Keep
+    // those holes empty: publishing fresh allocations after eviction would
+    // let a later, shorter request reuse uninitialized history.
+    if (enable_reuse_cache && pos < context.linear_prefill_read_state_pos) {
         return false;
     }
 
@@ -65,6 +74,15 @@ bool LinearKVCacheGroup::shouldMaterializeBlock(int pos, int seq_len, int reserv
 
 NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
     int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
+    return getNeedBlocksForRequest(common_seq_len, seq_len, reserve_step, reuse_blocks_len, reuse_enabled, {});
+}
+
+NeedBlocksInfo LinearKVCacheGroup::getNeedBlocksForRequest(int                             common_seq_len,
+                                                           int                             seq_len,
+                                                           int                             reserve_step,
+                                                           int                             reuse_blocks_len,
+                                                           bool                            reuse_enabled,
+                                                           const KVCacheAllocationContext& context) const {
     NeedBlocksInfo info;
 
     // common_slots: blocks for common_seq_len (no reserve)
@@ -72,8 +90,12 @@ NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
     // total_slots includes reserve_step - 1 extra linear slots when reserve_step is non-zero.
     const int total_slots = needBlocksNum(seq_len, 0, reserve_step);
 
-    auto common_required = [&](int pos) { return shouldMaterializeBlock(pos, common_seq_len, 0, reuse_enabled); };
-    auto final_required  = [&](int pos) { return shouldMaterializeBlock(pos, seq_len, reserve_step, reuse_enabled); };
+    auto common_required = [&](int pos) {
+        return shouldMaterializeBlock(pos, common_seq_len, 0, reuse_enabled, context);
+    };
+    auto final_required = [&](int pos) {
+        return shouldMaterializeBlock(pos, seq_len, reserve_step, reuse_enabled, context);
+    };
 
     if (!request_cache_mode_) {
         for (int pos = 0; pos < common_slots; ++pos) {
@@ -87,7 +109,12 @@ NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
             }
         }
 
-        const int reused_tail_pos = (reuse_enabled && reuse_blocks_len > 0) ? reuse_blocks_len - 1 : -1;
+        // Explicit context uses logical state coordinates even with CP; the
+        // caller's reuse_blocks_len may instead count CP-canonical FULL pages.
+        const int reused_tail_pos = !reuse_enabled                             ? -1 :
+                                    context.linear_prefill_read_state_pos >= 0 ? context.linear_prefill_read_state_pos :
+                                    reuse_blocks_len > 0                       ? reuse_blocks_len - 1 :
+                                                                                 -1;
         if (reused_tail_pos >= 0) {
             if (reused_tail_pos < common_slots && common_required(reused_tail_pos)) {
                 info.common_blocks--;
@@ -113,9 +140,11 @@ NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
         }
     }
 
-    // Linear reuse materializes only one prefix block: the matched tail at
-    // reuse_blocks_len - 1. Do not count that block as newly allocated.
-    const int reused_tail_pos = (reuse_enabled && reuse_blocks_len > 0) ? reuse_blocks_len - 1 : -1;
+    // CP reuse counts are virtual blocks; explicit context carries the actual
+    // global logical state position. Do not charge an already referenced state.
+    const int reused_tail_pos = !reuse_enabled                  ? -1 :
+                                context.input_token_length >= 0 ? context.linear_prefill_read_state_pos :
+                                                                  reuse_blocks_len - 1;
     if (reused_tail_pos >= 0) {
         if (reused_tail_pos < common_slots && common_required(reused_tail_pos)) {
             common_required_blocks--;
@@ -151,12 +180,20 @@ MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
 }
 
 bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
+    return mallocForRequest(block_ids, seq_len, enable_reuse_cache, reserve_step, {});
+}
+
+bool LinearKVCacheGroup::mallocForRequest(BlockIds&                       block_ids,
+                                          int                             seq_len,
+                                          bool                            enable_reuse_cache,
+                                          int                             reserve_step,
+                                          const KVCacheAllocationContext& context) {
     const int current_blocks_len = static_cast<int>(block_ids.blocksNum());
     const int total_slots        = needBlocksNum(seq_len, 0, reserve_step);
     const int new_blocks_len     = std::max(total_slots - current_blocks_len, 0);
 
     auto should_materialize = [&](int pos) {
-        return shouldMaterializeBlock(pos, seq_len, reserve_step, enable_reuse_cache);
+        return shouldMaterializeBlock(pos, seq_len, reserve_step, enable_reuse_cache, context);
     };
 
     // Reclaim states that fell out of the two-block active tail before allocating
