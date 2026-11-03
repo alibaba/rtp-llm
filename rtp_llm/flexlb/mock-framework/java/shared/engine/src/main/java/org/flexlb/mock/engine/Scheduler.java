@@ -65,7 +65,9 @@ public interface Scheduler extends AutoCloseable {
 
     Request input(Input input, Listener listener);
     /** One complete explicit batch; accepted members retain this boundary until policy fallback. */
-    List<InputResult> input(List<InputItem> batch);
+    default List<InputResult> input(List<InputItem> batch) {
+        throw new RequestFailure(RequestFailure.Reason.INVALID, "Explicit groups are not supported by this scheduler");
+    }
     void control(Request request, Control event);
     void transferCompleted(Request request, TransferResult result);
     void finish(Request request, RequestFailure failure);
