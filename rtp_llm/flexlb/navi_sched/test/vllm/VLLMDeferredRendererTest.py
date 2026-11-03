@@ -1,5 +1,5 @@
+import ast
 import builtins
-import importlib.util
 import os
 import unittest
 from pathlib import Path
@@ -7,9 +7,16 @@ from types import SimpleNamespace
 from unittest import mock
 
 source = Path(__file__).resolve().parents[2] / "adapters/vllm/VLLMDeferredRenderer.py"
-spec = importlib.util.spec_from_file_location("deferred_renderer_test_module", source)
-deferred = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(deferred)
+factory = next(
+    node
+    for node in ast.parse(source.read_text()).body
+    if isinstance(node, ast.FunctionDef) and node.name == "create_deferred_renderer"
+)
+namespace = {"os": os}
+exec(
+    compile(ast.Module(body=[factory], type_ignores=[]), str(source), "exec"), namespace
+)
+create_deferred_renderer = namespace["create_deferred_renderer"]
 
 
 class VLLMDeferredRendererTest(unittest.TestCase):
@@ -26,12 +33,12 @@ class VLLMDeferredRendererTest(unittest.TestCase):
             mock.patch.dict(os.environ, {"VLLM_NAVI_SCHED_DEFER_RENDER": "1"}),
             mock.patch("builtins.__import__", side_effect=ppu_import),
         ):
-            self.assertIs(renderer, deferred.create_deferred_renderer(renderer))
+            self.assertIs(renderer, create_deferred_renderer(renderer))
 
     def test_disabled_mode_preserves_renderer_with_media(self):
         renderer = SimpleNamespace(mm_processor=object())
         with mock.patch.dict(os.environ, {"VLLM_NAVI_SCHED_DEFER_RENDER": "0"}):
-            self.assertIs(renderer, deferred.create_deferred_renderer(renderer))
+            self.assertIs(renderer, create_deferred_renderer(renderer))
 
 
 if __name__ == "__main__":
