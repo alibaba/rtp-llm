@@ -11,7 +11,7 @@ import java.util.Comparator;
  * @param deterministicTieBreak stable tie-break (smallest victim request id)
  */
 public record PlanCost(
-        PriorityHarmProfile priorityHarmProfile, int victimCount, long deterministicTieBreak) {
+        PriorityHarmProfile priorityHarmProfile, int victimCount, String deterministicTieBreak) {
 
     /**
      * Plan preference (smaller = better): exact priority harm profile →
@@ -22,5 +22,5 @@ public record PlanCost(
     public static final Comparator<PlanCost> ORDER =
             Comparator.comparing(PlanCost::priorityHarmProfile)
                     .thenComparingInt(PlanCost::victimCount)
-                    .thenComparingLong(PlanCost::deterministicTieBreak);
+                    .thenComparing(PlanCost::deterministicTieBreak);
 }

@@ -13,8 +13,8 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 import java.util.function.BiPredicate;
-import java.util.function.LongPredicate;
 import java.util.function.LongSupplier;
+import java.util.function.Predicate;
 
 /**
  * Semantic owner of request deadlines and lifecycle-retention maintenance.
@@ -471,7 +471,7 @@ final class ExpirationTimer implements AutoCloseable {
     // ── 保留期维护：先清终态目录，再扫描 Endpoint 孤儿 ──
 
     /** Run one complete maintenance pass using one dynamic policy snapshot. */
-    void maintain(BiConsumer<Long, LongPredicate> exactSweeper) {
+    void maintain(BiConsumer<Long, Predicate<String>> exactSweeper) {
         if (lifecycle.isShuttingDown()) {
             return;
         }

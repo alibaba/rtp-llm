@@ -2,7 +2,7 @@ package org.flexlb.sync.schedule;
 
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;

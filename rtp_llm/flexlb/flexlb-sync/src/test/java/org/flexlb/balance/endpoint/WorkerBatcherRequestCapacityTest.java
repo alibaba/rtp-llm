@@ -138,7 +138,7 @@ class WorkerBatcherRequestCapacityTest {
             doAnswer(
                             invocation -> {
                                 List<ScheduledRequest> candidates = invocation.getArgument(0);
-                                if (candidates.getFirst().requestId() == 1L) {
+                                if (candidates.getFirst().requestId().equals("1")) {
                                     DeliveryStrategy.Transaction transaction =
                                             live.prepare(
                                                     candidates,
@@ -224,7 +224,8 @@ class WorkerBatcherRequestCapacityTest {
             ScheduledRequest first = admitted.getFirst();
             assertFalse(
                     fixture.endpoint.removeQueued(
-                            item(config, fixture.endpoint, first.requestId()), "stale identity"));
+                            item(config, fixture.endpoint, Long.parseLong(first.requestId())),
+                            "stale identity"));
             assertFalse(
                     EndpointTestSupport.offer(
                             fixture.endpoint, item(config, fixture.endpoint, 70L)));
@@ -349,7 +350,7 @@ class WorkerBatcherRequestCapacityTest {
     private static ScheduledRequest item(
             FlexlbConfig config, PrefillEndpoint endpoint, long requestId, int priority) {
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         request.setSeqLen(100L);
         BalanceContext context = new BalanceContext(config);
         context.setRequest(request);

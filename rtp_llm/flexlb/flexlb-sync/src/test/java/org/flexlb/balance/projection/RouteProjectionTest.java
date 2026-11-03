@@ -30,7 +30,7 @@ class RouteProjectionTest {
                         13L,
                         List.of(
                                 new WorkSnapshot.RequestWork(
-                                        1L, WorkSnapshot.Phase.ENGINE_RUNNING, 1_000L)),
+                                        "1", WorkSnapshot.Phase.ENGINE_RUNNING, 1_000L)),
                         List.of(),
                         0L);
         WorkSnapshot current =
@@ -38,7 +38,7 @@ class RouteProjectionTest {
                         20L,
                         List.of(
                                 new WorkSnapshot.RequestWork(
-                                        1L, WorkSnapshot.Phase.ENGINE_RUNNING, 993L)),
+                                        "1", WorkSnapshot.Phase.ENGINE_RUNNING, 993L)),
                         List.of(),
                         0L);
         assertEquals(
@@ -136,7 +136,7 @@ class RouteProjectionTest {
         return new QueueSnapshot(
                 capturedAtMs,
                 true,
-                Comparator.comparingLong(GroupPlanner.Item::requestId),
+                Comparator.comparing(GroupPlanner.Item::requestId),
                 new GroupPlanner.Constraints(1, 1_000_000L, 1_000_000L, 0L, 30L),
                 List.of(),
                 null);
@@ -147,7 +147,7 @@ class RouteProjectionTest {
     }
 
     private static RouteProjection.Probe probe() {
-        return new RouteProjection.Probe(99L, 50, 13L, Long.MAX_VALUE, 20L, 0L, 0L);
+        return new RouteProjection.Probe("99", 50, 13L, Long.MAX_VALUE, 20L, 0L, 0L);
     }
 
     private static RouteProjection.DeliveryProjection routeProjection() {
