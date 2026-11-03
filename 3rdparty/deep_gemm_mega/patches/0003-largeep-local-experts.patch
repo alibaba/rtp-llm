@@ -1,0 +1,79 @@
+diff --git a/csrc/jit_kernels/heuristics/mega_moe.hpp b/csrc/jit_kernels/heuristics/mega_moe.hpp
+index 1df7330f99..07bdead457 100644
+--- a/csrc/jit_kernels/heuristics/mega_moe.hpp
++++ b/csrc/jit_kernels/heuristics/mega_moe.hpp
+@@ -87,7 +87,8 @@ static MegaMoEStage1Config get_stage1_config(
+     }
+     // M890P V4 Flash decode (up to 32 local rows, including MTP). Runtime
+     // tuning records remain authoritative; other shapes use the generic path.
+-    if (ranks == 8 && groups == 32 && n == 4096 && k == 2048 && sms == 39 && em <= 9 &&
++    if (ranks == 8 && (groups == 8 || groups == 16 || groups == 32) &&
++        n == 4096 && k == 2048 && sms == 39 && em <= 9 &&
+         !deep_gemm_lut::get_runtime_config(em, n, k * 2, groups,
+             GemmType::MegaMoE, deep_gemm_lut::RuntimeLutKind::FP4)) {
+         config = {sms, 16, 128, 128, 16, 32, 3,
+@@ -117,8 +118,9 @@ static MegaMoEStageConfig get_stage2_config(
+     auto config = make_stage_config(deep_gemm_fp4_common::get_best_configs(
+         shape_m, em, n, k, groups, sms, false, false,
+         GemmType::MegaMoE, 256, 128));
+-    const bool flash_ep8 = ranks == 8 && n == 4096 && k == 1024 && groups == 32;
+-    if (flash_ep8 && sms == 39 && em <= 9 &&
++    const bool flash_local = ranks == 8 && n == 4096 && k == 1024 &&
++        (groups == 8 || groups == 16 || groups == 32);
++    if (flash_local && sms == 39 && em <= 9 &&
+         !deep_gemm_lut::get_runtime_config(em, n, k * 2, groups,
+             GemmType::MegaMoE, deep_gemm_lut::RuntimeLutKind::FP4)) {
+         config = {sms, 32, 128, 128, 32, 64, 2,
+@@ -128,13 +130,13 @@ static MegaMoEStageConfig get_stage2_config(
+     // Flash may use half-warps for N128. Every Flash tile writes linear
+     // storage, preserving one scatter layout across heterogeneous ranks.
+     const int old_bn = config.block_n, old_wn = config.warp_n;
+-    if (config.block_n == 128 && !flash_ep8) config.block_n = 256;
++    if (config.block_n == 128 && !flash_local) config.block_n = 256;
+     config.warp_n = std::max(config.warp_n, 32);
+     if (config.block_n != old_bn || config.warp_n != old_wn)
+         config.smem_bytes = std::get<0>(deep_gemm_fp4_common::get_smem_config_fp4(
+             config.num_stages, config.block_m, config.block_n, config.warp_m, config.warp_n,
+             config.block_k, n, false, false));
+-    DG_HOST_ASSERT(config.block_n == 256 || (flash_ep8 && config.block_n == 128));
++    DG_HOST_ASSERT(config.block_n == 256 || (flash_local && config.block_n == 128));
+     // Scatter needs two accumulator tiles in addition to the mainloop resource contract.
+     config.smem_bytes = std::max(config.smem_bytes, 2 * (config.block_m / config.warp_m) *
+                                 16 * config.block_n * static_cast<int>(sizeof(float)));
+diff --git a/csrc/jit_kernels/impls/sm89_fp4_fp4_mega_moe.hpp b/csrc/jit_kernels/impls/sm89_fp4_fp4_mega_moe.hpp
+index 7d3ceef40c..92c7facb60 100644
+--- a/csrc/jit_kernels/impls/sm89_fp4_fp4_mega_moe.hpp
++++ b/csrc/jit_kernels/impls/sm89_fp4_fp4_mega_moe.hpp
+@@ -455,5 +455,7 @@ static void fp4_fp4_mega_moe_impl(
+     if (!fuse_reduce)
+         reduce(views.scatter_buffer, views.topk_idx, views.topk_weights, y, num_tokens, num_max_tokens_per_rank,
+                num_experts_per_rank, rank_idx,
+-               !(num_ranks == 8 && hidden == 4096 && num_experts_per_rank == 32 && l2_weights.size(2) == 1024));
++               !(num_ranks == 8 && hidden == 4096 &&
++                 (num_experts_per_rank == 8 || num_experts_per_rank == 16 || num_experts_per_rank == 32) &&
++                 l2_weights.size(2) == 1024));
+ }
+diff --git a/deep_gemm/include/deep_gemm/impls/mega_moe.cuh b/deep_gemm/include/deep_gemm/impls/mega_moe.cuh
+index ffb76c1135..1cc9e9daae 100644
+--- a/deep_gemm/include/deep_gemm/impls/mega_moe.cuh
++++ b/deep_gemm/include/deep_gemm/impls/mega_moe.cuh
+@@ -46,7 +46,8 @@ struct MegaMoEFp4Kernel {
+         typename OperandSFB::GmemTiledCopy, typename OperandSFB::SmemLayoutAtom,
+         FP4DynamicTileId::Disabled,
+         kIsLinear1 ? DispatchBufferLayout::k_scale_blocks_for_hidden(K * 2) : 0,
+-        kIsLinear1 && Ranks == 8 && N == 4096 && K == 2048 && Groups == 32>;
++        kIsLinear1 && Ranks == 8 && N == 4096 && K == 2048 &&
++            (Groups == 8 || Groups == 16 || Groups == 32)>;
+     using ActivationEpilogue = cutlass::epilogue::collective::EpilogueSiluAndMulPostQuant<
+         StrideCD, StrideCD,
+         cutlass::epilogue::thread::LinearCombination<
+@@ -58,7 +59,8 @@ struct MegaMoEFp4Kernel {
+         Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, float>, float, ElementD,
+         cutlass::epilogue::thread::LinearCombination<ElementD, 16, float, float>,
+         Ranks, WideScatterOffset, FuseReduce,
+-        Ranks == 8 && N == 4096 && K == 1024 && Groups == 32>;
++        Ranks == 8 && N == 4096 && K == 1024 &&
++            (Groups == 8 || Groups == 16 || Groups == 32)>;
+     using Epilogue = std::conditional_t<kIsLinear1, ActivationEpilogue, ScatterEpilogue>;
+     using Scheduler = DeepGemmScheduler<
+         kGemmType, N, K, BM, BN, Groups, ceil_div(N, BN),

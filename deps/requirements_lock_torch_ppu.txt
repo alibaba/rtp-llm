@@ -1,4 +1,13 @@
 # PPU SDK 2.2.0 / CUDA 13.0 / alios7u2 / Python 3.12 / torch 2.11.0.
+# PPU JIT runtime wheels (Python 3.12, Linux x86_64).
+tilelang==0.1.13 \
+    --hash=sha256:a6f0a90330d7abaae9aac56c27935fcfb4a5b27bbbbe9aaa918cf2245aecdd0e
+ml-dtypes==0.5.4 \
+    --hash=sha256:9ad459e99793fa6e13bd5b7e6792c8f9190b4e5a1b45c63aba14a4d0a7f1d5ff
+torch-c-dlpack-ext==0.1.5 \
+    --hash=sha256:e6f9da4bb9af70e27facc777458be62e10dbbbddda7672d16138db0553c5a524
+z3-solver==4.15.4.0 \
+    --hash=sha256:7e103a6f203f505b8b8b8e5c931cc407c95b61556512d4921c1ddc0b3f41b08e
 # Generated with uv pip compile --generate-hashes --python-platform x86_64-manylinux_2_28.
 aiohappyeyeballs==2.7.1 \
     --hash=sha256:065665c041c42a5938ed220bdcd7230f22527fbec085e1853d2402c8a3615d9d \

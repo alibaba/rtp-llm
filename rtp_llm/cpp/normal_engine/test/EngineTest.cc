@@ -889,6 +889,34 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupStartup) {
     ASSERT_EQ(cache_config.groups().front().block_num, 100u);
 }
 
+TEST_F(NormalEngineTest, testPpuFlashWarmupKeepsRowCountWithinTokenBudget) {
+    CustomConfig config;
+    config.warm_up = true;
+    config.prefill_chunk_size = 4;
+    config.forward_shapes = std::make_shared<std::vector<ForwardShape>>();
+    ModelConfig model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    params.model_config_.model_type = "deepseek_v4";
+    params.model_config_.hidden_size = 4096;
+    params.model_config_.num_layers = 43;
+    setDefaultMhaKVCacheSpecDescs(params.model_config_);
+    NormalExecutor::test_model_factory = [shapes = config.forward_shapes](const GptModelInitParams&) {
+        return std::make_unique<MockModel>(100, shapes);
+    };
+    struct ResetFactory {
+        ~ResetFactory() { NormalExecutor::test_model_factory = nullptr; }
+    } reset_factory;
+    auto engine = std::make_shared<NormalEngine>(params, nullptr);
+    ASSERT_EQ(config.forward_shapes->size(), 6u);
+#if USE_PPU
+    EXPECT_EQ(config.forward_shapes->back(), (ForwardShape{4, 18, 4}));
+#else
+    EXPECT_EQ(config.forward_shapes->back(), (ForwardShape{16, 14, 4}));
+#endif
+}
+
 TEST_F(NormalEngineTest, testChunkedPrefillWarmupCapsIntMaxBudgetByContextBatchSize) {
     CustomConfig config;
     config.warm_up                = true;

@@ -97,8 +97,11 @@ cc_test(
         "//rtp_llm/cpp/engine_base/schedulers",
     ] + torch_deps() + cuda13_torch_link_deps,
     env = device_test_envs(),
-    exec_properties = {"gpu": "L20_CU13"},
-    tags = ["L20_CU13"],
+    exec_properties = select({
+        "@//:using_ppu": {"gpu": "PPU-ZW810E"},
+        "//conditions:default": {"gpu": "L20_CU13"},
+    }),
+    tags = ["L20_CU13", "PPU-ZW810E"],
 )
 
 cc_test(

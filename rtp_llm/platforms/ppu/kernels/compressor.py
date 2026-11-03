@@ -1,0 +1,741 @@
+"""PPU reciprocal-square-root compressor kernels; shared validation stays upstream."""
+
+import os
+from typing import Optional
+
+import torch
+import triton
+import triton.language as tl
+
+from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
+    _trap_invalid_kv_access, _FUSED_CONSTEXPR_BY_HEAD_DIM,
+    _fused_num_warps, _validate_fused_state_block_table,
+)
+from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
+    trap_invalid_kv_access_enabled, validate_slot_mapping,
+)
+
+
+@triton.jit(
+    do_not_specialize=[
+        "block_table_stride",
+        "seq_start",
+        "n_raw",
+        "kv_cache_block_size",
+        "KV_BLOCK_STRIDE",
+        "NUM_STATE_BLOCKS",
+        "NUM_KV_BLOCKS",
+    ]
+)
+def _fused_kv_compress_norm_rope_insert_sparse_attn(
+    state_cache_ptr,
+    state_cache_stride0,
+    state_cache_stride1,
+    token_to_req_indices_ptr,
+    positions_ptr,
+    slot_mapping_ptr,
+    block_table_ptr,
+    block_table_stride,
+    block_size,
+    # Raw kv/score for the tokens supplied to this launch + ape table.
+    # ``seq_start`` = absolute position of ``kv_raw[0]`` (prefill: the
+    # current chunk's start = sp_int). ``n_raw`` = ``kv_raw.shape[0]``,
+    # i.e. how many leading positions ``kv_raw`` covers (NOT a batch
+    # size — DSV4 prefill runs bsz=1, so this is the chunk length).
+    # See module docstring for the source-dispatch rules.
+    kv_raw_ptr,
+    kv_raw_stride,
+    score_raw_ptr,
+    score_raw_stride,
+    ape_ptr,
+    ape_stride,
+    seq_start,
+    n_raw,
+    # Phase-3a part 4c — varlen raw path. When ``BATCHED=True`` these
+    # arrays carry per-request data so the kernel can compute the flat
+    # ``kv_raw`` offset for each request independently:
+    #   seq_start_per_req[b]  = absolute position of req b's first new token
+    #   cu_seq_per_req[b+1]   = end offset of req b in the flat kv_raw axis
+    # ``BATCHED=False`` falls back to scalar ``seq_start`` + global
+    # ``[0, n_raw)`` check, byte-equal to the legacy single-request path.
+    seq_start_per_req_ptr,
+    cu_seq_per_req_ptr,
+    rms_norm_weight_ptr,
+    rms_norm_eps,
+    cos_sin_cache_ptr,
+    cos_sin_stride,
+    k_cache_ptr,
+    kv_slot_mapping_ptr,
+    kv_cache_block_size,
+    HEAD_SIZE: tl.constexpr,
+    TRITON_BLOCK_SIZE: tl.constexpr,
+    STATE_WIDTH: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    OVERLAP: tl.constexpr,
+    ROPE_HEAD_DIM: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    QUANT_BLOCK: tl.constexpr,
+    TOKEN_STRIDE: tl.constexpr,
+    SCALE_DIM: tl.constexpr,
+    KV_BLOCK_STRIDE,
+    NUM_STATE_BLOCKS,
+    NUM_KV_BLOCKS,
+    BATCHED: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    STATE_RING_ENTRIES: tl.constexpr,
+    PPU_RMS_COMPAT: tl.constexpr = False,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+
+    position = tl.load(positions_ptr + token_idx).to(tl.int64)
+    if (position + 1) % COMPRESS_RATIO != 0:
+        return
+
+    req_idx = tl.load(token_to_req_indices_ptr + token_idx).to(tl.int64)
+
+    start = position - (1 + OVERLAP) * COMPRESS_RATIO + 1
+    tokens = tl.arange(0, (1 + OVERLAP) * COMPRESS_RATIO)
+    pos = start + tokens
+    mask_pos = pos >= 0
+    head_offset = (tokens >= COMPRESS_RATIO).to(tl.int32) * HEAD_SIZE
+
+    block = tl.arange(0, TRITON_BLOCK_SIZE)
+    mask = block < HEAD_SIZE
+
+    # ── Source dispatch (see module docstring) ──
+    #   flat_idx in [0, n_raw)  → raw   (covered by this launch's kv_raw)
+    #   flat_idx <  0           → cache (prefix-cache hit; resolve via
+    #                                    block_table[req_idx])
+    # Decode: disable_raw_path → n_raw == 0, every position → cache.
+    # BATCHED: per-request raw window — req b's tokens live in
+    #   kv_raw[cu_seq_per_req[b] : cu_seq_per_req[b+1]] and cover abs
+    #   positions [seq_start_per_req[b], seq_start_per_req[b]+req_n_raw).
+    if BATCHED:
+        req_seq_start = tl.load(seq_start_per_req_ptr + req_idx).to(tl.int64)
+        req_cu_lo = tl.load(cu_seq_per_req_ptr + req_idx).to(tl.int64)
+        req_cu_hi = tl.load(cu_seq_per_req_ptr + req_idx + 1).to(tl.int64)
+        req_n_raw = req_cu_hi - req_cu_lo
+        flat_idx_in_req = pos - req_seq_start
+        use_raw = mask_pos & (flat_idx_in_req >= 0) & (flat_idx_in_req < req_n_raw)
+        flat_idx = req_cu_lo + flat_idx_in_req
+    else:
+        flat_idx = pos - seq_start
+        use_raw = mask_pos & (flat_idx >= 0) & (flat_idx < n_raw)
+    flat_idx_safe = tl.where(use_raw, flat_idx, 0)
+
+    raw_mask = use_raw[:, None] & mask[None, :]
+    kv_from_raw = tl.load(
+        kv_raw_ptr
+        + flat_idx_safe[:, None] * kv_raw_stride
+        + head_offset[:, None]
+        + block[None, :],
+        mask=raw_mask,
+        other=0.0,
+    )
+    score_from_raw = tl.load(
+        score_raw_ptr
+        + flat_idx_safe[:, None] * score_raw_stride
+        + head_offset[:, None]
+        + block[None, :],
+        mask=raw_mask,
+        other=0.0,
+    )
+    ape_rows = pos % COMPRESS_RATIO
+    ape_rows_safe = tl.where(use_raw, ape_rows, 0)
+    ape_vals = tl.load(
+        ape_ptr
+        + ape_rows_safe[:, None] * ape_stride
+        + head_offset[:, None]
+        + block[None, :],
+        mask=raw_mask,
+        other=0.0,
+    )
+    score_from_raw = score_from_raw + ape_vals
+
+    # State-cache path: prefix-cache hit region. The framework supplies sparse
+    # absolute logical-block tables. Any non-negative physical block id is
+    # readable; negative entries are invalid. Do not clamp here: a
+    # block index beyond the table width means the framework failed to grow the
+    # table before this launch.
+    use_cache = mask_pos & ~use_raw
+    block_indices = (pos // block_size) % block_table_stride
+    block_indices_safe = tl.where(use_cache, block_indices, 0)
+    block_numbers = tl.load(
+        block_table_ptr + req_idx * block_table_stride + block_indices_safe,
+        mask=use_cache,
+        other=0,
+    )
+    invalid_state_block = use_cache & (block_numbers >= NUM_STATE_BLOCKS)
+    if tl.max(invalid_state_block.to(tl.int32), axis=0) != 0:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+    valid_block = use_cache & (block_numbers > 0)
+    block_numbers_i64 = tl.where(valid_block, block_numbers, 0).to(tl.int64)
+    ring_mod = STATE_RING_ENTRIES
+    block_offsets_raw = pos % ring_mod
+    block_offsets = tl.where(mask_pos, block_offsets_raw, 0)
+
+    row_base = (
+        state_cache_ptr
+        + block_numbers_i64 * state_cache_stride0.to(tl.int64)
+        + block_offsets.to(tl.int64) * state_cache_stride1.to(tl.int64)
+        + head_offset
+    )
+    cache_mask = valid_block[:, None] & mask[None, :]
+    kv_from_cache = tl.load(
+        row_base[:, None] + block[None, :], mask=cache_mask, other=0.0
+    )
+    score_from_cache = tl.load(
+        row_base[:, None] + STATE_WIDTH + block[None, :],
+        mask=cache_mask,
+        other=0.0,
+    )
+
+    kv = tl.where(use_raw[:, None], kv_from_raw, kv_from_cache)
+    score = tl.where(use_raw[:, None], score_from_raw, score_from_cache)
+
+    final_valid = use_raw | (use_cache & valid_block)
+    combined_mask = final_valid[:, None] & mask[None, :]
+
+    score = tl.where(combined_mask, score, float("-inf"))
+    score = tl.softmax(score, dim=0)
+    kv = tl.where(combined_mask, kv, 0.0)
+    compressed_kv = tl.sum(kv * score, axis=0)
+
+    rms_w = tl.load(rms_norm_weight_ptr + block, mask=mask, other=0.0)
+    variance = tl.sum(compressed_kv * compressed_kv, axis=0) / HEAD_SIZE
+    if PPU_RMS_COMPAT:
+        rrms = 1.0 / tl.sqrt(variance + rms_norm_eps)
+    else:
+        rrms = tl.rsqrt(variance + rms_norm_eps)
+    normed = compressed_kv * rrms * rms_w
+
+    kv_slot_idx = tl.load(kv_slot_mapping_ptr + token_idx)
+    if kv_slot_idx < 0:
+        return
+    kv_block_idx = kv_slot_idx // kv_cache_block_size
+    kv_pos_in_block = kv_slot_idx % kv_cache_block_size
+    if kv_block_idx < 0:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+    if kv_block_idx >= NUM_KV_BLOCKS:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+
+    cache_block_ptr = k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE.to(
+        tl.int64
+    )
+    fp8_ptr = cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE
+    scale_ptr = (
+        cache_block_ptr
+        + kv_cache_block_size * TOKEN_STRIDE
+        + kv_pos_in_block * SCALE_DIM
+    )
+
+    NOPE_HEAD_DIM: tl.constexpr = HEAD_SIZE - ROPE_HEAD_DIM
+    HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2
+
+    N_QUANT_BLOCKS: tl.constexpr = TRITON_BLOCK_SIZE // QUANT_BLOCK
+    N_NOPE_BLOCKS: tl.constexpr = NOPE_HEAD_DIM // QUANT_BLOCK
+    INV_FP8_MAX: tl.constexpr = 1.0 / FP8_MAX
+
+    quant_input = normed.to(tl.bfloat16).to(tl.float32)
+    quant_2d = tl.reshape(quant_input, (N_QUANT_BLOCKS, QUANT_BLOCK))
+    abs_2d = tl.abs(quant_2d)
+    block_absmax = tl.max(abs_2d, axis=1)
+    block_absmax = tl.maximum(block_absmax, 1e-4)
+
+    raw_scales = block_absmax * INV_FP8_MAX
+    exponents = tl.ceil(tl.log2(raw_scales))
+    inv_scales = tl.exp2(-exponents)
+    inv_scales_col = tl.reshape(inv_scales, (N_QUANT_BLOCKS, 1))
+    x_scaled = quant_2d * inv_scales_col
+    x_clamped = tl.clamp(x_scaled, -FP8_MAX, FP8_MAX)
+    x_fp8 = x_clamped.to(tl.float8e4nv)
+    x_uint8 = x_fp8.to(tl.uint8, bitcast=True)
+    x_uint8_flat = tl.reshape(x_uint8, (TRITON_BLOCK_SIZE,))
+
+    nope_mask = block < NOPE_HEAD_DIM
+    tl.store(fp8_ptr + block, x_uint8_flat, mask=nope_mask)
+
+    scale_idx = tl.arange(0, N_QUANT_BLOCKS)
+    encoded = exponents + 127.0
+    encoded = tl.maximum(tl.minimum(encoded, 255.0), 0.0)
+    tl.store(
+        scale_ptr + scale_idx,
+        encoded.to(tl.uint8),
+        mask=scale_idx < N_NOPE_BLOCKS,
+    )
+    tl.store(scale_ptr + N_NOPE_BLOCKS, tl.zeros((), dtype=tl.uint8))
+
+    NUM_PAIRS: tl.constexpr = TRITON_BLOCK_SIZE // 2
+    NOPE_PAIRS: tl.constexpr = NOPE_HEAD_DIM // 2
+
+    pair_2d = tl.reshape(normed, (NUM_PAIRS, 2))
+    even, odd = tl.split(pair_2d)
+
+    pair_idx = tl.arange(0, NUM_PAIRS)
+    rope_pair_local = pair_idx - NOPE_PAIRS
+    is_rope_pair = rope_pair_local >= 0
+    cs_idx = tl.maximum(rope_pair_local, 0)
+
+    compressed_pos = (position // COMPRESS_RATIO) * COMPRESS_RATIO
+    cache_base = cos_sin_cache_ptr + compressed_pos * cos_sin_stride
+    cos_v = tl.load(cache_base + cs_idx, mask=is_rope_pair, other=1.0)
+    sin_v = tl.load(cache_base + HALF_ROPE + cs_idx, mask=is_rope_pair, other=0.0)
+
+    new_even = even * cos_v - odd * sin_v
+    new_odd = odd * cos_v + even * sin_v
+    result = tl.interleave(new_even, new_odd)
+
+    bf16_ptr = (fp8_ptr + NOPE_HEAD_DIM).to(tl.pointer_type(tl.bfloat16))
+    rope_local = block - NOPE_HEAD_DIM
+    is_rope = (block >= NOPE_HEAD_DIM) & mask
+    tl.store(bf16_ptr + rope_local, result.to(tl.bfloat16), mask=is_rope)
+
+
+@triton.jit(
+    do_not_specialize=[
+        "block_table_stride",
+        "seq_start",
+        "n_raw",
+        "kv_cache_block_size",
+        "KV_BLOCK_STRIDE",
+        "NUM_STATE_BLOCKS",
+        "NUM_KV_BLOCKS",
+    ]
+)
+def _fused_kv_compress_norm_rope_insert_indexer_attn(
+    state_cache_ptr,
+    state_cache_stride0,
+    state_cache_stride1,
+    token_to_req_indices_ptr,
+    positions_ptr,
+    slot_mapping_ptr,
+    block_table_ptr,
+    block_table_stride,
+    block_size,
+    # Raw kv/score for the tokens supplied to this launch + ape table.
+    # ``seq_start`` = absolute position of ``kv_raw[0]`` (prefill: the
+    # current chunk's start = sp_int). ``n_raw`` = ``kv_raw.shape[0]``,
+    # i.e. how many leading positions ``kv_raw`` covers (NOT a batch
+    # size — DSV4 prefill runs bsz=1, so this is the chunk length).
+    # See module docstring for the source-dispatch rules.
+    kv_raw_ptr,
+    kv_raw_stride,
+    score_raw_ptr,
+    score_raw_stride,
+    ape_ptr,
+    ape_stride,
+    seq_start,
+    n_raw,
+    # Phase-3a part 4c — varlen raw path. When ``BATCHED=True`` these
+    # arrays carry per-request data so the kernel can compute the flat
+    # ``kv_raw`` offset for each request independently:
+    #   seq_start_per_req[b]  = absolute position of req b's first new token
+    #   cu_seq_per_req[b+1]   = end offset of req b in the flat kv_raw axis
+    # ``BATCHED=False`` falls back to scalar ``seq_start`` + global
+    # ``[0, n_raw)`` check, byte-equal to the legacy single-request path.
+    seq_start_per_req_ptr,
+    cu_seq_per_req_ptr,
+    rms_norm_weight_ptr,
+    rms_norm_eps,
+    cos_sin_cache_ptr,
+    cos_sin_stride,
+    k_cache_ptr,
+    kv_slot_mapping_ptr,
+    kv_cache_block_size,
+    HEAD_SIZE: tl.constexpr,
+    TRITON_BLOCK_SIZE: tl.constexpr,
+    STATE_WIDTH: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    OVERLAP: tl.constexpr,
+    ROPE_HEAD_DIM: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    QUANT_BLOCK: tl.constexpr,
+    TOKEN_STRIDE: tl.constexpr,
+    SCALE_DIM: tl.constexpr,
+    KV_BLOCK_STRIDE,
+    NUM_STATE_BLOCKS,
+    NUM_KV_BLOCKS,
+    BATCHED: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    STATE_RING_ENTRIES: tl.constexpr,
+    PPU_RMS_COMPAT: tl.constexpr = False,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+
+    position = tl.load(positions_ptr + token_idx).to(tl.int64)
+    if (position + 1) % COMPRESS_RATIO != 0:
+        return
+
+    req_idx = tl.load(token_to_req_indices_ptr + token_idx).to(tl.int64)
+
+    start = position - (1 + OVERLAP) * COMPRESS_RATIO + 1
+    tokens = tl.arange(0, (1 + OVERLAP) * COMPRESS_RATIO)
+    pos = start + tokens
+    mask_pos = pos >= 0
+    head_offset = (tokens >= COMPRESS_RATIO).to(tl.int32) * HEAD_SIZE
+
+    block = tl.arange(0, TRITON_BLOCK_SIZE)
+    mask = block < HEAD_SIZE
+
+    # ── Source dispatch (see module docstring) ──
+    #   flat_idx in [0, n_raw)  → raw   (covered by this launch's kv_raw)
+    #   flat_idx <  0           → cache (prefix-cache hit; resolve via
+    #                                    block_table[req_idx])
+    # Decode: disable_raw_path → n_raw == 0, every position → cache.
+    if BATCHED:
+        req_seq_start = tl.load(seq_start_per_req_ptr + req_idx).to(tl.int64)
+        req_cu_lo = tl.load(cu_seq_per_req_ptr + req_idx).to(tl.int64)
+        req_cu_hi = tl.load(cu_seq_per_req_ptr + req_idx + 1).to(tl.int64)
+        req_n_raw = req_cu_hi - req_cu_lo
+        flat_idx_in_req = pos - req_seq_start
+        use_raw = mask_pos & (flat_idx_in_req >= 0) & (flat_idx_in_req < req_n_raw)
+        flat_idx = req_cu_lo + flat_idx_in_req
+    else:
+        flat_idx = pos - seq_start
+        use_raw = mask_pos & (flat_idx >= 0) & (flat_idx < n_raw)
+    flat_idx_safe = tl.where(use_raw, flat_idx, 0)
+
+    raw_mask = use_raw[:, None] & mask[None, :]
+    kv_from_raw = tl.load(
+        kv_raw_ptr
+        + flat_idx_safe[:, None] * kv_raw_stride
+        + head_offset[:, None]
+        + block[None, :],
+        mask=raw_mask,
+        other=0.0,
+    )
+    score_from_raw = tl.load(
+        score_raw_ptr
+        + flat_idx_safe[:, None] * score_raw_stride
+        + head_offset[:, None]
+        + block[None, :],
+        mask=raw_mask,
+        other=0.0,
+    )
+    # state_cache stores score+ape pre-summed; raw path adds ape here.
+    ape_rows = pos % COMPRESS_RATIO
+    ape_rows_safe = tl.where(use_raw, ape_rows, 0)
+    ape_vals = tl.load(
+        ape_ptr
+        + ape_rows_safe[:, None] * ape_stride
+        + head_offset[:, None]
+        + block[None, :],
+        mask=raw_mask,
+        other=0.0,
+    )
+    score_from_raw = score_from_raw + ape_vals
+
+    # State-cache path: prefix-cache hit region. The framework supplies sparse
+    # absolute logical-block tables. Any non-negative physical block id is
+    # readable; negative entries are invalid. Do not clamp here: a
+    # block index beyond the table width means the framework failed to grow the
+    # table before this launch.
+    use_cache = mask_pos & ~use_raw
+    block_indices = (pos // block_size) % block_table_stride
+    block_indices_safe = tl.where(use_cache, block_indices, 0)
+    block_numbers = tl.load(
+        block_table_ptr + req_idx * block_table_stride + block_indices_safe,
+        mask=use_cache,
+        other=0,
+    )
+    invalid_state_block = use_cache & (block_numbers >= NUM_STATE_BLOCKS)
+    if tl.max(invalid_state_block.to(tl.int32), axis=0) != 0:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+    valid_block = use_cache & (block_numbers > 0)
+    block_numbers_i64 = tl.where(valid_block, block_numbers, 0).to(tl.int64)
+    ring_mod = STATE_RING_ENTRIES
+    block_offsets_raw = pos % ring_mod
+    block_offsets = tl.where(mask_pos, block_offsets_raw, 0)
+
+    row_base = (
+        state_cache_ptr
+        + block_numbers_i64 * state_cache_stride0.to(tl.int64)
+        + block_offsets.to(tl.int64) * state_cache_stride1.to(tl.int64)
+        + head_offset
+    )
+    cache_mask = valid_block[:, None] & mask[None, :]
+    kv_from_cache = tl.load(
+        row_base[:, None] + block[None, :], mask=cache_mask, other=0.0
+    )
+    score_from_cache = tl.load(
+        row_base[:, None] + STATE_WIDTH + block[None, :],
+        mask=cache_mask,
+        other=0.0,
+    )
+
+    # ── Combine: pick raw or cache per position ──
+    kv = tl.where(use_raw[:, None], kv_from_raw, kv_from_cache)
+    score = tl.where(use_raw[:, None], score_from_raw, score_from_cache)
+
+    # Final mask: position must contribute (either source produced data)
+    final_valid = use_raw | (use_cache & valid_block)
+    combined_mask = final_valid[:, None] & mask[None, :]
+
+    score = tl.where(combined_mask, score, float("-inf"))
+    score = tl.softmax(score, dim=0)
+
+    kv = tl.where(combined_mask, kv, 0.0)
+
+    compressed_kv = tl.sum(kv * score, axis=0)
+
+    rms_w = tl.load(rms_norm_weight_ptr + block, mask=mask, other=0.0)
+    variance = tl.sum(compressed_kv * compressed_kv, axis=0) / HEAD_SIZE
+    if PPU_RMS_COMPAT:
+        rrms = 1.0 / tl.sqrt(variance + rms_norm_eps)
+    else:
+        rrms = tl.rsqrt(variance + rms_norm_eps)
+    normed = compressed_kv * rrms * rms_w
+
+    kv_slot_idx = tl.load(kv_slot_mapping_ptr + token_idx)
+    if kv_slot_idx < 0:
+        return
+    kv_block_idx = kv_slot_idx // kv_cache_block_size
+    kv_pos_in_block = kv_slot_idx % kv_cache_block_size
+    if kv_block_idx < 0:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+    if kv_block_idx >= NUM_KV_BLOCKS:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+
+    cache_block_ptr = k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE.to(
+        tl.int64
+    )
+    fp8_ptr = cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE
+    scale_ptr = (
+        cache_block_ptr
+        + kv_cache_block_size * TOKEN_STRIDE
+        + kv_pos_in_block * SCALE_DIM
+    )
+
+    NOPE_HEAD_DIM: tl.constexpr = HEAD_SIZE - ROPE_HEAD_DIM
+    HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2
+
+    NUM_PAIRS: tl.constexpr = TRITON_BLOCK_SIZE // 2
+    NOPE_PAIRS: tl.constexpr = NOPE_HEAD_DIM // 2
+
+    normed_2d = tl.reshape(normed, (NUM_PAIRS, 2))
+    even, odd = tl.split(normed_2d)
+
+    pair_idx = tl.arange(0, NUM_PAIRS)
+    rope_pair_local = pair_idx - NOPE_PAIRS
+    is_rope_pair = rope_pair_local >= 0
+    cs_idx = tl.maximum(rope_pair_local, 0)
+
+    compressed_pos = (position // COMPRESS_RATIO) * COMPRESS_RATIO
+    cache_base = cos_sin_cache_ptr + compressed_pos * cos_sin_stride
+    cos_v = tl.load(cache_base + cs_idx, mask=is_rope_pair, other=1.0)
+    sin_v = tl.load(cache_base + HALF_ROPE + cs_idx, mask=is_rope_pair, other=0.0)
+
+    new_even = even * cos_v - odd * sin_v
+    new_odd = odd * cos_v + even * sin_v
+    result = tl.interleave(new_even, new_odd)
+
+    tl.static_assert(
+        TRITON_BLOCK_SIZE == QUANT_BLOCK,
+        "Indexer expects one quant block (QUANT_BLOCK == TRITON_BLOCK_SIZE)",
+    )
+    INV_FP8_MAX: tl.constexpr = 1.0 / FP8_MAX
+
+    result_bf16 = result.to(tl.bfloat16).to(tl.float32)
+    absmax = tl.max(tl.abs(result_bf16), axis=0)
+    absmax = tl.maximum(absmax, 1e-4)
+    raw_scale = absmax * INV_FP8_MAX
+    exponent = tl.ceil(tl.log2(raw_scale))
+    inv_scale = tl.exp2(-exponent)
+
+    x_scaled = result_bf16 * inv_scale
+    x_clamped = tl.clamp(x_scaled, -FP8_MAX, FP8_MAX)
+    x_fp8 = x_clamped.to(tl.float8e4nv)
+    x_uint8 = x_fp8.to(tl.uint8, bitcast=True)
+
+    tl.store(fp8_ptr + block, x_uint8, mask=mask)
+
+    scale_val = tl.exp2(exponent)
+    tl.store(scale_ptr.to(tl.pointer_type(tl.float32)), scale_val)
+
+
+def run_fused_compress_kv_write(
+    state_cache: torch.Tensor,  # [num_blocks, block_size, 2*coff*head_dim] fp32
+    token_to_req_indices: torch.Tensor,  # [N] int32
+    positions: torch.Tensor,  # [N] int64
+    slot_mapping: torch.Tensor,  # [N] int64 — state-pool slot per token
+    block_table: torch.Tensor,  # [B, max_state_blocks] int — state-pool block table
+    rms_norm_weight: torch.Tensor,  # [head_dim] bf16
+    rms_norm_eps: float,
+    cos_sin_cache: torch.Tensor,  # [max_pos, rope_head_dim] fp32
+    kv_cache: torch.Tensor,  # [num_blocks, kv_block_size, ENTRY_BYTES] uint8 (per-block padded)
+    kv_slot_mapping: torch.Tensor,  # [N] int64 — KV-pool slot per token (-1 if non-boundary)
+    # Raw kv/score for the tokens supplied to this launch + ape table.
+    # In prefill these cover the current chunk (kv_raw.shape[0] = chunk
+    # length, NOT a batch dim — DSV4 prefill is bsz=1). The kernel reads
+    # from them whenever ``flat_idx = pos - seq_start`` falls in
+    # ``[0, kv_raw.shape[0])``; positions before ``seq_start`` are
+    # prefix-cache hits and route to the state pool via block_table.
+    kv_raw: torch.Tensor,  # [n_raw, (1+overlap)*head_dim], row-strided OK
+    score_raw: torch.Tensor,  # [n_raw, (1+overlap)*head_dim], row-strided OK
+    ape: torch.Tensor,  # [compress_ratio, (1+overlap)*head_dim] fp32
+    seq_start: int,  # absolute position of kv_raw[0] (prefill: == sp_int)
+    disable_raw_path: bool = False,  # decode path: skip raw, read cache only
+    *,
+    head_dim: int,
+    rope_head_dim: int,
+    compress_ratio: int,
+    overlap: bool,
+    # Phase-3a part 4c — varlen raw path. When both arrays are passed
+    # (and ``disable_raw_path=False``) the kernel computes per-request
+    # ``flat_idx`` so B>1 batched prefill keeps the raw fast path that
+    # avoids state-cache readback. Scalar ``seq_start`` is
+    # ignored in that mode.
+    seq_start_per_req: Optional[torch.Tensor] = None,  # [B] int64
+    cu_seq_per_req: Optional[torch.Tensor] = None,  # [B+1] int64
+    state_tokens_per_block: int,
+    is_decode: bool = False,
+) -> Optional[torch.Tensor]:
+    """Boundary-token compress→norm→rope→fp8 quant→KV-pool store.
+
+    For each boundary token (``(position+1) % compress_ratio == 0``), the
+    kernel gathers the prior ``(1+overlap)*compress_ratio`` positions of
+    kv/score, softmax-reduces over positions, RMSNorms, FP8-quantises the
+    nope segment + RoPEs the rope segment, and writes the result into
+    ``kv_cache`` at ``kv_slot_mapping[t]``. Non-boundary tokens self-skip
+    (early-exit); pass a flat ``[N_tok]`` slot_mapping.
+
+    Source dispatch for each gathered position is described in the module
+    docstring. The wrapper materialises ``n_raw`` from ``kv_raw.shape[0]``
+    (or 0 if ``disable_raw_path``) and forwards everything else verbatim.
+    """
+    N = int(slot_mapping.shape[0])
+    if N == 0:
+        return None
+    cfg = _FUSED_CONSTEXPR_BY_HEAD_DIM.get(head_dim)
+    if cfg is None:
+        raise ValueError(f"Unsupported head_dim {head_dim} for fused compressor write")
+
+    state_width = int(state_cache.shape[-1] // 2)
+    state_ring_entries = int(state_cache.shape[1])
+    state_block_size = state_tokens_per_block
+    kv_block_size = int(kv_cache.shape[1])
+    kv_block_stride = int(kv_cache.stride(0))
+    n_raw = 0 if disable_raw_path else int(kv_raw.shape[0])
+
+    batched = (
+        not disable_raw_path
+        and seq_start_per_req is not None
+        and cu_seq_per_req is not None
+    )
+    if batched:
+        seq_start_per_req = seq_start_per_req.contiguous()
+        cu_seq_per_req = cu_seq_per_req.contiguous()
+    else:
+        # Triton requires a non-None pointer arg even when BATCHED=False.
+        # Pass ``positions`` as a stand-in — the kernel never reads from
+        # these tensors when BATCHED=False, but the launcher needs a
+        # valid CUDA address to bind.
+        seq_start_per_req = positions
+        cu_seq_per_req = positions
+
+    validate_slot_mapping(
+        "compressor.fused_compress.kv_slot_mapping",
+        kv_slot_mapping,
+        block_size=kv_block_size,
+        num_blocks=int(kv_cache.shape[0]),
+        negative_mode="skip_any",
+    )
+    _validate_fused_state_block_table(
+        site="compressor.fused_compress.state_block_table",
+        block_table=block_table,
+        token_to_req_indices=token_to_req_indices,
+        positions=positions,
+        state_block_size=state_block_size,
+        num_state_blocks=int(state_cache.shape[0]),
+        compress_ratio=compress_ratio,
+        overlap=overlap,
+        seq_start=seq_start,
+        n_raw=n_raw,
+        batched=batched,
+        seq_start_per_req=seq_start_per_req,
+        cu_seq_per_req=cu_seq_per_req,
+    )
+
+    if (
+        (disable_raw_path or (
+            is_decode and batched
+            and kv_raw.dtype == state_cache.dtype
+            and score_raw.dtype == state_cache.dtype
+        ))
+        and head_dim == 512
+        and rope_head_dim == 64
+        and compress_ratio == 128
+        and not overlap
+        and state_width == 512
+        and 0 < N <= 12 and os.environ.get("EP_SIZE") in ("16", "32")
+        and os.environ.get("TP_SIZE") == "1"
+        and os.environ.get("DSV4_PPU_HCA_SPLIT", "0") == "1"
+    ):
+        from .ppu_hca_split import hca_decode_split
+
+        hca_decode_split(
+            state_cache, token_to_req_indices, positions, block_table,
+            rms_norm_weight, rms_norm_eps, cos_sin_cache, kv_slot_mapping,
+            kv_cache, state_tokens_per_block, trap_invalid_kv_access_enabled(),
+            raw_kv=kv_raw if batched else None,
+            raw_score=score_raw if batched else None,
+            ape=ape if batched else None,
+            starts=seq_start_per_req if batched else None,
+            cu=cu_seq_per_req if batched else None,
+        )
+        return None
+
+    if head_dim == 512:
+        kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
+    else:
+        kernel = _fused_kv_compress_norm_rope_insert_indexer_attn
+
+    kernel[(N,)](
+        state_cache,
+        state_cache.stride(0),
+        state_cache.stride(1),
+        token_to_req_indices,
+        positions,
+        slot_mapping,
+        block_table,
+        block_table.stride(0),
+        state_block_size,
+        # raw path
+        kv_raw,
+        kv_raw.stride(0),
+        score_raw,
+        score_raw.stride(0),
+        ape,
+        ape.stride(0),
+        seq_start,
+        n_raw,
+        seq_start_per_req,
+        cu_seq_per_req,
+        rms_norm_weight,
+        rms_norm_eps,
+        cos_sin_cache,
+        cos_sin_cache.stride(0),
+        kv_cache,
+        kv_slot_mapping,
+        kv_block_size,
+        HEAD_SIZE=head_dim,
+        TRITON_BLOCK_SIZE=triton.next_power_of_2(head_dim),
+        STATE_WIDTH=state_width,
+        COMPRESS_RATIO=compress_ratio,
+        OVERLAP=overlap,
+        ROPE_HEAD_DIM=rope_head_dim,
+        FP8_MAX=448.0,
+        QUANT_BLOCK=cfg["quant_block"],
+        TOKEN_STRIDE=cfg["token_stride"],
+        SCALE_DIM=cfg["scale_dim"],
+        KV_BLOCK_STRIDE=kv_block_stride,
+        NUM_STATE_BLOCKS=int(state_cache.shape[0]),
+        NUM_KV_BLOCKS=int(kv_cache.shape[0]),
+        BATCHED=batched,
+        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        STATE_RING_ENTRIES=state_ring_entries,
+        # Preserve upstream CUDA rounding before the compressed KV quantizer.
+        # Keep the previously validated reciprocal-sqrt path on PPU only.
+        PPU_RMS_COMPAT=True,
+        num_warps=_fused_num_warps(head_dim, compress_ratio, cfg),
+    )

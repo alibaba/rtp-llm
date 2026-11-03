@@ -61,7 +61,6 @@ _PPU_LOCK_SKIPPED = [
     "nvidia-cutlass-dsl",
     "pyrsmi",
     "rtp-kernel",
-    "tilelang",
     "triton-kernels",
     "xfastertransformer_devel",
     "xfastertransformer_devel_icx",

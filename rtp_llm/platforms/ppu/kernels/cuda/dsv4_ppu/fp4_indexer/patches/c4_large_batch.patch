@@ -1,0 +1,34 @@
+--- include/sgl_kernel/deepseek_v4/compress_v2.cuh
++++ include/sgl_kernel/deepseek_v4/compress_v2.cuh
+@@ -23,8 +23,9 @@
+ /// \brief Per-token compress plan (used by c4/c128 prefill). Layout: 16 bytes.
+ struct alignas(16) CompressPlan {
+   uint32_t seq_len;
+-  uint16_t ragged_id;
+-  uint16_t buffer_len;
++  // RTP batches can exceed 64K tokens; C4 needs only 0..8 buffered rows.
++  uint32_t ragged_id : 28;
++  uint32_t buffer_len : 4;
+   int32_t read_page_0;
+   /// \brief Stage 0 (CPU): batch_id (used to look up page table).
+   /// \brief Stage 1 (GPU): final state-pool write location.
+--- csrc/deepseek_v4/c4_v2.cuh
++++ csrc/deepseek_v4/c4_v2.cuh
+@@ -240,7 +240,7 @@
+   const auto score_bias = static_cast<const InFloat*>(params.score_bias) + split_offset;
+   if (plan.is_invalid()) return;
+ 
+-  const auto kv_src = kv_input + plan.ragged_id * Trait::kElementSize;
++  const auto kv_src = kv_input + static_cast<int64_t>(plan.ragged_id) * Trait::kElementSize;
+   // Compact output: one row per compress plan, indexed by `global_pid`.
+   const auto kv_out = kv_output + global_pid * Trait::kHeadDim;
+   const auto kv_buf_0 = kv_buffer + plan.read_page_0 * Trait::kPageElementSize;
+@@ -271,7 +271,7 @@
+   if (plan.is_invalid()) return;
+ 
+   // each warp will handle a contiguous region
+-  const auto kv_src = kv_input + plan.ragged_id * Trait::kElementSize;
++  const auto kv_src = kv_input + static_cast<int64_t>(plan.ragged_id) * Trait::kElementSize;
+   const auto kv_buf = kv_buffer + plan.write_loc * Trait::kElementSize;
+   const auto gmem = tile::Memory<StorageIn>::warp();
+ 
