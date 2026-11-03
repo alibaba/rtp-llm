@@ -185,6 +185,8 @@ py_library(
         "utils/warmup.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
+        "utils/scr/test/*.py",
+        "utils/scr/test/**/*.py",
     ]),
     data = glob(["utils/moe_luts/*"]),
     deps = [

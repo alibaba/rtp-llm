@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[4]  # repo root: <repo>/rtp_llm/utils/scr/test
 STUBS = {
     "alog/Logger.h": r"""
 #pragma once
