@@ -279,6 +279,47 @@ TEST_F(MemoryLayoutStrategyTest, SharedIndexerLayersHaveNoScaleTensorWithoutChan
     EXPECT_EQ(strategy->convertIndexToBuffer(3, 0).size(), 1u);
 }
 
+TEST_F(MemoryLayoutStrategyTest, TieredMlaBlockDescriptorsUseStorageRelativeOffsets) {
+    for (size_t kernel_pages : {1u, 2u}) {
+        MemoryLayoutConfig config;
+        config.layer_num                = 2;
+        config.block_num                = 4;
+        config.mla_hbm_blocks           = 2;
+        config.mla_resident_tokens      = 8;
+        config.seq_size_per_block       = 8;
+        config.kv_block_stride_bytes    = 128;
+        config.kv_scale_stride_bytes    = 132 * config.seq_size_per_block;
+        config.kv_scale_pool_size_bytes = config.block_num * config.kv_scale_stride_bytes;
+        config.layer_to_scale_slot      = {0, 0};
+        config.scale_layer_num          = 1;
+        config.dtype                    = TYPE_INT8;
+        config.is_mla = config.use_mla = config.enable_kv_scale = true;
+        config.kernel_blocks_per_kv_block                       = kernel_pages;
+        auto host    = torch::zeros({512}, torch::TensorOptions().dtype(torch::kInt8).pinned_memory(true));
+        auto hbm     = torch::zeros({768}, torch::TensorOptions().dtype(torch::kInt8).device(torch::kCUDA));
+        auto indexer = torch::zeros({static_cast<int64_t>(config.kv_scale_pool_size_bytes)}, hbm.options());
+        MemoryLayoutStrategy strategy;
+        ASSERT_TRUE(strategy.init(config, host, indexer, host.data_ptr(), hbm));
+        for (int layer = 0; layer < 2; ++layer) {
+            for (int block = 0; block < 4; ++block) {
+                auto buffers = strategy.convertIndexToBuffer(layer, block);
+                ASSERT_EQ(buffers.size(), layer == 0 ? 2u : 1u);
+                const bool on_gpu         = block < 2;
+                auto       base           = static_cast<char*>(on_gpu ? hbm.data_ptr() : host.data_ptr());
+                const int  storage_offset = on_gpu ? layer * 3 + block : layer * 2 + block - 2;
+                EXPECT_EQ(buffers[0].addr, base + storage_offset * config.kv_block_stride_bytes);
+                EXPECT_EQ(buffers[0].is_cuda, on_gpu);
+                EXPECT_EQ(buffers[0].size_bytes, config.kv_block_stride_bytes);
+                if (layer == 0) {
+                    EXPECT_TRUE(buffers[1].is_cuda);
+                    EXPECT_EQ(buffers[1].addr,
+                              static_cast<char*>(indexer.data_ptr()) + block * config.kv_scale_stride_bytes);
+                }
+            }
+        }
+    }
+}
+
 TEST_F(MemoryLayoutStrategyTest, GetLayerCacheTensors) {
     auto ctx = createTestContext();
 

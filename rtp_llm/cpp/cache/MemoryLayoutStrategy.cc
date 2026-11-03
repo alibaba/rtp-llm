@@ -273,8 +273,8 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createBasicBlockInfo(int layer_id, 
                                 "Physical block ID %d out of range (max: %zu)",
                                 block_id,
                                 config_.block_num);
-        kv_addr =
-            static_cast<char*>(layer_tensor.data_ptr()) + static_cast<size_t>(block_id) * config_.kv_block_stride_bytes;
+        kv_addr = static_cast<char*>(layer_tensor.data_ptr())
+                  + static_cast<size_t>(storage_block) * config_.kv_block_stride_bytes;
     } else {
         kv_addr = getBlockPtr(layer_tensor, storage_block);
     }
