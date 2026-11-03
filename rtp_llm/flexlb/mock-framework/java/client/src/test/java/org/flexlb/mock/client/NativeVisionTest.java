@@ -23,7 +23,12 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class NativeVisionTest {
     @TempDir Path directory;
-    int port() throws Exception { try(var socket=new ServerSocket(0)) { return socket.getLocalPort(); } }
+    int port() throws Exception {
+        try (var socket = new ServerSocket()) {
+            socket.bind(new InetSocketAddress("127.0.0.1", 0));
+            return socket.getLocalPort();
+        }
+    }
     EngineHostApi.Instance create(EngineHost host,String role) throws Exception {
         var model = directory.resolve("model"); Files.createDirectories(model);
         new ObjectMapper().writeValue(model.resolve("config.json").toFile(), Map.of("image_token_id", 1000,
