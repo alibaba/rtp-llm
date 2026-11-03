@@ -3,6 +3,20 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "dynamic_decode_scheduler_test",
+    srcs = ["dynamic_decode_scheduler_test.py"],
+    main = "dynamic_decode_scheduler_test.py",
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cu12_9_or_13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
     name = "qwen_gdn_graph_replay_test_rocm",
     srcs = ["qwen_gdn_graph_replay_test.py"],
     main = "qwen_gdn_graph_replay_test.py",
