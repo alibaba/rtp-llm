@@ -305,8 +305,8 @@ torch::Tensor pickOneStepTargetLastToken(const GenerateStreamPtr& stream) {
     const auto state          = stream->getMtpAsyncDeviceState();
     const auto& accept_tokens = state.accept_tokens_gpu;
     const auto& accept_len    = state.accept_len_gpu;
-    if (useMtpDeviceState() && accept_tokens.defined() && accept_tokens.is_cuda() && accept_len.defined()
-        && accept_len.is_cuda()) {
+    if (useMtpDeviceState() && accept_tokens.defined() && (accept_tokens.is_cuda() || accept_tokens.is_privateuseone())
+        && accept_len.defined() && (accept_len.is_cuda() || accept_len.is_privateuseone())) {
         auto idx_t = (accept_len - 1).to(torch::kLong);
         return accept_tokens.squeeze(0).index_select(/*dim=*/0, idx_t);
     }

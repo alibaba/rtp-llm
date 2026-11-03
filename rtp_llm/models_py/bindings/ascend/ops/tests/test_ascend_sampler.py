@@ -1121,17 +1121,45 @@ class TestAscendRejectionSampling(unittest.TestCase):
         np.testing.assert_array_equal(acc, [2])
 
     def test_mapping_draft2_target(self):
-        # tokens [bs, 5]; map window columns [1, 3); d2t_map[i] = i + 10
-        tokens = np.array([[0, 1, 2, 3, 4],
-                           [5, 100, 3, 200, 6]], dtype=np.int64)
+        # In-contract shape: tokens [bs, token_stride]; window columns [1, 3);
+        # d2t_map[i] = i + 10. Expected values are identical under the CUDA
+        # kernel / host / generic-fallback flat contract (idx = i*stride + j,
+        # i < batch_size), guarding cross-backend consistency.
+        tokens = np.array([[0, 1, 2],
+                           [5, 100, 3]], dtype=np.int64)
         d2t_map = torch.arange(10, dtype=torch.int64, device=NPU_DEVICE) + 10
         tokens_t = torch.tensor(tokens, device=NPU_DEVICE)
         sampler_test_module.exec_mapping_draft2_target(tokens_t, d2t_map, 2, 1, 3)
         torch.npu.synchronize()
         got = tokens_t.cpu().numpy()
-        # column 1/2 mapped (+10); 100 out of range -> passthrough; others untouched
-        np.testing.assert_array_equal(got, [[0, 11, 12, 3, 4],
-                                            [5, 100, 13, 200, 6]])
+        # window cols 1/2 of both rows mapped (+10); 100 out of range -> passthrough
+        np.testing.assert_array_equal(got, [[0, 11, 12],
+                                            [5, 100, 13]])
+
+    def test_mapping_draft2_target_production_shape(self):
+        # Production shape (FastTopKSampler::forward): tokens [B, 1],
+        # batch=B, offset=0, stride=1 — map column 0 of every row.
+        tokens = np.array([[7], [100], [2]], dtype=np.int64)
+        d2t_map = torch.arange(10, dtype=torch.int64, device=NPU_DEVICE) + 10
+        tokens_t = torch.tensor(tokens, device=NPU_DEVICE)
+        sampler_test_module.exec_mapping_draft2_target(tokens_t, d2t_map, 3, 0, 1)
+        torch.npu.synchronize()
+        # 100 out of range -> passthrough
+        np.testing.assert_array_equal(tokens_t.cpu().numpy(), [[17], [100], [12]])
+
+    def test_mapping_draft2_target_extra_rows_untouched(self):
+        # Rows beyond batch_size are outside the flat contract's i < batch_size
+        # bound and must stay untouched.
+        tokens = np.array([[0, 1, 2],
+                           [5, 100, 3],
+                           [9, 9, 9]], dtype=np.int64)
+        d2t_map = torch.arange(10, dtype=torch.int64, device=NPU_DEVICE) + 10
+        tokens_t = torch.tensor(tokens, device=NPU_DEVICE)
+        sampler_test_module.exec_mapping_draft2_target(tokens_t, d2t_map, 2, 1, 3)
+        torch.npu.synchronize()
+        np.testing.assert_array_equal(tokens_t.cpu().numpy(), [[0, 11, 12],
+                                                               [5, 100, 13],
+                                                               [9, 9, 9]])
 
     def test_mapping_empty_map_is_noop(self):
         tokens = np.array([[1, 2, 3]], dtype=np.int64)

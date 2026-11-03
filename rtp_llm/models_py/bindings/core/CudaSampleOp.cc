@@ -901,16 +901,25 @@ void rejectionSampling(const RejectionSamplingParams& params) {
 }
 
 void mappingDraft2Target(const MappingDraft2TargetParams& params) {
-    // Mirror the CUDA kernel: map the [token_offset, token_stride) column
-    // window of each row through d2t_map; ids outside [0, map_size) pass
-    // through unchanged. Empty map is a no-op.
+    // Mirror the CUDA kernel's flat contract: tokens is a [rows, token_stride]
+    // buffer; map the [token_offset, token_stride) column window of the first
+    // batch_size rows through d2t_map; ids outside [0, map_size) pass through
+    // unchanged. Empty map is a no-op.
     if (!params.d2t_map.defined() || params.d2t_map.numel() == 0) {
         return;
     }
+    RTP_LLM_CHECK_WITH_INFO(params.d2t_map.dtype() == torch::kInt64, "mappingDraft2Target: d2t_map must be int64");
+    RTP_LLM_CHECK_WITH_INFO(params.tokens.device() == params.d2t_map.device(),
+                            "tokens and d2t_map must be on the same device");
     RTP_LLM_CHECK_WITH_INFO(params.tokens.dtype() == torch::kInt32 || params.tokens.dtype() == torch::kInt64,
                             "mappingDraft2Target: unsupported token dtype");
+    RTP_LLM_CHECK_WITH_INFO(params.tokens.dim() == 2 && params.tokens.size(1) == params.token_stride,
+                            "mappingDraft2Target: tokens must be [rows, token_stride]");
+    RTP_LLM_CHECK_WITH_INFO(params.tokens.size(0) >= params.batch_size,
+                            "mappingDraft2Target: token rows must cover batch_size");
     const int64_t map_size = params.d2t_map.numel();
-    auto window   = params.tokens.narrow(1, params.token_offset, params.token_stride - params.token_offset);
+    auto rows     = params.tokens.narrow(0, 0, params.batch_size);
+    auto window   = rows.narrow(1, params.token_offset, params.token_stride - params.token_offset);
     auto ids      = window.to(torch::kLong);
     auto in_range = (ids >= 0) & (ids < map_size);
     // NPU index_select only accepts 1-D indices: flatten, gather, restore shape.

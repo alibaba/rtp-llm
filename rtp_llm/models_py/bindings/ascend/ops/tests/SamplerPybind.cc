@@ -146,5 +146,6 @@ PYBIND11_MODULE(sampler_test_module, m) {
         py::arg("batch_size"),
         py::arg("token_offset"),
         py::arg("token_stride"),
-        "Map draft-vocab token ids to target vocab (in-place on the [offset, stride) column window).");
+        "Map draft-vocab token ids to target vocab (in-place on the [offset, stride) column window "
+        "of the first batch_size rows; tokens must be [rows, token_stride]).");
 }
