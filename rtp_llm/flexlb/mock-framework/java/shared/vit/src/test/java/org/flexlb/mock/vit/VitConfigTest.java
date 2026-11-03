@@ -66,4 +66,13 @@ class VitConfigTest {
         assertThrows(IllegalArgumentException.class, () -> VitConfig.fromEnvironment("vit-0", Map.of(
             "CHECKPOINT_PATH", directory.toString(), "MOCK_COMPUTE_FORWARD_EXPRESSION", "1", "MOCK_VIT_PATCH_SIZE", "8")));
     }
+    @Test void normalizesAsyncAdmissionAndDoesNotInventATimeoutCeiling() throws Exception {
+        var root = root(); var config = (ObjectNode) root.path("component").path("config");
+        config.put("vit_concurrency", 0).put("vit_max_queue_size", -3).put("mm_timeout_ms", 7200000);
+        var parsed = VitConfig.load(root);
+        assertEquals(1, parsed.concurrency()); assertEquals(1, parsed.queueSize());
+        assertEquals(0, parsed.effective().path("vit_max_queue_size").intValue());
+        assertEquals(7200000, parsed.timeoutMs());
+    }
+
 }

@@ -67,7 +67,11 @@ class PrefillAdmissionTest {
     }
 
     @Test void queuedTimeoutNeverOwnsKvAndDoesNotResetItsBudget() throws Exception {
-        var config = config("500");
+        config("500");
+        var json = new ObjectMapper();
+        var root = json.readTree(directory.resolve("config.json").toFile());
+        ((ObjectNode) root.path("component").path("config")).put("concurrency_limit", 1);
+        var config = RtpConfig.load(root);
         try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config))) {
             var first = engine.submit(input(1, 0, true));
             var queued = engine.submit(input(2, 25, true));

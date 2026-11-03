@@ -2,7 +2,7 @@ package org.flexlb.mock.cache;
 
 import java.util.*;
 
-/** Immutable semantic input and cache-only media identity; no model or RPC dependency. */
+/** Immutable semantic input, cache-only media identity and model-owned cache key namespace. */
 public record CacheSequence(int blockSize, List<Integer> tokens, List<Span> spans, long seed) {
     public CacheSequence(int blockSize, List<Integer> tokens, List<Span> spans) { this(blockSize, tokens, spans, 0); }
     public record Span(int offset, List<Integer> rowHashes) {
@@ -41,6 +41,25 @@ public record CacheSequence(int blockSize, List<Integer> tokens, List<Span> span
         }
         return List.copyOf(keys);
     }
+    /** Same model-owned namespace as configure_v41_kv_cache/get_v41_cache_key_seed. */
+    public static long cacheKeySeed(com.fasterxml.jackson.databind.JsonNode model, Map<String, String> env) {
+        boolean v41 = model.path("model_type").asText().startsWith("deepseek_v41")
+            || model.path("architectures").toString().contains("DeepseekV41")
+            || env.getOrDefault("MODEL_TYPE", "").startsWith("deepseek_v41");
+        if (!v41) {
+            if (model.has("cache_key_hash_seed")) {
+                var seed = model.get("cache_key_hash_seed");
+                if (!seed.isIntegralNumber() || !seed.canConvertToLong())
+                    throw new IllegalArgumentException("Model cache_key_hash_seed must be int64");
+                return seed.longValue();
+            }
+            return 0;
+        }
+        boolean bounded = java.util.Set.of("1", "true", "yes", "on").contains(
+            env.getOrDefault("DSV41_SWA_BOUNDED_REPLAY", "0").toLowerCase(java.util.Locale.ROOT));
+        return bounded ? 0x4453563431494231L : 0x4453563431494631L;
+    }
+
     private static long roll(long hash, long value) {
         return hash ^ (value + 0x9e3779b97f4a7c15L + (hash << 12) + (hash >> 32));
     }
