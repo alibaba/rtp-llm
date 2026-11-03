@@ -351,6 +351,7 @@ class MasterService:
             if response.status_code == 200:
                 result = response.json()
                 return {
+                    "ready": result.get("ready", True) is True,
                     "real_master_host": result.get("real_master_host"),
                     "queue_length": result.get("queue_length", 0),
                     "requires_generate_input": result.get("requires_generate_input"),
@@ -371,7 +372,12 @@ class MasterService:
 
         heartbeat_info = host_health_map[host_addr]
 
-        if result is not None:
+        if result is not None and not result.get("ready", True):
+            heartbeat_info.mark_failure("Host is not ready")
+            heartbeat_info.health_status = HostHealthStatus.UNHEALTHY
+            heartbeat_info.is_master = False
+            route_logger.debug("Host %s is not ready", host_addr)
+        elif result is not None:
             heartbeat_info.mark_success(
                 real_master_host=result.get("real_master_host"),
                 queue_length=result.get("queue_length", 0),
