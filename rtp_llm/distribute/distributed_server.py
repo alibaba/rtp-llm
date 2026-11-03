@@ -21,9 +21,9 @@ from rtp_llm.config.py_config_modules import (
 from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.models_py.distributed.rank_layout import Coord, RankLayout
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
-from rtp_llm.utils import scr_vip
+from rtp_llm.utils.scr import network
 from rtp_llm.utils.gang_info import GangInfoReader, get_gang_member
-from rtp_llm.utils.scr_local_comm import local_comm_enabled, validate_local_members
+from rtp_llm.utils.scr.network import local_comm_enabled, validate_local_members
 
 
 def _template_loopback_enabled(parallelism_config: ParallelismConfig) -> bool:
@@ -178,7 +178,7 @@ def get_local_world_info(
     distribute_config: DistributeConfig,
     parallelism_config: ParallelismConfig,
 ) -> WorldInfo:
-    ip = scr_vip.internal_ip(
+    ip = network.internal_ip(
         parallelism_config,
         server_config.ip or socket.gethostbyname(socket.gethostname()),
         GangInfoReader.from_config(distribute_config),
@@ -306,13 +306,13 @@ class DistributedServer(object):
         distribute_config = py_env_configs.distribute_config
         pc = py_env_configs.parallelism_config
         self.gang_info = GangInfoReader.from_config(distribute_config)
-        ip = scr_vip.internal_ip(
+        ip = network.internal_ip(
             pc,
             server_config.ip or socket.gethostbyname(socket.gethostname()),
             self.gang_info,
         )
         # internal_ip has validated the platform network before transports open.
-        scr_vip.configure_network(pc)
+        network.configure_network(pc)
         self.worker_info = WorkerInfo(
             ip=ip,
             local_rank=pc.local_rank,
@@ -602,8 +602,8 @@ def get_master(
     parallelism_config: ParallelismConfig,
 ) -> (str, str):
     port = ""
-    if scr_vip.enabled(parallelism_config):
-        nodes = scr_vip.topology(
+    if network.enabled(parallelism_config):
+        nodes = network.topology(
             parallelism_config,
             GangInfoReader.from_config(distribute_config),
             wait=True,

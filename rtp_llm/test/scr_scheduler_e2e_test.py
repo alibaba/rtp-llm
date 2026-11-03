@@ -8,7 +8,7 @@ import time
 import unittest
 from unittest import mock
 
-from rtp_llm.utils import scr_template_utils as scr
+from rtp_llm.utils.scr import template_utils as scr
 
 
 class _MockScheduler:

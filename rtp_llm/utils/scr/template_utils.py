@@ -30,9 +30,9 @@ from typing import Mapping as TypingMapping
 from typing import Optional
 
 from rtp_llm.utils.gang_info import GangInfoReader
-from rtp_llm.utils.scr_restore_context import RestoreContext
-from rtp_llm.utils.scr_runtime_fixup import fixup_runtime_after_restore
-from rtp_llm.utils.scr_template_lifecycle import CallbackHook, get_template_lifecycle
+from rtp_llm.utils.scr.restore_context import RestoreContext
+from rtp_llm.utils.scr.runtime_fixup import fixup_runtime_after_restore
+from rtp_llm.utils.scr.lifecycle import CallbackHook, get_template_lifecycle
 from rtp_llm.utils.signal_guard import ignore_sigpipe
 
 LOGGER = logging.getLogger(__name__)
@@ -77,13 +77,13 @@ class _BackendVisitorTemplateHook:
             get_dp_addrs_from_world_info,
             get_world_info,
         )
-        from rtp_llm.utils import scr_vip
+        from rtp_llm.utils.scr import network
 
         # VIP restore must validate the endpoints actually used before checkpoint.
         # No new registry connection is opened while other ranks are resuming.
         current = (
             self.world_info
-            if scr_vip.enabled(self.configs.parallelism_config)
+            if network.enabled(self.configs.parallelism_config)
             else get_world_info(
                 self.configs.server_config,
                 self.configs.distribute_config,
