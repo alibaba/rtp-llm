@@ -198,6 +198,7 @@ apache-tvm-ffi==0.1.12 \
     #   -r internal_source/deps/requirements_cuda13_arm.txt
     #   flashinfer-python
     #   tilelang
+    #   tokenspeed-mla
     #   xgrammar
 async-timeout==5.0.1 \
     --hash=sha256:39e3809566ff85354557ec2398b55e096c8364bacac9405a7a1fa429e77fe76c \
@@ -594,6 +595,9 @@ cuda-core==1.0.1 \
     --hash=sha256:e0f1324486bb90be6bde28bd0afbaf78a38827948d37f93f90318a01da8a3f8c \
     --hash=sha256:e9b0f115a68f2f84c0f6d9b7e863a29517f6dfe5f7b7d07d1d9da8904754e9a2
     # via cuda-python
+cuda-linear-attention @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/cuda_linear_attention/cuda_linear_attention-0.1.dev88+dcce4719.cu132-cp310-cp310-linux_aarch64.whl \
+    --hash=sha256:007154cc956e143d8a2ff0fac2c6a9fbbc7dffd5fbe2f7adaba89696d7fd0ab1
+    # via -r deps/requirements_cuda13_arm.txt
 cuda-pathfinder==1.6.0 \
     --hash=sha256:1503af579d8379c24bdd65528379bc57039b0455be9f5f9686cf8e473a1fce51
     # via
@@ -679,6 +683,11 @@ filelock==3.32.0 \
     #   blobfile
     #   huggingface-hub
     #   torch
+flash-linear-attention @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_linear_attention/flash_linear_attention-0.5.0+rtp.3a9ce1c.6-py3-none-any.whl \
+    --hash=sha256:20db1cc279f59abf8f18d20cc9fa575eeb152cf781cc4bff78e5a1d8a77141de
+    # via
+    #   -r deps/requirements_cuda13_arm.txt
+    #   cuda-linear-attention
 flash-mla @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_mla/flash_mla-1.0.0%2B3ca6856.cu132-cp310-cp310-linux_aarch64.whl#sha256=d960b9b2ae558f7c088af277657dc8814a8802dee1df5b1eca24573490a2f94d \
     --hash=sha256:d960b9b2ae558f7c088af277657dc8814a8802dee1df5b1eca24573490a2f94d
     # via -r deps/requirements_cuda13_arm.txt
@@ -2226,6 +2235,7 @@ nvidia-cutlass-dsl==4.5.3 \
     # via
     #   -r deps/requirements_cuda13_arm.txt
     #   flashinfer-python
+    #   tokenspeed-mla
 nvidia-cutlass-dsl-libs-base==4.5.3 \
     --hash=sha256:1bea2f2e5312a97a850be4bfe73ab0689861fa6f81888ad2abe47172f96afd1d \
     --hash=sha256:224ceed6db71b632b318c19bea52f1d0efdafc321dbe4159a7508f93abe8c694 \
@@ -3973,6 +3983,9 @@ tokenizers==0.22.2 \
     --hash=sha256:e10bf9113d209be7cd046d40fbabbaf3278ff6d18eb4da4c500443185dc1896c \
     --hash=sha256:f01a9c019878532f98927d2bacb79bbb404b43d3437455522a00a30718cdedb5
     # via transformers
+tokenspeed-mla @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/tokenspeed-mla/tokenspeed_mla-0.2.11+8b513a59.cu132-py3-none-any.whl#sha256=d66de94e5072c4e509d9b83b115616ddbc91bc1f50a6fb438deb5dfeecf089c3 \
+    --hash=sha256:d66de94e5072c4e509d9b83b115616ddbc91bc1f50a6fb438deb5dfeecf089c3
+    # via -r deps/requirements_cuda13_arm.txt
 torch==2.11.0+cu130 \
     --hash=sha256:4af01fad0822353e766770ff2c7d6bdc2cbcc2ac7fcd6da93a9e3c6f3f932b21
     # via
@@ -3985,6 +3998,7 @@ torch==2.11.0+cu130 \
     #   tile-kernels
     #   tilelang
     #   timm
+    #   tokenspeed-mla
     #   torch-c-dlpack-ext
     #   torchvision
     #   xgrammar

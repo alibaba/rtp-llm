@@ -113,3 +113,9 @@ cuda13_sm100_py_test(
     srcs = ["fused_silu_mul_token_quant_batched_test.py"],
     deps = py_test_deps,
 )
+
+cuda13_sm100_py_test(
+    name = "fused_activation_index_test",
+    srcs = ["fused_activation_index_test.py"],
+    deps = py_test_deps,
+)

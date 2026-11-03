@@ -80,6 +80,17 @@ def requirement(names):
                 visibility = ["//visibility:public"],
             )
             continue
+        if name == "tokenspeed-mla":
+            native.py_library(
+                name = name,
+                deps = select({
+                    "@rtp_llm//:using_cuda13_x86": [requirement_gpu_cuda13(name)],
+                    "@rtp_llm//:using_cuda13_arm": [requirement_cuda13_arm(name)],
+                    "//conditions:default": [],
+                }),
+                visibility = ["//visibility:public"],
+            )
+            continue
         cuda13_x86_deps = [] if name in _CUDA13_X86_DEFERRED else [requirement_gpu_cuda13(name)]
         cuda13_arm_deps = [] if name in _CUDA13_ARM_DEFERRED else [requirement_cuda13_arm(name)]
         ppu_deps = [] if name in _PPU_LOCK_SKIPPED else [requirement_ppu(name)]
@@ -172,6 +183,9 @@ def whl_deps():
             "fastsafetensors==0.1.20+ali",
             "tilelang==0.1.15",
             "apache-tvm-ffi==0.1.12",
+            "tokenspeed-mla@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/tokenspeed-mla/tokenspeed_mla-0.2.11+8b513a59.cu132-py3-none-any.whl#sha256=d66de94e5072c4e509d9b83b115616ddbc91bc1f50a6fb438deb5dfeecf089c3",
+            "cuda-linear-attention@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/cuda_linear_attention/cuda_linear_attention-0.1.dev88+dcce4719.cu132-cp310-cp310-linux_x86_64.whl",
+            "flash-linear-attention@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_linear_attention/flash_linear_attention-0.5.0+rtp.3a9ce1c.6-py3-none-any.whl",
             "nvidia-cutlass-dsl==4.5.3",
         ],
         "@rtp_llm//:using_cuda13_arm": [
@@ -187,6 +201,9 @@ def whl_deps():
             "fastsafetensors==0.1.20+ali",
             "tilelang==0.1.15+cuda.gita35f8ddf",
             "apache-tvm-ffi==0.1.12",
+            "tokenspeed-mla@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/tokenspeed-mla/tokenspeed_mla-0.2.11+8b513a59.cu132-py3-none-any.whl#sha256=d66de94e5072c4e509d9b83b115616ddbc91bc1f50a6fb438deb5dfeecf089c3",
+            "cuda-linear-attention@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/cuda_linear_attention/cuda_linear_attention-0.1.dev88+dcce4719.cu132-cp310-cp310-linux_aarch64.whl",
+            "flash-linear-attention@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_linear_attention/flash_linear_attention-0.5.0+rtp.3a9ce1c.6-py3-none-any.whl",
             "nvidia-cutlass-dsl==4.5.3",
         ],
         "@rtp_llm//:using_cuda12_9_x86": [
@@ -279,8 +296,12 @@ def ml_pin_reqs():
             "transformers==5.2.0",
             "sentence-transformers==5.2.0",
             "pyarrow==14.0.0",
-            "xgrammar==0.2.8",
         ],
+    }) + select({
+        "@rtp_llm//:using_cuda13_x86": ["xgrammar==0.2.8"],
+        "@rtp_llm//:using_cuda13_arm": ["xgrammar==0.2.8"],
+        "@rtp_llm//:using_ppu": [],
+        "//conditions:default": ["xgrammar==0.2.5"],
     })
 
 def platform_deps():

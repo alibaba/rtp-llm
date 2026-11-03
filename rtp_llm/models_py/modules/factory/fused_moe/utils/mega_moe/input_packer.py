@@ -8,6 +8,7 @@ packer below is the reference oracle for tests; the runtime always uses the fuse
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 
 import torch
@@ -66,6 +67,9 @@ class TorchMegaMoEInputPacker(MegaMoEInputPacker):
 class FusedMegaMoEInputPacker(MegaMoEInputPacker):
     name = "fused"
 
+    def __init__(self, *, assume_finite: bool = False):
+        self.assume_finite = assume_finite
+
     def pack(
         self,
         x: torch.Tensor,
@@ -97,8 +101,14 @@ class FusedMegaMoEInputPacker(MegaMoEInputPacker):
             buf.x_sf[:tokens],
             buf.topk_idx[:tokens],
             buf.topk_weights[:tokens],
+            assume_finite=self.assume_finite,
         )
 
 
-def get_mega_moe_input_packer() -> MegaMoEInputPacker:
-    return FusedMegaMoEInputPacker()
+def get_mega_moe_input_packer(*, activation: str = "swiglu") -> FusedMegaMoEInputPacker:
+    if activation != "situ":
+        return FusedMegaMoEInputPacker()
+    mode = os.environ.get("MEGA_MOE_INPUT_PACKER_IMPL", "optimized").strip().lower()
+    if mode not in ("optimized", "fast_finite"):
+        raise ValueError("MEGA_MOE_INPUT_PACKER_IMPL must be optimized or fast_finite")
+    return FusedMegaMoEInputPacker(assume_finite=mode == "fast_finite")
