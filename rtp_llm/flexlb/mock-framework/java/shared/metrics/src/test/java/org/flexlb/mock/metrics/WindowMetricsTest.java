@@ -12,6 +12,21 @@ class WindowMetricsTest {
             .mapToDouble(line -> Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1))).findFirst().orElseThrow();
     }
 
+    @Test void nativeTagSeriesHaveIndependentMeansAndOneMetricFamily() {
+        var clock = new AtomicLong(); var registry = new CollectorRegistry();
+        var metrics = new WindowMetrics("prefill", clock::get); metrics.register(registry);
+        var loaded = Map.of("load_attempted", "true"); var local = Map.of("load_attempted", "false");
+        metrics.observe("latency_us", 10, loaded); metrics.observe("latency_us", 30, loaded);
+        metrics.observe("latency_us", 5, local);
+        clock.set(1_000_000_000);
+        var text = MetricTags.scrape(registry, Map.of());
+        assertEquals(20, sample(text, "latency_us", "load_attempted=\"true\""));
+        assertEquals(5, sample(text, "latency_us", "load_attempted=\"false\""));
+        assertEquals(2, sample(text, "latency_us_count", "load_attempted=\"true\""));
+        assertEquals(1, text.lines().filter(line -> line.startsWith("# TYPE latency_us ")).count());
+        assertThrows(IllegalArgumentException.class, () -> metrics.observe("latency_us", 1));
+    }
+
     @Test void windowsUseEventMeanAndWallQpsAndDoNotRepeatIdleLatency() {
         var clock = new AtomicLong(); var registry = new CollectorRegistry();
         var metrics = new WindowMetrics("vit", clock::get); metrics.register(registry);
