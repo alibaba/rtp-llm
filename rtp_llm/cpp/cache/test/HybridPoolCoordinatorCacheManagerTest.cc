@@ -45,18 +45,22 @@ using TestHybridPoolCoordinatorCacheManager = BlockTreeCacheTestAllocator<Coordi
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Build a tiny multi-pool config with two groups: group_id=0 LINEAR(layers 0,1)
-// and group_id=1 FULL(layers 2,3). Each group has its own per-group block budget,
+// Build a tiny multi-pool config with LINEAR(layers 0,1) and FULL(layers 2,3).
+// Topology assigns group IDs by tag; each group has its own per-group block budget,
 // so TestHybridPoolCoordinatorCacheManager creates two independent BlockPools.
 static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num = 6,
                                                  uint32_t       full_block_num   = 8,
-                                                 CacheGroupType second_type      = CacheGroupType::FULL) {
+                                                 CacheGroupType second_type      = CacheGroupType::FULL,
+                                                 const std::string& linear_tag   = "linear",
+                                                 const std::string& second_tag   = "") {
     CacheConfig config;
     config.dtype              = rtp_llm::DataType::TYPE_FP16;
     config.layer_num          = 4;
     config.seq_size_per_block = 4;
     config.linear_step        = 2;
 
+    const auto resolved_second_tag = second_tag.empty() ? (second_type == CacheGroupType::SWA ? "swa" : "full") :
+                                                         second_tag;
     auto linear_spec = makeResolvedLinearSpec(config.dtype,
                                               1,
                                               1,
@@ -66,17 +70,18 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
                                               static_cast<uint32_t>(config.seq_size_per_block),
                                               config.dtype,
                                               config.dtype,
-                                              "linear");
-    auto full_spec = makeResolvedMhaSpec(config.dtype, 1, 1, static_cast<uint32_t>(config.seq_size_per_block), "full");
+                                              linear_tag);
+    auto full_spec = makeResolvedMhaSpec(
+        config.dtype, 1, 1, static_cast<uint32_t>(config.seq_size_per_block), resolved_second_tag);
 
     config.fromGroupedSpecs({linear_spec, full_spec},
                             {{0, 1}, {2, 3}},
                             {CacheGroupType::LINEAR, second_type},
-                            {"linear", second_type == CacheGroupType::SWA ? "swa" : "full"});
+                            {linear_tag, resolved_second_tag});
 
     const auto linear_stride = linear_spec->block_size_bytes();
     const auto full_stride   = full_spec->block_size_bytes();
-    config.setGroupBlockLayout({"linear", second_type == CacheGroupType::SWA ? "swa" : "full"},
+    config.setGroupBlockLayout({linear_tag, resolved_second_tag},
                                {linear_block_num, full_block_num},
                                {linear_stride, full_stride},
                                {0, 0});
@@ -661,6 +666,51 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, RecomputePreservesCompactCpReadyPr
     }
 }
 
+TEST_F(HybridPoolCoordinatorCacheManagerTest, LinearReplayReservesOnlyTheCurrentStateBlock) {
+    // MTP Verify reconstructs the accepted LINEAR state in its replay log;
+    // proposal slots are needed by FULL attention, not by the LINEAR pool.
+    auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/4, /*full_block_num=*/8);
+    config.linear_replay.group_ids = {static_cast<int>(config.topology().groupIdForTag("linear"))};
+    auto allocator = makeAllocator(config, RoleType::DECODE);
+    ASSERT_TRUE(allocator->init());
+
+    auto resource = makeBatchResource(1, config);
+    auto tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/3, /*seq_size_per_block=*/4);
+    tokens->setReserveStep(4);
+    MallocInfo info{resource, tokens};
+    info.enable_cache_lookup = false;
+    info.reuse_cache = false;
+
+    // The three proposed tokens stay in the existing 4-token FULL page until
+    // they cross its boundary; only one additional FULL page is needed here.
+    EXPECT_EQ(allocator->getNeedBlocks(info), 3);
+    ASSERT_TRUE(allocator->malloc(info).success);
+    ASSERT_EQ(resource->blocksNum(0, "linear"), 1u);
+    ASSERT_EQ(resource->blocksNum(0, "full"), 2u);
+    EXPECT_EQ(validBlockCount(resource->blocks(0, "linear")), 1u);
+    EXPECT_EQ(validBlockCount(resource->blocks(0, "full")), 2u);
+    allocator->free(FreeInfo{resource, tokens});
+}
+
+TEST_F(HybridPoolCoordinatorCacheManagerTest, OrdinaryLinearGroupKeepsSpeculativeReserveBlocks) {
+    auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
+    auto allocator = makeAllocator(config, RoleType::DECODE);
+    ASSERT_TRUE(allocator->init());
+
+    auto resource = makeBatchResource(1, config);
+    auto tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/3, /*seq_size_per_block=*/4);
+    tokens->setReserveStep(4);
+    MallocInfo info{resource, tokens};
+    info.enable_cache_lookup = false;
+    info.reuse_cache = false;
+
+    EXPECT_EQ(allocator->getNeedBlocks(info), 6);
+    ASSERT_TRUE(allocator->malloc(info).success);
+    EXPECT_EQ(resource->blocksNum(0, "linear"), 4u);
+    EXPECT_EQ(resource->blocksNum(0, "full"), 2u);
+    allocator->free(FreeInfo{resource, tokens});
+}
+
 TEST_F(HybridPoolCoordinatorCacheManagerTest, ResidentInsertProtectsAllReusableGroups) {
     const CacheConfig                                            config = makeTinyFullSwaMultiPoolHybridConfig(12, 12);
     const std::shared_ptr<TestHybridPoolCoordinatorCacheManager> allocator = makeAllocator(config);
@@ -738,7 +788,15 @@ static void runStorageRoundTrip(const CacheConfig&                           con
         writer->insertIntoCache(InsertInfo{writer_resource, writer_tokens, /*is_resident=*/false},
                                 resident_prefix_length);
     }
-    EXPECT_EQ(writer_backend->writeGroupTags(), expected_write_groups);
+    const auto sorted_handles_by_key = [](std::vector<std::vector<std::string>> rows) {
+        for (auto& row : rows) {
+            std::sort(row.begin(), row.end());
+        }
+        return rows;
+    };
+    // The sparse keys and their member tags are the contract; handle order
+    // within one key follows topology and does not change the stored payload.
+    EXPECT_EQ(sorted_handles_by_key(writer_backend->writeGroupTags()), sorted_handles_by_key(expected_write_groups));
 
     auto reader_backend = std::make_shared<PolicyMemoryStorageBackend>(state);
     auto reader         = makeAllocator(config);
@@ -760,7 +818,7 @@ static void runStorageRoundTrip(const CacheConfig&                           con
     result.async_context->waitDone();
     EXPECT_TRUE(result.async_context->success());
     EXPECT_EQ(reader_backend->matchedKeys(), 4u);
-    EXPECT_EQ(reader_backend->readGroupTags(), expected_read_groups);
+    EXPECT_EQ(sorted_handles_by_key(reader_backend->readGroupTags()), sorted_handles_by_key(expected_read_groups));
 
     reader->free(FreeInfo{reader_resource, reader_tokens});
     writer->free(FreeInfo{writer_resource, writer_tokens});
@@ -860,11 +918,11 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, InitCreatesIndependentBlockPoolPer
     ASSERT_TRUE(allocator->init());
 
     ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
-    EXPECT_NE(allocator->groupBlockPools()[0], allocator->groupBlockPools()[1]);
+    EXPECT_NE(poolForTag(*allocator, "linear"), poolForTag(*allocator, "full"));
 
     // Per-pool totalBlocksNum = group_block_nums[group_id] - 1 (block 0 reserved).
-    EXPECT_EQ(allocator->groupBlockPools()[0]->totalBlocksNum(), 6u - 1u);
-    EXPECT_EQ(allocator->groupBlockPools()[1]->totalBlocksNum(), 8u - 1u);
+    EXPECT_EQ(poolForTag(*allocator, "linear")->totalBlocksNum(), 6u - 1u);
+    EXPECT_EQ(poolForTag(*allocator, "full")->totalBlocksNum(), 8u - 1u);
 }
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, SwaDefaultRegionGroupPoolUsesGpuBacking) {
@@ -908,14 +966,14 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AvailableCapacityAggregatesCanonic
 
     const auto& pools = allocator->groupBlockPools();
     ASSERT_EQ(pools.size(), 2u);
-    const DeviceBlockPoolPtr& full_pool = pools[1];
+    const auto full_pool = poolForTag(*allocator, "full");
     ASSERT_NE(full_pool, nullptr);
 
     const size_t total_available             = allocator->availableBlocksNum();
     const size_t tokens_before               = allocator->availableTokensNum();
     const auto   capacity_before             = allocator->tokenCapacity(config.seq_size_per_block);
     auto expected_available_capacity = [&]() {
-        return pools[1]->availableBlocksNum() * config.group("full").seqSizePerBlock();
+        return full_pool->availableBlocksNum() * config.group("full").seqSizePerBlock();
     };
 
     const std::optional<BlockIdxType> block = full_pool->malloc();
@@ -938,7 +996,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AvailableCapacityAggregatesCanonic
 
     full_pool->decTreeRef(*block, BlockTreeRefType::CACHE);
 
-    const DeviceBlockPoolPtr&         linear_pool  = pools[0];
+    const auto                       linear_pool  = poolForTag(*allocator, "linear");
     const std::optional<BlockIdxType> linear_block = linear_pool->malloc();
     ASSERT_TRUE(linear_block.has_value());
     EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, capacity_before.available_tokens);
@@ -1170,8 +1228,10 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, PoolMetricsSnapshotsReportReserveB
 
     const auto snapshots = allocator->poolMetricsSnapshots();
     ASSERT_EQ(snapshots.size(), 2u);
-    EXPECT_EQ("linear", snapshots[0].pool_name);
-    EXPECT_EQ("full", snapshots[1].pool_name);
+    const auto linear_gid = config.topology().groupIdForTag("linear");
+    const auto full_gid   = config.topology().groupIdForTag("full");
+    EXPECT_EQ("linear", snapshots[linear_gid].pool_name);
+    EXPECT_EQ("full", snapshots[full_gid].pool_name);
     EXPECT_EQ(snapshots[0].used_blocks, snapshots[0].total_blocks - snapshots[0].free_blocks);
     EXPECT_EQ(snapshots[1].used_blocks, snapshots[1].total_blocks - snapshots[1].free_blocks);
 
@@ -1550,8 +1610,8 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, ReserveRatioAndSnapshotsExcludeNon
     ASSERT_TRUE(allocator->init());
     ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
 
-    const size_t excluded_free      = allocator->groupBlockPools()[0]->freeBlocksNum();
-    const size_t participating_free = allocator->groupBlockPools()[1]->freeBlocksNum();
+    const size_t excluded_free      = poolForTag(*allocator, "linear")->freeBlocksNum();
+    const size_t participating_free = poolForTag(*allocator, "full")->freeBlocksNum();
     ASSERT_GT(excluded_free, 0u);
     ASSERT_GT(participating_free, 0u);
     EXPECT_EQ(allocator->reserveBlocksNum(),
@@ -1561,8 +1621,8 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, ReserveRatioAndSnapshotsExcludeNon
 
     const auto snapshots = allocator->poolMetricsSnapshots();
     ASSERT_EQ(snapshots.size(), 2u);
-    EXPECT_EQ(snapshots[0].reserve_blocks, 0u);
-    EXPECT_EQ(snapshots[1].reserve_blocks, allocator->reserveBlocksNum());
+    EXPECT_EQ(snapshots[config.topology().groupIdForTag("linear")].reserve_blocks, 0u);
+    EXPECT_EQ(snapshots[config.topology().groupIdForTag("full")].reserve_blocks, allocator->reserveBlocksNum());
 }
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, NonReservableOnlyPoolsHaveDivisionSafeZeroReserveShares) {
@@ -2001,7 +2061,13 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, IncrMallocRollbackFreesPartiallyAl
 TEST_F(HybridPoolCoordinatorCacheManagerTest, IncrMallocRollbackRestoresLinearBackfilledSlots) {
     // Block 0 is reserved by each pool, so FULL needs three configured blocks
     // to provide the two request blocks used by the initial allocation.
-    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/4, /*full_block_num=*/3);
+    // Keep LINEAR before FULL in canonical order so allocation really mutates
+    // the sparse LINEAR row before the exhausted FULL pool forces rollback.
+    const std::string linear_tag = "a_linear";
+    const std::string full_tag   = "z_full";
+    auto config = makeTinyMultiPoolHybridConfig(
+        /*linear_block_num=*/4, /*full_block_num=*/3, CacheGroupType::FULL, linear_tag, full_tag);
+    ASSERT_LT(config.topology().groupIdForTag(linear_tag), config.topology().groupIdForTag(full_tag));
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
@@ -2013,15 +2079,17 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, IncrMallocRollbackRestoresLinearBa
     init_info.enable_cache_lookup = false;
     init_info.reuse_cache         = false;
     ASSERT_TRUE(allocator->malloc(init_info).success);
-    ASSERT_EQ(batch_res->blocksNum(0, "linear"), 2u);
-    ASSERT_EQ(batch_res->blocksNum(0, "full"), 2u);
+    ASSERT_EQ(batch_res->blocksNum(0, linear_tag), 2u);
+    ASSERT_EQ(batch_res->blocksNum(0, full_tag), 2u);
 
-    auto& linear_ids       = batch_res->mutableBlockIds(0, "linear");
+    auto& linear_ids       = batch_res->mutableBlockIds(0, linear_tag);
     auto  removed_block_id = linear_ids.blocks()[1];
     ASSERT_FALSE(isNullBlockIdx(removed_block_id));
-    allocator->groupBlockPools()[0]->decRef(removed_block_id);
+    poolForTag(*allocator, linear_tag)->decRef(removed_block_id);
     linear_ids.setAt(1, NULL_BLOCK_IDX);
     const auto counters_before = snapshotPoolCounters(allocator);
+    ASSERT_GE(poolForTag(*allocator, linear_tag)->freeBlocksNum(), 2u);
+    ASSERT_EQ(poolForTag(*allocator, full_tag)->freeBlocksNum(), 0u);
 
     // LINEAR first backfills the old sparse tail and appends a new tail block.
     // FULL then fails because its independent pool is exhausted. Rollback must
@@ -2032,9 +2100,9 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, IncrMallocRollbackRestoresLinearBa
     incr_info.reuse_cache         = false;
     EXPECT_FALSE(allocator->malloc(incr_info).success);
 
-    ASSERT_EQ(batch_res->blocksNum(0, "linear"), 2u);
-    ASSERT_EQ(batch_res->blocksNum(0, "full"), 2u);
-    EXPECT_TRUE(isNullBlockIdx(batch_res->blocks(0, "linear")[1]));
+    ASSERT_EQ(batch_res->blocksNum(0, linear_tag), 2u);
+    ASSERT_EQ(batch_res->blocksNum(0, full_tag), 2u);
+    EXPECT_TRUE(isNullBlockIdx(batch_res->blocks(0, linear_tag)[1]));
     expectPoolCountersEq(allocator, counters_before);
 }
 

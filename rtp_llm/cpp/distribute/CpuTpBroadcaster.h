@@ -4,10 +4,17 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace rtp_llm {
+
+// Only a clean EOF between frames may be treated as an orderly engine stop.
+class CpuTpPeerClosed: public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 // CPU-only framed UDS broadcaster for intra-node TP input sync.
 // It avoids NCCL cudaDeviceSynchronize for small CPU tensors; cross-node or

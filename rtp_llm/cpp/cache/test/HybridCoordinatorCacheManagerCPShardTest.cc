@@ -306,6 +306,43 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, ShardedAllocCpSize4) {
     EXPECT_EQ(batch_res->blocksNum(0, "full"), 2);  // ceil(8/4)=2
 }
 
+TEST_F(HybridCoordinatorCacheManagerCPShardTest, InflightReservationKeepsPageRoundRobinProjection) {
+    for (const int cp_size : {2, 16}) {
+        auto config    = makeCPHybridConfig();
+        auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+        ASSERT_TRUE(allocator->init());
+        allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, cp_size, 4));
+        auto       resource       = makeBatchRes(1, config, {});
+        const int  initial_length = cp_size * 4;
+        auto       tokens         = makeTokens(1, initial_length, 4);
+        MallocInfo info{resource, tokens};
+        info.enable_cache_lookup = false;
+        info.reuse_cache         = false;
+        ASSERT_TRUE(allocator->malloc(info).success);
+        const auto physical = resource->blocks(0, "full");
+        const auto kernel   = resource->kernelBlocks(0, "full");
+        ASSERT_EQ(physical.size(), 1u);
+        ASSERT_EQ(kernel.size(), 2u);
+
+        info.incr_seq_len_override = initial_length + 1;
+        info.preserve_inflight     = true;
+        ASSERT_TRUE(allocator->malloc(info).success);
+        const auto& grown_physical = resource->blocks(0, "full");
+        const auto& grown_kernel   = resource->kernelBlocks(0, "full");
+        ASSERT_EQ(grown_physical.size(), 2u);
+        ASSERT_EQ(grown_kernel.size(), 4u);
+        EXPECT_EQ(grown_physical[0], physical[0]);
+        EXPECT_EQ(grown_kernel[0], kernel[0]);
+        EXPECT_EQ(grown_kernel[1], kernel[1]);
+        EXPECT_EQ(grown_kernel[2], grown_physical[1] * 2);
+        EXPECT_EQ(grown_kernel[3], grown_physical[1] * 2 + 1);
+        const auto reserved = grown_physical;
+        allocator->pruneKVCache(resource, initial_length, 0, false);
+        EXPECT_EQ(resource->blocks(0, "full"), reserved);
+        allocator->free(FreeInfo{resource, nullptr});
+    }
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 
