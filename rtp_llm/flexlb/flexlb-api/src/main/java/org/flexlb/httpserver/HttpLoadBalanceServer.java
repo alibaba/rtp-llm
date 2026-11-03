@@ -24,7 +24,6 @@ import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.service.grace.ApplicationLifecycle;
 import org.flexlb.sync.status.WorkerDirectory;
-import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.Bean;
@@ -58,7 +57,6 @@ public class HttpLoadBalanceServer {
     private final RequestScheduler requestScheduler;
     private final EndpointRegistry endpointRegistry;
     private final WorkerDirectory workerDirectory;
-    private final MasterEngineSynchronizer masterEngineSynchronizer;
     private final ApplicationLifecycle applicationLifecycle;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
 
@@ -68,8 +66,6 @@ public class HttpLoadBalanceServer {
             RequestScheduler requestScheduler,
             EndpointRegistry endpointRegistry,
             WorkerDirectory workerDirectory,
-            @org.springframework.beans.factory.annotation.Autowired(required = false)
-                    MasterEngineSynchronizer masterEngineSynchronizer,
             ApplicationLifecycle applicationLifecycle,
             ServerScheduleLatencyRecorder serverLatencyRecorder) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
@@ -77,7 +73,6 @@ public class HttpLoadBalanceServer {
         this.requestScheduler = requestScheduler;
         this.endpointRegistry = endpointRegistry;
         this.workerDirectory = workerDirectory;
-        this.masterEngineSynchronizer = masterEngineSynchronizer;
         this.applicationLifecycle = applicationLifecycle;
         this.serverLatencyRecorder = serverLatencyRecorder;
     }
@@ -195,14 +190,7 @@ public class HttpLoadBalanceServer {
                                     result.setCode(200);
                                     result.setSuccess(true);
                                     result.setWorkerSummary(buildWorkerSummary());
-                                    result.setReady(
-                                            !applicationLifecycle.isShuttingDown()
-                                                    && (!lbStatusConsistencyService
-                                                                    .isNeedConsistency()
-                                                            || lbStatusConsistencyService
-                                                                    .isMaster())
-                                                    && masterEngineSynchronizer != null
-                                                    && masterEngineSynchronizer.isReady());
+                                    result.setReady(applicationLifecycle.isReady());
                                     return ServerResponse.ok()
                                             .contentType(MediaType.APPLICATION_JSON)
                                             .body(Mono.just(result), Response.class);

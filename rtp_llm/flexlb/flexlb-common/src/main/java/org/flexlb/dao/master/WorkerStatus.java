@@ -250,7 +250,7 @@ public class WorkerStatus {
 
     /**
      * Worker health and successful-poll timing, independent of local status application.
-     * Successful timestamps are used for diagnostics and readiness, never worker expiration.
+     * Successful timestamps are used for diagnostics, never worker expiration.
      * A zero timestamp means no RPC has succeeded in this generation.
      * reportedAlive retains the last valid worker report. Once established,
      * healthy is retained until three confirmed worker failures. Unattributed
@@ -409,7 +409,7 @@ public class WorkerStatus {
                 return false;
             }
             lease.statusRpcResultRecorded = true;
-            if (failure != null || !valid) {
+            if (failure != null) {
                 return false;
             }
 
