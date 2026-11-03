@@ -30,15 +30,9 @@ public class GlobalCacheIndex {
     private final ConcurrentHashMap<Long, Set<String>> blockToEnginesMap = new ConcurrentHashMap<>();
 
     /**
-     * Serialize each block's ownership changes without serializing the whole fleet.
+     * Serializes index mutations and mapping-count updates
      */
-    private final ReentrantLock[] mutationLocks = java.util.stream.IntStream.range(0, 256)
-            .mapToObj(ignored -> new ReentrantLock()).toArray(ReentrantLock[]::new);
-
-    private ReentrantLock mutationLock(Long key) {
-        int hash = key.hashCode();
-        return mutationLocks[(hash ^ (hash >>> 16)) & (mutationLocks.length - 1)];
-    }
+    private final ReentrantLock lock = new ReentrantLock();
 
     /**
      * Statistics
@@ -60,7 +54,6 @@ public class GlobalCacheIndex {
             return;
         }
 
-        ReentrantLock lock = mutationLock(blockCacheKey);
         boolean contended = !lock.tryLock();
         if (contended) {
             if (pollTrace != null) {
@@ -98,7 +91,6 @@ public class GlobalCacheIndex {
             return;
         }
 
-        ReentrantLock lock = mutationLock(blockCacheKey);
         boolean contended = !lock.tryLock();
         if (contended) {
             if (pollTrace != null) {
@@ -148,30 +140,30 @@ public class GlobalCacheIndex {
 
         long scannedKeys = 0L;
         long removedMappings = 0L;
+        // Only this generation's owned keys are visited. Cache maintenance is
+        // isolated from health polling; periodic unlock/relock is not needed
+        // for heartbeat progress and a non-fair lock cannot guarantee handoff.
+        if (trace != null) {trace.record(Stage.CACHE_INDEX_LOCK_ATTEMPT);}
+        lock.lock();
         try {
-            // The caller holds the generation lock; different blocks can retire independently.
+            if (trace != null) {trace.record(Stage.CACHE_INDEX_LOCK_ACQUIRED);}
             for (Long key : blockCacheKeys) {
-                ReentrantLock lock = mutationLock(key);
-                if (trace != null) {trace.record(Stage.CACHE_INDEX_LOCK_ATTEMPT);}
-                lock.lock();
-                try {
-                    if (trace != null) {trace.record(Stage.CACHE_INDEX_LOCK_ACQUIRED);}
-                    scannedKeys++;
-                    Set<String> engines = blockToEnginesMap.get(key);
-                    if (engines != null && engines.remove(engineIp)) {
-                        removedMappings++;
-                        totalMappings.decrement();
-                        if (engines.isEmpty()) {
-                            blockToEnginesMap.remove(key);
-                        }
+                scannedKeys++;
+                Set<String> engines = blockToEnginesMap.get(key);
+                if (engines != null && engines.remove(engineIp)) {
+                    removedMappings++;
+                    totalMappings.decrement();
+                    if (engines.isEmpty()) {
+                        blockToEnginesMap.remove(key);
                     }
-                } finally {
-                    lock.unlock();
-                    if (trace != null) {trace.record(Stage.CACHE_INDEX_LOCK_RELEASED);}
                 }
             }
         } finally {
-            if (trace != null) {trace.recordCleanupCounts(scannedKeys, removedMappings);}
+            lock.unlock();
+            if (trace != null) {
+                trace.record(Stage.CACHE_INDEX_LOCK_RELEASED);
+                trace.recordCleanupCounts(scannedKeys, removedMappings);
+            }
         }
     }
 
@@ -286,16 +278,12 @@ public class GlobalCacheIndex {
      */
     public void clear() {
 
-        for (ReentrantLock lock : mutationLocks) {
-            lock.lock();
-        }
+        lock.lock();
         try {
             blockToEnginesMap.clear();
             totalMappings.reset();
         } finally {
-            for (int index = mutationLocks.length - 1; index >= 0; index--) {
-                mutationLocks[index].unlock();
-            }
+            lock.unlock();
         }
         log.info("Cleared global cache index");
     }
