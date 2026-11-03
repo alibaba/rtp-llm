@@ -30,16 +30,24 @@ from rtp_llm.utils.util import check_with_info
 
 class ModelFactory:
     @staticmethod
-    def _share_glm5_mtp_global_weights(model: Any, propose_model: Any) -> bool:
-        """Share immutable GLM-5 target globals with its full-checkpoint MTP model."""
+    def _share_mtp_global_weights(model: Any, propose_model: Any) -> bool:
+        """Share immutable GLM5/HY4 target globals with a same-checkpoint draft."""
         model_config = getattr(model, "model_config", None)
         propose_config = getattr(propose_model, "model_config", None)
+        if model_config is None or propose_config is None:
+            return False
+
+        model_pair = (
+            getattr(model_config, "model_type", None),
+            getattr(propose_config, "model_type", None),
+        )
+        if model_pair not in (("glm_5", "glm_5_mtp"), ("hy_v4", "hy_v4_mtp")):
+            return False
+        # GLM5 standalone drafts have their own globals. HY4's named
+        # model.mtp_layers.0 layout reads the target globals with offset zero.
         if (
-            model_config is None
-            or propose_config is None
-            or getattr(model_config, "model_type", None) != "glm_5"
-            or getattr(propose_config, "model_type", None) != "glm_5_mtp"
-            or int(getattr(propose_config, "mtp_layer_offset", 0) or 0) <= 0
+            model_pair[0] == "glm_5"
+            and int(getattr(propose_config, "mtp_layer_offset", 0) or 0) <= 0
         ):
             return False
 
@@ -54,9 +62,7 @@ class ModelFactory:
             # do not expose the loader's effective configuration.
             effective_merge_lora = bool(getattr(model, "merge_lora", False))
         if bool(effective_merge_lora):
-            logging.warning(
-                "skip GLM-5 MTP global weight sharing: target has merged LoRA"
-            )
+            logging.warning("skip MTP global weight sharing: target has merged LoRA")
             return False
         for field, default in (
             ("normalize_lm_head_weight", False),
@@ -65,9 +71,7 @@ class ModelFactory:
             if getattr(model_config, field, default) != getattr(
                 propose_config, field, default
             ):
-                logging.warning(
-                    "skip GLM-5 MTP global weight sharing: %s differs", field
-                )
+                logging.warning("skip MTP global weight sharing: %s differs", field)
                 return False
 
         model_ckpt_path = getattr(model_config, "ckpt_path", None)
@@ -76,14 +80,14 @@ class ModelFactory:
             propose_ckpt_path, str
         ):
             logging.warning(
-                "skip GLM-5 MTP global weight sharing: checkpoint path is unavailable"
+                "skip MTP global weight sharing: checkpoint path is unavailable"
             )
             return False
         model_ckpt = os.path.realpath(os.path.abspath(model_ckpt_path))
         propose_ckpt = os.path.realpath(os.path.abspath(propose_ckpt_path))
         if model_ckpt != propose_ckpt:
             logging.warning(
-                "skip GLM-5 MTP global weight sharing: target and propose "
+                "skip MTP global weight sharing: target and propose "
                 "checkpoints differ (%s vs %s)",
                 model_ckpt,
                 propose_ckpt,
@@ -100,7 +104,7 @@ class ModelFactory:
             or propose_embedding is None
         ):
             logging.warning(
-                "skip GLM-5 MTP global weight sharing: model weights or "
+                "skip MTP global weight sharing: model weights or "
                 "propose embedding are unavailable"
             )
             return False
@@ -112,9 +116,7 @@ class ModelFactory:
             shared = model_weights.global_weights.get(name)
             old = propose_weights.global_weights.get(name)
             if shared is None or old is None:
-                logging.warning(
-                    "skip GLM-5 MTP global weight sharing: missing %s", name
-                )
+                logging.warning("skip MTP global weight sharing: missing %s", name)
                 return False
             if (
                 shared.shape != old.shape
@@ -123,7 +125,7 @@ class ModelFactory:
                 or shared.stride() != old.stride()
             ):
                 logging.warning(
-                    "skip GLM-5 MTP global weight sharing: incompatible %s "
+                    "skip MTP global weight sharing: incompatible %s "
                     "target=(shape=%s dtype=%s device=%s stride=%s) "
                     "propose=(shape=%s dtype=%s device=%s stride=%s)",
                     name,
@@ -142,7 +144,7 @@ class ModelFactory:
 
         if propose_embedding.weight.data_ptr() != old_weights[0].data_ptr():
             logging.warning(
-                "skip GLM-5 MTP global weight sharing: Python embedding does "
+                "skip MTP global weight sharing: Python embedding does "
                 "not reference the propose ModelWeights embedding"
             )
             return False
@@ -181,9 +183,10 @@ class ModelFactory:
             reserved_after = torch.cuda.memory_reserved(device)
             mib = 1024 * 1024
             logging.info(
-                "shared GLM-5 MTP embedding/lm_head with target: "
+                "shared MTP embedding/lm_head with target: model=%s "
                 "storage=%d MiB, allocated=%d->%d MiB, reserved=%d->%d MiB, "
                 "cuda_free=%d->%d MiB",
+                model_config.model_type,
                 released_bytes // mib,
                 allocated_before // mib,
                 allocated_after // mib,
@@ -194,7 +197,8 @@ class ModelFactory:
             )
         else:
             logging.info(
-                "shared GLM-5 MTP embedding/lm_head with target: storage=%d MiB",
+                "shared MTP embedding/lm_head with target: model=%s storage=%d MiB",
+                model_config.model_type,
                 released_bytes // (1024 * 1024),
             )
         return True
@@ -344,7 +348,7 @@ class ModelFactory:
                 force_cpu_load_weights=engine_config.load_config.force_cpu_load_weights,
             )
             if model is not None:
-                ModelFactory._share_glm5_mtp_global_weights(model, gpt_model)
+                ModelFactory._share_mtp_global_weights(model, gpt_model)
             logging.info(f"create propose model {engine_config.sp_config.type}")
             return ProposeModel(sp_type, gen_num_per_circle, gpt_model)
         elif sp_type == SpeculativeType.DETERMINISTIC:
