@@ -7,7 +7,7 @@ exports_files([
 
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
-load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
+load("//bazel:defs.bzl", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
 load("@arch_config//:arch_select.bzl", "requirement", "whl_deps", "ml_pin_reqs", "internal_deps", "jit_deps", "platform_deps", "triton_deps")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 

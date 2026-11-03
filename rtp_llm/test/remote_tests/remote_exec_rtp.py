@@ -49,7 +49,6 @@ _SOURCE_CONTRACT_FILES = (
     "arch_config/arch_select.bzl",
     "rtp_llm/cpp/cache/test/BUILD",
     "rtp_llm/cpp/cache/test/KVCacheManagerCPSlotMapperTest.cc",
-    "rtp_llm/cpp/cache/test/SharedBlockCacheTest.cc",
     "rtp_llm/cpp/cuda_graph/cuda_graph_runner.cc",
     "rtp_llm/cpp/disaggregate/cache_store/test/BUILD",
     "rtp_llm/cpp/model_rpc/test/BUILD",

@@ -26,26 +26,39 @@ This page lists server arguments used to configure the behavior and performance 
 
 | Arguments | Description | Defaults |
 |-----------|-------------|----------|
+| `--attn_backend` | Selects attention backends by name; `auto` uses priority-ordered selection. | auto |
+| `--prefill_attn_backend` | Overrides backend selection for prefill; empty uses `--attn_backend`. | Empty |
+| `--decode_attn_backend` | Overrides backend selection for decode; empty uses `--attn_backend`. | Empty |
+| `--disable_attn_backends` | Comma-separated backend names to exclude. | Empty |
 | `--enable_fmha` | Enables Fused Multi-Head Attention (FMHA) feature. | True |
-| `--enable_flashinfer_trtllm_gen` | Enables FlashInfer TRT-LLM Gen attention on SM100. | True |
-| `--enable_flashinfer_trt_fmha_v2` | Enables FlashInfer TRT-LLM FMHA v2 contiguous prefill. | True |
-| `--enable_paged_flashinfer_trt_fmha_v2` | Enables FlashInfer TRT-LLM FMHA v2 paged prefill. | True |
+| `--enable_trt_fmha` | Enables TensorRT FMHA implementations during automatic selection. | True |
+| `--enable_paged_trt_fmha` | Enables paged TensorRT FMHA implementations during automatic selection. | True |
 | `--enable_open_source_fmha` | Enables open-source FMHA implementation. | True |
-| `--enable_paged_open_source_fmha` | Enables Paged open-source FMHA implementation. | True |
-| `--disable_flashinfer_native` | Disables FlashInfer native attention backends. | False |
+| `--disable_flash_infer` | Disables FlashInfer implementations during automatic selection when True. | False |
 | `--disable_flashinfer_hybrid_prefill` | Disables FlashInfer native Hybrid Prefill implementation. | True |
 | `--enable_xqa` | Enables XQA feature (requires SM90+ GPU). | True |
 
-### Removed FMHA options
+Legacy boolean switches apply to automatic backend selection. Explicit backend names use `--attn_backend` or the per-stage overrides.
 
-The following legacy options and environment variables were removed and must no longer be used:
+### Removed FlashInfer-specific switches
 
-| Removed CLI option | Removed environment variable | Replacement |
-|--------------------|------------------------------|-------------|
-| `--enable_trt_fmha` | `ENABLE_TRT_FMHA` | `--enable_flashinfer_trt_fmha_v2` / `ENABLE_FLASHINFER_TRT_FMHA_V2` for contiguous prefill |
-| `--enable_paged_trt_fmha` | `ENABLE_PAGED_TRT_FMHA` | `--enable_paged_flashinfer_trt_fmha_v2` / `ENABLE_PAGED_FLASHINFER_TRT_FMHA_V2` for paged prefill |
-| `--enable_trtv1_fmha` | `ENABLE_TRTV1_FMHA` | None; select another supported attention backend |
-| `--disable_flash_infer` | `DISABLE_FLASH_INFER` | To preserve global disable behavior, set `--disable_flashinfer_native=true`, `--enable_flashinfer_trtllm_gen=false`, `--enable_flashinfer_trt_fmha_v2=false`, and `--enable_paged_flashinfer_trt_fmha_v2=false` |
+These switches are not registered by the current argument parser:
+
+| Removed CLI option | Replacement |
+|--------------------|-------------|
+| `--enable_flashinfer_trtllm_gen` | Select `trtllm_gen` with `--attn_backend` or a per-stage override; exclude it with `--disable_attn_backends`. |
+| `--enable_flashinfer_trt_fmha_v2` | Select `trt`, or use `--enable_trt_fmha` during automatic selection. |
+| `--enable_paged_flashinfer_trt_fmha_v2` | Select `trt_paged`, or use `--enable_paged_trt_fmha` during automatic selection. |
+
+### Deprecated compatibility flags
+
+These CLI options are still accepted with a deprecation warning but do not change configuration:
+
+| Deprecated CLI option | Replacement |
+|-----------------------|-------------|
+| `--enable_paged_open_source_fmha` | Select a supported paged backend with `--attn_backend`. |
+| `--enable_trtv1_fmha` | Select a supported backend with `--attn_backend`. |
+| `--disable_flashinfer_native` | Use `--disable_flash_infer` during automatic selection, or exclude named backends with `--disable_attn_backends`. |
 
 ## KV Cache Configuration
 

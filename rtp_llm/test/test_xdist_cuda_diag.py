@@ -11,7 +11,7 @@ Run:
 
   Or via remote session:
     pytest --remote-session --rtp-ci-profile=py_ut_sm8x \
-      -k test_xdist_cuda_diag --timeout=600 -v
+      -k test_xdist_cuda_diag --rtp-ci-allow-subset --timeout=600 -v
 """
 
 import json

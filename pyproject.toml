@@ -49,7 +49,7 @@ smoke-runs-per-test = "rtp_llm.test.smoke_framework.runs_plugin"
 # Model plugins can be registered here
 
 # `dev` and `docs` extras are declared statically here (not via setup.py
-# extras_require) so `uv pip install --compile-bytecode -e .[dev]` resolves them from PEP 621
+# extras_require) so `uv pip install --compile-bytecode -e '.[dev]'` resolves them from PEP 621
 # metadata. Without this, uv warns "does not have an extra named dev" and
 # silently drops pytest, breaking REAPI workers that need pytest to run.
 # GPU platform extras (cuda12_9 / rocm / cuda12_arm) stay in
@@ -88,7 +88,7 @@ include = ["rtp_llm", "rtp_llm.*", "_build"]
 # ``dependencies`` is dynamic but no source is declared here: setuptools accepts
 # ``install_requires=`` from setup.py for any field marked dynamic in [project]
 # without an explicit dynamic source. setup.py builds the per-platform list from
-# pyproject.toml [tool.rtp-llm].base-dependencies + extras at import time.
+# pyproject.toml [tool.rtp-llm].base-dependencies + extras in its main entry point.
 [tool.setuptools.dynamic]
 version = {attr = "setup.dynamic_version"}
 

@@ -482,6 +482,7 @@ document.write(`
 <h1>Attention Backend<a class="headerlink" href="#attention-backend" title="Link to this heading">#</a></h1>
 <section id="supporting-matrix-for-different-attention-backends">
 <h2>Supporting matrix for different attention backends<a class="headerlink" href="#supporting-matrix-for-different-attention-backends" title="Link to this heading">#</a></h2>
+<p>Use <code class="docutils literal notranslate"><span class="pre">--attn_backend=auto</span></code> for priority-ordered selection, or select backend names with <code class="docutils literal notranslate"><span class="pre">--attn_backend</span></code>, <code class="docutils literal notranslate"><span class="pre">--prefill_attn_backend</span></code>, and <code class="docutils literal notranslate"><span class="pre">--decode_attn_backend</span></code>. Exclude named backends with <code class="docutils literal notranslate"><span class="pre">--disable_attn_backends</span></code>. Legacy boolean switches affect automatic selection; see <a class="reference internal" href="server_arguments.html"><span class="std std-doc">ServerArgs</span></a> for deprecated compatibility flags.</p>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
 <tr class="row-odd"><th class="head"><p><strong>Backend</strong></p></th>
@@ -495,30 +496,30 @@ document.write(`
 </tr>
 </thead>
 <tbody>
-<tr class="row-even"><td><p><strong>TRT_V1</strong></p></td>
+<tr class="row-even"><td><p><strong>FLASHINFER_TRTLLM_GEN</strong></p></td>
+<td><p>✅</p></td>
+<td><p>✅</p></td>
 <td><p>❌</p></td>
 <td><p>❌</p></td>
-<td><p>❌</p></td>
-<td><p>❌</p></td>
-<td><p>NV ✅<br> AMD ❌</p></td>
-<td><p>–enable_trtv1_fmha</p></td>
-<td><p>PREFILL ✅ <br>  DECODE❌</p></td>
+<td><p>NV SM100 ✅<br> AMD ❌</p></td>
+<td><p>–attn_backend=trtllm_gen</p></td>
+<td><p>PREFILL ✅ <br>  DECODE✅</p></td>
 </tr>
-<tr class="row-odd"><td><p><strong>TRT_V2</strong></p></td>
+<tr class="row-odd"><td><p><strong>FLASHINFER_TRT_FMHA_V2</strong></p></td>
 <td><p>❌</p></td>
 <td><p>❌</p></td>
 <td><p>❌</p></td>
 <td><p>❌</p></td>
-<td><p>NV ✅<br> AMD ❌</p></td>
+<td><p>NV SM90/SM12x ✅<br> AMD ❌</p></td>
 <td><p>–enable_trt_fmha</p></td>
 <td><p>PREFILL ✅ <br>  DECODE❌</p></td>
 </tr>
-<tr class="row-even"><td><p><strong>PAGED_TRT_V2</strong></p></td>
+<tr class="row-even"><td><p><strong>PAGED_FLASHINFER_TRT_FMHA_V2</strong></p></td>
 <td><p>✅</p></td>
 <td><p>❌</p></td>
 <td><p>❌</p></td>
 <td><p>❌</p></td>
-<td><p>NV ✅<br> AMD ❌</p></td>
+<td><p>NV SM90/SM12x ✅<br> AMD ❌</p></td>
 <td><p>–enable_paged_trt_fmha</p></td>
 <td><p>PREFILL ✅ <br>  DECODE❌</p></td>
 </tr>
@@ -537,7 +538,7 @@ document.write(`
 <td><p>❌</p></td>
 <td><p>❌</p></td>
 <td><p>NV ✅<br> AMD ❌</p></td>
-<td><p>–enable_paged_open_source_fmha</p></td>
+<td><p>Use named backend selection</p></td>
 <td><p>PREFILL ✅ <br>  DECODE❌</p></td>
 </tr>
 <tr class="row-odd"><td><p><strong>CKFMHA</strong></p></td>
@@ -549,13 +550,13 @@ document.write(`
 <td><p>None</p></td>
 <td><p>PREFILL ✅ <br>  DECODE❌</p></td>
 </tr>
-<tr class="row-even"><td><p><strong>FlashInfer</strong></p></td>
+<tr class="row-even"><td><p><strong>FLASHINFER_NATIVE</strong></p></td>
 <td><p>✅</p></td>
 <td><p>✅</p></td>
 <td><p>✅</p></td>
 <td><p>✅</p></td>
 <td><p>NV ✅<br> AMD ✅</p></td>
-<td><p>–disable_flash_infer</p></td>
+<td><p>–disable_flash_infer<br>–disable_flashinfer_hybrid_prefill</p></td>
 <td><p>PREFILL ✅ <br>  DECODE✅</p></td>
 </tr>
 <tr class="row-odd"><td><p><strong>XQA</strong></p></td>
@@ -597,6 +598,87 @@ document.write(`
 </tbody>
 </table>
 </div>
+</section>
+<section id="rocm-kv-cache-v-layout-and-pa-flag-combinations">
+<h2>ROCm KV-cache V layout and PA flag combinations<a class="headerlink" href="#rocm-kv-cache-v-layout-and-pa-flag-combinations" title="Link to this heading">#</a></h2>
+<p>The matrix uses <code class="docutils literal notranslate"><span class="pre">[prefill</span> <span class="pre">writer:layout]</span> <span class="pre">(decode</span> <span class="pre">reader:layout)</span></code>, where <code class="docutils literal notranslate"><span class="pre">V</span></code> is vectorized and <code class="docutils literal notranslate"><span class="pre">L</span></code> is
+linear. It assumes the default <code class="docutils literal notranslate"><span class="pre">page=16</span></code>, BF16/FP16 for BASE cache, and FP8 E4M3; FP8 has
+<code class="docutils literal notranslate"><span class="pre">width=16</span></code>, so its linear and vectorized addressing coincide when <code class="docutils literal notranslate"><span class="pre">page=width</span></code>. The rows apply to
+full-attention MHA with an interleaved RoPE KV cache, not MLA.</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>aiter/asm/triton</p></th>
+<th class="head"><p>128 BASE</p></th>
+<th class="head"><p>128 FP8</p></th>
+<th class="head"><p>256 BASE</p></th>
+<th class="head"><p>256 FP8</p></th>
+<th class="head"><p>fix for ❌</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">1/1/1</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[Asm:V]</span> <span class="pre">(Triton:V)</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[Asm:V]</span> <span class="pre">(Triton:V)</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[Asm:V]</span> <span class="pre">(Triton:V)</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[Asm:V]</span> <span class="pre">(Triton:V)</span></code></p></td>
+<td><p>—</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">1/1/0</span></code> <strong>(default)</strong></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[Asm:V]</span> <span class="pre">(Asm:V)</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[Asm:V]</span> <span class="pre">(Asm:V)</span></code></p></td>
+<td><p>❌ <code class="docutils literal notranslate"><span class="pre">[Asm:V]</span> <span class="pre">(NonAsm:L)</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[Asm:V]</span> <span class="pre">(NonAsm:L)</span></code> <code class="docutils literal notranslate"><span class="pre">page=width</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--use_triton_pa</span> <span class="pre">1</span></code>, or <code class="docutils literal notranslate"><span class="pre">--use_asm_pa</span> <span class="pre">0</span></code> on BASE</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">1/0/1</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[NonAsm:L]</span> <span class="pre">(TritonLin:L)</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[NonAsm:V]</span> <span class="pre">(Triton:V)</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[NonAsm:L]</span> <span class="pre">(TritonLin:L)</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[NonAsm:V]</span> <span class="pre">(Triton:V)</span></code></p></td>
+<td><p>—</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">1/0/0</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[NonAsm:L]</span> <span class="pre">(NonAsm:L)</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[NonAsm:V]</span> <span class="pre">(NonAsm:L)</span></code> <code class="docutils literal notranslate"><span class="pre">page=width</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[NonAsm:L]</span> <span class="pre">(NonAsm:L)</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[NonAsm:V]</span> <span class="pre">(NonAsm:L)</span></code> <code class="docutils literal notranslate"><span class="pre">page=width</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--use_triton_pa</span> <span class="pre">1</span></code> for non-default FP8 pages</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">0/1/1</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[Asm:V]</span> <span class="pre">(Triton:V)</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[Asm:V]</span> <span class="pre">(Triton:V)</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[Asm:V]</span> <span class="pre">(Triton:V)</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[Asm:V]</span> <span class="pre">(Triton:V)</span></code></p></td>
+<td><p>—</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">0/1/0</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[Asm:V]</span> <span class="pre">(Asm:V)</span></code></p></td>
+<td><p>✅ <code class="docutils literal notranslate"><span class="pre">[Asm:V]</span> <span class="pre">(Asm:V)</span></code></p></td>
+<td><p>❌ <code class="docutils literal notranslate"><span class="pre">[Asm:V]</span> <span class="pre">(none)</span></code></p></td>
+<td><p>❌ <code class="docutils literal notranslate"><span class="pre">[Asm:V]</span> <span class="pre">(none)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--use_triton_pa</span> <span class="pre">1</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">0/0/1</span></code></p></td>
+<td><p>❌ <code class="docutils literal notranslate"><span class="pre">[none]</span> <span class="pre">(TritonLin:L)</span></code></p></td>
+<td><p>❌ <code class="docutils literal notranslate"><span class="pre">[none]</span> <span class="pre">(Triton:V)</span></code></p></td>
+<td><p>❌ <code class="docutils literal notranslate"><span class="pre">[none]</span> <span class="pre">(TritonLin:L)</span></code></p></td>
+<td><p>❌ <code class="docutils literal notranslate"><span class="pre">[none]</span> <span class="pre">(Triton:V)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--use_asm_pa</span> <span class="pre">1</span></code>, or <code class="docutils literal notranslate"><span class="pre">--use_aiter_pa</span> <span class="pre">1</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">0/0/0</span></code></p></td>
+<td><p>❌ <code class="docutils literal notranslate"><span class="pre">[none]</span> <span class="pre">(none)</span></code></p></td>
+<td><p>❌ <code class="docutils literal notranslate"><span class="pre">[none]</span> <span class="pre">(none)</span></code></p></td>
+<td><p>❌ <code class="docutils literal notranslate"><span class="pre">[none]</span> <span class="pre">(none)</span></code></p></td>
+<td><p>❌ <code class="docutils literal notranslate"><span class="pre">[none]</span> <span class="pre">(none)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--use_aiter_pa</span> <span class="pre">1</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The vector width is <code class="docutils literal notranslate"><span class="pre">16</span> <span class="pre">//</span> <span class="pre">itemsize</span></code>; both <code class="docutils literal notranslate"><span class="pre">head_dim</span></code> and <code class="docutils literal notranslate"><span class="pre">page</span></code> must be divisible by it. Non-ASM
+decode also requires <code class="docutils literal notranslate"><span class="pre">page</span></code> to divide its selected 512- or 256-token partition. The factory rejects
+invalid geometry, missing implementations, and non-equivalent writer/reader layouts; disaggregated
+prefill and decode roles must therefore use the same PA flags because no layout negotiation exists.</p>
 </section>
 </section>
 
@@ -646,6 +728,7 @@ document.write(`
   <nav class="bd-toc-nav page-toc">
     <ul class="visible nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#supporting-matrix-for-different-attention-backends">Supporting matrix for different attention backends</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#rocm-kv-cache-v-layout-and-pa-flag-combinations">ROCm KV-cache V layout and PA flag combinations</a></li>
 </ul>
   </nav></div>
 

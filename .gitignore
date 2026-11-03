@@ -2,7 +2,7 @@
 *.o
 __pycache__/
 
-# Local venv: use $HOME/venvs/<name> (see scripts/create_venv.sh). .venv/ is uv/IDE default when
+# Local venv: use $HOME/venvs/<name>. .venv/ is uv/IDE default when
 # running `uv run`/`uv sync` in-tree without UV_PROJECT_ENVIRONMENT — ignore so it never gets committed.
 .venv/
 venv/

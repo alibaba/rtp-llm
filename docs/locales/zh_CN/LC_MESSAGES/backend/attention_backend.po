@@ -76,10 +76,6 @@ msgid "NV SM100 ✅<br> AMD ❌"
 msgstr ""
 
 #: ../../backend/attention_backend.md
-msgid "--enable_flashinfer_trtllm_gen"
-msgstr ""
-
-#: ../../backend/attention_backend.md
 msgid "NV SM90/SM12x ✅<br> AMD ❌"
 msgstr ""
 
@@ -92,19 +88,11 @@ msgid "**FLASHINFER_TRT_FMHA_V2**"
 msgstr ""
 
 #: ../../backend/attention_backend.md
-msgid "--enable_flashinfer_trt_fmha_v2"
-msgstr ""
-
-#: ../../backend/attention_backend.md
 msgid "**PAGED_FLASHINFER_TRT_FMHA_V2**"
 msgstr ""
 
 #: ../../backend/attention_backend.md
 msgid "✅"
-msgstr ""
-
-#: ../../backend/attention_backend.md
-msgid "--enable_paged_flashinfer_trt_fmha_v2"
 msgstr ""
 
 #: ../../backend/attention_backend.md
@@ -117,10 +105,6 @@ msgstr ""
 
 #: ../../backend/attention_backend.md
 msgid "**PAGED_OPEN_SOURCE**"
-msgstr ""
-
-#: ../../backend/attention_backend.md
-msgid "--enable_paged_open_source_fmha"
 msgstr ""
 
 #: ../../backend/attention_backend.md
@@ -178,3 +162,23 @@ msgstr ""
 #: ../../backend/attention_backend.md
 msgid "**AiterPA**"
 msgstr ""
+
+#: ../../backend/attention_backend.md
+msgid "--attn_backend=trtllm_gen"
+msgstr "--attn_backend=trtllm_gen"
+
+#: ../../backend/attention_backend.md
+msgid "--enable_paged_trt_fmha"
+msgstr "--enable_paged_trt_fmha"
+
+#: ../../backend/attention_backend.md
+msgid "--enable_trt_fmha"
+msgstr "--enable_trt_fmha"
+
+#: ../../backend/attention_backend.md
+msgid "Use `--attn_backend=auto` for priority-ordered selection, or select backend names with `--attn_backend`, `--prefill_attn_backend`, and `--decode_attn_backend`. Exclude named backends with `--disable_attn_backends`. Legacy boolean switches affect automatic selection; see [ServerArgs](server_arguments.md) for deprecated compatibility flags."
+msgstr "使用 `--attn_backend=auto` 按优先级自动选择，或通过 `--attn_backend`、`--prefill_attn_backend` 和 `--decode_attn_backend` 指定后端名称。通过 `--disable_attn_backends` 排除指定后端。旧布尔开关只影响自动选择；已弃用兼容参数见 [ServerArgs](server_arguments.md)。"
+
+#: ../../backend/attention_backend.md
+msgid "Use named backend selection"
+msgstr "通过后端名称选择"

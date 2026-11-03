@@ -510,31 +510,35 @@ document.write(`
 </tr>
 </thead>
 <tbody>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--tp-size</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--worker_info_port_num</span></code></p></td>
+<td><p>Stride between port <strong>bases</strong> for each <code class="docutils literal notranslate"><span class="pre">rank_id</span></code>: <code class="docutils literal notranslate"><span class="pre">base</span> <span class="pre">=</span> <span class="pre">start_port</span> <span class="pre">+</span> <span class="pre">rank_id</span> <span class="pre">*</span> <span class="pre">worker_info_port_num</span></code>. Offsets under each base include RPC, HTTP, DashSc gRPC (<code class="docutils literal notranslate"><span class="pre">base</span> <span class="pre">+</span> <span class="pre">8</span></code>), etc. <strong>Breaking change:</strong> default was <strong>8</strong>, now <strong>9</strong>. Services with DashSc gRPC enabled require this value to be at least <code class="docutils literal notranslate"><span class="pre">9</span></code>; multi-rank deployments that relied on the old stride must re-check ports. See <a class="reference internal" href="../release/breaking-changes.html"><span class="std std-doc">breaking-changes.md</span></a>.</p></td>
+<td><p>9</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--tp-size</span></code></p></td>
 <td><p>Specifies the tensor parallelism degree.</p></td>
 <td><p>None</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--ep-size</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--ep-size</span></code></p></td>
 <td><p>Defines the number of model instances for expert parallelism.</p></td>
 <td><p>None</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--dp-size</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--dp-size</span></code></p></td>
 <td><p>Sets the number of replicas or group size for data parallelism.</p></td>
 <td><p>None</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--world-size</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--world-size</span></code></p></td>
 <td><p>Total number of GPUs used in distributed setup (WORLD_SIZE = TP_SIZE * DP_SIZE).</p></td>
 <td><p>None</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--world-rank</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--world-rank</span></code></p></td>
 <td><p>Global unique ID of the current process/GPU in the distributed system.</p></td>
 <td><p>None</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--local-world-size</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--local-world-size</span></code></p></td>
 <td><p>Number of GPU devices used on the current node.</p></td>
 <td><p>None</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--enable_ffn_disaggregate</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable_ffn_disaggregate</span></code></p></td>
 <td><p>Enables FFN disaggregation feature to separate attention and feed-forward network computations for performance optimization.</p></td>
 <td><p>None</p></td>
 </tr>
@@ -574,49 +578,100 @@ document.write(`
 </tr>
 </thead>
 <tbody>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-fmha</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--attn_backend</span></code></p></td>
+<td><p>按名称选择注意力后端；<code class="docutils literal notranslate"><span class="pre">auto</span></code> 按优先级自动选择。</p></td>
+<td><p>auto</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--prefill_attn_backend</span></code></p></td>
+<td><p>覆盖预填充阶段的后端选择；留空时使用 <code class="docutils literal notranslate"><span class="pre">--attn_backend</span></code>。</p></td>
+<td><p>空</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--decode_attn_backend</span></code></p></td>
+<td><p>覆盖解码阶段的后端选择；留空时使用 <code class="docutils literal notranslate"><span class="pre">--attn_backend</span></code>。</p></td>
+<td><p>空</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--disable_attn_backends</span></code></p></td>
+<td><p>以逗号分隔的待排除后端名称。</p></td>
+<td><p>空</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--enable_fmha</span></code></p></td>
 <td><p>Enables Fused Multi-Head Attention (FMHA) feature.</p></td>
 <td><p>True</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-trt-fmha</span></code></p></td>
-<td><p>Enables TensorRT optimized FMHA feature.</p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable_trt_fmha</span></code></p></td>
+<td><p>在自动选择模式下启用 TensorRT FMHA 实现。</p></td>
 <td><p>True</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-paged-trt-fmha</span></code></p></td>
-<td><p>Enables Paged TensorRT FMHA.</p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--enable_paged_trt_fmha</span></code></p></td>
+<td><p>在自动选择模式下启用分页 TensorRT FMHA 实现。</p></td>
 <td><p>True</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-open-source-fmha</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable_open_source_fmha</span></code></p></td>
 <td><p>Enables open-source FMHA implementation.</p></td>
 <td><p>True</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-paged-open-source-fmha</span></code></p></td>
-<td><p>Enables Paged open-source FMHA implementation.</p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--disable_flash_infer</span></code></p></td>
+<td><p>在自动选择模式下，设为 True 可禁用 FlashInfer 实现。</p></td>
+<td><p>False</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--disable_flashinfer_hybrid_prefill</span></code></p></td>
+<td><p>Disables FlashInfer native Hybrid Prefill implementation.</p></td>
 <td><p>True</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-trtv1-fmha</span></code></p></td>
-<td><p>Enables TRTv1-style FMHA.</p></td>
-<td><p>True</p></td>
-</tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--fmha-perf-instrument</span></code></p></td>
-<td><p>Enables NVTX performance profiling for FMHA.</p></td>
-<td><p>False</p></td>
-</tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--fmha-show-params</span></code></p></td>
-<td><p>Displays FMHA parameter information.</p></td>
-<td><p>False</p></td>
-</tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--disable-flash-infer</span></code></p></td>
-<td><p>Disables FlashInfer Attention mechanism.</p></td>
-<td><p>False</p></td>
-</tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-xqa</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--enable_xqa</span></code></p></td>
 <td><p>Enables XQA feature (requires SM90+ GPU).</p></td>
 <td><p>True</p></td>
 </tr>
 </tbody>
 </table>
 </div>
+<p>旧布尔开关用于自动选择后端；显式指定后端名称时，请使用 <code class="docutils literal notranslate"><span class="pre">--attn_backend</span></code> 或分阶段覆盖参数。</p>
+<section id="removed-flashinfer-specific-switches">
+<h3>已移除的 FlashInfer 专用开关<a class="headerlink" href="#removed-flashinfer-specific-switches" title="Link to this heading">#</a></h3>
+<p>当前参数解析器未注册以下开关：</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Removed CLI option</p></th>
+<th class="head"><p>Replacement</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--enable_flashinfer_trtllm_gen</span></code></p></td>
+<td><p>通过 <code class="docutils literal notranslate"><span class="pre">--attn_backend</span></code> 或分阶段覆盖参数选择 <code class="docutils literal notranslate"><span class="pre">trtllm_gen</span></code>；通过 <code class="docutils literal notranslate"><span class="pre">--disable_attn_backends</span></code> 排除该后端。</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable_flashinfer_trt_fmha_v2</span></code></p></td>
+<td><p>选择 <code class="docutils literal notranslate"><span class="pre">trt</span></code>，或在自动选择模式下使用 <code class="docutils literal notranslate"><span class="pre">--enable_trt_fmha</span></code>。</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--enable_paged_flashinfer_trt_fmha_v2</span></code></p></td>
+<td><p>选择 <code class="docutils literal notranslate"><span class="pre">trt_paged</span></code>，或在自动选择模式下使用 <code class="docutils literal notranslate"><span class="pre">--enable_paged_trt_fmha</span></code>。</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="deprecated-compatibility-flags">
+<h3>已弃用的兼容参数<a class="headerlink" href="#deprecated-compatibility-flags" title="Link to this heading">#</a></h3>
+<p>以下命令行参数仍可被解析，并会发出弃用警告，但不会更改配置：</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>已弃用的命令行参数</p></th>
+<th class="head"><p>Replacement</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--enable_paged_open_source_fmha</span></code></p></td>
+<td><p>通过 <code class="docutils literal notranslate"><span class="pre">--attn_backend</span></code> 选择受支持的分页后端。</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable_trtv1_fmha</span></code></p></td>
+<td><p>通过 <code class="docutils literal notranslate"><span class="pre">--attn_backend</span></code> 选择受支持的后端。</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--disable_flashinfer_native</span></code></p></td>
+<td><p>在自动选择模式下使用 <code class="docutils literal notranslate"><span class="pre">--disable_flash_infer</span></code>，或通过 <code class="docutils literal notranslate"><span class="pre">--disable_attn_backends</span></code> 排除指定名称的后端。</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
 </section>
 <section id="kv-cache-configuration">
 <h2>KV Cache Configuration<a class="headerlink" href="#kv-cache-configuration" title="Link to this heading">#</a></h2>
@@ -830,10 +885,6 @@ document.write(`
 <td><p>Override system maximum batch size.</p></td>
 <td><p>0</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-flashinfer-sample-kernel</span></code></p></td>
-<td><p>Enables FlashInfer sampling kernel.</p></td>
-<td><p>True</p></td>
-</tr>
 </tbody>
 </table>
 </div>
@@ -1020,19 +1071,7 @@ document.write(`
 <td><p>Reserved resource percentage</p></td>
 <td><p>5</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-fast-gen</span></code></p></td>
-<td><p>Enables long request chunking processing</p></td>
-<td><p>False</p></td>
-</tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--fast-gen-context-budget</span></code></p></td>
-<td><p>Chunk processing size</p></td>
-<td><p>None</p></td>
-</tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--enable-partial-fallback</span></code></p></td>
-<td><p>Allows partial resource reclamation</p></td>
-<td><p>False</p></td>
-</tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--batch-decode-scheduler-batch-size</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--batch-decode-scheduler-batch-size</span></code></p></td>
 <td><p>Decode batch size</p></td>
 <td><p>1</p></td>
 </tr>
@@ -1139,8 +1178,20 @@ document.write(`
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--load_method</span></code></p></td>
-<td><p>Specify the weight loading method.<br>Options: auto, fastsafetensors, scratch</p></td>
+<td><p>Specify the weight loading method.<br>Options: auto, fastsafetensors, scratch (<code class="docutils literal notranslate"><span class="pre">LOAD_METHOD</span></code>)</p></td>
 <td><p>auto</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--force_cpu_load_weights</span></code></p></td>
+<td><p>Load weights on CPU to reduce device memory usage (<code class="docutils literal notranslate"><span class="pre">FORCE_CPU_LOAD_WEIGHTS</span></code>)</p></td>
+<td><p>False</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--loader_recycle_handles</span></code></p></td>
+<td><p>ROCm + safetensors only: close consumed main-model shard handles to release mmap memory. Requires layer-numbered tensors and copies safetensors data out before closing; no effect on fastsafetensors, ViT, EPLB, or .bin weights. (<code class="docutils literal notranslate"><span class="pre">LOADER_RECYCLE_HANDLES</span></code>)</p></td>
+<td><p>True</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--moe_pure_tp_preshard</span></code></p></td>
+<td><p>Disabled by default. Set true to pre-shard supported Qwen3-Next / Qwen3.5 MoE and offline FP8 weights under pure TP (<code class="docutils literal notranslate"><span class="pre">tp&gt;1,</span> <span class="pre">dp=1,</span> <span class="pre">ep=1</span></code>) before device copy. Unsupported sources or layouts warn and use legacy full reads. (<code class="docutils literal notranslate"><span class="pre">MOE_PURE_TP_PRESHARD</span></code>)</p></td>
+<td><p>False</p></td>
 </tr>
 </tbody>
 </table>
@@ -1195,7 +1246,11 @@ document.write(`
     <ul class="visible nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#parallelism-and-distributed-setup-configuration">Parallelism and Distributed Setup Configuration</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#concurrency-control">Concurrency Control</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#attention-optimization"><span class="xref myst">Attention Optimization</span></a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#attention-optimization"><span class="xref myst">Attention Optimization</span></a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#removed-flashinfer-specific-switches">已移除的 FlashInfer 专用开关</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#deprecated-compatibility-flags">已弃用的兼容参数</a></li>
+</ul>
+</li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#kv-cache-configuration">KV Cache Configuration</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#hardware-kernel-optimization">Hardware/Kernel Optimization</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#device-resource-management">Device Resource Management</a></li>

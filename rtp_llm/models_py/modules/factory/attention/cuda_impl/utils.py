@@ -17,5 +17,5 @@ def is_cuda_12_9_or_later() -> bool:
 
 @functools.cache
 def is_sm_100() -> bool:
-    """Check if current GPU is SM 10.0 (Blackwell architecture)."""
+    """Check if current GPU is SM 10.x (Blackwell architecture)."""
     return torch.cuda.get_device_capability()[0] in [10]

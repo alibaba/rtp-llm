@@ -73,7 +73,7 @@ def make_output_files_decl() -> list:
 def make_tar_postscript() -> str:
     """Shell snippet appended after pytest.  Runs regardless of exit code.
 
-    Tars the entire working directory, excluding only coredump files.
+    Archives only `_rtp_test_outputs` and `logs`, excluding coredump files.
     """
     return (
         f"dmesg -T 2>/dev/null | tail -200 > {WORKER_OUTPUTS_DIR}/dmesg.log 2>/dev/null; "

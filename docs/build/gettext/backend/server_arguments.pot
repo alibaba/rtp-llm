@@ -1,5 +1,5 @@
 # SOME DESCRIPTIVE TITLE.
-# Copyright (C) 2023-2025, RTP-LLM
+# Copyright (C) 2023-2026, RTP-LLM
 # This file is distributed under the same license as the RTP-LLM package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
 #
@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: RTP-LLM 0.2.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-11-03 16:43+0800\n"
+"POT-Creation-Date: 2026-11-04 02:56+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -38,6 +38,18 @@ msgstr ""
 
 #: ../../backend/server_arguments.md:0
 msgid "Defaults"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "`--worker_info_port_num`"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "Stride between port **bases** for each `rank_id`: `base = start_port + rank_id * worker_info_port_num`. Offsets under each base include RPC, HTTP, DashSc gRPC (`base + 8`), etc. **Breaking change:** default was **8**, now **9**. Services with DashSc gRPC enabled require this value to be at least `9`; multi-rank deployments that relied on the old stride must re-check ports. See [breaking-changes.md](../release/breaking-changes.md)."
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "9"
 msgstr ""
 
 #: ../../backend/server_arguments.md:0
@@ -100,7 +112,7 @@ msgstr ""
 msgid "Enables FFN disaggregation feature to separate attention and feed-forward network computations for performance optimization."
 msgstr ""
 
-#: ../../backend/server_arguments.md:17
+#: ../../backend/server_arguments.md:18
 msgid "Concurrency Control"
 msgstr ""
 
@@ -128,12 +140,52 @@ msgstr ""
 msgid "32"
 msgstr ""
 
-#: ../../backend/server_arguments.md:24
+#: ../../backend/server_arguments.md:25
 msgid "[Attention Optimization](./attention_backend.md)"
 msgstr ""
 
 #: ../../backend/server_arguments.md:0
-msgid "`--enable-fmha`"
+msgid "`--attn_backend`"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "Selects attention backends by name; `auto` uses priority-ordered selection."
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "auto"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "`--prefill_attn_backend`"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "Overrides backend selection for prefill; empty uses `--attn_backend`."
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "Empty"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "`--decode_attn_backend`"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "Overrides backend selection for decode; empty uses `--attn_backend`."
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "`--disable_attn_backends`"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "Comma-separated backend names to exclude."
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "`--enable_fmha`"
 msgstr ""
 
 #: ../../backend/server_arguments.md:0
@@ -145,23 +197,23 @@ msgid "True"
 msgstr ""
 
 #: ../../backend/server_arguments.md:0
-msgid "`--enable-trt-fmha`"
+msgid "`--enable_trt_fmha`"
 msgstr ""
 
 #: ../../backend/server_arguments.md:0
-msgid "Enables TensorRT optimized FMHA feature."
+msgid "Enables TensorRT FMHA implementations during automatic selection."
 msgstr ""
 
 #: ../../backend/server_arguments.md:0
-msgid "`--enable-paged-trt-fmha`"
+msgid "`--enable_paged_trt_fmha`"
 msgstr ""
 
 #: ../../backend/server_arguments.md:0
-msgid "Enables Paged TensorRT FMHA."
+msgid "Enables paged TensorRT FMHA implementations during automatic selection."
 msgstr ""
 
 #: ../../backend/server_arguments.md:0
-msgid "`--enable-open-source-fmha`"
+msgid "`--enable_open_source_fmha`"
 msgstr ""
 
 #: ../../backend/server_arguments.md:0
@@ -169,54 +221,110 @@ msgid "Enables open-source FMHA implementation."
 msgstr ""
 
 #: ../../backend/server_arguments.md:0
-msgid "`--enable-paged-open-source-fmha`"
+msgid "`--disable_flash_infer`"
 msgstr ""
 
 #: ../../backend/server_arguments.md:0
-msgid "Enables Paged open-source FMHA implementation."
+msgid "Disables FlashInfer implementations during automatic selection when True."
 msgstr ""
 
 #: ../../backend/server_arguments.md:0
-msgid "`--enable-trtv1-fmha`"
+msgid "`--disable_flashinfer_hybrid_prefill`"
 msgstr ""
 
 #: ../../backend/server_arguments.md:0
-msgid "Enables TRTv1-style FMHA."
+msgid "Disables FlashInfer native Hybrid Prefill implementation."
 msgstr ""
 
 #: ../../backend/server_arguments.md:0
-msgid "`--fmha-perf-instrument`"
-msgstr ""
-
-#: ../../backend/server_arguments.md:0
-msgid "Enables NVTX performance profiling for FMHA."
-msgstr ""
-
-#: ../../backend/server_arguments.md:0
-msgid "`--fmha-show-params`"
-msgstr ""
-
-#: ../../backend/server_arguments.md:0
-msgid "Displays FMHA parameter information."
-msgstr ""
-
-#: ../../backend/server_arguments.md:0
-msgid "`--disable-flash-infer`"
-msgstr ""
-
-#: ../../backend/server_arguments.md:0
-msgid "Disables FlashInfer Attention mechanism."
-msgstr ""
-
-#: ../../backend/server_arguments.md:0
-msgid "`--enable-xqa`"
+msgid "`--enable_xqa`"
 msgstr ""
 
 #: ../../backend/server_arguments.md:0
 msgid "Enables XQA feature (requires SM90+ GPU)."
 msgstr ""
 
-#: ../../backend/server_arguments.md:39
+#: ../../backend/server_arguments.md:41
+msgid "Legacy boolean switches apply to automatic backend selection. Explicit backend names use `--attn_backend` or the per-stage overrides."
+msgstr ""
+
+#: ../../backend/server_arguments.md:43
+msgid "Removed FlashInfer-specific switches"
+msgstr ""
+
+#: ../../backend/server_arguments.md:45
+msgid "These switches are not registered by the current argument parser:"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "Removed CLI option"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "Replacement"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "`--enable_flashinfer_trtllm_gen`"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "Select `trtllm_gen` with `--attn_backend` or a per-stage override; exclude it with `--disable_attn_backends`."
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "`--enable_flashinfer_trt_fmha_v2`"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "Select `trt`, or use `--enable_trt_fmha` during automatic selection."
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "`--enable_paged_flashinfer_trt_fmha_v2`"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "Select `trt_paged`, or use `--enable_paged_trt_fmha` during automatic selection."
+msgstr ""
+
+#: ../../backend/server_arguments.md:53
+msgid "Deprecated compatibility flags"
+msgstr ""
+
+#: ../../backend/server_arguments.md:55
+msgid "These CLI options are still accepted with a deprecation warning but do not change configuration:"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "Deprecated CLI option"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "`--enable_paged_open_source_fmha`"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "Select a supported paged backend with `--attn_backend`."
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "`--enable_trtv1_fmha`"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "Select a supported backend with `--attn_backend`."
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "`--disable_flashinfer_native`"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "Use `--disable_flash_infer` during automatic selection, or exclude named backends with `--disable_attn_backends`."
+msgstr ""
+
+#: ../../backend/server_arguments.md:63
 msgid "KV Cache Configuration"
 msgstr ""
 
@@ -244,7 +352,7 @@ msgstr ""
 msgid "Multi-task prompt JSON string."
 msgstr ""
 
-#: ../../backend/server_arguments.md:47
+#: ../../backend/server_arguments.md:71
 msgid "Hardware/Kernel Optimization"
 msgstr ""
 
@@ -300,7 +408,7 @@ msgstr ""
 msgid "Disables custom AllReduce implementation."
 msgstr ""
 
-#: ../../backend/server_arguments.md:58
+#: ../../backend/server_arguments.md:82
 msgid "Device Resource Management"
 msgstr ""
 
@@ -376,7 +484,7 @@ msgstr ""
 msgid "Do not use default CUDA stream."
 msgstr ""
 
-#: ../../backend/server_arguments.md:71
+#: ../../backend/server_arguments.md:95
 msgid "DeepEP Configuration"
 msgstr ""
 
@@ -420,7 +528,7 @@ msgstr ""
 msgid "Number of SMs for DeepEPBuffer."
 msgstr ""
 
-#: ../../backend/server_arguments.md:81
+#: ../../backend/server_arguments.md:105
 msgid "EPLB Configuration"
 msgstr ""
 
@@ -528,7 +636,7 @@ msgstr ""
 msgid "(DEBUG) Enables expert pseudo-balancing mechanism."
 msgstr ""
 
-#: ../../backend/server_arguments.md:96
+#: ../../backend/server_arguments.md:120
 msgid "Sampling Configuration"
 msgstr ""
 
@@ -540,15 +648,7 @@ msgstr ""
 msgid "Override system maximum batch size."
 msgstr ""
 
-#: ../../backend/server_arguments.md:0
-msgid "`--enable-flashinfer-sample-kernel`"
-msgstr ""
-
-#: ../../backend/server_arguments.md:0
-msgid "Enables FlashInfer sampling kernel."
-msgstr ""
-
-#: ../../backend/server_arguments.md:103
+#: ../../backend/server_arguments.md:126
 msgid "Logging & Profiling"
 msgstr ""
 
@@ -640,7 +740,7 @@ msgstr ""
 msgid "\"\""
 msgstr ""
 
-#: ../../backend/server_arguments.md:118
+#: ../../backend/server_arguments.md:141
 msgid "Speculative Decoding"
 msgstr ""
 
@@ -712,7 +812,7 @@ msgstr ""
 msgid "Forces context attention scoring"
 msgstr ""
 
-#: ../../backend/server_arguments.md:131
+#: ../../backend/server_arguments.md:154
 msgid "RPC and Service Discovery"
 msgstr ""
 
@@ -756,7 +856,7 @@ msgstr ""
 msgid "Multimodal service discovery configuration"
 msgstr ""
 
-#: ../../backend/server_arguments.md:141
+#: ../../backend/server_arguments.md:164
 msgid "Cache Store"
 msgstr ""
 
@@ -788,7 +888,7 @@ msgstr ""
 msgid "WRR ranking factor (0=KV_CACHE usage, 1=in-flight requests)"
 msgstr ""
 
-#: ../../backend/server_arguments.md:149
+#: ../../backend/server_arguments.md:172
 msgid "Scheduler Configuration"
 msgstr ""
 
@@ -821,30 +921,6 @@ msgid "5"
 msgstr ""
 
 #: ../../backend/server_arguments.md:0
-msgid "`--enable-fast-gen`"
-msgstr ""
-
-#: ../../backend/server_arguments.md:0
-msgid "Enables long request chunking processing"
-msgstr ""
-
-#: ../../backend/server_arguments.md:0
-msgid "`--fast-gen-context-budget`"
-msgstr ""
-
-#: ../../backend/server_arguments.md:0
-msgid "Chunk processing size"
-msgstr ""
-
-#: ../../backend/server_arguments.md:0
-msgid "`--enable-partial-fallback`"
-msgstr ""
-
-#: ../../backend/server_arguments.md:0
-msgid "Allows partial resource reclamation"
-msgstr ""
-
-#: ../../backend/server_arguments.md:0
 msgid "`--batch-decode-scheduler-batch-size`"
 msgstr ""
 
@@ -852,7 +928,7 @@ msgstr ""
 msgid "Decode batch size"
 msgstr ""
 
-#: ../../backend/server_arguments.md:161
+#: ../../backend/server_arguments.md:181
 msgid "Load Balancing and Performance Optimization Configuration"
 msgstr ""
 
@@ -896,7 +972,7 @@ msgstr ""
 msgid "Disables PDL feature"
 msgstr ""
 
-#: ../../backend/server_arguments.md:170
+#: ../../backend/server_arguments.md:190
 msgid "3FS Configuration"
 msgstr ""
 
@@ -908,7 +984,7 @@ msgstr ""
 msgid "Enables 3FS for managing KVCache"
 msgstr ""
 
-#: ../../backend/server_arguments.md:176
+#: ../../backend/server_arguments.md:196
 msgid "Model Adaptation"
 msgstr ""
 
@@ -924,7 +1000,7 @@ msgstr ""
 msgid "-1"
 msgstr ""
 
-#: ../../backend/server_arguments.md:182
+#: ../../backend/server_arguments.md:202
 msgid "System Debugging"
 msgstr ""
 
@@ -936,7 +1012,7 @@ msgstr ""
 msgid "Torch Profiler output directory"
 msgstr ""
 
-#: ../../backend/server_arguments.md:189
+#: ../../backend/server_arguments.md:209
 msgid "Load Config"
 msgstr ""
 
@@ -945,9 +1021,29 @@ msgid "`--load_method`"
 msgstr ""
 
 #: ../../backend/server_arguments.md:0
-msgid "Specify the weight loading method.<br>Options: auto, fastsafetensors, scratch"
+msgid "Specify the weight loading method.<br>Options: auto, fastsafetensors, scratch (`LOAD_METHOD`)"
 msgstr ""
 
 #: ../../backend/server_arguments.md:0
-msgid "auto"
+msgid "`--force_cpu_load_weights`"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "Load weights on CPU to reduce device memory usage (`FORCE_CPU_LOAD_WEIGHTS`)"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "`--loader_recycle_handles`"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "ROCm + safetensors only: close consumed main-model shard handles to release mmap memory. Requires layer-numbered tensors and copies safetensors data out before closing; no effect on fastsafetensors, ViT, EPLB, or .bin weights. (`LOADER_RECYCLE_HANDLES`)"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "`--moe_pure_tp_preshard`"
+msgstr ""
+
+#: ../../backend/server_arguments.md:0
+msgid "Disabled by default. Set true to pre-shard supported Qwen3-Next / Qwen3.5 MoE and offline FP8 weights under pure TP (`tp>1, dp=1, ep=1`) before device copy. Unsupported sources or layouts warn and use legacy full reads. (`MOE_PURE_TP_PRESHARD`)"
 msgstr ""

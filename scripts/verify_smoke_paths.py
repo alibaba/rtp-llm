@@ -41,9 +41,9 @@ def main() -> int:
     internal_smoke = repo / "internal_source" / "rtp_llm" / "test" / "smoke"
     gho_smoke = gho / "rtp_llm" / "test" / "smoke"
 
-    # Suite split: each suite is its own test_<suite>.py + <suite>_cases.py
-    # under suites/. The monolith test_smoke_oss.py / test_smoke_internal.py
-    # files are gone — pyproject `paths` now points at the suites/ directory.
+    # Each suites/test_smoke_*.py module declares its own SMOKE_CASES dict.
+    # The corresponding suites/conftest.py selects the data root before
+    # comparer imports; pyproject `paths` selects these suite modules.
     assert internal_smoke.is_dir(), f"missing {internal_smoke}"
     assert (internal_smoke / "data").is_dir()
     assert (internal_smoke / "suites").is_dir(), "internal suites/ dir missing"

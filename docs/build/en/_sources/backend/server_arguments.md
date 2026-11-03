@@ -6,6 +6,7 @@ This page lists server arguments used to configure the behavior and performance 
 
 | Arguments | Description | Defaults |
 |-----------|-------------|----------|
+| `--worker_info_port_num` | Stride between port **bases** for each `rank_id`: `base = start_port + rank_id * worker_info_port_num`. Offsets under each base include RPC, HTTP, DashSc gRPC (`base + 8`), etc. **Breaking change:** default was **8**, now **9**. Services with DashSc gRPC enabled require this value to be at least `9`; multi-rank deployments that relied on the old stride must re-check ports. See [breaking-changes.md](../release/breaking-changes.md). | 9 |
 | `--tp-size` | Specifies the tensor parallelism degree. | None |
 | `--ep-size` | Defines the number of model instances for expert parallelism. | None |
 | `--dp-size` | Sets the number of replicas or group size for data parallelism. | None |
@@ -25,16 +26,39 @@ This page lists server arguments used to configure the behavior and performance 
 
 | Arguments | Description | Defaults |
 |-----------|-------------|----------|
-| `--enable-fmha` | Enables Fused Multi-Head Attention (FMHA) feature. | True |
-| `--enable-trt-fmha` | Enables TensorRT optimized FMHA feature. | True |
-| `--enable-paged-trt-fmha` | Enables Paged TensorRT FMHA. | True |
-| `--enable-open-source-fmha` | Enables open-source FMHA implementation. | True |
-| `--enable-paged-open-source-fmha` | Enables Paged open-source FMHA implementation. | True |
-| `--enable-trtv1-fmha` | Enables TRTv1-style FMHA. | True |
-| `--fmha-perf-instrument` | Enables NVTX performance profiling for FMHA. | False |
-| `--fmha-show-params` | Displays FMHA parameter information. | False |
-| `--disable-flash-infer` | Disables FlashInfer Attention mechanism. | False |
-| `--enable-xqa` | Enables XQA feature (requires SM90+ GPU). | True |
+| `--attn_backend` | Selects attention backends by name; `auto` uses priority-ordered selection. | auto |
+| `--prefill_attn_backend` | Overrides backend selection for prefill; empty uses `--attn_backend`. | Empty |
+| `--decode_attn_backend` | Overrides backend selection for decode; empty uses `--attn_backend`. | Empty |
+| `--disable_attn_backends` | Comma-separated backend names to exclude. | Empty |
+| `--enable_fmha` | Enables Fused Multi-Head Attention (FMHA) feature. | True |
+| `--enable_trt_fmha` | Enables TensorRT FMHA implementations during automatic selection. | True |
+| `--enable_paged_trt_fmha` | Enables paged TensorRT FMHA implementations during automatic selection. | True |
+| `--enable_open_source_fmha` | Enables open-source FMHA implementation. | True |
+| `--disable_flash_infer` | Disables FlashInfer implementations during automatic selection when True. | False |
+| `--disable_flashinfer_hybrid_prefill` | Disables FlashInfer native Hybrid Prefill implementation. | True |
+| `--enable_xqa` | Enables XQA feature (requires SM90+ GPU). | True |
+
+Legacy boolean switches apply to automatic backend selection. Explicit backend names use `--attn_backend` or the per-stage overrides.
+
+### Removed FlashInfer-specific switches
+
+These switches are not registered by the current argument parser:
+
+| Removed CLI option | Replacement |
+|--------------------|-------------|
+| `--enable_flashinfer_trtllm_gen` | Select `trtllm_gen` with `--attn_backend` or a per-stage override; exclude it with `--disable_attn_backends`. |
+| `--enable_flashinfer_trt_fmha_v2` | Select `trt`, or use `--enable_trt_fmha` during automatic selection. |
+| `--enable_paged_flashinfer_trt_fmha_v2` | Select `trt_paged`, or use `--enable_paged_trt_fmha` during automatic selection. |
+
+### Deprecated compatibility flags
+
+These CLI options are still accepted with a deprecation warning but do not change configuration:
+
+| Deprecated CLI option | Replacement |
+|-----------------------|-------------|
+| `--enable_paged_open_source_fmha` | Select a supported paged backend with `--attn_backend`. |
+| `--enable_trtv1_fmha` | Select a supported backend with `--attn_backend`. |
+| `--disable_flashinfer_native` | Use `--disable_flash_infer` during automatic selection, or exclude named backends with `--disable_attn_backends`. |
 
 ## KV Cache Configuration
 
@@ -98,7 +122,6 @@ This page lists server arguments used to configure the behavior and performance 
 | Arguments | Description | Defaults |
 |-----------|-------------|----------|
 | `--max-batch-size` | Override system maximum batch size. | 0 |
-| `--enable-flashinfer-sample-kernel` | Enables FlashInfer sampling kernel. | True |
 
 ## Logging & Profiling
 
@@ -153,9 +176,6 @@ This page lists server arguments used to configure the behavior and performance 
 | `--use-batch-decode-scheduler` | Enables batch decode scheduler | False |
 | `--max-context-batch-size` | Maximum context batch size | 1 |
 | `--scheduler-reserve-resource-ratio` | Reserved resource percentage | 5 |
-| `--enable-fast-gen` | Enables long request chunking processing | False |
-| `--fast-gen-context-budget` | Chunk processing size | None |
-| `--enable-partial-fallback` | Allows partial resource reclamation | False |
 | `--batch-decode-scheduler-batch-size` | Decode batch size | 1 |
 
 ## Load Balancing and Performance Optimization Configuration
@@ -190,4 +210,7 @@ This page lists server arguments used to configure the behavior and performance 
 
 | Arguments | Description | Defaults |
 |-----------|-------------|----------|
-| `--load_method` | Specify the weight loading method.<br>Options: auto, fastsafetensors, scratch | auto |
+| `--load_method` | Specify the weight loading method.<br>Options: auto, fastsafetensors, scratch (`LOAD_METHOD`) | auto |
+| `--force_cpu_load_weights` | Load weights on CPU to reduce device memory usage (`FORCE_CPU_LOAD_WEIGHTS`) | False |
+| `--loader_recycle_handles` | ROCm + safetensors only: close consumed main-model shard handles to release mmap memory. Requires layer-numbered tensors and copies safetensors data out before closing; no effect on fastsafetensors, ViT, EPLB, or .bin weights. (`LOADER_RECYCLE_HANDLES`) | True |
+| `--moe_pure_tp_preshard` | Disabled by default. Set true to pre-shard supported Qwen3-Next / Qwen3.5 MoE and offline FP8 weights under pure TP (`tp>1, dp=1, ep=1`) before device copy. Unsupported sources or layouts warn and use legacy full reads. (`MOE_PURE_TP_PRESHARD`) | False |

@@ -11,8 +11,8 @@ WORLD_SIZE = "WORLD_SIZE"
 # OSS and internal smoke share comparer code but have separate data trees.
 # When BOTH internal_source/rtp_llm/test/smoke/ and rtp_llm/test/smoke/ exist,
 # the previous "first hit wins" rule misrouted OSS task_info paths to the
-# internal data dir. Test entry files (test_smoke_oss.py / test_smoke_internal.py)
-# call ``set_default_data_root("oss"|"internal")`` BEFORE importing comparers
+# internal data dir. The corresponding suites/conftest.py for
+# suites/test_smoke_*.py cases calls ``set_default_data_root("oss"|"internal")`` BEFORE importing comparers
 # (which capture ``REL_PATH`` at import time) to bias the choice.
 #
 # Resolution logic lives in ``rel_path_config.py`` (stdlib-only) for verify scripts.

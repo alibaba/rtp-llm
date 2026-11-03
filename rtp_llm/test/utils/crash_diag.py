@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """xdist worker crash diagnostic script.
 
-Runs 4 layers of diagnostics to capture crash site information when
+Runs seven diagnostic layers (LG, LE, L0, L1, L2, L3, L4) by default when
 pytest-xdist workers crash with "Not properly terminated" on remote
 GPU workers.
 
@@ -10,7 +10,7 @@ dumped to stdout at the end. This avoids output loss from pytest capture
 or xdist stderr swallowing.
 
 Usage (inside REAPI session, after venv activation):
-    python rtp_llm/test/utils/crash_diag.py [--layers L1,L2,L3,L4]
+    python rtp_llm/test/utils/crash_diag.py [--layers LG,LE,L0,L1,L2,L3,L4]
 """
 import argparse
 import glob

@@ -1,6 +1,6 @@
 """Typed dataclass models for smoke / perf cases.
 
-Wraps the existing dict-of-dict layout in `smoke_defs_*.py` without changing
+Wraps the existing SMOKE_CASES dicts in `suites/test_smoke_*.py` without changing
 its on-disk shape. Use `SmokeCase.from_dict(name, dict_)` when you want type
 safety + IDE autocomplete; the existing dicts continue to work unchanged.
 
@@ -20,7 +20,7 @@ SmokeArgs = Union[str, Dict[str, str]]
 
 @dataclass
 class SmokeCase:
-    """Typed view of one entry in `SMOKE_TESTS[<suite>][<case>]`."""
+    """Typed view of one entry in a suite's `SMOKE_CASES` dict."""
 
     name: str
     task_info: str

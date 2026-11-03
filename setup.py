@@ -1710,9 +1710,10 @@ def get_merged_optional_dependencies() -> dict:
 
     OSS extras are loaded from ``_build/oss_optional_extras.toml`` when present
     (GPU pins split out of ``pyproject.toml`` to avoid duplicating them under
-    PEP621). ``setup()`` only exposes ``dev``/``docs``/``all`` via
-    ``extras_require``; platform stacks are merged into ``install_requires``
-    (``get_all_dependencies()``) so installers never see two torch pins.
+    PEP621). ``dev`` and ``docs`` are static PEP 621 extras in
+    ``pyproject.toml``; the setup entry point exposes only ``all`` via
+    ``extras_require``. Platform stacks feed ``install_requires`` through
+    ``get_all_dependencies()`` so installers never see two torch pins.
     Otherwise fall back to ``pyproject.toml``.
 
     Layer 1 — OSS extras file or pyproject.toml.

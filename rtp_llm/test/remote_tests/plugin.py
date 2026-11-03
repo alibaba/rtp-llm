@@ -444,7 +444,7 @@ def pytest_addoption(parser):
         "--remote-timeout",
         type=int,
         default=_get_int_env("REMOTE_TIMEOUT", 7200),
-        help="Per-test timeout in seconds (default: 7200)",
+        help="Total remote session budget override in seconds (default: selected profile policy)",
     )
     g.addoption(
         "--remote-concurrency",
