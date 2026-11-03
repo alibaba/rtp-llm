@@ -475,6 +475,18 @@ def _target_verify_geometry(
                             "QSA cache 'indexer_state' target-verify tail resolves to "
                             "an unallocated or out-of-range physical block"
                         )
+    elif graph_target:
+        # Graph capture materialises synthetic block tables whose entries are
+        # unallocated placeholders; only the table width is real. Keep the
+        # capture-time coverage check host-side (required_state_columns is a
+        # CPU tensor built from the pinned host prefix mirror, so this stays
+        # capture-safe without a device readback) and skip the physical-block
+        # resolution verdict, mirroring the legacy capture-time semantics.
+        if int(required_state_columns.max()) > int(state_table.shape[1]):
+            raise RuntimeError(
+                "QSA cache 'indexer_state' block table does not cover the "
+                "target-verify tail"
+            )
     else:
         qsa_assert_valid(
             _required_blocks_verdict(
