@@ -58,9 +58,20 @@ class FakeFrontendWorker(object):
 class FakeRawRequest(object):
     def __init__(self, headers=None):
         self.headers = headers or {}
+        self.disconnect = asyncio.Event()
+        self.receive_started = asyncio.Event()
+        self.receive_finished = asyncio.Event()
 
     async def is_disconnected(self):
         return False
+
+    async def receive(self):
+        self.receive_started.set()
+        try:
+            await self.disconnect.wait()
+            return {"type": "http.disconnect"}
+        finally:
+            self.receive_finished.set()
 
 
 class FrontendServerTest(TestCase):
@@ -106,6 +117,62 @@ class FrontendServerTest(TestCase):
         self.assertEqual(
             res.body.decode("utf-8"), '{"res":"hello"}', res.body.decode("utf-8")
         )
+
+    def test_nonstream_disconnect_cancels_generation_before_any_output(self):
+        async def run():
+            request = FakeRawRequest()
+            generation_started = asyncio.Event()
+            generation_cancelled = asyncio.Event()
+
+            async def generate(*args, **kwargs):
+                generation_started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    generation_cancelled.set()
+                    raise
+                yield FakePipelinResponse(res="unexpected")
+
+            with patch.object(
+                self.frontend_server._frontend_worker, "_inference", generate
+            ):
+                task = asyncio.create_task(
+                    self._async_run(req={"prompt": "hello"}, raw_request=request)
+                )
+                try:
+                    await asyncio.wait_for(generation_started.wait(), timeout=1)
+                    request.disconnect.set()
+                    done, _ = await asyncio.wait({task}, timeout=1)
+                    self.assertIn(
+                        task, done, "generation kept running after disconnect"
+                    )
+                    self.assertTrue(generation_cancelled.is_set())
+                    self.assertTrue(request.receive_finished.is_set())
+                finally:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+
+        asyncio.run(run())
+
+    def test_nonstream_completion_releases_disconnect_listener(self):
+        async def run():
+            request = FakeRawRequest()
+
+            async def generate(*args, **kwargs):
+                await request.receive_started.wait()
+                yield FakePipelinResponse(res="done")
+
+            with patch.object(
+                self.frontend_server._frontend_worker, "_inference", generate
+            ):
+                response = await asyncio.wait_for(
+                    self._async_run(req={"prompt": "hello"}, raw_request=request),
+                    timeout=1,
+                )
+            self.assertEqual(json.loads(response.body), {"res": "done"})
+            self.assertTrue(request.receive_finished.is_set())
+
+        asyncio.run(run())
 
     def test_qos_priority_reaches_frontend_metrics_and_backend(self):
         raw_request = FakeRawRequest(

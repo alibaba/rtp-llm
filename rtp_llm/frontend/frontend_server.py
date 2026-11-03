@@ -660,14 +660,41 @@ class FrontendServer(object):
                 media_type="text/event-stream",
             )
         generation_finished = False
-        async for x in res:
-            generation_finished = generation_finished or self._response_finished(x)
-            if await raw_request.is_disconnected():
-                # Abort the request if the client disconnects.
+
+        async def consume_response():
+            nonlocal generation_finished
+            async for response in res:
+                generation_finished = generation_finished or self._response_finished(
+                    response
+                )
+
+        async def wait_for_disconnect():
+            # The route has already read the request body. Wait for ASGI's
+            # disconnect event even when the backend has not sent any output.
+            while (await raw_request.receive())["type"] != "http.disconnect":
+                pass
+
+        consumer = asyncio.create_task(consume_response())
+        disconnect = asyncio.create_task(wait_for_disconnect())
+        try:
+            done, _ = await asyncio.wait(
+                {consumer, disconnect}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if consumer in done:
+                consumer.result()
+            else:
+                disconnect.result()
+                if not generation_finished:
+                    raise asyncio.CancelledError("client disconnects")
+        finally:
+            consumer.cancel()
+            disconnect.cancel()
+            await asyncio.gather(consumer, disconnect, return_exceptions=True)
+            try:
                 await res.aclose()
-                if generation_finished:
-                    break
-                raise asyncio.CancelledError("client disconnects")
+            finally:
+                # Also cover cancellation before the response iterator starts.
+                request_metrics.finish()
 
         complete_response = await self._collect_complete_response_and_record_access_log(
             req, res
