@@ -2133,7 +2133,8 @@ void NaviSchedAgentImpl::reportMetrics() const
             _lastExecutionBusyTimeUs = executionBusyTimeUs;
             _lastExecutionBusyReportTimeUs = nowTimeUs;
         }
-        if (_agentBatchR->hasBackendExecutionObservation()) {
+        {
+            // Include idle nodes in both execution utilization metrics.
             const auto backendNowTimeUs = autil::TimeUtility::monotonicTimeUs();
             const auto backendExecutionBusyTimeUs =
                 _agentBatchR->getBackendExecutionBusyTimeUs(backendNowTimeUs);
