@@ -65,7 +65,9 @@ class KimiK3Fp8AttnResTest(unittest.TestCase):
 
         class Attention:
             _fp8_collective = SimpleNamespace(
-                enable_ag=True, can_run_ag=lambda rows: rows * 8 <= 65536
+                enable_ag=True,
+                decode_staging=False,
+                can_run_ag=lambda rows: rows * 8 <= 65536,
             )
 
             def __call__(self, hidden, *args):
@@ -87,8 +89,12 @@ class KimiK3Fp8AttnResTest(unittest.TestCase):
             metadata = SimpleNamespace(is_target_verify=False)
             layer.forward(Hidden(8192), None, None, None, inputs, metadata, None)
             layer.forward(Hidden(8193), None, None, None, inputs, metadata, None)
+            # Decode-role staging only consumes FP8 for target verification.
+            # Its ordinary framework prefill warmup must retain BF16.
+            layer.attention._fp8_collective.decode_staging = True
+            layer.forward(Hidden(8192), None, None, None, inputs, metadata, None)
         self.assertEqual(layer.attention_residual.fp8_calls, 1)
-        self.assertEqual(layer.attention_residual.bf16_calls, 1)
+        self.assertEqual(layer.attention_residual.bf16_calls, 2)
 
     @staticmethod
     def dequantize(values, scale_wire):

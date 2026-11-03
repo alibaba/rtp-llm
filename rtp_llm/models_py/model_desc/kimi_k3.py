@@ -176,6 +176,7 @@ class KimiK3DecoderLayer(nn.Module):
             produce_fp8 = (
                 fp8_ag is not None
                 and fp8_ag.enable_ag
+                and not fp8_ag.decode_staging
                 and hidden.is_cuda
                 and hidden.shape[0] >= 4096
                 and fp8_ag.can_run_ag(hidden.shape[0])
