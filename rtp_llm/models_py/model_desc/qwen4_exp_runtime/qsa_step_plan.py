@@ -99,6 +99,14 @@ def clear_step_plan_cache() -> None:
 def _tensor_fingerprint(tensor: Any) -> tuple[int, int] | None:
     if not isinstance(tensor, torch.Tensor):
         return None
+    if torch.is_inference(tensor):
+        # Inference tensors do not track a version counter: reading
+        # ``._version`` raises "Inference tensors do not track version
+        # counter" during a real (inference_mode) forward. The storage
+        # identity stands in for the version slot; the engine materialises
+        # fresh inference tensors per step and the runtime never rewrites
+        # the fingerprinted metadata tensors in place.
+        return (int(tensor.data_ptr()), -1)
     return (int(tensor.data_ptr()), int(tensor._version))
 
 

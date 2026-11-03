@@ -246,6 +246,25 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
             qsa_step_plan.lookup_prefill_step_plan(context.main_inputs, 5)
         )
 
+    def test_tensor_fingerprint_accepts_inference_tensors(self):
+        """Real requests run under inference_mode; their tensors track no version.
+
+        Regression: reading ``._version`` raised "Inference tensors do not
+        track version counter" from the first real (inference_mode) prefill
+        forward and terminated the worker.
+        """
+        with torch.inference_mode():
+            inference_tensor = torch.arange(8, dtype=torch.int32)
+        self.assertEqual(
+            qsa_step_plan._tensor_fingerprint(inference_tensor),
+            (inference_tensor.data_ptr(), -1),
+        )
+        normal = torch.arange(8, dtype=torch.int32)
+        pointer, version = qsa_step_plan._tensor_fingerprint(normal)
+        self.assertEqual(pointer, normal.data_ptr())
+        self.assertEqual(version, normal._version)
+        self.assertIsNone(qsa_step_plan._tensor_fingerprint(object()))
+
     def test_modes_key_separately_and_lookup_serves_the_impl_side(self):
         context = self._context([8], [5])
         plan = self._geometry(context, 5)
