@@ -1,207 +1,247 @@
-# Sparse KV Offload
+# Sparse KV Offload 设计
 
-基于 main `bcd02fdb05` 的本地实现，按 2026-10-27 当前代码整理。本文说明设计和调用关系；实验版本、性能及验证结果单独放在[验收记录](sparse_kv_offload_acceptance_20261025.md)。
+Sparse KV offload 的核心分工是：**cache group 描述 KV 怎么存，模型决定本步读写哪些 KV，offload runtime 负责把选中行准备到 GPU。**
 
-**Cache group 描述 KV 怎么存，模型决定本步读写哪些 KV，offload runtime 负责把 attention 要读的数据准备到 GPU。**
+请求继续使用原 block table 和 block ID。一个 offload group 的正式 KV 可以同时位于 HBM 和 pinned Host；GPU 热缓存只保存最近被稀疏 attention 访问到的 Host 行，不参与请求 block 分配或 P/D 传输。
 
-## 1. 与 cache group 的结合
+## 1. 目标与范围
 
-沿用 main 的按 tag 分组、block 分配、引用计数、P/D 传输和 MR 注册。对开启 offload 的 group，增加混合 GPU/Host 存储和 GPU 热缓存。
+- 只对 decode 阶段稀疏访问的正式 KV 做 offload；prefill、prefix reuse 和 decode reuse 保持原路径。
+- `indexer_kv`、HCA、SWA 和 compressor state 仍在 HBM，不进入本机制。
+- 不引入第二套对外 KV 地址。Host 行在 attention 前被映射到热缓存槽，原 sparse attention kernel 继续消费 GPU tensor。
+- 当前接入 GLM/DSA sparse MLA 和 DeepSeek V4 FP8 CSA。MHA 已覆盖存储和 runtime，但还没有完整模型 attention 适配。
 
-| GLM 的 group | 内容 | 存储方式 |
-|---|---|---|
-| `default` | attention 使用的 KV，各层数据独立 | 一部分 block 在 GPU，一部分在 pinned Host；GPU 热缓存保存从 Host 取回的行 |
-| `indexer_kv` | indexer 用于选择 token 的数据 | 保持在 GPU；IndexShare 模型只在实际计算 indexer 的源层分配 |
+生产 decode 使用 `--reuse_cache 0`。这里关闭的是 decode prefix reuse；P 侧仍可单独启用 prefill prefix reuse。
 
-同一个 offload group 内部包含 GPU 和 Host block，不额外拆成两组。请求仍使用原来的 block ID；热缓存槽位只供本地 attention 读取，不参与请求的 block 分配。
-
-模型在每层的 [KVCacheSpecDesc](../rtp_llm/cpp/cache/KVCacheSpecDesc.h) 上声明：
-
-```python
-offload: Optional[CacheOffloadPolicy]  # enabled, max_selected_rows
-offload_runtime_group: Optional[int] # 同一 tag 下，共享选择结果的层使用相同 ID
-```
-
-`cache group` 按存储类型分组；`offload_runtime_group` 按哪些层共享选择结果分组。属于同一个 `default` group，不等于所有层共用一个 runtime，更不等于共享 KV。
-
-存储布局由 [KVCacheSpec.entryLayout()](../rtp_llm/cpp/cache/KVCacheSpecBase.h) 提供：每页 entry 数，以及各 plane 的 dtype、offset、shape、stride。Plane 是一份 tensor 视图，例如 packed KV、K、V 或 scale；entry 是一次可以选择、搬运的数据行。
-
-| 布局 | 一行是什么 | planes |
-|---|---|---|
-| MLA | 一个 token 的压缩 KV | packed KV |
-| sparse MHA | 一个 token 的各 head K/V | K、V，量化时另有 scales |
-| CSA | 一个压缩后的 KV entry | packed KV，页 padding 不作为有效数据 |
-
-当前要求 offload group 是可分页的 `FULL` group，使用默认 block 容量分配并提供有效 entry 布局；固定容量、SWA、state/ring group 不自动进入 offload。
-
-## 2. 初始化：声明如何变成可用存储
+## 2. 分层与调用链
 
 ```mermaid
 flowchart TD
-    M["模型：KVCacheSpecDesc"] -->|"tag、offload 策略、共享组"| C["CacheConfigCreator"]
-    C -->|"容量、entryLayout、所属层"| P["DeviceBlockPoolConfigHelper → DeviceBlockPool"]
-    P -->|"每层 OffloadStorage"| K["CacheManager → 模型初始化参数 → pybind KVCache"]
-    K -->|"GPU / Host tensor 视图"| B["build_offload_plans"]
-    M -->|"同一份 descriptor"| B
-    B -->|"创建并持有"| R["SparseOffloadRuntime"]
-    B -->|"每层 LayerOffloadPlan"| A["MlaAttention"]
-    A -->|"通过 plan 调用"| R
+    M["模型层<br/>KVCacheSpecDesc / top-K or CSA selection"] --> C["存储配置<br/>CacheConfigCreator"]
+    C --> P["DeviceBlockPoolConfigHelper<br/>DeviceBlockPool"]
+    P --> S["OffloadStorage<br/>pinned Host + HBM resident planes"]
+    S --> K["KVCacheManager / pybind KVCache"]
+    M --> B["build_offload_plans"]
+    K --> B
+    B --> R["SparseOffloadRuntime<br/>mapping / admission / prefetch"]
+    R --> A["MLA / V4 attention<br/>write / acquire"]
 ```
 
-| 连接点 | 交接什么 | 代码位置 |
+| 层 | 职责 | 主要代码入口 |
 |---|---|---|
-| 模型 → 引擎 | `default` 开启 offload、选择上限、共享组；经 `EngineInitParams.model_config_` 进入 C++ | [DeepSeekV2._configure_sparse_kv_offload](../rtp_llm/models/deepseek_v2.py)、[RtpLLMOp::initModel](../rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.cc) |
-| 引擎 → 分配器 | 每个 tag 的 HBM/Host block 数、布局和所属层 | [CacheConfigCreator](../rtp_llm/cpp/cache/CacheConfigCreator.cc)、[DeviceBlockPoolConfigHelper](../rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h) |
-| 分配器 → Python | `OffloadStorage`：Host/GPU planes、block/page 行数、选择上限、共享版本 tensor | [DeviceBlockPool](../rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.cc)、[BufferTypes.h](../rtp_llm/cpp/cache/BufferTypes.h) |
-| Python 装配 → attention | `(layer, tag) → LayerOffloadPlan`，包含 runtime、本层 storage 编号、是否组首/组末 | [build_offload_plans](../rtp_llm/models_py/modules/offload/plan.py)、[GenericMoeModel.initialize](../rtp_llm/models_py/model_desc/generic_moe.py) |
+| 存储层 | 把模型声明转成每个 tag/layer 的 Host/HBM block、native planes、热缓存容量和 generation | [KVCacheSpecDesc.h](../rtp_llm/cpp/cache/KVCacheSpecDesc.h)、[CacheConfigCreator.cc](../rtp_llm/cpp/cache/CacheConfigCreator.cc)、[DeviceBlockPool.cc](../rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.cc)、[BufferTypes.h](../rtp_llm/cpp/cache/BufferTypes.h) |
+| runtime 层 | 把 backing ID 转成 resident 索引，完成去重、热槽替换、异步 fetch、写回和版本检查 | [plan.py](../rtp_llm/models_py/modules/offload/plan.py)、[runtime.py](../rtp_llm/models_py/modules/offload/runtime.py)、[layout.py](../rtp_llm/models_py/modules/offload/layout.py) |
+| 模型层 | 声明可 offload 的 group，产生选择结果，调用 `begin/write/acquire/drain` 后进入原 attention kernel | [deepseek_v2.py](../rtp_llm/models/deepseek_v2.py)、[deepseek_v4.py](../rtp_llm/models/deepseek_v4.py)、[mla_attention.py](../rtp_llm/models_py/modules/hybrid/mla_attention.py)、[V4 attention](../rtp_llm/models_py/modules/dsv4/fp8/attention.py) |
+| 生命周期 | block 重新分配、P/D copy/load 或 speculative cache swap 后发布 generation，使旧热副本失效 | [DecodeRpcServer.cc](../rtp_llm/cpp/model_rpc/DecodeRpcServer.cc)、[NormalExecutor.cc](../rtp_llm/cpp/normal_engine/NormalExecutor.cc)、[MtpExecutor.cc](../rtp_llm/cpp/normal_engine/speculative/MtpExecutor.cc) |
 
-存储到模型的具体桥接为：`CoordinatorCacheManager.allLayerCacheBase()` → `KVCacheManager.getMainModelGroupedCacheLayerLayout()` → `NormalExecutor` 初始化参数 → `PyWrappedModel` → `init_resource.kv_cache.get_offload_storage(layer, tag)`。
+层间交接有五个稳定接口：
 
-C++ 拥有正式 KV 和热缓存内存；Python 使用同一份内存的视图，另建行映射、热槽状态和 CUDA 事件。`build_offload_plans` 按 `(tag, offload_runtime_group)` 创建 runtime；未声明共享组时每层独立。模型装配通过 `MlaAttention.configure_offload()` 安装 plan。
-
-### 容量与计费
-
-正式存储的 block 数为 `N = H + P`：`[0, H)` 在 GPU，`[H, N)` 在 Host，block 0 保留不用。GPU 热缓存额外分配，不改变这套地址。
-
-只保留一个容量参数 `max_selected_rows`，表示一次 `begin` 的索引总数上限；当前 MLA 模型设置为 `max_generate_batch_size * indexer_topk`。热缓存行数由它向上按 page 对齐计算，不单独配置。Scratch 使用未对齐的选择上限，因此多分配的页尾空间不会放宽调用限制。
-
-| 内存 | 计费单位 |
+| 接口 | 交接内容 |
 |---|---|
-| 行映射、去重状态、热槽状态、selection/miss scratch | 每个 runtime 一份 |
-| block 版本 `generations` | 每个 tag 一份 |
-| 正式 KV、热缓存 KV、新 KV 打包缓冲区 | 每个 storage，即各层对应的存储，一份 |
+| `KVCacheSpecDesc.offload` | 是否开启 offload，以及一次 selection 的行数上限 `max_selected_rows` |
+| `KVCacheSpecDesc.offload_runtime_group` | 同一 tag 下哪些层共享选择结果和 runtime 元数据；未设置时每层独立 |
+| `KVCacheSpec.entryLayout()` | 每个 native page 的 entry 数和各 plane 的 dtype、shape、offset、stride |
+| `OffloadStorage` | Host/resident tensor views、block 几何、选择上限和所有层共享的 `generations` |
+| `LayerOffloadPlan` | 某层对应哪个 runtime/storage，以及该层是否负责组首 `begin` 和组末 `drain` |
 
-例如 GLM-5.3 的 78 层、21 个共享选择组，管理状态计 21 份，每层 KV 仍计 78 份。
+## 3. 存储层
 
-## 3. 执行：五个接口与调用位置
+### 3.1 block 与 plane 布局
 
-接口实现在 [SparseOffloadRuntime](../rtp_llm/models_py/modules/offload/runtime.py)。行地址是连续 CUDA `int32` tensor，`-1` 表示无效项；`begin` 按整个 tensor 的元素数检查选择上限。
+一个 offload group 有 `N = H + P` 个正式 block：`[0, H)` 位于 HBM，`[H, N)` 位于 pinned Host。GPU 热缓存另外占用 resident plane 的尾部空间，不改变正式 block 编号。
 
-| 接口 | 调用点 | 行为 |
+`entryLayout()` 描述一次可选择的 entry，而不是假设所有模型都使用连续 MLA KV：
+
+| 布局 | 一个 entry | plane |
 |---|---|---|
-| `begin(backing_ids)` | [MlaAttention.forward](../rtp_llm/models_py/modules/hybrid/mla_attention.py)，组首层得到 top-K 后 | GPU 正式存储中的行直接使用；Host 行检查热缓存，去重并为缺失或过期的行安排搬运，生成 GPU 索引 |
-| `write(storage_index, KVWrite)` | [SparseMlaImpl.forward](../rtp_llm/models_py/modules/factory/attention/cuda_mla_impl/flashmla_sparse_impl.py)，RoPE 和 [pack](../rtp_llm/models_py/modules/factory/attention/cuda_mla_impl/mla_kv_cache_write_op.py) 后 | 等待本层在途 fetch，再写入新 KV 的正式存储；已有有效热副本同步更新 |
-| `acquire(storage_index) → KVReadView` | 同一 `forward`，attention 前 | 让调用 stream 等待本层数据就绪，返回 GPU planes 和重映射索引 |
-| `drain()` | 共享组末层及异常退出路径 | 让调用 stream 等待组内剩余搬运完成 |
-| `reset()` | [模型 reset](../rtp_llm/models_py/model_desc/module_base.py)，由 [CUDA Graph 初始化](../rtp_llm/cpp/cuda_graph/cuda_graph_runner.cc) 在 capture 外调用 | 等待搬运并清空热缓存管理状态，保留正式 KV 和 block 版本 |
+| MLA | 一个 token 的压缩 KV | packed KV |
+| sparse MHA | 一个 token 的 K/V | K、V，量化时另有 scales |
+| V4 CSA | 一个压缩 KV entry | 576 B packed KV、8 B scale |
 
-`KVWrite(backing_ids, planes)` 传本步生成的新 KV；`KVReadView(planes, indices)` 交给原 sparse attention kernel。历史 KV 的 Host → GPU 搬运由 `begin` 发起。`acquire` 是数据就绪依赖，不是互斥锁。
+`PagedRowLayout` 直接使用 tensor 的 shape/stride 计算页内偏移，保留原生 K/V/scale 布局和页 padding。这样存储层无需把模型 tensor 重新打包成统一 dense 格式。
 
-**地址交接必须按 tag 对齐**：indexer 输出请求内的 token 位置，用 `default` 的 block table 转为 backing ID；新 KV 用 `default` 的 slot mapping 写入。`indexer_kv` 有自己的表，不能混用。
+### 3.2 配置与分配
+
+初始化链路为：
+
+```text
+模型 KVCacheSpecDesc
+  -> CacheConfigCreator：按 tag 计算容量、布局、owner layer、runtime 数
+  -> DeviceBlockPoolConfigHelper：生成 pool 配置和 native page geometry
+  -> DeviceBlockPool::initializeOffloadStorage()：创建 pinned Host 和 resident CUDA planes
+  -> OffloadStorage：暴露给 CacheManager、pybind 和 Python runtime
+```
+
+模型只声明策略，不直接分配 buffer。例如 sparse MLA 会把 `default` group 标记为 offload，并把同一 indexer 选择源的层设置为同一个 runtime group：
+
+```python
+policy = CacheOffloadPolicy()
+policy.enabled = True
+policy.max_selected_rows = concurrency * (gen_num_per_cycle + 1) * top_k
+desc.offload = policy
+desc.offload_runtime_group = runtime_groups[layer_id]
+```
+
+`max_selected_rows` 是一次 `begin` 的 flat selection 上限，不是热缓存行数。热缓存容量按 page 向上取整：
+
+```text
+resident_rows = ceil(max_selected_rows / rows_per_page) * rows_per_page
+```
+
+`OffloadStorage` 保存 `total_blocks`、`hbm_blocks`、`rows_per_block`、`rows_per_page`、`max_selected_rows`、`host_planes`、`resident_planes` 和 `generations`。C++ 持有正式 KV 和热缓存内存，Python 只持有同一块内存的 tensor view。
+
+同一 tag 的层共享 `generations`，但每层仍有自己的 `OffloadStorage` 和正式 KV。共享的是 block 版本与 runtime 管理状态，不是 KV 数据。
+
+### 3.3 数据版本
+
+block 被重新分配或覆盖后，`DeviceBlockPool` 增加该 block 的 generation：
+
+```text
+block allocation / overwrite
+  -> DeviceBlockPool::onAllocatedNoLock()
+  -> takeOffloadVersionUpdates()
+  -> NormalExecutor / MtpExecutor 做 TP broadcast
+  -> publishOffloadVersions()
+  -> OffloadStorage.generations
+```
+
+`DecodeRpcServer` 在 P/D load 覆盖目标 block 后调用 `markOffloadOverwrite()`。Runtime 的热槽保存 `(block, generation)`；下一次 `begin` 发现 generation 不一致时重新 fetch，避免 request block 复用后读到旧热副本。
+
+## 4. Runtime 层
+
+`SparseOffloadRuntime` 按 `(tag, offload_runtime_group)` 创建。构造时校验所有 storage 的 block 几何、plane 形状和 `generations` 地址完全一致，然后分配：
+
+- `mapping`：正式 backing row 到 resident 槽的映射。
+- `owners/tags/versions/protected`：去重、替换保护、槽归属和版本。
+- `_slots/_misses/_write_slots`：selection、miss 和写回 scratch。
+- transfer stream 与每层 ready event：异步搬运和计算流依赖。
+
+一次 selection 的执行接口如下：
+
+| 接口 | 调用位置 | 行为 |
+|---|---|---|
+| `begin(backing_ids)` | MLA top-K 转成 `default` backing ID 后；V4 把 CSA 压缩 ID 转成全局 slot 后 | 检查 flat 行数，去重 HBM/Host 行，保护当前热槽，安排 miss 行从 Host 搬到每层 resident plane |
+| `write(storage_index, KVWrite)` | MLA RoPE/pack 后；V4 compressor 写完 striped staging 后 | 等待本层 fetch，写入正式 HBM/Host backing，并同步仍有效的热副本 |
+| `acquire(storage_index)` | 进入原 sparse attention kernel 前 | 让当前计算流等待该层 fetch，返回 resident planes 和重映射后的索引 |
+| `drain()` | 共享组末层、下一次 `begin` 前、graph 生命周期边界 | 等待组内剩余搬运完成 |
+| `reset()` | `reset_sparse_kv_offload()`，graph capture 外 | 清空 mapping/热槽/事件状态，保留正式 KV 和 block generation |
+
+`acquire` 是 CUDA stream 依赖，不是锁。`begin` 发起整组各层的 fetch，后续层搬运可与当前层 attention 重叠。
 
 ```mermaid
 sequenceDiagram
-    participant M as MlaAttention / SparseMlaImpl
+    participant M as 模型 attention
     participant R as SparseOffloadRuntime
     participant T as Transfer Stream
     participant A as Attention Kernel
-    M->>M: 组首层输入投影、indexer、default 地址翻译
+    M->>M: top-K / CSA selection，翻译为 backing IDs
     M->>R: begin(backing_ids)
-    R->>T: 为组内各层安排缺失行的 fetch
+    R->>T: 各组层安排 miss rows 的 Host -> GPU fetch
     loop 组内各层
-        M->>M: 完成本层 Q/KV 计算、RoPE、pack
+        M->>M: Q/KV 计算、RoPE、pack
         M->>R: write(storage_index, KVWrite)
-        R->>R: 计算流等待本层 fetch 事件，再更新 KV
         M->>R: acquire(storage_index)
-        R-->>M: KVReadView(planes, indices)
-        M->>A: forward_resident(view)
-        Note over T,A: 后续层搬运可与当前层计算重叠
+        R-->>M: KVReadView(resident_planes, indices)
+        M->>A: 原 sparse attention kernel
     end
     M->>R: drain()
 ```
 
-Runtime 决定搬哪些行，[PagedRowLayout](../rtp_llm/models_py/modules/offload/layout.py) 按 tensor 的 shape/stride 执行读写，保留原生 K/V/scale 布局和页 padding。模型仍调用原 attention kernel。
+`begin` 本身会先调用 `drain()`，因此一个 runtime 同时只有一份活动 selection。这个约束依赖引擎串行执行 forward 并保证 backing block 的生命周期。
 
-## 4. 模型适配：相同与不同
+## 5. 模型层
 
-GLM 和不共享选择结果的 DSA MLA 使用同一组接口和相同参数类型。区别是哪些层共用 runtime、谁调用 `begin/drain`，以及传入的选择结果。
+模型层只负责“选择谁”和“何时调用 runtime”，不直接处理 Host 地址或热槽替换。
 
-| 模型 | runtime 分组 | `begin` | `write / acquire` | `drain` |
-|---|---|---|---|---|
-| GLM-5.3 IndexShare | 共享选择结果的层共用一个 | 组首层调用，为整组安排预取 | 每层传自己的 storage 编号和新 KV | 组末层 |
-| 不共享选择结果的 DSA MLA | 每层独立 | 每层产生自己的选择后调用 | 每层调用 | 每层结束 |
+| 模型路径 | runtime 分组 | 调用方式 |
+|---|---|---|
+| GLM IndexShare / 共享选择结果的 sparse MLA | 同 tag、同 `offload_runtime_group` 的层共用一个 runtime | 组首层 `begin`，各层独立 `write/acquire`，组末层 `drain` |
+| 不共享选择结果的 DSA MLA | 每层独立 runtime | 每层产生自己的 top-K，再执行 `begin/write/acquire/drain` |
+| DeepSeek V4 FP8 CSA | 每层独立 runtime，只 offload `csa_kv` | 压缩 ID 经 block table 翻译后 `begin`，compressor staging 经 `write` 写入，attention 用 `acquire` 返回的新索引读取 |
 
-例如 GLM 的第 2～5 层（从 0 编号）共用一个 runtime：第 2 层 `begin`，各层分别 `write/acquire(0..3)`，第 5 层 `drain`。各层 KV 独立，只共享选择结果和映射。独立选择的模型可以重叠当前层后续计算，但不能利用上一层选择结果预取下一层。
+GLM 的各层 KV 仍独立。共享 runtime 只共享“本步选择了哪些历史行”和 mapping/热槽元数据，避免组内每层重复做一次相同的 selection admission。
 
-更换 attention 布局时，存储和搬运模块复用 `entryLayout`；模型仍需接好以下三处：
+MLA 的桥接点是 `MlaAttention.configure_offload()` 和 `SparseMlaImpl.forward()`：前者把 `LayerOffloadPlan` 和 writer 装到模型层，后者在 RoPE 后调用 `write()`，在 attention 前调用 `acquire()`。
 
-| 接入点 | MLA | sparse MHA | CSA |
-|---|---|---|---|
-| 选择结果 → `begin` | token top-K 转本组行地址 | token/head 选择转本组行地址 | 压缩 entry ID 转本组行地址，不能直接用原 token ID |
-| 新 KV → `write` | packed KV | K/V 和 scales | compressor 产生的压缩 KV，接管其正式存储写入 |
-| `acquire` → attention | packed plane 和新索引 | K/V、scales 和新索引 | 压缩 plane 和新索引；SWA/state 仍走各自 group |
+V4 的桥接点是 `DeepSeekV4Model._initialize_sparse_offload()`、`configure_sparse_offload()` 和 `compressor.write_offloaded_kv()`。CSA 不能直接使用 token ID，必须使用压缩 entry ID；SWA、HCA 和 compressor state 仍走各自的原生 group。
 
-当前已完成 GLM/DSA MLA 和 DeepSeek V4 FP8 CSA 模型接入；MHA 只验证到通用存储和 runtime。Cache group 能描述布局，不会自动完成模型的读写调用适配。
+## 6. 生命周期与 SWA
 
-V4 只 offload `csa_kv`，`indexer_kv`、HCA、SWA 和 compressor state 留在 HBM。CSA 用压缩行 ID 选择，不能用原 token ID；每个 native page 内先排全部 576B KV payload，再排全部 8B scale，因此 `entryLayout` 提供两个 plane。普通 compressor 和默认 CSA megakernel 都先写一个固定地址的 striped staging page，再由 runtime 写入正式 Host/HBM backing；FlashMLA 继续使用原融合双池算子，SWA 与重映射后的 resident CSA 合并 attention。每层独立选择、独立 runtime；DSpark draft 的 SWA 缓存不 offload。
+正常 decode 的调用顺序是：
 
-## 5. 生命周期与支持边界
+1. C++ 完成 block 分配、copy/load，并在必要时更新 generation。
+2. Executor 将 generation update 通过 TP 同步后发布到 GPU tensor。
+3. 模型产生 top-K/CSA selection，调用 `begin`。
+4. runtime 完成 Host 行 admission 和 fetch，模型写新 KV 并读取 resident KV。
+5. 组末 `drain`，backing block 保持由原 cache manager 管理。
 
-Block 重新分配、copy 或 P/D 覆盖后，C++ 记录 generation 变化。[DecodeRpcServer](../rtp_llm/cpp/model_rpc/DecodeRpcServer.cc) 标记成功加载的数据，[NormalExecutor](../rtp_llm/cpp/normal_engine/NormalExecutor.cc) 收集更新、随输入做 TP 广播，并在 forward 前发布到 `OffloadStorage.generations`。Runtime 持有同一份 GPU tensor，版本不一致就重新 fetch，防止复用旧请求的热副本。
+SWA 清理还有一个独立的单位约束：`active_tail_blocks` 是 block 数，`reserve_step` 是 token 数。保留区必须换算成 block：
 
-P/D 和 MR 注册使用正式存储的原生 KV/scale buffer，包含页 padding、排除热缓存。当前一次 runtime 只有一份活动 selection，依赖引擎串行 forward 和 block 生命周期管理。已有 P/D load 取消后的在途回调问题未在本分支修复。
+```text
+reserve_blocks = ceil(reserve_step / seq_size_per_block)
+```
 
-| 范围 | 当前状态 |
-|---|---|
-| 执行路径 | CUDA、P/D 的 decode 侧，eager / CUDA Graph；关闭 offload 走原路径 |
-| 并行 | 引擎接入 TP 版本同步；模型能否运行仍受 attention kernel 限制。完整 GLM-5.3 历史对照为 TP1/DP4/EP4 |
-| GLM-5.3 FP8 的 TP 限制 | 已测 FlashMLA `49e2000.cu132` 下，TP2/4/8 的每 rank 32/16/8 个 query heads 不支持；关闭 graph 也不能解决，不能据此承诺任意 TP 配置 |
-| MTP / DSpark | GLM `glm_5` + `glm_5_mtp` 的 EAGLE/NextN，以及 V4 `deepseek_v4` + `deepseek_v4_dspark`；P/D 两端开启相同配置，offload 仅在 D 端开启 |
-| V4 并行 | 已测 4 卡：P CP2/EP2，D TP1/DP2/EP2。TP1 D 可接收 CP2 P 的缓存，D 自身不运行 CP attention |
-| 明确拒绝 | D 实际执行 CP>1、PP>1、其他 speculative 组合、layer micro-batch、memory/disk/remote prefix connector、drop-broadcast-sync |
-| 其他传输边界 | MHA 非对称 TP 传输要求每个 physical block 只有一个 kernel page；同 TP 多 page 保持原生字节布局 |
+`SWACacheManager::removeSkippedBlocks()` 只释放 active tail 和 reserve blocks 之前的历史 block。Coordinator 端到端测试
+`CompleteTokenIdsReserveStepReclaimsSwaRollingWindow` 从 `CompleteTokenIds` 读取 `reserve_step`，经过真实 allocator 路径，检查最终有效 block 数，避免再次混用 token/block 单位。
 
-MoE 前额外等待默认关闭；`RTP_LLM_DSA_MLA_DRAIN_BEFORE_MOE=1` 可用于对照，组末等待始终保留。FlashMLA 精度升级、融合优化和 DSV4.1 完整模型适配独立处理；历史验证所用依赖见验收记录。
+## 7. 部署
 
-## 6. 启用与验证
+最小 D 侧增量配置：
 
-已有可正常运行的 P/D 部署中，仅在 D 侧开启；P 侧保持原配置。相关参数在 [kv_cache_group_args.py](../rtp_llm/server/server_args/kv_cache_group_args.py)：
+```bash
+--role_type DECODE
+--enable_sparse_kv_offload 1
+--sparse_kv_offload_host_mb 53248
+--kv_cache_mem_mb 0
+--reuse_cache 0
+```
 
-| 参数 | 含义 |
-|---|---|
-| `--enable_sparse_kv_offload 1` | 开启模型声明的 offload groups；要求 `--role_type DECODE` |
-| `--sparse_kv_offload_host_mb 65536` | 每 rank 最多 64 GiB pinned Host KV；默认 0，不增加 Host block |
-| `--kv_cache_mem_mb 16384` | 每 rank 16 GiB GPU KV 预算，包含正式 GPU KV、热缓存、device-only groups 和管理开销；不含模型权重 |
-| `--concurrency_limit` | 引擎据此设置最大 decode batch；MLA 用该上限乘 top-K 推导热缓存容量，MTP 还需乘 `gen_num_per_cycle + 1`，增大会占用更多预算 |
-| `--sparse_kv_offload_test_hbm_blocks` | 仅测试使用，强制 HBM block 数；生产保持默认 0，按预算计算 |
+`--kv_cache_mem_mb` 是所有 HBM cache 和热缓存的总预算；设为 0 时由部署脚本或固定 pool 参数控制容量。`--sparse_kv_offload_host_mb` 是每个 rank 可用的 pinned Host KV 上限。热缓存容量由 `--concurrency_limit`、模型 top-K 和 MTP/DSpark 的每轮 token 数共同决定。
 
-最小 P/D 启动对照可直接使用已有 smoke，它自动启动 P/D、发送请求并停止服务，无需手写两套启动参数。需要 CUDA13 构建环境、测试 worker 可分配两张 SM103 GPU，以及本地模型目录 `/models/GLM-5.3-ms-4ed051d0`：
+P/D 两端必须使用一致的模型和 speculative 配置。offload 只在 D 打开，P 不打开。本次验证的 V4 四卡部署为：
+
+- P：`CP2 / EP2`，GPU 0/1。
+- D：`TP1 / DP2 / EP2`，GPU 2/3。
+- DSpark `gen_num_per_cycle=3`，因此实验使用 `reserve_step=9`。
+- DSpark 与 D 侧 CUDA Graph 开启。
+
+## 8. 实验与结果
+
+实验环境为 DeepSeek-V4-Flash-0731、4 张 L20D，并按 L20A 有效 HBM 预算 `189470 MiB/GPU` 校准。D 卡纯模型权重为 `82.105 GiB`，KV/state HBM pool 为 `66.38/66.17 GiB`，Host KV pool 分别为 `32/52 GiB`。
+
+数据集是固定 synthetic 长文本：同一份重复技术文档经模型 tokenizer 编为恰好 `131072` tokens，所有请求复用该输入。采样设置为 `top_k=1`、`random_seed=42`、`ignore_eos=false`，输出到自然 EOS 或 1M context limit。测量口径为 D 侧 egress、P 转发前，排除 prefill 和 KV load。
+
+两档均通过资源审计：
+
+| 设置 | 并发/D | Host KV | 成功请求 | 聚合 decode TPS | TPOT P50 | TPOT P99 | CSA 读放大 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Offload-150 | 150 | 32 GiB | 300/300 | 9789.4 | 27.995 ms | 30.841 ms | 51.91 KB/token |
+| Offload-192 | 192 | 52 GiB | 384/384 | **10377.4** | 34.965 ms | 39.130 ms | 129.01 KB/token |
+
+150 档是干净复现交叉验证。192 档没有漏测：干净环境下它是本次两档中的最高聚合吞吐点，但 TPOT 和 Host 读放大也更高。192 档早期的 `9281.3 TPS` 来自 GPU 污染窗口，不作为结果。
+
+最终功能回归沿用同一模型、同一 `131072`-token 输入和上述 2P2D 部署（P：GPU 0/1，D：GPU 2/3），同时提交 4 个请求，Host KV 为 `32 GiB`，decode reuse 为 0。4/4 请求自然 EOS，输出长度分别为 1344、1510、1523、1765，每个 D rank 各接收 2 个请求；D 侧聚合 decode 为 `587.70 token/s`，TPOT P50/P99 为 `5.962/6.022 ms`。该点用于 128K 输入和 SWA rolling-window 修复的端到端功能验收，不与 150/192 容量吞吐点做性能排名。
+
+## 9. 验证与边界
+
+关键回归入口：
 
 ```bash
 bazel test --config=cuda13 \
-  --test_env=RTP_TEST_MODEL_ROOT=/models \
-  //rtp_llm/test/smoke:glm53_sparse_kv_offload_model_test
-```
+  //rtp_llm/cpp/cache/test:hybrid_pool_kv_cache_allocator_test \
+  //rtp_llm/cpp/cache/test:tiered_cache_config_test \
+  //rtp_llm/config/test:kv_cache_config_pickle_test \
+  //rtp_llm/config/test:server_config_setup_test \
+  //rtp_llm/cpp/cache/block_tree_cache/test:device_swa_cache_manager_test
 
-该 smoke 只加载 7 层，使用稳定 top-K，覆盖 off/on 与 eager/graph；D 侧测试预算为 GPU 512 MiB、Host 32 MiB、HBM 2 个 block，确保使用 Host。它验证调用链，不代表完整模型部署或性能。
-
-GLM MTP 在 P/D 两端添加相同参数：
-
-```bash
---sp_type eagle --sp_model_type glm_5_mtp \
---sp_checkpoint_path /models/GLM-5.3-ms-4ed051d0 --gen_num_per_cycle 3
-```
-
-支持从完整 checkpoint 的第 `num_hidden_layers` 层读取 NextN 权重，也支持独立的单层 MTP checkpoint。target verify 和 draft extend 使用各 query 的因果前缀访问 paged indexer/MLA；分层缓存为 target 与 draft 分别保留存储及 runtime，并在每次 forward 前发布 block 版本。这里不启用参考分支的可选跨 MTP 迭代 index 复用。
-
-新增对照入口 `//rtp_llm/test/smoke:glm5_mtp_offload_model_test` 默认使用 7 层 target 加真实 NextN 层，比较关闭 MTP、MTP eager、MTP offload、MTP graph、MTP graph + offload，包含长请求、并发和 block 复用。直接运行 [glm5_mtp_offload_test.py](../rtp_llm/test/smoke/glm5_mtp_offload_test.py) 时，可用 `RTP_GLM_MTP_LAYERS=78 RTP_GLM_MTP_ROLE_SIZE=4` 在 8 卡上运行完整模型的 4P/4D 对照；每端使用 TP1/DP4/EP4。`RTP_GLM_MTP_STABLE_TOPK=0` 使用原生 top-K；默认稳定 top-K 仅用于逐 token 精度对照。
-
-默认要求全部输出 ID 严格相同。多卡 FP8 的 batch/rank 路由可能使近似计算的 argmax 改变；`RTP_GLM_MTP_COMPARE_IDS=record` 显式记录每个请求的首个差异位置，便于将数值变化与运行失败分开排查。该诊断模式仍验证 P/D、生成长度、MTP 实际执行及 graph 捕获/回放，但不宣称全部输出 ID 相等。
-
-日常单测和真实 TCP P/D 传输测试：
-
-```bash
 bazel test --config=cuda13 \
-  //rtp_llm/models_py/modules/offload/test:sparse_kv_offload_unit_tests \
-  //rtp_llm/cpp/model_rpc/test:decode_rpc_server_test
+  //rtp_llm/models_py/modules/offload/test:dsv4_offload_gpu_test \
+  //rtp_llm/models_py/modules/offload/test:sparse_kv_offload_gpu_test
 ```
 
-单测入口覆盖配置、容量、存储、版本同步、模型路由和 GPU runtime；模型 smoke 独立运行。GLM BF16/FP8 和 DSv3.2 的四层模型对照入口为 `//rtp_llm/test/smoke:sparse_kv_offload_model_test`，所需 checkpoint 名称见 [sparse_kv_offload_test.py](../rtp_llm/test/smoke/sparse_kv_offload_test.py)。测试结果只在验收记录维护。
+C++ 回归覆盖 SWA reserve 单位、pool sizing、storage/version 和 coordinator 路径；GPU 入口覆盖 Host 更新后的 graph replay、compressor 写回和多 token verify。
 
-V4 原生 FP8 layout、Host 更新后的 graph replay、普通 compressor 写回及完整 CSA megakernel 多 token verify 的 GPU 对照：
-
-```bash
-bazel test --config=cuda13 //rtp_llm/models_py/modules/offload/test:dsv4_offload_gpu_test
-```
-
-完整 V4 Flash 模型的配置和性能见 [V4 Flash offload 验收记录](deepseek_v4_flash_offload_acceptance_20261029.md)。此接入不覆盖 V4.1 或 V4 BF16 KV。
+- 一个 runtime 当前只支持一份活动 selection，依赖引擎串行 forward 和 backing block 生命周期管理。
+- 已观察到 P/D load 取消后的在途回调问题，本分支未修复。
+- 性能数字来自 L20D 上的 V4 Flash FP8 KV，不外推到 V4.1、BF16 KV 或其他 attention layout。
+- 本次只有 natural-EOS primary 批次，没有 profiler 批次的组件级 GPU 空闲拆分。
