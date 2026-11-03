@@ -54,6 +54,7 @@ private:
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);
     WarmUpResult                    decodeWarmUp(const EngineInitParams& params);
+    absl::Status                      runAttentionAccuracyCheck(const EngineInitParams& params);
     absl::StatusOr<GenerateStreamPtr> runPrefillWarmupShape(const std::shared_ptr<GenerateInput>& generate_input,
                                                             const ResourceContext& resource_context,
                                                             int                    reuse_length,
@@ -83,9 +84,6 @@ private:
     bool isMTPEagle() override;
     bool isEagle() override;
     bool isDSpark() override;
-
-    absl::Status runAccuracyCheckWithTemporaryCache(const EngineInitParams&            params,
-                                                    const std::optional<WarmUpResult>& warm_up_result);
 
 private:
     autil::ThreadPtr                              loop_thread_;

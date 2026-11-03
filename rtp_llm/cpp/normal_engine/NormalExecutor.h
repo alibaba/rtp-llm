@@ -30,8 +30,12 @@ public:
                             int                                    propose_model_index = 0,
                             MlaOpsType                             mla_ops_type        = MlaOpsType::AUTO,
                             std::function<void()>                  profile_step_start  = nullptr,
-                            std::function<void()>                  profile_step_finish = nullptr);
+                            std::function<void()>                  profile_step_finish = nullptr,
+                            bool                                   allow_cuda_graph    = true);
     ~NormalExecutor();
+    ModelBase* getModel() {
+        return model_.get();
+    }
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     void         reportMetrics(const StreamGroups&                        stream_groups,
                                RtpLLMExecutorMetricsCollector&            executor_collector,
@@ -45,10 +49,6 @@ public:
 
     void setModel(std::unique_ptr<ModelBase> model) {
         model_ = std::move(model);
-    }
-
-    ModelBase* getModel() {
-        return model_.get();
     }
 
     // Test hook: if set, used to create model when py_model is None

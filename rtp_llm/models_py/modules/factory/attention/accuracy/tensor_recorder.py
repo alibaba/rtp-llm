@@ -4,6 +4,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.model_desc.block_map import get_primary_attention_inputs
 from rtp_llm.models_py.modules.factory.attention.accuracy.attention_record import (
     AttentionForwardRecord,
 )
@@ -22,13 +23,19 @@ from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     get_all_supported_impls,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import RopeStyle
+from rtp_llm.ops import RopeStyle, get_rope_cache_once
 from rtp_llm.ops.compute_ops import PyModelInputs
 
 
 class TensorRecorder:
     def __init__(self, model: Any) -> None:
         self.model = model
+        # The serving cache is a call-once singleton. Prime it before the
+        # recorder's No-RoPE forwards can permanently initialize it as unused.
+        serving_config = model.config.getAttentionConfigs(
+            model.parallelism_config.get_attn_tp_size()
+        )
+        get_rope_cache_once(serving_config.rope_config, serving_config.max_seq_len)
         # scenario -> impl -> forward records
         self.records: Dict[str, Dict[str, List[AttentionForwardRecord]]] = {}
         self._current_bucket: Optional[Dict[str, List[AttentionForwardRecord]]] = None
@@ -167,7 +174,7 @@ class TensorRecorder:
         # Compare all implementations without RoPE or logn
         attn_configs.rope_config.style = RopeStyle.No
         attn_configs.use_logn_attn = False
-        attention_inputs = inputs.attention_inputs
+        attention_inputs = get_primary_attention_inputs(inputs)
         attention_inputs.is_cuda_graph = False
         # Headwise attention is outside this check
         attention_inputs.headwise_config = None

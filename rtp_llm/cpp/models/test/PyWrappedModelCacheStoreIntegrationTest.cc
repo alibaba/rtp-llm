@@ -788,6 +788,11 @@ Scenario makeScenario(const std::string& name) {
         scenario.inputs.skip_lm_head = true;
         return scenario;
     }
+    if (name == "prefill_only_pd_cache_store_disabled") {
+        auto scenario                 = makeMultiTagScenario();
+        scenario.inputs.pd_separation = true;
+        return scenario;
+    }
     if (name == "capture_bf16") {
         return makeCaptureScenario(false, false, true, false);
     }
@@ -1192,7 +1197,16 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     std::vector<std::string>   deferred_capture_errors;
     forward_hidden_states.reserve(forward_count);
     {
-        PyWrappedModel                model(params, std::move(py_model));
+        const bool enable_cache_store =
+            scenario_name != "prefill_only_pd_cache_store_disabled";
+        PyWrappedModel model(params,
+                             std::move(py_model),
+                             /*is_prefill_cuda_graph_mode=*/false,
+                             /*use_spec_decoding=*/false,
+                             DSparkModelRole::NONE,
+                             /*allow_cuda_graph=*/true,
+                             /*track_cache_store_completion=*/false,
+                             enable_cache_store);
         TestContextParallelProcessor* test_cp_processor = nullptr;
         if (inspect_split) {
             const auto split = PyWrappedModelTestPeer::splitInputsIntoMicroBatches(model, scenario.inputs);

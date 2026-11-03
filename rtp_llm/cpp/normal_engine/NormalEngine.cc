@@ -2,27 +2,43 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
-#include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/accuracy/AccuracyChecker.h"
+#include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
+#include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/TorchCudaOom.h"
+#include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <c10/core/InferenceMode.h>
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <list>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <random>
+#include <stdexcept>
 
 #if USING_CUDA
 #include "c10/cuda/CUDACachingAllocator.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+
+#include "c10/cuda/CUDAGuard.h"
 #endif
 
 #ifdef __linux__
@@ -46,6 +62,101 @@ void releaseHostMemoryCache() {
 #endif
 }
 
+bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig& pd_sep_config, const CacheStoreConfig& cache_store_config) {
+    // Only PD cache-store RDMA registers KV cache as user MR.  Keep the
+    // raw device allocation backing out of direct KVCacheManager users and non-RDMA
+    // paths so PyTorch allocator behavior is unchanged elsewhere.
+    const bool pd_role = pd_sep_config.role_type == RoleType::PREFILL || pd_sep_config.role_type == RoleType::DECODE;
+    const bool has_cache_store_server = pd_sep_config.cache_store_listen_port > 0
+                                        || pd_sep_config.cache_store_rdma_listen_port > 0
+                                        || pd_sep_config.remote_rpc_server_port > 0;
+    return pd_role && pd_sep_config.cache_store_rdma_mode
+           && (cache_store_config.cache_store_rdma_mode || has_cache_store_server);
+}
+
+// Must keep the same parsing semantics as NormalExecutor::useDeviceInput()
+// (RTP_LLM_DEVICE_INPUT == "1"); the guard below rejects combinations that
+// the executor's device-input path cannot handle.
+bool deviceInputEnabled() {
+    const char* env = std::getenv("RTP_LLM_DEVICE_INPUT");
+    return env != nullptr && std::strcmp(env, "1") == 0;
+}
+
+#if USING_CUDA
+size_t positiveDelta(size_t larger, size_t smaller) {
+    return larger > smaller ? larger - smaller : 0;
+}
+
+class ScopedWarmUpCacheManagerBinding {
+public:
+    ScopedWarmUpCacheManagerBinding(ResourceContext& resource_context, std::shared_ptr<KVCacheManager> cache_manager):
+        resource_context_(resource_context), previous_cache_manager_(resource_context.cache_manager) {
+        resource_context_.cache_manager = std::move(cache_manager);
+    }
+
+    ~ScopedWarmUpCacheManagerBinding() {
+        resource_context_.cache_manager = std::move(previous_cache_manager_);
+    }
+
+    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&) = delete;
+    ScopedWarmUpCacheManagerBinding& operator=(const ScopedWarmUpCacheManagerBinding&) = delete;
+
+private:
+    ResourceContext&                resource_context_;
+    std::shared_ptr<KVCacheManager> previous_cache_manager_;
+};
+
+std::shared_ptr<KVCacheManager> createGenerationPrefillCudaGraphWarmUpCacheManager(const EngineInitParams& params) {
+    auto cache_config = CacheConfigCreator::createWarmupConfig(
+        params.model_config_, params.parallelism_config, params.kv_cache_config, /*gen_num_per_cycle=*/0);
+
+    RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block > 0,
+                            "generation prefill CUDA graph warmup requires a positive KV block size");
+
+    // This temporary pool only supplies the KV tensor bound into the captured
+    // model. The warmup config publishes complete per-group capacities before
+    // KVCacheManager allocates the reserved block 0, as in decode warmup.
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
+    RTP_LLM_CHECK_WITH_INFO(cache_manager->init(), "init generation prefill CUDA graph warmup KV cache manager failed");
+    return cache_manager;
+}
+
+std::mutex warmup_memory_tracker_mutex;
+
+class WarmupMemoryTracker {
+public:
+    WarmupMemoryTracker(): lock_(warmup_memory_tracker_mutex), device_(at::cuda::current_device()) {
+        baseline_free_bytes_ = getGpuExecStatus().device_memory_status.free_bytes;
+        const auto stats     = c10::cuda::CUDACachingAllocator::getDeviceStats(device_);
+        baseline_allocated_  = stats.allocated_bytes[0].current;
+        baseline_reserved_   = stats.reserved_bytes[0].current;
+        c10::cuda::CUDACachingAllocator::resetPeakStats(device_);
+    }
+
+    size_t maxConsumedBytes() const {
+        at::cuda::CUDAGuard device_guard(device_);
+        const size_t        current_free_bytes = getGpuExecStatus().device_memory_status.free_bytes;
+        const auto          stats              = c10::cuda::CUDACachingAllocator::getDeviceStats(device_);
+
+        const auto positive_delta = [](int64_t peak, int64_t baseline) -> size_t {
+            return peak > baseline ? static_cast<size_t>(peak - baseline) : 0;
+        };
+        const size_t driver_consumed = baseline_free_bytes_ - std::min(baseline_free_bytes_, current_free_bytes);
+        const size_t allocated_peak  = positive_delta(stats.allocated_bytes[0].peak, baseline_allocated_);
+        const size_t reserved_peak   = positive_delta(stats.reserved_bytes[0].peak, baseline_reserved_);
+        return std::max({driver_consumed, allocated_peak, reserved_peak});
+    }
+
+private:
+    // PyTorch peak stats are device-global. Serialize the new startup-warmup trackers so one
+    // engine cannot reset another engine's in-flight measurement.
+    std::unique_lock<std::mutex> lock_;
+    c10::DeviceIndex             device_;
+    size_t                       baseline_free_bytes_ = 0;
+    int64_t                      baseline_allocated_  = 0;
+    int64_t                      baseline_reserved_   = 0;
+};
+#endif
 }  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
@@ -58,6 +169,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     pd_sep_config(params.pd_sep_config),
     profiling_debug_logging_config(params.profiling_debug_logging_config),
     kv_cache_config(params.kv_cache_config),
+    cache_store_config(params.cache_store_config),
     ffn_disaggregate_config(params.ffn_disaggregate_config),
     model_specific_config(params.model_specific_config),
     sp_config(params.sp_config),
@@ -67,6 +179,75 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                    params.parallelism_config.dp_rank * params.parallelism_config.tp_size
                        + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
+    // As in PyWrappedModel, failed construction must release Python references under the GIL.
+    auto cleanup_on_failure = [](NormalEngine* engine) noexcept {
+        if (engine->custom_output_selector_) {
+            py::gil_scoped_acquire gil;
+            engine->custom_output_selector_ = py::object();
+        }
+    };
+    std::unique_ptr<NormalEngine, decltype(cleanup_on_failure)> construction_guard(this, cleanup_on_failure);
+    if (params.py_model && !params.py_model.is_none()) {
+        py::gil_scoped_acquire gil;
+        if (py::hasattr(params.py_model, "custom_output_handler")) {
+            custom_output_selector_ = params.py_model.attr("custom_output_handler").attr("select_token_position");
+        }
+    }
+    // Reject an explicitly requested generation-prefill/speculative combination
+    // on PDFUSION before warmup or runner creation. The shared request predicate
+    // excludes roles that ignore this feature. Do not gate on full runner
+    // ownership, which also excludes speculative wrappers and would hide a
+    // PDFUSION conflict. Python defers this execution-mode check to C++.
+    if (isGenerationPrefillCudaGraphRequested(params.hw_kernel_config, parallelism_config.role_type)) {
+        RTP_LLM_CHECK_WITH_INFO(
+            supportsGenerationPrefillCudaGraphExecutionMode(sp_config.type, propose_params_ != nullptr),
+            "GENERATION_PREFILL_CAPTURE_CONFIG does not support speculative execution in the first version; "
+            "remove the generation-prefill configuration when using speculative execution on PDFUSION (type=%s)",
+            SpeculativeExecutionConfig::to_string(sp_config.type).c_str());
+    }
+    if (!model_config_.output_vocab_ids.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE && !propose_params_,
+                                "output vocabulary pruning does not support speculative, MTP, or EAGLE engines");
+        RTP_LLM_CHECK_WITH_INFO(!runtime_config.warm_up_with_loss,
+                                "output vocabulary pruning does not support warm_up_with_loss");
+        // forwardPostLayersLastHidden (prefill CP) is a second lm_head exit that does not
+        // narrow P-wide logits down to the output vocabulary width, so padded zero columns
+        // would reach sampling. Reject the combination until that path narrows as well.
+        RTP_LLM_CHECK_WITH_INFO(!parallelism_config.prefill_cp_config.is_enabled(),
+                                "output vocabulary pruning does not support prefill context parallelism");
+        // publishNormalDeviceState stores sampler token ids as the next step's device
+        // input without restoration; under pruning those are compact ids, which would
+        // be fed to the embedding lookup as-is. Reject until that path restores them.
+        RTP_LLM_CHECK_WITH_INFO(!deviceInputEnabled(),
+                                "output vocabulary pruning does not support device-input mode (RTP_LLM_DEVICE_INPUT)");
+        const auto& output_vocab_ids = model_config_.output_vocab_ids;
+        RTP_LLM_CHECK_WITH_INFO(std::is_sorted(output_vocab_ids.begin(), output_vocab_ids.end())
+                                    && std::adjacent_find(output_vocab_ids.begin(), output_vocab_ids.end())
+                                           == output_vocab_ids.end(),
+                                "output_vocab_ids must be strictly ascending and deduplicated");
+        RTP_LLM_CHECK_WITH_INFO(output_vocab_ids.front() >= 0 && output_vocab_ids.back() < model_config_.vocab_size,
+                                "output_vocab_ids must be within [0, vocab_size)");
+        RTP_LLM_CHECK_WITH_INFO(model_config_.output_vocab_padded_size >= static_cast<int64_t>(output_vocab_ids.size()),
+                                "output_vocab_padded_size must be >= output_vocab_ids.size()");
+    }
+    if (propose_params_) {
+        RTP_LLM_CHECK_WITH_INFO(sp_config.type == propose_params_->sp_type,
+                                "speculative type mismatch: config=%s proposal=%s",
+                                SpeculativeExecutionConfig::to_string(sp_config.type).c_str(),
+                                SpeculativeExecutionConfig::to_string(propose_params_->sp_type).c_str());
+        RTP_LLM_CHECK_WITH_INFO(sp_config.gen_num_per_cycle >= 0,
+                                "speculative gen_num_per_cycle must be non-negative: %lld",
+                                static_cast<long long>(sp_config.gen_num_per_cycle));
+        RTP_LLM_CHECK_WITH_INFO(static_cast<uint64_t>(sp_config.gen_num_per_cycle)
+                                    == propose_params_->gen_num_per_circle,
+                                "speculative gamma mismatch: config=%lld proposal=%zu",
+                                static_cast<long long>(sp_config.gen_num_per_cycle),
+                                propose_params_->gen_num_per_circle);
+        reserve_step_ = static_cast<int>(sp_config.speculativeReserveStep());
+    } else {
+        reserve_step_ = 0;
+    }
+    RTP_LLM_LOG_INFO("normal engine speculative reserve_step is %d", reserve_step_);
 #if !USING_CUDA
     // On ROCm, this constructor runs on a gRPC handler thread that defaults to
     // GPU 0. Set the correct device so all GPU allocations (KV cache, etc.) go
@@ -95,23 +276,22 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     } else {
         RTP_LLM_LOG_INFO("skip warm up.");
     }
-
-    if (auto accuracy_status = runAccuracyCheckWithTemporaryCache(params, warm_up_result); !accuracy_status.ok()) {
-        RTP_LLM_LOG_WARNING("accuracy check did not complete, continuing startup: %s",
-                            accuracy_status.ToString().c_str());
-    }
 #else
-    RTP_LLM_LOG_INFO("skip warm up and accuracy check on non-CUDA platform.");
+    RTP_LLM_LOG_INFO("skip warm up on non-CUDA platform.");
 #endif
+    if (runtime_config.enable_accuracy_check || params.hw_kernel_config.enable_dynamic_decode_backend) {
+        auto status = runAttentionAccuracyCheck(params);
+        if (!status.ok()) {
+            if (params.hw_kernel_config.enable_dynamic_decode_backend) {
+                RTP_LLM_FAIL("dynamic decode precision gate failed: %s", status.ToString().c_str());
+            }
+            RTP_LLM_LOG_WARNING("accuracy recording failed: %s", status.ToString().c_str());
+        }
+    }
     initCacheManager(warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager done");
 
     initExecutor(params, propose_params_);
-    if (propose_params_) {
-        reserve_step_ = propose_params_->gen_num_per_circle + 1;
-    } else {
-        reserve_step_ = 0;
-    }
 
     RTP_LLM_LOG_INFO("create normal executor done");
 
@@ -122,6 +302,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     initScheduler();
     step_profiler_.configureFromConfig(profiling_debug_logging_config);
     (void)startLoop();
+    (void)construction_guard.release();
 }
 
 void NormalEngine::initExecutor(const EngineInitParams&                        params,
@@ -130,7 +311,15 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
         executor_.reset(new MtpExecutor(
             params, propose_params, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_));
     } else {
-        executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, false, false, 0, mla_ops_type_));
+        executor_.reset(new NormalExecutor(
+            params,
+            resource_context_.cache_manager,
+            false,
+            false,
+            0,
+            mla_ops_type_,
+            [this]() { step_profiler_.startStep(); },
+            [this]() { step_profiler_.finishStep(); }));
     }
 }
 
@@ -174,27 +363,60 @@ void NormalEngine::initScheduler() {
 NormalEngine::~NormalEngine() {
     RTP_LLM_LOG_INFO("destory normal engine");
     (void)stop();
+    if (custom_output_selector_) {
+        py::gil_scoped_acquire gil;
+        custom_output_selector_ = py::object();
+    }
+}
+
+size_t NormalEngine::warmUpReservedBlockCount(size_t seq_len, size_t reserve_tokens, size_t tokens_per_block) {
+    RTP_LLM_CHECK_WITH_INFO(tokens_per_block > 0, "decode warmup tokens_per_block must be positive");
+    RTP_LLM_CHECK_WITH_INFO(reserve_tokens <= std::numeric_limits<size_t>::max() - seq_len,
+                            "decode warmup token count overflow: seq_len=%zu reserve_tokens=%zu",
+                            seq_len,
+                            reserve_tokens);
+    const size_t reserved_tokens = seq_len + reserve_tokens;
+    return reserved_tokens / tokens_per_block + (reserved_tokens % tokens_per_block != 0);
 }
 
 absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                        preRunMode                            mode) {
     c10::InferenceMode inference_guard(true);
 
+    // Chunked activation warmup is handled by runPrefillWarmupShape(). All preRun callers
+    // require whole-segment semantics.
+    RuntimeConfig stream_runtime_config                            = runtime_config;
+    stream_runtime_config.fifo_scheduler_config.prefill_chunk_size = 0;
+
     auto stream = std::make_shared<NormalGenerateStream>(generate_input,
                                                          model_config_,
-                                                         runtime_config,
+                                                         stream_runtime_config,
                                                          resource_context_,
                                                          nullptr,
                                                          0,
                                                          mode == preRunMode::prefill_warm_up);
+    const auto reserve_step = reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly());
+    stream->setReserveStep(reserve_step);
     if (mode == preRunMode::decode_warm_up) {
         stream->setIsContextStream(false);
-        size_t seq_size_per_block = model_config_.attn_config.tokens_per_block;
-        size_t reserved_blocks    = (stream->seqLength() + seq_size_per_block - 1) / seq_size_per_block + reserve_step_;
+        const size_t seq_size_per_block = model_config_.attn_config.tokens_per_block;
+        const size_t reserved_blocks = warmUpReservedBlockCount(stream->seqLength(), reserve_step, seq_size_per_block);
+        stream->fakeInitKVBlock(reserved_blocks);
+    } else if (mode == preRunMode::prefill_warm_up && resource_context_.cache_manager) {
+        // Generation-prefill CUDA Graph capture needs a temporary real KV pool, while the
+        // framework warmup stream deliberately does not allocate request KV
+        // blocks. Keep the model-level KV tensor and per-request block table
+        // paired by routing every logical warmup block to reserved block zero.
+        // This preserves the max-length eager warmup used for memory sizing
+        // without consuming or publishing any real cache block.
+        const size_t seq_size_per_block = resource_context_.cache_manager->cacheConfig().seq_size_per_block;
+        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0,
+                                "generation prefill CUDA graph warmup requires a positive KV block size");
+        const size_t reserved_blocks = (stream->seqLength() + seq_size_per_block - 1) / seq_size_per_block;
         stream->fakeInitKVBlock(reserved_blocks);
     } else if (mode == preRunMode::build_system_prompt) {
-        stream->setReserveStep(reserve_step_);
         THROW_IF_STATUS_ERROR(stream->initKVBlock());
+        THROW_IF_STATUS_ERROR(stream->streamCacheResource().waitForAllocatorLoad());
     };
     std::list<GenerateStreamPtr> streams{stream};
     THROW_IF_STATUS_ERROR(executor_->process(streams));
@@ -205,6 +427,82 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
     }
 #endif
     return stream;
+}
+
+absl::StatusOr<GenerateStreamPtr>
+NormalEngine::runPrefillWarmupShape(const std::shared_ptr<GenerateInput>& generate_input,
+                                    const ResourceContext&                resource_context,
+                                    int                                   reuse_length,
+                                    int64_t                               token_budget) {
+    c10::InferenceMode inference_guard(true);
+
+    const int block_size = model_config_.attn_config.tokens_per_block;
+    if (block_size <= 0) {
+        return absl::InvalidArgumentError("prefill warmup requires a positive KV block size");
+    }
+
+    RuntimeConfig stream_runtime_config                            = runtime_config;
+    stream_runtime_config.fifo_scheduler_config.prefill_chunk_size = token_budget;
+    auto stream                                                    = std::make_shared<NormalGenerateStream>(
+        generate_input, model_config_, stream_runtime_config, resource_context, nullptr, 0, true);
+    stream->setIsFakeStream(true);
+    if (token_budget > 0 && !stream->chunkedPrefillEnabled()) {
+        return absl::FailedPreconditionError("chunked prefill warmup stream is not chunk-enabled");
+    }
+    if (reuse_length < 0 || reuse_length >= stream->seqLength() || reuse_length % block_size != 0) {
+        return absl::InvalidArgumentError("prefill warmup reuse length is invalid or not block-aligned");
+    }
+
+    stream->setReuseLength(reuse_length);
+    // The temporary manager owns valid physical block 0. Alias the logical prompt table to that
+    // block so the warmup shapes exercise the production paged-attention path without reserving
+    // a production-sized KV cache before capacity is sampled.
+    stream->fakeInitKVBlock((static_cast<size_t>(stream->seqLength()) + static_cast<size_t>(block_size) - 1)
+                            / block_size);
+
+    std::list<GenerateStreamPtr> streams{stream};
+    if (token_budget <= 0) {
+        RETURN_IF_STATUS_ERROR(executor_->process(streams));
+        return stream;
+    }
+
+    stream->enableWarmupChunkWindow();
+    while (true) {
+        const int64_t remaining = static_cast<int64_t>(stream->seqLength()) - stream->reuseLength();
+        const int64_t grant     = computeChunkGrant(token_budget, stream->currentBatchSize(), remaining, block_size);
+        if (grant <= 0) {
+            return absl::InvalidArgumentError(
+                "chunked prefill warmup shape cannot make progress within the global token budget");
+        }
+        stream->setChunkSize(static_cast<int>(grant));
+
+        RETURN_IF_STATUS_ERROR(executor_->process(streams));
+        if (stream->isLastChunk()) {
+            return stream;
+        }
+        stream->advanceChunk();
+        if (stream->hasError()) {
+            return absl::InternalError(stream->stopReason());
+        }
+    }
+}
+
+std::shared_ptr<KVCacheManager> NormalEngine::createWarmupCacheManager() {
+    const int cache_gen_num_per_cycle =
+        sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
+    // Use the same cache geometry as real inference, including independent
+    // pools and kernel page overrides. The warmup helper assigns the small
+    // temporary capacity needed by fake streams.
+    auto cache_config = CacheConfigCreator::createWarmupConfig(
+        model_config_, parallelism_config, kv_cache_config, cache_gen_num_per_cycle);
+    ParallelismConfig temp_parallelism_config;
+    RuntimeConfig     temp_runtime_config;
+    auto              cache_manager = make_shared<KVCacheManager>(
+        cache_config, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
+    if (!cache_manager->init()) {
+        RTP_LLM_FAIL("init warmup kv cache manager failed");
+    }
+    return cache_manager;
 }
 
 int64_t NormalEngine::getLastScheduleTime() {
@@ -242,24 +540,160 @@ std::shared_ptr<GenerateInput> NormalEngine::makeFakeInput(size_t seq_len) {
     return fake_input;
 }
 
+size_t NormalEngine::getWarmUpInputLength() const {
+    const auto max_seq_len  = static_cast<size_t>(model_config_.max_seq_len);
+    const auto reserve_step = reserve_step_ > 0 ? static_cast<size_t>(reserve_step_) : 0;
+    const auto input_len    = warmUpInputLength(max_seq_len, reserve_step);
+    if (reserve_step > 0) {
+        RTP_LLM_LOG_INFO("framework warm up input len adjusted by speculative reserve_step, "
+                         "max_seq_len=%zu, reserve_step=%zu, input_len=%zu",
+                         max_seq_len,
+                         reserve_step,
+                         input_len);
+    }
+    return input_len;
+}
+
 WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 #if !USING_CUDA
     RTP_LLM_FAIL("prefillWarmUp is not supported on non-CUDA platforms");
     return {};
 #else
-    auto fake_input                                   = makeFakeInput((size_t)model_config_.max_seq_len - 1);
-    fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
+    const int64_t token_budget = runtime_config.fifo_scheduler_config.prefill_chunk_size;
+    const bool use_global_budget_warmup = token_budget > 0 && !runtime_config.warm_up_with_loss;
+    const int64_t token_heavy_seq_len = std::max<int64_t>(1, static_cast<int64_t>(getWarmUpInputLength()));
+
+    auto fake_input = makeFakeInput(static_cast<size_t>(token_heavy_seq_len));
+    fake_input->generate_config->num_return_sequences =
+        use_global_budget_warmup ? 1 : runtime_config.fifo_scheduler_config.max_context_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
-    rtp_llm::setTraceMemory(true);
-    executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
-    THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
-    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
-    rtp_llm::setTraceMemory(false);
-    (void)executor_.reset(nullptr);
+    if (!use_global_budget_warmup) {
+        const bool generation_prefill_cuda_graph_requested =
+            shouldCreateGenerationPrefillCudaGraph(params.hw_kernel_config,
+                                                   /*allow_cuda_graph=*/true,
+                                                   /*primary_graph_is_prefill=*/false,
+                                                   params.parallelism_config.role_type,
+                                                   params.sp_config.type);
+        if (!generation_prefill_cuda_graph_requested) {
+            rtp_llm::setTraceMemory(true);
+            executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
+            THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
+            const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
+            rtp_llm::setTraceMemory(false);
+            (void)executor_.reset(nullptr);
+            cudaDeviceSynchronize();
+            c10::cuda::CUDACachingAllocator::emptyCache();
+            const auto device_status = getGpuExecStatus();
+            return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
+        }
+
+        // A normal prefill warmup historically has no CacheManager. Generation
+        // prefill CUDA Graph, however, needs a real KV layout and reserved dummy
+        // block 0 during construction. Capture against a minimal temporary pool so
+        // graph-owned tensors and graph-pool reservations are included in the
+        // runtime budget before the production KV pool consumes the remaining
+        // memory. Speculative/MTP models stay on their independent warmup path.
+        auto warmup_cache_manager = createGenerationPrefillCudaGraphWarmUpCacheManager(params);
+
+        const auto baseline_status    = getGpuExecStatus().device_memory_status;
+        const auto baseline_allocated = cuda_graph::graphAllocatedBytes();
+        const auto baseline_reserved  = cuda_graph::graphReservedBytes();
+
+        rtp_llm::setTraceMemory(true);
+        executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0, mla_ops_type_));
+        {
+            // NormalGenerateStream snapshots ResourceContext at construction. Bind
+            // the same temporary manager used by NormalExecutor so fakeInitKVBlock
+            // observes the captured cache topology; restore it before production
+            // cache initialization, including when preRun throws.
+            ScopedWarmUpCacheManagerBinding cache_binding(resource_context_, warmup_cache_manager);
+            THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
+        }
+        cudaDeviceSynchronize();
+
+        const auto measured_status    = getGpuExecStatus().device_memory_status;
+        const auto measured_allocated = cuda_graph::graphAllocatedBytes();
+        const auto measured_reserved  = cuda_graph::graphReservedBytes();
+        // cudaMemGetInfo catches non-PyTorch allocations, allocated_bytes catches
+        // graph tensors that reuse an existing allocator pool, and reserved_bytes
+        // catches graph-pool rounding/fragmentation. The baseline is taken after
+        // the temporary KV pool is initialized, so that pool is not double-counted.
+        const auto measured_runtime_bytes =
+            std::max({positiveDelta(baseline_status.available_bytes, measured_status.available_bytes),
+                      positiveDelta(measured_allocated, baseline_allocated),
+                      positiveDelta(measured_reserved, baseline_reserved),
+                      measured_status.max_consumed_bytes});
+        RTP_LLM_LOG_INFO("prefill warmup runtime reservation: measured=%zu MiB allocated_delta=%zu MiB "
+                         "reserved_delta=%zu MiB free_delta=%zu MiB",
+                         measured_runtime_bytes / 1024 / 1024,
+                         positiveDelta(measured_allocated, baseline_allocated) / 1024 / 1024,
+                         positiveDelta(measured_reserved, baseline_reserved) / 1024 / 1024,
+                         positiveDelta(baseline_status.available_bytes, measured_status.available_bytes) / 1024 / 1024);
+
+        rtp_llm::setTraceMemory(false);
+        (void)executor_.reset(nullptr);
+        warmup_cache_manager.reset();
+        cudaDeviceSynchronize();
+        c10::cuda::CUDACachingAllocator::emptyCache();
+        const auto device_status = getGpuExecStatus();
+        return WarmUpResult({device_status.device_memory_status.available_bytes, measured_runtime_bytes});
+    }
+
+    size_t max_consumed = 0;
+    {
+        auto            warmup_cache_manager    = createWarmupCacheManager();
+        ResourceContext warmup_resource_context = resource_context_;
+        warmup_resource_context.cache_manager   = warmup_cache_manager;
+        // The temporary paged cache is warmup infrastructure, not runtime activation memory.
+        // Create it before tracing and destroy it before sampling production cache capacity.
+        rtp_llm::setTraceMemory(true);
+        auto memory_tracker = std::make_unique<WarmupMemoryTracker>();
+        executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0, mla_ops_type_));
+        auto token_heavy_result = runPrefillWarmupShape(fake_input, warmup_resource_context, 0, token_budget);
+        THROW_IF_STATUSOR_ERROR(token_heavy_result);
+        max_consumed = memory_tracker->maxConsumedBytes();
+        token_heavy_result.value().reset();
+
+        const int64_t block_size       = model_config_.attn_config.tokens_per_block;
+        const int64_t row_count =
+            std::min(token_budget, runtime_config.fifo_scheduler_config.max_context_batch_size);
+        const int64_t row_heavy_tokens = std::min(token_budget, token_heavy_seq_len);
+        const int64_t row_heavy_reuse  = (token_heavy_seq_len - row_heavy_tokens) / block_size * block_size;
+        auto          row_heavy_input  = makeFakeInput(static_cast<size_t>(row_heavy_reuse + row_heavy_tokens));
+        row_heavy_input->generate_config->num_return_sequences = static_cast<int>(row_count);
+
+        // Conservatively combine multiple rows with a full chunk per row and a long prefix.
+        // Run once without splitting by the scheduler's global token budget.
+        auto row_heavy_result = runPrefillWarmupShape(
+            row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), 0);
+        THROW_IF_STATUSOR_ERROR(row_heavy_result);
+        max_consumed = std::max(max_consumed, memory_tracker->maxConsumedBytes());
+        row_heavy_result.value().reset();
+
+        const auto longest_system_prompt =
+            std::max_element(kv_cache_config.multi_task_prompt_tokens.begin(),
+                             kv_cache_config.multi_task_prompt_tokens.end(),
+                             [](const auto& lhs, const auto& rhs) { return lhs.second.size() < rhs.second.size(); });
+        if (longest_system_prompt != kv_cache_config.multi_task_prompt_tokens.end()
+            && !longest_system_prompt->second.empty()) {
+            auto system_prompt_input  = makeFakeInput(longest_system_prompt->second.size());
+            auto system_prompt_result = runPrefillWarmupShape(system_prompt_input, warmup_resource_context, 0, 0);
+            THROW_IF_STATUSOR_ERROR(system_prompt_result);
+            max_consumed = std::max(max_consumed, memory_tracker->maxConsumedBytes());
+        }
+
+        if (!params.py_model.is_none()) {
+            // PyWrappedModel initializes the shared Python model in place, so destroying the
+            // wrapper alone does not clear Python's references to the temporary KV tensors.
+            pybind11::gil_scoped_acquire gil;
+            params.py_model.attr("initialize")(torch_ext::PyModelInitResources{});
+        }
+        (void)executor_.reset(nullptr);
+        rtp_llm::setTraceMemory(false);
+    }
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
-    const auto device_status = getGpuExecStatus();
-    return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
+    return WarmUpResult({getGpuExecStatus().device_memory_status.available_bytes, max_consumed});
 #endif
 }
 
@@ -268,24 +702,20 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     RTP_LLM_FAIL("decodeWarmUp is not supported on non-CUDA platforms");
     return {};
 #else
-    auto fake_input                                   = makeFakeInput((size_t)model_config_.max_seq_len - 1);
+    auto fake_input                                   = makeFakeInput(getWarmUpInputLength());
     fake_input->generate_config->num_return_sequences = runtime_config.max_generate_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
 
-    auto cache_config = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, 0);
-    cache_config.seq_size_per_block = model_config_.attn_config.tokens_per_block;
-    cache_config.block_num          = 5;
-    ParallelismConfig temp_parallelism_config;
-    RuntimeConfig     temp_runtime_config;
-    auto              cache_manager = make_shared<KVCacheManager>(
-        cache_config, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
-    if (!cache_manager->init()) {
-        RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
-    }
+    auto cache_manager = createWarmupCacheManager();
     executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, mla_ops_type_));
-    THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
-    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
+    // preRun creates its stream through resource_context_; expose the same
+    // finalized warmup topology that the temporary executor owns.
+    {
+        ScopedWarmUpCacheManagerBinding cache_binding(resource_context_, cache_manager);
+        THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
+    }
+    const auto max_consumed         = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
     cudaDeviceSynchronize();
@@ -319,55 +749,154 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
                                      torch::Tensor(),
                                      false};
         stream->update(update_info);
+        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+            .epoch                 = 0,
+            .last_sample_token_gpu = torch::zeros({1}, cuda_i32),
+            .next_seq_len_gpu      = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32),
+            .last_real_seq_len     = stream->seqLength(),
+            .next_real_seq_len     = stream->seqLength(),
+        });
     }
     return stream;
 }
 
-void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
-    if (propose_params_ && propose_params_->draftModel()) {
-        auto config = CacheConfigCreator::createSpConfig(model_config_,
-                                                         propose_params_->getEngineInitParams().model_config_,
-                                                         parallelism_config,
-                                                         runtime_config,
-                                                         kv_cache_config,
-                                                         sp_config,
-                                                         warm_up_result,
-                                                         isMTPEagle(),
-                                                         isEagle());
-
-        resource_context_.cache_manager = make_shared<KVCacheManager>(
-            config, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config, sp_config);
-        resource_context_.role_type = pd_sep_config.role_type;
-        if (!resource_context_.cache_manager->init()) {
-            RTP_LLM_FAIL("init kv cache manager failed");
-        }
-
-        const auto& cache_cfg = resource_context_.cache_manager->cacheConfig();
-        kv_cache_group_num_   = cache_cfg.groupNums();
-    } else {
-        auto result = CacheConfigCreator::createConfig(
-            model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
-        RTP_LLM_LOG_INFO("create cache manager with config %s", result.debugString().c_str());
-        RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
-                         result.block_num,
-                         result.block_size_bytes / 1024);
-        RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
-        resource_context_.cache_manager = make_shared<KVCacheManager>(
-            result, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
-        resource_context_.role_type = pd_sep_config.role_type;
-        if (!resource_context_.cache_manager->init()) {
-            RTP_LLM_FAIL("init kv cache manager failed");
-        }
-        const auto& cache_cfg = resource_context_.cache_manager->cacheConfig();
-        kv_cache_group_num_   = cache_cfg.groupNums();
+void NormalEngine::normalizeSystemPromptCacheConfig() {
+    if (kv_cache_config.multi_task_prompt_tokens.empty()) {
+        return;
     }
+    if (!kv_cache_config.reuse_cache || !kv_cache_config.enable_device_cache) {
+        RTP_LLM_LOG_INFO("system prompt enabled; forcing reuse_cache and enable_device_cache on");
+    }
+    kv_cache_config.reuse_cache         = true;
+    kv_cache_config.enable_device_cache = true;
+}
+
+void NormalEngine::initializeAndPublishCacheManager(ResourceContext&                            resource_context,
+                                                    int&                                        kv_cache_group_num,
+                                                    RoleType                                    role_type,
+                                                    std::shared_ptr<KVCacheManager>             cache_manager,
+                                                    const std::function<bool(KVCacheManager&)>& initializer) {
+    RTP_LLM_CHECK_WITH_INFO(cache_manager != nullptr, "cache manager candidate must not be null");
+    RTP_LLM_CHECK_WITH_INFO(initializer != nullptr, "cache manager initializer must not be null");
+    if (!initializer(*cache_manager)) {
+        RTP_LLM_FAIL("init kv cache manager failed");
+    }
+    const auto& cache_config = cache_manager->cacheConfig();
+    RTP_LLM_LOG_INFO("cache manager initialized with config %s", cache_config.debugString().c_str());
+
+    // Publish the cache state only after allocation, BlockTree/backend setup,
+    // and callback registration have all completed successfully.
+    kv_cache_group_num             = cache_config.groupNums();
+    resource_context.cache_manager = std::move(cache_manager);
+    resource_context.role_type     = role_type;
+}
+
+absl::Status NormalEngine::runAttentionAccuracyCheck(const EngineInitParams& params) {
+#if !USING_CUDA
+    return absl::UnimplementedError("attention accuracy check requires CUDA");
+#else
+    const bool dynamic = params.hw_kernel_config.enable_dynamic_decode_backend;
+    if (params.moe_config.use_deepep_moe && params.moe_config.use_deepep_low_latency) {
+        return absl::FailedPreconditionError(
+            "Hongmin recorder does not chunk golden bootstrap for DeepEP low-latency token limits");
+    }
+    if (params.py_model.is_none() || propose_params_ || sp_config.type != SP_TYPE_NONE
+        || model_config_.mm_model_config.is_multimodal || model_config_.attn_config.use_mla
+        || model_config_.data_type != DataType::TYPE_BF16 || parallelism_config.pp_size != 1
+        || parallelism_config.prefill_cp_config.is_enabled()
+        || parallelism_config.prefill_cp_config.is_prefill_enabled() || ffn_disaggregate_config.enable_ffn_disaggregate
+        || (dynamic && !params.hw_kernel_config.enable_cuda_graph)) {
+        return absl::FailedPreconditionError("attention accuracy check requires BF16 MHA without speculation or CP/PP");
+    }
+    auto check_config                = kv_cache_config;
+    check_config.reuse_cache         = false;
+    check_config.enable_device_cache = false;
+    check_config.enable_memory_cache = false;
+    check_config.enable_disk_cache   = false;
+    check_config.enable_remote_cache = false;
+    auto cache_config = CacheConfigCreator::createConfig(model_config_, parallelism_config, check_config);
+    if (cache_config.groupNums() != 1
+        || cache_config.topology().groups().front().policy.group_type != CacheGroupType::FULL) {
+        return absl::FailedPreconditionError("attention accuracy check requires one FULL KV cache group");
+    }
+    cache_config.finalizeBlockNums(AccuracyChecker::computeTemporaryBlockNum(model_config_, check_config),
+                                   runtime_config);
+    ResourceContext check_context;
+    check_context.initCacheConfig(check_config);
+    check_context.role_type = pd_sep_config.role_type;
+    absl::Status status;
+    bool         cache_ready = false;
+    try {
+        check_context.cache_manager = std::make_shared<KVCacheManager>(
+            cache_config, false, nullptr, check_config, parallelism_config, runtime_config);
+        cache_ready = check_context.cache_manager->init();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("accuracy temporary cache setup failed: %s", e.what());
+    }
+    cudaSyncAndCheck();
+    if (parallelism_config.world_size > 1) {
+        auto ready  = torch::tensor({cache_ready ? 1 : 0}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+        ready       = execAllReduce({ready, ReduceOp::Min, false, ParallelMode::DP_AND_TP}).buffer;
+        cache_ready = ready.item<int>() != 0;
+    }
+    if (!cache_ready) {
+        return absl::InternalError("accuracy temporary cache setup failed on at least one rank");
+    }
+    try {
+        NormalExecutor check_executor(
+            params, check_context.cache_manager, false, false, 0, mla_ops_type_, nullptr, nullptr, false);
+        auto check_runtime                                     = runtime_config;
+        check_runtime.fifo_scheduler_config.prefill_chunk_size = 0;
+        AccuracyChecker checker(model_config_, check_runtime, parallelism_config, dynamic);
+        status = checker.runAll(&check_executor, check_context);
+    } catch (const std::exception& e) {
+        status = absl::InternalError(e.what());
+    }
+    {
+        py::gil_scoped_acquire gil;
+        params.py_model.attr("initialize")(torch_ext::PyModelInitResources{});
+    }
+    check_context.cache_manager.reset();
+    cudaSyncAndCheck();
+    c10::cuda::CUDACachingAllocator::emptyCache();
+    return status;
+#endif
+}
+
+void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
+    normalizeSystemPromptCacheConfig();
+    const bool use_device_malloc_block_pool = shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config);
+    const ModelConfig* draft_model_config   = propose_params_ && propose_params_->draftModel() ?
+                                                  &propose_params_->getEngineInitParams().model_config_ :
+                                                  nullptr;
+    auto               config               = CacheConfigCreator::createConfig(
+        model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
+    const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
+        config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
+    const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config);
+    config.finalizeBlockNums(confirmed_block_num, runtime_config);
+    auto cache_manager = make_shared<KVCacheManager>(config,
+                                                     false,
+                                                     metrics_reporter_,
+                                                     kv_cache_config,
+                                                     parallelism_config,
+                                                     runtime_config,
+                                                     draft_model_config ? sp_config : SpeculativeExecutionConfig{},
+                                                     pd_sep_config,
+                                                     cache_store_config,
+                                                     use_device_malloc_block_pool);
+    initializeAndPublishCacheManager(resource_context_,
+                                     kv_cache_group_num_,
+                                     pd_sep_config.role_type,
+                                     std::move(cache_manager),
+                                     [](KVCacheManager& manager) { return manager.init(); });
 }
 
 absl::Status NormalEngine::initSystemPrompt() {
-    resource_context_.initCacheConfig(kv_cache_config, runtime_config.fifo_scheduler_config, model_config_.max_seq_len);
+    resource_context_.initCacheConfig(kv_cache_config);
 
     if (!kv_cache_config.multi_task_prompt_tokens.empty()) {
-        resource_context_.reuse_cache = true;
         CHECK_AND_RETURN_REF(
             system_prompt_param,
             SystemPromptConstructor::construct(
@@ -399,6 +928,9 @@ absl::Status NormalEngine::stop() {
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
+    // Join the async dispatch runner and release the dispatcher-owned worker pool.
+    executor_.reset();
+    resource_context_.cache_manager->stopMetricsReporter();
     return absl::OkStatus();
 }
 
@@ -406,7 +938,7 @@ void NormalEngine::loop() {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
-    cudaPreRun(getDeviceId());
+    setCurrentThreadDevice(getDeviceId());
     while (running_) {
         auto status = step();
         if (!status.ok()) {
@@ -420,45 +952,139 @@ absl::Status NormalEngine::trySaveStepError() const {
     return absl::UnimplementedError("can not save yet!");
 }
 
-std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
+bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) const {
+    if (stream->hasError()) {
+        return false;
+    }
+    if (pd_sep_config.role_type != RoleType::DECODE || !stream->generateConfig()->isPrefillOnly()) {
+        return true;
+    }
+    stream->reportError(ErrorCode::INVALID_PARAMS, kDecodeRolePrefillOnlyError);
+    return false;
+}
+
+std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr<GenerateInput>& input) {
+    try {
+        input->generate_config->validatePrefillOnly();
+    } catch (const std::invalid_argument& error) {
+        // Keep invalid request handling on the stream error path instead of exposing
+        // validation exceptions to direct engine callers or RPC adapters.
+        auto safe_input             = std::make_shared<GenerateInput>(*input);
+        auto safe_config            = std::make_shared<GenerateConfig>(*input->generate_config);
+        safe_config->max_new_tokens = 1;
+        safe_input->generate_config = std::move(safe_config);
+        auto stream                 = std::make_shared<NormalGenerateStream>(
+            safe_input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+        stream->reportError(ErrorCode::INVALID_PARAMS, error.what());
+        return stream;
+    }
+
+    ErrorInfo selection_error;
+    // Target-only prefill does not request generation custom output or its prompt constraints.
+    if (custom_output_selector_ && !input->fake_query && !input->generate_config->isPrefillOnly()) {
+        py::gil_scoped_acquire gil;
+        try {
+            // Select once in the model process, after RPC/multimodal expansion and before system-prefix insertion.
+            // Decode iterations reuse this stream; the selected position is not an RPC input.
+            const int position = custom_output_selector_(input->input_ids, input->text_tokens_mask).cast<int>();
+            if (position < -1 || position >= input->inputLength()) {
+                selection_error = ErrorInfo(ErrorCode::INVALID_PARAMS, "custom output position outside prompt");
+            } else {
+                input->custom_output_token_position = position;
+            }
+        } catch (const py::error_already_set& error) {
+            // ValueError is the selector's input-rejection contract; other Python errors are execution failures.
+            selection_error =
+                ErrorInfo(error.matches(PyExc_ValueError) ? ErrorCode::INVALID_PARAMS : ErrorCode::EXECUTION_EXCEPTION,
+                          error.what());
+        } catch (const std::exception& error) {
+            selection_error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what());
+        }
+    }
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    if (selection_error.hasError()) {
+        stream->reportError(selection_error.code(), selection_error.ToString());
+    }
+    return stream;
+}
+
+std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
+    auto stream = createStream(input);
+    // DecodeRpcServer allocates the destination KV table before enqueue/P-D handoff.
+    stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
+    (void)validateStreamForScheduling(stream);
     return stream;
 }
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
-    stream->setReserveStep(reserve_step_);
+    stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
+    if (!validateStreamForScheduling(stream)) {
+        return;
+    }
     (void)scheduler_->enqueue(stream);
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
-    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
-        input, model_config_, runtime_config, resource_context_, metrics_reporter_);
-    stream->setReserveStep(reserve_step_);
-    (void)scheduler_->enqueue(stream);
+    auto stream = makeStream(input);
+    enqueue(stream);
     return stream;
 }
 
-std::vector<std::shared_ptr<GenerateStream>>
-NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
-    std::vector<std::shared_ptr<GenerateStream>> streams;
+std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
+    std::vector<GenerateStreamPtr> streams;
+    std::vector<GenerateStreamPtr> schedulable_streams;
+    std::vector<size_t>            schedulable_indexes;
     streams.reserve(inputs.size());
+    schedulable_streams.reserve(inputs.size());
+    schedulable_indexes.reserve(inputs.size());
     for (auto& inp : inputs) {
-        auto stream = std::make_shared<NormalGenerateStream>(
-            inp, model_config_, runtime_config, resource_context_, metrics_reporter_);
-        stream->setReserveStep(reserve_step_);
+        auto stream = createStream(inp);
+        stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
         streams.push_back(stream);
     }
-    return scheduler_->batchEnqueue(streams);
+
+    std::vector<GenerateStreamPtr> streams_for_mode_check;
+    streams_for_mode_check.reserve(streams.size());
+    for (const auto& stream : streams) {
+        if (!stream->hasError()) {
+            streams_for_mode_check.push_back(stream);
+        }
+    }
+
+    if (hasMixedExecutionModes(streams_for_mode_check)) {
+        for (const auto& stream : streams) {
+            if (!stream->hasError()) {
+                stream->reportError(ErrorCode::INVALID_PARAMS, kMixedForceBatchGroupError);
+            }
+        }
+        return {std::vector<bool>(streams.size(), false), std::move(streams)};
+    }
+
+    for (size_t i = 0; i < streams.size(); ++i) {
+        if (validateStreamForScheduling(streams[i])) {
+            schedulable_indexes.push_back(i);
+            schedulable_streams.push_back(streams[i]);
+        }
+    }
+
+    auto              schedulable_result = scheduler_->enqueueGroup(schedulable_streams);
+    std::vector<bool> enqueue_successes(streams.size(), false);
+    for (size_t i = 0; i < schedulable_indexes.size(); ++i) {
+        enqueue_successes[schedulable_indexes[i]] = schedulable_result.first[i];
+    }
+    return {std::move(enqueue_successes), std::move(streams)};
 }
 
-absl::Status NormalEngine::step() {
+absl::Status NormalEngine::step() try {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
     while (pause_) {
         // wait 50ms if system paused.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
+    int64_t                 tps_schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     list<GenerateStreamPtr> streams;
     if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
         {
@@ -469,10 +1095,9 @@ absl::Status NormalEngine::step() {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
             mayAddFakeStream(streams);
         }
-        // When TP > 1, all ranks must enter process() together so that
-        // tpSyncModelInputs (collective broadcast) does not deadlock.
-        // The skip_run flag inside process() handles the "no work" case.
-        if (streams.empty() && parallelism_config.tp_size <= 1) {
+        // TP collectives and FFN-disaggregate alignment both require empty batches to enter process().
+        if (shouldEarlyReturnEmptyBatch(
+                streams.empty(), parallelism_config.tp_size, ffn_disaggregate_config.enable_ffn_disaggregate)) {
             return absl::OkStatus();
         }
     }
@@ -482,7 +1107,8 @@ absl::Status NormalEngine::step() {
     absl::Status status             = absl::OkStatus();
 
     // Per-request timeline: if any stream requested gen_timeline and no session is
-    // active yet, configure the profiler so the next stepScope() captures THIS step.
+    // active yet, configure the profiler so the executor-driven step window
+    // captures THIS step.
     if (!step_profiler_.enabled()) {
         for (const auto& stream : streams) {
             if (stream && stream->genTimeline()) {
@@ -494,19 +1120,35 @@ absl::Status NormalEngine::step() {
     }
 
     {
-        [[maybe_unused]] auto profile_step = step_profiler_.stepScope();
+        // NormalExecutor drives startStep/finishStep via callbacks; MtpExecutor
+        // has no callbacks yet, so bracket the propose path here on the engine
+        // loop thread (Kineto requires enable/disable on the same thread).
+        if (propose_params_) {
+            step_profiler_.startStep();
+        }
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
-        status = executor_->process(streams);
+        status = executor_->process(streams, tps_schedule_time_us);
+        if (propose_params_) {
+            step_profiler_.finishStep();
+        }
     }
 
     // report step metrics
-    if (parallelism_config.tp_rank == 0) {
+    // loop() is a no-sleep tight loop and with TP>1 every iteration enters
+    // process() to drive the collective tpSync even with empty streams —
+    // without this gate the gauge gets diluted to ~0 by idle iterations.
+    if (parallelism_config.tp_rank == 0 && !streams.empty()) {
         RTP_LLM_PROFILE_SCOPE("engine.normal.report_metrics_work");
         auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
         reportMetrics({step_latency});
     }
 
     return status;
+} catch (const std::exception& exception) {
+    if (isTorchCudaOom(exception)) {
+        dumpFatalTorchCudaOomDiagnostics(parallelism_config.local_rank, exception);
+    }
+    throw;
 }
 
 bool NormalEngine::updateEplbConfig(const EPLBConfig& config) {
@@ -522,7 +1164,8 @@ void NormalEngine::startTimelineProfiling(const std::string& trace_name, int sta
 
 bool NormalEngine::isMTPEagle() {
     if (propose_params_) {
-        return propose_params_->sp_type == SP_TYPE_MTP || propose_params_->sp_type == SP_TYPE_EAGLE;
+        return propose_params_->sp_type == SP_TYPE_MTP || propose_params_->sp_type == SP_TYPE_EAGLE
+               || propose_params_->sp_type == SP_TYPE_DSPARK;
     }
     return false;
 }
@@ -534,9 +1177,27 @@ bool NormalEngine::isEagle() {
     return false;
 }
 
+bool NormalEngine::isDSpark() {
+    return propose_params_ && propose_params_->sp_type == SP_TYPE_DSPARK;
+}
+
+size_t NormalEngine::reserveStepForStream(size_t configured_reserve_step, bool is_prefill_only) {
+    return is_prefill_only ? 0 : configured_reserve_step;
+}
+
+bool NormalEngine::shouldEarlyReturnEmptyBatch(bool streams_empty, int64_t tp_size, bool enable_ffn_disaggregate) {
+    return streams_empty && tp_size == 1 && !enable_ffn_disaggregate;
+}
+
+bool NormalEngine::shouldAddMtpFakePrefill(bool has_prefill, bool use_batch_decode_scheduler, int64_t dp_size) {
+    return !has_prefill && (!use_batch_decode_scheduler || dp_size > 1);
+}
+
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
     if (isMTPEagle()) {
-        int propose_step = sp_config.gen_num_per_cycle;
+        int        propose_step   = sp_config.gen_num_per_cycle;
+        int        mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
+        const bool is_dspark      = propose_params_->sp_type == SP_TYPE_DSPARK;
         switch (pd_sep_config.role_type) {
             case RoleType::PREFILL:
                 if (streams.empty()) {
@@ -547,7 +1208,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
             case RoleType::DECODE:
                 if (streams.empty()) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_));
+                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark));
                 }
                 break;
             case RoleType::PDFUSION: {
@@ -560,13 +1221,14 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                         has_decode = true;
                     }
                 }
-                if (!has_prefill) {
+                if (shouldAddMtpFakePrefill(
+                        has_prefill, runtime_config.use_batch_decode_scheduler, parallelism_config.dp_size)) {
                     streams.emplace_back(
                         MtpExecutor::createMinFakePrefillStream(1, model_config_, runtime_config, resource_context_));
                 }
                 if (!has_decode) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_));
+                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark));
                 }
                 break;
             }
@@ -579,72 +1241,6 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
             streams.emplace_back(createMinFakeStream(1));
         }
     }
-}
-
-absl::Status NormalEngine::runAccuracyCheckWithTemporaryCache(const EngineInitParams&            params,
-                                                              const std::optional<WarmUpResult>& warm_up_result) {
-    if (!runtime_config.enable_accuracy_check) {
-        return absl::OkStatus();
-    }
-    if (propose_params_ || model_config_.mm_model_config.is_multimodal
-        || ffn_disaggregate_config.enable_ffn_disaggregate || model_config_.attn_config.use_mla
-        || parallelism_config.prefill_cp_config.is_enabled()
-        || parallelism_config.prefill_cp_config.is_prefill_enabled()) {
-        RTP_LLM_LOG_WARNING("skip accuracy check: unsupported model/config");
-        return absl::OkStatus();
-    }
-
-    auto old_cache_manager = resource_context_.cache_manager;
-    auto old_role_type     = resource_context_.role_type;
-    auto old_group_num     = kv_cache_group_num_;
-
-    // hook executor with tmp kv_cache_manager
-    KVCacheConfig tmp_kv_cache_config = kv_cache_config;
-    tmp_kv_cache_config.test_block_num =
-        static_cast<int>(AccuracyChecker::computeTemporaryBlockNum(model_config_, kv_cache_config));
-    tmp_kv_cache_config.reuse_cache                = false;
-    tmp_kv_cache_config.enable_memory_cache        = false;
-    tmp_kv_cache_config.enable_remote_cache        = false;
-    tmp_kv_cache_config.enable_tiered_memory_cache = false;
-    auto config                                    = CacheConfigCreator::createConfig(
-        model_config_, parallelism_config, runtime_config, tmp_kv_cache_config, warm_up_result);
-    if (config.groupNums() != 1) {
-        RTP_LLM_LOG_WARNING("skip accuracy check: requires a single kv-cache group (got %d)", config.groupNums());
-        return absl::OkStatus();
-    }
-    auto tmp_cache_manager =
-        make_shared<KVCacheManager>(config, false, nullptr, tmp_kv_cache_config, parallelism_config, runtime_config);
-    if (!tmp_cache_manager->init()) {
-        RTP_LLM_LOG_WARNING("skip accuracy check: temporary kv cache init failed (insufficient memory?)");
-        return absl::OkStatus();
-    }
-    RTP_LLM_LOG_INFO("accuracy check: temporary kv cache created with %d blocks", config.block_num);
-    absl::Status check_status;
-    try {
-        resource_context_.cache_manager = tmp_cache_manager;
-        resource_context_.role_type     = pd_sep_config.role_type;
-        kv_cache_group_num_             = config.groupNums();
-        initExecutor(params, propose_params_);
-
-        AccuracyChecker checker(model_config_, runtime_config, parallelism_config);
-        check_status = checker.runAll(executor_.get(), resource_context_);
-    } catch (const std::exception& e) {
-        check_status = absl::InternalError(std::string("accuracy check threw: ") + e.what());
-    } catch (...) {
-        check_status = absl::InternalError("accuracy check threw: unknown");
-    }
-
-    // restore executor
-    executor_.reset(nullptr);
-    resource_context_.cache_manager = old_cache_manager;
-    resource_context_.role_type     = old_role_type;
-    kv_cache_group_num_             = old_group_num;
-
-    // release memory
-    tmp_cache_manager.reset();
-    cudaDeviceSynchronize();
-    c10::cuda::CUDACachingAllocator::emptyCache();
-    return check_status;
 }
 
 }  // namespace rtp_llm

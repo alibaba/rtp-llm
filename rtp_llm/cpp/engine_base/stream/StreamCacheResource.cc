@@ -515,14 +515,6 @@ bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch,
         batch_kv_cache_resource_, block_src_batch, copy_last_block, block_update_mapping_);
 }
 
-void StreamCacheResource::referenceRequestBlocks(const BlockIndicesType& src_block_ids) {
-    RTP_LLM_CHECK_WITH_INFO(resource_context_.cache_manager != nullptr,
-                            "referenceRequestBlocks: cache manager is null");
-    bool ok = resource_context_.cache_manager->referenceRequestBlocks(
-        batch_kv_cache_resource_, /*batch_id=*/0, /*group_id=*/0, src_block_ids);
-    RTP_LLM_CHECK_WITH_INFO(ok, "referenceRequestBlocks failed");
-}
-
 bool StreamCacheResource::hasCacheKeys() const {
     return batch_kv_cache_resource_->hasCacheKeys();
 }

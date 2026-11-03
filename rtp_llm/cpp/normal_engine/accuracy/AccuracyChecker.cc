@@ -53,12 +53,10 @@ struct StreamReleaseGuard {
     }
 };
 
-// RAII for closing the Python recorder and clearing accuracy_recording_.
+// RAII for closing the Python recorder before the temporary executor is released.
 struct RecordingSession {
-    PyWrappedModel* py_model_;
-    py::object      recorder_;
-    RecordingSession(PyWrappedModel* py_model, py::object recorder):
-        py_model_(py_model), recorder_(std::move(recorder)) {}
+    py::object recorder_;
+    RecordingSession()                                   = default;
     RecordingSession(const RecordingSession&)            = delete;
     RecordingSession& operator=(const RecordingSession&) = delete;
     ~RecordingSession() {
@@ -73,7 +71,6 @@ struct RecordingSession {
             }
             recorder_ = py::object();
         }
-        py_model_->setAccuracyRecording(false);
     }
 };
 
@@ -147,8 +144,12 @@ const std::vector<AccuracyScenario>& AccuracyChecker::defaultScenarios() {
 
 AccuracyChecker::AccuracyChecker(const ModelConfig&       model_config,
                                  const RuntimeConfig&     runtime_config,
-                                 const ParallelismConfig& parallelism_config):
-    model_config_(model_config), runtime_config_(runtime_config), parallelism_config_(parallelism_config) {}
+                                 const ParallelismConfig& parallelism_config,
+                                 bool                     decode_gate):
+    model_config_(model_config),
+    runtime_config_(runtime_config),
+    parallelism_config_(parallelism_config),
+    decode_gate_(decode_gate) {}
 
 torch::Tensor AccuracyChecker::makeCheckPrompt(size_t len) {
     int64_t token_size = model_config_.embedding_size ?
@@ -184,13 +185,14 @@ absl::StatusOr<GenerateStreamPtr> AccuracyChecker::buildAccuracyStream(torch::Te
     return stream;
 }
 
-// Build an independent stream that reuses golden's KV cache for `history_len` tokens
+// Build an independent stream that copies golden's KV cache for `history_len` tokens
 // Prefix: `init_tokens` contains history + chunk; reuse history and execute the chunk
 // Decode: `init_tokens` contains history; append and execute `cur_token`
-// Full history blocks are referenced, while an unaligned boundary block is copied
+// Copy mappings are broadcast and executed by the ordinary forward path on every rank.
 absl::StatusOr<GenerateStreamPtr> AccuracyChecker::makeForkStream(
     torch::Tensor init_tokens, size_t history_len, bool is_decode, int cur_token, const GenerateStreamPtr& golden) {
-    const size_t block_size  = model_config_.attn_config.tokens_per_block;
+    const size_t block_size  = resource_context_->cache_manager->cacheConfig().seq_size_per_block;
+    const auto&  cache_tag   = resource_context_->cache_manager->cacheConfig().groupTags().front();
     const size_t full_blocks = history_len / block_size;
     const size_t boundary    = history_len % block_size;
 
@@ -206,7 +208,7 @@ absl::StatusOr<GenerateStreamPtr> AccuracyChecker::makeForkStream(
                                 (long)golden->seqLength(),
                                 history_len);
     }
-    const auto&  golden_blocks = golden->kvCache().blocks(0, 0);
+    const auto&  golden_blocks = golden->kvCache().blocks(0, cache_tag);
     const size_t total_blocks  = full_blocks + (boundary ? 1 : 0);
     // check golden kv cache has been generated completely
     RTP_LLM_CHECK_WITH_INFO(
@@ -226,9 +228,8 @@ absl::StatusOr<GenerateStreamPtr> AccuracyChecker::makeForkStream(
                             "accuracy check: each fork must contain exactly one sequence");
     RTP_LLM_CHECK_WITH_INFO(!cache_resource.reuseCache(), "accuracy check: fork must have reuse_cache=false");
 
-    // Reference golden's complete history blocks
-    BlockIndicesType history_blocks(golden_blocks.begin(), golden_blocks.begin() + full_blocks);
-    cache_resource.referenceRequestBlocks(history_blocks);
+    // Allocate an independent request using the current coordinator API. Copy
+    // golden history through the same tagged mapping used by normal forwards.
 
     if (is_decode) {
         // Decode: Append golden's token and set stream on decode phase
@@ -267,10 +268,10 @@ absl::StatusOr<GenerateStreamPtr> AccuracyChecker::makeForkStream(
     // Allocate own blocks for the remainder (decode: one tail; prefix: the chunk blocks)
     RETURN_IF_STATUS_ERROR(stream->incrKVBlock());
     const size_t need_blocks = (stream->seqLength() + block_size - 1) / block_size;
-    RTP_LLM_CHECK_WITH_INFO(stream->kvCache().blocks(0, 0).size() == need_blocks,
+    RTP_LLM_CHECK_WITH_INFO(stream->kvCache().blocks(0, cache_tag).size() == need_blocks,
                             "accuracy check: fork expected %zu blocks, got %zu",
                             need_blocks,
-                            stream->kvCache().blocks(0, 0).size());
+                            stream->kvCache().blocks(0, cache_tag).size());
     if (!is_decode) {
         // Verify the configured reuse length.
         RTP_LLM_CHECK_WITH_INFO(stream->reuseLength() == (int)history_len,
@@ -279,13 +280,11 @@ absl::StatusOr<GenerateStreamPtr> AccuracyChecker::makeForkStream(
                                 history_len);
     }
 
-    // Copy unaligned block
-    if (boundary != 0) {
-        const int                      dst_block = stream->kvCache().blocks(0, 0)[full_blocks];
-        const std::string              cache_tag = resource_context_->cache_manager->cacheConfig().tagForGroup(0);
-        std::vector<TaggedBlockIdPair> mapping{TaggedBlockIdPair{cache_tag, golden_blocks[full_blocks], dst_block}};
-        cache_resource.setKVBlockUpdateMapping(mapping);
+    std::vector<TaggedBlockIdPair> mapping;
+    for (size_t block = 0; block < total_blocks; ++block) {
+        mapping.push_back({cache_tag, golden_blocks[block], stream->kvCache().blocks(0, cache_tag)[block]});
     }
+    cache_resource.setKVBlockUpdateMapping(mapping);
     return stream;
 }
 
@@ -687,7 +686,7 @@ size_t AccuracyChecker::computeTemporaryBlockNum(const ModelConfig&             
             plain_peak_blocks += 2 * ((plain_len + block_size - 1) / block_size);
             golden_decode_blocks += (plain_len + sequence.decode_steps + block_size - 1) / block_size;
             if (sequence.decode_steps > 0) {
-                decode_fork_blocks += 1;
+                decode_fork_blocks += (plain_len + sequence.decode_steps + block_size - 1) / block_size;
             }
         }
         max_peak_blocks = std::max({max_peak_blocks, plain_peak_blocks, golden_decode_blocks + decode_fork_blocks});
@@ -716,19 +715,29 @@ absl::Status AccuracyChecker::runAll(Executor*                            execut
     auto* py_model = dynamic_cast<PyWrappedModel*>(normal_executor->getModel());
     RTP_LLM_CHECK_WITH_INFO(py_model, "accuracy check requires PyWrappedModel");
 
-    RecordingSession session{py_model, py::object()};
-    {
+    RecordingSession session;
+    bool             recorder_ready = true;
+    try {
         py::gil_scoped_acquire gil;
         auto                   recorder_module =
-            py::module::import("rtp_llm.models_py.modules.factory.attention.accuracy.tensor_recorder");
-        session.recorder_ = recorder_module.attr("TensorRecorder")(py_model->getPyModel());
+            py::module::import(decode_gate_ ? "rtp_llm.models_py.modules.factory.attention.dispatch.gate_recorder" :
+                                              "rtp_llm.models_py.modules.factory.attention.accuracy.tensor_recorder");
+        session.recorder_ =
+            recorder_module.attr(decode_gate_ ? "GateRecorder" : "TensorRecorder")(py_model->getPyModel());
+    } catch (const std::exception& e) {
+        recorder_ready = false;
+        RTP_LLM_LOG_ERROR("accuracy recorder initialization failed: %s", e.what());
     }
-    py_model->setAccuracyRecording(true);
+    RETURN_IF_STATUS_ERROR(abortIfFailed(recorder_ready, "recorder-init"));
 
     const int64_t record_begin_us = autil::TimeUtility::currentTimeInMicroSeconds();
     try {
         for (const auto& scenario : scenarios) {
             RETURN_IF_STATUS_ERROR(runScenario(session.recorder_, scenario));
+        }
+        if (decode_gate_) {
+            py::gil_scoped_acquire gil;
+            session.recorder_.attr("finalize")();
         }
     } catch (const std::exception& e) {
         return absl::InternalError(std::string("accuracy check scenario threw: ") + e.what());
