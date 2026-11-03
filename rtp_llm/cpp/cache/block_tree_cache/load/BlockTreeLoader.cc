@@ -62,6 +62,46 @@ BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&          
     return result;
 }
 
+size_t BlockTreeLoader::reusableDeviceBlocksLocked(const CacheKeysType&               cache_keys,
+                                                    const std::function<bool(size_t)>& valid_prefix) const {
+    if (cache_keys.empty()) {
+        return 0;
+    }
+    auto path = tree_->findNode(cache_keys);
+    std::vector<bool> candidate_valid;
+    if (!validMatch(path, candidate_valid, valid_prefix)) {
+        return 0;
+    }
+    // Use the same device-readiness rule as createMatchResult(). A cached key
+    // alone is insufficient: every group needed by the candidate must still
+    // own complete device blocks at its reuse positions.
+    for (size_t candidate_count = path.size(); candidate_count > 0; --candidate_count) {
+        if (!candidate_valid[candidate_count - 1]) {
+            continue;
+        }
+        size_t reusable_blocks = 0;
+        bool   ready           = true;
+        for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
+            const auto& group_set = tree_->groupSets()[group_set_id];
+            const size_t reuse_count = std::min(group_set->computeReuseBlockCount(candidate_count), candidate_count);
+            for (size_t i = candidate_count - reuse_count; i < candidate_count; ++i) {
+                if (!path[i]->group_set_resources[group_set_id].hasCompleteDeviceValue()) {
+                    ready = false;
+                    break;
+                }
+            }
+            if (!ready) {
+                break;
+            }
+            reusable_blocks += reuse_count * group_set->groupTags().size();
+        }
+        if (ready) {
+            return reusable_blocks;
+        }
+    }
+    return 0;
+}
+
 bool BlockTreeLoader::validMatch(std::vector<TreeNode*>&            path,
                                  std::vector<bool>&                 candidate_valid,
                                  const std::function<bool(size_t)>& valid_prefix) const {

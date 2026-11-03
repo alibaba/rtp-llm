@@ -399,6 +399,26 @@ def _infer_model_type(ckpt_path: str) -> Optional[str]:
         return None
 
 
+def _route_atom_qwen4_exp_model_types(py_env_configs: PyEnvConfigs) -> None:
+    """Select ATOM's Qwen4Exp only when its RTP plugin is explicitly enabled."""
+    model_args = py_env_configs.model_args
+    if "atom.plugin.rtpllm.models" not in (model_args.external_model_packages or []):
+        return
+    if model_args.model_type not in ("qwen4_exp", "atom_qwen4_exp"):
+        return
+
+    if model_args.model_type == "qwen4_exp":
+        model_args.model_type = "atom_qwen4_exp"
+        logging.getLogger(__name__).info(
+            "Routed qwen4_exp to ATOM via external model package"
+        )
+    if py_env_configs.sp_config.model_type == "qwen4_exp_mtp":
+        py_env_configs.sp_config.model_type = "atom_qwen4_exp_mtp"
+        logging.getLogger(__name__).info(
+            "Routed qwen4_exp_mtp to ATOM via external model package"
+        )
+
+
 def setup_default_args(py_env_configs):
     set_parallelism_config(
         py_env_configs.parallelism_config,
@@ -422,6 +442,7 @@ def setup_default_args(py_env_configs):
         raise ValueError(
             f"model_type is not set and could not be inferred from checkpoint path: {py_env_configs.model_args.ckpt_path}. Please provide --model_type or MODEL_TYPE environment variable."
         )
+    _route_atom_qwen4_exp_model_types(py_env_configs)
 
     if (
         os.path.exists("/dev/kfd")

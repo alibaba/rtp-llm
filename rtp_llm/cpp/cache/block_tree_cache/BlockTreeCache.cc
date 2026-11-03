@@ -153,6 +153,12 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               ca
     return result;
 }
 
+size_t BlockTreeCache::reusableDeviceBlocks(const CacheKeysType&               cache_keys,
+                                             const std::function<bool(size_t)>& valid_prefix) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return loader_.reusableDeviceBlocksLocked(cache_keys, valid_prefix);
+}
+
 void BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
                             const std::vector<std::vector<GroupSetResource>>& resources,
                             Tier                                              target_tier) {
