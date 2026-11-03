@@ -195,6 +195,10 @@ class DsaWorkspaceOwner:
         self.sfa_use_fp8 = sfa_use_fp8
         if sfa_use_fp8 and (latent_dim, suffix_dim) != (512, 64):
             raise ValueError("fp8_ds_mla requires 512 latent and 64 physical suffix dimensions")
+        from .dsa_dcp_options import dcp_topk_mode
+
+        # Decode selection of the FP8 target across the DCP group by MegaTopk (dsa_dcp_options).
+        self.mega_topk = indexer_use_fp8 and tp_size > 1 and dcp_topk_mode() == "mega_topk"
         self.indexer_score = None
         self.heads, self.latent_dim = heads, latent_dim
         self.suffix_dim, self.value_dim = suffix_dim, value_dim

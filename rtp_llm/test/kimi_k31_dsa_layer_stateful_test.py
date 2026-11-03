@@ -83,6 +83,8 @@ def main():
     parser.add_argument("--eager-tolerance", type=float, default=2e-2)
     parser.add_argument("--replay-tolerance", type=float, default=1e-2,
                         help="replay vs first replay, max error / max value (selections must match exactly)")
+    parser.add_argument("--mega-epoch-start", type=int, default=None,
+                        help="start MegaTopk's exchange epochs here (uint32, e.g. 4294967255 wraps within a few launches)")
     parser.add_argument("--seed", type=int, default=3101)
     parser.add_argument("--step-timeout", type=int, default=1800)
     args = parser.parse_args()
@@ -117,6 +119,21 @@ def main():
         server = layer_test.Server(queries, pools, max_seq_len=args.max_context, tp=tp, rank=rank,
                                    seed=args.seed * 10 + number, budget=(args.pool_pages - 1) // len(buckets))
         graphs.append(Bucket(slot, server, torch.Generator(device="cuda").manual_seed(args.seed * 13 + rank + 8 * number)))
+    if args.mega_epoch_start is not None:
+        # Every rank restarts its exchange epochs at the same value over a zeroed workspace, as at
+        # construction: words of the earlier rounds must not carry the epochs reached after the wrap.
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import page_rr_mega_topk
+
+        if not page_rr_mega_topk._instances:
+            raise ValueError("--mega-epoch-start needs DSA_DCP_TOPK=mega_topk")
+        start = args.mega_epoch_start - (1 << 32) if args.mega_epoch_start >= 1 << 31 else args.mega_epoch_start
+        torch.cuda.synchronize()
+        dist.barrier()
+        for selector in page_rr_mega_topk._instances.values():
+            selector.workspace.zero_()
+            selector.epochs.fill_(start)
+        torch.cuda.synchronize()
+        dist.barrier()
     for index, graph in enumerate(graphs):
         low = buckets[index - 1] + 1 if index else 1
         graph.refresh(decisions.randint(low, graph.slot.bucket), pools, tp, rank, config.hidden_size)

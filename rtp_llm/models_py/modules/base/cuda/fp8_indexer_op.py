@@ -87,8 +87,10 @@ class Fp8IndexerOp(IndexerKVOp):
                                (1 + execution.batch * (block.width // 64), 64, 1, 132),
                                torch.uint8)
             pack_indexer_pages64(keys, params.block_table, block.start, native)
+        # Without a wire/score workspace (MegaTopk) the MQA output is returned as is: MegaTopk reads
+        # only each row's causal length, so it needs neither the copy nor the sanitizing pass.
         return self.native_score.paged(
             query, native, gates.reshape(execution.rows, 32), block.native_context,
             block.native_table, block.native_schedule, block.width,
-            block.key_positions, wire=wire,
+            block.key_positions, wire=wire, sanitize=wire is not None,
         )

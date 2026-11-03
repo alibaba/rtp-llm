@@ -251,6 +251,20 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Exact top-k across a DCP group with Page-RR KV sharding, exchanging over NVLink inside one
+# persistent kernel (K3.1 DSA decode). Exact FP32 ordering and CTA clusters, as for topk_v3.
+cc_library(
+    name = "mega_topk",
+    srcs = ["mega_topk.cu"],
+    hdrs = ["mega_topk.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = dsv4_indexer_topk_cuda_copts,
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "cuda_graph_prepare",
     srcs = ["cuda_graph_prepare.cu"],

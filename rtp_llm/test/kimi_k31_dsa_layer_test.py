@@ -42,7 +42,7 @@ except ImportError:  # run as a plain script next to the fixture (no Bazel runfi
 TOPK, INDEX_HEADS, LATENT, ROPE, NOPE, V_HEAD = 2048, 32, 512, 64, 128, 128
 # Switch environment per arm (dsa_dcp_options); switches are read when the layer and its
 # workspace owner are built, so arms coexist in one process.
-ARMS = {"dev": {}}
+ARMS = {"dev": {}, "mega_topk": {"DSA_DCP_TOPK": "mega_topk"}}
 
 
 # Row counts (requests x Q) at MegaTopk's launch-shape switches on 148 SMs: clusters of 16/8/4/2 CTAs
@@ -507,6 +507,8 @@ def main():
                           "seconds": round(elapsed, 3), "passed": failed.item() == 0,
                           "kv_blocks": [len(fmha["indexer_kv"].page_rr_params.indexer_execution.blocks),
                                         len(fmha["full"].page_rr_params.sfa_execution.blocks)],
+                          # The selection path that actually ran (MegaTopk falls back when its logits do not fit).
+                          "mega_topk": fmha["indexer_kv"].page_rr_params.indexer_execution.mega_topk,
                           # Indexer phase: planned bytes and the other phases' resident bytes (MiB).
                           "indexer_mib": [
                               fmha["indexer_kv"].page_rr_params.indexer_execution.required_bytes >> 20,

@@ -64,6 +64,8 @@ class IndexerKVOp(nn.Module):
                 (execution.rows, self.topk), -1, dtype=torch.int32, device=query.device
             )
         workspace = execution.begin()
+        if execution.mega_topk:
+            return self._mega_topk_decode(query, gates, q_positions, keys, params, execution, workspace)
         running = (
             workspace(
                 "running.scores", (execution.selection_rows, self.topk), torch.float32
@@ -158,5 +160,44 @@ class IndexerKVOp(nn.Module):
             output = output[: execution.rows]
         from rtp_llm.models_py.utils.smoke_evidence import completed_dsa_chunks
         completed_dsa_chunks("indexer", params, len(execution.blocks), execution.rows)
+        execution.finish()
+        return output
+
+    def _mega_topk_decode(self, query, gates, q_positions, keys, params, execution, workspace):
+        """Decode selection by MegaTopk: no score exchange, no all-gather of positions.
+
+        Scores this rank's whole local history (KV blocks side by side), then selects each row's
+        exact global top-k across the DCP group in one kernel. Returns [rows, topk] holding the
+        selected global positions this rank owns, then -1: sparse attention reads only its own
+        positions, and the DCP combine treats a rank without keys as empty.
+        """
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.page_rr_mega_topk import (
+            get_page_rr_mega_topk,
+        )
+        from rtp_llm.models_py.utils.smoke_evidence import completed_dsa_chunks
+
+        page, rows = params.kernel_page_size, execution.rows
+        whole = len(execution.blocks) == 1
+        logits = None if whole else workspace(
+            "mega_topk.logits", (rows, params.block_table.shape[1] * page), torch.float32
+        )
+        for block in execution.blocks:
+            score = self._score_decode(query, gates, q_positions, keys, params,
+                                       execution, block, workspace, None)
+            if whole:
+                logits = score
+            else:
+                logits[:, block.start : block.start + block.width].copy_(score)
+            del score
+        selector = get_page_rr_mega_topk(
+            self.topk, (params.max_owner_columns or params.block_table.shape[1]) * page,
+            page, params.page_size, query.device,
+        )
+        output = workspace("mega_topk.positions", (rows, self.topk), torch.int32)
+        count = workspace("mega_topk.count", (rows,), torch.int32)
+        with profile_scope("RTP::attention.dsa.indexer.mega_topk"):
+            selector(logits, params.decode.local_causal_lens.view(-1), params.positions_d,
+                     params.block_table, execution.queries, output, count)
+        completed_dsa_chunks("indexer", params, len(execution.blocks), rows)
         execution.finish()
         return output
