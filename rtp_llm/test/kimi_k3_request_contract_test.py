@@ -7,6 +7,7 @@ from rtp_llm.models.kimi_k3.kimi_k3_request_contract import (
     apply_kimi_k3_request_contract,
     kimi_k3_pending_prompt_token_count,
     kimi_k3_pending_prompt_token_ids,
+    kimi_k3_prompt_channel,
     validate_kimi_k3_tool_history,
     validate_kimi_k3_top_logprobs,
 )
@@ -259,6 +260,25 @@ class KimiK3PendingPromptTest(unittest.TestCase):
                     kimi_k3_pending_prompt_token_count(tokenizer, ids), expected
                 )
         self.assertEqual(kimi_k3_pending_prompt_token_count(None, [99]), 0)
+
+    def test_finds_open_channel_before_partial_content_but_not_closed_history(self):
+        tokenizer = SimpleNamespace(encode=lambda text: list(text.encode("utf-8")))
+        think = "<|open|>think<|sep|>"
+        response = "<|open|>response<|sep|>"
+        closed = response + "old" + "<|close|>response<|sep|>"
+        for text, expected in (
+            (think + "prefix", ("think", 20)),
+            (response + "prefix", ("response", 23)),
+            (closed + think + "prefix", ("think", 20)),
+            (closed, (None, 0)),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    kimi_k3_prompt_channel(
+                        tokenizer, tokenizer.encode(text), allow_content=True
+                    ),
+                    expected,
+                )
 
     def test_rejects_invalid_tokenizer_results(self):
         for result in (None, [], "123", ["10"], (10, 11, 12)):

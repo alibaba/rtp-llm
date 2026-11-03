@@ -692,6 +692,86 @@ class KimiK3GrammarTest(unittest.TestCase):
         self.accept(matcher, THINK_TO_RESPONSE + "{}" + RESPONSE_CLOSE + MESSAGE_CLOSE)
         self.assertTrue(self.allows(matcher, "EOS"))
 
+    def test_openai_partial_continues_existing_channel_without_open_marker(self):
+        from rtp_llm.openai.api_datatype import (
+            ChatCompletionRequest,
+            ChatCompletionTokenLogprob,
+        )
+        from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+        from rtp_llm.openai.renderers.custom_renderer import RenderedInputs
+        from rtp_llm.openai.renderers.kimi_k3_renderer import (
+            K3XtmlDecoder,
+            KimiK3Renderer,
+        )
+
+        for thinking in (False, True):
+            with self.subTest(thinking=thinking):
+                opening = THINK_OPEN if thinking else RESPONSE_OPEN
+                renderer = KimiK3Renderer.__new__(KimiK3Renderer)
+                renderer.tokenizer = self.tokenizer
+                endpoint = OpenaiEndpoint.__new__(OpenaiEndpoint)
+                endpoint.chat_renderer = renderer
+                endpoint.tokenizer = self.tokenizer
+                endpoint.model_type = "kimi_k3"
+                endpoint.stop_words_str_list = []
+                endpoint.stop_words_id_list = []
+                endpoint.generate_env_config = None
+                request = ChatCompletionRequest(
+                    messages=[
+                        {"role": "assistant", "content": "prefix", "partial": True}
+                    ],
+                    enable_thinking=thinking,
+                    logprobs=True,
+                )
+                with patch.object(
+                    renderer,
+                    "render_chat",
+                    return_value=RenderedInputs(self.tokenizer.encode(opening)),
+                ):
+                    rendered = endpoint.render_chat(request)
+                self.assertEqual(
+                    rendered.input_ids, self.tokenizer.encode(opening + "prefix")
+                )
+                config = endpoint._extract_generation_config(
+                    request, rendered.input_ids, renderer
+                )
+                matcher = xgr.GrammarMatcher(
+                    self.compiler.compile_structural_tag(config.structural_tag)
+                )
+                # The generated continuation starts with text in the channel
+                # already opened before the assistant prefix.
+                self.accept(matcher, "tail")
+                self.accept(
+                    matcher,
+                    (THINK_TO_RESPONSE if thinking else "")
+                    + RESPONSE_CLOSE
+                    + MESSAGE_CLOSE,
+                )
+                self.assertTrue(self.allows(matcher, "EOS"))
+                parsed = K3XtmlDecoder(thinking, request).decode(
+                    "tail",
+                    [
+                        ChatCompletionTokenLogprob(
+                            token=token,
+                            bytes=[ord(token)],
+                            logprob=-0.1,
+                            top_logprobs=[],
+                        )
+                        for token in "tail"
+                    ],
+                    flush=True,
+                )
+                channel = "reasoning_content" if thinking else "content"
+                self.assertEqual(getattr(parsed.delta, channel), "tail")
+                self.assertEqual(
+                    bytes(
+                        byte
+                        for token in parsed.channel_logprobs[channel]
+                        for byte in token.bytes
+                    ),
+                    b"tail",
+                )
+
     def test_model_plan_installation_does_not_rebuild_grammar(self):
         config = GenerateConfig(
             thinking_mode=ThinkingMode.ENABLED, in_think_mode=True, regex="a"

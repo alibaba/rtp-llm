@@ -21,6 +21,7 @@ from rtp_llm.models.kimi_k3.kimi_k3_request_contract import (
     THINK_TO_RESPONSE,
     apply_kimi_k3_request_contract,
     kimi_k3_pending_prompt_token_ids,
+    kimi_k3_prompt_channel,
     validate_kimi_k3_tool_history,
     validate_kimi_k3_top_logprobs,
 )
@@ -1381,6 +1382,9 @@ class KimiK3Renderer(CustomChatRenderer):
             ),
             parallel_tool_calls=request.parallel_tool_calls is not False,
             required_tools_tail=generate_config.structural_tag if forced else None,
+            prompt_info=kimi_k3_prompt_channel(
+                self.tokenizer, input_ids, allow_content=True
+            ),
         ).build_plan(generate_config, self.tokenizer, input_ids)
 
 

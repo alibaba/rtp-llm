@@ -27,15 +27,39 @@ def kimi_k3_pending_prompt_token_ids(tokenizer: Any, thinking: bool) -> list[int
 
 
 def kimi_k3_prompt_channel(
-    tokenizer: Any, input_ids: Sequence[int] | None
+    tokenizer: Any,
+    input_ids: Sequence[int] | None,
+    *,
+    allow_content: bool = False,
 ) -> tuple[str | None, int]:
-    """Return the open channel and its public-usage token offset together."""
+    """Return the open channel and its public-usage token offset together.
+
+    OpenAI partial messages append text after the generation marker. Opt into
+    finding its last complete boundary when preparing their grammar; usage
+    accounting keeps its existing exact-suffix contract.
+    """
     if tokenizer is None or not input_ids:
         return None, 0
-    for thinking in (False, True):
-        pending_ids = kimi_k3_pending_prompt_token_ids(tokenizer, thinking)
+    openings = [
+        (kimi_k3_pending_prompt_token_ids(tokenizer, thinking), channel)
+        for thinking, channel in ((False, "response"), (True, "think"))
+    ]
+    for pending_ids, channel in openings:
         if input_ids[-len(pending_ids) :] == pending_ids:
-            return ("think" if thinking else "response"), len(pending_ids)
+            return channel, len(pending_ids)
+    if allow_content:
+        boundaries = openings + [
+            (list(tokenizer.encode(marker)), None)
+            for marker in (THINK_CLOSE, RESPONSE_CLOSE)
+        ]
+        for start in range(len(input_ids) - 1, -1, -1):
+            for marker_ids, channel in boundaries:
+                if (
+                    marker_ids
+                    and input_ids[start] == marker_ids[0]
+                    and input_ids[start : start + len(marker_ids)] == marker_ids
+                ):
+                    return channel, len(marker_ids) if channel is not None else 0
     return None, 0
 
 
