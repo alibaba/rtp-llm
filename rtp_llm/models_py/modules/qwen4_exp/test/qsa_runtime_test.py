@@ -1,3 +1,4 @@
+import os
 from types import SimpleNamespace
 from unittest import TestCase, main, skipUnless
 from unittest.mock import patch
@@ -28,6 +29,11 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
 )
 from rtp_llm.ops import RopeStyle
 from rtp_llm.ops.compute_ops import PyCacheStoreInputs
+
+# Many cases here assert the legacy per-check validation errors (exact
+# messages, raises before pool mutation). Keep them on the strict path; the
+# production path demotes those checks to async device asserts.
+os.environ.setdefault("RTP_LLM_QSA_STRICT_VALIDATION", "1")
 
 
 class Qwen4ExpQSARuntimeTest(TestCase):
@@ -762,6 +768,83 @@ class Qwen4ExpQSARuntimeTest(TestCase):
             )
         self.assertEqual(geometry.call_count, 1)
         self.assertIsNone(context._target_verify_plan)
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for graph capture mirrors")
+    def test_target_verify_graph_capture_skips_block_resolution(self):
+        """Graph capture feeds synthetic zero block tables.
+
+        Regression: the production resolution verdict used to run against the
+        synthetic tables during CudaGraphRunner capture; the device assert
+        trapped the context and the next cublasLtMatmul failed with
+        CUBLAS_STATUS_EXECUTION_FAILED on L20X. Capture must keep only the
+        host-side width checks, exactly like the strict path.
+        """
+        self.kv_base = self.kv_base.cuda()
+        self.state_base = self.state_base.cuda()
+        self.indexer.k_norm_gamma = self.indexer.k_norm_gamma.cuda()
+        q_len = self.RATIO
+        device = self.kv_base.device
+        committed_length = 7
+        input_lengths = torch.tensor([q_len], dtype=torch.int32, device=device)
+        # Graph mirrors keep prefix_lengths on the host: the runtime pins a
+        # decode-length mirror for capture bookkeeping.
+        prefix_lengths = torch.tensor([committed_length], dtype=torch.int32)
+        sequence_lengths = torch.empty(0, dtype=torch.int32)
+        cu_seqlens = torch.tensor([0, q_len], dtype=torch.int32, device=device)
+        cu_kv_seqlens = torch.tensor(
+            [0, committed_length + q_len], dtype=torch.int32, device=device
+        )
+        position_ids = (
+            torch.arange(
+                committed_length, committed_length + q_len, dtype=torch.int32
+            )
+            .unsqueeze(1)
+            .expand(-1, 3)
+            .reshape(-1)
+        )
+        # Synthetic capture tables: zero entries stand for unallocated blocks.
+        kv_table = torch.zeros(1, 2, dtype=torch.int32, device=device)
+        state_table = torch.zeros(1, 2, dtype=torch.int32, device=device)
+
+        def _inputs():
+            return SimpleNamespace(
+                is_prefill=True,
+                is_target_verify=True,
+                is_cuda_graph=True,
+                is_s_padded=False,
+                context_parallel_info=None,
+                cache_store_inputs=None,
+                input_lengths=input_lengths,
+                prefix_lengths=prefix_lengths,
+                sequence_lengths=sequence_lengths,
+                cu_seqlens_device=cu_seqlens,
+                cu_kv_seqlens_device=cu_kv_seqlens,
+                combo_position_ids=position_ids,
+                kv_cache_kernel_block_id_device=kv_table,
+                kv_cache_block_id_device=state_table,
+            )
+
+        context = Qwen4ExpQSARuntimeContext(
+            main_cache=SimpleNamespace(tag="full"),
+            main_inputs=_inputs(),
+            indexer_kv_cache=SimpleNamespace(
+                tag=INDEXER_KV_TAG,
+                kv_cache_base=self.kv_base,
+                seq_size_per_block=self.KV_TOKENS_PER_BLOCK,
+            ),
+            indexer_kv_inputs=_inputs(),
+            indexer_state_cache=SimpleNamespace(
+                tag=INDEXER_STATE_TAG,
+                kv_cache_base=self.state_base,
+                seq_size_per_block=self.STATE_TOKENS_PER_BLOCK,
+            ),
+            indexer_state_inputs=_inputs(),
+        )
+        context.validate_before_projection(
+            indexer=self._decode_indexer(), token_count=q_len, device=device
+        )
+        # A trapped device assert would surface at this synchronization.
+        torch.cuda.synchronize()
 
     @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
     def test_target_verify_never_overwrites_the_committed_partial_group(self):

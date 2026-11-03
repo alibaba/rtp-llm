@@ -1,4 +1,5 @@
 import itertools
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -121,6 +122,9 @@ class IndexerPrefillTritonTest(unittest.TestCase):
         self.assertIs(check.call_args.args[1], context.main_inputs.cu_seqlens)
 
     def test_runtime_metadata_fusion_keeps_all_write_preflights(self):
+        # The device-only preflight demoted its invalid verdict to an async
+        # device assert in production; strict validation restores the
+        # synchronous per-check raises this contract test pins down.
         for case in (
             "cu",
             "prefix",
@@ -129,7 +133,9 @@ class IndexerPrefillTritonTest(unittest.TestCase):
             "kv_oob",
             "alias_bad_cu",
         ):
-            with self.subTest(case=case):
+            with self.subTest(case=case), patch.dict(
+                os.environ, {"RTP_LLM_QSA_STRICT_VALIDATION": "1"}
+            ):
                 context, raw, indexer, rope, kv, state = self.runtime_inputs([129, 7])
                 before = kv.clone(), state.clone()
                 if case in ("cu", "alias_bad_cu"):
@@ -328,8 +334,13 @@ class IndexerPrefillTritonTest(unittest.TestCase):
                 torch.testing.assert_close(args[8], before_state, atol=0, rtol=0)
 
     def test_invalid_cu_or_required_page_fails_before_either_pool_mutates(self):
+        # Strict validation keeps the synchronous raises: without it the
+        # invalid verdict is an async device assert enqueued before any
+        # mutation (fail-stop at the next host synchronization).
         for case in ("cu", "state_missing", "state_oob", "kv_missing", "kv_oob"):
-            with self.subTest(case=case):
+            with self.subTest(case=case), patch.dict(
+                os.environ, {"RTP_LLM_QSA_STRICT_VALIDATION": "1"}
+            ):
                 args = list(self.inputs([129, 7]))
                 before_kv, before_state = args[6].clone(), args[8].clone()
                 if case == "cu":
@@ -366,13 +377,18 @@ class IndexerPrefillTritonTest(unittest.TestCase):
         args[7][1, 1:] = -1
         args[9][1, 1:] = args[8].shape[0] + 123
         self.assertIsNotNone(self.fused(args))
+        # Shared pages keep the vectorized-writer fallback; strict validation
+        # restores the legacy readback verdict, while the production path
+        # declines aliased pages through the host mirrors (or traps fail-stop
+        # on the async device assert when only device metadata exists).
         for table_idx in (7, 9):
-            args = list(self.inputs([128, 128]))
-            args[table_idx][1, 0] = args[table_idx][0, 0]
-            before_kv, before_state = args[6].clone(), args[8].clone()
-            self.assertIsNone(self.fused(args))
-            torch.testing.assert_close(args[6], before_kv, atol=0, rtol=0)
-            torch.testing.assert_close(args[8], before_state, atol=0, rtol=0)
+            with patch.dict(os.environ, {"RTP_LLM_QSA_STRICT_VALIDATION": "1"}):
+                args = list(self.inputs([128, 128]))
+                args[table_idx][1, 0] = args[table_idx][0, 0]
+                before_kv, before_state = args[6].clone(), args[8].clone()
+                self.assertIsNone(self.fused(args))
+                torch.testing.assert_close(args[6], before_kv, atol=0, rtol=0)
+                torch.testing.assert_close(args[8], before_state, atol=0, rtol=0)
 
     def test_write_failure_restores_both_snapshots(self):
         args = self.inputs([129, 7])

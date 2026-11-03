@@ -45,6 +45,13 @@ from .qsa_plans import IncrementalPrefillPlan, TargetVerifyPlan
 
 @dataclass(frozen=True)
 class Qwen4ExpQSARuntimeContext:
+    """Per-layer QSA runtime wiring.
+
+    The model recreates one context per attention layer, so layer-independent
+    prefill metadata is NOT cached here: the frozen per-step plans live in
+    :mod:`.qsa_step_plan` (keyed by the step's ``main_inputs`` identity),
+    following the same freeze-once rationale as ``_target_verify_plan``.
+    """
     main_cache: LayerKVCache
     main_inputs: PyAttentionInputs
     indexer_kv_cache: LayerKVCache
@@ -292,9 +299,15 @@ class Qwen4ExpQSARuntimeContext:
         *,
         indexer: Any,
         rope_config: Any,
+        raw_query: bool = False,
     ) -> torch.Tensor:
         return qsa_prefill.select_prefix_reuse_prefill_tokens(
-            self, q, raw_keys, indexer=indexer, rope_config=rope_config
+            self,
+            q,
+            raw_keys,
+            indexer=indexer,
+            rope_config=rope_config,
+            raw_query=raw_query,
         )
 
     def select_draft_prefix_reuse_prefill_tokens(
@@ -318,6 +331,7 @@ class Qwen4ExpQSARuntimeContext:
         rope_config: Any,
         draft: bool,
         draft_prefix_reuse: bool = False,
+        raw_query: bool = False,
     ) -> torch.Tensor:
         return qsa_prefill._incremental_prefill_selection(
             self,
@@ -327,6 +341,7 @@ class Qwen4ExpQSARuntimeContext:
             rope_config=rope_config,
             draft=draft,
             draft_prefix_reuse=draft_prefix_reuse,
+            raw_query=raw_query,
         )
 
     def select_decode_tokens(

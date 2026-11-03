@@ -59,6 +59,18 @@ def required_blocks_are_valid(
     table: torch.Tensor, required_columns: torch.Tensor, pool_blocks: int
 ) -> bool:
     """Return one device-computed verdict, synchronizing only for that scalar."""
+    return bool(required_blocks_verdict(table, required_columns, pool_blocks).item())
+
+
+def required_blocks_verdict(
+    table: torch.Tensor, required_columns: torch.Tensor, pool_blocks: int
+) -> torch.Tensor:
+    """Launch the one-program reduction and return the raw 0-dim verdict.
+
+    ``True`` means every required column is in range and allocated. Unlike
+    :func:`required_blocks_are_valid` this never reads the verdict back to
+    the host, so callers can consume it with a device-side assert.
+    """
     batch, width = table.shape
     result = torch.empty((), dtype=torch.int32, device=table.device)
     _validate_required_blocks_kernel[(1,)](
@@ -73,4 +85,4 @@ def required_blocks_are_valid(
         POOL_BLOCKS=pool_blocks,
         N=triton.next_power_of_2(batch * width),
     )
-    return not bool(result.item())
+    return result == 0

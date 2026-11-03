@@ -178,6 +178,13 @@ py_test(
     exec_properties = {'gpu':'A10'},
 )
 
+# CPU-only frozen step-plan cache behavior (hit/invalidation/mode keying).
+py_test(
+    name = "qsa_step_plan_test",
+    srcs = ["qsa_step_plan_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
 py_test(
     name = "qsa_topk_triton_test",
     srcs = ["qsa_topk_triton_test.py", "topk_reference.py"],
@@ -822,5 +829,17 @@ py_test(
     deps = ["//rtp_llm/models_py:qsa_sparse_prefill_testlib"],
     env = {"GPU_COUNT": "1"},
     tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+# Manual single-layer QSA prefix-reuse bench (DtoH sync points + layer wall);
+# see the module docstring. Not part of the test suite: run it explicitly.
+py_test(
+    name = "qsa_single_layer_bench",
+    srcs = ["qsa_single_layer_bench.py"],
+    main = "qsa_single_layer_bench.py",
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13", "manual"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )

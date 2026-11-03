@@ -18,21 +18,31 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
+    qsa_assert_valid,
+    qsa_strict_validation_enabled,
+)
+
 _BLOCK_K = 64
 
 
-def _validate_sparse_paged_indices(
+def _sparse_paged_indices_verdict(
     block_table: torch.Tensor,
     kv_lens: torch.Tensor,
     selected: torch.Tensor,
     *,
     page_size: int,
     cache_blocks: int,
-) -> None:
-    """Check paged reads with one device-to-host verdict on valid inputs."""
+) -> torch.Tensor:
+    """0-dim boolean verdict for _validate_sparse_paged_indices (True=valid).
+
+    Computes the same combined predicate without any host synchronization so
+    the production entry can consume it with a device-side assert.
+    """
     table_width = int(block_table.shape[1])
     invalid_lengths = (kv_lens < 0) | (kv_lens > table_width * page_size)
     invalid_pool = block_table >= cache_blocks
+    verdict = ~invalid_lengths.any() & ~invalid_pool.any()
     if selected.numel():
         invalid_negative = selected < -1
         invalid_visible = (selected >= 0) & (selected >= kv_lens.unsqueeze(-1))
@@ -51,17 +61,46 @@ def _validate_sparse_paged_indices(
         invalid_selection = (
             invalid_negative | invalid_visible | invalid_logical | invalid_missing
         )
-        failed = invalid_lengths.any() | invalid_pool.any() | invalid_selection.any()
-    else:
-        failed = invalid_lengths.any() | invalid_pool.any()
-    if not bool(failed.item()):
+        verdict = verdict & ~invalid_selection.any()
+    return verdict
+
+
+def _validate_sparse_paged_indices(
+    block_table: torch.Tensor,
+    kv_lens: torch.Tensor,
+    selected: torch.Tensor,
+    *,
+    page_size: int,
+    cache_blocks: int,
+) -> None:
+    """Check paged reads with one device-to-host verdict on valid inputs."""
+    verdict = _sparse_paged_indices_verdict(
+        block_table,
+        kv_lens,
+        selected,
+        page_size=page_size,
+        cache_blocks=cache_blocks,
+    )
+    if bool(verdict.item()):
         return
 
     # Error paths may synchronize again to preserve the existing specific
     # diagnostics. No main-cache write has happened at this point.
+    invalid_lengths = (kv_lens < 0) | (kv_lens > int(block_table.shape[1]) * page_size)
     if bool(invalid_lengths.any().item()):
         raise ValueError("kv_lens exceed the block-table token capacity")
     if selected.numel():
+        invalid_negative = selected < -1
+        invalid_visible = (selected >= 0) & (selected >= kv_lens.unsqueeze(-1))
+        logical_blocks = torch.clamp_min(selected, 0) // page_size
+        invalid_logical = logical_blocks >= int(block_table.shape[1])
+        safe_logical_blocks = logical_blocks.clamp(max=int(block_table.shape[1]) - 1)
+        physical = torch.gather(
+            block_table.unsqueeze(1).expand(-1, selected.shape[1], -1),
+            2,
+            safe_logical_blocks.to(torch.long),
+        )
+        invalid_missing = (selected >= 0) & (physical <= 0)
         if bool(invalid_negative.any().item()):
             raise ValueError("selected indices may only use -1 as padding")
         if bool(invalid_visible.any().item()):
@@ -676,15 +715,34 @@ def sparse_paged_gqa_attn(
             invalid = (
                 invalid.any() | ((tokens >= 0) != (slots < count.unsqueeze(-1))).any()
             )
-            if bool(invalid.item()):
-                raise ValueError("invalid packed QSA prefix/count")
-        _validate_sparse_paged_indices(
-            block_table,
-            kv_lens,
-            selected[..., :-1] if selected_has_count else selected,
-            page_size=page_size,
-            cache_blocks=cache_blocks,
-        )
+            if qsa_strict_validation_enabled():
+                if bool(invalid.item()):
+                    raise ValueError("invalid packed QSA prefix/count")
+            else:
+                qsa_assert_valid(~invalid, "invalid packed QSA prefix/count")
+        paged_selected = selected[..., :-1] if selected_has_count else selected
+        if qsa_strict_validation_enabled():
+            _validate_sparse_paged_indices(
+                block_table,
+                kv_lens,
+                paged_selected,
+                page_size=page_size,
+                cache_blocks=cache_blocks,
+            )
+        else:
+            # FMHA-entry validation (the kept half of the pair with the
+            # per-request planner checks): one enqueue-only device verdict.
+            qsa_assert_valid(
+                _sparse_paged_indices_verdict(
+                    block_table,
+                    kv_lens,
+                    paged_selected,
+                    page_size=page_size,
+                    cache_blocks=cache_blocks,
+                ),
+                "qwen4_exp sparse paged GQA selection, kv_lens or block table "
+                "is invalid",
+            )
 
     q = q.contiguous()
     block_table = block_table.contiguous()

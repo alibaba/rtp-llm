@@ -22,6 +22,10 @@ from typing import Literal, Optional
 
 import torch
 
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
+    qsa_assert_valid,
+    qsa_strict_validation_enabled,
+)
 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     exact_head_rms_norm,
 )
@@ -217,17 +221,32 @@ def _write_indexer_cache_vectorized(
         | torch.any(lengths < 0)
         | torch.any(starts < 0)
     )
-    if bool(invalid_cu.item()):
-        raise ValueError(
+    if qsa_strict_validation_enabled():
+        if bool(invalid_cu.item()):
+            raise ValueError(
+                "cu_seqlens must be monotonic from 0 to raw_keys.shape[0], and "
+                "start_positions must be non-negative"
+            )
+    else:
+        qsa_assert_valid(
+            ~invalid_cu,
             "cu_seqlens must be monotonic from 0 to raw_keys.shape[0], and "
-            "start_positions must be non-negative"
+            "start_positions must be non-negative",
         )
     if not rope_is_token_aligned:
-        max_position = int((starts + lengths).max().item()) if batch_size else 0
-        if max_position > int(rope_cos.shape[-2]):
-            raise ValueError(
+        # Cold path (the production QSA writers pass token-aligned tables).
+        if qsa_strict_validation_enabled():
+            max_position = int((starts + lengths).max().item()) if batch_size else 0
+            if max_position > int(rope_cos.shape[-2]):
+                raise ValueError(
+                    f"RoPE tables cover {rope_cos.shape[-2]} positions, "
+                    f"need {max_position}"
+                )
+        elif batch_size:
+            qsa_assert_valid(
+                torch.all((starts + lengths) <= int(rope_cos.shape[-2])),
                 f"RoPE tables cover {rope_cos.shape[-2]} positions, "
-                f"need {max_position}"
+                "need more",
             )
 
     flat_indices = torch.arange(token_count, dtype=torch.long, device=device)
@@ -253,12 +272,31 @@ def _write_indexer_cache_vectorized(
         safe_columns = logical_blocks.clamp(0, max(width - 1, 0))
         blocks = table[requests, safe_columns].to(torch.long)
         out_of_pool = required & in_bounds & (blocks >= pool_blocks)
-        if bool(torch.any(out_of_pool).item()):
-            raise IndexError(f"{tag} physical block is outside pool size {pool_blocks}")
+        if qsa_strict_validation_enabled():
+            if bool(torch.any(out_of_pool).item()):
+                raise IndexError(
+                    f"{tag} physical block is outside pool size {pool_blocks}"
+                )
+        else:
+            qsa_assert_valid(
+                ~torch.any(out_of_pool),
+                f"{tag} physical block is outside pool size {pool_blocks}",
+            )
+        # The allocated mask stays materialized: the write plan below needs it
+        # to mask out unresolved slots.
         allocated = in_bounds & (blocks > 0) & (blocks < pool_blocks)
         missing = required & ~allocated
-        if invalid_block_policy == "raise" and bool(torch.any(missing).item()):
-            raise ValueError(f"{tag} resolves to an unallocated logical block")
+        if invalid_block_policy == "raise":
+            if qsa_strict_validation_enabled():
+                if bool(torch.any(missing).item()):
+                    raise ValueError(
+                        f"{tag} resolves to an unallocated logical block"
+                    )
+            else:
+                qsa_assert_valid(
+                    ~torch.any(missing),
+                    f"{tag} resolves to an unallocated logical block",
+                )
         return blocks, allocated
 
     state_logical = positions // state_tokens_per_block
@@ -395,8 +433,11 @@ def _write_indexer_cache_vectorized(
         "state_slots": state_slots,
         "kv_slots": kv_slots,
         "completed": completed,
-        "num_state_writes": int(state_write_mask.sum().item()),
-        "num_kv_writes": int((kv_slots >= 0).sum().item()),
+        # 0-dim device int64 tensors: no production consumer reads these back,
+        # so they stay lazy instead of two host-synchronizing sums. Tests only
+        # compare them for equality (bool() of the 0-dim tensor is free there).
+        "num_state_writes": state_write_mask.sum(),
+        "num_kv_writes": (kv_slots >= 0).sum(),
     }
     if capture_undo:
         result["undo"] = undo
