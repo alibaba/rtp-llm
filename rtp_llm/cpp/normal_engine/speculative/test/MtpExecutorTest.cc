@@ -273,6 +273,18 @@ class FakeModel: public ModelBase {
 public:
     FakeModel() = default;
     std::function<void(GptModelInputs&)> forward_hook;
+    bool requires_global_mtp_hidden = false;
+    std::function<torch::Tensor(torch::Tensor)> restore_mtp_hidden;
+
+    bool requiresGlobalMtpPrefillHidden() const override {
+        return requires_global_mtp_hidden;
+    }
+
+    torch::Tensor restoreMtpPrefillHiddenStates(torch::Tensor hidden, const GptModelInputs& inputs) override {
+        EXPECT_EQ(inputs.combo_tokens.numel(), 4);
+        EXPECT_EQ(inputs.input_lengths.item<int>(), 4);
+        return restore_mtp_hidden(hidden);
+    }
 
     FakeModel(const GptModelInitParams& params) {
         weights_  = params.weights;
@@ -1064,7 +1076,8 @@ public:
         EXPECT_EQ(target_sampler->forwardCount(), 0);
     }
 
-    void runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers = true);
+    void runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers = true,
+                                      bool native_mla_draft = false);
     void runSingleBatchDecodeScenario(bool with_prefill_only);
 
     void setupAlignmentModel(FakeModel*          model,
@@ -1778,7 +1791,8 @@ TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
     }
 }
 
-void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers) {
+void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers,
+                                                 bool native_mla_draft) {
     MtpExecutorTestConfig test_config;
     test_config.gen_num_per_cycle = 4;
     auto components               = createMtpExecutorComponents(test_config);
@@ -1843,6 +1857,20 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
         EXPECT_EQ(draft_input.last_hidden_states.size(0), 2);
         EXPECT_EQ(draft_output.all_hidden_states.size(0), 2);
     }
+    bool restored_mla_hidden = false;
+    if (native_mla_draft) {
+        components.fake_draft_model->requires_global_mtp_hidden = true;
+        components.fake_draft_model->setMtpLastHiddenStates(torch::Tensor());
+        components.fake_target_model->restore_mtp_hidden = [&](torch::Tensor local) {
+            EXPECT_EQ(local.size(0), 2);
+            EXPECT_TRUE(local.equal(target_output.all_hidden_states.narrow(0, 0, 2)));
+            restored_mla_hidden = true;
+            return target_output.all_hidden_states;
+        };
+        draft_input.last_hidden_states = target_output.all_hidden_states;
+        draft_output.all_hidden_states =
+            torch::tensor({0.11f, 0.12f, 0.13f, 0.14f, 0.15f, 0.16f, 0.17f, 0.18f}).reshape({4, 2});
+    }
 
     components.fake_draft_model->setInputs({draft_input});
     components.fake_draft_model->setOutputs({draft_output});
@@ -1889,6 +1917,7 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
     // Verify executor was created successfully
     auto status = components.executor->process({stream1});
     ASSERT_TRUE(status.ok());
+    EXPECT_EQ(restored_mla_hidden, native_mla_draft);
     if (simulate_cp_mutation) {
         EXPECT_FALSE(stream1->hasError());
     }
@@ -1916,6 +1945,11 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefillRestoresCpInputBeforeDraftShift) {
 
 TEST_F(MtpExecutorTest, testCpPrefillDoesNotFallBackWithoutHiddenBuffers) {
     runSingleBatchPrefillScenario(/*simulate_cp_mutation=*/true, /*with_cp_hidden_buffers=*/false);
+}
+
+TEST_F(MtpExecutorTest, testCpTargetRestoresGlobalHiddenForNativeMlaDraftAndUsesOrdinaryLastRow) {
+    runSingleBatchPrefillScenario(/*simulate_cp_mutation=*/true, /*with_cp_hidden_buffers=*/true,
+                                  /*native_mla_draft=*/true);
 }
 
 TEST_F(MtpExecutorTest, testTargetOnlyRunsTargetPrefillWithoutDraftOrSampling) {

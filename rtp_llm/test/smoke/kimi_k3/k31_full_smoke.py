@@ -15,10 +15,10 @@ import time
 
 if __package__:
     from . import text_smoke as legacy
-    from .mtp_contract import synthetic_fixture
+    from .mtp_contract import synthetic_fixture, native_mla_draft
 else:
     import text_smoke as legacy
-    from mtp_contract import synthetic_fixture
+    from mtp_contract import synthetic_fixture, native_mla_draft
 
 K3_REFERENCE = '0a0b31a72b7e831c2499d6f3c9e77b3df70a33b1'
 
@@ -311,7 +311,8 @@ class K31FullRunner(legacy.Runner):
             actual_request_counts=dict(total=len(self.records), formal=formal, preparation=preparation),
             full_reference_count_matches=complete_count,
             cancellation_RPC_attempts_are_separate=True,
-            native_K31_MTP=False, synthetic_draft=self.args.synthetic_draft,
+            native_K31_MTP=getattr(self.args, "draft_contract", None) is not None,
+            draft_contract=getattr(self.args, "draft_contract", None), synthetic_draft=self.args.synthetic_draft,
             group_tokenizer_setup_seconds=getattr(self, 'group_tokenizer_setup_seconds', None),
             cache_pressure_plan=getattr(self, '_cache_pressure_plan', None))
         path.write_text(json.dumps(value, ensure_ascii=False, indent=2)+'\n')
@@ -324,8 +325,13 @@ def parse_args(argv=None):
     for key in ('base-url', 'decode-health-url', 'namespace', 'source-commit'):
         p.add_argument('--'+key, required=True)
     for key in ('output', 'geometry', 'prefill-engine-log', 'prefill-rpc-runfiles',
-                'checkpoint', 'synthetic-draft-checkpoint'):
+                'checkpoint'):
         p.add_argument('--'+key, required=True, type=Path)
+    draft = p.add_mutually_exclusive_group(required=True)
+    draft.add_argument('--draft-checkpoint', type=Path,
+                       help='Trained native K3 MLA MTP checkpoint')
+    draft.add_argument('--synthetic-draft-checkpoint', type=Path,
+                       help='Historical fixture metadata only; no runtime fallback')
     p.add_argument('--prefill-grpc-port', required=True, type=int)
     p.add_argument('--decode-role-addr', action='append', dest='decode_role_addrs',
                    type=legacy.parse_decode_role_addr, required=True)
@@ -344,12 +350,17 @@ def parse_args(argv=None):
     if args.output.exists() or (args.output.parent/'requests').exists():
         p.error('existing evidence cannot be overwritten')
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.synthetic_draft = synthetic_fixture(args.synthetic_draft_checkpoint)
+    args.draft_contract = (native_mla_draft(args.draft_checkpoint,
+        json.loads((args.checkpoint/'config.json').read_text()))
+        if args.draft_checkpoint is not None else None)
+    args.synthetic_draft = (synthetic_fixture(args.synthetic_draft_checkpoint)
+        if args.synthetic_draft_checkpoint is not None else None)
     args.block_size = g['page_size']
     args.reuse_unit_tokens = lcm(g['checkpoint_span'],g['cache_key_stride'])
     args.runtime_layers, args.profile = 93, 'k3-full'
     args.suite = 'main-text-64k-capped'
-    args.run_kind = 'real93-synthetic-mtp-' + args.decode_batch_profile
+    args.run_kind = ('real93-native-mla-mtp-' if args.draft_contract is not None
+                     else 'real93-synthetic-mtp-') + args.decode_batch_profile
     args.batch_size, args.chunk_tokens, args.max_tokens = 4, 65536, 128
     args.identity_max_tokens, args.single_exact_max_tokens, args.mtp_chunk_max_tokens = 256,128,128
     args.require_mtp, args.capture_rpc_frames = True,True

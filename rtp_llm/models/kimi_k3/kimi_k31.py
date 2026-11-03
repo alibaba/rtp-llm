@@ -1,6 +1,7 @@
 """K3.1 configuration adapter over the shared K3 decoder and weight loader."""
 
 from dataclasses import dataclass, replace
+import copy
 import json
 
 from rtp_llm.config.dsa_config import DsaConfig
@@ -16,6 +17,7 @@ from rtp_llm.ops import (
     KVCacheSpecDesc,
     KVCacheSpecType,
     OpaqueBlockEntryCountMode,
+    CPRotateMethod,
 )
 
 
@@ -125,25 +127,41 @@ class KimiK31(KimiK3):
 register_model("kimi_k31", KimiK31, ["KimiK31ForConditionalGeneration"])
 
 
-class KimiK31Mtp(KimiK3Mtp, KimiK31):
+class KimiK31Mtp(KimiK3Mtp):
+    """Trained K3 MLA nextn layer paired with a K3.1 sparse target."""
+
     MODEL_TYPE = "kimi_k31_mtp"
     TARGET_MODEL_CLASS = KimiK31
 
     @classmethod
     def _from_config_json(cls, config_json, ckpt_path=""):
         fixture = config_json.get("rtp_llm_fixture", {})
-        if fixture.get("kind") != "synthetic_dsa_mtp":
-            raise ValueError("K3.1 MTP currently requires an explicit synthetic_dsa_mtp fixture")
-        config = super()._from_config_json(config_json, ckpt_path)
-        runtime = config.k3_runtime_config
-        if runtime.mtp_source_layer not in runtime.dsa.layers:
-            raise ValueError("synthetic MTP source layer must explicitly use DSA")
-        config.k3_runtime_config = replace(runtime, dsa=replace(runtime.dsa, layers=(0,)))
-        return config
+        if fixture.get("synthetic") or fixture.get("trained") is False:
+            raise ValueError("K3.1 MTP requires trained native K3 MLA weights; synthetic fallback is disabled")
+        return super()._from_config_json(config_json, ckpt_path)
+
+    @classmethod
+    def speculative_weight_alias_names(cls, target_model, draft_model_config):
+        # Validate the pairing and special-token contract, but retain the
+        # trained draft's embedding and shared head. Shape equality cannot
+        # establish weight identity across independently trained checkpoints.
+        super().speculative_weight_alias_names(target_model, draft_model_config)
+        return ()
+
+    @staticmethod
+    def speculative_parallelism_config(parallelism):
+        draft = copy.deepcopy(parallelism)
+        # ParallelismConfig's legacy pickle omits local_rank. Keep device and
+        # cache-store ownership when making the draft's private config.
+        draft.local_rank = parallelism.local_rank
+        draft.prefill_cp_config.method = CPRotateMethod.DISABLED
+        draft.prefill_cp_config.preserve_tp_layout = False
+        # KV ownership remains Page-RR; only the query split is disabled.
+        return draft
 
     @staticmethod
     def get_weight_cls():
         return KimiK31MtpWeight
 
 
-register_model("kimi_k31_mtp", KimiK31Mtp, ["KimiK31SyntheticMTPModel"])
+register_model("kimi_k31_mtp", KimiK31Mtp, ["KimiK31MTPModel"])

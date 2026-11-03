@@ -200,10 +200,16 @@ class ModelFactory:
                     "disable ROCm swizzleA for BF16 qwen_3_dspark propose model"
                 )
 
+            propose_parallelism_config = engine_config.parallelism_config
+            if hasattr(model_cls, "speculative_parallelism_config"):
+                propose_parallelism_config = model_cls.speculative_parallelism_config(
+                    propose_parallelism_config
+                )
+
             gpt_model = model_cls.from_config(
                 model_config=propose_model_config,
                 runtime_config=engine_config.runtime_config,
-                parallelism_config=engine_config.parallelism_config,
+                parallelism_config=propose_parallelism_config,
                 hw_kernel_config=propose_hw_kernel_config,
                 kv_cache_config=engine_config.kv_cache_config,
                 fmha_config=engine_config.fmha_config,

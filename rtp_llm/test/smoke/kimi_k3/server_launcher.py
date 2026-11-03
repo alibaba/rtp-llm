@@ -16,6 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from rtp_llm.test.smoke.kimi_k3.mtp_contract import native_mla_draft
+
 
 def launch_config(args):
     fp8_gemm = bool(getattr(args, "fp8_gemm", False))
@@ -25,7 +27,8 @@ def launch_config(args):
     if model_warm_up and not warm_up:
         raise ValueError("model warmup requires --warm-up")
     checkpoint = Path(args.checkpoint).resolve(strict=True)
-    draft = Path(args.draft_checkpoint).resolve(strict=True)
+    target_only = bool(getattr(args, "target_only", False))
+    draft = None if target_only else Path(args.draft_checkpoint).resolve(strict=True)
     config = json.loads((checkpoint / "config.json").read_text())
     text = config.get("text_config", config)
     model_type = getattr(args, "model_type", "kimi_k3")
@@ -39,17 +42,8 @@ def launch_config(args):
     if model_type == "kimi_k31":
         if config.get("model_type") != "kimi_k31" or fp8_gemm or fp8_kv_cache:
             raise ValueError("K3.1 requires FP8 Indexer with BF16 SFA/KDA")
-        draft_config = json.loads((draft / "config.json").read_text())
-        draft_text = draft_config.get("text_config", draft_config)
-        fixture = draft_config.get("rtp_llm_fixture", {})
-        if (not getattr(args, "allow_synthetic_draft", False)
-                or fixture.get("kind") != "synthetic_dsa_mtp"
-                or fixture.get("synthetic") is not True
-                or fixture.get("native") is not False
-                or fixture.get("trained") is not False
-                or draft_text.get("num_hidden_layers") != expected_layers
-                or draft_text.get("num_nextn_predict_layers") != 1):
-            raise ValueError("K3.1 smoke needs the explicitly declared untrained DSA draft")
+        if not target_only:
+            native_mla_draft(draft, config)
     orthogonal_smoke = bool(getattr(args, "orthogonal_smoke", False))
     tp_size = int(getattr(args, "tp_size", 8))
     dp_size = int(getattr(args, "dp_size", 1))
@@ -138,12 +132,12 @@ def launch_config(args):
                 "RESERVE_BLOCK_RATIO": "0",
             }
         ),
-        "SP_TYPE": "mtp",
-        "SP_MODEL_TYPE": model_type + "_mtp",
-        "SP_CHECKPOINT_PATH": str(draft),
+        "SP_TYPE": "none" if target_only else "mtp",
+        "SP_MODEL_TYPE": "" if target_only else model_type + "_mtp",
+        "SP_CHECKPOINT_PATH": "" if target_only else str(draft),
         "SP_ACT_TYPE": "BF16",
         "FT_DISABLE_CUSTOM_AR": "1",
-        "GEN_NUM_PER_CIRCLE": "3",
+        "GEN_NUM_PER_CIRCLE": "0" if target_only else "3",
         "ENABLE_LINEAR_REPLAY": (
             "1" if args.role == "DECODE" else os.environ.get("ENABLE_LINEAR_REPLAY", "0")
         ),
@@ -234,6 +228,13 @@ def launch_config(args):
         if orthogonal_smoke and dp_size > 1
         else [1, 2, 4, 8, 16, 32, 64] if orthogonal_smoke else [1, 2, 3, 4, 7, 8, 9, 16]
     )
+    capture = getattr(args, "decode_capture_batches", None)
+    if capture is not None:
+        decode_capture_batches = [int(value) for value in capture.split(",")]
+        if (args.role != "DECODE" or not decode_capture_batches
+                or decode_capture_batches != sorted(set(decode_capture_batches))
+                or decode_capture_batches[0] < 1):
+            raise ValueError("Decode capture batches must be sorted unique positive sizes")
     options = {
         "role_type": args.role,
         "tp_size": tp_size,
@@ -248,7 +249,7 @@ def launch_config(args):
         "remote_server_port": args.peer_port,
         "use_local": 1,
         # K3.1's longest smoke history is655360, plus generation. Preserve
-        # every case while budgeting BF16 synthetic-draft Graph buckets for
+        # every case while budgeting BF16 MLA-draft Graph buckets for
         # that declared service range. The checkpoint is never rewritten.
         "max_seq_len": 2097152 if orthogonal_smoke else 262144,
         # MTP update capture uses this request capacity independently of the
@@ -314,6 +315,17 @@ def launch_config(args):
         environment["PREFILL_CHUNK_SIZE"] = str(prefill_capacity)
         options["max_batch_tokens_without_cache"] = prefill_capacity
         options["max_batch_tokens_size"] = prefill_capacity
+    max_seq_len = getattr(args, "max_seq_len", None)
+    if max_seq_len is not None:
+        if max_seq_len < 1024:
+            raise ValueError("max sequence length must be at least one physical page")
+        options["max_seq_len"] = max_seq_len
+    capacity = getattr(args, "request_capacity", None)
+    if capacity is not None:
+        if not 1 <= capacity <= 64 or (args.role == "DECODE" and max(decode_capture_batches) > capacity):
+            raise ValueError("request capacity must cover all Decode graph buckets and remain in [1,64]")
+        options["concurrency_limit"] = capacity
+        options["max_context_batch_size"] = capacity
     if args.role == "DECODE":
         options["decode_capture_config"] = ",".join(map(str, decode_capture_batches))
     command = [str(Path(args.server).resolve(strict=True))]
@@ -561,8 +573,15 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--model-type", choices=("kimi_k3", "kimi_k31"), default="kimi_k3")
     parser.add_argument("--expected-target-layers", type=int, choices=(4, 93), default=93)
-    parser.add_argument("--allow-synthetic-draft", action="store_true")
-    parser.add_argument("--draft-checkpoint", required=True)
+    parser.add_argument("--draft-checkpoint")
+    parser.add_argument("--target-only", action="store_true",
+                        help="Launch a true SP_TYPE=none baseline without draft weights")
+    parser.add_argument("--max-seq-len", type=int,
+                        help="Explicit bounded sequence capacity for acceptance runs")
+    parser.add_argument("--request-capacity", type=int,
+                        help="Explicit per-owner request capacity for bounded acceptance runs")
+    parser.add_argument("--decode-capture-batches",
+                        help="Explicit comma-separated Decode graph buckets for bounded acceptance runs")
     parser.add_argument("--peer-ip", required=True)
     parser.add_argument("--start-port", required=True, type=int)
     parser.add_argument("--peer-port", required=True, type=int)
@@ -656,6 +675,8 @@ def main():
     parser.add_argument("--prefill-token-capacity", type=int,
                         help="K3.1 fixture-only page-aligned token/workspace capacity;default65536 unchanged")
     args = parser.parse_args()
+    if not args.target_only and not args.draft_checkpoint:
+        parser.error("MTP requires --draft-checkpoint; synthetic fallback is disabled")
     if args.expected_draft_shards is not None and args.expected_draft_shards < 1:
         parser.error("--expected-draft-shards requires a positive count")
     if args.ep_size is None:
@@ -719,6 +740,8 @@ def main():
         ("target", args.checkpoint),
         ("draft", args.draft_checkpoint),
     ):
+        if label == "draft" and args.target_only:
+            continue
         guard_command = [
             sys.executable,
             str(Path(__file__).with_name("checkpoint_guard.py")),
@@ -768,7 +791,13 @@ def main():
                 "profile": (
                     f"{'fp8' if args.fp8_kv_cache or args.fp8_gemm else 'bf16'}-"
                     f"real{args.expected_target_layers}-"
-                    f"dp{args.dp_size}-tp{args.tp_size}-ep{args.ep_size}-sp-mtp3-rdma"
+                    f"dp{args.dp_size}-tp{args.tp_size}-ep{args.ep_size}-"
+                    f"{'target-only' if args.target_only else 'native-mla-mtp3'}-rdma"
+                ),
+                "draft_contract": (
+                    None if args.target_only or args.model_type != "kimi_k31"
+                    else native_mla_draft(args.draft_checkpoint,
+                                          json.loads((Path(args.checkpoint) / "config.json").read_text()))
                 ),
                 "full_model_acceptance_eligible": args.expected_target_layers == 93,
                 "environment": environment,

@@ -54,7 +54,9 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
     std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_params =
         std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
 
-    // Get model_config from model (only difference between propose and score models)
+    // Dense MLA MTP can shard KV without inheriting its target's query CP.
+    // Use the same private parallelism config as the Python draft and loader.
+    const auto draft_parallelism = sp_model.attr("parallelism_config").cast<ParallelismConfig>();
     auto model_config = sp_model.attr("model_config").cast<ModelConfig>();
 
     py::object   py_layers_weights     = sp_model.attr("weight").attr("weights");
@@ -77,7 +79,7 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
         mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
                                                                           model_config,
-                                                                          base_params.parallelism_config,
+                                                                          draft_parallelism,
                                                                           base_params.runtime_config,
                                                                           base_params.pd_sep_config,
                                                                           base_params.concurrency_config,
@@ -125,7 +127,7 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         auto gpt_weight = convert.createGptWeights(tmp, py_global_weights);
         mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
                                                                            module_plan.module_configs[i],
-                                                                           base_params.parallelism_config,
+                                                                           draft_parallelism,
                                                                            base_params.runtime_config,
                                                                            base_params.pd_sep_config,
                                                                            base_params.concurrency_config,

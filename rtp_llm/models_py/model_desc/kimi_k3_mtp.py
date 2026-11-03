@@ -11,6 +11,14 @@ from rtp_llm.utils.model_weight import W
 
 
 class KimiK3MtpModel(KimiK3Model):
+    # Native MLA uses ordinary SP queries and consumes natural-order global
+    # target features. Its KV cache is still sharded across TP ranks.
+    @property
+    def requires_global_mtp_prefill_hidden(self):
+        # Preserve the existing K3 query-CP draft contract. K3.1's private
+        # draft configuration disables that split and consumes global rows.
+        return not self.prefill_query_cp
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.register_buffer("_mtp_prefill_last_hidden_buffer", None, persistent=False)

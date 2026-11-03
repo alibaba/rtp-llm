@@ -90,6 +90,9 @@ public:
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
     bool                       hasMtpTargetHiddenBuffer() const override;
+    bool                       requiresGlobalMtpPrefillHidden() const override;
+    torch::Tensor              restoreMtpPrefillHiddenStates(torch::Tensor hidden,
+                                                             const GptModelInputs& inputs) override;
     void                       prepareAttentionInputs(const GptModelInputs& inputs) override;
     void                       prepareAttentionInputs(const GptModelInputs& inputs,
                                                        bool skip_forward_event_sync,
@@ -106,6 +109,8 @@ private:
 
 private:
     bool sequence_parallel_padding_enabled_ = false;
+    bool requires_global_mtp_prefill_hidden_ = false;
+    std::optional<torch_ext::PyContextParallelParams> mtp_prefill_cp_params_;
     GptModelInputs padSequenceParallelInputs(const GptModelInputs& inputs);
 
     // Helper functions to reduce code duplication
@@ -360,6 +365,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     supports_micro_batch_     = py::hasattr(py_model_, "forward_micro_batch");
     sequence_parallel_padding_enabled_ = py::hasattr(py_instance, "requires_sequence_parallel_padding")
         && py_instance.attr("requires_sequence_parallel_padding").cast<bool>();
+    requires_global_mtp_prefill_hidden_ = py::hasattr(py_instance, "requires_global_mtp_prefill_hidden")
+        && py_instance.attr("requires_global_mtp_prefill_hidden").cast<bool>();
     RTP_LLM_CHECK_WITH_INFO(!sequence_parallel_padding_enabled_
                                 || device_props_.enable_layer_micro_batch == MicroBatchType::NONE,
                             "K3 SP requires ENABLE_LAYER_MICRO_BATCH=0");

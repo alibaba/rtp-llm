@@ -238,5 +238,34 @@ class FullK31SmokeTest(unittest.TestCase):
             self.assertEqual(args.synthetic_draft['kind'],'synthetic_untrained')
 
 
+    def test_native_draft_entry_preserves_the_existing_case_inventory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            geometry = root/'geometry.json'
+            geometry.write_text(json.dumps(dict(runtime_verified=True,runtime_layers=93,
+                page_size=1024,kernel_page_size=128,source_shards=8,
+                checkpoint_span=8192,cache_key_stride=8192)))
+            target = root/'target';target.mkdir()
+            (target/'config.json').write_text(json.dumps({'model_type':'kimi_k31'}))
+            contract = {'kind':'native_k3_mla_mtp','synthetic':False,'trained':True}
+            with patch('k31_full_smoke.native_mla_draft', return_value=contract) as validate:
+                args = parse_args(['--base-url','http://127.0.0.1:1',
+                    '--decode-health-url','http://127.0.0.1:2/health','--namespace','full',
+                    '--source-commit','a'*40,'--output',str(root/'result/accuracy.json'),
+                    '--geometry',str(geometry),'--prefill-engine-log',str(root/'engine.log'),
+                    '--prefill-rpc-runfiles',str(root),'--checkpoint',str(target),
+                    '--draft-checkpoint',str(root/'draft'),'--prefill-grpc-port','12345',
+                    '--decode-role-addr','192.0.2.2:22100:22101'])
+            validate.assert_called_once_with(root/'draft', {'model_type':'kimi_k31'})
+            self.assertIs(args.draft_contract, contract)
+            self.assertIsNone(args.synthetic_draft)
+            self.assertEqual(args.run_kind, 'real93-native-mla-mtp-smoke')
+            self.assertEqual(args.suite, 'main-text-64k-capped')
+            self.assertEqual(args.orthogonal_phases, ('cache','cancel','page','chunk','decode'))
+            self.assertTrue(args.require_mtp)
+            self.assertEqual(request_budget(args.decode_batch_profile),
+                             dict(total=304, formal=267, preparation=37))
+
+
 if __name__ == '__main__':
     unittest.main()

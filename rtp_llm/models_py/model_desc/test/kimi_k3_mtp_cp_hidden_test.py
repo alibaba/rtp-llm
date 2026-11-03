@@ -33,6 +33,13 @@ class KimiK3MtpCpHiddenTest(unittest.TestCase):
             is_speculative=speculative, max_context_batch_size=requests
         ))
 
+    def test_global_hidden_handoff_is_only_for_a_draft_without_query_cp(self):
+        model = self.model(KimiK3MtpModel)
+        model.prefill_query_cp = False
+        self.assertTrue(model.requires_global_mtp_prefill_hidden)
+        model.prefill_query_cp = True
+        self.assertFalse(model.requires_global_mtp_prefill_hidden)
+
     def test_capability_requires_real_storage(self):
         model = self.model()
         self.assertFalse(model.has_mtp_hidden_buffer())
@@ -193,6 +200,34 @@ class KimiK3MtpCpHiddenTest(unittest.TestCase):
         torch.testing.assert_close(torch.stack(values).sum(0), expected, rtol=0, atol=0)
         self.assertTrue(torch.isfinite(torch.stack(values)).all())
         self.assertEqual(torch.stack(owners).nonzero()[:, 0].tolist(), [1, 2, 7])
+
+    def test_restored_cp_rows_feed_native_sp_projection_with_ragged_prefixes(self):
+        layouts, local, expected_last = self.ragged_layouts()
+        feature = lambda value: (value.float() / 9).sin() + 2 * (value.float() / 13).cos()
+        local = [feature(value) for value in local]
+        natural = layouts[0].gather_natural(torch.cat(local)).clone()
+        expected_natural = feature(torch.arange(88).reshape(22, 4))
+        torch.testing.assert_close(natural, expected_natural, rtol=0, atol=0)
+        torch.testing.assert_close(natural[torch.tensor([2, 19, 21])], feature(expected_last), rtol=0, atol=0)
+        self.assertTrue(torch.isfinite(natural).all())
+        # The global valid rows are padded together before native MLA SP,
+        # independently of the target's per-request zigzag padding.
+        padded = torch.nn.functional.pad(natural, (0, 0, 0, 2))
+        torch.manual_seed(3101)
+        embedded = torch.randn(24, 4)
+        model = self.model(KimiK3MtpModel)
+        model.prefill_query_cp = False
+        model.enorm, model.hnorm = nn.LayerNorm(4), nn.LayerNorm(4)
+        model.eh_proj = nn.Linear(8, 4, bias=False)
+        expected = model.eh_proj(torch.cat((model.enorm(embedded), model.hnorm(padded)), -1))
+        inputs = SimpleNamespace(input_ids=torch.arange(24), input_hiddens=padded)
+        pieces = []
+        with patch.object(model, '_embed_inputs', return_value=embedded):
+            for rank in range(8):
+                model.tp_rank = rank
+                pieces.append(model._project_local_mtp_input(inputs))
+        torch.testing.assert_close(torch.cat(pieces), expected, rtol=1e-6, atol=1e-6)
+        self.assertIsNone(model.get_mtp_last_hidden_states(-1))
 
     def test_last_hidden_handoff_gathers_only_request_rows_and_keeps_pre_norm(self):
         layouts, local, expected = self.ragged_layouts()

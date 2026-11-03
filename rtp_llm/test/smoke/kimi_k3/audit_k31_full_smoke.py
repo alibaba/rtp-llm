@@ -291,7 +291,10 @@ def audit(result, prefill, decode, tp_size):
             "counts": counts, "decode_batches": {str(k):sorted(v) for k,v in batches.items()},
             "validation_profile": profile, "request_budget": budget,
             "complete_smoke_passed": not errors and profile == "smoke",
-            "native_K31_MTP": False, "golden_alignment": "pending"}
+            "native_K31_MTP": bool(result.get("draft_contract") and
+                result["draft_contract"].get("kind") == "native_k3_mla_mtp"),
+            "draft_contract": result.get("draft_contract"),
+            "golden_alignment": "pending"}
 
 
 def main():

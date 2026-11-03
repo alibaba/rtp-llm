@@ -7,12 +7,15 @@ from unittest.mock import patch
 
 from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3, KimiK3ModelConfig, KimiK3Mtp
 from rtp_llm.models.kimi_k3.kimi_k31 import KimiK31, KimiK31Mtp
+from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3MtpWeight
 from rtp_llm.ops import (
     DataType,
     HybridAttentionType,
     KVCacheConfig,
     KvCacheDataType,
     KVCacheSpecType,
+    ParallelismConfig,
+    CPRotateMethod,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -53,6 +56,7 @@ class KimiK3MainCacheConfigTest(unittest.TestCase):
                 with self.subTest(model_type=model_type, fp8_mla=enabled):
                     config = KimiK3ModelConfig()
                     config.model_type = model_type
+                    config.is_mtp = model_type.endswith("_mtp")
                     config.config_dtype = "bfloat16"
                     config.quantization = ""
                     cache_config = KVCacheConfig()
@@ -146,7 +150,6 @@ class KimiK3MtpMediaTokenConfigTest(unittest.TestCase):
         checkpoint = self._checkpoint_config()
         checkpoint.update(
             model_type="kimi_k31",
-            rtp_llm_fixture={"kind": "synthetic_dsa_mtp"},
             media_placeholder_token_id=17,
             image_placeholder="<|kimi_image_placeholder|>",
         )
@@ -167,6 +170,7 @@ class KimiK3MtpMediaTokenConfigTest(unittest.TestCase):
             )
             for model_class in (KimiK31, KimiK31Mtp):
                 is_mtp = model_class is KimiK31Mtp
+                checkpoint["model_type"] = model_class.HF_MODEL_TYPE
                 layers = [4, 5] if is_mtp else [4]
                 text["linear_attn_config"]["full_attn_layers"] = layers
                 text["dsa_config"]["dsa_layers"] = layers
@@ -183,9 +187,11 @@ class KimiK3MtpMediaTokenConfigTest(unittest.TestCase):
                         self.assertEqual(
                             "vision_config" in config.mm_related_params.config, enabled
                         )
-                        self.assertEqual(
-                            config.k3_runtime_config.dsa.indexer_use_fp8, not is_mtp
-                        )
+                        if is_mtp:
+                            self.assertFalse(config.attn_config.is_sparse)
+                            self.assertIsNone(getattr(config.k3_runtime_config, "dsa", None))
+                        else:
+                            self.assertTrue(config.k3_runtime_config.dsa.indexer_use_fp8)
 
     def test_media_token_is_retained_without_configuring_vit(self):
         for media_token_id in (0, 17, 127):
@@ -376,6 +382,92 @@ class KimiK3MtpMediaTokenPairingTest(unittest.TestCase):
                     "image_token_index", draft.mm_related_params.special_token_ids
                 )
                 self.assertIs(draft.k3_runtime_config, original_runtime)
+
+
+class KimiK31NativeMtpContractTest(unittest.TestCase):
+    def setUp(self):
+        backend = patch.dict("os.environ", {"KIMI_K3_KDA_PREFILL_BACKEND": "rtp"})
+        backend.start()
+        self.addCleanup(backend.stop)
+
+    def config(self):
+        checkpoint = KimiK3MtpMediaTokenConfigTest._checkpoint_config()
+        text = checkpoint["text_config"]
+        text["num_hidden_layers"] = 93
+        text["linear_attn_config"]["full_attn_layers"].append(94)
+        with patch.dict("os.environ", {"KIMI_K3_KDA_PREFILL_BACKEND": "rtp"}):
+            return KimiK31Mtp._from_config_json(checkpoint)
+
+    def test_native_layer_mapping_precision_and_cache_have_no_indexer(self):
+        config = self.config()
+        self.assertIs(type(config), KimiK3ModelConfig)
+        self.assertTrue(config.is_mtp)
+        self.assertEqual(config.num_layers, 1)
+        self.assertEqual(config.k3_runtime_config.mtp_source_layer, 93)
+        self.assertTrue(config.k3_runtime_config.mla_use_nope)
+        self.assertFalse(config.attn_config.is_sparse)
+        with patch.dict("os.environ", {"FP8_MLA": "1"}):
+            config.init_precision_config(KVCacheConfig(), "BF16")
+        KimiK31Mtp._post_build_model_config(config)
+        self.assertFalse(config.attn_config.mla_fp8_compute)
+        self.assertIsNone(config.attention_projection_quant_config)
+        self.assertEqual(config.attn_config.kv_cache_dtype, KvCacheDataType.BASE)
+        self.assertEqual([d.tag for d in config.kv_cache_spec_descs[0]], ["full"])
+        self.assertIs(KimiK31Mtp.get_weight_cls(), KimiK3MtpWeight)
+        names = list(KimiK31Mtp.get_weight_cls().expected_checkpoint_tensor_names(config))
+        self.assertTrue(names)
+        self.assertTrue(all("layers.93." in name for name in names))
+        self.assertFalse(any("indexer" in name for name in names))
+
+    def test_independent_parallelism_preserves_device_and_kv_ownership(self):
+        target = ParallelismConfig()
+        target.tp_size, target.ep_size, target.world_size = 8, 8, 8
+        target.local_rank, target.tp_rank, target.world_rank = 7, 7, 7
+        cp = target.prefill_cp_config
+        cp.method = CPRotateMethod.ALL_GATHER
+        cp.kv_cache_sharded, cp.prefill_cp_size, cp.preserve_tp_layout = True, 8, True
+        draft = KimiK31Mtp.speculative_parallelism_config(target)
+        self.assertTrue(target.prefill_cp_config.is_enabled())
+        self.assertFalse(draft.prefill_cp_config.is_enabled())
+        self.assertTrue(draft.prefill_cp_config.kv_cache_sharded)
+        self.assertEqual(draft.prefill_cp_config.prefill_cp_size, 8)
+        self.assertEqual((draft.local_rank, draft.tp_rank, draft.world_rank), (7, 7, 7))
+        self.assertEqual((draft.tp_size, draft.ep_size, draft.world_size), (8, 8, 8))
+
+    def test_trained_embedding_and_head_never_alias_target(self):
+        target = object.__new__(KimiK31)
+        target.model_config = self.config()
+        draft = self.config()
+        self.assertEqual(KimiK31Mtp.speculative_weight_alias_names(target, draft), ())
+        for field in ("vocab_size", "hidden_size"):
+            old = getattr(draft, field)
+            setattr(draft, field, old + 1)
+            with self.assertRaisesRegex(ValueError, field):
+                KimiK31Mtp.speculative_weight_alias_names(target, draft)
+            setattr(draft, field, old)
+
+    def test_synthetic_dsa_checkpoint_is_rejected(self):
+        checkpoint = KimiK3MtpMediaTokenConfigTest._checkpoint_config()
+        checkpoint["model_type"] = "kimi_k31"
+        with self.assertRaisesRegex(ValueError, "kimi_k3 checkpoint"):
+            KimiK31Mtp._from_config_json(checkpoint)
+
+    def test_native_entry_also_rejects_explicit_untrained_fixtures(self):
+        for fixture in ({"synthetic": True}, {"trained": False}):
+            checkpoint = KimiK3MtpMediaTokenConfigTest._checkpoint_config()
+            checkpoint["rtp_llm_fixture"] = fixture
+            with self.subTest(fixture=fixture), self.assertRaisesRegex(ValueError, "trained native K3 MLA"):
+                KimiK31Mtp._from_config_json(checkpoint)
+
+    def test_native_entry_preserves_nope_and_bf16_precision_guards(self):
+        checkpoint = KimiK3MtpMediaTokenConfigTest._checkpoint_config()
+        checkpoint["text_config"]["mla_use_nope"] = False
+        with self.assertRaisesRegex(ValueError, "NoPE MLA"):
+            KimiK31Mtp._from_config_json(checkpoint)
+        config = self.config()
+        config.quantization = "FP8_PER_BLOCK"
+        with self.assertRaisesRegex(ValueError, "BF16 projections"):
+            config.init_precision_config(KVCacheConfig(), "BF16")
 
 
 if __name__ == "__main__":

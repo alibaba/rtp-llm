@@ -11,6 +11,7 @@
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <array>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <memory>
@@ -246,6 +247,17 @@ public:
     // hand-off exists before admitting CPRR execution.
     virtual bool hasMtpTargetHiddenBuffer() const {
         return false;
+    }
+
+    // A dense MLA draft consumes global natural-order prefill rows even when
+    // its target uses query CP. Other draft architectures retain their layout.
+    virtual bool requiresGlobalMtpPrefillHidden() const {
+        return false;
+    }
+
+    virtual torch::Tensor restoreMtpPrefillHiddenStates(torch::Tensor /*hidden*/,
+                                                       const GptModelInputs& /*inputs*/) {
+        throw std::runtime_error("model cannot restore CP MTP prefill hidden states");
     }
 
     // Optional CP-prefill companion: expose one final pre-hc row per request

@@ -78,5 +78,5 @@ class KimiK31Weight(KimiK3Weight):
         return attention + indexer
 
 
-class KimiK31MtpWeight(KimiK3MtpWeight, KimiK31Weight):
-    """Synthetic DSA draft: reuse native MTP remapping and replicated Indexer."""
+# Preserve the import name without adding K3.1 Indexer tensors to the draft.
+KimiK31MtpWeight = KimiK3MtpWeight

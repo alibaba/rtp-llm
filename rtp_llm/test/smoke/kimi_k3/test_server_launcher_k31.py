@@ -15,10 +15,14 @@ launch=importlib.util.module_from_spec(spec);spec.loader.exec_module(launch)
 class K31LaunchContract(unittest.TestCase):
     def fixture(self,root,layers):
         target=root/'target';draft=root/'draft';target.mkdir();draft.mkdir()
-        target_config={'model_type':'kimi_k31','text_config':{'num_hidden_layers':layers,'num_nextn_predict_layers':0}}
-        draft_config={'model_type':'kimi_k31','text_config':{'num_hidden_layers':layers,'num_nextn_predict_layers':1},'rtp_llm_fixture':{'kind':'synthetic_dsa_mtp','synthetic':True,'native':False,'trained':False}}
+        target_config={'model_type':'kimi_k31','text_config':{'num_hidden_layers':layers,'num_nextn_predict_layers':0,'hidden_size':64,'vocab_size':128}}
+        draft_config={'model_type':'kimi_k3','text_config':{'num_hidden_layers':93,'num_nextn_predict_layers':1,'hidden_size':64,'vocab_size':128,'mla_use_nope':True,'linear_attn_config':{'full_attn_layers':[94]}}}
         (target/'config.json').write_text(json.dumps(target_config));(draft/'config.json').write_text(json.dumps(draft_config))
-        return SimpleNamespace(model_type='kimi_k31',expected_target_layers=layers,allow_synthetic_draft=True,checkpoint=target,draft_checkpoint=draft,server=sys.executable,role='PREFILL',start_port=28000,peer_port=29000,peer_ip='127.0.0.1',orthogonal_smoke=True,tp_size=8,dp_size=1,ep_size=8)
+        suffixes=('embed_tokens.weight','shared_head.head.weight','shared_head.norm.weight','enorm.weight','hnorm.weight','eh_proj.weight')
+        mapping={f'language_model.model.layers.93.{suffix}':'draft.safetensors' for suffix in suffixes}
+        (draft/'model.safetensors.index.json').write_text(json.dumps({'weight_map':mapping}))
+        (draft/'draft.safetensors').write_bytes(b'fixture-index-only')
+        return SimpleNamespace(model_type='kimi_k31',expected_target_layers=layers,checkpoint=target,draft_checkpoint=draft,server=sys.executable,role='PREFILL',start_port=28000,peer_port=29000,peer_ip='127.0.0.1',orthogonal_smoke=True,tp_size=8,dp_size=1,ep_size=8)
 
     def test_both_layers_topologies_and_roles_keep_mtp_and_dcp_contract(self):
         for layers in (4,93):
@@ -47,10 +51,58 @@ class K31LaunchContract(unittest.TestCase):
                         self.assertEqual(options['--max_context_batch_size'],
                                          '16' if role=='PREFILL' else str(64//dp))
 
-    def test_synthetic_draft_is_explicit_not_native(self):
+    def test_synthetic_draft_cannot_replace_trained_mla(self):
         with tempfile.TemporaryDirectory() as tmp:
-            args=self.fixture(Path(tmp),4);args.allow_synthetic_draft=False
-            with self.assertRaisesRegex(ValueError,'explicitly declared untrained'):launch.launch_config(args)
+            args=self.fixture(Path(tmp),4)
+            path=args.draft_checkpoint/'config.json';config=json.loads(path.read_text())
+            config['rtp_llm_fixture']={'synthetic':True,'trained':False};path.write_text(json.dumps(config))
+            with self.assertRaisesRegex(ValueError,'real native K3 MLA draft'):launch.launch_config(args)
+
+    def test_target_only_is_a_real_non_speculative_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args=self.fixture(Path(tmp),93);args.target_only=True;args.draft_checkpoint=None
+            with patch.object(launch.socket,'socket') as route:
+                route.return_value.getsockname.return_value=('127.0.0.1',0)
+                env,argv=launch.launch_config(args)
+            self.assertEqual(env['SP_TYPE'],'none')
+            self.assertEqual(env['SP_CHECKPOINT_PATH'],'')
+            self.assertEqual(env['SP_MODEL_TYPE'],'')
+            self.assertEqual(env['GEN_NUM_PER_CIRCLE'],'0')
+
+    def test_bounded_acceptance_capacity_keeps_topology_and_precision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args=self.fixture(Path(tmp),93)
+            args.role='DECODE';args.tp_size=4;args.dp_size=2
+            args.max_seq_len=8192;args.request_capacity=4;args.decode_capture_batches='1,2,4'
+            with patch.object(launch.socket,'socket') as route:
+                route.return_value.getsockname.return_value=('127.0.0.1',0)
+                env,argv=launch.launch_config(args)
+            options=dict(zip(argv[1::2],argv[2::2]))
+            self.assertEqual(options['--max_seq_len'],'8192')
+            self.assertEqual(options['--decode_capture_config'],'1,2,4')
+            self.assertEqual(options['--concurrency_limit'],'4')
+            self.assertEqual(options['--max_context_batch_size'],'4')
+            self.assertEqual((options['--tp_size'],options['--dp_size']),('4','2'))
+            self.assertEqual((env['ACT_TYPE'],env['SP_ACT_TYPE']),('BF16','BF16'))
+            args.request_capacity=2
+            with self.assertRaisesRegex(ValueError,'cover all Decode graph buckets'):
+                launch.launch_config(args)
+
+    def test_pairing_rejects_wrong_shapes_missing_weights_and_indexer(self):
+        for field in ('hidden_size','vocab_size'):
+            with tempfile.TemporaryDirectory() as tmp:
+                args=self.fixture(Path(tmp),93)
+                path=args.draft_checkpoint/'config.json';config=json.loads(path.read_text())
+                config['text_config'][field]+=1;path.write_text(json.dumps(config))
+                with self.assertRaisesRegex(ValueError,field):launch.launch_config(args)
+        for mutation,error in [('missing','missing trained draft'),('indexer','Indexer')]:
+            with tempfile.TemporaryDirectory() as tmp:
+                args=self.fixture(Path(tmp),93)
+                path=args.draft_checkpoint/'model.safetensors.index.json';index=json.loads(path.read_text())
+                if mutation=='missing':index['weight_map'].pop(next(iter(index['weight_map'])))
+                else:index['weight_map']['language_model.model.layers.93.self_attn.indexer.wq_b.weight']='draft.safetensors'
+                path.write_text(json.dumps(index))
+                with self.assertRaisesRegex(ValueError,error):launch.launch_config(args)
 
     def test_fp8_sfa_or_kda_does_not_sneak_into_indexer_migration(self):
         with tempfile.TemporaryDirectory() as tmp:

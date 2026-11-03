@@ -309,6 +309,24 @@ bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
     return has_mtp_hidden_buffer_;
 }
 
+bool PyWrappedModel::requiresGlobalMtpPrefillHidden() const {
+    return requires_global_mtp_prefill_hidden_;
+}
+
+torch::Tensor PyWrappedModel::restoreMtpPrefillHiddenStates(torch::Tensor hidden,
+                                                           const GptModelInputs& inputs) {
+    RTP_LLM_CHECK_WITH_INFO(context_parallel_processor_ && mtp_prefill_cp_params_.has_value(),
+                            "MTP CP restore requires the current prefill layout");
+    const auto& cp = *mtp_prefill_cp_params_;
+    RTP_LLM_CHECK_WITH_INFO(hidden.defined() && hidden.dim() == 2
+                                && hidden.size(0) * device_props_.tp_size == cp.prefill_qkv_restore_indice.numel(),
+                            "MTP CP hidden rows do not match the current rank-local layout");
+    const auto rows = context_parallel_processor_->handleOutputs(hidden, inputs, cp);
+    RTP_LLM_CHECK_WITH_INFO(rows == static_cast<size_t>(inputs.combo_tokens.numel()),
+                            "restored MTP hidden rows must match the global draft tokens");
+    return hidden;
+}
+
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
@@ -1181,6 +1199,7 @@ void PyWrappedModel::finalizeLinearReplay(const GptModelInputs& inputs) {
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
+    mtp_prefill_cp_params_.reset();
     // Reset the per-forward prepared flag even if input preparation throws.
     struct PreparedFlagGuard {
         std::atomic<bool>& flag;
@@ -1234,6 +1253,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
             // CP accepts pure-prefill batches without MTP/speculative hidden states;
             // handleInputs enforces both constraints before mutating the batch.
             context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
+            mtp_prefill_cp_params_ = cp_params;
         }
 
         torch::Tensor token_ids;
