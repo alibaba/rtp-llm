@@ -74,7 +74,7 @@ public final class KvCache implements AutoCloseable {
         }
         while (allocated.hasNext()) slots.add(new Slot(allocated.next(), null));
         matched.forEach(tree::unpin);
-        var lease = new Lease(slots, matched.size()); active.add(lease);
+        var lease = new Lease(slots, matched.size(), matched.size() - direct.size()); active.add(lease);
         balance();
         return new Admission(lease, null, device.generation());
     }
@@ -101,10 +101,13 @@ public final class KvCache implements AutoCloseable {
 
     public final class Lease implements AutoCloseable {
         private final List<Slot> slots;
-        private final int reused;
+        private final int reused, memoryReused;
         private boolean terminal;
-        private Lease(List<Slot> slots, int reused) { this.slots = slots; this.reused = reused; }
+        private Lease(List<Slot> slots, int reused, int memoryReused) {
+            this.slots = slots; this.reused = reused; this.memoryReused = memoryReused;
+        }
         public long reusedTokens() { synchronized (KvCache.this) { return terminal ? 0 : (long) reused * blockSize; } }
+        public long memoryReusedTokens() { synchronized (KvCache.this) { return terminal ? 0 : (long) memoryReused * blockSize; } }
         public Failure ensureCapacity(long requiredTokens) {
             synchronized (KvCache.this) {
                 requireOpen();

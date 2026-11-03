@@ -286,13 +286,13 @@ RTP 后端的 RtpMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独
 | rtp_llm_scheduler_requests | Gauge，state=waiting/running/loading/ready | 调度器报告的四类互斥请求数。 |
 | rtp_llm_kv_tokens | Gauge，state=total/available/free/held | token 容量，available 含可驱逐缓存，不等于 free。 |
 
-RTP 原生观测直接导出：`rtp_llm_wait_stream_size`、`rtp_llm_running_stream_size`、`rtp_llm_kv_cache_left_seq`（Tokens）、`rtp_llm_kv_cache_{total,free,available,used}_blocks`（Blocks）和 `rtp_llm_kv_cache_used_ratio`（0–100，不可用比例）。Host 暂只上报 total/free/used Blocks，不用 free 冒充 available。loading/ready 仍是调度器阶段辅助观测，不冒充 real 的加载缓存队列。
+RTP 原生观测直接导出：`rtp_llm_wait_stream_size`、`rtp_llm_running_stream_size`、`rtp_llm_kv_cache_left_seq`（Tokens）、`rtp_llm_kv_cache_{total,free,available,used,active}_blocks`（Blocks）和 `rtp_llm_kv_cache_used_ratio`（0–100，不可用比例）。Host 暂只上报 total/free/used Blocks，不用 free 冒充 available。loading/ready 仍是调度器阶段辅助观测，不冒充 real 的加载缓存队列。
 
 Prefill 的 context TPS 用计算 Tokens／执行时间，含缓存 TPS 用输入 Tokens／执行时间；墙钟 TPS 用对应 Tokens／实际窗口。Decode generate TPS 统计提交的输出 Tokens，total TPS 统计模型计算 Tokens，二者在投机采样时不同。`rtp_llm_framework_qps` 统计终态，不是接纳；error 包含 timeout，cancel 单列。上述速率 Gauge 的窗口是两次采集间的单调时钟间隔，无后台采样线程；空闲窗口报告零。real 默认按后台周期报告，窗口边界可能不同，不能要求逐点相等。
 
 没有 real 同名指标的真实观测，以 RTP Prometheus 辅助 Counter/Histogram 保留供 Python 门禁和统计使用，不拿它们的累计值直接冒充线上 QPS/TPS Gauge。理论 Forward、ViT 运行图片数和 hash 缓存预算保留 `mock_` 前缀。此次更名不保留旧 `mock_engine_*` 别名；旧实验保持原始 view.json 和 TSDB，不承诺新查询可以直接读取旧指标名。
 
-P/D 已补 `rtp_llm_{context,generate}_batch_size`、执行 Token 数、最长序列、逐请求等待/首 Token/总延迟、输入/输出长度与迭代数；Decode 传输等待接入 `rtp_llm_stream_loading_cache_latency_us`。Query batch 的 native 语义是 beam 数，不能用调度批大小代替。
+P/D 已补 `rtp_llm_{context,generate}_batch_size`、执行 Token 数、最长序列、逐请求等待/首 Token/总延迟、输入/输出长度与迭代数；缓存加载延迟只用于真实缓存准备阶段，不用 Decode 的 PD 协议等待代替。Query batch 的 native 语义是 beam 数，不能用调度批大小代替。
 
 ViT 使用相同的物理元数据与 Prometheus instance 发现；QPS、Embedding 队列/等待/Forward/合批、请求图片数/输出长度，以及缓存命中/未命中/在途合并/淘汰和逻辑驻留量均按 real 名称导出。下载分别上报 real 的 `py_rtp_vit_download_rt`（ms）与 `rtp_llm_vit_image_fetch_rt_us`（μs）。请求总耗时、就绪等待加计算、Forward 分别统计，命中不制造计算耗时；跳过下载及未模拟的预处理子进程、CUDA Graph 不补零。详见 [指标覆盖与边界](../views/README.md)。
 
@@ -355,3 +355,11 @@ prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collect
 ### RTP 调度实现边界
 
 `RtpSchedulerBase` 共享请求状态、KV 引用、PD 生命周期、Forward 提交、取消和指标；`RtpScheduler` 仅做普通 FIFO 准入，`RtpGroupScheduler` 单独拥有显式组队列、残余成员和普通/组之间的选择。组标识不改变普通请求的调度方式。选择在 Engine 启动时完成，不从 Master 配置推断，也不在运行中按请求切换。`fifo` 模式应配合 Master 的 `NON_BATCH` 交付；它仍会动态组成多请求 Forward batch。当前拆分保留既有同步缓存行为，尚未增加远端 KV 加载或组级异步加载。
+
+### main 的调度状态和缓存指标
+
+普通请求默认走 FIFO；Master 的 NON_BATCH 交付不限制 Engine 自主组成 Forward batch。显式 Batch/Group 交付需在 P 配置 `mock.scheduler.mode: group`。Master HA Case 使用 NON_BATCH；Batch 接线继续由集成测试覆盖。
+
+调度器 waiting/running 指标来自实际队列，PD 协议等待不计入 waiting。WorkerStatus 与 real 一样保留旧 query_len 字段为默认值，主控通过任务列表读取每个请求的 phase/is_waiting。活动任务的 waiting 为 0、execution 为 -1；完成记录才发布最终耗时。Decode 收到 Generate 后重新开始计算阶段计时。`rtp_llm_stream_loading_cache_latency_us` 不再用 PD 传输耗时冒充；当前缓存加载同步完成，不发布异步加载或远端 read/write 指标。
+
+缓存复用按实际 Device/Host 命中分别上报 `rtp_llm_stream_cache_device_reuse_length` 和 `rtp_llm_stream_cache_memory_reuse_length`，长度单位为 token；`rtp_llm_kv_cache_active_blocks` 表示 Device 不可回收块数。本分支未引入远端存储适配器及其异步任务模型。

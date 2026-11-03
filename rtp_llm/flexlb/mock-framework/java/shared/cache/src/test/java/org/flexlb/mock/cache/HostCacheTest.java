@@ -21,6 +21,7 @@ class HostCacheTest {
             long version = cache.snapshot(-1, true).version();
             try (var lease = cache.acquire(4, List.of(1L, 2L, 3L, 4L)).lease()) {
                 assertNotNull(lease); assertEquals(4, lease.reusedTokens());
+                assertEquals(4, lease.memoryReusedTokens());
                 assertEquals(4, cache.hostSnapshot().free());
                 assertEquals(0, cache.snapshot(-1, false).availableBlocks());
                 assertTrue(cache.snapshot(-1, true).version() > version); // Residency changes advance shared metadata.
@@ -63,6 +64,7 @@ class HostCacheTest {
             assertEquals(5, cache.snapshot(-1, false).availableBlocks());
             try (var reader = cache.acquire(1, List.of(1L)).lease()) {
                 assertEquals(1, reader.reusedTokens());
+                assertEquals(0, reader.memoryReusedTokens());
                 lease.close(); assertEquals(7, cache.snapshot(-1, false).availableBlocks());
             }
             assertEquals(8, cache.snapshot(-1, false).availableBlocks());

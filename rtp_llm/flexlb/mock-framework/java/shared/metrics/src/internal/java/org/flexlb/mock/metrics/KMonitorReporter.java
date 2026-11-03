@@ -5,7 +5,9 @@ import com.taobao.kmonitor.impl.KMonitorConfig;
 import io.prometheus.client.Collector.MetricFamilySamples;
 import java.util.*;
 
-/** Internal SDK transport, compiled only by the internal-monitoring profile. */
+/**
+ * Internal SDK transport, compiled only by the internal-monitoring profile.
+ */
 public final class KMonitorReporter implements MetricReporter {
     private final Set<String> registered = new HashSet<>();
     private KMonitor monitor;

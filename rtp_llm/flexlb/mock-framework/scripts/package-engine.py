@@ -11,6 +11,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import zipfile
 
 FRAMEWORK = Path(__file__).resolve().parents[1]
 
@@ -82,7 +83,7 @@ def package():
     recipe = os.environ.get('CI_RECIPE_SHA')
     if recipe is not None and (len(recipe) != 40 or any(c not in '0123456789abcdef' for c in recipe)):
         raise SystemExit('CI_RECIPE_SHA must be a full Git SHA')
-    internal_monitoring = (FRAMEWORK.parents[2] / 'internal_source/java/kmonitor/pom.xml').is_file()
+    internal_monitoring = (FRAMEWORK.parents[3] / 'internal_source/java/kmonitor/pom.xml').is_file()
     profiles = []
     if internal_monitoring:
         profiles.append('internal-monitoring')

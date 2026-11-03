@@ -469,11 +469,11 @@ class PdGenerationTest {
                 var busy = new Call(p, input(d, 115, 5, 4, 4000, true)); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             busy.output(1, false, 1);
             var pending = workers.submit(() -> enqueue(p, 2000, input(d, 116, 11, 4, 3000, true)));
-            await(() -> d.status().getWaitingQueryLen() == 1);
+            await(() -> d.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 1);
             assertEquals(CancelStatusPB.CANCEL_STATUS_ACCEPTED, cancel(p, 116));
             var ack = pending.get(2, TimeUnit.SECONDS);
             assertEquals(0, ack.getSuccessesCount()); assertEquals(8429, ack.getErrors(0).getErrorInfo().getErrorCode());
-            await(() -> d.status().getWaitingQueryLen() == 0);
+            await(() -> d.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 0);
             assertEquals(1, d.status().getRunningTaskInfoCount());
         }
     }
@@ -634,7 +634,7 @@ class PdGenerationTest {
 
     @Test void cancellationDuringPComputeReleasesBothNodesWithoutOutput() throws Exception {
         try (var p = node("prefill", 8, 1000); var d = node("decode", 8, 1); var call = new Call(p, input(d, 1, 5, 4, 3000, true))) {
-            await(() -> p.status().getRunningQueryLen() == 1 && d.status().getWaitingQueryLen() == 1);
+            await(() -> p.status().getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 1 && d.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 1);
             call.close(); await(() -> p.status().getAvailableKvCache() == 16 && d.status().getAvailableKvCache() == 16);
             assertEquals(0, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
         }
@@ -642,7 +642,7 @@ class PdGenerationTest {
 
     @Test void cancellationDuringDComputeDoesNotProduceLateTokens() throws Exception {
         try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1000); var call = new Call(p, input(d, 1, 5, 4, 3000, true))) {
-            call.output(1, false, 1); await(() -> d.status().getRunningQueryLen() == 1);
+            call.output(1, false, 1); await(() -> d.status().getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 1);
             call.close(); await(() -> d.status().getAvailableKvCache() == 16);
             assertEquals(0, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
             assertEquals(16, p.status().getAvailableKvCache());
@@ -652,7 +652,7 @@ class PdGenerationTest {
     @Test void prefillDoesNotStartBeforeDecodeAllocationAcknowledgement() throws Exception {
         try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1); var holder = d.node.cache().acquire(12, List.of()).lease();
                 var call = new Call(p, input(d, 1, 5, 4, 2500, true))) {
-            await(() -> d.status().getWaitingQueryLen() == 1);
+            await(() -> d.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 1);
             assertEquals(0, p.status().getRunningTaskInfoCount()); assertEquals(16, p.status().getAvailableKvCache());
             assertEquals(0, metric(p, "rtp_llm_requests_started_total", "")); holder.close();
             for (int n = 1; n <= 4; n++) call.output(n, n == 4, 1);
@@ -684,9 +684,9 @@ class PdGenerationTest {
     @Test void deadlineDuringCapacityWaitReleasesRequestAndDoesNotWakeIntoGeneration() throws Exception {
         try (var p = node("prefill", 8, 1); var d = node("decode", 4, 1); var holder = d.node.cache().acquire(6, List.of()).lease();
                 var call = new Call(p, input(d, 1, 3, 6, 300, true))) {
-            await(() -> d.status().getWaitingQueryLen() == 1);
+            await(() -> d.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 1);
             call.error(Status.Code.DEADLINE_EXCEEDED);
-            await(() -> d.status().getWaitingQueryLen() == 0); holder.close();
+            await(() -> d.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 0); holder.close();
             await(() -> d.status().getAvailableKvCache() == 8);
             assertEquals(0, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
             assertEquals(0, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
@@ -696,7 +696,7 @@ class PdGenerationTest {
 
     @Test void closingDecodeMidGenerationFailsPRequestAndReleasesP() throws Exception {
         try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1000); var call = new Call(p, input(d, 1, 3, 4, 2000, true))) {
-            call.output(1, false, 1); await(() -> d.status().getRunningQueryLen() == 1); d.node.close();
+            call.output(1, false, 1); await(() -> d.status().getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 1); d.node.close();
             call.error(Status.Code.UNAVAILABLE); assertEquals(16, p.status().getAvailableKvCache());
         }
     }
@@ -719,7 +719,7 @@ class PdGenerationTest {
 
     @Test void duplicatePRequestCannotReplaceTheOriginalOwner() throws Exception {
         try (var p = node("prefill", 8, 1000); var d = node("decode", 8, 1); var first = new Call(p, input(d, 1, 3, 4, 2500, true))) {
-            await(() -> p.status().getRunningQueryLen() == 1);
+            await(() -> p.status().getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 1);
             try (var duplicate = new Call(p, input(d, 1, 3, 4, 2500, true))) { duplicate.error(Status.Code.ALREADY_EXISTS); }
             assertEquals(1, p.status().getRunningTaskInfoCount()); first.close();
             await(() -> p.status().getAvailableKvCache() == 16 && d.status().getAvailableKvCache() == 16);
@@ -728,7 +728,7 @@ class PdGenerationTest {
 
     @Test void closingPAfterLoadStillCancelsTheRemoteGeneration() throws Exception {
         try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1000); var call = new Call(p, input(d, 1, 3, 4, 2500, true))) {
-            call.output(1, false, 1); await(() -> d.status().getRunningQueryLen() == 1); p.node.close();
+            call.output(1, false, 1); await(() -> d.status().getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 1); p.node.close();
             assertInstanceOf(Throwable.class, call.next()); await(() -> d.status().getAvailableKvCache() == 16);
         }
     }
@@ -753,7 +753,7 @@ class PdGenerationTest {
     @Test void downstreamFailureDuringPrefillCancelsTheComputeAndReleasesKv() throws Exception {
         try (var p = node("prefill", 8, 1000); var d = node("decode", 8, 1);
              var call = new Call(p, input(d, 2400, 3, 4, 3000, true))) {
-            await(() -> p.status().getRunningQueryLen() == 1);
+            await(() -> p.status().getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 1);
             d.node.close();
             call.error(Status.Code.UNAVAILABLE);
             await(() -> p.status().getAvailableKvCache() == 16);

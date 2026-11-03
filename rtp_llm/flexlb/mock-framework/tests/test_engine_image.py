@@ -43,7 +43,7 @@ def test_context_contains_only_service_payload_and_provenance(tmp_path, monkeypa
             archive.writestr('org/flexlb/mock/metrics/KMonitorReporter.class', b'fixture')
             archive.writestr('com/taobao/kmonitor/KMonitorFactory.class', b'fixture')
     if internal:
-        marker = framework.parents[2] / 'internal_source/java/kmonitor/pom.xml'
+        marker = framework.parents[3] / 'internal_source/java/kmonitor/pom.xml'
         marker.parent.mkdir(parents=True)
         marker.write_text('<project/>')
     verified = []

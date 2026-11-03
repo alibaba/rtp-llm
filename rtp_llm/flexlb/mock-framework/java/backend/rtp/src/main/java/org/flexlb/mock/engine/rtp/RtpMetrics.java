@@ -95,16 +95,16 @@ final class RtpMetrics {
                 result.add(gauge("rtp_llm_wait_stream_size", "Waiting scheduler requests.", role, value.waiting()));
                 result.add(gauge("rtp_llm_running_stream_size", "Running scheduler requests.", role, value.running()));
                 result.add(gauge("rtp_llm_kv_cache_left_seq", "Available Device KV token capacity.", role, value.availableTokens()));
-                for (String name : List.of("total", "free", "available", "used")) {
+                for (String name : List.of("total", "free", "available", "used", "active")) {
                     var blocks = new GaugeMetricFamily("rtp_llm_kv_cache_" + name + "_blocks",
                         "KV pool capacity in blocks.", List.of("role", "pool_name", "tier"));
                     long device = switch (name) {
                         case "total" -> value.totalTokens(); case "free" -> value.freeTokens();
-                        case "available" -> value.availableTokens(); default -> value.totalTokens() - value.freeTokens();
+                        case "available" -> value.availableTokens(); case "active" -> value.totalTokens() - value.availableTokens(); default -> value.totalTokens() - value.freeTokens();
                     };
                     blocks.addMetric(List.of(role, "device", "DEVICE"), device / value.blockSize());
                     // Host available includes evictable entries; free alone cannot represent it.
-                    if (!name.equals("available")) {
+                    if (!name.equals("available") && !name.equals("active")) {
                         long hostValue = name.equals("total") ? value.hostTotalTokens() : name.equals("free")
                             ? value.hostFreeTokens() : value.hostTotalTokens() - value.hostFreeTokens();
                         blocks.addMetric(List.of(role, "host", "HOST"), hostValue / value.blockSize());
@@ -165,7 +165,13 @@ final class RtpMetrics {
     public void cacheLookup(long input, long reused) {
         if (input < 0 || reused < 0 || reused > input) throw new IllegalArgumentException("Invalid cache observation");
         cacheInputs.inc(input); cacheHits.inc(reused);
+    }
+    void positiveMicros(String name, long nanos) { if (nanos >= 1000) events.observe(name, nanos / 1000); }
+    void cacheReuse(long input, long reused, long memoryReused) {
+        events.observe("rtp_llm_device_input_length", input);
         events.observe("rtp_llm_kv_cache_reuse_length", reused);
+        events.observe("rtp_llm_stream_cache_device_reuse_length", reused - memoryReused);
+        events.observe("rtp_llm_stream_cache_memory_reuse_length", memoryReused);
     }
     public void forwardCompleted(long elapsedNanos, long plannedNanos, long input, long computed, long output) {
         if (elapsedNanos < 0 || plannedNanos < 0 || input < 0 || computed < 0 || computed > input || output < 0)

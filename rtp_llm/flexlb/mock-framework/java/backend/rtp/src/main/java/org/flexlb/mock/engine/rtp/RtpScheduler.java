@@ -5,7 +5,9 @@ import java.util.Objects;
 import org.flexlb.mock.cache.KvCache;
 import org.flexlb.mock.engine.Scheduler;
 
-/** Ordinary FIFO admission; Forward batches are formed from individual requests. */
+/**
+ * Ordinary FIFO admission; Forward batches are formed from individual requests.
+ */
 public final class RtpScheduler extends RtpSchedulerBase {
     public static Scheduler.Factory factory(RtpConfig config) {
         Objects.requireNonNull(config);

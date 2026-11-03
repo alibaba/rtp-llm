@@ -102,11 +102,16 @@ class LocalRpcTest {
                     @Override public void onError(Throwable error) { done.countDown(); }
                     @Override public void onCompleted() { done.countDown(); }
                 }));
-                await(() -> read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getRunningQueryLen() == 1);
+                await(() -> read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 1);
+                var nativeStatus = read.getWorkerStatus(StatusVersionPB.getDefaultInstance());
+                assertEquals(0, nativeStatus.getWaitingQueryLen());
+                assertEquals(0, nativeStatus.getRunningQueryLen());
+                assertEquals(-1, nativeStatus.getRunningTaskInfo(0).getExecutionTimeMs());
+                assertEquals(0, nativeStatus.getRunningTaskInfo(0).getWaitingTimeMs());
                 assertEquals(10, read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
                 assertEquals(10, sample(metrics(node), "rtp_llm_kv_tokens", "state=\"available\""));
                 context.cancel(null); assertTrue(done.await(2, TimeUnit.SECONDS));
-                await(() -> read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getRunningQueryLen() == 0);
+                await(() -> read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 0);
                 Thread.sleep(350);
                 assertEquals(0, frames.get());
                 assertEquals(16, read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
@@ -159,10 +164,10 @@ class LocalRpcTest {
                         @Override public void onError(Throwable error) { failure.set(error); done.countDown(); }
                         @Override public void onCompleted() { done.countDown(); }
                     });
-                await(() -> read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getRunningQueryLen() == 1);
+                await(() -> read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 1);
                 assertTrue(done.await(2, TimeUnit.SECONDS));
                 assertEquals(Status.Code.DEADLINE_EXCEEDED, Status.fromThrowable(failure.get()).getCode());
-                await(() -> read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getRunningQueryLen() == 0);
+                await(() -> read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 0);
                 var status = read.getWorkerStatus(StatusVersionPB.getDefaultInstance());
                 assertEquals(603, status.getFinishedTaskList(0).getErrorInfo().getErrorCode());
                 assertEquals(16, status.getAvailableKvCache());

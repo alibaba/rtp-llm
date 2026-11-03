@@ -5,7 +5,9 @@ import org.flexlb.mock.cache.KvCache;
 import org.flexlb.mock.engine.RequestFailure;
 import static org.flexlb.mock.engine.RequestFailure.Reason.*;
 
-/** Explicit-group admission, isolated from ordinary FIFO scheduling. */
+/**
+ * Explicit-group admission, isolated from ordinary FIFO scheduling.
+ */
 final class RtpGroupScheduler extends RtpSchedulerBase {
     private final ArrayDeque<ArrayDeque<Entry>> groups = new ArrayDeque<>();
     private final Map<Entry, ArrayDeque<Entry>> memberships = new IdentityHashMap<>();

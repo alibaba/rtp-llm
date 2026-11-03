@@ -261,7 +261,7 @@ class RtpSchedulerTest {
         } finally { release.countDown(); }
     }
 
-    @Test void statusIsReadOnlyAndWaitingTimeFreezesAtResourceAdmission() throws Exception {
+    @Test void statusIsReadOnlyAndPublishesFinalTimingsOnlyAfterFinish() throws Exception {
         var config = config("prefill", "1", 1);
         try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
@@ -276,7 +276,12 @@ class RtpSchedulerTest {
             Thread.sleep(20);
             var later = scheduler.status(0).tasks().getFirst();
             assertEquals(ready.waitingMillis(), later.waitingMillis());
-            assertTrue(later.executionMillis() >= ready.executionMillis() + 10);
+            assertEquals(0, later.waitingMillis());
+            assertEquals(-1, later.executionMillis());
+            scheduler.finish(scheduler.requests().getFirst(), null); drain(scheduler);
+            var finished = scheduler.status(0).finished().getFirst();
+            assertTrue(finished.executionMillis() >= 10);
+            assertTrue(finished.waitingMillis() >= 0);
             assertEquals(Scheduler.ReportedPhase.RECEIVED, before.tasks().getFirst().phase(), "Snapshots must not change later");
         }
     }

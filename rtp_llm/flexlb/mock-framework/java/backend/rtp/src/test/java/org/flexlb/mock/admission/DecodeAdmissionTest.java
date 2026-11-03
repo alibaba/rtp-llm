@@ -104,8 +104,8 @@ class DecodeAdmissionTest {
             call.request.onNext(input("p", 1, 5, 0)); call.ack();
             var status = node.status(); assertEquals(10, status.getAvailableKvCache());
             assertEquals(TaskPhase.TASK_PHASE_KV_ALLOCATED, status.getRunningTaskInfo(0).getPhase());
-            assertEquals(1, status.getWaitingQueryLen()); assertEquals(0, status.getRunningQueryLen());
-            call.close(); await(() -> node.status().getAvailableKvCache() == 16 && node.status().getWaitingQueryLen() == 0);
+            assertEquals(1, status.getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count()); assertEquals(0, status.getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count());
+            call.close(); await(() -> node.status().getAvailableKvCache() == 16 && node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 0);
             assertEquals(8100, node.status().getFinishedTaskList(0).getErrorInfo().getErrorCode());
             assertTrue(node.node.cache().snapshot(-1, true).keys().isEmpty());
         }
@@ -114,7 +114,7 @@ class DecodeAdmissionTest {
     @Test void temporaryPressureWaitsPastOldRetryBudgetAndWakesOnRelease() throws Exception {
         try (var node = node(false); var owner = node.node.cache().acquire(12, List.of()).lease(); var call = new Call(node, 0)) {
             call.request.onNext(input("p", 1, 5, 0));
-            await(() -> node.status().getWaitingQueryLen() == 1);
+            await(() -> node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 1);
             assertEquals(TaskPhase.TASK_PHASE_RECEIVED, node.status().getRunningTaskInfo(0).getPhase());
             assertNull(call.replies.poll(200, TimeUnit.MILLISECONDS)); assertEquals(4, node.status().getAvailableKvCache());
             owner.close(); call.ack(); assertEquals(10, node.status().getAvailableKvCache());
@@ -126,7 +126,7 @@ class DecodeAdmissionTest {
             call.request.onNext(input("p", 1, 5, 50));
             assertEquals(603, engineCode(call.error(Status.Code.DEADLINE_EXCEEDED)));
             owner.close(); Thread.sleep(100);
-            assertEquals(16, node.status().getAvailableKvCache()); assertEquals(0, node.status().getWaitingQueryLen());
+            assertEquals(16, node.status().getAvailableKvCache()); assertEquals(0, node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count());
             assertEquals(1, node.status().getFinishedTaskListCount()); assertTrue(call.replies.isEmpty());
         }
     }
@@ -143,7 +143,7 @@ class DecodeAdmissionTest {
         try (var node = node(false); var call = new Call(node, 500)) {
             call.request.onNext(input("p", 1, 5, 0)); call.ack();
             call.error(Status.Code.DEADLINE_EXCEEDED);
-            await(() -> node.status().getWaitingQueryLen() == 0);
+            await(() -> node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 0);
             assertEquals(16, node.status().getAvailableKvCache());
             assertEquals(603, node.status().getFinishedTaskList(0).getErrorInfo().getErrorCode());
         }
@@ -153,7 +153,7 @@ class DecodeAdmissionTest {
         try (var node = node(false); var call = new Call(node, 0)) {
             call.request.onNext(input("p", 1, 19, 0));
             assertEquals(602, engineCode(call.error(Status.Code.RESOURCE_EXHAUSTED)));
-            assertEquals(16, node.status().getAvailableKvCache()); assertEquals(0, node.status().getWaitingQueryLen());
+            assertEquals(16, node.status().getAvailableKvCache()); assertEquals(0, node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count());
         }
     }
 
@@ -167,7 +167,7 @@ class DecodeAdmissionTest {
                 }
                 call.request.onNext(input); call.ack();
                 assertEquals(disabled ? 0 : 4, node.status().getRunningTaskInfo(0).getPrefixLength());
-                call.close(); await(() -> node.status().getWaitingQueryLen() == 0);
+                call.close(); await(() -> node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 0);
                 assertEquals(Set.copyOf(keys), node.node.cache().snapshot(-1, true).keys());
             }
         }
@@ -178,7 +178,7 @@ class DecodeAdmissionTest {
             first.request.onNext(input("p1", 1, 5, 0)); first.ack();
             duplicate.request.onNext(input("p1", 1, 5, 0)); duplicate.error(Status.Code.ALREADY_EXISTS);
             other.request.onNext(input("p2", 1, 5, 0)); other.ack();
-            assertEquals(2, node.status().getWaitingQueryLen()); assertEquals(4, node.status().getAvailableKvCache());
+            assertEquals(2, node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count()); assertEquals(4, node.status().getAvailableKvCache());
         }
     }
 
@@ -209,8 +209,8 @@ class DecodeAdmissionTest {
 
     @Test void cancellingCapacityWaitCannotResurrectAnAllocationOrReportForwardWork() throws Exception {
         try (var node = node(false); var owner = node.node.cache().acquire(12, List.of()).lease(); var call = new Call(node, 0)) {
-            call.request.onNext(input("p", 1, 5, 0)); await(() -> node.status().getWaitingQueryLen() == 1);
-            call.close(); await(() -> node.status().getWaitingQueryLen() == 0);
+            call.request.onNext(input("p", 1, 5, 0)); await(() -> node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 1);
+            call.close(); await(() -> node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 0);
             owner.close(); Thread.sleep(100);
             assertEquals(16, node.status().getAvailableKvCache()); assertEquals(1, node.status().getFinishedTaskListCount());
             try (var text = java.net.URI.create((String) node.node.endpoints().get("metrics")).toURL().openStream()) {
@@ -224,7 +224,7 @@ class DecodeAdmissionTest {
     @Test void nodeCloseReleasesAcknowledgedAndWaitingReservations() throws Exception {
         try (var node = node(false); var first = new Call(node, 0); var waiting = new Call(node, 0)) {
             first.request.onNext(input("p", 1, 9, 0)); first.ack();
-            waiting.request.onNext(input("p", 2, 9, 0)); await(() -> node.status().getWaitingQueryLen() == 2);
+            waiting.request.onNext(input("p", 2, 9, 0)); await(() -> node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 2);
             node.node.close();
             assertEquals(0, node.node.cache().snapshot(0, false).heldBlocks());
             assertEquals(8, node.node.cache().snapshot(0, false).availableBlocks());

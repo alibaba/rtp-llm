@@ -27,8 +27,10 @@ class NativeVisionTest {
     EngineHostApi.Instance create(EngineHost host,String role) throws Exception {
         var config=role.equals("vit")?Map.of("mock.vit.skip.download",true,"mock.vit.hidden.size",4,"mm_cache_gpu_max_bytes",1024,"mock.compute",Map.of("forward",Map.of("expression","5")))
             :Map.of("seq_size_per_block",2,"max_seq_len",128,"test_block_num",32,"reserve_block_ratio",0,"reuse_cache",true,"mock.compute",Map.of("forward",Map.of("expression","1")));
+        var settings = new LinkedHashMap<String, Object>(config);
+        if (role.equals("prefill")) settings.put("mock.scheduler.mode", "group");
         var path=directory.resolve(role+"-0");Files.createDirectories(path);
-        new ObjectMapper().writeValue(path.resolve("config.json").toFile(),Map.of("id",role+"-0","component_role",role,"component",role.equals("vit")?Map.of("config",config):Map.of("engine","rtp","config",config),"environment",Map.of()));
+        new ObjectMapper().writeValue(path.resolve("config.json").toFile(),Map.of("id",role+"-0","component_role",role,"component",role.equals("vit")?Map.of("config",settings):Map.of("engine","rtp","config",settings),"environment",Map.of()));
         return host.create(new EngineHostApi.Create(role+"-0",port(),port()));
     }
     FlexlbServerStatusPB server(EngineHostApi.Instance node) {

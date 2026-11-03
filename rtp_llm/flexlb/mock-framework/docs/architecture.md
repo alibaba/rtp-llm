@@ -278,7 +278,7 @@ write_inputs("traffic.binpb.zst", (
 
 ### Python 指标查询与公共指标
 
-Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API，不经过 Engine 查询代理，也不新增 Java 查询服务。原始 PromQL 可在 Prometheus 存活期间查询其已采集的数据，框架不维护实例历史。
+Java 产生指标，公共构建暴露 `/metrics`，内部镜像使用 KMonitor 上报；Python 直接调用 Prometheus HTTP API，不经过 Engine 查询代理，也不新增 Java 查询服务。原始 PromQL 可在 Prometheus 存活期间查询其已采集的数据，框架不维护实例历史。
 
 公共 Engine 使用同一组指标含义和采集事件，Python 默认只实现一套公共语义查询。公共客户端处理 HTTP、超时和响应解析，指标函数处理 PromQL、单位、目标范围和结果形态。确有后端原生指标差异时，映射和公式放在 RTP/vLLM 对应 Python 模块中，Runner 直接调用；不为相同指标复制两份实现。原始 `prometheus/query` 走公共查询客户端，不进行后端改写或自动附加过滤。
 
@@ -325,7 +325,7 @@ Python 接口与 Java 内部协议已分开；Engine 已接通共享/独立宿�
 | `java/shared/engine/` | EngineLoop/Scheduler 执行边界及工厂契约、RequestState 进度与终态/资源使用权、QueueSnapshot 请求计数。 |
 | `java/shared/compute/` | Forward batch、公式、噪声、Decode 推进、停止模型和可取消计时。 |
 | `java/shared/cache/` | BlockPool 物理容量与引用、KvCache 块租约及前缀发布、BlockTree 叶子候选与驱逐。 |
-| `java/shared/metrics/` | 物理标签、Prometheus 文本导出与窗口均值/QPS 统计；不包含 RTP 调度语义，不提供查询代理。 |
+| `java/shared/metrics/` | 物理标签、Prometheus 导出或内部 KMonitor 上报，以及窗口均值/QPS 统计；不包含 RTP 调度语义，不提供查询代理。 |
 | `tests/`、各模块 `src/test/` | Python/跨语言集成与 Java 测试；探针不作为正式业务入口。 |
 | `scripts/` | 构建和检查入口。 |
 
@@ -443,3 +443,7 @@ KvCache/BlockTree 提供 CacheMetadata 快照与介质变更事件；仅有效�
 ### 原生 Master 接线
 
 本地文件发现通过 main 的 ServiceDiscoveryProvider 接口接入，endpoint 显式声明 discovery.type=file；文件完整解析后整体更新内存视图，临时读取失败保留最近可用视图。Master 选举使用原生 FLEXLB_CONFIG.consistency 和实验独立的部署身份，Runner 仅绑定独占 ZooKeeper 的连接地址，不实现选举或缓存匹配策略。KVCM 匹配、健康检测及备用索引均由 real Master 负责。共享缓存上报器只负责发现与元数据发布，不参与 Master 的路由决策。
+
+### main 的调度状态和缓存指标
+
+调度器指标按实际队列报告 waiting/running，PD 等待不计入 waiting；完成时发布最终阶段耗时，缓存加载延迟不使用 PD 传输时间代替。缓存复用区分 Device/Host 来源；main 保留同步缓存模型，不引入远端加载任务。具体字段及指标见 [组件参考](component-reference.md)。

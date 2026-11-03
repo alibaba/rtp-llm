@@ -11,7 +11,9 @@ import org.flexlb.mock.cache.KvCache;
 import static org.flexlb.mock.engine.RequestFailure.Reason.*;
 import static org.flexlb.mock.engine.rtp.RtpSchedulerBase.Phase.*;
 
-/** Shared RTP request, KV, PD and Forward lifecycle; admission policies own their queues. */
+/**
+ * Shared RTP request, KV, PD and Forward lifecycle; admission policies own their queues.
+ */
 abstract class RtpSchedulerBase implements Scheduler {
     enum Phase { QUEUED, CAPACITY, LOADING, TRANSFERRING, TRANSFERRED, RUNNING, OUTPUT, FORWARD, READY }
     private final TaskHistory history = new TaskHistory();
@@ -37,7 +39,7 @@ abstract class RtpSchedulerBase implements Scheduler {
         int reused, outputToken;
         boolean prefillFinished;
         final long begun = System.nanoTime();
-        long queuedAt = begun, waitNanos, firstToken, transferStarted;
+        long timingStarted = begun, enqueuedAt = begun, waitNanos, firstToken, canRun, firstRunning;
         long admittedAt = Long.MIN_VALUE, attemptedGeneration = Long.MIN_VALUE;
         Phase phase = QUEUED;
         ReportedPhase finalPhase;
@@ -91,8 +93,10 @@ abstract class RtpSchedulerBase implements Scheduler {
                 throw new RequestFailure(INVALID, "Generation requires loaded KV and a new generation permit");
             entry.outputToken = generate.tokenId();
             entry.generating = true;
+            entry.timingStarted = System.nanoTime();
+            entry.waitNanos = 0; entry.canRun = entry.firstRunning = 0;
             entry.state.transferred(1);
-            entry.phase = QUEUED; entry.queuedAt = System.nanoTime(); waiting.addLast(entry);
+            entry.phase = QUEUED; entry.enqueuedAt = entry.timingStarted; waiting.addLast(entry);
             return;
         }
         if (!(control instanceof org.flexlb.mock.admission.Control event)) throw new RequestFailure(INVALID, "Foreign RTP control");
@@ -159,7 +163,11 @@ abstract class RtpSchedulerBase implements Scheduler {
             items.add(new ForwardBatch.Request(entry.input.identity(), entry.input.tokens(), entry.reused,
                 prefill() ? 1 : entry.input.maxNewTokens(), progress.generated(), tokens, entry.input.priority(), List.of()));
             members.add(new Member(entry, entry.state.forward(), entry.nextStep));
-            if (entry.queuedAt != 0) { entry.waitNanos += System.nanoTime() - entry.queuedAt; entry.queuedAt = 0; }
+            long now = System.nanoTime();
+            if (entry.firstRunning == 0) {
+                entry.waitNanos = Math.max(0, now - entry.timingStarted);
+                entry.firstRunning = now;
+            }
             entry.phase = FORWARD;
         }
         metrics.observe("rtp_llm_context_batch_size", prefill() ? items.size() : 0);
@@ -222,6 +230,7 @@ abstract class RtpSchedulerBase implements Scheduler {
     }
 
     private boolean reserve(Entry entry) {
+        if (entry.canRun == 0) entry.canRun = System.nanoTime();
         if (prefill()) {
             var failure = acquire(entry);
             if (failure == KvCache.Failure.PERMANENT)
@@ -302,7 +311,7 @@ abstract class RtpSchedulerBase implements Scheduler {
         var entry = entry(request);
         if (!live(entry) || entry.transferBegun || (prefill() ? entry.phase != READY : entry.phase != LOADING))
             throw new RequestFailure(INVALID, "Request is not ready for a new KV transfer");
-        entry.transferBegun = true; entry.transferStarted = System.nanoTime();
+        entry.transferBegun = true;
         entry.phase = TRANSFERRING;
         return entry.state.pin();
     }
@@ -317,7 +326,6 @@ abstract class RtpSchedulerBase implements Scheduler {
             if (entry.lease == null || entry.loaded || entry.generating)
                 throw new RequestFailure(INVALID, "Unexpected KV load completion");
             entry.loaded = true;
-            metrics.observe("rtp_llm_stream_loading_cache_latency_us", (System.nanoTime() - entry.transferStarted) / 1000.0);
             entry.prefillFinished = transferred.prefillFinished();
         }
         entry.phase = TRANSFERRED;
@@ -326,6 +334,8 @@ abstract class RtpSchedulerBase implements Scheduler {
         var entry = entry(request);
         if (entry.state.terminating()) return;
         entry.finalPhase = reportedPhase(entry);
+        if (waitingEntries().contains(entry) || entry.phase == Phase.CAPACITY)
+            entry.waitNanos = Math.max(0, System.nanoTime() - entry.timingStarted);
         removeWaiting(entry);
         running.remove(entry);
         entry.state.finish(failure);
@@ -336,8 +346,10 @@ abstract class RtpSchedulerBase implements Scheduler {
         // Real emits stream timings for success, cancellation and timeout, not arbitrary internal errors.
         if (failure == null || failure.reason() == CANCELLED || failure.reason() == TIMEOUT) {
             var progress = entry.state.snapshot();
-            metrics.observe("rtp_llm_latency_us", (now - entry.begun) / 1000.0);
-            metrics.observe("rtp_llm_wait_latency_us", (entry.waitNanos + (entry.queuedAt == 0 ? 0 : now - entry.queuedAt)) / 1000.0);
+            metrics.observe("rtp_llm_latency_us", Math.max(0, now - entry.timingStarted) / 1000.0);
+            metrics.observe("rtp_llm_wait_latency_us", entry.waitNanos / 1000.0);
+            metrics.positiveMicros("rtp_llm_stream_enqueue_to_canrun_us", entry.canRun == 0 ? 0 : Math.max(0, entry.canRun - entry.enqueuedAt));
+            metrics.positiveMicros("rtp_llm_stream_canrun_to_running_us", entry.canRun == 0 || entry.firstRunning == 0 ? 0 : Math.max(0, entry.firstRunning - entry.canRun));
             if (entry.firstToken != 0) metrics.observe("rtp_llm_first_token_latency_us", (entry.firstToken - entry.begun) / 1000.0);
             metrics.observe("rtp_llm_input_token_length", entry.input.tokens());
             metrics.observe("rtp_llm_output_token_length", progress.generated());
@@ -414,7 +426,7 @@ abstract class RtpSchedulerBase implements Scheduler {
         if (admission.lease() == null) return admission.failure();
         if (entry.admittedAt == Long.MIN_VALUE) {
             entry.admittedAt = System.nanoTime();
-            if (!prefill() && entry.queuedAt != 0) { entry.waitNanos += entry.admittedAt - entry.queuedAt; entry.queuedAt = 0; }
+            entry.waitNanos = Math.max(0, entry.admittedAt - entry.timingStarted);
         }
         entry.lease = admission.lease();
         entry.reused = Math.toIntExact(admission.lease().reusedTokens());
@@ -426,6 +438,9 @@ abstract class RtpSchedulerBase implements Scheduler {
                 (long) entry.input.tokens() + computedOutput);
         });
         metrics.cacheLookup(entry.input.tokens(), entry.reused);
+        if (config.reuseCache() && entry.input.reuse())
+            metrics.cacheReuse((long) (entry.input.tokens() / config.blockSize()) * config.blockSize(),
+                entry.reused, entry.lease.memoryReusedTokens());
         return null;
     }
     @Override public List<Request> requests() { return new ArrayList<>(active.values()); }
@@ -448,18 +463,20 @@ abstract class RtpSchedulerBase implements Scheduler {
     @Override public Status status(long latestFinishedVersion) {
         long now = System.nanoTime();
         var tasks = active.values().stream().map(entry -> task(entry, now, -1, null)).toList();
-        int running = (int) tasks.stream().filter(task -> task.phase() == ReportedPhase.RUNNING).count();
-        return history.snapshot(latestFinishedVersion, tasks, tasks.size() - running, running);
+        var counts = queues();
+        return history.snapshot(latestFinishedVersion, tasks, counts.waiting(), counts.running());
     }
     private Task task(Entry entry, long now, long endTimeMillis, RequestFailure failure) {
         var progress = entry.state.snapshot();
         var phase = endTimeMillis >= 0 && entry.finalPhase != null ? entry.finalPhase : reportedPhase(entry);
-        long wait = Math.max(0, (entry.admittedAt == Long.MIN_VALUE ? now : entry.admittedAt) - entry.input.started());
-        long execution = entry.admittedAt == Long.MIN_VALUE ? 0 : Math.max(0, now - entry.admittedAt);
+        boolean finished = endTimeMillis >= 0;
+        // Native runtime metadata publishes final timings only on dequeue. Live execution is -1.
+        long waitMillis = finished ? entry.waitNanos / 1_000_000 : 0;
+        long executionMillis = finished ? Math.max(0, (now - entry.timingStarted) / 1_000_000 - waitMillis) : -1;
         long code = failure == null ? 0 : RpcErrors.code(failure);
         if (failure != null && code == 0) code = RpcErrors.status(failure).getCode().value();
         return new Task(entry.input.requestId(), entry.input.groupId(), entry.input.tokens(), entry.reused,
-            entry.input.priority(), phase, progress.iterations(), wait / 1_000_000, execution / 1_000_000,
+            entry.input.priority(), phase, progress.iterations(), waitMillis, executionMillis,
             endTimeMillis, code, failure == null ? "" : Objects.toString(failure.getMessage(), ""), entry.admittedAt != Long.MIN_VALUE);
     }
     private ReportedPhase reportedPhase(Entry entry) {

@@ -5,7 +5,9 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
 
-/** Exactly one reader consumes each instance's metric windows: HTTP pull or internal push. */
+/**
+ * Exactly one reader consumes each instance's metric windows: HTTP pull or internal push.
+ */
 public final class MetricsOutput implements AutoCloseable {
     private static final System.Logger LOG = System.getLogger(MetricsOutput.class.getName());
     private static final class Provider {

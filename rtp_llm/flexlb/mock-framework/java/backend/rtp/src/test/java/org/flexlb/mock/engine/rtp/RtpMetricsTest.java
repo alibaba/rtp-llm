@@ -34,12 +34,15 @@ class RtpMetricsTest {
         var metrics = new RtpMetrics("prefill", () -> IDLE);
         metrics.started(); metrics.started();
         metrics.cacheLookup(100, 60); metrics.cacheLookup(10, 0);
+        metrics.cacheReuse(100, 60, 20);
         metrics.forwardCompleted(20_000_000, 1000, 100, 40, 1);
         metrics.forwardCompleted(10_000_000, 1000, 10, 10, 1);
         metrics.finished(RtpMetrics.Outcome.success); metrics.finished(RtpMetrics.Outcome.timeout);
         var text = metrics.scrape();
         assertEquals(110, sample(text, "rtp_llm_cache_lookup_tokens_total", ""));
         assertEquals(60, sample(text, "rtp_llm_cache_hit_tokens_total", ""));
+        assertEquals(40, sample(text, "rtp_llm_stream_cache_device_reuse_length", ""));
+        assertEquals(20, sample(text, "rtp_llm_stream_cache_memory_reuse_length", ""));
         assertEquals(50, sample(text, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
         assertEquals(110, sample(text, "rtp_llm_forward_tokens_total", "kind=\"input\""));
         assertEquals(2, sample(text, "rtp_llm_model_forward_seconds_count", ""));
