@@ -72,9 +72,11 @@ abstract class RtpSchedulerBase implements Scheduler {
 
     @Override public Request input(Input input, Listener listener) {
         if (closed) throw new RequestFailure(CLOSED, "Engine is closing");
-        long length = (long) input.tokens() + (prefill() ? 1 : input.maxNewTokens());
-        if (prefill() ? length > config.maxSeqLen() : length >= config.maxSeqLen())
-            throw new RequestFailure(INVALID, "Request exceeds scheduling limits");
+        int reserve = config.compute().kvReserveTokens();
+        if (input.tokens() >= config.maxSeqLen() || (long) input.tokens() + reserve > config.maxSeqLen())
+            throw new RequestFailure(INVALID, "Prompt and speculative reserve exceed the context limit");
+        if (input.tokens() > cache.maxRequestTokens())
+            throw new RequestFailure(RequestFailure.Reason.CAPACITY, "Prompt exceeds the maximum KV capacity");
         if (active.containsKey(input.identity())) throw new RequestFailure(DUPLICATE, "Active request identity already exists");
         var entry = new Entry(input, Objects.requireNonNull(listener));
         active.put(input.identity(), entry);
@@ -97,6 +99,8 @@ abstract class RtpSchedulerBase implements Scheduler {
             entry.outputToken = generate.tokenId();
             entry.generating = true;
             entry.state.transferred(1);
+            // The first P token may already reach D's context/output limit. No Decode forward is needed.
+            if (entry.state.snapshot().generated() >= outputLimit(entry)) { emit(entry, 0, true); return; }
             entry.phase = QUEUED; entry.enqueuedAt = entry.timingStarted; waiting.addLast(entry);
             return;
         }
@@ -233,6 +237,12 @@ abstract class RtpSchedulerBase implements Scheduler {
         return sum <= budget && longest * (selected.size() + 1L) <= budget;
     }
 
+    private int outputLimit(Entry entry) {
+        // Native maxTokenNum subtracts the speculative reserve from the context window.
+        return Math.min(entry.input.maxNewTokens(),
+            config.maxSeqLen() - config.compute().kvReserveTokens() - entry.input.tokens());
+    }
+
     private int workTokens(Entry entry) {
         if (!live(entry) || entry.outputPending) return 0;
         if (!entry.listener.writable()) { entry.phase = OUTPUT; return 0; }
@@ -240,7 +250,8 @@ abstract class RtpSchedulerBase implements Scheduler {
         if (entry.nextStep == null)
             entry.nextStep = config.compute().prepare(config.role(), new ComputeModel.Request(
                 Long.toString(entry.input.requestId()), progress.iterations(), entry.input.tokens(), progress.generated(),
-                entry.input.minNewTokens(), entry.input.maxNewTokens(), config.maxSeqLen(), entry.input.ignoreEos()));
+                entry.input.minNewTokens(), entry.input.maxNewTokens(),
+                config.maxSeqLen() - config.compute().kvReserveTokens(), entry.input.ignoreEos()));
         if (prefill()) return entry.input.tokens();
         return entry.nextStep.verifyTokens();
     }
