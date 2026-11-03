@@ -25,10 +25,11 @@ that hid host synchronizations.
 
 ``RTP_LLM_DEVICE_INPUT=1`` engines keep ``input_lengths``/``prefix_lengths``
 on the device.  :func:`host_input_mirror` reads such a source back exactly
-once per model step (keyed by the owning inputs object and guarded by the
-source fingerprint) so the gate, the plan build, the hit validation and the
-FMHA input planning all consume host values without per-layer
-synchronizations.  Host sources pass through with zero copies.
+once per model step (keyed by the source tensor's identity and guarded by
+its fingerprint) so the gate, the plan build, the hit validation, the
+per-layer dispatch checks and the FMHA input planning all consume host
+values without per-layer synchronizations.  Host sources pass through with
+zero copies.
 
 ``RTP_LLM_QSA_STRICT_VALIDATION=1`` bypasses the cache entirely: every call
 rebuilds through the legacy per-check host validation chain with its exact
@@ -133,14 +134,15 @@ def host_input_mirror(main_inputs: Any, name: str) -> torch.Tensor | None:
     """CPU mirror of a small metadata tensor on the inputs object.
 
     Host sources pass through unchanged (the exact tensor, zero copies).  A
-    device source is read back once per step: the mirror is keyed by
-    ``(id(main_inputs), name)`` and validated by the source fingerprint, so a
-    fresh step that materialises new tensors refreshes the mirror while the
-    layers of one step share the single readback.  In-place device edits that
-    keep the same storage are outside the fingerprint's reach -- the same bet
-    the plan fingerprints already make (the engine materialises fresh
-    inference tensors per step and the runtime never rewrites the
-    fingerprinted metadata tensors in place).
+    device source is read back once per step: the mirror is keyed by the
+    source tensor's identity and validated by its fingerprint, so every reader
+    of the same tensor (the gate, the plan build, the per-layer dispatch
+    checks and the three cache regions, which share one inputs tensor per
+    attribute) reuses a single readback, and a fresh step that materialises
+    new tensors refreshes it.  In-place device edits that keep the same storage
+    are outside the fingerprint's reach -- the same bet the plan fingerprints
+    already make (the engine materialises fresh inference tensors per step and
+    the runtime never rewrites the fingerprinted metadata tensors in place).
     """
     tensor = getattr(main_inputs, name, None)
     if not isinstance(tensor, torch.Tensor):
@@ -148,17 +150,19 @@ def host_input_mirror(main_inputs: Any, name: str) -> torch.Tensor | None:
     if tensor.device.type == "cpu":
         return tensor
     fingerprint = _tensor_fingerprint(tensor)
-    key = (id(main_inputs), name)
+    key = id(tensor)
     entry = _MIRROR_CACHE.get(key)
     if entry is not None:
         owner, mirror, cached = entry
-        if owner is main_inputs and cached == fingerprint:
+        if owner is tensor and cached == fingerprint:
             _MIRROR_CACHE.move_to_end(key)
             return mirror
         del _MIRROR_CACHE[key]
     mirror = tensor.detach().to("cpu").contiguous()
     _MIRROR_STATS["readbacks"] += 1
-    _MIRROR_CACHE[key] = (main_inputs, mirror, fingerprint)
+    # The entry holds the source tensor alive so its id stays unique while
+    # the mirror exists.
+    _MIRROR_CACHE[key] = (tensor, mirror, fingerprint)
     while len(_MIRROR_CACHE) > _MIRROR_CACHE_LIMIT:
         _MIRROR_CACHE.popitem(last=False)
     return mirror

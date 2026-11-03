@@ -159,7 +159,9 @@ class Qwen4ExpQSARuntimeContext:
                 raise RuntimeError("qwen4_exp QSA Graph requires an exact batch graph")
             if inputs.context_parallel_info is not None:
                 raise RuntimeError("qwen4_exp QSA does not support context parallelism")
-            prefixes = inputs.prefix_lengths
+            # Per-step CPU mirror: the region loop checks prefix reuse on
+            # host values even when the engine staged prefixes on the device.
+            prefixes = host_input_mirror(inputs, "prefix_lengths")
             if (
                 not is_target_verify
                 and not allow_draft_incremental

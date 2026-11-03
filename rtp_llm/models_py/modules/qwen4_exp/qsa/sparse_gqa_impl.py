@@ -28,6 +28,7 @@ from typing import Optional
 import torch
 
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+    host_input_mirror,
     lookup_prefill_step_plan,
 )
 from rtp_llm.models_py.modules.factory.attention import common
@@ -187,7 +188,10 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         )
 
     def _has_nonzero_prefill_prefix(self) -> bool:
-        prefixes = self.attn_inputs.prefix_lengths
+        # Per-step CPU mirror: a device prefix_lengths source
+        # (RTP_LLM_DEVICE_INPUT) was read back once this step by the
+        # gate/plan build; this per-layer dispatch check stays host-side.
+        prefixes = host_input_mirror(self.attn_inputs, "prefix_lengths")
         return bool(prefixes.numel()) and bool(torch.any(prefixes != 0).item())
 
     def _validate_main_paged_geometry(
@@ -633,7 +637,12 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         tokens = int(qkv.shape[0])
         q, k, v = torch.split(qkv, [self.q_width, self.kv_width, self.kv_width], dim=-1)
 
-        lengths = [int(length) for length in self.attn_inputs.input_lengths.tolist()]
+        lengths = [
+            int(length)
+            for length in host_input_mirror(
+                self.attn_inputs, "input_lengths"
+            ).tolist()
+        ]
         if (
             not lengths
             or any(length <= 0 for length in lengths)
@@ -781,7 +790,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 and step.lengths
                 == [int(req.end) - int(req.start) for req in requests]
                 and step.prefix_values
-                == self.attn_inputs.prefix_lengths.tolist()
+                == host_input_mirror(
+                    self.attn_inputs, "prefix_lengths"
+                ).tolist()
             ):
                 row_map = step.selection_row_map
                 valid = step.selection_valid
