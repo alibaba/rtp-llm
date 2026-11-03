@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 <x86|arm> [--check|--print-command]" >&2
+    echo "Usage: $0 <x86|arm|sm120> [--check|--print-command]" >&2
     exit 2
 }
 
@@ -14,11 +14,16 @@ workspace=${BUILD_WORKSPACE_DIRECTORY:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 
 overrides="$workspace/deps/requirements_cuda13_overrides.txt"
 
 case "$platform" in
-    x86)
+    x86|sm120)
         input="$workspace/deps/requirements_torch_gpu_cuda13.txt"
         output="$workspace/deps/requirements_lock_torch_gpu_cuda13.txt"
         python_platform=x86_64-manylinux_2_28
         target=requirements_torch_gpu_cuda13.update
+        if [[ "$platform" == sm120 ]]; then
+            input="$workspace/deps/requirements_torch_gpu_cuda13_sm120.txt"
+            output="$workspace/deps/requirements_lock_torch_gpu_cuda13_sm120.txt"
+            target=requirements_torch_gpu_cuda13_sm120.update
+        fi
         # Indexes are caller-supplied: public regeneration uses the defaults
         # below; internal regeneration (where artlab carries the aarch64+cu13
         # artifacts and mirrors public PyPI) sets UV_INDEX/UV_EXTRA_INDEX to
@@ -43,6 +48,7 @@ case "$platform" in
     *) usage ;;
 esac
 
+compile_label="//deps:$target"
 command=(
     "${UV_BIN:-uv}" --no-config pip compile "$input"
     --overrides "$overrides"
@@ -52,7 +58,7 @@ command=(
     --no-strip-extras
     "${indexes[@]}"
     --index-strategy unsafe-best-match
-    --custom-compile-command "bazelisk run //deps:$target"
+    --custom-compile-command "bazelisk run $compile_label"
     # Locks carry no index lines: --emit-index-url is deliberately omitted so
     # install-time index selection stays with the caller (pip.bzl envsubst).
 )

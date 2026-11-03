@@ -13,6 +13,11 @@ fi
 
 x86=$($script x86 --print-command)
 arm=$($script arm --print-command)
+sm120=$($script sm120 --print-command)
+if "$script" sm120-internal --print-command >/dev/null 2>&1; then
+    echo "removed sm120-internal lane is still accepted" >&2
+    exit 1
+fi
 
 [[ "$x86" == *"requirements_torch_gpu_cuda13.txt"* ]]
 [[ "$x86" == *"requirements_cuda13_overrides.txt"* ]]
@@ -22,3 +27,7 @@ arm=$($script arm --print-command)
 [[ "$arm" == *"requirements_cuda13_overrides.txt"* ]]
 [[ "$arm" == *"aarch64-manylinux_2_28"* ]]
 [[ "$arm" == *"requirements_cuda13_arm.update"* ]]
+[[ "$sm120" == *"requirements_torch_gpu_cuda13_sm120.txt"* ]]
+[[ "$sm120" == *"requirements_cuda13_overrides.txt"* ]]
+[[ "$sm120" == *"x86_64-manylinux_2_28"* ]]
+[[ "$sm120" == *"//deps:requirements_torch_gpu_cuda13_sm120.update"* ]]
