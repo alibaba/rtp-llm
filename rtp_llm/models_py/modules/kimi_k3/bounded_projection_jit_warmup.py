@@ -100,7 +100,14 @@ def _kv_up_rows(model, init_resource, layer, projection, splits, current_rows):
     if batch <= 0 or sequence <= 0:
         raise ValueError("K3 KV-up requires positive context batch and sequence limits")
     # Real histories are limited per request; physical Q can add TP-1 padding.
-    request_bound = batch * sequence + max(int(model.parallelism_config.tp_size), 1) - 1
+    padding = max(int(model.parallelism_config.tp_size), 1) - 1
+    request_bound = batch * sequence + padding
+    # FIFO admits one long request or a batch whose full histories fit its
+    # token limit. Chunking only bounds Q, not the KV-up input with prefixes.
+    serving_bound = min(
+        request_bound,
+        max(sequence, int(init_resource.max_batch_tokens_size)) + padding,
+    )
     maximum = min(current_rows, request_bound)
     if model.kv_cache is None:
         return maximum
@@ -117,9 +124,10 @@ def _kv_up_rows(model, init_resource, layer, projection, splits, current_rows):
             bytes_per_token=heads * sum(splits) * factor,
             budget_gib=budget,
         )
-        # Budget zero disables production chunking. Preserve its actual request
-        # limit, rather than silently applying the default six-GiB budget.
-        bound = request_bound if budget == 0 else min(capacity, request_bound)
+        # Budget zero disables KV expansion chunking. Keep the scheduler
+        # history bound, while maximum still covers any larger explicit
+        # framework warmup shape carried by current_rows.
+        bound = serving_bound if budget == 0 else min(capacity, request_bound)
         maximum = max(maximum, bound)
     return maximum
 

@@ -120,7 +120,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("kv_cache", &PyModelInitResources::kv_cache, "KV cache for all layers")
         .def_readonly("is_speculative", &PyModelInitResources::is_speculative)
         .def_readonly("is_decode_role", &PyModelInitResources::is_decode_role)
-        .def_readonly("max_context_batch_size", &PyModelInitResources::max_context_batch_size);
+        .def_readonly("max_context_batch_size", &PyModelInitResources::max_context_batch_size)
+        .def_readonly("max_batch_tokens_size", &PyModelInitResources::max_batch_tokens_size);
 
     pybind11::class_<caffe2::TypeMeta>(m, "TypeMeta").def(pybind11::init<>());
 

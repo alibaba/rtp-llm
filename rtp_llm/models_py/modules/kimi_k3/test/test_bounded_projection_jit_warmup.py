@@ -239,6 +239,7 @@ class BoundedProjectionWarmupTest(unittest.TestCase):
         linear = CudaF16Linear if opts.get("native") else CudaFp8GEMMLinear
         projection = linear(weight, supported=supported)
         model = Model(cache_dtype=dtype, max_seq_len=seq)
+        model._max_moe_tokens = opts.get("current_rows", model._max_moe_tokens)
         sample = mock.Mock(side_effect=lambda maximum, *_, **__: (1, maximum))
 
         bf16 = mock.Mock(wraps=self.warmup._warmup_bf16)
@@ -267,7 +268,12 @@ class BoundedProjectionWarmupTest(unittest.TestCase):
             _warmup_bf16=bf16,
         ):
             self.run_warmup(
-                model, NS(is_decode_role=False, max_context_batch_size=batch)
+                model,
+                NS(
+                    is_decode_role=False,
+                    max_context_batch_size=batch,
+                    max_batch_tokens_size=opts.get("max_batch_tokens", seq),
+                ),
             )
         self.assertEqual(projection.probes[0], ((1, 512), SPLITS))
         self.assertEqual(bf16.called, not fp8 and supported)
@@ -314,6 +320,26 @@ class BoundedProjectionWarmupTest(unittest.TestCase):
                 )
         with self.assertRaisesRegex(RuntimeError, "needs at least"):
             self._prepare("6.0", FP8, 1048576, 1, True, False, free=0)
+
+    def test_zero_expansion_budget_uses_admissible_full_kv_rows(self):
+        # A chunk can have a long cached prefix: bound full KV by singleton
+        # max_seq_len or the scheduler's multi-request token budget, not Q rows.
+        for fp8 in (False, True):
+            with self.subTest(fp8=fp8):
+                maximum, _ = self._prepare(
+                    "0", BF16, 2097152, 16, fp8=fp8, max_batch_tokens=262144
+                )
+                self.assertEqual(maximum, 2097152 + 7)
+        maximum, _ = self._prepare(
+            "0", BF16, 2048, 16, current_rows=256, max_batch_tokens=8192
+        )
+        self.assertEqual(maximum, 8192 + 7)
+        # The cacheless framework warmup really executes full-length rows.
+        # Its explicit projection capacity must still be covered.
+        maximum, _ = self._prepare(
+            "0", BF16, 2048, 16, current_rows=32768, max_batch_tokens=8192
+        )
+        self.assertEqual(maximum, 32768)
 
     def test_launch_routes_and_scratch_memory_guards(self):
         with dependencies(torch=metadata_torch()):
