@@ -12,9 +12,15 @@
   </modules>
   <properties>
     <maven.compiler.release>21</maven.compiler.release>
+    <!-- Match internal_source/java/pom.xml for internal SDK annotation processors. -->
+    <lombok.version>1.18.32</lombok.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
   </properties>
   <dependencyManagement><dependencies>
+    <dependency>
+      <groupId>org.projectlombok</groupId><artifactId>lombok</artifactId>
+      <version>${lombok.version}</version><scope>provided</scope>
+    </dependency>
     <!-- Match native FlexLB; an SDK must not replace gRPC's runtime Guava API. -->
     <dependency><groupId>com.google.guava</groupId><artifactId>guava</artifactId><version>33.4.8-jre</version></dependency>
   </dependencies></dependencyManagement>
