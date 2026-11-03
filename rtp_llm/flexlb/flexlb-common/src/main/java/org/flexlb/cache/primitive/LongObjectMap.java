@@ -24,7 +24,9 @@ public final class LongObjectMap<V> {
     }
 
     private Long2ObjectOpenHashMap<V> shard(long key) {
-        return shards[(int) HashCommon.mix(key) & (SHARDS - 1)];
+        // The table uses the low bits of the same hash for its initial slot.
+        // Select shards from the high bits to preserve slot diversity inside each table.
+        return shards[(int) (HashCommon.mix(key) >>> 56)];
     }
 
     public V get(long key) {
