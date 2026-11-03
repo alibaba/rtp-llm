@@ -3,9 +3,13 @@
 Run inside the NPU container:
   PYTHONPATH=<repo> python -m pytest rtp_llm/test/npu/test_w8a8_mxfp8_moe_executor.py -v -s
 
-Validates plan B (stepwise grouped GEMM path) against a per-expert bf16
-reference, including the up|gate ordering of moe_w1 and the
-grouped-contiguous compaction/scatter logic.
+Validates the CANN-native pipeline (fused dispatch via npu_moe_init_routing_v2
+-> grouped GEMMs -> fused combine via npu_moe_token_unpermute, incl. topk
+weights) against a per-token per-expert bf16 reference, including:
+  * empty experts (expert 1 receives no tokens)
+  * multiple tokens routed to the same expert (grouping correctness)
+  * the up|gate ordering of moe_w1
+  * the topk weighted-sum semantics of the fused combine
 """
 
 from unittest.mock import MagicMock
@@ -32,9 +36,10 @@ from test_w8a8_common import (
 torch.manual_seed(2024)
 
 E = 4
-T = 16
+T = 8  # tokens; several share experts (multi-token grouping), expert 1 stays empty
 HIDDEN = 256
 INTER = 128
+TOPK = 2
 
 
 # ---------------- fixtures ----------------
@@ -74,14 +79,21 @@ def weights(w_bf16_pair):
 
 
 @pytest.fixture(scope="module")
-def masked_m():
-    # deliberately includes an empty expert (0) and a full slot (T)
-    return torch.tensor([5, 0, 16, 3], dtype=torch.int32, device="npu")
+def topk_ids():
+    # expert 1 never selected -> empty expert; several tokens share experts.
+    pool = torch.tensor([[0, 2], [0, 2], [0, 2], [2, 3], [2, 3], [0, 3], [0, 3], [2, 3]])
+    return pool.to(torch.int32).to("npu")
+
+
+@pytest.fixture(scope="module")
+def topk_weights():
+    g = torch.rand(T, TOPK) + 0.1
+    return (g / g.sum(dim=1, keepdim=True)).float().to("npu")
 
 
 @pytest.fixture(scope="module")
 def expert_x():
-    return torch.randn(E, T, HIDDEN, dtype=torch.bfloat16, device="npu")
+    return torch.randn(T, HIDDEN, dtype=torch.bfloat16, device="npu")
 
 
 @pytest.fixture(scope="module")
@@ -92,10 +104,12 @@ def executor(weights):
 
 
 @pytest.fixture(scope="module")
-def out(executor, expert_x, masked_m):
+def out(executor, expert_x, topk_ids, topk_weights):
     payload = ExpertForwardPayload(
         expert_x=expert_x,
-        expert_tokens_meta=ExpertTokensMetadata(expert_num_tokens=masked_m),
+        expert_tokens_meta=ExpertTokensMetadata(),
+        expert_topk_ids=topk_ids,
+        expert_topk_weights=topk_weights,
     )
     return executor.execute(
         payload, activation="SiGLU", expert_map=None, a2_scale=None,
@@ -104,22 +118,23 @@ def out(executor, expert_x, masked_m):
 
 
 @pytest.fixture(scope="module")
-def ref(w_bf16_pair, expert_x, masked_m):
-    """Per-expert bf16 reference (up|gate order of w1)."""
+def ref(w_bf16_pair, expert_x, topk_ids, topk_weights):
+    """Per-token per-expert bf16 reference (up|gate order of w1)."""
     w1_bf16, w2_bf16 = w_bf16_pair
-    res = torch.zeros(E, T, HIDDEN, dtype=torch.float32)
     x_all = expert_x.float().cpu()
-    for e in range(E):
-        m = int(masked_m[e].item())
-        if m == 0:
-            continue
-        x = x_all[e, :m]  # [m, K]
-        w1e = w1_bf16[e].float().T  # [K, 2N]
-        upgate = x @ w1e  # [m, 2N]
-        up, gate = upgate[:, :INTER], upgate[:, INTER:]
-        act = torch.nn.functional.silu(gate) * up
-        w2e = w2_bf16[e].float().T  # [K_inter, N_hidden]
-        res[e, :m] = act @ w2e
+    ids = topk_ids.cpu().long()
+    wts = topk_weights.cpu().float()
+    res = torch.zeros(T, HIDDEN, dtype=torch.float32)
+    for t in range(T):
+        for j in range(TOPK):
+            e = int(ids[t, j])
+            x = x_all[t]  # [K]
+            w1e = w1_bf16[e].float().T  # [K, 2N]
+            upgate = x @ w1e  # [2N]
+            up, gate = upgate[:INTER], upgate[INTER:]
+            act = torch.nn.functional.silu(gate) * up
+            w2e = w2_bf16[e].float().T  # [K_inter, N_hidden]
+            res[t] += wts[t, j] * (act @ w2e)
     return res
 
 
@@ -127,26 +142,24 @@ def ref(w_bf16_pair, expert_x, masked_m):
 
 
 def test_output_shape_dtype(out):
-    assert tuple(out.shape) == (E, T, HIDDEN), out.shape
+    assert tuple(out.shape) == (T, HIDDEN), out.shape
     assert out.dtype == torch.bfloat16
 
 
-def test_numeric_vs_bf16_reference(out, ref, masked_m):
-    # compare only valid rows
-    valid_rows = []
-    for e in range(E):
-        m = int(masked_m[e].item())
-        if m:
-            valid_rows.append(out[e, :m].float().cpu())
-    valid = torch.cat(valid_rows, dim=0)
-    ref_valid = torch.cat(
-        [ref[e, : int(masked_m[e].item())] for e in range(E) if int(masked_m[e].item())],
-        dim=0,
-    )
-    cs = cos_sim(valid, ref_valid)
-    print(f"MoE executor plan B: cos_sim={cs:.6f}")
+def test_numeric_vs_bf16_reference(out, ref):
+    cs = cos_sim(out.float().cpu(), ref)
+    print(f"MoE executor (fused dispatch/combine): cos_sim={cs:.6f}")
     assert cs > 0.99, cs
 
 
-def test_empty_expert_rows_zero(out):
-    assert (out[1] == 0).all(), "expert with 0 tokens should stay zero"
+def test_topk_weight_semantics(out, ref, topk_weights):
+    # strongest on the tokens whose experts differ the most: per-token cos
+    per_tok = []
+    for t in range(T):
+        a = out[t].float().cpu()
+        b = ref[t]
+        per_tok.append(float(a @ b / (a.norm() * b.norm())))
+    worst = min(per_tok)
+    print(f"per-token cos_sim: min={worst:.6f} mean={sum(per_tok) / T:.6f}")
+    # empty expert (1) is never referenced; every token is a valid fusion check
+    assert worst > 0.97, (worst, per_tok)

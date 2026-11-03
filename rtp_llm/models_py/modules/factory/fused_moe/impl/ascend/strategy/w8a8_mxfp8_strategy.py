@@ -1,9 +1,12 @@
 """Ascend NPU W8A8_MXFP8 MoE strategy (W8A8_MXFP8: Weight & Activation FP8 Quantization).
 
-Reuses the pure-torch ``BatchedDataRouter`` (its ``prepare`` asserts
-``a1_scale/a2_scale is None``, which holds here because the activation MX
-quantization happens inside the executor) with relaxed quantization
-conditions, and pairs it with ``AscendW8A8MXFP8Executor``.
+Flat router (NpuPureTpRouter semantics) + CANN-native executor: the router
+passes the un-permuted hidden states and top-k ids/weights straight through
+and the executor performs the fused dispatch
+(``npu_moe_init_routing_v2``) / combine (``npu_moe_token_unpermute``), so
+no torch bucketing / boolean-mask compaction / index_add runs on the hot
+path.  The activation MX quantization happens inside the executor, so
+``a1_scale/a2_scale`` stay None through ``prepare()``.
 
 The existing ``AscendBf16FallbackStrategy`` requires "no quantization", so
 without this strategy a quantized config would find no candidate and
@@ -19,6 +22,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     ExpertForwardPayload,
     ExpertTokensMetadata,
+    FusedMoeDataRouter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import (
     StrategyAttributes,
@@ -27,62 +31,26 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeStrategy
-from rtp_llm.models_py.modules.factory.fused_moe.impl.common.router.batched_data_router import (
-    BatchedDataRouter,
-)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
 
 
-class AscendW8A8MXFP8BatchedDataRouter(BatchedDataRouter):
-    """MXFP8 quantized MoE router (single GPU / tp==ep).
+class AscendW8A8MXFP8MoeRouter(FusedMoeDataRouter):
+    """Flat router for the MXFP8 CANN executor (single GPU / tp==ep).
 
-    prepare/finalize are vectorized bucketing: the inherited per-expert
-    loops sync the device ~2x per expert (>1s/step at E=256). Slot
-    semantics unchanged (expert-major, token-ascending per expert).
+    ``prepare`` only validates and forwards the flat ``[tokens, hidden]``
+    activations with the top-k ids/weights; the fused dispatch/combine and
+    the router-weight application happen inside the executor
+    (init_routing_v2 / token_unpermute), so ``finalize`` reduces to the TP
+    collective.
     """
+
+    @classmethod
+    def router_type(cls) -> RouterType:
+        return RouterType.PURE_TP
 
     def __init__(self, config: Any, quant_config: FusedMoEQuantConfig) -> None:
         super().__init__(config, quant_config)
-        # ep_size == 1: all topk ids are local; skip the in-range filter
-        # (its nonzero() would force a device sync).
-        self._needs_filter = config.expert_num != self.num_local_experts
-
-    def _bucket_slots(
-        self, topk_ids: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Bucket flattened (token, topk) slots by local expert id.
-
-        Returns (sorted_e, slot_idx, sorted_rows, weights_order, num_tokens):
-        expert-ascending slot order; slot_idx == the row the executor's
-        mask-compaction reads back; weights_order == permutation of
-        flattened topk_weights.
-        """
-        num_tokens, topk_k = topk_ids.shape
-        device = topk_ids.device
-        local_ids = topk_ids.flatten() - self.num_local_experts * self.ep_rank
-        if self._needs_filter:
-            in_range = (local_ids >= 0) & (local_ids < self.num_local_experts)
-            keep = torch.nonzero(in_range, as_tuple=False).flatten()
-            local_ids = local_ids[keep]
-            # row-major flatten -> global slot n belongs to token n // topk_k
-            slot_rows = keep // topk_k
-            weights_order = keep
-        else:
-            slot_rows = (
-                torch.arange(num_tokens * topk_k, device=device) // topk_k
-            )
-            weights_order = torch.arange(
-                num_tokens * topk_k, device=device
-            )
-
-        order = torch.argsort(local_ids, stable=True)
-        sorted_e = local_ids[order].long()
-        sorted_rows = slot_rows[order].long()
-
-        counts = torch.bincount(local_ids, minlength=self.num_local_experts)
-        offsets = torch.cumsum(counts, dim=0) - counts
-        slot_idx = torch.arange(sorted_e.numel(), device=device) - offsets[sorted_e]
-        slot_idx = slot_idx.long()
-        return sorted_e, slot_idx, sorted_rows, weights_order[order], num_tokens
+        self.tp_size = config.tp_size
 
     def prepare(
         self,
@@ -92,38 +60,37 @@ class AscendW8A8MXFP8BatchedDataRouter(BatchedDataRouter):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> ExpertForwardPayload:
-        assert a1.dim() == 2
-        assert topk_ids.dim() == 2
-        assert a1.size(0) == topk_ids.size(0)
-        assert a1_scale is None and a2_scale is None, "not support quanted moe"
-
-        _, hidden_dim = a1.size()
-        sorted_e, slot_idx, sorted_rows, _, _ = self._bucket_slots(topk_ids)
-        counts = torch.bincount(
-            sorted_e, minlength=self.num_local_experts
-        ).to(torch.int)
-
-        # Dynamic t_cap: fixed [E, max_tokens, H] costs >1GB zero-fill per
-        # layer per step. zeros (not empty): NPU index_put may touch untouched
-        # rows, uninitialized memory would leak NaNs.
-        t_cap = max(int(counts.max().item()), 1)
-        b_a1 = torch.zeros(
-            (self.num_local_experts, t_cap, hidden_dim),
-            dtype=a1.dtype,
-            device=a1.device,
-        )
-        # 1D flatten indexing: 2D combined indices crash NPU AdvancedIndex
-        # (aivec 259) under some topk distributions.
-        flat_idx = sorted_e * t_cap + slot_idx
-        b_a1.view(-1, hidden_dim)[flat_idx] = a1[sorted_rows]
+        if a1_scale is not None or a2_scale is not None:
+            raise NotImplementedError(
+                "Ascend W8A8_MXFP8 MoE does not take activation scales: "
+                "the MX quantization happens inside the executor"
+            )
+        if a1.dim() != 2 or not a1.is_contiguous():
+            raise ValueError(
+                "Ascend W8A8_MXFP8 MoE input must be a contiguous "
+                "[tokens, hidden] tensor"
+            )
+        if topk_weights.shape != topk_ids.shape:
+            raise ValueError("topk_weights and topk_ids must have identical shapes")
+        if topk_ids.size(0) != a1.size(0):
+            raise ValueError("top-k token dimension does not match hidden states")
+        if topk_ids.dtype != torch.int32:
+            raise TypeError(
+                f"Ascend W8A8_MXFP8 MoE requires int32 topk_ids, got {topk_ids.dtype}"
+            )
+        if topk_weights.dtype != torch.float32:
+            raise TypeError(
+                "Ascend W8A8_MXFP8 MoE requires float32 topk_weights, "
+                f"got {topk_weights.dtype}"
+            )
 
         return ExpertForwardPayload(
-            expert_x=b_a1,
+            expert_x=a1,
+            expert_x_origin_dtype=a1.dtype,
             expert_x_scale=None,
-            expert_tokens_meta=ExpertTokensMetadata(
-                expert_num_tokens=counts,
-                expert_num_tokens_cpu=None,
-            ),
+            expert_tokens_meta=ExpertTokensMetadata(),
+            expert_topk_ids=topk_ids,
+            expert_topk_weights=topk_weights,
         )
 
     def finalize(
@@ -134,26 +101,13 @@ class AscendW8A8MXFP8BatchedDataRouter(BatchedDataRouter):
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[dict[str, Any]],
     ) -> torch.Tensor:
-        sorted_e, slot_idx, sorted_rows, weights_order, num_tokens = (
-            self._bucket_slots(topk_ids)
-        )
-        fused = payload.fused_expert_output
-        # 1D flattened gather (same AdvancedIndex avoidance as prepare)
-        flat_idx = sorted_e * fused.size(1) + slot_idx
-        compact = fused.view(-1, fused.size(-1))[flat_idx]
-        if not apply_router_weight_on_input:
-            # fp32 topk_weights would promote the output dtype; compute in
-            # fp32 and cast back so hidden states stay bf16 for downstream.
-            compact = (
-                compact.float()
-                * topk_weights.flatten()[weights_order].unsqueeze(-1)
-            ).to(fused.dtype)
-        output = torch.zeros(
-            (num_tokens, fused.size(-1)), dtype=compact.dtype, device=fused.device
-        )
-        output.index_add_(0, sorted_rows, compact)
+        if apply_router_weight_on_input:
+            raise NotImplementedError(
+                "Ascend W8A8_MXFP8 MoE applies router weights in token unpermute"
+            )
+        output = payload.fused_expert_output
         if self.tp_size > 1:
-            output = all_reduce(output, Group.TP)
+            output = all_reduce(output, group=Group.TP)
         return output
 
     @classmethod
@@ -163,9 +117,9 @@ class AscendW8A8MXFP8BatchedDataRouter(BatchedDataRouter):
         )
 
         resolver = MoeConfigResolver()
-        # Unlike the base router, quantization IS expected here (ModelSlim /
-        # W8A8_MXFP8); activation quantization happens inside the executor so
-        # prepare()'s a1_scale/a2_scale=None assertion still holds.
+        # Unlike the pure-TP bf16 router, quantization IS expected here
+        # (ModelSlim / W8A8_MXFP8); activation quantization happens inside the
+        # executor so prepare()'s a1_scale/a2_scale=None assertion still holds.
         checker.check(
             resolver.get_quant_method(config) in ("ASCEND_W8A8_MXFP8",)
         )
@@ -181,7 +135,7 @@ class AscendW8A8MXFP8MoeStrategy(MoeStrategy):
         )
 
         return StrategyAttributes(
-            router_class=AscendW8A8MXFP8BatchedDataRouter,
+            router_class=AscendW8A8MXFP8MoeRouter,
             executor_class=AscendW8A8MXFP8Executor,
             quant_config=FusedMoEQuantConfig(quant_dtype=None),
         )

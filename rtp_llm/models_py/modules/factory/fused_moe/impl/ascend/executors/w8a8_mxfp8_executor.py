@@ -10,9 +10,11 @@ Weight layouts after ``PerBlockFp8Weight._postprocess`` (NPU branch):
   * ``moe_s1``: uint8 (E8M0) ``[E, kp1, 2N, 2]`` swizzled pair-split layout
   * ``moe_s2``: uint8 (E8M0) ``[E, kp2, N_hidden, 2]``
 
-Execution path (fully controlled semantics): grouped GEMM1 -> silu*mul ->
-npu_dynamic_mx_quant -> grouped GEMM2. Numerically verified against a
-per-expert bf16 reference on Ascend950PR (cos_sim ~0.997).
+Execution path (fully controlled semantics): npu_moe_init_routing_v2
+(fused dispatch) -> npu_dynamic_mx_quant -> grouped GEMM1 -> silu*mul ->
+npu_dynamic_mx_quant -> grouped GEMM2 -> npu_moe_token_unpermute (fused
+combine incl. topk weights). Numerically verified against a per-expert
+bf16 reference on Ascend950PR (cos_sim ~0.997).
 
 NOTE: the fused ``npu_grouped_matmul_swiglu_quant_v2`` path was evaluated
 (semantics mismatch, cos_sim 0.88/0.73 vs both half-order references) and
@@ -88,41 +90,75 @@ class AscendW8A8MXFP8Executor(FusedMoeExpertExecutor):
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
     ) -> CombineForwardPayload:
-        expert_x = payload.expert_x  # bf16 [E, T, K]
-        masked_m = payload.expert_tokens_meta.expert_num_tokens  # [E]
-
-        e, t, k = expert_x.shape
-        # Vectorized compaction to the grouped-contiguous layout (expert-major).
-        mask = (
-            torch.arange(t, device=expert_x.device).unsqueeze(0)
-            < masked_m.unsqueeze(1)
-        )  # [E, T]
-        x_grouped = expert_x[mask]  # [sum_tokens, K]
-        # aclnnGroupedMatmulV4 requires groupList to be int64.
-        group_list = torch.cumsum(masked_m, dim=0).to(torch.int64)
-
-        if x_grouped.shape[0] == 0:
-            out = torch.zeros(
-                (e, t, self._w2.shape[-1]),
-                dtype=expert_x.dtype,
-                device=expert_x.device,
+        if expert_map is not None:
+            raise NotImplementedError("Ascend W8A8_MXFP8 MoE does not support expert maps")
+        if a2_scale is not None or apply_router_weight_on_input:
+            raise NotImplementedError(
+                "Ascend W8A8_MXFP8 MoE applies router weights in token unpermute"
             )
-            return CombineForwardPayload(fused_expert_output=out)
+        if payload.expert_topk_ids is None or payload.expert_topk_weights is None:
+            raise ValueError("Ascend W8A8_MXFP8 MoE requires top-k ids and weights")
+        expert_x = payload.expert_x  # flat bf16 [tokens, hidden]
+        topk_ids = payload.expert_topk_ids.contiguous()
+        topk_weights = payload.expert_topk_weights.contiguous()
+        if topk_ids.dtype != torch.int32:
+            raise TypeError(
+                f"Ascend W8A8_MXFP8 MoE requires int32 topk_ids, got {topk_ids.dtype}"
+            )
 
-        # One MX dynamic quantization for the whole grouped batch.
+        # Fused dispatch: expand to [tokens*topk, hidden] expert-grouped rows +
+        # the group_list / row_idx metadata in one CANN call (replaces the
+        # legacy torch argsort/bincount/cumsum bucketing + boolean-mask
+        # compaction, ~66 kernels/MoE-layer/step and a .item() D2H sync).
+        sorted_x, row_idx, group_list, _ = torch_npu.npu_moe_init_routing_v2(
+            expert_x,
+            expert_idx=topk_ids,
+            scale=None,
+            active_num=topk_ids.numel(),
+            expert_num=self._w1.shape[0],
+            active_expert_range=[0, self._w1.shape[0]],
+            drop_pad_mode=0,
+            expert_tokens_num_type=0,
+            expert_tokens_num_flag=True,
+            quant_mode=-1,  # int8 dynamic quant only; MXFP8 stays below
+            row_idx_type=1,
+        )
+        # npu_grouped_matmul requires int64 groupList. Zero-length groups
+        # (empty experts) are legal; no special-casing needed.
+        group_list = group_list.to(torch.int64)
+
+        # Activation MX quantization stays between dispatch and GEMM1
+        # (same rows as the legacy x_grouped, unchanged numerics).
         x_fp8, x_scale = torch_npu.npu_dynamic_mx_quant(
-            x_grouped, dst_type=torch.float8_e4m3fn
+            sorted_x, dst_type=torch.float8_e4m3fn
         )
         down_output = self._stepwise_grouped_ffn(x_fp8, x_scale, group_list)
 
-        # Scatter back to the batched [E, T, hidden] layout.
-        out = torch.zeros(
-            (e, t, down_output.shape[-1]),
-            dtype=down_output.dtype,
-            device=down_output.device,
+        # npu_moe_init_routing_v2(row_idx_type=1) returns a gather index:
+        # row_idx[permuted_row] == original (token, topk) flat row.  But
+        # npu_moe_token_unpermute expects a scatter index, i.e.
+        # sorted_indices[original_row] == permuted_row.  Feeding the gather
+        # index straight through silently reshuffles tokens between rows, so
+        # invert the permutation first (same as the bf16 CANN pipeline).
+        gather_idx = torch.abs(row_idx)
+        scatter_idx = torch.empty_like(gather_idx)
+        scatter_idx.scatter_(
+            0,
+            gather_idx.long(),
+            torch.arange(
+                gather_idx.numel(),
+                device=gather_idx.device,
+                dtype=gather_idx.dtype,
+            ),
         )
-        out[mask] = down_output
-        return CombineForwardPayload(fused_expert_output=out)
+        # Fused combine: restore token order, apply topk weights, and sum
+        # the topk expert outputs in one CANN call.
+        output = torch_npu.npu_moe_token_unpermute(
+            permuted_tokens=down_output,
+            sorted_indices=scatter_idx,
+            probs=topk_weights,
+        )
+        return CombineForwardPayload(fused_expert_output=output)
 
     def _stepwise_grouped_ffn(
         self, x_fp8: torch.Tensor, x_scale: torch.Tensor, group_list: torch.Tensor
