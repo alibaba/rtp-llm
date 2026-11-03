@@ -48,7 +48,7 @@ public final class NativeProbe {
                     result.put("decode_reserved_tokens", worker.getAvailableKvCache() - reserved.getAvailableKvCache());
                     context.cancel(null);
                     long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-                    while (rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getWaitingQueryLen() != 0) {
+                    while (rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() != 0) {
                         if (System.nanoTime() >= end) throw new IllegalStateException("Decode did not release cancelled reservation");
                         Thread.sleep(5);
                     }

@@ -1,5 +1,7 @@
 package org.flexlb.mock.engine.rtp;
 
+import org.flexlb.mock.cache.KvCache;
+import org.flexlb.mock.cache.CacheLoad;
 import org.flexlb.mock.metrics.MetricTags;
 import org.flexlb.mock.metrics.WindowMetrics;
 
@@ -16,9 +18,9 @@ final class RtpMetrics {
     public static final String FORWARD_SECONDS = "rtp_llm_model_forward_seconds";
     public enum Outcome { success, cancelled, timeout, error }
     public record State(long waiting, long running, long loading, long ready, long totalTokens, long availableTokens,
-                        long freeTokens, long heldTokens, long hostTotalTokens, long hostFreeTokens, int blockSize) {
+                        long freeTokens, long heldTokens, long hostTotalTokens, long hostFreeTokens, int blockSize, long cacheLoading) {
         public State {
-            if (blockSize <= 0 || waiting < 0 || running < 0 || loading < 0 || ready < 0 || totalTokens < 0 || availableTokens < 0 || freeTokens < 0
+            if (cacheLoading < 0 || cacheLoading > loading || blockSize <= 0 || waiting < 0 || running < 0 || loading < 0 || ready < 0 || totalTokens < 0 || availableTokens < 0 || freeTokens < 0
                     || heldTokens < 0 || hostTotalTokens < 0 || hostFreeTokens < 0 || hostFreeTokens > hostTotalTokens || availableTokens > totalTokens || freeTokens > availableTokens || heldTokens > totalTokens)
                 throw new IllegalArgumentException("Invalid engine state");
             if (totalTokens % blockSize != 0 || availableTokens % blockSize != 0 || freeTokens % blockSize != 0
@@ -42,9 +44,18 @@ final class RtpMetrics {
     private long windowStarted, windowInput, windowComputed, windowOutput, windowComputeNanos, windowInputNanos;
     private double lastFinished, lastErrors, lastCancelled;
 
-    public RtpMetrics(String role, Supplier<State> state) { this(role, state, System::nanoTime); }
+    public RtpMetrics(String role, Supplier<State> state) { this(role, state, System::nanoTime, () -> new KvCache.TransferState(0, 0, 0, 0)); }
+
+    RtpMetrics(String role, Supplier<State> state, KvCache cache) {
+        this(role, state, System::nanoTime, cache::transferState);
+        cache.onTransfer(this::transfer);
+    }
 
     RtpMetrics(String role, Supplier<State> state, LongSupplier clock) {
+        this(role, state, clock, () -> new KvCache.TransferState(0, 0, 0, 0));
+    }
+
+    private RtpMetrics(String role, Supplier<State> state, LongSupplier clock, Supplier<KvCache.TransferState> transfers) {
         if (role == null || role.isBlank()) throw new IllegalArgumentException("Metric role must not be blank");
         Objects.requireNonNull(state);
         this.clock = Objects.requireNonNull(clock);
@@ -94,17 +105,27 @@ final class RtpMetrics {
                 result.addAll(List.of(tasks, kv, host));
                 result.add(gauge("rtp_llm_wait_stream_size", "Waiting scheduler requests.", role, value.waiting()));
                 result.add(gauge("rtp_llm_running_stream_size", "Running scheduler requests.", role, value.running()));
+                result.add(gauge("rtp_llm_loading_cache_stream_size", "Requests awaiting allocator cache readiness; excludes PD protocol waits.", role, value.cacheLoading()));
+                var transfer = transfers.get();
+                for (var item : Map.of("load", transfer.loadRefs(), "store", transfer.storeRefs()).entrySet()) {
+                    var refs = new GaugeMetricFamily("rtp_llm_kv_cache_" + item.getKey() + "_ref_blocks",
+                        "Distinct blocks pinned by this operation, not reference count.", List.of("role", "pool_name", "tier"));
+                    refs.addMetric(List.of(role, "device", "DEVICE"), item.getValue()); result.add(refs);
+                }
+                var inflight = new GaugeMetricFamily("mock_remote_cache_in_flight", "Logical remote tasks including match, excluding completed tasks.", List.of("role", "operation"));
+                inflight.addMetric(List.of(role, "read"), transfer.reads()); inflight.addMetric(List.of(role, "write"), transfer.writes());
+                result.add(inflight);
                 result.add(gauge("rtp_llm_kv_cache_left_seq", "Available Device KV token capacity.", role, value.availableTokens()));
-                for (String name : List.of("total", "free", "available", "used")) {
+                for (String name : List.of("total", "free", "available", "used", "active")) {
                     var blocks = new GaugeMetricFamily("rtp_llm_kv_cache_" + name + "_blocks",
                         "KV pool capacity in blocks.", List.of("role", "pool_name", "tier"));
                     long device = switch (name) {
                         case "total" -> value.totalTokens(); case "free" -> value.freeTokens();
-                        case "available" -> value.availableTokens(); default -> value.totalTokens() - value.freeTokens();
+                        case "available" -> value.availableTokens(); case "active" -> value.totalTokens() - value.availableTokens(); default -> value.totalTokens() - value.freeTokens();
                     };
                     blocks.addMetric(List.of(role, "device", "DEVICE"), device / value.blockSize());
                     // Host available includes evictable entries; free alone cannot represent it.
-                    if (!name.equals("available")) {
+                    if (!name.equals("available") && !name.equals("active")) {
                         long hostValue = name.equals("total") ? value.hostTotalTokens() : name.equals("free")
                             ? value.hostFreeTokens() : value.hostTotalTokens() - value.hostFreeTokens();
                         blocks.addMetric(List.of(role, "host", "HOST"), hostValue / value.blockSize());
@@ -160,12 +181,57 @@ final class RtpMetrics {
         return Counter.build().name(name).help(help).labelNames(LABELS).register(registry);
     }
     public void observe(String name, double value) { events.observe(name, value); }
+    // Native stream REPORT_GAUGE omits zero samples; allocator event gauges do not.
+    void positiveMicros(String name, long nanos) { if (nanos >= 1000) events.observe(name, nanos / 1000); }
     public void started() { started.inc(); }
     public void finished(Outcome outcome) { finished.get(Objects.requireNonNull(outcome)).inc(); }
     public void cacheLookup(long input, long reused) {
         if (input < 0 || reused < 0 || reused > input) throw new IllegalArgumentException("Invalid cache observation");
         cacheInputs.inc(input); cacheHits.inc(reused);
-        events.observe("rtp_llm_kv_cache_reuse_length", reused);
+    }
+    void prepared(long deviceInputTokens, CacheLoad load, CacheLoad.Result result, long observed) {
+        events.observe("rtp_llm_device_input_length", deviceInputTokens);
+        events.observe("rtp_llm_kv_cache_reuse_length", result.reusedTokens());
+        events.observe("rtp_llm_stream_cache_device_reuse_length", result.reusedTokens() - result.memoryTokens() - result.remoteTokens());
+        events.observe("rtp_llm_stream_cache_memory_reuse_length", result.memoryTokens());
+        events.observe("rtp_llm_stream_cache_remote_reuse_length", result.remoteTokens());
+        loadFinished(load, result.remoteError() == null, observed);
+    }
+    void loadFinished(CacheLoad load, boolean success, long observed) {
+        events.observe("rtp_llm_kv_cache_match_to_ready_latency_us", Math.max(0, observed - load.startedNanos()) / 1000.0,
+            Map.of("load_attempted", Boolean.toString(load.loadAttempted())));
+        if (load.loadAttempted()) {
+            events.increment("rtp_llm_kv_cache_load_qps");
+            if (!success) events.increment("rtp_llm_kv_cache_load_fail_qps");
+            events.observe("rtp_llm_kv_cache_load_prepare_latency_us", (load.preparedNanos() - load.startedNanos()) / 1000.0);
+            events.observe("rtp_llm_kv_cache_load_wait_latency_us", Math.max(0, observed - load.preparedNanos()) / 1000.0);
+        }
+    }
+    private void transfer(KvCache.TransferEvent event) {
+        String operation = event.operation().name().toLowerCase(Locale.ROOT);
+        if (!event.submitted()) {
+            events.observe("mock_remote_cache_rejected_qps", 1, Map.of("operation", operation)); return;
+        }
+        events.increment("rtp_llm_remote_" + operation + "_qps");
+        if (!event.success()) events.increment("rtp_llm_remote_" + operation + "_fail_qps");
+        double micros = event.elapsedNanos() / 1000;
+        switch (event.operation()) {
+            case MATCH -> {
+                events.observe("rtp_llm_remote_match_time_us", micros);
+                events.observe("rtp_llm_remote_match_reuse_block_num", event.blocks());
+                if (event.blocks() > 0) events.observe("rtp_llm_remote_valid_hit_ratio",
+                    (double) (event.localBlocks() + event.blocks()) / event.requestedBlocks());
+            }
+            case READ -> {
+                events.observe("rtp_llm_remote_read_task_cost_time_us", micros);
+                // Logical tokens are independent of TP rank and payload group counts.
+                events.observe("rtp_llm_remote_read_token_num", (long) event.blocks() * event.blockSize());
+            }
+            case WRITE -> {
+                events.observe("rtp_llm_remote_write_task_cost_time_us", micros);
+                events.observe("rtp_llm_remote_write_cache_block_num", event.blocks());
+            }
+        }
     }
     public void forwardCompleted(long elapsedNanos, long plannedNanos, long input, long computed, long output) {
         if (elapsedNanos < 0 || plannedNanos < 0 || input < 0 || computed < 0 || computed > input || output < 0)

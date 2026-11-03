@@ -36,9 +36,10 @@ class CacheLoadTest {
             transferred = List.copyOf(keys); block();
             if (failRead) throw new java.io.IOException("Read failed");
         }
-        public void write(List<Long> keys, long deadline) throws Exception {
+        public int write(List<Long> keys, long deadline) throws Exception {
             write = true; transferred = List.copyOf(keys); block();
             if (failWrite) throw new java.io.IOException("Write failed");
+            return keys.size();
         }
         public void close() { release.countDown(); }
     }

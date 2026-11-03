@@ -14,7 +14,7 @@ public interface RemoteCache extends AutoCloseable {
     Match match(List<Long> keys, int localBlocks, long deadlineNanos) throws Exception;
     /** Read the missing suffix. Successful return means every requested logical block is ready. */
     void read(Match match, List<Long> missingKeys, long deadlineNanos) throws Exception;
-    /** Successful return includes the backend's write confirmation, not merely submission. */
-    void write(List<Long> keys, long deadlineNanos) throws Exception;
+    /** Return the number of successfully published blocks, after backend confirmation (0 if already present). */
+    int write(List<Long> keys, long deadlineNanos) throws Exception;
     @Override void close();
 }

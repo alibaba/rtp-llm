@@ -82,7 +82,7 @@ class KvcmProtocolTest {
             var remote = new org.flexlb.mock.cache.remote.RemoteCache() {
                 public Match match(List<Long> keys, int local, long deadline) { return () -> local; }
                 public void read(Match match, List<Long> keys, long deadline) { throw new AssertionError("No reads expected"); }
-                public void write(List<Long> keys, long deadline) { throw new AssertionError("No writes expected"); }
+                public int write(List<Long> keys, long deadline) { throw new AssertionError("No writes expected"); }
                 public void close() {}
             };
             try (var node = RtpNode.start(config, 0, 0, RtpScheduler.factory(config), remote)) {

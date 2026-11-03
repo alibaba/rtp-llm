@@ -158,7 +158,6 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
                 .setTotalKvCache(tokens(snapshot.totalBlocks())).setAvailableKvCache(tokens(snapshot.availableBlocks()))
                 .addAllRunningTaskInfo(tasks.tasks().stream().map(RpcTasks::task).toList())
                 .addAllFinishedTaskList(tasks.finished().stream().map(RpcTasks::task).toList()).setLatestFinishedVersion(tasks.finishedVersion())
-                .setWaitingQueryLen(tasks.waiting()).setRunningQueryLen(tasks.running())
                 .build();
         });
     }

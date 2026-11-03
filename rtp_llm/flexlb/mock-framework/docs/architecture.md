@@ -445,3 +445,9 @@ Engine 的 HTTP 与原生健康检查读取现有 Loop/Scheduler 失败状态，
 ### 非 group 的异步缓存准备
 
 KvCache 统一拥有本地分配、有效前缀提交和异步读写引用。CacheLoad 代表一次准备操作，立即就绪和远端等待使用同一入口；RemoteCache 只负责外部协议，不操作调度队列。普通 RtpScheduler 独立推进 loading，请求准备就绪后重新参与 FIFO 组批。EngineLoop 通过 KvCache.onChange 接收容量/准备完成信号，网络调用不持有调度或缓存锁。RtpGroupScheduler 不支持远端适配器，保持已有本地组边界。后台写持有缓存引用，不使用 RequestState.pin 延迟请求终态。真实远端存储、payload 和 KVCM/KVS 适配尚未实现。
+
+### 状态与观测边界
+
+Scheduler 的 allocator loading 与 D 的 PD 协议等待分开统计。WorkerStatus 按 real 输出 phase/is_waiting，不再填写 real 未实现的 waiting_query_len/running_query_len；活动 execution_time_ms=-1，终态总耗时减最后一次离开 WAITING 时冻结的 wait 得到 execution_time_ms。正常加载后重新调度会更新 wait，加载中取消则保留之前的 wait；不能把该字段当作纯 Forward 时长。微秒阶段指标在终态上报，具体名称、零值和统计窗口见 component-reference。
+
+KvCache 投递类型化的 match/read/write 完成事件，由 RTP 指标层映射 real 名称与单位，不把协议细节放入 Scheduler。读取未成功不增加远端复用，写入确认数由适配器返回；独立拉取 LOAD/STORE 引用与逻辑在途状态，后台写失败不依赖请求是否还存活。未模拟的 SDK/payload 子阶段没有指标样本。

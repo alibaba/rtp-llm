@@ -56,7 +56,7 @@ class EngineHostTest {
                 });
                 var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(2, TimeUnit.SECONDS);
                 long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-                while (rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getRunningQueryLen() == 0) {
+                while (rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 0) {
                     assertTrue(System.nanoTime() < end); Thread.sleep(5);
                 }
                 assertEquals(p, host.stop(new EngineHostApi.Stop(p.id())));
