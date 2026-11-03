@@ -1,11 +1,17 @@
 package org.flexlb.cache.primitive;
 
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
+import it.unimi.dsi.fastutil.HashCommon;
+import java.util.BitSet;
 import java.util.HashSet;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.Executors;
 import org.junit.jupiter.api.Test;
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PrimitiveCacheStorageTest {
     @Test
@@ -38,7 +44,7 @@ class PrimitiveCacheStorageTest {
     @Test
     void concurrentReadersObserveExistingKeysDuringResize() throws Exception {
         var map = new LongObjectMap<String>();
-        map.computeIfAbsent(0, key -> "retained");
+        map.computeIfAbsent(Long.MIN_VALUE, key -> "retained");
         try (var executor = Executors.newFixedThreadPool(2)) {
             var writer = executor.submit(() -> {
                 for (long key = 1; key <= 200_000; key++) {
@@ -47,15 +53,39 @@ class PrimitiveCacheStorageTest {
             });
             var reader = executor.submit(() -> {
                 for (int index = 0; index < 200_000; index++) {
-                    assertEquals("retained", map.get(0));
+                    assertEquals("retained", map.get(Long.MIN_VALUE));
                 }
             });
             writer.get();
             reader.get();
         }
         assertEquals(200_001, map.mappingCount());
-        assertEquals("retained", map.remove(0));
-        assertNull(map.get(0));
+        assertEquals("retained", map.remove(Long.MIN_VALUE));
+        assertNull(map.get(Long.MIN_VALUE));
+    }
+
+    @Test
+    void shardsRetainDiverseInitialTableSlots() throws Exception {
+        var map = new LongObjectMap<Boolean>();
+        var random = new Random(817);
+        for (int index = 0; index < 65_536; index++) {
+            map.computeIfAbsent(random.nextLong(), ignored -> Boolean.TRUE);
+        }
+        var field = LongObjectMap.class.getDeclaredField("shards");
+        field.setAccessible(true);
+        var shards = (Object[]) field.get(map);
+        for (Object storage : shards) {
+            var shard = (Long2ObjectOpenHashMap<?>) storage;
+            var slots = new BitSet(256);
+            var keys = shard.keySet().iterator();
+            while (keys.hasNext()) {
+                slots.set((int) HashCommon.mix(keys.nextLong()) & 255);
+            }
+            assertTrue(shard.size() > 150 && shard.size() < 400,
+                    "keys must spread across shards");
+            assertTrue(slots.cardinality() > 100,
+                    "shard selection must preserve diverse low hash bits for table slots");
+        }
     }
 
     @Test
