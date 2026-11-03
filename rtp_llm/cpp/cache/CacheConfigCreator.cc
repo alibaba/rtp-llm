@@ -501,6 +501,9 @@ void CacheConfigCreator::configureLinearReplay(CacheConfig&                     
     if (group_ids.empty()) {
         return;
     }
+#if !USING_CUDA || USE_PPU
+    RTP_LLM_FAIL("LINEAR replay is only supported on CUDA; disable enable_linear_replay on this platform");
+#endif
     RTP_LLM_CHECK_WITH_INFO(runtime_config.max_generate_batch_size > 0
                                 && runtime_config.max_generate_batch_size <= std::numeric_limits<int>::max(),
                             "LINEAR replay requires a positive slot count fitting int");

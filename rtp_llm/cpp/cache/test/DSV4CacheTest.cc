@@ -568,7 +568,7 @@ TEST(CacheConfigCreatorTest, DecodeLinearPoolPreservesCheckpointCapacityAndRequi
     }
 }
 
-TEST(CacheConfigCreatorTest, ReplaySelectsTargetLinearGroupsAndReservesLogMemory) {
+TEST(CacheConfigCreatorTest, ReplayRequiresCudaAndSelectsTargetLinearGroups) {
     auto target = makeTestGroup(std::make_shared<LinearKVCacheSpec>("target_linear", 16, 16, 1),
                                 CacheGroupType::LINEAR,
                                 {0});
@@ -602,6 +602,12 @@ TEST(CacheConfigCreatorTest, ReplaySelectsTargetLinearGroupsAndReservesLogMemory
             CacheConfig config;
             config.layer_num = 2;
             config.setTopology({target, draft, full}, {{0, {"target_linear"}}, {1, {"full"}}, {2, {"draft_linear"}}});
+#if !USING_CUDA || USE_PPU
+            EXPECT_ANY_THROW(
+                CacheConfigCreator::configureLinearReplay(config, model, parallelism, runtime, speculative, true));
+            EXPECT_FALSE(config.linear_replay.enabled());
+            continue;
+#endif
             CacheConfigCreator::configureLinearReplay(config, model, parallelism, runtime, speculative, true);
             const auto&   plan        = config.linear_replay;
             const int64_t key_heads   = 8 / tp_size;
