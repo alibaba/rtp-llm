@@ -1,7 +1,10 @@
 import copy
 import json
+import multiprocessing
 import tempfile
 import unittest
+from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -27,15 +30,132 @@ from rtp_llm.models_py.modules.factory.attention.dispatch.gate_recorder import (
     _GoldenFeedback,
 )
 from rtp_llm.models_py.modules.factory.attention.dispatch.precision_metrics import (
-    DecodeGateConfig,
     FP8_GATE_CONFIG,
+    DecodeGateConfig,
     evaluate_precision,
     gate_config,
-    load_gate_profiles,
     parse_gate_thresholds,
     validate_calibration_target,
 )
 from rtp_llm.ops import KvCacheDataType
+
+
+def _gate_world_worker(
+    rank,
+    rendezvous,
+    result_dir,
+    fail_rank,
+    backend="gloo",
+    fail_allocation=0,
+    mixed_sm=False,
+):
+    import torch.distributed as dist
+
+    module = "rtp_llm.models_py.modules.factory.attention.dispatch.gate_recorder"
+    device = "cpu"
+    if backend == "nccl":
+        torch.cuda.set_device(rank)
+        device = f"cuda:{rank}"
+    dist.init_process_group(
+        backend,
+        init_method=f"file://{rendezvous}",
+        rank=rank,
+        world_size=2,
+        timeout=timedelta(seconds=20),
+    )
+    installed, operations = [], []
+    status = torch.ones(1, dtype=torch.int32, device=device)
+    original_empty = torch.empty
+    allocations = 0
+    model = SimpleNamespace(
+        prepare_fmha_impl=lambda: None,
+        layer_num=1,
+        config=SimpleNamespace(
+            getAttentionConfigs=lambda size: SimpleNamespace(
+                rope_config=None, max_seq_len=128
+            )
+        ),
+        parallelism_config=SimpleNamespace(world_size=2, get_attn_tp_size=lambda: 1),
+        set_decode_backend_gate=installed.append,
+    )
+
+    def allocate(*args, **kwargs):
+        nonlocal allocations
+        current = allocations
+        allocations += 1
+        if rank == fail_rank and current == fail_allocation:
+            raise MemoryError("injected candidate mask allocation failure")
+        kwargs["device"] = device
+        return original_empty(*args, **kwargs)
+
+    def reduce(mask, group):
+        operations.append(("SUM", mask.numel()))
+        dist.all_reduce(mask, op=dist.ReduceOp.SUM)
+
+    error = None
+    try:
+        registry = [type("Good", (), {})]
+        if mixed_sm:
+            registry.append(type("XQADecodeImpl", (), {}))
+        with patch(module + ".DECODE_MHA_IMPS", registry), patch(
+            module + ".PREFILL_MHA_IMPS", [type("Good", (), {})]
+        ), patch(module + ".torch.empty", side_effect=allocate), patch(
+            "rtp_llm.models_py.modules.factory.attention.accuracy.tensor_recorder.get_rope_cache_once"
+        ):
+            try:
+                recorder = GateRecorder(model)
+            except MemoryError as exc:
+                error = str(exc)
+                status.zero_()
+        # Mirror AccuracyChecker's existing recorder-init status convergence.
+        operations.append(("MIN", 1))
+        dist.all_reduce(status, op=dist.ReduceOp.MIN)
+        if status.item():
+            recorder._profile = (False, gate_config(False))
+            recorder._current_scenario_base_name = "s"
+            recorder._candidates = {"decode_0": [cls.__name__ for cls in registry]}
+            recorder.active_ids = {("s", "decode_0"): (0, 1)}
+            recorder.records, _ = records_fixture()
+            with patch(module + ".all_reduce", side_effect=reduce), patch(
+                module + ".get_sm", return_value=(9 + rank if mixed_sm else 9, 0)
+            ), patch(
+                module + ".torch.empty",
+                side_effect=AssertionError("collective storage allocated after init"),
+            ), patch(
+                module + ".torch.tensor",
+                side_effect=AssertionError("collective tensor created after init"),
+            ), patch.object(
+                recorder, "_calibration_coverage", return_value={}
+            ):
+                assert recorder.list_candidates("decode_0") == ["Good"]
+                assert recorder.expected[("s", "decode_0")] == ((0, 1), ("Good",))
+                recorder.finalize()
+            recorder.close()
+        Path(result_dir, f"rank-{rank}.json").write_text(
+            json.dumps(
+                dict(
+                    ready=bool(status.item()),
+                    error=error,
+                    installed=installed,
+                    operations=operations,
+                )
+            )
+        )
+    finally:
+        dist.destroy_process_group()
+
+
+def _threshold_config_worker(hw_config, result_file):
+    recorder = DecodeGateThresholdInjectionTest()._recorder(hw_config=hw_config)
+    Path(result_file).write_text(
+        json.dumps(
+            {
+                "profile": recorder._profile[1].to_dict(),
+                "source": recorder.threshold_source,
+            }
+        )
+    )
+    recorder.close()
 
 
 def records_fixture():
@@ -59,7 +179,8 @@ def records_fixture():
     return records, {("s", "decode_0"): ((0, 2), ("Good",))}
 
 
-def gate_recorder_with_world(world_rank, world_size):
+def gate_recorder(world_rank=0, world_size=1):
+    """Recorder over the shared records fixture, with a configurable WORLD rank."""
     model = SimpleNamespace(
         prepare_fmha_impl=lambda: None,
         layer_num=1,
@@ -209,9 +330,32 @@ class DecodePrecisionGateTest(unittest.TestCase):
 
     def test_fp8_and_bf16_use_independent_calibrations(self):
         self.assertEqual(gate_config(False).calibration_id, "h20-qwen3-20261030-v1")
-        self.assertEqual(gate_config(True).calibration_id, "h20-qwen3-fp8-20261105-v2")
+        self.assertEqual(gate_config(True).calibration_id, "h20-qwen3-fp8-20261115-v3")
         self.assertEqual(gate_config(False).cosine_limit, 0.9995)
         self.assertEqual(gate_config(True).cosine_limit, FP8_GATE_CONFIG.cosine_limit)
+
+    def test_fp8_total_error_budget_keeps_gain_and_direction_guards(self):
+        golden = torch.ones(1, 128, dtype=torch.bfloat16)
+        noise = golden.clone()
+        noise[:, ::2] *= -1
+        candidate = golden * 0.925 + noise * 0.29
+        contribution = torch.ones(1, 2)
+        old = replace(gate_config(True), cosine_limit=0.975, nrmse_limit=0.21)
+        self.assertFalse(
+            evaluate_precision(candidate, golden, contribution, True, old)[
+                "overall_pass"
+            ]
+        )
+        self.assertTrue(
+            evaluate_precision(candidate, golden, contribution, True)["overall_pass"]
+        )
+        self.assertFalse(
+            evaluate_precision(candidate, golden, contribution, False)["overall_pass"]
+        )
+        for bad in (golden * 1.2, -golden, golden + noise * 0.5):
+            self.assertFalse(
+                evaluate_precision(bad, golden, contribution, True)["overall_pass"]
+            )
 
     def test_zero_output_is_valid(self):
         self.assertTrue(
@@ -316,21 +460,10 @@ class DecodePrecisionGateTest(unittest.TestCase):
         self.assertIsNone(record.v)
         self.assertEqual(tuple(record.output.shape), (2, 8))
 
-    def test_gate_profile_loader_and_calibration_target(self):
+    def test_calibration_target_is_diagnostic(self):
         config = DecodeGateConfig()
-        payload = {
-            "selected": {
-                "bf16": {"config": config.to_dict()},
-                "fp8": {"config": config.to_dict()},
-            }
-        }
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "profiles.json"
-            path.write_text(json.dumps(payload))
-            profiles = load_gate_profiles(path)
-        self.assertEqual(profiles[False], config)
-        validate_calibration_target(config, 9, "Qwen3ForCausalLM")
-        validate_calibration_target(config, 9, "qwen_3")
+        self.assertIsNone(validate_calibration_target(config, 9, "Qwen3ForCausalLM"))
+        self.assertIsNone(validate_calibration_target(config, 9, "qwen_3"))
         self.assertIn(
             "runtime=SM10",
             validate_calibration_target(config, 10, "Qwen3ForCausalLM"),
@@ -425,53 +558,29 @@ class DecodePrecisionGateTest(unittest.TestCase):
         recorder.restore()
 
     def test_world_gate_failure_does_not_install_names(self):
-        class Good:
-            pass
-
-        records, expected = records_fixture()
-        model = SimpleNamespace(
-            prepare_fmha_impl=lambda: None,
-            layer_num=1,
-            config=SimpleNamespace(
-                getAttentionConfigs=lambda size: SimpleNamespace(
-                    dtype=torch.bfloat16,
-                    kv_cache_dtype=KvCacheDataType.BASE,
-                    rope_config=None,
-                    max_seq_len=128,
-                )
-            ),
-            parallelism_config=SimpleNamespace(
-                world_size=2, get_attn_tp_size=lambda: 1
-            ),
-            set_decode_backend_gate=lambda names: None,
-        )
-        with patch(
-            "rtp_llm.models_py.modules.factory.attention.accuracy.tensor_recorder.get_rope_cache_once"
-        ):
-            recorder = GateRecorder(model)
-        recorder.records, recorder.expected = records, expected
+        installed = []
+        recorder = gate_recorder(0, 2)
+        recorder.model.set_decode_backend_gate = installed.append
+        recorder.records, recorder.expected = records_fixture()
+        recorder._current_scenario_base_name = "s"
         module = "rtp_llm.models_py.modules.factory.attention.dispatch.gate_recorder"
-        original_tensor = torch.tensor
 
-        def cpu_tensor(*args, **kwargs):
-            kwargs["device"] = "cpu"
-            return original_tensor(*args, **kwargs)
-
-        def other_rank_failed(mask, group):
+        def remote_rank_failed(mask, group):
             from rtp_llm.models_py.distributed.collective_torch import Group
 
             self.assertEqual(group, Group.WORLD)
-            mask[0] += 0
-            mask[1:] += 1
+            # This rank passed locally; only the peer contributed a failed record.
+            mask[1:] *= 2
 
-        with patch(module + ".DECODE_MHA_IMPS", [Good]), patch(
-            module + ".torch.tensor", side_effect=cpu_tensor
-        ), patch(module + ".all_reduce", side_effect=other_rank_failed):
+        with patch(module + ".all_reduce", side_effect=remote_rank_failed):
             with self.assertRaisesRegex(RuntimeError, "at least one rank"):
                 recorder.finalize()
+        # This rank's own verdict passed; only the peer record was missing.
+        self.assertEqual(recorder._passed, frozenset({"Good"}))
+        self.assertEqual(installed, [])
 
     def test_failure_details_log_world_rank_and_backend(self):
-        recorder = gate_recorder_with_world(3, 8)
+        recorder = gate_recorder(3, 8)
         recorder.records, recorder.expected = records_fixture()
         module = "rtp_llm.models_py.modules.factory.attention.dispatch.gate_recorder"
         verdict = (0, None, None, {"overall_pass": False, "reason": "injected"})
@@ -487,7 +596,7 @@ class DecodePrecisionGateTest(unittest.TestCase):
         self.assertIn("injected", detail)
 
     def test_local_result_log_carries_rank_and_passed_names(self):
-        recorder = gate_recorder_with_world(3, 8)
+        recorder = gate_recorder(3, 8)
         recorder.records, recorder.expected = records_fixture()
         recorder._current_scenario_base_name = "s"
         module = "rtp_llm.models_py.modules.factory.attention.dispatch.gate_recorder"
@@ -508,7 +617,7 @@ class DecodePrecisionGateTest(unittest.TestCase):
         self.assertIn("passed=['Good']", world)
 
     def test_structural_failure_log_carries_rank_and_still_raises(self):
-        recorder = gate_recorder_with_world(1, 2)
+        recorder = gate_recorder(1, 2)
         recorder.records = {"leaked": {}}
         module = "rtp_llm.models_py.modules.factory.attention.dispatch.gate_recorder"
         with patch(
@@ -604,6 +713,155 @@ class DecodePrecisionGateTest(unittest.TestCase):
 
 
 class DecodeGateThresholdInjectionTest(unittest.TestCase):
+    def test_registered_thresholds_reach_model_and_recorder_after_spawn(self):
+        from rtp_llm.server.server_args import server_args
+
+        value = json.dumps(self._thresholds())
+        with patch.dict(
+            "os.environ", {"DYN_DECODE_GATE_THRESHOLDS": value}, clear=True
+        ):
+            config = server_args.setup_args(
+                ["--enable_dynamic_decode_backend", "1"]
+            ).py_hw_kernel_config
+        context = multiprocessing.get_context("spawn")
+        with tempfile.TemporaryDirectory() as tmp:
+            result_file = str(Path(tmp, "result.json"))
+            worker = context.Process(
+                target=_threshold_config_worker, args=(config, result_file)
+            )
+            try:
+                worker.start()
+                worker.join(timeout=60)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(worker.exitcode, 0)
+                result = json.loads(Path(result_file).read_text())
+                self.assertEqual(result["source"], "config")
+                self.assertEqual(
+                    result["profile"], parse_gate_thresholds(value).to_dict()
+                )
+            finally:
+                if worker.is_alive():
+                    worker.terminate()
+                    worker.join(timeout=5)
+
+    def test_two_rank_mask_allocation_and_collective_order(self):
+        context = multiprocessing.get_context("spawn")
+        for fail_rank, allocation, mixed_sm in (
+            (-1, 0, False),
+            (1, 0, False),
+            (1, 1, False),
+            (1, 2, False),
+            (-1, 0, True),
+        ):
+            with self.subTest(
+                fail_rank=fail_rank, allocation=allocation, mixed_sm=mixed_sm
+            ), tempfile.TemporaryDirectory() as tmp:
+                workers = [
+                    context.Process(
+                        target=_gate_world_worker,
+                        args=(
+                            rank,
+                            str(Path(tmp, "rendezvous")),
+                            tmp,
+                            fail_rank,
+                            "gloo",
+                            allocation,
+                            mixed_sm,
+                        ),
+                    )
+                    for rank in range(2)
+                ]
+                try:
+                    for worker in workers:
+                        worker.start()
+                    for worker in workers:
+                        worker.join(timeout=60)
+                    self.assertTrue(all(not worker.is_alive() for worker in workers))
+                    self.assertEqual([worker.exitcode for worker in workers], [0, 0])
+                    results = [
+                        json.loads(Path(tmp, f"rank-{rank}.json").read_text())
+                        for rank in range(2)
+                    ]
+                    expected_ops = (
+                        [
+                            ["MIN", 1],
+                            ["SUM", 2 if mixed_sm else 1],
+                            ["SUM", 3 if mixed_sm else 2],
+                        ]
+                        if fail_rank == -1
+                        else [["MIN", 1]]
+                    )
+                    for rank, result in enumerate(results):
+                        self.assertEqual(result["operations"], expected_ops)
+                        self.assertEqual(result["ready"], fail_rank == -1)
+                        self.assertEqual(
+                            result["installed"],
+                            (
+                                [None, ["Good"]]
+                                if fail_rank == -1
+                                else ([] if rank == fail_rank else [None])
+                            ),
+                        )
+                    if fail_rank == 1:
+                        self.assertIn("allocation failure", results[1]["error"])
+                finally:
+                    for worker in workers:
+                        if worker.is_alive():
+                            worker.terminate()
+                            worker.join(timeout=5)
+
+    def test_coverage_failure_does_not_block_admission(self):
+        module = "rtp_llm.models_py.modules.factory.attention.dispatch.gate_recorder"
+        for report_error in (False, True):
+            recorder = self._recorder()
+            installed = []
+            recorder.model.set_decode_backend_gate = installed.append
+            recorder._passed = frozenset({"Good"})
+            with patch.object(recorder, "_finalize_scenario"), patch.object(
+                recorder,
+                "_calibration_coverage",
+                side_effect=ValueError("bad report") if report_error else None,
+                return_value={"tested_batches": (1,)},
+            ):
+                if report_error:
+                    with self.assertLogs(level="WARNING") as logs:
+                        recorder.finalize()
+                    self.assertIn("coverage report failed", "\n".join(logs.output))
+                else:
+                    recorder.finalize()
+            self.assertEqual(installed, [["Good"]])
+
+    def test_gate_errors_are_not_swallowed_by_report_protection(self):
+        module = "rtp_llm.models_py.modules.factory.attention.dispatch.gate_recorder"
+        for failure in ("precision", "records", "world", "install"):
+            recorder = self._recorder()
+            installed = []
+            recorder.model.set_decode_backend_gate = installed.append
+            recorder._passed = (
+                frozenset() if failure == "precision" else frozenset({"Good"})
+            )
+            if failure == "install":
+
+                def fail_install(names):
+                    raise RuntimeError("installation failed")
+
+                recorder.model.set_decode_backend_gate = fail_install
+            if failure == "world":
+                recorder.model.parallelism_config.world_size = 2
+            with patch.object(
+                recorder,
+                "_finalize_scenario",
+                side_effect=ValueError("bad records") if failure == "records" else None,
+            ), patch(
+                module + ".all_reduce", side_effect=RuntimeError("WORLD failed")
+            ), patch.object(
+                recorder, "_calibration_coverage"
+            ) as report:
+                with self.assertRaises(RuntimeError):
+                    recorder.finalize()
+                report.assert_not_called()
+            self.assertEqual(installed, [])
+
     def _thresholds(self):
         config = gate_config(False).to_dict()
         config.pop("calibration_sm_major")
@@ -611,34 +869,52 @@ class DecodeGateThresholdInjectionTest(unittest.TestCase):
         config["target"] = {"sm_major": 9, "model_family": "qwen3"}
         return config
 
-    def _recorder(self, *, fp8=False, environment=None):
+    def _recorder(self, *, fp8=False, thresholds=None, hw_config=None):
+        from rtp_llm.models_py.model_desc.module_base import GptModelBase
+        from rtp_llm.ops import HWKernelConfig
+
         attention = SimpleNamespace(
             rope_config=None,
             max_seq_len=128,
             dtype=torch.bfloat16,
             kv_cache_dtype=KvCacheDataType.FP8 if fp8 else KvCacheDataType.BASE,
         )
-        model = SimpleNamespace(
-            prepare_fmha_impl=lambda: None,
-            config=SimpleNamespace(
-                model_type="qwen_3", getAttentionConfigs=lambda size: attention
+        if hw_config is None:
+            hw_config = HWKernelConfig()
+            hw_config.dyn_decode_gate_thresholds = thresholds
+        model = GptModelBase(
+            SimpleNamespace(
+                num_layers=1,
+                vocab_size=8,
+                capture_aux_hidden_layer_ids=[],
+                model_type="qwen_3",
+                getAttentionConfigs=lambda size: attention,
             ),
-            parallelism_config=SimpleNamespace(
-                world_size=1, get_attn_tp_size=lambda: 1
-            ),
-            set_decode_backend_gate=lambda names: None,
+            SimpleNamespace(world_size=1, get_attn_tp_size=lambda: 1),
+            object(),
+            8,
+            py_hw_kernel_config=hw_config,
         )
-        with patch.dict("os.environ", environment or {}, clear=True), patch(
+        original_empty = torch.empty
+        with patch.dict("os.environ", {}, clear=True), patch(
             "rtp_llm.models_py.modules.factory.attention.accuracy.tensor_recorder.get_rope_cache_once"
         ), patch(
             "rtp_llm.models_py.modules.factory.attention.dispatch.gate_recorder.get_sm",
             return_value=(9, 0),
+        ), patch(
+            "rtp_llm.models_py.modules.factory.attention.dispatch.gate_recorder.DECODE_MHA_IMPS",
+            [type("Good", (), {})],
+        ), patch(
+            "rtp_llm.models_py.modules.factory.attention.dispatch.gate_recorder.torch.empty",
+            side_effect=lambda *args, **kwargs: original_empty(
+                *args, **{**kwargs, "device": "cpu"}
+            ),
         ):
             recorder = GateRecorder(model)
             recorder._gate_profile()
         return recorder
 
-    def test_no_environment_keeps_builtin_and_legacy_file_profiles(self):
+    def test_unconfigured_uses_builtin(self):
         for fp8 in (False, True):
             with self.subTest(fp8=fp8), self.assertLogs(level="INFO") as logs:
                 recorder = self._recorder(fp8=fp8)
@@ -646,25 +922,8 @@ class DecodeGateThresholdInjectionTest(unittest.TestCase):
             self.assertEqual(recorder.threshold_source, "builtin")
             self.assertIn("source=builtin", "\n".join(logs.output))
             self.assertRegex(recorder.threshold_sha256, r"^[0-9a-f]{8}$")
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "profiles.json"
-            path.write_text(
-                json.dumps(
-                    {
-                        name: {"config": gate_config(fp8).to_dict()}
-                        for name, fp8 in (("bf16", False), ("fp8", True))
-                    }
-                )
-            )
-            for fp8 in (False, True):
-                recorder = self._recorder(
-                    fp8=fp8,
-                    environment={"DYN_DECODE_GATE_PROFILE": str(path)},
-                )
-                self.assertEqual(recorder._profile, (fp8, gate_config(fp8)))
-                self.assertEqual(recorder.threshold_source, "file")
 
-    def test_inline_thresholds_override_file_and_apply_to_active_kv_profile(self):
+    def test_config_thresholds_apply_to_active_kv_profile(self):
         value = self._thresholds()
         value["calibration_id"] = "inline-equivalent"
         hashes = []
@@ -672,19 +931,16 @@ class DecodeGateThresholdInjectionTest(unittest.TestCase):
             with self.subTest(fp8=fp8), self.assertLogs(level="INFO") as logs:
                 recorder = self._recorder(
                     fp8=fp8,
-                    environment={
-                        "DYN_DECODE_GATE_THRESHOLDS": json.dumps(value),
-                        "DYN_DECODE_GATE_PROFILE": "/must-not-be-read.json",
-                    },
+                    thresholds=json.dumps(value),
                 )
             self.assertEqual(recorder._profile[0], fp8)
             self.assertEqual(
                 recorder._profile[1], parse_gate_thresholds(json.dumps(value))
             )
-            self.assertIn("source=env id=inline-equivalent", "\n".join(logs.output))
+            self.assertIn("source=config id=inline-equivalent", "\n".join(logs.output))
             recorder.expected = {("b1__s0_p0c1d1", "decode_0"): ((0,), ("Good",))}
             coverage = recorder._calibration_coverage("inline-equivalent")
-            self.assertEqual(coverage["threshold_source"], "env")
+            self.assertEqual(coverage["threshold_source"], "config")
             self.assertEqual(coverage["threshold_id"], "inline-equivalent")
             self.assertEqual(coverage["threshold_sha256"], recorder.threshold_sha256)
             hashes.append(recorder.threshold_sha256)
@@ -733,12 +989,7 @@ class DecodeGateThresholdInjectionTest(unittest.TestCase):
                 parse_gate_thresholds(raw)
         for raw in ("", "{broken"):
             with self.subTest(raw=raw), self.assertRaises(json.JSONDecodeError):
-                self._recorder(
-                    environment={
-                        "DYN_DECODE_GATE_THRESHOLDS": raw,
-                        "DYN_DECODE_GATE_PROFILE": "/must-not-be-read.json",
-                    }
-                )
+                self._recorder(thresholds=raw)
 
     def test_invalid_ranges_and_nonfinite_values_fail(self):
         thresholds = set(self._thresholds()) - {"calibration_id", "target"}
@@ -781,12 +1032,10 @@ class DecodeGateThresholdInjectionTest(unittest.TestCase):
         value["target"] = {"sm_major": 10, "model_family": "qwen3"}
         value["calibration_id"] = "sm100-qwen3-test"
         with self.assertLogs(level="WARNING") as logs:
-            recorder = self._recorder(
-                environment={"DYN_DECODE_GATE_THRESHOLDS": json.dumps(value)}
-            )
+            recorder = self._recorder(thresholds=json.dumps(value))
         warning = "\n".join(logs.output)
         self.assertIn(
-            "decode gate thresholds: source=env id=sm100-qwen3-test "
+            "decode gate thresholds: source=config id=sm100-qwen3-test "
             "declared=SM10/qwen3 runtime=SM9/qwen_3;",
             warning,
         )

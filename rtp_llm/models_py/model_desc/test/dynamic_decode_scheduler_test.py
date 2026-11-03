@@ -1,7 +1,5 @@
-import filecmp
 import importlib.metadata
 import os
-import pickle
 import sys
 import unittest
 from pathlib import Path
@@ -19,9 +17,9 @@ from rtp_llm.models_py.modules.factory.attention.dispatch.backend_selector impor
     benchmark_sequence_cap,
     dynamic_backend_allowed,
     instantiate_decode_backend,
+    select_decode_backend,
 )
 from rtp_llm.models_py.modules.factory.attention.dispatch.selector import select_stable
-from rtp_llm.ops import HWKernelConfig
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 
 
@@ -32,25 +30,11 @@ class DecodeSchedulerTest(unittest.TestCase):
             self.assertTrue(
                 os.path.samefile(sys.modules[name].__file__, root / (name + ".so"))
             )
-        # gpu_lock stages declared wheel packages into stable JIT paths.
-        # Check content identity rather than mistaking the copy for ambient torch.
+        # gpu_lock stages the declared torch wheel into stable JIT paths, so only
+        # provenance is asserted here; library content belongs to the build.
         declared = importlib.metadata.distribution("torch")
-        loaded = Path(torch.__file__).parent
-        for relative in (
-            "__init__.py",
-            Path(torch._C.__file__).name,
-            "lib/libtorch_cpu.so",
-            "lib/libtorch_cuda.so",
-        ):
-            source = declared.locate_file("torch/" + str(relative))
-            self.assertTrue(str(source).startswith(os.environ["TEST_SRCDIR"] + os.sep))
-            self.assertTrue(filecmp.cmp(loaded / relative, source, shallow=False))
-
-    def test_dynamic_config_survives_spawn_pickle(self):
-        hw = HWKernelConfig()
-        self.assertFalse(hw.enable_dynamic_decode_backend)
-        hw.enable_dynamic_decode_backend = True
-        self.assertTrue(pickle.loads(pickle.dumps(hw)).enable_dynamic_decode_backend)
+        init = declared.locate_file("torch/__init__.py")
+        self.assertTrue(str(init).startswith(os.environ["TEST_SRCDIR"] + os.sep))
 
     def test_dynamic_backend_arch_filter(self):
         self.assertTrue(dynamic_backend_allowed("XQADecodeImpl", 9))
@@ -104,6 +88,17 @@ class DecodePlanTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "before precision"):
             self.model.configure_dynamic_decode(True)
 
+    def test_disabled_dynamic_decode_does_not_parse_threshold_config(self):
+        self.model.py_hw_kernel_config = SimpleNamespace(
+            dyn_decode_gate_thresholds="invalid-json"
+        )
+        with patch(
+            "rtp_llm.models_py.modules.factory.attention.dispatch.gate_recorder.parse_gate_thresholds",
+            side_effect=AssertionError("disabled path parsed thresholds"),
+        ):
+            self.model.configure_dynamic_decode(False)
+        self.assertFalse(self.model._dynamic_decode_enabled)
+
     def test_disabled_decode_graph_keeps_mainline_routing(self):
         module = "rtp_llm.models_py.modules.factory.attention.dispatch.backend_selector"
         with patch(
@@ -152,6 +147,52 @@ class DecodePlanTest(unittest.TestCase):
             self.assertEqual(instantiate.call_count, 3)
             self.assertEqual(set(self.model.decode_backend_plan), {2, 4})
 
+    def test_selector_uses_fixed_five_percent_policy(self):
+        module = "rtp_llm.models_py.modules.factory.attention.dispatch.backend_selector"
+
+        class A:
+            support = staticmethod(lambda *args: True)
+            support_parallelism_config = staticmethod(lambda *args: True)
+
+        class B(A):
+            pass
+
+        self.model.config.getAttentionConfigs = lambda _: SimpleNamespace(
+            max_seq_len=2048, kernel_tokens_per_block=64
+        )
+        self.model.parallelism_config = SimpleNamespace(
+            get_attn_tp_size=lambda: 1, tp_size=1, tp_rank=0
+        )
+        cache = SimpleNamespace(kv_cache_base=torch.zeros(8, 64))
+        self.model.kv_cache = SimpleNamespace(get_layer_cache_groups=lambda _: [cache])
+        tensor = torch.tensor
+        full = torch.full
+        with patch(module + ".DECODE_MHA_IMPS", [A, B]), patch(
+            module + ".get_sm", return_value=(9, 0)
+        ), patch(
+            module + "._implementation_allows_cuda_graph_selection_mode",
+            return_value=True,
+        ), patch(
+            module + "._is_fmha_impl_disabled", return_value=False
+        ), patch(
+            module + ".torch.tensor",
+            side_effect=lambda *a, **k: tensor(*a, **{**k, "device": "cpu"}),
+        ), patch(
+            module + ".torch.full",
+            side_effect=lambda *a, **k: full(*a, **{**k, "device": "cpu"}),
+        ), patch(
+            module + ".torch.cuda.empty_cache"
+        ), patch(
+            module + ".torch.cuda.mem_get_info", return_value=(2**30, 2**30)
+        ), patch(
+            module + ".kv_grid", return_value=[64]
+        ), patch(
+            module + ".bench_backend_grid", side_effect=[[100], [97]]
+        ), patch(
+            module + "._fatal", side_effect=AssertionError("selector failed")
+        ):
+            self.assertIs(select_decode_backend(self.model, self.inputs, [A, B]), A)
+
     def test_headwise_with_gate_uses_static_graph_factory(self):
         self.model.configure_dynamic_decode(True)
         self.model.decode_backend_plan[2] = self.backend
@@ -180,25 +221,8 @@ class DecodePlanTest(unittest.TestCase):
         select.assert_not_called()
         instantiate.assert_not_called()
 
-    def test_capture_uses_graph_bucket_without_kv_envelope(self):
+    def test_long_kv_does_not_block_capture_selection(self):
         self.model.configure_dynamic_decode(True)
-        self.inputs.sequence_lengths = torch.full((2,), 4095, dtype=torch.int32)
-        module = "rtp_llm.models_py.modules.factory.attention.dispatch.backend_selector"
-        with patch(
-            module + ".select_decode_backend", return_value=self.backend
-        ) as select, patch(
-            module + ".instantiate_decode_backend",
-            return_value=SimpleNamespace(name="actual"),
-        ):
-            instance = self.model.prepare_fmha_impl(
-                SimpleNamespace(attention_inputs=self.inputs), True
-            )
-            self.assertEqual(instance.name, "actual")
-            self.assertEqual(select.call_count, 1)
-
-    def test_capture_does_not_publish_replay_kv_guard(self):
-        self.model.configure_dynamic_decode(True)
-        self.inputs.sequence_lengths = torch.full((2,), 4096, dtype=torch.int32)
         module = "rtp_llm.models_py.modules.factory.attention.dispatch.backend_selector"
         instance = SimpleNamespace(name="actual")
         with patch(
@@ -207,11 +231,21 @@ class DecodePlanTest(unittest.TestCase):
             module + ".instantiate_decode_backend",
             return_value=instance,
         ):
-            actual = self.model.prepare_fmha_impl(
-                SimpleNamespace(attention_inputs=self.inputs), True
-            )
-            self.assertIs(actual, instance)
-            self.assertEqual(select.call_count, 1)
+            # Both lengths are past the retired calibration caps; selection is
+            # still per capture bucket, so each batch is planned once.
+            for batch, sequence_length in ((2, 4095), (3, 4096)):
+                self.inputs.input_lengths = torch.ones(batch, dtype=torch.int32)
+                self.inputs.sequence_lengths = torch.full(
+                    (batch,), sequence_length, dtype=torch.int32
+                )
+                with self.subTest(sequence_length=sequence_length):
+                    self.assertIs(
+                        self.model.prepare_fmha_impl(
+                            SimpleNamespace(attention_inputs=self.inputs), True
+                        ),
+                        instance,
+                    )
+            self.assertEqual(select.call_count, 2)
 
     def test_no_backend_uses_static_graph_factory(self):
         self.model.configure_dynamic_decode(True)

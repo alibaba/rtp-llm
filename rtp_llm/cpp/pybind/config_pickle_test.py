@@ -241,6 +241,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         config.prefill_capture_seq_lens = [17, 23]
         config.decode_capture_batch_sizes = [2, 7]
         config.enable_dynamic_decode_backend = True
+        config.dyn_decode_gate_thresholds = '{"calibration_id":"round-trip"}'
 
         restored = pickle.loads(pickle.dumps(config))
 
@@ -254,6 +255,22 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         self.assertEqual(restored.prefill_capture_seq_lens, [17, 23])
         self.assertEqual(restored.decode_capture_batch_sizes, [2, 7])
         self.assertTrue(restored.enable_dynamic_decode_backend)
+        self.assertEqual(
+            restored.dyn_decode_gate_thresholds, config.dyn_decode_gate_thresholds
+        )
+
+    def test_threshold_defaults_and_explicit_empty_survive_pickle(self):
+        config = HWKernelConfig()
+        for value in (None, ""):
+            config.dyn_decode_gate_thresholds = value
+            self.assertEqual(
+                pickle.loads(pickle.dumps(config)).dyn_decode_gate_thresholds, value
+            )
+        state = config.__getstate__()
+        for size in (5, 7, 8, 9, 10, 11):
+            restored = _new_hw_kernel_config()
+            restored.__setstate__(state[:size])
+            self.assertIsNone(restored.dyn_decode_gate_thresholds)
 
     def test_core_only_tuple_uses_generation_prefill_cuda_graph_defaults(self):
         restored = pickle.loads(pickle.dumps(_LegacyHWKernelConfig()))
@@ -289,7 +306,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
                 self.assertFalse(restored.enable_dynamic_decode_backend)
 
     def test_unsupported_tuple_sizes_are_rejected(self):
-        for size in (6, 12, 15, 19, 20):
+        for size in (6, 13, 15, 19, 20):
             with self.subTest(size=size), self.assertRaisesRegex(
                 RuntimeError, "Invalid state"
             ):

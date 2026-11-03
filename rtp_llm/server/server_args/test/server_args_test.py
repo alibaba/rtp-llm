@@ -123,23 +123,6 @@ class PipelinePartitionArgumentsTest(TestCase):
 
 
 class DynamicDecodeArgumentsTest(TestCase):
-    def test_retired_accuracy_check_environment_is_ignored(self):
-        from rtp_llm.server.server_args import server_args
-
-        with patch.dict(os.environ, {"ENABLE_ACCURACY_CHECK": "1"}, clear=True):
-            configs = server_args.setup_args([])
-            self.assertFalse(hasattr(configs.runtime_config, "enable_accuracy_check"))
-            restored = pickle.loads(pickle.dumps(configs.runtime_config))
-            self.assertFalse(hasattr(restored, "enable_accuracy_check"))
-            self.assertFalse(configs.py_hw_kernel_config.enable_dynamic_decode_backend)
-
-    def test_retired_accuracy_check_cli_is_rejected(self):
-        from rtp_llm.server.server_args import server_args
-
-        with patch.dict(os.environ, {}, clear=True):
-            with patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
-                server_args.setup_args(["--enable_accuracy_check", "1"])
-
     def test_dynamic_decode_backend_parser_and_default(self):
         from rtp_llm.server.server_args import server_args
 
@@ -147,6 +130,37 @@ class DynamicDecodeArgumentsTest(TestCase):
         disabled = server_args.setup_args([])
         self.assertTrue(enabled.py_hw_kernel_config.enable_dynamic_decode_backend)
         self.assertFalse(disabled.py_hw_kernel_config.enable_dynamic_decode_backend)
+
+    def test_gate_threshold_registration_precedence_and_lazy_parsing(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            config = server_args.setup_args([]).py_hw_kernel_config
+            self.assertIsNone(config.dyn_decode_gate_thresholds)
+        with patch.dict(
+            os.environ,
+            {
+                "DYN_DECODE_GATE_THRESHOLDS": "invalid-json",
+                "ENABLE_DYNAMIC_DECODE_BACKEND": "0",
+            },
+            clear=True,
+        ):
+            config = server_args.setup_args([]).py_hw_kernel_config
+            self.assertFalse(config.enable_dynamic_decode_backend)
+            self.assertEqual(config.dyn_decode_gate_thresholds, "invalid-json")
+            restored = pickle.loads(pickle.dumps(config))
+            self.assertEqual(restored.dyn_decode_gate_thresholds, "invalid-json")
+            config = server_args.setup_args(
+                ["--dyn_decode_gate_thresholds", "cli-json"]
+            ).py_hw_kernel_config
+            self.assertEqual(config.dyn_decode_gate_thresholds, "cli-json")
+        with patch.dict(os.environ, {"DYN_DECODE_GATE_THRESHOLDS": ""}, clear=True):
+            self.assertEqual(
+                server_args.setup_args(
+                    []
+                ).py_hw_kernel_config.dyn_decode_gate_thresholds,
+                "",
+            )
 
 
 class CacheConfigArgumentsTest(TestCase):
