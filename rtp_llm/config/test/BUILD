@@ -22,6 +22,12 @@ py_test(
     tags = ["L20_CU13"],
 )
 
+py_test(
+    name = "layer_partition_test",
+    srcs = ["layer_partition_test.py"],
+    deps = ["//rtp_llm:config"],
+)
+
 py_library(
     name = "kv_cache_event_test_values",
     srcs = [

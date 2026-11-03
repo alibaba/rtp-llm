@@ -18,6 +18,7 @@ from rtp_llm.model_loader.ffn_weight import (
     MoeConfig,
     iter_stacked_moe_weights,
 )
+from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.per_channel_fp8_quant_weight import (
     LoadQuantPerChannelFp8Weight,
     per_channel_cast_to_fp8,
@@ -99,8 +100,6 @@ class TestBuildStackedKeyConfigNoOverwrite(unittest.TestCase):
     def test_same_checkpoint_key_preserves_first_template(self):
         """When kernel and scale share the same stacked checkpoint key,
         _build_stacked_key_config must keep the kernel's template (first seen)."""
-        from unittest.mock import patch
-
         from rtp_llm.model_loader.loader import ModelLoader
 
         config = MoeConfig(expert_num=4)
@@ -119,16 +118,9 @@ class TestBuildStackedKeyConfigNoOverwrite(unittest.TestCase):
             stacked_ckpt_keys=True,
         )
 
-        fake_weight = MagicMock()
-        wi = MagicMock()
-        wi.weight = fake_weight
-        wi.layer_id = 0
-
-        with patch(
-            "rtp_llm.model_loader.loader.iter_stacked_moe_weights",
-            return_value=iter([kernel, scale]),
-        ):
-            result = ModelLoader._build_stacked_key_config([wi])
+        result = ModelLoader._build_stacked_key_config(
+            ModelWeightInfo(weights=[], layer_weights=[[kernel, scale]])
+        )
 
         resolved_key = shared_ckpt_key.format(i="0")
         self.assertIn(resolved_key, result)

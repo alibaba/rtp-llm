@@ -369,6 +369,13 @@ class OpenaiEndpoint(object):
         )
         if request.debug_info:
             config.return_output_ids = True
+        if config.num_return_sequences > 1 and (
+            config.return_output_ids
+            or config.return_hidden_states
+            or config.return_logits
+        ):
+            # Keep each sequence's last valid fields before the batch finishes.
+            config.is_streaming = True
         return config
 
     @staticmethod
@@ -464,6 +471,7 @@ class OpenaiEndpoint(object):
         usage = None
         aux_info = None
         extra_outputs = None
+        collected_output_ids: Optional[List[List[int]]] = None
         async for response in choice_generator:
             if len(response.choices) != len(all_choices):
                 if all_choices == []:
@@ -530,17 +538,31 @@ class OpenaiEndpoint(object):
                         all_choices[i].logprobs = response.choices[i].logprobs
             usage = response.usage or usage
             aux_info = response.aux_info or aux_info
-            if (
-                extra_outputs is not None
-                and response.extra_outputs is not None
-                and response.extra_outputs.custom_output is not None
-            ):
-                # Persistent scores must not erase prefill-only outputs.
-                extra_outputs = extra_outputs.model_copy(
-                    update=response.extra_outputs.model_dump(exclude_none=True)
+            chunk_extra = response.extra_outputs
+            if chunk_extra is None:
+                continue
+
+            # Accumulate tokens separately to avoid copying the growing history.
+            if chunk_extra.output_ids is not None:
+                if collected_output_ids is None:
+                    collected_output_ids = []
+                for i, token_ids in enumerate(chunk_extra.output_ids):
+                    if i == len(collected_output_ids):
+                        collected_output_ids.append([])
+                    collected_output_ids[i].extend(token_ids)
+
+            if extra_outputs is None:
+                extra_outputs = chunk_extra.model_copy(
+                    update={"output_ids": None}, deep=True
                 )
             else:
-                extra_outputs = response.extra_outputs or extra_outputs
+                updates = chunk_extra.model_dump(
+                    exclude={"output_ids"}, exclude_none=True
+                )
+                extra_outputs = extra_outputs.model_copy(update=updates)
+
+        if extra_outputs is not None:
+            extra_outputs.output_ids = collected_output_ids
 
         if usage == None:
             logging.warning(f"No usage returned from stream response. use empty value.")
@@ -572,6 +594,7 @@ class OpenaiEndpoint(object):
         choice_generator: AsyncGenerator[StreamResponseObject, None],
         debug_info: Optional[DebugInfo],
         tokenizer: Optional[Any] = None,
+        stream: bool = True,
     ) -> CompleteResponseAsyncGenerator:
         # prompt_logits is attached by renderer.generate_choice on the last StreamResponseObject;
         # capture it here so collect_with_prompt_logits can attach it to the final ChatCompletionResponse.
@@ -583,7 +606,8 @@ class OpenaiEndpoint(object):
             async for response in choice_generator:
                 output = None
                 if (
-                    debug_info is not None
+                    stream
+                    and debug_info is not None
                     and response.extra_outputs is not None
                     and response.extra_outputs.output_ids is not None
                 ):
@@ -765,7 +789,7 @@ class OpenaiEndpoint(object):
         )
 
         return self._complete_stream_response(
-            choice_generator, debug_info, self.tokenizer
+            choice_generator, debug_info, self.tokenizer, stream=bool(chat_request.stream)
         )
 
     def _prepare_chat_input(self, request_id: int, chat_request):

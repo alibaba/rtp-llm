@@ -223,7 +223,7 @@ public:
         }
     }
 
-    absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
+    absl::StatusOr<ScheduleOutput> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
         cond_.wait_for(lock, std::chrono::seconds(30), [this] {
             return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
@@ -249,7 +249,7 @@ public:
             }
         }
 
-        return running_streams_;
+        return ScheduleOutput{running_streams_};
     }
 
     absl::Status stop() override {
@@ -279,7 +279,7 @@ private:
     std::list<GenerateStreamPtr> running_streams_;
     uint32_t                     batch_size_;
     bool                         reorder_request_;
-    uint32_t                     current_step_ = 0;
+    uint32_t                     current_step_         = 0;
     bool                         draining_mixed_modes_ = false;
 
     std::shared_ptr<KVCacheManager> cache_manager_;

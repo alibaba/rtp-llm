@@ -91,6 +91,7 @@ class Qwen3Model(GptModelBase):
         py_hw_kernel_config=None,
         device_resource_config=None,
     ):
+        """Build owned decoder layers with global weight IDs and local cache IDs."""
         super().__init__(
             config,
             parallelism_config,
@@ -101,8 +102,13 @@ class Qwen3Model(GptModelBase):
             device_resource_config=device_resource_config,
         )
 
-        self.embed_tokens = Embedding(
-            config, parallelism_config, weights.get_global_weight(W.embedding)
+        layer_ids = self.layer_ids()
+        self.embed_tokens = (
+            Embedding(
+                config, parallelism_config, weights.get_global_weight(W.embedding)
+            )
+            if 0 in layer_ids
+            else None
         )
         self.layers = nn.ModuleList(
             [
@@ -114,11 +120,15 @@ class Qwen3Model(GptModelBase):
                     quant_config,
                     py_hw_kernel_config,
                 )
-                for idx in range(self.layer_num)
+                for idx in layer_ids
             ]
         )
-        self.norm = RMSNorm(
-            weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
+        self.norm = (
+            RMSNorm(
+                weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
+            )
+            if self.layer_num - 1 in layer_ids
+            else None
         )
         self._init_capture_context(
             self._capture_canonical_layer,
@@ -136,21 +146,39 @@ class Qwen3Model(GptModelBase):
         return self.norm(hidden_states)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        input_ids: torch.Tensor = inputs.input_ids
-        inputs_embeds = self.embed_tokens(input_ids)
-        hidden_states = inputs_embeds
+        """Embed at the model entry or resume the upstream PP hidden states.
+
+        The first target stage and a complete draft own their embedding.
+        Later target stages require the hidden-state boundary supplied by
+        the upstream stage; stage-local warmup supplies the same boundary with zeros.
+        """
+        if self.embed_tokens is not None:
+            hidden_states = self.embed_tokens(inputs.input_ids)
+        else:
+            hidden_states = inputs.pp_intermediates["hidden_states"]
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         capture = self.capture_context(inputs.capture_hidden_states)
-        for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+        layer_ids = self.layer_ids()
+        # Cache surfaces are indexed by model-local layer ids (the C++ layout is projected to this stage).
+        for local_idx, decoder_layer in enumerate(self.layers):
+            layer_fmha_impl = select_fmha_impl_for_layer(
+                fmha_impl, self.kv_cache, local_idx
+            )
             hidden_states = decoder_layer(
                 hidden_states,
                 layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=(
+                    self.kv_cache.get_layer_cache(local_idx) if self.kv_cache else None
+                ),
             )
-            capture.capture_layer(i, hidden_states)
-        return capture.finalize(hidden_states)
+            capture.capture_layer(layer_ids[local_idx], hidden_states)
+        if self.norm is not None:
+            return capture.finalize(hidden_states)
+        # Non-last stage: emit the single boundary tensor (fused-residual models emit two, see qwen3_next).
+        outputs = PyModelOutputs(hidden_states)
+        outputs.pp_intermediates = {"hidden_states": hidden_states}
+        return outputs
 
 
 __all__ = [

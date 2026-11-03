@@ -153,7 +153,7 @@ class LayerKVCache:
     @property
     def layer_id(self) -> int:
         """
-        Global layer id
+        Model-local (stage-local) layer id
         """
 
     @property
@@ -388,6 +388,11 @@ class PyModelInputs:
     @multimodal_inputs.setter
     def multimodal_inputs(self, arg0: PyMultimodalInputs) -> None: ...
 
+    @property
+    def pp_intermediates(self) -> dict[str, torch.Tensor]: ...
+    @pp_intermediates.setter
+    def pp_intermediates(self, arg0: dict[str, torch.Tensor]) -> None: ...
+
 class PyModelOutputs:
     @typing.overload
     def __init__(self) -> None:
@@ -428,6 +433,11 @@ class PyModelOutputs:
 
     @mtp_target_hidden_states.setter
     def mtp_target_hidden_states(self, arg0: torch.Tensor | None) -> None: ...
+
+    @property
+    def pp_intermediates(self) -> dict[str, torch.Tensor]: ...
+    @pp_intermediates.setter
+    def pp_intermediates(self, arg0: dict[str, torch.Tensor]) -> None: ...
 
 class PyMultimodalInputs:
     mm_features_spans: torch.Tensor
@@ -487,7 +497,13 @@ def init_exec_ctx(
     mla_ops_type: int,
 ) -> None: ...
 
-def register_comm_ops(broadcast_fn: typing.Callable, allreduce_fn: typing.Callable, allgather_fn: typing.Callable) -> None:
+def register_comm_ops(
+    broadcast_fn: typing.Callable,
+    allreduce_fn: typing.Callable,
+    allgather_fn: typing.Callable,
+    isend_fn: typing.Callable[[torch.Tensor, int, str], typing.Any],
+    irecv_fn: typing.Callable[[torch.Tensor, int, str], typing.Any],
+) -> None:
     """
     Register Python callbacks for C++ communication ops.
     """

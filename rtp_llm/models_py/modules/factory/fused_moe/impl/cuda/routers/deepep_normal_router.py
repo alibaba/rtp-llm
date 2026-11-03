@@ -110,8 +110,10 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         )
 
         # pre dispatch
-        tp_expert_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size).to(
-            torch.int64
+        # Convert before slicing so empty TP shards retain backing storage,
+        # just like topk_weights; DeepEP requires both pointers to be null or not.
+        tp_expert_ids = torch.narrow(
+            topk_ids.to(torch.int64), 0, slice_begin, slice_size
         )
         tp_expert_scales = torch.narrow(topk_weights, 0, slice_begin, slice_size)
 
@@ -154,9 +156,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
                 expert_x_scale = expert_x_scale[:, 0].contiguous()
         else:
             if use_fp8:
-                raise ValueError(
-                    "FP8 DeepEP dispatch must return (activation, scale)"
-                )
+                raise ValueError("FP8 DeepEP dispatch must return (activation, scale)")
             expert_x = output
 
         expert_num_tokens = torch.tensor(

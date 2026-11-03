@@ -17,7 +17,8 @@ public:
 
     static bool decodeTransfer(const MemoryOperationRequestPB&  request,
                                std::vector<TransferDescriptor>& descriptors,
-                               const std::vector<GroupSetPtr>&  group_sets);
+                               const std::vector<GroupSetPtr>&  group_sets,
+                               bool                             allow_absent_group_sets = false);
 
     static MemoryOperationResponsePB::Code encodeCode(CacheCopyError error);
     static CacheCopyError                  decodeCode(MemoryOperationResponsePB::Code error);

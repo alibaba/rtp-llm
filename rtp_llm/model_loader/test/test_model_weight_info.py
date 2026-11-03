@@ -59,6 +59,7 @@ class FakeCompositeWeight:
 
 def make_database(files: List[FakeCkptFileInfo]) -> CkptDatabase:
     database = CkptDatabase(None)
+    database.lora_ckpt = SimpleNamespace(has_lora=lambda: False)
     database.pretrain_file_list = files
     database.finetune_file_list = []
     database._is_ft_style = False
@@ -519,6 +520,9 @@ class OutputVocabWeightTest(unittest.TestCase):
 
 
 class FakeQuantAlgo:
+    def getWeightBits(self):
+        return 16
+
     def isQuant(self):
         return False
 
@@ -557,6 +561,7 @@ def make_minimal_configs(
         attn_config=attn_config,
         quant_config=None,
         num_layers=1,
+        is_mtp=False,
         src_quantization_bit=0,
         isGatedActivation=lambda: False,
         expert_num=0,
@@ -572,6 +577,8 @@ def make_minimal_configs(
         vocab_size=5,
     )
     parallelism_config = SimpleNamespace(
+        pp_size=1,
+        pp_rank=0,
         get_attn_tp_size=lambda: 1,
         get_attn_tp_rank=lambda: 0,
         ep_size=1,
@@ -579,6 +586,7 @@ def make_minimal_configs(
         dp_size=1,
         dp_rank=0,
         world_size=1,
+        world_rank=0,
         local_world_size=1,
         get_ffn_tp_rank=lambda: 0,
         get_ffn_tp_size=lambda: 1,
@@ -590,6 +598,71 @@ def make_minimal_configs(
     )
     hw_kernel_config = SimpleNamespace(use_swizzleA=False)
     return model_config, parallelism_config, hw_kernel_config
+
+
+class ModelDeployLayerRangeTest(unittest.TestCase):
+    def test_load_config_uses_local_model_scope(self):
+        for is_mtp, layers, pp_size, pp_rank, counts, expected in (
+            (False, 7, 3, 0, [2, 3, 2], range(2)),
+            (False, 7, 3, 1, [2, 3, 2], range(2, 5)),
+            (False, 7, 3, 2, [2, 3, 2], range(5, 7)),
+            (True, 2, 3, 2, [2, 3, 2], range(2)),
+            (False, 7, 1, 0, [], range(7)),
+            (False, 7, 1, 0, [2, 5], range(7)),
+        ):
+            with self.subTest(is_mtp=is_mtp, pp_size=pp_size, pp_rank=pp_rank):
+                model, parallel, hw = make_minimal_configs()
+                model.num_layers = layers
+                model.is_mtp = is_mtp
+                parallel.pp_size = pp_size
+                parallel.pp_rank = pp_rank
+                parallel.pp_stage_layer_counts = counts
+                parallel.world_size = pp_size
+                parallel.world_rank = pp_rank
+                weights_info = ModelDeployWeightInfo(model, parallel, hw, object())
+                load_config = weights_info.create_load_config(
+                    torch.float16, make_database([])
+                )
+                self.assertEqual(weights_info.layer_range, expected)
+                self.assertEqual(load_config.layer_range, expected)
+
+
+class EplbNodeCountTest(unittest.TestCase):
+    def test_pp_node_count_belongs_to_the_ep_group_and_pp1_keeps_main(self):
+        # (PP, PP rank, TP, DP, EP, local world size, nodes per EP group)
+        for pp, pp_rank, tp, dp, ep, local, expected in (
+            (1, 0, 1, 8, 8, 8, 1),
+            (1, 0, 1, 16, 8, 8, 2),
+            (2, 0, 1, 8, 8, 8, 1),
+            (2, 0, 1, 16, 16, 8, 2),
+            (2, 0, 8, 1, 1, 8, 1),
+            # 12 ranks over 3 machines of 4: each 6-rank EP group spans 2.
+            (2, 0, 2, 3, 6, 4, 2),
+            (2, 1, 2, 3, 6, 4, 2),
+            # Dense PP stages may span nodes unevenly without enabling EPLB.
+            (4, 1, 3, 1, 3, 4, 2),
+            (4, 2, 3, 1, 3, 4, 2),
+            (4, 1, 1, 3, 3, 4, 2),
+            (4, 2, 1, 3, 3, 4, 2),
+        ):
+            with self.subTest(pp=pp, pp_rank=pp_rank, tp=tp, dp=dp, ep=ep):
+                model, parallel, hw = make_minimal_configs()
+                parallel.pp_size, parallel.pp_rank = pp, pp_rank
+                parallel.pp_stage_layer_counts = [1] * pp
+                parallel.tp_size, parallel.dp_size = tp, dp
+                parallel.ep_size = ep
+                parallel.world_size = pp * tp * dp
+                parallel.world_rank = pp_rank * tp * dp
+                parallel.local_world_size = local
+                parallel.get_attn_tp_size = lambda: tp
+                model.num_layers = pp
+                weights_info = ModelDeployWeightInfo(model, parallel, hw, object())
+                self.assertEqual(weights_info.num_nodes, expected)
+                load_config = weights_info.create_load_config(
+                    torch.float16,
+                    make_database([]),
+                )
+                self.assertEqual(load_config.num_nodes, expected)
 
 
 class MinimalLmHeadDeployWeightInfo(ModelDeployWeightInfo):
