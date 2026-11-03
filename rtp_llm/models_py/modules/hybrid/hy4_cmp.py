@@ -30,10 +30,11 @@ def implementation_capabilities() -> dict:
     return {
         "version": "production-attention-v2",
         "validation": "NOT_RUN",
-        "phase": "single-token decode",
+        "phase": "decode, flattened target_verify/draft_extend (M<=256)",
         "heads": [8, 64],
         "weight_format": "MXFP8 group32",
-        "kv_cache": "BF16",
+        "kv_cache": ["BF16", "native fp8_ds_mla 656-byte slots"],
+        "fp8_cache_attention": "native SparseMlaFp8Op; BF16 query/output, FP8 cache",
         "fused_kernels": ["qkv_norm_quant", "output_bmm_gate_quant",
                           "indexer_wk_norm_rope_cache", "indexer_q_rope_quant_weighted_scale", "qb_rope_direct_pe"],
         "native_operations": ["absorbed query BMM", "Indexer Q projection", "sink attention", "O projection"],
@@ -65,14 +66,12 @@ class Hy4Cmp:
         return clone
 
     def _unsupported(self, hidden, fmha, cache):
-        if _multi_token_decode(fmha.attn_inputs):
-            return "multi-token decode unsupported"
-        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import SparseMlaImpl
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import SparseMlaImpl, SparseMlaFp8Op
         from rtp_llm.models_py.modules.factory.linear.impl.cuda.mxfp8_linear import CudaMxfp8Linear
         from rtp_llm.utils.model_weight import W
 
         a = self.attention
-        if not isinstance(fmha, SparseMlaImpl):
+        if type(fmha) is not SparseMlaImpl:
             return "requires SparseMlaImpl"
         if (hidden.ndim != 2 or hidden.shape[1] != 6144
                 or not 1 <= hidden.shape[0] <= 256
@@ -83,22 +82,33 @@ class Hy4Cmp:
         if (a.q_lora_rank, a.kv_lora_rank, a.qk_nope_head_dim,
                 a.qk_rope_head_dim, a.v_head_dim) != (2048, 512, 192, 64, 256):
             return "unsupported MLA geometry"
-        if hidden.shape[0] not in (1,2,4,8,16,17,32,64,128,256):
-            return "QB requires measured token bucket"
         if not fmha._fuse_qk_rope_cat_cache_mla or fmha._is_neox_style:
             return "QB requires fused non-NeoX cache write"
         if a.num_heads not in (8, 64) or a.gating_type != "elementwise":
             return "requires H8/H64 elementwise gate"
         if a.attn_sink is None or not fmha.is_sparse():
             return "requires sparse sink attention"
-        if cache is None or cache.kv_cache_base.dtype != torch.bfloat16:
-            return "requires real BF16 LayerKVCache"
+        if cache is None:
+            return "requires real LayerKVCache"
+        storage = cache.kv_cache_base
+        if (not storage.is_cuda or storage.device != hidden.device or storage.ndim != 3
+                or storage.shape[0] < 1 or storage.shape[1] != 64 or not storage.is_contiguous()):
+            return "requires contiguous CUDA MLA cache [blocks,64,slot]"
+        if fmha._kv_cache_type == "fp8_ds_mla":
+            if (not isinstance(fmha.fmha_impl, SparseMlaFp8Op)
+                    or storage.dtype not in (torch.uint8, torch.float8_e4m3fn)
+                    or storage.shape[2] != 656):
+                return "requires native FP8 MLA operator and 656-byte cache slots"
+        elif (fmha._kv_cache_type != "auto" or isinstance(fmha.fmha_impl, SparseMlaFp8Op)
+                or storage.dtype != torch.bfloat16 or storage.shape[2] != 576):
+            return "requires native BF16 MLA operator and 576-element cache slots"
         if getattr(fmha, "cp_params", None) is not None:
             return "context parallel unsupported"
         if getattr(fmha, "pinned_mla_groups", {}):
             return "pinned MLA cache unsupported"
-        if getattr(fmha.fmha_params, "multi_token_decode_total_tokens", 0) > 0:
-            return "multi-token decode unsupported"
+        reason = self._request_layout_reason(hidden, fmha)
+        if reason is not None:
+            return reason
         if not all(isinstance(op, CudaMxfp8Linear) for op in
                    (a.fused_qkv_a_proj, a.q_b_proj, a.o_proj)):
             return "requires native MXFP8 projections"
@@ -140,10 +150,64 @@ class Hy4Cmp:
                 return "score PDL requires request-prepared metadata"
         return None
 
-    def _workspace(self, hidden, fused):
+    @staticmethod
+    def _request_layout_reason(hidden, fmha):
+        inputs, params = fmha.attn_inputs, fmha.fmha_params
+        rows = hidden.shape[0]
+        multi = _multi_token_decode(inputs)
+        if bool(getattr(inputs, "is_target_verify", False)) and bool(getattr(inputs, "is_draft_extend", False)):
+            return "ambiguous MTP phase"
+        total = int(getattr(params, "multi_token_decode_total_tokens", 0))
+        if multi:
+            if not bool(inputs.is_prefill) or total != rows:
+                return "MTP requires native flattened prefill-shaped decode metadata"
+            table = getattr(inputs, "kv_cache_kernel_block_id_device", None)
+            if not isinstance(table, torch.Tensor) or table.numel() == 0:
+                table = getattr(inputs, "kv_cache_block_id_device", None)
+            if (not isinstance(table, torch.Tensor) or table.ndim != 2
+                    or table.shape[0] < 1 or rows % table.shape[0]
+                    or table.device != hidden.device or table.dtype != torch.int32):
+                return "MTP requires uniform flattened rows per physical request table"
+            if inputs.input_lengths.numel() != table.shape[0] or inputs.prefix_lengths.numel() != table.shape[0]:
+                return "MTP request length metadata size mismatch"
+            width = rows // table.shape[0]
+            if inputs.input_lengths.is_cuda or inputs.prefix_lengths.is_cuda:
+                for tensor in (inputs.input_lengths, inputs.prefix_lengths):
+                    if (tensor.device != hidden.device or tensor.dtype != torch.int32
+                            or tensor.ndim != 1 or not tensor.is_contiguous()):
+                        return "MTP CUDA request length metadata layout mismatch"
+                # fill_params builds this host prefix sum before graph capture.
+                # Validate every request width without reading CUDA lengths.
+                indptr = getattr(params, "qo_indptr_h", None)
+                if (not isinstance(indptr, torch.Tensor) or indptr.is_cuda
+                        or indptr.dtype != torch.int32
+                        or indptr.shape != (table.shape[0] + 1,)
+                        or indptr.tolist() != list(range(0, rows + 1, width))):
+                    return "MTP requires native host proof of uniform query widths"
+            elif any(length != width for length in inputs.input_lengths.tolist()):
+                return "ragged MTP query widths unsupported by native paged Indexer mapping"
+        elif total:
+            return "multi-token metadata supplied to single-token decode"
+        for owner in (params, fmha.rope_params):
+            for name, dtype in (("positions_d", torch.int32), ("slot_mapping", torch.int64)):
+                tensor = getattr(owner, name, None)
+                if (not isinstance(tensor, torch.Tensor) or tensor.shape != (rows,)
+                        or tensor.dtype != dtype or tensor.device != hidden.device
+                        or not tensor.is_contiguous()):
+                    return "native per-token position/slot metadata layout mismatch"
+        lengths = getattr(params, "expanded_seq_lens", None)
+        if (not isinstance(lengths, torch.Tensor) or lengths.shape != (rows,)
+                or lengths.dtype != torch.int32 or lengths.device != hidden.device):
+            return "native per-token causal lengths layout mismatch"
+        return None
+
+    def _workspace(self, hidden, fused, fmha):
         from .hy4_cmp_kernels.ops import output_bmm_gate, qkv_norm, qb
 
-        key = (hidden.device, hidden.shape[0])
+        key = (hidden.device, hidden.shape[0],
+               bool(getattr(fmha.attn_inputs, "is_target_verify", False)),
+               bool(getattr(fmha.attn_inputs, "is_draft_extend", False)),
+               fmha.attn_inputs.input_lengths.numel())
         if key not in self._workspaces:
             if torch.cuda.is_current_stream_capturing():
                 raise RuntimeError("HY4 CMP bucket must warm up before capture")
@@ -279,7 +343,7 @@ class Hy4Cmp:
         if x_fp8 is None:
             x_fp8, x_scale = mxfp8_quant_act_packed(hidden_states)
         fused = a.fused_qkv_a_proj(x_fp8, input_scales=x_scale)
-        workspace = self._workspace(hidden_states, fused)
+        workspace = self._workspace(hidden_states, fused, fmha_impl)
         full_indexer = a.indexer is not None and not a.reuse_topk_indices
         if full_indexer:
             self._prepare_indexer(hidden_states, x_fp8, x_scale, fmha_impl, kv_cache, workspace)
@@ -370,6 +434,9 @@ class Hy4Cmp:
             output = all_reduce(output, group=Group.TP)
         phase = "capture_dispatch" if torch.cuda.is_current_stream_capturing() else "eager_dispatch"
         self.counts[phase] += 1
+        if _multi_token_decode(fmha_impl.attn_inputs):
+            self.counts["target_verify_dispatch" if fmha_impl.attn_inputs.is_target_verify
+                        else "draft_extend_dispatch"] += 1
         if self.counts[phase] == 1:
             logging.info("HY4 CMP actual dispatch layer=%s heads=%s phase=%s pdl=%s kernels=%s",
                          a.layer_idx, a.num_heads, phase, self.pdl,

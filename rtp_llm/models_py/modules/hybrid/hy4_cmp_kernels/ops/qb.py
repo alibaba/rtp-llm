@@ -81,7 +81,7 @@ class Outputs:
 
 
 def allocate_outputs(rows, heads=64, *, device="cuda"):
-    if rows not in (1, 2, 4, 8, 16, 17, 32, 64, 128, 256) or heads not in (8, 64):
+    if not 1 <= rows <= 256 or heads not in (8, 64):
         raise ValueError("unsupported HY4 rows/heads")
     if torch.cuda.is_current_stream_capturing():
         raise RuntimeError("allocate_outputs must run outside capture")
