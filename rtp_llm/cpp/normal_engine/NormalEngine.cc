@@ -444,11 +444,20 @@ NormalEngine::runPrefillWarmupShape(const std::shared_ptr<GenerateInput>& genera
     }
 
     stream->setReuseLength(reuse_length);
-    // The temporary manager owns valid physical block 0. Alias the logical prompt table to that
-    // block so the warmup shapes exercise the production paged-attention path without reserving
-    // a production-sized KV cache before capacity is sampled.
+    // The temporary manager owns the null sentinel and one real block per group.
+    // Cached LINEAR prefixes require a nonzero state block, so alias all logical
+    // warmup pages to that real block instead of the reserved null sentinel.
     stream->fakeInitKVBlock((static_cast<size_t>(stream->seqLength()) + static_cast<size_t>(block_size) - 1)
                             / block_size);
+    auto& warmup_blocks = stream->streamCacheResource().kvCacheMutable();
+    for (const auto& group : resource_context.cache_manager->cacheConfig().groups()) {
+        RTP_LLM_CHECK_WITH_INFO(
+            group.block_num > 1, "prefill warmup requires a non-null block for tag=%s", group.tag.c_str());
+        for (int batch = 0; batch < warmup_blocks.batchSize(); ++batch) {
+            auto& blocks = warmup_blocks.mutableBlockIds(batch, group.tag);
+            blocks.assign(BlockIndicesType(blocks.blocksNum(), 1));
+        }
+    }
 
     std::list<GenerateStreamPtr> streams{stream};
     if (token_budget <= 0) {
@@ -491,6 +500,20 @@ std::shared_ptr<KVCacheManager> NormalEngine::createWarmupCacheManager() {
         cache_config, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init warmup kv cache manager failed");
+    }
+    // Synthetic cached prefixes have no earlier request to initialize their
+    // state. Seed the tiny temporary pool before any warmup alias is read.
+    const auto warmup_layout = cache_manager->allLayerCacheBase();
+    for (const auto& [tag, layout] : warmup_layout.groups()) {
+        (void)tag;
+        for (const auto& layer : layout.layers()) {
+            if (layer.kv_addr.defined()) {
+                layer.kv_addr.zero_();
+            }
+            if (layer.kv_scale_addr.defined()) {
+                layer.kv_scale_addr.zero_();
+            }
+        }
     }
     return cache_manager;
 }

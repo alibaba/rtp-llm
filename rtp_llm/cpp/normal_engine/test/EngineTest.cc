@@ -885,6 +885,49 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupStartup) {
     ASSERT_EQ(cache_config.groups().front().block_num, 100u);
 }
 
+TEST_F(NormalEngineTest, testChunkedPrefillWarmupUsesNonNullPrefixBlocks) {
+    CustomConfig config;
+    config.warm_up            = true;
+    config.prefill_chunk_size = 4;
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+
+    bool saw_cached_prefix             = false;
+    NormalExecutor::test_model_factory = [&](const GptModelInitParams& init_params) {
+        if (init_params.cache_manager && init_params.cache_manager->cacheConfig().groups().front().block_num == 2) {
+            for (const auto& [tag, layout] : init_params.kv_cache_layer_layout->groups()) {
+                (void)tag;
+                for (const auto& layer : layout.layers()) {
+                    if (layer.kv_addr.defined()) {
+                        EXPECT_TRUE(layer.kv_addr.eq(0).all().item<bool>());
+                    }
+                }
+            }
+            return std::make_unique<MockModel>(model_config.vocab_size, [&](const GptModelInputs& inputs) {
+                ASSERT_TRUE(inputs.warmup);
+                ASSERT_TRUE(inputs.kv_cache_kernel_block_id.defined());
+                // Block zero cannot represent a cached KDA prefix state. The
+                // tiny warmup pool owns block one for every logical alias.
+                EXPECT_TRUE(inputs.kv_cache_kernel_block_id.eq(1).all().item<bool>());
+                if (inputs.prefix_lengths.gt(0).any().item<bool>()) {
+                    saw_cached_prefix = true;
+                }
+            });
+        }
+        return std::make_unique<MockModel>(model_config.vocab_size);
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } factory_reset_guard;
+
+    auto engine = std::make_shared<NormalEngine>(params, nullptr);
+    EXPECT_TRUE(saw_cached_prefix);
+}
+
 TEST_F(NormalEngineTest, testChunkedPrefillWarmupCapsIntMaxBudgetByContextBatchSize) {
     CustomConfig config;
     config.warm_up                = true;
