@@ -1,17 +1,22 @@
 package org.flexlb.cache.match.localsync;
 
 import lombok.extern.slf4j.Slf4j;
+
 import org.flexlb.cache.domain.DiffResult;
+import org.flexlb.cache.primitive.LongKeySet;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.WorkerRegistryConfig;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PreDestroy;
 import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ForkJoinTask;
 import java.util.concurrent.RejectedExecutionException;
+
+import javax.annotation.PreDestroy;
 
 /**
  * Engine local view (small hash table)
@@ -33,6 +38,20 @@ public class EngineLocalView {
      * Custom ForkJoin thread pool for parallel computation
      */
     private volatile ForkJoinPool customPool;
+    private final int diffParallelism;
+
+    public EngineLocalView() {
+        this(new WorkerRegistryConfig.ExecutorsConfig());
+    }
+
+    @Autowired
+    public EngineLocalView(ConfigService configService) {
+        this(configService.loadBalanceConfig().getWorkerRegistry().getExecutors());
+    }
+
+    private EngineLocalView(WorkerRegistryConfig.ExecutorsConfig executors) {
+        diffParallelism = Math.min(Runtime.getRuntime().availableProcessors(), executors.getCacheDiffParallelism());
+    }
 
     private volatile boolean closed;
 
@@ -55,7 +74,7 @@ public class EngineLocalView {
             }
             if (customPool == null) {
                 customPool =
-                        new ForkJoinPool(Math.min(Runtime.getRuntime().availableProcessors(), 8));
+                        new ForkJoinPool(diffParallelism);
             }
             return customPool;
         }
@@ -83,44 +102,18 @@ public class EngineLocalView {
 
         Set<Long> oldCacheBlocks = getEngineCacheBlocks(engineIPort);
 
-        // Efficiently calculate differences
-        Set<Long> addedBlocks = ConcurrentHashMap.newKeySet(128);
-        Set<Long> removedBlocks = ConcurrentHashMap.newKeySet(128);
-
-        // Use custom ForkJoin thread pool to parallel compute added and removed cache blocks
         ForkJoinPool pool = diffPool();
-        ForkJoinTask<?> addedTask = null;
+        ForkJoinTask<LongKeySet> addedTask = null;
+        Set<Long> addedBlocks;
+        Set<Long> removedBlocks;
         try {
-            addedTask =
-                    pool.submit(
-                            () ->
-                                    newCacheBlocks.parallelStream()
-                                            .filter(
-                                                    blockCacheKey ->
-                                                            !oldCacheBlocks.contains(blockCacheKey))
-                                            .forEach(addedBlocks::add));
-
-            ForkJoinTask<?> removedTask =
-                    pool.submit(
-                            () ->
-                                    oldCacheBlocks.parallelStream()
-                                            .filter(
-                                                    blockCacheKey ->
-                                                            !newCacheBlocks.contains(blockCacheKey))
-                                            .forEach(removedBlocks::add));
-
-            addedTask.join();
-            removedTask.join();
+            addedTask = pool.submit(() -> LongKeySet.difference(newCacheBlocks, oldCacheBlocks));
+            ForkJoinTask<LongKeySet> removedTask = pool.submit(() -> LongKeySet.difference(oldCacheBlocks, newCacheBlocks));
+            addedBlocks = addedTask.join();
+            removedBlocks = removedTask.join();
         } catch (RejectedExecutionException error) {
-            if (addedTask != null) {
-                addedTask.join();
-            }
-            newCacheBlocks.stream()
-                    .filter(blockCacheKey -> !oldCacheBlocks.contains(blockCacheKey))
-                    .forEach(addedBlocks::add);
-            oldCacheBlocks.stream()
-                    .filter(blockCacheKey -> !newCacheBlocks.contains(blockCacheKey))
-                    .forEach(removedBlocks::add);
+            addedBlocks = addedTask == null ? LongKeySet.difference(newCacheBlocks, oldCacheBlocks) : addedTask.join();
+            removedBlocks = LongKeySet.difference(oldCacheBlocks, newCacheBlocks);
         }
 
         // Update statistics in dynamic sync interval manager
@@ -149,8 +142,7 @@ public class EngineLocalView {
                     blockCacheKey);
             return;
         }
-        Set<Long> engineCache =
-                engineViews.computeIfAbsent(engineIPort, k -> ConcurrentHashMap.newKeySet());
+        Set<Long> engineCache = engineViews.computeIfAbsent(engineIPort, k -> new LongKeySet());
 
         engineCache.add(blockCacheKey);
     }

@@ -427,6 +427,31 @@
   </build>
 
     <profiles>
+        <profile>
+            <id>cache-performance-regression</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>default-test</id>
+                                <configuration combine.self="override">
+                                    <includes>
+                                        <include>**/CacheDiffPerformanceTest.java</include>
+                                    </includes>
+                                    <groups>performance-regression</groups>
+                                    <forkCount>1</forkCount>
+                                    <reuseForks>false</reuseForks>
+                                    <failIfNoTests>false</failIfNoTests>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
         <!-- Run FlexLB Sync performance regressions in a dedicated Maven invocation. -->
         <profile>
             <id>sync-performance-regression</id>
@@ -442,6 +467,7 @@
                                     <includes>
                                         <include>**/WorkerBatcherPerformanceTest.java</include>
                                         <include>**/PrefillAdmissionFailurePerformanceTest.java</include>
+                                        <include>**/MillionBlockCacheStatusPerformanceTest.java</include>
                                     </includes>
                                     <groups>performance-regression</groups>
                                     <forkCount>1</forkCount>

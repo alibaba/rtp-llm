@@ -134,10 +134,16 @@ public final class FlexlbConfigValidator {
     }
 
     public static void validate(FlexlbConfig config) {
+        require(config.getEngineGrpc() != null, "engineGrpc", "is required");
         require(
                 config.getEngineGrpc().getKvCacheMaxInboundMessageBytes() > 0,
                 "engineGrpc.kvCacheMaxInboundMessageBytes",
                 "must be positive");
+        positive(config.getEngineGrpc().getExecutorThreads(), "engineGrpc.executorThreads");
+        positive(
+                config.getEngineGrpc().getExecutorQueueCapacity(),
+                "engineGrpc.executorQueueCapacity");
+        positive(config.getEngineGrpc().getEventLoopThreads(), "engineGrpc.eventLoopThreads");
         require(
                 config.getSchemaVersion() == FlexlbConfig.CURRENT_SCHEMA_VERSION,
                 "schemaVersion",
@@ -368,6 +374,14 @@ public final class FlexlbConfigValidator {
     }
 
     private static void validateWorkerRegistry(WorkerRegistryConfig workers) {
+        require(workers.getExecutors() != null, "workerRegistry.executors", "is required");
+        var executors = workers.getExecutors();
+        positive(executors.getCacheStatusThreads(), "workerRegistry.executors.cacheStatusThreads");
+        range(
+                executors.getCacheDiffParallelism(),
+                1,
+                32767,
+                "workerRegistry.executors.cacheDiffParallelism");
         require(workers.getHealth() != null, "workerRegistry.health", "is required");
         positive(
                 workers.getHealth().getStatusPollIntervalMs(),

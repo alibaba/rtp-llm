@@ -23,7 +23,6 @@ import org.flexlb.balance.scheduler.RouteAdmission;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.InternalRuntimeSettings;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -157,15 +156,15 @@ public abstract class FlexLBMockTestBase {
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         // 3. Create gRPC infrastructure
-        InternalRuntimeSettings runtime = config.getInternalRuntime();
-        eventLoopGroup = new NioEventLoopGroup(runtime.getGrpcClientEventLoopThreads());
+        var engineGrpc = config.getEngineGrpc();
+        eventLoopGroup = new NioEventLoopGroup(engineGrpc.getEventLoopThreads());
         grpcExecutor =
                 new ThreadPoolExecutor(
-                        runtime.getGrpcClientExecutorThreads(),
-                        runtime.getGrpcClientExecutorThreads(),
+                        engineGrpc.getExecutorThreads(),
+                        engineGrpc.getExecutorThreads(),
                         60L,
                         TimeUnit.SECONDS,
-                        new LinkedBlockingQueue<>(runtime.getGrpcClientExecutorQueueCapacity()));
+                        new LinkedBlockingQueue<>(engineGrpc.getExecutorQueueCapacity()));
 
         GrpcReporter grpcReporter = new GrpcReporter(new NoOpFlexMonitor());
         grpcClient =
