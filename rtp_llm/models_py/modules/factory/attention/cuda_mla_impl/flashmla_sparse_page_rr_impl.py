@@ -71,6 +71,17 @@ class PageRRSparseMlaOp(SparseMlaOp):
                     topk=self.top_k,
                 )
             self._fp8_metadata, self._fp8_num_splits = self._fp8_schedules[key]
+        self.mega_a2a = None
+        if not params.is_prefill and self.workspace_owner is not None and self.workspace_owner.mega_a2a:
+            from rtp_llm.models_py.distributed.collective_torch import Group, get_process_group
+            from rtp_llm.models_py.kernels.cuda.dsa_mega_a2a import get_mega_a2a_buffers
+
+            # Symmetric sources exist before any capture: prepare runs outside the graph.
+            heads = self.communicator.heads
+            self.mega_a2a = get_mega_a2a_buffers(
+                heads, heads, self.workspace_owner.value_dim, params.positions_d.numel(),
+                torch.device("cuda", torch.cuda.current_device()), get_process_group(Group.TP),
+            )
 
     projects_values = True
 
@@ -259,9 +270,19 @@ class PageRRSparseMlaOp(SparseMlaOp):
             with profile_scope("RTP::attention.dsa.sfa.chunk_lse_merge"):
                 merge_mla_states_in_place(running, running_lse, projected, partial_lse)
             del partial, lse, history
+        lengths = (topk_indices >= 0).sum(-1).to(torch.int32).contiguous()
+        if self.mega_a2a is not None:
+            # MegaA2A: the merged state and its base-2 LSE (-inf without local keys) go straight to
+            # the symmetric sources the peers pull from.
+            with profile_scope("RTP::attention.dsa.sfa.mega_a2a"):
+                self.mega_a2a.output(rows).copy_(running)
+                lse = torch.mul(running_lse, 1.0 / math.log(2), out=self.mega_a2a.lse(rows))
+                lse.masked_fill_((lengths <= 0)[:, None], -float("inf"))
+                output = self.mega_a2a.merge(rows).transpose(0, 1)
+            execution.finish()
+            return output
         output = workspace("output", (rows, heads, value_dim), torch.bfloat16)
         output.copy_(running)
-        lengths = (topk_indices >= 0).sum(-1).to(torch.int32).contiguous()
         # Only the DCP boundary converts to the established base-2 contract.
         lse_base2 = (running_lse / math.log(2)).contiguous()
         output = self.communicator.combine(

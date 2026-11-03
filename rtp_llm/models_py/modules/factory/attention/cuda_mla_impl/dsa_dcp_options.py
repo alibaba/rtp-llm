@@ -7,6 +7,11 @@ DSA_DCP_TOPK
                share of the rows, and all-gathers the global positions (default).
     mega_topk  MegaTopk (rtp_llm_ops.mega_topk) selects the exact global top-k inside one kernel and
                returns the global positions this rank owns; no score is exchanged.
+DSA_DCP_COMBINE
+    a2a        LSE-weighted head scatter of the decode partial outputs through an NCCL all-to-all
+               (default).
+    mega_a2a   MegaA2A: peers pull their heads' partial outputs from symmetric memory and merge them
+               inside one kernel.
 """
 
 import os
@@ -21,3 +26,7 @@ def _option(name, default, choices):
 
 def dcp_topk_mode():
     return _option("DSA_DCP_TOPK", "a2a", ("a2a", "mega_topk"))
+
+
+def dcp_combine_backend():
+    return _option("DSA_DCP_COMBINE", "a2a", ("a2a", "mega_a2a"))

@@ -42,7 +42,11 @@ except ImportError:  # run as a plain script next to the fixture (no Bazel runfi
 TOPK, INDEX_HEADS, LATENT, ROPE, NOPE, V_HEAD = 2048, 32, 512, 64, 128, 128
 # Switch environment per arm (dsa_dcp_options); switches are read when the layer and its
 # workspace owner are built, so arms coexist in one process.
-ARMS = {"dev": {}, "mega_topk": {"DSA_DCP_TOPK": "mega_topk"}}
+ARMS = {
+    "dev": {},
+    "mega_topk": {"DSA_DCP_TOPK": "mega_topk"},
+    "mega_a2a": {"DSA_DCP_TOPK": "mega_topk", "DSA_DCP_COMBINE": "mega_a2a"},
+}
 
 
 # Row counts (requests x Q) at MegaTopk's launch-shape switches on 148 SMs: clusters of 16/8/4/2 CTAs
