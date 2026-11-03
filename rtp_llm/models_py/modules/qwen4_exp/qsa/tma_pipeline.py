@@ -32,10 +32,13 @@ def _value_half(
     KN: gl.constexpr,
     mma: gl.constexpr,
     rhs: gl.constexpr,
+    CHECK_LENGTH: gl.constexpr,
 ):
     value = Smem.slice(start, 128, dim=1).load(mma)
     rows = gl.arange(0, KN, layout=SliceLayout(1, mma))
-    return gl.convert_layout(gl.where((kt * KN + rows < S)[:, None], value, 0.0), rhs)
+    if CHECK_LENGTH:
+        value = gl.where((kt * KN + rows < S)[:, None], value, 0.0)
+    return gl.convert_layout(value, rhs)
 
 
 @g.jit
@@ -50,14 +53,15 @@ def _packed_pv(
     KN: gl.constexpr,
     mma: gl.constexpr,
     rhs: gl.constexpr,
+    CHECK_LENGTH: gl.constexpr,
 ):
     left, right = acc.reshape((QM, 2, 128)).permute((0, 2, 1)).split()
     left = gl.convert_layout(left, mma, assert_trivial=True)
     right = gl.convert_layout(right, mma, assert_trivial=True)
-    value = _value_half(Smem, 0, S, kt, KN, mma, rhs)
+    value = _value_half(Smem, 0, S, kt, KN, mma, rhs, CHECK_LENGTH)
     left = mma_v2(hi, value, left)
     left = mma_v2(lo, value, left)
-    value = _value_half(Smem, 128, S, kt, KN, mma, rhs)
+    value = _value_half(Smem, 128, S, kt, KN, mma, rhs, CHECK_LENGTH)
     right = mma_v2(hi, value, right)
     right = mma_v2(lo, value, right)
     # Splitting accumulator columns only renames registers in this MMA layout.
@@ -92,7 +96,7 @@ def _producer(
         if operand >= SLOTS:
             mbarrier.wait(empty.index(slot), (iteration - 1) & 1)
         mbarrier.expect(full.index(slot), KN * D * 2)
-        kt = operand // 2
+        kt = tiles - 1 - operand // 2
         if operand % 2 == 0:
             tma.async_copy_global_to_shared(
                 K, [Base + kt * KN, 0], full.index(slot), buf.index(slot)
@@ -101,6 +105,120 @@ def _producer(
             tma.async_copy_global_to_shared(
                 V, [Base + kt * KN, 0], full.index(slot), buf.index(slot)
             )
+
+
+@g.jit
+def _attention_step(
+    q,
+    K,
+    V,
+    Mask,
+    buf,
+    full,
+    empty,
+    S,
+    WORDS,
+    D: gl.constexpr,
+    G: gl.constexpr,
+    QM: gl.constexpr,
+    KN: gl.constexpr,
+    PIPE: gl.constexpr,
+    SLOTS: gl.constexpr,
+    WM: gl.constexpr,
+    EARLY: gl.constexpr,
+    Base,
+    TAIL: gl.constexpr,
+    iteration,
+    tiles,
+    pos,
+    live,
+    c,
+    maximum,
+    normalizer,
+    acc,
+    CHECK_LENGTH: gl.constexpr,
+):
+    mma: gl.constexpr = NVMMADistributedLayout(
+        version=[2, 0], warps_per_cta=[WM, 4 // WM], instr_shape=[16, 8]
+    )
+    lhs: gl.constexpr = DotOperandLayout(0, mma, 2)
+    rhs: gl.constexpr = DotOperandLayout(1, mma, 2)
+    kt = tiles - 1 - iteration
+    if PIPE:
+        ks = (2 * iteration) % SLOTS
+        vs = (2 * iteration + 1) % SLOTS
+        kp = ((2 * iteration) // SLOTS) & 1
+        vp = ((2 * iteration + 1) // SLOTS) & 1
+    else:
+        ks = 0
+        vs = 1
+        kp = iteration & 1
+        vp = iteration & 1
+        mbarrier.expect(full.index(ks), KN * D * 2)
+        tma.async_copy_global_to_shared(
+            K, [Base + kt * KN, 0], full.index(ks), buf.index(ks)
+        )
+        mbarrier.expect(full.index(vs), KN * D * 2)
+        tma.async_copy_global_to_shared(
+            V, [Base + kt * KN, 0], full.index(vs), buf.index(vs)
+        )
+    mbarrier.wait(full.index(ks), kp, deps=[buf])
+    k = buf.index(ks).permute((1, 0)).load(rhs)
+    scores = mma_v2(q, k, gl.full((QM, KN), 0.0, gl.float32, mma)) * (
+        D**-0.5 * 1.4426950408889634
+    )
+    if PIPE:
+        # All compute warps must finish their generic shared-memory reads before
+        # the producer can overwrite this slot with another asynchronous transfer.
+        gl.thread_barrier()
+        fence_async_shared()
+        mbarrier.arrive(empty.index(ks))
+    column = kt * KN + c
+    bits = gl.load(
+        Mask + (Base + pos[:, None]) * WORDS + column[None, :] // 32,
+        live[:, None] & ((column[None, :] < S) if CHECK_LENGTH else True),
+        other=0,
+    ).to(gl.uint32)
+    selected = ((bits >> (column[None, :] % 32)) & 1) != 0
+    scores = gl.where(selected, scores, -float("inf"))
+    next_max = gl.maximum(maximum, gl.max(scores, 1))
+    safe_max = gl.where(next_max == -float("inf"), 0.0, next_max)
+    alpha = gl.exp2(maximum - safe_max)
+    p = gl.exp2(scores - safe_max[:, None])
+    # Retain the BF16 rounding residual while using warp MMA for both PV terms.
+    hi = p.to(gl.bfloat16)
+    lo = (p - hi.to(gl.float32)).to(gl.bfloat16)
+    hi = gl.convert_layout(hi, lhs)
+    lo = gl.convert_layout(lo, lhs)
+    acc = acc * alpha[:, None]
+    if EARLY:
+        normalizer = normalizer * alpha + gl.sum(p, 1)
+        maximum = next_max
+    mbarrier.wait(full.index(vs), vp, deps=[buf])
+    if TAIL == 2 and QM == 32:
+        acc = _packed_pv(
+            hi, lo, buf.index(vs), acc, S, kt, QM, KN, mma, rhs, CHECK_LENGTH
+        )
+    else:
+        if CHECK_LENGTH and TAIL == 2:
+            v = buf.index(vs).load(mma)
+            vr = gl.arange(0, KN, layout=SliceLayout(1, mma))
+            v = gl.convert_layout(gl.where((kt * KN + vr < S)[:, None], v, 0.0), rhs)
+        else:
+            v = buf.index(vs).load(rhs)
+            if CHECK_LENGTH and TAIL == 1:
+                vr = gl.arange(0, KN, layout=SliceLayout(1, rhs))
+                v = gl.where((kt * KN + vr < S)[:, None], v, 0.0)
+        acc = mma_v2(hi, v, acc)
+        acc = mma_v2(lo, v, acc)
+    gl.thread_barrier()
+    fence_async_shared()
+    if PIPE:
+        mbarrier.arrive(empty.index(vs))
+    if not EARLY:
+        normalizer = normalizer * alpha + gl.sum(p, 1)
+        maximum = next_max
+    return maximum, normalizer, acc
 
 
 @g.jit
@@ -136,7 +254,6 @@ def _consumer(
         version=[2, 0], warps_per_cta=[WM, 4 // WM], instr_shape=[16, 8]
     )
     lhs: gl.constexpr = DotOperandLayout(0, mma, 2)
-    rhs: gl.constexpr = DotOperandLayout(1, mma, 2)
     load_layout: gl.constexpr = BlockedLayout([1, 4], [4, 8], [4, 1], [1, 0])
     tile = Tile
     group = gl.program_id(0 if G == 4 else 1)
@@ -159,82 +276,70 @@ def _consumer(
     normalizer = gl.full((QM,), 0.0, gl.float32, SliceLayout(1, mma))
     acc = gl.full((QM, D), 0.0, gl.float32, mma)
     tiles = gl.cdiv(gl.minimum(S, (tile + 1) * POSITIONS), KN)
-    for iteration in range(tiles):
-        kt = iteration
-        if PIPE:
-            ks = (2 * iteration) % SLOTS
-            vs = (2 * iteration + 1) % SLOTS
-            kp = ((2 * iteration) // SLOTS) & 1
-            vp = ((2 * iteration + 1) // SLOTS) & 1
-        else:
-            ks = 0
-            vs = 1
-            kp = iteration & 1
-            vp = iteration & 1
-            mbarrier.expect(full.index(ks), KN * D * 2)
-            tma.async_copy_global_to_shared(
-                K, [Base + kt * KN, 0], full.index(ks), buf.index(ks)
-            )
-            mbarrier.expect(full.index(vs), KN * D * 2)
-            tma.async_copy_global_to_shared(
-                V, [Base + kt * KN, 0], full.index(vs), buf.index(vs)
-            )
-        mbarrier.wait(full.index(ks), kp, deps=[buf])
-        k = buf.index(ks).permute((1, 0)).load(rhs)
-        scores = mma_v2(q, k, gl.full((QM, KN), 0.0, gl.float32, mma)) * (
-            D**-0.5 * 1.4426950408889634
+    # Visit the only potentially partial KV tile first. Earlier tiles are
+    # inside this request; their sparse membership checks remain necessary.
+    if tiles > 0:
+        maximum, normalizer, acc = _attention_step(
+            q,
+            K,
+            V,
+            Mask,
+            buf,
+            full,
+            empty,
+            S,
+            WORDS,
+            D,
+            G,
+            QM,
+            KN,
+            PIPE,
+            SLOTS,
+            WM,
+            EARLY,
+            Base,
+            TAIL,
+            0,
+            tiles,
+            pos,
+            live,
+            c,
+            maximum,
+            normalizer,
+            acc,
+            True,
         )
-        if PIPE:
-            # All compute warps must finish their generic shared-memory reads before
-            # the producer can overwrite this slot with another asynchronous transfer.
-            gl.thread_barrier()
-            fence_async_shared()
-            mbarrier.arrive(empty.index(ks))
-        column = kt * KN + c
-        bits = gl.load(
-            Mask + (Base + pos[:, None]) * WORDS + column[None, :] // 32,
-            live[:, None] & (column[None, :] < S),
-            other=0,
-        ).to(gl.uint32)
-        selected = ((bits >> (column[None, :] % 32)) & 1) != 0
-        scores = gl.where(selected, scores, -float("inf"))
-        next_max = gl.maximum(maximum, gl.max(scores, 1))
-        safe_max = gl.where(next_max == -float("inf"), 0.0, next_max)
-        alpha = gl.exp2(maximum - safe_max)
-        p = gl.exp2(scores - safe_max[:, None])
-        # Retain the BF16 rounding residual while using warp MMA for both PV terms.
-        hi = p.to(gl.bfloat16)
-        lo = (p - hi.to(gl.float32)).to(gl.bfloat16)
-        hi = gl.convert_layout(hi, lhs)
-        lo = gl.convert_layout(lo, lhs)
-        acc = acc * alpha[:, None]
-        if EARLY:
-            normalizer = normalizer * alpha + gl.sum(p, 1)
-            maximum = next_max
-        mbarrier.wait(full.index(vs), vp, deps=[buf])
-        if TAIL == 2 and QM == 32:
-            acc = _packed_pv(hi, lo, buf.index(vs), acc, S, kt, QM, KN, mma, rhs)
-        else:
-            if TAIL == 2:
-                v = buf.index(vs).load(mma)
-                vr = gl.arange(0, KN, layout=SliceLayout(1, mma))
-                v = gl.convert_layout(
-                    gl.where((kt * KN + vr < S)[:, None], v, 0.0), rhs
-                )
-            else:
-                v = buf.index(vs).load(rhs)
-                if TAIL == 1:
-                    vr = gl.arange(0, KN, layout=SliceLayout(1, rhs))
-                    v = gl.where((kt * KN + vr < S)[:, None], v, 0.0)
-            acc = mma_v2(hi, v, acc)
-            acc = mma_v2(lo, v, acc)
-        gl.thread_barrier()
-        fence_async_shared()
-        if PIPE:
-            mbarrier.arrive(empty.index(vs))
-        if not EARLY:
-            normalizer = normalizer * alpha + gl.sum(p, 1)
-            maximum = next_max
+    for iteration in range(1, tiles):
+        maximum, normalizer, acc = _attention_step(
+            q,
+            K,
+            V,
+            Mask,
+            buf,
+            full,
+            empty,
+            S,
+            WORDS,
+            D,
+            G,
+            QM,
+            KN,
+            PIPE,
+            SLOTS,
+            WM,
+            EARLY,
+            Base,
+            TAIL,
+            iteration,
+            tiles,
+            pos,
+            live,
+            c,
+            maximum,
+            normalizer,
+            acc,
+            False,
+        )
     output = gl.where(normalizer[:, None] > 0, acc / normalizer[:, None], 0.0)
     dc = gl.arange(0, D, layout=SliceLayout(0, mma))
     heads = group * G + r % G

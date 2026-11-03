@@ -10,6 +10,7 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.tma_prefill import (
     try_causal_qsa_prefill,
     try_paged_causal_qsa_prefill,
     try_ragged_causal_qsa_prefill,
+    try_ragged_paged_qsa_prefill,
 )
 
 
@@ -265,6 +266,250 @@ class TmaPrefillTest(unittest.TestCase):
                     torch.testing.assert_close(
                         actual / 2**17, expected / 2**17, atol=0.0078125, rtol=0.008
                     )
+
+    @classmethod
+    def _paged_batch_case(cls, heads, lengths, prefixes, fp8):
+        cases = [cls._paged_case(heads, p, s, fp8) for p, s in zip(prefixes, lengths)]
+        tokens = sum(lengths)
+        packed = torch.empty(
+            tokens, (heads + 2) * 256, device="cuda", dtype=torch.bfloat16
+        )
+        q = packed[:, : heads * 256]
+        q.copy_(
+            torch.cat(
+                [c[0].transpose(1, 2).reshape(s, -1) for c, s in zip(cases, lengths)]
+            )
+        )
+        backing = torch.cat([c[1].float() for c in cases]).to(cases[0][1].dtype)
+        cache = torch.as_strided(
+            backing,
+            (backing.shape[0], 2, 1, 128, 256),
+            (backing.stride(0), 128 * 256, 128 * 256, 256, 1),
+        )
+        width = max(c[3].shape[1] for c in cases)
+        table = torch.zeros(len(cases), width + 3, device=q.device, dtype=torch.int32)[
+            :, :width
+        ]
+        offset = 0
+        for row, c in enumerate(cases):
+            table[row, : c[3].shape[1]] = torch.where(c[3][0] > 0, c[3][0] + offset, 0)
+            offset += c[1].shape[0]
+        scale = None
+        if fp8:
+            scale_backing = torch.full(
+                (backing.shape[0], 272), torch.nan, device=q.device
+            )
+            scale = torch.as_strided(
+                scale_backing, (backing.shape[0], 2, 1, 128), (272, 128, 128, 1)
+            )
+            scale.copy_(torch.cat([c[5] for c in cases]))
+        ids = torch.cat([c[4][0] for c in cases])
+        cu = torch.tensor(
+            [0] + list(torch.tensor(lengths).cumsum(0).tolist()),
+            device=q.device,
+            dtype=torch.int32,
+        )
+        pd = torch.tensor(prefixes, device=q.device, dtype=torch.int32)
+        return q, backing, cache, table, ids, scale, cu, pd
+
+    @classmethod
+    def _paged_batch_reference(cls, q, cache, table, ids, lengths, prefixes, scale):
+        outputs = []
+        start = 0
+        for row, (length, prefix) in enumerate(zip(lengths, prefixes)):
+            end = start + length
+            query = q[start:end].view(1, length, -1, 256).transpose(1, 2)
+            value = cls._paged_reference(
+                query, cache, table[row : row + 1], ids[None, start:end], prefix, scale
+            )
+            outputs.append(value.transpose(1, 2).reshape(length, -1))
+            start = end
+        return torch.cat(outputs)
+
+    def test_batched_paged_refreshes_partition_prefixes_and_cache_inputs(self):
+        for heads in (6, 12):
+            for fp8 in (False, True):
+                with self.subTest(heads=heads, fp8=fp8):
+                    lengths, prefixes = [129, 257, 356], [127, 128, 384]
+                    q, backing, cache, table, ids, scale, cu, pd = (
+                        self._paged_batch_case(heads, lengths, prefixes, fp8)
+                    )
+                    ids[[0, 13, 129, 742 - 1]] = -1
+                    ids[(ids >= 0) & (ids < 32)] = -1
+                    original = ids.clone()
+
+                    def run():
+                        return try_ragged_paged_qsa_prefill(
+                            q,
+                            backing,
+                            table,
+                            ids,
+                            lengths,
+                            prefixes,
+                            cu,
+                            pd,
+                            page_size=128,
+                            kv_head_num=1,
+                            kv_scale=scale,
+                        )
+
+                    def expected(active_lengths=lengths, active_prefixes=prefixes):
+                        return self._paged_batch_reference(
+                            q, cache, table, ids, active_lengths, active_prefixes, scale
+                        )
+
+                    actual = run()
+                    self.assertIsNotNone(actual)
+                    self.assertTrue(actual.is_contiguous())
+                    torch.testing.assert_close(
+                        actual, expected(), atol=0.0078125, rtol=0.008
+                    )
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        actual = run()
+                    ids.fill_(-1)
+                    graph.replay()
+                    self.assertTrue((actual == 0).all())
+                    ids.copy_(original)
+                    q.mul_(0.75)
+                    if scale is not None:
+                        scale[:, 1].mul_(-0.5)
+                    table[:, :2].copy_(table[:, :2].flip(1))
+                    graph.replay()
+                    torch.testing.assert_close(
+                        actual, expected(), atol=0.0078125, rtol=0.008
+                    )
+                    new_lengths, new_prefixes = lengths[::-1], prefixes[::-1]
+                    cu.copy_(
+                        torch.tensor(
+                            [0, 356, 613, 742], device=q.device, dtype=torch.int32
+                        )
+                    )
+                    pd.copy_(pd.flip(0))
+                    table.copy_(table.flip(0))
+                    ids.copy_(
+                        torch.cat(
+                            [
+                                make_selection(p + s)[0, p:]
+                                for p, s in zip(new_prefixes, new_lengths)
+                            ]
+                        )
+                    )
+                    for _ in range(20):
+                        graph.replay()
+                    torch.testing.assert_close(
+                        actual,
+                        expected(new_lengths, new_prefixes),
+                        atol=0.0078125,
+                        rtol=0.008,
+                    )
+
+    def test_batched_paged_guards_keep_unsupported_metadata_on_general_path(self):
+        q, backing, _, table, ids, scale, cu, pd = self._paged_batch_case(
+            12, [129, 257], [128, 128], True
+        )
+
+        def run(**changes):
+            args = dict(
+                q=q,
+                cache=backing,
+                table=table,
+                selected=ids,
+                lengths=[129, 257],
+                prefixes=[128, 128],
+                cu_seqlens=cu,
+                prefixes_device=pd,
+                page_size=128,
+                kv_head_num=1,
+                kv_scale=scale,
+            )
+            args.update(changes)
+            return try_ragged_paged_qsa_prefill(**args)
+
+        for changes in (
+            dict(cu_seqlens=None),
+            dict(cu_seqlens=cu.long()),
+            dict(prefixes=[None, 128]),
+            dict(prefixes_device=pd.long()),
+            dict(kv_scale=scale.bfloat16()),
+            dict(lengths=[127, 259]),
+            dict(prefixes=[4096, 128]),
+            dict(kv_head_num=2),
+        ):
+            with self.subTest(changes=list(changes)):
+                self.assertIsNone(run(**changes))
+
+    def test_batched_paged_runtime_requires_trusted_selection_and_plan(self):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa import sparse_gqa_impl
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.fmha_plans import (
+            IncrementalPrefillInputs,
+            PrefillRequest,
+        )
+
+        q, backing, cache, table, ids, scale, cu, pd = self._paged_batch_case(
+            12, [129, 257], [128, 128], True
+        )
+        requests = [
+            PrefillRequest(
+                a,
+                b,
+                (128 + torch.arange(1, b - a + 1, device=q.device, dtype=torch.int32))[
+                    None
+                ],
+                ids[None, a:b],
+                128,
+            )
+            for a, b in ((0, 129), (129, 386))
+        ]
+        plan = IncrementalPrefillInputs(2, 386, table, 128, requests, ids, pd, cu)
+        impl = object.__new__(sparse_gqa_impl.SparseGqaFmhaImpl)
+        impl.head_num, impl.kv_head_num, impl.head_dim, impl.q_width = 12, 1, 256, 3072
+        impl._is_mtp_draft = False
+        impl.attn_configs = SimpleNamespace(
+            indexer_topk=512, kernel_tokens_per_block=128
+        )
+        layer = SimpleNamespace(kv_cache_base=backing, kv_scale_base=scale)
+        name = "rtp_llm.models_py.modules.qwen4_exp.qsa.tma_prefill.try_ragged_paged_qsa_prefill"
+        with patch(name, wraps=try_ragged_paged_qsa_prefill) as fast:
+            actual = impl._forward_ragged_paged(q, layer, plan, trusted_selected=True)
+            fast.assert_called_once()
+            self.assertEqual(fast.call_args.args[0].data_ptr(), q.data_ptr())
+            self.assertIs(fast.call_args.args[6], cu)
+        expected = self._paged_batch_reference(
+            q, cache, table, ids, [129, 257], [128, 128], scale
+        )
+        torch.testing.assert_close(actual, expected, atol=0.0078125, rtol=0.008)
+        ids[:, 4:8] = ids[:, :4]
+        with patch(
+            name, side_effect=AssertionError("injected selection reached batched TMA")
+        ):
+            actual = impl._forward_ragged_paged(q, layer, plan)
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
+            sparse_paged_gqa_attn,
+        )
+
+        outputs = []
+        for row, request in enumerate(requests):
+            query = (
+                q[request.start : request.end]
+                .view(1, request.end - request.start, 12, 256)
+                .transpose(1, 2)
+                .contiguous()
+            )
+            value = sparse_paged_gqa_attn(
+                query,
+                backing,
+                table[row : row + 1].contiguous(),
+                request.kv_lens,
+                request.selected_indices,
+                page_size=128,
+                kv_head_num=1,
+                kv_scale=scale,
+            )
+            outputs.append(
+                value.transpose(1, 2).reshape(request.end - request.start, -1)
+            )
+        torch.testing.assert_close(actual, torch.cat(outputs), atol=0, rtol=0)
 
     def test_paged_runtime_preserves_selection_provenance(self):
         from rtp_llm.models_py.modules.qwen4_exp.qsa import sparse_gqa_impl

@@ -35,3 +35,4 @@ class IncrementalPrefillInputs:
     requests: list[PrefillRequest]
     selected_indices: torch.Tensor
     prefixes_device: torch.Tensor
+    cu_seqlens: Optional[torch.Tensor] = None

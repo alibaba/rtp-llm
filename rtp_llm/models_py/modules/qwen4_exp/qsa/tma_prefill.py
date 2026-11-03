@@ -312,3 +312,109 @@ def try_paged_causal_qsa_prefill(
     except ImportError:
         return None
     return run_prefill(q, cache, table, selected, prefix, page_size, kv_scale)
+
+
+def try_ragged_paged_qsa_prefill(
+    q,
+    cache,
+    table,
+    selected,
+    lengths,
+    prefixes,
+    cu_seqlens,
+    prefixes_device,
+    *,
+    page_size,
+    kv_head_num,
+    kv_scale=None,
+):
+    """Consume a validated batch without copying queries or joining outputs.
+
+    CPU snapshots bound the workspace and launch grid. Their GPU counterparts
+    belong to the same preflight plan and remain dynamic during graph replay.
+    """
+    if not (
+        2 <= len(lengths) <= 32
+        and len(prefixes) == len(lengths)
+        and all(isinstance(p, int) and p >= 0 for p in prefixes)
+        and min(lengths) >= 128
+        and max(prefixes) + max(lengths) <= 4096
+        and q.ndim == 2
+        and q.is_cuda
+        and torch.version.hip is None
+        and q.dtype == torch.bfloat16
+        and q.shape[0] == sum(lengths)
+        and q.shape[1] in (6 * 256, 12 * 256)
+        and q.stride(1) == 1
+        and q.stride(0) > 0
+        and isinstance(cu_seqlens, torch.Tensor)
+        and cu_seqlens.shape == (len(lengths) + 1,)
+        and cu_seqlens.dtype == torch.int32
+        and cu_seqlens.is_contiguous()
+        and isinstance(prefixes_device, torch.Tensor)
+        and prefixes_device.shape == (len(lengths),)
+        and prefixes_device.dtype == torch.int32
+        and prefixes_device.is_contiguous()
+        and kv_head_num == 1
+        and page_size == 128
+        and cache.dtype in (torch.bfloat16, torch.float8_e4m3fn)
+        and cache.ndim in (2, 5)
+        and cache.shape[0] > 0
+        and all(
+            t.device == q.device
+            for t in (cache, table, selected, cu_seqlens, prefixes_device)
+        )
+        and cache.data_ptr() % 16 == 0
+        and cache.stride(0) % 256 == 0
+        and cache.stride(0) >= 2 * page_size * 256
+        and cache.shape[0] * (cache.stride(0) // 256) < 2**31
+        and table.ndim == 2
+        and table.shape[0] == len(lengths)
+        and table.shape[1]
+        >= triton.cdiv(max(p + s for p, s in zip(prefixes, lengths)), page_size)
+        and table.dtype == torch.int32
+        and table.stride(1) == 1
+        and selected.shape == (q.shape[0], 2051)
+        and selected.dtype == torch.int32
+        and selected.is_contiguous()
+        and torch.cuda.get_device_capability(q.device) == (12, 0)
+    ):
+        return None
+    if cache.ndim == 2:
+        if cache.shape[1] < 2 * page_size * 256 or cache.stride(1) != 1:
+            return None
+    elif cache.shape[1:] != (2, 1, page_size, 256) or cache.stride()[1:] != (
+        page_size * 256,
+        page_size * 256,
+        256,
+        1,
+    ):
+        return None
+    if cache.dtype == torch.float8_e4m3fn:
+        if not (
+            kv_scale is not None
+            and kv_scale.device == q.device
+            and kv_scale.dtype == torch.float32
+            and kv_scale.shape == (cache.shape[0], 2, 1, page_size)
+            and kv_scale.stride()[1:] == (page_size, page_size, 1)
+            and kv_scale.stride(0) >= 2 * page_size
+        ):
+            return None
+    else:
+        kv_scale = None
+    try:
+        from .tma_paged_ragged_pipeline import run_prefill
+    except ImportError:
+        return None
+    return run_prefill(
+        q,
+        cache,
+        table,
+        selected,
+        cu_seqlens,
+        prefixes_device,
+        lengths,
+        prefixes,
+        page_size,
+        kv_scale,
+    )

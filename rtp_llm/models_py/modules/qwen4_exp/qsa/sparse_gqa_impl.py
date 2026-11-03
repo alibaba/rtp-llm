@@ -824,6 +824,25 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 .index_select(0, packed_positions)
             )
 
+        if trusted_selected and self.attn_configs.indexer_topk == 512:
+            from .tma_prefill import try_ragged_paged_qsa_prefill
+
+            output = try_ragged_paged_qsa_prefill(
+                q,
+                kv_cache.kv_cache_base,
+                block_table,
+                plan.selected_indices,
+                [int(req.end) - int(req.start) for req in requests],
+                [req.prefix for req in requests],
+                plan.cu_seqlens,
+                plan.prefixes_device,
+                page_size=page_size,
+                kv_head_num=self.kv_head_num,
+                **self._paged_kv_scale_args(kv_cache),
+            )
+            if output is not None:
+                return output
+
         outputs = []
         for request_idx, request in enumerate(requests):
             start, end = int(request.start), int(request.end)

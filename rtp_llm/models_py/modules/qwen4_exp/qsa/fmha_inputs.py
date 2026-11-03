@@ -314,5 +314,6 @@ def _prepare_incremental_prefill_inputs(
             "requests": requests,
             "selected_indices": selected_indices,
             "prefixes_device": prefixes_device,
+            "cu_seqlens": cu_seqlens,
         }
     )
