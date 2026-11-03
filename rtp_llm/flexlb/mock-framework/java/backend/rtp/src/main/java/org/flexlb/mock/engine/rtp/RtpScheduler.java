@@ -501,7 +501,7 @@ public final class RtpScheduler implements Scheduler {
         if (failure != null && code == 0) code = RpcErrors.status(failure).getCode().value();
         return new Task(entry.input.requestId(), entry.input.groupId(), entry.input.tokens(), entry.reused,
             entry.input.priority(), phase, progress.iterations(), wait / 1_000_000, execution / 1_000_000,
-            endTimeMillis, code, failure == null ? "" : Objects.toString(failure.getMessage(), ""));
+            endTimeMillis, code, failure == null ? "" : Objects.toString(failure.getMessage(), ""), entry.admittedAt != Long.MIN_VALUE);
     }
     private ReportedPhase reportedPhase(Entry entry) {
         return entry.phase == FORWARD || entry.phase == RUNNING || !prefill() && entry.phase == OUTPUT

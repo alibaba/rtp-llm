@@ -19,6 +19,7 @@ public final class NativeClient implements AutoCloseable {
                          int outputTokens, Outcome outcome, String grpcCode, long errorCode, String message) {}
     private final java.util.function.Supplier<List<String>> masters;
     private final java.util.function.Consumer<Event.Builder> events;
+    private final long cacheKeySeed;
     private final MediaClient vision = new MediaClient();
     private final Map<String, ManagedChannel> channels = new HashMap<>();
     private final Map<Long, Call> active = new HashMap<>();
@@ -35,6 +36,10 @@ public final class NativeClient implements AutoCloseable {
         this(masters, event -> {});
     }
     NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<Event.Builder> events) {
+        this(masters, events, 0);
+    }
+    NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<Event.Builder> events, long seed) {
+        cacheKeySeed = seed;
         this.masters = Objects.requireNonNull(masters); this.events = Objects.requireNonNull(events);
         timers.setRemoveOnCancelPolicy(true);
     }
@@ -56,6 +61,9 @@ public final class NativeClient implements AutoCloseable {
                 || input.getGenerateConfig().getNumBeams() > 1 || input.getGenerateConfig().getNumReturnSequences() > 1)
             throw new IllegalArgumentException("Client currently requires matching single-sequence request metadata");
         if (input.getGenerateConfig().getTimeoutMs() > 0) budget = Math.min(budget, TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs()));
+        if (input.getMultimodalInputsCount()==0 && request.getCacheKeyBlockSize()>0)
+            request=request.toBuilder().clearBlockCacheKeys().addAllBlockCacheKeys(new org.flexlb.mock.cache.CacheSequence(
+                Math.toIntExact(request.getCacheKeyBlockSize()),input.getTokenIdsList(),List.of(),cacheKeySeed).keys()).build();
         Call call;
         synchronized (this) {
             if (closed || closing) throw new IllegalStateException("Client closed");
@@ -182,7 +190,8 @@ public final class NativeClient implements AutoCloseable {
                             if (terminal) return;
                             input = prepared; visionPrepared = true;
                             request = request.toBuilder().setGenerateInput(prepared.toByteString()).setSeqLen(prepared.getTokenIdsCount())
-                                .setSelectedVit(selected).clearBlockCacheKeys().build();
+                                .setSelectedVit(selected).clearBlockCacheKeys().addAllBlockCacheKeys(request.getCacheKeyBlockSize()>0
+                                    ?new org.flexlb.mock.cache.CacheSequence(Math.toIntExact(request.getCacheKeyBlockSize()),prepared.getTokenIdsList(),List.of(),cacheKeySeed).keys():List.of()).build();
                             schedule(0);
                         }
                     } catch (RuntimeException error) { fail(error); }

@@ -133,6 +133,8 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
             var tasks = requests == null ? decode.snapshot(request.getLatestFinishedVersion()) : requests.snapshot(request.getLatestFinishedVersion());
             return WorkerStatusPB.newBuilder().setRole("RoleType." + role)
                 .setRoleType(RoleTypePB.valueOf("ROLE_TYPE_" + role)).setAlive(true)
+                .setKvCacheGroupMode(KvCacheGroupModePB.KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY)
+                .setBlockSize(config.blockSize()).setBlockHashLookaheadTokens(0).setCacheMatchRollbackBlocks(0)
                 .setDpSize(1).setDpRank(0).setTpSize(config.tpSize()).setPrecision("FP16")
                 .setStatusVersion(version).setMaxSeqLen(config.maxSeqLen()).setMaxBatchTokensSize(config.maxBatchTokens())
                 .setTotalKvCache(tokens(snapshot.totalBlocks())).setAvailableKvCache(tokens(snapshot.availableBlocks()))

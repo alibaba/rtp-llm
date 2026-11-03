@@ -61,16 +61,26 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
         var values = config.business();
         String type = values.path("kv_cache_event_publisher_type").asText("none");
         if (!Set.of("none", "kvcm").contains(type)) throw new IllegalArgumentException("Invalid kv_cache_event_publisher_type");
-        String endpoint = values.path("kv_cache_event_manager_endpoint").asText();
-        if (type.equals("none") && (!RtpConfig.nativeBool(values, "enable_remote_cache", false) || endpoint.isBlank())) return null;
-        var settings = new KvcmReporter.Configuration(java.net.URI.create(endpoint), type.equals("kvcm"),
-            RtpConfig.nativeInt(values, "kv_cache_event_snapshot_interval_ms", 600000, 1, Integer.MAX_VALUE));
+        if (type.equals("none") && !RtpConfig.nativeBool(values, "enable_remote_cache", false)) return null;
+        String instance = values.path("kv_cache_event_instance_id").asText();
+        String host = values.path("kv_cache_event_host_ip_port").asText(address.rpc(rpc.getPort() - 1) + "@0");
+        if (instance.isBlank() || host.isBlank())
+            throw new IllegalArgumentException("KVCM requires a shared instance_id and a nonempty Master-visible host_ip_port");
         var identity = new KvcmReporter.Identity(
-            values.path("kv_cache_event_instance_id").asText(config.id() + "-" + UUID.randomUUID()),
+            instance,
             values.path("kv_cache_event_instance_group").asText("default"),
-            values.path("kv_cache_event_host_ip_port").asText(rpcAddress()),
+            host,
             values.path("model_name").asText("mock-full-kv"), "FP16", false,
             config.blockSize(), config.tpSize(), config.dpSize(), "rtp_llm_hbm_" + config.blockSize() + "_full");
+        int snapshotMillis = RtpConfig.nativeInt(values, "kv_cache_event_snapshot_interval_ms", 600000, 1, Integer.MAX_VALUE);
+        String override = values.path("kv_cache_event_manager_endpoint").asText();
+        boolean vip = RtpConfig.nativeBool(values, "kvcm_enable_vipserver", false);
+        var endpoint = override.isBlank()
+            ? org.flexlb.mock.cache.KvcmDiscovery.discover(
+                values.path(vip ? "kvcm_vipserver_domain" : "kvcm_server_address").asText(), instance, vip)
+            : org.flexlb.mock.cache.KvcmDiscovery.direct(java.net.URI.create(override));
+        var settings = new KvcmReporter.Configuration(endpoint, type.equals("kvcm"),
+            snapshotMillis);
         return new KvcmReporter(settings, identity, cache);
     }
 

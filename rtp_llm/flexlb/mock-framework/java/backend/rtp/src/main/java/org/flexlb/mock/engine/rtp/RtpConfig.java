@@ -19,7 +19,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
                         boolean reuseCache, boolean deviceCache, int hostBlocks, EvictionPolicy hostPolicy,
                         Watermark deviceWatermark, Watermark hostWatermark, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
                         int maxGenerateBatchSize, int maxInitedKvStreams, int maxUncachedBatchTokens, int cpSize, boolean cpEnabled, int tpSize, int dpSize,
-                        JsonNode business, ComputeModel compute) {
+                        JsonNode business, ComputeModel compute, long cacheKeySeed) {
     public static final int REQUEST_LIMIT = 1024;
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -42,7 +42,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
     public static RtpConfig fromEnvironment(String id, Role role, Map<String, String> env) throws IOException {
         var root = JSON.createObjectNode().put("id", id).put("component_role", role.name());
         var component = root.putObject("component").put("engine", "rtp");
-        component.set("config", EngineConfig.environment(env, RtpSettings.environmentNames(role), RtpSettings.mockNames()));
+        component.set("config", RtpSettings.environment(env,role));
         return load(root);
     }
 
@@ -90,11 +90,11 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             nativeInt(config, "max_inited_kv_cache_streams", 0, 0, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_without_cache", 0, 0, Integer.MAX_VALUE),
             cpSize, cpEnabled, tpSize, dpSize,
-            config, compute);
+            config, compute, EngineConfig.cacheKeySeed(config));
     }
 
     public AdmissionConfig endpoint() {
-        return new AdmissionConfig(id, role, blockSize, tpSize, maxSeqLen, maxBatchTokens, compute);
+        return new AdmissionConfig(id, role, blockSize, tpSize, maxSeqLen, maxBatchTokens, compute, cacheKeySeed);
     }
 
     public ObjectNode effective() {
@@ -115,11 +115,12 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             .put("block_tree_memory_evict_high_watermark_ratio", hostWatermark.high());
         if (role == Role.prefill) {
             result.put("max_inited_kv_cache_streams", maxInitedKvStreams).put("max_batch_tokens_without_cache", maxUncachedBatchTokens); }
-        result.put("concurrency_limit", maxGenerateBatchSize);
+        result.put("concurrency_limit", maxGenerateBatchSize).put("cache_key_hash_seed", cacheKeySeed);
+        if (business.has("checkpoint_path")) result.set("checkpoint_path",business.get("checkpoint_path"));
         boolean control = nativeBool(business,"enable_remote_cache",false);
         String events = business.path("kv_cache_event_publisher_type").asText("none");
         if (control || !events.equals("none")) {
-            for (String key : List.of("kv_cache_event_manager_endpoint","kv_cache_event_instance_id","kv_cache_event_instance_group","kv_cache_event_host_ip_port"))
+            for (String key : List.of("kvcm_enable_vipserver", "kvcm_vipserver_domain", "kvcm_server_address", "kv_cache_event_manager_endpoint","kv_cache_event_instance_id","kv_cache_event_instance_group","kv_cache_event_host_ip_port"))
                 if (business.has(key)) result.set(key,business.get(key));
             result.put("kv_cache_event_publisher_type",events)
                 .put("kv_cache_event_snapshot_interval_ms",nativeInt(business,"kv_cache_event_snapshot_interval_ms",600000,1,Integer.MAX_VALUE))

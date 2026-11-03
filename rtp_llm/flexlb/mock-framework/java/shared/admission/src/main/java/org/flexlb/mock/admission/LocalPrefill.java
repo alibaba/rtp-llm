@@ -58,7 +58,7 @@ final class LocalPrefill implements AutoCloseable {
         var session = new Session(input, retained);
         try {
             session.request = engine.input(RpcTasks.input(input, Long.toString(input.getRequestId()), started,
-                deadline, retained, config.blockSize()), session);
+                deadline, retained, config.blockSize(), config.cacheKeySeed()), session);
         } catch (RequestFailure failure) {
             throw rpcFailure(failure);
         }
@@ -79,7 +79,7 @@ final class LocalPrefill implements AutoCloseable {
                 validatePrepared(item.input(), true);
                 var session = new Session(item.input(), true);
                 var input = RpcTasks.input(item.input(), Long.toString(item.input().getRequestId()),
-                    System.nanoTime(), item.deadline(), true, config.blockSize());
+                    System.nanoTime(), item.deadline(), true, config.blockSize(), config.cacheKeySeed());
                 sessions.add(session); positions.add(i); items.add(new Scheduler.InputItem(input, session));
             } catch (RuntimeException failure) { results.set(i, new Admission(null, failure)); }
         }

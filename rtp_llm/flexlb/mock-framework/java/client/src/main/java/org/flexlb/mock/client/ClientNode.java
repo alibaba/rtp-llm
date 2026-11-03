@@ -15,6 +15,8 @@ import org.flexlb.mock.client.ClientProtocol.*;
 public final class ClientNode implements ClientProtocol, AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final String id;
+    private final int blockSize;
+    private final long cacheKeySeed;
     private final Path topology, directory;
     private final ClientMetrics metrics = new ClientMetrics();
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
@@ -26,6 +28,10 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
     private volatile boolean closed;
 
     public ClientNode(String id, Path topology, Path directory) throws IOException {
+        this(id,topology,directory,0,0);
+    }
+    private ClientNode(String id,Path topology,Path directory,int blockSize,long seed) throws IOException {
+        this.blockSize=blockSize; this.cacheKeySeed=seed;
         this.id = id; this.topology = topology; this.directory = directory;
         api = new ApiServer(new InetSocketAddress("127.0.0.1", 0)).bind(ClientProtocol.class, this).metrics(metrics::scrape).start();
     }
@@ -56,7 +62,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         Files.createDirectories(playback.getParent()); Files.createDirectory(playback);
         save(playback.resolve("plan.json"), args);
         if (worker != null) worker.close();
-        worker = new LoadClient(args, metrics, topology, playback.resolve("requests.binpb.zst"), id);
+        worker = new LoadClient(args, metrics, topology, playback.resolve("requests.binpb.zst"), id, blockSize, cacheKeySeed);
         workerSequence = args.sequence();
         return new Ack(true);
     }
@@ -198,11 +204,19 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
     public static void main(String[] args) throws Exception {
         if (args.length != 0) throw new IllegalArgumentException("Use runner environment");
         var config = JSON.readTree(Path.of(required("MOCK_CONFIG_FILE")).toFile());
-        if (!config.path("component").path("config").isEmpty()) throw new IllegalArgumentException("Client configuration belongs to client/start");
+        var settings=config.path("component").path("config");
+        if(!settings.isObject()) throw new IllegalArgumentException("Client config must be an object");
+        settings.fieldNames().forEachRemaining(name->{
+            if(!Set.of("checkpoint_path","seq_size_per_block").contains(name)) throw new IllegalArgumentException("Unknown Client setting: "+name);
+        });
+        int blockSize=settings.path("seq_size_per_block").asInt(0);
+        if(settings.has("seq_size_per_block") && (!settings.path("seq_size_per_block").isIntegralNumber() || !settings.path("seq_size_per_block").canConvertToInt() || blockSize<1))
+            throw new IllegalArgumentException("Client seq_size_per_block must be positive int32");
+        long seed=org.flexlb.mock.runtime.EngineConfig.cacheKeySeed(settings);
         var directory = Path.of(required("MOCK_OUTPUT_DIR"));
-        try (var node = new ClientNode(required("MOCK_NODE_ID"), Path.of(required("MOCK_TOPOLOGY_FILE")), directory)) {
+        try (var node = new ClientNode(required("MOCK_NODE_ID"), Path.of(required("MOCK_TOPOLOGY_FILE")), directory, blockSize, seed)) {
             var hook = new Thread(node::close, "client-shutdown"); Runtime.getRuntime().addShutdownHook(hook);
-            save(directory.resolve("effective-config.json"), Map.of("id", node.id));
+            save(directory.resolve("effective-config.json"), Map.of("id", node.id,"seq_size_per_block",blockSize,"cache_key_hash_seed",seed));
             save(directory.resolve("endpoints.json"), Map.of("id", node.id, "role", "client", "control", node.url(),
                 "rpc", URI.create(node.url()).getAuthority(), "metrics", node.url() + "/metrics"));
             node.api.publishReady(Path.of(required("MOCK_READY_FILE")));

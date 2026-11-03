@@ -50,7 +50,7 @@ class RtpConfigTest {
     @Test void unsupportedRealSettingsAreIgnoredWithoutValidatingTheirValues() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         var before = load(root).effective();
-        for (String key : java.util.List.of("dp_rank", "enable_disk_cache", "enable_remote_cache", "memory_cache_size_mb",
+        for (String key : java.util.List.of("dp_rank", "enable_disk_cache", "memory_cache_size_mb",
                 "prefill_retry_times", "load_cache_timeout_ms", "some_future_real_setting")) config.putObject(key).put("anything", true);
         assertEquals(before, load(root).effective());
         assertFalse(load(root).business().has("memory_cache_size_mb"));

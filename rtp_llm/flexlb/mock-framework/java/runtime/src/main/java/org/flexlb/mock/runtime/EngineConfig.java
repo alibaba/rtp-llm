@@ -76,5 +76,19 @@ public final class EngineConfig {
         return result;
     }
 
+    public static long cacheKeySeed(JsonNode config) throws IOException {
+        var path = config.get("checkpoint_path");
+        if (path == null) return 0;
+        if (!path.isTextual() || path.asText().isBlank()) throw new IllegalArgumentException("checkpoint_path must be a model directory");
+        var directory = ModelPath.resolve(path.asText(), System.getenv());
+        var model = read(directory.resolve("config.json"));
+        if (model == null || !model.isObject()) throw new IllegalArgumentException("Model config.json must be an object");
+        ((ObjectNode) config).put("checkpoint_path", directory.toString());
+        var seed = model.get("cache_key_hash_seed");
+        if (seed == null) return 0;
+        if (!seed.isIntegralNumber() || !seed.canConvertToLong()) throw new IllegalArgumentException("Model cache_key_hash_seed must be int64");
+        return seed.longValue();
+    }
+
     private EngineConfig() {}
 }

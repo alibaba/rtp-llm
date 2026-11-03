@@ -7,15 +7,16 @@ import org.flexlb.mock.engine.Scheduler;
 /** Translation at the native RTP boundary; scheduling state contains no protobuf objects. */
 final class RpcTasks {
     static Scheduler.Input input(GenerateInputPB input, String identity, long started, long rpcDeadline,
-                                    boolean retained, int blockSize) {
+                                    boolean retained, int blockSize, long seed) {
         long deadline = Math.min(rpcDeadline, input.getGenerateConfig().getTimeoutMs() == 0 ? Long.MAX_VALUE
             : after(started, TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs())));
         return new Scheduler.Input(identity, input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,
             input.getTokenIdsCount(), input.getGenerateConfig().getMaxNewTokens(), input.getPriority(), started, deadline,
-            new org.flexlb.mock.cache.CacheSequence(blockSize, input.getTokenIdsList(), java.util.List.of()), input.getGenerateConfig().getReuseCache(), retained, input.getGenerateConfig().getMinNewTokens(), input.getGenerateConfig().getIgnoreEos());
+            new org.flexlb.mock.cache.CacheSequence(blockSize, input.getTokenIdsList(), java.util.List.of(), seed), input.getGenerateConfig().getReuseCache(), retained, input.getGenerateConfig().getMinNewTokens(), input.getGenerateConfig().getIgnoreEos());
     }
     static TaskInfoPB task(Scheduler.Task task) {
         var result = TaskInfoPB.newBuilder().setRequestId(task.requestId()).setBatchId(task.batchId())
+            .setRequestIdStr(Long.toString(task.requestId())).setPrefixLengthValid(task.prefixLengthValid())
             .setInputLength(task.inputLength()).setPrefixLength(task.prefixLength()).setPriority(task.priority())
             .setDpRank(0).setPhase(switch (task.phase()) {
                 case PENDING -> TaskPhase.TASK_PHASE_PENDING;

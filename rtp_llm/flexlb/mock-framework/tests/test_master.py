@@ -52,10 +52,10 @@ def test_generic_transport_probe_does_not_require_a_native_master(tmp_path):
     assert master_environment({'a': {'b': 2}}, [], tmp_path) == {}
 
 
-@pytest.mark.parametrize('replicas,batched,history_overflow', [
-    (1, False, False), (2, False, False), (1, True, False), (2, True, False), (1, False, True),
-], ids=['single-one-master', 'single-two-masters', 'batch-one-master', 'batch-two-masters', 'late-master-after-history-overflow'])
-def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replicas, history_overflow):
+@pytest.mark.parametrize('replicas,batched,history_overflow,kvcm', [
+    (1, False, False, False), (2, False, False, False), (1, True, False, False), (2, True, False, False), (1, False, True, False), (1, False, False, True),
+], ids=['single-one-master', 'single-two-masters', 'batch-one-master', 'batch-two-masters', 'late-master-after-history-overflow', 'kvcm-cold-warm'])
+def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replicas, history_overflow, kvcm, native_kvcm):
     from mock_framework.execution.master import master_port
     try:
         master_port(replicas)
@@ -86,6 +86,17 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     master_config = configuration(); master_config['FLEXLB_CONFIG'] = json.dumps(native)
     engine_config = {'seq_size_per_block': 16, 'test_block_num': 9, 'reserve_block_ratio': 0,
                      'max_seq_len': 4096, 'mock.compute.forward.expression': '1 + batchSize'}
+    meta = native_kvcm() if kvcm else None
+    if kvcm:
+        native['cacheMatching'] = {'type': 'KVCM', 'medium': ['hbm'], 'requestTimeoutMs': 3000,
+                                  'leaderRefreshIntervalMs': 500}
+        master_config['FLEXLB_CONFIG'] = json.dumps(native)
+        route = json.loads(master_config['MODEL_SERVICE_CONFIG'])
+        route['kvcm'] = {'address': 'local-kvcm', 'port': meta['rpc_port'], 'namespace': 'mock',
+                         'discovery': {'type': 'static-env', 'hosts': [f"127.0.0.1:{meta['rpc_port']}"]}}
+        master_config['MODEL_SERVICE_CONFIG'] = json.dumps(route)
+        engine_config.update(reuse_cache=True, kv_cache_event_publisher_type='kvcm',
+                             kv_cache_event_instance_id='mock_16', kvcm_server_address=f"127.0.0.1:{meta['rpc_port']}")
     document = {'id': 'production_master_probe', 'describe': '真实Master与新P/D及Client接线验证',
         'environment': {'master': {'deployment': {'replicas': replicas}, 'config': master_config},
                         'prefill': {'engine': 'rtp', 'config': engine_config},
@@ -98,7 +109,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     if history_overflow:
         document['phases'][0]['steps'].append({'id': 'still_healthy', 'describe': '多轮同步后Engine仍可发现',
             'interface': 'master/engine/get', 'args': {'role': 'prefill'}})
-    dynamic = replicas == 1 and not batched and not history_overflow
+    dynamic = replicas == 1 and not batched and not history_overflow and not kvcm
     if dynamic:
         document['phases'][0]['timeout'] = '45s'
         document['phases'][0]['steps'].extend([
@@ -128,12 +139,21 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
             endpoints = json.loads((ready.parent / 'endpoints.json').read_text())
             actual = tmp_path / 'client.json'
             probe = await asyncio.to_thread(subprocess.run,
-                [str(java), '-cp', client_classpath, 'org.flexlb.mock.client.MasterProbe', endpoints['rpc'], str(batched).lower(), str(actual)],
+                [str(java), '-cp', client_classpath, 'org.flexlb.mock.client.KvcmMasterProbe' if kvcm else 'org.flexlb.mock.client.MasterProbe', endpoints['rpc'], str(batched).lower(), str(actual), *([meta['http']] if kvcm else [])],
                 capture_output=True, text=True, timeout=20)
             assert probe.returncode == 0, probe.stderr
             result = json.loads(actual.read_text())
             assert result['enqueued_by_master'] is batched and result['outcome'] == 'success'
             assert result['tokens'] == 3 and 0 < result['ttft_ns'] <= result['elapsed_ns']
+            if kvcm:
+                assert result['kvcm_queries'] >= 2 and result['positive_queries'] >= 1
+                engine = json.loads((output / 'components/prefill-0/endpoints.json').read_text())
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                with opener.open(engine['metrics'], timeout=3) as response:
+                    exported = response.read().decode()
+                reused = [float(line.rsplit(' ', 1)[1]) for line in exported.splitlines()
+                          if line.startswith('rtp_llm_kv_cache_reuse_length_sum{')]
+                assert reused and sum(reused) > 0, exported
             if replicas == 2:
                 from mock_framework.execution.transport import post
                 from mock_framework.execution.records import timestamp

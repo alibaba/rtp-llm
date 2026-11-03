@@ -439,3 +439,7 @@ KvCache/BlockTree 提供 CacheMetadata 快照与介质变更事件；仅有效�
 ### 共享 ViT 的准备与计算边界
 
 `VitPreparation` 负责唯一媒体任务从准入到结果发布的完整生命周期。下载在有界并发执行器异步进行，完成后才提交 `VitScheduler` 的就绪队列；Scheduler 只负责组批和 Forward，不拥有缓存发布与等待者状态。`VitCache` 管理共享 Future、缓存身份和逻辑驻留，不拥有准入计数；任务终态集中在 Preparation。最后一个等待者取消会撤销尚未执行的工作，停止时取消下载并结束等待。所有角色仍走同一 TCP RPC。
+
+### 原生 Master 接线
+
+本地文件发现通过 main 的 ServiceDiscoveryProvider 接口接入，endpoint 显式声明 discovery.type=file；文件完整解析后整体更新内存视图，临时读取失败保留最近可用视图。Master 选举使用原生 FLEXLB_CONFIG.consistency 和实验独立的部署身份，Runner 仅绑定独占 ZooKeeper 的连接地址，不实现选举或缓存匹配策略。KVCM 匹配、健康检测及备用索引均由 real Master 负责。共享缓存上报器只负责发现与元数据发布，不参与 Master 的路由决策。

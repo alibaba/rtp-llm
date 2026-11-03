@@ -78,7 +78,7 @@ final class DecodeAdmission implements AutoCloseable {
                 call.input = frame.getInput();
                 call.client = frame.getClientId();
                 call.request = engine.input(RpcTasks.input(call.input, call.client + "/" + call.input.getRequestId(),
-                    call.started, call.rpcDeadline, false, config.blockSize()), call);
+                    call.started, call.rpcDeadline, false, config.blockSize(), config.cacheKeySeed()), call);
                 return;
             }
             if (frame.getRequestId() != call.input.getRequestId()

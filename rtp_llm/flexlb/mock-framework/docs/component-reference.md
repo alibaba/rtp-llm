@@ -8,7 +8,7 @@
 
 `org.flexlb.MasterNode` 与生产 Application、同步器和调度器在同一 JVM，不另起 Master 子进程，也不实现 Mock 调度器。Case 的 `environment.master.config` 使用原生环境变量字符串：`FLEXLB_CONFIG` 是业务 JSON，`MODEL_SERVICE_CONFIG` 是路由 JSON。
 
-Runner 先启动独占 ZK，再启动 Engine、Master 和 Client，与 YAML 书写顺序无关。已启动 Engine 的 `endpoints.json` 形成 topology/discovery；Runner 只替换 `MODEL_SERVICE_CONFIG` 的 hosts/discovery_file，保留 service_id、组和角色域名，不读取线上 VIP，不改写 `FLEXLB_CONFIG`。当前只支持一个 endpoint 组、分离角色和 gRPC；ViT 使用相同的发现和实例生命周期。
+Runner 先启动独占 ZK，再启动 Engine、Master 和 Client，与 YAML 书写顺序无关。已启动 Engine 的 `endpoints.json` 形成 topology/discovery；Runner 将本地 Engine endpoint 的 discovery.type 设为 file，并写入 discovery_file；保留 service_id、组、角色域名及独立配置的 KVCM endpoint。资源启动时仅把独占 ZooKeeper 地址绑定到 `FLEXLB_CONFIG.consistency`，其余业务配置保持原值。当前只支持一个 endpoint 组、分离角色和 gRPC；ViT 使用相同的发现和实例生命周期。
 
 发现使用实际 Engine gRPC 端口，生产 WorkerAddressService 再转换内部 HTTP 身份，不假定 Mock 控制端口相邻。原始组件配置、实际环境、effective-config 和 discovery 分开保存；Master 暴露生产 `/prometheus`。
 
@@ -19,7 +19,7 @@ Runner 先启动独占 ZK，再启动 Engine、Master 和 Client，与 YAML 书�
 | `master/get` | 默认返回所选活动 Master 的服务地址列表；`is_leader: true/false` 按各 Master 的生产 isMaster 声明筛选主/非主节点。数量由 expect 判断，不伪造唯一主备。 |
 | `master/engine/get` | 读取各 Master 的 WorkerDirectory，按角色映射 Engine 服务地址，逐 Master 返回。未知地址报错，不能按部署数量补齐或将各节点取并集。 |
 
-单/多 Master 全部使用生产 ZK 选举，不提供 standalone 分支。独立 ZookeeperNode 使用已有依赖、独立 JVM/数据目录；Runner 分配地址和本次 HIPPO_ROLE，运行时同步配置为 needConsistency=true、会话超时 6s，并保存实际值。ready 必须等到真实选举产生 Leader。
+单/多 Master 全部使用生产 ZK 选举，不提供 standalone 分支。独立 ZookeeperNode 使用已有依赖、独立 JVM/数据目录；Runner 分配地址和实验独立的 BIZ_NAME／DEPLOYMENT_NAME／ZONE_NAME，使用原生 `consistency.type=ZOOKEEPER`、connectString 和 6s 会话期限，并保存实际值。ready 必须等到真实选举产生 Leader。
 
 Master 使用 127.0.0.1、127.0.0.2 等地址，相同 HTTP 端口，gRPC=HTTP+2，适配生产以 IP 作为身份和共用转发端口的约束。端口启动时被抢占则失败，不静默换协议。Linux 默认支持 127/8；macOS 缺少别名时明确报错。实验之间不共享 ZK 或选举路径。清理先停止组件，再停止 ZK，最后停止 Prometheus，保留日志和数据。
 
@@ -340,7 +340,12 @@ prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collect
 
 缓存身份由 shared/cache/CacheSequence 统一计算。Decode 除 prompt 外还缓存已完成计算的输出前缀，最后一个仅采样但未进入 Forward 的 token 不计入有效 KV。main 保留现有图片布局和 hash-token 输入协议；此能力不依赖 DSV4.1 的 PD 新字段。
 
-使用 real 名称 kv_cache_event_publisher_type=kvcm 与 kv_cache_event_manager_endpoint（直接 Meta HTTP 地址）启用 HBM 事件；可选 kv_cache_event_instance_id、kv_cache_event_instance_group、kv_cache_event_host_ip_port、kv_cache_event_snapshot_interval_ms。仅 enable_remote_cache=true 且给出直接 endpoint 时可进行控制心跳；不会产生实际远端读取或命中。有效配置和端点标明 payload_io=false，ExecuteFunction 数据读写仍未实现，不承诺 SDK、GDR 或混合 KV 布局。
+使用 `kv_cache_event_publisher_type=kvcm` 启用 HBM 事件；`kvcm_server_address` 通过原生 MetaService 发现 Leader 的 HTTP 地址，`kv_cache_event_manager_endpoint` 可直接指定 HTTP 地址。`kvcm_enable_vipserver`／`kvcm_vipserver_domain` 需内部包提供原生 VIPSERVER ServiceDiscoveryProvider；公开包不伪造 VIP 发现。三个发现字段使用 real 的 RECO_ENABLE_VIPSERVER／RECO_VIPSERVER_DOMAIN／RECO_SERVER_ADDRESS ENV。
+
+`kv_cache_event_instance_id` 必须明确设置，与 Master 的最终 namespace 相同，例如 Master namespace=experiment、blockSize=16 时注册 experiment_16。默认 host_ip_port 按 Master 对 GRPC 发现的逻辑身份计算为 `ip:(rpcPort-1)@0`，不是独立 HTTP 控制接口地址。每个 Mock Engine 仍拥有独立 RPC endpoint，不模拟同一 frontend 后的多个 engine index。Leader 失败或 SERVER_NOT_LEADER 时重新发现并补快照；退出只向缓存的已知端点报告 HOST_DOWN。
+
+`enable_remote_cache=true` 可接入控制心跳，`payload_io=false` 明确表示未实现远端 KV 数据读取。WorkerStatus 上报实际块大小、FULL_ATTENTION_ONLY、零 lookahead/rollback；prefix_length_valid 仅在 Scheduler 已确认准入命中后为 true。Client 的 `seq_size_per_block` 要与 Engine 一致；二者共用 CacheSequence，checkpoint_path 可提供模型原生 cache_key_hash_seed，默认 0，不引入 DSV 专用常量。main 的图片仍采用原有展开 span 和 hash-token 输入格式。
+
 
 ### main 的 ViT 适配边界
 
