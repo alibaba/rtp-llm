@@ -55,6 +55,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
     """Run routed FP4 experts and the replicated FP8 shared expert together."""
 
     includes_shared_expert = True
+    supported_activations = ("swiglu",)
 
     @classmethod
     def check_conditions(cls, checker: Any, config) -> None:

@@ -167,6 +167,7 @@ apache-tvm-ffi==0.1.12 \
     #   -r deps/requirements_torch_gpu_cuda13.txt
     #   flashinfer-python
     #   tilelang
+    #   tokenspeed-mla
     #   xgrammar
 async-timeout==5.0.1 \
     --hash=sha256:39e3809566ff85354557ec2398b55e096c8364bacac9405a7a1fa429e77fe76c \
@@ -1946,6 +1947,7 @@ nvidia-cutlass-dsl==4.5.3 \
     # via
     #   -r deps/requirements_torch_gpu_cuda13.txt
     #   flashinfer-python
+    #   tokenspeed-mla
 nvidia-cutlass-dsl-libs-base==4.5.3 \
     --hash=sha256:1bea2f2e5312a97a850be4bfe73ab0689861fa6f81888ad2abe47172f96afd1d \
     --hash=sha256:224ceed6db71b632b318c19bea52f1d0efdafc321dbe4159a7508f93abe8c694 \
@@ -3490,6 +3492,9 @@ tokenizers==0.22.1 \
     --hash=sha256:e2ef6063d7a84994129732b47e7915e8710f27f99f3a3260b8a38fc7ccd083f4 \
     --hash=sha256:e7d094ae6312d69cc2a872b54b91b309f4f6fbce871ef28eb27b52a98e4d0214
     # via transformers
+tokenspeed-mla @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/tokenspeed-mla/tokenspeed_mla-0.2.11+8b513a59.cu132-py3-none-any.whl#sha256=d66de94e5072c4e509d9b83b115616ddbc91bc1f50a6fb438deb5dfeecf089c3 \
+    --hash=sha256:d66de94e5072c4e509d9b83b115616ddbc91bc1f50a6fb438deb5dfeecf089c3
+    # via -r deps/requirements_torch_gpu_cuda13.txt
 tomli==2.4.1 \
     --hash=sha256:01f520d4f53ef97964a240a035ec2a869fe1a37dde002b57ebc4417a27ccd853 \
     --hash=sha256:0d85819802132122da43cb86656f8d1f8c6587d54ae7dcaf30e90533028b49fe \
@@ -3552,6 +3557,7 @@ torch @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%
     #   sentence-transformers
     #   tilelang
     #   timm
+    #   tokenspeed-mla
     #   torch-c-dlpack-ext
     #   torchvision
     #   xgrammar
