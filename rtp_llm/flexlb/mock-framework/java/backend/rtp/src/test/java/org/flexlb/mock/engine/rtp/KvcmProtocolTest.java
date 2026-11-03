@@ -13,6 +13,8 @@ import java.util.function.BooleanSupplier;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -76,9 +78,17 @@ class KvcmProtocolTest {
             assertTrue(meta.has("EVENT_HOST_DOWN"));
         }
     }
-    @Test void controlOnlyKeepsHeartbeatsWithoutPublishingHbmKeys() throws Exception {
+    @ParameterizedTest @ValueSource(ints = {600000, 0, -1})
+    void controlOnlyKeepsHeartbeatsWithoutPublishingHbmKeys(int interval) throws Exception {
         try(var meta = new Meta()) {
-            var config = config("decode", meta.endpoint(), false);
+            var root = JSON.<ObjectNode>valueToTree(RtpNodeTest.configuration("decode"));
+            var values = (ObjectNode) root.path("component").path("config");
+            values.put("enable_remote_cache", true).put("kv_cache_event_manager_endpoint", meta.endpoint())
+                .put("kv_cache_event_instance_id", "control-only").put("kv_cache_event_snapshot_interval_ms", interval)
+                .put("kv_cache_event_publisher_type", interval <= 0 ? "kvcm" : "none");
+            var config = RtpConfig.load(root);
+            values.put("enable_remote_cache", false).put("kv_cache_event_snapshot_interval_ms", 0);
+            assertThrows(IllegalArgumentException.class, () -> RtpConfig.load(root));
             var remote = new org.flexlb.mock.cache.remote.RemoteCache() {
                 public Match match(List<Long> keys, int local, long deadline) { return () -> local; }
                 public void read(Match match, List<Long> keys, long deadline) { throw new AssertionError("No reads expected"); }

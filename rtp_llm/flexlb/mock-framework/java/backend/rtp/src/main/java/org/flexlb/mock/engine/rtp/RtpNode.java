@@ -91,14 +91,14 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
             host,
             values.path("model_name").asText("mock-full-kv"), "FP16", false,
             config.blockSize(), config.tpSize(), config.dpSize(), "rtp_llm_hbm_" + config.blockSize() + "_full");
-        int snapshotMillis = RtpConfig.nativeInt(values, "kv_cache_event_snapshot_interval_ms", 600000, 1, Integer.MAX_VALUE);
+        int snapshotMillis = RtpConfig.nativeInt(values, "kv_cache_event_snapshot_interval_ms", 600000, Integer.MIN_VALUE, Integer.MAX_VALUE);
         String override = values.path("kv_cache_event_manager_endpoint").asText();
         boolean vip = RtpConfig.nativeBool(values, "kvcm_enable_vipserver", false);
         var endpoint = override.isBlank()
             ? org.flexlb.mock.cache.KvcmDiscovery.discover(
                 values.path(vip ? "kvcm_vipserver_domain" : "kvcm_server_address").asText(), instance, vip)
             : org.flexlb.mock.cache.KvcmDiscovery.direct(java.net.URI.create(override));
-        var settings = new KvcmReporter.Configuration(endpoint, type.equals("kvcm"),
+        var settings = new KvcmReporter.Configuration(endpoint, type.equals("kvcm") && snapshotMillis > 0,
             snapshotMillis);
         return new KvcmReporter(settings, identity, cache);
     }

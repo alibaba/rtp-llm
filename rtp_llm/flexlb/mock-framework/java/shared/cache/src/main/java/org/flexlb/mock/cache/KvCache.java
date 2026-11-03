@@ -26,7 +26,6 @@ public final class KvCache implements AutoCloseable {
     private final BlockPool device, host;
     private final RemoteCache remote;
     private final Set<RemoteTask> transfers = Collections.newSetFromMap(new IdentityHashMap<>());
-    private static final int MAX_TRANSFERS = 1024;
     private final BlockTree tree;
     private final int blockSize, reserve;
     private final boolean deviceCache;
@@ -174,7 +173,7 @@ public final class KvCache implements AutoCloseable {
             });
             load.worker = task.thread;
             if (!submit(task)) load.result = new CacheLoad.Result(localTokens, memoryTokens, 0,
-                new RejectedExecutionException("Remote cache transfer limit reached"));
+                new RejectedExecutionException("Remote cache closed"));
         }
         return new Preparation(load, null, admission.generation());
     }
@@ -206,10 +205,10 @@ public final class KvCache implements AutoCloseable {
         if (System.nanoTime() >= deadline) throw new TimeoutException("Cache transfer deadline exceeded");
     }
     private boolean submit(RemoteTask task) {
-        if (closed || transfers.size() >= MAX_TRANSFERS) {
+        if (closed) {
             task.pins.forEach(BlockPool.Reference::close);
             reportTransfer(new TransferEvent(task.operation, 0, 0, 0, 0, blockSize, false, false));
-            task.completion.completeExceptionally(new RejectedExecutionException("Remote cache transfer limit reached"));
+            task.completion.completeExceptionally(new RejectedExecutionException("Remote cache closed"));
             return false;
         }
         transfers.add(task);

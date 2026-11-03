@@ -20,7 +20,7 @@ public final class MediaInput {
         return media.build();
     }
     public static String key(MultimodalInputPB input) {
-        if (input.getMultimodalUrl().isBlank() || input.getMultimodalUrl().length() > 4096) throw invalid("Image cache identity must be nonempty");
+        if (input.getMultimodalUrl().isBlank()) throw invalid("Image cache identity must be nonempty");
         var p = input.getMmPreprocessConfig();
         String crop = p.getCropPositionsList().stream().map(v -> String.format(Locale.ROOT,"%.6f",v)).collect(java.util.stream.Collectors.joining(":"));
         return Long.toUnsignedString(linuxString(input.getMultimodalUrl().getBytes(StandardCharsets.UTF_8)))+"_"+input.getMultimodalType()+"_"
@@ -52,10 +52,10 @@ public final class MediaInput {
         var tensor = output.getMultimodalEmbedding(); var hashes = output.getMultimodalFeatureHash();
         if (output.getOutputRdmaSlotsCount() != 0 || !tensor.getFp32Data().isEmpty() || !tensor.getBf16Data().isEmpty()
                 || !tensor.getFp16Data().isEmpty() || !tensor.getInt32Data().isEmpty()
-                || tensor.getShapeCount() != 2 || tensor.getShape(0) < 1 || tensor.getShape(0) > 1048576 || tensor.getShape(1) < 1 || tensor.getShape(1) > 65536
+                || tensor.getShapeCount() != 2 || tensor.getShape(0) < 1 || tensor.getShape(1) < 1
                 || tensor.getDataType() != TensorPB.DataType.BF16 || hashes.getDataType() != TensorPB.DataType.INT32
                 || hashes.getShapeCount() != 1 || hashes.getShape(0) != tensor.getShape(0)
-                || hashes.getInt32Data().size() != tensor.getShape(0) * 4)
+                || hashes.getInt32Data().size() != (long) tensor.getShape(0) * 4)
             throw Status.DATA_LOSS.withDescription("Malformed Mock vision metadata").asRuntimeException();
         if (output.hasMultimodalPosId() || output.getMultimodalExtraInputCount() != 0 || !hashes.getFp32Data().isEmpty()
                 || !hashes.getBf16Data().isEmpty() || !hashes.getFp16Data().isEmpty())
@@ -71,10 +71,9 @@ public final class MediaInput {
         for(var media:input.getMultimodalInputsList()) {
             var entry=entries.get(key(media));
             if(entry==null || !entry.getHashHit() || entry.getSplitSizeCount()!=1 || entry.getSplitSize(0)<1
-                    || entry.getSplitSize(0)>1048576 || entry.getFeatureHashes().size()!=(long)entry.getSplitSize(0)*4)
+                    || entry.getFeatureHashes().size()!=(long)entry.getSplitSize(0)*4)
                 throw Status.DATA_LOSS.withDescription("Missing or invalid vision feature hashes").asRuntimeException();
             sizes.add(entry.getSplitSize(0));payload=payload.concat(entry.getFeatureHashes());
-            if(payload.size()>4*1048576) throw Status.RESOURCE_EXHAUSTED.withDescription("Vision hashes exceed request limit").asRuntimeException();
         }
         return applyRows(input,sizes,payload,imageToken);
     }
@@ -88,7 +87,7 @@ public final class MediaInput {
             if (token != imageToken) { result.addTokenIds(token); continue; }
             if (image >= sizes.size()) throw invalid("Too many image placeholders");
             int rows = sizes.get(image++);
-            if (rows < 1 || (long) result.getTokenIdsCount() + rows > 1048576 || data.remaining() < (long) rows * 4)
+            if (rows < 1 || data.remaining() < (long) rows * 4)
                 throw invalid("Invalid image output length");
             var span = MultimodalCacheSpanPB.newBuilder().setOffset(result.getTokenIdsCount());
             for (int row = 0; row < rows; row++) {
