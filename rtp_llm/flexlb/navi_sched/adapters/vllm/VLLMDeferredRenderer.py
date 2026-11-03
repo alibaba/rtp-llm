@@ -23,6 +23,7 @@ def _report_image_preparation(status, http_status, upstream_code):
     try:
         if _image_preparation_metrics is None:
             from llm_plugin.metrics import _kmonitor
+
             from .VLLMAdapterUtils import make_kmon_tags
 
             tags = make_kmon_tags("agent")
@@ -31,10 +32,20 @@ def _report_image_preparation(status, http_status, upstream_code):
                 name: _kmonitor.register_acc_metric(
                     "navi_sched.agent.image_prepare_" + name + "_qps", tags
                 )
-                for name in ("completed", "success", "rate_limited", "other_error", "cancelled")
+                for name in (
+                    "completed",
+                    "success",
+                    "rate_limited",
+                    "other_error",
+                    "cancelled",
+                )
             }
         cancelled = status == "cancelled"
-        limited = status == "failed" and http_status == 503 and upstream_code == "RATE_LIMIT_EXCEEDED"
+        limited = (
+            status == "failed"
+            and http_status == 503
+            and upstream_code == "RATE_LIMIT_EXCEEDED"
+        )
         values = {
             "completed": not cancelled,
             "success": status == "ok",
@@ -75,12 +86,16 @@ class _PredictionRenderer:
         )
 
         class ReferenceParser(AsyncMultiModalContentParser):
-            async def _image_with_uuid_async(self, image_url, uuid, preprocess_config=None):
+            async def _image_with_uuid_async(
+                self, image_url, uuid, preprocess_config=None
+            ):
                 if not image_url:
                     raise ValueError("deferred rendering requires an image URL")
-                identity = hashlib.sha256(msgspec.json.encode(
-                    ["navi-scheduling-image-url-v1", image_url, preprocess_config]
-                )).hexdigest()
+                identity = hashlib.sha256(
+                    msgspec.json.encode(
+                        ["navi-scheduling-image-url-v1", image_url, preprocess_config]
+                    )
+                ).hexdigest()
                 return None, identity
 
             def _unsupported(self, *args, **kwargs):
@@ -111,10 +126,13 @@ class _PredictionRenderer:
         image_token_id = getattr(config, "image_token_id", None)
         if image_token_id is None:
             image_token_id = config.image_token_index
-        updates = [PromptReplacement(
-            modality="image", target=[image_token_id],
-            replacement=[image_token_id] * SCHEDULING_IMAGE_TOKEN_COUNT,
-        )]
+        updates = [
+            PromptReplacement(
+                modality="image",
+                target=[image_token_id],
+                replacement=[image_token_id] * SCHEDULING_IMAGE_TOKEN_COUNT,
+            )
+        ]
         grouped = processor._bind_and_group_updates(updates, {"image": count})
         tokens = processor._apply_hf_processor_tokens_only(prompt)
         tokens, positions = processor._apply_prompt_updates(tokens, grouped)
@@ -145,12 +163,14 @@ class _TokenizedRenderer:
         from vllm.renderers.hf import resolve_chat_template_content_format
 
         conversation, media, uuids = await parse_chat_messages_async(
-            messages, self.model_config,
+            messages,
+            self.model_config,
             content_format=resolve_chat_template_content_format(
                 chat_template=params.chat_template,
                 tools=params.chat_template_kwargs.get("tools"),
                 given_format=params.chat_template_content_format,
-                tokenizer=self.get_tokenizer(), model_config=self.model_config,
+                tokenizer=self.get_tokenizer(),
+                model_config=self.model_config,
             ),
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
@@ -180,7 +200,9 @@ class VLLMDeferredRenderer:
     def __init__(self, renderer):
         self._renderer = renderer
         self._prediction = _PredictionRenderer(renderer)
-        logger.info("NaviSched deferred native rendering enabled; engine transport entry unchanged")
+        logger.info(
+            "NaviSched deferred native rendering enabled; engine transport entry unchanged"
+        )
 
     def __getattr__(self, name):
         return getattr(self._renderer, name)
@@ -188,64 +210,108 @@ class VLLMDeferredRenderer:
     async def render_chat_async(
         self, conversations, chat_params, tok_params=None, *, prompt_extras=None
     ):
-        media = [any(
-            isinstance(message.get("content"), list) and any(
-                isinstance(part, dict) and part.get("type") != "text"
-                for part in message["content"]
-            ) for message in conversation
-        ) for conversation in conversations]
+        media = [
+            any(
+                isinstance(message.get("content"), list)
+                and any(
+                    isinstance(part, dict) and part.get("type") != "text"
+                    for part in message["content"]
+                )
+                for message in conversation
+            )
+            for conversation in conversations
+        ]
         if not any(media):
             return await self._renderer.render_chat_async(
                 conversations, chat_params, tok_params, prompt_extras=prompt_extras
             )
         if not all(media):
-            results = await asyncio.gather(*(self.render_chat_async(
-                [conversation], chat_params, tok_params, prompt_extras=prompt_extras
-            ) for conversation in conversations))
-            return ([conversation for conversations, _ in results for conversation in conversations],
-                    [prompt for _, prompts in results for prompt in prompts])
-        calls = [msgspec.msgpack.encode({
-            "version": 1,
-            "entry": "render_chat_async",
-            "inputs": [conversation],
-            "chat_params": asdict(chat_params),
-            "tok_params": asdict(tok_params) if tok_params is not None else None,
-            "prompt_extras": prompt_extras,
-        }) for conversation in conversations]
+            results = await asyncio.gather(
+                *(
+                    self.render_chat_async(
+                        [conversation],
+                        chat_params,
+                        tok_params,
+                        prompt_extras=prompt_extras,
+                    )
+                    for conversation in conversations
+                )
+            )
+            return (
+                [
+                    conversation
+                    for conversations, _ in results
+                    for conversation in conversations
+                ],
+                [prompt for _, prompts in results for prompt in prompts],
+            )
+        calls = [
+            msgspec.msgpack.encode(
+                {
+                    "version": 1,
+                    "entry": "render_chat_async",
+                    "inputs": [conversation],
+                    "chat_params": asdict(chat_params),
+                    "tok_params": (
+                        asdict(tok_params) if tok_params is not None else None
+                    ),
+                    "prompt_extras": prompt_extras,
+                }
+            )
+            for conversation in conversations
+        ]
         conversation_outputs, prompts = await self._prediction.render_chat_async(
             conversations, chat_params, tok_params, prompt_extras=prompt_extras
         )
         for prompt, call in zip(prompts, calls, strict=True):
             continuation = msgspec.msgpack.decode(call)
-            continuation["tokenized_prompt"] = prompt.pop("_navi_sched_tokenized_prompt")
+            continuation["tokenized_prompt"] = prompt.pop(
+                "_navi_sched_tokenized_prompt"
+            )
             prompt["navi_sched_render_call"] = msgspec.msgpack.encode(continuation)
         return conversation_outputs, prompts
 
     async def render_cmpl_async(self, prompts, tok_params=None, *, prompt_extras=None):
-        media = [isinstance(prompt, dict) and bool(prompt.get("multi_modal_data"))
-                 for prompt in prompts]
+        media = [
+            isinstance(prompt, dict) and bool(prompt.get("multi_modal_data"))
+            for prompt in prompts
+        ]
         if not any(media):
             return await self._renderer.render_cmpl_async(
                 prompts, tok_params, prompt_extras=prompt_extras
             )
         if not all(media):
-            results = await asyncio.gather(*(self.render_cmpl_async(
-                [prompt], tok_params, prompt_extras=prompt_extras
-            ) for prompt in prompts))
+            results = await asyncio.gather(
+                *(
+                    self.render_cmpl_async(
+                        [prompt], tok_params, prompt_extras=prompt_extras
+                    )
+                    for prompt in prompts
+                )
+            )
             return [prompt for outputs in results for prompt in outputs]
-        calls = [msgspec.msgpack.encode({
-            "version": 1,
-            "entry": "render_cmpl_async",
-            "inputs": [prompt],
-            "tok_params": asdict(tok_params) if tok_params is not None else None,
-            "prompt_extras": prompt_extras,
-        }) for prompt in prompts]
+        calls = [
+            msgspec.msgpack.encode(
+                {
+                    "version": 1,
+                    "entry": "render_cmpl_async",
+                    "inputs": [prompt],
+                    "tok_params": (
+                        asdict(tok_params) if tok_params is not None else None
+                    ),
+                    "prompt_extras": prompt_extras,
+                }
+            )
+            for prompt in prompts
+        ]
         outputs = await self._prediction.render_cmpl_async(
             prompts, tok_params, prompt_extras=prompt_extras
         )
         for output, call in zip(outputs, calls, strict=True):
             continuation = msgspec.msgpack.decode(call)
-            continuation["tokenized_prompt"] = output.pop("_navi_sched_tokenized_prompt")
+            continuation["tokenized_prompt"] = output.pop(
+                "_navi_sched_tokenized_prompt"
+            )
             output["navi_sched_render_call"] = msgspec.msgpack.encode(continuation)
         return outputs
 
@@ -253,17 +319,27 @@ class VLLMDeferredRenderer:
 def create_deferred_renderer(renderer):
     if os.environ.get("VLLM_NAVI_SCHED_DEFER_RENDER", "0") != "1":
         return renderer
+    if getattr(renderer, "mm_processor", None) is None:
+        return renderer
     from vllm.model_executor.models.deepseek_vl import DeepseekVLMultiModalProcessor
     from vllm.model_executor.models.qwen3_vl import Qwen3VLMultiModalProcessor
     from vllm.renderers.hf import HfRenderer
 
     if not isinstance(renderer, HfRenderer) or not isinstance(
-        renderer.mm_processor, (DeepseekVLMultiModalProcessor, Qwen3VLMultiModalProcessor)
+        renderer.mm_processor,
+        (DeepseekVLMultiModalProcessor, Qwen3VLMultiModalProcessor),
     ):
-        raise ValueError("deferred rendering requires a DeepSeek-VL or Qwen3-VL HfRenderer")
+        raise ValueError(
+            "deferred rendering requires a DeepSeek-VL or Qwen3-VL HfRenderer"
+        )
     mm_config = renderer.model_config.get_multimodal_config()
-    if mm_config.mm_processor_cache_gb > 0 and mm_config.mm_processor_cache_type == "shm":
-        raise ValueError("deferred rendering does not support the shared-memory media transport")
+    if (
+        mm_config.mm_processor_cache_gb > 0
+        and mm_config.mm_processor_cache_type == "shm"
+    ):
+        raise ValueError(
+            "deferred rendering does not support the shared-memory media transport"
+        )
     return VLLMDeferredRenderer(renderer)
 
 
@@ -279,8 +355,8 @@ class NativeRenderContinuation:
         renderer = self._processor.renderer
         if renderer.mm_processor is not None:
             renderer.shutdown()
-            renderer.mm_processor.cache = MULTIMODAL_REGISTRY.processor_only_cache_from_config(
-                vllm_config
+            renderer.mm_processor.cache = (
+                MULTIMODAL_REGISTRY.processor_only_cache_from_config(vllm_config)
             )
         self._supported_tasks = supported_tasks
         self._loop = None
@@ -305,7 +381,9 @@ class NativeRenderContinuation:
             if call.get("version") != 1:
                 raise ValueError("unsupported native renderer continuation version")
             tok_params = call["tok_params"]
-            tok_params = TokenizeParams(**tok_params) if tok_params is not None else None
+            tok_params = (
+                TokenizeParams(**tok_params) if tok_params is not None else None
+            )
             renderer = self._processor.renderer
             if "tokenized_prompt" in call:
                 renderer = _TokenizedRenderer(
@@ -315,7 +393,9 @@ class NativeRenderContinuation:
             phase_started_ns = time.perf_counter_ns()
             if call["entry"] == "render_chat_async":
                 _, prompts = await renderer.render_chat_async(
-                    call["inputs"], ChatParams(**call["chat_params"]), tok_params,
+                    call["inputs"],
+                    ChatParams(**call["chat_params"]),
+                    tok_params,
                     prompt_extras=call["prompt_extras"],
                 )
             elif call["entry"] == "render_cmpl_async":
@@ -326,17 +406,26 @@ class NativeRenderContinuation:
                 raise ValueError("unsupported native renderer continuation entry")
             render_ms = (time.perf_counter_ns() - phase_started_ns) / 1_000_000.0
             if len(prompts) != 1:
-                raise ValueError("a renderer continuation must contain exactly one prompt")
+                raise ValueError(
+                    "a renderer continuation must contain exactly one prompt"
+                )
             phase = "process_inputs"
             phase_started_ns = time.perf_counter_ns()
             materialized = self._processor.process_inputs(
-                request.request_id, prompts[0], request.params,
+                request.request_id,
+                prompts[0],
+                request.params,
                 supported_tasks=self._supported_tasks,
-                arrival_time=request.arrival_time, lora_request=request.lora_request,
-                trace_headers=request.trace_headers, priority=request.priority,
-                data_parallel_rank=request.data_parallel_rank, resumable=request.resumable,
+                arrival_time=request.arrival_time,
+                lora_request=request.lora_request,
+                trace_headers=request.trace_headers,
+                priority=request.priority,
+                data_parallel_rank=request.data_parallel_rank,
+                resumable=request.resumable,
             )
-            process_inputs_ms = (time.perf_counter_ns() - phase_started_ns) / 1_000_000.0
+            process_inputs_ms = (
+                time.perf_counter_ns() - phase_started_ns
+            ) / 1_000_000.0
             phase = "restore_native_inputs"
             phase_started_ns = time.perf_counter_ns()
             request.prompt_token_ids = materialized.prompt_token_ids
@@ -372,22 +461,41 @@ class NativeRenderContinuation:
                     "error_type=%s http_status=%s error=%r "
                     "upstream_code=%r upstream_message=%r upstream_trace_id=%r "
                     "upstream_server=%r upstream_retry_after=%r",
-                    request.request_id, status, phase,
+                    request.request_id,
+                    status,
+                    phase,
                     (finished_ns - phase_started_ns) / 1_000_000.0,
-                    render_ms, process_inputs_ms, total_ms,
-                    schedule_batch_id, local_batch_id, error_type, http_status, error,
-                    upstream_code, upstream_message, upstream_trace_id,
-                    upstream_server, upstream_retry_after,
+                    render_ms,
+                    process_inputs_ms,
+                    total_ms,
+                    schedule_batch_id,
+                    local_batch_id,
+                    error_type,
+                    http_status,
+                    error,
+                    upstream_code,
+                    upstream_message,
+                    upstream_trace_id,
+                    upstream_server,
+                    upstream_retry_after,
                 )
 
     async def resume_async(
-        self, requests, *, return_exceptions=False, schedule_batch_id=0, local_batch_id=0
+        self,
+        requests,
+        *,
+        return_exceptions=False,
+        schedule_batch_id=0,
+        local_batch_id=0,
     ):
         if self._renderer_closed:
             raise RuntimeError("native render continuation is closed")
         results = await asyncio.gather(
-            *(self._resume_one(request, schedule_batch_id, local_batch_id)
-              for request in requests), return_exceptions=True
+            *(
+                self._resume_one(request, schedule_batch_id, local_batch_id)
+                for request in requests
+            ),
+            return_exceptions=True,
         )
         if not return_exceptions:
             for result in results:
@@ -400,13 +508,14 @@ class NativeRenderContinuation:
             self._loop = asyncio.new_event_loop()
         started = time.monotonic()
         try:
-            return self._loop.run_until_complete(self.resume_async(
-                requests, return_exceptions=return_exceptions
-            ))
+            return self._loop.run_until_complete(
+                self.resume_async(requests, return_exceptions=return_exceptions)
+            )
         finally:
             logger.info(
                 "NAVI_SCHED_VLLM_NATIVE_RENDER request_count=%d elapsed_ms=%.3f",
-                len(requests), (time.monotonic() - started) * 1000,
+                len(requests),
+                (time.monotonic() - started) * 1000,
             )
 
     def close(self):
