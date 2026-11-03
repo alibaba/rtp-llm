@@ -73,16 +73,7 @@ class TestMegaMoEInputPacker(unittest.TestCase):
         torch.cuda.synchronize()
 
     def test_dispatch(self):
-        old = os.environ.pop("MEGA_MOE_INPUT_PACKER", None)
-        try:
-            self.assertIsInstance(get_mega_moe_input_packer(), FusedMegaMoEInputPacker)
-        finally:
-            if old is not None:
-                os.environ["MEGA_MOE_INPUT_PACKER"] = old
-        with _env("MOE_STRICT_FUSED", "0"), _env("MEGA_MOE_INPUT_PACKER", "torch"):
-            self.assertIsInstance(get_mega_moe_input_packer(), TorchMegaMoEInputPacker)
-        with _env("MEGA_MOE_INPUT_PACKER", "fused"):
-            self.assertIsInstance(get_mega_moe_input_packer(), FusedMegaMoEInputPacker)
+        self.assertIsInstance(get_mega_moe_input_packer(), FusedMegaMoEInputPacker)
 
     def test_fused_rejects_unsupported_without_fallback(self):
         tokens = 2
@@ -95,25 +86,6 @@ class TestMegaMoEInputPacker(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "requires CUDA bf16"):
             FusedMegaMoEInputPacker().pack(x, weights, indices, buf, tokens)
 
-    def test_strict_rejects_torch_packer(self):
-        with _env("MOE_STRICT_FUSED", "1"), _env("MEGA_MOE_INPUT_PACKER", "torch"):
-            with self.assertRaisesRegex(RuntimeError, "forbids"):
-                get_mega_moe_input_packer()
-
-    def test_non_strict_allows_torch_packer(self):
-        with _env("MOE_STRICT_FUSED", "0"), _env("MEGA_MOE_INPUT_PACKER", "torch"):
-            self.assertIsInstance(get_mega_moe_input_packer(), TorchMegaMoEInputPacker)
-
-    def test_legacy_pack_impl_disables_gate_pack_fast_path(self):
-        executor = MegaMoeExecutor.__new__(MegaMoeExecutor)
-        torch.nn.Module.__init__(executor)
-        executor._input_packer = FusedMegaMoEInputPacker()
-        executor.cfg = SimpleNamespace(n_activated_experts=8)
-        with _env("MEGA_MOE_INPUT_PACKER_IMPL", "optimized"):
-            self.assertTrue(executor.supports_gate_pack)
-        with _env("MEGA_MOE_INPUT_PACKER_IMPL", "legacy"):
-            self.assertFalse(executor.supports_gate_pack)
-
     def test_gate_pack_capability_checks_topk_bounds(self):
         for executor_cls in (MegaMoeExecutor, MegaMoeSEExecutor):
             executor = executor_cls.__new__(executor_cls)
@@ -121,10 +93,7 @@ class TestMegaMoEInputPacker(unittest.TestCase):
             executor._input_packer = FusedMegaMoEInputPacker()
             for topk, supported in ((0, False), (1, True), (32, True), (33, False)):
                 executor.cfg = SimpleNamespace(n_activated_experts=topk)
-                with (
-                    self.subTest(executor=executor_cls, topk=topk),
-                    _env("MEGA_MOE_INPUT_PACKER_IMPL", "optimized"),
-                ):
+                with self.subTest(executor=executor_cls, topk=topk):
                     self.assertEqual(executor.supports_gate_pack, supported)
 
     def test_topk_33_uses_eager_gate_and_ordinary_gpu_pack(self):

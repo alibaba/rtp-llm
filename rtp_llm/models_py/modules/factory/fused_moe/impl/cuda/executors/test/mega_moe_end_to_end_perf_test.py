@@ -17,7 +17,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.test.mega_m
     _DIM,
     _EXPERTS,
     _MAX_TOKENS,
-    _TOPK,
     _WORLD_SIZE,
     _make_global_weights,
     _make_moe,
@@ -113,7 +112,6 @@ def _bench_pair(fused, separated, device: torch.device) -> tuple[float, float, f
 
 def _perf_worker(rank: int, world_size: int, rendezvous_path: str) -> None:
     os.environ["MODEL_WARM_UP"] = "0"
-    os.environ["MEGA_MOE_INPUT_PACKER_IMPL"] = "optimized"
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)
     dist.init_process_group(
