@@ -5,7 +5,6 @@ import os
 import random
 import shlex
 import signal as signal_mod
-import socket
 import subprocess
 import sys
 import threading

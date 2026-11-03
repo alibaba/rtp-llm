@@ -22,6 +22,7 @@ class TestMasterService(unittest.TestCase):
         with patch("rtp_llm.server.host_service.threading.Thread") as mock_thread_cls:
             mock_thread_cls.return_value.start = MagicMock()
             svc = MasterService(vip)
+        self.addCleanup(svc._probe_executor.shutdown)
         return svc, {}
 
     def _refresh(
