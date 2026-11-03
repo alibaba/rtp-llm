@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
+#include "rtp_llm/cpp/normal_engine/speculative/DSparkSampleSeed.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 
 #include <algorithm>
@@ -58,6 +59,111 @@ TEST(FastTopKSamplerTest, TopKGreaterThanOneReturnsTopKIndices) {
 }
 
 #if USING_CUDA
+TEST(DSparkSamplerTest, BoundedResidualUsesReservedUniformWithoutChangingUnboundedLayout) {
+    const c10::cuda::CUDAGuard guard(0);
+    constexpr int              batch = 2, gamma = 5, vocab = 4;
+    const auto                 ints        = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    const auto                 floats      = ints.dtype(torch::kFloat32);
+    auto                       draft_probs = torch::zeros({batch, gamma, vocab}, floats);
+    draft_probs.select(2, 3).fill_(1.0f);
+    auto target_probs = torch::zeros({batch, gamma + 1, vocab}, floats);
+    target_probs.narrow(2, 0, 2).fill_(0.5f);
+    const auto draft_ids  = torch::full({batch, gamma}, 3, ints);
+    const auto target_ids = torch::zeros({batch * (gamma + 1), 1}, ints);
+    const auto do_sample  = torch::ones({batch}, ints.dtype(torch::kBool));
+    const auto valid      = torch::tensor({1, gamma}, ints);
+    auto       uniforms   = torch::full({batch, gamma + 1}, 0.1f, floats);
+    uniforms.select(1, 1).fill_(0.75f);
+    uniforms.select(1, gamma).fill_(0.25f);
+    // The first draft is certainly rejected. In the same residual (1/2,1/2),
+    // bounded rows must use the reserved final column, while legacy callers
+    // retain their historical pos+1 draw.
+    for (const bool bounded : {false, true}) {
+        auto tokens  = torch::empty({batch, gamma + 1}, ints);
+        auto lengths = torch::empty({batch}, ints);
+        execRejectionSampling({draft_probs,
+                               draft_ids,
+                               uniforms,
+                               target_probs,
+                               target_ids,
+                               tokens,
+                               lengths,
+                               do_sample,
+                               false,
+                               false,
+                               {},
+                               true,
+                               bounded ? valid : torch::Tensor()});
+        EXPECT_TRUE(torch::equal(lengths.cpu(), torch::ones({batch}, torch::kInt32)));
+        EXPECT_TRUE(torch::equal(tokens.select(1, 0).cpu(), torch::full({batch}, bounded ? 0 : 1, torch::kInt32)));
+        EXPECT_EQ(tokens.narrow(1, 1, gamma).count_nonzero().item<int64_t>(), 0);
+    }
+}
+
+TEST(DSparkSamplerTest, TwoRoundResidualHistoryPreservesConditionalAcceptance) {
+    const c10::cuda::CUDAGuard guard(0);
+    constexpr int              batch = 4096, gamma = 5, vocab = 4;
+    constexpr int64_t          base        = 4096;
+    const auto                 ints        = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    const auto                 floats      = ints.dtype(torch::kFloat32);
+    auto                       draft_probs = torch::zeros({batch, gamma, vocab}, floats);
+    draft_probs.select(2, 3).fill_(1.0f);
+    const auto draft_ids    = torch::full({batch, gamma}, 3, ints);
+    const auto do_sample    = torch::ones({batch}, ints.dtype(torch::kBool));
+    const auto valid        = torch::ones({batch}, ints);
+    auto       first_target = torch::zeros({batch, gamma + 1, vocab}, floats);
+    first_target.narrow(2, 0, 2).fill_(0.5f);
+    std::vector<float> first_values(batch * (gamma + 1)), next_values(first_values.size());
+    for (int row = 0; row < batch; ++row) {
+        for (int slot = 0; slot <= gamma; ++slot) {
+            first_values[row * (gamma + 1) + slot] = dsparkRejectionUniformAt(row, base, slot, gamma);
+            next_values[row * (gamma + 1) + slot]  = dsparkRejectionUniformAt(row, base + 1, slot, gamma);
+        }
+    }
+    const auto cpu_floats     = torch::TensorOptions().dtype(torch::kFloat32);
+    const auto first_uniforms = torch::tensor(first_values, cpu_floats).view({batch, gamma + 1}).to(torch::kCUDA);
+    const auto next_uniforms  = torch::tensor(next_values, cpu_floats).view({batch, gamma + 1}).to(torch::kCUDA);
+    auto       run            = [&](const torch::Tensor& target, const torch::Tensor& uniforms) {
+        auto tokens     = torch::empty({batch, gamma + 1}, ints);
+        auto lengths    = torch::empty({batch}, ints);
+        auto target_ids = target.argmax(-1).reshape({batch * (gamma + 1), 1}).to(torch::kInt32);
+        execRejectionSampling({draft_probs,
+                               draft_ids,
+                               uniforms,
+                               target,
+                               target_ids,
+                               tokens,
+                               lengths,
+                               do_sample,
+                               false,
+                               false,
+                               {},
+                               true,
+                               valid});
+        return std::make_pair(tokens, lengths);
+    };
+    for (const bool reuse_residual_as_next_acceptance : {false, true}) {
+        auto uniforms = first_uniforms.clone();
+        if (reuse_residual_as_next_acceptance) {
+            // Negative control: this is exactly the historical counter reuse.
+            uniforms.select(1, gamma).copy_(next_uniforms.select(1, 0));
+        }
+        auto first = run(first_target, uniforms);
+        EXPECT_TRUE(torch::equal(first.second.cpu(), torch::ones({batch}, torch::kInt32)));
+        const auto history = first.first.select(1, 0);
+        EXPECT_TRUE(history.ge(0).logical_and(history.le(1)).all().item<bool>());
+        // Same fixed conditional model as the exact Fraction oracle: q=delta(3),
+        // p(3|H=0)=1, p(3|H=1)=1/2, with the other mass on token 0.
+        auto next_target      = torch::zeros_like(first_target);
+        auto accept_threshold = torch::where(history.eq(0), 1.0f, 0.5f).unsqueeze(1);
+        next_target.select(2, 3).copy_(accept_threshold.expand({batch, gamma + 1}));
+        next_target.select(2, 0).copy_((1.0f - accept_threshold).expand({batch, gamma + 1}));
+        const auto next       = run(next_target, next_uniforms);
+        const auto acceptance = next.second.sub(1).to(torch::kFloat32).mean().item<float>();
+        EXPECT_NEAR(acceptance, reuse_residual_as_next_acceptance ? 0.50f : 0.75f, 0.03f);
+    }
+}
+
 TEST(DSparkSamplerTest, CompactRejectionMatchesDenseForAcceptedAndRejectedTokens) {
     const c10::cuda::CUDAGuard guard(0);
     const auto                 ints           = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);

@@ -22,6 +22,9 @@ constexpr uint64_t kDSparkTargetSeedNamespace = 0;
 // Matches DeepInfer's _MTP_SEED_OFFSET so the two engines document the same
 // namespace split.
 constexpr uint64_t kDSparkDraftSeedNamespace = 1000000007ULL;
+// A residual token becomes part of the next round's history. Its draw must
+// therefore never reuse a future acceptance draw at the same token position.
+constexpr uint64_t kDSparkResidualSeedNamespace = 0x726573696475616cULL;
 
 inline uint64_t dsparkSplitMix64(uint64_t value) {
     value += 0x9E3779B97F4A7C15ULL;
@@ -41,6 +44,18 @@ inline uint64_t dsparkSeedAt(uint64_t sequence_seed, uint64_t seed_namespace, in
 inline float dsparkUniformAt(uint64_t sequence_seed, uint64_t seed_namespace, int64_t position) {
     constexpr float kScale = 1.0f / 16777216.0f;
     return static_cast<float>(dsparkSeedAt(sequence_seed, seed_namespace, position) >> 40) * kScale;
+}
+
+// Bounded rejection reserves the last of gamma+1 uniforms for its one possible
+// residual sample. Acceptance uses only slots [0, gamma); addressing those by
+// absolute position preserves the existing acceptance stream across budgets.
+// Each round advances the committed prefix, so its base position uniquely
+// addresses the residual stream without coupling it to a future accept draw.
+inline float
+dsparkRejectionUniformAt(uint64_t sequence_seed, int64_t round_base_position, int64_t slot, int64_t proposal_width) {
+    return slot == proposal_width ?
+               dsparkUniformAt(sequence_seed, kDSparkResidualSeedNamespace, round_base_position) :
+               dsparkUniformAt(sequence_seed, kDSparkTargetSeedNamespace, round_base_position + slot);
 }
 
 }  // namespace speculative

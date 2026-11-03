@@ -1057,7 +1057,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                 row_index[row]     = source.row;
                 for (int64_t position = 0; position < width; ++position) {
                     values[row * width + position] =
-                        dsparkUniformAt(source.seed, kDSparkTargetSeedNamespace, source.base_position + position);
+                        dsparkRejectionUniformAt(source.seed, source.base_position, position, width - 1);
                 }
             }
             buffer_holder_.hold_host(host);
