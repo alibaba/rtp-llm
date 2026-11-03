@@ -40,8 +40,9 @@ abstract class RtpSchedulerBase implements Scheduler {
         int reused, outputToken;
         boolean prefillFinished;
         final long begun = System.nanoTime();
-        long queuedAt = begun, waitNanos, firstToken, transferStarted;
-        long admittedAt = Long.MIN_VALUE, attemptedGeneration = Long.MIN_VALUE;
+        long enqueuedAt = begun, waitNanos, firstToken;
+        long timingStarted, canRun, firstRunning, loadStarted, loadDone;
+        long attemptedGeneration = Long.MIN_VALUE;
         Phase phase = QUEUED;
         ReportedPhase finalPhase;
         boolean loaded, generating, outputPending, delivering, transferBegun;
@@ -49,6 +50,7 @@ abstract class RtpSchedulerBase implements Scheduler {
 
         Entry(Input input, Listener listener) {
             this.input = input;
+            timingStarted = input.started();
             this.listener = listener;
             this.state = new RequestState(input.deadline(), failure -> terminal(this, failure));
         }
@@ -66,7 +68,7 @@ abstract class RtpSchedulerBase implements Scheduler {
         this.lock = Objects.requireNonNull(lock);
         this.config = Objects.requireNonNull(config);
         this.cache = Objects.requireNonNull(cache);
-        this.metrics = new RtpMetrics(config.role().name(), this::metricState);
+        this.metrics = new RtpMetrics(config.role().name(), this::metricState, cache);
     }
 
     @Override public Request input(Input input, Listener listener) {
@@ -92,10 +94,12 @@ abstract class RtpSchedulerBase implements Scheduler {
         if (control instanceof org.flexlb.mock.admission.Control.Generate generate) {
             if (prefill() || !entry.loaded || entry.generating || entry.prefillFinished || generate.tokenId() < 0)
                 throw new RequestFailure(INVALID, "Generation requires loaded KV and a new generation permit");
+            entry.timingStarted = System.nanoTime();
+            entry.waitNanos = 0; entry.canRun = entry.firstRunning = 0;
             entry.outputToken = generate.tokenId();
             entry.generating = true;
             entry.state.transferred(1);
-            entry.phase = QUEUED; entry.queuedAt = System.nanoTime(); waiting.addLast(entry);
+            entry.phase = QUEUED; entry.enqueuedAt = entry.timingStarted; waiting.addLast(entry);
             return;
         }
         if (!(control instanceof org.flexlb.mock.admission.Control event)) throw new RequestFailure(INVALID, "Foreign RTP control");
@@ -162,7 +166,11 @@ abstract class RtpSchedulerBase implements Scheduler {
             items.add(new ForwardBatch.Request(entry.input.identity(), entry.input.tokens(), entry.reused,
                 prefill() ? 1 : entry.input.maxNewTokens(), progress.generated(), tokens, entry.input.priority(), List.of()));
             members.add(new Member(entry, entry.state.forward(), entry.nextStep));
-            if (entry.queuedAt != 0) { entry.waitNanos += System.nanoTime() - entry.queuedAt; entry.queuedAt = 0; }
+            long now = System.nanoTime();
+            if (entry.firstRunning == 0) {
+                entry.waitNanos = Math.max(0, now - entry.timingStarted);
+                entry.firstRunning = now;
+            }
             entry.phase = FORWARD;
         }
         metrics.observe("rtp_llm_context_batch_size", prefill() ? items.size() : 0);
@@ -234,6 +242,7 @@ abstract class RtpSchedulerBase implements Scheduler {
     }
 
     private boolean reserve(Entry entry) {
+        if (entry.canRun == 0) entry.canRun = System.nanoTime();
         if (prefill()) {
             var failure = acquire(entry);
             if (failure == KvCache.Failure.PERMANENT)
@@ -316,7 +325,7 @@ abstract class RtpSchedulerBase implements Scheduler {
         var entry = entry(request);
         if (!live(entry) || entry.transferBegun || (prefill() ? entry.phase != READY : entry.phase != LOADING))
             throw new RequestFailure(INVALID, "Request is not ready for a new KV transfer");
-        entry.transferBegun = true; entry.transferStarted = System.nanoTime();
+        entry.transferBegun = true;
         entry.phase = TRANSFERRING;
         return entry.state.pin();
     }
@@ -331,7 +340,6 @@ abstract class RtpSchedulerBase implements Scheduler {
             if (entry.lease == null || entry.loaded || entry.generating)
                 throw new RequestFailure(INVALID, "Unexpected KV load completion");
             entry.loaded = true;
-            metrics.observe("rtp_llm_stream_loading_cache_latency_us", (System.nanoTime() - entry.transferStarted) / 1000.0);
             entry.prefillFinished = transferred.prefillFinished();
         }
         entry.phase = TRANSFERRED;
@@ -340,6 +348,13 @@ abstract class RtpSchedulerBase implements Scheduler {
         var entry = entry(request);
         if (entry.state.terminating()) return;
         entry.finalPhase = reportedPhase(entry);
+        long now = System.nanoTime();
+        if (waitingEntries().contains(entry) || entry.phase == Phase.CAPACITY)
+            entry.waitNanos = Math.max(0, now - entry.timingStarted);
+        if (entry.preparation != null && !entry.cacheReported && entry.preparation.loadAttempted()) {
+            metrics.loadFinished(entry.preparation, false, now);
+            entry.cacheReported = true;
+        }
         removeWaiting(entry);
         running.remove(entry);
         entry.state.finish(failure);
@@ -350,8 +365,12 @@ abstract class RtpSchedulerBase implements Scheduler {
         // Real emits stream timings for success, cancellation and timeout, not arbitrary internal errors.
         if (failure == null || failure.reason() == CANCELLED || failure.reason() == TIMEOUT) {
             var progress = entry.state.snapshot();
-            metrics.observe("rtp_llm_latency_us", (now - entry.begun) / 1000.0);
-            metrics.observe("rtp_llm_wait_latency_us", (entry.waitNanos + (entry.queuedAt == 0 ? 0 : now - entry.queuedAt)) / 1000.0);
+            metrics.observe("rtp_llm_latency_us", Math.max(0, now - entry.timingStarted) / 1000.0);
+            metrics.observe("rtp_llm_wait_latency_us", entry.waitNanos / 1000.0);
+            metrics.positiveMicros("rtp_llm_stream_enqueue_to_canrun_us", entry.canRun == 0 ? 0 : Math.max(0, entry.canRun - entry.enqueuedAt));
+            metrics.positiveMicros("rtp_llm_stream_canrun_to_running_us", entry.canRun == 0 || entry.firstRunning == 0 ? 0 : Math.max(0, entry.firstRunning - entry.canRun));
+            metrics.positiveMicros("rtp_llm_stream_loading_cache_latency_us", entry.loadDone == 0 ? 0 : entry.loadDone - entry.loadStarted);
+            metrics.positiveMicros("rtp_llm_stream_load_done_to_running_us", entry.loadDone == 0 || entry.firstRunning == 0 ? 0 : Math.max(0, entry.firstRunning - entry.loadDone));
             if (entry.firstToken != 0) metrics.observe("rtp_llm_first_token_latency_us", (entry.firstToken - entry.begun) / 1000.0);
             metrics.observe("rtp_llm_input_token_length", entry.input.tokens());
             metrics.observe("rtp_llm_output_token_length", progress.generated());
@@ -427,10 +446,7 @@ abstract class RtpSchedulerBase implements Scheduler {
             entry.input.deadline(), remoteLookup());
         entry.attemptedGeneration = admission.generation();
         if (admission.load() == null) return admission.failure();
-        if (entry.admittedAt == Long.MIN_VALUE) {
-            entry.admittedAt = System.nanoTime();
-            if (!prefill() && entry.queuedAt != 0) { entry.waitNanos += entry.admittedAt - entry.queuedAt; entry.queuedAt = 0; }
-        }
+        entry.waitNanos = Math.max(0, System.nanoTime() - entry.timingStarted);
         entry.preparation = admission.load();
         entry.lease = entry.preparation.lease();
         entry.reused = Math.toIntExact(entry.lease.reusedTokens());
@@ -452,6 +468,9 @@ abstract class RtpSchedulerBase implements Scheduler {
         if (!entry.cacheReported) {
             entry.reused = Math.toIntExact(result.reusedTokens());
             metrics.cacheLookup(entry.input.tokens(), entry.reused);
+            if (config.reuseCache() && entry.input.reuse())
+                metrics.prepared((long) (entry.input.tokens() / config.blockSize()) * config.blockSize(),
+                    entry.preparation, result, System.nanoTime());
             entry.cacheReported = true;
         }
         return true;
@@ -476,18 +495,20 @@ abstract class RtpSchedulerBase implements Scheduler {
     @Override public Status status(long latestFinishedVersion) {
         long now = System.nanoTime();
         var tasks = active.values().stream().map(entry -> task(entry, now, -1, null)).toList();
-        int running = (int) tasks.stream().filter(task -> task.phase() == ReportedPhase.RUNNING).count();
-        return history.snapshot(latestFinishedVersion, tasks, tasks.size() - running, running);
+        var counts = queues();
+        return history.snapshot(latestFinishedVersion, tasks, counts.waiting(), counts.running());
     }
     private Task task(Entry entry, long now, long endTimeMillis, RequestFailure failure) {
         var progress = entry.state.snapshot();
         var phase = endTimeMillis >= 0 && entry.finalPhase != null ? entry.finalPhase : reportedPhase(entry);
-        long wait = Math.max(0, (entry.admittedAt == Long.MIN_VALUE ? now : entry.admittedAt) - entry.input.started());
-        long execution = entry.admittedAt == Long.MIN_VALUE ? 0 : Math.max(0, now - entry.admittedAt);
+        boolean finished = endTimeMillis >= 0;
+        // Native runtime metadata publishes final timings only on dequeue. Live execution is -1.
+        long waitMillis = finished ? entry.waitNanos / 1_000_000 : 0;
+        long executionMillis = finished ? Math.max(0, (now - entry.timingStarted) / 1_000_000 - waitMillis) : -1;
         long code = failure == null ? 0 : RpcErrors.code(failure);
         if (failure != null && code == 0) code = RpcErrors.status(failure).getCode().value();
         return new Task(entry.input.requestId(), entry.input.groupId(), entry.input.tokens(), entry.reused,
-            entry.input.priority(), phase, progress.iterations(), wait / 1_000_000, execution / 1_000_000,
+            entry.input.priority(), phase, progress.iterations(), waitMillis, executionMillis,
             endTimeMillis, code, failure == null ? "" : Objects.toString(failure.getMessage(), ""));
     }
     private ReportedPhase reportedPhase(Entry entry) {
@@ -502,7 +523,8 @@ abstract class RtpSchedulerBase implements Scheduler {
             var host = cache.hostSnapshot();
             long block = config.blockSize();
             return new RtpMetrics.State(counts.waiting(), counts.running(), counts.loading(), counts.ready(), kv.totalBlocks() * block,
-                kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, host.total() * block, host.free() * block, config.blockSize());
+                kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, host.total() * block, host.free() * block, config.blockSize(),
+                active.values().stream().filter(e -> !e.state.terminating() && e.phase == CACHE_LOADING).count());
         }
     }
     @Override public String scrapeMetrics() { return metrics.scrape(); }

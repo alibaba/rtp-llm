@@ -42,7 +42,7 @@ class RtpRemoteSchedulerTest {
                 catch (InterruptedException error) { if (!ignoreInterrupt) throw error; }
             }
         }
-        public void write(List<Long> keys, long deadline) {}
+        public int write(List<Long> keys, long deadline) { return keys.size(); }
         public void close() { release.countDown(); }
     }
     private static KvCache cache(RemoteCache remote) {
@@ -172,6 +172,10 @@ class RtpRemoteSchedulerTest {
             assertNotNull(work);
             assertEquals(5, work.batch().dps().getFirst().requests().getFirst().computeTokens());
             assertEquals(1, remote.calls); complete(scheduler, work, config);
+            var text = scheduler.scrapeMetrics();
+            assertTrue(RtpMetricsTest.sample(text, "rtp_llm_remote_read_fail_qps", "") > 0);
+            assertEquals(0, RtpMetricsTest.sample(text, "rtp_llm_remote_read_token_num_sum", ""));
+            assertEquals(0, RtpMetricsTest.sample(text, "rtp_llm_stream_cache_remote_reuse_length_sum", ""));
         }
     }
 
@@ -179,9 +183,10 @@ class RtpRemoteSchedulerTest {
         var config = config(2, 0); var lock = new Object();
         var writing = new CountDownLatch(1); var finishWrite = new CountDownLatch(1);
         var remote = new Backend() {
-            @Override public void write(List<Long> keys, long deadline) {
+            @Override public int write(List<Long> keys, long deadline) {
                 writing.countDown();
                 try { finishWrite.await(); } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+                return keys.size();
             }
             @Override public void close() { super.close(); finishWrite.countDown(); }
         };
@@ -193,6 +198,87 @@ class RtpRemoteSchedulerTest {
             assertTrue(writing.await(2, TimeUnit.SECONDS));
             assertEquals(14, cache.snapshot(0, false).availableBlocks());
             finishWrite.countDown(); await(() -> cache.snapshot(0, false).availableBlocks() == 16);
+        }
+    }
+
+    @Test void nativeLoadingReuseTransferAndTimingMetricsFollowTheSameLifecycle() throws Exception {
+        var config = config(2, 0); var remote = new Backend();
+        try (var cache = cache(remote); var scheduler = new RtpScheduler(new Object(), config, cache)) {
+            var value = input(1, true, Long.MAX_VALUE);
+            scheduler.input(value, new Listener()); assertNull(scheduler.schedule());
+            assertTrue(remote.entered.await(2, TimeUnit.SECONDS));
+            var live = scheduler.status(0).tasks().getFirst();
+            assertEquals(Scheduler.ReportedPhase.KV_ALLOCATED, live.phase());
+            assertEquals(-1, live.executionMillis()); assertEquals(0, live.waitingMillis());
+            String loading = scheduler.scrapeMetrics();
+            assertEquals(0, RtpMetricsTest.sample(loading, "rtp_llm_wait_stream_size", ""));
+            assertEquals(1, RtpMetricsTest.sample(loading, "rtp_llm_loading_cache_stream_size", ""));
+            assertEquals(2, RtpMetricsTest.sample(loading, "rtp_llm_kv_cache_load_ref_blocks", ""));
+            Thread.sleep(25); remote.release.countDown();
+            await(() -> { scheduler.maintain(); return scheduler.queues().loading() == 0; });
+            Thread.sleep(20); // Cache readiness is not the first RUNNING boundary.
+            long beforeForward = System.nanoTime();
+            var work = scheduler.schedule(); complete(scheduler, work, config);
+            long afterForward = System.nanoTime();
+            await(() -> cache.transferState().writes() == 0 && cache.transferState().reads() == 0);
+            var finished = scheduler.status(0).finished().getFirst();
+            assertTrue(finished.waitingMillis() >= (beforeForward - value.started()) / 1_000_000);
+            assertTrue(finished.executionMillis() <= (afterForward - beforeForward) / 1_000_000 + 1);
+            String text = scheduler.scrapeMetrics();
+            assertEquals(0, RtpMetricsTest.sample(text, "rtp_llm_loading_cache_stream_size", ""));
+            assertEquals(4, RtpMetricsTest.sample(text, "rtp_llm_stream_cache_remote_reuse_length_sum", ""));
+            assertEquals(0, RtpMetricsTest.sample(text, "rtp_llm_stream_cache_device_reuse_length_sum", ""));
+            assertEquals(2, RtpMetricsTest.sample(text, "rtp_llm_remote_match_reuse_block_num_sum", ""));
+            assertEquals(4, RtpMetricsTest.sample(text, "rtp_llm_remote_read_token_num_sum", ""));
+            assertEquals(1, RtpMetricsTest.sample(text, "rtp_llm_remote_valid_hit_ratio_sum", ""));
+            assertEquals(2, RtpMetricsTest.sample(text, "rtp_llm_remote_write_cache_block_num_sum", ""));
+            assertTrue(RtpMetricsTest.sample(text, "rtp_llm_stream_loading_cache_latency_us_sum", "") >= 20_000);
+            assertTrue(RtpMetricsTest.sample(text, "rtp_llm_stream_load_done_to_running_us_sum", "") >= 15_000);
+            assertEquals(1, RtpMetricsTest.sample(text, "rtp_llm_kv_cache_match_to_ready_latency_us_count", "load_attempted=\"true\""));
+            assertFalse(text.contains("rtp_llm_remote_finish_write_time_us"));
+        }
+    }
+
+    @Test void backgroundWriteFailureIsVisibleWithoutChangingSuccessfulRequestOutcome() throws Exception {
+        var config = config(2, 0);
+        var remote = new Backend() {
+            @Override public int write(List<Long> keys, long deadline) { throw new IllegalStateException("write failed"); }
+        };
+        remote.release.countDown();
+        try (var cache = cache(remote); var scheduler = new RtpScheduler(new Object(), config, cache)) {
+            var listener = new Listener(); scheduler.input(input(1, true, Long.MAX_VALUE), listener);
+            var work = scheduler.schedule();
+            if (work == null) {
+                await(() -> { scheduler.maintain(); return scheduler.queues().loading() == 0; });
+                work = scheduler.schedule();
+            }
+            complete(scheduler, work, config);
+            assertNull(listener.terminal.get(1, TimeUnit.SECONDS));
+            await(() -> cache.transferState().writes() == 0);
+            var text = scheduler.scrapeMetrics();
+            assertTrue(RtpMetricsTest.sample(text, "rtp_llm_remote_write_fail_qps", "") > 0);
+            assertEquals(0, RtpMetricsTest.sample(text, "rtp_llm_remote_write_cache_block_num_sum", ""));
+            assertEquals(0, RtpMetricsTest.sample(text, "rtp_llm_kv_cache_store_ref_blocks", ""));
+        }
+    }
+
+    @Test void cancellingDuringLoadingKeepsNativeLegacyWaitBoundary() throws Exception {
+        var config = config(2, 0); var remote = new Backend(); remote.ignoreInterrupt = true;
+        try (var cache = cache(remote); var scheduler = new RtpScheduler(new Object(), config, cache)) {
+            var value = input(1, true, Long.MAX_VALUE);
+            var request = scheduler.input(value, new Listener()); assertNull(scheduler.schedule());
+            assertTrue(remote.entered.await(2, TimeUnit.SECONDS));
+            long loadingObserved = System.nanoTime(); Thread.sleep(25);
+            scheduler.finish(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel while loading"));
+            drain(scheduler);
+            var task = scheduler.status(0).finished().getFirst();
+            assertTrue(task.waitingMillis() <= (loadingObserved - value.started()) / 1_000_000 + 1);
+            assertTrue(task.executionMillis() >= 20, "Native terminal time minus frozen wait includes a cancelled load");
+            var text = scheduler.scrapeMetrics();
+            assertEquals(0, RtpMetricsTest.sample(text, "rtp_llm_loading_cache_stream_size", ""));
+            assertEquals(2, RtpMetricsTest.sample(text, "rtp_llm_kv_cache_load_ref_blocks", ""));
+            assertTrue(RtpMetricsTest.sample(text, "rtp_llm_kv_cache_load_fail_qps", "") > 0);
+            remote.release.countDown(); await(() -> cache.transferState().reads() == 0);
         }
     }
 

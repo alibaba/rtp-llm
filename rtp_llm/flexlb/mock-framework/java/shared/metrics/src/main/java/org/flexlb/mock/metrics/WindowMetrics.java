@@ -10,40 +10,49 @@ public final class WindowMetrics extends Collector {
         double sum, total;
         long count, samples;
     }
+    private record Series(String name, Map<String, String> tags) {}
     private final String role;
     private final LongSupplier clock;
     private long started;
-    private final Map<String, Reading> values = new TreeMap<>();
+    private final Map<String, Set<String>> labelNames = new HashMap<>();
+    private final Map<Series, Reading> values = new LinkedHashMap<>();
 
     public WindowMetrics(String role) { this(role, System::nanoTime); }
     public WindowMetrics(String role, LongSupplier clock) {
         this.role = Objects.requireNonNull(role); this.clock = clock; started = clock.getAsLong();
     }
-    public synchronized void observe(String name, double value) {
-        if (!Double.isFinite(value) || value < 0) throw new IllegalArgumentException("Invalid metric observation");
-        var reading = values.computeIfAbsent(name, ignored -> new Reading());
+    public void observe(String name, double value) { observe(name, value, Map.of()); }
+    public synchronized void observe(String name, double value, Map<String, String> tags) {
+        if (!Double.isFinite(value) || value < 0 || tags.containsKey("role")) throw new IllegalArgumentException("Invalid metric observation");
+        var previous = labelNames.putIfAbsent(name, Set.copyOf(tags.keySet()));
+        if (previous != null && !previous.equals(tags.keySet())) throw new IllegalArgumentException("Inconsistent metric labels: " + name);
+        var series = new Series(name, Collections.unmodifiableMap(new TreeMap<>(tags)));
+        var reading = values.computeIfAbsent(series, ignored -> new Reading());
         reading.sum += value; reading.total += value; reading.count++; reading.samples++;
     }
     public void increment(String name) { observe(name, 1); }
-    private GaugeMetricFamily gauge(String name, double value) {
-        var family = new GaugeMetricFamily(name, "Native observation; event gauges use the scrape-window mean.", List.of("role"));
-        family.addMetric(List.of(role), value); return family;
+    private void add(Map<String, GaugeMetricFamily> result, String name, double value, Map<String, String> tags) {
+        var names = new ArrayList<>(List.of("role")); names.addAll(tags.keySet());
+        var labels = new ArrayList<>(List.of(role)); labels.addAll(tags.values());
+        var family = result.computeIfAbsent(name, ignored -> new GaugeMetricFamily(name,
+            "Native observation; event gauges use the scrape-window mean.", names));
+        family.addMetric(labels, value);
     }
     @Override public synchronized List<MetricFamilySamples> collect() {
         long now = clock.getAsLong(), elapsed = now - started;
         if (elapsed <= 0) return List.of();
-        var result = new ArrayList<MetricFamilySamples>();
+        var result = new LinkedHashMap<String, GaugeMetricFamily>();
         for (var entry : values.entrySet()) {
-            String name = entry.getKey(); var reading = entry.getValue();
-            if (name.endsWith("_qps")) result.add(gauge(name, reading.sum * 1e9 / elapsed));
+            String name = entry.getKey().name(); var tags = entry.getKey().tags(); var reading = entry.getValue();
+            if (name.endsWith("_qps")) add(result, name, reading.sum * 1e9 / elapsed, tags);
             else {
-                if (reading.count > 0) result.add(gauge(name, reading.sum / reading.count));
+                if (reading.count > 0) add(result, name, reading.sum / reading.count, tags);
                 // Cumulative helpers retain rare events for queries between scrapes.
-                result.add(gauge(name + "_sum", reading.total));
-                result.add(gauge(name + "_count", reading.samples));
+                add(result, name + "_sum", reading.total, tags);
+                add(result, name + "_count", reading.samples, tags);
             }
             reading.sum = 0; reading.count = 0;
         }
-        started = now; return result;
+        started = now; return new ArrayList<>(result.values());
     }
 }

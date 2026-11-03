@@ -24,6 +24,8 @@ public final class RtpScheduler extends RtpSchedulerBase {
     @Override protected void cacheLoading(Entry entry) {
         waiting.remove(entry);
         entry.phase = Phase.CACHE_LOADING;
+        entry.loadStarted = System.nanoTime();
+        entry.waitNanos = Math.max(0, entry.loadStarted - entry.timingStarted);
         loading.add(entry);
     }
 
@@ -33,6 +35,7 @@ public final class RtpScheduler extends RtpSchedulerBase {
             if (!live(entry)) continue;
             if (cacheReady(entry)) {
                 loading.remove(entry);
+                entry.loadDone = System.nanoTime();
                 entry.phase = Phase.QUEUED;
                 waiting.addLast(entry);
             }

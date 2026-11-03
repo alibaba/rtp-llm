@@ -6,7 +6,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class RtpMetricsTest {
-    private static final RtpMetrics.State IDLE = new RtpMetrics.State(0, 0, 0, 0, 100, 100, 100, 0, 0, 0, 1);
+    private static final RtpMetrics.State IDLE = new RtpMetrics.State(0, 0, 0, 0, 100, 100, 100, 0, 0, 0, 1, 0);
 
     static double sample(String text, String name, String label) {
         return text.lines().filter(line -> line.startsWith(name + "{") && line.contains(label))
@@ -17,7 +17,7 @@ class RtpMetricsTest {
         var state = new AtomicReference<>(IDLE);
         var metrics = new RtpMetrics("prefill", state::get);
         assertEquals(0, sample(metrics.scrape(), "rtp_llm_requests_started_total", ""));
-        state.set(new RtpMetrics.State(2, 1, 3, 4, 100, 70, 50, 30, 200, 120, 5));
+        state.set(new RtpMetrics.State(2, 1, 3, 4, 100, 70, 50, 30, 200, 120, 5, 3));
         var before = metrics.scrape();
         assertEquals(2, sample(before, "rtp_llm_scheduler_requests", "state=\"waiting\""));
         assertEquals(70, sample(before, "rtp_llm_kv_tokens", "state=\"available\""));
@@ -53,7 +53,7 @@ class RtpMetricsTest {
     }
 
     @Test void nativeQueueAndKvMetricsKeepRealUnitsAndDoNotInventHostAvailability() {
-        var metrics = new RtpMetrics("prefill", () -> new RtpMetrics.State(2, 1, 3, 4, 100, 70, 50, 30, 200, 120, 5));
+        var metrics = new RtpMetrics("prefill", () -> new RtpMetrics.State(2, 1, 3, 4, 100, 70, 50, 30, 200, 120, 5, 3));
         var text = metrics.scrape();
         assertEquals(2, sample(text, "rtp_llm_wait_stream_size", ""));
         assertEquals(1, sample(text, "rtp_llm_running_stream_size", ""));
@@ -61,13 +61,14 @@ class RtpMetricsTest {
         assertEquals(20, sample(text, "rtp_llm_kv_cache_total_blocks", "tier=\"DEVICE\""));
         assertEquals(14, sample(text, "rtp_llm_kv_cache_available_blocks", "tier=\"DEVICE\""));
         assertEquals(10, sample(text, "rtp_llm_kv_cache_used_blocks", "tier=\"DEVICE\""));
+        assertEquals(6, sample(text, "rtp_llm_kv_cache_active_blocks", "tier=\"DEVICE\""));
         assertEquals(30, sample(text, "rtp_llm_kv_cache_used_ratio", "tier=\"DEVICE\""));
         assertEquals(40, sample(text, "rtp_llm_kv_cache_total_blocks", "tier=\"HOST\""));
         assertEquals(24, sample(text, "rtp_llm_kv_cache_free_blocks", "tier=\"HOST\""));
         assertFalse(text.lines().anyMatch(line -> line.startsWith("rtp_llm_kv_cache_available_blocks{") && line.contains("HOST")));
-        assertFalse(text.contains("rtp_llm_loading_cache_stream_size"));
+        assertEquals(3, sample(text, "rtp_llm_loading_cache_stream_size", ""));
         assertFalse(text.contains("mock_engine_"));
-        assertThrows(IllegalArgumentException.class, () -> new RtpMetrics.State(0, 0, 0, 0, 100, 71, 50, 0, 0, 0, 5));
+        assertThrows(IllegalArgumentException.class, () -> new RtpMetrics.State(0, 0, 0, 0, 100, 71, 50, 0, 0, 0, 5, 0));
     }
 
     @Test void nativeThroughputSeparatesActiveTimeWallTimeAndTerminalQpsAndClearsIdleWindows() {
@@ -123,7 +124,7 @@ class RtpMetricsTest {
         assertThrows(IllegalArgumentException.class, () -> metrics.cacheLookup(1, 2));
         assertThrows(IllegalArgumentException.class, () -> metrics.forwardCompleted(-1, 1000, 1, 1, 1));
         assertThrows(IllegalArgumentException.class, () -> metrics.forwardCompleted(1, 1000, 1, 2, 1));
-        assertThrows(IllegalArgumentException.class, () -> new RtpMetrics.State(0, 0, 0, 0, 10, 11, 0, 0, 0, 0, 1));
+        assertThrows(IllegalArgumentException.class, () -> new RtpMetrics.State(0, 0, 0, 0, 10, 11, 0, 0, 0, 0, 1, 0));
         assertEquals(0, sample(metrics.scrape(), "rtp_llm_cache_lookup_tokens_total", ""));
         assertEquals(0, sample(metrics.scrape(), "rtp_llm_model_forward_seconds_count", ""));
     }
