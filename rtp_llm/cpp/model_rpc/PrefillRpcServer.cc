@@ -356,13 +356,6 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
     }
 
     prefill_context.markMultimodalAttemptStarted();
-    if (maga_init_params_.model_config_.model_type == "qwen4_exp") {
-        prefill_context.setRetryable(false);
-        setContextError(
-            prefill_context,
-            ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "qwen4_exp QSA currently supports text inputs only"));
-        return;
-    }
     if (mm_processor_ == nullptr) {
         const auto error =
             ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "multimodal inputs require a configured multimodal processor");

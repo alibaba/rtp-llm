@@ -368,14 +368,6 @@ TEST_F(InferenceServiceTest, InferResponseRejectsPartialEnqueueAndCancelsAdmitte
     writer_ptr.release();
 }
 
-TEST_F(InferenceServiceTest, Qwen4RejectsImagesBeforeTokenizationOrEnqueue) {
-    inference_service_->model_config_.model_type = "qwen4_exp";
-    EXPECT_CALL(*mock_token_processor_, encode(_)).Times(0);
-    EXPECT_THROW(
-        inference_service_->fillGenerateInput(1, "image", {"unused-image"}, std::make_shared<GenerateConfig>()),
-        HttpApiServerException);
-}
-
 TEST_F(InferenceServiceTest, fillGenerateInput) {
 
     EXPECT_CALL(*mock_metric_reporter_, reportFTInputTokenLengthMetric(_)).Times(1);

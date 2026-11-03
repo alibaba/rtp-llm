@@ -424,10 +424,6 @@ ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB&                   
     output.reset();
     try {
         output = QueryConverter::transQuery(&input_pb);
-        if (maga_init_params_.model_config_.model_type == "qwen4_exp" && output->multimodal_inputs
-            && !output->multimodal_inputs->empty()) {
-            return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "qwen4_exp QSA currently supports text inputs only");
-        }
         if (mm_processor_ != nullptr && (output->multimodal_inputs || output->v41_inputs)) {
             RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
             auto mm_res = updateMultimodalFeaturesWithTrace(output, parent_span, server_context);

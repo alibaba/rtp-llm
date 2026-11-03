@@ -349,11 +349,23 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
         from rtp_llm.config.exceptions import ExceptionType
 
         response = self.session.post(
-            self.url("/"),
+            self.url("/v1/chat/completions"),
             json={
-                "prompt": "Describe the image.",
-                "images": ["https://example.invalid/image.png"],
-                "generate_config": {"max_new_tokens": 1},
+                "model": "qwen4_exp",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "https://example.invalid/image.png"
+                                },
+                            }
+                        ],
+                    }
+                ],
+                "max_tokens": 1,
             },
             timeout=30,
         )
@@ -361,10 +373,11 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
         self.assertFalse(response.ok, response.text)
         error = response.json()
         self.assertEqual(
-            error["error_code"], int(ExceptionType.MM_NOT_SUPPORTED_ERROR), error
+            error["error_code"], int(ExceptionType.UNSUPPORTED_OPERATION), error
         )
         self.assertIn(
-            "qwen4_exp QSA currently supports text inputs only", error["message"]
+            "Qwen3.8-Flash-Next QSA currently supports text inputs only",
+            error["message"],
         )
         self.check_chat_goldens("after_rejected_multimodal_request")
 
