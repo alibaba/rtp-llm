@@ -6,6 +6,7 @@ import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.NonBatchDeliveryStrategy;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.estimate.BatchTtftEstimator;
@@ -33,8 +34,12 @@ import org.flexlb.service.monitor.RequestSchedulerReporter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Test-only composition root for mock-engine end-to-end scheduler tests. */
 public final class RequestSchedulerTestRuntime implements AutoCloseable {
@@ -101,6 +106,25 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     public RequestScheduler scheduler() {
         return scheduler;
+    }
+
+    /**
+     * Exercise capacity-blocked admission with the fixture's real request registry and Cancel channel.
+     */
+    public CompletableFuture<Response> preemptDecode(BalanceContext context, DecodeEndpoint endpoint) {
+        var future = lifecycle.register(context);
+        context.setFuture(future);
+        var selected = router.select(context, null);
+        assertEquals(PlacementResult.Status.SUCCESS, selected.status());
+        RouteAdmission admission = selected.value();
+        try {
+            assertTrue(evictionManager.tryAdmit(context, future, admission, endpoint),
+                    "Decode preemption must accept the capacity-blocked route");
+        } catch (RuntimeException | Error failure) {
+            admission.close();
+            throw failure;
+        }
+        return future;
     }
 
     public EndpointRegistry endpointRegistry() {

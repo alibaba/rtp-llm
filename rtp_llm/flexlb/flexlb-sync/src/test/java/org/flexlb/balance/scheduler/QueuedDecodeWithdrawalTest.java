@@ -124,7 +124,8 @@ class QueuedDecodeWithdrawalTest {
         applyStatus(Map.of(), Map.of());
         assertEquals(RequestState.Phase.ACKNOWLEDGED, slot.snapshot().state());
         assertEquals(1, registry.snapshotActiveRequests().size());
-        assertEquals(1, decode.routingView().engineCapacityUsed());
+        assertEquals(0, decode.routingView().engineCapacityUsed());
+        assertTrue(decode.isAcceptedByEngine(item.decodeReservation()));
         applyStatus(Map.of(), Map.of("42", task));
         assertEquals(RequestState.Phase.COMPLETED, slot.snapshot().state());
         assertTrue(registry.snapshotActiveRequests().isEmpty());

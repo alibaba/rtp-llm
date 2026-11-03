@@ -355,8 +355,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         return status;
     }
 
-    private static WorkerStatusResponse statusResponse(
-            RoleType role, EngineRpcService.WorkerStatusPB snapshot) {
+    private static WorkerStatusResponse statusResponse(RoleType role, EngineRpcService.WorkerStatusPB snapshot) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(role);
         response.setAlive(snapshot.getAlive());
@@ -364,6 +363,8 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         response.setTotalKvCacheTokens(snapshot.getTotalKvCache());
         response.setMaxBatchTokensSize(snapshot.getMaxBatchTokensSize());
         response.setMaxSeqLen(snapshot.getMaxSeqLen());
+        response.setRunningQueryLen(snapshot.getRunningQueryLen());
+        response.setWaitingQueryLen(snapshot.getWaitingQueryLen());
         response.setStatusVersion(snapshot.getStatusVersion());
         response.setLatestFinishedVersion(snapshot.getLatestFinishedVersion());
         Map<String, TaskInfo> running = new HashMap<>();
@@ -425,6 +426,10 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         EnumSet<VictimStage> stages = EnumSet.of(first, additional);
         preemption.setAllowedVictimStages(stages);
         config.priorityOrdering().setPreemption(preemption);
+    }
+
+    CompletableFuture<Response> preemptDecode(BalanceContext context, int decodeIndex) {
+        return schedulerRuntime.preemptDecode(context, decodeEndpoint(decodeIndex));
     }
 
     private ServerStatus prefillServer(int index, String requestId) {

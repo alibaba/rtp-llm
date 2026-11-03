@@ -106,8 +106,13 @@ class SchedulingErrorCodeMatrixTest {
     @ParameterizedTest(name = "{0}: healthy Prefill has no KV -> queue expiry 8431")
     @MethodSource("queuedModes")
     void queueExpiryRetainsPrefillPressure(String mode) throws Exception {
-        try (Fixture fixture = new Fixture(mode)) {
-            fixture.harness.prefillEngines.getFirst().setFaultConfig(FaultInjectionConfig.builder()
+        try (Fixture fixture = new Fixture(mode, "30000")) {
+            var prefill = fixture.harness.prefillEngines.getFirst();
+            MockEngineTestSupport.enqueue(prefill, MockEngineTestSupport.batch(1L,
+                    MockEngineTestSupport.slot(0, MockEngineTestSupport.input(REQUEST_ID - 1, 128))));
+            AutoTpmE2EHarness.await(() -> prefill.getRunningCount() == 1, 2_000L,
+                    "Prefill must be busy before applying KV pressure");
+            prefill.setFaultConfig(FaultInjectionConfig.builder()
                     .kvPressureTokens(Long.MAX_VALUE).build());
             fixture.harness.pumpOnce();
             BalanceContext context = fixture.context();
@@ -191,10 +196,10 @@ class SchedulingErrorCodeMatrixTest {
         final RouteService service;
 
         Fixture(String mode) {
-            this(mode, 100);
+            this(mode, "1");
         }
 
-        Fixture(String mode, int prefillCapacity) {
+        Fixture(String mode, String prefillFormulaMs) {
             FlexlbConfig config = new FlexlbConfig();
             DecisionPolicyConfig decision = new DecisionPolicyConfig();
             decision.setMaxRequests(1);
@@ -207,8 +212,8 @@ class SchedulingErrorCodeMatrixTest {
             config.queueScheduler().setDecision(decision);
             config.getDispatcher().setType(DispatcherConfig.Type.valueOf(parts[2]));
             config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
-            config.getDispatcher().setMaxInflightPerPrefillWorker(prefillCapacity);
-            harness = new AutoTpmE2EHarness(61_500, 1, 1, "1", 1.0, true,
+            config.getDispatcher().setMaxInflightPerPrefillWorker(100);
+            harness = new AutoTpmE2EHarness(61_500, 1, 1, prefillFormulaMs, 1.0, true,
                     false, decision, true, config);
             service = new RouteService(harness.scheduler, mock(TheoryCacheHitReporter.class));
         }
