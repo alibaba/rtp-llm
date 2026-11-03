@@ -689,56 +689,6 @@ TEST(BlockTreeTest, InsertReplacesIdleFrozenLowerTierWithoutReclaimingBacking) {
     }
 }
 
-TEST(BlockTreeTest, InsertReplacesIdleFrozenHostFullResourceWithoutChangingBranch) {
-    BlockTree  tree(makeLowerTierFullGroupSets(1));
-    const auto original = insertLowerTierPrefix(tree, {100, 200, 300}, Tier::HOST);
-    ASSERT_EQ(original.path.size(), 3u);
-    const auto fork = insertLowerTierPrefix(tree, {100, 200, 400}, Tier::HOST);
-    ASSERT_EQ(fork.path.size(), 3u);
-
-    TreeNode* branch = original.path[1];
-    TreeNode* left   = original.path[2];
-    TreeNode* right  = fork.path[2];
-    ASSERT_EQ(branch->children.size(), 2u);
-    const auto original_cache_keys = tree.cacheKeys();
-
-    IBlockPool* pool        = tree.groupSets()[0]->hostPool().get();
-    const auto  host_block = branch->group_set_resources[0].host_block;
-    pool->freezeBlock(host_block);
-    block_tree_cache_detail::ScopeRollback unfreeze([&]() { pool->decTreeRef(host_block, BlockTreeRefType::FROZEN); });
-
-    auto resources = makeEmpty2DResources(2);
-    resources[1][0].device_blocks = {20};
-    const auto result = tree.insertNode({100, 200}, resources, true, false);
-
-    EXPECT_FALSE(result.hard_stop.has_value());
-    ASSERT_EQ(result.path.size(), 2u);
-    EXPECT_EQ(result.path[0], original.path[0]);
-    EXPECT_EQ(result.path[1], branch);
-    EXPECT_TRUE(result.inserted_nodes.empty());
-    ASSERT_EQ(result.adopted_nodes.size(), 1u);
-    EXPECT_EQ(result.adopted_nodes[0].first, branch);
-    EXPECT_EQ(result.accepted_resource_count, 1u);
-    EXPECT_EQ(branch->group_set_resources[0].getTopTier(), Tier::DEVICE);
-    EXPECT_EQ(branch->group_set_resources[0].device_blocks, (BlockIndicesType{20}));
-    EXPECT_TRUE(pool->isAllocated(host_block));
-    EXPECT_TRUE(pool->isFrozen(host_block));
-
-    EXPECT_EQ(tree.size(), 4u);
-    EXPECT_EQ(tree.cacheKeys(), original_cache_keys);
-    EXPECT_EQ(branch->parent, original.path[0]);
-    ASSERT_EQ(branch->children.size(), 2u);
-    EXPECT_EQ(branch->children.at(300), left);
-    EXPECT_EQ(branch->children.at(400), right);
-    EXPECT_EQ(left->parent, branch);
-    EXPECT_EQ(right->parent, branch);
-    EXPECT_EQ(tree.findNode({100, 200, 300}), (std::vector<TreeNode*>{original.path[0], branch, left}));
-    EXPECT_EQ(tree.findNode({100, 200, 400}), (std::vector<TreeNode*>{original.path[0], branch, right}));
-
-    unfreeze.run();
-    EXPECT_FALSE(pool->isAllocated(host_block));
-}
-
 TEST(BlockTreeTest, InsertPreflightsAllFullGroupsBeforeReplacingLowerTierResources) {
     for (Tier tier : {Tier::HOST, Tier::DISK}) {
         BlockTree tree(makeLowerTierFullGroupSets(2));

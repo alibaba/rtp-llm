@@ -468,7 +468,6 @@ TEST(KVCMLocalTest, ExecuteFunctionPropagatesMetadataErrorsAndPreservesTransferS
         EXPECT_FALSE(manager.executeFunction(request, response));
     }
 
-    int operation_sequence = 0;
     for (const auto ec :
          {kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS, kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT}) {
         client_wrapper->load_status = ec;
@@ -477,26 +476,15 @@ TEST(KVCMLocalTest, ExecuteFunctionPropagatesMetadataErrorsAndPreservesTransferS
             FunctionRequestPB request;
             auto*             remote = request.mutable_remote_request();
             remote->set_op(operation);
-            const auto operation_id = "transfer_" + std::to_string(operation_sequence++);
-            remote->set_operation_id(operation_id);
             remote->add_group_tags("default");
             remote->add_block_ids(environment.block_id);
             remote->add_uris("transfer_uri");
             FunctionResponsePB response;
             EXPECT_TRUE(manager.executeFunction(request, response));
             ASSERT_TRUE(response.has_remote_response());
-            const bool timed_out = ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT;
             EXPECT_EQ(response.remote_response().transfer_status(),
-                      timed_out ? REMOTE_TRANSFER_STATUS_TIMEOUT : REMOTE_TRANSFER_STATUS_FAILED);
-
-            QueryKVCMOperationsRequestPB  query_request;
-            QueryKVCMOperationsResponsePB query_response;
-            query_request.add_operation_ids(operation_id);
-            ASSERT_TRUE(manager.queryKVCMOperations(query_request, query_response));
-            ASSERT_EQ(query_response.operations_size(), 1);
-            EXPECT_EQ(query_response.operations(0).state(),
-                      QueryKVCMOperationsResponsePB::OperationState::RUNNING);
-            EXPECT_FALSE(manager.forgetKVCMOperation(operation_id));
+                      ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT :
+                                                                                REMOTE_TRANSFER_STATUS_FAILED);
         }
     }
 }

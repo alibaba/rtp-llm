@@ -16,22 +16,6 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
-namespace {
-
-bool hasFrozenLowerTierBlock(const GroupSetPtr& group_set, Tier tier, const std::vector<BlockIdxType>& blocks) {
-    const IBlockPool* pool = nullptr;
-    if (tier == Tier::HOST) {
-        pool = group_set->hostPool().get();
-    } else if (tier == Tier::DISK) {
-        pool = group_set->diskPool().get();
-    } else {
-        return false;
-    }
-    RTP_LLM_CHECK(pool != nullptr);
-    return std::any_of(blocks.begin(), blocks.end(), [pool](BlockIdxType block) { return pool->isFrozen(block); });
-}
-
-}  // namespace
 
 BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
                                  BlockTreeEvictor&               evictor,
@@ -199,24 +183,6 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         }
     }
 
-    // A frozen source still belongs to an earlier UNKNOWN transfer. Check only sources that this
-    // match would actually load so unused SWA/LINEAR resources do not truncate an otherwise valid match.
-    for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
-        const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
-        const size_t logical_reuse_count = std::min(group_set->computeReuseBlockCount(path.size()), path.size());
-        for (size_t i = std::max(path.size() - logical_reuse_count, result.matched_device_blocks); i < path.size();
-             ++i) {
-            const GroupSetResource& resource = path[i]->group_set_resources[group_set_id];
-            if (resource.transfer_state == GroupSetTransferState::LOADING) {
-                continue;
-            }
-            const Tier source_tier = resource.getTopTier();
-            if (hasFrozenLowerTierBlock(group_set, source_tier, resource.getBlocks(source_tier))) {
-                return {};
-            }
-        }
-    }
-
     std::vector<TransferDescriptor> pending_load_descs;
     std::vector<bool>               joined_loads;
     for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
@@ -359,11 +325,6 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
             ++prepared_desc_count;
             continue;
         }
-        if (hasFrozenLowerTierBlock(
-                tree_->groupSets()[desc.group_set_id], desc.source_tier, desc.source_blocks)) {
-            RTP_LLM_LOG_WARNING("committed load source is frozen, group_set_id=%zu", desc.group_set_id);
-            return false;
-        }
         if (!changeTransferState(
                 desc.node, desc.group_set_id, GroupSetTransferState::LOAD_PENDING, GroupSetTransferState::LOADING)) {
             RTP_LLM_LOG_ERROR("committed load source is not LOAD_PENDING, group_set_id=%zu", desc.group_set_id);
@@ -500,25 +461,21 @@ void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
                                                                    transfer.traceId(),
                                                                    false);
             CompletionStageScope freeze(observation, "freeze_blocks", "workflow_callback");
-            TransferResult result = task->host_result;
-            result.merge(task->disk_result);
-            FrozenTask frozen(result);
             // Ordinary LOAD references still protect both ends until settlement.
             // Preserve those physical slots before publishing the failure.
             for (const TransferDescriptor& desc : task->load_descs) {
                 const GroupSetPtr& group_set   = tree_->groupSets()[desc.group_set_id];
-                std::shared_ptr<IBlockPool> source_pool = desc.source_tier == Tier::HOST ?
-                    std::static_pointer_cast<IBlockPool>(group_set->hostPool()) :
-                    std::static_pointer_cast<IBlockPool>(group_set->diskPool());
+                IBlockPool*        source_pool = desc.source_tier == Tier::HOST ?
+                                                     static_cast<IBlockPool*>(group_set->hostPool().get()) :
+                                                     static_cast<IBlockPool*>(group_set->diskPool().get());
                 for (BlockIdxType block : desc.source_blocks) {
-                    frozen.freeze(source_pool, block);
+                    source_pool->freezeBlock(block);
                 }
                 const auto& device_pools = group_set->devicePools();
                 for (size_t member = 0; member < device_pools.size(); ++member) {
-                    frozen.freeze(device_pools[member], desc.target_blocks[member]);
+                    device_pools[member]->freezeBlock(desc.target_blocks[member]);
                 }
             }
-            transfer_dispatcher_->retainFrozenTask(std::move(frozen));
         }
         const size_t descriptor_count = task->load_descs.size();
         if (!task->context->completeTransfers(descriptor_count, error.ok())) {
