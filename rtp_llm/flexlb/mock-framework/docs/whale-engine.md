@@ -69,3 +69,14 @@ HTTP 为 START_PORT，gRPC 为 START_PORT+1；平台探针访问 HTTP `/health`�
 | Frontend、ViT | 保持原有链路和配置 | 相同 |
 
 这里只启用缓存元信息查询和上报，未实现远端 KV 数据加载，开启组的 `ENABLE_REMOTE_CACHE` 也保持 false。Engine 的共享 instance_id 必须等于 Master 查询的 `<namespace>_<cacheKeyBlockSize>`，host 身份必须与 Master 发现结果一致。更改 Master 查询模式需要重启。
+
+
+## 监控自动选择
+
+Engine 只启用一个指标后端，不需要额外部署开关。公共构建没有 `MetricReporter` SPI 实现，P/D/V 提供 Prometheus `/metrics`；CI 发现原生 `internal_source/java/kmonitor/pom.xml` 时自动启用 `internal-monitoring` profile，将内部 KMonitor reporter、SDK 和 SPI 文件打入 Engine JAR。启动时发现该实现就使用 KMonitor，不注册 `/metrics`，endpoints 的 `metrics_backend` 为 `kmonitor`、`metrics` 为空字符串。内部包在本地启动也会选择 KMonitor；本地 Case 使用公共构建。
+
+内部 reporter 读取 real 的 `kmonitorSinkAddress`（默认 `HIPPO_SLAVE_IP`，再回退 127.0.0.1）、`kmonitorPort`（4141）、`kmonitorServiceName`、`kmonitorTenant`（default）和 `kmonitorNormalSamplePeriod`（1 秒）。`kmonitorTags` 使用原生 `key^value@key^value` 格式，合并到现有 Hippo 身份标签，平台显式标签优先。没有使用 Master 的 `FLEXLB_MONITOR_*` 配置或 `whale-lb` 默认服务名。
+
+两种后端消费同一份结构化快照，各自只有一个采集入口，不解析 Prometheus 文本，不重复清空窗口。快照里的 QPS 已是速率、counter 是累计值，KMonitor 按 Gauge 上报，避免再次转换成 QPS；Histogram bucket/sum/count 保留为同名数值序列，不冒充原始延迟样本。SDK 的 JVM 内置资源采集关闭，避免当成每个模拟 Engine 的资源。指标实例在关闭前停止其采集线程；SDK 为 JVM 共享，在进程退出时关闭。
+
+缺少 provider 时使用 Prometheus；provider 存在但 SDK 加载或初始化失败则启动失败，不静默回退。运行期间上报异常记录错误并在后续周期继续尝试。打包会检查 reporter、SDK、SPI 及服务启动后 `/metrics` 的互斥行为；本地公共测试不能替代内部 CI 的 SDK 编译、配置测试，以及 Whale 上实际指标验收。内部配置测试命令为 `scripts/build.sh -pl java/host -am -Pinternal-monitoring -Dtest=KMonitorReporterTest -Dsurefire.failIfNoSpecifiedTests=false`。

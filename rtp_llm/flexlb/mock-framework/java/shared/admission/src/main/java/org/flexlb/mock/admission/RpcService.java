@@ -52,6 +52,9 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
         if (closed) throw new IllegalStateException("Engine closed");
         if (requests == null) decode.checkHealthy(); else requests.checkHealthy();
     }
+    public java.util.List<io.prometheus.client.Collector.MetricFamilySamples> collectMetrics() {
+        return requests == null ? decode.collectMetrics() : requests.collectMetrics();
+    }
     public String scrapeMetrics() { return requests == null ? decode.scrapeMetrics() : requests.scrapeMetrics(); }
 
     @Override public void executeFunction(FunctionRequestPB input, StreamObserver<FunctionResponsePB> response) {
