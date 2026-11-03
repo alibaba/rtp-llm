@@ -681,6 +681,7 @@ class Indexer(nn.Module):
                     q_lora,
                     hidden_states,
                     fmha_params,
+                    attention_inputs,
                     cp_params,
                     x_fp8,
                     x_scale,

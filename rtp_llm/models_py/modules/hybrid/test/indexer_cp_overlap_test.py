@@ -116,6 +116,21 @@ class IndexerCPOverlapTest(unittest.TestCase):
             step("topk")
             return "result"
 
+        def get_q_k(
+            q_lora,
+            hidden,
+            fmha,
+            attention_inputs,
+            cp_params,
+            x_fp8,
+            x_scale,
+            q_c_fp8,
+            q_c_scale,
+        ):
+            self.assertIs(cp_params, cp)
+            self.assertIsNotNone(attention_inputs)
+            return NS(), NS()
+
         obj = NS(
             use_hadamard=hadamard,
             indexer_op=NS(
@@ -129,7 +144,7 @@ class IndexerCPOverlapTest(unittest.TestCase):
             ),
             _prefill_cp_fused_quant_enabled=lambda: fused,
             _fused_forward_prefill_cp_early_k=fused_call,
-            _get_q_k_bf16=lambda *args: (NS(), NS()),
+            _get_q_k_bf16=get_q_k,
             _get_logits_head_gate=weights,
             _compute_topk=topk,
         )
