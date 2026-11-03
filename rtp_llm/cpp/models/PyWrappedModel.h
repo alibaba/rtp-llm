@@ -36,6 +36,7 @@
 #if USING_ASCEND
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wpedantic"
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #pragma GCC diagnostic pop
 #include "rtp_llm/cpp/ascend_graph/ascend_graph_runner.h"
