@@ -51,7 +51,7 @@ class SchedulerInjectionTest {
             var resource = new AtomicReference<KvCache>();
             var config = config("prefill");
             var error = assertThrows(RuntimeException.class,
-                () -> RtpNode.start(config, (lock, cache) -> {
+                () -> RtpNode.start(config, (lock, cache, finished) -> {
                     resource.set(cache);
                     if (returnsNull) return null;
                     throw new IllegalStateException("Cannot create scheduler");

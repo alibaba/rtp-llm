@@ -137,6 +137,42 @@ class PdGenerationTest {
         } finally { vision.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
     }
 
+    @Test void preparationIsVisibleWithoutInflatingSchedulerLoadAndFailureHasOneTerminal() throws Exception {
+        var pending = new LinkedBlockingQueue<StreamObserver<MultimodalOutputPB>>();
+        var vision = io.grpc.netty.NettyServerBuilder.forPort(0)
+            .addService(new org.flexlb.engine.grpc.MultimodalRpcServiceGrpc.MultimodalRpcServiceImplBase() {
+                @Override public void remoteMultimodalEmbedding(MultimodalInputsPB input, StreamObserver<MultimodalOutputPB> response) {
+                    pending.add(response);
+                }
+            }).build().start();
+        try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1)) {
+            for (int output : new int[]{1, 3}) {
+                try (var call = new Call(p, image(input(d, output, 4, output, 3000, true), vision.getPort()))) {
+                    var response = pending.poll(2, TimeUnit.SECONDS); assertNotNull(response);
+                    var active = p.status();
+                    assertEquals(1, active.getRunningTaskInfoCount());
+                    assertEquals(TaskPhase.TASK_PHASE_PENDING, active.getRunningTaskInfo(0).getPhase());
+                    assertEquals(output, active.getRunningTaskInfo(0).getRequestId());
+                    assertEquals(32, active.getAvailableKvCache());
+                    assertEquals(0, metric(p, "rtp_llm_requests_started_total", ""));
+                    assertEquals(0, metric(p, "rtp_llm_wait_stream_size", ""));
+                    response.onError(Status.UNAVAILABLE.withDescription("V unavailable").asRuntimeException());
+                    call.error(Status.Code.UNAVAILABLE);
+                    var ended = p.status();
+                    assertEquals(0, ended.getRunningTaskInfoCount());
+                    assertEquals(output == 1 ? 1 : 2, ended.getFinishedTaskListCount());
+                    var task = ended.getFinishedTaskList(ended.getFinishedTaskListCount() - 1);
+                    assertEquals(output, task.getRequestId());
+                    assertEquals(TaskPhase.TASK_PHASE_PENDING, task.getPhase());
+                    assertEquals(Status.Code.UNAVAILABLE.value(), task.getErrorInfo().getErrorCode());
+                    var delta = RpcServiceGrpc.newBlockingStub(p.channel).getWorkerStatus(StatusVersionPB.newBuilder()
+                        .setLatestFinishedVersion(ended.getLatestFinishedVersion()).build());
+                    assertEquals(0, delta.getFinishedTaskListCount());
+                }
+            }
+        } finally { vision.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
+    }
+
     @Test void localVisionFailureAndDeadlineNeverAdmitToScheduler() throws Exception {
         var calls = new java.util.concurrent.atomic.AtomicInteger();
         var vision = io.grpc.netty.NettyServerBuilder.forPort(0)
@@ -154,7 +190,11 @@ class PdGenerationTest {
                 var error = assertThrows(StatusRuntimeException.class, () -> rpc.generateStreamCall(request).hasNext());
                 assertEquals(id == 1 ? Status.Code.UNAVAILABLE : Status.Code.DEADLINE_EXCEEDED, error.getStatus().getCode());
                 assertEquals(0, p.status().getRunningTaskInfoCount());
-                assertEquals(0, p.status().getFinishedTaskListCount());
+                assertEquals(id, p.status().getFinishedTaskListCount());
+                var finished = p.status().getFinishedTaskList(id - 1);
+                assertEquals(id, finished.getRequestId());
+                assertEquals(TaskPhase.TASK_PHASE_PENDING, finished.getPhase());
+                assertEquals(id == 1 ? Status.Code.UNAVAILABLE.value() : 603, finished.getErrorInfo().getErrorCode());
                 assertEquals(32, p.status().getAvailableKvCache());
             }
             assertEquals(2, calls.get());
@@ -653,7 +693,9 @@ class PdGenerationTest {
         try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1); var holder = d.node.cache().acquire(12, List.of()).lease();
                 var call = new Call(p, input(d, 1, 5, 4, 2500, true))) {
             await(() -> d.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 1);
-            assertEquals(0, p.status().getRunningTaskInfoCount()); assertEquals(16, p.status().getAvailableKvCache());
+            assertEquals(1, p.status().getRunningTaskInfoCount());
+            assertEquals(TaskPhase.TASK_PHASE_PENDING, p.status().getRunningTaskInfo(0).getPhase());
+            assertEquals(16, p.status().getAvailableKvCache());
             assertEquals(0, metric(p, "rtp_llm_requests_started_total", "")); holder.close();
             for (int n = 1; n <= 4; n++) call.output(n, n == 4, 1);
             assertEquals("completed", call.next());
@@ -823,7 +865,7 @@ class PdGenerationTest {
             var ack = enqueue(p, 2000, input(d, 711, 5, 3, 2000, true), input(d, 712, 50, 3, 2000, true));
             assertEquals(1, ack.getSuccessesCount()); assertEquals(711, ack.getSuccesses(0).getRequestId());
             assertEquals(1, ack.getErrorsCount()); assertEquals(602, ack.getErrors(0).getErrorInfo().getErrorCode());
-            await(() -> p.status().getFinishedTaskListCount() == 1 && d.status().getFinishedTaskListCount() == 2);
+            await(() -> p.status().getFinishedTaskListCount() == 2 && d.status().getFinishedTaskListCount() == 2);
             assertEquals(1, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
             assertEquals(32, p.status().getAvailableKvCache()); assertEquals(16, d.status().getAvailableKvCache());
         }
@@ -844,7 +886,7 @@ class PdGenerationTest {
             assertEquals(1, ack.getSuccessesCount()); assertEquals(1, ack.getErrorsCount());
             assertEquals(pending, ack.getErrors(0).getRequestId());
             assertEquals(8429, ack.getErrors(0).getErrorInfo().getErrorCode());
-            await(() -> p.status().getFinishedTaskListCount() == 1 && d.status().getFinishedTaskListCount() == 2);
+            await(() -> p.status().getFinishedTaskListCount() == 2 && d.status().getFinishedTaskListCount() == 2);
             assertEquals(1, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
             assertEquals(8, d.status().getAvailableKvCache());
             holder.close(); assertEquals(16, d.status().getAvailableKvCache());
@@ -858,7 +900,7 @@ class PdGenerationTest {
             var ack = enqueue(p, 2000, input(d, 731, 5, 3, 2000, true), input(d, 732, 8, 3, 2000, true));
             assertEquals(1, ack.getSuccessesCount()); assertEquals(731, ack.getSuccesses(0).getRequestId());
             assertEquals(1, ack.getErrorsCount()); assertEquals(605, ack.getErrors(0).getErrorInfo().getErrorCode());
-            await(() -> p.status().getFinishedTaskListCount() == 1 && d.status().getFinishedTaskListCount() == 2);
+            await(() -> p.status().getFinishedTaskListCount() == 2 && d.status().getFinishedTaskListCount() == 2);
             assertEquals(32, p.status().getAvailableKvCache()); assertEquals(32, d.status().getAvailableKvCache());
         }
     }

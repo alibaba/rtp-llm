@@ -28,6 +28,13 @@ public final class RpcErrors {
         };
         return new RequestFailure(reason, status.getDescription(), failure(status, code));
     }
+    static RequestFailure scheduling(Throwable error) {
+        if (error instanceof RequestFailure failure) return failure;
+        var status = Status.fromThrowable(error);
+        long code = code(new RequestFailure(INTERNAL, status.getDescription(), error));
+        if (code == 0 && status.getCode() == Status.Code.DEADLINE_EXCEEDED) code = 603;
+        return scheduling(status, code);
+    }
     public static Status status(RequestFailure failure) {
         if (failure == null) return Status.OK;
         if (failure.getCause() instanceof StatusRuntimeException nativeError) return nativeError.getStatus();

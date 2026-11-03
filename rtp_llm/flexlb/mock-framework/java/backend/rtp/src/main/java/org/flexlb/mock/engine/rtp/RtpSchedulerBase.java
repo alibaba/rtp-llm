@@ -1,7 +1,5 @@
 package org.flexlb.mock.engine.rtp;
 
-import org.flexlb.mock.admission.RpcErrors;
-import org.flexlb.mock.admission.TaskHistory;
 
 import java.util.*;
 import org.flexlb.mock.api.model.Types.Role;
@@ -15,7 +13,7 @@ import static org.flexlb.mock.engine.rtp.RtpSchedulerBase.Phase.*;
 /** Shared RTP request, KV, PD and Forward lifecycle; admission policies own their queues. */
 abstract class RtpSchedulerBase implements Scheduler {
     enum Phase { QUEUED, CAPACITY, CACHE_LOADING, LOADING, TRANSFERRING, TRANSFERRED, RUNNING, OUTPUT, FORWARD, READY }
-    private final TaskHistory history = new TaskHistory();
+    private final TaskHistory history;
     private final Object lock;
     protected final RtpConfig config;
     private final KvCache cache;
@@ -64,7 +62,8 @@ abstract class RtpSchedulerBase implements Scheduler {
     private record Batch(List<Member> members) {}
     private record Notice(Runnable action, boolean terminal) {}
 
-    RtpSchedulerBase(Object lock, RtpConfig config, KvCache cache) {
+    RtpSchedulerBase(Object lock, RtpConfig config, KvCache cache, TaskHistory history) {
+        this.history = Objects.requireNonNull(history);
         this.lock = Objects.requireNonNull(lock);
         this.config = Objects.requireNonNull(config);
         this.cache = Objects.requireNonNull(cache);
@@ -492,11 +491,9 @@ abstract class RtpSchedulerBase implements Scheduler {
         return active.values().stream().filter(entry -> !entry.state.terminating())
             .mapToLong(entry -> entry.input.deadline()).min().orElse(Long.MAX_VALUE);
     }
-    @Override public Status status(long latestFinishedVersion) {
+    @Override public List<Task> tasks() {
         long now = System.nanoTime();
-        var tasks = active.values().stream().map(entry -> task(entry, now, -1, null)).toList();
-        var counts = queues();
-        return history.snapshot(latestFinishedVersion, tasks, counts.waiting(), counts.running());
+        return active.values().stream().map(entry -> task(entry, now, -1, null)).toList();
     }
     private Task task(Entry entry, long now, long endTimeMillis, RequestFailure failure) {
         var progress = entry.state.snapshot();
@@ -505,11 +502,9 @@ abstract class RtpSchedulerBase implements Scheduler {
         // Native runtime metadata publishes final timings only on dequeue. Live execution is -1.
         long waitMillis = finished ? entry.waitNanos / 1_000_000 : 0;
         long executionMillis = finished ? Math.max(0, (now - entry.timingStarted) / 1_000_000 - waitMillis) : -1;
-        long code = failure == null ? 0 : RpcErrors.code(failure);
-        if (failure != null && code == 0) code = RpcErrors.status(failure).getCode().value();
         return new Task(entry.input.requestId(), entry.input.groupId(), entry.input.tokens(), entry.reused,
             entry.input.priority(), phase, progress.iterations(), waitMillis, executionMillis,
-            endTimeMillis, code, failure == null ? "" : Objects.toString(failure.getMessage(), ""));
+            endTimeMillis, failure);
     }
     private ReportedPhase reportedPhase(Entry entry) {
         return entry.phase == FORWARD || entry.phase == RUNNING || !prefill() && entry.phase == OUTPUT
