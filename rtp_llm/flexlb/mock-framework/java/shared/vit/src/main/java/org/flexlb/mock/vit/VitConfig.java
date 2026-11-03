@@ -30,9 +30,11 @@ public record VitConfig(String id, int patch, int merge, int hidden, int minPixe
         }
         var root = new ObjectMapper().createObjectNode().put("id", id).put("component_role", "vit");
         root.putObject("component").set("config", EngineConfig.environment(values, NATIVE, mockNames()));
-        return load(root);
+        return load(root, env);
     }
-    public static VitConfig load(JsonNode root) throws Exception {
+    public static VitConfig load(JsonNode root) throws Exception { return load(root, System.getenv()); }
+
+    private static VitConfig load(JsonNode root, Map<String, String> env) throws Exception {
         if (!root.path("component_role").asText().equals("vit") || !root.path("id").isTextual())
             throw new IllegalArgumentException("V instance requires role vit and an id");
         if (root.path("component").has("engine"))
@@ -40,7 +42,7 @@ public record VitConfig(String id, int patch, int merge, int hidden, int minPixe
         var config = root.path("component").path("config");
         if (!config.isObject()) throw new IllegalArgumentException("V config must be an object");
         config = EngineConfig.normalize(config, NATIVE, mockNames());
-        var model = EngineConfig.model(config);
+        var model = EngineConfig.model(config, env);
         if (model.isEmpty()) throw new IllegalArgumentException("ViT requires checkpoint_path with model config.json");
         var vision = model.path("vision_config");
         if (!vision.isObject()) throw new IllegalArgumentException("Model vision_config must be an object");
@@ -49,12 +51,12 @@ public record VitConfig(String id, int patch, int merge, int hidden, int minPixe
         var compute = ComputeModel.fromSettings(config, Map.of());
         var effective = new ObjectMapper().createObjectNode().put("id", root.path("id").asText()).put("role", "vit");
         int batchSize = integer(config,"gpu_max_batch_size",1,1,1024);
-        int concurrency = integer(config,"vit_concurrency",64,1,65536);
-        int pending = integer(config,"vit_max_queue_size",64,0,65536);
+        int concurrency = Math.max(1, signedInteger(config,"vit_concurrency",64));
+        int pending = Math.max(0, signedInteger(config,"vit_max_queue_size",64));
         var result = new VitConfig(root.path("id").asText(), integer(vision,"patch_size",null,1,1024), integer(vision,"downsample_ratio",null,1,32), integer(text,"hidden_size",null,1,65536),
             integer(vision,"min_pixels",null,0,Integer.MAX_VALUE), integer(vision,"max_image_tokens",null,4,1048576),
             batchSize, integer(config,"gpu_batch_wait_ms",10,0,60000), concurrency, Math.addExact(concurrency,pending),
-            bool(config,"mock.vit.skip.download",false), integer(config,"mm_timeout_ms",120000,1,3600000),
+            bool(config,"mock.vit.skip.download",false), integer(config,"mm_timeout_ms",120000,1,Integer.MAX_VALUE),
             integer(config,"mm_image_max_file_size_kb",102400,0,Integer.MAX_VALUE), headers(config),
             number(config,"mm_cache_gpu_max_bytes",2147483648L), number(config,"mm_cache_cpu_max_bytes",2147483648L), number(config,"mm_hash_key_cache_max_bytes",268435456L),compute,effective);
         effective.put("checkpoint_path",config.path("checkpoint_path").asText())
@@ -87,6 +89,15 @@ public record VitConfig(String id, int patch, int merge, int hidden, int minPixe
             headers.put(entry.getKey(),entry.getValue().asText());
         });
         return Map.copyOf(headers);
+    }
+    private static int signedInteger(JsonNode config, String key, int fallback) {
+        var value = config.get(key);
+        if (value == null) return fallback;
+        if (value.isIntegralNumber() || value.isTextual() && value.asText().matches("[+-]?\\d+")) {
+            try { return Integer.parseInt(value.asText()); }
+            catch (NumberFormatException ignored) { }
+        }
+        throw new IllegalArgumentException("Invalid V " + key);
     }
     private static int integer(JsonNode node,String key,Integer fallback,int low,int high) {
         long value = number(node,key,fallback == null ? null : fallback.longValue()); if (value < low || value > high) throw new IllegalArgumentException("Invalid V " + key); return (int)value;

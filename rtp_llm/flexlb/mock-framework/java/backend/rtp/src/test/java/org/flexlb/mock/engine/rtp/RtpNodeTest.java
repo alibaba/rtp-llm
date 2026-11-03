@@ -27,7 +27,9 @@ public class RtpNodeTest {
     }
 
     @Test void servesProductionNativeProtocolAndLiveCacheCapacity() throws Exception {
-        try (var node = RtpNode.start(config("prefill"))) {
+        var root = JSON.<com.fasterxml.jackson.databind.node.ObjectNode>valueToTree(configuration("prefill"));
+        ((com.fasterxml.jackson.databind.node.ObjectNode) root.path("component").path("config")).put("dp_size", 3);
+        try (var node = RtpNode.start(RtpConfig.load(root))) {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
             try {
                 var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(2, TimeUnit.SECONDS);
@@ -37,6 +39,8 @@ public class RtpNodeTest {
                 assertEquals(0, status.getAvailableConcurrency()); assertTrue(status.getAlive());
                 assertEquals(128, status.getTotalKvCache()); assertEquals(128, status.getAvailableKvCache());
                 assertEquals(4096, status.getMaxSeqLen());
+                assertEquals(3, status.getDpSize()); assertEquals(0, status.getDpRank());
+                assertEquals(4096, status.getMaxBatchTokensSize());
                 assertTrue(rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getStatusVersion() > status.getStatusVersion());
                 var lease = node.cache().acquire(32, List.of()).lease();
                 assertEquals(96, rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());

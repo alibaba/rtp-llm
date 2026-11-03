@@ -196,7 +196,7 @@ abstract class RtpSchedulerBase implements Scheduler {
         var admitted = new ArrayList<Entry>();
         for (var entry : List.copyOf(queue)) {
             if (!live(entry)) continue;
-            if (admitted.size() >= config.maxGenerateBatchSize()) break;
+            if (admitted.size() >= config.maxGenerateBatchSize() || config.forceSinglePrefill() && !admitted.isEmpty()) break;
             if (uncachedLimit > 0 && uncached >= uncachedLimit) continue;
             if (entry.lease == null && config.maxInitedKvStreams() > 0
                     && active.values().stream().filter(e -> e.lease != null).count() >= config.maxInitedKvStreams()) continue;
@@ -204,18 +204,24 @@ abstract class RtpSchedulerBase implements Scheduler {
             if (!reserve(entry)) {
                 if (entry.phase == CACHE_LOADING) {
                     admitted.add(entry);
-                    uncached += entry.input.tokens() - entry.reused;
+                    uncached += uncachedTokens(entry);
                 }
                 continue;
             }
             admitted.add(entry);
             queue.remove(entry); running.add(entry); selected.add(entry);
-            uncached += entry.input.tokens() - entry.reused;
+            uncached += uncachedTokens(entry);
         }
     }
     protected void removeWaiting(Entry entry) { waiting.remove(entry); }
 
     protected Set<Entry> waitingEntries() { return new HashSet<>(waiting); }
+
+    private long uncachedTokens(Entry entry) {
+        long tokens = entry.input.tokens() - entry.reused;
+        long alignment = 2L * config.cpSize();
+        return config.cpSize() > 1 ? (tokens + alignment - 1) / alignment * alignment : tokens;
+    }
 
     private boolean fitsPrefill(List<Entry> selected, Entry candidate) {
         if (selected.isEmpty()) return candidate.input.tokens() < config.maxSeqLen();

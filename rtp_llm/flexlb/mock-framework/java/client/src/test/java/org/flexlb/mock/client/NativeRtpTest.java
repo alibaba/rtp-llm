@@ -13,7 +13,7 @@ class NativeRtpTest {
     RtpNode node(String role) throws Exception {
         var path = directory.resolve(role + ".json");
         new ObjectMapper().writeValue(path.toFile(), Map.of("id", role + "-0", "component_role", role,
-            "component", Map.of("engine", "rtp", "config", Map.of("seq_size_per_block", 16, "test_block_num", 9,
+            "component", Map.of("engine", "rtp", "config", Map.of("mock.scheduler.mode", "group", "seq_size_per_block", 16, "test_block_num", 9,
                 "max_seq_len", 4096, "reserve_block_ratio", 0, "mock.compute", Map.of("forward", Map.of("expression", "5")))), "environment", Map.of()));
         return RtpNode.start(RtpConfig.load(path));
     }

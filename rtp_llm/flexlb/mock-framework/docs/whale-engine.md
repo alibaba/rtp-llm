@@ -80,3 +80,20 @@ Engine 只启用一个指标后端，不需要额外部署开关。公共构建�
 两种后端消费同一份结构化快照，各自只有一个采集入口，不解析 Prometheus 文本，不重复清空窗口。快照里的 QPS 已是速率、counter 是累计值，KMonitor 按 Gauge 上报，避免再次转换成 QPS；Histogram bucket/sum/count 保留为同名数值序列，不冒充原始延迟样本。SDK 的 JVM 内置资源采集关闭，避免当成每个模拟 Engine 的资源。指标实例在关闭前停止其采集线程；SDK 为 JVM 共享，在进程退出时关闭。
 
 缺少 provider 时使用 Prometheus；provider 存在但 SDK 加载或初始化失败则启动失败，不静默回退。运行期间上报异常记录错误并在后续周期继续尝试。打包会检查 reporter、SDK、SPI 及服务启动后 `/metrics` 的互斥行为；本地公共测试不能替代内部 CI 的 SDK 编译、配置测试，以及 Whale 上实际指标验收。内部配置测试命令为 `scripts/build.sh -pl java/host -am -Pinternal-monitoring -Dtest=KMonitorReporterTest -Dsurefire.failIfNoSpecifiedTests=false`。
+
+### 配置初始化边界
+
+文件配置和 Whale ENV 都在 `RtpConfig` / `VitConfig` 中完成默认值、派生值和校验，随后才创建组件。
+`EngineConfig` 负责输入转换和模型文件读取，`RtpNode` / `VitNode` 负责装配与生命周期；Scheduler 使用最终值，不重新解释自动配置。
+模型元信息每次加载只读一次，缓存 key namespace 由共享 `CacheSequence` 解析，Client 与 Engine 共用。
+ENV 路径始终使用入口传入的环境，包括模型下载和 DSV4.1 namespace，不混入另一份进程 ENV。
+
+- `max_batch_tokens_size` 缺省或为 0 时，使用 `max_context_batch_size × max_seq_len`；context batch 默认 1。显式非零预算保持不变，超出支持的整数范围会在启动前报错。
+- `seq_size_per_block` 缺省或为 0 时使用普通设备路径的 64。Mock 不根据宿主硬件推断 ROCm/XPU；需要这些布局时显式设置原生参数。
+- DSV4.1 未显式配置 `max_seq_len` 时从模型 `text_config.max_position_embeddings` 读取；无模型元信息时回落 8192。其他模型尚未实现对应初始化规则时，要求显式设置，避免猜测模型长度。
+- CP 开启时，`cp_force_single_prefill` 默认 true；设为 false 才允许同轮接纳多个 Prefill。uncached token 配额按 real 的 `2 × CP size` 对齐计数。
+- `dp_size` 一致用于计算参数、KVCM 元信息及 WorkerStatus；当前实例表示 rank 0，不创建或模拟其他 DP rank 的独立执行。
+- ViT 将 `vit_concurrency` 归一为至少 1，`vit_max_queue_size` 归一为至少 0；不额外限制一小时超时上限。
+
+容量自动推算仍不模拟：P/D 必须显式提供包含 null block 的 `test_block_num`（至少 2），Host cache 开启时必须提供 `mock.cache.memory.blocks`。
+`memory_cache_size_mb` 及真实 GPU 显存预算不用于推测 Mock block 数；没有实现的 real 配置继续忽略。
