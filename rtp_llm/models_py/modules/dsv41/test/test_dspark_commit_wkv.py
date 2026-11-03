@@ -577,6 +577,64 @@ class DSparkCommitCacheTest(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class DSparkCommitCacheCudaTest(unittest.TestCase):
+    def test_planar_cp_partial_updates_preserve_entries_and_padding(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _swa_kv_insert_triton as planar
+        from rtp_llm.models_py.modules.dsv41.fp8._swa_cp_byte_sliced import (
+            build_cp_byte_sliced_slot_compaction,
+        )
+
+        for entries, cp_size in ((136, 8), (128, 3), (130, 5)):
+            with self.subTest(entries=entries, cp_size=cp_size):
+                alignment = 576 * cp_size
+                stride = (entries * 584 + alignment - 1) // alignment * alignment
+                initial = torch.full(
+                    (5, stride), 173, dtype=torch.uint8, device="cuda"
+                )
+                expected = initial.clone()
+                view = expected.as_strided((5, entries, 584), (stride, 584, 1))
+                shards = [
+                    part.contiguous().clone() for part in initial.chunk(cp_size, dim=1)
+                ]
+                for start, end in ((0, 128), (128, 131), (131, 140)):
+                    positions = torch.arange(start, end, device="cuda")
+                    slots = torch.cat(
+                        (
+                            3 * entries + positions % entries,
+                            entries + positions % entries,
+                            positions.new_tensor([-1]),
+                        )
+                    )
+                    indices = torch.arange(slots.numel() * 512, device="cuda")
+                    keys = (
+                        (((indices * 73 + 19 + start) % 4093 - 2046).float() / 256)
+                        .reshape(-1, 512)
+                        .bfloat16()
+                    )
+                    compaction = build_cp_byte_sliced_slot_compaction(
+                        slots, entries, 5, "dspark_partial_page_test", "skip_minus_one"
+                    )
+                    planar.quantize_and_insert_k_cache(keys, view, slots)
+                    for rank, raw in enumerate(shards):
+                        planar.quantize_and_insert_k_cache_cp_byte_sliced(
+                            keys, raw, slots, entries, rank, cp_size, compaction
+                        )
+                    torch.cuda.synchronize()
+                    actual = torch.cat(shards, dim=1)
+                    exact(self, actual, expected)
+                    exact(self, actual[[0, 2, 4]], initial[[0, 2, 4]])
+                    exact(self, actual[:, entries * 584 :], initial[:, entries * 584 :])
+
+                # A skipped-only update must not touch any page or padding.
+                slots = torch.tensor([-1], device="cuda", dtype=torch.long)
+                compaction = build_cp_byte_sliced_slot_compaction(
+                    slots, entries, 5, "dspark_skip_page_test", "skip_minus_one"
+                )
+                for rank, raw in enumerate(shards):
+                    planar.quantize_and_insert_k_cache_cp_byte_sliced(
+                        keys[:1], raw, slots, entries, rank, cp_size, compaction
+                    )
+                exact(self, torch.cat(shards, dim=1), expected)
+
     def test_cp8_prefill_bytes_match_decode_codec_across_ring_wraps(self):
         from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
         from rtp_llm.models_py.modules.dsv41.fp8 import _swa_kv_insert_triton as planar

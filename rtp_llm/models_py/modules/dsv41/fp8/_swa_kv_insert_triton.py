@@ -226,11 +226,15 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
     slice_start = cp_rank * local_slice_bytes
     slice_end = slice_start + local_slice_bytes
 
-    full_raw = torch.zeros(
+    full_raw = torch.empty(
         (int(unique_blocks.numel()), full_stride_bytes),
         dtype=torch.uint8,
         device=k_cache_raw.device,
     )
+    local_slice = full_raw[:, slice_start:slice_end]
+    # Preserve untouched entries and alignment padding on partial-page updates.
+    # Other ranks' bytes are never read or copied back to this rank's pool.
+    local_slice.copy_(k_cache_raw.index_select(0, unique_blocks))
     full_view = full_raw.as_strided(
         (int(unique_blocks.numel()), full_entries_per_block, 584),
         (full_stride_bytes, 584, 1),
@@ -240,6 +244,4 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
         full_view,
         compact_slots,
     )
-    k_cache_raw.index_copy_(
-        0, unique_blocks, full_raw[:, slice_start:slice_end].contiguous()
-    )
+    k_cache_raw.index_copy_(0, unique_blocks, local_slice.contiguous())
