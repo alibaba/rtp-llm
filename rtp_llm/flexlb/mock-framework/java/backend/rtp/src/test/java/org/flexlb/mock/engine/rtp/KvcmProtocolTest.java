@@ -77,13 +77,22 @@ class KvcmProtocolTest {
         }
     }
     @Test void controlOnlyKeepsHeartbeatsWithoutPublishingHbmKeys() throws Exception {
-        try(var meta = new Meta(); var node = RtpNode.start(config("decode",meta.endpoint(),false))) {
-            await(() -> meta.has("EVENT_HEARTBEAT"));
-            assertFalse(meta.has("EVENT_BLOCK_SNAPSHOT"));
-            var registration = meta.requests.stream().filter(r -> r.path("events").findValuesAsText("event_type").contains("EVENT_NODE_REGISTER")).findFirst().orElseThrow();
-            assertTrue(registration.path("events").get(0).path("node_register").path("mediums").isEmpty());
-            assertEquals(false,((Map<?,?>)node.endpoints().get("kvcm")).get("payload_io"));
-            assertEquals(true,((Map<?,?>)node.endpoints().get("kvcm")).get("remote_enabled"));
+        try(var meta = new Meta()) {
+            var config = config("decode", meta.endpoint(), false);
+            var remote = new org.flexlb.mock.cache.remote.RemoteCache() {
+                public Match match(List<Long> keys, int local, long deadline) { return () -> local; }
+                public void read(Match match, List<Long> keys, long deadline) { throw new AssertionError("No reads expected"); }
+                public void write(List<Long> keys, long deadline) { throw new AssertionError("No writes expected"); }
+                public void close() {}
+            };
+            try (var node = RtpNode.start(config, 0, 0, RtpScheduler.factory(config), remote)) {
+                await(() -> meta.has("EVENT_HEARTBEAT"));
+                assertFalse(meta.has("EVENT_BLOCK_SNAPSHOT"));
+                var registration = meta.requests.stream().filter(r -> r.path("events").findValuesAsText("event_type").contains("EVENT_NODE_REGISTER")).findFirst().orElseThrow();
+                assertTrue(registration.path("events").get(0).path("node_register").path("mediums").isEmpty());
+                assertEquals(false,((Map<?,?>)node.endpoints().get("kvcm")).get("payload_io"));
+                assertEquals(true,((Map<?,?>)node.endpoints().get("kvcm")).get("remote_enabled"));
+            }
         }
     }
     @Test void sharedReporterTracksHbmRemovalAndRestorationWithoutAnRtpScheduler() throws Exception {

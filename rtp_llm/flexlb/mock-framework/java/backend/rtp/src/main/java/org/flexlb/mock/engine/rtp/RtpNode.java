@@ -9,6 +9,7 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.flexlb.mock.cache.KvCache;
+import org.flexlb.mock.cache.remote.RemoteCache;
 import org.flexlb.mock.cache.KvcmReporter;
 import org.flexlb.mock.engine.Scheduler;
 import org.flexlb.mock.runtime.ApiServer;
@@ -24,11 +25,17 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
     private ApiServer api;
     private KvcmReporter publisher;
 
-    private RtpNode(RtpConfig config, Scheduler.Factory schedulers) {
+    private RtpNode(RtpConfig config, Scheduler.Factory schedulers, RemoteCache remote) {
         this.config = Objects.requireNonNull(config);
         Objects.requireNonNull(schedulers);
+        boolean enabled = RtpConfig.nativeBool(config.business(), "enable_remote_cache", false);
+        if (enabled != (remote != null))
+            throw new IllegalArgumentException(enabled ? "enable_remote_cache requires a remote KV adapter; no storage adapter is installed"
+                : "Remote KV adapter requires enable_remote_cache=true");
+        if (remote != null && config.groupScheduling())
+            throw new IllegalArgumentException("Remote KV requires mock.scheduler.mode=fifo");
         cache = new KvCache(config.blockSize(), config.deviceBlocks(), config.reserveBlocks(), config.evictionPolicy(),
-            config.deviceCache(), config.hostBlocks(), config.hostPolicy(), config.deviceWatermark(), config.hostWatermark());
+            config.deviceCache(), config.hostBlocks(), config.hostPolicy(), config.deviceWatermark(), config.hostWatermark(), remote);
         try { service = new RpcService(config.endpoint(), cache, schedulers, config.groupScheduling()); }
         catch (RuntimeException error) { cache.close(); throw error; }
     }
@@ -46,7 +53,13 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
     }
 
     public static RtpNode start(RtpConfig config, int rpcPort, int controlPort, Scheduler.Factory schedulers) throws IOException {
-        var node = new RtpNode(config, schedulers);
+        return start(config, rpcPort, controlPort, schedulers, null);
+    }
+
+    /** Explicit adapter assembly; production entrypoints install no remote storage implementation. */
+    public static RtpNode start(RtpConfig config, int rpcPort, int controlPort, Scheduler.Factory schedulers,
+                                RemoteCache remote) throws IOException {
+        var node = new RtpNode(config, schedulers, remote);
         try {
             var builder = NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service);
             node.rpc = builder.build().start();

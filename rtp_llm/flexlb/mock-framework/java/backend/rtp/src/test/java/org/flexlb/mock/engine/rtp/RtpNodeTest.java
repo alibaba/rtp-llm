@@ -84,6 +84,14 @@ public class RtpNodeTest {
         }
     }
 
+    @Test void enabledRemoteCacheRequiresAnExplicitAdapter() throws Exception {
+        var root = JSON.<com.fasterxml.jackson.databind.node.ObjectNode>valueToTree(configuration("prefill"));
+        ((com.fasterxml.jackson.databind.node.ObjectNode) root.path("component").path("config"))
+            .put("enable_remote_cache", true);
+        var error = assertThrows(IllegalArgumentException.class, () -> RtpNode.start(RtpConfig.load(root)));
+        assertTrue(error.getMessage().contains("no storage adapter is installed"));
+    }
+
     @Test void exportsClasspathForNativeCrossProcessProbe() throws Exception {
         Files.writeString(Path.of("target/rtp-classpath.txt"), System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")));
     }
