@@ -1162,6 +1162,17 @@ class RemoteREAPIPlugin:
         item.add_marker(pytest.mark.timeout(controller_timeout), append=False)
 
     def _session_collection_modifyitems(self, config, items) -> None:
+        self._session_smoke_items = []
+        for item in items:
+            params = getattr(getattr(item, "callspec", None), "params", {})
+            test_config = params.get("test_config", {})
+            if (
+                isinstance(test_config, dict)
+                and test_config.get("data_root") == "internal"
+                and Path(str(test_config.get("task_info", ""))).parts[:1]
+                == ("private_inputs",)
+            ):
+                self._session_smoke_items.append(item)
         if not items:
             # No tests collected locally (e.g. platform host lacks GPU hardware).
             # Try to infer GPU type from --remote-gpu-type, CI profile, or markexpr.
@@ -1612,7 +1623,13 @@ class RemoteREAPIPlugin:
         gpu_req = self._gpu_request
 
         self._ensure_remote_clients()
-        files = collect_session_files(self.rootdir, gpu_type=gpu_req.gpu_type)
+        smoke_items = getattr(self, "_session_smoke_items", [])
+        if smoke_items:
+            files = collect_session_files(
+                self.rootdir, gpu_type=gpu_req.gpu_type, smoke_items=smoke_items
+            )
+        else:
+            files = collect_session_files(self.rootdir, gpu_type=gpu_req.gpu_type)
         input_root = _upload_directory_with_progress(
             self.cas, self.rootdir, files, self.config
         )

@@ -873,6 +873,38 @@ def _collect_smoke_files(rootdir: Path) -> List[str]:
     return files
 
 
+def _collect_selected_private_smoke_files(
+    rootdir: Path, items: List[Any]
+) -> List[str]:
+    """Ship private smoke data only for explicitly selected internal cases."""
+    smoke_root = (rootdir / "internal_source/rtp_llm/test/smoke").resolve()
+    private_root = (smoke_root / "private_inputs").resolve()
+    files: List[str] = []
+    for item in items:
+        params = getattr(getattr(item, "callspec", None), "params", {})
+        config = params.get("test_config", {})
+        if not isinstance(config, dict) or config.get("data_root") != "internal":
+            continue
+        rel = Path(str(config.get("task_info", "")))
+        if not rel.parts or rel.parts[0] != "private_inputs":
+            continue
+        selected = (smoke_root / rel).resolve()
+        if (
+            not private_root.is_relative_to(smoke_root)
+            or not selected.is_relative_to(private_root)
+        ):
+            raise ValueError("Private smoke input escapes its declared data root")
+        if not selected.is_file():
+            raise FileNotFoundError("Selected private smoke input is missing")
+        files.append(
+            str(
+                Path("internal_source/rtp_llm/test/smoke")
+                / selected.relative_to(smoke_root)
+            )
+        )
+    return files
+
+
 def _collect_session_extra_files(rootdir: Path) -> List[str]:
     """Extra files only needed by session mode (internal testdata, tiktoken, conf)."""
     files: List[str] = []
@@ -948,6 +980,7 @@ def collect_remote_files(rootdir: Path, items: List[Any]) -> List[str]:
 
     files.extend(_collect_repo_runtime_files(rootdir))
     files.extend(_prepare_ppu_runtime_libs(rootdir, items))
+    files.extend(_collect_selected_private_smoke_files(rootdir, items))
 
     has_smoke = any(item.get_closest_marker("smoke") is not None for item in items)
     if has_smoke:
@@ -1007,12 +1040,15 @@ def _check_no_lfs_pointers(rootdir: Path, rel_files: List[str]) -> None:
         )
 
 
-def collect_session_files(rootdir: Path, *, gpu_type: str = "") -> List[str]:
+def collect_session_files(
+    rootdir: Path, *, gpu_type: str = "", smoke_items: Optional[List[Any]] = None
+) -> List[str]:
     """Collect remote-session execution inputs."""
     files = _collect_base_files(rootdir)
     files.extend(_collect_repo_runtime_files(rootdir, include_libs=False))
     files.extend(_prepare_ppu_runtime_libs(rootdir, [], gpu_type=gpu_type))
     files.extend(_collect_smoke_files(rootdir))
+    files.extend(_collect_selected_private_smoke_files(rootdir, smoke_items or []))
     files.extend(_collect_session_extra_files(rootdir))
     files.append(_prepare_runtime_libs_archive(rootdir))
 
