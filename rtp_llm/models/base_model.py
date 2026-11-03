@@ -37,6 +37,7 @@ from rtp_llm.ops import (
     KVCacheSpecType,
     MoeConfig,
     ParallelismConfig,
+    RuntimeConfig,
 )
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import sp_0_pad8_size
@@ -71,6 +72,7 @@ class BaseModel(object):
     kv_cache_config: KVCacheConfig
     fmha_config: FMHAConfig
     moe_config: MoeConfig
+    runtime_config: Optional[RuntimeConfig] = None
 
     def __init__(
         self,
@@ -309,6 +311,7 @@ class BaseModel(object):
         moe_pure_tp_preshard: bool = False,
         weight_alias_owner: Optional["BaseModel"] = None,
         weight_alias_names: Sequence[str] = (),
+        runtime_config: Optional[RuntimeConfig] = None,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -338,6 +341,7 @@ class BaseModel(object):
             loader_recycle_handles=loader_recycle_handles,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
         )
+        model.runtime_config = runtime_config
         if weight_alias_names and weight_alias_owner is None:
             raise ValueError(
                 "weight_alias_names require an explicit weight_alias_owner"

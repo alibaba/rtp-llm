@@ -70,10 +70,11 @@ _PPU_LOCK_SKIPPED = [
 def requirement(names):
     for name in names:
         if name == "flash-mla-legacy":
+            # Compatibility label: current CUDA13 FlashMLA includes legacy ops.
             native.py_library(
                 name = name,
                 deps = select({
-                    "@rtp_llm//:using_cuda13_arm": [requirement_cuda13_arm(name)],
+                    "@rtp_llm//:using_cuda13_arm": [requirement_cuda13_arm("flash-mla")],
                     "//conditions:default": [],
                 }),
                 visibility = ["//visibility:public"],
@@ -153,9 +154,9 @@ def whl_deps():
             # source upstream is download.pytorch.org/whl/cu130).
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
-            # CI-built DeepGEMM: opt_glm5 with isolated SM120 GEMMs.
-            "deep_gemm==2.8.0+122e18b.cu132",
-            "flash-mla==1.0.0+9241ae3",
+            # DeepGEMM with the K3 Mega MoE kernels.
+            "deep_gemm==2.8.2+98a672e.cu132",
+            "flash-mla==1.0.0+3ca6856.cu132",
             "deep-ep==2.1.0+a56d615",
             "fast-hadamard-transform==1.1.0+e7706fa.cu132.torch2.11.cxx11abitrue",
             "flash_attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1",
@@ -171,16 +172,13 @@ def whl_deps():
             "fastsafetensors==0.1.20+ali",
             "tilelang==0.1.15",
             "apache-tvm-ffi==0.1.12",
-            # flash_attn_3 / nvidia_cutlass_dsl: deferred rebuild for
-            # torch2.11+cu130, omitted from cuda13 lock.
+            "nvidia-cutlass-dsl==4.5.3",
         ],
         "@rtp_llm//:using_cuda13_arm": [
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
-            # DeepGEMM opt_glm5 + SM12x, CI-built against torch 2.11+cu130.
-            "deep_gemm==2.8.1+057ca59",
-            "flash-mla==1.0.0+2e5429f",
-            "flash-mla-legacy==1.0.0+92fd68b.rtp1",
+            "deep_gemm==2.8.2+98a672e.cu132",
+            "flash-mla==1.0.0+3ca6856.cu132",
             "deep-ep==2.1.0+a56d615",
             "flashinfer-python==0.6.9+8c4f4dcf",
             "flashinfer-cubin==0.6.9+8c4f4dcf",
@@ -189,8 +187,7 @@ def whl_deps():
             "fastsafetensors==0.1.20+ali",
             "tilelang==0.1.15+cuda.gita35f8ddf",
             "apache-tvm-ffi==0.1.12",
-            # flash_attn / flash_attn_3 / fast_hadamard / nvidia_cutlass_dsl
-            # remain deferred.
+            "nvidia-cutlass-dsl==4.5.3",
         ],
         "@rtp_llm//:using_cuda12_9_x86": [
             # torch 2.8.0+cu129: the upstream wheel (http.bzl torch_2.8_py310_cuda
@@ -282,7 +279,7 @@ def ml_pin_reqs():
             "transformers==5.2.0",
             "sentence-transformers==5.2.0",
             "pyarrow==14.0.0",
-            "xgrammar==0.2.5",
+            "xgrammar==0.2.8",
         ],
     })
 

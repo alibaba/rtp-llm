@@ -51,6 +51,7 @@ void addBudgetBytes(size_t& total, size_t bytes, size_t count = 1) {
 
 KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     KVCacheBlockBudget budget;
+    addBudgetBytes(budget.explicit_pool_reserve_bytes, config.linear_replay.reserve_bytes);
     for (size_t gid = 0; gid < config.topology().groups().size(); ++gid) {
         const auto& group          = config.topology().groups()[gid];
         size_t      group_bytes    = 0;
@@ -222,7 +223,6 @@ void populateGroups(CacheConfig&                 config,
         CacheGroupPolicy policy;
     };
     std::map<std::string, BuildState> groups_by_tag;
-    std::vector<std::string>          ordered_tags;
     std::vector<LayerBase>            layers(static_cast<size_t>(config.layer_num));
     for (uint32_t layer_id = 0; layer_id < config.layer_num; ++layer_id) {
         layers[layer_id].layer_id = static_cast<int>(layer_id);
@@ -256,7 +256,6 @@ void populateGroups(CacheConfig&                 config,
                 it->second.spec        = spec;
                 it->second.fingerprint = spec->fingerprint();
                 it->second.policy      = policy;
-                ordered_tags.push_back(spec->tag);
             } else {
                 RTP_LLM_CHECK_WITH_INFO(it->second.fingerprint == spec->fingerprint(),
                                         "cache tag=%s has multiple physical prototypes",
@@ -270,10 +269,9 @@ void populateGroups(CacheConfig&                 config,
     }
 
     std::vector<GroupBase> groups;
-    groups.reserve(ordered_tags.size());
-    for (const auto& tag : ordered_tags) {
-        const auto& state = groups_by_tag.at(tag);
-        GroupBase   group;
+    groups.reserve(groups_by_tag.size());
+    for (const auto& [tag, state] : groups_by_tag) {
+        GroupBase group;
         group.tag    = tag;
         group.spec   = state.spec;
         group.policy = state.policy;
@@ -419,8 +417,8 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                              const KVCacheConfig&                             kv_cache_config,
                                              const std::optional<SpeculativeExecutionConfig>& sp_config,
                                              const ModelConfig*                               draft_model_config,
-                                             bool                                             is_mtp,
-                                             bool                                             is_eagle) {
+                                             bool                                             /*is_mtp*/,
+                                             bool                                             /*is_eagle*/) {
     RTP_LLM_CHECK_WITH_INFO(draft_model_config == nullptr || sp_config.has_value(),
                             "draft cache configuration requires speculative execution configuration");
     RTP_LLM_CHECK_WITH_INFO(
@@ -431,7 +429,9 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     auto      config = createBasicConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     if (draft_model_config != nullptr) {
         auto draft = createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
-        int  num_mtp_modules = is_mtp && !is_eagle && sp_config->type != SP_TYPE_DSPARK ? gen_num_per_cycle : 1;
+        // The executor currently reuses module 0 for every proposal step.
+        // gen_num_per_cycle controls proposal depth, not active module count.
+        const int num_mtp_modules = 1;
         RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
         config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));
         for (int module = 0; module < num_mtp_modules; ++module) {
@@ -440,6 +440,59 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     }
 
     return config;
+}
+
+void CacheConfigCreator::configureLinearReplay(CacheConfig&                                      config,
+                                               const ModelConfig&                                model_config,
+                                               const ParallelismConfig&                          parallelism_config,
+                                               const RuntimeConfig&                              runtime_config,
+                                               const std::optional<SpeculativeExecutionConfig>& sp_config,
+                                               bool                                              is_mtp) {
+    if (!runtime_config.enable_linear_replay || !is_mtp || parallelism_config.role_type == RoleType::PREFILL
+        || !sp_config || sp_config->gen_num_per_cycle <= 0
+        || (sp_config->type != SP_TYPE_MTP && sp_config->type != SP_TYPE_EAGLE
+            && sp_config->type != SP_TYPE_EAGLE3)) {
+        return;
+    }
+    std::vector<int> group_ids;
+    size_t           layer_count = 0;
+    for (size_t group_id = 0; group_id < config.groups().size(); ++group_id) {
+        const auto& group = config.groups()[group_id];
+        if (group.policy.group_type != CacheGroupType::LINEAR
+            || group.policy.memory_placement != CacheMemoryPlacement::DEVICE) {
+            continue;
+        }
+        const auto layers = config.layerIdsForGroup(group.tag);
+        const auto target_layers = std::count_if(layers.begin(), layers.end(), [&](int layer) {
+            return layer >= 0 && static_cast<uint32_t>(layer) < config.layer_num;
+        });
+        if (target_layers > 0) {
+            group_ids.push_back(static_cast<int>(group_id));
+            layer_count += static_cast<size_t>(target_layers);
+        }
+    }
+    if (group_ids.empty()) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(runtime_config.max_generate_batch_size > 0
+                                && runtime_config.max_generate_batch_size <= std::numeric_limits<int>::max(),
+                            "LINEAR replay requires a positive slot count fitting int");
+    RTP_LLM_CHECK_WITH_INFO(sp_config->gen_num_per_cycle < std::numeric_limits<int>::max(),
+                            "LINEAR replay verify width overflows int");
+    const auto& linear = model_config.linear_attention_config;
+    const auto  tp     = std::max<int64_t>(1, parallelism_config.get_attn_tp_size());
+    RTP_LLM_CHECK_WITH_INFO(linear.linear_num_key_heads > 0 && linear.linear_num_value_heads > 0
+                                && linear.linear_num_key_heads % tp == 0 && linear.linear_num_value_heads % tp == 0,
+                            "LINEAR replay requires head counts divisible by attention TP");
+    RTP_LLM_CHECK_WITH_INFO(linear.linear_conv_kernel_dim > 1, "LINEAR replay requires convolution history");
+    config.linear_replay = LinearReplayPlan::create(std::move(group_ids),
+                                                    runtime_config.max_generate_batch_size,
+                                                    sp_config->gen_num_per_cycle + 1,
+                                                    {linear.linear_num_key_heads / tp, linear.linear_key_head_dim},
+                                                    {linear.linear_num_value_heads / tp, linear.linear_value_head_dim},
+                                                    linear.replay_vector_gate,
+                                                    linear.conv_state_dtype,
+                                                    layer_count);
 }
 
 uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&                               config,

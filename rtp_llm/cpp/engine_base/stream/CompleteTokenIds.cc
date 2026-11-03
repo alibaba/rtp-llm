@@ -172,18 +172,29 @@ bool CompleteTokenIds::matchEosToken(int batch_id, int token_id) {
     return false;
 }
 
-bool CompleteTokenIds::matchStopWordsList(int batch_id, const std::vector<int>& stop_words) {
-    int* token_ids = data(batch_id);
-    for (size_t i = start_check_seq_length_; i <= seq_length_; ++i) {
-        bool   match_one   = true;
-        size_t begin_index = i - stop_words.size();
-        for (auto& token : stop_words) {
-            if (token != token_ids[begin_index++]) {
-                match_one = false;
-                break;
-            }
+bool CompleteTokenIds::matchesStopWordsAt(int                     batch_id,
+                                          const std::vector<int>& stop_words,
+                                          int                     end,
+                                          const int*              new_tokens) const {
+    if (end < 0 || stop_words.size() > static_cast<size_t>(end)) {
+        return false;
+    }
+    RTP_LLM_CHECK(end <= seq_length_ || new_tokens != nullptr);
+    const auto* history  = complete_token_ids_.data_ptr<int>() + batch_id * tokenDim();
+    int         position = end - static_cast<int>(stop_words.size());
+    for (int expected : stop_words) {
+        const int actual = position < seq_length_ ? history[position] : new_tokens[position - seq_length_];
+        if (actual != expected) {
+            return false;
         }
-        if (match_one) {
+        ++position;
+    }
+    return true;
+}
+
+bool CompleteTokenIds::matchStopWordsList(int batch_id, const std::vector<int>& stop_words) {
+    for (size_t i = start_check_seq_length_; i <= seq_length_; ++i) {
+        if (matchesStopWordsAt(batch_id, stop_words, i)) {
             seq_length_ = i;
             return true;
         }

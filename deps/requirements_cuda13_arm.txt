@@ -1,7 +1,7 @@
 # CUDA 13 / aarch64 (GB200 / GB300) dep set.
 # Matches the x86 cuda13 pattern: only self-built wheels against torch 2.11+cu130.
 # Packages that link libcudart.so.12 (flash_attn, fast_hadamard,
-# nvidia_cutlass_dsl) are deferred.
+# legacy CUDA 12 operator wheels) are deferred.
 -r requirements_base.txt
 torch==2.11.0+cu130
 torchvision==0.26.0+cu130
@@ -9,11 +9,12 @@ mysql-connector-python
 flashinfer-python==0.6.9+8c4f4dcf
 flashinfer-cubin==0.6.9+8c4f4dcf
 
-# Self-built wheels against torch 2.11+cu130; SHAs encoded in filename.
-deep-gemm==2.8.1+057ca59
-flash-mla==1.0.0+2e5429f
-# Preserve existing model KV formats through a separate namespace.
-flash-mla-legacy==1.0.0+92fd68b.rtp1
+# Self-built wheels (built from GitHub deepseek-ai/{DeepGEMM,FlashMLA} main
+# against torch 2.11+cu130; SHAs encoded in filename).
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.2+98a672e.cu132-cp310-cp310-linux_aarch64.whl
+# Current and legacy model KV formats share one versioned FlashMLA wheel.
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_mla/flash_mla-1.0.0%2B3ca6856.cu132-cp310-cp310-linux_aarch64.whl#sha256=d960b9b2ae558f7c088af277657dc8814a8802dee1df5b1eca24573490a2f94d
+nvidia-cutlass-dsl==4.5.3
 # Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.
 deep-ep==2.1.0+a56d615
 
@@ -34,4 +35,4 @@ tile-kernels==0.1.dev0+ali.git36d9e45
 safetensors==0.7.0
 tabulate==0.9.0
 
-# flash_attn / flash_attn_3 / fast_hadamard / nvidia_cutlass_dsl are deferred.
+# flash_attn / flash_attn_3 / fast_hadamard remain deferred.

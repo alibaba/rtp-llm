@@ -123,7 +123,7 @@ int fakePeerSendRank(const std::string& base, int peer_rank) {
     return rc;
 }
 
-int fakeServerWrongProbe(const std::string& base) {
+int fakeServer(const std::string& base, char probe, const std::function<int(int)>& send_frames = {}) {
     const std::string path = socketPath(base);
     ::unlink(path.c_str());
 
@@ -160,9 +160,11 @@ int fakeServerWrongProbe(const std::string& base) {
     if (readAllRaw(fd, &peer_rank, sizeof(peer_rank)) != static_cast<ssize_t>(sizeof(peer_rank))) {
         rc = 1;
     }
-    const char wrong_probe = 0x13;
-    if (writeAllRaw(fd, &wrong_probe, sizeof(wrong_probe)) != static_cast<ssize_t>(sizeof(wrong_probe))) {
+    if (writeAllRaw(fd, &probe, sizeof(probe)) != static_cast<ssize_t>(sizeof(probe))) {
         rc = 1;
+    }
+    if (rc == 0 && send_frames) {
+        rc = send_frames(fd);
     }
     ::close(fd);
     ::close(listen_fd);
@@ -289,6 +291,61 @@ void runHappyPath(int tp_size) {
     cleanupTempBase(base, tp_size);
 }
 
+void runPeerCloseCase(const std::function<int(int)>& send_frames, const std::string& expected_error) {
+    const std::string base = makeTempBase();
+    std::vector<pid_t> pids;
+    pids.push_back(spawnChild([&] { return fakeServer(base, 0x5a, send_frames); }));
+    pids.push_back(spawnChild([&] {
+        auto& bcast = CpuTpBroadcaster::instance();
+        bcast.reset();
+        bcast.initialize(1, 2, base);
+        int value = 0;
+        int rc    = 1;
+        try {
+            bcast.broadcast(&value, sizeof(value), 0);
+        } catch (const CpuTpPeerClosed&) {
+            rc = expected_error.empty() ? 0 : 1;
+        } catch (const std::exception& error) {
+            rc = !expected_error.empty() && std::string(error.what()).find(expected_error) != std::string::npos ? 0 : 1;
+        }
+        bcast.reset();
+        return rc;
+    }));
+    expectChildrenOk(pids);
+    cleanupTempBase(base, 2);
+}
+
+TEST(CpuTpBroadcasterTest, CleanPeerCloseHasDedicatedException) {
+    runPeerCloseCase({}, "");
+}
+
+TEST(CpuTpBroadcasterTest, TruncatedHeaderIsNotCleanPeerClose) {
+    runPeerCloseCase(
+        [](int fd) {
+            const char byte = 0;
+            return writeAllRaw(fd, &byte, sizeof(byte)) == static_cast<ssize_t>(sizeof(byte)) ? 0 : 1;
+        },
+        "frame-header read");
+}
+
+TEST(CpuTpBroadcasterTest, TruncatedPayloadIsNotCleanPeerClose) {
+    runPeerCloseCase(
+        [](int fd) {
+            struct Header {
+                uint32_t magic         = 0x52545042;
+                uint16_t version       = 1;
+                uint16_t header_bytes  = sizeof(Header);
+                uint64_t sequence      = 0;
+                uint64_t payload_bytes = sizeof(int);
+            } header;
+            static_assert(sizeof(Header) == 24);
+            const char byte = 0;
+            return writeAllRaw(fd, &header, sizeof(header)) == static_cast<ssize_t>(sizeof(header))
+                           && writeAllRaw(fd, &byte, sizeof(byte)) == static_cast<ssize_t>(sizeof(byte)) ? 0 : 1;
+        },
+        "payload read");
+}
+
 TEST(CpuTpBroadcasterTest, BroadcastHappyPathTp2) {
     runHappyPath(2);
 }
@@ -339,7 +396,7 @@ TEST(CpuTpBroadcasterTest, Rank0RejectsDuplicatePeerRank) {
 TEST(CpuTpBroadcasterTest, NonRootRejectsBadLinkProbe) {
     const std::string  base = makeTempBase();
     std::vector<pid_t> pids;
-    pids.push_back(spawnChild([=] { return fakeServerWrongProbe(base); }));
+    pids.push_back(spawnChild([=] { return fakeServer(base, 0x13); }));
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     pids.push_back(spawnChild([=] {
         auto& bcast = CpuTpBroadcaster::instance();

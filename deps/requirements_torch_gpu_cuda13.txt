@@ -5,7 +5,7 @@ opentelemetry-exporter-otlp-proto-http==1.15.0
 # CUDA 13.2 / torch 2.11+cu130 / triton 3.6.0 dep set.
 # Includes official DeepEP main@a56d6156 built against NCCL 2.30.4 and
 # NVSHMEM 3.5.19, plus the RTP FlashInfer 0.6.9 CUDA 13.2 wheels.
-# FlashAttention 3 and nvidia_cutlass_dsl remain deferred.
+# FlashAttention 3 remains deferred. TokenSpeed MLA uses CUTLASS DSL 4.5.3.
 
 # Core torch stack — wheels mirrored to OSS by us; upstream is
 # https://download.pytorch.org/whl/cu130/.
@@ -32,11 +32,11 @@ fast-hadamard-transform==1.1.0+e7706fa.cu132.torch2.11.cxx11abitrue
 # Upstream v2.8.3.post1@a8aa52b1 with CUTLASS dc481792, rebuilt for CUDA 13.2.
 flash-attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1
 
-# Wheels built against torch 2.11+cu130.
-# DeepGEMM 122e18b is CI-built with gcc-toolset-13: opt_glm5 plus SM12x GEMMs.
-deep-gemm==2.8.0+122e18b.cu132
-flash-mla==1.0.0+9241ae3
-
+# Self-built wheels against torch 2.11+cu130 with gcc-toolset-12.
+# DeepGEMM 98a672e for CUDA 13.2.
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.2+98a672e.cu132-cp310-cp310-linux_x86_64.whl
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_mla/flash_mla-1.0.0%2B3ca6856.cu132-cp310-cp310-linux_x86_64.whl#sha256=53dc99022a69667ad20059809db1e91b7b5f8546f95d4d613cea173332deaf58
+nvidia-cutlass-dsl==4.5.3
 # Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.
 deep-ep==2.1.0+a56d615
 
