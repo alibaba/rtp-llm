@@ -745,6 +745,55 @@ class TmaPrefillTest(unittest.TestCase):
         self.assertTrue((staged[0] == 0).all())
         self.assertTrue((scales[0] == 0).all())
 
+    def test_staged_sparse_frontier_updates_after_empty_tiles(self):
+        for heads, prefix, tokens in ((6, 1024, 513), (6, 3072, 513), (12, 1024, 257)):
+            with self.subTest(heads=heads, prefix=prefix, tokens=tokens):
+                q, backing, cache, table, selected, scale = self._paged_case(
+                    heads, prefix, tokens, True
+                )
+                selected.fill_(-1)
+                selected[..., :4] = torch.arange(
+                    4, device=q.device, dtype=selected.dtype
+                )
+
+                def run():
+                    return try_paged_causal_qsa_prefill(
+                        q,
+                        backing,
+                        table,
+                        selected,
+                        prefix=prefix,
+                        page_size=128,
+                        kv_head_num=1,
+                        kv_scale=scale,
+                    )
+
+                actual = run()
+                torch.testing.assert_close(
+                    actual,
+                    self._paged_reference(q, cache, table, selected, prefix, scale),
+                    atol=0.0078125,
+                    rtol=0.008,
+                )
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    actual = run()
+                selected.fill_(-1)
+                graph.replay()
+                self.assertTrue((actual == 0).all())
+                selected[..., 2048] = prefix + torch.arange(
+                    tokens, device=q.device, dtype=selected.dtype
+                )
+                q.mul_(0.75)
+                scale[:, 1].mul_(-0.5)
+                graph.replay()
+                torch.testing.assert_close(
+                    actual,
+                    self._paged_reference(q, cache, table, selected, prefix, scale),
+                    atol=0.0078125,
+                    rtol=0.008,
+                )
+
     def test_staged_fp8_graph_refreshes_partition_pages_and_scales(self):
         for heads in (6, 12):
             with self.subTest(heads=heads):

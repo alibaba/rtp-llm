@@ -150,6 +150,7 @@ def _attention_step(
     acc,
     CHECK_LENGTH: gl.constexpr,
     FRONTIER: gl.constexpr,
+    SINGLE_REQUEST: gl.constexpr,
 ):
     mma: gl.constexpr = NVMMADistributedLayout(
         version=[2, 0], warps_per_cta=[WM, num_warps() // WM], instr_shape=[16, 8]
@@ -221,16 +222,35 @@ def _attention_step(
         fence_async_shared()
         mbarrier.arrive(empty.index(ks))
     column = kt * KN + c
-    bits = gl.load(
-        Mask + pos[:, None] * WORDS + column[None, :] // 32,
-        live[:, None] & ((column[None, :] < Prefix + S) if CHECK_LENGTH else True),
-        other=0,
-    ).to(gl.uint32)
+    # All key columns in a KN32 tile share one bitmap word per query row.
+    broadcast: gl.constexpr = (
+        SINGLE_REQUEST
+        and KN == 32
+        and QM == 32
+        and SCALED
+        and not RAW_FP8
+        and (G == 12 or (G == 6 and PIPE and SLOTS == 3))
+    )
+    if broadcast:
+        word = gl.load(Mask + pos * WORDS + kt, live & (kt < WORDS), other=0).to(
+            gl.uint32
+        )
+        bits = word[:, None]
+        if CHECK_LENGTH:
+            bits = gl.where(column[None, :] < Prefix + S, bits, 0)
+    else:
+        bits = gl.load(
+            Mask + pos[:, None] * WORDS + column[None, :] // 32,
+            live[:, None] & ((column[None, :] < Prefix + S) if CHECK_LENGTH else True),
+            other=0,
+        ).to(gl.uint32)
     selected = (((bits >> (column[None, :] % 32)) & 1) != 0) & page_valid
     scores = gl.where(selected, scores, -float("inf"))
-    next_max = gl.maximum(maximum, gl.max(scores, 1))
+    initial: gl.constexpr = broadcast and G == 6 and CHECK_LENGTH and FRONTIER
+    next_max = gl.max(scores, 1) if initial else gl.maximum(maximum, gl.max(scores, 1))
     safe_max = gl.where(next_max == -float("inf"), 0.0, next_max)
-    alpha = gl.exp2(maximum - safe_max)
+    if not initial:
+        alpha = gl.exp2(maximum - safe_max)
     p = gl.exp2(scores - safe_max[:, None])
     # Retain the BF16 rounding residual while using warp MMA for both PV terms.
     if SCALED:
@@ -251,9 +271,10 @@ def _attention_step(
     lo = (weights - hi.to(gl.float32)).to(gl.bfloat16)
     hi = gl.convert_layout(hi, lhs)
     lo = gl.convert_layout(lo, lhs)
-    acc = acc * alpha[:, None]
+    if not initial:
+        acc = acc * alpha[:, None]
     if EARLY:
-        normalizer = normalizer * alpha + gl.sum(p, 1)
+        normalizer = gl.sum(p, 1) if initial else normalizer * alpha + gl.sum(p, 1)
         maximum = next_max
     mbarrier.wait(full.index(vs), vp, deps=[buf])
     v = buf.index(vs).load(raw_rhs)
@@ -272,7 +293,7 @@ def _attention_step(
     if PIPE:
         mbarrier.arrive(empty.index(vs))
     if not EARLY:
-        normalizer = normalizer * alpha + gl.sum(p, 1)
+        normalizer = gl.sum(p, 1) if initial else normalizer * alpha + gl.sum(p, 1)
         maximum = next_max
     return maximum, normalizer, acc
 
@@ -315,6 +336,7 @@ def _consumer(
     SCALED: gl.constexpr,
     CACHE_ROWS: gl.constexpr,
     FRONTIER: gl.constexpr,
+    SINGLE_REQUEST: gl.constexpr,
 ):
     mma: gl.constexpr = NVMMADistributedLayout(
         version=[2, 0], warps_per_cta=[WM, num_warps() // WM], instr_shape=[16, 8]
@@ -405,6 +427,7 @@ def _consumer(
                 acc,
                 True,
                 FRONTIER,
+                SINGLE_REQUEST,
             )
         for iteration in range(1, tiles):
             maximum, normalizer, acc = _attention_step(
@@ -447,6 +470,7 @@ def _consumer(
                 acc,
                 False,
                 FRONTIER,
+                SINGLE_REQUEST,
             )
     else:
         for iteration in range(tiles):
@@ -490,6 +514,7 @@ def _consumer(
                 acc,
                 True,
                 FRONTIER,
+                SINGLE_REQUEST,
             )
     output = gl.where(normalizer[:, None] > 0, acc / normalizer[:, None], 0.0)
     dc = gl.arange(0, D, layout=SliceLayout(0, mma))
@@ -536,6 +561,7 @@ def _execute_prefill(
     CACHE_ROWS: gl.constexpr,
     FRONTIER: gl.constexpr,
     OPERAND_SLOTS: gl.constexpr = 0,
+    SINGLE_REQUEST: gl.constexpr = False,
 ):
     # K and V occupy successive slots in one ring, allowing V to arrive
     # while QK and softmax execute without allocating separate K/V pipelines.
@@ -589,6 +615,7 @@ def _execute_prefill(
                         SCALED,
                         CACHE_ROWS,
                         FRONTIER,
+                        SINGLE_REQUEST,
                     ),
                 ),
                 (
@@ -662,6 +689,7 @@ def _execute_prefill(
             SCALED,
             CACHE_ROWS,
             FRONTIER,
+            SINGLE_REQUEST,
         )
     for i in gl.static_range(slots):
         mbarrier.invalidate(full.index(i))
@@ -734,6 +762,7 @@ def _paged_prefill(
         CACHE_ROWS,
         FRONTIER,
         OPERAND_SLOTS,
+        SINGLE_REQUEST=True,
     )
 
 
