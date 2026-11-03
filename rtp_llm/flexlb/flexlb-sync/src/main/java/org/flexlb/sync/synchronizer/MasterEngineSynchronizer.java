@@ -91,7 +91,7 @@ public final class MasterEngineSynchronizer {
                 statusThreads, "status-checker-executor", new ThreadPoolExecutor.AbortPolicy());
         statusApplicationExecutor = newExecutor(
                 statusThreads, "status-application-executor", new ThreadPoolExecutor.AbortPolicy());
-        int cacheThreads = flexlbConfig.getInternalRuntime().getCacheStatusExecutorThreads();
+        int cacheThreads = flexlbConfig.getWorkerRegistry().getExecutors().getCacheStatusThreads();
         cacheStatusExecutor = newExecutor(
                 cacheThreads, "cache-status-executor", new ThreadPoolExecutor.AbortPolicy());
         this.scheduler = new ScheduledThreadPoolExecutor(5, new NamedThreadFactory("sync-status-scheduler"),

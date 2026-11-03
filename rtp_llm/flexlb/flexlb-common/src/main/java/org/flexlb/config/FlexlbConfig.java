@@ -35,6 +35,9 @@ public final class FlexlbConfig {
     @Setter
     public static final class EngineGrpcConfig {
         private int kvCacheMaxInboundMessageBytes = 128 * 1024 * 1024;
+        private int executorThreads = 32;
+        private int executorQueueCapacity = 10_000;
+        private int eventLoopThreads = 8;
     }
 
     @JsonIgnore

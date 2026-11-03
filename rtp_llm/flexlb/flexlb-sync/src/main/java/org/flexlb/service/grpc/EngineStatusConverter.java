@@ -13,7 +13,7 @@ import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 
 import java.util.HashMap;
-import java.util.HashSet;
+import org.flexlb.cache.primitive.LongKeySet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -85,7 +85,7 @@ public class EngineStatusConverter {
      */
     public static CacheStatus convertToCacheStatus(EngineRpcService.CacheStatusPB cacheStatusPB) {
         // Own the key set independently from the protobuf message graph.
-        return convertToCacheStatus(cacheStatusPB, new HashSet<>(
+        return convertToCacheStatus(cacheStatusPB, new LongKeySet(
                 cacheStatusPB.getCacheKeyListCount() > 0
                         ? cacheStatusPB.getCacheKeyListList()
                         : cacheStatusPB.getCacheKeysMap().keySet()));

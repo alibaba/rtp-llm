@@ -129,6 +129,34 @@
                             </target>
                         </configuration>
                     </execution>
+                    <execution>
+                        <id>primitive-cache-map-storage</id>
+                        <phase>process-sources</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <replaceregexp
+                                    file="${project.build.directory}/generated-sources/protobuf/java/org/flexlb/engine/grpc/EngineRpcService.java"
+                                    match="com\.google\.protobuf\.MapField\.newMapField\(\s*CacheKeysDefaultEntryHolder\.defaultEntry\)"
+                                    replace="org.flexlb.engine.grpc.PackedCacheMapField.create(CacheKeysDefaultEntryHolder.defaultEntry)"
+                                    flags="g"/>
+                                <replaceregexp
+                                    file="${project.build.directory}/generated-sources/protobuf/java/org/flexlb/engine/grpc/EngineRpcService.java"
+                                    match="cacheKeys_ = cacheKeys_\.copy\(\)"
+                                    replace="cacheKeys_ = org.flexlb.engine.grpc.PackedCacheMapField.copy(cacheKeys_, CacheKeysDefaultEntryHolder.defaultEntry)"
+                                    flags="g"/>
+                                <fail message="CacheStatusPB primitive map generation did not match the pinned protobuf output">
+                                    <condition>
+                                        <not>
+                                            <resourcecontains
+                                                resource="${project.build.directory}/generated-sources/protobuf/java/org/flexlb/engine/grpc/EngineRpcService.java"
+                                                substring="PackedCacheMapField.create(CacheKeysDefaultEntryHolder.defaultEntry)"/>
+                                        </not>
+                                    </condition>
+                                </fail>
+                            </target>
+                        </configuration>
+                    </execution>
                 </executions>
             </plugin>
             <plugin>

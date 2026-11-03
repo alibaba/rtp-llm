@@ -78,6 +78,8 @@ delivery, routing, worker synchronization, and observability; file paths are not
 The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fields,
 `null`, scalar coercion, numeric enums, and trailing JSON fail startup.
 
+Executor and event-loop sizes take effect at process startup; changing them requires a restart.
+
 | Setting | Schema 3 behavior |
 | --- | --- |
 | `dispatcher.maxInflightPerPrefillWorker` | Positive integer, default 2 in every mode. BATCH counts batches; NON_BATCH / DIRECT count requests reserved for delivery or still in flight. QUEUE waiting requests do not consume this limit; full workers remain eligible for cache-affinity selection. |
@@ -85,6 +87,9 @@ The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fie
 | Prefill ownership | Work remains tracked until authoritative completion, safe rollback or retirement. PDFUSION has no distinct Prefill-completion signal, so its ownership lasts through request termination. |
 | `requestLifecycle.request.timeoutMs` | Required positive integer; maximum request inactivity in milliseconds, renewed by matching Engine request status. No default. |
 | `workerRegistry.health.cleanupIntervalMs` | Positive integer, default 3000 ms; interval for completing confirmed worker retirements. |
+| `workerRegistry.executors.cacheStatusThreads` | Positive integer, default 32; Cache response processing. |
+| `workerRegistry.executors.cacheDiffParallelism` | Integer 1–32767, default 8; Cache diff ForkJoin parallelism, capped by available processors. |
+| `engineGrpc.executorThreads` / `executorQueueCapacity` / `eventLoopThreads` | Positive integers, defaults 32 / 10000 / 8; Engine gRPC callbacks, callback queue capacity, and client I/O threads. |
 | Worker health | Three valid not-alive responses mark a worker unavailable. RPC failures preserve established health and neither increment nor reset the count; a valid healthy response resets it before retirement. Confirmed discovery removal retires the worker immediately. Status age does not determine health. Exceptions alone cannot confirm a crashed worker while discovery still lists it; no engine-specific error metadata is required. |
 | Worker status polling | Each worker generation has at most one RPC in flight and one response queued or applying locally. RPC polling continues during local application; scheduling uses the last committed state. |
 | Discovery failures | Timeout, query failure or executor rejection preserves existing workers and continues status polling. Only a successful discovery result confirms removed addresses. |

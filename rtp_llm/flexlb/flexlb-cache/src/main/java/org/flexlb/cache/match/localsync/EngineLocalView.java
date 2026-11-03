@@ -7,6 +7,9 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
 import java.util.Collections;
+import org.flexlb.cache.primitive.LongKeySet;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.WorkerRegistryConfig;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
@@ -34,6 +37,20 @@ public class EngineLocalView {
      */
     private volatile ForkJoinPool customPool;
     private volatile boolean closed;
+    private final int configuredParallelism;
+
+    public EngineLocalView() {
+        this(new WorkerRegistryConfig.ExecutorsConfig());
+    }
+
+    @Autowired
+    public EngineLocalView(ConfigService configService) {
+        this(configService.loadBalanceConfig().getWorkerRegistry().getExecutors());
+    }
+
+    private EngineLocalView(WorkerRegistryConfig.ExecutorsConfig executors) {
+        configuredParallelism = executors.getCacheDiffParallelism();
+    }
 
     /**
      * Dynamic sync interval manager
@@ -54,7 +71,7 @@ public class EngineLocalView {
                 throw new IllegalStateException("Engine local view is closed");
             }
             if (customPool == null) {
-                customPool = new ForkJoinPool(Math.min(Runtime.getRuntime().availableProcessors(), 8));
+                customPool = new ForkJoinPool(Math.min(Runtime.getRuntime().availableProcessors(), configuredParallelism));
             }
             return customPool;
         }
@@ -82,38 +99,21 @@ public class EngineLocalView {
 
         Set<Long> oldCacheBlocks = getEngineCacheBlocks(engineIPort);
 
-        // Efficiently calculate differences
-        Set<Long> addedBlocks = ConcurrentHashMap.newKeySet(128);
-        Set<Long> removedBlocks = ConcurrentHashMap.newKeySet(128);
-
-        // Use custom ForkJoin thread pool to parallel compute added and removed cache blocks
         ForkJoinPool pool = diffPool();
-        ForkJoinTask<?> addedTask = null;
+        Set<Long> addedBlocks;
+        Set<Long> removedBlocks;
+        ForkJoinTask<LongKeySet> addedTask = null;
         try {
-            addedTask = pool.submit(() ->
-                newCacheBlocks.parallelStream()
-                     .filter(blockCacheKey -> !oldCacheBlocks.contains(blockCacheKey))
-                     .forEach(addedBlocks::add)
-            );
-
-            ForkJoinTask<?> removedTask = pool.submit(() ->
-                oldCacheBlocks.parallelStream()
-                    .filter(blockCacheKey -> !newCacheBlocks.contains(blockCacheKey))
-                    .forEach(removedBlocks::add)
-            );
-
-            addedTask.join();
-            removedTask.join();
+            addedTask = pool.submit(() -> LongKeySet.difference(newCacheBlocks, oldCacheBlocks));
+            var removedTask = pool.submit(() -> LongKeySet.difference(oldCacheBlocks, newCacheBlocks));
+            addedBlocks = addedTask.join();
+            removedBlocks = removedTask.join();
         } catch (RejectedExecutionException error) {
             if (addedTask != null) {
                 addedTask.join();
             }
-            newCacheBlocks.stream()
-                    .filter(blockCacheKey -> !oldCacheBlocks.contains(blockCacheKey))
-                    .forEach(addedBlocks::add);
-            oldCacheBlocks.stream()
-                    .filter(blockCacheKey -> !newCacheBlocks.contains(blockCacheKey))
-                    .forEach(removedBlocks::add);
+            addedBlocks = LongKeySet.difference(newCacheBlocks, oldCacheBlocks);
+            removedBlocks = LongKeySet.difference(oldCacheBlocks, newCacheBlocks);
         }
 
         // Update statistics in dynamic sync interval manager
@@ -140,7 +140,7 @@ public class EngineLocalView {
             log.warn("Invalid parameters: engineIPort={}, blockCacheKey={}", engineIPort, blockCacheKey);
             return;
         }
-        Set<Long> engineCache = engineViews.computeIfAbsent(engineIPort, k -> ConcurrentHashMap.newKeySet());
+        Set<Long> engineCache = engineViews.computeIfAbsent(engineIPort, k -> new LongKeySet());
 
         engineCache.add(blockCacheKey);
     }

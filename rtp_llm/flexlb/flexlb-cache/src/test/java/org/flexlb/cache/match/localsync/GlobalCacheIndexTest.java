@@ -95,7 +95,7 @@ class GlobalCacheIndexTest {
         var release = new CountDownLatch(1);
         var mapField = GlobalCacheIndex.class.getDeclaredField("blockToEnginesMap");
         mapField.setAccessible(true);
-        var map = (Map<Long, Set<String>>) mapField.get(globalCacheIndex);
+        var map = (org.flexlb.cache.primitive.LongObjectMap<Set<String>>) mapField.get(globalCacheIndex);
         var blockingOwners = new java.util.HashSet<String>() {
             @Override
             public boolean remove(Object value) {
@@ -112,7 +112,8 @@ class GlobalCacheIndexTest {
             }
         };
         blockingOwners.add(retiring);
-        map.put(1L, blockingOwners);
+        map.remove(1L);
+        map.computeIfAbsent(1L, ignored -> blockingOwners);
         var cleanupHistory = new EndpointTrace();
         var waiterHistory = new EndpointTrace();
         var poll = waiterHistory.beginPoll("CACHE", 2L);
