@@ -246,9 +246,16 @@ void CpuTpBroadcaster::requestStop() {
     }
     // This direction is otherwise idle after bootstrap. Do not SHUT_RD: rank 0
     // may already have sent this step's inputs and entered a model collective.
+    // The connected sockets are blocking, and this otherwise idle direction
+    // carries only one stop byte. Retry interrupted sends rather than losing
+    // the notification after stop_requested_ has been set.
     const char token = kStopToken;
-    const auto n     = ::send(peer_fds_[0], &token, 1, MSG_NOSIGNAL | MSG_DONTWAIT);
-    RTP_LLM_CHECK_WITH_INFO(n == 1, "CpuTpBroadcaster shutdown request failed: %s", std::strerror(errno));
+    const auto n     = writeAll(peer_fds_[0], &token, 1);
+    if (n != 1) {
+        // Root may already have sent its terminal frame and closed the socket
+        // before the local stop() call. Let that call still join and clean up.
+        RTP_LLM_LOG_WARNING("CpuTpBroadcaster shutdown request failed: %s", std::strerror(errno));
+    }
 }
 
 bool CpuTpBroadcaster::shouldStop(bool locally_requested) {
@@ -281,10 +288,11 @@ void CpuTpBroadcaster::finish() {
     const BroadcastFrameHeader header{kStopMagic, kFrameVersion, sizeof(BroadcastFrameHeader), next_sequence_, 0};
     for (int rank = 1; rank < tp_size_; ++rank) {
         const auto n = writeAll(peer_fds_[rank], &header, sizeof(header));
-        RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(header)),
-                                "CpuTpBroadcaster stop frame to rank %d failed: %s",
-                                rank,
-                                std::strerror(errno));
+        if (n != static_cast<ssize_t>(sizeof(header))) {
+            // A departed peer must not prevent the remaining ranks from
+            // receiving their terminal frame, or throw out of the loop thread.
+            RTP_LLM_LOG_WARNING("CpuTpBroadcaster stop frame to rank %d failed: %s", rank, std::strerror(errno));
+        }
     }
     broadcast_stopped_ = true;
 }

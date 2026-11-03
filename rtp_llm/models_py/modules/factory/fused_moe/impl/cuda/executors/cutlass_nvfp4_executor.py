@@ -20,6 +20,18 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.nvfp4_parallelism import 
 from rtp_llm.utils.model_weight import W
 
 
+def _prefill_library(config):
+    # An environment override supplies the whole pinned artifact; never combine
+    # its path with a checksum from a different configuration source.
+    library = os.getenv("RTP_LLM_NVFP4_SM120_LIBRARY")
+    if library:
+        return library, os.getenv("RTP_LLM_NVFP4_SM120_LIBRARY_SHA256")
+    return (
+        getattr(config, "prefill_library", None),
+        getattr(config, "prefill_library_sha256", None),
+    )
+
+
 class CutlassNvfp4Executor(FusedMoeExpertExecutor):
     @classmethod
     def executor_type(cls):
@@ -84,12 +96,7 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
         self.tp_rank = pc.get_ffn_tp_rank() if pc is not None else 0
         self.sm120_prefill = None
         backend_config = getattr(config.model_config, "quant_config", None)
-        library = os.getenv("RTP_LLM_NVFP4_SM120_LIBRARY") or getattr(
-            backend_config, "prefill_library", None
-        )
-        library_sha256 = os.getenv("RTP_LLM_NVFP4_SM120_LIBRARY_SHA256") or getattr(
-            backend_config, "prefill_library_sha256", None
-        )
+        library, library_sha256 = _prefill_library(backend_config)
         if (
             library
             and self.w1.is_cuda

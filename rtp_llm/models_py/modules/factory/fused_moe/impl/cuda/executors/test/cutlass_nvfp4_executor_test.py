@@ -16,11 +16,45 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_nvfp4_executor import (
     CutlassNvfp4Executor,
+    _prefill_library,
 )
 from rtp_llm.utils.model_weight import W
 
 
 class CutlassNvfp4ExecutorTest(unittest.TestCase):
+    def test_prefill_library_keeps_path_and_checksum_from_one_source(self):
+        config = SimpleNamespace(
+            prefill_library="config.so", prefill_library_sha256="config-sha"
+        )
+        for environ, expected in (
+            ({}, ("config.so", "config-sha")),
+            (
+                {
+                    "RTP_LLM_NVFP4_SM120_LIBRARY": "env.so",
+                    "RTP_LLM_NVFP4_SM120_LIBRARY_SHA256": "env-sha",
+                },
+                ("env.so", "env-sha"),
+            ),
+            ({"RTP_LLM_NVFP4_SM120_LIBRARY": "env.so"}, ("env.so", None)),
+            (
+                {"RTP_LLM_NVFP4_SM120_LIBRARY_SHA256": "env-sha"},
+                ("config.so", "config-sha"),
+            ),
+            (
+                {
+                    "QWEN4_MOE_SM120_LIBRARY": "old.so",
+                    "QWEN4_MOE_SM120_LIBRARY_SHA256": "old-sha",
+                },
+                ("config.so", "config-sha"),
+            ),
+        ):
+            with self.subTest(environ=environ), patch.dict(
+                "os.environ", environ, clear=True
+            ):
+                self.assertEqual(_prefill_library(config), expected)
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(_prefill_library(None), (None, None))
+
     def test_marlin_layout_requires_matching_strategy_before_loading(self):
         import sys
 

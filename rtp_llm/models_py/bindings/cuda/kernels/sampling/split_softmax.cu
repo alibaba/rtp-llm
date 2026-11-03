@@ -21,72 +21,6 @@ struct Maximum {
     }
 };
 
-template<int Tile>
-__global__ void samplerLocalLogitStats(const float* input, float* maximums, float* totals, int vocab, int parts) {
-    __shared__ typename Reduce::TempStorage scratch;
-    __shared__ float                        maximum;
-    const int                               row  = blockIdx.x;
-    const int                               part = blockIdx.y;
-    float                                   values[Tile / kThreads];
-    float                                   local_max = -CUDART_INF_F;
-#pragma unroll
-    for (int i = 0; i < Tile / kThreads; ++i) {
-        const int col = part * Tile + threadIdx.x + i * kThreads;
-        values[i]     = col < vocab ? input[static_cast<int64_t>(row) * vocab + col] : -CUDART_INF_F;
-        local_max     = fmaxf(local_max, values[i]);
-    }
-    const float block_max = Reduce(scratch).Reduce(local_max, Maximum());
-    if (threadIdx.x == 0)
-        maximum = block_max;
-    __syncthreads();
-    float local_sum = 0.0f;
-#pragma unroll
-    for (int i = 0; i < Tile / kThreads; ++i) {
-        local_sum += __expf(values[i] - maximum);
-    }
-    const float block_sum = Reduce(scratch).Sum(local_sum);
-    if (threadIdx.x == 0) {
-        maximums[row * parts + part] = maximum;
-        totals[row * parts + part]   = maximum == -CUDART_INF_F ? 0.0f : block_sum;
-    }
-}
-
-template<int Tile>
-__global__ void
-samplerWriteProbabilities(float* input, const float* maximums, const float* totals, int vocab, int parts) {
-    __shared__ typename Reduce::TempStorage scratch;
-    __shared__ float                        maximum;
-    __shared__ float                        inverse_sum;
-    const int                               row       = blockIdx.x;
-    const int                               part      = blockIdx.y;
-    float                                   local_max = -CUDART_INF_F;
-    for (int i = threadIdx.x; i < parts; i += kThreads) {
-        local_max = fmaxf(local_max, maximums[row * parts + i]);
-    }
-    const float block_max = Reduce(scratch).Reduce(local_max, Maximum());
-    if (threadIdx.x == 0)
-        maximum = block_max;
-    __syncthreads();
-    float local_sum = 0.0f;
-    for (int i = threadIdx.x; i < parts; i += kThreads) {
-        local_sum += totals[row * parts + i] * __expf(maximums[row * parts + i] - maximum);
-    }
-    const float block_sum = Reduce(scratch).Sum(local_sum);
-    if (threadIdx.x == 0)
-        inverse_sum = 1.0f / block_sum;
-    __syncthreads();
-    // The preceding stats launch completed every cross-tile input read.
-    // Each CTA now reads and overwrites only its own disjoint tile.
-#pragma unroll
-    for (int i = 0; i < Tile / kThreads; ++i) {
-        const int col = part * Tile + threadIdx.x + i * kThreads;
-        if (col < vocab) {
-            const int64_t offset = static_cast<int64_t>(row) * vocab + col;
-            input[offset]        = __expf(input[offset] - maximum) * inverse_sum;
-        }
-    }
-}
-
 // Parallelize the vocabulary while retaining the installed PyTorch softmax's
 // FP32 accumulation order: 1024 logical threads, vec4 loads, scalar tail,
 // warp sums then a second warp sum. The two reduction levels may execute in
@@ -181,46 +115,20 @@ void launchOrderedSoftmax(torch::Tensor logits) {
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-template<int Tile>
-void launchSplitSoftmax(torch::Tensor logits) {
-    const int  rows      = logits.size(0);
-    const int  vocab     = logits.size(1);
-    const int  parts     = (vocab + Tile - 1) / Tile;
-    auto       workspace = torch::empty({2, rows, parts}, logits.options());
-    auto*      maximums  = workspace.data_ptr<float>();
-    auto*      totals    = maximums + rows * parts;
-    const auto stream    = at::cuda::getCurrentCUDAStream().stream();
-    const dim3 grid(rows, parts);
-    samplerLocalLogitStats<Tile>
-        <<<grid, kThreads, 0, stream>>>(logits.data_ptr<float>(), maximums, totals, vocab, parts);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-    samplerWriteProbabilities<Tile>
-        <<<grid, kThreads, 0, stream>>>(logits.data_ptr<float>(), maximums, totals, vocab, parts);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-}
-
 }  // namespace
 
 void splitSoftmaxInplace(torch::Tensor logits) {
     TORCH_CHECK(logits.is_cuda() && logits.scalar_type() == torch::kFloat32 && logits.dim() == 2
-                    && logits.is_contiguous() && logits.size(0) > 0 && logits.size(0) <= 32 && logits.size(1) > 0
-                    && logits.size(1) <= 262144,
-                "split softmax expects contiguous CUDA FP32 [1..32,1..262144]");
+                    && logits.is_contiguous() && logits.size(0) > 0 && logits.size(0) <= 32 && logits.size(1) == 248320,
+                "split softmax expects contiguous CUDA FP32 [1..32,248320]");
     at::cuda::CUDAGuard guard(logits.device());
-    if (logits.size(1) == 248320) {
-        if (reinterpret_cast<uintptr_t>(logits.data_ptr<float>()) % 16 == 0) {
-            launchOrderedSoftmax(logits);
-        } else {
-            // The original vec4 alignment prologue has a different reduction
-            // schedule. Retain that exact path for unaligned storage views.
-            logits.copy_(torch::softmax(logits, -1));
-        }
-        return;
+    if (reinterpret_cast<uintptr_t>(logits.data_ptr<float>()) % 16 == 0) {
+        launchOrderedSoftmax(logits);
+    } else {
+        // The original vec4 alignment prologue has a different reduction
+        // schedule. Retain that exact path for unaligned storage views.
+        logits.copy_(torch::softmax(logits, -1));
     }
-    if (logits.size(0) <= 8)
-        launchSplitSoftmax<1024>(logits);
-    else
-        launchSplitSoftmax<4096>(logits);
 }
 
 }  // namespace rtp_llm

@@ -895,19 +895,19 @@ class ModelConfig(CppModelConfig):
         Args:
             kv_cache_config: Optional KVCacheConfig to set attn_config.kv_cache_dtype
         """
-        if self.quantization:
-            requested = init_quant_config(self.quantization)
+        requested = init_quant_config(self.quantization) if self.quantization else None
+        if requested is not None:
             recipe = getattr(requested, "model_recipe", None)
             if recipe is not None and (
-                recipe != "qwen4_fp8_nvfp4"
+                recipe != QWEN4_FP8_NVFP4_RECIPE
                 or self.model_type not in ("qwen4_exp", "qwen4_exp_mtp")
             ):
                 raise ValueError("QWEN4_FP8_NVFP4 is only valid for qwen4_exp models")
         # Load quant_config
         quant_config = QuantizationConfig.load_from_ckpt(self.ckpt_path)
         if not quant_config:
-            if self.quantization:
-                quant_config = init_quant_config(self.quantization)
+            if requested is not None:
+                quant_config = requested
                 logging.info(f"need_load_quant by {quant_config.get_method()}")
 
         # Set quant_algo if quant_config exists
