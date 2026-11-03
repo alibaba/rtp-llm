@@ -71,7 +71,8 @@ public class VitCacheSelector {
         Map<String, Candidate> candidates = directory.candidates(group, keys);
         long now = System.currentTimeMillis();
         if (now - pendingPrunedAt >= 5000) {
-            pending.values().removeIf(p -> !p.matches(candidates.get(p.worker().getLogicalIpPort()), now));
+            pending.values()
+                    .removeIf(p -> !p.matches(candidates.get(p.worker().getLogicalIpPort()), now));
             pendingPrunedAt = now;
         }
         List<Candidate> best = new ArrayList<>();
@@ -132,9 +133,7 @@ public class VitCacheSelector {
         if (selected == null) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
-        try (var pin =
-                workers.captureEndpoint(
-                        RoleType.VIT, selected.getLogicalIpPort())) {
+        try (var pin = workers.captureEndpoint(RoleType.VIT, selected.getLogicalIpPort())) {
             WorkerStatus worker = pin == null ? null : pin.endpoint().getStatus();
             if (selected.getRole() != RoleType.VIT
                     || worker == null
@@ -158,8 +157,7 @@ public class VitCacheSelector {
             return null;
         }
         WorkerEndpoint.GenerationPin pin =
-                workers.captureEndpoint(
-                        RoleType.VIT, result.getLogicalIpPort());
+                workers.captureEndpoint(RoleType.VIT, result.getLogicalIpPort());
         if (pin == null) {
             return null;
         }

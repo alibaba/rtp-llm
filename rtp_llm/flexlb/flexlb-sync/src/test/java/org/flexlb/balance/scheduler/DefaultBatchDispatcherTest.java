@@ -1169,14 +1169,24 @@ class DefaultBatchDispatcherTest {
         vit.setGrpcPort(9001);
         var route = new org.flexlb.dao.loadbalance.Response();
         route.setServerStatus(List.of(base.prefill(), vit));
-        ScheduledRequest item = new ScheduledRequest(base.ctx(), new CompletableFuture<>(), route,
-                base.prefill(), null, endpoint, null, null, System.currentTimeMillis());
+        ScheduledRequest item =
+                new ScheduledRequest(
+                        base.ctx(),
+                        new CompletableFuture<>(),
+                        route,
+                        base.prefill(),
+                        null,
+                        endpoint,
+                        null,
+                        null,
+                        System.currentTimeMillis());
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
-                .thenAnswer(inv -> {
-                    sent.add(inv.getArgument(2));
-                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
-                });
+                .thenAnswer(
+                        inv -> {
+                            sent.add(inv.getArgument(2));
+                            return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
+                        });
         submit(List.of(item), 1L, 100, "vit", callback);
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
         var addresses = sentInput(sent.getFirst()).getGenerateConfig().getRoleAddrsList();

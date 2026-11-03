@@ -1648,7 +1648,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     }
 
     private static Path findOnlineLogsDirectory() throws IOException {
-        var resource = MasterBatchEndToEndPerformanceTest.class.getResource("/online-logs/sample_access.json");
+        var resource =
+                MasterBatchEndToEndPerformanceTest.class.getResource(
+                        "/online-logs/sample_access.json");
         if (resource == null) {
             throw new IOException("Missing online-logs test fixtures");
         }

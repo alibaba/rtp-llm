@@ -1,9 +1,10 @@
 package org.flexlb.consistency;
 
-import java.net.InetAddress;
-import java.net.Inet4Address;
-import java.net.UnknownHostException;
 import org.springframework.core.env.Environment;
+
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 
 /**
  * Routable advertised identity shared by ZooKeeper election and follower forwarding.
@@ -21,8 +22,10 @@ public final class MasterHost {
             configured = System.getenv("FLEXLB_ADVERTISED_IP");
         }
         try {
-            InetAddress address = configured == null || configured.isBlank()
-                    ? InetAddress.getLocalHost() : InetAddress.getByName(configured);
+            InetAddress address =
+                    configured == null || configured.isBlank()
+                            ? InetAddress.getLocalHost()
+                            : InetAddress.getByName(configured);
             if (address.isAnyLocalAddress()) {
                 throw new IllegalArgumentException("advertised Master address cannot be wildcard");
             }
