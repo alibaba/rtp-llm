@@ -4,8 +4,8 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
-from rtp_llm.utils import scr_runtime_fixup as runtime
-from rtp_llm.utils.scr_local_comm import cache_store_advertise_ip, current_pod_ip
+from rtp_llm.utils.scr import runtime_fixup as runtime
+from rtp_llm.utils.scr.network import cache_store_advertise_ip, current_pod_ip
 
 
 class ScrAdvertiseIpTest(unittest.TestCase):

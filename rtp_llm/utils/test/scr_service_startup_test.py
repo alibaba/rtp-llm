@@ -11,8 +11,8 @@ from rtp_llm.config.generate_config import RoleType
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.host_service import HostService, HostServiceArgs, VipServerWrapper
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
-from rtp_llm.utils.scr_restore_context import RestoreContext
-from rtp_llm.utils.scr_template_lifecycle import TemplateLifecycle
+from rtp_llm.utils.scr.restore_context import RestoreContext
+from rtp_llm.utils.scr.lifecycle import TemplateLifecycle
 from rtp_llm.vipserver.host import Host
 from rtp_llm.vipserver.host_reactor import HostReactor
 from rtp_llm.vipserver.vip_client import VipClient

@@ -46,7 +46,7 @@ from rtp_llm.openai.renderers.custom_renderer import RendererParams
 from rtp_llm.ops import TaskType
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
 from rtp_llm.telemetry import init_telemetry, shutdown_telemetry
-from rtp_llm.utils.scr_template_lifecycle import get_template_lifecycle
+from rtp_llm.utils.scr.lifecycle import get_template_lifecycle
 
 if TYPE_CHECKING:
     from rtp_llm.config.model_config import ModelConfig

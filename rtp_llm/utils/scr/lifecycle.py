@@ -14,7 +14,7 @@ import threading
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
-from rtp_llm.utils.scr_restore_context import RestoreContext
+from rtp_llm.utils.scr.restore_context import RestoreContext
 
 LOGGER = logging.getLogger(__name__)
 

@@ -11,7 +11,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
-from rtp_llm.utils import scr_template_utils as scr
+from rtp_llm.utils.scr import template_utils as scr
 
 
 class _EpsilonDouble:

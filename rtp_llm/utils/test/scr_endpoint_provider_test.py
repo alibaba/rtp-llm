@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from rtp_llm.distribute.distributed_server import WorldInfo
 from rtp_llm.distribute.worker_info import WorkerInfo
-from rtp_llm.utils.scr_endpoint_provider import (
+from rtp_llm.utils.scr.endpoint import (
     is_restore_phase,
     read_restore_manifest,
     resolve_world_info,

@@ -9,7 +9,7 @@ from typing import Any
 
 from rtp_llm.distribute.distributed_server import WorldInfo
 from rtp_llm.distribute.worker_info import WorkerInfo
-from rtp_llm.utils.scr_local_comm import local_comm_enabled
+from rtp_llm.utils.scr.network import local_comm_enabled
 
 ENDPOINT_MANIFEST_ENV = "RTP_LLM_SCR_ENDPOINT_MANIFEST"
 _MANIFEST_UNSET = object()

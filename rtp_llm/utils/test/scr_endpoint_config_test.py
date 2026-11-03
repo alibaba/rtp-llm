@@ -10,8 +10,8 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.distributed_server import WorldInfo
 from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.server.backend_manager import BackendManager
-from rtp_llm.utils.scr_restore_context import RestoreContext
-from rtp_llm.utils.scr_template_utils import _BackendVisitorTemplateHook
+from rtp_llm.utils.scr.restore_context import RestoreContext
+from rtp_llm.utils.scr.template_utils import _BackendVisitorTemplateHook
 
 
 class ScrEndpointConfigTest(unittest.TestCase):
@@ -122,7 +122,7 @@ class ScrEndpointConfigTest(unittest.TestCase):
                     "rtp_llm.distribute.distributed_server.get_dp_addrs_from_world_info",
                     return_value=["192.0.2.20:9001"],
                 ), patch(
-                    "rtp_llm.utils.scr_endpoint_provider.resolve_world_info",
+                    "rtp_llm.utils.scr.endpoint.resolve_world_info",
                     return_value=restored,
                 ) as resolve:
                     hook.restore_fixup(RestoreContext("generation-2", "192.0.2.20"))
@@ -177,7 +177,7 @@ class ScrEndpointConfigTest(unittest.TestCase):
                     "rtp_llm.server.backend_manager.get_world_info",
                     return_value=current,
                 ), patch(
-                    "rtp_llm.utils.scr_endpoint_provider.resolve_world_info",
+                    "rtp_llm.utils.scr.endpoint.resolve_world_info",
                     return_value=restored,
                 ) as resolve, patch(
                     "rtp_llm.server.backend_manager.update_worker_addrs"
