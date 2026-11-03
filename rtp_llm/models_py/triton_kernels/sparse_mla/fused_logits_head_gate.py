@@ -42,6 +42,7 @@ from typing import Optional, Union
 import torch
 import triton
 import triton.language as tl
+
 from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
 MAX_K = 8192
@@ -91,13 +92,9 @@ def _fused_logits_head_gate_kernel(
                 other=0.0,
             ).to(tl.float32)
             if HIGH_PRECISION:
-                acc += tl.dot(
-                    x, w, out_dtype=tl.float32, input_precision="tf32x3"
-                )
+                acc += tl.dot(x, w, out_dtype=tl.float32, input_precision="tf32x3")
             else:
-                acc += tl.dot(
-                    x, w, out_dtype=tl.float32, input_precision="tf32"
-                )
+                acc += tl.dot(x, w, out_dtype=tl.float32, input_precision="tf32")
         else:
             # [BLOCK_N, BLOCK_K] with K as inner dim (coalesced: stride_w_k=1)
             w = tl.load(

@@ -32,9 +32,7 @@ def _ceil_div(x: int, y: int) -> int:
     return (x + y - 1) // y
 
 
-def _infer_fp8_scale_recipe(
-    scale: torch.Tensor, mn: int, k: int
-) -> Tuple[int, int]:
+def _infer_fp8_scale_recipe(scale: torch.Tensor, mn: int, k: int) -> Tuple[int, int]:
     """Infer a raw MegaMoE weight-scale recipe from its trailing shape."""
     # Packed scales do not retain enough logical shape information. Existing
     # callers only prepack the legacy 128x128 format; MXFP8 stays raw FP32
@@ -392,6 +390,7 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
         )
 
         y = self._mega_y[:T]
+
         def _run_mega_moe() -> None:
             deep_gemm.fp8_fp8_mega_moe(
                 y,

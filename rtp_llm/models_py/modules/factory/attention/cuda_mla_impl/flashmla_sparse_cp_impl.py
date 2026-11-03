@@ -1194,7 +1194,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         else:
             q0 = q[self.total_local_ids].contiguous()
         if self._gather is not None:
-            out0 = self._attend_gather(q0, kv_cache, topk, attn_sink=attn_sink, prepared_kv=prepared_kv)
+            out0 = self._attend_gather(
+                q0, kv_cache, topk, attn_sink=attn_sink, prepared_kv=prepared_kv
+            )
         else:
             out0 = self._attend_with_kvcache(q0, kv_cache, topk, layer_id, attn_sink)
 
@@ -1473,7 +1475,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
     ) -> torch.Tensor:
         """flash_mla_with_kvcache on FP8 paged cache (CP equivalent of non-CP baseline)."""
         if self.kv_cache_sharded:
-            return self._attend_gather(q0, kv_cache, topk, attn_sink)
+            return self._attend_gather(q0, kv_cache, topk, attn_sink=attn_sink)
         q0, attn_sink, actual_heads = self._pad_query_and_sink(q0, attn_sink)
         kv_cache_flat = _as_uint8(
             kv_cache.kv_cache_base.view(-1, 1, kv_cache.kv_cache_base.size(-1))
@@ -1992,6 +1994,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             kv_cache=None,
             layer_id: int = 0,
             scatter_out: Optional[torch.Tensor] = None,
+            attn_sink: Optional[torch.Tensor] = None,
             original_q_len: Optional[int] = None,
             prepared_kv: Optional[torch.Tensor] = None,
             defer_output_scatter: bool = False,
@@ -2049,9 +2052,13 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             else:
                 q0 = q[self.total_local_ids].contiguous()
             if self._gather is not None:
-                out0 = self._attend_gather(q0, kv_cache, topk, prepared_kv)
+                out0 = self._attend_gather(
+                    q0, kv_cache, topk, prepared_kv=prepared_kv, attn_sink=attn_sink
+                )
             else:
-                out0 = self._attend_with_kvcache(q0, kv_cache, topk, layer_id)
+                out0 = self._attend_with_kvcache(
+                    q0, kv_cache, topk, layer_id, attn_sink
+                )
 
             if use_identity_q or defer_output_scatter:
                 return out0
@@ -2174,10 +2181,14 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             kv_cache,
             topk: torch.Tensor,
             prepared_kv: Optional[torch.Tensor] = None,
+            attn_sink: Optional[torch.Tensor] = None,
         ) -> torch.Tensor:
             """gather + flash_mla_sparse_fwd. After CP all-gather/restore/write, the paged
             cache has the full per-request KV; the CP plan supplies the per-q-token
             workspace offset for the sparse attention indices."""
+            q0, attn_sink, actual_heads = self._pad_query_and_sink(
+                q0, attn_sink, self.bf16_num_heads
+            )
             ws = self._gather
             assert ws is not None and self.precomputed_kv_offsets is not None
             fused_kv = prepared_kv
@@ -2227,14 +2238,16 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 global_indices = offset_cp_topk(
                     topk_2d, offsets, restore_indices, fused_kv.shape[0]
                 ).unsqueeze(1)
+            sink_kwargs = {} if attn_sink is None else {"attn_sink": attn_sink}
             out, _, _ = flash_mla_sparse_fwd(
                 q0,
                 fused_kv.unsqueeze(1),
                 global_indices,
                 self.scale,
                 d_v=self.kv_lora_rank,
+                **sink_kwargs,
             )
-            return out
+            return out[:, :actual_heads]
 
         _attend_gather = _baseline__attend_gather
 
@@ -2755,7 +2768,14 @@ class SparseMlaCpImpl(SparseMlaImpl):
         workspace = self._glm53_prefill_workspace
         try:
             return self._forward_impl(
-                q, compressed_kv, k_pe, kv_cache, layer_id, topk_indices, prepared_kv, attn_sink
+                q,
+                compressed_kv,
+                k_pe,
+                kv_cache,
+                layer_id,
+                topk_indices,
+                prepared_kv,
+                attn_sink,
             )
         finally:
             # GLM's large MoE follows attention in every layer. Return the slot
@@ -3008,6 +3028,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
             layer_id: int,
             topk_indices: Optional[torch.Tensor],
             prepared_kv=None,
+            attn_sink: Optional[torch.Tensor] = None,
         ) -> torch.Tensor:
             """CP sparse MLA forward. q: [total_q_len, H, qk_head_dim]; topk_indices
             is request-local. Returns [total_q_len, H, nope_head_dim]."""
@@ -3080,6 +3101,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
                 kv_cache,
                 layer_id=layer_id,
                 scatter_out=scatter_out,
+                attn_sink=attn_sink,
                 original_q_len=original_q_len,
                 prepared_kv=fused_kv,
                 defer_output_scatter=defer_output_scatter,

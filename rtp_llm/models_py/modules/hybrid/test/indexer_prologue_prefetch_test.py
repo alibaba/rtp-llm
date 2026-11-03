@@ -42,6 +42,7 @@ class IndexerProloguePrefetchTest(unittest.TestCase):
             return buffers
 
         obj = NS(
+            use_hadamard=True,
             wk=projection,
             k_norm=lambda x: x,
             wq_b=lambda *a, **k: torch.zeros(2, 128),
@@ -177,6 +178,19 @@ class IndexerProloguePrefetchTest(unittest.TestCase):
 
     def test_capture_fallback(self):
         self.assertEqual(self.protocol(captured=True), [])
+
+    def test_hy4_without_hadamard_preserves_the_existing_quantization_path(self):
+        indexer = NS(use_hadamard=False)
+        with patch.dict(
+            "os.environ", {"RTP_LLM_CP_INDEXER_PROLOGUE_PREFETCH": "1"}
+        ), patch.dict(
+            Indexer.prefetch_cp_k.__wrapped__.__globals__,
+            {"_DEVICE_TYPE": DeviceType.Cuda},
+        ), patch.object(
+            torch.cuda, "current_stream", side_effect=AssertionError("CUDA accessed")
+        ):
+            with Indexer.prefetch_cp_k(indexer, None, None, None, None) as state:
+                self.assertIsNone(state)
 
     def test_mla_wrapper_skips_reuse_and_dense_layers(self):
         for reuse in (False, True):

@@ -447,6 +447,7 @@ class Indexer(nn.Module):
             prefill_optimization_setting("RTP_LLM_CP_INDEXER_PROLOGUE_PREFETCH", "1")
             == "1"
             and _DEVICE_TYPE == DeviceType.Cuda
+            and self.use_hadamard
             and hidden_states.is_cuda
             and cp_params is not None
             and self._is_sparse_prefill_cp(attention_inputs)
@@ -659,7 +660,8 @@ class Indexer(nn.Module):
                         kv_cache, attention_inputs, cp_params
                     )
             if (
-                self._prefill_cp_fused_quant_enabled()
+                self.use_hadamard
+                and self._prefill_cp_fused_quant_enabled()
                 and cp_params.full_rope_pos_ids is not None
             ):
                 q_fp8, q_scale = self._fused_forward_prefill_cp_early_k(
@@ -963,7 +965,8 @@ class Indexer(nn.Module):
             # Fused Q-RoPE-Hadamard-Quant path: single Triton kernel does
             # RoPE + 128-pt Hadamard + ue8m0 FP8 quant for Q (decode only).
             if (
-                self._is_sparse_prefill_cp(attention_inputs)
+                self.use_hadamard
+                and self._is_sparse_prefill_cp(attention_inputs)
                 and self._prefill_cp_fused_quant_enabled()
                 and cp_params.full_rope_pos_ids is not None
             ):
@@ -979,7 +982,8 @@ class Indexer(nn.Module):
                     q_c_scale,
                 )
             elif (
-                self._fuse_logits_head_gate
+                self.use_hadamard
+                and self._fuse_logits_head_gate
                 and not attention_inputs.is_prefill
                 and cp_params is None
             ):

@@ -14,6 +14,25 @@ py_test(
     deps = py_test_deps,
 )
 
+[
+    py_test(
+        name = "hy4_prefill_migration_opt_%s_test" % enabled,
+        srcs = ["hy4_prefill_migration_test.py"],
+        deps = py_test_deps,
+        env = {"RTP_LLM_CP_PREFILL_PIPELINE_OPT": enabled},
+    )
+    for enabled in ["0", "1"]
+]
+
+py_test(
+    name = "hy4_mtp_frontend_test",
+    srcs = ["hy4_mtp_frontend_test.py"],
+    deps = py_test_deps,
+    env = {"RTP_LLM_MTP_OPTIMIZE": "1", "GPU_COUNT": "1"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
 py_test(
     name = "glm5_cmp_test",
     srcs = ["glm5_cmp_test.py"],

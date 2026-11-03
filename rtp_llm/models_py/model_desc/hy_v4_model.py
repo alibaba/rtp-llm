@@ -11,6 +11,7 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.model_desc.block_map import cpu_layer_group_ids
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
@@ -75,6 +76,9 @@ class Hy4DecoderLayer(nn.Module):
                 f"weights: {missing_attention}"
             )
         self.layer_idx = layer_idx
+        self._drain_prefill_before_moe = layer_idx in config.moe_layer_index and str(
+            moe_config.moe_strategy
+        ).startswith("mega_moe")
         self.self_attn = MlaAttention.from_model_config(
             config,
             parallelism_config,
@@ -140,6 +144,7 @@ class Hy4DecoderLayer(nn.Module):
         clone = object.__new__(type(self))
         nn.Module.__init__(clone)
         clone.layer_idx = self.layer_idx
+        clone._drain_prefill_before_moe = self._drain_prefill_before_moe
         clone.self_attn = self.self_attn
         clone.mlp = (
             self.mlp.clone_for_cuda_graph()
@@ -191,6 +196,9 @@ class Hy4DecoderLayer(nn.Module):
             **attn_kwargs,
         )
         channels = self.attn_ihc.post(attn_output, channels, attn_post_gate)
+        layered = getattr(fmha_impl, "layered_prefill_cache", None)
+        if self._drain_prefill_before_moe and layered is not None:
+            layered.wait_prefetch_complete()
         mlp_input_fp8 = None
         mlp_input_scale = None
         if getattr(self, "_fuse_mlp_ihc_mxfp8", False):
@@ -199,9 +207,7 @@ class Hy4DecoderLayer(nn.Module):
                 mlp_post_gate,
                 mlp_input_fp8,
                 mlp_input_scale,
-            ) = self.mlp_ihc.pre_normed_mxfp8(
-                channels, self.post_attention_layernorm
-            )
+            ) = self.mlp_ihc.pre_normed_mxfp8(channels, self.post_attention_layernorm)
         else:
             mlp_input, mlp_post_gate = self.mlp_ihc.pre_normed(
                 channels, self.post_attention_layernorm
@@ -254,8 +260,7 @@ class Hy4Model(GptModelBase):
             weights.get_global_weight(W.embedding),
         )
         enable_cuda_graph = bool(
-            py_hw_kernel_config is not None
-            and py_hw_kernel_config.enable_cuda_graph
+            py_hw_kernel_config is not None and py_hw_kernel_config.enable_cuda_graph
         )
         self.layers = nn.ModuleList(
             [
@@ -286,21 +291,38 @@ class Hy4Model(GptModelBase):
         )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        failed = True
+        try:
+            output = self._forward(inputs, fmha_impl)
+            failed = False
+            return output
+        finally:
+            if (
+                self.layered_prefill_cache is not None
+                and self.layered_prefill_cache.active
+            ):
+                self.layered_prefill_cache.end_forward(failed=failed)
+
+    def _forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        if fmha_impl is None:
+            fmha_impl = self.prepare_fmha_impl(inputs)
+        fmha_impl.layered_prefill_cache = self.layered_prefill_cache
+        if self.layered_prefill_cache is not None:
+            self.layered_prefill_cache.begin_forward(fmha_impl)
         input_ids: torch.Tensor = inputs.input_ids
         hidden_states = self.embed_tokens(input_ids)
         if hidden_states.dim() != 2:
             hidden_states = hidden_states.reshape(-1, self.hidden_size)
-        channels = (
-            hidden_states.unsqueeze(1)
-            .expand(-1, self.hc_mult, -1)
-            .contiguous()
-        )
-        if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)
+        channels = hidden_states.unsqueeze(1).expand(-1, self.hc_mult, -1).contiguous()
 
         prev_topk_indices = None
+        layer_group_ids = cpu_layer_group_ids(inputs.attention_inputs)
         for idx, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            layer_cache = self.prepare_decoder_layer(inputs.attention_inputs, idx)
+            if self.layered_prefill_cache is not None:
+                self.layered_prefill_cache.before_layer(idx)
+            layer_cache = self.prepare_decoder_layer(
+                inputs.attention_inputs, idx, layer_group_ids
+            )
             output = decoder_layer(
                 channels,
                 fmha_impl,

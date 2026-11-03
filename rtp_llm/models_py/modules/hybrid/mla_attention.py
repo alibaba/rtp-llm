@@ -4,8 +4,8 @@ from typing import Any, Dict, Optional, Tuple, Union
 import torch
 from torch import nn
 
-from rtp_llm.config.prefill_optimization import PREFILL_OPTIMIZATIONS_ENABLED
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.prefill_optimization import PREFILL_OPTIMIZATIONS_ENABLED
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py import prefill_optimization as _prefill_optimization
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
@@ -55,9 +55,7 @@ def _infer_gated_mla_type(
 ) -> str:
     """Infer the gate kind from BF16-transposed or FP8 checkpoint layout."""
     if gate_weight.dim() != 2:
-        raise ValueError(
-            f"gated MLA weight must be 2D, got {tuple(gate_weight.shape)}"
-        )
+        raise ValueError(f"gated MLA weight must be 2D, got {tuple(gate_weight.shape)}")
     shape = tuple(gate_weight.shape)
     elementwise_width = num_heads * v_head_dim
     elementwise = elementwise_width in shape
@@ -154,9 +152,7 @@ class MlaAttention(nn.Module):
                 quant_config,
                 hw_kernel_config,
                 parallelism_config,
-                scale_fmt=(
-                    "none" if indexer_scale_fmt is None else indexer_scale_fmt
-                ),
+                scale_fmt=("none" if indexer_scale_fmt is None else indexer_scale_fmt),
                 use_hadamard=indexer_use_hadamard,
             )
         else:
@@ -278,13 +274,10 @@ class MlaAttention(nn.Module):
         # hidden/q_c tensor as MLA, quantize once and pass the exact same FP8
         # bytes and packed scales to both GEMMs.
         main_input_proj = (
-            self.fused_qkv_a_proj
-            if self.q_lora_rank > 0
-            else self.fused_qkv_proj
+            self.fused_qkv_a_proj if self.q_lora_rank > 0 else self.fused_qkv_proj
         )
         self.accepts_mxfp8_input = bool(
-            CudaMxfp8Linear is not None
-            and isinstance(main_input_proj, CudaMxfp8Linear)
+            CudaMxfp8Linear is not None and isinstance(main_input_proj, CudaMxfp8Linear)
         )
         self._reuse_mxfp8_hidden_quant = bool(
             mxfp8_quant_act_packed is not None
@@ -330,18 +323,12 @@ class MlaAttention(nn.Module):
             and self.gating_type == "elementwise"
             and sigmoid_mul_fp8_quant_fwd is not None
         ):
-            if CudaMxfp8Linear is not None and isinstance(
-                self.o_proj, CudaMxfp8Linear
-            ):
+            if CudaMxfp8Linear is not None and isinstance(self.o_proj, CudaMxfp8Linear):
                 self._fuse_gated_mla_quant = True
-                self._gated_mla_quant_group_size = (
-                    self.o_proj.input_quant_group_size
-                )
+                self._gated_mla_quant_group_size = self.o_proj.input_quant_group_size
                 # Request DeepGEMM's packed UE8M0/TMA layout directly so the
                 # output projection skips its standalone scale-pack kernel.
-                self._gated_mla_scale_ue8m0 = (
-                    self.o_proj.input_quant_scale_ue8m0
-                )
+                self._gated_mla_scale_ue8m0 = self.o_proj.input_quant_scale_ue8m0
                 self._gated_mla_round_scale_to_pow2 = (
                     self.o_proj.input_quant_round_to_pow2
                 )
@@ -350,8 +337,7 @@ class MlaAttention(nn.Module):
             ):
                 self._gated_mla_scale_ue8m0 = self.o_proj.scale_ue8m0
                 self._fuse_gated_mla_quant = self.o_proj.K % 128 == 0 and (
-                    not self._gated_mla_scale_ue8m0
-                    or (self.o_proj.K // 128) % 4 == 0
+                    not self._gated_mla_scale_ue8m0 or (self.o_proj.K // 128) % 4 == 0
                 )
 
     def _run_sparse_indexer(
@@ -571,7 +557,11 @@ class MlaAttention(nn.Module):
                     q_c_scale,
                     prev_topk_indices,
                     force_reuse_topk_indices,
-                    prepared_cp_k=prepared_cp_k,
+                    **(
+                        {"prepared_cp_k": prepared_cp_k}
+                        if prepared_cp_k is not None
+                        else {}
+                    ),
                 )
                 fmha_impl.prefetch_kv(self.layer_idx, topk_indices)
             defer_cross_layer_kv = (
@@ -701,7 +691,11 @@ class MlaAttention(nn.Module):
                     q_c_scale,
                     prev_topk_indices,
                     force_reuse_topk_indices,
-                    prepared_cp_k=prepared_cp_k,
+                    **(
+                        {"prepared_cp_k": prepared_cp_k}
+                        if prepared_cp_k is not None
+                        else {}
+                    ),
                 )
             del q_c, q_c_fp8, q_c_scale
             if prepared_kv is None:
@@ -709,7 +703,9 @@ class MlaAttention(nn.Module):
             attention_kwargs = {}
             if self.attn_sink is not None:
                 if not fmha_impl.is_sparse():
-                    raise RuntimeError("HY V4 learnable attention sink requires a sparse MLA backend")
+                    raise RuntimeError(
+                        "HY V4 learnable attention sink requires a sparse MLA backend"
+                    )
                 attention_kwargs["attn_sink"] = self.attn_sink
             attn_output = fmha_impl.forward(
                 q_view,

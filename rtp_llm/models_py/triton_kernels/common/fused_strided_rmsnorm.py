@@ -40,6 +40,7 @@ contention noise, not a real loss zone.
 import torch
 import triton
 import triton.language as tl
+
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     create_per_token_group_quant_fp8_output_scale,
 )
@@ -151,9 +152,7 @@ def _fused_strided_rmsnorm_singlepass_kernel(
         # Triton's ``div.approx.f32`` default.
         if SCALE_UE8M0:
             if MXFP8_SEMANTICS:
-                normalized_max = absmax * tl.full(
-                    absmax.shape, 1.0 / 448.0, tl.float32
-                )
+                normalized_max = absmax * tl.full(absmax.shape, 1.0 / 448.0, tl.float32)
                 exp_field = _float_to_ue8m0(normalized_max)
                 inv_scale = _ue8m0_to_inv_scale(exp_field)
                 inv_scale_full = tl.broadcast_to(
@@ -268,13 +267,13 @@ def _baseline_strided_rmsnorm_fp8_quant_with_bf16_output(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     import flashinfer.norm
 
-
     bf16_out = flashinfer.norm.rmsnorm(x.contiguous(), weight, eps=eps)
     if mxfp8_semantics:
         fp8_out, scale = mxfp8_quant_act_packed(bf16_out)
         return bf16_out, fp8_out, scale
 
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+
     fp8_out, scale = sgl_per_token_group_quant_fp8(
         bf16_out,
         group_size=group_size,

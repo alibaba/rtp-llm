@@ -73,7 +73,7 @@ class IndexerCPOverlapTest(unittest.TestCase):
                 ],
             )
 
-    def run_protocol(self, fused=True, fail=None, early=False):
+    def run_protocol(self, fused=True, fail=None, early=False, hadamard=True):
         calls = []
         compute = NS(
             wait_event=lambda e: calls.append("join_ready"),
@@ -117,6 +117,7 @@ class IndexerCPOverlapTest(unittest.TestCase):
             return "result"
 
         obj = NS(
+            use_hadamard=hadamard,
             indexer_op=NS(
                 quant_k_cp_only=cache_key,
                 prepare_cp_k=prepare,
@@ -243,6 +244,12 @@ class IndexerCPOverlapTest(unittest.TestCase):
 
     def test_consecutive_calls_have_no_retained_per_call_state(self):
         self.assertEqual(self.run_protocol(), self.run_protocol())
+
+    def test_hy4_keeps_non_hadamard_quantization_with_overlap(self):
+        calls = self.run_protocol(fused=True, hadamard=False)
+        self.assertNotIn("fused_qk", calls)
+        self.assertLess(calls.index("record_ready"), calls.index("quant_q"))
+        self.assertLess(calls.index("join_ready"), calls.index("topk"))
 
 
 if __name__ == "__main__":

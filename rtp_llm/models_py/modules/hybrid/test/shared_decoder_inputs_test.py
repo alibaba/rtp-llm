@@ -76,6 +76,7 @@ class SharedDecoderInputsTest(unittest.TestCase):
                     model.fc = nn.Linear(8, 4, bias=False)
                     model.fc.weight = nn.Parameter(projection)
                     model.pinned_mla_groups = {}
+                    model._mtp_frontend_native = None
                     inputs = SimpleNamespace(input_ids=ids, input_hiddens=hidden)
                     fmha = SimpleNamespace(
                         fmha_params=SimpleNamespace(positions_d=positions)

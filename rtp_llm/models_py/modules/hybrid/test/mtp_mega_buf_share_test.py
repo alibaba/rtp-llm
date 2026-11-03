@@ -46,6 +46,7 @@ def make_source(cls, wrapper_cls):
     model = cls.__new__(cls)
     nn.Module.__init__(model)
     model.cfg = SimpleNamespace()
+    model._fp8_weight_recipe = (128, 128)
     model._mega_group = object()
     model._mega_buf = SimpleNamespace(
         num_max_tokens_per_rank=8,

@@ -32,6 +32,7 @@ cc_test(
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/normal_engine:normal_engine",
+        "//rtp_llm/cpp/utils:mtp_fusion",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/config:config_modules",
         "@com_google_googletest//:gtest",
@@ -82,6 +83,9 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = [
+        "//rtp_llm/models_py/bindings/cuda/kernels:mtp_token_gather",
+        "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
+        "//rtp_llm/models_py/bindings/cuda/kernels:mtp_target_verify_prepare",
         "//rtp_llm/cpp/testing:device_test_utils",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/cpp/normal_engine:normal_engine",

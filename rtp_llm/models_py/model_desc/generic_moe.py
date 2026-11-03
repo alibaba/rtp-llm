@@ -2,6 +2,8 @@ import os
 from typing import Any, Dict, Optional
 
 import torch
+from torch import nn
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py import prefill_optimization as _prefill_optimization
@@ -35,7 +37,6 @@ from rtp_llm.models_py.modules.hybrid.glm5_cmp import (
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 try:
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
@@ -527,8 +528,7 @@ class GenericMoeLayer(nn.Module):
             extra_expert_args={
                 "swiglu_limit": (
                     float(getattr(self.config, "swiglu_limit", 0.0))
-                    if getattr(self.config, "model_type", "")
-                    in ("hy_v4", "hy_v4_mtp")
+                    if getattr(self.config, "model_type", "") in ("hy_v4", "hy_v4_mtp")
                     else 0.0
                 )
             },
@@ -1072,7 +1072,9 @@ class GenericMoeModel(GptModelBase):
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             if self.layered_prefill_cache is not None:
                 self.layered_prefill_cache.before_layer(i)
-            layer_cache = self.prepare_decoder_layer(inputs.attention_inputs, i, layer_group_ids)
+            layer_cache = self.prepare_decoder_layer(
+                inputs.attention_inputs, i, layer_group_ids
+            )
             output = decoder_layer(
                 hidden_states,
                 residual,

@@ -2,6 +2,8 @@ import os
 from typing import Any
 
 import torch
+from torch import nn
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.kernels.cuda.mtp_frontend import native as mtp_frontend_native
@@ -18,7 +20,6 @@ from rtp_llm.models_py.modules.hybrid.glm5_cmp import should_enable_glm5_cmp
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 _MTP_INDEXER_ROLE_NORMAL = 0
 _MTP_INDEXER_ROLE_SEED = 1
@@ -306,7 +307,9 @@ class GenericMoeMTPModel(GptModelBase):
         )
         layer_group_ids = cpu_layer_group_ids(inputs.attention_inputs)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            layer_cache = self.prepare_decoder_layer(inputs.attention_inputs, i, layer_group_ids)
+            layer_cache = self.prepare_decoder_layer(
+                inputs.attention_inputs, i, layer_group_ids
+            )
             output = decoder_layer(
                 hidden_states,
                 residual,
