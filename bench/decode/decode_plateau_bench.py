@@ -9,12 +9,23 @@ several engine steps into one chunk, so chunk intervals alone are not used).
 The concurrency reconstructed from token timestamps is printed as proof that
 the batch was full during the window.
 
-Output (one JSON line on stdout): step ms, effective TPOT = step / accept_len,
-aggregate output tok/s = requests * accept_len / step.
+Output (one JSON line on stdout):
+  measured_tpot_ms / measured_tok_per_s   from the token counters in the window
+                                          (what the client actually sees);
+  observed_tokens_per_step, measured_step_ms   tokens per SSE chunk (= per
+                                          engine step when the stream is dense)
+                                          and the implied step time;
+  step_mean_ms, tpot_eff_ms, agg_tok_per_s   the simulated numbers for
+                                          ``--force-accept``: every step emits
+                                          ``--tokens-per-step`` tokens and is
+                                          rescaled to ``--accept-len``.
 
 For RTP-LLM with MTP, ``--force-accept`` sends ``force_sp_accept`` so every
 draft token is accepted; set ``--tokens-per-step`` to gen_num_per_cycle + 1
-and ``--accept-len`` to the acceptance length you want to report.
+and ``--accept-len`` to the acceptance length you want to report. When the
+server itself forces a fractional acceptance (PPU decode with
+``DSV4_SP_FORCE_ACCEPT_LEN``), do not pass ``--force-accept``; use the
+``measured_*`` fields (``observed_tokens_per_step`` shows the acceptance).
 """
 import argparse
 import asyncio
@@ -173,8 +184,27 @@ def analyze(args, results):
         max(r["token_ts"][-1][0] for r in results)
         - min(r["token_ts"][0][0] for r in results),
     )
+    # Tokens actually emitted per engine step, from the SSE chunk stream (one
+    # chunk per step when the stream is dense).  With PPU
+    # DSV4_SP_FORCE_ACCEPT_LEN the engine already emits accept_len tokens per
+    # step, so --tokens-per-step (gen+1, the force_sp_accept assumption) would
+    # overstate the step and understate the throughput by (gen+1)/accept_len.
+    toks_per_chunk = sorted(
+        r["token_ts"][-1][1] / len(r["token_ts"]) for r in dense if r["token_ts"]
+    )
+    observed_tps = toks_per_chunk[len(toks_per_chunk) // 2] if toks_per_chunk else 0.0
+    if dense and min(rates) > 0:
+        tpot_ms = 1000 * len(rates) / sum(rates)
+        agg_tok_s = sum(rates)
+    else:
+        tpot_ms = step_ms / args.tokens_per_step
+        agg_tok_s = len(results) * 1000 / tpot_ms
     out.update(
         {
+            "observed_tokens_per_step": round(observed_tps, 3),
+            "measured_tpot_ms": round(tpot_ms, 2),
+            "measured_tok_per_s": round(agg_tok_s, 1),
+            "measured_step_ms": round(tpot_ms * observed_tps, 2),
             "step_mean_ms": round(step_ms, 2),
             "step_min_max_ms": [
                 round(1000 * min(spans), 2),
