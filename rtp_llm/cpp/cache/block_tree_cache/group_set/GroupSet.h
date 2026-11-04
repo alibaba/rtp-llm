@@ -122,6 +122,9 @@ public:
     virtual std::unique_ptr<MatchValidator> createMatchValidator() = 0;
 
     virtual size_t computeReuseBlockCount(size_t matched_block_count) const = 0;
+    // Point-state groups require only this endpoint. SWA overrides this with
+    // the same token window used by its native match validator.
+    virtual size_t matchWindowBlocks() const { return 1; }
 
     const std::vector<DeviceBlockPoolPtr>& devicePools() const {
         return device_pools_;

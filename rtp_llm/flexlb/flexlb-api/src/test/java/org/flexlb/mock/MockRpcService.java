@@ -2,6 +2,7 @@ package org.flexlb.mock;
 
 import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -154,10 +155,11 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         if (beh.isFailOnEnqueue()) {
             for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
                 for (EngineRpcService.EnqueueBatchExternalInputPB ext : slot.getRequestsList()) {
-                    long reqId = ext.getInput().getRequestId();
+                    String reqId = RequestId.parse(ext.getInput());
                     responseBuilder.addErrors(
-                            EngineRpcService.EnqueueBatchErrorPB.newBuilder()
-                                    .setRequestId(reqId)
+                            RequestIdFixtures.write(
+                                            EngineRpcService.EnqueueBatchErrorPB.newBuilder(),
+                                            reqId)
                                     .setErrorInfo(
                                             EngineRpcService.ErrorDetailsPB.newBuilder()
                                                     .setErrorCode(beh.getEnqueueErrorCode())
@@ -169,10 +171,11 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         } else {
             for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
                 for (EngineRpcService.EnqueueBatchExternalInputPB ext : slot.getRequestsList()) {
-                    long reqId = ext.getInput().getRequestId();
+                    String reqId = RequestId.parse(ext.getInput());
                     responseBuilder.addSuccesses(
-                            EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
-                                    .setRequestId(reqId)
+                            RequestIdFixtures.write(
+                                            EngineRpcService.EnqueueBatchSuccessPB.newBuilder(),
+                                            reqId)
                                     .build());
                 }
             }

@@ -2,6 +2,10 @@
 #include <chrono>
 #include <cmath>
 #include <exception>
+#include <tuple>
+#include <unordered_map>
+#include "autil/Lock.h"
+#include "aios/navi_sched/adapters/rtp_llm/RtpLLMAdapter.h"
 #include <memory>
 #include <stdexcept>
 #include <unistd.h>
@@ -24,6 +28,224 @@
 using namespace std;
 
 namespace rtp_llm {
+
+class NaviSchedRtpBatchHandler: public std::enable_shared_from_this<NaviSchedRtpBatchHandler> {
+public:
+    NaviSchedRtpBatchHandler(const std::shared_ptr<EngineBase>& engine, int64_t block_size):
+        _engine(engine), _block_size(block_size) {}
+
+    std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<navi_sched::NaviSchedAgent>& agent,
+                                            const std::shared_ptr<GenerateInput>&              input,
+                                            grpc::ServerContext*                               context) {
+        auto request     = std::make_shared<Request>();
+        request->input   = input;
+        request->context = context;
+        {
+            autil::ScopedLock lock(_condition);
+            if (_stopped) {
+                throw std::runtime_error("NaviSched batch handler is stopped");
+            }
+            if (!_requests.emplace(input->request_id, request).second) {
+                throw std::runtime_error("duplicate NaviSched batch request");
+            }
+        }
+        navi_sched::NaviSchedBatchRequest batch_request;
+        batch_request.requestId       = input->request_id;
+        batch_request.totalTokenCount = input->inputLength();
+        batch_request.blockSize       = _block_size;
+        auto self                     = shared_from_this();
+        auto added                    = navi_sched::addRtpLLMBatchRequest(
+            agent,
+            batch_request,
+            input->group_id,
+            input->group_size,
+            [self](const navi_sched::NaviSchedBatchPtr& batch) { self->handleReadyBatch(batch); });
+        if (!added) {
+            finishRequest(input->request_id, "failed to add NaviSched batch request");
+        }
+        autil::ScopedLock lock(_condition);
+        while (!request->finished && !_stopped) {
+            _condition.wait();
+        }
+        _requests.erase(input->request_id);
+        if (!request->errorMessage.empty()) {
+            throw std::runtime_error(request->errorMessage);
+        }
+        if (!request->stream) {
+            throw std::runtime_error("NaviSched batch request has no stream");
+        }
+        return request->stream;
+    }
+
+    void handleReadyBatch(const navi_sched::NaviSchedBatchPtr& batch) noexcept {
+        try {
+            handleReadyBatchInternal(batch);
+        } catch (const std::exception& error) {
+            failBatch(batch, error.what());
+        } catch (...) {
+            failBatch(batch, "NaviSched batch callback failed");
+        }
+    }
+
+private:
+    void handleReadyBatchInternal(const navi_sched::NaviSchedBatchPtr& batch) {
+        if (!batch) {
+            throw std::runtime_error("NaviSched returned an empty ready batch");
+        }
+        std::vector<std::shared_ptr<Request>>       requests;
+        std::vector<std::shared_ptr<GenerateInput>> inputs;
+        bool                                        incompleteBatch = false;
+        {
+            autil::ScopedLock lock(_condition);
+            if (_stopped) {
+                return;
+            }
+            requests.reserve(batch->requestIds.size());
+            inputs.reserve(batch->requestIds.size());
+            for (const auto requestId : batch->requestIds) {
+                auto it = _requests.find(requestId);
+                if (_requests.end() == it) {
+                    incompleteBatch = true;
+                    continue;
+                }
+                auto& request = it->second;
+                if (request->context && request->context->IsCancelled()) {
+                    request->errorMessage = "NaviSched batch request is cancelled";
+                    request->finished     = true;
+                    incompleteBatch       = true;
+                    continue;
+                }
+                requests.emplace_back(request);
+                inputs.emplace_back(request->input);
+            }
+            if (incompleteBatch) {
+                for (const auto requestId : batch->requestIds) {
+                    auto it = _requests.find(requestId);
+                    if (_requests.end() != it && !it->second->finished) {
+                        it->second->errorMessage = "NaviSched batch was cancelled atomically";
+                        it->second->finished     = true;
+                    }
+                }
+            }
+            for (auto& input : inputs) {
+                input->group_size = static_cast<int>(inputs.size());
+            }
+            _condition.broadcast();
+        }
+        if (incompleteBatch || inputs.empty()) {
+            batch->finishReporter.reset();
+            return;
+        }
+
+        std::vector<bool>                            enqueueSuccesses;
+        std::vector<std::shared_ptr<GenerateStream>> streams;
+        std::string                                  errorMessage;
+        try {
+            std::tie(enqueueSuccesses, streams) = _engine->enqueueMultiple(inputs);
+            if (enqueueSuccesses.size() != requests.size() || streams.size() != requests.size()) {
+                errorMessage = "NaviSched batch enqueue returned unexpected result count";
+            } else if (std::find(enqueueSuccesses.begin(), enqueueSuccesses.end(), false) != enqueueSuccesses.end()) {
+                errorMessage = "NaviSched batch enqueue was rejected";
+                for (size_t index = 0; index < streams.size(); ++index) {
+                    if (enqueueSuccesses[index] && streams[index]) {
+                        streams[index]->reportError(ErrorCode::CANCELLED, "NaviSched requires atomic batch enqueue");
+                    }
+                }
+            }
+        } catch (const std::exception& error) {
+            errorMessage = error.what();
+        } catch (...) {
+            errorMessage = "NaviSched batch enqueue failed";
+        }
+        if (errorMessage.empty() && !navi_sched::retainRtpLLMReadyBatch(batch)) {
+            errorMessage = "failed to retain NaviSched ready batch";
+            for (const auto& stream : streams) {
+                if (stream) {
+                    stream->reportError(ErrorCode::CANCELLED, errorMessage);
+                }
+            }
+        }
+
+        autil::ScopedLock lock(_condition);
+        for (size_t index = 0; index < requests.size(); ++index) {
+            auto& request = requests[index];
+            if (errorMessage.empty()) {
+                request->stream = streams[index];
+            } else {
+                request->errorMessage = errorMessage;
+            }
+            request->finished = true;
+        }
+        _condition.broadcast();
+        if (!errorMessage.empty()) {
+            batch->finishReporter.reset();
+        }
+    }
+
+public:
+    void stop() {
+        autil::ScopedLock lock(_condition);
+        _stopped = true;
+        for (auto& pair : _requests) {
+            pair.second->errorMessage = "NaviSched batch handler is stopped";
+            pair.second->finished     = true;
+        }
+        _condition.broadcast();
+    }
+
+private:
+    struct Request {
+        std::shared_ptr<GenerateInput>  input;
+        grpc::ServerContext*            context = nullptr;
+        std::shared_ptr<GenerateStream> stream;
+        std::string                     errorMessage;
+        bool                            finished = false;
+    };
+
+    void failBatch(const navi_sched::NaviSchedBatchPtr& batch, const std::string& errorMessage) noexcept {
+        try {
+            if (!batch) {
+                return;
+            }
+            {
+                autil::ScopedLock lock(_condition);
+                for (const auto requestId : batch->requestIds) {
+                    auto it = _requests.find(requestId);
+                    if (_requests.end() == it) {
+                        continue;
+                    }
+                    it->second->errorMessage = errorMessage;
+                    it->second->finished     = true;
+                }
+                _condition.broadcast();
+            }
+            const bool aborted =
+                !batch->requestIds.empty() && navi_sched::abortRetainedRtpLLMBatch(batch->requestIds.front());
+            if (!aborted) {
+                batch->finishReporter.reset();
+            }
+        } catch (...) {}
+    }
+
+    void finishRequest(int64_t requestId, const std::string& errorMessage) {
+        autil::ScopedLock lock(_condition);
+        auto              it = _requests.find(requestId);
+        if (_requests.end() == it) {
+            return;
+        }
+        it->second->errorMessage = errorMessage;
+        it->second->finished     = true;
+        _condition.broadcast();
+    }
+
+private:
+    std::shared_ptr<EngineBase>                           _engine;
+    int64_t                                               _block_size = 256;
+    autil::ThreadCond                                     _condition;
+    std::unordered_map<int64_t, std::shared_ptr<Request>> _requests;
+    bool                                                  _stopped = false;
+};
+
 
 namespace {
 constexpr int64_t kRpcOutputWaitTimeoutMs        = 500;
@@ -218,6 +440,57 @@ private:
 
 }  // namespace
 
+LocalRpcServer::~LocalRpcServer() {
+    if (navi_sched_batch_handler_) {
+        navi_sched_batch_handler_->stop();
+        navi_sched_batch_handler_.reset();
+    }
+    stopNaviSchedAgent();
+}
+
+grpc::Status LocalRpcServer::initNaviSchedAgent() {
+    const auto role_type          = maga_init_params_.pd_sep_config.role_type;
+    const bool should_start_agent = role_type != RoleType::FRONTEND && role_type != RoleType::VIT
+                                    && maga_init_params_.parallelism_config.tp_rank == 0;
+    std::string error_message;
+    auto        status = navi_sched::createRtpLLMAgentFromEnvironment(should_start_agent,
+                                                               maga_init_params_.server_ip,
+                                                               maga_init_params_.rpc_server_port,
+                                                               navi_sched_agent_,
+                                                               error_message);
+    if (status == navi_sched::RtpLLMAgentInitStatus::INVALID_CONFIG) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, error_message);
+    }
+    if (status == navi_sched::RtpLLMAgentInitStatus::INIT_FAILED) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, error_message);
+    }
+    if (!navi_sched_agent_) {
+        return grpc::Status::OK;
+    }
+    maga_init_params_.navi_sched_agent = navi_sched_agent_;
+    RTP_LLM_LOG_INFO("NaviSched Agent started, model server [%s:%d], gig port [%d]",
+                     maga_init_params_.server_ip.c_str(),
+                     maga_init_params_.rpc_server_port,
+                     navi_sched::getRtpLLMAgentGrpcPort(navi_sched_agent_));
+    return grpc::Status::OK;
+}
+
+void LocalRpcServer::stopNaviSchedAgent() {
+    if (navi_sched_agent_) {
+        navi_sched::stopRtpLLMAgent(navi_sched_agent_);
+        navi_sched_agent_.reset();
+        maga_init_params_.navi_sched_agent.reset();
+    }
+}
+
+std::shared_ptr<GenerateStream> LocalRpcServer::enqueueWithNaviSchedBatch(const std::shared_ptr<GenerateInput>& input,
+                                                                          grpc::ServerContext* context) {
+    if (!navi_sched_agent_ || !navi_sched_batch_handler_ || !input->isGroup() || input->group_size <= 1) {
+        return engine_->enqueue(input);
+    }
+    return navi_sched_batch_handler_->enqueue(navi_sched_agent_, input, context);
+}
+
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
                                   std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                                   py::object                                    mm_process_engine) {
@@ -262,6 +535,10 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     }
     RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s", maga_init_params_.misc_config.aux_string.c_str());
     propose_maga_init_params_ = propose_params.get();
+    auto navi_sched_status = initNaviSchedAgent();
+    if (!navi_sched_status.ok()) {
+        return navi_sched_status;
+    }
     if (maga_init_params_.parallelism_config.tp_rank == 0
         && !maga_init_params_.runtime_config.worker_grpc_addrs.empty()) {
         tp_broadcaster_ = std::make_shared<BroadcastManager>(maga_init_params_.runtime_config.worker_grpc_addrs);
@@ -288,7 +565,11 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         pybind11::gil_scoped_release release;
         RTP_LLM_CHECK_WITH_INFO(!PyGILState_Check(),
                                 "running engine init with gil held may cause program hang, please check");
-        engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
+        engine_.reset(new NormalEngine(maga_init_params_, std::move(propose_params)));
+    }
+    if (navi_sched_agent_) {
+        navi_sched_batch_handler_ =
+            std::make_shared<NaviSchedRtpBatchHandler>(engine_, maga_init_params_.kv_cache_config.seq_size_per_block);
     }
     if (mm_kind == MMProcessorKind::LOCAL) {
         mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
@@ -558,7 +839,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
     {
         RTP_LLM_PROFILE_SCOPE("rpc.enqueue_engine");
-        generate_context.setStream(engine_->enqueue(input));
+        generate_context.setStream(enqueueWithNaviSchedBatch(input, context));
     }
 
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
@@ -567,6 +848,9 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
         pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());
     if (generate_context.hasError() && generate_context.getStream() && generate_context.getStream()->hasError()) {
         generate_context.error_info = generate_context.getStream()->statusInfo();
+    }
+    if (input->navi_sched) {
+        navi_sched::abortRetainedRtpLLMBatch(request_id);
     }
     meta_->dequeue(generate_context.request_id, generate_context.getStream());
     return generate_context.error_status;

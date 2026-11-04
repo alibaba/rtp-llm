@@ -54,7 +54,27 @@ BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&          
     }
 
     std::vector<TreeNode*> path   = tree_->findNode(cache_keys);
+    const size_t flat_matched_blocks = path.size();
+    size_t min_full_reuse_blocks = path.size();
+    for (size_t gid = 0; gid < tree_->groupSets().size(); ++gid) {
+        const auto& group_set = tree_->groupSets()[gid];
+        if (group_set->group(group_set->groupTags().front()).policy.active_tail_blocks != 0) {
+            continue;
+        }
+        size_t full_prefix = 0;
+        while (full_prefix < path.size()) {
+            const auto& value = path[full_prefix]->group_set_resources[gid];
+            if (!value.isMatchUsable() || value.is_empty()) {
+                break;
+            }
+            ++full_prefix;
+        }
+        min_full_reuse_blocks = std::min(min_full_reuse_blocks, full_prefix);
+    }
     BlockTreeMatchResult   result = createMatchResult(path, cache_keys, valid_prefix);
+    result.candidate_blocks = cache_keys.size();
+    result.flat_matched_blocks = flat_matched_blocks;
+    result.min_full_reuse_blocks = min_full_reuse_blocks;
     RTP_LLM_LOG_DEBUG("matched %zu device blocks, cache_keys=%zu, tree_nodes=%zu",
                       result.matched_device_blocks,
                       cache_keys.size(),

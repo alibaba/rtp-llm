@@ -215,7 +215,9 @@ bool BlockTreeEvictor::dropLocked(size_t      group_set_id,
                                   Tier        source_tier,
                                   bool        notify_settled,
                                   const char* trigger_type) {
+    const auto selection_begin_us = currentTimeUs();
     std::optional<TransferDescriptor> eviction_desc = chooseVictim(group_set_id, source_tier, /*force_drop=*/true);
+    cache_allocation_eviction_timing.select_us += currentTimeUs() - selection_begin_us;
     if (!eviction_desc.has_value()) {
         return false;
     }
@@ -712,7 +714,9 @@ void BlockTreeEvictor::collectFullPrune(const TransferDescriptor&               
 }
 
 void BlockTreeEvictor::runDropTask(TransferDescriptor eviction_desc, bool notify_settled, const char* trigger_type) {
+    const auto selection_begin_us = currentTimeUs();
     const EvictionDropTask task = createDropTask(std::move(eviction_desc), trigger_type);
+    cache_allocation_eviction_timing.select_us += currentTimeUs() - selection_begin_us;
     for (const TransferDescriptor& dependent_desc : task.dependent_prune_descs) {
         completeDrop(dependent_desc);
     }
@@ -734,7 +738,9 @@ void BlockTreeEvictor::runDropTask(TransferDescriptor eviction_desc, bool notify
     if (notify_settled) {
         settled_(false);
     }
+    const auto metrics_begin_us = currentTimeUs();
     metrics_reporter_->reportEvictionFinished(task, tree_->groupSets(), trigger_type);
+    cache_allocation_eviction_timing.metrics_us += currentTimeUs() - metrics_begin_us;
 }
 
 void BlockTreeEvictor::completeDrop(const TransferDescriptor& desc) {
@@ -747,10 +753,12 @@ void BlockTreeEvictor::completeDrop(const TransferDescriptor& desc) {
                             static_cast<int>(resource.transfer_state),
                             tierName(desc.source_tier));
 
+    const auto free_begin_us = currentTimeUs();
     const MultiNodeResource source_holder{desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}};
     group_set->unreferenceBlocks(source_holder, BlockTreeRefType::CACHE);
     resource.evictFromTier(desc.source_tier);
     resource.transfer_state = GroupSetTransferState::IDLE;
+    cache_allocation_eviction_timing.free_us += currentTimeUs() - free_begin_us;
     tree_->refreshPublishedState(desc.node);
     RTP_LLM_CHECK_WITH_INFO(!resource.hasTier(Tier::DEVICE) || resource.hasCompleteDeviceValue(),
                             "drop settlement produced invalid steady state: group_set_id=%zu node_key=%ld",

@@ -119,7 +119,7 @@ class ConcurrentDoubleSchedulingTest {
                         try {
                             startGate.await();
                             EngineRpcService.GenerateInputPB input =
-                                    inputWithDecode(requestId, 10, decodePort);
+                                    inputWithDecode(String.valueOf(requestId), 10, decodePort);
                             enqueue(prefill, batch(batchId, slot(0, input)));
                         } catch (Throwable t) {
                             errors.incrementAndGet();
@@ -142,7 +142,8 @@ class ConcurrentDoubleSchedulingTest {
                     () -> {
                         try {
                             startGate.await();
-                            EngineRpcService.GenerateInputPB input = input(requestId, 10);
+                            EngineRpcService.GenerateInputPB input =
+                                    input(String.valueOf(requestId), 10);
                             decode.generateStreamCall(
                                     input,
                                     new StreamObserver<>() {
@@ -220,7 +221,7 @@ class ConcurrentDoubleSchedulingTest {
                         try {
                             startGate.await();
                             EngineRpcService.GenerateInputPB input =
-                                    inputWithDecode(requestId, 10, decodePort);
+                                    inputWithDecode(String.valueOf(requestId), 10, decodePort);
                             enqueue(prefill, batch(batchId, slot(0, input)));
                         } catch (Throwable t) {
                             errors.incrementAndGet();

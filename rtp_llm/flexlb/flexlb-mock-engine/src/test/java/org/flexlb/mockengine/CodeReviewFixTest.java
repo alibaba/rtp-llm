@@ -127,7 +127,7 @@ class CodeReviewFixTest {
         int inputLen = 10;
         // Block-pool caliber: inputLen=10 rounds up to ceil(10/1024)=1 block,
         // so the lease pins 1 x spb = 1024 tokens.
-        long expectedKvTokens = 1024L;
+        long kvBudgetTokens = 1024L;
         MockPerformanceModel.RequestShape shape = shapeOf(model, requestId, inputLen);
 
         // Directly invoke the private scheduleDecodeCompletion via reflection.
@@ -139,9 +139,9 @@ class CodeReviewFixTest {
                 getActiveDecodeRequests(decode),
                 "activeDecodeRequests should be 1 after scheduling");
         assertEquals(
-                expectedKvTokens,
+                kvBudgetTokens,
                 decode.getActiveKvTokens(),
-                "activeKvTokens should be " + expectedKvTokens + " after scheduling");
+                "activeKvTokens should be " + kvBudgetTokens + " after scheduling");
         assertEquals(1, decode.getInflightCount(), "pendingRequests should be 1 after scheduling");
         assertEquals(
                 1,
@@ -185,7 +185,8 @@ class CodeReviewFixTest {
         int decodePort = decode.getGrpcPort();
 
         // Enqueue a single request with decode routing.
-        EngineRpcService.GenerateInputPB input = inputWithDecode(requestId, 10, decodePort);
+        EngineRpcService.GenerateInputPB input =
+                inputWithDecode(String.valueOf(requestId), 10, decodePort);
         EngineRpcService.EnqueueBatchResponsePB response =
                 enqueue(prefill, batch(9000, slot(0, input)));
         assertEquals(0, response.getErrorsCount(), "enqueue should have 0 errors");
@@ -251,7 +252,7 @@ class CodeReviewFixTest {
         long requestId = 99L;
         int inputLen = 10;
         // Block-pool caliber: inputLen=10 rounds up to 1 block = 1024 tokens.
-        long expectedKvTokens = 1024L;
+        long kvBudgetTokens = 1024L;
         MockPerformanceModel.RequestShape shape = shapeOf(model, requestId, inputLen);
 
         int nThreads = 50;
@@ -289,12 +290,12 @@ class CodeReviewFixTest {
                         + nThreads
                         + " (putIfAbsent must reject duplicates)");
         assertEquals(
-                expectedKvTokens,
+                kvBudgetTokens,
                 decode.getActiveKvTokens(),
                 "activeKvTokens should be "
-                        + expectedKvTokens
+                        + kvBudgetTokens
                         + ", not "
-                        + (nThreads * expectedKvTokens)
+                        + (nThreads * kvBudgetTokens)
                         + " (putIfAbsent must reject duplicates)");
         assertEquals(
                 1,

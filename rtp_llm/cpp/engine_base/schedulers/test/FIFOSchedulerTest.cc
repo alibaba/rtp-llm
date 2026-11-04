@@ -6288,4 +6288,166 @@ TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetValidatesFanoutReuseAndShortFinal
     ASSERT_EQ(short_stream->currentBatchSize(), 8);
 }
 
+TEST_F(FIFOSchedulerTest, naviSchedGroupIsRejectedAtomicallyWhenTokenCapCannotFit) {
+    CacheConfig                     cache_config  = test::makeSimpleMhaCacheConfig(1, 11, 8, rtp_llm::DataType::TYPE_FP16, 1, 4);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 2;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    vector<GenerateStreamPtr> streams;
+    for (int i = 0; i < 3; ++i) {
+        auto query             = make_shared<GenerateInput>();
+        query->input_ids       = torch::tensor({1}, torch::kInt32);
+        query->generate_config = make_shared<GenerateConfig>();
+        query->group_id        = 102;
+        query->group_size      = 3;
+        query->navi_sched      = true;
+        streams.push_back(
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr));
+    }
+    EXPECT_EQ(scheduler.enqueueGroup(streams).first, std::vector<bool>({false, false, false}));
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
+    EXPECT_EQ(scheduler.runningStreamsSize(), 0);
+    EXPECT_EQ(scheduler.pending_group_fallback_count_.load(), 0);
+    for (const auto& stream : streams) {
+        EXPECT_TRUE(stream->hasError());
+    }
+}
+
+TEST_F(FIFOSchedulerTest, oversizedNaviSchedGroupIsRejectedAtomically) {
+    CacheConfig                     cache_config  = test::makeSimpleMhaCacheConfig(1, 11, 8, rtp_llm::DataType::TYPE_FP16, 1, 4);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 2;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    vector<GenerateStreamPtr> streams;
+    for (int i = 0; i < 3; ++i) {
+        auto query             = make_shared<GenerateInput>();
+        query->input_ids       = torch::tensor({1}, torch::kInt32);
+        query->generate_config = make_shared<GenerateConfig>();
+        query->group_id        = 103;
+        query->group_size      = 3;
+        query->navi_sched      = true;
+        streams.push_back(
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr));
+    }
+
+    EXPECT_EQ(scheduler.enqueueGroup(streams).first, std::vector<bool>({false, false, false}));
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
+    for (const auto& stream : streams) {
+        EXPECT_TRUE(stream->hasError());
+    }
+}
+
+TEST_F(FIFOSchedulerTest, naviSchedGroupRunsAsOnePhysicalBatch) {
+    CacheConfig                     cache_config  = test::makeSimpleMhaCacheConfig(1, 11, 8, rtp_llm::DataType::TYPE_FP16, 1, 4);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 8;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    vector<GenerateStreamPtr> streams;
+    for (int i = 0; i < 3; ++i) {
+        auto query             = make_shared<GenerateInput>();
+        query->input_ids       = torch::tensor({1}, torch::kInt32);
+        query->generate_config = make_shared<GenerateConfig>();
+        query->group_id        = 104;
+        query->group_size      = 3;
+        query->navi_sched      = true;
+        streams.push_back(
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr));
+    }
+    ASSERT_EQ(scheduler.enqueueGroup(streams).first, std::vector<bool>({true, true, true}));
+
+    auto result = scheduler.schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->size(), 3);
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
+    EXPECT_EQ(scheduler.runningStreamsSize(), 3);
+    for (const auto& stream : *result) {
+        EXPECT_TRUE(stream->isNaviSched());
+        EXPECT_EQ(stream->groupId(), 104);
+        EXPECT_EQ(stream->groupSize(), 3);
+    }
+}
+
+
+TEST_F(FIFOSchedulerTest, naviSchedGroupCancelsAtomicallyWhileWaiting) {
+    CacheConfig                     cache_config  = test::makeSimpleMhaCacheConfig(1, 11, 8, rtp_llm::DataType::TYPE_FP16, 1, 4);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 8;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    vector<GenerateStreamPtr> streams;
+    for (int i = 0; i < 3; ++i) {
+        auto query             = make_shared<GenerateInput>();
+        query->input_ids       = torch::tensor({1}, torch::kInt32);
+        query->generate_config = make_shared<GenerateConfig>();
+        query->group_id        = 104;
+        query->group_size      = 3;
+        query->navi_sched      = true;
+        streams.push_back(
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr));
+    }
+    ASSERT_EQ(scheduler.enqueueGroup(streams).first, std::vector<bool>({true, true, true}));
+
+    streams[1]->reportError(ErrorCode::CANCELLED, "cancelled by user");
+    auto result = scheduler.schedule();
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result->empty());
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
+    EXPECT_EQ(scheduler.runningStreamsSize(), 0);
+    for (const auto& stream : streams) {
+        EXPECT_TRUE(stream->hasError());
+        EXPECT_TRUE(stream->isFinished());
+    }
+}
+
 }  // namespace rtp_llm

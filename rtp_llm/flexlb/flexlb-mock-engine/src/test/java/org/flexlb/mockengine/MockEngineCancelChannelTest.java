@@ -18,6 +18,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -32,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 /**
  * {@link MockEngineCancelChannel} contract tests against the in-process mock
@@ -77,6 +79,22 @@ class MockEngineCancelChannelTest {
     // ---- accepted: mid-flight cancel drives the mock ----
 
     @Test
+    void invalidRequestIdDoesNotReachTheEngineOrConsumeCancelFaults() {
+        JavaMockEngineCluster.FastRpcService service =
+                mock(JavaMockEngineCluster.FastRpcService.class);
+        EngineCancelChannel channel = new MockEngineCancelChannel(Map.of(BASE_PORT, service));
+
+        for (String requestId : List.of("007", "+7", "request-a", "9223372036854775808")) {
+            CompletionException failure =
+                    assertThrows(
+                            CompletionException.class,
+                            () -> channel.cancel(target(BASE_PORT), requestId, 2_000).join());
+            assertTrue(failure.getCause() instanceof IllegalArgumentException);
+        }
+        verifyNoInteractions(service);
+    }
+
+    @Test
     void cancelMidFlightAcceptedAndCancelledSurfacesInWorkerStatus() throws Exception {
         startCluster(model("500"), 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
@@ -85,7 +103,8 @@ class MockEngineCancelChannelTest {
         int n = 4;
         EngineRpcService.GenerateInputPB[] inputs = new EngineRpcService.GenerateInputPB[n];
         for (int i = 0; i < n; i++) {
-            inputs[i] = inputWithDecode(i + 1, 10, decodeServices.get(0).getGrpcPort());
+            inputs[i] =
+                    inputWithDecode(String.valueOf(i + 1), 10, decodeServices.get(0).getGrpcPort());
         }
         EngineRpcService.EnqueueBatchResponsePB response =
                 enqueue(prefill, batch(9000, slot(0, inputs)));
@@ -93,7 +112,7 @@ class MockEngineCancelChannelTest {
         awaitInflight(prefill, 1, 1_000);
 
         CancelAck outcome =
-                channel.cancel(target(prefill.getGrpcPort()), 1L, 2_000).get(2, TimeUnit.SECONDS);
+                channel.cancel(target(prefill.getGrpcPort()), "1", 2_000).get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, outcome, "mid-flight cancel must register the intent");
 
         // The addressed Prefill is the authoritative typed CANCELED producer.
@@ -102,7 +121,7 @@ class MockEngineCancelChannelTest {
                 status.getFinishedTaskListList().stream()
                         .anyMatch(
                                 task ->
-                                        task.getRequestId() == 1L
+                                        task.getRequestId() == 1
                                                 && task.getErrorInfo().getErrorCode() == 8429L
                                                 && task.getPriorityPreemptionProgress()
                                                         == EngineRpcService
@@ -125,7 +144,7 @@ class MockEngineCancelChannelTest {
         JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
-        enqueue(prefill, batch(9050, slot(0, inputWithDecode(51, 10, decode.getGrpcPort()))));
+        enqueue(prefill, batch(9050, slot(0, inputWithDecode("51", 10, decode.getGrpcPort()))));
         awaitInflight(decode, 1, 1_000);
         awaitNoInflight(prefill, 1_000);
         assertEquals(
@@ -135,7 +154,7 @@ class MockEngineCancelChannelTest {
         assertTrue(prefill.hasDownstreamOwnership(51L));
 
         CancelAck outcome =
-                channel.cancel(target(prefill.getGrpcPort()), 51L, 2_000).get(2, TimeUnit.SECONDS);
+                channel.cancel(target(prefill.getGrpcPort()), "51", 2_000).get(2, TimeUnit.SECONDS);
 
         assertEquals(CancelAck.ACCEPTED, outcome);
         assertEquals(0, decode.getInflightCount());
@@ -145,7 +164,7 @@ class MockEngineCancelChannelTest {
                 workerStatus(decode, 0).getFinishedTaskListList().stream()
                         .anyMatch(
                                 task ->
-                                        task.getRequestId() == 51L
+                                        task.getRequestId() == 51
                                                 && task.getErrorInfo().getErrorCode()
                                                         == EngineRpcService.ErrorCodePB.CANCELLED
                                                                 .getNumber());
@@ -154,7 +173,7 @@ class MockEngineCancelChannelTest {
                 workerStatus(prefill, 0).getFinishedTaskListList().stream()
                         .anyMatch(
                                 task ->
-                                        task.getRequestId() == 51L
+                                        task.getRequestId() == 51
                                                 && task.getErrorInfo().getErrorCode() == 8429L
                                                 && task.getPriorityPreemptionProgress()
                                                         == EngineRpcService
@@ -175,11 +194,13 @@ class MockEngineCancelChannelTest {
 
         enqueue(
                 prefill,
-                batch(9100, slot(0, inputWithDecode(11, 10, decodeServices.get(0).getGrpcPort()))));
+                batch(
+                        9100,
+                        slot(0, inputWithDecode("11", 10, decodeServices.get(0).getGrpcPort()))));
         awaitAllInflightZero(5_000);
 
         CancelAck outcome =
-                channel.cancel(target(prefill.getGrpcPort()), 11L, 2_000).get(2, TimeUnit.SECONDS);
+                channel.cancel(target(prefill.getGrpcPort()), "11", 2_000).get(2, TimeUnit.SECONDS);
         // Production-faithful branch (C++ Cancel handler):
         // seen-but-terminal answers NOT_FOUND — the completion record
         // stays in the retain-window backlog for GetWorkerStatus delivery
@@ -199,15 +220,17 @@ class MockEngineCancelChannelTest {
 
         enqueue(
                 prefill,
-                batch(9200, slot(0, inputWithDecode(21, 10, decodeServices.get(0).getGrpcPort()))));
+                batch(
+                        9200,
+                        slot(0, inputWithDecode("21", 10, decodeServices.get(0).getGrpcPort()))));
         awaitInflight(prefill, 1, 1_000);
 
         CancelAck first =
-                channel.cancel(target(prefill.getGrpcPort()), 21L, 2_000).get(2, TimeUnit.SECONDS);
+                channel.cancel(target(prefill.getGrpcPort()), "21", 2_000).get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, first);
 
         CancelAck second =
-                channel.cancel(target(prefill.getGrpcPort()), 21L, 2_000).get(2, TimeUnit.SECONDS);
+                channel.cancel(target(prefill.getGrpcPort()), "21", 2_000).get(2, TimeUnit.SECONDS);
         assertEquals(
                 CancelAck.ACCEPTED,
                 second,
@@ -216,7 +239,7 @@ class MockEngineCancelChannelTest {
                 workerStatus(prefill, -1).getFinishedTaskListList().stream()
                         .filter(
                                 task ->
-                                        task.getRequestId() == 21L
+                                        task.getRequestId() == 21
                                                 && task.getErrorInfo().getErrorCode() == 8429L
                                                 && task.getPriorityPreemptionProgress()
                                                         == EngineRpcService
@@ -236,7 +259,7 @@ class MockEngineCancelChannelTest {
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
         CancelAck outcome =
-                channel.cancel(target(prefill.getGrpcPort()), 424242L, 2_000)
+                channel.cancel(target(prefill.getGrpcPort()), "424242", 2_000)
                         .get(2, TimeUnit.SECONDS);
         // Never-seen rid: REQUEST_FENCED — the ABSENT_FENCE record is
         // installed (production Prefill contract).
@@ -245,7 +268,7 @@ class MockEngineCancelChannelTest {
         // Fence idempotence: a retried cancel still reads REQUEST_FENCED (it
         // must NOT flip onto the ACCEPTED ACTIVE_CANCEL terminal record branch).
         CancelAck retry =
-                channel.cancel(target(prefill.getGrpcPort()), 424242L, 2_000)
+                channel.cancel(target(prefill.getGrpcPort()), "424242", 2_000)
                         .get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.REQUEST_FENCED, retry);
 
@@ -284,11 +307,13 @@ class MockEngineCancelChannelTest {
 
         enqueue(
                 prefill,
-                batch(9300, slot(0, inputWithDecode(31, 10, decodeServices.get(0).getGrpcPort()))));
+                batch(
+                        9300,
+                        slot(0, inputWithDecode("31", 10, decodeServices.get(0).getGrpcPort()))));
         awaitInflight(prefill, 1, 1_000);
 
         CancelAck outcome =
-                channel.cancel(target(decodeServices.get(0).getGrpcPort()), 31L, 2_000)
+                channel.cancel(target(decodeServices.get(0).getGrpcPort()), "31", 2_000)
                         .get(2, TimeUnit.SECONDS);
 
         assertEquals(
@@ -311,7 +336,7 @@ class MockEngineCancelChannelTest {
         assertTrue(channel.isSupported(endpoint(decodeServices.get(0).getGrpcPort())));
         assertFalse(channel.isSupported(endpoint(59999)));
 
-        CancelAck outcome = channel.cancel(target(59999), 1L, 2_000).get(2, TimeUnit.SECONDS);
+        CancelAck outcome = channel.cancel(target(59999), "1", 2_000).get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.UNSUPPORTED, outcome);
     }
 
@@ -335,7 +360,7 @@ class MockEngineCancelChannelTest {
         prefill.setFaultConfig(prefill.getFaultConfig().toBuilder().cancelNoRespond(true).build());
         try {
             CompletableFuture<CancelAck> future =
-                    channel.cancel(target(prefill.getGrpcPort()), 41L, 2_000);
+                    channel.cancel(target(prefill.getGrpcPort()), "41", 2_000);
             assertThrows(
                     TimeoutException.class,
                     () -> future.get(500, TimeUnit.MILLISECONDS),
@@ -362,7 +387,7 @@ class MockEngineCancelChannelTest {
         // After the injection clears, the same rid cancels normally — proof
         // the fault path installed no terminal record and no fence.
         CancelAck outcome =
-                channel.cancel(target(prefill.getGrpcPort()), 41L, 2_000).get(2, TimeUnit.SECONDS);
+                channel.cancel(target(prefill.getGrpcPort()), "41", 2_000).get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, outcome);
         awaitAllInflightZero(10_000);
     }
@@ -379,7 +404,7 @@ class MockEngineCancelChannelTest {
         prefill.setFaultConfig(prefill.getFaultConfig().toBuilder().cancelError(true).build());
         try {
             CompletableFuture<CancelAck> future =
-                    channel.cancel(target(prefill.getGrpcPort()), 424243L, 2_000);
+                    channel.cancel(target(prefill.getGrpcPort()), "424243", 2_000);
             ExecutionException failure =
                     assertThrows(
                             ExecutionException.class,
@@ -434,7 +459,7 @@ class MockEngineCancelChannelTest {
                 prefill.getFaultConfig().toBuilder().cancelUnexpectedStatus(true).build());
         try {
             CompletableFuture<CancelAck> future =
-                    channel.cancel(target(prefill.getGrpcPort()), 424244L, 2_000);
+                    channel.cancel(target(prefill.getGrpcPort()), "424244", 2_000);
             ExecutionException failure =
                     assertThrows(
                             ExecutionException.class,

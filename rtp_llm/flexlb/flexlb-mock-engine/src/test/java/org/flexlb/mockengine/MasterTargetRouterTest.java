@@ -43,9 +43,7 @@ class MasterTargetRouterTest {
     }
 
     private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request() {
-        return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(42L)
-                .build();
+        return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(42).build();
     }
 
     private static FlexlbScheduleProtocol.FlexlbScheduleResponsePB response(int code) {

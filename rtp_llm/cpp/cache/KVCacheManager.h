@@ -19,6 +19,10 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
 
+namespace navi_sched {
+class NaviSchedAgent;
+}
+
 namespace rtp_llm {
 
 class CPSlotMapper;
@@ -40,6 +44,9 @@ public:
                    const CacheStoreConfig&            cache_store_config           = CacheStoreConfig{},
                    bool                               use_device_malloc_block_pool = false);
     ~KVCacheManager();
+    void setNaviSchedAgent(std::shared_ptr<navi_sched::NaviSchedAgent> agent) {
+        navi_sched_agent_ = std::move(agent);
+    }
 
     // 初始化和配置相关
     bool init();
@@ -151,10 +158,12 @@ public:
 private:
     std::function<void()> allocationChangeCallback() const;
     void                  reportMetricsLoop();
+    void initNaviSchedCacheReporting();
     void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
 
     // 成员变量
+    std::shared_ptr<navi_sched::NaviSchedAgent> navi_sched_agent_;
     CacheConfig                config_;
     CoordinatorCacheManagerPtr coordinator_manager_;
 

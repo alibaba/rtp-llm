@@ -8,6 +8,10 @@
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
+namespace navi_sched {
+class NaviSchedAgent;
+}
+
 namespace rtp_llm {
 
 class GenerateStream;
@@ -15,6 +19,7 @@ class GenerateStream;
 struct ResourceContext {
     std::shared_ptr<KVCacheManager> cache_manager;
     std::shared_ptr<SystemPrompt>   system_prompt;
+    std::shared_ptr<navi_sched::NaviSchedAgent> navi_sched_agent;
 
     RoleType role_type{RoleType::PDFUSION};
     bool     decode_entrance{false};  // PD反转模式：Decode侧作为请求入口

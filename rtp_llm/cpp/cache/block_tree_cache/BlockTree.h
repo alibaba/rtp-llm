@@ -44,6 +44,16 @@ struct BlockTreeNodeRangeResult {
     bool   cycle_complete{false};
 };
 
+struct BlockTreeCacheState {
+    CacheKeyType key{0};
+    bool present{false};
+    bool full_ready{false};
+    bool tail_ready{false};
+    bool hybrid_tail_required{false};
+    size_t cached_blocks{0};
+};
+using BlockTreeStateObserver = std::function<void(const BlockTreeCacheState&)>;
+
 class BlockTree {
 public:
     explicit BlockTree(std::vector<GroupSetPtr> group_sets);
@@ -91,9 +101,18 @@ public:
     // Only complete, matchable DEVICE values in every required group are advertised.
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
+    // Invoked under the owning cache mutex. Observers must not re-enter the cache.
+    void setStateObserver(BlockTreeStateObserver observer);
     void            refreshPublishedState(const TreeNode* node);
 
 private:
+    struct ObservedNodeState {
+        size_t depth{0};
+        std::vector<size_t> swa_run_blocks;
+    };
+    void refreshObservedState(const TreeNode* node);
+    BlockTreeStateObserver state_observer_;
+    std::unordered_map<const TreeNode*, ObservedNodeState> observed_node_states_;
     void                               removePublishedKey(CacheKeyType key);
     KVCacheEventPublisherPtr           event_publisher_;
     std::vector<ReusableGroupLocation> publication_groups_;

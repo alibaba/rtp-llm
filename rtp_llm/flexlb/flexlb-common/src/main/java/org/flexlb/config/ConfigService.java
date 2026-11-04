@@ -1,66 +1,124 @@
 package org.flexlb.config;
 
-import com.fasterxml.jackson.core.JsonParser;
-import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.MapperFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.dao.route.ServiceRoute;
+import org.flexlb.service.config.ConfigSource;
+import org.flexlb.service.config.NormalizedConfig;
+import org.flexlb.service.config.merger.FlexlbConfigMerger;
+import org.flexlb.service.config.parser.ConfigDocumentParser;
+import org.flexlb.service.config.parser.ConfigDocumentParserResolver;
+import org.flexlb.service.config.parser.ModelServiceConfigParser;
+import org.flexlb.service.config.parser.StandardConfigDocumentParser;
+import org.flexlb.service.config.parser.V0ConfigDocumentParser;
+import org.flexlb.util.JsonUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
 
-import java.util.Iterator;
+import javax.annotation.PreDestroy;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
-/** Loads the single, strict FLEXLB_CONFIG JSON document. */
+/**
+ * Loads the strict FLEXLB_CONFIG document and the independent MODEL_SERVICE_CONFIG document.
+ * Registered configuration sources may update only the FlexLB behavior snapshot.
+ */
 @Slf4j
 @Component
+@DependsOn({"environmentConfigSource", "nacosConfigSource", "uniConfigConfigSource"})
 public class ConfigService {
 
-    static final String FLEXLB_CONFIG_ENV = "FLEXLB_CONFIG";
+    public static final String FLEXLB_CONFIG_ENV = "FLEXLB_CONFIG";
 
-    private static final ObjectMapper STRICT_MAPPER =
-            JsonMapper.builder()
-                    .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
-                    .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
-                    .enable(DeserializationFeature.FAIL_ON_IGNORED_PROPERTIES)
-                    .enable(DeserializationFeature.FAIL_ON_NULL_FOR_PRIMITIVES)
-                    .enable(DeserializationFeature.FAIL_ON_NUMBERS_FOR_ENUMS)
-                    .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
-                    .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT)
-                    .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS)
-                    .build();
+    private static final List<ConfigSource> CONFIG_SOURCES = new ArrayList<>();
 
-    private final FlexlbConfig flexlbConfig;
+    private final AtomicReference<FlexlbConfig> currentFlexlbConfig;
+    private final AtomicReference<ServiceRoute> currentModelServiceConfig;
+    private final List<Consumer<FlexlbConfig>> updateListeners = new ArrayList<>();
+    private final StartupDecisionTopology startupDecisionTopology;
+    private final Object updateLock = new Object();
+    private int configSchemaVersion = ConfigSchemaVersion.V0_COMPATIBILITY;
 
+    /**
+     * Compatibility constructor for direct construction in tests and embedders.
+     */
     public ConfigService() {
-        this(System.getenv());
+        this(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
     }
 
-    ConfigService(Map<String, String> environment) {
-        this(configDocument(environment));
-    }
-
-    ConfigService(String document) {
+    public ConfigService(String document) {
         if (document == null || document.isBlank()) {
             throw new ConfigValidationException(
                     FLEXLB_CONFIG_ENV, "is required; configure requestLifecycle.request.timeoutMs");
         }
-        this.flexlbConfig = parse(document);
-        FlexlbConfigValidator.validate(flexlbConfig);
-        logEffectiveConfig(flexlbConfig);
+        FlexlbConfig config = parse(document);
+        this.currentFlexlbConfig = new AtomicReference<>(config);
+        this.currentModelServiceConfig = new AtomicReference<>();
+        this.startupDecisionTopology = StartupDecisionTopology.from(config);
+        this.configSchemaVersion = config.getSchemaVersion();
     }
 
-    private static String configDocument(Map<String, String> environment) {
+    ConfigService(Map<String, String> environment) {
+        this(requireEnvironmentDocument(environment));
+    }
+
+    private static String requireEnvironmentDocument(Map<String, String> environment) {
+        List<String> removed =
+                environment.keySet().stream()
+                        .filter(
+                                name ->
+                                        name.equals("CACHE_STATUS_MAX_INTERVAL_MS")
+                                                || name.equals("DEFAULT_SCHEDULE_MODE")
+                                                || name.equals("FLEXLB_MONITOR_MODE")
+                                                || name.equals("FLEXLB_MONITOR_METRIC_WHITELIST"))
+                        .sorted()
+                        .toList();
+        if (!removed.isEmpty()) {
+            throw new ConfigValidationException(
+                    "environment",
+                    "Removed legacy FlexLB environment variables are no longer read: "
+                            + String.join(", ", removed)
+                            + ". Migrate scheduling behavior into FLEXLB_CONFIG with schemaVersion 3."
+                            + " Configure metric exposure with --flexlb.monitor.metric-whitelist.");
+        }
         return environment.get(FLEXLB_CONFIG_ENV);
+    }
+
+    @Autowired
+    public ConfigService(List<ConfigDocumentParser> parsers) {
+        if (parsers.isEmpty()) {
+            throw new IllegalStateException("No ConfigDocumentParser beans registered");
+        }
+        parsers.forEach(ConfigDocumentParserResolver::register);
+        FlexlbConfig defaults = new FlexlbConfig();
+        defaults.getRequestLifecycle().getRequest().setTimeoutMs(300_000L);
+        this.currentFlexlbConfig = new AtomicReference<>(defaults);
+        this.currentModelServiceConfig = new AtomicReference<>();
+        initializeConfigSources();
+        this.startupDecisionTopology = StartupDecisionTopology.from(currentFlexlbConfig.get());
+        logEffectiveConfig(currentFlexlbConfig.get(), configSchemaVersion);
+    }
+
+    public static synchronized void register(ConfigSource source) {
+        if (!CONFIG_SOURCES.contains(source)) {
+            CONFIG_SOURCES.add(source);
+            CONFIG_SOURCES.sort(Comparator.comparingInt(ConfigSource::priority));
+        }
     }
 
     public static FlexlbConfig parse(String document) {
         try {
-            JsonNode tree = STRICT_MAPPER.readTree(document);
-            rejectJsonNull(tree, "$");
+            JsonNode tree = JsonUtils.readStrictTree(document);
+            JsonUtils.rejectJsonNull(tree, "$", FLEXLB_CONFIG_ENV);
             FlexlbConfigValidator.validateDocumentShape(tree);
-            FlexlbConfig config = STRICT_MAPPER.treeToValue(tree, FlexlbConfig.class);
+            FlexlbConfig config = JsonUtils.strictTreeToValue(tree, FlexlbConfig.class);
             FlexlbConfigValidator.validate(config);
             return config;
         } catch (ConfigValidationException error) {
@@ -72,37 +130,243 @@ public class ConfigService {
     }
 
     public FlexlbConfig loadBalanceConfig() {
-        return flexlbConfig;
+        return currentFlexlbConfig.get();
     }
 
-    public synchronized void updateTrafficPolicy(TrafficPolicyConfig groupSelector) {
+    public ServiceRoute modelServiceConfig() {
+        return currentModelServiceConfig.get();
+    }
+
+    /**
+     * DSV4 compatibility alias retained for existing integrations.
+     */
+    public ServiceRoute loadModelServiceConfig() {
+        return modelServiceConfig();
+    }
+
+    public void addUpdateListener(Consumer<FlexlbConfig> listener) {
+        synchronized (updateLock) {
+            updateListeners.add(listener);
+            listener.accept(currentFlexlbConfig.get());
+        }
+    }
+
+    public void updateTrafficPolicy(TrafficPolicyConfig groupSelector) {
         if (groupSelector == null) {
             throw new IllegalArgumentException("groupSelector cannot be null");
         }
         TrafficPolicyConfig.validate(groupSelector);
-        flexlbConfig.getRouter().setGroupSelector(groupSelector);
-        log.info("Group selector updated: rules={}", groupSelector.getRules().size());
-    }
-
-    private static void rejectJsonNull(JsonNode node, String path) {
-        if (node == null || node.isNull()) {
-            throw new ConfigValidationException(
-                    FLEXLB_CONFIG_ENV, "JSON null is not allowed at " + path);
-        }
-        if (node.isObject()) {
-            Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
-            while (fields.hasNext()) {
-                Map.Entry<String, JsonNode> field = fields.next();
-                rejectJsonNull(field.getValue(), path + "." + field.getKey());
-            }
-        } else if (node.isArray()) {
-            for (int index = 0; index < node.size(); index++) {
-                rejectJsonNull(node.get(index), path + "[" + index + "]");
+        synchronized (updateLock) {
+            try {
+                ObjectNode document = JsonUtils.strictValueToTree(currentFlexlbConfig.get());
+                ObjectNode router = (ObjectNode) document.get("router");
+                router.set("groupSelector", JsonUtils.strictValueToTree(groupSelector));
+                FlexlbConfig updated = parse(JsonUtils.toStrictString(document));
+                currentFlexlbConfig.set(updated);
+                notifyUpdateListeners(updated);
+                log.info("Group selector updated: rules={}", groupSelector.getRules().size());
+            } catch (ConfigValidationException error) {
+                throw error;
+            } catch (Exception error) {
+                throw new IllegalStateException("Failed to update group selector", error);
             }
         }
     }
 
-    private static void logEffectiveConfig(FlexlbConfig config) {
+    private void initializeConfigSources() {
+        try {
+            synchronized (updateLock) {
+                for (ConfigSource source : CONFIG_SOURCES) {
+                    NormalizedConfig normalized;
+                    try {
+                        source.setUpdateListener(content -> receiveConfigUpdate(source, content));
+                        normalized = source.loadConfig();
+                    } catch (Exception error) {
+                        throw new IllegalStateException(
+                                "Failed to initialize FlexLB configuration from " + source.name(),
+                                error);
+                    }
+                    initializeConfigSource(source, normalized);
+                }
+            }
+        } catch (RuntimeException error) {
+            closeConfigSources();
+            throw error;
+        }
+    }
+
+    private void initializeConfigSource(ConfigSource source, NormalizedConfig normalized) {
+        try {
+            FlexlbConfig previous = currentFlexlbConfig.get();
+            FlexlbConfig updated =
+                    FlexlbConfigMerger.merge(previous, normalized.flexlbConfig(), source.name());
+            currentFlexlbConfig.set(updated);
+            if (updated != previous) {
+                configSchemaVersion = normalized.sourceSchemaVersion();
+            }
+        } catch (Exception error) {
+            throw new IllegalStateException(
+                    "Failed to initialize FlexLB configuration from " + source.name(), error);
+        }
+        String modelServiceDocument = normalized.modelServiceConfig();
+        if (currentModelServiceConfig.get() == null
+                && modelServiceDocument != null
+                && !modelServiceDocument.isBlank()) {
+            currentModelServiceConfig.set(ModelServiceConfigParser.parse(modelServiceDocument));
+            log.info("Loaded MODEL_SERVICE_CONFIG from {} source", source.name());
+        }
+        log.info("Loaded FlexLB configuration from {} source", source.name());
+    }
+
+    private void receiveConfigUpdate(ConfigSource source, String content) {
+        synchronized (updateLock) {
+            try {
+                FlexlbConfig previous = currentFlexlbConfig.get();
+                NormalizedConfig normalized = source.normalize(content);
+                String activeDocument = preserveStartupDecisionTopology(normalized.flexlbConfig());
+                FlexlbConfig updated =
+                        FlexlbConfigMerger.merge(previous, activeDocument, source.name());
+                if (updated == previous) {
+                    log.info(
+                            "Ignored empty FlexLB configuration update from {} source",
+                            source.name());
+                    return;
+                }
+                currentFlexlbConfig.set(updated);
+                configSchemaVersion = normalized.sourceSchemaVersion();
+                notifyUpdateListeners(updated);
+                logEffectiveConfig(updated, configSchemaVersion);
+                log.info("Applied FlexLB configuration update from {} source", source.name());
+            } catch (Exception error) {
+                log.error(
+                        "Rejected invalid FlexLB configuration update from {} source; "
+                                + "keeping last-known-good configuration: {}",
+                        source.name(),
+                        error.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Removes runtime changes to scheduler, dispatcher and decision modes before normal
+     * merge validation runs.
+     *
+     * <p>These modes select threads and strategy beans at startup, so a
+     * type update cannot take effect safely. Active numeric fields are left in
+     * the document and continue through the regular hot-update path. Fields
+     * belonging only to a requested-but-inactive fixed-window mode are removed
+     * with its type rather than rejected as a whole update.
+     */
+    private String preserveStartupDecisionTopology(String content) throws Exception {
+        if (startupDecisionTopology == null || content == null || content.isBlank()) {
+            return content;
+        }
+        JsonNode parsed = JsonUtils.readStrictTree(content);
+        if (!(parsed instanceof ObjectNode document)) {
+            return content;
+        }
+        boolean changed = false;
+        if (document.get("scheduler") instanceof ObjectNode scheduler) {
+            changed |=
+                    preserveStartupMode(
+                            scheduler,
+                            "scheduler.type",
+                            startupDecisionTopology.schedulerType().name(),
+                            Set.of("DIRECT", "QUEUE"));
+            if (scheduler.get("decision") instanceof ObjectNode decision) {
+                changed |= preserveWorkerDecisionType(decision);
+            }
+        }
+        if (document.get("dispatcher") instanceof ObjectNode dispatcher) {
+            changed |=
+                    preserveStartupMode(
+                            dispatcher,
+                            "dispatcher.type",
+                            startupDecisionTopology.dispatcherType().name(),
+                            Set.of("BATCH", "NON_BATCH"));
+        }
+        return changed ? JsonUtils.toStrictString(document) : content;
+    }
+
+    private boolean preserveStartupMode(
+            ObjectNode settings, String path, String activeType, Set<String> supportedTypes) {
+        JsonNode type = settings.get("type");
+        if (type == null
+                || !type.isTextual()
+                || !supportedTypes.contains(type.textValue())
+                || activeType.equals(type.textValue())) {
+            return false;
+        }
+        settings.remove("type");
+        log.warn(
+                "Ignored runtime update to startup-fixed {}: requested={}, active={}",
+                path,
+                type.textValue(),
+                activeType);
+        return true;
+    }
+
+    /**
+     * Keeps the per-worker decision type selected at startup while preserving
+     * numeric local-window fields when that startup type is FIXED_WINDOW.
+     */
+    private boolean preserveWorkerDecisionType(ObjectNode decision) {
+        JsonNode type = decision.get("type");
+        if (type == null || !type.isTextual()) {
+            return false;
+        }
+        DecisionPolicyConfig.Type requested;
+        try {
+            requested = DecisionPolicyConfig.Type.valueOf(type.textValue());
+        } catch (IllegalArgumentException ignored) {
+            return false;
+        }
+        DecisionPolicyConfig.Type active = startupDecisionTopology.decisionType();
+        if (requested == active) {
+            return false;
+        }
+        decision.remove("type");
+        if (active == DecisionPolicyConfig.Type.SINGLE) {
+            decision.remove("maxRequests");
+            decision.remove("maxCollectionWaitMs");
+            decision.remove("maxPredictedExecutionMs");
+        }
+        log.warn(
+                "Ignored runtime update to startup-fixed scheduler.decision.type: "
+                        + "requested={}, active={}",
+                requested,
+                active);
+        return true;
+    }
+
+    private record StartupDecisionTopology(
+            SchedulerConfig.Type schedulerType,
+            DispatcherConfig.Type dispatcherType,
+            DecisionPolicyConfig.Type decisionType) {
+
+        /**
+         * Captures the scheduling modes selected when the application starts.
+         */
+        private static StartupDecisionTopology from(FlexlbConfig config) {
+            SchedulerConfig scheduler = config.getScheduler();
+            return new StartupDecisionTopology(
+                    scheduler.getType(),
+                    config.getDispatcher().getType(),
+                    scheduler.getDecision().getType());
+        }
+    }
+
+    private void notifyUpdateListeners(FlexlbConfig config) {
+        for (Consumer<FlexlbConfig> listener : updateListeners) {
+            try {
+                listener.accept(config);
+            } catch (RuntimeException error) {
+                log.error("FlexLB configuration update listener failed", error);
+            }
+        }
+    }
+
+    private static void logEffectiveConfig(FlexlbConfig config, int configSchemaVersion) {
         String scheduler = config.isDirect() ? "DIRECT" : "QUEUE";
         String ordering =
                 config.isDirect() ? "N/A" : config.isPriorityOrdering() ? "PRIORITY" : "FIFO";
@@ -113,16 +377,31 @@ public class ConfigService {
         String dispatcher = config.getDispatcher().typeName();
         log.info(
                 "FlexLB config loaded: schemaVersion={}, scheduler={}, ordering={}, decision={}, "
-                        + "dispatcher={}, prefillSelection=BEST_ONLY, "
-                        + "decodeCostExpression={}, groupRules={}",
-                config.getSchemaVersion(),
+                        + "dispatcher={}, prefillEstimator={}, groupRules={}",
+                configSchemaVersion,
                 scheduler,
                 ordering,
                 decision,
                 dispatcher,
-                config.getRouter().getRoles().getDecode().getCostEstimator().getExpression(),
+                config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator().getType(),
                 config.getRouter().getGroupSelector() == null
                         ? 0
                         : config.getRouter().getGroupSelector().getRules().size());
+    }
+
+    @PreDestroy
+    public void close() {
+        closeConfigSources();
+    }
+
+    private static synchronized void closeConfigSources() {
+        for (ConfigSource source : CONFIG_SOURCES) {
+            try {
+                source.close();
+            } catch (Exception error) {
+                log.warn("Failed to close {} configuration source", source.name(), error);
+            }
+        }
+        CONFIG_SOURCES.clear();
     }
 }

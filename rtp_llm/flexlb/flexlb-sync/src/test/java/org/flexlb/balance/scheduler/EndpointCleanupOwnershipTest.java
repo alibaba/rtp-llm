@@ -22,7 +22,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.function.ToIntFunction;
 
@@ -65,11 +65,11 @@ class EndpointCleanupOwnershipTest {
 
     @Test
     void currentDirectoryProtectsReservationButEarlierSnapshotCanEvictIt() {
-        Set<Long> beforeRegistration =
+        Set<String> beforeRegistration =
                 registry.snapshotSlots().stream()
                         .map(RequestSlot::requestId)
                         .collect(java.util.stream.Collectors.toSet());
-        long id = 7001L;
+        String id = "7001";
         registry.register(RequestLifecycleTestSupport.context(config, id));
         var endpoint =
                 new DecodeEndpoint(
@@ -92,12 +92,12 @@ class EndpointCleanupOwnershipTest {
 
     @Test
     void terminalRecordMembershipIsConservativeButNotEquivalentToLiveOwnership() throws Exception {
-        long id = 7002L;
+        String id = "7002";
         var future = registry.register(RequestLifecycleTestSupport.context(config, id));
         RequestSlot original = registry.requestSlot(id);
         registry.cancelRequest(id, 0L, CancelReason.CLIENT_CANCELLED);
         future.get(5, java.util.concurrent.TimeUnit.SECONDS);
-        assertEquals(0, registry.liveRequestCount());
+        assertEquals(0, registry.trackedRequestCount());
         assertTrue(registry.retainForSchedulerCleanup(id));
         assertSame(original, registry.requestSlot(id), "terminal record remains indexed");
         assertTrue(registry.removeExactTerminalRecord(original, Long.MAX_VALUE));
@@ -114,7 +114,7 @@ class EndpointCleanupOwnershipTest {
     @ParameterizedTest(name = "Decode confirmed={0}: absent lookup cannot release the replacement")
     @ValueSource(booleans = {false, true})
     void registrationAfterAbsentCheckAcquiresFreshReservation(boolean confirmed) throws Exception {
-        long id = 7003L;
+        String id = "7003";
         var endpoint =
                 new DecodeEndpoint(
                         WorkerStatus.createDiscovered(
@@ -172,7 +172,7 @@ class EndpointCleanupOwnershipTest {
     @ParameterizedTest(name = "Prefill batch={0}: absent lookup cannot release the replacement")
     @ValueSource(booleans = {false, true})
     void prefillRegistrationAfterAbsentCheckPreservesFreshWork(boolean batch) throws Exception {
-        long id = 7004L;
+        String id = "7004";
         var ledger = new PrefillLedger(batch);
         var old = ledger.commit(id, 1L, 20L);
         ledger.advanceBeyondTtl();
@@ -222,7 +222,7 @@ class EndpointCleanupOwnershipTest {
     @ParameterizedTest(name = "Prefill batch={0}: replacement directory entry retains old work")
     @ValueSource(booleans = {false, true})
     void prefillReplacementDirectoryEntryConservativelyRetainsOldWork(boolean batch) {
-        long id = 7006L;
+        String id = "7006";
         registry.register(RequestLifecycleTestSupport.context(config, id));
         var ledger = new PrefillLedger(batch);
         var old = ledger.commit(id, 1L, 20L);
@@ -247,7 +247,7 @@ class EndpointCleanupOwnershipTest {
 
     @Test
     void confirmedRecordIsRetainedUntilExactTerminalRecordRemoval() {
-        long id = 7005L;
+        String id = "7005";
         registry.register(RequestLifecycleTestSupport.context(config, id));
         var endpoint =
                 new DecodeEndpoint(
@@ -279,17 +279,17 @@ class EndpointCleanupOwnershipTest {
     }
 
     private static DecodeEndpoint.ReservationHandle reserve(
-            DecodeEndpoint endpoint, long id, long hardKv, long expectedKv) {
+            DecodeEndpoint endpoint, String id, long requiredKv, long kvBudget) {
         try (var pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
-            var reservation = endpoint.reserveUnqueued(pin, id, hardKv, expectedKv, 50);
+            var reservation = endpoint.reserveUnqueued(pin, id, requiredKv, kvBudget, 50);
             assertNotNull(reservation);
             return reservation;
         }
     }
 
     private static void assertDecodeLedger(
-            DecodeEndpoint endpoint, int reserved, int confirmed, long hardKv, long expectedKv) {
+            DecodeEndpoint endpoint, int reserved, int confirmed, long requiredKv, long kvBudget) {
         var view = endpoint.resourceSnapshot();
         assertEquals(reserved, endpoint.getInflightCount());
         assertEquals(reserved, view.reserved().size());
@@ -298,16 +298,16 @@ class EndpointCleanupOwnershipTest {
         // These are immediate reservations, so both unqueued shadows and
         // confirmed Engine owners occupy dispatch capacity.
         assertEquals(reserved + confirmed, view.engineCapacityUsed());
-        assertEquals(hardKv, view.routing().inflightHardKv());
-        assertEquals(expectedKv, view.routing().inflightExpectedKv());
+        assertEquals(requiredKv, view.routing().inputKvReserved());
+        assertEquals(kvBudget, view.routing().inputAndMaxOutputKvReserved());
     }
 
     private record CleanupRace<T>(int evicted, T owner) {}
 
     private <T> CleanupRace<T> raceRegistrationAfterAbsentCheck(
-            long id,
+            String id,
             int earlierQueries,
-            ToIntFunction<LongPredicate> sweep,
+            ToIntFunction<Predicate<String>> sweep,
             Supplier<T> acquire,
             Runnable assertOldLedger)
             throws Exception {

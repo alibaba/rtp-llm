@@ -322,6 +322,10 @@ void BlockTree::removeNode(TreeNode* node) {
         pending_node_pool_.erase(node->cache_key);
         return;
     }
+    if (state_observer_) {
+        state_observer_({node->cache_key, false, false, false, false, node_pool_.size() - 1});
+        observed_node_states_.erase(node);
+    }
     removePublishedKey(node->cache_key);
     node->parent->children.erase(node->cache_key);
     node->parent            = nullptr;
@@ -405,6 +409,7 @@ void BlockTree::removePublishedKey(CacheKeyType key) {
 }
 
 void BlockTree::refreshPublishedState(const TreeNode* node) {
+    refreshObservedState(node);
     if (!event_publisher_ || node->parent == nullptr) {
         return;
     }
@@ -420,6 +425,71 @@ void BlockTree::refreshPublishedState(const TreeNode* node) {
     if (published_keys_.insert(node->cache_key).second) {
         ++publication_version_;
         (void)event_publisher_->tryPublish({KVCacheEventType::BLOCK_ADD, static_cast<int64_t>(node->cache_key), 0});
+    }
+}
+
+
+void BlockTree::setStateObserver(BlockTreeStateObserver observer) {
+    state_observer_ = std::move(observer);
+    observed_node_states_.clear();
+    if (!state_observer_) {
+        return;
+    }
+    // Parent state must be initialized before a descendant's SWA run.
+    for (const auto& [_, child] : root_->children) {
+        refreshObservedState(child);
+    }
+}
+
+void BlockTree::refreshObservedState(const TreeNode* node) {
+    if (!state_observer_ || node == nullptr || node->parent == nullptr) {
+        return;
+    }
+    const auto parent_it = observed_node_states_.find(node->parent);
+    const auto* parent = parent_it == observed_node_states_.end() ? nullptr : &parent_it->second;
+    ObservedNodeState next;
+    next.depth = parent == nullptr ? 1 : parent->depth + 1;
+    next.swa_run_blocks.resize(group_sets_.size(), 0);
+    BlockTreeCacheState report;
+    report.key = node->cache_key;
+    report.full_ready = true;
+    report.tail_ready = true;
+    report.cached_blocks = node_pool_.size();
+    for (size_t gid = 0; gid < group_sets_.size(); ++gid) {
+        const auto& group_set = group_sets_[gid];
+        const auto& group = group_set->group(group_set->groupTags().front());
+        const auto& value = node->group_set_resources[gid];
+        const bool present = !value.is_empty();
+        const bool ready = value.isMatchUsable() && present;
+        report.present = report.present || present;
+        if (group.policy.active_tail_blocks == 0) {
+            report.full_ready = report.full_ready && ready;
+        } else {
+            report.hybrid_tail_required = true;
+            bool tail_ready = ready;
+            if (group.policy.group_type == CacheGroupType::SWA) {
+                next.swa_run_blocks[gid] = ready ? (parent ? parent->swa_run_blocks[gid] : 0) + 1 : 0;
+                tail_ready = ready &&
+                    (next.swa_run_blocks[gid] == next.depth ||
+                     (group_set->matchWindowBlocks() > 0 &&
+                      next.swa_run_blocks[gid] >= group_set->matchWindowBlocks()));
+            }
+            report.tail_ready = report.tail_ready && tail_ready;
+        }
+    }
+    report.full_ready = report.present && report.full_ready;
+    report.tail_ready = report.present && report.hybrid_tail_required && report.tail_ready;
+    const auto old = observed_node_states_.find(node);
+    const bool propagate = old == observed_node_states_.end() ||
+                           old->second.swa_run_blocks != next.swa_run_blocks;
+    observed_node_states_[node] = std::move(next);
+    state_observer_(report);
+    // A changed SWA window can change descendants' reuse endpoints. FULL
+    // membership is reported per key and does not require a subtree scan.
+    if (propagate) {
+        for (const auto& [_, child] : node->children) {
+            refreshObservedState(child);
+        }
     }
 }
 
