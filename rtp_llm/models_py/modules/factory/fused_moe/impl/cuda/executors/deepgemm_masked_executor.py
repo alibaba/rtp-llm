@@ -1,3 +1,4 @@
+import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -241,15 +242,30 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     )
                 else:
                     # Standard path for other SM versions
-                    down_input_scale = torch.empty(
-                        (
-                            num_slice_experts,
-                            num_tokens,
-                            self._N // 2 // self.DEEPGEMM_BLOCK_SHAPE[0],
-                        ),
-                        device=device,
-                        dtype=torch.float32,
-                    )
+                    scale_groups = self._N // 2 // self.DEEPGEMM_BLOCK_SHAPE[0]
+                    if (
+                        os.environ.get("QWEN_MOE_SCALE_LAYOUT_FUSION", "0") == "1"
+                        and sm_major == 9
+                        and not is_deep_gemm_e8m0_used()
+                    ):
+                        # The SiLU/quant producer accepts scale strides. Write the
+                        # MN-major, TMA-aligned layout consumed by SM90 DeepGEMM
+                        # directly, avoiding its separate FP32 transpose kernel.
+                        import deep_gemm
+
+                        aligned_tokens = deep_gemm.get_tma_aligned_size(num_tokens, 4)
+                        down_input_scale = torch.empty_strided(
+                            (num_slice_experts, num_tokens, scale_groups),
+                            (scale_groups * aligned_tokens, 1, aligned_tokens),
+                            device=device,
+                            dtype=torch.float32,
+                        )
+                    else:
+                        down_input_scale = torch.empty(
+                            (num_slice_experts, num_tokens, scale_groups),
+                            device=device,
+                            dtype=torch.float32,
+                        )
                     # SiLU Activation
                     silu_mul_masked_fp8_post_quant_fwd(
                         input=upgate_output,

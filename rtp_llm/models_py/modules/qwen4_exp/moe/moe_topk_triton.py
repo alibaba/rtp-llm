@@ -1,5 +1,7 @@
 """Fused FP32 softmax and ten-expert routing for the Qwen4 MoE geometry."""
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -13,6 +15,7 @@ def _moe_topk(logits, ids, weights, STRIDE: tl.constexpr):
     values = tl.load(logits + row * STRIDE + experts).to(tl.float32)
     probabilities = tl.exp(values - tl.max(values, 0))
     probabilities = probabilities / tl.sum(probabilities, 0)
+    probabilities = tl.where(probabilities < 1.1754943508222875e-38, 0.0, probabilities)
     invalid = tl.sum((probabilities != probabilities).to(tl.int32), 0) > 0
     slots = tl.arange(0, 16)
     chosen = tl.full((16,), 0, tl.float32)
@@ -44,7 +47,13 @@ def is_supported(logits, ids, weights):
         and logits.stride(-1) == 1
         and logits.stride(0) > 0
         and ids.shape == weights.shape == (logits.shape[0], 10)
-        and ids.dtype == torch.int32
+        and (
+            ids.dtype == torch.int32
+            or (
+                ids.dtype == torch.int64
+                and os.environ.get("QWEN_MOE_TOPK_INT64_FUSION", "0") == "1"
+            )
+        )
         and weights.dtype == torch.float32
         and ids.device == weights.device == logits.device
         and ids.is_contiguous()
