@@ -1,6 +1,8 @@
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.projection.QueueSnapshot;
-import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation;
+import org.flexlb.balance.projection.RequestTimeEstimation.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
+import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -22,7 +24,7 @@ public class ProjectionDifferential {
     public static void main(String[] args) throws Exception {
         SnapshotBench.initialize(Path.of(args[0]));
         var model = SnapshotBench.model;
-        var batchPolicy = SnapshotBench.strategy.mode();
+        var batchPolicy = org.flexlb.config.DispatcherConfig.Type.BATCH;
         var routePolicy = org.flexlb.config.DispatcherConfig.Type.NON_BATCH;
         var random = new Random(1729);
         var digest = MessageDigest.getInstance("SHA-256");
@@ -70,12 +72,15 @@ public class ProjectionDifferential {
                             new long[] {0, 30, 700}[trial % 3]);
             var predictor = model.newBatchPrediction();
             var selection =
-                    GroupPlanner.FIXED_WINDOW.select(
+                    org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW.select(
                             items,
                             limits,
                             (added, prefix) -> predictor.append(added.seqLen(), added.hitCache()));
             add(digest, selection);
-            add(digest, GroupPlanner.FIXED_WINDOW.dispatchReason(selection, limits, 1000));
+            add(
+                    digest,
+                    org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(
+                            selection, limits, 1000));
             add(
                     digest,
                     GroupPlanner.collectionDeadlineMs(
@@ -94,7 +99,7 @@ public class ProjectionDifferential {
                     new QueueSnapshot(
                             1000,
                             true,
-                            org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
+                            org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
                             order,
                             limits,
                             items,

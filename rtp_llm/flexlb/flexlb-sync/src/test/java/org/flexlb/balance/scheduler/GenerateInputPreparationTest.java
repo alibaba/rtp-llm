@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.config.ConfigService;
 import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
@@ -51,12 +52,11 @@ class GenerateInputPreparationTest {
         context.data().setGenerateInputPb(valid.toByteString());
         context.data().prepareGenerateInput();
         var parsed = context.data().getGenerateInput();
-        assertEquals(
-                valid, GenerateInputPB.parseFrom(parsed.toWireBuilder().build().toByteString()));
+        assertEquals(valid, GenerateInputPB.parseFrom(parsed.toBuilder().build().toByteString()));
         assertSame(parsed, context.data().getGenerateInput());
-        assertEquals(71, context.data().getGenerateInput().toWireBuilder().getRequestId());
-        parsed.toWireBuilder().setRequestId(72).build();
-        assertEquals(71, context.data().getGenerateInput().toWireBuilder().getRequestId());
+        assertEquals(71, context.data().getGenerateInput().toBuilder().getRequestId());
+        parsed.toBuilder().setRequestId(72).build();
+        assertEquals(71, context.data().getGenerateInput().toBuilder().getRequestId());
         context.data().setGenerateInputPb(ByteString.EMPTY);
         assertFalse(context.data().hasGenerateInput());
         assertNull(context.data().getGenerateInput());
@@ -97,7 +97,7 @@ class GenerateInputPreparationTest {
         assertNull(context.data().getGenerateInput());
         if (reader != null) {
             assertEquals(
-                    wire, GenerateInputPB.parseFrom(reader.toWireBuilder().build().toByteString()));
+                    wire, GenerateInputPB.parseFrom(reader.toBuilder().build().toByteString()));
         }
     }
 
@@ -143,7 +143,12 @@ class GenerateInputPreparationTest {
                         new PlacementAvailability());
         var queue = registry;
         try {
-            var future = SchedulerTestServices.entry((AbstractRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(queue)).submit(context);
+            var future =
+                    SchedulerTestServices.entry(
+                                    (AbstractRequestScheduler)
+                                            org.flexlb.balance.scheduler.SchedulerTestServices
+                                                    .scheduler(queue))
+                            .submit(context);
             assertTrue(
                     entered.await(3, TimeUnit.SECONDS), "submit returns while planning is blocked");
             if (deadline) {

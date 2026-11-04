@@ -328,24 +328,20 @@ class InflightLeakTest {
                     () -> MockEngineTestSupport.getCompletedCount(h.decodeEngines.getFirst()) == 4L,
                     5_000L,
                     "all four requests must finish before the first status pump");
-            assertEquals(2, h.prefillEndpoint(0).ownership.stats().batchCount());
-            assertEquals(
-                    4,
-                    prefill.ownership.admissionSummary(0, prefill.requestLimit).occupiedRequests());
+            assertEquals(2, h.prefillEndpoint(0).stats().batchCount());
+            assertEquals(4, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
 
             h.pumpPrefillOnce(0);
             assertEquals(
                     0,
-                    h.prefillEndpoint(0).ownership.stats().batchCount(),
+                    h.prefillEndpoint(0).stats().batchCount(),
                     "the first real status response must release both completed batches");
-            assertEquals(
-                    0,
-                    prefill.ownership.admissionSummary(0, prefill.requestLimit).occupiedRequests());
+            assertEquals(0, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
             h.pumpDecodeOnce(0);
             h.pumpPrefillOnce(0);
             assertEquals(
                     0,
-                    h.prefillEndpoint(0).ownership.stats().batchCount(),
+                    h.prefillEndpoint(0).stats().batchCount(),
                     "repeated polls must not restore or double-release completed ownership");
 
             List<CompletableFuture<Response>> secondWave = new ArrayList<>();
@@ -357,10 +353,8 @@ class InflightLeakTest {
                     5_000L,
                     "returned batch slots must allow the next requests to dispatch");
             h.pumpOnce();
-            assertEquals(0, h.prefillEndpoint(0).ownership.stats().batchCount());
-            assertEquals(
-                    0,
-                    prefill.ownership.admissionSummary(0, prefill.requestLimit).occupiedRequests());
+            assertEquals(0, h.prefillEndpoint(0).stats().batchCount());
+            assertEquals(0, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
             for (CompletableFuture<Response> future : firstWave) {
                 assertTrue(future.get(1, TimeUnit.SECONDS).isSuccess());
             }

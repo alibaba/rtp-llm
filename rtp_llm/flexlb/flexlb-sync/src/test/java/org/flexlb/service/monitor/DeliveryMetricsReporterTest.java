@@ -65,14 +65,10 @@ class DeliveryMetricsReporterTest {
         var prefill = mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
         var decode = mock(org.flexlb.balance.endpoint.DecodeEndpoint.class);
         var requests = mock(RequestSchedulerReporter.class);
-        when(endpoints.endpointSnapshot(org.flexlb.dao.route.RoleType.PREFILL))
-                .thenReturn(java.util.Map.of("prefill", prefill));
-        when(endpoints.endpointSnapshot(org.flexlb.dao.route.RoleType.DECODE))
-                .thenReturn(java.util.Map.of("decode", decode));
+        when(endpoints.prefillStats()).thenReturn(java.util.Map.of("prefill", prefill));
+        when(endpoints.decodeStats()).thenReturn(java.util.Map.of("decode", decode));
         when(prefill.queueDepth()).thenReturn(7);
-        doThrow(new IllegalStateException("isolated metric failure"))
-                .when(prefill)
-                .reportBatchMetrics(reporter);
+        doThrow(new IllegalStateException("isolated metric failure")).when(prefill).queueCounters();
         try (var context = new AnnotationConfigApplicationContext()) {
             context.registerBean(
                     org.flexlb.balance.scheduler.RequestRepository.class,
@@ -84,8 +80,8 @@ class DeliveryMetricsReporterTest {
             context.refresh();
             assertDoesNotThrow(reporter::report);
             verify(requests).reportPrefillQueueDepth("prefill", 7);
-            verify(decode).reportBatchMetrics(reporter);
-            verify(decode).reportAdmissionMetrics(requests);
+            verify(decode).stats();
+            verify(requests).reportDecodePreemption(eq("decode"), any());
         }
     }
 

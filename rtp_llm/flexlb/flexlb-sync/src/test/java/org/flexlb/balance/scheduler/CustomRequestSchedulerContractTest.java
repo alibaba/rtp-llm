@@ -13,7 +13,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -149,16 +148,100 @@ class CustomRequestSchedulerContractTest {
         }
     }
 
-    private static final class ManualScheduler
-            implements RequestScheduler, RequestLifecycle.Scheduling, AutoCloseable {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void customSchedulerOwnsDeadlineForBothRequestModes(boolean queued) throws Exception {
+        var due = new java.util.concurrent.atomic.AtomicLong(Long.MAX_VALUE);
+        var dispatched = new java.util.concurrent.atomic.AtomicLong();
+        try (var scheduler =
+                new ManualScheduler(true, queued) {
+                    @Override
+                    public void onRequest(RequestContext request) {
+                        super.onRequest(request);
+                        due.set(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(80));
+                        runtime.taskTimer().schedule(this::schedule, 80L);
+                    }
+
+                    @Override
+                    public void schedule() {
+                        long now = System.nanoTime();
+                        if (now < due.get()) throw new AssertionError("timer ran before deadline");
+                        if (advance()) dispatched.set(now);
+                    }
+                }) {
+            scheduler.start();
+            var future =
+                    scheduler.entry.submit(
+                            RequestProtocolTestSupport.context(scheduler.config, 81006L));
+            assertFalse(future.isDone(), "admission must not bypass the scheduler's deadline");
+            assertFalse(future.get(2, TimeUnit.SECONDS).isSuccess());
+            assertTrue(dispatched.get() >= due.get());
+            verify(scheduler.selector).select(any(), isNull());
+        }
+    }
+
+    @Test
+    void customSchedulerOwnsEndpointSubscriptions() throws Exception {
+        var availability = new PlacementAvailability();
+        var changed = new java.util.concurrent.atomic.AtomicBoolean();
+        var scheduled = new java.util.concurrent.CountDownLatch(1);
+        try (var scheduler =
+                new ManualScheduler(true) {
+                    private final PlacementAvailability.Listener listener =
+                            key -> {
+                                changed.set(true);
+                                schedule();
+                            };
+
+                    @Override
+                    public void start() {
+                        availability.addListener(listener);
+                    }
+
+                    @Override
+                    public void stop() {
+                        availability.removeListener(listener);
+                    }
+
+                    @Override
+                    public void schedule() {
+                        if (changed.get()) scheduled.countDown();
+                    }
+                }) {
+            scheduler.start();
+            var endpoint = mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
+            when(endpoint.getStatus())
+                    .thenReturn(
+                            org.flexlb.dao.master.WorkerStatus.createDiscovered(
+                                    org.flexlb.dao.route.RoleType.PREFILL,
+                                    null,
+                                    "127.0.0.1",
+                                    8100,
+                                    8101,
+                                    null));
+            when(endpoint.ipPort()).thenReturn("127.0.0.1:8100");
+            availability.changed(endpoint);
+            assertTrue(scheduled.await(2, TimeUnit.SECONDS));
+        }
+    }
+
+    private static class ManualScheduler implements RequestScheduler, AutoCloseable {
         final FlexlbConfig config = SchedulingTestConfig.batchConfig();
         final SchedulerTestServices runtime;
         final RequestLifecycle lifecycle;
-        final RequestSchedulerEntry entry;
+        final RequestLifecycle entry;
         final PlacementQueue queue;
         final RequestWorkerSelector selector = mock(RequestWorkerSelector.class);
 
         ManualScheduler(boolean alternative) {
+            this(alternative, true);
+        }
+
+        ManualScheduler(boolean alternative, boolean queued) {
+            if (!queued) {
+                config.setScheduler(org.flexlb.config.ConfigTestSupport.direct());
+                config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+            }
             queue = alternative ? new ListPlacementQueue() : new OrderedRequestQueue(false);
             when(selector.select(any(), isNull()))
                     .thenReturn(
@@ -178,17 +261,22 @@ class CustomRequestSchedulerContractTest {
             lifecycle =
                     runtime.boundLifecycle(
                             this,
-                            this,
                             config,
                             SchedulingTestConfig.capacity(config),
                             mock(RecentCacheKeyTraceReporter.class));
-            entry = new RequestSchedulerEntry(this, lifecycle, selector, config.isQueue());
+            entry = lifecycle;
             runtime.registerScheduler(this);
         }
 
         @Override
-        public long schedule(long nowNanos) {
-            return Long.MAX_VALUE;
+        public void schedule() {}
+
+        public void start() {}
+
+        public void stop() {}
+
+        public boolean awaitStopped(long deadlineNanos) {
+            return true;
         }
 
         @Override
@@ -197,7 +285,8 @@ class CustomRequestSchedulerContractTest {
         @Override
         public void onRequest(RequestContext request) {
             synchronized (queue) {
-                if (!request.data().getFuture().isDone() && request.snapshot().cancellation() == null) {
+                if (!request.data().getFuture().isDone()
+                        && request.snapshot().cancellation() == null) {
                     queue.add(new GlobalQueueEntry(request, null));
                 }
             }
@@ -210,11 +299,6 @@ class CustomRequestSchedulerContractTest {
                     if (entry.context != request) queue.restore(entry);
                 }
             }
-        }
-
-        @Override
-        public boolean reschedule(RequestRoute previousRoute) {
-            return false;
         }
 
         boolean advance() {

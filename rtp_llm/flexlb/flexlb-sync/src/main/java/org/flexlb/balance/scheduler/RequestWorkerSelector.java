@@ -3,10 +3,10 @@ package org.flexlb.balance.scheduler;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeResources.DecodeRoutingView;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.strategy.DecodeSelectionStrategy;
 import org.flexlb.balance.strategy.PrefillSelectionStrategy;
@@ -15,7 +15,6 @@ import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.SchedulingMetadata;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -46,7 +45,6 @@ public class RequestWorkerSelector {
     private final EndpointRegistry endpoints;
     private final EngineHealthReporter healthReporter;
     private final CacheMetricsReporter cacheReporter;
-    private final boolean queueScheduling;
     private final String deliveryMode;
     private static final ThreadLocal<DecodeInputs> DECODE_INPUTS =
             ThreadLocal.withInitial(DecodeInputs::new);
@@ -66,7 +64,6 @@ public class RequestWorkerSelector {
         this.vitCacheSelector = vitCacheSelector;
         this.healthReporter = Objects.requireNonNull(healthReporter);
         this.cacheReporter = Objects.requireNonNull(cacheReporter);
-        this.queueScheduling = configService.loadBalanceConfig().isQueue();
         this.deliveryMode = configService.loadBalanceConfig().getDispatcher().typeName();
         this.prefillSelector = Objects.requireNonNull(prefillSelector, "prefillSelector");
         this.decodeSelector = Objects.requireNonNull(decodeSelector, "decodeSelector");
@@ -120,7 +117,7 @@ public class RequestWorkerSelector {
                             role.getCode(),
                             context.data().getRequestId());
                     return switch (result.status()) {
-                        case REJECTED, BLOCKED -> result.asFailure();
+                        case REJECTED, BLOCKED, ENDPOINT_CHANGED -> result.asFailure();
                         default ->
                                 throw new IllegalStateException(
                                         "unexpected selector result: " + result.status());
@@ -286,11 +283,7 @@ public class RequestWorkerSelector {
             if (pin == null
                     || pin.endpoint() != endpoint
                     || pin.generationId() != selected.generationId()) {
-                return PlacementResult.blocked(new PlacementKey(role, group, null));
-            }
-            var failure = prefillCapacityFailure(endpoint, metadata, role, selected);
-            if (failure != null) {
-                return failure;
+                return PlacementResult.endpointChanged(new PlacementKey(role, group, null), result);
             }
             var status = endpoint.getStatus();
             ServerStatus assignment =
@@ -326,63 +319,6 @@ public class RequestWorkerSelector {
         }
     }
 
-    private PlacementResult<ServerStatus, PlacementKey> prefillCapacityFailure(
-            PrefillEndpoint endpoint,
-            SchedulingMetadata metadata,
-            RoleType role,
-            PrefillSelectionStrategy.Selection<?> selected) {
-        if (queueScheduling
-                || endpoint.ownership.requestCapacityAvailable(endpoint.requestLimit, 1)) {
-            return null;
-        }
-        Response failure = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
-        var reason =
-                classifyWorkerCapacity(
-                        endpoint.ownership.admissionSummary(
-                                metadata.priority(), endpoint.requestLimit));
-        failure =
-                reason == AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
-                                || reason == AdmissionRejectReason.SAME_PRIORITY_AHEAD
-                        ? Response.error(StrategyErrorType.PRIORITY_ADMISSION_REJECTED, reason)
-                        : reason == AdmissionRejectReason.UNSPECIFIED
-                                ? Response.error(StrategyErrorType.ADMISSION_UNAVAILABLE)
-                                : failure;
-        return PlacementResult.blocked(
-                PlacementKey.exact(
-                        role, endpoint.getStatus().topologySnapshot().group(), selected.address()),
-                failure,
-                Map.of(
-                        "role",
-                        role.name(),
-                        "workers",
-                        selected.workerCount(),
-                        "observedAtMs",
-                        System.currentTimeMillis(),
-                        "details",
-                        Map.of(
-                                "reason",
-                                "PREFILL_CAPACITY",
-                                "selectedEndpoint",
-                                selected.address(),
-                                "cacheHitTokens",
-                                selected.cacheHitTokens())));
-    }
-
-    private static AdmissionRejectReason classifyWorkerCapacity(
-            PrefillState.AdmissionSummary summary) {
-        long residual = Math.max(0L, summary.requestsToRelease() - summary.lowerPriorityRequests());
-        long protectedRequests = summary.higherPriorityRequests() + summary.samePriorityRequests();
-        if (residual > protectedRequests && summary.unknownPriorityRequests() > 0L) {
-            return AdmissionRejectReason.UNSPECIFIED;
-        }
-        if (residual > 0L && protectedRequests >= residual) {
-            return summary.higherPriorityRequests() > 0L
-                    ? AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
-                    : AdmissionRejectReason.SAME_PRIORITY_AHEAD;
-        }
-        return AdmissionRejectReason.RESOURCE_EXHAUSTED;
-    }
-
     private void reportSelection(
             RoleType role, String ip, long seqLen, PrefillSelectionStrategy.Selection<?> selected) {
         try {
@@ -414,47 +350,42 @@ public class RequestWorkerSelector {
         DecodeInputs cached = DECODE_INPUTS.get();
         DecodeInputs inputs = cached.inUse ? new DecodeInputs() : cached;
         inputs.inUse = true;
-        int captured = 0;
         try {
-            for (int attempt = 0; attempt < 2; attempt++) {
-                inputs.decode.clear();
-                endpoints.decodeRoutingSnapshot(group, inputs.decode);
-                captured = Math.max(captured, inputs.decode.size());
-                var result =
-                        decodeSelector.select(
-                                request, metadata, group, inputs.readOnly, capacityReader);
-                if (result.status() != PlacementResult.Status.SUCCESS) {
-                    return result.asFailure();
-                }
-                var selected = result.value();
-                WorkerEndpoint.GenerationPin pin = endpoints.captureDecodeGeneration(selected);
-                if (pin == null) {
-                    continue;
-                }
-                try {
-                    com.google.common.base.Preconditions.checkState(
-                            pin.generationId() == selected.generationId()
-                                    && pin.endpoint() instanceof DecodeEndpoint,
-                            "Decode snapshot pin changed before selection handoff");
-                    ServerStatus assignment =
-                            ServerStatus.forWorker(
-                                    RoleType.DECODE,
-                                    request.getRequestId(),
-                                    selected.topology(),
-                                    selected.workerStatus().fields());
-                    var ownedPin = pin;
-                    pin = null;
-                    return PlacementResult.success(
-                            route.add(ownedPin, assignment, -1L, selected.admissionVersion()));
-                } finally {
-                    if (pin != null) {
-                        pin.close();
-                    }
+            endpoints.decodeRoutingSnapshot(group, inputs.decode);
+            var result =
+                    decodeSelector.select(
+                            request, metadata, group, inputs.readOnly, capacityReader);
+            if (result.status() != PlacementResult.Status.SUCCESS) {
+                return result.asFailure();
+            }
+            var selected = result.value();
+            WorkerEndpoint.GenerationPin pin = endpoints.captureDecodeGeneration(selected);
+            if (pin == null) {
+                return PlacementResult.endpointChanged(
+                        new PlacementKey(RoleType.DECODE, group, null), result);
+            }
+            try {
+                com.google.common.base.Preconditions.checkState(
+                        pin.generationId() == selected.generationId()
+                                && pin.endpoint() instanceof DecodeEndpoint,
+                        "Decode snapshot pin changed before selection handoff");
+                ServerStatus assignment =
+                        ServerStatus.forWorker(
+                                RoleType.DECODE,
+                                request.getRequestId(),
+                                selected.topology(),
+                                selected.workerStatus().fields());
+                var ownedPin = pin;
+                pin = null;
+                return PlacementResult.success(
+                        route.add(ownedPin, assignment, -1L, selected.admissionVersion()));
+            } finally {
+                if (pin != null) {
+                    pin.close();
                 }
             }
-            return PlacementResult.blocked(new PlacementKey(RoleType.DECODE, group, null));
         } finally {
-            captured = Math.max(captured, inputs.decode.size());
+            int captured = inputs.decode.size();
             inputs.decode.clear();
             inputs.inUse = false;
             if (inputs == cached && captured > 4096) {
@@ -463,8 +394,7 @@ public class RequestWorkerSelector {
         }
     }
 
-    private org.flexlb.balance.endpoint.DecodeResources.AdmissionSummary readDecodeCapacity(
-            DecodeRoutingView view) {
+    private DecodeResources.AdmissionSummary readDecodeCapacity(DecodeRoutingView view) {
         try (var pin = endpoints.captureDecodeGeneration(view)) {
             return pin == null ? null : ((DecodeEndpoint) pin.endpoint()).admissionSummary();
         }

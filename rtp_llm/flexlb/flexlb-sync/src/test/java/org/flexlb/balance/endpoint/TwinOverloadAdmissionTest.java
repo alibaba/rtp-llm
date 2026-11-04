@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
@@ -49,10 +50,10 @@ class TwinOverloadAdmissionTest {
         commitBatch(endpoint, config, 1L, 1L);
         commitBatch(endpoint, config, 2L, 9L);
 
-        assertEquals(2, endpoint.ownership.stats().batchCount());
+        assertEquals(2, endpoint.stats().batchCount());
         assertEquals(
                 16,
-                endpoint.ownership.admissionSummary(0, endpoint.requestLimit).occupiedRequests(),
+                endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests(),
                 "maxRequests=8 bounds one decision, not the engine's total inflight work");
     }
 
@@ -61,33 +62,27 @@ class TwinOverloadAdmissionTest {
         FlexlbConfig config = config(1);
         PrefillEndpoint endpoint = prefill(config);
         commitBatch(endpoint, config, 11L, 1L);
-        assertEquals(
-                8,
-                endpoint.ownership.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
-        assertTrue(!endpoint.ownership.batchCapacityAvailable(1));
+        assertEquals(8, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+        assertTrue(!endpoint.batchCapacityAvailable(1));
 
         Map<String, TaskInfo> finished = tasks(1L, 7, 11L, TaskPhase.RUNNING);
         applyStatus(endpoint, tasks(8L, 1, 11L, TaskPhase.RUNNING), finished);
-        assertEquals(1, endpoint.ownership.stats().batchCount());
+        assertEquals(1, endpoint.stats().batchCount());
         assertEquals(
                 1,
-                endpoint.ownership.admissionSummary(0, endpoint.requestLimit).occupiedRequests(),
+                endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests(),
                 "completed members immediately leave ownership while the last member retains the batch");
         assertTrue(
-                !endpoint.ownership.batchCapacityAvailable(1),
+                !endpoint.batchCapacityAvailable(1),
                 "seven finished members do not release the final member's batch slot");
 
         applyStatus(endpoint, Map.of(), tasks(8L, 1, 11L, TaskPhase.RUNNING));
-        assertEquals(0, endpoint.ownership.stats().batchCount());
-        assertEquals(
-                0,
-                endpoint.ownership.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
-        assertTrue(endpoint.ownership.batchCapacityAvailable(1));
+        assertEquals(0, endpoint.stats().batchCount());
+        assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+        assertTrue(endpoint.batchCapacityAvailable(1));
         // The full snapshot may repeat across polls without releasing ownership twice.
         applyStatus(endpoint, Map.of(), tasks(8L, 1, 11L, TaskPhase.RUNNING));
-        assertEquals(
-                0,
-                endpoint.ownership.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+        assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
     }
 
     @ParameterizedTest
@@ -98,31 +93,27 @@ class TwinOverloadAdmissionTest {
         FlexlbConfig config = config(2);
         PrefillEndpoint endpoint = prefill(config);
         commitBatch(endpoint, config, 70L, 101L);
-        assertEquals(
-                8,
-                endpoint.ownership.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+        assertEquals(8, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
 
         applyStatus(endpoint, tasks(101L, 8, 70L, phase), Map.of());
         assertEquals(
                 8,
-                endpoint.ownership.admissionSummary(0, endpoint.requestLimit).occupiedRequests(),
+                endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests(),
                 "the local batch and its engine observation describe the same eight requests");
-        assertEquals(1, endpoint.ownership.stats().batchCount());
+        assertEquals(1, endpoint.stats().batchCount());
         assertEquals(
                 1,
-                endpoint.ownership.stats().batchCount(),
+                endpoint.stats().batchCount(),
                 "a local batch must consume one slot without being counted again by worker status");
 
         applyStatus(endpoint, tasks(101L, 8, 70L, phase), Map.of());
         assertEquals(
                 1,
-                endpoint.ownership.stats().batchCount(),
+                endpoint.stats().batchCount(),
                 "repeated status must neither release nor duplicate the local batch slot");
 
         applyStatus(endpoint, Map.of(), tasks(101L, 8, 70L, phase));
-        assertEquals(
-                0,
-                endpoint.ownership.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+        assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
     }
 
     @Test
@@ -133,33 +124,33 @@ class TwinOverloadAdmissionTest {
         RequestRoute staged = item(endpoint, config, 2L);
         assertTrue(EndpointTestSupport.offer(endpoint, first));
         assertTrue(EndpointTestSupport.offer(endpoint, staged));
-        PrefillState.ReservationResult<PrefillState.BatchReservation> acquired =
-                endpoint.reserveBatch(first, 70L, 1);
-        assertEquals(PrefillState.CapacityStatus.ACQUIRED, acquired.status());
+        CapacityBoundary.Attempt<PrefillEndpoint.BatchReservation> acquired =
+                endpoint.reserveBatch(70L, 1);
+        assertTrue(acquired.accepted());
         {
-            PrefillState.BatchReservation ignored = acquired.reservation();
+            PrefillEndpoint.BatchReservation ignored = acquired.value();
             try (var preparationIgnored = EndpointTestSupport.preparation(ignored)) {
-                assertEquals(2, endpoint.ownership.progress().queueDepth());
-                PrefillState.ReservationResult<PrefillState.BatchReservation> blocked =
-                        endpoint.reserveBatch(staged, 71L, 1);
+                assertEquals(2, endpoint.progress().queueDepth());
+                CapacityBoundary.Attempt<PrefillEndpoint.BatchReservation> blocked =
+                        endpoint.reserveBatch(71L, 1);
                 {
-                    PrefillState.BatchReservation unexpected = blocked.reservation();
+                    PrefillEndpoint.BatchReservation unexpected = blocked.value();
                     try (var preparationUnexpected = EndpointTestSupport.preparation(unexpected)) {
                         assertEquals(
-                                PrefillState.CapacityStatus.CAPACITY_FULL,
-                                blocked.status(),
+                                CapacityBoundary.Resource.PREFILL_BATCH,
+                                blocked.boundary().resource(),
                                 "a locally reserved batch must occupy the only slot at final admission");
                     }
                 }
             }
         }
-        assertEquals(2, endpoint.ownership.progress().queueDepth());
-        PrefillState.ReservationResult<PrefillState.BatchReservation> resumed =
-                endpoint.reserveBatch(staged, 71L, 1);
+        assertEquals(2, endpoint.progress().queueDepth());
+        CapacityBoundary.Attempt<PrefillEndpoint.BatchReservation> resumed =
+                endpoint.reserveBatch(71L, 1);
         {
-            PrefillState.BatchReservation ignored = resumed.reservation();
+            PrefillEndpoint.BatchReservation ignored = resumed.value();
             try (var preparationIgnored = EndpointTestSupport.preparation(ignored)) {
-                assertEquals(PrefillState.CapacityStatus.ACQUIRED, resumed.status());
+                assertTrue(resumed.accepted());
             }
         }
     }
@@ -170,14 +161,10 @@ class TwinOverloadAdmissionTest {
         config.setDispatcher(ConfigTestSupport.nonBatch());
         PrefillEndpoint endpoint = prefill(config);
         applyStatus(endpoint, tasks(101L, 8, 70L, TaskPhase.RUNNING), Map.of());
-        assertEquals(
-                8,
-                endpoint.ownership.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+        assertEquals(8, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
         assertTrue(endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().isEmpty());
         applyStatus(endpoint, Map.of(), tasks(101L, 8, 70L, TaskPhase.RUNNING));
-        assertEquals(
-                0,
-                endpoint.ownership.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+        assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
         assertEquals(
                 0L,
                 endpoint.captureRouteProjectionInputs()
@@ -275,17 +262,14 @@ class TwinOverloadAdmissionTest {
             items.add(item);
         }
         int limit = config.getDispatcher().getMaxInflightPerPrefillWorker();
-        PrefillState.ReservationResult<PrefillState.BatchReservation> acquisition =
-                endpoint.reserveBatch(items.getFirst(), batchId, limit);
-        assertEquals(PrefillState.CapacityStatus.ACQUIRED, acquisition.status());
-        PrefillState state =
-                (PrefillState)
-                        org.springframework.test.util.ReflectionTestUtils.getField(
-                                endpoint, "ownership");
+        CapacityBoundary.Attempt<PrefillEndpoint.BatchReservation> acquisition =
+                endpoint.reserveBatch(batchId, limit);
+        assertTrue(acquisition.accepted());
+        PrefillEndpoint state = (PrefillEndpoint) endpoint;
         {
-            PrefillState.BatchReservation reservation = acquisition.reservation();
+            PrefillEndpoint.BatchReservation reservation = acquisition.value();
             try (var preparationReservation = EndpointTestSupport.preparation(reservation);
-                    PrefillState.CommittedHandoff ignored =
+                    org.flexlb.balance.scheduler.Delivery ignored =
                             EndpointTestSupport.commitBatch(state, reservation, items, 300_000L)) {
                 // Releasing the handoff closes only the generation pin, not engine work.
             }

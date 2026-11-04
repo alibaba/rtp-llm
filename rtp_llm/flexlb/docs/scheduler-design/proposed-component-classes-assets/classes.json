@@ -1,0 +1,1403 @@
+{
+  "status": "PROPOSED_NOT_IMPLEMENTED",
+  "classes": [
+    {
+      "group": "请求与调度",
+      "name": "RequestContext",
+      "budget": 650,
+      "kind": "class",
+      "role": "唯一请求状态；所有状态变化在请求锁内，副作用在锁外",
+      "fields": [
+        "- final Request input",
+        "- final long generation",
+        "- RequestRoute route",
+        "- Cancellation cancellation",
+        "- SendState sendState",
+        "- long deliveryId",
+        "- Response selectedResponse",
+        "- ReleaseProgress released",
+        "- Deadlines deadlines"
+      ],
+      "methods": [
+        "+ snapshot(): Snapshot",
+        "+ cancel(reason, now): boolean",
+        "+ beginDelivery(route, deliveryId, now): boolean",
+        "+ recordDeliveryResult(deliveryId, result): boolean",
+        "+ selectResponse(response): boolean",
+        "+ markResourcesReleased(role, identity): boolean"
+      ]
+    },
+    {
+      "group": "请求与调度",
+      "name": "RequestLifecycle",
+      "budget": 850,
+      "kind": "class",
+      "role": "准入、取消、超时、结果驱动与结算；不再拥有第二套请求状态",
+      "fields": [
+        "- RequestRepository requests",
+        "- RequestScheduler scheduler",
+        "- DeliveryDispatcher dispatcher",
+        "- ExpirationTimer expiration",
+        "- ResponseCompletionExecutor responses",
+        "- RequestTaskPool tasks"
+      ],
+      "methods": [
+        "+ submit(ctx): CompletionStage<Response>",
+        "+ cancel(requestId, reason): RequestState",
+        "+ onTimeout(ctx, token): void",
+        "+ onDeliveryResult(ctx, deliveryId, result): void",
+        "+ onEngineStatus(identity, status): void",
+        "+ settle(ctx): void",
+        "+ stopAdmission(): void",
+        "+ awaitSettled(deadline): boolean",
+        "+ bind(scheduler, dispatcher): void [启动前一次]"
+      ]
+    },
+    {
+      "group": "请求与调度",
+      "name": "RequestRepository",
+      "budget": 250,
+      "kind": "class",
+      "role": "精确 generation 的当前身份目录及有限终态历史",
+      "fields": [
+        "- ConcurrentMap<RequestId, RequestContext> active",
+        "- BoundedHistory<RequestState> completed"
+      ],
+      "methods": [
+        "+ register(ctx): boolean",
+        "+ find(id): RequestContext",
+        "+ isCurrent(ctx): boolean",
+        "+ remove(ctx, result): boolean",
+        "+ findResult(id): RequestState",
+        "+ snapshot(): List<RequestContext>"
+      ]
+    },
+    {
+      "group": "请求与调度",
+      "name": "RequestRoute",
+      "budget": 200,
+      "kind": "class",
+      "role": "一次路由身份和资源句柄；close 仅释放 generation 使用权",
+      "fields": [
+        "- final RequestContext context",
+        "- final long routeId",
+        "- final PrefillEndpoint prefill",
+        "- final DecodeEndpoint decode",
+        "- final Reservation prefillReservation",
+        "- final Reservation decodeReservation",
+        "- final Use[] endpointUses"
+      ],
+      "methods": [
+        "+ context(): RequestContext",
+        "+ identity(): RouteIdentity",
+        "+ planningInput(): QueueItem",
+        "+ close(): void"
+      ]
+    },
+    {
+      "group": "请求与调度",
+      "name": "RequestState",
+      "budget": 100,
+      "kind": "record",
+      "role": "请求对外只读查询结果，不用它驱动内部状态机",
+      "fields": [
+        "+ requestId: long",
+        "+ generation: long",
+        "+ phase: Phase",
+        "+ reason: String",
+        "+ response: Response",
+        "+ updatedAt: long"
+      ],
+      "methods": []
+    },
+    {
+      "group": "请求与调度",
+      "name": "RequestScheduler",
+      "budget": 50,
+      "kind": "interface",
+      "role": "独立业务调度模块；实现自己决定到达触发、事件触发或定时触发；不受外部统一轮询接口约束",
+      "fields": [],
+      "methods": [
+        "+ start(): void",
+        "+ schedule(): void",
+        "+ onRequest(ctx): void",
+        "+ onRequestChanged(ctx): void",
+        "+ onEndpointChanged(endpoint): void",
+        "+ stop(): void",
+        "+ awaitStopped(deadlineNanos): boolean",
+        "+ close(): void"
+      ]
+    },
+    {
+      "group": "请求与调度",
+      "name": "DirectRequestScheduler",
+      "budget": 180,
+      "kind": "class",
+      "role": "独立即时调度实现：请求到达即选择和提交；无统一循环，无 Worker 等待；start/close 管理调度准入",
+      "fields": [
+        "- RequestWorkerSelector selector",
+        "- DeliveryDispatcher dispatcher",
+        "- RequestLifecycle lifecycle"
+      ],
+      "methods": [
+        "+ start(): void",
+        "+ onRequest(ctx): void",
+        "+ onRequestChanged(ctx): void",
+        "+ onEndpointChanged(endpoint): void",
+        "+ close(): void",
+        "+ schedule(): void",
+        "+ stop(): void",
+        "+ awaitStopped(deadlineNanos): boolean"
+      ]
+    },
+    {
+      "group": "请求与调度",
+      "name": "QueuedRequestScheduler",
+      "budget": 850,
+      "kind": "class",
+      "role": "独立队列调度实现：拥有原有后台调度线程和 schedule 入口；请求/容量变化唤醒，按下一调度期限等待；选择和组批任务使用原 planner 池",
+      "fields": [
+        "- PlacementQueue queue",
+        "- RequestWorkerSelector selector",
+        "- GroupPlanner planner",
+        "- DeliveryDispatcher dispatcher",
+        "- RequestLifecycle lifecycle",
+        "- DecodePreemption preemption",
+        "- Map<CapacityKey, Waiters> waiting",
+        "- Set<WorkerEndpoint> ready",
+        "- Set<PlanId> inFlight",
+        "- ExecutorService planners [复用现有池]",
+        "- Thread schedulerThread [移入原有调度线程]",
+        "- long nextCheck",
+        "- AtomicLong notifications"
+      ],
+      "methods": [
+        "+ start(): void",
+        "+ onRequest(ctx): void",
+        "+ onRequestChanged(ctx): void",
+        "+ onEndpointChanged(endpoint): void",
+        "- schedulePlacement(now): void",
+        "- scheduleDelivery(endpoint, now): void",
+        "- onSubmissionResult(result): void",
+        "+ close(): void",
+        "- requestRun(): void",
+        "+ schedule(): void",
+        "+ stop(): void",
+        "+ awaitStopped(deadlineNanos): boolean",
+        "- run(): void [调用 schedule 并按期限等待]"
+      ]
+    },
+    {
+      "group": "队列与组批",
+      "name": "PlacementQueue",
+      "budget": 70,
+      "kind": "interface",
+      "role": "全局队列；扫描不结算，精确删除不释放资源",
+      "fields": [],
+      "methods": [
+        "+ add(entry): boolean",
+        "+ remove(entry): boolean",
+        "+ candidates(limit, cursor): Scan",
+        "+ order(): Comparator<PlacementItem>",
+        "+ size(): int",
+        "+ drain(): List<PlacementItem>"
+      ]
+    },
+    {
+      "group": "队列与组批",
+      "name": "OrderedRequestQueue",
+      "budget": 350,
+      "kind": "class",
+      "role": "默认全局队列；索引与游标属于容器，无请求生命周期",
+      "fields": [
+        "- OrderedIndex<PlacementItem> entries",
+        "- IdentityIndex membership",
+        "- Comparator<PlacementItem> ordering",
+        "- long version"
+      ],
+      "methods": [
+        "+ add(entry): boolean",
+        "+ remove(entry): boolean",
+        "+ candidates(limit, cursor): Scan",
+        "+ order(): Comparator<PlacementItem>",
+        "+ size(): int",
+        "+ drain(): List<PlacementItem>"
+      ]
+    },
+    {
+      "group": "队列与组批",
+      "name": "PrefillRequestQueue",
+      "budget": 80,
+      "kind": "interface",
+      "role": "Worker 精确成员及快照；实时和预测共享同一排序输入",
+      "fields": [],
+      "methods": [
+        "+ add(route): boolean",
+        "+ remove(route): boolean",
+        "+ contains(route): boolean",
+        "+ peek(): RequestRoute",
+        "+ size(): int",
+        "+ snapshot(): Snapshot",
+        "+ order(): Comparator<QueueItem>"
+      ]
+    },
+    {
+      "group": "队列与组批",
+      "name": "PrefillActiveIndex",
+      "budget": 220,
+      "kind": "class",
+      "role": "默认 Worker 队列，保留精确身份索引",
+      "fields": [
+        "- OrderedIndex<RequestRoute> members",
+        "- IdentityIndex identities",
+        "- Comparator<QueueItem> ordering",
+        "- long version"
+      ],
+      "methods": [
+        "+ add(route): boolean",
+        "+ remove(route): boolean",
+        "+ contains(route): boolean",
+        "+ peek(): RequestRoute",
+        "+ size(): int",
+        "+ snapshot(): Snapshot",
+        "+ order(): Comparator<QueueItem>"
+      ]
+    },
+    {
+      "group": "队列与组批",
+      "name": "GroupPlanner",
+      "budget": 160,
+      "kind": "interface",
+      "role": "纯有序前缀组批；返回选择及就绪条件，不修改成员",
+      "fields": [],
+      "methods": ["+ select(ordered, limits, evaluator, now): Selection"]
+    },
+    {
+      "group": "队列与组批",
+      "name": "BuiltinGroupPlanner",
+      "budget": 250,
+      "kind": "class",
+      "role": "默认单请求或固定窗口组批",
+      "fields": ["- Mode mode", "- GroupLimits defaults"],
+      "methods": [
+        "+ select(ordered, limits, evaluator, now): Selection",
+        "- checkLimits(prefix, limits): boolean",
+        "- nextReadyTime(prefix, now): long"
+      ]
+    },
+    {
+      "group": "Endpoint 选择",
+      "name": "RequestWorkerSelector",
+      "budget": 450,
+      "kind": "class",
+      "role": "调用策略后校验精确身份并预留；资源竞态不能改写策略原结果",
+      "fields": [
+        "- EndpointRegistry endpoints",
+        "- PrefillSelectionStrategy prefill",
+        "- DecodeSelectionStrategy decode",
+        "- VitSelectionStrategy vit"
+      ],
+      "methods": [
+        "+ select(ctx): PlacementAttempt",
+        "+ selectVit(ctx): VitResult",
+        "- reserveRoute(ctx, selection): PlacementAttempt",
+        "- rollbackPartial(attempt): void"
+      ]
+    },
+    {
+      "group": "Endpoint 选择",
+      "name": "PrefillSelectionStrategy",
+      "budget": 100,
+      "kind": "interface",
+      "role": "只读 Prefill 选择；结果保留原因、阻塞位置与候选身份",
+      "fields": [],
+      "methods": ["+ select(request, candidates, now): SelectionResult"]
+    },
+    {
+      "group": "Endpoint 选择",
+      "name": "CostBasedPrefillStrategy",
+      "budget": 350,
+      "kind": "class",
+      "role": "默认成本与缓存亲和选择",
+      "fields": [
+        "- CacheAwareService cache",
+        "- RequestTimeEstimation estimation",
+        "- RoutingConfig config"
+      ],
+      "methods": [
+        "+ select(request, candidates, now): SelectionResult",
+        "- scoreCandidates(request, candidates): Scores",
+        "- choose(scores): SelectionResult"
+      ]
+    },
+    {
+      "group": "Endpoint 选择",
+      "name": "DecodeSelectionStrategy",
+      "budget": 70,
+      "kind": "interface",
+      "role": "只读 Decode 选择；失败路径可读取精确容量",
+      "fields": [],
+      "methods": [
+        "+ select(request, candidates, capacityReader): SelectionResult"
+      ]
+    },
+    {
+      "group": "Endpoint 选择",
+      "name": "DecodeSelector",
+      "budget": 400,
+      "kind": "class",
+      "role": "默认 Decode 排名、轮转和失败归因",
+      "fields": ["- RoutingConfig config", "- Map<GroupKey, Cursor> rotation"],
+      "methods": [
+        "+ select(request, candidates, capacityReader): SelectionResult",
+        "- findEligible(request, candidates): Candidates",
+        "- classifyCapacityFailure(request, candidates): Failure"
+      ]
+    },
+    {
+      "group": "Endpoint 选择",
+      "name": "VitSelectionStrategy",
+      "budget": 30,
+      "kind": "interface",
+      "role": "选择只读 VIT 候选，不保留列表、不写资源",
+      "fields": [],
+      "methods": ["+ selectIndex(addresses): int"]
+    },
+    {
+      "group": "Endpoint 选择",
+      "name": "VitWorkerSelector",
+      "budget": 60,
+      "kind": "class",
+      "role": "默认 VIT 选择实现",
+      "fields": ["- AtomicLong cursor"],
+      "methods": ["+ selectIndex(addresses): int"]
+    },
+    {
+      "group": "资源与投递",
+      "name": "EndpointRegistry",
+      "budget": 650,
+      "kind": "class",
+      "role": "维护发现身份、发布 generation、路由快照和退休",
+      "fields": [
+        "- Map<EndpointKey, WorkerEndpoint> discovered",
+        "- PublishedEndpoints published",
+        "- EndpointChangeListener changes"
+      ],
+      "methods": [
+        "+ updateDiscovered(workers): void",
+        "+ publish(endpoint): boolean",
+        "+ find(identity): WorkerEndpoint",
+        "+ routingSnapshot(role, group): RoutingSnapshot",
+        "+ retire(identity): CompletionStage<Void>",
+        "+ counts(role): Counts",
+        "+ resourceStats(): ResourceStats"
+      ]
+    },
+    {
+      "group": "资源与投递",
+      "name": "WorkerEndpoint",
+      "budget": 300,
+      "kind": "class",
+      "role": "节点身份、使用权与退休；不创建调度或执行流程",
+      "fields": [
+        "- final EndpointIdentity identity",
+        "- WorkerStatus status",
+        "- GenerationPhase generationPhase",
+        "- int activeUses",
+        "- Completion retirement"
+      ],
+      "methods": [
+        "+ identity(): EndpointIdentity",
+        "+ acquireUse(): Use",
+        "+ beginRetirement(): void",
+        "+ awaitRetirement(deadline): boolean",
+        "+ snapshotStatus(): StatusSnapshot",
+        "- releaseUse(use): void"
+      ]
+    },
+    {
+      "group": "资源与投递",
+      "name": "PrefillEndpoint",
+      "budget": 900,
+      "kind": "class",
+      "role": "Prefill 唯一资源记录；原子性仅限本节点",
+      "fields": [
+        "- ReentrantLock resourceLock",
+        "- Map<RouteIdentity, RequestRecord> requests",
+        "- Map<BatchId, BatchRecord> batches",
+        "- PrefillRequestQueue queue",
+        "- PrefillTimePredictor predictor",
+        "- long version"
+      ],
+      "methods": [
+        "+ reserveRequest(route, limits): ReserveResult",
+        "+ reserveBatch(batchId, limits): ReserveResult",
+        "+ commit(reservation, members, predictions): CommitResult",
+        "+ rollback(reservation): boolean",
+        "+ releaseRequest(identity, evidence): ReleaseResult",
+        "+ applyEngineStatus(status): Changes",
+        "+ snapshot(): PrefillSnapshot",
+        "+ queueSnapshot(): QueueSnapshot"
+      ]
+    },
+    {
+      "group": "资源与投递",
+      "name": "DecodeEndpoint",
+      "budget": 900,
+      "kind": "class",
+      "role": "Decode 唯一资源记录；预留、投递及回收证据",
+      "fields": [
+        "- ReentrantLock resourceLock",
+        "- Map<ReservationId, RequestRecord> requests",
+        "- CapacityUsage usage",
+        "- Map<AttemptId, PreemptionRecord> preemptions",
+        "- long version"
+      ],
+      "methods": [
+        "+ reserveRequest(route, limits): ReserveResult",
+        "+ reserveDispatch(reservation): ReserveResult",
+        "+ commitDispatch(reservation, deliveryId): CommitResult",
+        "+ rollback(reservation): boolean",
+        "+ releaseRequest(identity, evidence): ReleaseResult",
+        "+ applyEngineStatus(status): Changes",
+        "+ snapshot(): DecodeSnapshot",
+        "+ claimVictims(attempt, proposal): ClaimResult",
+        "+ updatePreemption(attempt, evidence): Changes",
+        "+ releaseVictimClaim(attempt): void"
+      ]
+    },
+    {
+      "group": "资源与投递",
+      "name": "EndpointStats",
+      "budget": 50,
+      "kind": "interface",
+      "role": "仅供观测读取的节点、资源统计",
+      "fields": [],
+      "methods": ["+ counts(role): Counts", "+ resourceStats(): ResourceStats"]
+    },
+    {
+      "group": "资源与投递",
+      "name": "Delivery",
+      "budget": 300,
+      "kind": "class",
+      "role": "一次投递的成员、临时资源及共享 RPC 进度；每个请求的发送资格只在 Context；结果归本操作",
+      "fields": [
+        "- final long id",
+        "- final List<Member> members",
+        "- final SendMode mode",
+        "- final PrefixPolicy prefixPolicy",
+        "- Reservation batchReservation",
+        "- DeliveryPermit executionPermit",
+        "- SendProgress progress",
+        "- CompletableFuture<Result> completion"
+      ],
+      "methods": [
+        "+ id(): long",
+        "+ members(): List<Member>",
+        "+ beginTransport(): boolean",
+        "+ recordResult(result): boolean",
+        "+ result(): CompletionStage<Result>",
+        "+ rollback(): void",
+        "+ close(): void"
+      ]
+    },
+    {
+      "group": "资源与投递",
+      "name": "DeliveryDispatcher",
+      "budget": 850,
+      "kind": "class",
+      "role": "完整准备、提交、发送流程；同时支持仅发布路由的模式",
+      "fields": [
+        "- EngineGrpcClient client",
+        "- DeliveryExecution execution",
+        "- RequestLifecycle lifecycle",
+        "- TaskTimer timer",
+        "- DeliveryMetricsReporter reporter",
+        "- DispatcherConfig config"
+      ],
+      "methods": [
+        "+ submit(selection, prefixPolicy): SubmissionResult",
+        "+ cancelDelivery(delivery): CompletionStage<Result>",
+        "- prepare(delivery): PrepareResult",
+        "- commit(delivery): CommitResult",
+        "- send(delivery): void",
+        "- publishRoutes(delivery): void",
+        "- onResponse(delivery, reply): void",
+        "- onFailure(delivery, failure): void",
+        "+ bindLifecycle(lifecycle): void [启动前一次]",
+        "+ cancelRemote(target, attemptId): CompletionStage<CancelReply>"
+      ]
+    },
+    {
+      "group": "资源与投递",
+      "name": "DeliveryExecution",
+      "budget": 350,
+      "kind": "class",
+      "role": "执行设施容量和真实任务排空；不是请求资源账本",
+      "fields": [
+        "- ExecutorService workers",
+        "- CapacityCounter admission",
+        "- Set<OperationId> inFlight",
+        "- BatchIdGenerator ids",
+        "- boolean accepting",
+        "- final ExecutorStats statistics"
+      ],
+      "methods": [
+        "+ tryReserve(): DeliveryPermit",
+        "+ execute(delivery, work): void",
+        "+ nextBatchId(): long",
+        "+ stopAdmission(): void",
+        "+ awaitIdle(deadline): boolean",
+        "+ stats(): ExecutorStats",
+        "+ close(): void"
+      ]
+    },
+    {
+      "group": "抢占",
+      "name": "DecodePreemption",
+      "budget": 70,
+      "kind": "interface",
+      "role": "可替换的资源回收执行；成功结果含精确新预留",
+      "fields": [],
+      "methods": [
+        "+ tryReclaim(ctx, endpoint): CompletionStage<Result>",
+        "+ stopAdmission(): void",
+        "+ awaitIdle(deadline): boolean",
+        "+ close(): void"
+      ]
+    },
+    {
+      "group": "抢占",
+      "name": "DefaultDecodePreemption",
+      "budget": 650,
+      "kind": "class",
+      "role": "请求级抢占尝试、远端确认、重新预留；不自行终结请求",
+      "fields": [
+        "- DecodePreemptionPolicy policy",
+        "- DeliveryDispatcher dispatcher",
+        "- RequestLifecycle lifecycle",
+        "- TaskTimer timer",
+        "- RequestSchedulerReporter reporter",
+        "- Map<AttemptId, Attempt> attempts"
+      ],
+      "methods": [
+        "+ tryReclaim(ctx, endpoint): CompletionStage<Result>",
+        "- withdrawQueued(attempt): void",
+        "- cancelRunning(attempt): void",
+        "- onCancelResult(attempt, reply): void",
+        "- finish(attempt): void",
+        "+ stopAdmission(): void",
+        "+ awaitIdle(deadline): boolean",
+        "+ close(): void"
+      ]
+    },
+    {
+      "group": "抢占",
+      "name": "DecodePreemptionPolicy",
+      "budget": 100,
+      "kind": "interface",
+      "role": "只读受害者选择与容量缺口计算",
+      "fields": [],
+      "methods": ["+ selectVictims(request, snapshot, limits): Proposal"]
+    },
+    {
+      "group": "抢占",
+      "name": "PriorityDecodePreemptionPolicy",
+      "budget": 500,
+      "kind": "class",
+      "role": "默认优先级损害与成本选择；所有辅助数据计入本类预算",
+      "fields": ["- PreemptionConfig config"],
+      "methods": [
+        "+ selectVictims(request, snapshot, limits): Proposal",
+        "- comparePlans(left, right): int",
+        "- calculateCost(victim): Cost"
+      ]
+    },
+    {
+      "group": "预测与观测",
+      "name": "PrefillTimePredictor",
+      "budget": 200,
+      "kind": "interface",
+      "role": "不可变模型视图；统一数值有效性约束",
+      "fields": [],
+      "methods": [
+        "+ evaluator(): Evaluator",
+        "+ learn(features, predicted, actual): LearningResult"
+      ]
+    },
+    {
+      "group": "预测与观测",
+      "name": "FormulaPredictor",
+      "budget": 300,
+      "kind": "class",
+      "role": "公式模型、变量绑定和批量求值",
+      "fields": [
+        "- CompiledExpression expression",
+        "- Evaluator model",
+        "- ThreadLocal<Bindings> bindings"
+      ],
+      "methods": [
+        "+ evaluator(): Evaluator",
+        "+ learn(features, predicted, actual): LearningResult",
+        "- evaluateRequest(input): long",
+        "- evaluateBatch(features): double"
+      ]
+    },
+    {
+      "group": "预测与观测",
+      "name": "LearningPredictor",
+      "budget": 450,
+      "kind": "class",
+      "role": "学习状态更新与稳定模型发布",
+      "fields": [
+        "- volatile Evaluator model",
+        "- TrainingState training",
+        "- ModelConfig config"
+      ],
+      "methods": [
+        "+ evaluator(): Evaluator",
+        "+ learn(features, predicted, actual): LearningResult",
+        "- updateModel(sample): void"
+      ]
+    },
+    {
+      "group": "预测与观测",
+      "name": "RequestTimeEstimation",
+      "budget": 550,
+      "kind": "class",
+      "role": "使用实际队列排序和同一组批策略模拟完成时间",
+      "fields": ["- GroupPlanner grouping"],
+      "methods": [
+        "+ estimate(request, snapshot, evaluator): Estimate",
+        "- insertCandidate(request, snapshot): OrderedInputs",
+        "- simulateGroups(inputs, limits, evaluator): Estimate",
+        "- remainingWork(snapshot, now): long"
+      ]
+    },
+    {
+      "group": "预测与观测",
+      "name": "DeliveryMetricsReporter",
+      "budget": 300,
+      "kind": "class",
+      "role": "投递、排队、预测偏差；只读统计值",
+      "fields": [
+        "- FlexMonitor monitor",
+        "- ExecutorStats executors",
+        "- Supplier<DeliveryStats> stats"
+      ],
+      "methods": [
+        "+ bindExecutorStats(stats): void",
+        "+ reportDelivery(values): void",
+        "+ reportLatency(values): void",
+        "+ reportPrediction(values): void"
+      ]
+    },
+    {
+      "group": "预测与观测",
+      "name": "EngineHealthReporter",
+      "budget": 300,
+      "kind": "class",
+      "role": "节点健康、发现、下线与停服观测",
+      "fields": ["- FlexMonitor monitor", "- EndpointStats endpoints"],
+      "methods": [
+        "+ reportSnapshot(): void",
+        "+ reportPoll(values): void",
+        "+ reportRetirement(values): void",
+        "+ reportShutdown(values): void"
+      ]
+    },
+    {
+      "group": "预测与观测",
+      "name": "RequestSchedulerReporter",
+      "budget": 250,
+      "kind": "class",
+      "role": "调度、阻塞、取消、抢占观测",
+      "fields": ["- FlexMonitor monitor"],
+      "methods": [
+        "+ reportSelection(values): void",
+        "+ reportWait(values): void",
+        "+ reportCancellation(values): void",
+        "+ reportPreemption(values): void"
+      ]
+    },
+    {
+      "group": "执行与同步设施",
+      "name": "PlacementConfiguration",
+      "budget": 300,
+      "kind": "class",
+      "role": "装配所有默认实现；先构造设施再连接通知，最后启动；业务类禁止硬编码默认实现",
+      "fields": ["- ConfigService config"],
+      "methods": [
+        "+ scheduler(lifecycle, selector, planner, queue, dispatcher, preemption): RequestScheduler",
+        "+ workerQueueFactory(config): Factory",
+        "+ prefillStrategy(cache, estimation, config): PrefillSelectionStrategy",
+        "+ decodeStrategy(config): DecodeSelectionStrategy",
+        "+ connectLifecycle(lifecycle, scheduler, dispatcher): void",
+        "+ startScheduling(scheduler): void"
+      ]
+    },
+    {
+      "group": "执行与同步设施",
+      "name": "RequestTaskPool",
+      "budget": 300,
+      "kind": "class",
+      "role": "请求任务及必要清理执行、排空；不实现请求生命周期",
+      "fields": [
+        "- ExecutorService workers",
+        "- TaskRegistrations accepted",
+        "- PoolPhase phase"
+      ],
+      "methods": [
+        "+ execute(owner, task): boolean",
+        "+ stopAdmission(): void",
+        "+ awaitIdle(deadline): boolean",
+        "+ close(): void"
+      ]
+    },
+    {
+      "group": "执行与同步设施",
+      "name": "ScheduledTaskTimer",
+      "budget": 150,
+      "kind": "class",
+      "role": "现有一次性计时设施及取消，不结算请求",
+      "fields": ["- ScheduledExecutorService timer"],
+      "methods": ["+ schedule(task, delayMs): Cancellation", "+ close(): void"]
+    },
+    {
+      "group": "执行与同步设施",
+      "name": "ExpirationTimer",
+      "budget": 220,
+      "kind": "class",
+      "role": "将 Context 期望 deadline 对应到精确定时任务",
+      "fields": [
+        "- TaskTimer timer",
+        "- Map<RequestIdentity, ScheduledDeadline> deadlines",
+        "- TimeoutListener listener"
+      ],
+      "methods": [
+        "+ update(ctx, deadlines): void",
+        "+ remove(ctx): void",
+        "- fire(ctx, token): void",
+        "+ close(): void"
+      ]
+    },
+    {
+      "group": "执行与同步设施",
+      "name": "ResponseCompletionExecutor",
+      "budget": 220,
+      "kind": "class",
+      "role": "响应回调执行、拒绝处理及排空",
+      "fields": [
+        "- ExecutorService workers",
+        "- TaskRegistrations accepted",
+        "- boolean accepting"
+      ],
+      "methods": [
+        "+ complete(ctx, response): boolean",
+        "+ execute(task): boolean",
+        "+ stopAdmission(): void",
+        "+ awaitIdle(deadline): boolean",
+        "+ close(): void"
+      ]
+    },
+    {
+      "group": "执行与同步设施",
+      "name": "WorkerStatusSynchronizer",
+      "budget": 500,
+      "kind": "class",
+      "role": "管理轮询时机、执行设施及节点退休重试",
+      "fields": [
+        "- EndpointRegistry endpoints",
+        "- WorkerAddressService discovery",
+        "- ExecutorService workers",
+        "- ScheduledExecutorService timer",
+        "- WorkerStatusRpcClient client",
+        "- SyncConfig config"
+      ],
+      "methods": [
+        "+ start(): void",
+        "- pollWorkers(): void",
+        "- pollCaches(): void",
+        "- retireRemoved(): void",
+        "+ close(): void"
+      ]
+    },
+    {
+      "group": "执行与同步设施",
+      "name": "GrpcWorkerStatusRunner",
+      "budget": 350,
+      "kind": "class",
+      "role": "一次 Worker 状态获取、generation 校验、应用和通知",
+      "fields": [
+        "- WorkerEndpoint endpoint",
+        "- PollLease lease",
+        "- WorkerStatusRpcClient client",
+        "- EndpointRegistry registry",
+        "- EngineHealthReporter reporter"
+      ],
+      "methods": [
+        "+ run(): void",
+        "- onResponse(reply, failure): void",
+        "- applyStatus(status): void",
+        "- finish(): void"
+      ]
+    },
+    {
+      "group": "执行与同步设施",
+      "name": "GrpcCacheStatusCheckRunner",
+      "budget": 300,
+      "kind": "class",
+      "role": "一次缓存同步及精确轮询许可归还",
+      "fields": [
+        "- WorkerEndpoint endpoint",
+        "- PollLease lease",
+        "- WorkerStatusRpcClient client",
+        "- CacheAwareService cache",
+        "- DynamicCacheIntervalService intervals"
+      ],
+      "methods": [
+        "+ run(): void",
+        "- onResponse(reply, failure): void",
+        "- applyCacheStatus(status): void",
+        "- finish(): void"
+      ]
+    },
+    {
+      "group": "执行与同步设施",
+      "name": "WorkerStatusRpcClient",
+      "budget": 300,
+      "kind": "class",
+      "role": "状态查询 RPC、转换及公共回调安全处理",
+      "fields": ["- EngineGrpcClient client"],
+      "methods": [
+        "+ getWorkerStatus(identity, version, timeout): CompletionStage<Status>",
+        "+ getCacheStatus(identity, version, timeout): CompletionStage<CacheStatus>",
+        "- decodeStatus(reply): Status"
+      ]
+    },
+    {
+      "group": "执行与同步设施",
+      "name": "WorkerAddressService",
+      "budget": 180,
+      "kind": "class",
+      "role": "服务发现地址刷新与缓存",
+      "fields": [
+        "- ServiceDiscovery discovery",
+        "- ConfigService config",
+        "- ExecutorService workers",
+        "- AddressSnapshot current"
+      ],
+      "methods": [
+        "+ refresh(): void",
+        "+ addresses(role): List<EndpointAddress>",
+        "+ close(): void"
+      ]
+    },
+    {
+      "group": "主节点、缓存与协议",
+      "name": "MasterStatusService",
+      "budget": 250,
+      "kind": "class",
+      "role": "本机及已选主节点状态，不承担选举算法",
+      "fields": [
+        "- AtomicReference<MasterSnapshot> current",
+        "- LocalNode local"
+      ],
+      "methods": [
+        "+ currentMaster(): MasterSnapshot",
+        "+ isMaster(): boolean",
+        "+ updateMaster(snapshot): void"
+      ]
+    },
+    {
+      "group": "主节点、缓存与协议",
+      "name": "MasterStatusView",
+      "budget": 30,
+      "kind": "interface",
+      "role": "路由和管理使用的只读主节点视图",
+      "fields": [],
+      "methods": ["+ currentMaster(): MasterSnapshot", "+ isMaster(): boolean"]
+    },
+    {
+      "group": "主节点、缓存与协议",
+      "name": "ZookeeperMasterElectService",
+      "budget": 450,
+      "kind": "class",
+      "role": "ZooKeeper 选举和主节点变化发布",
+      "fields": [
+        "- ZkClient client",
+        "- MasterStatusService status",
+        "- LBConsistencyConfig config",
+        "- ElectionHandle election"
+      ],
+      "methods": [
+        "+ start(): void",
+        "- onLeadershipChanged(event): void",
+        "- publishStatus(): void",
+        "+ close(): void"
+      ]
+    },
+    {
+      "group": "主节点、缓存与协议",
+      "name": "LBConsistencyConfig",
+      "budget": 60,
+      "kind": "class",
+      "role": "一致性配置；保持实际部署配置兼容",
+      "fields": [
+        "- boolean needConsistency",
+        "- MasterElectType masterElectType",
+        "- ZookeeperConfig zookeeperConfig",
+        "- String zkHost",
+        "- int zkTimeoutMs"
+      ],
+      "methods": ["+ validate(): void"]
+    },
+    {
+      "group": "主节点、缓存与协议",
+      "name": "MasterChangeNotifyReq",
+      "budget": 30,
+      "kind": "class",
+      "role": "保持原有主节点变更请求 wire schema",
+      "fields": ["- String reqIp", "- String roleId"],
+      "methods": []
+    },
+    {
+      "group": "主节点、缓存与协议",
+      "name": "MasterChangeNotifyResp",
+      "budget": 30,
+      "kind": "class",
+      "role": "保持原有主节点变更响应 wire schema",
+      "fields": ["- boolean success", "- String msg"],
+      "methods": []
+    },
+    {
+      "group": "主节点、缓存与协议",
+      "name": "SyncLBStatusReq",
+      "budget": 30,
+      "kind": "class",
+      "role": "保持原有主节点查询请求 wire schema",
+      "fields": ["- String roleId"],
+      "methods": []
+    },
+    {
+      "group": "主节点、缓存与协议",
+      "name": "SyncLBStatusResp",
+      "budget": 40,
+      "kind": "class",
+      "role": "保持原有主节点查询响应 wire schema",
+      "fields": ["- boolean success", "- String msg", "- String lbStatus"],
+      "methods": []
+    },
+    {
+      "group": "主节点、缓存与协议",
+      "name": "PvLogData",
+      "budget": 100,
+      "kind": "class",
+      "role": "一次调度的日志数据",
+      "fields": [
+        "- final long requestId",
+        "- final long seqLen",
+        "- final Response response",
+        "- final String error",
+        "- final boolean success",
+        "- final long enqueueTime",
+        "- final long startTime",
+        "- final long requestTimeMs",
+        "- final int code",
+        "- final String admissionRejectReason",
+        "- final String scheduleOrigin",
+        "- final int priority",
+        "- final long requestExpiresAtMs",
+        "- final long latencyMs",
+        "- final long batchId",
+        "- final String requestState",
+        "- final String realMasterHost",
+        "- final Map<String, Object> schedulingDiagnostics"
+      ],
+      "methods": ["+ from(ctx, result): PvLogData", "+ serialize(): String"]
+    },
+    {
+      "group": "主节点、缓存与协议",
+      "name": "RecentCacheKeyTraceReporter",
+      "budget": 300,
+      "kind": "class",
+      "role": "缓存 key 跟踪缓冲与批量输出",
+      "fields": [
+        "- TraceBuffer buffer",
+        "- TraceSink sink",
+        "- TraceConfig config"
+      ],
+      "methods": ["+ record(trace): void", "+ flush(): void", "+ close(): void"]
+    },
+    {
+      "group": "主节点、缓存与协议",
+      "name": "VitCacheDirectory",
+      "budget": 300,
+      "kind": "class",
+      "role": "VIT 缓存事实和临时占位资源",
+      "fields": [
+        "- CacheSnapshot current",
+        "- Map<CacheKey, Placement> pending"
+      ],
+      "methods": [
+        "+ snapshot(): CacheSnapshot",
+        "+ reserve(key, endpoint): Reservation",
+        "+ confirm(reservation): boolean",
+        "+ release(reservation): boolean"
+      ]
+    },
+    {
+      "group": "主节点、缓存与协议",
+      "name": "VitCacheSelector",
+      "budget": 250,
+      "kind": "class",
+      "role": "缓存亲和计算与占位流程；节点选择仍通过 VIT 策略",
+      "fields": [
+        "- VitCacheDirectory directory",
+        "- VitSelectionStrategy strategy"
+      ],
+      "methods": [
+        "+ select(request, candidates): Selection",
+        "+ reservePlacement(selection): Reservation",
+        "+ onPlacementResult(reservation, result): void"
+      ]
+    },
+    {
+      "group": "主节点、缓存与协议",
+      "name": "Failures",
+      "budget": 100,
+      "kind": "utility",
+      "role": "多项清理全部尝试，保留最初异常",
+      "fields": [],
+      "methods": [
+        "+ append(first, next): Throwable",
+        "+ run(failure, work): Throwable",
+        "+ close(resource): Throwable",
+        "+ rethrow(failure, detail): void"
+      ]
+    },
+    {
+      "group": "主节点、缓存与协议",
+      "name": "BatchIdGenerator",
+      "budget": 100,
+      "kind": "class",
+      "role": "同进程批次 ID；保留回拨和耗尽检查",
+      "fields": [
+        "- final long processIdentity",
+        "- LongSupplier clock",
+        "- long lastTime",
+        "- long sequence"
+      ],
+      "methods": ["+ nextId(): long", "+ forCurrentProcess(): BatchIdGenerator"]
+    }
+  ],
+  "relationships": [
+    ["RequestLifecycle", "RequestContext", "call", "状态转换"],
+    ["RequestLifecycle", "RequestRepository", "call", "精确身份"],
+    ["RequestLifecycle", "RequestScheduler", "call", "通知"],
+    ["RequestLifecycle", "DeliveryDispatcher", "call", "取消与清理"],
+    ["RequestContext", "RequestRoute", "own", "当前路由"],
+    ["RequestRepository", "RequestState", "call", "归档结果"],
+    ["DirectRequestScheduler", "RequestScheduler", "impl", ""],
+    ["QueuedRequestScheduler", "RequestScheduler", "impl", ""],
+    ["QueuedRequestScheduler", "PlacementQueue", "own", "等待"],
+    ["QueuedRequestScheduler", "GroupPlanner", "call", "选择前缀"],
+    ["QueuedRequestScheduler", "RequestWorkerSelector", "call", "路由"],
+    ["QueuedRequestScheduler", "DeliveryDispatcher", "call", "提交"],
+    ["DirectRequestScheduler", "RequestWorkerSelector", "call", "路由"],
+    ["DirectRequestScheduler", "DeliveryDispatcher", "call", "提交"],
+    ["OrderedRequestQueue", "PlacementQueue", "impl", ""],
+    ["PrefillActiveIndex", "PrefillRequestQueue", "impl", ""],
+    ["BuiltinGroupPlanner", "GroupPlanner", "impl", ""],
+    ["RequestTimeEstimation", "GroupPlanner", "call", "相同策略"],
+    ["RequestTimeEstimation", "PrefillRequestQueue", "call", "只读顺序快照"],
+    ["RequestWorkerSelector", "EndpointRegistry", "call", "快照及精确引用"],
+    ["RequestWorkerSelector", "PrefillSelectionStrategy", "call", "select"],
+    ["RequestWorkerSelector", "DecodeSelectionStrategy", "call", "select"],
+    ["RequestWorkerSelector", "VitSelectionStrategy", "call", "select"],
+    ["CostBasedPrefillStrategy", "PrefillSelectionStrategy", "impl", ""],
+    ["DecodeSelector", "DecodeSelectionStrategy", "impl", ""],
+    ["VitWorkerSelector", "VitSelectionStrategy", "impl", ""],
+    ["CostBasedPrefillStrategy", "RequestTimeEstimation", "call", "只读预测"],
+    ["PrefillEndpoint", "WorkerEndpoint", "extends", ""],
+    ["DecodeEndpoint", "WorkerEndpoint", "extends", ""],
+    ["EndpointRegistry", "WorkerEndpoint", "own", "generation"],
+    ["EndpointRegistry", "EndpointStats", "impl", ""],
+    ["PrefillEndpoint", "PrefillRequestQueue", "own", "原子成员变更"],
+    ["PrefillEndpoint", "PrefillTimePredictor", "own", "模型"],
+    ["DeliveryDispatcher", "Delivery", "own", "一次投递"],
+    ["DeliveryDispatcher", "DeliveryExecution", "call", "设施"],
+    ["DeliveryDispatcher", "RequestLifecycle", "call", "报告结果"],
+    ["DeliveryDispatcher", "PrefillEndpoint", "call", "预留 / 提交"],
+    ["DeliveryDispatcher", "DecodeEndpoint", "call", "精确资源操作"],
+    ["Delivery", "RequestRoute", "call", "成员身份"],
+    ["DefaultDecodePreemption", "DecodePreemption", "impl", ""],
+    ["PriorityDecodePreemptionPolicy", "DecodePreemptionPolicy", "impl", ""],
+    ["DefaultDecodePreemption", "DecodePreemptionPolicy", "call", "受害者选择"],
+    ["DefaultDecodePreemption", "RequestLifecycle", "call", "请求取消 / 结算"],
+    ["DefaultDecodePreemption", "DecodeEndpoint", "call", "证据及重新预留"],
+    ["DefaultDecodePreemption", "DeliveryDispatcher", "call", "远端取消"],
+    ["QueuedRequestScheduler", "DecodePreemption", "call", "资源回收"],
+    ["FormulaPredictor", "PrefillTimePredictor", "impl", ""],
+    ["LearningPredictor", "PrefillTimePredictor", "impl", ""],
+    ["RequestTimeEstimation", "PrefillTimePredictor", "call", "冻结 evaluator"],
+    ["EngineHealthReporter", "EndpointStats", "call", "只读"],
+    [
+      "DeliveryMetricsReporter",
+      "DeliveryExecution",
+      "call",
+      "仅 ExecutorStats"
+    ],
+    ["RequestLifecycle", "ExpirationTimer", "call", "deadline"],
+    ["RequestLifecycle", "ResponseCompletionExecutor", "call", "响应"],
+    ["RequestLifecycle", "RequestTaskPool", "call", "执行"],
+    ["ExpirationTimer", "ScheduledTaskTimer", "call", "经 TaskTimer"],
+    ["WorkerStatusSynchronizer", "GrpcWorkerStatusRunner", "call", "轮询"],
+    ["WorkerStatusSynchronizer", "GrpcCacheStatusCheckRunner", "call", "轮询"],
+    ["GrpcWorkerStatusRunner", "WorkerStatusRpcClient", "call", "RPC"],
+    ["GrpcCacheStatusCheckRunner", "WorkerStatusRpcClient", "call", "RPC"],
+    ["WorkerStatusSynchronizer", "WorkerAddressService", "call", "发现"],
+    ["MasterStatusService", "MasterStatusView", "impl", ""],
+    [
+      "ZookeeperMasterElectService",
+      "MasterStatusService",
+      "call",
+      "发布主节点"
+    ],
+    ["VitCacheSelector", "VitCacheDirectory", "call", "缓存事实 / 占位"],
+    ["VitCacheSelector", "VitSelectionStrategy", "call", "节点选择"],
+    ["DeliveryExecution", "BatchIdGenerator", "own", "批次标识"]
+  ],
+  "contracts": [
+    [
+      "RequestContext.Snapshot",
+      "只读快照",
+      "request generation；route identity；取消原因；发送阶段；deliveryId；响应；Prefill/Decode 结算进度；deadline",
+      "不能包含可写 Future、线程池、Endpoint 锁；快照数据只供读取。"
+    ],
+    [
+      "RequestContext.Cancellation / Deadlines",
+      "请求事实",
+      "取消原因与时间；request/inactivity/visibility 的 deadline token 和到期时间",
+      "deadline token 用于丢弃旧定时器回调；不能只靠 requestId。"
+    ],
+    [
+      "RequestContext.SendState",
+      "枚举",
+      "NOT_STARTED / MAY_HAVE_SENT / ACKNOWLEDGED / FINISHED",
+      "NOT_SENT 结果可确定本次未发送；异常不能自动倒退成 NOT_STARTED。取消独立于发送事实。"
+    ],
+    [
+      "RequestContext.ReleaseProgress",
+      "请求事实",
+      "prefillReleased；decodeReleased",
+      "只在对应精确资源释放成立后更新；取消标记不等于资源释放。"
+    ],
+    [
+      "RequestRoute.RouteIdentity",
+      "不可变身份",
+      "requestId；requestGeneration；routeId；Endpoint generation",
+      "新请求、新路由均不能复用旧操作身份；使用已有身份字段收敛，不再另建一层索引。"
+    ],
+    [
+      "PlacementQueue.PlacementItem / Scan",
+      "队列数据",
+      "精确请求身份；入队序号；排序字段 / bounded candidates；cursor；version",
+      "游标属于队列；调度器不读取默认实现节点。扫描不改请求生命周期，过期候选由 Scheduler 通知 Lifecycle。"
+    ],
+    [
+      "PrefillRequestQueue.QueueItem",
+      "只读输入接口",
+      "requestId()；priority()；enqueueSeq()；enqueuedAtMs()；expiresAtMs()；seqLen()；hitCache()",
+      "真实 route 和冻结预测输入使用同一字段契约；比较器不读取可变 Context。"
+    ],
+    [
+      "PrefillRequestQueue.Snapshot",
+      "不可变快照",
+      "version；orderedItems；Comparator<QueueItem>",
+      "比较器自身必须稳定；允许排序规则依赖的状态必须在快照中冻结。预测不得重新解释 priorityOrdering。"
+    ],
+    [
+      "PrefillRequestQueue.Factory",
+      "工厂接口",
+      "create(defaultOrder): PrefillRequestQueue",
+      "自定义实现可提供自己的规则；预测只读取实际队列 order，不再读取传入的默认值。"
+    ],
+    [
+      "GroupPlanner.Selection / GroupLimits",
+      "不可变选择",
+      "orderedPrefix；predictedMs；readyAt；reason / request、token、KV、窗口和预测上限",
+      "执行只接收策略选中的成员；不允许自行换人。GroupPlanner 只支持有序前缀。"
+    ],
+    [
+      "SelectionResult / PlacementAttempt",
+      "结果协议",
+      "策略：selected identity 或 failure/blocker + 原始原因；执行：原策略结果 + resource failure（如有）",
+      "策略结果保持原样；选中后资源竞争失败单独报告，不能把容量竞争重新包装成策略判断。归已有策略接口/Selector，不新增管理层。"
+    ],
+    [
+      "DecodeSelectionStrategy.CapacityReader",
+      "只读接口",
+      "read(expectedEndpointIdentity): CapacitySnapshot",
+      "精确身份失效返回 unavailable；不能获取或释放资源。只读入口不泄露 DecodeEndpoint。"
+    ],
+    [
+      "WorkerEndpoint.Use",
+      "现有 generation 使用权",
+      "精确 generation；一次性归还状态；close()",
+      "跨退休保护。已有的使用计数必须覆盖接受与交接窗口；不能因更名丢掉排空保障。"
+    ],
+    [
+      "PrefillEndpoint / DecodeEndpoint.Reservation",
+      "资源句柄",
+      "endpointGeneration；resource kind；reservationId；route 或 batch identity",
+      "不可变能力身份；消耗状态只在账本记录。批次预留绑定 batch，不绑定队头请求。"
+    ],
+    [
+      "PrefillEndpoint.RequestRecord / BatchRecord",
+      "资源记录",
+      "精确身份；RESERVED/COMMITTED；预测工作；Engine 进度；batch 成员关系",
+      "队列排序不是资源状态。批次预留尚无提交成员时仍占批次容量；request cancel 不直接替代 batch rollback。"
+    ],
+    [
+      "DecodeEndpoint.RequestRecord / PreemptionRecord",
+      "资源记录",
+      "精确 reservation；KV/slot 占用；投递事实；抢占 claim 与已确认清理事实",
+      "Request 取消与远端资源释放分别记录；未知发送保留必要占用。"
+    ],
+    [
+      "ReserveResult / CommitResult / ReleaseResult",
+      "资源结果",
+      "成功 + 精确身份；或容量不足、身份失效、generation 下线等失败原因",
+      "不携带 scheduler retry 动作；允许局部提交失败但不能修改已失效资源。具体枚举在实现前逐项覆盖现有结果语义。"
+    ],
+    [
+      "ReleaseEvidence",
+      "不可变证据",
+      "NOT_SENT；ENGINE_COMPLETED；REMOTE_CLEANED；GENERATION_RETIRED_WITH_PROOF；附精确操作身份",
+      "退役本身不意味着远端资源消失；代际清理必须有既有协议支持的证据。禁止 force=true。"
+    ],
+    [
+      "Delivery.Member",
+      "一次投递成员数据",
+      "RequestRoute route；deliveryId；本次 Decode dispatch reservation",
+      "每个成员独立身份；发送资格由 Context 持有。不复制取消状态和请求终态。"
+    ],
+    [
+      "Delivery.PrefixPolicy / SendMode",
+      "枚举",
+      "ALL_SELECTED / ORDERED_PREFIX；RPC_BATCH / ROUTE_PUBLICATION",
+      "兼容现有 BATCH 与 NON_BATCH 路由发布差异；不能强制所有模式走 RPC。"
+    ],
+    [
+      "Delivery.SendProgress / Result",
+      "操作事实",
+      "共享 RPC 是否开始、完成；逐成员 DELIVERED / NOT_SENT / REJECTED / UNCERTAIN；cause",
+      "共享 RPC 进度不替代 Context 逐请求状态；异步结果先完成后订阅也必须可见。"
+    ],
+    [
+      "DeliveryExecution.DeliveryPermit",
+      "设施句柄",
+      "容量额度；payload bytes；一次性归还；close()",
+      "close 只归还设施容量，不释放请求在 Engine 的资源。与请求资源句柄不能合并。"
+    ],
+    [
+      "DeliveryDispatcher.SubmissionResult",
+      "提交结果",
+      "实际成员前缀；blocked index；resource cause；投递标识",
+      "Scheduler 明确决定是否接受前缀；提交失败不负责选择下一请求。"
+    ],
+    [
+      "DecodePreemption.Attempt / Result",
+      "抢占操作",
+      "attemptId；incoming identity；victim identities；截止时间；完成结果；成功新预留",
+      "取消等待不等于资源回收；成功预留必须由当前 incoming request 接收或撤销。"
+    ],
+    [
+      "DecodePreemptionPolicy.Proposal",
+      "只读方案",
+      "目标 generation；受害者身份；预计回收量；成本及原因",
+      "方案不代表已获取受害者控制权；执行必须逐个验证。"
+    ],
+    [
+      "PrefillTimePredictor.Evaluator / Features",
+      "冻结模型与只读特征",
+      "modelIdentity；estimateRequest(input)；estimateBatch(features)；可选 append predictor",
+      "一次计算使用同一模型。并发学习不更改已捕获 evaluator；所有预测必须有限且非负。"
+    ],
+    [
+      "RequestTimeEstimation.Inputs",
+      "冻结预测输入",
+      "capture time；queue snapshot；committed work；model identity；容量与阻塞事实",
+      "只读；必须将真实队列已提交的工作与假想请求插入区分开，不能双重计数。"
+    ],
+    [
+      "RequestTaskPool.Executor / ScheduledTaskTimer.TaskTimer",
+      "设施接口",
+      "execute(owner, work)；schedule(task, delayMs): Cancellation",
+      "迁移现有 RequestTaskExecutor/TaskTimer 的窄契约，测试及自定义实现不依赖具体线程池；不得添加调度选择。"
+    ],
+    [
+      "ExpirationTimer.ScheduledDeadline",
+      "定时设施登记",
+      "精确 request identity；deadline token；Cancellation handle",
+      "旧任务取消与新任务注册竞争时，token 检查保证旧回调无效。"
+    ],
+    [
+      "ResponseCompletionExecutor.Registration",
+      "设施登记",
+      "被接受的完成任务；执行状态；排空计数",
+      "登记仅表示设施责任，不另存响应结果。选定响应与关闭竞争、回调重入必须通过测试后才可替换旧 ResponsePublication。"
+    ],
+    [
+      "各组件的 Stats / Counts",
+      "只读统计",
+      "当前数量、累计次数、延迟数值",
+      "累计值不能作为周期增量重复上报；后台订阅身份与生命周期遵循现有监控装配契约。"
+    ],
+    [
+      "QueuedRequestScheduler 调度字段",
+      "调度执行事实",
+      "停止标记；当前调度线程；通知版本；下一次调度期限",
+      "字段直接归调度器；通知版本防止调度中阻塞消耗唤醒许可，停止等待不得等待自身。"
+    ]
+  ],
+  "risks": [
+    [
+      "资源提交与发送资格",
+      "Context.beginDelivery 与 cancel 在同一请求锁下竞争：取消先成功则拒绝发送；发送资格先成功则保守视为可能发送，后续取消必须遵循远端 fencing/确认协议，不能先清本地资源。保留两个边界，不承诺跨 Prefill/Decode/Context 的全局原子提交。Endpoint 锁内禁止获取请求锁、RPC、预测或回调；取消后失败走统一未发送结算。"
+    ],
+    [
+      "Delivery 合并",
+      "只统一临时资源负责人和数据，不把逐请求身份合成一个 batchId；不新增每请求包装层，替换已有 Member/Claim 后需实测分配。"
+    ],
+    [
+      "RequestSignals 删除",
+      "完成先于订阅、重复完成、订阅与完成竞争均需验证；不为所有请求预建多份 Future。"
+    ],
+    [
+      "响应流程重写",
+      "必须保持现有对外 Future 的取消与完成语义。普通 CompletableFuture 替换不够；必要拦截逻辑归响应组件并计入预算。"
+    ],
+    [
+      "停服和下线",
+      "ApplicationLifecycle（现有 API 模块类，图外）仍拥有停服顺序；停止新工作后允许已登记工作的清理，不能先关闭回调所需执行器。"
+    ],
+    [
+      "依赖装配",
+      "Lifecycle、Scheduler、Dispatcher 有双向通知。配置先构造再一次性 bind，最后启动；bind 只能启动前执行且非可替换运行状态。不使用新的依赖袋绕过六参数限制。"
+    ],
+    [
+      "预算可行性",
+      "64 是顶层类型目标；附属协议与内部类型必须另外计数。合并后的 Endpoint 900 行、Dispatcher 850 行是待验证预算，不能用拆分隐藏超标。"
+    ],
+    [
+      "删除 SchedulerLoop",
+      "RequestScheduler 显式暴露 start/schedule/stop/awaitStopped 和事件入口；实现拥有触发方式，默认 QUEUE 直接拥有原有调度线程，planner 池继续执行选择和组批。停止必须取消唤醒并等待已接受的调度工作；不能等待自身。"
+    ],
+    [
+      "生命周期与请求状态",
+      "保留 RequestLifecycle 和 RequestContext；删除重复终态、通用 Granted/Denied 授权结果及无职责转发。Context 不调用 Scheduler、Endpoint、RPC、Future 回调；Lifecycle 在请求锁外执行这些副作用。"
+    ]
+  ]
+}

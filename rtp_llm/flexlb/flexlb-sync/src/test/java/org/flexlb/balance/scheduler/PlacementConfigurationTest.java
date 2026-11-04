@@ -31,9 +31,9 @@ import static org.mockito.Mockito.when;
 
 class PlacementConfigurationTest {
     static class RequestConsumer {
-        final RequestSchedulerEntry entry;
+        final RequestLifecycle entry;
 
-        RequestConsumer(@org.springframework.context.annotation.Lazy RequestSchedulerEntry entry) {
+        RequestConsumer(@org.springframework.context.annotation.Lazy RequestLifecycle entry) {
             this.entry = entry;
         }
     }
@@ -57,7 +57,17 @@ class PlacementConfigurationTest {
                         PlacementResult.rejected(
                                 Response.error(StrategyErrorType.NO_PREFILL_WORKER)));
         var batchDispatcher =
-                spy(new DeliveryDispatcher(null, service, mock(DeliveryMetricsReporter.class)));
+                spy(
+                        new DeliveryDispatcher(
+                                null,
+                                service,
+                                mock(DeliveryMetricsReporter.class),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.TaskTimer.class),
+                                new org.flexlb.balance.scheduler.PlacementConfiguration()
+                                        .decodeAdmissionCapacity(service),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
         RequestRepository repository;
         try (var spring = new AnnotationConfigApplicationContext()) {
             spring.setEnvironment(environment);
@@ -89,6 +99,7 @@ class PlacementConfigurationTest {
             assertSame(batchDispatcher, deliveryStrategy);
             assertEquals(dispatcherType, deliveryStrategy.mode());
             var scheduler = spring.getBean(RequestScheduler.class);
+            scheduler.start();
             if (dispatcherType == DispatcherConfig.Type.BATCH) {
                 assertInstanceOf(DeliveryDispatcher.class, deliveryStrategy);
                 assertInstanceOf(QueuedRequestScheduler.class, scheduler);
@@ -108,6 +119,7 @@ class PlacementConfigurationTest {
             scheduler.close();
             SchedulerTestSupport.lifecycle(scheduler).stopAdmissionsAndAwaitCompletion();
             spring.getBean(ExpirationTimer.class).close();
+            spring.getBean("deadlineTaskTimer", ScheduledTaskTimer.class).close();
             spring.getBean(RequestTaskPool.class).close();
             spring.getBean(ResponseCompletionExecutor.class).close();
             spring.getBean(ScheduledTaskTimer.class).close();

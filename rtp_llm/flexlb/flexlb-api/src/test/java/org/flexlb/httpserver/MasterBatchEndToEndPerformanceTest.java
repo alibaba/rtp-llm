@@ -3,7 +3,6 @@ package org.flexlb.httpserver;
 import ch.qos.logback.classic.Level;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.protobuf.ByteString;
 import io.grpc.CallOptions;
 import io.grpc.ConnectivityState;
 import io.grpc.Drainable;
@@ -109,7 +108,7 @@ import static org.mockito.Mockito.withSettings;
  *
  * <p>The exercised path is:
  * client call -> Netty Master gRPC server -> FlexlbServiceImpl -> RequestLifecycle
- * -> RequestLifecycle -> RequestExecution. BATCH continues through EngineGrpcClient
+ * -> RequestLifecycle -> EndpointWork. BATCH continues through EngineGrpcClient
  * to a Netty mock engine; NON_BATCH publishes the route decision to the frontend.
  * The worker capacities are fixed by the fixture, while worker selection uses the
  * production RequestWorkerSelector with cost-based Prefill and Decode selection.
@@ -999,6 +998,11 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             futures.add(new CompletableFuture<>());
         }
 
+        var planners =
+                (java.util.concurrent.ThreadPoolExecutor)
+                        ReflectionTestUtils.getField(
+                                ReflectionTestUtils.getField(scheduler, "owner"), "planners");
+        long plannerTasksBefore = planners.getTaskCount();
         long trafficStartEpochMs = System.currentTimeMillis();
         long trafficStartUptimeMs = ManagementFactory.getRuntimeMXBean().getUptime();
         long trafficStartNanos = System.nanoTime();
@@ -1019,6 +1023,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                     index,
                     firstRequestId + index,
                     targetQps > 0 ? nextIssueNanos : issueStartedNanos);
+            // The RPC owns the buffer until transport consumption; the load generator no longer
+            // needs to retain every issued payload until the entire traffic window completes.
+            serializedRequests[index] = null;
             long issueCompletedNanos = System.nanoTime();
             issueCallNanos += issueCompletedNanos - issueStartedNanos;
             if (targetQps > 0 && index + 1 < requestCount) {
@@ -1103,6 +1110,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 targetQps,
                 Arrays.stream(latencies).average().orElse(0.0) / 1_000_000.0);
         awaitSimulatedCompletions();
+        System.out.printf(
+                "FlexLB planner tasks: requests=%d tasks=%d%n",
+                requestCount, planners.getTaskCount() - plannerTasksBefore);
         return new TrafficResult(
                 requestCount * 1_000_000_000.0 / elapsedNanos,
                 percentileNanos(latencies, 0.50) / 1_000_000.0,
@@ -1156,11 +1166,33 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         }
     }
 
+    private record ReceivedBatch(MockPrefillWorker worker, long[] requestIds, int[] inputLengths) {}
+
+    private final java.util.concurrent.ConcurrentLinkedQueue<ReceivedBatch> receivedBatches =
+            new java.util.concurrent.ConcurrentLinkedQueue<>();
+
+    private void recordReceivedBatch(
+            MockPrefillWorker worker, EngineRpcService.EnqueueBatchRequestPB batch) {
+        int size = 0;
+        for (var slot : batch.getDpSlotsList()) size += slot.getRequestsCount();
+        long[] ids = new long[size];
+        int[] lengths = new int[size];
+        int index = 0;
+        for (var slot : batch.getDpSlotsList()) {
+            for (var external : slot.getRequestsList()) {
+                ids[index] = external.getInput().getRequestId();
+                lengths[index++] = external.getInput().getTokenIdsCount();
+            }
+        }
+        receivedBatches.add(new ReceivedBatch(worker, ids, lengths));
+    }
+
     private void registerAcceptedBatchCallback(MockPrefillWorker worker) {
         worker.getRpcService()
                 .onAcceptedBatch(
                         batch -> {
                             try {
+                                recordReceivedBatch(worker, batch);
                                 for (var slot : batch.getDpSlotsList()) {
                                     for (var external : slot.getRequestsList()) {
                                         var input = external.getInput();
@@ -1203,6 +1235,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                                 }
                             } catch (Throwable failure) {
                                 simulatedStatusFailure.compareAndSet(null, failure);
+                            } finally {
+                                worker.getRpcService().removeRecordedBatch(batch);
                             }
                         });
     }
@@ -1347,19 +1381,14 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         for (String address : endpointRegistry.endpointAddressSnapshot(RoleType.PREFILL)) {
             PrefillEndpoint endpoint =
                     (PrefillEndpoint) endpointRegistry.get(RoleType.PREFILL, address);
+            assertEquals(0, endpoint.stats().batchCount(), address + " retained batch credits");
             assertEquals(
                     0,
-                    endpoint.ownership.stats().batchCount(),
-                    address + " retained batch credits");
-            assertEquals(
-                    0,
-                    endpoint.ownership.stats().locallyOwnedRequests(),
+                    endpoint.stats().locallyOwnedRequests(),
                     address + " retained Prefill ownership");
             assertEquals(
                     0L,
-                    endpoint.ownership
-                            .admissionSummary(0, endpoint.requestLimit)
-                            .occupiedRequests(),
+                    endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests(),
                     address + " retained Prefill requests");
         }
         for (String address : endpointRegistry.endpointAddressSnapshot(RoleType.DECODE)) {
@@ -1401,14 +1430,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
     private long receivedEngineRequestCount() {
         long received = 0L;
-        for (MockPrefillWorker worker : allPrefillWorkers()) {
-            for (EngineRpcService.EnqueueBatchRequestPB batch :
-                    worker.getRpcService().getEnqueuedRequests()) {
-                for (EngineRpcService.EnqueueBatchDpSlotPB slot : batch.getDpSlotsList()) {
-                    received += slot.getRequestsCount();
-                }
-            }
-        }
+        for (var batch : receivedBatches) received += batch.requestIds().length;
         return received;
     }
 
@@ -1457,7 +1479,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                         .build();
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(requestId)
-                .setGenerateInput(ByteString.copyFrom(generateInput.toByteArray()))
+                .setGenerateInput(generateInput.toByteString())
                 .addAllBlockCacheKeys(template.blockCacheKeys())
                 .setSeqLen(template.seqLen())
                 .setRequestTimeMs(System.currentTimeMillis())
@@ -1601,6 +1623,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         latencyRecorder.reset();
         dispatchReasonCounts.clear();
         deliveryWaitHistogram.reset();
+        receivedBatches.clear();
         for (MockPrefillWorker worker : allPrefillWorkers()) {
             worker.resetRecords();
         }
@@ -1619,40 +1642,31 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         int totalRequests = 0;
         long totalInputTokens = 0;
         int batchCount = 0;
-        int activeWorkerCount = 0;
-        for (MockPrefillWorker worker : workers) {
-            List<EngineRpcService.EnqueueBatchRequestPB> workerBatches =
-                    worker.getRpcService().getEnqueuedRequests();
-            if (!workerBatches.isEmpty()) {
-                activeWorkerCount++;
+        Set<MockPrefillWorker> selectedWorkers = new HashSet<>(workers);
+        Set<MockPrefillWorker> activeWorkers = new HashSet<>();
+        for (ReceivedBatch batch : receivedBatches) {
+            if (!selectedWorkers.contains(batch.worker())) continue;
+            activeWorkers.add(batch.worker());
+            batchCount++;
+            int batchSize = batch.requestIds().length;
+            for (int index = 0; index < batchSize; index++) {
+                totalRequests++;
+                long requestId = batch.requestIds()[index];
+                assertTrue(
+                        requestIds.add(requestId), "mock engine received a duplicate request_id");
+                int inputLength = batch.inputLengths()[index];
+                int requestIndex = Math.toIntExact(requestId - firstRequestId);
+                RealRequestTemplate template =
+                        realRequestTemplates.get(
+                                Math.floorMod(requestIndex, realRequestTemplates.size()));
+                assertEquals(
+                        template.seqLen(),
+                        inputLength,
+                        "engine input length must match the log-derived schedule request");
+                inputLengths.add(inputLength);
+                totalInputTokens += inputLength;
             }
-            batchCount += workerBatches.size();
-            for (EngineRpcService.EnqueueBatchRequestPB batch : workerBatches) {
-                int batchSize = 0;
-                for (EngineRpcService.EnqueueBatchDpSlotPB slot : batch.getDpSlotsList()) {
-                    for (EngineRpcService.EnqueueBatchExternalInputPB request :
-                            slot.getRequestsList()) {
-                        batchSize++;
-                        totalRequests++;
-                        long requestId = request.getInput().getRequestId();
-                        assertTrue(
-                                requestIds.add(requestId),
-                                "mock engine received a duplicate request_id");
-                        int inputLength = request.getInput().getTokenIdsCount();
-                        int requestIndex = Math.toIntExact(requestId - firstRequestId);
-                        RealRequestTemplate template =
-                                realRequestTemplates.get(
-                                        Math.floorMod(requestIndex, realRequestTemplates.size()));
-                        assertEquals(
-                                template.seqLen(),
-                                inputLength,
-                                "engine input length must match the log-derived schedule request");
-                        inputLengths.add(inputLength);
-                        totalInputTokens += inputLength;
-                    }
-                }
-                maxBatchSize = Math.max(maxBatchSize, batchSize);
-            }
+            maxBatchSize = Math.max(maxBatchSize, batchSize);
         }
         double averageBatchSize = batchCount == 0 ? 0.0 : totalRequests / (double) batchCount;
         double averageInputTokens =
@@ -1663,7 +1677,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 averageBatchSize,
                 averageInputTokens,
                 inputLengths.size(),
-                activeWorkerCount,
+                activeWorkers.size(),
                 requestIds);
     }
 

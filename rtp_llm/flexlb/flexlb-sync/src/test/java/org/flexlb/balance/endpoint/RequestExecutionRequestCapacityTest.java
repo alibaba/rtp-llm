@@ -3,9 +3,9 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
-import org.flexlb.balance.scheduler.RequestExecution;
-import org.flexlb.balance.scheduler.RequestExecutionTestSupport;
+import org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork;
 import org.flexlb.balance.scheduler.RequestContext;
+import org.flexlb.balance.scheduler.RequestExecutionTestSupport;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigTestSupport;
@@ -62,13 +62,20 @@ class RequestExecutionRequestCapacityTest {
                 routes.add(route);
                 assertTrue(EndpointTestSupport.offer(fixture.endpoint, route));
             }
-            assertEquals(8, fixture.endpoint.ownership.captureQueue(20).items().size());
-            assertTrue(fixture.endpoint.ownership.requestCapacityAvailable(2, 2));
+            assertEquals(8, fixture.endpoint.captureQueue(20).items().size());
+            assertTrue(fixture.endpoint.requestCapacityAvailable(2, 2));
             verify(fixture.runtime.events(), times(0))
-                    .onQueueEvent(any(), org.mockito.Mockito.any(), org.mockito.Mockito.isNull());
+                    .rejectRoute(any(), org.mockito.Mockito.isNull());
+            verify(fixture.runtime.events(), times(0))
+                    .cancel(
+                            org.mockito.ArgumentMatchers.any(
+                                    org.flexlb.balance.scheduler.RequestContext.class),
+                            org.mockito.Mockito.anyLong(),
+                            org.mockito.ArgumentMatchers.eq(
+                                    org.flexlb.balance.scheduler.CancelReason.DEADLINE_EXCEEDED));
             assertFalse(fixture.endpoint.removeQueued(item(config, fixture.endpoint, 1L)));
             assertTrue(fixture.endpoint.removeQueued(routes.getFirst()));
-            assertEquals(7, fixture.endpoint.ownership.captureQueue(20).items().size());
+            assertEquals(7, fixture.endpoint.captureQueue(20).items().size());
         }
     }
 
@@ -92,15 +99,15 @@ class RequestExecutionRequestCapacityTest {
                         writers.submit(
                                 () -> {
                                     try (var handoff =
-                                            fixture.endpoint.commit(
-                                                    new PrefillState.CommitPlan(
-                                                            PrefillState.CommitKind.QUEUED,
-                                                            List.of(route),
-                                                            List.of(),
-                                                            null,
-                                                            new long[] {100L},
-                                                            null,
-                                                            System.currentTimeMillis()))) {
+                                            EndpointTestSupport.commitQueued(
+                                                    fixture.endpoint,
+                                                    org.flexlb.balance.scheduler.DeliveryTestSupport
+                                                            .queued(
+                                                                    List.of(route),
+                                                                    null,
+                                                                    new long[] {100L},
+                                                                    null,
+                                                                    System.currentTimeMillis()))) {
                                         return handoff == null ? null : route;
                                     }
                                 }));
@@ -111,30 +118,29 @@ class RequestExecutionRequestCapacityTest {
                 if (route != null) committed.add(route);
             }
             assertEquals(4, committed.size());
-            assertEquals(60, fixture.endpoint.ownership.captureQueue(100).items().size());
-            assertFalse(fixture.endpoint.ownership.requestCapacityAvailable(4, 1));
+            assertEquals(60, fixture.endpoint.captureQueue(100).items().size());
+            assertFalse(fixture.endpoint.requestCapacityAvailable(4, 1));
             var first = committed.getFirst();
             assertFalse(
-                    fixture.endpoint.release(
-                            null, item(config, fixture.endpoint, first.requestId())));
-            assertFalse(fixture.endpoint.ownership.requestCapacityAvailable(4, 1));
-            assertTrue(fixture.endpoint.release(null, first));
-            assertFalse(fixture.endpoint.release(null, first));
-            assertTrue(fixture.endpoint.ownership.requestCapacityAvailable(4, 1));
-            var next = fixture.endpoint.ownership.captureQueue(1).head();
+                    fixture.endpoint.releaseRequest(
+                            item(config, fixture.endpoint, first.requestId())));
+            assertFalse(fixture.endpoint.requestCapacityAvailable(4, 1));
+            assertTrue(fixture.endpoint.releaseRequest(first));
+            assertFalse(fixture.endpoint.releaseRequest(first));
+            assertTrue(fixture.endpoint.requestCapacityAvailable(4, 1));
+            var next = fixture.endpoint.captureQueue(1).head();
             try (var handoff =
-                    fixture.endpoint.commit(
-                            new PrefillState.CommitPlan(
-                                    PrefillState.CommitKind.QUEUED,
+                    EndpointTestSupport.commitQueued(
+                            fixture.endpoint,
+                            org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
                                     List.of(next),
-                                    List.of(),
                                     null,
                                     new long[] {100L},
                                     null,
                                     System.currentTimeMillis()))) {
                 assertNotNull(handoff);
             }
-            assertFalse(fixture.endpoint.ownership.requestCapacityAvailable(4, 1));
+            assertFalse(fixture.endpoint.requestCapacityAvailable(4, 1));
         }
     }
 
@@ -155,17 +161,16 @@ class RequestExecutionRequestCapacityTest {
                 assertTrue(fixture.endpoint.removeQueued(route));
             }
             assertNull(
-                    fixture.endpoint.commit(
-                            new PrefillState.CommitPlan(
-                                    PrefillState.CommitKind.QUEUED,
+                    EndpointTestSupport.commitQueued(
+                            fixture.endpoint,
+                            org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
                                     List.of(route),
-                                    List.of(),
                                     null,
                                     new long[] {100L},
                                     null,
                                     System.currentTimeMillis())));
-            assertTrue(fixture.endpoint.ownership.requestCapacityAvailable(1, 1));
-            assertEquals(0, fixture.endpoint.ownership.stats().batchCount());
+            assertTrue(fixture.endpoint.requestCapacityAvailable(1, 1));
+            assertEquals(0, fixture.endpoint.stats().batchCount());
         }
     }
 
@@ -189,7 +194,7 @@ class RequestExecutionRequestCapacityTest {
         when(predictor.evaluator()).thenReturn(mock(PrefillTimePredictor.Evaluator.class));
         ReflectionTestUtils.setField(endpoint, "predictor", predictor);
         var requests = EndpointTestSupport.requestRuntime();
-        RequestExecution runtime =
+        EndpointWork runtime =
                 RequestExecutionTestSupport.create(
                         "failed-reservation",
                         endpoint,
@@ -197,7 +202,7 @@ class RequestExecutionRequestCapacityTest {
                         EndpointTestSupport.routeStrategy(requests),
                         requests.events());
         IllegalStateException failure = new IllegalStateException("reservation failed");
-        runtime.start();
+        RequestExecutionTestSupport.start(runtime);
         try {
             RequestRoute previous = item(config, endpoint, 1L);
             RequestRoute incoming = org.mockito.Mockito.spy(item(config, endpoint, 2L, 90));
@@ -213,20 +218,21 @@ class RequestExecutionRequestCapacityTest {
                             })
                     .when(incoming)
                     .requestId();
-            assertTrue(runtime.offer(previous));
+            assertTrue(RequestExecutionTestSupport.offer(runtime, previous));
             assertSame(
                     failure,
-                    assertThrows(IllegalStateException.class, () -> runtime.offer(incoming)));
+                    assertThrows(
+                            IllegalStateException.class,
+                            () -> RequestExecutionTestSupport.offer(runtime, incoming)));
             assertEquals(List.of(previous), RequestExecutionTestSupport.capture(runtime).items());
             assertEquals(
                     1L,
                     RequestExecutionTestSupport.state(runtime)
                             .admissionSummary(0, 0L)
                             .occupiedRequests());
-            verify(requests.events(), times(0))
-                    .onQueueEvent(any(), org.mockito.Mockito.any(), org.mockito.Mockito.isNull());
+            verify(requests.events(), times(0)).rejectRoute(any(), org.mockito.Mockito.isNull());
             RequestRoute next = item(config, endpoint, 3L);
-            assertTrue(runtime.offer(next));
+            assertTrue(RequestExecutionTestSupport.offer(runtime, next));
             assertEquals(
                     List.of(previous, next), RequestExecutionTestSupport.capture(runtime).items());
             assertEquals(
@@ -249,7 +255,7 @@ class RequestExecutionRequestCapacityTest {
                         WorkerStatus.createDiscovered(
                                 RoleType.PREFILL, "test", "127.0.0.1", 8080, 9090, "test"));
         var requests = EndpointTestSupport.requestRuntime();
-        RequestExecution runtime =
+        EndpointWork runtime =
                 RequestExecutionTestSupport.create(
                         "retiring-publication",
                         endpoint,
@@ -267,18 +273,18 @@ class RequestExecutionRequestCapacityTest {
                             return true;
                         })
                 .when(endpoint)
-                .isGenerationRetiringOrRetired();
-        runtime.start();
+                .isRetired();
+        RequestExecutionTestSupport.start(runtime);
         try {
             RequestRoute item = item(config, endpoint, 1L);
-            assertFalse(runtime.offer(item));
+            assertFalse(RequestExecutionTestSupport.offer(runtime, item));
             assertEquals(
                     0L,
                     RequestExecutionTestSupport.state(runtime)
                             .admissionSummary(0, 0L)
                             .occupiedRequests());
             assertTrue(RequestExecutionTestSupport.capture(runtime).items().isEmpty());
-            assertFalse(endpoint.release(null, item));
+            assertFalse(endpoint.releaseRequest(item));
         } finally {
             assertNull(runtime.stopAndAwait());
         }
@@ -300,7 +306,8 @@ class RequestExecutionRequestCapacityTest {
                     org.flexlb.balance.scheduler.QueueExecutionSettings.capture(
                             config, org.flexlb.balance.planner.BuiltinGroupPlanner.from(config)),
                     org.flexlb.balance.scheduler.SchedulerTestSupport.queueDependencies(
-                            fixture.runtime.events(), config));
+                            fixture.runtime.events(), config),
+                    fixture.delivery);
             var worker = EndpointTestSupport.requestExecution(fixture.endpoint);
             assertTrue(org.mockito.Mockito.mockingDetails(worker).isMock());
             org.flexlb.balance.scheduler.DeliveryTestSupport.selectWith(
@@ -336,7 +343,7 @@ class RequestExecutionRequestCapacityTest {
         FlexlbConfig config = productionConfig();
         try (Fixture fixture = fixture(config)) {
             var items = new ArrayList<RequestRoute>();
-            var reservations = new ArrayList<PrefillState.BatchReservation>();
+            var reservations = new ArrayList<PrefillEndpoint.BatchReservation>();
             try {
                 for (long id = 1L; id <= 3L; id++) {
                     RequestRoute queued = item(config, fixture.endpoint, id);
@@ -349,28 +356,25 @@ class RequestExecutionRequestCapacityTest {
                 for (int index = 0; index < 2; index++) {
                     var result =
                             fixture.endpoint.reserveBatch(
-                                    items.get(index),
                                     100L + index,
                                     config.getDispatcher().getMaxInflightPerPrefillWorker());
-                    assertEquals(PrefillState.CapacityStatus.ACQUIRED, result.status());
-                    reservations.add(result.reservation());
+                    assertTrue(result.accepted());
+                    reservations.add(result.value());
                 }
                 assertEquals(
-                        PrefillState.CapacityStatus.CAPACITY_FULL,
-                        fixture.endpoint.reserveBatch(items.get(2), 102L, 2).status());
-                assertEquals(2, fixture.endpoint.ownership.progress().batchSlots());
-                var released = fixture.endpoint.ownership.release(reservations.removeFirst(), null);
-                assertEquals(PrefillState.RequestRelease.RESERVED, released.kind());
-                assertNotNull(released.generationHandoff());
-                released.generationHandoff().close();
-                assertEquals(1, fixture.endpoint.ownership.progress().batchSlots());
-                var replacement = fixture.endpoint.reserveBatch(items.get(2), 102L, 2);
-                assertEquals(PrefillState.CapacityStatus.ACQUIRED, replacement.status());
-                reservations.add(replacement.reservation());
+                        CapacityBoundary.Resource.PREFILL_BATCH,
+                        fixture.endpoint.reserveBatch(102L, 2).boundary().resource());
+                assertEquals(2, fixture.endpoint.queueCounters().batchSlots());
+                var released = fixture.endpoint.rollback(reservations.removeFirst());
+                assertTrue(released);
+                assertEquals(1, fixture.endpoint.queueCounters().batchSlots());
+                var replacement = fixture.endpoint.reserveBatch(102L, 2);
+                assertTrue(replacement.accepted());
+                reservations.add(replacement.value());
             } finally {
                 reservations.forEach(
-                        reservation -> assertTrue(fixture.endpoint.release(reservation, null)));
-                assertEquals(0, fixture.endpoint.ownership.progress().batchSlots());
+                        reservation -> assertTrue(fixture.endpoint.rollback(reservation)));
+                assertEquals(0, fixture.endpoint.queueCounters().batchSlots());
             }
         }
     }

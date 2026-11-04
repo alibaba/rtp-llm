@@ -73,6 +73,15 @@ public class EndpointRegistry implements EndpointStats {
         public RequestTimeEstimation.Inputs projectionInputs() {
             return endpoint.captureRouteProjectionInputs();
         }
+
+        public boolean requestCapacityAvailable() {
+            return endpoint.requestCapacityAvailable(endpoint.requestLimit, 1);
+        }
+
+        public org.flexlb.balance.strategy.PrefillSelectionStrategy.AdmissionSummary
+                admissionSummary(int priority) {
+            return endpoint.admissionSummary(priority, endpoint.requestLimit);
+        }
     }
 
     /** Owns one retiring status identity and its optional published endpoint. */
@@ -181,7 +190,7 @@ public class EndpointRegistry implements EndpointStats {
     }
 
     private final DeliveryMetricsReporter reporter;
-    private final DeliveryDispatcher dispatcher;
+    private final org.flexlb.config.DispatcherConfig.Type deliveryMode;
     private final PlacementAvailability placementAvailability;
     private final GroupPlanner grouping;
     private final PrefillRequestQueue.Factory workerQueues;
@@ -217,7 +226,7 @@ public class EndpointRegistry implements EndpointStats {
         this.configService = java.util.Objects.requireNonNull(configService, "configService");
         this.requests = java.util.Objects.requireNonNull(requests, "requests");
         this.reporter = java.util.Objects.requireNonNull(reporter, "reporter");
-        this.dispatcher = java.util.Objects.requireNonNull(dispatcher, "dispatcher");
+        this.deliveryMode = java.util.Objects.requireNonNull(dispatcher, "dispatcher").mode();
         this.grouping = Objects.requireNonNull(grouping);
         this.workerQueues = Objects.requireNonNull(workerQueues);
         this.placementAvailability =
@@ -642,7 +651,7 @@ public class EndpointRegistry implements EndpointStats {
                     new PrefillEndpoint(
                             status,
                             configService.loadBalanceConfig(),
-                            dispatcher,
+                            deliveryMode,
                             reporter,
                             placementAvailability,
                             grouping,
@@ -809,6 +818,23 @@ public class EndpointRegistry implements EndpointStats {
     public Map<String, WorkerEndpoint> endpointSnapshot(RoleType role) {
         Map<String, WorkerEndpoint> endpoints = endpointsByRole.get(role);
         return endpoints == null ? Map.of() : Map.copyOf(endpoints);
+    }
+
+    @Override
+    public Map<String, EndpointStats.Prefill> prefillStats() {
+        return statistics(RoleType.PREFILL, EndpointStats.Prefill.class);
+    }
+
+    @Override
+    public Map<String, EndpointStats.Decode> decodeStats() {
+        return statistics(RoleType.DECODE, EndpointStats.Decode.class);
+    }
+
+    private <T> Map<String, T> statistics(RoleType role, Class<T> type) {
+        var values = new java.util.HashMap<String, T>();
+        endpointSnapshot(role)
+                .forEach((address, endpoint) -> values.put(address, type.cast(endpoint)));
+        return Map.copyOf(values);
     }
 
     /** Cheap role counts; no endpoint or request snapshots are constructed. */

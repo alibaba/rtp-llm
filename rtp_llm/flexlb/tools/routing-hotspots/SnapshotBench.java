@@ -1,15 +1,17 @@
 import com.sun.management.ThreadMXBean;
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillActiveIndex;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.endpoint.PrefillRequestQueue;
+import org.flexlb.balance.planner.BuiltinGroupPlanner;
+import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.FormulaPredictor;
-import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PlacementAvailability;
-import org.flexlb.balance.scheduler.PrefillQueueRunner;
 import org.flexlb.balance.scheduler.QueueExecutionSettings;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
@@ -33,27 +35,25 @@ import java.util.concurrent.Future;
 
 import static org.mockito.Mockito.mock;
 
-/** Same source on both revisions; includes real PrefillQueueRunner snapshot capture. */
+/** Real endpoint snapshot capture, compiled unchanged against compatible revisions. */
 public class SnapshotBench {
     static final ThreadMXBean CPU = (ThreadMXBean) ManagementFactory.getThreadMXBean();
     static volatile long sink;
     static FormulaPredictor model;
-    static DeliveryDispatcher strategy;
     static final RequestTimeEstimationTestSupport.Probe PROBE =
             new RequestTimeEstimationTestSupport.Probe(
                     Long.MAX_VALUE, 0, 1, Long.MAX_VALUE, 2048, 0, 0);
 
     record Endpoint(
             PrefillEndpoint endpoint,
-            PrefillState state,
-            PrefillState.QueueGuard lock,
+            PrefillEndpoint state,
+            java.util.concurrent.locks.ReentrantLock lock,
             RequestRoute member) {
         void changeMembership() {
             lock.lock();
             try {
-                if (state.updateQueue(PrefillState.QueueChange.REMOVE, member, 0) != member
-                        || state.updateQueue(PrefillState.QueueChange.ENQUEUE, member, 0)
-                                != member) {
+                if (EndpointTestSupport.removeQueued(state, member) != member
+                        || EndpointTestSupport.enqueue(state, member) != member) {
                     throw new AssertionError("membership update failed");
                 }
             } finally {
@@ -91,50 +91,37 @@ public class SnapshotBench {
                 PrefillEndpoint.class.getDeclaredConstructor(
                         WorkerStatus.class,
                         FlexlbConfig.class,
-                        DeliveryDispatcher.class,
+                        DispatcherConfig.Type.class,
                         DeliveryMetricsReporter.class,
-                        PlacementAvailability.class);
+                        PlacementAvailability.class,
+                        GroupPlanner.class,
+                        PrefillRequestQueue.Factory.class);
         constructor.setAccessible(true);
         var endpoint =
                 constructor.newInstance(
                         WorkerStatus.createDiscovered(
                                 RoleType.PREFILL, null, "127.0.0.1", 8080, 9090, null),
                         config,
-                        strategy,
+                        DispatcherConfig.Type.BATCH,
                         mock(DeliveryMetricsReporter.class),
-                        new PlacementAvailability());
+                        new PlacementAvailability(),
+                        BuiltinGroupPlanner.from(config),
+                        (PrefillRequestQueue.Factory)
+                                order -> PrefillActiveIndex.ordered(16, order));
         Field predictorField = PrefillEndpoint.class.getDeclaredField("predictor");
         predictorField.setAccessible(true);
         predictorField.set(endpoint, model);
-        var state = endpoint.ownership;
-        var lock = state.queueGuard();
-        var enableQueue =
-                PrefillState.class.getDeclaredMethod("enableQueueLocked", Comparator.class);
-        enableQueue.setAccessible(true);
-        lock.lock();
-        try {
-            enableQueue.invoke(state, QueueExecutionSettings.queueOrder(true));
-        } finally {
-            lock.unlock();
-        }
-        var worker =
-                new PrefillQueueRunner(
-                        endpoint.ipPort(),
-                        endpoint,
-                        QueueExecutionSettings.capture(config),
-                        strategy,
-                        state);
-        Field batcherField = PrefillEndpoint.class.getDeclaredField("queueRunner");
-        batcherField.setAccessible(true);
-        batcherField.set(endpoint, worker);
+        var state = endpoint;
+        var lock = state.resourceLock();
+        endpoint.enableQueue(
+                QueueExecutionSettings.capture(config, BuiltinGroupPlanner.from(config)));
         var random = new Random(seed);
         RequestRoute last = null;
         lock.lock();
         try {
             for (int i = 0; i < depth; i++) {
                 last = request(config, i, 1 + i % 4, 100 + random.nextInt(4096));
-                if (state.updateQueue(PrefillState.QueueChange.ENQUEUE, last, 0) != last)
-                    throw new AssertionError();
+                if (EndpointTestSupport.enqueue(state, last) != last) throw new AssertionError();
             }
         } finally {
             lock.unlock();
@@ -234,9 +221,13 @@ public class SnapshotBench {
         var index =
                 PrefillActiveIndex.ordered(
                         depth,
-                        Comparator.comparingInt(RequestRoute::priority)
+                        Comparator.comparingInt(
+                                        org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
+                                                ::priority)
                                 .reversed()
-                                .thenComparingLong(RequestRoute::enqueueSeq));
+                                .thenComparingLong(
+                                        org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
+                                                ::enqueueSeq));
         var members = new ArrayList<RequestRoute>();
         for (int i = 0; i < depth; i++) {
             var item = request(config, i, i % 4, 100);
@@ -268,10 +259,6 @@ public class SnapshotBench {
 
     static void initialize(Path formula) throws Exception {
         model = new FormulaPredictor(Files.readString(formula));
-        var reporter = new DeliveryMetricsReporter(null);
-        var service = mock(org.flexlb.config.ConfigService.class);
-        org.mockito.Mockito.when(service.loadBalanceConfig()).thenReturn(config());
-        strategy = new DeliveryDispatcher(null, service, reporter);
     }
 
     public static void main(String[] args) throws Exception {

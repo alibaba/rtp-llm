@@ -19,7 +19,6 @@ import org.flexlb.mock.MockWorkerBehavior;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.WorkerStatusRpcClient;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.sync.runner.EngineSyncRunner;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -56,7 +55,7 @@ import static org.mockito.Mockito.when;
 /**
  * End-to-end validation of dynamic service discovery through the REAL master
  * pipeline: LocalServiceDiscovery (file re-read per poll) → WorkerAddressService
- * (domain → hosts, http→grpc conversion) → EngineSyncRunner (20 ms re-pull,
+ * (domain → hosts, http→grpc conversion) → Runnable (20 ms re-pull,
  * getOrCreateWorkerStatus, eviction of vanished entries) → GrpcWorkerStatusRunner
  * (gRPC status check) → EndpointRegistry.ensureEndpoint (routing candidate set)
  * → round-robin Router over the live endpoint set.
@@ -156,8 +155,8 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                             return thread;
                         });
 
-        EngineSyncRunner prefillSyncRunner =
-                new EngineSyncRunner(
+        Runnable prefillSyncRunner =
+                org.flexlb.sync.synchronizer.WorkerSyncTestSupport.runner(
                         MODEL_NAME,
                         // Share the fixture's directory so discovery retires and
                         // republishes the exact generations used by routing.
@@ -176,8 +175,8 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                         statusCheckExecutor,
                         statusCheckExecutor);
 
-        EngineSyncRunner decodeSyncRunner =
-                new EngineSyncRunner(
+        Runnable decodeSyncRunner =
+                org.flexlb.sync.synchronizer.WorkerSyncTestSupport.runner(
                         MODEL_NAME,
                         engineWorkerStatus,
                         workerAddressService,
@@ -241,7 +240,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         // The base fixture preinitializes A/B endpoint generations with a
         // placeholder group ("test-group"), while discovery reports group
         // "mock", so the FIRST sync pass retires those generations
-        // (EngineSyncRunner.getOrCreateWorkerStatus group-change path) and
+        // (Runnable.getOrCreateWorkerStatus group-change path) and
         // detaches both addresses from the EndpointRegistry — the routable
         // prefill set is briefly EMPTY until the next pass re-publishes A/B
         // from discovery. "Both polled" alone can pass inside that window:

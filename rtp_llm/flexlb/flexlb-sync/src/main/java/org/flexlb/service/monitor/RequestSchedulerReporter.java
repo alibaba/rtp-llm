@@ -1,17 +1,26 @@
 package org.flexlb.service.monitor;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRoutingView;
 import org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot;
+import org.flexlb.balance.endpoint.EndpointStats;
+import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.metric.SafeFlexMonitor;
+import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_CONFIRM_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_QPS;
@@ -204,6 +213,55 @@ public class RequestSchedulerReporter {
     }
 
     /** Report one snapshot: local reservations, accepted/running Engine tasks and Engine-facing load. */
+    /** Read committed victim facts; neither publication nor metric failure changes the attempt. */
+    public void reportPreemptionVictims(
+            long requestId,
+            int incomingPriority,
+            String endpoint,
+            String evictionCase,
+            List<DecodeRequestView> victims,
+            boolean cancelled) {
+        for (var victim : victims) {
+            String stage =
+                    !cancelled
+                            ? "decode_reserved"
+                            : victim.phase() == DecodeTaskPhase.RUNNING
+                                    ? "decode_running"
+                                    : "decode_cancel";
+            try {
+                reportVictim(victim.priority(), incomingPriority, stage, evictionCase);
+                reportVictimKvTokens(victim.priority(), stage, victim.kvTokens());
+                if (cancelled) reportEngineCancel(CancelEvent.CONFIRM, endpoint, victim.priority());
+            } catch (Throwable failure) {
+                Logger.warn(
+                        "[decode-capacity] failed to report victim: request_id={}",
+                        requestId,
+                        failure);
+            }
+            if (!cancelled) {
+                Logger.debug(
+                        "[decode-capacity] decode victim preempted: victim_id={} victim_priority={}"
+                                + " stage={} outcome={} kv_tokens={} incoming_id={} incoming_priority={} worker={}",
+                        victim.requestId(),
+                        victim.priority(),
+                        stage,
+                        "requeued",
+                        victim.kvTokens(),
+                        requestId,
+                        incomingPriority,
+                        endpoint);
+            }
+        }
+        reportEviction(EvictionEvent.COMMIT, incomingPriority, evictionCase, "success");
+    }
+
+    public void reportPreemptionCancelRequests(String endpoint, List<DecodeRequestView> victims) {
+        for (var victim : victims) {
+            reportEngineCancel(CancelEvent.REQUEST, endpoint, victim.priority());
+            reportCancel(victim.priority(), "PRIORITY_PREEMPTED");
+        }
+    }
+
     public void reportDecodePreemption(String endpoint, ResourceSnapshot view) {
         FlexMetricTags tags = FlexMetricTags.of("endpoint", endpoint);
         monitor.report(AUTO_TPM_DECODE_RESERVED_COUNT, tags, view.reservedCount());
@@ -211,5 +269,82 @@ public class RequestSchedulerReporter {
         monitor.report(AUTO_TPM_DECODE_RUNNING_COUNT, tags, view.runningCount());
         monitor.report(AUTO_TPM_DECODE_ACCEPTED_COUNT, tags, view.acceptedCount());
         monitor.report(AUTO_TPM_DECODE_ENGINE_LOAD, tags, view.routing().engineLoad());
+    }
+
+    /** Format captured queue values; this method never reads or changes live scheduling state. */
+    public static Map<String, Object> placementWait(
+            String role,
+            String group,
+            String endpoint,
+            int depth,
+            int[] counts,
+            Map<String, Object> decision) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("cause", role + " placement unavailable");
+        details.put("role", role);
+        if (group != null) details.put("group", group);
+        if (endpoint != null) details.put("endpoint", endpoint);
+        details.put("capturedAtMs", System.currentTimeMillis());
+        details.put("queueDepth", depth);
+        details.put("priorityCounts", priorityCounts(counts));
+        if (decision != null) details.put("decision", decision);
+        return Collections.unmodifiableMap(details);
+    }
+
+    private static Map<Integer, Integer> priorityCounts(int[] counts) {
+        Map<Integer, Integer> values = new LinkedHashMap<>();
+        for (int priority = 0; priority < counts.length; priority++) {
+            if (counts[priority] > 0) values.put(priority, counts[priority]);
+        }
+        return Collections.unmodifiableMap(values);
+    }
+
+    /** Frozen decision evidence; the log representation is materialized only on failure. */
+    @lombok.RequiredArgsConstructor(access = lombok.AccessLevel.PUBLIC)
+    public static final class QueueWaitSnapshot {
+        private final String endpoint;
+        private final String cause;
+        private final long capturedAtMs = System.currentTimeMillis();
+        private final EndpointStats.QueueCounts counters;
+        private final DecodeRoutingView decode;
+        private volatile Map<String, Object> snapshotValues;
+
+        public Map<String, Object> asMap() {
+            Map<String, Object> cached = snapshotValues;
+            if (cached != null) {
+                return cached;
+            }
+            int[] requestCountsByPriority = counters.byPriority();
+            int depth = java.util.Arrays.stream(requestCountsByPriority).sum();
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("cause", cause);
+            details.put("capturedAtMs", capturedAtMs);
+            details.put("endpoint", endpoint);
+            details.put("queueDepth", depth);
+            details.put("queueVersion", counters.version());
+            details.put("priorityCounts", priorityCounts(requestCountsByPriority));
+            details.put("prefillRequests", counters.outstandingRequests());
+            details.put("prefillBatchSlots", counters.batchSlots());
+            if (decode != null) {
+                details.put(
+                        "decode",
+                        Map.of(
+                                "endpoint",
+                                decode.address(),
+                                "version",
+                                decode.admissionVersion(),
+                                "engineLoad",
+                                decode.engineLoad(),
+                                "totalLoad",
+                                decode.totalLoad(),
+                                "kvTotal",
+                                decode.totalKv(),
+                                "kvAvailable",
+                                decode.placementUsage().hardKvAvailable()));
+            }
+            cached = Collections.unmodifiableMap(details);
+            snapshotValues = cached;
+            return cached;
+        }
     }
 }

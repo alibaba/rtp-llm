@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
@@ -13,20 +14,16 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -40,7 +37,6 @@ import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 /** Planning input changes are independent from locally owned request/work changes. */
@@ -69,9 +65,10 @@ class PrefillPlanningInputChangeTest {
         publishInitial(status, response(1, oldBatchTokens, oldSeqLen, oldAvailableKv, oldTotalKv));
         PrefillEndpoint endpoint = endpoint(config, status);
         var before = endpoint.captureRouteProjectionInputs();
-        var progress = endpoint.ownership.progress();
+        var progress = endpoint.progress();
         var worker = EndpointTestSupport.requestExecution(endpoint);
         clearInvocations(worker);
+        var changes = observeChanges(endpoint);
 
         apply(endpoint, response(2, newBatchTokens, newSeqLen, newAvailableKv, newTotalKv));
 
@@ -85,12 +82,12 @@ class PrefillPlanningInputChangeTest {
         assertEquals(expectedKvCapacity, after.queue().constraints().batchKvCapacity());
         assertEquals(
                 progress.ownershipVersion(),
-                endpoint.ownership.progress().ownershipVersion(),
+                endpoint.progress().ownershipVersion(),
                 "capacity-only updates do not create an ownership mutation");
         assertEquals(
                 progress.schedulingInputVersion() + 1,
-                endpoint.ownership.progress().schedulingInputVersion());
-        verify(worker, times(1)).wake();
+                endpoint.progress().schedulingInputVersion());
+        assertEquals(1, changes.get());
         assertEquals(
                 oldAvailableKv <= 0 && oldTotalKv > 0
                         ? 0
@@ -106,20 +103,21 @@ class PrefillPlanningInputChangeTest {
         publishInitial(status, response(1, 200, 100, 150, 100));
         PrefillEndpoint endpoint = endpoint(config, status);
         var before = endpoint.captureRouteProjectionInputs();
-        var progress = endpoint.ownership.progress();
+        var progress = endpoint.progress();
         var worker = EndpointTestSupport.requestExecution(endpoint);
         clearInvocations(worker);
+        var changes = observeChanges(endpoint);
 
         apply(endpoint, response(2, 200, 999, 200, 100));
 
         assertEquals(2, status.appliedStatusCursor().statusVersion());
         assertSame(
                 progress,
-                endpoint.ownership.progress(),
+                endpoint.progress(),
                 "equal normalized constraints need no wake revision");
         assertSame(before, endpoint.captureRouteProjectionInputs());
         verify(worker, never()).signal(anyBoolean());
-        verify(worker, never()).wake();
+        assertEquals(0, changes.get());
     }
 
     @Test
@@ -129,18 +127,25 @@ class PrefillPlanningInputChangeTest {
         WorkerStatus status = status();
         publishInitial(status, response(1, 1000, 1000, 0, 100));
         PrefillEndpoint endpoint = endpoint(config, status);
-        RequestExecution worker = EndpointTestSupport.requestExecution(endpoint);
+        EndpointWork worker = EndpointTestSupport.requestExecution(endpoint);
         CountDownLatch selected = new CountDownLatch(1);
         doAnswer(
                         invocation -> {
                             List<RequestRoute> candidates = invocation.getArgument(0);
                             RequestRoute exact = candidates.getFirst();
-                            assertTrue(worker.removeQueued(exact));
+                            assertTrue(worker.prefillEndpoint().removeQueued(exact));
                             selected.countDown();
                             return null;
                         })
                 .when(worker)
-                .processSelection(anyList(), anyString(), any(), any(), any());
+                .processSelection(
+                        anyList(),
+                        anyString(),
+                        any(),
+                        any(),
+                        any(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any());
         RequestContext context = new RequestContext(config);
         context.data()
                 .setRequest(Request.builder().requestId(51L).rawPriority(0).seqLen(10L).build());
@@ -155,11 +160,11 @@ class PrefillPlanningInputChangeTest {
                         null,
                         null,
                         System.currentTimeMillis());
-        worker.start();
+        RequestExecutionTestSupport.start(worker);
         try {
-            assertTrue(worker.offer(route));
-            awaitKvWait(worker, endpoint);
-            var queueBefore = endpoint.ownership.progress().queueVersion();
+            assertTrue(RequestExecutionTestSupport.offer(worker, route));
+            awaitKvWait(worker);
+            var queueBefore = endpoint.progress().queueVersion();
 
             apply(endpoint, response(2, 1000, 1000, 100, 100));
 
@@ -168,37 +173,19 @@ class PrefillPlanningInputChangeTest {
                     "KV recovery must wake the retained head before its request expiration");
             assertEquals(
                     queueBefore + 1,
-                    endpoint.ownership.progress().queueVersion(),
+                    endpoint.progress().queueVersion(),
                     "the only queue change is removing the resumed exact selection");
-            assertEquals(0, endpoint.ownership.progress().queueDepth());
+            assertEquals(0, endpoint.progress().queueDepth());
         } finally {
             assertNull(worker.stopAndAwait());
         }
     }
 
-    private static void awaitKvWait(RequestExecution worker, PrefillEndpoint endpoint) {
-        Condition condition =
-                (Condition)
-                        ReflectionTestUtils.getField(
-                                endpoint.ownership.queueGuard(), "stateChanged");
-        var lock =
-                (java.util.concurrent.locks.ReentrantLock)
-                        ReflectionTestUtils.getField(endpoint.ownership, "lock");
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-        while (System.nanoTime() < deadline) {
-            lock.lock();
-            try {
-                if ("Prefill KV capacity exhausted"
-                                .equals(worker.getLatestQueueWaitSnapshot().get("cause"))
-                        && lock.hasWaiters(condition)) {
-                    return;
-                }
-            } finally {
-                lock.unlock();
-            }
-            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
-        }
-        fail("worker did not enter the exact KV scheduling-input wait");
+    private static void awaitKvWait(EndpointWork worker) throws InterruptedException {
+        RequestProtocolTestSupport.awaitCondition(
+                () ->
+                        "Prefill KV capacity exhausted"
+                                .equals(worker.getLatestQueueWaitSnapshot().get("cause")));
     }
 
     private static FlexlbConfig config() {
@@ -212,6 +199,26 @@ class PrefillPlanningInputChangeTest {
     private static WorkerStatus status() {
         return WorkerStatus.createDiscovered(
                 RoleType.PREFILL, "planning-input-test", "127.0.0.1", 8080, 8090, null);
+    }
+
+    private static java.util.concurrent.atomic.AtomicInteger observeChanges(
+            PrefillEndpoint endpoint) {
+        var changes = new java.util.concurrent.atomic.AtomicInteger();
+        ((PlacementAvailability)
+                        org.springframework.test.util.ReflectionTestUtils.getField(
+                                endpoint, "placementAvailability"))
+                .addListener(
+                        new PlacementAvailability.Listener() {
+                            public void onAvailabilityChanged(PlacementKey key) {
+                                changes.incrementAndGet();
+                            }
+
+                            public void onEndpointChanged(
+                                    org.flexlb.balance.endpoint.WorkerEndpoint changed) {
+                                changes.incrementAndGet();
+                            }
+                        });
+        return changes;
     }
 
     private static PrefillEndpoint endpoint(FlexlbConfig config, WorkerStatus status) {

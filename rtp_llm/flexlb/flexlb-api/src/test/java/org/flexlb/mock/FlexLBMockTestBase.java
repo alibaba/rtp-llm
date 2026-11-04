@@ -12,7 +12,6 @@ import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestRoute;
-import org.flexlb.balance.scheduler.RequestSchedulerEntry;
 import org.flexlb.balance.scheduler.RequestSchedulerTestRuntime;
 import org.flexlb.balance.scheduler.RequestWorkerSelector;
 import org.flexlb.config.ConfigService;
@@ -81,7 +80,7 @@ public abstract class FlexLBMockTestBase {
 
     protected MockDecodeWorker mockDecodeWorker;
 
-    protected RequestSchedulerEntry scheduler;
+    protected RequestLifecycle scheduler;
 
     protected EndpointRegistry endpointRegistry;
 
@@ -349,7 +348,14 @@ public abstract class FlexLBMockTestBase {
      * Override when an integration fixture needs deterministic dispatcher sizing.
      */
     protected DeliveryDispatcher createDispatcher() {
-        return new DeliveryDispatcher(grpcClient, configService, reporter);
+        return new DeliveryDispatcher(
+                grpcClient,
+                configService,
+                reporter,
+                org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
+                new org.flexlb.balance.scheduler.PlacementConfiguration()
+                        .decodeAdmissionCapacity(configService),
+                org.mockito.Mockito.mock(org.flexlb.balance.scheduler.DeliveryExecution.class));
     }
 
     protected org.flexlb.balance.scheduler.RequestRepository requestRegistry() {

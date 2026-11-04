@@ -88,11 +88,13 @@ class RequestSchedulerModeTest {
                                 assertTrue(release.await(3, TimeUnit.SECONDS));
                                 throw new IllegalStateException("late selection failure");
                             });
-            var submitted = executor.submit(() -> SchedulerTestServices.entry(f.scheduler).submit(f.context));
+            var submitted =
+                    executor.submit(
+                            () -> SchedulerTestServices.entry(f.scheduler).submit(f.context));
             try {
                 assertTrue(selecting.await(3, TimeUnit.SECONDS));
-                SchedulerTestServices.entry(f.scheduler).cancel(
-                        f.context.data().getRequestId(), 0, CancelReason.CLIENT_CANCELLED);
+                SchedulerTestServices.entry(f.scheduler)
+                        .cancel(f.context.data().getRequestId(), 0, CancelReason.CLIENT_CANCELLED);
             } finally {
                 release.countDown();
             }
@@ -118,7 +120,10 @@ class RequestSchedulerModeTest {
                     .setGenerateInputPb(com.google.protobuf.ByteString.copyFromUtf8("input"));
             assertEquals(
                     StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
-                    SchedulerTestServices.entry(direct.scheduler).submit(laterQueue).join().getCode());
+                    SchedulerTestServices.entry(direct.scheduler)
+                            .submit(laterQueue)
+                            .join()
+                            .getCode());
             assertEquals(
                     0,
                     org.flexlb.balance.scheduler.SchedulerTestSupport.repository(direct.requests)
@@ -133,25 +138,25 @@ class RequestSchedulerModeTest {
                     .thenReturn(
                             PlacementResult.rejected(
                                     Response.error(StrategyErrorType.NO_PREFILL_WORKER)));
-            var future =
-                    SchedulerTestServices.entry(new DirectRequestScheduler(
-                                    queued.router,
-                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                                    queued.requests)
-                                            .newLifecycle(
-                                                    directConfig,
-                                                    SchedulingTestConfig.capacity(directConfig),
-                                                    org.mockito.Mockito.mock(
-                                                            org.flexlb.service
-                                                                    .RecentCacheKeyTraceReporter
-                                                                    .class))))
-                            .submit(laterDirect);
-            assertSame(future, laterDirect.data().getFuture());
-            assertEquals(
-                    StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
-                    future.get(3, TimeUnit.SECONDS).getCode());
-            verify(queued.router, times(1)).select(laterDirect, null);
-            assertEquals(0, RequestProtocolTestSupport.queuedCount(queued.queue));
+            try (var directScheduler =
+                    new DirectRequestScheduler(
+                            queued.router,
+                            SchedulerTestSupport.runtime(queued.requests)
+                                    .newLifecycle(
+                                            directConfig,
+                                            SchedulingTestConfig.capacity(directConfig),
+                                            mock(
+                                                    org.flexlb.service.RecentCacheKeyTraceReporter
+                                                            .class)))) {
+                SchedulerTestSupport.startScheduling(directScheduler);
+                var future = SchedulerTestServices.entry(directScheduler).submit(laterDirect);
+                assertSame(future, laterDirect.data().getFuture());
+                assertEquals(
+                        StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
+                        future.get(3, TimeUnit.SECONDS).getCode());
+                verify(queued.router, times(1)).select(laterDirect, null);
+                assertEquals(0, RequestProtocolTestSupport.queuedCount(queued.queue));
+            }
         }
     }
 
@@ -278,7 +283,9 @@ class RequestSchedulerModeTest {
                             router,
                             mock(DecodePreemption.class),
                             new PlacementAvailability());
-            scheduler = ((AbstractRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(requests));
+            scheduler =
+                    ((AbstractRequestScheduler)
+                            org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(requests));
             queue =
                     scheduler instanceof QueuedRequestScheduler queuedScheduler
                             ? queuedScheduler

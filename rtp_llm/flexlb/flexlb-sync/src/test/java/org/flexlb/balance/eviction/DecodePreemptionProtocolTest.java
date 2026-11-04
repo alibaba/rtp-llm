@@ -91,8 +91,9 @@ class DecodePreemptionProtocolTest {
                 .build();
     }
 
-    @Test
-    void commitsOnlyAfterEveryExactVictimIsTerminal() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void commitsOnlyAfterEveryExactVictimIsTerminal(boolean cancelledResult) throws Exception {
         Fixture fixture = fixture();
         RequestLifecycle requests = fixture.requests();
         DecodeEndpoint endpoint = fixture.endpoint();
@@ -130,7 +131,6 @@ class DecodePreemptionProtocolTest {
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests),
                         runtime.tasks(),
                         runtime.taskTimer(),
-                        runtime.signals(),
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(2L, 100L),
@@ -149,13 +149,23 @@ class DecodePreemptionProtocolTest {
                                 "test"));
 
         assertFalse(result.isDone());
+        assertFalse(acquirer.awaitIdle(System.nanoTime()));
+        if (cancelledResult) assertTrue(result.cancel(false));
+        assertFalse(
+                acquirer.awaitIdle(System.nanoTime()),
+                "cancelling a result is not resource settlement");
         firstTerminal.complete(new VictimResolution(11L, VictimResolution.Outcome.REQUEST_END));
-        assertFalse(result.isDone(), "one terminal cannot release two victims");
+        assertEquals(cancelledResult, result.isDone(), "one terminal cannot release two victims");
         secondTerminal.complete(new VictimResolution(12L, VictimResolution.Outcome.REQUEST_END));
 
-        assertTrue(result.get(1, TimeUnit.SECONDS).committed());
-        assertEquals(
-                new DecodeResources.ReservationHandle(9L, 20L, 100L), result.join().reservation());
+        assertTrue(acquirer.awaitIdle(System.nanoTime() + TimeUnit.SECONDS.toNanos(1L)));
+        if (cancelledResult) assertTrue(result.isCancelled());
+        else {
+            assertTrue(result.get(1, TimeUnit.SECONDS).committed());
+            assertEquals(
+                    new DecodeResources.ReservationHandle(9L, 20L, 100L),
+                    result.join().reservation());
+        }
         verify(engineClient)
                 .cancelAsync(
                         eq("10.0.0.1"),
@@ -189,11 +199,10 @@ class DecodePreemptionProtocolTest {
             default -> throw new AssertionError(completionKind);
         }
         PreemptionRegistration victimClaim = claim(fixture.requests(), 11L, resolution);
-        var signalInput = mock(org.flexlb.balance.scheduler.RequestSignals.class);
-        when(signalInput.preemption(victimClaim)).thenReturn(resolution);
-        when(signalInput.resolved(victimClaim))
+        victimClaim = org.mockito.Mockito.spy(victimClaim);
+        org.mockito.Mockito.doReturn(resolution).when(victimClaim).completion();
+        when(victimClaim.result())
                 .thenAnswer(call -> resolution.handle((result, failure) -> result).getNow(null));
-        org.mockito.Mockito.doReturn(signalInput).when(runtime).signals();
         when(fixture.requests().tryClaim(any(), anyLong())).thenReturn(Optional.of(victimClaim));
         var channel = mock(EngineGrpcClient.class);
         when(channel.cancelAsync(
@@ -212,7 +221,6 @@ class DecodePreemptionProtocolTest {
                         SchedulerTestSupport.repository(fixture.requests()),
                         runtime.tasks(),
                         runtime.taskTimer(),
-                        runtime.signals(),
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(1L, 100L),
@@ -259,7 +267,6 @@ class DecodePreemptionProtocolTest {
                         SchedulerTestSupport.repository(fixture.requests()),
                         runtime.tasks(),
                         runtime.taskTimer(),
-                        runtime.signals(),
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(1L, 100L),
@@ -320,7 +327,6 @@ class DecodePreemptionProtocolTest {
                                 fixture.requests()),
                         runtime.tasks(),
                         runtime.taskTimer(),
-                        runtime.signals(),
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(1L, 100L),
@@ -401,7 +407,6 @@ class DecodePreemptionProtocolTest {
                                 fixture.requests()),
                         runtime.tasks(),
                         runtime.taskTimer(),
-                        runtime.signals(),
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(2L, 100L),
@@ -455,7 +460,8 @@ class DecodePreemptionProtocolTest {
         verify(fixture.requests(), never())
                 .onPreemption(
                         second, new RequestLifecycle.PreemptionEvent(null, true, null, null, null));
-        verify(fixture.requests())
+        // The RPC failure and the attempt timeout both report uncertainty on the same identity.
+        verify(fixture.requests(), org.mockito.Mockito.times(2))
                 .onPreemption(
                         eq(second),
                         eq(
@@ -528,7 +534,6 @@ class DecodePreemptionProtocolTest {
                                 fixture.requests()),
                         runtime.tasks(),
                         runtime.taskTimer(),
-                        runtime.signals(),
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(2L, 100L),
@@ -564,7 +569,7 @@ class DecodePreemptionProtocolTest {
                 .onPreemption(first, phaseEvent(PreemptionCancelPhase.CANCEL_REQUESTED));
         switch (secondReply) {
             case FAILED ->
-                    verify(fixture.requests(), org.mockito.Mockito.timeout(2000))
+                    verify(fixture.requests(), org.mockito.Mockito.timeout(2000).times(2))
                             .onPreemption(second, phaseEvent(PreemptionCancelPhase.CANCEL_UNKNOWN));
             case NOT_FOUND ->
                     verify(fixture.requests(), org.mockito.Mockito.timeout(2000))
@@ -640,7 +645,6 @@ class DecodePreemptionProtocolTest {
                                 fixture.requests()),
                         runtime.tasks(),
                         runtime.taskTimer(),
-                        runtime.signals(),
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(1L, 100L),
@@ -693,7 +697,6 @@ class DecodePreemptionProtocolTest {
                                 fixture.requests()),
                         runtime.tasks(),
                         runtime.taskTimer(),
-                        runtime.signals(),
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(2L, 100L),
@@ -739,7 +742,6 @@ class DecodePreemptionProtocolTest {
                                 fixture.requests()),
                         runtime.tasks(),
                         runtime.taskTimer(),
-                        runtime.signals(),
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(2L, 100L),
@@ -783,7 +785,6 @@ class DecodePreemptionProtocolTest {
                                 fixture.requests()),
                         runtime.tasks(),
                         runtime.taskTimer(),
-                        runtime.signals(),
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(1L, 100L),
@@ -856,7 +857,6 @@ class DecodePreemptionProtocolTest {
                                 SchedulerTestSupport.repository(fixture.requests()),
                                 runtime.tasks(),
                                 runtime.taskTimer(),
-                                runtime.signals(),
                                 mock(RequestSchedulerReporter.class),
                                 SchedulingTestConfig.configService(
                                         SchedulingTestConfig.newConfig()),
@@ -902,7 +902,7 @@ class DecodePreemptionProtocolTest {
         var terminal = new CompletableFuture<VictimResolution>();
         var victimClaim = claim(fixture.requests(), 11L, terminal);
         when(fixture.requests().tryClaim(any(), anyLong())).thenReturn(Optional.of(victimClaim));
-        var deadline = mock(TaskTimer.ScheduledTask.class);
+        var deadline = mock(java.util.concurrent.Future.class);
         var protocolRuntime =
                 mock(
                         TaskTimer.class,
@@ -934,7 +934,6 @@ class DecodePreemptionProtocolTest {
                         SchedulerTestSupport.repository(fixture.requests()),
                         runtime.tasks(),
                         protocolRuntime,
-                        runtime.signals(),
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(1L, 100L),
@@ -963,7 +962,7 @@ class DecodePreemptionProtocolTest {
                 "late request resolution remains available to its resource owner");
         verify(fixture.endpoint(), never()).commitPreemption(anyLong());
         verify(fixture.endpoint()).abortPreemption(1L);
-        verify(deadline).cancel();
+        verify(deadline).cancel(false);
     }
 
     @ParameterizedTest
@@ -976,7 +975,7 @@ class DecodePreemptionProtocolTest {
                 mock(
                         org.flexlb.balance.scheduler.RequestContext.class,
                         org.mockito.Mockito.RETURNS_DEEP_STUBS);
-        when(context.data().getScheduler()).thenReturn(fixture.requests());
+        when(context.data().getLifecycle()).thenReturn(fixture.requests());
         var terminal = new CompletableFuture<VictimResolution>();
         var victimClaim = claim(fixture.requests(), 11L, terminal);
         when(fixture.requests().tryClaim(any(), anyLong())).thenReturn(Optional.of(victimClaim));
@@ -1031,7 +1030,6 @@ class DecodePreemptionProtocolTest {
                             SchedulerTestSupport.repository(fixture.requests()),
                             tasks,
                             runtime.taskTimer(),
-                            runtime.signals(),
                             mock(RequestSchedulerReporter.class),
                             SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                             new DecodeResources.AdmissionCapacity(1L, 100L),
@@ -1127,7 +1125,6 @@ class DecodePreemptionProtocolTest {
                         SchedulerTestSupport.repository(fixture.requests()),
                         runtime.tasks(),
                         runtime.taskTimer(),
-                        runtime.signals(),
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(1L, 100L),
@@ -1191,7 +1188,6 @@ class DecodePreemptionProtocolTest {
                                 SchedulerTestSupport.repository(fixture.requests()),
                                 runtime.tasks(),
                                 runtime.taskTimer(),
-                                runtime.signals(),
                                 mock(RequestSchedulerReporter.class),
                                 SchedulingTestConfig.configService(
                                         SchedulingTestConfig.newConfig()),
@@ -1250,7 +1246,7 @@ class DecodePreemptionProtocolTest {
                 mock(
                         org.flexlb.balance.scheduler.RequestContext.class,
                         org.mockito.Mockito.RETURNS_DEEP_STUBS);
-        when(context.data().getScheduler()).thenReturn(mock(RequestLifecycle.class));
+        when(context.data().getLifecycle()).thenReturn(mock(RequestLifecycle.class));
         return acquirer.preempt(context, command);
     }
 
@@ -1261,41 +1257,74 @@ class DecodePreemptionProtocolTest {
                 org.springframework.test.util.ReflectionTestUtils.getField(runtime, "dispatcher");
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void returnedClaimMustMatchTheExactVictimReservation(boolean differentGeneration)
+            throws Exception {
+        var f = fixture();
+        var original = claim(f.requests(), 11L, new CompletableFuture<>());
+        var stale =
+                new PreemptionRegistration(
+                        original.owner(),
+                        1L,
+                        new DecodeResources.ReservationHandle(
+                                differentGeneration ? 10L : 9L,
+                                11L,
+                                differentGeneration ? 101L : 999L),
+                        original.cancelTarget());
+        when(f.requests().tryClaim(any(), anyLong())).thenReturn(Optional.of(stale));
+        var channel = mock(EngineGrpcClient.class);
+        when(channel.cancelAsync(any(), anyInt(), any(), anyLong()))
+                .thenReturn(
+                        CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.ACCEPTED));
+        var preemption =
+                new DefaultDecodePreemption(
+                        dispatcher(channel),
+                        SchedulerTestSupport.repository(f.requests()),
+                        runtime.tasks(),
+                        runtime.taskTimer(),
+                        mock(RequestSchedulerReporter.class),
+                        SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
+                        new DecodeResources.AdmissionCapacity(1L, 100L),
+                        new PriorityDecodePreemptionPolicy());
+        var result =
+                preempt(
+                                preemption,
+                                new DefaultDecodePreemption.PreemptionCommand(
+                                        f.endpoint(),
+                                        incoming(),
+                                        org.flexlb.dao.SchedulingMetadata.explicit(
+                                                70, Long.MAX_VALUE),
+                                        List.of(victim(11L, 101L)),
+                                        50L,
+                                        50L,
+                                        () -> true,
+                                        "exact victim"))
+                        .get(1, TimeUnit.SECONDS);
+        assertFalse(result.committed());
+        assertTrue(result.detail().contains("mismatched_claim"));
+        verify(f.endpoint(), never())
+                .beginPreemption(
+                        anyLong(), anyList(), anyLong(), anyLong(), anyLong(), anyInt(), any());
+        verify(channel, never()).cancelAsync(any(), anyInt(), any(), anyLong());
+        verify(f.requests())
+                .onPreemption(
+                        stale, new RequestLifecycle.PreemptionEvent(null, true, null, null, null));
+    }
+
     private Fixture fixture() {
         RequestLifecycle requests = mock(RequestLifecycle.class);
         org.flexlb.balance.scheduler.SchedulerTestServices.bind(requests, runtime);
-        when(requests.onPreemption(any(), any())).thenReturn(true);
-        when(requests.onDeliveryFact(
-                        any(org.flexlb.balance.scheduler.ContextResult.DeliveryFact.class)))
+        when(requests.onPreemption(any(), any()))
                 .thenAnswer(
-                        invocation -> {
-                            var fact =
-                                    invocation.getArgument(
-                                            0,
-                                            org.flexlb.balance.scheduler.ContextResult.DeliveryFact
-                                                    .class);
-                            if (fact
-                                    instanceof
-                                    org.flexlb.balance.scheduler.ContextResult.PreemptionFact
-                                            preemption) {
-                                if (preemption.event().phase()
-                                        != org.flexlb.balance.preemption.PreemptionCancelPhase
-                                                .CANCEL_UNKNOWN) {
-                                    requests.onPreemption(preemption.attempt(), preemption.event());
-                                }
-                                return preemption.event().phase()
-                                                == org.flexlb.balance.preemption
-                                                        .PreemptionCancelPhase.NOT_FOUND_STALE
-                                        ? PreemptionRegistration.Reply.NOT_FOUND
-                                        : preemption.event().phase()
-                                                        == org.flexlb.balance.preemption
-                                                                .PreemptionCancelPhase
-                                                                .CANCEL_UNKNOWN
-                                                ? PreemptionRegistration.Reply.UNKNOWN
-                                                : PreemptionRegistration.Reply.WAITING;
-                            }
-                            return null;
-                        });
+                        call ->
+                                call.getArgument(1) == null
+                                        || call.getArgument(
+                                                                1,
+                                                                RequestLifecycle.PreemptionEvent
+                                                                        .class)
+                                                        .phase()
+                                                != PreemptionCancelPhase.CANCEL_UNKNOWN);
         DecodeEndpoint endpoint =
                 org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
         WorkerStatus status = mock(WorkerStatus.class);
@@ -1331,7 +1360,7 @@ class DecodePreemptionProtocolTest {
         when(context.data().getRequestId()).thenReturn(requestId);
         when(context.snapshot().delivery()).thenReturn(null);
         when(context.snapshot().cancellation()).thenReturn(null);
-        when(context.data().getScheduler()).thenReturn(owner);
+        when(context.data().getLifecycle()).thenReturn(owner);
         var reservation =
                 new DecodeResources.ReservationHandle(
                         9L, requestId, requestId == 11L ? 101L : 102L);
@@ -1341,7 +1370,7 @@ class DecodePreemptionProtocolTest {
         terminal.whenComplete(
                 (result, failure) -> {
                     if (failure == null) {
-                        runtime.signals().resolvePreemption(claim, result);
+                        claim.complete(result);
                     }
                 });
         return claim;
@@ -1416,7 +1445,6 @@ class DecodePreemptionProtocolTest {
                             SchedulerTestSupport.repository(f.requests()),
                             runtime.tasks(),
                             runtime.taskTimer(),
-                            runtime.signals(),
                             mock(RequestSchedulerReporter.class),
                             SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                             new DecodeResources.AdmissionCapacity(1L, 100L),
@@ -1484,7 +1512,7 @@ class DecodePreemptionProtocolTest {
         var release = new java.util.concurrent.CountDownLatch(1);
         var registered = new java.util.concurrent.CountDownLatch(1);
         var timeout = new java.util.concurrent.atomic.AtomicReference<Runnable>();
-        var cancellation = mock(TaskTimer.ScheduledTask.class);
+        var cancellation = mock(java.util.concurrent.Future.class);
         var context =
                 mock(
                         org.flexlb.balance.scheduler.RequestContext.class,
@@ -1521,7 +1549,6 @@ class DecodePreemptionProtocolTest {
                             SchedulerTestSupport.repository(f.requests()),
                             runtime.tasks(),
                             timing,
-                            runtime.signals(),
                             mock(RequestSchedulerReporter.class),
                             SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                             new DecodeResources.AdmissionCapacity(1L, 100L),
@@ -1563,7 +1590,7 @@ class DecodePreemptionProtocolTest {
                 verify(f.endpoint(), never()).commitPreemption(anyLong());
                 verify(f.endpoint()).abortPreemption(1L);
             }
-            verify(cancellation).cancel();
+            verify(cancellation).cancel(false);
         } finally {
             release.countDown();
         }
@@ -1599,7 +1626,6 @@ class DecodePreemptionProtocolTest {
                         SchedulerTestSupport.repository(f.requests()),
                         runtime.tasks(),
                         runtime.taskTimer(),
-                        runtime.signals(),
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(2L, 100L),
@@ -1658,7 +1684,7 @@ class DecodePreemptionProtocolTest {
         org.mockito.Mockito.doAnswer(
                         call -> {
                             timeout.set(call.getArgument(0));
-                            return mock(TaskTimer.ScheduledTask.class);
+                            return mock(java.util.concurrent.Future.class);
                         })
                 .when(timing)
                 .schedule(any(), anyLong());
@@ -1668,7 +1694,6 @@ class DecodePreemptionProtocolTest {
                         SchedulerTestSupport.repository(f.requests()),
                         runtime.tasks(),
                         timing,
-                        runtime.signals(),
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(1L, 100L),
@@ -1692,12 +1717,10 @@ class DecodePreemptionProtocolTest {
         assertTrue(coordinator != null);
         assertTrue(timeout.get() != null);
         @SuppressWarnings("unchecked")
-        var signals =
-                (java.util.concurrent.ConcurrentMap<
-                                PreemptionRegistration, CompletableFuture<VictimResolution>>)
+        var canonical =
+                (CompletableFuture<VictimResolution>)
                         org.springframework.test.util.ReflectionTestUtils.getField(
-                                runtime.signals(), "preemptions");
-        var canonical = signals.get(victimClaim);
+                                victimClaim, "completion");
         var factVisible = new java.util.concurrent.CountDownLatch(1);
         var resumeNotification = new java.util.concurrent.CountDownLatch(1);
         // CompletableFuture completes the result before running dependents. Pause propagation
@@ -1724,7 +1747,7 @@ class DecodePreemptionProtocolTest {
                                                         VictimResolution.Outcome.REQUEST_END)));
         try {
             assertTrue(factVisible.await(2, TimeUnit.SECONDS));
-            assertTrue(runtime.signals().resolved(victimClaim) != null);
+            assertTrue(victimClaim.result() != null);
             coordinator.run();
             while (!outcome.isDone()) {
                 var work = queued.poll(2, TimeUnit.SECONDS);
@@ -1770,9 +1793,15 @@ class DecodePreemptionProtocolTest {
         var timing =
                 new TaskTimer() {
                     @Override
-                    public ScheduledTask schedule(Runnable work, long delayMs) {
+                    public java.util.concurrent.Future<?> schedule(Runnable work, long delayMs) {
                         deadline.complete(work);
-                        return () -> deadline.obtrudeValue(null);
+                        return new CompletableFuture<Void>() {
+                            @Override
+                            public boolean cancel(boolean interrupt) {
+                                deadline.obtrudeValue(null);
+                                return super.cancel(interrupt);
+                            }
+                        };
                     }
                 };
         var f = fixture();
@@ -1804,7 +1833,6 @@ class DecodePreemptionProtocolTest {
                         SchedulerTestSupport.repository(f.requests()),
                         runtime.tasks(),
                         timing,
-                        runtime.signals(),
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(2L, 100L),
@@ -1841,7 +1869,7 @@ class DecodePreemptionProtocolTest {
         assertFalse(outcome.get(2, TimeUnit.SECONDS).committed());
         var unresolved = mixed ? second : first;
         assertFalse(
-                runtime.signals().preemption(unresolved).toCompletableFuture().isDone(),
+                unresolved.completion().toCompletableFuture().isDone(),
                 "ending the local wait must not manufacture remote cleanup evidence or cancel its"
                         + " signal");
         verify(f.endpoint(), never()).commitPreemption(anyLong());

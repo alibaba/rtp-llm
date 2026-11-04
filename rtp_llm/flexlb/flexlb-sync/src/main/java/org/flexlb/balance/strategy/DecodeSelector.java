@@ -47,6 +47,11 @@ public class DecodeSelector implements DecodeSelectionStrategy {
                 candidates = new int[size];
             }
         }
+
+        private void clear(int size) {
+            Arrays.fill(addresses, 0, Math.min(size, addresses.length), null);
+            inUse = false;
+        }
     }
 
     private final EndpointRoundRobin rotation = new EndpointRoundRobin();
@@ -78,71 +83,87 @@ public class DecodeSelector implements DecodeSelectionStrategy {
         scratch.inUse = true;
         try {
             scratch.prepare(snapshots.size());
-            var candidates = scratch.candidates;
-            Availability preferred = Availability.IMPOSSIBLE;
-            long largestKvBudget = 0L;
-            int candidateCount = 0;
-            for (int index = 0; index < snapshots.size(); index++) {
-                DecodeRoutingView view = snapshots.get(index);
-                scratch.addresses[index] = view.address();
-                Availability available = availability(request, view);
-                largestKvBudget = Math.max(largestKvBudget, capacity.kvBudget(view.totalKv()));
-                if (available.ordinal() < preferred.ordinal()) {
-                    preferred = available;
-                    candidateCount = 0;
-                }
-                if (available == preferred) {
-                    candidates[candidateCount++] = index;
-                }
-            }
-            if (preferred == Availability.IMPOSSIBLE) {
-                return PlacementResult.rejected(
-                        oversizedRequestFailure(request.getExpectedKvTokens(), largestKvBudget));
-            }
-            if (preferred == Availability.BUSY && direct) {
-                return classifyCapacityFailure(request, metadata, group, snapshots, reader);
-            }
-            double minimumCost = Double.POSITIVE_INFINITY;
-            int winners = 0;
-            var evaluator = costFormula.evaluator();
-            for (int index = 0; index < candidateCount; index++) {
-                DecodeRoutingView view = snapshots.get(candidates[index]);
-                double cost =
-                        evaluator.evaluate(
-                                view.totalLoad(),
-                                capacity.maxEngineRequests(),
-                                view.realKvUsed(),
-                                view.totalKv());
-                if (!Double.isFinite(cost)) {
-                    continue;
-                }
-                if (cost < minimumCost) {
-                    minimumCost = cost;
-                    winners = 0;
-                }
-                if (cost == minimumCost) {
-                    candidates[winners++] = candidates[index];
-                }
-            }
-            checkState(
-                    winners > 0,
-                    "Decode cost formula produced no finite score: %s",
-                    costFormula.expression());
-            int selected =
-                    rotation.next(RoleType.DECODE, group, scratch.addresses, candidates, winners);
-            checkState(selected >= 0, "Decode snapshot candidate disappeared");
-            return PlacementResult.success(snapshots.get(selected));
+            return selectCandidates(request, metadata, group, snapshots, reader, scratch);
         } finally {
-            Arrays.fill(
-                    scratch.addresses,
-                    0,
-                    Math.min(snapshots.size(), scratch.addresses.length),
-                    null);
-            scratch.inUse = false;
+            scratch.clear(snapshots.size());
             if (scratch == cached && scratch.addresses.length > MAX_CACHED_WORKERS) {
                 SCRATCH.remove();
             }
         }
+    }
+
+    private PlacementResult<DecodeRoutingView, PlacementKey> selectCandidates(
+            Request request,
+            SchedulingMetadata metadata,
+            String group,
+            List<DecodeRoutingView> snapshots,
+            CapacityReader reader,
+            Scratch scratch) {
+        var candidates = scratch.candidates;
+        Availability preferred = Availability.IMPOSSIBLE;
+        int candidateCount = 0;
+        for (int index = 0; index < snapshots.size(); index++) {
+            DecodeRoutingView view = snapshots.get(index);
+            scratch.addresses[index] = view.address();
+            Availability available = availability(request, view);
+            if (available.ordinal() < preferred.ordinal()) {
+                preferred = available;
+                candidateCount = 0;
+            }
+            if (available == preferred) {
+                candidates[candidateCount++] = index;
+            }
+        }
+        if (preferred == Availability.IMPOSSIBLE) {
+            return PlacementResult.rejected(
+                    oversizedRequestFailure(
+                            request.getExpectedKvTokens(),
+                            snapshots.stream()
+                                    .mapToLong(view -> capacity.kvBudget(view.totalKv()))
+                                    .max()
+                                    .orElse(0L)));
+        }
+        if (preferred == Availability.BUSY && direct) {
+            return classifyCapacityFailure(request, metadata, group, snapshots, reader);
+        }
+        int winners = selectLowestCost(snapshots, scratch.candidates, candidateCount);
+        int selected =
+                rotation.next(
+                        RoleType.DECODE, group, scratch.addresses, scratch.candidates, winners);
+        checkState(selected >= 0, "Decode snapshot candidate disappeared");
+        return PlacementResult.success(snapshots.get(selected));
+    }
+
+    /** Evaluate only the selected capacity class; preserve ties for round-robin selection. */
+    private int selectLowestCost(
+            List<DecodeRoutingView> snapshots, int[] candidates, int candidateCount) {
+        double minimumCost = Double.POSITIVE_INFINITY;
+        int winners = 0;
+        var evaluator = costFormula.evaluator();
+        for (int index = 0; index < candidateCount; index++) {
+            DecodeRoutingView view = snapshots.get(candidates[index]);
+            double cost =
+                    evaluator.evaluate(
+                            view.totalLoad(),
+                            capacity.maxEngineRequests(),
+                            view.realKvUsed(),
+                            view.totalKv());
+            if (!Double.isFinite(cost)) {
+                continue;
+            }
+            if (cost < minimumCost) {
+                minimumCost = cost;
+                winners = 0;
+            }
+            if (cost == minimumCost) {
+                candidates[winners++] = candidates[index];
+            }
+        }
+        checkState(
+                winners > 0,
+                "Decode cost formula produced no finite score: %s",
+                costFormula.expression());
+        return winners;
     }
 
     private PlacementResult<DecodeRoutingView, PlacementKey> classifyCapacityFailure(
@@ -160,21 +181,7 @@ public class DecodeSelector implements DecodeSelectionStrategy {
             if (snapshot == null) {
                 workerFailure = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
             } else {
-                var routing = snapshot.routing();
-                evidence.add(
-                        Map.of(
-                                "endpoint",
-                                view.address(),
-                                "version",
-                                routing.admissionVersion(),
-                                "engineLoad",
-                                routing.engineLoad(),
-                                "totalLoad",
-                                routing.totalLoad(),
-                                "kvTotal",
-                                routing.totalKv(),
-                                "kvAvailable",
-                                routing.placementUsage().hardKvAvailable()));
+                evidence.add(capacityEvidence(view.address(), snapshot.routing()));
                 workerFailure = classifyCapacityFailure(request, metadata, snapshot);
             }
             if (failure == null) {
@@ -188,10 +195,8 @@ public class DecodeSelector implements DecodeSelectionStrategy {
                 failure = workerFailure;
             }
         }
-        if (failure == null
-                || !uniformFailure
-                        && failure.getCode()
-                                != StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode()) {
+        if (!uniformFailure
+                && failure.getCode() != StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode()) {
             failure = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
         }
         return PlacementResult.blocked(
@@ -204,6 +209,16 @@ public class DecodeSelector implements DecodeSelectionStrategy {
                         System.currentTimeMillis(),
                         "decode",
                         List.copyOf(evidence)));
+    }
+
+    private static Map<String, Object> capacityEvidence(String address, DecodeRoutingView routing) {
+        return Map.of(
+                "endpoint", address,
+                "version", routing.admissionVersion(),
+                "engineLoad", routing.engineLoad(),
+                "totalLoad", routing.totalLoad(),
+                "kvTotal", routing.totalKv(),
+                "kvAvailable", routing.placementUsage().hardKvAvailable());
     }
 
     /** Classify only the dimensions that prevent this request from fitting. */
@@ -244,6 +259,13 @@ public class DecodeSelector implements DecodeSelectionStrategy {
         if (residual.fits()) {
             return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
         }
+        return classifyProtectedCapacity(residual, higher, same);
+    }
+
+    private static Response classifyProtectedCapacity(
+            DecodeResources.CapacityDeficit residual,
+            CapacityRelease higher,
+            CapacityRelease same) {
         CapacityRelease attributed = higher.plus(same);
         if (residual.requests() > attributed.requests()
                 || residual.hardKvTokens() > attributed.hardKvTokens()

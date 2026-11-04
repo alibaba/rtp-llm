@@ -89,10 +89,14 @@ class SubmissionShutdownDeadlockTest {
                                         try {
                                             activeResult.complete(
                                                     queued
-                                                            ? SchedulerTestServices.entry(f.scheduler).submit(
-                                                                    activeContext,
-                                                                    waitForExternalLock)
-                                                            : SchedulerTestServices.entry(f.scheduler).submit(activeContext));
+                                                            ? SchedulerTestServices.entry(
+                                                                            f.scheduler)
+                                                                    .submit(
+                                                                            activeContext,
+                                                                            waitForExternalLock)
+                                                            : SchedulerTestServices.entry(
+                                                                            f.scheduler)
+                                                                    .submit(activeContext));
                                         } catch (Throwable failure) {
                                             activeResult.completeExceptionally(failure);
                                         }
@@ -105,7 +109,9 @@ class SubmissionShutdownDeadlockTest {
                                     () -> {
                                         externalLock.lock();
                                         try {
-                                            lateResult.complete(SchedulerTestServices.entry(f.scheduler).submit(lateContext));
+                                            lateResult.complete(
+                                                    SchedulerTestServices.entry(f.scheduler)
+                                                            .submit(lateContext));
                                         } catch (Throwable failure) {
                                             lateResult.completeExceptionally(failure);
                                         } finally {
@@ -146,7 +152,7 @@ class SubmissionShutdownDeadlockTest {
                 // gate.
                 assertTrue(beforeAcceptingReturn.await(3, TimeUnit.SECONDS));
                 assertNull(
-                        lateContext.data().getScheduler(),
+                        lateContext.data().getLifecycle(),
                         "late submission has not registered yet");
 
                 f.runtime.requests().stopAccepting();
@@ -159,8 +165,7 @@ class SubmissionShutdownDeadlockTest {
                             "shutdown must await live DIRECT admission");
                 }
                 beginExternalWait.countDown();
-                RequestProtocolTestSupport.awaitCondition(
-                        () -> externalLock.hasQueuedThread(active));
+                RequestProtocolTestSupport.awaitCondition(externalLock::hasQueuedThreads);
                 resumeAcceptingReturn.countDown();
 
                 assertTrue(
@@ -171,7 +176,7 @@ class SubmissionShutdownDeadlockTest {
                         StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
                         lateResult.get(3, TimeUnit.SECONDS).get(3, TimeUnit.SECONDS).getCode());
                 assertNull(
-                        lateContext.data().getScheduler(),
+                        lateContext.data().getLifecycle(),
                         "stopped submission must remain unregistered");
                 activeResult.get(3, TimeUnit.SECONDS).get(3, TimeUnit.SECONDS);
                 shutdownResult.get(3, TimeUnit.SECONDS);
@@ -217,7 +222,7 @@ class SubmissionShutdownDeadlockTest {
                                     service,
                                     mock(EngineGrpcClient.class)));
             scheduler =
-                    PlacementConfiguration.create(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.createStartedScheduler(
                             runtime.newLifecycle(
                                     config,
                                     SchedulingTestConfig.capacity(config),
@@ -225,12 +230,10 @@ class SubmissionShutdownDeadlockTest {
                                             org.flexlb.service.RecentCacheKeyTraceReporter.class)),
                             config,
                             router,
-                            reporter,
                             mock(DecodePreemption.class),
                             new PlacementAvailability(),
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
-                            new OrderedRequestQueue(config.isPriorityOrdering()),
-                            runtime.queueDependencies);
+                            new OrderedRequestQueue(config.isPriorityOrdering()));
             runtime.registerScheduler(scheduler);
         }
 

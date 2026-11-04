@@ -7,7 +7,6 @@ import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.config.MeterFilter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.DeliveryExecution.DeliveryPermit;
 import org.flexlb.config.ConfigService;
@@ -35,8 +34,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 
-import static org.flexlb.balance.scheduler.ContextResult.Granted;
-import static org.flexlb.balance.scheduler.ContextResult.PlacementToken;
 import static org.flexlb.balance.scheduler.ContextResult.PreparationFailure;
 import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
 import static org.flexlb.balance.scheduler.ContextResult.TransportResult;
@@ -206,7 +203,7 @@ class DeliveryDispatcherTest {
                         .findFirst()
                         .orElseThrow();
         assertEquals(
-                first.ctx().data().getGenerateInput().toWireBuilder().getUnknownFields(),
+                first.ctx().data().getGenerateInput().toBuilder().getUnknownFields(),
                 firstSent.getUnknownFields());
         boolean replaced = enabled && validScheduleContext;
         assertEquals(
@@ -227,10 +224,7 @@ class DeliveryDispatcherTest {
                 secondSent.getRequestInfo().getTraceContext().getTracestate());
         assertEquals(
                 "vendor=one",
-                first.ctx()
-                        .data()
-                        .getGenerateInput()
-                        .toWireBuilder()
+                first.ctx().data().getGenerateInput().toBuilder()
                         .getRequestInfo()
                         .getTraceContext()
                         .getTracestate(),
@@ -471,7 +465,7 @@ class DeliveryDispatcherTest {
                                         org.mockito.ArgumentMatchers.eq(
                                                 org.flexlb.telemetry.FlexlbTrace.ENQUEUE_BATCH_MS),
                                         anyLong());
-                        assertEquals(DeliveryResult.Status.DELIVERED, result.status());
+                        assertEquals(Delivery.Result.Status.DELIVERED, result.status());
                         if (remaining.decrementAndGet() == 0) {
                             verified.complete(null);
                         }
@@ -515,7 +509,8 @@ class DeliveryDispatcherTest {
                             invoked.countDown();
                             return rpc;
                         });
-        var results = new CopyOnWriteArrayList<java.util.Map.Entry<RequestRoute, DeliveryResult>>();
+        var results =
+                new CopyOnWriteArrayList<java.util.Map.Entry<RequestRoute, Delivery.Result>>();
         submit(
                 List.of(first, second),
                 95L,
@@ -532,7 +527,7 @@ class DeliveryDispatcherTest {
         assertEquals(
                 List.of(first, second), results.stream().map(java.util.Map.Entry::getKey).toList());
         for (var result : results) {
-            assertEquals(DeliveryResult.Status.UNCERTAIN, result.getValue().status());
+            assertEquals(Delivery.Result.Status.UNCERTAIN, result.getValue().status());
             org.junit.jupiter.api.Assertions.assertSame(timeout, result.getValue().cause());
             assertFalse(
                     result.getValue().failed(),
@@ -665,16 +660,16 @@ class DeliveryDispatcherTest {
         CountDownLatch attempted = new CountDownLatch(2);
         var failures = new java.util.concurrent.ConcurrentHashMap<Long, Integer>();
         AtomicInteger uncertain = new AtomicInteger();
-        BiConsumer<RequestRoute, DeliveryResult> throwingCallback =
+        BiConsumer<RequestRoute, Delivery.Result> throwingCallback =
                 (exactItem, completion) -> {
                     RequestRoute item = assertInstanceOf(RequestRoute.class, exactItem);
-                    if (completion.status() == DeliveryResult.Status.NOT_SENT) {
+                    if (completion.status() == Delivery.Result.Status.NOT_SENT) {
                         failures.merge(item.requestId(), 1, Integer::sum);
                         attempted.countDown();
                         if (item.requestId() == 1L) {
                             throw new IllegalStateException("first callback failed");
                         }
-                    } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
+                    } else if (completion.status() == Delivery.Result.Status.UNCERTAIN) {
                         uncertain.incrementAndGet();
                     }
                 };
@@ -698,12 +693,12 @@ class DeliveryDispatcherTest {
         CountDownLatch attempted = new CountDownLatch(2);
         AtomicInteger failures = new AtomicInteger();
         var uncertain = new java.util.concurrent.ConcurrentHashMap<Long, Integer>();
-        BiConsumer<RequestRoute, DeliveryResult> throwingCallback =
+        BiConsumer<RequestRoute, Delivery.Result> throwingCallback =
                 (exactItem, completion) -> {
                     RequestRoute item = assertInstanceOf(RequestRoute.class, exactItem);
-                    if (completion.status() == DeliveryResult.Status.NOT_SENT) {
+                    if (completion.status() == Delivery.Result.Status.NOT_SENT) {
                         failures.incrementAndGet();
-                    } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
+                    } else if (completion.status() == Delivery.Result.Status.UNCERTAIN) {
                         uncertain.merge(item.requestId(), 1, Integer::sum);
                         attempted.countDown();
                         if (item.requestId() == 1L) {
@@ -793,7 +788,7 @@ class DeliveryDispatcherTest {
                 100,
                 "test",
                 (exact, result) -> {
-                    assertEquals(DeliveryResult.Status.PREFILL_REJECTED, result.status());
+                    assertEquals(Delivery.Result.Status.PREFILL_REJECTED, result.status());
                     callback.accept(exact, result);
                 });
 
@@ -846,7 +841,7 @@ class DeliveryDispatcherTest {
         }
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response.build()));
-        var results = new CopyOnWriteArrayList<DeliveryResult>();
+        var results = new CopyOnWriteArrayList<Delivery.Result>();
         var identities = new CopyOnWriteArrayList<RequestRoute>();
         CountDownLatch observed = new CountDownLatch(2);
         submit(
@@ -863,8 +858,8 @@ class DeliveryDispatcherTest {
         runtime.deliveries().awaitDeliveries();
         assertEquals(List.of(first, second), identities);
         assertEquals(2, results.size());
-        for (DeliveryResult result : results) {
-            assertEquals(DeliveryResult.Status.UNCERTAIN, result.status());
+        for (Delivery.Result result : results) {
+            assertEquals(Delivery.Result.Status.UNCERTAIN, result.status());
             List<String> expectedViolations =
                     violation.equals("multiple violations")
                             ? List.of(
@@ -930,16 +925,16 @@ class DeliveryDispatcherTest {
         AtomicInteger successes = new AtomicInteger();
         AtomicInteger failures = new AtomicInteger();
         AtomicInteger uncertain = new AtomicInteger();
-        BiConsumer<RequestRoute, DeliveryResult> throwingCallback =
+        BiConsumer<RequestRoute, Delivery.Result> throwingCallback =
                 (exactItem, completion) -> {
-                    if (completion.status() == DeliveryResult.Status.DELIVERED) {
+                    if (completion.status() == Delivery.Result.Status.DELIVERED) {
                         successes.incrementAndGet();
                         callbacksAttempted.countDown();
-                    } else if (completion.status() == DeliveryResult.Status.PREFILL_REJECTED) {
+                    } else if (completion.status() == Delivery.Result.Status.PREFILL_REJECTED) {
                         failures.incrementAndGet();
                         callbacksAttempted.countDown();
                         throw new IllegalStateException("callback failed after committing failure");
-                    } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
+                    } else if (completion.status() == Delivery.Result.Status.UNCERTAIN) {
                         uncertain.incrementAndGet();
                     }
                 };
@@ -1044,7 +1039,7 @@ class DeliveryDispatcherTest {
         RequestRoute second = createRequestRoute(2L, 500, 200, endpoint);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenReturn(CompletableFuture.completedFuture(ackResponse(91L, List.of(1L, 2L))));
-        var results = new CopyOnWriteArrayList<DeliveryResult>();
+        var results = new CopyOnWriteArrayList<Delivery.Result>();
         var identities = new CopyOnWriteArrayList<RequestRoute>();
         CountDownLatch observed = new CountDownLatch(2);
         submit(
@@ -1062,8 +1057,8 @@ class DeliveryDispatcherTest {
                 java.time.Duration.ofSeconds(5), runtime.deliveries()::awaitDeliveries);
         assertEquals(List.of(first, second), identities);
         assertEquals(2, results.size());
-        for (DeliveryResult result : results) {
-            assertEquals(DeliveryResult.Status.UNCERTAIN, result.status());
+        for (Delivery.Result result : results) {
+            assertEquals(Delivery.Result.Status.UNCERTAIN, result.status());
             assertInstanceOf(java.util.concurrent.RejectedExecutionException.class, result.cause());
         }
         verify(grpcClient).batchEnqueueAsync(anyString(), anyInt(), any());
@@ -1159,14 +1154,14 @@ class DeliveryDispatcherTest {
                         malformed
                                 ? com.google.protobuf.ByteString.copyFrom(new byte[] {(byte) 0xff})
                                 : com.google.protobuf.ByteString.EMPTY);
-        CompletableFuture<DeliveryResult> result = new CompletableFuture<>();
+        CompletableFuture<Delivery.Result> result = new CompletableFuture<>();
         submit(
                 List.of(item),
                 1L,
                 100,
                 "replacement",
                 (request, completion) -> result.complete(completion));
-        assertEquals(DeliveryResult.Status.NOT_SENT, result.get(5, TimeUnit.SECONDS).status());
+        assertEquals(Delivery.Result.Status.NOT_SENT, result.get(5, TimeUnit.SECONDS).status());
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
     }
 
@@ -1478,7 +1473,12 @@ class DeliveryDispatcherTest {
                 new DeliveryDispatcher(
                         grpcClient,
                         configService,
-                        new org.flexlb.service.monitor.DeliveryMetricsReporter(null));
+                        new org.flexlb.service.monitor.DeliveryMetricsReporter(null),
+                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
+                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                                .decodeAdmissionCapacity(configService),
+                        org.mockito.Mockito.mock(
+                                org.flexlb.balance.scheduler.DeliveryExecution.class));
         runtime =
                 new SchedulerTestServices(
                         new RequestRepository(),
@@ -1502,7 +1502,7 @@ class DeliveryDispatcherTest {
             long batchId,
             long prediction,
             String reason,
-            BiConsumer<RequestRoute, DeliveryResult> observer) {
+            BiConsumer<RequestRoute, Delivery.Result> observer) {
         submit(reservePermit(), items, batchId, prediction, reason, observer);
     }
 
@@ -1512,60 +1512,65 @@ class DeliveryDispatcherTest {
             long batchId,
             long prediction,
             String reason,
-            BiConsumer<RequestRoute, DeliveryResult> observer) {
+            BiConsumer<RequestRoute, Delivery.Result> observer) {
         for (var item : items) {
             org.flexlb.balance.scheduler.SchedulerTestServices.bind(
-                    item.ctx().data().getScheduler(), runtime);
-            DeliveryClaim claim = item.ctx().snapshot().delivery().identity();
-            if (claim.item() != item) {
-                claim =
-                        new DeliveryClaim(
-                                item.ctx(), claim.sequence(), item, claim.kind(), batchId);
-                when(item.ctx().data().getScheduler().tryStartSend(claim)).thenReturn(true);
+                    item.ctx().data().getLifecycle(), runtime);
+            Delivery.Member claim = item.ctx().snapshot().delivery().identity();
+            if (claim.route() != item) {
+                claim = DeliveryTestSupport.member(item, claim.kind(), batchId);
+                when(item.ctx().data().getLifecycle().tryStartSend(claim)).thenReturn(true);
             }
             when(item.ctx()
                             .data()
-                            .getScheduler()
-                            .claimDelivery(
-                                    org.mockito.ArgumentMatchers.same(item),
+                            .getLifecycle()
+                            .prepareDelivery(
+                                    org.mockito.ArgumentMatchers.argThat(
+                                            member -> member != null && member.route() == item),
                                     org.mockito.ArgumentMatchers.eq(
-                                            DeliveryClaimKind.BATCH_ENQUEUE),
-                                    anyLong(),
-                                    any()))
-                    .thenReturn(claim);
+                                            Delivery.SendMode.BATCH_ENQUEUE),
+                                    anyLong()))
+                    .thenReturn(
+                            new ContextResult.DeliveryFacts(
+                                    claim,
+                                    ContextResult.SendState.NOT_STARTED,
+                                    false,
+                                    null,
+                                    false,
+                                    false,
+                                    true,
+                                    System.currentTimeMillis()));
             org.mockito.Mockito.doAnswer(
                             call -> {
                                 observer.accept(
                                         item, ((TransportResult) call.getArgument(0)).result());
                                 return null;
                             })
-                    .when(item.ctx().data().getScheduler())
-                    .onDeliveryFact(org.mockito.ArgumentMatchers.isA(TransportResult.class));
+                    .when(item.ctx().data().getLifecycle())
+                    .onDeliveryResult(org.mockito.ArgumentMatchers.isA(TransportResult.class));
             org.mockito.Mockito.doAnswer(
                             call -> {
                                 var failed = (PreparationFailure) call.getArgument(0);
                                 observer.accept(
                                         item,
-                                        DeliveryResult.notSent(
+                                        Delivery.Result.notSent(
                                                 new IllegalStateException(failed.detail())));
                                 return null;
                             })
-                    .when(item.ctx().data().getScheduler())
-                    .onDeliveryFact(
+                    .when(item.ctx().data().getLifecycle())
+                    .onDeliveryResult(
                             argThat(
-                                    (ContextResult.DeliveryFact e) ->
+                                    (ContextResult.DeliveryEvidence e) ->
                                             e instanceof PreparationFailure failed
                                                     && failed.route() == item));
         }
-        DeliveryDispatcher.Batch batch;
+        Delivery batch;
         try {
             batch =
-                    new DeliveryDispatcher.Batch(
+                    DeliveryTestSupport.committed(
                             batchId,
-                            items.stream()
-                                    .map(item -> new DeliveryDispatcher.Member(item, null))
-                                    .toList(),
-                            new org.flexlb.balance.projection.WorkSnapshot(
+                            items.stream().map(item -> new Delivery.Member(item, null)).toList(),
+                            new org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot(
                                     0L, List.of(), List.of(), 0L),
                             prediction,
                             DeliveryTestSupport.EVALUATOR,
@@ -1629,7 +1634,7 @@ class DeliveryDispatcherTest {
                 "thread-contract",
                 (member, result) -> {
                     assertFalse(Thread.holdsLock(member.ctx()));
-                    assertEquals(DeliveryResult.Status.DELIVERED, result.status());
+                    assertEquals(Delivery.Result.Status.DELIVERED, result.status());
                     completed.complete(Thread.currentThread());
                 });
         assertTrue(invoked.await(5, TimeUnit.SECONDS));
@@ -1659,7 +1664,7 @@ class DeliveryDispatcherTest {
         when(cancelled
                         .ctx()
                         .data()
-                        .getScheduler()
+                        .getLifecycle()
                         .tryStartSend(cancelled.ctx().snapshot().delivery().identity()))
                 .thenReturn(false);
         var admittedSpan = mock(io.opentelemetry.api.trace.Span.class);
@@ -1683,7 +1688,7 @@ class DeliveryDispatcherTest {
                             return CompletableFuture.completedFuture(
                                     ackResponse(71L, List.of(702L)));
                         });
-        var results = new java.util.concurrent.ConcurrentHashMap<Long, DeliveryResult.Status>();
+        var results = new java.util.concurrent.ConcurrentHashMap<Long, Delivery.Result.Status>();
         var completed = new CountDownLatch(2);
         submit(
                 List.of(cancelled, admitted),
@@ -1702,8 +1707,8 @@ class DeliveryDispatcherTest {
                         .map(request -> request.getInput().getRequestId())
                         .toList());
         assertTrue(completed.await(2, TimeUnit.SECONDS));
-        assertEquals(DeliveryResult.Status.NOT_SENT, results.get(701L));
-        assertEquals(DeliveryResult.Status.DELIVERED, results.get(702L));
+        assertEquals(Delivery.Result.Status.NOT_SENT, results.get(701L));
+        assertEquals(Delivery.Result.Status.DELIVERED, results.get(702L));
         verify(admittedSpan).setAttribute(org.flexlb.telemetry.FlexlbTrace.BATCH_SIZE, 1L);
         verify(cancelledSpan, org.mockito.Mockito.never())
                 .setAttribute(
@@ -1727,7 +1732,7 @@ class DeliveryDispatcherTest {
             when(items.get(index)
                             .ctx()
                             .data()
-                            .getScheduler()
+                            .getLifecycle()
                             .tryStartSend(items.get(index).ctx().snapshot().delivery().identity()))
                     .thenReturn(accepted);
             if (accepted) {
@@ -1741,7 +1746,7 @@ class DeliveryDispatcherTest {
                             sent.complete(call.getArgument(2));
                             return CompletableFuture.completedFuture(ackResponse(73L, acceptedIds));
                         });
-        var results = new java.util.concurrent.ConcurrentHashMap<Long, DeliveryResult.Status>();
+        var results = new java.util.concurrent.ConcurrentHashMap<Long, Delivery.Result.Status>();
         var completed = new CountDownLatch(items.size());
         submit(
                 items,
@@ -1759,10 +1764,10 @@ class DeliveryDispatcherTest {
         for (int index = 0; index < items.size(); index++) {
             var expected =
                     (refusedMask & (1 << index)) == 0
-                            ? DeliveryResult.Status.DELIVERED
-                            : DeliveryResult.Status.NOT_SENT;
+                            ? Delivery.Result.Status.DELIVERED
+                            : Delivery.Result.Status.NOT_SENT;
             assertEquals(expected, results.get(items.get(index).requestId()));
-            verify(items.get(index).ctx().data().getScheduler())
+            verify(items.get(index).ctx().data().getLifecycle())
                     .tryStartSend(items.get(index).ctx().snapshot().delivery().identity());
         }
         if (acceptedIds.isEmpty()) {
@@ -1782,17 +1787,17 @@ class DeliveryDispatcherTest {
         var item = createRequestRoute(703L, 20L, 0L, createPrefillEndpoint());
         when(item.ctx()
                         .data()
-                        .getScheduler()
+                        .getLifecycle()
                         .tryStartSend(item.ctx().snapshot().delivery().identity()))
                 .thenReturn(false);
-        var completed = new CompletableFuture<DeliveryResult>();
+        var completed = new CompletableFuture<Delivery.Result>();
         submit(
                 List.of(item),
                 72L,
                 10L,
                 "cancelled",
                 (ignored, result) -> completed.complete(result));
-        assertEquals(DeliveryResult.Status.NOT_SENT, completed.get(2, TimeUnit.SECONDS).status());
+        assertEquals(Delivery.Result.Status.NOT_SENT, completed.get(2, TimeUnit.SECONDS).status());
         org.mockito.Mockito.verify(grpcClient, org.mockito.Mockito.never())
                 .batchEnqueueAsync(anyString(), anyInt(), any());
     }
@@ -1839,21 +1844,23 @@ class DeliveryDispatcherTest {
         var route =
                 SchedulingTestConfig.createRoute(
                         ctx, null, prefill, null, prefillEp, null, null, now);
-        var placement = (PlacementToken) ((Granted<?>) ctx.beginPlacement(null)).value();
+        var placement = (AdmissionHandle) ctx.beginPlacement(null);
         ctx.bindPlacement(placement, route, PublicationResult.PREPARED);
         ctx.bindPlacement(placement, route, PublicationResult.PUBLISHED);
-        ctx.completePlacement(placement, PublicationResult.PUBLISHED, now);
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                ctx,
+                observedRequest ->
+                        observedRequest.completePlacement(
+                                placement, PublicationResult.PUBLISHED, now));
         var delivery =
                 (ContextResult.DeliveryFacts)
-                        ((Granted<?>)
-                                        ctx.prepareDelivery(
-                                                route,
-                                                DeliveryClaimKind.BATCH_ENQUEUE,
-                                                requestId,
-                                                now))
-                                .value();
+                        ctx.prepareDelivery(
+                                new org.flexlb.balance.scheduler.Delivery.Member(route, null),
+                                Delivery.SendMode.BATCH_ENQUEUE,
+                                requestId,
+                                now);
         ctx.publishDelivery(delivery);
-        when(ctx.data().getScheduler().tryStartSend(delivery.identity())).thenReturn(true);
+        when(ctx.data().getLifecycle().tryStartSend(delivery.identity())).thenReturn(true);
         return route;
     }
 
@@ -1870,7 +1877,7 @@ class DeliveryDispatcherTest {
 
     // ---- Test callback ----
 
-    private static class TestCallback implements BiConsumer<RequestRoute, DeliveryResult> {
+    private static class TestCallback implements BiConsumer<RequestRoute, Delivery.Result> {
         final AtomicInteger successCount = new AtomicInteger(0);
         final AtomicInteger failureCount = new AtomicInteger(0);
         final AtomicInteger uncertainCount = new AtomicInteger(0);
@@ -1880,16 +1887,16 @@ class DeliveryDispatcherTest {
         volatile Throwable lastError;
 
         @Override
-        public void accept(RequestRoute exactItem, DeliveryResult completion) {
-            if (completion.status() == DeliveryResult.Status.DELIVERED) {
+        public void accept(RequestRoute exactItem, Delivery.Result completion) {
+            if (completion.status() == Delivery.Result.Status.DELIVERED) {
                 successCount.incrementAndGet();
                 successLatch.countDown();
-            } else if (completion.status() == DeliveryResult.Status.NOT_SENT
-                    || completion.status() == DeliveryResult.Status.PREFILL_REJECTED) {
+            } else if (completion.status() == Delivery.Result.Status.NOT_SENT
+                    || completion.status() == Delivery.Result.Status.PREFILL_REJECTED) {
                 lastError = completion.cause();
                 failureCount.incrementAndGet();
                 failureLatch.countDown();
-            } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
+            } else if (completion.status() == Delivery.Result.Status.UNCERTAIN) {
                 lastError = completion.cause();
                 uncertainCount.incrementAndGet();
                 uncertainLatch.countDown();
@@ -2043,9 +2050,9 @@ class DeliveryDispatcherTest {
         when(configService.loadBalanceConfig())
                 .thenThrow(new IllegalStateException("config unavailable before send"));
         CountDownLatch failed = new CountDownLatch(1);
-        BiConsumer<RequestRoute, DeliveryResult> failureCallback =
+        BiConsumer<RequestRoute, Delivery.Result> failureCallback =
                 (exactItem, completion) -> {
-                    if (completion.status() == DeliveryResult.Status.NOT_SENT) {
+                    if (completion.status() == Delivery.Result.Status.NOT_SENT) {
                         failed.countDown();
                     }
                 };
@@ -2142,9 +2149,9 @@ class DeliveryDispatcherTest {
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenAnswer(invocation -> pending);
         CountDownLatch uncertain = new CountDownLatch(1);
-        BiConsumer<RequestRoute, DeliveryResult> uncertainCallback =
+        BiConsumer<RequestRoute, Delivery.Result> uncertainCallback =
                 (exactItem, completion) -> {
-                    if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
+                    if (completion.status() == Delivery.Result.Status.UNCERTAIN) {
                         uncertain.countDown();
                     }
                 };
@@ -2198,9 +2205,9 @@ class DeliveryDispatcherTest {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
         CountDownLatch failed = new CountDownLatch(1);
-        BiConsumer<RequestRoute, DeliveryResult> failureCallback =
+        BiConsumer<RequestRoute, Delivery.Result> failureCallback =
                 (exactItem, completion) -> {
-                    if (completion.status() == DeliveryResult.Status.NOT_SENT) {
+                    if (completion.status() == Delivery.Result.Status.NOT_SENT) {
                         failed.countDown();
                     }
                 };

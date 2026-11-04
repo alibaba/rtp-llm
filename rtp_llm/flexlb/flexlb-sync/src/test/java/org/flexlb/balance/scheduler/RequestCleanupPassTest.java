@@ -8,20 +8,15 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.flexlb.balance.scheduler.ContextResult.Cancellation;
-import static org.flexlb.balance.scheduler.ContextResult.Claim;
 import static org.flexlb.balance.scheduler.ContextResult.CloseProgress;
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
 import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
-import static org.flexlb.balance.scheduler.ContextResult.GrantValue;
-import static org.flexlb.balance.scheduler.ContextResult.Granted;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
 import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
-import static org.flexlb.balance.scheduler.ContextResult.Rejected;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -53,8 +48,9 @@ class RequestCleanupPassTest {
         assertSame(closed.terminalRecord(), context.snapshot().terminalRecord());
     }
 
-    static <T extends GrantValue> T granted(Claim<T> claim) {
-        return ((Granted<T>) assertInstanceOf(Granted.class, claim)).value();
+    static <T> T requireValue(T value) {
+        assertNotNull(value);
+        return value;
     }
 
     static ContextResult.End ended(ContextResult.Snapshot snapshot) {
@@ -63,7 +59,7 @@ class RequestCleanupPassTest {
     }
 
     static CloseProgress released(boolean prefill, boolean decode) {
-        return new CloseProgress(false, prefill, decode, false, false);
+        return new CloseProgress(false, prefill, decode, false);
     }
 
     static RequestContext endingContext(long id) {
@@ -81,7 +77,7 @@ class RequestCleanupPassTest {
                                 false,
                                 false),
                         1001L));
-        context.completeClose(new CloseProgress(true, false, false, true, true), 1001L);
+        context.completeClose(new CloseProgress(true, false, false, true), 1001L);
         return context;
     }
 
@@ -89,21 +85,28 @@ class RequestCleanupPassTest {
     void completedRollbackAllowsAnotherRouteInTheSamePlacementScope() {
         var context = new RequestContext(mock(FlexlbConfig.class));
         context.register(990L, 1000L, 100_000L, 10_000L);
-        var operation = granted(context.beginPlacement(null));
+        var operation = requireValue(context.beginPlacement(null));
         var first = route(context, 990L);
-        granted(context.bindPlacement(operation, first, PublicationResult.PREPARED));
-        granted(context.bindPlacement(operation, first, PublicationResult.NOT_PUBLISHED));
+        org.junit.jupiter.api.Assertions.assertTrue(
+                context.bindPlacement(operation, first, PublicationResult.PREPARED));
+        org.junit.jupiter.api.Assertions.assertTrue(
+                context.bindPlacement(operation, first, PublicationResult.NOT_PUBLISHED));
         var alternate = route(context, 990L);
-        assertInstanceOf(
-                Rejected.class,
+        org.junit.jupiter.api.Assertions.assertFalse(
                 context.bindPlacement(operation, alternate, PublicationResult.PREPARED),
                 "unreleased acquisition cannot be overwritten");
-        granted(context.bindPlacement(operation, first, PublicationResult.ROLLBACK_COMPLETED));
+        org.junit.jupiter.api.Assertions.assertTrue(
+                context.bindPlacement(operation, first, PublicationResult.ROLLBACK_COMPLETED));
         assertNull(context.snapshot().route());
-        assertNull(context.snapshot().placement().acquired());
-        granted(context.bindPlacement(operation, alternate, PublicationResult.PREPARED));
-        granted(context.bindPlacement(operation, alternate, PublicationResult.PUBLISHED));
-        context.completePlacement(operation, PublicationResult.PUBLISHED, 1002L);
+        org.junit.jupiter.api.Assertions.assertTrue(
+                context.bindPlacement(operation, alternate, PublicationResult.PREPARED));
+        org.junit.jupiter.api.Assertions.assertTrue(
+                context.bindPlacement(operation, alternate, PublicationResult.PUBLISHED));
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.completePlacement(
+                                operation, PublicationResult.PUBLISHED, 1002L));
         assertSame(alternate, context.snapshot().route());
         assertTrue(context.snapshot().preparedDelivery());
         assertFalse(context.snapshot().close().prefillSettled());
@@ -114,9 +117,10 @@ class RequestCleanupPassTest {
     void samePlacementRollbackKeepsCancellationWithoutTheDiscardedRouteIdentity() {
         var context = new RequestContext(mock(FlexlbConfig.class));
         context.register(991L, 1000L, 100_000L, 10_000L);
-        var operation = granted(context.beginPlacement(null));
+        var operation = requireValue(context.beginPlacement(null));
         var route = route(context, 991L);
-        granted(context.bindPlacement(operation, route, PublicationResult.PREPARED));
+        org.junit.jupiter.api.Assertions.assertTrue(
+                context.bindPlacement(operation, route, PublicationResult.PREPARED));
         context.requestCancel(
                 new Cancellation(
                         0L,
@@ -125,16 +129,21 @@ class RequestCleanupPassTest {
                         1001L,
                         StrategyErrorType.REQUEST_CANCELLED,
                         "original cancellation"));
-        assertSame(route, context.snapshot().placement().pendingTerminal().route());
-        granted(context.bindPlacement(operation, route, PublicationResult.ROLLBACK_COMPLETED));
-        context.completePlacement(operation, PublicationResult.PUBLISHED, 1003L);
+        assertSame(route, context.snapshot().pendingEnd().route());
+        org.junit.jupiter.api.Assertions.assertTrue(
+                context.bindPlacement(operation, route, PublicationResult.ROLLBACK_COMPLETED));
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.completePlacement(
+                                operation, PublicationResult.PUBLISHED, 1003L));
         assertNull(
                 context.snapshot().pendingEnd().route(),
                 "completed rollback detaches only this scope's old identity");
         assertEquals("original cancellation", context.snapshot().pendingEnd().detail());
         ended(context.beginClose(context.snapshot().pendingEnd(), 1004L));
-        assertEquals(RequestState.Phase.CANCELLED, context.snapshot().outcome().outcome().phase());
-        context.completeClose(new CloseProgress(true, false, false, true, true), 1005L);
+        assertEquals(RequestState.Phase.CANCELLED, context.snapshot().outcome().phase());
+        context.completeClose(new CloseProgress(true, false, false, true), 1005L);
         assertEquals(Phase.CLOSED, context.snapshot().phase());
         assertEquals(CancelReason.CLIENT_CANCELLED, context.snapshot().cancellation().reason());
     }
@@ -144,21 +153,27 @@ class RequestCleanupPassTest {
         var context = openContext(992L);
         var route = context.snapshot().route();
         assertTrue(context.snapshot().preparedDelivery());
-        context.recordEngineEvidence(
-                new EngineEvidence(
-                        route,
-                        null,
-                        org.flexlb.dao.route.RoleType.PREFILL,
-                        EngineKind.FAILED,
-                        42L,
-                        "worker failed",
-                        1001L));
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.recordEngineEvidence(
+                                new EngineEvidence(
+                                        route,
+                                        null,
+                                        org.flexlb.dao.route.RoleType.PREFILL,
+                                        EngineKind.FAILED,
+                                        42L,
+                                        "worker failed",
+                                        1001L)));
         assertNull(context.snapshot().outcome(), "publication capacity precedes outcome ownership");
         assertNotNull(context.snapshot().pendingEnd());
         assertFalse(context.snapshot().preparedDelivery());
-        assertInstanceOf(
-                Rejected.class,
-                context.prepareDelivery(route, DeliveryClaimKind.BATCH_ENQUEUE, 1L, 1002L));
+        org.junit.jupiter.api.Assertions.assertNull(
+                context.prepareDelivery(
+                        new org.flexlb.balance.scheduler.Delivery.Member(route, null),
+                        Delivery.SendMode.BATCH_ENQUEUE,
+                        1L,
+                        1002L));
         assertNull(context.snapshot().delivery());
     }
 
@@ -166,9 +181,10 @@ class RequestCleanupPassTest {
     void realAdmissionFailureSupersedesUnclaimedShutdownEvidence() {
         var context = new RequestContext(mock(FlexlbConfig.class));
         context.register(993L, 1000L, 100_000L, 10_000L);
-        var placement = granted(context.beginPlacement(null));
+        var placement = requireValue(context.beginPlacement(null));
         var route = route(context, 993L);
-        granted(context.bindPlacement(placement, route, PublicationResult.PREPARED));
+        org.junit.jupiter.api.Assertions.assertTrue(
+                context.bindPlacement(placement, route, PublicationResult.PREPARED));
         assertNull(
                 context.beginClose(
                                 new EndEvidence(
@@ -184,7 +200,11 @@ class RequestCleanupPassTest {
                                 1001L)
                         .outcome());
         assertNull(context.snapshot().outcome());
-        context.completePlacement(placement, PublicationResult.FAILED, 1002L);
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.completePlacement(
+                                placement, PublicationResult.FAILED, 1002L));
         assertNull(context.snapshot().pendingEnd());
         ended(
                 context.beginClose(
@@ -210,9 +230,10 @@ class RequestCleanupPassTest {
             boolean notificationsFinished) {
         var context = new RequestContext(mock(FlexlbConfig.class));
         context.register(994L, 1000L, 100_000L, 10_000L);
-        var placement = granted(context.beginPlacement(null));
+        var placement = requireValue(context.beginPlacement(null));
         var originalRoute = route(context, 994L);
-        granted(context.bindPlacement(placement, originalRoute, PublicationResult.PREPARED));
+        org.junit.jupiter.api.Assertions.assertTrue(
+                context.bindPlacement(placement, originalRoute, PublicationResult.PREPARED));
         ended(
                 context.beginClose(
                         new EndEvidence(
@@ -227,34 +248,34 @@ class RequestCleanupPassTest {
                                 false),
                         1001L));
         var outcome = context.snapshot().outcome();
-        context.completeClose(
-                new CloseProgress(true, false, false, notificationsFinished, true), 1002L);
-        granted(
+        context.completeClose(new CloseProgress(true, false, false, notificationsFinished), 1002L);
+        org.junit.jupiter.api.Assertions.assertTrue(
                 context.bindPlacement(
                         placement, originalRoute, PublicationResult.ROLLBACK_COMPLETED));
         var acquired = route(context, 994L);
-        assertInstanceOf(
-                Rejected.class,
+        org.junit.jupiter.api.Assertions.assertFalse(
                 context.bindPlacement(placement, acquired, PublicationResult.PREPARED));
         var afterAcquisition = context.snapshot();
         assertSame(
                 acquired,
                 afterAcquisition.route(),
                 "real acquisition remains owned despite denying publication");
-        assertSame(acquired, afterAcquisition.placement().acquired());
         assertSame(outcome, afterAcquisition.outcome());
         assertEquals(notificationsFinished, afterAcquisition.close().notificationsDone());
         assertTrue(afterAcquisition.close().notificationsAttempted());
-        assertTrue(afterAcquisition.close().timersDone());
         assertFalse(
                 afterAcquisition.close().prefillSettled(),
                 "new acquisition reopens its physical proof");
         assertFalse(afterAcquisition.close().decodeSettled());
         assertNull(context.releaseReason(), "the producer still owns placement completion");
-        context.completePlacement(placement, PublicationResult.FAILED, 1003L);
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.completePlacement(
+                                placement, PublicationResult.FAILED, 1003L));
         if (!notificationsFinished) {
             assertSame(outcome, context.beginClose(null, 1004L).outcome());
-            context.completeClose(new CloseProgress(true, false, false, true, true), 1004L);
+            context.completeClose(new CloseProgress(true, false, false, true), 1004L);
         }
         assertEquals(
                 Phase.ENDING,
@@ -266,6 +287,40 @@ class RequestCleanupPassTest {
         assertFalse(context.snapshot().close().decodeSettled());
         context.completeClose(released(true, true), 1005L);
         assertEquals(Phase.CLOSED, context.snapshot().phase());
+        assertSame(outcome, context.snapshot().outcome());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void preparationFailureWinsPendingWorkerEndBeforePlacementFinishes(boolean workerFirst) {
+        var context = new RequestContext(mock(FlexlbConfig.class));
+        context.register(995L, 1000L, 100_000L, 10_000L);
+        var placement = requireValue(context.beginPlacement(null));
+        var route = route(context, 995L);
+        assertTrue(context.bindPlacement(placement, route, PublicationResult.PREPARED));
+        Runnable worker =
+                () ->
+                        context.recordEngineEvidence(
+                                new EngineEvidence(
+                                        route,
+                                        route.decodeReservation(),
+                                        org.flexlb.dao.route.RoleType.DECODE,
+                                        EngineKind.COMPLETED,
+                                        0L,
+                                        "worker complete",
+                                        1001L));
+        Runnable failed =
+                () ->
+                        context.recordDeliveryResult(
+                                new ContextResult.PreparationFailure(
+                                        null, route, "preparation failed", 1002L));
+        if (workerFirst) worker.run();
+        failed.run();
+        if (!workerFirst) worker.run();
+        var outcome = ended(context.beginClose(null, 1003L));
+        assertEquals(EndKind.DELIVERY_FAILURE, outcome.kind());
+        assertEquals(RequestState.Phase.FAILED, outcome.phase());
+        context.completePlacement(placement, PublicationResult.FAILED, 1004L);
         assertSame(outcome, context.snapshot().outcome());
     }
 
@@ -290,10 +345,16 @@ class RequestCleanupPassTest {
         when(route.decodeEp()).thenReturn(decode);
         when(route.decodeReservation())
                 .thenReturn(new DecodeResources.ReservationHandle(1L, id, 1L));
-        var placement = granted(context.beginPlacement(null));
-        granted(context.bindPlacement(placement, route, PublicationResult.PREPARED));
-        granted(context.bindPlacement(placement, route, PublicationResult.PUBLISHED));
-        context.completePlacement(placement, PublicationResult.PUBLISHED, 1000L);
+        var placement = requireValue(context.beginPlacement(null));
+        org.junit.jupiter.api.Assertions.assertTrue(
+                context.bindPlacement(placement, route, PublicationResult.PREPARED));
+        org.junit.jupiter.api.Assertions.assertTrue(
+                context.bindPlacement(placement, route, PublicationResult.PUBLISHED));
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.completePlacement(
+                                placement, PublicationResult.PUBLISHED, 1000L));
         return context;
     }
 }

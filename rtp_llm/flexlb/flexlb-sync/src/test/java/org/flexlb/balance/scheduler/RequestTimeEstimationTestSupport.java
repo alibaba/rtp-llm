@@ -2,9 +2,9 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -47,7 +47,8 @@ public final class RequestTimeEstimationTestSupport {
 
                 @Override
                 public double predictBatchMs(
-                        org.flexlb.balance.prediction.PrefillBatchFeatures features) {
+                        org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures
+                                features) {
                     return features.items().stream()
                             .mapToLong(item -> estimateMs(item.seqLen(), item.hitCache()))
                             .sum();

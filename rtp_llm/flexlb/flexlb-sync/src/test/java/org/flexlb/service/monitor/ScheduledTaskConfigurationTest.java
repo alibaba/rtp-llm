@@ -3,7 +3,7 @@ package org.flexlb.service.monitor;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
-import org.flexlb.sync.schedule.WorkerRetirementCleaner;
+import org.flexlb.sync.synchronizer.WorkerStatusSynchronizer;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
@@ -53,11 +53,16 @@ class ScheduledTaskConfigurationTest {
                         });
         ScheduledThreadPoolExecutor scheduler;
         try (var context = new AnnotationConfigApplicationContext()) {
-            context.register(ScheduledTaskConfiguration.class);
+            context.register(Scheduling.class);
             context.registerBean("configService", ConfigService.class, () -> service);
             context.registerBean(EndpointRegistry.class, () -> registry);
             context.registerBean(CacheAwareService.class, () -> mock(CacheAwareService.class));
-            context.registerBean(WorkerRetirementCleaner.class);
+            context.registerBean(
+                    org.flexlb.sync.synchronizer.WorkerStatusSynchronizer.class,
+                    () ->
+                            org.flexlb.sync.synchronizer.WorkerSyncTestSupport.retirements(
+                                    context.getBean(CacheAwareService.class),
+                                    context.getBean(EndpointRegistry.class)));
             if (legacyMetricBean) {
                 context.registerBean(
                         "taskMetricScheduler",
@@ -85,7 +90,7 @@ class ScheduledTaskConfigurationTest {
                                                                             item.getTask()
                                                                                     .getRunnable())
                                                                     .getTarget()
-                                                            instanceof WorkerRetirementCleaner)
+                                                            instanceof WorkerStatusSynchronizer)
                                     .findFirst()
                                     .orElseThrow()
                                     .getTask());
@@ -94,5 +99,14 @@ class ScheduledTaskConfigurationTest {
             assertTrue(worker.get().getName().startsWith("task-scheduler"));
         }
         assertTrue(scheduler.isShutdown(), "Spring owns the selected executor lifecycle");
+    }
+
+    @org.springframework.context.annotation.Configuration
+    @org.springframework.scheduling.annotation.EnableScheduling
+    static class Scheduling {
+        @org.springframework.context.annotation.Bean(name = "taskScheduler")
+        ScheduledThreadPoolExecutor taskScheduler() {
+            return new org.flexlb.balance.scheduler.PlacementConfiguration().taskScheduler();
+        }
     }
 }

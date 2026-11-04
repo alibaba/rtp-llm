@@ -1,7 +1,7 @@
 package org.flexlb.httpserver;
 
 import org.flexlb.service.grace.ApplicationLifecycle;
-import org.flexlb.service.grace.GracefulLifecycleReporter;
+import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -30,7 +30,7 @@ class AppStateHookServerTest {
 
     @Mock private ApplicationLifecycle applicationLifecycle;
 
-    @Mock private GracefulLifecycleReporter lifecycleReporter;
+    @Mock private EngineHealthReporter lifecycleReporter;
 
     @Mock private ServerRequest serverRequest;
 

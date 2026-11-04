@@ -110,7 +110,8 @@ class EndpointCleanupDeadlockTest {
             RequestLifecycle registry = mock(RequestLifecycle.class);
             ExpirationTimer timer =
                     new ExpirationTimer(
-                            org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry));
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry),
+                            (task, delay) -> mock(java.util.concurrent.Future.class));
             RequestContext requestContext = RequestProtocolTestSupport.context(config, 992L);
             when(SchedulerTestSupport.repository(registry).isCurrent(requestContext))
                     .thenReturn(true);
@@ -291,9 +292,9 @@ class EndpointCleanupDeadlockTest {
                             case "decode-rejection" ->
                                     () ->
                                             RequestProtocolTestSupport.transport(
-                                                    claim.owner().data().getScheduler(),
+                                                    claim.owner().data().getLifecycle(),
                                                     claim,
-                                                    org.flexlb.balance.delivery.DeliveryResult
+                                                    org.flexlb.balance.scheduler.Delivery.Result
                                                             .notSent(
                                                                     new IllegalStateException(
                                                                             "not sent")));
@@ -302,7 +303,8 @@ class EndpointCleanupDeadlockTest {
                                             RequestProtocolTestSupport.prediction(
                                                     registry,
                                                     claim,
-                                                    new org.flexlb.balance.projection.WorkSnapshot(
+                                                    new org.flexlb.balance.projection
+                                                            .RequestTimeEstimation.WorkSnapshot(
                                                             System.currentTimeMillis(),
                                                             java.util.List.of(),
                                                             java.util.List.of(),

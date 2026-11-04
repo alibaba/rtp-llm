@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
-import org.flexlb.balance.eviction.DecodeEvictionProposal;
+import org.flexlb.balance.eviction.DecodePreemptionPolicy.DecodeEvictionProposal;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;

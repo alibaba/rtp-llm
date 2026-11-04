@@ -1,10 +1,9 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
+import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.balance.scheduler.SchedulerTestSupport.Stage;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.route.RoleType;
@@ -50,7 +49,6 @@ class RequestTerminalSettlementTest {
     @Test
     void latePlacementDiagnosticsCannotOverwriteQueueTimeoutEvidence() {
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), 42L);
-        var queue = mock(QueuedRequestScheduler.class);
         var timeoutEvidence =
                 java.util.Map.<String, Object>of("cause", "DECODE placement unavailable");
         RequestLifecycle requestOwner =
@@ -58,12 +56,11 @@ class RequestTerminalSettlementTest {
                         mock(ResponseCompletionExecutor.class),
                         context,
                         mock(ExpirationTimer.class));
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(requestOwner), "latestQueueWaitSnapshot", timeoutEvidence);
         var admission = RequestProtocolTestSupport.beginAdmission(requestOwner, context);
         assertNotNull(admission);
         admission.recordDiagnostics(java.util.Map.of("cause", "earlier placement"));
         assertEquals("earlier placement", context.data().getSchedulingDiagnostics().get("cause"));
+        context.data().setSchedulingDiagnostics(timeoutEvidence);
         requestOwner.cancel(context, 0L, CancelReason.DEADLINE_EXCEEDED);
         admission.recordDiagnostics(java.util.Map.of("cause", "late placement"));
         assertEquals(timeoutEvidence, context.data().getSchedulingDiagnostics());
@@ -113,7 +110,7 @@ class RequestTerminalSettlementTest {
         assertTrue((f.requestContext().snapshot().phase() == Phase.OPEN));
         assertFalse(f.requestContext().data().getFuture().isDone());
         assertSame(f.item(), f.requestContext().snapshot().route());
-        verify(f.item().prefillEp(), never()).release(org.mockito.ArgumentMatchers.isNull(), any());
+        verify(f.item().prefillEp(), never()).releaseRequest(any());
     }
 
     @ParameterizedTest
@@ -121,7 +118,7 @@ class RequestTerminalSettlementTest {
     void decodeRetirementPublishesTheOriginalPreemptionResolution(boolean cancelAlreadyUnknown) {
         Fixture f = fixture(true);
         PreemptionRegistration claim =
-                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 40L).orElse(null);
+                f.requestContext().data().getLifecycle().tryClaim(RESERVATION, 40L).orElse(null);
         assertNotNull(claim);
         if (cancelAlreadyUnknown) {
             assertTrue(
@@ -156,7 +153,7 @@ class RequestTerminalSettlementTest {
     void unknownCancelOutcomeKeepsTheAcknowledgedCancellationVisible() {
         Fixture f = fixture(true, true);
         PreemptionRegistration claim =
-                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 4L).orElse(null);
+                f.requestContext().data().getLifecycle().tryClaim(RESERVATION, 4L).orElse(null);
         assertNotNull(claim);
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
@@ -181,7 +178,7 @@ class RequestTerminalSettlementTest {
     void queuedCancellationDoesNotWaitForAClaimWithoutPhysicalOwnership() {
         Fixture f = fixture(true, true);
         PreemptionRegistration claim =
-                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 4L).orElse(null);
+                f.requestContext().data().getLifecycle().tryClaim(RESERVATION, 4L).orElse(null);
         assertNotNull(claim);
         assertEquals(
                 RequestState.Phase.CANCELLED,
@@ -204,7 +201,7 @@ class RequestTerminalSettlementTest {
     void queuedDecodeRetirementFreezesTheResultBeforeAsyncCleanup() throws Exception {
         Fixture f = fixture(true, true);
         AtomicReference<String> cleanupThread = new AtomicReference<>();
-        when(f.item().prefillEp().release(org.mockito.ArgumentMatchers.isNull(), any()))
+        when(f.item().prefillEp().releaseRequest(any()))
                 .thenAnswer(
                         call -> {
                             cleanupThread.set(Thread.currentThread().getName());
@@ -228,19 +225,19 @@ class RequestTerminalSettlementTest {
     void decodeTerminalIsAProofOfAlreadyCommittedEndpointSettlement() {
         Fixture f = fixture(true);
         var sender =
-                f.scheduler()
-                        .claimDelivery(
-                                f.item(),
-                                DeliveryClaimKind.BATCH_ENQUEUE,
-                                7L,
-                                RequestProtocolTestSupport.handoff(() -> true));
-        assertTrue(sender.owner().data().getScheduler().tryStartSend(sender));
+                DeliveryDispatcher.commitDelivery(
+                        f.scheduler(),
+                        new org.flexlb.balance.scheduler.Delivery.Member(
+                                f.item(), RequestProtocolTestSupport.handoff(() -> true)),
+                        Delivery.SendMode.BATCH_ENQUEUE,
+                        7L);
+        assertTrue(sender.owner().data().getLifecycle().tryStartSend(sender));
         RequestProtocolTestSupport.transport(
-                sender.owner().data().getScheduler(),
+                sender.owner().data().getLifecycle(),
                 sender,
-                DeliveryResult.uncertain(new IllegalStateException("reply lost")));
+                Delivery.Result.uncertain(new IllegalStateException("reply lost")));
         PreemptionRegistration claim =
-                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 4L).orElse(null);
+                f.requestContext().data().getLifecycle().tryClaim(RESERVATION, 4L).orElse(null);
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
                         f.scheduler(), claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
@@ -267,23 +264,23 @@ class RequestTerminalSettlementTest {
     void deliveryAckDuringPreemptionResumesWithTheOriginalBatchIdentity(boolean notificationFails) {
         Fixture f = fixture(true);
         var assignedDecode = f.item().decodeEp();
-        DeliveryClaim delivery =
-                f.scheduler()
-                        .claimDelivery(
-                                f.item(),
-                                DeliveryClaimKind.BATCH_ENQUEUE,
-                                7L,
-                                RequestProtocolTestSupport.handoff(() -> true));
+        Delivery.Member delivery =
+                DeliveryDispatcher.commitDelivery(
+                        f.scheduler(),
+                        new org.flexlb.balance.scheduler.Delivery.Member(
+                                f.item(), RequestProtocolTestSupport.handoff(() -> true)),
+                        Delivery.SendMode.BATCH_ENQUEUE,
+                        7L);
         assertNotNull(delivery);
         PreemptionRegistration preemption =
-                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 9L).orElse(null);
+                f.requestContext().data().getLifecycle().tryClaim(RESERVATION, 9L).orElse(null);
         assertNotNull(preemption);
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
                         f.scheduler(), preemption, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
 
         RequestProtocolTestSupport.transport(
-                delivery.owner().data().getScheduler(), delivery, DeliveryResult.delivered());
+                delivery.owner().data().getLifecycle(), delivery, Delivery.Result.delivered());
         assertSame(preemption, RequestProtocolTestSupport.activePreemption(f.requestContext()));
         assertFalse(f.requestContext().data().getFuture().isDone());
         assertNull(
@@ -309,13 +306,7 @@ class RequestTerminalSettlementTest {
                             assertNull(
                                     RequestProtocolTestSupport.activePreemption(
                                             f.requestContext()));
-                            assertFalse(
-                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                                    preemption.owner().data().getScheduler())
-                                            .signals()
-                                            .preemption(preemption)
-                                            .toCompletableFuture()
-                                            .isDone());
+                            assertFalse(preemption.completion().toCompletableFuture().isDone());
                             if (notificationFails) {
                                 throw notificationFailure;
                             }
@@ -339,11 +330,7 @@ class RequestTerminalSettlementTest {
         assertEquals(
                 org.flexlb.balance.preemption.VictimResolution.Outcome.DELIVERY_RESUMED,
                 RequestProtocolTestSupport.awaitResult(
-                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                                preemption.owner().data().getScheduler())
-                                        .signals()
-                                        .preemption(preemption)
-                                        .toCompletableFuture())
+                                preemption.completion().toCompletableFuture())
                         .outcome());
         assertEquals(
                 RequestState.Phase.ACKNOWLEDGED,
@@ -369,19 +356,19 @@ class RequestTerminalSettlementTest {
         Fixture f = fixture(true);
         var assignedDecode = f.item().decodeEp();
         var sender =
-                f.scheduler()
-                        .claimDelivery(
-                                f.item(),
-                                DeliveryClaimKind.BATCH_ENQUEUE,
-                                7L,
-                                RequestProtocolTestSupport.handoff(() -> true));
-        assertTrue(sender.owner().data().getScheduler().tryStartSend(sender));
+                DeliveryDispatcher.commitDelivery(
+                        f.scheduler(),
+                        new org.flexlb.balance.scheduler.Delivery.Member(
+                                f.item(), RequestProtocolTestSupport.handoff(() -> true)),
+                        Delivery.SendMode.BATCH_ENQUEUE,
+                        7L);
+        assertTrue(sender.owner().data().getLifecycle().tryStartSend(sender));
         RequestProtocolTestSupport.transport(
-                sender.owner().data().getScheduler(),
+                sender.owner().data().getLifecycle(),
                 sender,
-                DeliveryResult.uncertain(new IllegalStateException("reply lost")));
+                Delivery.Result.uncertain(new IllegalStateException("reply lost")));
         PreemptionRegistration claim =
-                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 4L).orElse(null);
+                f.requestContext().data().getLifecycle().tryClaim(RESERVATION, 4L).orElse(null);
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
                         f.scheduler(), claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
@@ -401,13 +388,7 @@ class RequestTerminalSettlementTest {
                                     RequestProtocolTestSupport.activePreemption(
                                             f.requestContext()));
                             assertTrue(RequestProtocolTestSupport.preemptionFinished(claim));
-                            assertFalse(
-                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                                    claim.owner().data().getScheduler())
-                                            .signals()
-                                            .preemption(claim)
-                                            .toCompletableFuture()
-                                            .isDone());
+                            assertFalse(claim.completion().toCompletableFuture().isDone());
                             return null;
                         })
                 .when(assignedDecode)
@@ -448,16 +429,11 @@ class RequestTerminalSettlementTest {
         assertTrue((stage(f.requestContext()) == Stage.FINISHED));
         assertEquals(
                 org.flexlb.balance.preemption.VictimResolution.Outcome.REQUEST_END,
-                RequestProtocolTestSupport.awaitResult(
-                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                                claim.owner().data().getScheduler())
-                                        .signals()
-                                        .preemption(claim)
-                                        .toCompletableFuture())
+                RequestProtocolTestSupport.awaitResult(claim.completion().toCompletableFuture())
                         .outcome());
         verify(f.item().decodeEp())
                 .publishCapacity(org.flexlb.balance.endpoint.DecodeEndpoint.CapacityEdge.BOTH);
-        verify(f.item().prefillEp(), never()).release(org.mockito.ArgumentMatchers.isNull(), any());
+        verify(f.item().prefillEp(), never()).releaseRequest(any());
         verify(f.item().decodeEp(), never()).release(any(), any());
     }
 
@@ -473,7 +449,7 @@ class RequestTerminalSettlementTest {
         Fixture f = fixture(true);
         var assignedDecode = f.item().decodeEp();
         var claim =
-                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 31L).orElse(null);
+                f.requestContext().data().getLifecycle().tryClaim(RESERVATION, 31L).orElse(null);
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
                         f.scheduler(), claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
@@ -508,13 +484,7 @@ class RequestTerminalSettlementTest {
                             assertEquals(
                                     priorityCanceled,
                                     RequestProtocolTestSupport.preemptionFinished(claim));
-                            assertFalse(
-                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                                    claim.owner().data().getScheduler())
-                                            .signals()
-                                            .preemption(claim)
-                                            .toCompletableFuture()
-                                            .isDone());
+                            assertFalse(claim.completion().toCompletableFuture().isDone());
                             return null;
                         })
                 .when(assignedDecode)
@@ -522,12 +492,12 @@ class RequestTerminalSettlementTest {
 
         var requestStatus =
                 priorityCanceled
-                        ? new PrefillState.PrefillRequestStatus(
+                        ? new PrefillEndpoint.PrefillRequestStatus(
                                 f.item(),
-                                PrefillState.PrefillRequestStatus.Kind.PRIORITY_CANCELED,
+                                PrefillEndpoint.PrefillRequestStatus.Kind.PRIORITY_CANCELED,
                                 0L)
-                        : new PrefillState.PrefillRequestStatus(
-                                f.item(), PrefillState.PrefillRequestStatus.Kind.ACTIVE, 0L);
+                        : new PrefillEndpoint.PrefillRequestStatus(
+                                f.item(), PrefillEndpoint.PrefillRequestStatus.Kind.ACTIVE, 0L);
         RequestProtocolTestSupport.applyPrefillStatus(
                 f.scheduler(),
                 f.requestContext(),
@@ -538,14 +508,7 @@ class RequestTerminalSettlementTest {
         verify(f.item().decodeEp()).updatePreemption(31L, update);
         verify(f.item().decodeEp())
                 .publishCapacity(org.flexlb.balance.endpoint.DecodeEndpoint.CapacityEdge.BOTH);
-        assertEquals(
-                priorityCanceled,
-                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                claim.owner().data().getScheduler())
-                        .signals()
-                        .preemption(claim)
-                        .toCompletableFuture()
-                        .isDone());
+        assertEquals(priorityCanceled, claim.completion().toCompletableFuture().isDone());
         assertEquals(priorityCanceled, f.requestContext().data().getFuture().isDone());
         if (priorityCanceled) {
             assertEquals(Stage.FINISHED, stage(f.requestContext()));
@@ -564,15 +527,15 @@ class RequestTerminalSettlementTest {
     void requestExpiryClosesPreemptionAndIgnoresLateCallbacks(PreemptionCancelPhase outcome) {
         Fixture f = fixture(true);
         RequestContext requestContext = f.requestContext();
-        DeliveryClaim delivery =
-                f.scheduler()
-                        .claimDelivery(
-                                f.item(),
-                                DeliveryClaimKind.BATCH_ENQUEUE,
-                                7L,
-                                RequestProtocolTestSupport.handoff(() -> true));
+        Delivery.Member delivery =
+                DeliveryDispatcher.commitDelivery(
+                        f.scheduler(),
+                        new org.flexlb.balance.scheduler.Delivery.Member(
+                                f.item(), RequestProtocolTestSupport.handoff(() -> true)),
+                        Delivery.SendMode.BATCH_ENQUEUE,
+                        7L);
         PreemptionRegistration claim =
-                requestContext.data().getScheduler().tryClaim(RESERVATION, 9L).orElse(null);
+                requestContext.data().getLifecycle().tryClaim(RESERVATION, 9L).orElse(null);
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
                         f.scheduler(), claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
@@ -586,18 +549,11 @@ class RequestTerminalSettlementTest {
                 inactivity,
                 RequestProtocolTestSupport.<Long>inspect(
                         f.scheduler(), requestContext, "inactivityExpiresAtMsLocked"));
-        assertFalse(
-                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                delivery.owner().data().getScheduler())
-                        .signals()
-                        .delivery(delivery)
-                        .toCompletableFuture()
-                        .isDone(),
-                "sender has not exited");
+        assertFalse(delivery.completion().toCompletableFuture().isDone(), "sender has not exited");
         RequestProtocolTestSupport.transport(
-                delivery.owner().data().getScheduler(),
+                delivery.owner().data().getLifecycle(),
                 delivery,
-                DeliveryResult.notSent(new IllegalStateException("expired before send")));
+                Delivery.Result.notSent(new IllegalStateException("expired before send")));
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
         RequestState ended = RequestState.from(requestContext.snapshot());
@@ -612,7 +568,7 @@ class RequestTerminalSettlementTest {
                 requestContext.snapshot().cancellation().reason(),
                 "finished context preserves the original cancellation fact");
         RequestProtocolTestSupport.transport(
-                delivery.owner().data().getScheduler(), delivery, DeliveryResult.delivered());
+                delivery.owner().data().getLifecycle(), delivery, Delivery.Result.delivered());
         assertFalse(
                 RequestProtocolTestSupport.finishPreemption(
                         f.scheduler(), claim, "late Cancel ACK"));
@@ -625,22 +581,22 @@ class RequestTerminalSettlementTest {
                 f.scheduler(), requestContext, inactivity, Long.MAX_VALUE);
         assertEquals(ended, RequestState.from(requestContext.snapshot()));
         verify(f.item().decodeEp()).release(RESERVATION, DecodeResources.ReleaseReason.NOT_SENT);
-        verify(f.item().prefillEp()).release(null, f.item());
+        verify(f.item().prefillEp()).releaseRequest(f.item());
     }
 
     @Test
     void completedDeliveryFutureCannotPreventRequestExpiry() throws Exception {
         Fixture f = fixture(true);
-        DeliveryClaim claim =
-                f.scheduler()
-                        .claimDelivery(
-                                f.item(),
-                                DeliveryClaimKind.BATCH_ENQUEUE,
-                                7L,
-                                RequestProtocolTestSupport.handoff(() -> true));
-        assertTrue(claim.owner().data().getScheduler().tryStartSend(claim));
+        Delivery.Member claim =
+                DeliveryDispatcher.commitDelivery(
+                        f.scheduler(),
+                        new org.flexlb.balance.scheduler.Delivery.Member(
+                                f.item(), RequestProtocolTestSupport.handoff(() -> true)),
+                        Delivery.SendMode.BATCH_ENQUEUE,
+                        7L);
+        assertTrue(claim.owner().data().getLifecycle().tryStartSend(claim));
         RequestProtocolTestSupport.transport(
-                claim.owner().data().getScheduler(), claim, DeliveryResult.delivered());
+                claim.owner().data().getLifecycle(), claim, Delivery.Result.delivered());
         Response delivered =
                 RequestProtocolTestSupport.awaitResult(f.requestContext().data().getFuture());
         assertTrue(delivered.isSuccess());
@@ -700,16 +656,16 @@ class RequestTerminalSettlementTest {
         Fixture f = fixture(true);
         var assignedDecode = f.item().decodeEp();
         RequestContext requestContext = f.requestContext();
-        DeliveryClaim delivery =
-                f.scheduler()
-                        .claimDelivery(
-                                f.item(),
-                                DeliveryClaimKind.BATCH_ENQUEUE,
-                                7L,
-                                RequestProtocolTestSupport.handoff(() -> true));
+        Delivery.Member delivery =
+                DeliveryDispatcher.commitDelivery(
+                        f.scheduler(),
+                        new org.flexlb.balance.scheduler.Delivery.Member(
+                                f.item(), RequestProtocolTestSupport.handoff(() -> true)),
+                        Delivery.SendMode.BATCH_ENQUEUE,
+                        7L);
         if (preempting) {
             PreemptionRegistration claim =
-                    requestContext.data().getScheduler().tryClaim(RESERVATION, 9L).orElse(null);
+                    requestContext.data().getLifecycle().tryClaim(RESERVATION, 9L).orElse(null);
             assertTrue(
                     RequestProtocolTestSupport.preemptionPhase(
                             f.scheduler(), claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
@@ -730,7 +686,7 @@ class RequestTerminalSettlementTest {
                         })
                 .when(assignedDecode)
                 .release(RESERVATION, DecodeResources.ReleaseReason.REMOTE_CLEANUP);
-        assertTrue(delivery.owner().data().getScheduler().tryStartSend(delivery));
+        assertTrue(delivery.owner().data().getLifecycle().tryStartSend(delivery));
         RequestProtocolTestSupport.applyDecodeStatus(
                 f.scheduler(),
                 requestContext,
@@ -739,7 +695,7 @@ class RequestTerminalSettlementTest {
         assertEquals(
                 RequestState.Phase.FAILED, RequestState.from(requestContext.snapshot()).state());
         RequestProtocolTestSupport.transport(
-                delivery.owner().data().getScheduler(), delivery, DeliveryResult.delivered());
+                delivery.owner().data().getLifecycle(), delivery, Delivery.Result.delivered());
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
         RequestProtocolTestSupport.awaitCondition(() -> stage(requestContext) == Stage.FINISHED);
@@ -747,7 +703,7 @@ class RequestTerminalSettlementTest {
         assertFalse(
                 RequestProtocolTestSupport.awaitResult(requestContext.data().getFuture())
                         .isSuccess());
-        verify(f.item().prefillEp()).release(null, f.item());
+        verify(f.item().prefillEp()).releaseRequest(f.item());
     }
 
     @Test
@@ -755,25 +711,28 @@ class RequestTerminalSettlementTest {
         Fixture f = fixture(true);
         RequestContext context = f.requestContext();
         var delivery =
-                f.scheduler()
-                        .claimDelivery(
-                                f.item(),
-                                DeliveryClaimKind.BATCH_ENQUEUE,
-                                7L,
-                                RequestProtocolTestSupport.handoff(() -> true));
+                DeliveryDispatcher.commitDelivery(
+                        f.scheduler(),
+                        new org.flexlb.balance.scheduler.Delivery.Member(
+                                f.item(), RequestProtocolTestSupport.handoff(() -> true)),
+                        Delivery.SendMode.BATCH_ENQUEUE,
+                        7L);
         assertTrue(f.scheduler().tryStartSend(delivery));
-        RequestProtocolTestSupport.transport(f.scheduler(), delivery, DeliveryResult.delivered());
+        RequestProtocolTestSupport.transport(f.scheduler(), delivery, Delivery.Result.delivered());
         End action;
         synchronized (context) {
-            context.recordEngineEvidence(
-                    new EngineEvidence(
-                            f.item(),
-                            RESERVATION,
-                            RoleType.DECODE,
-                            EngineKind.COMPLETED,
-                            0L,
-                            null,
-                            System.currentTimeMillis()));
+            org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                    context,
+                    observedRequest ->
+                            observedRequest.recordEngineEvidence(
+                                    new EngineEvidence(
+                                            f.item(),
+                                            RESERVATION,
+                                            RoleType.DECODE,
+                                            EngineKind.COMPLETED,
+                                            0L,
+                                            null,
+                                            System.currentTimeMillis())));
             var end =
                     context.beginClose(context.snapshot().pendingEnd(), System.currentTimeMillis());
             action = RequestCleanupPassTest.ended(end);
@@ -811,7 +770,7 @@ class RequestTerminalSettlementTest {
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.scheduler()));
         assertEquals(Stage.FINISHED, stage(context));
-        verify(f.item().prefillEp(), times(1)).release(null, f.item());
+        verify(f.item().prefillEp(), times(1)).releaseRequest(f.item());
         assertNull(context.snapshot().deadlines().inactivity());
     }
 
@@ -820,7 +779,7 @@ class RequestTerminalSettlementTest {
         Fixture owner = fixture(true, true);
         Fixture other = fixture(true, true);
         PreemptionRegistration claim =
-                owner.requestContext().data().getScheduler().tryClaim(RESERVATION, 4L).orElse(null);
+                owner.requestContext().data().getLifecycle().tryClaim(RESERVATION, 4L).orElse(null);
         assertNotNull(claim);
         var before = owner.requestContext().snapshot();
         assertFalse(
@@ -972,14 +931,14 @@ class RequestTerminalSettlementTest {
             assertEquals(3, attempts.get(), "one finish wake-up performs at most three attempts");
             assertEquals(Phase.ENDING, context.snapshot().phase());
             assertTrue(context.snapshot().close().notificationsAttempted());
-            assertFalse(context.snapshot().close().timersDone());
+            assertFalse(context.snapshot().close().notificationsDone());
             assertTrue(timer.needsUpdate(context, context.snapshot().deadlines()));
             assertNotNull(
                     context.snapshot().deadlines().inactivity(),
                     "real pending notification keeps its existing watch");
             assertSame(context, f.scheduler().requests.findActive(RESERVATION.requestId()));
             assertNull(f.scheduler().requests.findTerminal(RESERVATION.requestId()));
-            verify(f.item().prefillEp(), times(1)).release(null, f.item());
+            verify(f.item().prefillEp(), times(1)).releaseRequest(f.item());
             verify(f.item().decodeEp(), times(1))
                     .release(RESERVATION, DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
             if (failures > 3) {
@@ -1003,9 +962,8 @@ class RequestTerminalSettlementTest {
                 context.snapshot().outcome(),
                 "retries preserve the frozen outcome and first cause");
         assertTrue(context.snapshot().close().notificationsDone());
-        assertTrue(context.snapshot().close().timersDone());
         assertNull(context.snapshot().deadlines().inactivity());
-        verify(f.item().prefillEp(), times(1)).release(null, f.item());
+        verify(f.item().prefillEp(), times(1)).releaseRequest(f.item());
         verify(f.item().decodeEp(), times(1))
                 .release(RESERVATION, DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
         verify(timer, times(failures + 1)).update(any(), any());
@@ -1033,7 +991,7 @@ class RequestTerminalSettlementTest {
                 .thenReturn(
                         java.util.concurrent.CompletableFuture.completedFuture(
                                 EngineGrpcClient.CancelReply.REQUEST_CLEANED));
-        when(publisher.register(any())).thenReturn(true);
+        when(publisher.register()).thenReturn(true);
         doAnswer(
                         call -> {
                             call.<Runnable>getArgument(1).run();
@@ -1064,7 +1022,8 @@ class RequestTerminalSettlementTest {
         assertNotNull(admission);
         assertEquals(
                 org.flexlb.balance.PlacementResult.Status.SUCCESS,
-                requestOwner.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)));
+                RequestProtocolTestSupport.commitRoute(
+                        requestOwner, item, RequestProtocolTestSupport.publication(() -> true)));
         if (finishAdmission) {
             admission.finish();
         }

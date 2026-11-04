@@ -28,6 +28,7 @@ class PlacementPlanCloseTest {
         var failure = new IllegalStateException("cleanup failed");
         var plan = RequestProtocolTestSupport.plan(context, route);
         var handle = mock(AdmissionHandle.class);
+        when(handle.owner()).thenReturn(context);
         ReflectionTestUtils.setField(plan, "handle", handle);
         doAnswer(
                         call -> {
@@ -47,9 +48,11 @@ class PlacementPlanCloseTest {
                         })
                 .when(handle)
                 .terminate(any());
+        when(route.prefillEp()).thenReturn(mock(org.flexlb.balance.endpoint.PrefillEndpoint.class));
         when(route.decodeEp()).thenReturn(endpoint);
+        when(route.ctx()).thenReturn(context);
         if (rollbackFails) {
-            ReflectionTestUtils.setField(plan, "pendingDecodeRollback", reservation);
+            when(route.decodeReservation()).thenReturn(reservation);
             doThrow(failure)
                     .when(endpoint)
                     .release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
@@ -58,8 +61,11 @@ class PlacementPlanCloseTest {
         }
 
         var runtime = mock(RequestTaskPool.class);
-        plan.close(runtime);
-        plan.close(runtime);
+        var scheduler = ReflectionTestUtils.getField(plan, "this$0");
+        var lifecycle = ReflectionTestUtils.getField(scheduler, "lifecycle");
+        ReflectionTestUtils.setField(lifecycle, "tasks", runtime);
+        plan.close();
+        plan.close();
         verify(runtime).recordFailure(failure);
 
         var order = inOrder(route, handle);
@@ -68,6 +74,7 @@ class PlacementPlanCloseTest {
             order.verify(handle).terminate(any());
             verify(handle, never()).finish();
         } else {
+            verify(handle).owner();
             order.verify(handle).finish();
             verify(handle, never()).terminate(any());
         }

@@ -23,7 +23,21 @@ public interface PrefillSelectionStrategy {
         long cacheBlockSize();
 
         RequestTimeEstimation.Inputs projectionInputs();
+
+        /** Read-only current capacity. Selection never reserves a slot. */
+        boolean requestCapacityAvailable();
+
+        /** Exact priority counts, read only on a capacity failure. */
+        AdmissionSummary admissionSummary(int priority);
     }
+
+    record AdmissionSummary(
+            long occupiedRequests,
+            long requestsToRelease,
+            long lowerPriorityRequests,
+            long samePriorityRequests,
+            long higherPriorityRequests,
+            long unknownPriorityRequests) {}
 
     /**
      * Frozen scores; input must be the original candidate object, never a reconstructed identity.

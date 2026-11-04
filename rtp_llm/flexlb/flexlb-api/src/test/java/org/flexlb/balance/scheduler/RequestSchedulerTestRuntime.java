@@ -41,7 +41,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     private final PlacementAvailability placementAvailability = new PlacementAvailability();
     private final EndpointRegistry registry;
     private final AbstractRequestScheduler scheduler;
-    private final RequestSchedulerEntry entry;
+    private final RequestLifecycle entry;
     private final SchedulerTestServices runtime;
     private final BindingRouter router;
 
@@ -53,7 +53,15 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             RequestSchedulerReporter requestReporter) {
         this(
                 configService,
-                new DeliveryDispatcher(grpcClient, configService, deliveryReporter),
+                new DeliveryDispatcher(
+                        grpcClient,
+                        configService,
+                        deliveryReporter,
+                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
+                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                                .decodeAdmissionCapacity(configService),
+                        org.mockito.Mockito.mock(
+                                org.flexlb.balance.scheduler.DeliveryExecution.class)),
                 deliveryReporter,
                 requestReporter,
                 grpcClient,
@@ -112,14 +120,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             var deliveryExecution = org.mockito.Mockito.spy(runtime.deliveries());
             org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                     runtime, "deliveries", deliveryExecution);
-            org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
-                    runtime,
-                    "queueDependencies",
-                    new RequestExecution.Dependencies(
-                            deliveryExecution,
-                            deliveryReporter,
-                            runtime::recordFailure,
-                            QueuedRequestScheduler::runPrefill));
+            org.springframework.test.util.ReflectionTestUtils.setField(
+                    deliveryStrategy, "execution", deliveryExecution);
             org.mockito.Mockito.doAnswer(
                             invocation -> {
                                 preparationBarrier.run();
@@ -134,7 +136,6 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         requests,
                         runtime.tasks(),
                         runtime.taskTimer(),
-                        runtime.signals(),
                         requestReporter,
                         configService,
                         capacity,
@@ -147,20 +148,20 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                                 new org.flexlb.service.RecentCacheKeyTraceReporter()),
                         configService.loadBalanceConfig(),
                         router,
-                        deliveryReporter,
                         eviction,
                         placementAvailability,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                 configService.loadBalanceConfig()),
                         new OrderedRequestQueue(
-                                configService.loadBalanceConfig().isPriorityOrdering()),
-                        runtime.queueDependencies);
-        entry = new RequestSchedulerEntry(scheduler, SchedulerTestServices.lifecycle(scheduler), router,
-                configService.loadBalanceConfig().isQueue());
+                                configService.loadBalanceConfig().isPriorityOrdering()));
+        entry = SchedulerTestServices.lifecycle(scheduler);
         runtime.registerScheduler(scheduler);
+        scheduler.start();
     }
 
-    public RequestSchedulerEntry entry() { return entry; }
+    public RequestLifecycle entry() {
+        return entry;
+    }
 
     public RequestRepository requestRegistry() {
         return requests;
@@ -278,7 +279,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 }
                 long version =
                         pin.endpoint() instanceof PrefillEndpoint prefill
-                                ? prefill.ownership.progress().ownershipVersion()
+                                ? prefill.progress().ownershipVersion()
                                 : pin.endpoint() instanceof DecodeEndpoint decode
                                         ? decode.placementVersion()
                                         : 0L;

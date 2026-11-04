@@ -2,7 +2,6 @@ package org.flexlb.httpserver;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -118,11 +117,11 @@ class HttpLoadBalanceServerTest {
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         WorkerStatus status = mock(WorkerStatus.class);
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                endpoint, "ownership", mock(PrefillState.class));
         when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         when(endpoint.getStatus()).thenReturn(status);
-        when(endpoint.ownership.stats()).thenReturn(new PrefillState.Stats(7, 3, 2, 42L));
+        when(endpoint.stats())
+                .thenReturn(
+                        new org.flexlb.balance.endpoint.EndpointStats.PrefillCounts(7, 3, 2, 42L));
         when(status.cacheIndexSnapshot())
                 .thenReturn(
                         new WorkerStatus.CacheIndexSnapshot(
@@ -167,7 +166,7 @@ class HttpLoadBalanceServerTest {
                 .isEqualTo(8)
                 .jsonPath("$.prefill_endpoints[0].cache_key_size")
                 .isEqualTo(4);
-        verify(endpoint.ownership).stats();
+        verify(endpoint).stats();
     }
 
     @Test

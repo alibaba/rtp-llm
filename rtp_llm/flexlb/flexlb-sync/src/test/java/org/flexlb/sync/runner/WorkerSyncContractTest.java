@@ -12,7 +12,6 @@ import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.WorkerStatusRpcClient;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.sync.schedule.WorkerRetirementCleaner;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -146,8 +145,8 @@ class WorkerSyncContractTest {
                 var cacheExecutor = Executors.newSingleThreadExecutor();
                 var applications = Executors.newSingleThreadExecutor();
                 var discovery = Executors.newSingleThreadExecutor()) {
-            EngineSyncRunner runner =
-                    new EngineSyncRunner(
+            Runnable runner =
+                    org.flexlb.sync.synchronizer.WorkerSyncTestSupport.runner(
                             "model",
                             registry,
                             addresses,
@@ -169,7 +168,8 @@ class WorkerSyncContractTest {
                 org.flexlb.sync.runner.RunnerTestSupport.awaitCondition(
                         () -> status.pollHealth().reportedAlive());
                 assertEquals(-1L, status.appliedStatusCursor().statusVersion());
-                new WorkerRetirementCleaner(cache, registry).retireUnavailableWorkers();
+                org.flexlb.sync.synchronizer.WorkerSyncTestSupport.retirements(cache, registry)
+                        .retireUnavailableWorkers();
                 assertNull(status.retirementReason());
                 assertSame(
                         status, registry.statusSnapshot(status.getRole()).get(status.getIpPort()));

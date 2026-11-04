@@ -45,6 +45,52 @@ class RequestSchedulerReporterTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
+    void committedVictimStatisticsDistinguishQueueWithdrawalAndEngineCancellation(
+            boolean cancelled) {
+        var observed = org.mockito.Mockito.spy(reporter);
+        var victims =
+                java.util.List.of(
+                        new org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView(
+                                1L,
+                                20,
+                                100L,
+                                120L,
+                                org.flexlb.enums.DecodeTaskPhase.RUNNING,
+                                true,
+                                1L,
+                                true),
+                        new org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView(
+                                2L,
+                                30,
+                                200L,
+                                220L,
+                                org.flexlb.enums.DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN,
+                                true,
+                                2L,
+                                true));
+        observed.reportPreemptionVictims(3L, 70, "decode", "capacity", victims, cancelled);
+        verify(observed)
+                .reportVictim(20, 70, cancelled ? "decode_running" : "decode_reserved", "capacity");
+        verify(observed)
+                .reportVictim(30, 70, cancelled ? "decode_cancel" : "decode_reserved", "capacity");
+        verify(observed)
+                .reportVictimKvTokens(20, cancelled ? "decode_running" : "decode_reserved", 100L);
+        verify(observed)
+                .reportVictimKvTokens(30, cancelled ? "decode_cancel" : "decode_reserved", 200L);
+        verify(observed).reportEviction(EvictionEvent.COMMIT, 70, "capacity", "success");
+        for (var victim : victims) {
+            verify(observed, org.mockito.Mockito.times(cancelled ? 1 : 0))
+                    .reportEngineCancel(CancelEvent.CONFIRM, "decode", victim.priority());
+        }
+        observed.reportPreemptionCancelRequests("decode", victims);
+        for (var victim : victims) {
+            verify(observed).reportEngineCancel(CancelEvent.REQUEST, "decode", victim.priority());
+            verify(observed).reportCancel(victim.priority(), "PRIORITY_PREEMPTED");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     void metricFailureCannotInterruptSchedulingOrSuppressNextMetric(boolean error) {
         Throwable failure =
                 error

@@ -7,12 +7,13 @@ import org.flexlb.balance.endpoint.DecodeResources.DecodeRoutingView;
 import org.flexlb.balance.endpoint.DecodeResources.ReservationHandle;
 import org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.eviction.DecodePreemptionPolicy.DecodeEvictionProposal;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PlacementConfiguration;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestFuture;
 import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.balance.scheduler.SchedulerTestSupport;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigService;
@@ -61,7 +62,17 @@ class CustomDecodePreemptionContractTest {
                     }
 
                     @Override
-                    public void freezeAdmission() {}
+                    public void stopAdmission() {}
+
+                    @Override
+                    public boolean awaitIdle(long deadlineNanos) {
+                        return true;
+                    }
+
+                    @Override
+                    public void close() {
+                        stopAdmission();
+                    }
                 };
         DecodePreemptionPolicy policy =
                 (request, priority, capacity, snapshot, settings, reasons) ->
@@ -182,8 +193,7 @@ class CustomDecodePreemptionContractTest {
                                             : List.of(victim),
                                     DecodeEvictionProposal.CASE_SLOT,
                                     128L,
-                                    PriorityHarmProfile.empty(),
-                                    victim.requestId());
+                                    0L);
                     return new DecodePreemptionPolicy.DecodeEvictionDecision(
                             capacity.evaluate(
                                     view.routing().placementUsage(),
@@ -199,7 +209,6 @@ class CustomDecodePreemptionContractTest {
                                 SchedulerTestSupport.repository(owner),
                                 mock(org.flexlb.balance.scheduler.RequestTaskExecutor.class),
                                 mock(org.flexlb.balance.scheduler.TaskTimer.class),
-                                mock(org.flexlb.balance.scheduler.RequestSignals.class),
                                 mock(RequestSchedulerReporter.class),
                                 SchedulingTestConfig.configService(config),
                                 SchedulingTestConfig.capacity(config),
@@ -218,7 +227,7 @@ class CustomDecodePreemptionContractTest {
                 .preempt(any(), any());
         if (mode.equals("selected")) {
             assertSame(exact, executor.tryReclaim(context, endpoint).join().reservation());
-            executor.freezeAdmission();
+            executor.stopAdmission();
             assertNull(executor.tryReclaim(context, endpoint));
             verify(executor, times(1)).preempt(any(), any());
         } else {

@@ -1,5 +1,8 @@
 package org.flexlb.balance.planner;
 
+import org.flexlb.config.DecisionPolicyConfig;
+import org.flexlb.config.FlexlbConfig;
+
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
@@ -22,10 +25,10 @@ public enum BuiltinGroupPlanner implements GroupPlanner {
     SINGLE,
     FIXED_WINDOW;
 
-    public static BuiltinGroupPlanner from(org.flexlb.config.FlexlbConfig config) {
+    public static BuiltinGroupPlanner from(FlexlbConfig config) {
         return config.isQueue()
                         && config.decisionPolicy().getType()
-                                == org.flexlb.config.DecisionPolicyConfig.Type.FIXED_WINDOW
+                                == DecisionPolicyConfig.Type.FIXED_WINDOW
                 ? FIXED_WINDOW
                 : SINGLE;
     }
@@ -84,80 +87,73 @@ public enum BuiltinGroupPlanner implements GroupPlanner {
             List<T> picked,
             boolean mayGrow) {
         T head = picked.getFirst();
-        int maxRequests = constraints.maxRequests();
-        long headTokens = Math.max(0L, head.seqLen());
-        long maxSeqLen = headTokens;
-        long paddedTokens = headTokens;
-        long kvTokens = headTokens;
+        long maxSeqLen = Math.max(0L, head.seqLen());
+        long kvTokens = maxSeqLen;
         long windowOpenedAtMs = head.enqueuedAtMs();
         boolean predictionEnabled =
                 predictor != null && constraints.predictedExecutionBudgetMs() > 0L;
-        double selectedPredictionMs = 0.0;
-        boolean predictionBoundaryTriggered = false;
-        if (predictionEnabled) {
-            selectedPredictionMs =
-                    GroupPlanner.requireValidPrediction(predictor.append(head, picked));
-            predictionBoundaryTriggered =
-                    selectedPredictionMs >= constraints.predictedExecutionBudgetMs();
-        }
-
+        double selectedPredictionMs = predict(predictionEnabled ? predictor : null, head, picked);
+        boolean predictionBoundaryTriggered =
+                predictionEnabled
+                        && selectedPredictionMs >= constraints.predictedExecutionBudgetMs();
         while (mayGrow
                 && ordered.hasNext()
-                && picked.size() < maxRequests
+                && picked.size() < constraints.maxRequests()
                 && !predictionBoundaryTriggered) {
             T item = ordered.next();
             long itemTokens = Math.max(0L, item.seqLen());
             long nextMaxSeqLen = Math.max(maxSeqLen, itemTokens);
-            long nextPaddedTokens = saturatedMultiply(nextMaxSeqLen, picked.size() + 1);
             long nextKvTokens = saturatedAdd(kvTokens, itemTokens);
-            if (constraints.batchTokenCapacity() <= 0L
-                    || nextPaddedTokens >= constraints.batchTokenCapacity()) {
+            if (!fitsLimits(
+                    constraints, saturatedMultiply(nextMaxSeqLen, picked.size() + 1), nextKvTokens))
                 break;
-            }
-            if (constraints.batchKvCapacity() != Long.MAX_VALUE
-                    && (constraints.batchKvCapacity() < 0L
-                            || nextKvTokens > constraints.batchKvCapacity())) {
-                break;
-            }
-
             picked.add(item);
-            if (predictionEnabled) {
-                double predictedMs =
-                        GroupPlanner.requireValidPrediction(predictor.append(item, picked));
-                if (predictedMs > constraints.predictedExecutionBudgetMs()) {
-                    predictionBoundaryTriggered = true;
-                    // The head is indivisible. An additional over-budget member
-                    // stays queued for the following decision.
-                    picked.remove(picked.size() - 1);
-                    break;
-                }
-                selectedPredictionMs = predictedMs;
-                predictionBoundaryTriggered =
-                        predictedMs >= constraints.predictedExecutionBudgetMs();
+            double prediction = predict(predictionEnabled ? predictor : null, item, picked);
+            predictionBoundaryTriggered =
+                    predictionEnabled && prediction >= constraints.predictedExecutionBudgetMs();
+            if (predictionEnabled && prediction > constraints.predictedExecutionBudgetMs()) {
+                // The head is indivisible; an additional over-budget member stays queued.
+                picked.remove(picked.size() - 1);
+                break;
             }
+            selectedPredictionMs = prediction;
             maxSeqLen = nextMaxSeqLen;
-            paddedTokens = nextPaddedTokens;
             kvTokens = nextKvTokens;
             windowOpenedAtMs = Math.min(windowOpenedAtMs, item.enqueuedAtMs());
         }
-
-        List<T> selected =
-                !mayGrow
-                        ? picked
-                        : switch (picked.size()) {
-                            case 1 -> List.of(picked.getFirst());
-                            case 2 -> List.of(picked.get(0), picked.get(1));
-                            default -> picked;
-                        };
         return new Selection<>(
-                selected,
-                paddedTokens,
+                mayGrow ? compactPrefix(picked) : picked,
+                saturatedMultiply(maxSeqLen, picked.size()),
                 kvTokens,
                 windowOpenedAtMs,
                 predictionBoundaryTriggered,
                 predictionEnabled
                         ? OptionalDouble.of(selectedPredictionMs)
                         : OptionalDouble.empty());
+    }
+
+    private static <T extends Input> double predict(
+            PrefixPrediction<T> predictor, T item, List<T> prefix) {
+        return predictor == null
+                ? 0.0
+                : GroupPlanner.requireValidPrediction(predictor.append(item, prefix));
+    }
+
+    private static boolean fitsLimits(Constraints constraints, long paddedTokens, long kvTokens) {
+        return constraints.batchTokenCapacity() > 0L
+                && paddedTokens < constraints.batchTokenCapacity()
+                && (constraints.batchKvCapacity() == Long.MAX_VALUE
+                        || constraints.batchKvCapacity() >= 0L
+                                && kvTokens <= constraints.batchKvCapacity());
+    }
+
+    /** Selection freezes larger prefixes; avoid its array copy for the common one/two-member case. */
+    private static <T> List<T> compactPrefix(List<T> picked) {
+        return switch (picked.size()) {
+            case 1 -> List.of(picked.getFirst());
+            case 2 -> List.of(picked.get(0), picked.get(1));
+            default -> picked;
+        };
     }
 
     /** Return the dispatch reason at this clock, or null while the selected group must wait. */

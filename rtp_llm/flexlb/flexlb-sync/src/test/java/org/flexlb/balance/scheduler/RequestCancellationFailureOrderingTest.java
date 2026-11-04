@@ -49,17 +49,21 @@ class RequestCancellationFailureOrderingTest {
     void deliveryFailureOnlyBypassesPlacementWithoutAnEarlierCancellation(boolean cancelFirst) {
         var context = new RequestContext(mock(FlexlbConfig.class));
         context.register(9501L, 1000L, 100_000L, 10_000L);
-        var scope = RequestCleanupPassTest.granted(context.beginPlacement(null));
+        var scope = RequestCleanupPassTest.requireValue(context.beginPlacement(null));
         var route = RequestCleanupPassTest.route(context, 9501L);
-        RequestCleanupPassTest.granted(
+        org.junit.jupiter.api.Assertions.assertTrue(
                 context.bindPlacement(scope, route, PublicationResult.PREPARED));
-        RequestCleanupPassTest.granted(
+        org.junit.jupiter.api.Assertions.assertTrue(
                 context.bindPlacement(scope, route, PublicationResult.PUBLISHED));
         if (cancelFirst) {
             cancel(context);
         }
-        context.recordDeliveryResult(
-                new PreparationFailure(null, route, "late delivery failure", 1002L));
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.recordDeliveryResult(
+                                new PreparationFailure(
+                                        null, route, "late delivery failure", 1002L)));
         var failure =
                 new EndEvidence(
                         route,
@@ -76,14 +80,18 @@ class RequestCancellationFailureOrderingTest {
             assertNotNull(end.placement());
             assertEquals(Phase.OPEN, context.snapshot().phase());
             assertNull(context.snapshot().outcome());
-            assertEquals(EndKind.FRONTEND, context.snapshot().placement().pendingTerminal().kind());
-            context.completePlacement(scope, PublicationResult.PUBLISHED, 1004L);
+            assertEquals(EndKind.FRONTEND, context.snapshot().pendingEnd().kind());
+            org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                    context,
+                    observedRequest ->
+                            observedRequest.completePlacement(
+                                    scope, PublicationResult.PUBLISHED, 1004L));
             RequestCleanupPassTest.ended(
                     context.beginClose(context.snapshot().pendingEnd(), 1005L));
             assertFirstCause(context);
         } else {
             RequestCleanupPassTest.ended(end);
-            assertEquals(RequestState.Phase.FAILED, context.snapshot().outcome().outcome().phase());
+            assertEquals(RequestState.Phase.FAILED, context.snapshot().outcome().phase());
             assertNotNull(
                     context.snapshot().placement(),
                     "definite failure still publishes independently of physical placement cleanup");
@@ -96,7 +104,7 @@ class RequestCancellationFailureOrderingTest {
         var context = RequestCleanupPassTest.openContext(9502L);
         var route = context.snapshot().route();
         var preemption =
-                RequestCleanupPassTest.granted(
+                RequestCleanupPassTest.requireValue(
                         context.beginPreemption(
                                 route.decodeReservation(),
                                 11L,
@@ -104,8 +112,12 @@ class RequestCancellationFailureOrderingTest {
         if (cancelFirst) {
             cancel(context);
         }
-        context.recordDeliveryResult(
-                new PreparationFailure(null, route, "late delivery failure", 1002L));
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.recordDeliveryResult(
+                                new PreparationFailure(
+                                        null, route, "late delivery failure", 1002L)));
         var failure =
                 new EndEvidence(
                         route,
@@ -136,7 +148,7 @@ class RequestCancellationFailureOrderingTest {
             assertFirstCause(context);
         } else {
             RequestCleanupPassTest.ended(end);
-            assertEquals(RequestState.Phase.FAILED, context.snapshot().outcome().outcome().phase());
+            assertEquals(RequestState.Phase.FAILED, context.snapshot().outcome().phase());
             assertSame(preemption, context.snapshot().preemption().identity());
             assertFalse(
                     context.snapshot().preemption().finished(),
@@ -184,17 +196,19 @@ class RequestCancellationFailureOrderingTest {
                             return call.callRealMethod();
                         })
                 .when(completions)
-                .register(org.mockito.ArgumentMatchers.any());
+                .register();
         try {
             try (var admission = owner.claimAdmissionHandle(9503L, future)) {
                 assertNotNull(admission);
                 try {
                     assertEquals(
                             org.flexlb.balance.PlacementResult.Status.SUCCESS,
-                            owner.commitRoute(
-                                    route, RequestProtocolTestSupport.publication(() -> true)));
+                            RequestProtocolTestSupport.commitRoute(
+                                    owner,
+                                    route,
+                                    RequestProtocolTestSupport.publication(() -> true)));
                     owner.cancel(context, 0L, CancelReason.CLIENT_CANCELLED);
-                    owner.onDeliveryFact(
+                    owner.onDeliveryResult(
                             new PreparationFailure(
                                     null, route, "late failure", System.currentTimeMillis()));
                     assertEquals(
@@ -226,11 +240,10 @@ class RequestCancellationFailureOrderingTest {
             assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
             RequestProtocolTestSupport.awaitCondition(() -> owner.requests.liveRequestCount() == 0);
             assertEquals(Phase.CLOSED, context.snapshot().phase());
-            assertEquals(
-                    RequestState.Phase.CANCELLED, context.snapshot().outcome().outcome().phase());
+            assertEquals(RequestState.Phase.CANCELLED, context.snapshot().outcome().phase());
             assertEquals(CancelReason.CLIENT_CANCELLED, context.snapshot().cancellation().reason());
             assertEquals(1, publications.get());
-            verify(prefill, times(1)).release(null, route);
+            verify(prefill, times(1)).releaseRequest(route);
             verify(decode, times(1)).release(reservation, DecodeResources.ReleaseReason.EXPIRED);
         } finally {
             SchedulerTestSupport.shutdown(
@@ -250,7 +263,7 @@ class RequestCancellationFailureOrderingTest {
     }
 
     private static void assertFirstCause(RequestContext context) {
-        assertEquals(RequestState.Phase.CANCELLED, context.snapshot().outcome().outcome().phase());
+        assertEquals(RequestState.Phase.CANCELLED, context.snapshot().outcome().phase());
         assertEquals(CancelReason.CLIENT_CANCELLED, context.snapshot().cancellation().reason());
         assertEquals(StrategyErrorType.REQUEST_CANCELLED, context.snapshot().outcome().errorType());
         assertEquals("first client cancellation", context.snapshot().outcome().detail());

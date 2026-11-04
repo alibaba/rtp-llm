@@ -1,13 +1,10 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-
-import java.util.Objects;
 
 import static com.google.common.math.LongMath.saturatedAdd;
 
@@ -15,31 +12,10 @@ import static com.google.common.math.LongMath.saturatedAdd;
 public final class ContextResult {
     private ContextResult() {}
 
-    public enum UpdateKind {
-        APPLIED,
-        NO_CHANGE,
-        STALE
-    }
-
     public enum Phase {
         OPEN,
         ENDING,
         CLOSED
-    }
-
-    public enum Blocker {
-        PLACEMENT,
-        PREEMPTION,
-        RELEASE_PROOF
-    }
-
-    public enum Rejection {
-        NOT_REGISTERED,
-        CLOSED,
-        CANCELLED,
-        INVALID_STATE,
-        ALREADY_SELECTED,
-        NO_OUTCOME
     }
 
     public enum SendState {
@@ -63,12 +39,9 @@ public final class ContextResult {
     }
 
     public enum ResponseKind {
-        CONFIRMATION,
         ACK,
         TERMINAL,
-        CANCELLATION,
-        EXTERNAL_SUCCESS,
-        EXTERNAL_FAILURE
+        CANCELLATION
     }
 
     public enum CancelEvidenceKind {
@@ -103,7 +76,13 @@ public final class ContextResult {
     public record Identity(long requestId, long incarnation) {}
 
     public record End(
-            EndKind kind, TerminalOutcome outcome, StrategyErrorType errorType, String detail) {}
+            EndKind kind, RequestState.Phase phase, StrategyErrorType errorType, String detail) {
+        public End {
+            java.util.Objects.requireNonNull(phase, "phase");
+            com.google.common.base.Preconditions.checkArgument(
+                    phase.isTerminal(), "terminal phase required");
+        }
+    }
 
     public record EndEvidence(
             @lombok.With(lombok.AccessLevel.PACKAGE) RequestRoute route,
@@ -188,7 +167,40 @@ public final class ContextResult {
             EngineKind kind,
             long errorCode,
             String detail,
-            long nowMs) {}
+            long nowMs) {
+        boolean terminal() {
+            return kind == EngineKind.COMPLETED
+                    || kind == EngineKind.FAILED
+                    || kind == EngineKind.PRIORITY_CANCELLED
+                    || kind == EngineKind.RETIRED;
+        }
+
+        EndEvidence end() {
+            boolean decode = role == RoleType.DECODE;
+            EndKind end =
+                    kind == EngineKind.RETIRED
+                            ? EndKind.RETIREMENT
+                            : kind == EngineKind.PRIORITY_CANCELLED
+                                    ? EndKind.PRIORITY
+                                    : EndKind.WORKER;
+            StrategyErrorType error =
+                    switch (end) {
+                        case RETIREMENT -> StrategyErrorType.DISPATCH_FAILED;
+                        case PRIORITY -> StrategyErrorType.PRIORITY_PREEMPTED;
+                        default -> StrategyErrorType.WORKER_EXECUTION_FAILED;
+                    };
+            return new EndEvidence(
+                    route,
+                    end,
+                    role,
+                    kind == EngineKind.COMPLETED,
+                    errorCode,
+                    error,
+                    detail,
+                    !decode,
+                    decode);
+        }
+    }
 
     public record Cancellation(
             long expectedBatchId,
@@ -222,78 +234,52 @@ public final class ContextResult {
             boolean releaseAttempt,
             EndEvidence terminal) {}
 
+    /** notificationsDone includes successful removal/update of deadline registrations. */
     public record CloseProgress(
             boolean notificationsAttempted,
             boolean prefillSettled,
             boolean decodeSettled,
-            boolean notificationsDone,
-            boolean timersDone) {}
+            boolean notificationsDone) {}
 
-    public record ResponseCandidate(RequestContext owner, ResponseKind kind, End result, long nowMs)
-            implements GrantValue {}
+    public record ResponseCandidate(RequestContext owner, ResponseKind kind, long nowMs) {}
 
-    /** A delivery fact is already immutable; callers must not wrap it in an event object. */
-    public interface DeliveryFact {}
-
-    public sealed interface DeliveryEvidence extends DeliveryFact
+    public sealed interface DeliveryEvidence
             permits TransportResult,
                     Prediction,
                     RouteDelivered,
                     Abandonment,
                     CleanupAcknowledgement,
                     PreparationFailure {
-        DeliveryClaim delivery();
+        Delivery.Member delivery();
 
         long nowMs();
     }
 
-    public record TransportResult(DeliveryClaim delivery, DeliveryResult result, long nowMs)
+    public record TransportResult(Delivery.Member delivery, Delivery.Result result, long nowMs)
             implements DeliveryEvidence {}
 
-    public record Prediction(DeliveryClaim delivery, long predictedAtMs, long nowMs)
+    public record Prediction(Delivery.Member delivery, long predictedAtMs, long nowMs)
             implements DeliveryEvidence {}
 
-    public record RouteDelivered(DeliveryClaim delivery, long predictedAtMs, long nowMs)
+    public record RouteDelivered(Delivery.Member delivery, long predictedAtMs, long nowMs)
             implements DeliveryEvidence {}
 
-    public record Abandonment(DeliveryClaim delivery, CancelReason reason, long nowMs)
+    public record Abandonment(Delivery.Member delivery, CancelReason reason, long nowMs)
             implements DeliveryEvidence {}
 
     public record CleanupAcknowledgement(
-            DeliveryClaim delivery, CancelEvidenceKind kind, long nowMs)
+            Delivery.Member delivery, CancelEvidenceKind kind, long nowMs)
             implements DeliveryEvidence {}
 
     public record PreparationFailure(
-            DeliveryClaim delivery, RequestRoute route, String detail, long nowMs)
+            Delivery.Member delivery, RequestRoute route, String detail, long nowMs)
             implements DeliveryEvidence {}
 
-    public record PreemptionFact(
-            PreemptionRegistration attempt, RequestLifecycle.PreemptionEvent event)
-            implements DeliveryFact {
-        public PreemptionFact {
-            Objects.requireNonNull(attempt, "attempt");
-            Objects.requireNonNull(event, "event");
-        }
-    }
-
-    public interface GrantValue {
-        RequestContext owner();
-    }
-
-    public record PlacementToken(RequestContext owner, long sequence, RequestRoute withdrawing)
-            implements GrantValue {}
-
-    public record RoutePermit(
-            RequestContext owner, PlacementToken operation, RequestRoute route, boolean publishable)
-            implements GrantValue {}
-
     public record PlacementFacts(
-            PlacementToken operation,
-            RequestRoute acquired,
-            boolean published,
-            EndEvidence pendingTerminal,
-            EngineEvidence pendingRetirement,
-            boolean inactivityExpired) {}
+            AdmissionHandle operation,
+            @lombok.With(lombok.AccessLevel.PACKAGE) boolean published,
+            @lombok.With(lombok.AccessLevel.PACKAGE) EngineEvidence pendingRetirement,
+            @lombok.With(lombok.AccessLevel.PACKAGE) boolean inactivityExpired) {}
 
     public record EngineFacts(
             boolean prefillObserved,
@@ -301,11 +287,12 @@ public final class ContextResult {
             boolean decodeAccepted,
             long visibilityAtMs,
             boolean visibilityOverdue,
-            long predictionSequence) {
+            Delivery.Member predictedDelivery) {
         private static final long HANDOFF_GRACE_MS = 10_000L;
 
-        EngineFacts predict(long sequence, long atMs) {
-            if (predictionSequence == sequence) {
+        EngineFacts predict(Delivery.Member delivery, long atMs) {
+            java.util.Objects.requireNonNull(delivery, "delivery");
+            if (predictedDelivery == delivery) {
                 throw new IllegalStateException("delivery prediction already consumed");
             }
             if (atMs < 0L) {
@@ -317,7 +304,7 @@ public final class ContextResult {
                     decodeAccepted,
                     visibility(decodeAccepted, prefillObserved, prefillCompletedAtMs, atMs, true),
                     false,
-                    sequence);
+                    delivery);
         }
 
         EngineFacts observe(EngineEvidence evidence, boolean hasDecode) {
@@ -336,14 +323,14 @@ public final class ContextResult {
                             observed,
                             completed,
                             visibilityAtMs,
-                            hasDecode && predictionSequence != 0L);
+                            hasDecode && predictedDelivery != null);
             return accepted == decodeAccepted
                             && observed == prefillObserved
                             && completed == prefillCompletedAtMs
                             && visibility == visibilityAtMs
                     ? this
                     : new EngineFacts(
-                            observed, completed, accepted, visibility, false, predictionSequence);
+                            observed, completed, accepted, visibility, false, predictedDelivery);
         }
 
         EngineFacts expireVisibility() {
@@ -353,7 +340,7 @@ public final class ContextResult {
                     decodeAccepted,
                     0L,
                     true,
-                    predictionSequence);
+                    predictedDelivery);
         }
 
         private static long visibility(
@@ -372,22 +359,103 @@ public final class ContextResult {
     }
 
     public record DeliveryFacts(
-            DeliveryClaim identity,
+            Delivery.Member identity,
             @lombok.With(lombok.AccessLevel.PACKAGE) SendState send,
             @lombok.With(lombok.AccessLevel.PACKAGE) boolean acknowledged,
             CancelReason abandonment,
             boolean executionFinished,
             boolean prefillProof,
             boolean decodeProof,
-            long startedAtMs)
-            implements GrantValue {
-        @Override
+            long startedAtMs) {
+        static boolean releasable(DeliveryFacts delivery) {
+            if (delivery == null) {
+                return true;
+            }
+            if (delivery.send() == SendState.NOT_STARTED || delivery.send() == SendState.SENDING) {
+                return false;
+            }
+            if (delivery.identity().kind() == Delivery.SendMode.ROUTE_DECISION
+                    || delivery.send() == SendState.NOT_SENT) {
+                return true;
+            }
+            return delivery.abandonment() == null
+                    ? delivery.executionFinished()
+                    : delivery.prefillProof() && delivery.decodeProof();
+        }
+
         public RequestContext owner() {
             return identity.owner();
         }
 
+        DeliveryFacts record(DeliveryEvidence evidence, CancelReason reason) {
+            return switch (evidence) {
+                case TransportResult transport -> recordTransport(transport.result(), reason);
+                case RouteDelivered ignored -> {
+                    if (identity.kind() != Delivery.SendMode.ROUTE_DECISION) {
+                        throw new IllegalArgumentException(
+                                "route completion requires route delivery identity");
+                    }
+                    yield withSend(SendState.DELIVERED);
+                }
+                case Abandonment abandoned ->
+                        abandon(
+                                identity.kind() == Delivery.SendMode.ROUTE_DECISION
+                                                && send == SendState.NOT_STARTED
+                                        ? SendState.ROUTE_CLOSED
+                                        : send,
+                                abandonment == null && !releasable(this)
+                                        ? abandoned.reason()
+                                        : abandonment);
+                case CleanupAcknowledgement ack ->
+                        mergeReleaseProof(
+                                false,
+                                ack.kind() == CancelEvidenceKind.CLEANED
+                                        || ack.kind() == CancelEvidenceKind.FENCED,
+                                ack.kind() == CancelEvidenceKind.CLEANED);
+                case PreparationFailure ignored -> {
+                    if (send == SendState.SENDING) {
+                        throw new IllegalStateException(
+                                "preparation failure crossed send boundary");
+                    }
+                    yield send == SendState.NOT_STARTED ? withSend(SendState.NOT_SENT) : this;
+                }
+                case Prediction ignored -> this;
+            };
+        }
+
+        /** Exact sender result; cleanup evidence and cancellation remain separate facts. */
+        DeliveryFacts recordTransport(Delivery.Result result, CancelReason reason) {
+            if (identity.kind() != Delivery.SendMode.BATCH_ENQUEUE) {
+                throw new IllegalArgumentException(
+                        "transport result requires batch delivery identity");
+            }
+            var next =
+                    switch (result.status()) {
+                        case NOT_SENT -> SendState.NOT_SENT;
+                        case PREFILL_REJECTED -> SendState.REJECTED;
+                        case DELIVERED -> SendState.DELIVERED;
+                        case UNCERTAIN -> SendState.UNKNOWN;
+                    };
+            if (send != SendState.NOT_STARTED && send != SendState.SENDING) {
+                if (send == next) return this;
+                throw new IllegalStateException("conflicting result after sender completion");
+            }
+            boolean released =
+                    next == SendState.NOT_SENT
+                            || (abandonment == null
+                                    ? executionFinished
+                                    : prefillProof && decodeProof);
+            var abandoned =
+                    result.failed() && !released && abandonment == null ? reason : abandonment;
+            return recordResult(next, abandoned, prefillProof, decodeProof);
+        }
+
         DeliveryFacts recordResult(
                 SendState next, CancelReason abandoned, boolean prefillProof, boolean decodeProof) {
+            if (send == next
+                    && abandonment == abandoned
+                    && this.prefillProof == prefillProof
+                    && this.decodeProof == decodeProof) return this;
             return new DeliveryFacts(
                     identity,
                     next,
@@ -401,6 +469,9 @@ public final class ContextResult {
 
         DeliveryFacts mergeReleaseProof(
                 boolean finished, boolean prefillSettled, boolean decodeSettled) {
+            if ((!finished || executionFinished)
+                    && (!prefillSettled || prefillProof)
+                    && (!decodeSettled || decodeProof)) return this;
             return new DeliveryFacts(
                     identity,
                     send,
@@ -455,7 +526,6 @@ public final class ContextResult {
             boolean prefillSettled,
             boolean decodeSettled,
             boolean notificationsDone,
-            boolean timersDone,
             @lombok.With(lombok.AccessLevel.PACKAGE) boolean expired,
             boolean notificationsAttempted) {
         CloseFacts withSettlement(boolean prefillSettled, boolean decodeSettled) {
@@ -463,7 +533,6 @@ public final class ContextResult {
                     prefillSettled,
                     decodeSettled,
                     notificationsDone,
-                    timersDone,
                     expired,
                     notificationsAttempted);
         }
@@ -478,7 +547,6 @@ public final class ContextResult {
                     prefillSettled || evidence.prefillSettled() || prefillCompleted,
                     decodeSettled || evidence.decodeSettled(),
                     false,
-                    false,
                     expired || evidence.kind() == EndKind.INACTIVITY,
                     notificationsAttempted);
         }
@@ -490,7 +558,6 @@ public final class ContextResult {
                     prefillSettled || progress.prefillSettled(),
                     decodeSettled || progress.decodeSettled(),
                     notified,
-                    timersDone || progress.timersDone(),
                     expired,
                     notificationsAttempted || progress.notificationsAttempted());
         }
@@ -500,17 +567,15 @@ public final class ContextResult {
                     prefillSettled || evidence.prefillSettled(),
                     decodeSettled || evidence.decodeSettled(),
                     notificationsDone,
-                    timersDone,
                     expired || evidence.kind() == EndKind.INACTIVITY,
                     notificationsAttempted);
         }
     }
 
-    /** Control facts are shared by observations that change only activity timestamps. */
-    public record SnapshotFacts(
+    /** Immutable request facts and observation times captured in one transition. */
+    public record Snapshot(
             Identity key,
             long createdAtMs,
-            Phase phase,
             RequestRoute route,
             PlacementFacts placement,
             DeliveryFacts delivery,
@@ -523,62 +588,46 @@ public final class ContextResult {
             CloseFacts close,
             ExpirationTimer.Plan deadlines,
             RequestState terminalRecord,
-            boolean deliveryReleasable,
-            boolean preparedDelivery) {}
-
-    public record Snapshot(
-            @lombok.experimental.Delegate SnapshotFacts facts,
             long lastWorkerAtMs,
             long updatedAtMs,
-            long inactivityExpiresAtMs) {}
+            long inactivityExpiresAtMs) {
+        public boolean deliveryReleasable() {
+            return DeliveryFacts.releasable(delivery);
+        }
 
-    public record Update(UpdateKind kind, Snapshot before, Snapshot after) {
-        public Update {
-            Objects.requireNonNull(kind);
-            Objects.requireNonNull(before);
-            Objects.requireNonNull(after);
-            if (before.key() != null && before.key() != after.key()) {
-                throw new IllegalArgumentException("request incarnation changed");
+        /** State eligibility only; Context still checks inactivity and preemption before confirming. */
+        public boolean canConfirmDelivery() {
+            return key != null
+                    && phase() == Phase.OPEN
+                    && selectedResponse == null
+                    && pendingEnd == null
+                    && cancellation == null
+                    && delivery != null
+                    && delivery.abandonment() == null
+                    && (delivery.send() == SendState.DELIVERED
+                            || delivery.send() == SendState.UNKNOWN && engine.decodeAccepted());
+        }
+
+        public boolean preparedDelivery() {
+            if (outcome != null
+                    || route == null
+                    || delivery != null
+                    || cancellation != null
+                    || preemption != null
+                    || pendingEnd != null) {
+                return false;
             }
-            if (kind != UpdateKind.APPLIED && before != after) {
-                throw new IllegalArgumentException("unchanged updates must reuse their snapshot");
-            }
+            return placement == null
+                    || placement.published()
+                            && placement.operation().withdrawingRoute() == null
+                            && placement.pendingRetirement() == null
+                            && !placement.inactivityExpired();
         }
-    }
 
-    public sealed interface Claim<T extends GrantValue> permits Granted, Blocked, Rejected, Stale {
-        Snapshot before();
-
-        Snapshot after();
-    }
-
-    public record Granted<T extends GrantValue>(Snapshot before, Snapshot after, T value)
-            implements Claim<T> {
-        public Granted {
-            Objects.requireNonNull(before);
-            Objects.requireNonNull(after);
-            Objects.requireNonNull(value);
-        }
-    }
-
-    public record Blocked<T extends GrantValue>(Snapshot before, Snapshot after, Blocker blocker)
-            implements Claim<T> {
-        public Blocked {
-            Objects.requireNonNull(blocker);
-        }
-    }
-
-    public record Rejected<T extends GrantValue>(Snapshot before, Snapshot after, Rejection reason)
-            implements Claim<T> {
-        public Rejected {
-            Objects.requireNonNull(reason);
-        }
-    }
-
-    public record Stale<T extends GrantValue>(Snapshot before) implements Claim<T> {
-        @Override
-        public Snapshot after() {
-            return before;
+        public Phase phase() {
+            return terminalRecord != null
+                    ? Phase.CLOSED
+                    : outcome != null ? Phase.ENDING : Phase.OPEN;
         }
     }
 }

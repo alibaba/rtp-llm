@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+The approved refactor target is [the proposed component design](docs/scheduler-design/proposed-component-classes.html). Follow its complete responsibilities and budgets; [the current implementation diagram](docs/current-class-diagram.md) records partial progress, not completion. Historical proposals that delete RequestLifecycle or add SchedulerLoop do not supersede this target.
+
 ## Project Overview
 
 FlexLB is a high-performance, intelligent load balancer designed for AI model inference workloads. It provides advanced load balancing strategies, request batching, caching mechanisms, and automatic failover to optimize AI service deployments.
@@ -60,7 +62,7 @@ Core load balancing logic, scheduling strategies, and worker status synchronizat
 Key concepts:
 
 - **Routing**: `RequestWorkerSelector` composes the Prefill and Decode cost selectors and the VIT random selector for multi-role requests
-- **Queue-based scheduling**: `RequestScheduler` contract + `QueuedRequestScheduler` ordered placement owner + per-generation `PrefillQueueRunner` delivery runtime
+- **Queue-based scheduling**: `RequestScheduler` contract + `QueuedRequestScheduler` ordered placement owner + per-generation `PrefillEndpoint` resource handoff
 - **Resource measurement**: Endpoint resource views used by routing strategies
 - **Worker synchronization**: Periodic gRPC-based status sync (`GrpcWorkerStatusRunner`)
 - **Master election**: ZooKeeper-based leader election (`ZookeeperMasterElectService`)
@@ -68,17 +70,17 @@ Key concepts:
 
 Queue scheduling components:
 
-- `RequestScheduler`: Public submit and cancel contract
-- `AbstractRequestScheduler`: Per-generation admission, protocol effects, publication, and drain responsibilities shared by both modes
-- `DirectRequestScheduler`: Accepts requests and selects and commits one immediate route
-- `QueuedRequestScheduler`: Accepts requests and owns ordering, bounded planning, capacity waits, and commit
+- `RequestScheduler`: Replaceable scheduling timing, request/endpoint change notifications, and stopping scheduling
+- `AbstractRequestScheduler`: Shared wiring only: binds RequestLifecycle and retains its repository and Decode admission capacity; subclasses implement scheduling
+- `DirectRequestScheduler`: Chooses when to select an immediate route; DeliveryDispatcher prepares and commits its resources
+- `QueuedRequestScheduler`: Owns scheduling timing, bounded planning and capacity waits; replaceable queues supply ordering, and GroupPlanner supplies batching rules
 - `RequestRepository`: Shared registration, exact active/terminal identities, queries, and archival; no request protocol
 - `PlacementConfiguration`: Constructs the fixed-mode scheduler at startup
 - `RequestContext`: Private per-request lifecycle, exact admission/route/preemption identities, deadlines, cancellation, and response selection
-- `SchedulerRuntime`: Startup scheduler initialization, maintenance, and ordered shutdown; `ExpirationTimer` schedules exact registrations, while continuation and completion executors drain their own accepted work
-- `PrefillQueueRunner`: Endpoint-facing queue, capacity revalidation, and delivery runtime after placement
+- `RequestLifecycle`: Admission handles, cancellation, deadlines, resource handoff, and request settlement. `ApplicationLifecycle` owns service shutdown order; each execution component drains and closes its own work
+- `PrefillEndpoint`: Owns the Prefill generation, queue access, capacity revalidation, and committed resource handoff
 - `GroupPlanner`: Stateless SINGLE/FIXED_WINDOW decisions shared by live grouping and route projection
-- `RequestContext.DeliveryClaim`: Exact send outcome, irreversible abandonment and immutable release evidence; `DeliveryDispatcher` owns remote cleanup retries
+- `Delivery`: Owns one preparation-to-dispatch operation; its `Member` is the exact identity used by request delivery facts. RequestContext stores send outcomes and release evidence; DeliveryDispatcher owns resource preparation, atomic commit calls and remote cleanup retries
 
 Capacity management components:
 
@@ -215,7 +217,7 @@ Scheduling and dispatch are independent tagged choices in `FLEXLB_CONFIG`:
 - `dispatcher.type=BATCH`: Master delivers the formed group with `EnqueueBatch`.
 
 Every QUEUE combination enters through `RequestScheduler.submit`; `QueuedRequestScheduler` selects and commits all required
-endpoints once, and the selected Prefill `PrefillQueueRunner` performs the configured
+endpoints once, and the selected Prefill `PrefillEndpoint` performs the configured
 decision-window and delivery. There is no secondary routing queue, earlier-entry
 scan, or multi-stage placement retry loop. The global decision thread waits only
 on an exact capacity event or queue mutation; endpoint workers independently wait
@@ -245,7 +247,7 @@ During routing, the system queries matching cache blocks to prefer workers with 
 `ApplicationLifecycle` owns the fixed online/offline state machine. It starts
 and stops consistency registration, exposes health state, waits for the active
 request counter to remain quiet, and reports each phase through
-`GracefulLifecycleReporter`. There is no dynamic hook registry.
+`EngineHealthReporter`. There is no dynamic hook registry.
 
 ### Master Election and Consistency
 
@@ -353,8 +355,8 @@ completion, timeout, and cancellation races.
 Methods:
 
 - Lifecycle fields are private. Context behavior methods validate exact request/route/operation identities under its monitor; callers never assemble transitions through setters. Route publication, endpoint cleanup, and user callbacks run outside that monitor. Delivery eligibility, time checks, and local endpoint handoff remain one atomic request operation.
-- `RequestFuture`, `AdmissionHandle`, and `DeliveryClaim` are static Context types with narrow completion callbacks. `AbstractRequestScheduler` executes request effects; `SchedulerRuntime` drains admission, and `RequestRepository` owns active/terminal indexes.
-- `SchedulerRuntime` closes producers before continuations and publications; `closeRequestExecutors()` drains both executors last. Timer shutdown closes registration before detaching handles.
+- `AdmissionHandle` is a top-level admission identity; response futures belong to `ResponseCompletionExecutor.RequestFuture`, and delivery identity belongs to `Delivery.Member`. `RequestLifecycle` executes request effects and drains admission; `RequestRepository` owns active/terminal indexes. `AbstractRequestScheduler` only shares lifecycle wiring.
+- `ApplicationLifecycle.closeScheduling()` orders shutdown: stop registration and scheduling, settle requests and delivery cleanup, close endpoints, then drain and close execution components. Each component owns its own waiting and closure. Timer shutdown closes registration before detaching handles.
 
 ### Reactive Programming
 
@@ -460,4 +462,4 @@ Most development uses the opensource profile.
 
 The parenthetical content in such comments is unnecessary because it makes readers wonder about a problem X they weren't aware of. The code should look naturally correct from the beginning. 5. To run Maven commands, use the Maven wrapper from rtp_llm/flexlb directory: `./mvnw` 6. **IMPORTANT**: Do not repeatedly read the same file multiple times. Once you have sufficient context from a file read, proceed to edit directly. Avoid excessive redundant Read operations on the same file or code snippets.
 
-Spring creates one scheduler at startup. The scheduler and request contexts use the ConfigService startup configuration directly; changes to scheduling and shared PrefillQueueRunner settings require restart. BATCH abandonment requires sender exit and exact remote cleanup proof before archival; response completion does not release these obligations. Ordinary cancellation capability is checked before using the Engine cleanup protocol.
+Spring creates one scheduler at startup. The scheduler and request contexts use the ConfigService startup configuration directly; changes to scheduling and shared PrefillEndpoint settings require restart. BATCH abandonment requires sender exit and exact remote cleanup proof before archival; response completion does not release these obligations. Ordinary cancellation capability is checked before using the Engine cleanup protocol.

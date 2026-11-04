@@ -2,8 +2,10 @@ package org.flexlb.balance.projection;
 
 import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
+import org.flexlb.balance.projection.RequestTimeEstimation.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.config.DispatcherConfig;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;

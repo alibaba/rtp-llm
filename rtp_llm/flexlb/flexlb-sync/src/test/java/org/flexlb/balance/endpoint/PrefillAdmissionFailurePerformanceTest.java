@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.RequestLifecycle;
-import org.flexlb.balance.scheduler.RequestWorkerSelector;
+import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
@@ -27,13 +27,15 @@ class PrefillAdmissionFailurePerformanceTest {
     @Test
     void unchangedFleetDoesNotAllocatePerWorker() throws Throwable {
         var classify =
-                MethodHandles.privateLookupIn(RequestWorkerSelector.class, MethodHandles.lookup())
+                MethodHandles.privateLookupIn(
+                                CostBasedPrefillStrategy.class, MethodHandles.lookup())
                         .findStatic(
-                                RequestWorkerSelector.class,
+                                CostBasedPrefillStrategy.class,
                                 "classifyWorkerCapacity",
                                 MethodType.methodType(
                                         AdmissionRejectReason.class,
-                                        PrefillState.AdmissionSummary.class));
+                                        org.flexlb.balance.strategy.PrefillSelectionStrategy
+                                                .AdmissionSummary.class));
         var bean = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
         assertTrue(bean.isThreadAllocatedMemorySupported());
         bean.setThreadAllocatedMemoryEnabled(true);
@@ -63,7 +65,7 @@ class PrefillAdmissionFailurePerformanceTest {
                 observation.setAlive(true);
                 observation.setRunningQueryLen(1L);
                 EndpointTestSupport.applyStatus(endpoint, observation).run();
-                var summary = endpoint.ownership.admissionSummary(50, endpoint.requestLimit);
+                var summary = endpoint.admissionSummary(50, endpoint.requestLimit);
                 assertEquals(1L, summary.occupiedRequests());
                 assertEquals(1L, summary.unknownPriorityRequests());
                 directory.add(endpoint);
@@ -75,8 +77,7 @@ class PrefillAdmissionFailurePerformanceTest {
                 result =
                         (AdmissionRejectReason)
                                 classify.invokeExact(
-                                        selected.ownership.admissionSummary(
-                                                50, selected.requestLimit));
+                                        selected.admissionSummary(50, selected.requestLimit));
             }
             long before = bean.getThreadAllocatedBytes(threadId);
             long started = System.nanoTime();
@@ -85,8 +86,7 @@ class PrefillAdmissionFailurePerformanceTest {
                 result =
                         (AdmissionRejectReason)
                                 classify.invokeExact(
-                                        selected.ownership.admissionSummary(
-                                                50, selected.requestLimit));
+                                        selected.admissionSummary(50, selected.requestLimit));
             }
             long nsPerFailure = (System.nanoTime() - started) / 10_000;
             long bytesPerFailure = (bean.getThreadAllocatedBytes(threadId) - before) / 10_000;
@@ -110,12 +110,13 @@ class PrefillAdmissionFailurePerformanceTest {
         assertTrue(bean.isThreadAllocatedMemorySupported());
         bean.setThreadAllocatedMemoryEnabled(true);
         var state =
-                new PrefillState(
+                org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                         new java.util.concurrent.locks.ReentrantLock(),
                         PrefillActiveIndex.ordered(
                                 4,
                                 java.util.Comparator.comparingLong(
-                                        org.flexlb.balance.scheduler.RequestRoute::requestId)),
+                                        org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
+                                                ::requestId)),
                         System::currentTimeMillis);
         long threadId = Thread.currentThread().threadId();
         for (int round = 0; round < 20_000; round++) {

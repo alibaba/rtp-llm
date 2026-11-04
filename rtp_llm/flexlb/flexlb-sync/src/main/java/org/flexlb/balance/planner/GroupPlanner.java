@@ -1,6 +1,7 @@
 package org.flexlb.balance.planner;
 
-import org.flexlb.balance.prediction.PrefillBatchFeatures;
+import org.flexlb.balance.endpoint.PrefillRequestQueue;
+import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
 
 import java.util.List;
 import java.util.Objects;
@@ -36,7 +37,7 @@ public interface GroupPlanner {
             long enqueuedAtMs,
             long expiresAtMs,
             PrefillBatchFeatures.Item features)
-            implements Input {
+            implements Input, PrefillRequestQueue.QueueItem {
 
         public Item {
             Objects.requireNonNull(features, "features");

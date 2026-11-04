@@ -6,10 +6,9 @@ import io.grpc.Context;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
-import org.flexlb.balance.scheduler.DeliveryClaimKind;
+import org.flexlb.balance.scheduler.Delivery;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestLifecycle;
-import org.flexlb.balance.scheduler.RequestSchedulerEntry;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -61,7 +60,7 @@ class FlexlbServiceImplTest {
 
     private final java.util.concurrent.ScheduledExecutorService deadlineTimer =
             java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
-    private RequestSchedulerEntry requestScheduler;
+    private RequestLifecycle requestScheduler;
     private final RequestLifecycle requestState = mock(RequestLifecycle.class);
     private MasterStatusService masterStatusService;
     private EngineHealthReporter engineHealthReporter;
@@ -77,7 +76,7 @@ class FlexlbServiceImplTest {
     @BeforeEach
     void setUp() {
         org.flexlb.telemetry.FlexlbTrace.configure(io.opentelemetry.api.OpenTelemetry.noop(), "");
-        requestScheduler = mock(RequestSchedulerEntry.class);
+        requestScheduler = mock(RequestLifecycle.class);
         masterStatusService = mock(MasterStatusService.class);
         engineHealthReporter = mock(EngineHealthReporter.class);
         grpcForwarder = mock(FlexlbGrpcForwarder.class);
@@ -122,8 +121,8 @@ class FlexlbServiceImplTest {
     @Test
     void vitRouteDoesNotOwnOrCancelGenerationLifecycle() {
         when(masterStatusService.isNeedConsistency()).thenReturn(false);
-        CompletableFuture<Response> pending = new CompletableFuture<>();
-        when(requestScheduler.submit(any(), any())).thenReturn(pending);
+        var selector = mock(org.flexlb.balance.scheduler.RequestWorkerSelector.class);
+        service.configureRouting(selector);
         var request =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                         .setRequestId(12345L)
@@ -133,22 +132,25 @@ class FlexlbServiceImplTest {
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 mock(StreamObserver.class);
         Context.CancellableContext inbound = Context.current().withCancellation();
+        when(selector.routeVit(any()))
+                .thenAnswer(
+                        call -> {
+                            RequestContext context = call.getArgument(0);
+                            assertTrue(context.data().getRequest().isVitRouteOnly());
+                            assertEquals(
+                                    java.util.List.of("image"),
+                                    context.data().getRequest().getCacheAffinityKeys());
+                            inbound.cancel(null);
+                            Response response = new Response();
+                            response.setSuccess(true);
+                            response.setCode(200);
+                            return response;
+                        });
         inbound.run(() -> service.schedule(request, observer));
-        ArgumentCaptor<RequestContext> captured = ArgumentCaptor.forClass(RequestContext.class);
-        verify(requestScheduler).submit(captured.capture(), any());
-        assertTrue(captured.getValue().data().getRequest().isVitRouteOnly());
-        assertEquals(
-                java.util.List.of("image"),
-                captured.getValue().data().getRequest().getCacheAffinityKeys());
-        inbound.cancel(null);
-        Response response = new Response();
-        response.setSuccess(true);
-        response.setCode(200);
-        pending.complete(response);
-        verify(requestScheduler, never()).cancel(anyLong(), anyLong(), any());
+        verify(selector).routeVit(any());
+        verifyNoInteractions(requestScheduler, observer);
         verify(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requestState), never())
                 .getRequestState(anyLong(), anyLong());
-        verifyNoInteractions(observer);
     }
 
     @Test
@@ -1033,7 +1035,7 @@ class FlexlbServiceImplTest {
                         new RequestState(
                                 88L,
                                 RequestState.Phase.ACKNOWLEDGED,
-                                DeliveryClaimKind.BATCH_ENQUEUE,
+                                Delivery.SendMode.BATCH_ENQUEUE,
                                 1001L,
                                 10L,
                                 20L,
@@ -1064,7 +1066,7 @@ class FlexlbServiceImplTest {
                 new RequestState(
                         86L,
                         RequestState.Phase.ACKNOWLEDGED,
-                        DeliveryClaimKind.BATCH_ENQUEUE,
+                        Delivery.SendMode.BATCH_ENQUEUE,
                         1001L,
                         10L,
                         20L,
@@ -1843,7 +1845,7 @@ class FlexlbServiceImplTest {
                         new RequestState(
                                 700L,
                                 RequestState.Phase.ACKNOWLEDGED,
-                                DeliveryClaimKind.BATCH_ENQUEUE,
+                                Delivery.SendMode.BATCH_ENQUEUE,
                                 1001L,
                                 10L,
                                 20L,

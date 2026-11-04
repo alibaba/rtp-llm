@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -48,7 +49,7 @@ public final class RequestRepository {
                     if (activeRequests.containsKey(id) || terminalRecords.containsKey(id)) {
                         return RegistrationResult.DUPLICATE_ID;
                     }
-                    if (data.getScheduler() != null || context.snapshot().key() != null) {
+                    if (data.getLifecycle() != null || context.snapshot().key() != null) {
                         return RegistrationResult.CONTEXT_BOUND;
                     }
                     if (data.getConfig().getDispatcher().requiresGenerateInput()
@@ -85,7 +86,7 @@ public final class RequestRepository {
     public RequestLifecycle ownerOf(long requestId) {
         RequestContext context = findActive(requestId);
         if (context != null) {
-            return context.data().getScheduler();
+            return context.data().getLifecycle();
         }
         TerminalRecord terminal = findTerminal(requestId);
         return terminal == null ? null : terminal.owner();
@@ -125,12 +126,15 @@ public final class RequestRepository {
         for (var context : snapshotActive()) {
             var response = context.data().getFuture();
             if (response.isDone()) continue;
-            long remaining = deadlineNanos == Long.MAX_VALUE
-                    ? Long.MAX_VALUE : deadlineNanos - System.nanoTime();
+            long remaining =
+                    deadlineNanos == Long.MAX_VALUE
+                            ? Long.MAX_VALUE
+                            : deadlineNanos - System.nanoTime();
             if (remaining <= 0L) return false;
             try {
                 response.get(remaining, java.util.concurrent.TimeUnit.NANOSECONDS);
-            } catch (java.util.concurrent.ExecutionException | java.util.concurrent.CancellationException completed) {
+            } catch (java.util.concurrent.ExecutionException
+                    | java.util.concurrent.CancellationException completed) {
                 // A failed or cancelled response is finished; lifecycle still owns settlement.
             } catch (java.util.concurrent.TimeoutException timeout) {
                 return false;
@@ -157,7 +161,7 @@ public final class RequestRepository {
             }
             terminalRecords.put(
                     exact.data().getRequestId(),
-                    new TerminalRecord(terminal, exact.data().getScheduler()));
+                    new TerminalRecord(terminal, exact.data().getLifecycle()));
             activeRequests.remove(exact.data().getRequestId(), exact);
             exact.data().releaseSchedulingInput();
         }

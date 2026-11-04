@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -16,6 +17,7 @@ import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 /**
@@ -42,7 +44,7 @@ class PrefillEndpointDirectSchedulerTest {
                                 runtime.events()),
                         mock(DeliveryMetricsReporter.class));
         try (var executor = Executors.newFixedThreadPool(8)) {
-            List<Future<PrefillState.ReservationResult<PrefillState.RouteReservation>>> futures =
+            List<Future<CapacityBoundary.Attempt<PrefillEndpoint.RouteReservation>>> futures =
                     new ArrayList<>();
             for (long id = 1; id <= 64; id++) {
                 long requestId = id;
@@ -55,45 +57,35 @@ class PrefillEndpointDirectSchedulerTest {
                                     }
                                 }));
             }
-            List<PrefillState.RouteReservation> owned = new ArrayList<>();
+            List<PrefillEndpoint.RouteReservation> owned = new ArrayList<>();
             for (var future : futures) {
                 var result = future.get();
-                if (result.status() == PrefillState.CapacityStatus.ACQUIRED) {
-                    owned.add(result.reservation());
+                if (result.accepted()) {
+                    owned.add(result.value());
                 } else {
-                    assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, result.status());
+                    assertEquals(
+                            CapacityBoundary.Resource.PREFILL_REQUEST,
+                            result.boundary().resource());
                 }
             }
             assertEquals(4, owned.size());
-            assertEquals(
-                    4,
-                    endpoint.ownership
-                            .admissionSummary(0, endpoint.requestLimit)
-                            .occupiedRequests());
+            assertEquals(4, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
             try (var pin = endpoint.tryPinGeneration()) {
                 var full = endpoint.reserveUnqueuedRoute(pin, item(100L), 10L);
                 assertEquals(
-                        PrefillState.CapacityStatus.CAPACITY_FULL,
-                        full.status(),
+                        CapacityBoundary.Resource.PREFILL_REQUEST,
+                        full.boundary().resource(),
                         "four exact owners already consume the four-request limit");
             }
-            owned.forEach(reservation -> endpoint.release(reservation, null));
-            assertEquals(
-                    0,
-                    endpoint.ownership
-                            .admissionSummary(0, endpoint.requestLimit)
-                            .occupiedRequests());
+            owned.forEach(reservation -> endpoint.rollback(reservation));
+            assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
             try (var pin = endpoint.tryPinGeneration()) {
                 var result = endpoint.reserveUnqueuedRoute(pin, item(65L), 10L);
-                assertEquals(PrefillState.CapacityStatus.ACQUIRED, result.status());
-                endpoint.release(result.reservation(), null);
-                endpoint.release(result.reservation(), null);
+                assertTrue(result.accepted());
+                endpoint.rollback(result.value());
+                endpoint.rollback(result.value());
             }
-            assertEquals(
-                    0,
-                    endpoint.ownership
-                            .admissionSummary(0, endpoint.requestLimit)
-                            .occupiedRequests());
+            assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
         } finally {
             endpoint.close();
         }

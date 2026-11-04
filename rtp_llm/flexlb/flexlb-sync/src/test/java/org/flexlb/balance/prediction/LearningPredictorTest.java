@@ -1,5 +1,6 @@
 package org.flexlb.balance.prediction;
 
+import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 

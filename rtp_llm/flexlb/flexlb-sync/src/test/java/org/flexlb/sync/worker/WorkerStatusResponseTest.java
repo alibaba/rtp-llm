@@ -6,7 +6,7 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.PriorityPreemptionProgress;
-import org.flexlb.service.grpc.EngineStatusConverter;
+import org.flexlb.service.grpc.WorkerStatusRpcClient;
 import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -190,6 +190,6 @@ class WorkerStatusResponseTest {
         WorkerStatus owner =
                 WorkerStatus.createDiscovered(
                         RoleType.PREFILL, "test-group", "127.0.0.1", 8080, 8081, "test-site");
-        return EngineStatusConverter.convertToStatusObservation(owner, response);
+        return WorkerStatusRpcClient.convertToStatusObservation(owner, response);
     }
 }

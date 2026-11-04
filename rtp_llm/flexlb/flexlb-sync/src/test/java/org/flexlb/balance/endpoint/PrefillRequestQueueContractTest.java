@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.scheduler.RequestRoute;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -11,76 +11,148 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.locks.ReentrantLock;
 
-import static org.flexlb.balance.endpoint.PrefillState.QueueChange.ACK_STOP;
-import static org.flexlb.balance.endpoint.PrefillState.QueueChange.ENQUEUE;
-import static org.flexlb.balance.endpoint.PrefillState.QueueChange.REMOVE;
-import static org.flexlb.balance.endpoint.PrefillState.QueueChange.REMOVE_UNEXPIRED;
-import static org.flexlb.balance.endpoint.PrefillState.QueueChange.STOP;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class PrefillRequestQueueContractTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void replacementPreservesExactOwnershipAndRejectsAnExpiredOwner(boolean alternative) {
-        var order = Comparator.comparingLong(RequestRoute::enqueueSeq);
+        var order =
+                Comparator.comparingLong(
+                        org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem::enqueueSeq);
         PrefillRequestQueue queue =
                 alternative ? new ListQueue(order) : PrefillActiveIndex.ordered(4, order);
-        var state = new PrefillState(new ReentrantLock(), queue, () -> 100L);
+        var state =
+                org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
+                        new ReentrantLock(), queue, () -> 100L);
         var head = route(1, 1);
         var next = route(2, 2);
-        when(head.decodeEp()).thenReturn(mock(DecodeEndpoint.class));
-        when(next.decodeEp()).thenReturn(mock(DecodeEndpoint.class));
-        state.updateQueue(ENQUEUE, head, 100);
-        state.updateQueue(ENQUEUE, next, 100);
-        state.queueGuard().lock();
+        var sameDecode = mock(DecodeEndpoint.class);
+        when(head.decodeEp()).thenReturn(sameDecode);
+        when(next.decodeEp()).thenReturn(sameDecode);
+        org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(state, head);
+        org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(state, next);
+        state.resourceLock().lock();
         try {
-            assertTrue(state.canBypassLocked(head, next));
+            assertTrue(state.selectionCurrentLocked(head, next));
             when(head.requestExpired(100)).thenReturn(true);
-            assertFalse(state.canBypassLocked(head, next));
+            assertFalse(state.selectionCurrentLocked(head, next));
         } finally {
-            state.queueGuard().unlock();
+            state.resourceLock().unlock();
         }
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void replacementKeepsExactOwnershipAndStableSnapshots(boolean alternative) {
-        var order = Comparator.comparingLong(RequestRoute::enqueueSeq);
+        var order =
+                Comparator.comparingLong(
+                        org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem::enqueueSeq);
         PrefillRequestQueue queue =
                 alternative ? new ListQueue(order) : PrefillActiveIndex.ordered(4, order);
-        var state = new PrefillState(new ReentrantLock(), queue, () -> 100L);
+        var state =
+                org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
+                        new ReentrantLock(), queue, () -> 100L);
         var first = route(1, 1);
         var second = route(2, 2);
         var stale = route(1, 1);
-        assertSame(second, state.updateQueue(ENQUEUE, second, 100));
-        assertSame(first, state.updateQueue(ENQUEUE, first, 100));
-        assertNull(state.updateQueue(ENQUEUE, stale, 100));
+        assertSame(second, org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(state, second));
+        assertSame(first, org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(state, first));
+        assertNull(org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(state, stale));
         var snapshot = queue.capture();
         long version = queue.version();
         assertSame(first, queue.peek());
         assertEquals(
-                List.of(1L, 2L),
-                snapshot.items().stream().map(RequestRoute::requestId).toList());
-        assertNull(state.updateQueue(REMOVE, stale, 100));
+                List.of(1L, 2L), snapshot.items().stream().map(RequestRoute::requestId).toList());
+        assertNull(org.flexlb.balance.endpoint.EndpointTestSupport.removeQueued(state, stale));
         assertEquals(version, queue.version());
         when(first.requestExpired(100)).thenReturn(true);
-        assertNull(state.updateQueue(REMOVE_UNEXPIRED, first, 100));
-        assertSame(first, state.updateQueue(REMOVE, first, 100));
-        assertNull(state.updateQueue(REMOVE, first, 100));
+        assertSame(first, queue.peek(), "expiry does not remove queue membership");
+        assertSame(
+                first, org.flexlb.balance.endpoint.EndpointTestSupport.removeQueued(state, first));
+        assertNull(org.flexlb.balance.endpoint.EndpointTestSupport.removeQueued(state, first));
         assertTrue(queue.version() > version);
-        assertSame(second, state.updateQueue(STOP, null, 100));
+        assertEquals(List.of(second), state.closeQueue());
+        assertTrue(state.queueStopped());
+        assertTrue(state.closeQueue().isEmpty(), "only the first closer receives the members");
+        when(stale.prefillEp()).thenReturn(state);
+        assertFalse(state.offerQueued(stale), "closing the queue stops new membership");
+        verify(first, never()).ctx();
+        verify(second, never()).ctx();
         assertTrue(queue.isEmpty());
-        assertSame(second, state.updateQueue(ACK_STOP, second, 100));
+        assertEquals(
+                2L,
+                state.admissionSummary(0, 0).occupiedRequests(),
+                "queue removal does not settle either request");
+        assertTrue(state.releaseRequest(first));
+        assertTrue(state.releaseRequest(second));
+        assertEquals(0L, state.admissionSummary(0, 0).occupiedRequests());
         assertEquals(0, state.stats().locallyOwnedRequests());
         assertEquals(2, snapshot.items().size());
         assertThrows(UnsupportedOperationException.class, () -> snapshot.items().clear());
+    }
+
+    @Test
+    void rejectedInsertionDoesNotPublishOrRetainAReservation() {
+        var queue = mock(PrefillRequestQueue.class);
+        when(queue.enabled()).thenReturn(true);
+        var endpoint = EndpointTestSupport.prefillEndpoint(new ReentrantLock(), queue, () -> 100L);
+        var rejected = route(1, 1);
+        assertNull(org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(endpoint, rejected));
+        verify(rejected, never()).attachPrefillReservation(any());
+        assertEquals(0L, endpoint.admissionSummary(0, 0).occupiedRequests());
+        assertFalse(endpoint.releaseRequest(rejected));
+
+        var retry = route(1, 2);
+        when(queue.add(retry)).thenReturn(true);
+        assertSame(retry, org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(endpoint, retry));
+        assertEquals(1L, endpoint.admissionSummary(0, 0).occupiedRequests());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void queueOwnsBlockedHeadOrderAndSuccessfulDispatchAllowance(boolean alternative) {
+        Comparator<PrefillRequestQueue.QueueItem> order =
+                Comparator.comparingLong(PrefillRequestQueue.QueueItem::enqueueSeq);
+        PrefillRequestQueue queue =
+                alternative ? new ListQueue(order) : PrefillActiveIndex.ordered(4, order);
+        var state = EndpointTestSupport.prefillEndpoint(new ReentrantLock(), queue, () -> 100L);
+        var head = route(1, 1);
+        var candidate = route(2, 2);
+        when(head.decodeEp()).thenReturn(mock(DecodeEndpoint.class));
+        when(candidate.decodeEp()).thenReturn(mock(DecodeEndpoint.class));
+        EndpointTestSupport.enqueue(state, head);
+        EndpointTestSupport.enqueue(state, candidate);
+        assertEquals(
+                alternative ? List.of() : List.of(candidate),
+                state.captureQueue(10, head, true).items());
+        assertTrue(state.captureQueue(10, head, false).items().isEmpty());
+        // A failed preparation sends no dispatch event and retains the same candidates.
+        assertEquals(
+                alternative ? List.of() : List.of(candidate),
+                state.captureQueue(10, head, true).items());
+        state.resourceLock().lock();
+        try {
+            queue.recordDispatch(head);
+        } finally {
+            state.resourceLock().unlock();
+        }
+        assertTrue(state.captureQueue(10, head, true).items().isEmpty());
+        assertEquals(List.of(head, candidate), state.captureQueue(10).items());
+        assertEquals(
+                2L,
+                state.admissionSummary(0, 0).occupiedRequests(),
+                "queue decisions never settle requests");
     }
 
     private static RequestRoute route(long id, long sequence) {
@@ -94,10 +166,10 @@ class PrefillRequestQueueContractTest {
     /** Deliberately uses different storage from PrefillActiveIndex. */
     private static final class ListQueue implements PrefillRequestQueue {
         private final List<RequestRoute> items = new ArrayList<>();
-        private final Comparator<RequestRoute> order;
+        private final Comparator<org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem> order;
         private long version;
 
-        ListQueue(Comparator<RequestRoute> order) {
+        ListQueue(Comparator<org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem> order) {
             this.order = order;
         }
 
@@ -161,7 +233,7 @@ class PrefillRequestQueueContractTest {
 
         public Snapshot capture() {
             var copy = List.copyOf(items);
-            return () -> copy;
+            return new Snapshot(copy, order);
         }
     }
 }

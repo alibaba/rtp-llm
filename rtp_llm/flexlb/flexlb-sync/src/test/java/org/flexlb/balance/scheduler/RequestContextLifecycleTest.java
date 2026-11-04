@@ -4,8 +4,8 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.scheduler.RequestProtocolTestSupport.Registered;
+import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.balance.scheduler.SchedulerTestSupport.Stage;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
@@ -84,6 +84,47 @@ class RequestContextLifecycleTest {
     }
 
     @Test
+    void pendingWorkerEndKeepsInactivityRecheckInstalledUntilPlacementFinishes() throws Exception {
+        var context = RequestProtocolTestSupport.context(config, 895L);
+        var future = RequestProtocolTestSupport.register(lifecycle, context);
+        var route =
+                SchedulingTestConfig.createRoute(
+                        context,
+                        new Response(),
+                        null,
+                        null,
+                        mock(PrefillEndpoint.class),
+                        null,
+                        null,
+                        System.currentTimeMillis());
+        try (var admission = lifecycle.claimAdmissionHandle(895L, future);
+                var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
+            assertNotNull(lifecycle.beginRoute(route));
+            assertTrue(DeliveryDispatcher.recordRoute(admission, route, true, null));
+            var original = context.snapshot().deadlines().inactivity();
+            lifecycle.onEngineEvidence(
+                    context,
+                    new ContextResult.EngineEvidence(
+                            route,
+                            null,
+                            org.flexlb.dao.route.RoleType.PDFUSION,
+                            ContextResult.EngineKind.COMPLETED,
+                            0L,
+                            "worker complete",
+                            original.atMs() - 1));
+            assertNull(context.snapshot().outcome());
+            lifecycle.onDeadline(original, original.atMs());
+            awaitCondition(() -> context.snapshot().deadlines().inactivity() != original);
+            awaitCondition(
+                    () ->
+                            !lifecycle.expirationTimer.needsUpdate(
+                                    context, context.snapshot().deadlines()));
+            assertNull(context.snapshot().outcome());
+            assertFalse(future.isDone());
+        }
+    }
+
+    @Test
     void deadlineInstallationDoesNotReadUnboundRequestForDiagnostics() {
         RequestContext context = new RequestContext(config);
         context.data().setFuture(new CompletableFuture<>());
@@ -128,8 +169,8 @@ class RequestContextLifecycleTest {
             assertEquals(expectedPending, repository.pendingDeliveryRequestCount());
             assertEquals(
                     PlacementResult.Status.SUCCESS,
-                    lifecycle.commitRoute(
-                            item, RequestProtocolTestSupport.publication(() -> true)));
+                    RequestProtocolTestSupport.commitRoute(
+                            lifecycle, item, RequestProtocolTestSupport.publication(() -> true)));
             assertEquals(Stage.READY_TO_DELIVER, SchedulerTestSupport.stage(context));
             assertEquals(expectedPending, repository.pendingDeliveryRequestCount());
             admission.finish();
@@ -145,10 +186,10 @@ class RequestContextLifecycleTest {
             assertEquals(
                     1, repository.liveRequestCount(), "sender handoff is not request completion");
         } finally {
-            lifecycle.onDeliveryFact(
+            lifecycle.onDeliveryResult(
                     new ContextResult.TransportResult(
                             delivery,
-                            org.flexlb.balance.delivery.DeliveryResult.notSent(
+                            org.flexlb.balance.scheduler.Delivery.Result.notSent(
                                     new IllegalStateException("test sender stopped")),
                             System.currentTimeMillis()));
         }
@@ -382,7 +423,9 @@ class RequestContextLifecycleTest {
 
     @Test
     void rejectedDuplicateSubmitCannotReplaceTheCanonicalCancellation() {
-        var queue = (QueuedRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle);
+        var queue =
+                (QueuedRequestScheduler)
+                        org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle);
         org.mockito.Mockito.doNothing()
                 .when(queue)
                 .onRequestChanged(org.mockito.ArgumentMatchers.any());
@@ -424,7 +467,9 @@ class RequestContextLifecycleTest {
                 RequestProtocolTestSupport.register(lifecycle, context(802L));
         assertFalse(replacement.isDone());
         assertSame(replacement, lifecycle.requests.findActive(802L).data().getFuture());
-        var queue = (QueuedRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle);
+        var queue =
+                (QueuedRequestScheduler)
+                        org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle);
         queue.onRequestChanged(old);
         assertNull(SchedulerTestServices.lifecycle(queue).cancel(old, 0L, CancelReason.SHUTDOWN));
         assertSame(replacement, lifecycle.requests.findActive(802L).data().getFuture());
@@ -473,7 +518,9 @@ class RequestContextLifecycleTest {
     @ValueSource(booleans = {false, true})
     void futureCancelDuringAdmissionIsSynchronousAndTheAdmissionOwnerSettlesIt(
             boolean mayInterruptIfRunning) {
-        QueuedRequestScheduler queue = (QueuedRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle);
+        QueuedRequestScheduler queue =
+                (QueuedRequestScheduler)
+                        org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle);
         org.mockito.Mockito.doNothing()
                 .when(queue)
                 .onRequestChanged(org.mockito.ArgumentMatchers.any());
@@ -520,8 +567,8 @@ class RequestContextLifecycleTest {
             assertNotNull(admission);
             assertEquals(
                     PlacementResult.Status.SUCCESS,
-                    lifecycle.commitRoute(
-                            item, RequestProtocolTestSupport.publication(() -> true)));
+                    RequestProtocolTestSupport.commitRoute(
+                            lifecycle, item, RequestProtocolTestSupport.publication(() -> true)));
             assertNotNull(
                     RequestProtocolTestSupport.claimRouteWithoutPrediction(
                             lifecycle, item, () -> true));
@@ -569,7 +616,8 @@ class RequestContextLifecycleTest {
                     assertThrows(
                             IllegalStateException.class,
                             () ->
-                                    lifecycle.commitRoute(
+                                    RequestProtocolTestSupport.commitRoute(
+                                            lifecycle,
                                             item,
                                             RequestProtocolTestSupport.publication(() -> true))));
             assertSame(item, context.snapshot().route());
@@ -596,7 +644,7 @@ class RequestContextLifecycleTest {
                         System.currentTimeMillis());
         var failure = new IllegalStateException("failure after handoff");
         var publication =
-                new RequestLifecycle.Publication() {
+                new RequestProtocolTestSupport.Publication() {
                     private boolean published;
 
                     @Override
@@ -616,7 +664,9 @@ class RequestContextLifecycleTest {
                     failure,
                     assertThrows(
                             IllegalStateException.class,
-                            () -> lifecycle.commitRoute(item, publication)));
+                            () ->
+                                    RequestProtocolTestSupport.commitRoute(
+                                            lifecycle, item, publication)));
             assertSame(item, context.snapshot().route());
             assertEquals(Stage.READY_TO_DELIVER, SchedulerTestSupport.stage(context));
             verify(prefill).signal(org.flexlb.balance.endpoint.PrefillEndpoint.Signal.INPUT);
@@ -648,7 +698,8 @@ class RequestContextLifecycleTest {
                         assertThrows(
                                 IllegalStateException.class,
                                 () ->
-                                        lifecycle.commitRoute(
+                                        RequestProtocolTestSupport.commitRoute(
+                                                lifecycle,
                                                 item,
                                                 RequestProtocolTestSupport.publication(
                                                         () -> {
@@ -657,11 +708,13 @@ class RequestContextLifecycleTest {
             } else {
                 assertEquals(
                         PlacementResult.Status.BLOCKED,
-                        lifecycle.commitRoute(
-                                item, RequestProtocolTestSupport.publication(() -> false)));
+                        RequestProtocolTestSupport.commitRoute(
+                                lifecycle,
+                                item,
+                                RequestProtocolTestSupport.publication(() -> false)));
             }
             context.bindPlacement(
-                    admission.token, item, ContextResult.PublicationResult.ROLLBACK_COMPLETED);
+                    admission, item, ContextResult.PublicationResult.ROLLBACK_COMPLETED);
             assertNull(context.snapshot().route());
             assertEquals(Stage.ROUTING, SchedulerTestSupport.stage(context));
         }
@@ -690,12 +743,12 @@ class RequestContextLifecycleTest {
             assertNotNull(admission);
             assertEquals(
                     PlacementResult.Status.SUCCESS,
-                    lifecycle.commitRoute(
-                            item, RequestProtocolTestSupport.publication(() -> true)));
+                    RequestProtocolTestSupport.commitRoute(
+                            lifecycle, item, RequestProtocolTestSupport.publication(() -> true)));
             assertTrue(future.cancel(false));
             assertTrue(future.isCancelled());
         }
-        verify(prefill).release(null, item);
+        verify(prefill).releaseRequest(item);
         assertEquals(
                 RequestState.Phase.CANCELLED,
                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle)
@@ -788,7 +841,9 @@ class RequestContextLifecycleTest {
 
     @Test
     void globalWaitingCancellationDoesNotWaitForDecisionOwnerTicket() throws Exception {
-        QueuedRequestScheduler queue = (QueuedRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle);
+        QueuedRequestScheduler queue =
+                (QueuedRequestScheduler)
+                        org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle);
         org.mockito.Mockito.doNothing()
                 .when(queue)
                 .onRequestChanged(org.mockito.ArgumentMatchers.any());
@@ -821,16 +876,19 @@ class RequestContextLifecycleTest {
         assertTrue(requestContext.snapshot().phase() != ContextResult.Phase.CLOSED);
         var before = requestContext.snapshot();
         var stale =
-                requestContext.recordEngineEvidence(
-                        new ContextResult.EngineEvidence(
-                                null,
-                                null,
-                                RoleType.PREFILL,
-                                ContextResult.EngineKind.ACTIVE,
-                                0L,
-                                null,
-                                System.currentTimeMillis()));
-        assertEquals(ContextResult.UpdateKind.STALE, stale.kind());
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        requestContext,
+                        observedRequest ->
+                                observedRequest.recordEngineEvidence(
+                                        new ContextResult.EngineEvidence(
+                                                null,
+                                                null,
+                                                RoleType.PREFILL,
+                                                ContextResult.EngineKind.ACTIVE,
+                                                0L,
+                                                null,
+                                                System.currentTimeMillis())));
+        assertEquals(RequestChangeAssertions.UpdateKind.STALE, stale.kind());
         assertSame(before, stale.after());
         assertEquals(
                 RequestState.Phase.QUEUED, RequestState.from(requestContext.snapshot()).state());
@@ -872,7 +930,8 @@ class RequestContextLifecycleTest {
                 assertNotNull(admission);
                 assertEquals(
                         PlacementResult.Status.CLOSED,
-                        other.commitRoute(
+                        RequestProtocolTestSupport.commitRoute(
+                                other,
                                 item,
                                 RequestProtocolTestSupport.publication(
                                         () -> {
@@ -883,44 +942,47 @@ class RequestContextLifecycleTest {
                 assertNull(item.ctx().snapshot().route());
                 assertEquals(
                         PlacementResult.Status.SUCCESS,
-                        lifecycle.commitRoute(
-                                item, RequestProtocolTestSupport.publication(() -> true)));
+                        RequestProtocolTestSupport.commitRoute(
+                                lifecycle,
+                                item,
+                                RequestProtocolTestSupport.publication(() -> true)));
             }
             synchronized (item.ctx()) {
                 assertFalse(
                         other.requests.isCurrent(item.ctx())
-                                && item.ctx().data().getScheduler() == other
+                                && item.ctx().data().getLifecycle() == other
                                 && item.ctx().snapshot().preparedDelivery());
             }
             assertNull(
-                    other.claimDelivery(
-                            item,
-                            DeliveryClaimKind.BATCH_ENQUEUE,
-                            41L,
-                            RequestProtocolTestSupport.handoff(
-                                    () -> {
-                                        throw new AssertionError(
-                                                "foreign scheduler transferred endpoint ownership");
-                                    })));
-            other.onDeliveryFact(
+                    DeliveryDispatcher.commitDelivery(
+                            other,
+                            new org.flexlb.balance.scheduler.Delivery.Member(
+                                    item,
+                                    RequestProtocolTestSupport.handoff(
+                                            () -> {
+                                                throw new AssertionError(
+                                                        "foreign scheduler transferred endpoint ownership");
+                                            })),
+                            Delivery.SendMode.BATCH_ENQUEUE,
+                            41L));
+            other.onDeliveryResult(
                     new ContextResult.PreparationFailure(
                             null, item, "foreign failure", System.currentTimeMillis()));
-            other.onQueueEvent(item, RequestLifecycle.QueueKind.EXPIRED, null);
-            other.onQueueEvent(
-                    item,
-                    RequestLifecycle.QueueKind.REJECTED,
-                    new IllegalStateException("foreign queue failure"));
-            other.onQueueEvent(item, RequestLifecycle.QueueKind.REJECTED, null);
+            other.cancel(
+                    item.ctx(), 0L, org.flexlb.balance.scheduler.CancelReason.DEADLINE_EXCEEDED);
+            other.rejectRoute(item, new IllegalStateException("foreign queue failure"));
+            other.rejectRoute(item, null);
             assertEquals(Stage.READY_TO_DELIVER, SchedulerTestSupport.stage(item.ctx()));
             assertEquals(Stage.QUEUED, SchedulerTestSupport.stage(other.requests.findActive(806L)));
             assertFalse(registered.future().isDone());
             assertFalse(otherFuture.isDone());
             assertNotNull(
-                    lifecycle.claimDelivery(
-                            item,
-                            DeliveryClaimKind.BATCH_ENQUEUE,
-                            41L,
-                            RequestProtocolTestSupport.handoff(() -> true)));
+                    DeliveryDispatcher.commitDelivery(
+                            lifecycle,
+                            new org.flexlb.balance.scheduler.Delivery.Member(
+                                    item, RequestProtocolTestSupport.handoff(() -> true)),
+                            Delivery.SendMode.BATCH_ENQUEUE,
+                            41L));
         } finally {
             RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(other);
             other.closeOutstandingAndTerminalize();
@@ -941,11 +1003,12 @@ class RequestContextLifecycleTest {
             assertNotNull(admission);
             assertEquals(
                     PlacementResult.Status.BLOCKED,
-                    lifecycle.commitRoute(
+                    RequestProtocolTestSupport.commitRoute(
+                            lifecycle,
                             registered.item(),
                             RequestProtocolTestSupport.publication(() -> false)));
             requestContext.bindPlacement(
-                    admission.token,
+                    admission,
                     registered.item(),
                     ContextResult.PublicationResult.ROLLBACK_COMPLETED);
             assertEquals(Stage.ROUTING, SchedulerTestSupport.stage(requestContext));
@@ -955,8 +1018,10 @@ class RequestContextLifecycleTest {
                     RequestState.from(requestContext.snapshot()).state());
             assertEquals(
                     PlacementResult.Status.SUCCESS,
-                    lifecycle.commitRoute(
-                            registered.item(), RequestProtocolTestSupport.publication(() -> true)));
+                    RequestProtocolTestSupport.commitRoute(
+                            lifecycle,
+                            registered.item(),
+                            RequestProtocolTestSupport.publication(() -> true)));
             assertEquals(Stage.READY_TO_DELIVER, SchedulerTestSupport.stage(requestContext));
         }
     }
@@ -971,14 +1036,15 @@ class RequestContextLifecycleTest {
             assertNotNull(initial);
             try {
                 var result =
-                        lifecycle.commitRoute(
+                        RequestProtocolTestSupport.commitRoute(
+                                lifecycle,
                                 registered.item(),
                                 RequestProtocolTestSupport.publication(
                                         () -> {
                                             registered
                                                     .item()
                                                     .prefillEp()
-                                                    .release(null, registered.item());
+                                                    .releaseRequest(registered.item());
                                             assertEquals(
                                                     DecodeResources.ReservationReleaseResult
                                                             .RELEASED,
@@ -993,7 +1059,7 @@ class RequestContextLifecycleTest {
                                                                             .LOCAL_ROLLBACK)
                                                             .status());
                                             context.bindPlacement(
-                                                    initial.token,
+                                                    initial,
                                                     registered.item(),
                                                     ContextResult.PublicationResult
                                                             .ROLLBACK_COMPLETED);
@@ -1010,9 +1076,9 @@ class RequestContextLifecycleTest {
                         expected.get(),
                         context.snapshot(),
                         "the old publication must leave the new scope untouched");
-                assertSame(replacement.get().token, context.snapshot().placement().operation());
+                assertSame(replacement.get(), context.snapshot().placement().operation());
                 assertNull(context.snapshot().route());
-                assertNull(context.snapshot().placement().acquired());
+                assertNull(context.snapshot().route());
                 assertFalse(registered.future().isDone());
                 verify(registered.item().prefillEp(), org.mockito.Mockito.never())
                         .signal(org.flexlb.balance.endpoint.PrefillEndpoint.Signal.INPUT);
@@ -1047,18 +1113,15 @@ class RequestContextLifecycleTest {
             assertNotNull(admission);
             assertEquals(
                     PlacementResult.Status.SUCCESS,
-                    lifecycle.commitRoute(
-                            item, RequestProtocolTestSupport.publication(() -> true)));
+                    RequestProtocolTestSupport.commitRoute(
+                            lifecycle, item, RequestProtocolTestSupport.publication(() -> true)));
         }
 
         assertEquals(
                 RequestState.Phase.CANCELLED,
                 lifecycle.cancel(707L, 0L, CancelReason.CLIENT_CANCELLED).state());
         assertEquals(ContextResult.Phase.CLOSED, context.snapshot().phase());
-        lifecycle.onQueueEvent(
-                item,
-                RequestLifecycle.QueueKind.REJECTED,
-                new IllegalStateException("endpoint stopped"));
+        lifecycle.rejectRoute(item, new IllegalStateException("endpoint stopped"));
 
         assertEquals(
                 RequestState.Phase.CANCELLED,
@@ -1092,11 +1155,11 @@ class RequestContextLifecycleTest {
             assertNotNull(admission);
             assertEquals(
                     PlacementResult.Status.SUCCESS,
-                    lifecycle.commitRoute(
-                            item, RequestProtocolTestSupport.publication(() -> true)));
+                    RequestProtocolTestSupport.commitRoute(
+                            lifecycle, item, RequestProtocolTestSupport.publication(() -> true)));
         }
         AtomicReference<Thread> cleanupThread = new AtomicReference<>();
-        when(prefill.release(null, item))
+        when(prefill.releaseRequest(item))
                 .thenAnswer(
                         invocation -> {
                             assertFalse(Thread.holdsLock(context));
@@ -1113,7 +1176,7 @@ class RequestContextLifecycleTest {
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
         assertNotNull(cleanupThread.get());
         assertNotEquals(Thread.currentThread(), cleanupThread.get());
-        verify(prefill).release(null, item);
+        verify(prefill).releaseRequest(item);
         assertEquals(
                 RequestState.Phase.TIMED_OUT, RequestState.from(requestContext.snapshot()).state());
     }
@@ -1140,8 +1203,8 @@ class RequestContextLifecycleTest {
             assertNotNull(admission);
             assertEquals(
                     PlacementResult.Status.SUCCESS,
-                    lifecycle.commitRoute(
-                            item, RequestProtocolTestSupport.publication(() -> true)));
+                    RequestProtocolTestSupport.commitRoute(
+                            lifecycle, item, RequestProtocolTestSupport.publication(() -> true)));
         }
         RequestContext requestContext = lifecycle.requests.findActive(709L);
         lifecycle.onDeadline(
@@ -1201,12 +1264,12 @@ class RequestContextLifecycleTest {
             assertNotNull(admission);
             assertEquals(
                     PlacementResult.Status.SUCCESS,
-                    lifecycle.commitRoute(
-                            item, RequestProtocolTestSupport.publication(() -> true)));
+                    RequestProtocolTestSupport.commitRoute(
+                            lifecycle, item, RequestProtocolTestSupport.publication(() -> true)));
         }
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        when(prefill.release(null, item))
+        when(prefill.releaseRequest(item))
                 .thenAnswer(
                         call -> {
                             assertFalse(Thread.holdsLock(context));
@@ -1220,10 +1283,7 @@ class RequestContextLifecycleTest {
                             context, "inactivityDeadline"),
                     Long.MAX_VALUE);
             assertTrue(entered.await(2, TimeUnit.SECONDS));
-            lifecycle.onQueueEvent(
-                    item,
-                    RequestLifecycle.QueueKind.REJECTED,
-                    new IllegalStateException("endpoint stopped"));
+            lifecycle.rejectRoute(item, new IllegalStateException("endpoint stopped"));
             assertEquals(
                     RequestState.Phase.TIMED_OUT, RequestState.from(context.snapshot()).state());
         } finally {
@@ -1232,7 +1292,7 @@ class RequestContextLifecycleTest {
         assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
-        verify(prefill).release(null, item);
+        verify(prefill).releaseRequest(item);
         assertEquals(RequestState.Phase.TIMED_OUT, RequestState.from(context.snapshot()).state());
     }
 
@@ -1321,8 +1381,8 @@ class RequestContextLifecycleTest {
             assertNotNull(admission);
             assertEquals(
                     PlacementResult.Status.SUCCESS,
-                    lifecycle.commitRoute(
-                            route, RequestProtocolTestSupport.publication(() -> true)));
+                    RequestProtocolTestSupport.commitRoute(
+                            lifecycle, route, RequestProtocolTestSupport.publication(() -> true)));
             lifecycle.onEngineEvidence(
                     route.ctx(),
                     new ContextResult.EngineEvidence(
@@ -1340,9 +1400,9 @@ class RequestContextLifecycleTest {
                     context,
                     prefill,
                     RoleType.PREFILL,
-                    new PrefillState.PrefillRequestStatus(
+                    new PrefillEndpoint.PrefillRequestStatus(
                             route,
-                            org.flexlb.balance.endpoint.PrefillState.PrefillRequestStatus.Kind
+                            org.flexlb.balance.endpoint.PrefillEndpoint.PrefillRequestStatus.Kind
                                     .FAILED,
                             42L));
             assertFalse(
@@ -1365,7 +1425,7 @@ class RequestContextLifecycleTest {
                 .release(
                         route.decodeReservation(),
                         DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
-        org.mockito.Mockito.verify(prefill, org.mockito.Mockito.never()).release(null, route);
+        org.mockito.Mockito.verify(prefill, org.mockito.Mockito.never()).releaseRequest(route);
     }
 
     @Test
@@ -1515,8 +1575,10 @@ class RequestContextLifecycleTest {
                     requestContext,
                     registered.item().prefillEp(),
                     RoleType.PREFILL,
-                    new PrefillState.PrefillRequestStatus(
-                            registered.item(), PrefillState.PrefillRequestStatus.Kind.ACTIVE, 0L));
+                    new PrefillEndpoint.PrefillRequestStatus(
+                            registered.item(),
+                            PrefillEndpoint.PrefillRequestStatus.Kind.ACTIVE,
+                            0L));
         }
         lifecycle.cancel(602L, 0L, CancelReason.DEADLINE_EXCEEDED);
         SchedulerTestSupport.awaitRequestWork(
@@ -1527,7 +1589,7 @@ class RequestContextLifecycleTest {
                         .getRequestState(602L, 0L)
                         .state());
         assertEquals(0, lifecycle.requests.liveRequestCount());
-        verify(registered.item().prefillEp()).release(null, registered.item());
+        verify(registered.item().prefillEp()).releaseRequest(registered.item());
         verify(registered.item().decodeEp())
                 .release(
                         registered.item().decodeReservation(),
@@ -1581,7 +1643,7 @@ class RequestContextLifecycleTest {
         Registered registered = registerItemWithCancelTarget(703L);
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
         RequestContext old = lifecycle.requests.findActive(703L);
-        DeliveryClaim delivery =
+        Delivery.Member delivery =
                 RequestProtocolTestSupport.claimBatchWithoutPrediction(
                         lifecycle, registered.item(), 17L, () -> true);
         assertNotNull(delivery);
@@ -1596,14 +1658,14 @@ class RequestContextLifecycleTest {
                         lifecycle, old, "inactivityExpiresAtMsLocked"));
         registered.future().join();
         assertTrue(lifecycle.requests.isCurrent(old), "sender still owns prepared delivery");
-        delivery.item()
+        delivery.route()
                 .ctx()
                 .data()
-                .getScheduler()
-                .onDeliveryFact(
+                .getLifecycle()
+                .onDeliveryResult(
                         new ContextResult.TransportResult(
                                 delivery,
-                                org.flexlb.balance.delivery.DeliveryResult.notSent(
+                                org.flexlb.balance.scheduler.Delivery.Result.notSent(
                                         new IllegalStateException("expired before send")),
                                 System.currentTimeMillis()));
         SchedulerTestSupport.awaitRequestWork(
@@ -1619,17 +1681,21 @@ class RequestContextLifecycleTest {
                                 Long.MAX_VALUE));
         CompletableFuture<Response> replacement =
                 RequestProtocolTestSupport.register(lifecycle, context(703L));
-        assertSame(registered.future(), registered.item().future());
-        assertNotSame(replacement, registered.item().future());
+        assertSame(registered.future(), registered.item().ctx().data().getFuture());
+        assertNotSame(replacement, registered.item().ctx().data().getFuture());
         assertThrows(IllegalStateException.class, () -> old.data().setFuture(replacement));
-        assertSame(registered.future(), registered.item().future());
+        assertSame(registered.future(), registered.item().ctx().data().getFuture());
         var stale =
-                old.recordDeliveryResult(
-                        new ContextResult.TransportResult(
-                                delivery,
-                                org.flexlb.balance.delivery.DeliveryResult.delivered(),
-                                System.currentTimeMillis()));
-        assertEquals(ContextResult.UpdateKind.STALE, stale.kind());
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        old,
+                        observedRequest ->
+                                observedRequest.recordDeliveryResult(
+                                        new ContextResult.TransportResult(
+                                                delivery,
+                                                org.flexlb.balance.scheduler.Delivery.Result
+                                                        .delivered(),
+                                                System.currentTimeMillis())));
+        assertEquals(RequestChangeAssertions.UpdateKind.STALE, stale.kind());
         assertSame(stale.before(), stale.after());
         assertFalse(
                 lifecycle.onPreemption(
@@ -1645,12 +1711,12 @@ class RequestContextLifecycleTest {
                         preemption,
                         new RequestLifecycle.PreemptionEvent(null, true, null, null, null)));
         lifecycle.cancel(old, 0L, CancelReason.CLIENT_CANCELLED);
-        lifecycle.onQueueEvent(registered.item(), RequestLifecycle.QueueKind.EXPIRED, null);
-        lifecycle.onQueueEvent(
-                registered.item(),
-                RequestLifecycle.QueueKind.REJECTED,
-                new IllegalStateException("late queue failure"));
-        lifecycle.onQueueEvent(registered.item(), RequestLifecycle.QueueKind.REJECTED, null);
+        lifecycle.cancel(
+                registered.item().ctx(),
+                0L,
+                org.flexlb.balance.scheduler.CancelReason.DEADLINE_EXCEEDED);
+        lifecycle.rejectRoute(registered.item(), new IllegalStateException("late queue failure"));
+        lifecycle.rejectRoute(registered.item(), null);
         RequestContext current = lifecycle.requests.findActive(703L);
         ContextResult.Snapshot oldState = old.snapshot();
         ContextResult.Snapshot currentState = current.snapshot();
@@ -1659,16 +1725,16 @@ class RequestContextLifecycleTest {
                 old,
                 registered.item().prefillEp(),
                 RoleType.PREFILL,
-                new PrefillState.PrefillRequestStatus(
-                        registered.item(), PrefillState.PrefillRequestStatus.Kind.ACTIVE, 0L));
+                new PrefillEndpoint.PrefillRequestStatus(
+                        registered.item(), PrefillEndpoint.PrefillRequestStatus.Kind.ACTIVE, 0L));
         RequestProtocolTestSupport.applyPrefillStatus(
                 lifecycle,
                 old,
                 registered.item().prefillEp(),
                 RoleType.PREFILL,
-                new PrefillState.PrefillRequestStatus(
+                new PrefillEndpoint.PrefillRequestStatus(
                         registered.item(),
-                        org.flexlb.balance.endpoint.PrefillState.PrefillRequestStatus.Kind
+                        org.flexlb.balance.endpoint.PrefillEndpoint.PrefillRequestStatus.Kind
                                 .COMPLETED,
                         0L));
         RequestProtocolTestSupport.applyDecodeStatus(
@@ -1709,14 +1775,14 @@ class RequestContextLifecycleTest {
                 RequestProtocolTestSupport.claimBatch(
                         lifecycle, registered.item(), 17L, () -> true);
         assertNotNull(delivery);
-        delivery.item()
+        delivery.route()
                 .ctx()
                 .data()
-                .getScheduler()
-                .onDeliveryFact(
+                .getLifecycle()
+                .onDeliveryResult(
                         new ContextResult.TransportResult(
                                 delivery,
-                                org.flexlb.balance.delivery.DeliveryResult.delivered(),
+                                org.flexlb.balance.scheduler.Delivery.Result.delivered(),
                                 System.currentTimeMillis()));
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
@@ -1802,14 +1868,14 @@ class RequestContextLifecycleTest {
         var delivery =
                 RequestProtocolTestSupport.claimBatch(
                         lifecycle, registered.item(), 17L, () -> true);
-        delivery.item()
+        delivery.route()
                 .ctx()
                 .data()
-                .getScheduler()
-                .onDeliveryFact(
+                .getLifecycle()
+                .onDeliveryResult(
                         new ContextResult.TransportResult(
                                 delivery,
-                                org.flexlb.balance.delivery.DeliveryResult.delivered(),
+                                org.flexlb.balance.scheduler.Delivery.Result.delivered(),
                                 System.currentTimeMillis()));
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
@@ -1849,7 +1915,7 @@ class RequestContextLifecycleTest {
                         true,
                         false),
                 System.currentTimeMillis());
-        lifecycle.onDeliveryFact(
+        lifecycle.onDeliveryResult(
                 new ContextResult.PreparationFailure(
                         delivery,
                         registered.item(),
@@ -1893,12 +1959,7 @@ class RequestContextLifecycleTest {
                 (context.snapshot().preemption() == null
                         || context.snapshot().preemption().finished()));
         assertEquals(Stage.FINISHED, SchedulerTestSupport.stage(context));
-        assertTrue(
-                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle)
-                        .signals()
-                        .preemption(claim)
-                        .toCompletableFuture()
-                        .isDone());
+        assertTrue(claim.completion().toCompletableFuture().isDone());
         assertNull(lifecycle.requests.findActive(707L));
         assertNull(SchedulerTestSupport.preemption(context));
     }
@@ -1910,14 +1971,14 @@ class RequestContextLifecycleTest {
         var delivery =
                 RequestProtocolTestSupport.claimBatch(
                         lifecycle, registered.item(), 17L, () -> true);
-        delivery.item()
+        delivery.route()
                 .ctx()
                 .data()
-                .getScheduler()
-                .onDeliveryFact(
+                .getLifecycle()
+                .onDeliveryResult(
                         new ContextResult.TransportResult(
                                 delivery,
-                                org.flexlb.balance.delivery.DeliveryResult.delivered(),
+                                org.flexlb.balance.scheduler.Delivery.Result.delivered(),
                                 System.currentTimeMillis()));
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
@@ -2001,12 +2062,7 @@ class RequestContextLifecycleTest {
         assertTrue(
                 (context.snapshot().preemption() == null
                         || context.snapshot().preemption().finished()));
-        assertTrue(
-                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle)
-                        .signals()
-                        .preemption(claim)
-                        .toCompletableFuture()
-                        .isDone());
+        assertTrue(claim.completion().toCompletableFuture().isDone());
         assertEquals(Stage.FINISHED, SchedulerTestSupport.stage(context));
         assertEquals(RequestState.Phase.COMPLETED, RequestState.from(context.snapshot()).state());
         assertNull(lifecycle.requests.findActive(711L));
@@ -2022,11 +2078,12 @@ class RequestContextLifecycleTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () ->
-                        lifecycle.claimDelivery(
-                                registered.item(),
-                                DeliveryClaimKind.BATCH_ENQUEUE,
-                                7L,
-                                wrongReceipt));
+                        DeliveryDispatcher.commitDelivery(
+                                lifecycle,
+                                new org.flexlb.balance.scheduler.Delivery.Member(
+                                        registered.item(), wrongReceipt),
+                                Delivery.SendMode.BATCH_ENQUEUE,
+                                7L));
         assertNull(SchedulerTestSupport.delivery(registered.item().ctx()));
         assertEquals(Stage.READY_TO_DELIVER, SchedulerTestSupport.stage(registered.item().ctx()));
         assertFalse(registered.future().isDone());
@@ -2041,11 +2098,13 @@ class RequestContextLifecycleTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () ->
-                        lifecycle.claimDelivery(
-                                registered.item(),
-                                DeliveryClaimKind.BATCH_ENQUEUE,
-                                0L,
-                                RequestProtocolTestSupport.handoff(transfer)));
+                        DeliveryDispatcher.commitDelivery(
+                                lifecycle,
+                                new org.flexlb.balance.scheduler.Delivery.Member(
+                                        registered.item(),
+                                        RequestProtocolTestSupport.handoff(transfer)),
+                                Delivery.SendMode.BATCH_ENQUEUE,
+                                0L));
 
         org.mockito.Mockito.verify(transfer, org.mockito.Mockito.never()).getAsBoolean();
         assertEquals(
@@ -2061,7 +2120,7 @@ class RequestContextLifecycleTest {
             throws Exception {
         Registered registered = registerItem(705L);
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
-        DeliveryClaim claim =
+        Delivery.Member claim =
                 RequestProtocolTestSupport.claimBatch(
                         lifecycle, registered.item(), 23L, () -> true);
         assertNotNull(claim);
@@ -2069,11 +2128,11 @@ class RequestContextLifecycleTest {
         assertThrows(
                 NullPointerException.class,
                 () ->
-                        claim.item()
+                        claim.route()
                                 .ctx()
                                 .data()
-                                .getScheduler()
-                                .onDeliveryFact(
+                                .getLifecycle()
+                                .onDeliveryResult(
                                         new ContextResult.TransportResult(
                                                 claim, null, System.currentTimeMillis())));
         assertEquals(
@@ -2081,29 +2140,30 @@ class RequestContextLifecycleTest {
                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle)
                         .getRequestState(705L, 23L)
                         .state());
-        claim.item()
+        claim.route()
                 .ctx()
                 .data()
-                .getScheduler()
-                .onDeliveryFact(
+                .getLifecycle()
+                .onDeliveryResult(
                         new ContextResult.TransportResult(
                                 claim,
-                                org.flexlb.balance.delivery.DeliveryResult.delivered(),
+                                org.flexlb.balance.scheduler.Delivery.Result.delivered(),
                                 System.currentTimeMillis()));
         assertTrue(registered.future().get(5, TimeUnit.SECONDS).isSuccess());
         assertThrows(
                 IllegalStateException.class,
                 () ->
-                        claim.item()
+                        claim.route()
                                 .ctx()
                                 .data()
-                                .getScheduler()
-                                .onDeliveryFact(
+                                .getLifecycle()
+                                .onDeliveryResult(
                                         new ContextResult.TransportResult(
                                                 claim,
-                                                org.flexlb.balance.delivery.DeliveryResult.notSent(
-                                                        new IllegalStateException(
-                                                                "duplicate failure")),
+                                                org.flexlb.balance.scheduler.Delivery.Result
+                                                        .notSent(
+                                                                new IllegalStateException(
+                                                                        "duplicate failure")),
                                                 System.currentTimeMillis())));
 
         assertEquals(

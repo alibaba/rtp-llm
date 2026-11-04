@@ -407,11 +407,9 @@ class DecodeEndpointTest {
 
     /** Directly mutate the private counter to simulate drift. */
     private void setQueuedPhaseCount(int value) throws Exception {
-        java.lang.reflect.Field owner = DecodeEndpoint.class.getDeclaredField("state");
-        owner.setAccessible(true);
-        java.lang.reflect.Field usage = DecodeState.class.getDeclaredField("queuedUsage");
+        java.lang.reflect.Field usage = DecodeEndpoint.class.getDeclaredField("queuedUsage");
         usage.setAccessible(true);
-        Object counter = usage.get(owner.get(endpoint));
+        Object counter = usage.get(endpoint);
         java.lang.reflect.Field requests = counter.getClass().getDeclaredField("requests");
         requests.setAccessible(true);
         requests.setInt(counter, value);

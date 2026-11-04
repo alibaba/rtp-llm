@@ -6,7 +6,6 @@ import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.grpc.WorkerStatusRpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -423,7 +422,7 @@ class EndpointRegistryCloseTest {
                 // This transaction passed its generation check before close set
                 // the registry gate. Its resource commit must precede drain.
                 var observation =
-                        EngineStatusConverter.convertToStatusObservation(
+                        WorkerStatusRpcClient.convertToStatusObservation(
                                 status,
                                 runningStatus(status.appliedStatusCursor().statusVersion() + 1L));
                 endpoint.applyPreparedStatus(status, status.prepareNewStatus(observation));
@@ -450,7 +449,7 @@ class EndpointRegistryCloseTest {
         CacheAwareService cache = mock(CacheAwareService.class);
         var callbackOutsideMonitor = new java.util.concurrent.atomic.AtomicBoolean();
         CountDownLatch actualRetirement = new CountDownLatch(1);
-        Object lifecycle = ReflectionTestUtils.getField(endpoint, "generationLifecycle");
+        Object lifecycle = ReflectionTestUtils.getField(endpoint, "retirementCompleted");
         try (var pin = registry.capture(RoleType.PREFILL, address)) {
             assertNotNull(pin);
             EndpointRegistry.Retirement retirement;
@@ -547,13 +546,13 @@ class EndpointRegistryCloseTest {
         try {
             status.markRemovedFromDiscovery();
             var cleaner =
-                    new org.flexlb.sync.schedule.WorkerRetirementCleaner(
+                    org.flexlb.sync.synchronizer.WorkerSyncTestSupport.retirements(
                             mock(CacheAwareService.class), registry);
             assertThrows(AssertionError.class, cleaner::retireUnavailableWorkers);
             org.flexlb.sync.runner.RunnerTestSupport.awaitCondition(
                     () -> pendingRetirements(registry) == 0);
             assertTrue(loggingFailed.get());
-            assertTrue(endpoint.isGenerationRetiringOrRetired());
+            assertTrue(endpoint.isRetired());
             assertTrue(registry.statusSnapshot(RoleType.DECODE).isEmpty());
             assertEquals(0, pendingRetirements(registry));
             assertTimeoutPreemptively(java.time.Duration.ofSeconds(2), registry::close);
@@ -593,7 +592,7 @@ class EndpointRegistryCloseTest {
         EndpointTestSupport.completeRetirement(
                 retirement, mock(CacheAwareService.class), LoggerFactory.getLogger(getClass()));
         assertTrue(notifiedOutsideLock.get());
-        assertTrue(endpoint.isGenerationRetiringOrRetired());
+        assertTrue(endpoint.isRetired());
         assertTrue(registry.statusSnapshot(RoleType.VIT).isEmpty());
         assertTimeoutPreemptively(
                 java.time.Duration.ofSeconds(2),

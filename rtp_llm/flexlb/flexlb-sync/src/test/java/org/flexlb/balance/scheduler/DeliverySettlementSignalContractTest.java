@@ -1,11 +1,9 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
@@ -66,7 +64,7 @@ class DeliverySettlementSignalContractTest {
             assertEquals(1, fixture.decode.routingView().totalLoad());
             assertEquals(
                     side == Side.PREFILL ? 1L : 0L,
-                    fixture.prefill.ownership.progress().outstandingRequests());
+                    fixture.prefill.admissionSummary(0, 0L).occupiedRequests());
             assertFalse(fixture.settled.isDone(), "a release still owns real resources");
             assertEquals(
                     DeliveryDispatcher.StopResult.REMOTE_CLEANED,
@@ -90,11 +88,12 @@ class DeliverySettlementSignalContractTest {
         try (var fixture = new Fixture(Side.DECODE, true)) {
             fixture.cancelWithRemoteProof();
             RequestProtocolTestSupport.awaitCondition(
-                    () -> fixture.releaseAttempts.get() == 3 && fixture.pendingWork() == 0);
+                    () -> fixture.releaseAttempts.get() > 0 && fixture.pendingWork() == 0);
+            int failedAttempts = fixture.releaseAttempts.get();
             var close = fixture.context.snapshot().close();
             assertTrue(close.prefillSettled());
             assertFalse(close.decodeSettled());
-            assertEquals(0L, fixture.prefill.ownership.progress().outstandingRequests());
+            assertEquals(0L, fixture.prefill.admissionSummary(0, 0L).occupiedRequests());
             assertEquals(1, fixture.decode.routingView().totalLoad());
             assertTrue(fixture.scheduler.requests.isCurrent(fixture.context));
             assertFalse(fixture.settled.isDone(), "failed release is still an obligation");
@@ -111,7 +110,10 @@ class DeliverySettlementSignalContractTest {
             fixture.allowRelease.countDown();
             fixture.scheduler.scheduleClose(fixture.context);
             fixture.assertPhysicallySettledAndArchived();
-            assertEquals(4, fixture.releaseAttempts.get());
+            assertEquals(
+                    failedAttempts + 1,
+                    fixture.releaseAttempts.get(),
+                    "the explicit retry performs exactly one additional release");
             assertEquals(
                     1, fixture.cancelCalls.get(), "local retry needs no new remote proof session");
         }
@@ -127,7 +129,7 @@ class DeliverySettlementSignalContractTest {
         final DecodeEndpoint decode;
         final RequestContext context;
         final RequestRoute route;
-        final DeliveryClaim claim;
+        final Delivery.Member claim;
         final EngineGrpcClient channel = mock(EngineGrpcClient.class);
         final CompletableFuture<EngineGrpcClient.CancelReply> proof = new CompletableFuture<>();
         final CompletableFuture<Void> settled;
@@ -219,39 +221,36 @@ class DeliverySettlementSignalContractTest {
                             decode,
                             reservation,
                             System.currentTimeMillis());
-            var state = prefill.ownership;
+            var state = prefill;
             try (var admission = scheduler.claimAdmissionHandle(ID, future)) {
                 assertNotNull(admission);
                 assertEquals(
                         org.flexlb.balance.PlacementResult.Status.SUCCESS,
-                        scheduler.commitRoute(
+                        RequestProtocolTestSupport.commitRoute(
+                                scheduler,
                                 route,
                                 RequestProtocolTestSupport.publication(
                                         () ->
-                                                state.updateQueue(
-                                                                PrefillState.QueueChange.ENQUEUE,
-                                                                route,
-                                                                System.currentTimeMillis())
+                                                org.flexlb.balance.endpoint.EndpointTestSupport
+                                                                .enqueue(state, route)
                                                         == route)));
                 admission.finish();
             }
-            var prepared = prefill.reserveBatch(route, BATCH, 2);
-            assertEquals(PrefillState.CapacityStatus.ACQUIRED, prepared.status());
-            state.queueGuard().lock();
-            PrefillState.CommittedHandoff committed;
+            var prepared = prefill.reserveBatch(BATCH, 2);
+            assertTrue(prepared.accepted());
+            state.resourceLock().lock();
+            org.flexlb.balance.scheduler.Delivery committed;
             try {
                 committed =
                         prefill.commitLocked(
-                                new PrefillState.CommitPlan(
-                                        PrefillState.CommitKind.BATCH,
+                                org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
                                         List.of(route),
-                                        List.of(),
-                                        prepared.reservation(),
+                                        prepared.value(),
                                         new long[] {100L},
                                         null,
                                         System.currentTimeMillis()));
             } finally {
-                state.queueGuard().unlock();
+                state.resourceLock().unlock();
             }
             assertNotNull(committed);
             var dispatch =
@@ -260,13 +259,17 @@ class DeliverySettlementSignalContractTest {
             assertEquals(
                     DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, dispatch.status());
             claim =
-                    scheduler.claimDelivery(
-                            route, DeliveryClaimKind.BATCH_ENQUEUE, BATCH, dispatch.handle());
+                    DeliveryDispatcher.commitDelivery(
+                            scheduler,
+                            new org.flexlb.balance.scheduler.Delivery.Member(
+                                    route, dispatch.handle()),
+                            Delivery.SendMode.BATCH_ENQUEUE,
+                            BATCH);
             assertNotNull(claim);
             assertTrue(scheduler.tryStartSend(claim));
-            DeliveryDispatcher.closeCommitted(
-                    List.of(new DeliveryDispatcher.Member(route, dispatch.handle())), committed);
-            settled = runtime.signals().delivery(claim).toCompletableFuture();
+            dispatch.handle().release();
+            committed.close();
+            settled = claim.completion().toCompletableFuture();
             if (side == Side.PREFILL) {
                 doAnswer(
                                 call -> {
@@ -274,7 +277,7 @@ class DeliverySettlementSignalContractTest {
                                     return call.callRealMethod();
                                 })
                         .when(prefill)
-                        .release(null, route);
+                        .releaseRequest(route);
             } else {
                 doAnswer(
                                 call -> {
@@ -288,7 +291,8 @@ class DeliverySettlementSignalContractTest {
 
         private void awaitRelease() throws InterruptedException {
             assertFalse(Thread.holdsLock(context));
-            assertThrows(IllegalStateException.class, prefill.ownership.queueGuard()::requireHeld);
+            org.junit.jupiter.api.Assertions.assertFalse(
+                    prefill.resourceLock().isHeldByCurrentThread());
             releaseAttempts.incrementAndGet();
             releaseEntered.countDown();
             if (failRelease.get()) {
@@ -298,10 +302,10 @@ class DeliverySettlementSignalContractTest {
         }
 
         void cancelWithRemoteProof() {
-            scheduler.onDeliveryFact(
+            scheduler.onDeliveryResult(
                     new ContextResult.TransportResult(
                             claim,
-                            DeliveryResult.uncertain(
+                            Delivery.Result.uncertain(
                                     new IllegalStateException("transport response lost")),
                             System.currentTimeMillis()));
             scheduler.cancel(ID, BATCH, CancelReason.CLIENT_CANCELLED);
@@ -329,8 +333,8 @@ class DeliverySettlementSignalContractTest {
             settled.get(2, TimeUnit.SECONDS);
             session.get(2, TimeUnit.SECONDS);
             SchedulerTestSupport.awaitRequestWork(runtime);
-            assertEquals(0L, prefill.ownership.progress().outstandingRequests());
-            assertEquals(0, prefill.ownership.progress().batchSlots());
+            assertEquals(0L, prefill.admissionSummary(0, 0L).occupiedRequests());
+            assertEquals(0, prefill.queueCounters().batchSlots());
             assertEquals(0, decode.routingView().totalLoad());
             assertEquals(0, decode.resourceSnapshot().activeDispatchPermits());
             assertTrue(context.snapshot().close().prefillSettled());
@@ -338,7 +342,7 @@ class DeliverySettlementSignalContractTest {
             assertEquals(ContextResult.Phase.CLOSED, context.snapshot().phase());
             assertEquals(0, scheduler.requests.liveRequestCount());
             assertTrue(cleanupRegistry().isEmpty());
-            assertFalse(route.future().get(2, TimeUnit.SECONDS).isSuccess());
+            assertFalse(route.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
         }
 
         @Override

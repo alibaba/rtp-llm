@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -97,6 +98,24 @@ class ExpirationTimerInstallationRecoveryTest {
         }
     }
 
+    @org.junit.jupiter.api.Test
+    void missingTimerHandleLeavesTheExactDeadlineRetryable() {
+        try (var f = new Fixture()) {
+            var token = f.context.snapshot().deadlines().request();
+            var plan = new ExpirationTimer.Plan(1L, token, null, null);
+            org.mockito.Mockito.doReturn(null)
+                    .doCallRealMethod()
+                    .when(f.executor)
+                    .schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS));
+            assertThrows(NullPointerException.class, () -> f.timer.update(f.context, plan));
+            verify(f.owner, never()).onDeadline(any(), anyLong());
+            f.timer.update(f.context, plan);
+            f.clock.set(token.atMs());
+            ReflectionTestUtils.invokeMethod(f.handle(ExpirationTimer.Kind.REQUEST), "fire");
+            verify(f.owner).onDeadline(same(token), eq(token.atMs()));
+        }
+    }
+
     @ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     @Timeout(15)
@@ -157,7 +176,11 @@ class ExpirationTimerInstallationRecoveryTest {
                     .when(f.executor)
                     .schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS));
             assertThrows(RejectedExecutionException.class, () -> f.timer.update(f.context, old));
-            f.context.recordDeadline(old.request(), old.request().atMs() - 1L, null);
+            org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                    f.context,
+                    observedRequest ->
+                            observedRequest.recordDeadline(
+                                    old.request(), old.request().atMs() - 1L, null));
             var newer = f.context.snapshot().deadlines();
             assertTrue(newer.revision() > old.revision());
             assertNotSame(old.request(), newer.request());
@@ -208,10 +231,14 @@ class ExpirationTimerInstallationRecoveryTest {
 
         Fixture() {
             var delivery =
-                    RequestDeliveryClaimStateTest.fixture(DeliveryClaimKind.BATCH_ENQUEUE, false);
+                    RequestDeliveryClaimStateTest.fixture(Delivery.SendMode.BATCH_ENQUEUE, false);
             context = delivery.context();
-            context.recordDeliveryResult(
-                    new ContextResult.Prediction(delivery.delivery(), 3000L, 1002L));
+            org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                    context,
+                    observedRequest ->
+                            observedRequest.recordDeliveryResult(
+                                    new ContextResult.Prediction(
+                                            delivery.delivery(), 3000L, 1002L)));
             var request = mock(org.flexlb.dao.loadbalance.Request.class);
             when(request.getRequestId()).thenReturn(7502L);
             context.data().setRequest(request);
@@ -221,21 +248,23 @@ class ExpirationTimerInstallationRecoveryTest {
             context.data().register(owner, new RequestFuture((kind, response, failure) -> false));
             var repository = mock(RequestRepository.class);
             when(repository.isCurrent(context)).thenReturn(true);
-            timer = new ExpirationTimer(repository, clock::get);
-            ((ScheduledThreadPoolExecutor) ReflectionTestUtils.getField(timer, "executor"))
-                    .shutdownNow();
-            ReflectionTestUtils.setField(timer, "executor", executor);
+            timer =
+                    new ExpirationTimer(
+                            repository,
+                            (task, delay) -> executor.schedule(task, delay, TimeUnit.MILLISECONDS),
+                            clock::get);
         }
 
         Object handle(ExpirationTimer.Kind kind) {
             var slots = (Map<?, ?>) ReflectionTestUtils.getField(timer, "slots");
-            var handles = (Map<?, ?>) ReflectionTestUtils.getField(slots.get(context), "handles");
-            return handles.get(kind);
+            var handles = (Object[]) ReflectionTestUtils.getField(slots.get(context), "handles");
+            return handles[kind.ordinal()];
         }
 
         @Override
         public void close() {
             timer.close();
+            executor.shutdownNow();
         }
     }
 }

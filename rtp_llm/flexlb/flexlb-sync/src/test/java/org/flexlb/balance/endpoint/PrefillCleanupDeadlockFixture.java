@@ -20,14 +20,17 @@ import static org.mockito.Mockito.when;
 public final class PrefillCleanupDeadlockFixture {
     private final AtomicLong clock = new AtomicLong(100);
     private final ReentrantLock lock = new ReentrantLock();
-    private final PrefillState state =
-            new PrefillState(
+    private final PrefillEndpoint state =
+            org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                     lock,
                     PrefillActiveIndex.ordered(
-                            4, Comparator.comparingLong(RequestRoute::requestId)),
+                            4,
+                            Comparator.comparingLong(
+                                    org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
+                                            ::requestId)),
                     clock::get);
-    private final EndpointGenerationLifecycle generation =
-            new EndpointGenerationLifecycle(() -> {});
+    private final EndpointRetirementTestSupport generation =
+            new EndpointRetirementTestSupport(() -> {});
     private final RequestRoute next;
 
     public PrefillCleanupDeadlockFixture(long requestId, boolean batch) {
@@ -36,9 +39,7 @@ public final class PrefillCleanupDeadlockFixture {
         if (batch) {
             enqueue(first);
             {
-                var reservation =
-                        state.reserveBatch(first, 1L, 2, generation.tryAcquireHandoff())
-                                .reservation();
+                var reservation = state.reserveBatch(1L, 2, generation.tryPinGeneration()).value();
                 try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
                     assertNotNull(reservation);
                     try (var handoff =
@@ -50,15 +51,12 @@ public final class PrefillCleanupDeadlockFixture {
             }
         } else {
             {
-                var reservation = state.reserveUnqueuedRoute(first, 20L, 0L).reservation();
+                var reservation = state.reserveUnqueuedRoute(first, 20L, 0L).value();
                 try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
                     assertNotNull(reservation);
                     try (var handoff =
-                            EndpointTestSupport.commitRoutes(
-                                    state,
-                                    List.of(first),
-                                    List.of(reservation),
-                                    generation.tryAcquireHandoff())) {
+                            org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
+                                    state, first, reservation)) {
                         assertNotNull(handoff);
                     }
                 }
@@ -80,8 +78,7 @@ public final class PrefillCleanupDeadlockFixture {
 
     public void reserveNextBatch() {
         {
-            var reservation =
-                    state.reserveBatch(next, 2L, 2, generation.tryAcquireHandoff()).reservation();
+            var reservation = state.reserveBatch(2L, 2, generation.tryPinGeneration()).value();
             try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
                 assertNotNull(reservation);
             }
@@ -91,10 +88,7 @@ public final class PrefillCleanupDeadlockFixture {
     private void enqueue(RequestRoute item) {
         lock.lock();
         try {
-            assertSame(
-                    item,
-                    state.updateQueue(
-                            PrefillState.QueueChange.ENQUEUE, item, System.currentTimeMillis()));
+            assertSame(item, org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(state, item));
         } finally {
             lock.unlock();
         }

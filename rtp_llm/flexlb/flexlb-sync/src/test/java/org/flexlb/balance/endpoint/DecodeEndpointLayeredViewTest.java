@@ -173,7 +173,8 @@ class DecodeEndpointLayeredViewTest {
         reserve(3L, 300, 308, 50);
         FlexMonitor monitor = mock(FlexMonitor.class);
 
-        endpoint.reportAdmissionMetrics(new RequestSchedulerReporter(monitor));
+        new RequestSchedulerReporter(monitor)
+                .reportDecodePreemption(endpoint.ipPort(), endpoint.resourceSnapshot());
 
         FlexMetricTags tags = FlexMetricTags.of("endpoint", "10.0.0.1:8080");
         verify(monitor).report(AUTO_TPM_DECODE_RESERVED_COUNT, tags, 1.0);

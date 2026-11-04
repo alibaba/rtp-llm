@@ -311,7 +311,7 @@ public class HttpLoadBalanceServer {
                 CacheStatus cacheStatus = cacheIndex.cacheStatus();
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
-                var ownership = endpoint.ownership.stats();
+                var ownership = endpoint.stats();
                 ep.put("inflight_batches", ownership.batchCount());
                 ep.put("inflight_requests", ownership.locallyOwnedRequests());
                 ep.put("inflight_route_requests", ownership.individuallyOwnedRequests());

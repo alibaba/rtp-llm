@@ -60,17 +60,12 @@ class QueuedPublicationNotificationFailureTest {
                             fixture.prefill.getStatus(),
                             WorkerStatusTestSupport.freezeStatusResponse(
                                     fixture.prefill.getStatus(), observation)));
-            assertFalse(
-                    fixture.prefill.ownership.requestCapacityAvailable(
-                            fixture.prefill.requestLimit, 1));
+            assertFalse(fixture.prefill.requestCapacityAvailable(fixture.prefill.requestLimit, 1));
             fixture.metricsFailure = new IllegalStateException("unused victim metric");
             var incoming = fixture.context(9323L, 80);
             var actual = fixture.publish(incoming);
 
-            var items =
-                    RequestExecutionTestSupport.capture(
-                                    EndpointTestSupport.requestExecution(fixture.prefill))
-                            .items();
+            var items = fixture.prefill.captureQueue(Integer.MAX_VALUE).items();
             assertEquals(3, items.size());
             assertTrue(items.containsAll(List.of(firstRoute, secondRoute, actual)));
             for (var owner : List.of(first, second, incoming)) {
@@ -106,7 +101,7 @@ class QueuedPublicationNotificationFailureTest {
                         failure,
                         assertThrows(
                                 IllegalStateException.class,
-                                () -> fixture.queue.enqueueRoute(plan)));
+                                () -> SchedulerTestSupport.enqueueRoute(fixture.queue, plan)));
                 var acquired = incoming.snapshot().route();
                 assertNotNull(acquired);
                 assertFalse(incoming.snapshot().placement().published());
@@ -115,15 +110,49 @@ class QueuedPublicationNotificationFailureTest {
                 assertNull(incoming.snapshot().route());
                 assertFalse(fixture.decode.ownership(acquired.decodeReservation()).owned());
                 assertEquals(
-                        List.of(oldRoute),
-                        RequestExecutionTestSupport.capture(
-                                        EndpointTestSupport.requestExecution(fixture.prefill))
-                                .items());
+                        List.of(oldRoute), fixture.prefill.captureQueue(Integer.MAX_VALUE).items());
                 assertTrue(fixture.decode.ownership(oldRoute.decodeReservation()).owned());
             } finally {
                 handle.finish();
                 fixture.physicalFailure = null;
             }
+        }
+    }
+
+    @Test
+    void notificationFailureAfterPhysicalEnqueueKeepsTheExactResourceHandoff() throws Exception {
+        try (var fixture = new Fixture()) {
+            var context = fixture.context(9341L, 50);
+            var lifecycle = SchedulerTestServices.lifecycle(fixture.queue);
+            var admission = lifecycle.claimAdmissionHandle(9341L, context.data().getFuture());
+            var failure = new IllegalStateException("placement notification failed");
+            org.mockito.Mockito.doThrow(failure)
+                    .when(fixture.prefill)
+                    .signal(PrefillEndpoint.Signal.PLACEMENT);
+            RequestRoute route = fixture.select(context);
+            try (var plan = RequestProtocolTestSupport.plan(context, route)) {
+                assertSame(
+                        failure,
+                        assertThrows(
+                                IllegalStateException.class,
+                                () -> SchedulerTestSupport.enqueueRoute(fixture.queue, plan)));
+                assertNotNull(route.prefillReservation());
+                assertTrue(context.snapshot().placement().published());
+                plan.close();
+                assertSame(route, context.snapshot().route());
+                assertTrue(fixture.decode.ownership(route.decodeReservation()).owned());
+                assertEquals(List.of(route), fixture.prefill.captureQueue(2).items());
+            } finally {
+                admission.finish();
+            }
+            lifecycle.cancel(context, 0L, CancelReason.CLIENT_CANCELLED);
+            assertFalse(
+                    context.data()
+                            .getFuture()
+                            .get(2, java.util.concurrent.TimeUnit.SECONDS)
+                            .isSuccess());
+            assertFalse(fixture.decode.ownership(route.decodeReservation()).owned());
+            assertEquals(0, fixture.prefill.queueDepth());
         }
     }
 
@@ -152,7 +181,8 @@ class QueuedPublicationNotificationFailureTest {
             when(service.loadBalanceConfig()).thenReturn(config);
             queue =
                     (QueuedRequestScheduler)
-                            SchedulerTestServices.scheduler(SchedulerTestSupport.create(
+                            SchedulerTestServices.scheduler(
+                                    SchedulerTestSupport.create(
                                             service,
                                             mock(DeliveryMetricsReporter.class),
                                             reporter,
@@ -170,7 +200,9 @@ class QueuedPublicationNotificationFailureTest {
                                     config,
                                     SchedulerTestSupport.dispatcher(
                                             org.flexlb.balance.scheduler.SchedulerTestSupport
-                                                    .runtime(SchedulerTestServices.lifecycle(queue))),
+                                                    .runtime(
+                                                            SchedulerTestServices.lifecycle(
+                                                                    queue))),
                                     SchedulerTestServices.lifecycle(queue).requests,
                                     mock(DeliveryMetricsReporter.class)));
             decode =
@@ -181,13 +213,8 @@ class QueuedPublicationNotificationFailureTest {
                                     SchedulerTestServices.lifecycle(queue).requests));
             doAnswer(
                             call -> {
-                                assertThrows(
-                                        IllegalStateException.class,
-                                        RequestExecutionTestSupport.state(
-                                                                EndpointTestSupport.requestExecution(
-                                                                        prefill))
-                                                        .queueGuard()
-                                                ::requireHeld);
+                                org.junit.jupiter.api.Assertions.assertFalse(
+                                        prefill.resourceLock().isHeldByCurrentThread());
                                 if (metricsFailure != null
                                         && call.getArgument(0, Integer.class) == 20) {
                                     throw metricsFailure;
@@ -226,7 +253,7 @@ class QueuedPublicationNotificationFailureTest {
                                 return call.callRealMethod();
                             })
                     .when(prefill)
-                    .offerPinned(any(), any(), any(), any());
+                    .offerPinned(any(), any(), any());
         }
 
         RequestContext context(long id, int priority) {
@@ -247,7 +274,7 @@ class QueuedPublicationNotificationFailureTest {
                                         prefill.tryPinGeneration(),
                                         p,
                                         1L,
-                                        prefill.ownership.progress().ownershipVersion());
+                                        prefill.progress().ownershipVersion());
                                 route.add(
                                         decode.tryPinGeneration(),
                                         d,
@@ -265,7 +292,7 @@ class QueuedPublicationNotificationFailureTest {
                                     context.data().getRequestId(), context.data().getFuture());
             try (var plan = RequestProtocolTestSupport.plan(context, select(context))) {
                 assertNotNull(handle);
-                var publication = queue.enqueueRoute(plan);
+                var publication = SchedulerTestSupport.enqueueRoute(queue, plan);
                 assertEquals(PlacementResult.Status.SUCCESS, publication.status());
                 return publication.value();
             } finally {
@@ -293,7 +320,8 @@ class QueuedPublicationNotificationFailureTest {
         public void close() {
             metricsFailure = releaseFailure = physicalFailure = null;
             prefill.close();
-            if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(SchedulerTestServices.lifecycle(queue))) {
+            if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(
+                    SchedulerTestServices.lifecycle(queue))) {
                 SchedulerTestServices.lifecycle(queue).closeOutstandingAndTerminalize();
             }
             for (var context : SchedulerTestServices.lifecycle(queue).requests.snapshotActive()) {
@@ -304,7 +332,8 @@ class QueuedPublicationNotificationFailureTest {
                                     SchedulerTestServices.lifecycle(queue)))
                     .close();
             SchedulerTestSupport.closeRequestExecutors(
-                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(SchedulerTestServices.lifecycle(queue)));
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                            SchedulerTestServices.lifecycle(queue)));
         }
     }
 }

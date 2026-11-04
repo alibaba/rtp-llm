@@ -59,8 +59,7 @@ class RequestCleanupArchiveRaceTest {
                                 assertTrue(start.await(5, TimeUnit.SECONDS));
                                 synchronized (context) {
                                     context.completeClose(
-                                            new CloseProgress(true, false, false, true, true),
-                                            1002L);
+                                            new CloseProgress(true, false, false, true), 1002L);
                                     return context.snapshot();
                                 }
                             });

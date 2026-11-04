@@ -1,6 +1,7 @@
 package org.flexlb.mockengine;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
@@ -55,17 +56,17 @@ class PreemptionPhasesE2ETest {
             CompletableFuture<Response> low1 = h.scheduler.submit(h.context(101, 30));
             CompletableFuture<Response> low2 = h.scheduler.submit(h.context(102, 40));
             AutoTpmE2EHarness.await(
-                    () -> h.prefillEndpoint(0).ownership.progress().queueDepth() == 2,
+                    () -> h.prefillEndpoint(0).progress().queueDepth() == 2,
                     5_000,
                     "two low-priority requests must reach the Prefill queue");
-            assertEquals(2, h.prefillEndpoint(0).ownership.progress().queueDepth());
+            assertEquals(2, h.prefillEndpoint(0).progress().queueDepth());
             assertFalse(low1.isDone());
             assertFalse(low2.isDone());
 
             CompletableFuture<Response> high = h.scheduler.submit(h.context(103, 70));
 
             AutoTpmE2EHarness.await(
-                    () -> h.prefillEndpoint(0).ownership.progress().queueDepth() == 3,
+                    () -> h.prefillEndpoint(0).progress().queueDepth() == 3,
                     5_000,
                     "higher priority work must join the ordered queue without evicting existing work");
             assertFalse(high.isDone());
@@ -290,6 +291,11 @@ class PreemptionPhasesE2ETest {
                 assertEquals(1, MockEngineTestSupport.getCancelledCount(decodeEngine));
                 assertEquals(0, MockEngineTestSupport.getDownstreamOwnershipCount(prefillEngine));
                 assertEquals(0, MockEngineTestSupport.getUpstreamOwnershipCount(decodeEngine));
+
+                // The test deliberately leaves incoming work paused; settle it before draining.
+                h.scheduler.cancel(302L, 0L, CancelReason.CLIENT_CANCELLED);
+                assertFalse(high.get(2, TimeUnit.SECONDS).isSuccess());
+                assertEquals(0, decodeEp.resourceSnapshot().reservedCount());
             }
         }
     }
@@ -407,7 +413,7 @@ class PreemptionPhasesE2ETest {
             // victim 完全不受影响
             assertFalse(holder.isDone());
             assertTrue(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 501L));
-            assertEquals(1, h.prefillEndpoint(0).ownership.progress().queueDepth());
+            assertEquals(1, h.prefillEndpoint(0).progress().queueDepth());
             verify(h.requestReporter, never())
                     .reportVictim(anyInt(), anyInt(), anyString(), anyString());
         }

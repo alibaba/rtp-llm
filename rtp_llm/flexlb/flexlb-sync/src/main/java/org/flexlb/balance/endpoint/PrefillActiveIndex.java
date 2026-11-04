@@ -4,7 +4,6 @@ import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.util.PriorityNormalizer;
 
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.IdentityHashMap;
@@ -30,15 +29,17 @@ public final class PrefillActiveIndex implements PrefillRequestQueue {
     private final IdentityHashMap<RequestRoute, Entry> identities;
     private final int[] priorityCounts;
     private long nextSequence;
+    private RequestRoute bypassedHead;
     private volatile long version;
-    private Capture capture;
+    private Snapshot capture;
+    private final Comparator<QueueItem> ordering;
+    private static final Snapshot EMPTY = new Snapshot(List.of(), (left, right) -> 0);
 
     public static PrefillActiveIndex disabled() {
         return DISABLED;
     }
 
-    public static PrefillActiveIndex ordered(
-            int initialCapacity, Comparator<RequestRoute> ordering) {
+    public static PrefillActiveIndex ordered(int initialCapacity, Comparator<QueueItem> ordering) {
         return new PrefillActiveIndex(initialCapacity, ordering);
     }
 
@@ -46,18 +47,7 @@ public final class PrefillActiveIndex implements PrefillRequestQueue {
         queue = null;
         identities = null;
         priorityCounts = null;
-    }
-
-    /** Frozen membership and order; request state remains owned by its context. */
-    public static final class Capture implements PrefillRequestQueue.Snapshot {
-        private static final Capture EMPTY = new Capture(List.of());
-        private final List<RequestRoute> items;
-
-        private Capture(Collection<Entry> entries) {
-            items = entries.stream().map(entry -> entry.request).toList();
-        }
-
-        public List<RequestRoute> items() { return items; }
+        ordering = null;
     }
 
     private static final class Entry {
@@ -70,8 +60,8 @@ public final class PrefillActiveIndex implements PrefillRequestQueue {
         }
     }
 
-    private PrefillActiveIndex(int initialCapacity, Comparator<RequestRoute> ordering) {
-        Objects.requireNonNull(ordering, "ordering");
+    private PrefillActiveIndex(int initialCapacity, Comparator<QueueItem> ordering) {
+        this.ordering = Objects.requireNonNull(ordering, "ordering");
         priorityCounts = new int[PriorityNormalizer.MAX_PRIORITY + 1];
         identities = new IdentityHashMap<>(initialCapacity);
         queue =
@@ -104,6 +94,7 @@ public final class PrefillActiveIndex implements PrefillRequestQueue {
         queue.add(entry);
         identities.put(item, entry);
         priorityCounts[item.priority()]++;
+        if (bypassedHead != null && bypassedHead != peek()) bypassedHead = null;
         capture = null;
         version++;
         return true;
@@ -117,6 +108,7 @@ public final class PrefillActiveIndex implements PrefillRequestQueue {
         queue.remove(entry);
         identities.remove(item);
         priorityCounts[item.priority()]--;
+        if (bypassedHead != null && bypassedHead != peek()) bypassedHead = null;
         capture = null;
         version++;
         return true;
@@ -149,19 +141,44 @@ public final class PrefillActiveIndex implements PrefillRequestQueue {
         Arrays.fill(priorityCounts, 0);
         queue.clear();
         identities.clear();
+        bypassedHead = null;
         capture = null;
         version++;
     }
 
     /** Caller holds the owning ledger lock; reuse membership until it changes. */
-    public Capture capture() {
+    public Snapshot capture() {
         if (queue == null) {
-            return Capture.EMPTY;
+            return EMPTY;
         }
         if (capture == null) {
-            capture = queue.isEmpty() ? Capture.EMPTY : new Capture(queue);
+            capture = new Snapshot(queue.stream().map(entry -> entry.request).toList(), ordering);
         }
         return capture;
+    }
+
+    @Override
+    public List<RequestRoute> candidatesAfterBlockedHead(
+            List<RequestRoute> ordered, boolean priorityOrdering, long nowMs) {
+        if (!priorityOrdering || ordered.isEmpty()) return List.of();
+        var head = ordered.getFirst();
+        if (head != peek() || head == bypassedHead || head.requestExpired(nowMs)) return List.of();
+        int end = 1;
+        while (end < ordered.size()) {
+            var candidate = ordered.get(end);
+            if (head.priority() != candidate.priority()
+                    || candidate.requestExpired(nowMs)
+                    || head.decodeEp() == null
+                    || candidate.decodeEp() == null
+                    || head.decodeEp() == candidate.decodeEp()) break;
+            end++;
+        }
+        return ordered.subList(1, end);
+    }
+
+    @Override
+    public void recordDispatch(RequestRoute skippedHead) {
+        bypassedHead = skippedHead;
     }
 
     @Override

@@ -16,8 +16,8 @@ class TaskTimerTest {
         var cancelledRan = new AtomicBoolean();
         try {
             var cancelled = timer.schedule(() -> cancelledRan.set(true), 60_000L);
-            cancelled.cancel();
-            cancelled.cancel();
+            cancelled.cancel(false);
+            cancelled.cancel(false);
             var completed = new CompletableFuture<Void>();
             timer.schedule(() -> completed.complete(null), 0L);
             completed.get(2, TimeUnit.SECONDS);

@@ -156,7 +156,7 @@ class DecodeSelectorTest {
     }
 
     @Test
-    void retriesOneCaptureConflictBeforePublishingTheSelection() {
+    void callerRetriesCaptureConflictWithoutOverwritingSuccessfulSelection() {
         registerWorker("127.0.0.1", 10_000, 9_000);
         registerWorker("127.0.0.2", 10_000, 9_000);
         EndpointRegistry registry = decodeRegistry();
@@ -187,15 +187,19 @@ class DecodeSelectorTest {
         Mockito.when(racing.captureDecodeGeneration(replacement)).thenReturn(replacementPin);
 
         var inputs = request(1_000, 1_001L);
+        var selector =
+                new StrategyTestSupport.DecodeRoutingFixture(
+                        racing,
+                        configService,
+                        SchedulingTestConfig.capacity(configService.loadBalanceConfig()));
+        var changed = StrategyTestSupport.select(selector, inputs, SCHEDULING, null);
+        Assertions.assertEquals(PlacementResult.Status.ENDPOINT_CHANGED, changed.status());
+        Assertions.assertEquals(PlacementResult.Status.SUCCESS, changed.selection().status());
+        Assertions.assertSame(stale, changed.selection().value());
+        Assertions.assertEquals(1, captures.get());
+        // Only a new scheduling attempt may choose the replacement generation.
         PlacementResult<RequestRoute, RoleType> result =
-                StrategyTestSupport.select(
-                        new StrategyTestSupport.DecodeRoutingFixture(
-                                racing,
-                                configService,
-                                SchedulingTestConfig.capacity(configService.loadBalanceConfig())),
-                        inputs,
-                        SCHEDULING,
-                        null);
+                StrategyTestSupport.select(selector, inputs, SCHEDULING, null);
 
         Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
         RequestRoute selected = result.value();

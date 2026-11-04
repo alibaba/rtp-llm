@@ -15,7 +15,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.test.util.ReflectionTestUtils;
 
-import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -58,6 +57,45 @@ import static org.mockito.Mockito.when;
 @Timeout(15)
 class RequestPublicationFailureOwnershipTest {
     @Test
+    void rejectedCloseRegistrationIsReportedOnceAndDoesNotClaimCleanup() {
+        try (var f = new Fixture()) {
+            var context = RequestProtocolTestSupport.context(f.config, 9390L);
+            RequestProtocolTestSupport.register(f.owner, context);
+            context.beginClose(
+                    EndEvidence.failure(
+                            null,
+                            EndKind.FAILURE,
+                            StrategyErrorType.DISPATCH_FAILED,
+                            "test failure"),
+                    System.currentTimeMillis());
+            var before = context.snapshot();
+            var tasks = spy(f.runtime.tasks);
+            SchedulerTestServices.setDependency(f.runtime, "tasks", tasks);
+            SchedulerTestServices.bind(f.owner, f.runtime);
+            var rejected = new IllegalStateException("request work is closed");
+            doThrow(rejected).when(tasks).registerRequestWork(context);
+            try {
+                assertSame(
+                        rejected,
+                        assertThrows(
+                                IllegalStateException.class, () -> f.owner.scheduleClose(context)));
+                verify(tasks, times(1)).registerRequestWork(context);
+                assertEquals(Phase.ENDING, context.snapshot().phase());
+                assertSame(
+                        before,
+                        context.snapshot(),
+                        "failed submission cannot record cleanup progress");
+            } finally {
+                // A later explicit attempt can settle; the rejected attempt owns no cleanup task.
+                doCallRealMethod().when(tasks).registerRequestWork(context);
+                f.owner.scheduleClose(context);
+            }
+            assertEquals(Phase.CLOSED, context.snapshot().phase());
+            assertEquals(0, f.runtime.requests().liveRequestCount());
+        }
+    }
+
+    @Test
     void deliveryPublicationFailureSettlesTheTransferredOwnership() throws Exception {
         try (var f = new Fixture()) {
             var context = spy(RequestProtocolTestSupport.context(f.config, 9305L));
@@ -89,19 +127,20 @@ class RequestPublicationFailureOwnershipTest {
                         assertThrows(
                                 IllegalStateException.class,
                                 () ->
-                                        f.owner.claimDelivery(
-                                                route,
-                                                DeliveryClaimKind.ROUTE_DECISION,
-                                                0L,
-                                                null)));
+                                        DeliveryDispatcher.commitDelivery(
+                                                f.owner,
+                                                new org.flexlb.balance.scheduler.Delivery.Member(
+                                                        route, null),
+                                                Delivery.SendMode.ROUTE_DECISION,
+                                                0L)));
                 assertFalse(future.get(2, TimeUnit.SECONDS).isSuccess());
                 SchedulerTestSupport.awaitRequestWork(f.runtime);
                 assertEquals(Phase.CLOSED, context.snapshot().phase());
-                verify(endpoint, times(1)).release(null, route);
+                verify(endpoint, times(1)).releaseRequest(route);
             } finally {
                 var delivery = context.snapshot().delivery();
                 if (delivery != null && context.snapshot().phase() != Phase.CLOSED) {
-                    f.owner.onDeliveryFact(
+                    f.owner.onDeliveryResult(
                             new ContextResult.PreparationFailure(
                                     delivery.identity(),
                                     route,
@@ -146,7 +185,7 @@ class RequestPublicationFailureOwnershipTest {
                             })
                     .when(timer)
                     .update(eq(context), any());
-            when(endpoint.release(null, route))
+            when(endpoint.releaseRequest(route))
                     .thenAnswer(
                             call -> {
                                 released.countDown();
@@ -183,7 +222,7 @@ class RequestPublicationFailureOwnershipTest {
                         f.runtime, "timer", originalTimer);
             }
             assertEquals(Phase.CLOSED, context.snapshot().phase());
-            verify(endpoint, times(1)).release(null, route);
+            verify(endpoint, times(1)).releaseRequest(route);
         }
     }
 
@@ -232,7 +271,7 @@ class RequestPublicationFailureOwnershipTest {
             if (beforeFreeze) {
                 assertNull(context.snapshot().outcome());
                 assertFalse(future.isDone());
-                assertEquals(0, registrations(f.runtime).size());
+                assertEquals(0, registrations(f.runtime));
                 doCallRealMethod().when(context).beginClose(any(), anyLong());
                 f.owner.closeRequest(context, end);
                 assertTrue(future.get(5, TimeUnit.SECONDS).isSuccess());
@@ -247,10 +286,10 @@ class RequestPublicationFailureOwnershipTest {
                 assertEquals("worker completed", context.snapshot().outcome().detail());
             }
             SchedulerTestSupport.awaitRequestWork(f.runtime);
-            RequestProtocolTestSupport.awaitCondition(() -> registrations(f.runtime).isEmpty());
+            RequestProtocolTestSupport.awaitCondition(() -> registrations(f.runtime) == 0);
             assertEquals(Phase.CLOSED, context.snapshot().phase());
             assertEquals(0, f.runtime.requests().liveRequestCount());
-            verify(endpoint).release(null, route);
+            verify(endpoint).releaseRequest(route);
         }
     }
 
@@ -275,7 +314,12 @@ class RequestPublicationFailureOwnershipTest {
                                     System.currentTimeMillis()));
             RequestProtocolTestSupport.bind(
                     f.owner, new RequestProtocolTestSupport.Registered(route, future));
-            var delivery = f.owner.claimDelivery(route, DeliveryClaimKind.ROUTE_DECISION, 0L, null);
+            var delivery =
+                    DeliveryDispatcher.commitDelivery(
+                            f.owner,
+                            new org.flexlb.balance.scheduler.Delivery.Member(route, null),
+                            Delivery.SendMode.ROUTE_DECISION,
+                            0L);
             assertNotNull(delivery);
             var originalTimer = f.runtime.deadlines();
             var failure = new IllegalStateException("ACK preparation failed");
@@ -290,7 +334,7 @@ class RequestPublicationFailureOwnershipTest {
             try {
                 assertDoesNotThrow(
                         () ->
-                                f.owner.onDeliveryFact(
+                                f.owner.onDeliveryResult(
                                         new RouteDelivered(
                                                 delivery, 0L, System.currentTimeMillis())));
                 assertSame(failure, SchedulerTestSupport.failure(f.owner));
@@ -300,13 +344,13 @@ class RequestPublicationFailureOwnershipTest {
                                         ExecutionException.class,
                                         () -> future.get(5, TimeUnit.SECONDS))
                                 .getCause());
-                RequestProtocolTestSupport.awaitCondition(() -> registrations(f.runtime).isEmpty());
+                RequestProtocolTestSupport.awaitCondition(() -> registrations(f.runtime) == 0);
                 assertTrue(context.snapshot().delivery().acknowledged());
                 assertEquals(ResponseKind.ACK, context.snapshot().selectedResponse().kind());
                 assertEquals(Phase.OPEN, context.snapshot().phase());
                 assertSame(route, context.snapshot().route());
                 assertEquals(1, f.runtime.requests().liveRequestCount());
-                verify(endpoint, never()).release(org.mockito.ArgumentMatchers.isNull(), any());
+                verify(endpoint, never()).releaseRequest(any());
             } finally {
                 org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                         f.runtime, "timer", originalTimer);
@@ -349,7 +393,12 @@ class RequestPublicationFailureOwnershipTest {
                             System.currentTimeMillis());
             RequestProtocolTestSupport.bind(
                     f.owner, new RequestProtocolTestSupport.Registered(route, future));
-            var delivery = f.owner.claimDelivery(route, DeliveryClaimKind.ROUTE_DECISION, 0L, null);
+            var delivery =
+                    DeliveryDispatcher.commitDelivery(
+                            f.owner,
+                            new org.flexlb.balance.scheduler.Delivery.Member(route, null),
+                            Delivery.SendMode.ROUTE_DECISION,
+                            0L);
             var publisher = SchedulerTestSupport.responseCompletions(f.runtime);
             var originalWorkers = ReflectionTestUtils.getField(publisher, "completionWorkers");
             var workers = mock(java.util.concurrent.ThreadPoolExecutor.class);
@@ -366,7 +415,7 @@ class RequestPublicationFailureOwnershipTest {
             try {
                 assertDoesNotThrow(
                         () ->
-                                f.owner.onDeliveryFact(
+                                f.owner.onDeliveryResult(
                                         new RouteDelivered(
                                                 delivery, 0L, System.currentTimeMillis())));
                 var failure =
@@ -376,7 +425,7 @@ class RequestPublicationFailureOwnershipTest {
                                                 ExecutionException.class,
                                                 () -> future.get(5, TimeUnit.SECONDS))
                                         .getCause());
-                RequestProtocolTestSupport.awaitCondition(() -> registrations(f.runtime).isEmpty());
+                RequestProtocolTestSupport.awaitCondition(() -> registrations(f.runtime) == 0);
                 assertNull(context.snapshot().selectedResponse());
                 assertEquals(Phase.OPEN, context.snapshot().phase());
                 assertEquals(1, f.runtime.requests().liveRequestCount());
@@ -385,7 +434,7 @@ class RequestPublicationFailureOwnershipTest {
                 oldTask.get().run();
                 assertSame(before, context.snapshot());
                 assertSame(failure, assertThrows(ExecutionException.class, future::get).getCause());
-                verify(endpoint, never()).release(org.mockito.ArgumentMatchers.isNull(), any());
+                verify(endpoint, never()).releaseRequest(any());
             } finally {
                 ReflectionTestUtils.setField(publisher, "completionWorkers", originalWorkers);
             }
@@ -425,8 +474,10 @@ class RequestPublicationFailureOwnershipTest {
                 assertNotNull(admission);
                 assertEquals(
                         org.flexlb.balance.PlacementResult.Status.SUCCESS,
-                        f.owner.commitRoute(
-                                route, RequestProtocolTestSupport.publication(() -> true)));
+                        RequestProtocolTestSupport.commitRoute(
+                                f.owner,
+                                route,
+                                RequestProtocolTestSupport.publication(() -> true)));
                 try {
                     assertTrue(future.cancel(false));
                     assertTrue(future.isCancelled());
@@ -436,7 +487,7 @@ class RequestPublicationFailureOwnershipTest {
                     assertEquals(
                             CancelReason.CLIENT_CANCELLED,
                             context.snapshot().cancellation().reason());
-                    assertEquals(0, registrations(f.runtime).size());
+                    assertEquals(0, registrations(f.runtime));
                     assertNotNull(
                             context.snapshot().placement(),
                             "the real admission owner must remain until it finishes");
@@ -448,7 +499,7 @@ class RequestPublicationFailureOwnershipTest {
             assertEquals(Phase.CLOSED, context.snapshot().phase());
             assertEquals(0, f.runtime.requests().liveRequestCount());
             assertTrue(future.isCancelled());
-            verify(endpoint).release(null, route);
+            verify(endpoint).releaseRequest(route);
         }
     }
 
@@ -527,7 +578,7 @@ class RequestPublicationFailureOwnershipTest {
                                     () -> f.owner.closeRequest(context, end)));
                     if (alreadyRunning) {
                         assertTrue(accepted.hasTaskOwner());
-                        assertEquals(1, registrations(f.runtime).size());
+                        assertEquals(1, registrations(f.runtime));
                         assertFalse(future.isDone());
                         assertFalse(context.snapshot().close().notificationsAttempted());
                         finish.countDown();
@@ -542,8 +593,7 @@ class RequestPublicationFailureOwnershipTest {
                                         .getCause());
                     }
                     SchedulerTestSupport.awaitRequestWork(f.runtime);
-                    RequestProtocolTestSupport.awaitCondition(
-                            () -> registrations(f.runtime).isEmpty());
+                    RequestProtocolTestSupport.awaitCondition(() -> registrations(f.runtime) == 0);
                     assertEquals(EndKind.INACTIVITY, context.snapshot().outcome().kind());
                     assertEquals(Phase.CLOSED, context.snapshot().phase());
                     assertEquals(0, f.runtime.requests().liveRequestCount());
@@ -558,14 +608,11 @@ class RequestPublicationFailureOwnershipTest {
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private static Set<ResponsePublication> registrations(SchedulerTestServices runtime) {
-        var registered =
-                (Set<ResponsePublication>)
-                        ReflectionTestUtils.getField(
-                                SchedulerTestSupport.responseCompletions(runtime), "registrations");
-        synchronized (registered) {
-            return Set.copyOf(registered);
+    private static int registrations(SchedulerTestServices runtime) {
+        var executorOwner = SchedulerTestSupport.responseCompletions(runtime);
+        var lock = ReflectionTestUtils.getField(executorOwner, "completionLock");
+        synchronized (lock) {
+            return (int) ReflectionTestUtils.getField(executorOwner, "pendingCompletions");
         }
     }
 
@@ -591,9 +638,10 @@ class RequestPublicationFailureOwnershipTest {
         @Override
         public void close() {
             // A failed mutant must report its leaked obligation without hanging fixture shutdown.
-            for (var registration : registrations(runtime).toArray(ResponsePublication[]::new)) {
-                registration.close();
-            }
+            assertEquals(
+                    0,
+                    registrations(runtime),
+                    "response operations must release their registrations");
             org.flexlb.util.Failures.run(null, () -> SchedulerTestSupport.shutdown(runtime));
         }
     }

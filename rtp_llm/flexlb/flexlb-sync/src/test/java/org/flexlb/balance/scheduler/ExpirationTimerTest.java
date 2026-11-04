@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.junit.jupiter.api.Test;
@@ -10,7 +11,6 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -33,7 +33,6 @@ import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -67,13 +66,11 @@ class ExpirationTimerTest {
                         mock(org.flexlb.service.RecentCacheKeyTraceReporter.class));
         var runtime = org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner);
         var timer = runtime.deadlines();
-        ((ScheduledThreadPoolExecutor) ReflectionTestUtils.getField(timer, "executor"))
-                .shutdownNow();
-        var executor = spy(new ScheduledThreadPoolExecutor(1));
+        var executor = mock(TaskTimer.class);
         doAnswer(call -> mock(ScheduledFuture.class))
                 .when(executor)
-                .schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS));
-        ReflectionTestUtils.setField(timer, "executor", executor);
+                .schedule(any(Runnable.class), anyLong());
+        ReflectionTestUtils.setField(timer, "timer", executor);
         var wallClock = new java.util.concurrent.atomic.AtomicLong(nowMs);
         ReflectionTestUtils.setField(
                 timer, "clock", (java.util.function.LongSupplier) wallClock::get);
@@ -93,9 +90,14 @@ class ExpirationTimerTest {
                                 nowMs);
                 RequestProtocolTestSupport.bind(
                         owner, new RequestProtocolTestSupport.Registered(route, future));
-                var claim = owner.claimDelivery(route, DeliveryClaimKind.ROUTE_DECISION, 0L, null);
+                var claim =
+                        DeliveryDispatcher.commitDelivery(
+                                owner,
+                                new org.flexlb.balance.scheduler.Delivery.Member(route, null),
+                                Delivery.SendMode.ROUTE_DECISION,
+                                0L);
                 assertNotNull(claim);
-                owner.onDeliveryFact(new ContextResult.Prediction(claim, nowMs + 20_000L, nowMs));
+                owner.onDeliveryResult(new ContextResult.Prediction(claim, nowMs + 20_000L, nowMs));
             }
             var before = context.snapshot();
             var exact = before.deadlines().token(kind);
@@ -111,7 +113,7 @@ class ExpirationTimerTest {
             assertEquals(exact.atMs(), replacement.atMs());
             assertTrue(replacement.version() > exact.version());
             assertNotSame(originalHandle, currentHandle(timer, context, kind));
-            verify(executor).schedule(any(Runnable.class), eq(1_000L), eq(TimeUnit.MILLISECONDS));
+            verify(executor).schedule(any(Runnable.class), eq(1_000L));
             for (var other : ExpirationTimer.Kind.values()) {
                 if (other != kind) {
                     assertSame(before.deadlines().token(other), after.deadlines().token(other));
@@ -145,11 +147,60 @@ class ExpirationTimerTest {
         }
     }
 
+    @Test
+    void closingDeadlinesCancelsOnlyOwnedTasksAndLeavesBorrowedTimerUsable() throws Exception {
+        var requests = mock(RequestRepository.class);
+        var context = registeredContext();
+        when(requests.isCurrent(context)).thenReturn(true);
+        try (var tasks = new ScheduledTaskTimer(1, "expiration-contract-")) {
+            var timer = new ExpirationTimer(requests, tasks);
+            var token =
+                    new ExpirationTimer.Token(
+                            context, ExpirationTimer.Kind.REQUEST, 1L, Long.MAX_VALUE);
+            timer.update(context, new ExpirationTimer.Plan(1L, token, null, null));
+            var handle = currentHandle(timer, context, ExpirationTimer.Kind.REQUEST);
+            var task =
+                    (java.util.concurrent.Future<?>)
+                            ReflectionTestUtils.getField(handle, "scheduled");
+            var unrelated = tasks.schedule(() -> {}, 60_000L);
+            timer.close();
+            assertTrue(task.isCancelled());
+            assertFalse(unrelated.isCancelled());
+            tasks.schedule(() -> {}, 0L).get(2, TimeUnit.SECONDS);
+            unrelated.cancel(false);
+        }
+    }
+
+    @Test
+    void lateCallbackFromReplacementTimerCannotReachLifecycleAfterClose() {
+        var requests = mock(RequestRepository.class);
+        var context = registeredContext();
+        var owner = mock(RequestLifecycle.class);
+        when(context.data()).thenReturn(data(owner));
+        when(requests.isCurrent(context)).thenReturn(true);
+        var callback = new AtomicReference<Runnable>();
+        var task = mock(java.util.concurrent.Future.class);
+        TaskTimer tasks =
+                (work, delay) -> {
+                    callback.set(work);
+                    return task;
+                };
+        var timer = new ExpirationTimer(requests, tasks);
+        var token =
+                new ExpirationTimer.Token(
+                        context, ExpirationTimer.Kind.REQUEST, 1L, Long.MAX_VALUE);
+        timer.update(context, new ExpirationTimer.Plan(1L, token, null, null));
+        timer.close();
+        callback.get().run();
+        verify(task).cancel(false);
+        verify(owner, never()).onDeadline(any(), anyLong());
+    }
+
     private static Object currentHandle(
             ExpirationTimer timer, RequestContext context, ExpirationTimer.Kind kind) {
         var slots = (Map<?, ?>) ReflectionTestUtils.getField(timer, "slots");
-        var handles = (Map<?, ?>) ReflectionTestUtils.getField(slots.get(context), "handles");
-        return handles.get(kind);
+        var handles = (Object[]) ReflectionTestUtils.getField(slots.get(context), "handles");
+        return handles[kind.ordinal()];
     }
 
     @Test
@@ -157,7 +208,7 @@ class ExpirationTimerTest {
         var requests = mock(RequestRepository.class);
         var context = registeredContext();
         when(requests.isCurrent(context)).thenReturn(true);
-        var timer = new ExpirationTimer(requests);
+        var timer = new ExpirationTimer(requests, (task, delay) -> mock(ScheduledFuture.class));
         var token =
                 new ExpirationTimer.Token(
                         context, ExpirationTimer.Kind.REQUEST, 1L, Long.MAX_VALUE);
@@ -181,12 +232,8 @@ class ExpirationTimerTest {
         var context = registeredContext();
         var current = new java.util.concurrent.atomic.AtomicBoolean(true);
         when(requests.isCurrent(context)).thenAnswer(call -> current.get());
-        var timer = new ExpirationTimer(requests);
-        var original =
-                (ScheduledThreadPoolExecutor) ReflectionTestUtils.getField(timer, "executor");
-        original.shutdownNow();
-        var executor = spy(new ScheduledThreadPoolExecutor(1));
-        ReflectionTestUtils.setField(timer, "executor", executor);
+        var executor = mock(TaskTimer.class);
+        var timer = new ExpirationTimer(requests, executor);
         var task = mock(ScheduledFuture.class);
         var failure = new IllegalStateException("detach failed after archive");
         when(task.cancel(false)).thenThrow(failure);
@@ -196,7 +243,7 @@ class ExpirationTimerTest {
                             return task;
                         })
                 .when(executor)
-                .schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS));
+                .schedule(any(Runnable.class), anyLong());
         try {
             var token =
                     new ExpirationTimer.Token(
@@ -211,7 +258,6 @@ class ExpirationTimerTest {
                                             new ExpirationTimer.Plan(1L, token, null, null))));
             assertEquals(0, ReflectionTestUtils.getField(timer, "registrations"));
             timer.close();
-            assertTrue(executor.isTerminated());
             verify(task).cancel(false);
         } finally {
             // Keep a deliberately broken implementation from hanging the test's cleanup.
@@ -228,11 +274,8 @@ class ExpirationTimerTest {
         var access = mock(RequestRepository.class);
         var context = registeredContext();
         when(access.isCurrent(context)).thenReturn(true);
-        var timer = new ExpirationTimer(access);
-        var timerExecutor = spy(new ScheduledThreadPoolExecutor(1));
-        ((ScheduledThreadPoolExecutor) ReflectionTestUtils.getField(timer, "executor"))
-                .shutdownNow();
-        ReflectionTestUtils.setField(timer, "executor", timerExecutor);
+        var timerExecutor = mock(TaskTimer.class);
+        var timer = new ExpirationTimer(access, timerExecutor);
         var installing = new CountDownLatch(1);
         var finishInstall = new CountDownLatch(1);
         var exact =
@@ -250,7 +293,7 @@ class ExpirationTimerTest {
                             return task;
                         })
                 .when(timerExecutor)
-                .schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS));
+                .schedule(any(Runnable.class), anyLong());
         var owner = new AtomicReference<Thread>();
         var waiter = new AtomicReference<Thread>();
         var interrupted = new java.util.concurrent.atomic.AtomicBoolean();
@@ -302,8 +345,6 @@ class ExpirationTimerTest {
                 assertSame(cleanupFailure, first.get(5, TimeUnit.SECONDS));
                 assertSame(cleanupFailure, second.get(5, TimeUnit.SECONDS));
                 assertTrue(interrupted.get());
-                assertTrue(timerExecutor.isTerminated());
-                assertTrue(timerExecutor.getQueue().isEmpty());
                 assertSame(cleanupFailure, org.flexlb.util.Failures.run(null, timer::close));
                 verify(task).cancel(false);
             } finally {
@@ -377,10 +418,8 @@ class ExpirationTimerTest {
         var owner = mock(RequestLifecycle.class);
         when(context.data()).thenReturn(data(owner));
         when(requests.isCurrent(context)).thenReturn(true);
-        var timer = new ExpirationTimer(requests);
-        ((ScheduledThreadPoolExecutor) ReflectionTestUtils.getField(timer, "executor"))
-                .shutdownNow();
-        var executor = spy(new ScheduledThreadPoolExecutor(1));
+        var executor = mock(TaskTimer.class);
+        var timer = new ExpirationTimer(requests, executor);
         var task = mock(ScheduledFuture.class);
         var callback = new AtomicReference<Runnable>();
         var tokenKind =
@@ -401,8 +440,8 @@ class ExpirationTimerTest {
                             return task;
                         })
                 .when(executor)
-                .schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS));
-        ReflectionTestUtils.setField(timer, "executor", executor);
+                .schedule(any(Runnable.class), anyLong());
+        ReflectionTestUtils.setField(timer, "timer", executor);
         try {
             timer.update(
                     context,
@@ -457,7 +496,7 @@ class ExpirationTimerTest {
         private final RequestContext context = registeredContext();
         private final RequestLifecycle owner = mock(RequestLifecycle.class);
         private final ExpirationTimer timer;
-        private final java.util.EnumMap<ExpirationTimer.Kind, Object> handles;
+        private final Object[] handles;
         private final ScheduledFuture<?> inactivityTask;
         private final ScheduledFuture<?> requestTask;
         private final ScheduledFuture<?> decisionTask;
@@ -466,7 +505,7 @@ class ExpirationTimerTest {
             var access = mock(RequestRepository.class);
             when(access.isCurrent(context)).thenReturn(true);
             when(context.data()).thenReturn(data(owner));
-            timer = new ExpirationTimer(access);
+            timer = new ExpirationTimer(access, (task, delay) -> mock(ScheduledFuture.class));
             timer.update(
                     context,
                     new ExpirationTimer.Plan(
@@ -478,12 +517,10 @@ class ExpirationTimerTest {
                             new ExpirationTimer.Token(
                                     context, ExpirationTimer.Kind.INACTIVITY, 1L, Long.MAX_VALUE)));
             var slots = (Map<?, ?>) ReflectionTestUtils.getField(timer, "slots");
-            handles =
-                    (java.util.EnumMap<ExpirationTimer.Kind, Object>)
-                            ReflectionTestUtils.getField(slots.get(context), "handles");
-            requestTask = replaceTask(handles.get(ExpirationTimer.Kind.REQUEST));
-            decisionTask = replaceTask(handles.get(ExpirationTimer.Kind.VISIBILITY));
-            inactivityTask = replaceTask(handles.get(ExpirationTimer.Kind.INACTIVITY));
+            handles = (Object[]) ReflectionTestUtils.getField(slots.get(context), "handles");
+            requestTask = replaceTask(handles[ExpirationTimer.Kind.REQUEST.ordinal()]);
+            decisionTask = replaceTask(handles[ExpirationTimer.Kind.VISIBILITY.ordinal()]);
+            inactivityTask = replaceTask(handles[ExpirationTimer.Kind.INACTIVITY.ordinal()]);
         }
 
         private static ScheduledFuture<?> replaceTask(Object handle) {
@@ -494,7 +531,7 @@ class ExpirationTimerTest {
         }
 
         private void assertCanceled() {
-            for (Object handle : handles.values()) {
+            for (Object handle : handles) {
                 ReflectionTestUtils.invokeMethod(handle, "fire");
             }
             verify(owner, never()).onDeadline(any(), anyLong());

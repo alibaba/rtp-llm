@@ -45,6 +45,11 @@ class EngineHealthReporterSelectionMetricTest {
     @BeforeEach
     void setUp() {
         reporter = new EngineHealthReporter(monitor, workerDirectory);
+        verify(monitor)
+                .register(
+                        org.flexlb.constant.MetricConstant.GRACEFUL_LIFECYCLE_EVENT,
+                        FlexMetricType.GAUGE,
+                        FlexPriorityType.PRECISE);
     }
 
     @ParameterizedTest

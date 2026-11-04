@@ -2,6 +2,8 @@ package org.flexlb.balance.eviction;
 
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
+import org.flexlb.balance.eviction.DecodePreemptionPolicy.DecodeEvictionProposal;
+import org.flexlb.balance.eviction.PriorityDecodePreemptionPolicy.PriorityHarmProfile;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.loadbalance.Request;
@@ -263,10 +265,7 @@ class PriorityDecodePreemptionPolicyTest {
         assertEquals(DecodeEvictionProposal.CASE_SLOT_AND_KV, proposal.evictionCase());
         assertEquals(kvFirst ? List.of(1L, 5L, 2L) : List.of(1L, 2L, 3L), victimIds(proposal));
         long cost = kvFirst ? 320L : 256L;
-        assertEquals(cost, proposal.priorityHarmProfile().totalCost());
-        assertEquals(
-                PriorityHarmProfile.builder().add(30, BigInteger.valueOf(cost)).build(),
-                proposal.priorityHarmProfile());
+        assertEquals(cost, proposal.diagnosticCost());
         DecodeResources.CapacityRelease release = DecodeResources.CapacityRelease.NONE;
         for (DecodeRequestView victim : proposal.victims()) {
             release = release.plus(victim.placementRelease());
@@ -324,7 +323,7 @@ class PriorityDecodePreemptionPolicyTest {
             assertEquals(List.of(1L), victimIds(p));
             assertEquals(DecodeEvictionProposal.CASE_SLOT, p.evictionCase());
             // cost = H_SLOT * f(30) * g(ACCEPTED) = 4 * 1 * 16 = 64
-            assertEquals(64L, p.priorityHarmProfile().totalCost());
+            assertEquals(64L, p.diagnosticCost());
             assertEquals(128L, p.freedKvTokens());
         }
 
@@ -408,7 +407,7 @@ class PriorityDecodePreemptionPolicyTest {
             // cost = H_KV * f(30) * g(ACCEPTED) * lengthWasteCost(2048)
             //      = 8 * 1 * 16 * round(sqrt(ceil(2048/1024))) = 8*16*round(sqrt(2))
             //      = 8 * 16 * 1 = 128  (sqrt(2)=1.41→round=1)
-            assertEquals(128L, p.priorityHarmProfile().totalCost());
+            assertEquals(128L, p.diagnosticCost());
             assertEquals(2048L, p.freedKvTokens());
         }
 

@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
@@ -27,7 +28,7 @@ public final class PlacementAvailability {
     public interface Listener {
         void onAvailabilityChanged(PlacementKey key);
 
-        default void onEndpointChanged(org.flexlb.balance.endpoint.WorkerEndpoint endpoint) {
+        default void onEndpointChanged(WorkerEndpoint endpoint) {
             var status = endpoint.getStatus();
             onAvailabilityChanged(
                     PlacementKey.exact(
@@ -60,7 +61,7 @@ public final class PlacementAvailability {
                 worker);
     }
 
-    public void changed(org.flexlb.balance.endpoint.WorkerEndpoint endpoint) {
+    public void changed(WorkerEndpoint endpoint) {
         var status = Objects.requireNonNull(endpoint, "endpoint").getStatus();
         changed(
                 PlacementKey.exact(
@@ -85,10 +86,7 @@ public final class PlacementAvailability {
         changed(key, worker, null);
     }
 
-    private void changed(
-            PlacementKey key,
-            WorkerStatus worker,
-            org.flexlb.balance.endpoint.WorkerEndpoint endpoint) {
+    private void changed(PlacementKey key, WorkerStatus worker, WorkerEndpoint endpoint) {
         Objects.requireNonNull(key, "key");
         long next = sequence.incrementAndGet();
         if (worker != null && !worker.isActiveGeneration()) {
