@@ -34,7 +34,7 @@ def test_context_contains_only_service_payload_and_provenance(tmp_path, monkeypa
     monkeypatch.setattr(module.subprocess, 'check_output', lambda *args, **kwargs: 'b' * 40 + '\n')
     calls = []
     monkeypatch.setattr(module.subprocess, 'run', lambda args, **kwargs: calls.append(args))
-    jar = framework / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
+    jar = framework / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
     jar.parent.mkdir(parents=True)
     with zipfile.ZipFile(jar, 'w') as archive:
         archive.writestr('META-INF/MANIFEST.MF', 'Manifest-Version: 1.0\n')
@@ -66,7 +66,7 @@ def test_context_contains_only_service_payload_and_provenance(tmp_path, monkeypa
     if internal:
         assert calls[0][-1] == '-Pinternal-monitoring'
     else:
-        assert calls[0][-3:] == ['java/host', '-am', '-DskipTests']
+        assert calls[0][-3:] == ['java/engine', '-am', '-DskipTests']
 
 
 def test_image_entry_execs_java_with_standard_jvm_options(tmp_path):
@@ -80,6 +80,6 @@ def test_image_entry_execs_java_with_standard_jvm_options(tmp_path):
     output, _ = child.communicate(timeout=5)
     assert child.returncode == 0
     assert output.splitlines() == [str(child.pid), '0.0.0.0', '-Xmx512m', '-jar', '/home/admin/mock-engine/mock-engine.jar']
-    jar = ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
+    jar = ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
     with zipfile.ZipFile(jar) as packaged:
-        assert b'Main-Class: org.flexlb.mock.host.EngineMain' in packaged.read('META-INF/MANIFEST.MF')
+        assert b'Main-Class: org.flexlb.mock.engine.EngineMain' in packaged.read('META-INF/MANIFEST.MF')

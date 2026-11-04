@@ -25,7 +25,7 @@ class Args:
     pass
 
 
-def setup_case(tmp_path, operation, mode='shared', monitor=False, invalid=False, master=False):
+def setup_case(tmp_path, operation, monitor=False, invalid=False, master=False):
     registry = Registry.standard(); registry.register(operation)
     config = {'seq_size_per_block': 16, 'test_block_num': 9, 'reserve_block_ratio': 0, 'max_seq_len': 4096,
               'mock.compute.forward.expression': '1'}
@@ -47,8 +47,8 @@ def setup_case(tmp_path, operation, mode='shared', monitor=False, invalid=False,
             {'id': 'exercise', 'describe': 'exercise', 'interface': operation.case_interface.name}]}]}))
     case = compile_case(source, registry)
     java = Path(os.environ['JAVA_HOME']) / 'bin/java'
-    command = [str(java), '-cp', str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'), 'org.flexlb.mock.host.EngineHost']
-    raw = {'engine_mode': mode, 'components': {role: {'command': command} for role in env if role != 'master'}}
+    command = [str(java), '-cp', str(ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'), 'org.flexlb.mock.engine.EngineMain']
+    raw = {'components': {role: {'command': command} for role in env if role != 'master'}}
     if master:
         classpath = os.pathsep.join([str(ROOT / 'java/master/target/classes'),
             (ROOT / 'java/master/target/dependencies.txt').read_text().strip()])
@@ -70,12 +70,11 @@ def no_children(output):
     return events
 
 
-@pytest.mark.parametrize('mode', ['shared', 'isolated'])
-def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics(tmp_path, mode, monkeypatch):
+def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics(tmp_path, monkeypatch):
     @case_interface('probe/lifecycle', effect='write')
     async def exercise(ctx, args: Args) -> list[str]:
         owner = ctx.runtime
-        assert len(owner.engines.hosts) == (1 if mode == 'shared' else 3)
+        assert len({owner.supervisor.child(node).pid for node in owner.engines.instances}) == 3
         original = ctx.globals()['prefill']
         first = next(item for item in owner.topology.active('prefill') if item['rpc'] == original[0])
         original_files = {name: (ctx.records.directory / 'components' / first['id'] / name).read_bytes()
@@ -127,7 +126,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
             assert json.loads((folder / 'endpoints.json').read_text())['rpc'] == item['rpc']
             assert (folder / 'ready.json').exists() == (item['id'] in {node['id'] for node in owner.topology.active()})
         # Exercise real TCP request traffic after removal and subsequent creation.
-        classpath = os.pathsep.join([str(ROOT / 'java/backend/rtp/target/test-classes'), str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
+        classpath = os.pathsep.join([str(ROOT / 'java/backend/rtp/target/test-classes'), str(ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
         probe = await asyncio.to_thread(subprocess.run, [str(Path(os.environ['JAVA_HOME']) / 'bin/java'),
             '-cp', classpath, 'org.flexlb.mock.engine.rtp.NativeProbe', ctx.globals()['decode'][0],
             str(tmp_path / 'traffic.json'), ctx.globals()['prefill'][0]], capture_output=True, text=True, timeout=15)
@@ -140,7 +139,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
         assert len(await scale_out(ctx, ScaleOut())) == 1
         return removed + created
     monitor = bool(os.environ.get('PROMETHEUS_BIN'))
-    case, registry, launch = setup_case(tmp_path, exercise, mode, monitor)
+    case, registry, launch = setup_case(tmp_path, exercise, monitor)
     output = tmp_path / 'result'
     result = asyncio.run(run_case(case, registry, launch, output))
     assert result['status'] == 'PASS', result
@@ -163,7 +162,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
 def test_host_failure_or_partial_startup_fails_the_run_and_cleans_every_process(tmp_path, invalid):
     @case_interface('probe/crash', effect='write')
     async def crash(ctx, args: Args) -> bool:
-        next(iter(ctx.runtime.engines.hosts.values()))['child'].kill()
+        ctx.runtime.supervisor.child('prefill-0').kill()
         await asyncio.sleep(20)
         return True
     case, registry, launch = setup_case(tmp_path, crash, invalid=invalid)
@@ -171,27 +170,14 @@ def test_host_failure_or_partial_startup_fails_the_run_and_cleans_every_process(
     result = asyncio.run(run_case(case, registry, launch, output))
     assert result['status'] == 'ERROR'
     events = no_children(output)
-    assert len([event for event in events if event['event'] == 'process_started']) == 1
+    assert len([event for event in events if event['event'] == 'process_started']) == 3
     if not invalid:
-        assert all(node in result['error'] for node in ('prefill-0', 'prefill-1', 'decode-0'))
-
-
-def test_shared_host_rejects_conflicting_process_environment_and_bad_mode(tmp_path):
-    @case_interface('probe/noop', effect='read')
-    async def noop(ctx, args: Args) -> bool:
-        return True
-    case, _, launch = setup_case(tmp_path, noop)
-    components = {role: {'command': recipe['command'], 'env': {'ROLE_SETTING': role}} for role, recipe in launch['components'].items()}
-    with pytest.raises(ExecutionError, match='identical'):
-        prepare_launch({'components': components}, case, tmp_path)
-    assert prepare_launch({'components': components, 'engine_mode': 'isolated'}, case, tmp_path)['engine_mode'] == 'isolated'
-    with pytest.raises(ExecutionError, match='engine_mode'):
-        prepare_launch({'components': components, 'engine_mode': 'arbitrary'}, case, tmp_path)
+        assert 'prefill-0' in result['error']
 
 
 def test_allocator_exhaustion_fails_without_reusing_a_retired_listener(monkeypatch):
-    from mock_framework.execution.engines import EngineHosts
-    owner = EngineHosts(supervisor=None, topology=None, records=None, environment={}, recipes={}, mode='shared', monitoring=None)
+    from mock_framework.execution.engines import EngineProcesses
+    owner = EngineProcesses(supervisor=None, topology=None, records=None, environment={}, recipes={}, monitoring=None)
     owner.used_ports.add(12345)
     class Probe:
         def __enter__(self): return self
@@ -207,16 +193,19 @@ def test_allocator_exhaustion_fails_without_reusing_a_retired_listener(monkeypat
 def test_partial_scale_failure_is_not_replayed_or_reported_as_success(tmp_path, operation):
     @case_interface('probe/partial', effect='write')
     async def exercise(ctx, args: Args) -> bool:
-        original = ctx.runtime.engines.call
         calls = []
-        async def fail_second(host, name, body):
-            if name == operation:
-                calls.append(body['id'])
-                if len(calls) == 2:
-                    ctx.records.emit(event='injected_failure', operation=name, calls=calls)
-                    body = {**body, **({'controlPort': body['rpcPort']} if name == 'create' else {'id': 'prefill-999999'})}
-            return await original(host, name, body)
-        ctx.runtime.engines.call = fail_second
+        owner = ctx.runtime.engines if operation == 'create' else ctx.runtime.supervisor
+        method = 'start_instance_process' if operation == 'create' else 'stop_expected'
+        original = getattr(owner, method)
+
+        async def fail_second(*args):
+            calls.append(args[1] if operation == 'create' else args[0])
+            if len(calls) == 2:
+                ctx.records.emit(event='injected_failure', operation=operation, calls=calls)
+                raise ExecutionError('injected process failure')
+            return await original(*args)
+
+        setattr(owner, method, fail_second)
         if operation == 'create': await scale_out(ctx, ScaleOut(count=2))
         else: await scale_in(ctx, ScaleIn(count=2))
         raise AssertionError('Partial failure was swallowed')
@@ -232,8 +221,7 @@ def test_partial_scale_failure_is_not_replayed_or_reported_as_success(tmp_path, 
     assert json.loads((output / 'topology.json').read_text()) == []
 
 
-@pytest.mark.parametrize('mode', ['shared', 'isolated'])
-def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_address(tmp_path, mode):
+def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_address(tmp_path):
     if not os.environ.get('PROMETHEUS_BIN'):
         pytest.skip('PROMETHEUS_BIN required for live lifecycle and historical metric verification')
     @case_interface('probe/live_scale', effect='write')
@@ -245,7 +233,7 @@ def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_addr
         directory = ctx.records.directory / 'traffic'
         directory.mkdir()
         classpath = os.pathsep.join([str(ROOT / 'java/client/target/test-classes'), str(ROOT / 'java/client/target/classes'),
-            str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
+            str(ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
         master = ctx.globals()['masters'][0]
         def rows():
             path = directory / 'requests.jsonl'
@@ -300,7 +288,7 @@ def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_addr
                 except TimeoutError:
                     child.kill(); await child.wait()
                 assert child.returncode == 0, (directory / 'stderr.log').read_text()
-    case, registry, launch = setup_case(tmp_path, exercise, mode, monitor=True, master=True)
+    case, registry, launch = setup_case(tmp_path, exercise, monitor=True, master=True)
     output = tmp_path / 'result'
     result = asyncio.run(run_case(case, registry, launch, output))
     assert result['status'] == 'PASS', result

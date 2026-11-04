@@ -13,8 +13,7 @@ from helpers.input import pb, write_inputs
 from test_master import configuration
 
 
-@pytest.mark.parametrize('mode', ['shared', 'isolated'])
-def test_vision_playback_through_real_master(tmp_path, mode):
+def test_vision_playback_through_real_master(tmp_path):
     root = Path(__file__).resolve().parents[1]
     java = str(Path(os.environ['JAVA_HOME']) / 'bin/java')
     master_classpath = os.pathsep.join([str(root / 'java/master/target/classes'),
@@ -50,13 +49,13 @@ def test_vision_playback_through_real_master(tmp_path, mode):
     path.write_text(yaml.safe_dump(data))
     registry = Registry.standard()
     case = compile_case(path, registry)
-    host = root / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
+    host = root / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
     components = {'master': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.MasterNode'], 'startup_timeout': '60s'},
         'client': {'command': [java, '-jar', str(root / 'java/client/target/mock-client-1.0-SNAPSHOT-all.jar')]}}
     for role in ('prefill', 'decode', 'vit'):
-        components[role] = {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', str(host), 'org.flexlb.mock.host.EngineHost'],
+        components[role] = {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', str(host), 'org.flexlb.mock.engine.EngineMain'],
             'env': {'MOCK_BIND_HOST': '0.0.0.0', 'MOCK_ADVERTISE_HOST': '127.0.0.1'}}
-    launch = prepare_launch({'engine_mode': mode, 'components': components,
+    launch = prepare_launch({'components': components,
         'zookeeper': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.mock.master.ZookeeperNode']}}, case, tmp_path)
     output = tmp_path / 'result'
     result = asyncio.run(run_case(case, registry, launch, output))
@@ -66,8 +65,9 @@ def test_vision_playback_through_real_master(tmp_path, mode):
     client, = summary['clients'].values()
     assert client['issued'] == client['finished'] == client['outcomes']['success'] == 8, client
     events = [json.loads(line) for line in (output / 'events.jsonl').read_text().splitlines()]
-    hosts = [event for event in events if event.get('event') == 'process_started' and event.get('node', '').startswith('engine-')]
-    assert len(hosts) == (1 if mode == 'shared' else 3)
+    engines = [event for event in events if event.get('event') == 'process_started'
+               and event.get('node') in {'prefill-0', 'decode-0', 'vit-0'}]
+    assert len({event['pid'] for event in engines}) == 3
 
 
 def test_vit_is_a_shared_engine_without_backend_configuration():

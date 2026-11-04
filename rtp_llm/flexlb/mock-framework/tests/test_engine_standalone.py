@@ -42,7 +42,7 @@ def wait_healthy(child, port, log):
 
 def command():
     return [str(Path(os.environ['JAVA_HOME']) / 'bin/java'), '-XX:ActiveProcessorCount=2',
-            '-jar', str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')]
+            '-jar', str(ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar')]
 
 
 def environment(role, port):
@@ -110,16 +110,16 @@ def test_service_restarts_without_case_artifacts(tmp_path, role, source):
 
 def test_fatal_vit_compute_failure_exits_the_service(tmp_path):
     port = ports()
-    env = environment('vit', port, tmp_path / 'model')
+    env = environment('vit', port)
     env['MOCK_COMPUTE_FORWARD_EXPRESSION'] = '-1'
     log = tmp_path / 'process.log'
     with log.open('w') as stream:
         child = subprocess.Popen(command(), env=env, cwd=tmp_path, stdout=stream, stderr=stream)
         try:
             wait_healthy(child, port, log)
-            classpath = os.pathsep.join([str(ROOT / 'java/host/target/test-classes'),
-                                        str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
-            subprocess.run([command()[0], '-cp', classpath, 'org.flexlb.mock.host.EngineFailureProbe',
+            classpath = os.pathsep.join([str(ROOT / 'java/engine/target/test-classes'),
+                                        str(ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
+            subprocess.run([command()[0], '-cp', classpath, 'org.flexlb.mock.engine.EngineFailureProbe',
                             f'127.0.0.1:{port + 1}'], check=True, capture_output=True, timeout=10)
             child.wait(timeout=8)
             assert child.returncode not in (0, 143)

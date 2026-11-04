@@ -84,7 +84,7 @@ def test_cancelled_spawn_remains_owned_until_final_cleanup(tmp_path, monkeypatch
 
 def test_cleanup_continues_in_order_after_domain_failures(tmp_path):
     async def exercise():
-        runtime = RunEnvironment(SimpleNamespace(environment={}), {'components': {}, 'engine_mode': 'shared'},
+        runtime = RunEnvironment(SimpleNamespace(environment={}), {'components': {}},
             SimpleNamespace(directory=tmp_path, emit=lambda **event: None))
         order = []
         def operation(name, *, raises=False, errors=None):
@@ -125,7 +125,7 @@ def test_exit_before_cleanup_is_not_reclassified_as_normal_stop(tmp_path):
 
 def test_health_failure_at_teardown_still_fails_without_a_process_exit(tmp_path):
     async def exercise():
-        runtime = RunEnvironment(SimpleNamespace(environment={}), {'components': {}, 'engine_mode': 'shared'},
+        runtime = RunEnvironment(SimpleNamespace(environment={}), {'components': {}},
             SimpleNamespace(directory=tmp_path, emit=lambda **event: None))
         runtime.supervisor.fail('Engine membership differs')
         assert await runtime.close() == ['Engine membership differs']

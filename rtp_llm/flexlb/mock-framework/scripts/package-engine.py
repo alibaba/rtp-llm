@@ -78,9 +78,9 @@ def package():
     if internal_monitoring:
         profiles.append('internal-monitoring')
     build_args = ['-P' + ','.join(profiles)] if profiles else []
-    subprocess.run([str(FRAMEWORK / 'scripts/build.sh'), '-pl', 'java/host', '-am', '-DskipTests', *build_args],
+    subprocess.run([str(FRAMEWORK / 'scripts/build.sh'), '-pl', 'java/engine', '-am', '-DskipTests', *build_args],
                    cwd=FRAMEWORK, check=True)
-    jar = FRAMEWORK / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
+    jar = FRAMEWORK / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
     with zipfile.ZipFile(jar) as archive:
         provider = 'META-INF/services/org.flexlb.discovery.ServiceDiscovery'
         if internal_discovery:

@@ -49,7 +49,6 @@ uv run --locked mock-case compile "$CASE_FILE" \
 uv run --locked mock-case launch "$CASE_FILE" \
   --java "$JAVA_HOME/bin/java" \
   --prometheus "$PROMETHEUS_BIN" \
-  --engine-mode shared \
   --output "$RUN_ROOT/launch.yaml"
 
 uv run --locked mock-case run "$CASE_FILE" \

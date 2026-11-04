@@ -26,8 +26,8 @@ async def addresses(ctx, args: ProbeArgs) -> list[str]:
 def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(tmp_path):
     import yaml
     java = Path(os.environ.get('JAVA_HOME', '/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home')) / 'bin/java'
-    jar = ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
-    classpath = os.pathsep.join([str(ROOT / 'java/backend/rtp/target/test-classes'), str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
+    jar = ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
+    classpath = os.pathsep.join([str(ROOT / 'java/backend/rtp/target/test-classes'), str(ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
     environment = {role: {'engine': 'rtp', 'config': {'SEQ_SIZE_PER_BLOCK': '16', 'MAX_SEQ_LEN': '4096',
                     'TEST_BLOCK_NUM': '9', 'RESERVE_BLOCK_RATIO': '0'}} for role in ('prefill', 'decode')}
     environment['prefill']['config']['mock.scheduler.mode'] = 'group'
@@ -40,7 +40,7 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
     path = tmp_path / 'case.yaml'; path.write_text(yaml.safe_dump(data, allow_unicode=True))
     registry = Registry.standard(); registry.register(addresses)
     case = compile_case(path, registry)
-    launch = prepare_launch({'engine_mode': 'isolated', 'components': {role: {'command': [str(java), '-cp', str(jar), 'org.flexlb.mock.host.EngineHost'], 'startup_timeout': '10s'}
+    launch = prepare_launch({'components': {role: {'command': [str(java), '-cp', str(jar), 'org.flexlb.mock.engine.EngineMain'], 'startup_timeout': '10s'}
                                             for role in ('prefill', 'decode')}}, case, tmp_path)
     output = tmp_path / 'result'
 

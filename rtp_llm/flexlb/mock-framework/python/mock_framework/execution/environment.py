@@ -1,7 +1,7 @@
 """Assemble run-scoped services and preserve their explicit startup/cleanup order."""
 from .client_group import ClientGroup
 from .components import ComponentLauncher
-from .engines import EngineHosts
+from .engines import EngineProcesses
 from .master import MasterGroup
 from .monitoring import Prometheus
 from .processes import ProcessSupervisor
@@ -19,8 +19,8 @@ class RunEnvironment:
             election=launch.get('zookeeper'), launcher=launcher, supervisor=self.supervisor,
             topology=self.topology, records=records, monitoring=self.monitoring)
         self.topology.add_publisher(self.masters.publish_discovery)
-        self.engines = EngineHosts(supervisor=self.supervisor, topology=self.topology, records=records,
-            environment=case.environment, recipes=launch['components'], mode=launch['engine_mode'], monitoring=self.monitoring)
+        self.engines = EngineProcesses(supervisor=self.supervisor, topology=self.topology, records=records,
+            environment=case.environment, recipes=launch['components'], monitoring=self.monitoring)
         self.clients = ClientGroup(component=case.environment.get('client'), recipe=launch['components'].get('client'),
             launcher=launcher, supervisor=self.supervisor, topology=self.topology, records=records, monitoring=self.monitoring)
 
@@ -46,7 +46,6 @@ class RunEnvironment:
                     errors.extend(result)
             except Exception as error:
                 errors.append(f'{label}: {type(error).__name__}: {error}')
-        await cleanup('engine health monitor', self.engines.stop_monitor)
         if self.supervisor.failure.done():
             errors.append(self.supervisor.failure.result())
         # Keep producers and observers alive through Client drain and the final scrape.
