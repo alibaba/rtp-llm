@@ -13,7 +13,9 @@ This CPU oracle covers width, length, layout and input ownership, including
 HCA early widths 64->128 / 192->512 / 256->512, CSA 2048 and window 128.
 It also pins the masked-tail sentinel contract: every masked extra-table
 tail reads extra row 0, so that row must stay finite in the repacked extra
-cache (P1c NaN leak).
+cache (P1c NaN leak).  Finally it pins the paged-padding contract: on the
+caller-supplied pool path, ``-1`` padding must read a live slot of its own
+row, never the persistent pool's never-guaranteed-initialized block 0.
 """
 
 import os
@@ -27,6 +29,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._sm120_prefill_indices import (
     Sm120PrefillIndices,
     _ready_chunk,
     index_adapter_mode,
+    remap_padding_to_first_entry,
     split_sm120_combined_tables,
     zero_extra_sentinel_row,
 )
@@ -376,6 +379,88 @@ class ExtraSentinelFiniteTest(unittest.TestCase):
         workspace = torch.full((2, 128, 8), float("nan"), dtype=torch.bfloat16)
         zero_extra_sentinel_row(workspace, 0)
         self.assertTrue(torch.isnan(workspace[0, 0]).all())
+
+
+def paged_value_load(pool, indices, lens):
+    """Emulate the SM120 prefill kernel's paged value loader.
+
+    ``idx < 0`` reads pool row 0 (never a zero-fill); masked tail entries
+    still contribute ``0 * V`` to the PV product.  A zero-length row loads
+    no tiles at all, so it contributes nothing.
+    """
+    idx = indices.to(torch.int64)
+    idx = torch.where(idx < 0, torch.zeros_like(idx), idx)
+    values = pool[idx].to(torch.float32)
+    cols = torch.arange(idx.shape[1]).unsqueeze(0)
+    probs = (cols < lens.to(torch.int64).unsqueeze(1)).to(torch.float32)
+    out = (probs.unsqueeze(-1) * values).sum(dim=1)
+    return torch.where((lens > 0).unsqueeze(-1), out, torch.zeros_like(out))
+
+
+class PagedPaddingRemapTest(unittest.TestCase):
+    """Caller-supplied paged pools never guarantee block 0 is initialized.
+
+    The kernel maps ``idx < 0`` to pool slot 0 and still loads it, so the
+    historical ``clamp_min_(0)`` lets ``0 * NaN`` poison rows that carry
+    padding; the remap must point padding at a live slot of the same row.
+    """
+
+    def poisoned_pipeline(self, remap):
+        # Pool block 0 stays uninitialized (NaN); the other rows hold live
+        # tokens.  Padded rows come from canonical_topk, as on the paged path.
+        pool = torch.full((8, 8), float("nan"), dtype=torch.bfloat16)
+        pool[1:] = 1.0
+        raw = torch.tensor(
+            [[3, -1, -1, -1], [2, 5, -1, -1], [1, 2, 3, -1], [-1, -1, -1, -1]],
+            dtype=torch.int32,
+        )
+        canonical, lens = canonical_topk(
+            raw, torch.tensor([1, 2, 3, 0], dtype=torch.int32), (4,)
+        )
+        if remap:
+            table = remap_padding_to_first_entry(canonical)
+        else:
+            table = canonical.clamp_min(0)
+        return paged_value_load(pool, table, lens), canonical, lens
+
+    def test_padding_reads_a_live_slot_of_the_same_row(self):
+        out, canonical, lens = self.poisoned_pipeline(remap=True)
+        self.assertTrue(torch.isfinite(out).all())
+        # Lengths are untouched: the kernel still masks the remapped tail.
+        self.assertTrue(
+            torch.equal(lens, torch.tensor([1, 2, 3, 0], dtype=torch.int32))
+        )
+
+    def test_clamp_to_uninitialized_block_leaks_nan(self):
+        # Falsifiability: the identical poisoned pool under the incumbent
+        # clamp must leak NaN through the masked tail, proving the finite
+        # assertion above tests the remap, not an unpoisoned pool.
+        out, _, _ = self.poisoned_pipeline(remap=False)
+        self.assertTrue(torch.isnan(out[:3]).all())
+
+    def test_remapped_table_properties(self):
+        canonical = torch.tensor(
+            [[3, -1, -1, -1], [2, 5, -1, -1], [-1, -1, -1, -1]], dtype=torch.int32
+        )
+        original = canonical.clone()
+        remapped = remap_padding_to_first_entry(canonical)
+        self.assertTrue(
+            torch.equal(remapped[0], torch.tensor([3, 3, 3, 3], dtype=torch.int32))
+        )
+        self.assertTrue(
+            torch.equal(remapped[1], torch.tensor([2, 5, 2, 2], dtype=torch.int32))
+        )
+        # Zero-length rows load no tiles, so their -1 padding stays put.
+        self.assertTrue(torch.equal(remapped[2], canonical[2]))
+        # Out-of-place: the caller's (possibly shared) table is never mutated.
+        self.assertTrue(torch.equal(canonical, original))
+        self.assertEqual(remapped.dtype, torch.int32)
+        self.assertTrue(remapped.is_contiguous())
+        self.assertIsNot(remapped, canonical)
+
+    def test_non_2d_input_rejected(self):
+        with self.assertRaisesRegex(ValueError, "2D"):
+            remap_padding_to_first_entry(torch.zeros((2, 1, 4), dtype=torch.int32))
 
 
 class ModeParsingTest(unittest.TestCase):

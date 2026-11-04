@@ -95,6 +95,42 @@ class TestSparseAttnV4DecodeFp8Op(unittest.TestCase):
         self.assertIs(mock_run.call_args.kwargs["swa_cache"], swa_cache)
         self.assertIs(mock_run.call_args.kwargs["extra_cache"], extra_cache)
 
+    def test_sm120_remaps_topk_padding_to_first_entry(self):
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.decode."
+            "fp8_sparse_attn_decode_op._load_sm120_sparse_mla",
+            return_value=object(),
+        ):
+            op = SparseAttnV4DecodeFp8Op(8, 512, 1.0)
+        query = torch.zeros(1, 1, 8, 512, dtype=torch.bfloat16)
+        sink = torch.zeros(8, dtype=torch.float32)
+        swa_cache = torch.zeros(2, 64, 584, dtype=torch.uint8)
+        swa_indices = torch.full((1, 1, 128), -1, dtype=torch.int32)
+        swa_indices[0, 0, :2] = torch.tensor([5, 7], dtype=torch.int32)
+
+        with patch("rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla.warmup"), patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla.run"
+        ) as mock_run:
+            op._forward_sm120_flashinfer(
+                query,
+                swa_cache,
+                sink,
+                swa_indices,
+                torch.tensor([2], dtype=torch.int32),
+            )
+
+        passed = mock_run.call_args.kwargs["swa_indices"]
+        self.assertTrue(
+            torch.equal(passed[:, :2], torch.tensor([[5, 7]], dtype=torch.int32))
+        )
+        self.assertTrue((passed[:, 2:] == 5).all())
+        self.assertTrue(
+            torch.equal(
+                mock_run.call_args.kwargs["swa_lens"],
+                torch.tensor([2], dtype=torch.int32),
+            )
+        )
+
     def test_attn_sink_cache_tracks_source_identity_and_inplace_updates(self):
         with patch.object(fp8_sparse_attn_decode_op, "is_sm120", return_value=False):
             op = SparseAttnV4DecodeFp8Op(
