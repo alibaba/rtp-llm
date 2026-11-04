@@ -66,19 +66,15 @@ class ProcessSupervisor:
         retain(child)
         return child
 
-    async def stop_expected(self, name, grace=3):
+    async def stop_intentionally(self, name, *, mode='terminate', grace=3):
         child = self._children[name]
         if child.returncode is not None:
-            raise ExecutionError(f'{name} already exited before intentional stop')
+            raise ExecutionError(f'{name} already exited before intentional {mode}')
+        if mode not in ('terminate', 'kill'):
+            raise ExecutionError(f'Unknown intentional stop mode: {mode}')
         self._expected.add(name)
-        errors = await self.stop([name], grace)
-        return errors
-
-    async def kill_expected(self, name):
-        child = self._children[name]
-        if child.returncode is not None:
-            raise ExecutionError(f'{name} already exited before intentional kill')
-        self._expected.add(name)
+        if mode == 'terminate':
+            return await self.stop([name], grace)
         errors = []
         try:
             os.killpg(child.pid, signal.SIGKILL)

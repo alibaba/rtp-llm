@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from ...config.validation import duration
 from .. import ExecutionError
-from ._master import Targets
+from ._targets import Targets
 
 
 

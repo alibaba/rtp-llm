@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Literal
 from .registry import register_step
 from .step import Step, StepContext
-from ._master import Targets
+from ._targets import Targets
 
 
 @dataclass(frozen=True)

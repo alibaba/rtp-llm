@@ -4,7 +4,7 @@ from typing import Annotated
 from .registry import register_step
 from .step import Step, StepContext
 from .. import ExecutionError
-from ._master import Targets
+from ._targets import Targets
 from . import _metrics
 
 

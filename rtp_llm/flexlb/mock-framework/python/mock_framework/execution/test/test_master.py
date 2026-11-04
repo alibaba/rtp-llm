@@ -244,8 +244,11 @@ def adapter_context():
         {'id': 'master-0', 'rpc': 'm0:1', 'control': 'http://m0', 'role': 'master'},
         {'id': 'master-1', 'rpc': 'm1:1', 'control': 'http://m1', 'role': 'master'},
         {'id': 'p0', 'rpc': 'p0:1', 'role': 'prefill'}]
-    return SimpleNamespace(runtime=SimpleNamespace(topology=SimpleNamespace(
-        active=lambda role=None: [item for item in topology if role is None or item['role'] == role])), query_time='2026-10-28T00:00:00Z', timeout=2)
+    from mock_framework.execution.roles.master import MasterRole
+    endpoints = SimpleNamespace(active=lambda role=None: [item for item in topology if role is None or item['role'] == role])
+    masters = MasterRole(component=None, recipe=None, election=None, supervisor=None,
+                         topology=endpoints, records=None, monitoring=None)
+    return SimpleNamespace(runtime=SimpleNamespace(masters=masters), query_time='2026-10-28T00:00:00Z', timeout=2)
 
 
 @pytest.mark.parametrize('operation,responses,expected', [
@@ -257,7 +260,7 @@ def adapter_context():
 ])
 def test_adapter_keeps_per_master_observations(monkeypatch, operation, responses, expected):
     import asyncio
-    from mock_framework.execution.step import _master as master
+    from mock_framework.execution.roles import master
     calls = []
     async def post(url, payload):
         calls.append(url)
@@ -276,7 +279,7 @@ def test_adapter_keeps_per_master_observations(monkeypatch, operation, responses
 ])
 def test_adapter_rejects_wrong_identity_and_invalid_or_duplicate_engine(monkeypatch, operation, response):
     import asyncio
-    from mock_framework.execution.step import _master as master
+    from mock_framework.execution.roles import master
     async def post(url, payload):
         return response
     monkeypatch.setattr(master, 'post', post)
@@ -287,7 +290,7 @@ def test_adapter_rejects_wrong_identity_and_invalid_or_duplicate_engine(monkeypa
 
 def test_explicit_master_selection_and_empty_selection_do_not_broadcast(monkeypatch):
     import asyncio
-    from mock_framework.execution.step import _master as master
+    from mock_framework.execution.roles import master
     calls = []
     async def post(url, payload):
         calls.append(url)
@@ -296,7 +299,7 @@ def test_explicit_master_selection_and_empty_selection_do_not_broadcast(monkeypa
     assert asyncio.run(MasterGet.execute(adapter_context(), MasterSelection(['m1:1'], is_leader=True))) == []
     assert calls == ['http://m1']
     with pytest.raises(ValueError):
-        master.Targets([])
+        MasterSelection([])
     with pytest.raises(ExecutionError):
         asyncio.run(MasterGet.execute(adapter_context(), MasterSelection(['missing:1'], is_leader=True)))
     assert calls == ['http://m1']
@@ -327,7 +330,7 @@ def test_restart_port_probe_still_rejects_an_active_listener():
 ])
 def test_standby_query_preserves_actual_master_claims(monkeypatch, leaders, expected):
     import asyncio
-    from mock_framework.execution.step import _master as master
+    from mock_framework.execution.roles import master
     claims = dict(zip(['http://m0', 'http://m1'], leaders))
     async def post(url, payload):
         identity = 'master-0' if url == 'http://m0' else 'master-1'
@@ -339,8 +342,8 @@ def test_standby_query_preserves_actual_master_claims(monkeypatch, leaders, expe
 @pytest.mark.parametrize('targets,expected', [(None, ['m0:1', 'm1:1']), (['m1:1'], ['m1:1'])])
 def test_master_get_without_leadership_filter_lists_selected_active_masters(monkeypatch, targets, expected):
     import asyncio
-    from mock_framework.execution.step import _master as master
+    from mock_framework.execution.roles import master
     async def unexpected_read(*args):
         raise AssertionError('An unfiltered listing does not query leadership')
-    monkeypatch.setattr(master, '_read_master_state', unexpected_read)
+    monkeypatch.setattr(master, 'post', unexpected_read)
     assert asyncio.run(MasterGet.execute(adapter_context(), MasterSelection(targets))) == expected

@@ -1,18 +1,21 @@
 """Native Master configuration binding and per-Master state reads."""
 import asyncio
 import copy
+from dataclasses import dataclass
 import errno
 import json
 import os
 import secrets
 import socket
 import uuid
+from pathlib import Path
 from urllib.parse import urlsplit
 from ...config.validation import ConfigError, text
 
 from ..processes import launch_component
 from ..run_trace import write_json
 from .. import ExecutionError
+from ..transport import post
 
 
 def _unique_json_object(pairs):
@@ -122,6 +125,15 @@ def refresh_discovery(config, topology, directory):
         _environment(config, topology, directory, require_engines=False)
 
 
+@dataclass
+class _MasterInstance:
+    index: int
+    attempt: int
+    process: str
+    directory: Path
+    name: str
+
+
 class MasterRole:
     def __init__(self, *, component, recipe, election, supervisor, topology, records, monitoring, environment=None):
         self.component, self.recipe, self.election = component, recipe, election
@@ -167,8 +179,9 @@ class MasterRole:
         if self.component is not None:
             for node in snapshot:
                 if node['role'] == 'master':
-                    refresh_discovery(self.component['config'], snapshot,
-                        self._instances.get(node['rpc'], {}).get('directory', self.records.directory / 'components' / node['id']))
+                    instance = self._instances.get(node['rpc'])
+                    directory = instance.directory if instance else self.records.directory / 'components' / node['id']
+                    refresh_discovery(self.component['config'], snapshot, directory)
 
     async def _launch(self, index, attempt=0):
         name = f'master-{index}'
@@ -178,8 +191,8 @@ class MasterRole:
             directory = directory / f'restart-{attempt}'
         self._owned.append(process)
         if attempt:
-            address = next(address for address, item in self._instances.items() if item['index'] == index)
-            self._instances[address]['directory'] = directory
+            address = next(address for address, item in self._instances.items() if item.index == index)
+            self._instances[address].directory = directory
         control, endpoint = await launch_component(
             self.supervisor, self.records, self._configuration, 'master', index, self.recipe,
             configure=lambda directory: self._environment(index, directory), attempt=attempt)
@@ -192,8 +205,7 @@ class MasterRole:
             self.monitoring.discover(name, directory)
             if self.monitoring.baselined:
                 await self.monitoring.baseline([name])
-        return endpoint, {'index': index, 'attempt': attempt, 'process': process,
-                          'directory': directory, 'name': name}
+        return endpoint, _MasterInstance(index, attempt, process, directory, name)
 
     async def start(self, count=None):
         if count is None:
@@ -213,6 +225,46 @@ class MasterRole:
                     result.append(endpoint['rpc'])
             return result
 
+    def _read_targets(self, targets):
+        available = {item['rpc']: item for item in self.topology.active('master')}
+        addresses = sorted(available) if targets is None else targets
+        if not addresses or set(addresses) - available.keys():
+            raise ExecutionError('Master targets are empty or unknown')
+        return [available[address] for address in addresses]
+
+    async def _read_state(self, master, operation, args, query_time, remaining):
+        return await post(master['control'], {'interface': operation, 'args': args,
+            'context': {'run': 'foreground', 'query_time': query_time, 'observation': None,
+                        'timeout_ms': max(1, int(remaining() * 1000))}})
+
+    async def get(self, targets, is_leader, *, query_time, remaining):
+        masters = self._read_targets(targets)
+        if is_leader is None:
+            return [master['rpc'] for master in masters]
+        result = []
+        for master in masters:
+            value = await self._read_state(master, 'master/leadership/get', {}, query_time, remaining)
+            own = value['instances']
+            if own not in ([], [{'id': master['id']}]):
+                raise ExecutionError('Master returned an invalid local leadership observation')
+            if bool(own) == is_leader:
+                result.append(master['rpc'])
+        return result
+
+    async def get_engines(self, targets, role, *, query_time, remaining):
+        result = {}
+        for master in self._read_targets(targets):
+            value = await self._read_state(master, 'master/engine/get', {'role': role}, query_time, remaining)
+            if set(value['instances']) != {master['id']}:
+                raise ExecutionError('Master returned another instance observation')
+            addresses = value['instances'][master['id']]
+            if not isinstance(addresses, list) or any(not isinstance(address, str) or not address for address in addresses):
+                raise ExecutionError('Master reported invalid Engine addresses')
+            if len(set(addresses)) != len(addresses):
+                raise ExecutionError('Master reported duplicate Engines')
+            result[master['rpc']] = sorted(addresses)
+        return result
+
     def _selected(self, targets, *, active):
         available = {node['rpc'] for node in self.topology.active('master')}
         candidates = available if active else self._instances.keys() - available
@@ -228,22 +280,21 @@ class MasterRole:
                 raise ExecutionError('Unknown Master stop mode')
             addresses = self._selected(targets, active=True)
             selected = [self._instances[address] for address in addresses]
-            if any(self.supervisor.child(item['process']).returncode is not None for item in selected):
+            if any(self.supervisor.child(item.process).returncode is not None for item in selected):
                 raise ExecutionError('Selected Master is not running')
             self.records.emit(event='instances_selected', operation='master/stop', targets=addresses, mode=mode)
             if self.monitoring:
-                await self.monitoring.final_scrape([item['name'] for item in selected])
+                await self.monitoring.final_scrape([item.name for item in selected])
             for item in selected:
-                child = self.supervisor.child(item['process'])
-                if mode == 'kill':
-                    errors = await self.supervisor.kill_expected(item['process'])
-                else:
-                    errors = await self.supervisor.stop_expected(item['process'], grace=self._stop_grace())
+                child = self.supervisor.child(item.process)
+                errors = await self.supervisor.stop_intentionally(item.process, mode=mode, grace=self._stop_grace())
                 if child.returncode is not None:
-                    (item['directory'] / 'ready.json').unlink(missing_ok=True)
-                    self.topology.retire(item['name'])
+                    (item.directory / 'ready.json').unlink(missing_ok=True)
+                    self.topology.retire(item.name)
+                    self.records.emit(event='instance_stopped', node=item.name, role='master',
+                                      instance_id=item.name, generation=item.attempt, process=item.process)
                     if self.monitoring:
-                        self.monitoring.retire(item['name'])
+                        self.monitoring.retire(item.name)
                 if errors:
                     raise ExecutionError('; '.join(errors))
             return addresses
@@ -253,8 +304,8 @@ class MasterRole:
             addresses = self._selected(targets, active=False)
             for address in addresses:
                 item = self._instances[address]
-                item['attempt'] += 1
-                endpoint, replacement = await self._launch(item['index'], item['attempt'])
+                item.attempt += 1
+                endpoint, replacement = await self._launch(item.index, item.attempt)
                 if endpoint is None or endpoint['rpc'] != address:
                     raise ExecutionError('Restarted Master changed its service address')
                 self._instances[address] = replacement
