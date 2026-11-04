@@ -14,6 +14,14 @@ from rtp_llm.config.quant_config import (
 from rtp_llm.ops import DataType, KvCacheDataType
 
 
+def ple_eos_token_id(config):
+    """Resolve the checkpoint's PLE document boundary, not the chat stop ID."""
+    eos = getattr(config, "_qwen4_ple_eos_token_id", None)
+    if eos is None:
+        eos = getattr(getattr(config, "special_tokens", None), "eos_token_id", None)
+    return eos
+
+
 @dataclass(frozen=True)
 class Qwen4Options:
     ple_prefetch_mb: int

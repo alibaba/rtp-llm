@@ -17,25 +17,31 @@ class PreparedWeightDict(dict):
     """Compute weights whose copied projections require a model restart to update."""
 
 
-def prepare_compute_weights(weights):
+def prepare_compute_weights(weights, *, dense_bf16=False):
     view = copy.copy(weights)
     view._fp8_storage_owner = weights
 
     def convert(items):
         result = PreparedWeightDict()
+        converted = set()
         for name, value in items.items():
             scale = items.get(name + FP8_STORAGE_SCALE_SUFFIX)
             compute = (
                 (value.float() * scale).to(torch.bfloat16)
                 if value.dtype == torch.float8_e4m3fn
-                and value.ndim != 2
+                and (dense_bf16 or value.ndim != 2)
                 and scale is not None
                 else value
             )
             restart = value.dtype == torch.float8_e4m3fn or compute is not value
             if restart:
+                value._rtp_requires_restart_for_update = True
                 compute._rtp_requires_restart_for_update = True
             result[name] = compute
+            if dense_bf16 and compute is not value and value.ndim == 2:
+                converted.add(name + FP8_STORAGE_SCALE_SUFFIX)
+        for name in converted:
+            result.pop(name, None)
         return result
 
     view.weights = [convert(items) for items in weights.weights]

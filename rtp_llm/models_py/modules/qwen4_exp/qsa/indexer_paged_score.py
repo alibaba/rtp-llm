@@ -20,6 +20,7 @@ Per row::
     slot(row, t) = block_table[batch(row), t // block_size] * block_size + t % block_size
 """
 
+import os
 from typing import Optional
 
 import torch
@@ -197,6 +198,26 @@ def qsa_paged_indexer_score(
     logits = torch.empty((M, max_ctx_len), device=q_bf16.device, dtype=torch.float32)
     if M == 0 or max_ctx_len == 0:
         return logits
+    if (
+        os.getenv("RTP_QWEN4_PAGED_INDEXER_IMPL", "vector") == "mma"
+        and next_n >= 16
+        and H == 4
+        and D == 128
+        and block_n == _BLOCK_N
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability(q_bf16.device) == (12, 0)
+    ):
+        from .indexer_tensorcore import paged_indexer_mma
+
+        return paged_indexer_mma(
+            q_bf16,
+            weight,
+            kv_pool,
+            block_table,
+            context_lens,
+            block_size=block_size,
+            max_ctx_len=max_ctx_len,
+        )
 
     # The flattened (batch, token) rows are contiguous, each with H * D values.
     grid = (M, triton.cdiv(max_ctx_len, block_n))

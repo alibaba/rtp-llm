@@ -43,6 +43,7 @@ def is_supported(
     block_k,
     scale=None,
     selected_has_count=False,
+    allow_large_decode=False,
 ):
     if cache.ndim != 5 or q.ndim != 4:
         return False
@@ -74,7 +75,7 @@ def is_supported(
         and cache.dtype in (torch.bfloat16, torch.float8_e4m3fn)
         and group_heads in (3, 6, 12)
         and q.ndim == 4
-        and 1 <= q.shape[0] <= 8
+        and 1 <= q.shape[0] <= (64 if allow_large_decode else 8)
         and heads in (3, 6, 12, 24)
         and 1 <= q.shape[2] <= 4
         and q.shape[3] == 256

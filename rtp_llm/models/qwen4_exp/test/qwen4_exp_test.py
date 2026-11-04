@@ -110,6 +110,39 @@ class Qwen4ExpTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "128-token"):
             Qwen4Exp._post_build_model_config(self.config)
 
+    def test_ple_document_eos_survives_chat_tokenizer_setup(self):
+        from rtp_llm.config.qwen4_exp_config import ple_eos_token_id
+
+        data = self._config()
+        data["text_config"]["eos_token_id"] = 248044
+        Path(self._temp_dir.name, "config.json").write_text(json.dumps(data))
+        config = Qwen4Exp.create_config(self._temp_dir.name)
+        model = Qwen4Exp.__new__(Qwen4Exp)
+        model.model_config = config
+        model.tokenizer = SimpleNamespace(eos_token_id=248046)
+        model._fill_tokenizer_special_tokens()
+        self.assertEqual(config.special_tokens.eos_token_id, 248046)
+        self.assertEqual(ple_eos_token_id(config), 248044)
+        self.assertEqual(
+            ple_eos_token_id(self.config), self.config.special_tokens.eos_token_id
+        )
+        import torch
+
+        from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpNGramEmbedding
+
+        embedding = SimpleNamespace(eos_token_id=ple_eos_token_id(config))
+        history = torch.tensor([[11, 248046, 12, 248044, 13, 14]])
+        shifted = Qwen4ExpNGramEmbedding._shift_right_ignore_eos(embedding, history, 1)
+        self.assertEqual(shifted.tolist(), [[248044, 11, 248046, 12, 248044, 13]])
+
+    def test_invalid_ple_document_eos_is_rejected(self):
+        for eos in (-1, 248320, True, [248044]):
+            data = self._config()
+            data["text_config"]["eos_token_id"] = eos
+            Path(self._temp_dir.name, "config.json").write_text(json.dumps(data))
+            with self.subTest(eos=eos), self.assertRaisesRegex(ValueError, "PLE eos"):
+                Qwen4Exp.create_config(self._temp_dir.name)
+
     def _loaded_model(self, **changes):
         model = Qwen4Exp.__new__(Qwen4Exp)
         config = dict(

@@ -152,6 +152,10 @@ def _validate_main_paged_geometry(
         sequence_bases.device.type != "cpu" or query_lengths.device.type != "cpu"
     ):
         raise RuntimeError("qwen4_exp sparse GQA Graph requires host lengths")
+    if not graph_capture:
+        for receipt in getattr(self, "_model_prefill_geometry", None) or ():
+            if receipt.matches(self, cache, block_table, sequence_bases, query_lengths):
+                return receipt.page_size
     page_size = _try_validate_main_paged_geometry(
         self, cache, block_table, sequence_bases, query_lengths, device, graph_capture
     )

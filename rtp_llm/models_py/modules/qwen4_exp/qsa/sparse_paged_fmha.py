@@ -286,6 +286,7 @@ def sparse_paged_gqa_attn(
     output_gate: torch.Tensor | None = None,
     selected_has_count: bool = False,
     fp16_pv: bool = False,
+    validate_selected: bool = True,
     _validated_plan=None,
 ) -> torch.Tensor:
     """Attend to request-local token indices in a paged main MHA cache.
@@ -304,6 +305,9 @@ def sparse_paged_gqa_attn(
             cannot be inferred from ``kv_cache.shape[1]``.
         graph_capture: capture only. The caller must validate the initial
             metadata before capture; replayed values are masked by the kernel.
+        validate_selected: eager value checks. The model's trusted indexer
+            path may skip these after its paged-geometry preflight; shape,
+            dtype, strides and device checks still run here.
     """
     if q.dim() != 4 or q.dtype != torch.bfloat16 or not q.is_cuda:
         raise ValueError("q must be a rank-4 BF16 CUDA tensor")
@@ -422,7 +426,7 @@ def sparse_paged_gqa_attn(
             raise RuntimeError(
                 "qwen4 sparse paged GQA graph_capture requires an active capture or graph warmup"
             )
-    elif not prevalidated:
+    elif validate_selected and not prevalidated:
         if selected_has_count:
             count = selected[..., -1]
             slots = torch.arange(2051, device=selected.device)
@@ -455,6 +459,29 @@ def sparse_paged_gqa_attn(
         if output_gate is not None:
             output = output * torch.sigmoid(output_gate.transpose(1, 2))
         return output
+    if (
+        os.environ.get("RTP_QWEN4_PAGED_CHUNK_IMPL", "grouped") == "grouped"
+        and query_len >= 16
+        and head_dim == 256
+        and kv_heads in (1, 2)
+        and q_heads % kv_heads == 0
+        and q_heads // kv_heads in (3, 6, 12)
+        and selected_width == 2051
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability(q.device) == (12, 0)
+    ):
+        from .chunk_paged_gqa import chunk_paged_gqa
+
+        return chunk_paged_gqa(
+            q,
+            kv_cache,
+            block_table,
+            kv_lens,
+            selected,
+            scale=scale_view,
+            selected_has_count=selected_has_count,
+            output_gate=output_gate,
+        )
     splits = min(8, triton.next_power_of_2(triton.cdiv(selected_width, block_k)))
     from .grouped_sparse_paged_fmha import preferred_splits
 
@@ -491,6 +518,8 @@ def sparse_paged_gqa_attn(
         block_k=block_k,
         scale=scale_view,
         selected_has_count=selected_has_count,
+        allow_large_decode=os.environ.get("RTP_QWEN4_PAGED_DECODE_IMPL", "online")
+        == "grouped",
     )
     if grouped:
         grouped_sparse_paged_split(

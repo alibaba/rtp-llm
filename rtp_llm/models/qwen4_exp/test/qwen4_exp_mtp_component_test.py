@@ -240,6 +240,32 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "output-vocab pruning"):
             Qwen4ExpMTP.speculative_weight_alias_names(target, draft)
 
+    def test_source_bf16_vocabulary_aliases_do_not_request_fp8_scale(self):
+        draft = self.config
+        draft._qwen4_full_fp8_nvfp4 = True
+        draft._qwen4_dense_storage = "source_bf16"
+        target = Qwen4Exp.__new__(Qwen4Exp)
+        target.model_config = SimpleNamespace(
+            **{
+                name: getattr(draft, name)
+                for name in (
+                    "vocab_size",
+                    "hidden_size",
+                    "data_type",
+                    "enable_fp32_lm_head",
+                    "_qwen4_full_fp8_nvfp4",
+                    "_qwen4_dense_storage",
+                )
+            }
+        )
+        self.assertEqual(
+            Qwen4ExpMTP.speculative_weight_alias_names(target, draft),
+            (W.embedding, W.lm_head),
+        )
+        draft._qwen4_dense_storage = "fp8"
+        with self.assertRaisesRegex(ValueError, "matching dense storage"):
+            Qwen4ExpMTP.speculative_weight_alias_names(target, draft)
+
     def test_rejects_nonfinal_target_hidden_source(self):
         config = self._config()
         config["text_config"]["mtp"]["mtp_use_hidden_state_from_layer"] = 17
@@ -247,6 +273,79 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "final hidden state"):
             Qwen4ExpMTP.create_config(self._temp_dir.name)
+
+    def test_draft_original_precision_does_not_change_target_config(self):
+        for mode in ("source_bf16", "source_bf16_shared_vocab"):
+            with mock.patch.dict(
+                "os.environ",
+                RTP_QWEN4_DENSE_STORAGE="fp8",
+                RTP_QWEN4_MTP_DENSE_STORAGE=mode,
+            ):
+                target = Qwen4Exp.create_config(self._temp_dir.name)
+                draft = Qwen4ExpMTP.create_config(self._temp_dir.name)
+            self.assertEqual(target._qwen4_dense_storage, "fp8")
+            self.assertEqual(draft._qwen4_dense_storage, "source_bf16")
+            self.assertEqual(draft._qwen4_mtp_dense_storage_mode, mode)
+            self.assertEqual(
+                draft._qwen4_vocab_storage,
+                "fp8" if mode.endswith("shared_vocab") else "source_bf16",
+            )
+
+    def test_draft_original_vocab_loads_independently_and_shared_vocab_aliases_scales(
+        self,
+    ):
+        from rtp_llm.model_loader.fp8_weight import FP8_STORAGE_SCALE_SUFFIX
+
+        for mode in ("source_bf16", "source_bf16_shared_vocab"):
+            with mock.patch.dict(
+                "os.environ",
+                RTP_QWEN4_DENSE_STORAGE="fp8",
+                RTP_QWEN4_MTP_DENSE_STORAGE=mode,
+            ):
+                draft = Qwen4ExpMTP.create_config(self._temp_dir.name)
+            draft._qwen4_full_fp8_nvfp4 = True
+            target = Qwen4Exp.__new__(Qwen4Exp)
+            target.model_config = SimpleNamespace(
+                **{
+                    name: getattr(draft, name)
+                    for name in (
+                        "vocab_size",
+                        "hidden_size",
+                        "data_type",
+                        "enable_fp32_lm_head",
+                        "_qwen4_full_fp8_nvfp4",
+                    )
+                },
+                _qwen4_dense_storage="fp8",
+            )
+            names = Qwen4ExpMTP.speculative_weight_alias_names(target, draft)
+            if mode == "source_bf16":
+                self.assertEqual(names, ())
+                # An independent descriptor still loads the released target
+                # checkpoint matrices, never missing dedicated mtp.* tensors.
+                source = _source_keys(self._weight()._create_global_weights())
+                self.assertIn("model.language_model.embed_tokens.weight", source)
+                self.assertIn("lm_head.weight", source)
+            else:
+                self.assertEqual(
+                    names,
+                    (
+                        W.embedding,
+                        W.lm_head,
+                        W.embedding + FP8_STORAGE_SCALE_SUFFIX,
+                        W.lm_head + FP8_STORAGE_SCALE_SUFFIX,
+                    ),
+                )
+            target.model_config.hidden_size += 1
+            with self.assertRaisesRegex(ValueError, "semantically incompatible"):
+                Qwen4ExpMTP.speculative_weight_alias_names(target, draft)
+
+    def test_invalid_draft_storage_mode_is_rejected(self):
+        with mock.patch.dict(
+            "os.environ", RTP_QWEN4_MTP_DENSE_STORAGE="dequantized_fp8"
+        ):
+            with self.assertRaisesRegex(ValueError, "RTP_QWEN4_MTP_DENSE_STORAGE"):
+                Qwen4ExpMTP.create_config(self._temp_dir.name)
 
     @staticmethod
     def _config():

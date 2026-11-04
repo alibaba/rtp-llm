@@ -882,6 +882,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                     request.selected_indices,
                     page_size=page_size,
                     kv_head_num=self.kv_head_num,
+                    validate_selected=not trusted_selected,
                     **self._paged_kv_scale_args(kv_cache),
                 )
             outputs.append(

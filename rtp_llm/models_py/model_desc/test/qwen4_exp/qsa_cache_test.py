@@ -38,6 +38,41 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
         next_step = SimpleNamespace(metadata_cache={})
         self.assertEqual(host_values(next_step, values), [2, 3])
 
+    def test_batched_state_preflight_reads_fresh_values_before_any_write(self):
+        context = self._draft_incremental_context(
+            self.kv_base,
+            self.state_base,
+            prefixes=[8],
+            lengths=[16],
+            is_mtp_draft=False,
+        )
+        options = dict(
+            indexer=self._decode_indexer(),
+            token_count=16,
+            device=self.kv_base.device,
+            rope_config=self.rope_config,
+            draft=False,
+        )
+        with patch.dict("os.environ", RTP_QWEN4_PREFILL_META_IMPL="legacy"):
+            expected = context._draft_incremental_prefill_geometry(**options)
+        with patch.dict("os.environ", RTP_QWEN4_PREFILL_META_IMPL="batched"):
+            actual = context._draft_incremental_prefill_geometry(**options)
+            for name in (
+                "visible_lengths",
+                "compressed_lengths",
+                "current_cos",
+                "current_sin",
+            ):
+                torch.testing.assert_close(
+                    getattr(actual, name), getattr(expected, name), rtol=0, atol=0
+                )
+            context.indexer_state_inputs.kv_cache_block_id_device[0, 2] = 0
+            kv_before, state_before = self.kv_base.clone(), self.state_base.clone()
+            with self.assertRaisesRegex(RuntimeError, "incremental tail resolves"):
+                context._draft_incremental_prefill_geometry(**options)
+            torch.testing.assert_close(self.kv_base, kv_before, rtol=0, atol=0)
+            torch.testing.assert_close(self.state_base, state_before, rtol=0, atol=0)
+
     def test_metadata_alias_fast_path_preserves_distinct_tensor_validation(self):
         values = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
         alias = values.view_as(values)

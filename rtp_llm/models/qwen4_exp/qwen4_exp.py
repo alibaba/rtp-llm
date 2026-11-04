@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from typing import Dict, List
 
@@ -58,6 +59,14 @@ class Qwen4Exp(Qwen35Moe):
         config_json = json.loads((root / "config.json").read_text())
         source_quant = config_json.get("quantization_config")
         text_config = config_json.get("text_config", config_json)
+        # PLE hashes use the training document boundary, independently of the
+        # tokenizer's chat stop token installed later by BaseModel.
+        ple_eos = text_config.get("eos_token_id", config_json.get("eos_token_id"))
+        if ple_eos is not None and (
+            type(ple_eos) is not int or not 0 <= ple_eos < config.vocab_size
+        ):
+            raise ValueError("qwen4_exp PLE eos_token_id must be a vocabulary ID")
+        config._qwen4_ple_eos_token_id = ple_eos
         config.config_dtype = text_config.get("dtype") or text_config.get(
             "torch_dtype", ""
         )
@@ -72,6 +81,7 @@ class Qwen4Exp(Qwen35Moe):
 
     @staticmethod
     def _configure_precision_recipe(config: ModelConfig) -> None:
+        config._qwen4_dense_storage = os.getenv("RTP_QWEN4_DENSE_STORAGE", "fp8")
         config._qwen4_full_fp8_nvfp4 = bool(getattr(config, "_qwen4_fp8_source", False))
         config.quant_config = build_qwen4_quant_config(
             config.quantization, config._qwen4_full_fp8_nvfp4

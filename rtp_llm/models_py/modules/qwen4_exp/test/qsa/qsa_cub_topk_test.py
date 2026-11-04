@@ -11,6 +11,63 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_topk_triton import (
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class QsaCubTopkTest(unittest.TestCase):
+    def test_dense_unmasked_prefill_dispatch_owns_visibility_mask(self):
+        with patch.dict("os.environ", RTP_QWEN4_PREFILL_TOPK_IMPL="cub"):
+            for columns in (4096, 16384):
+                # Match the actual 8K-token Prefill rows, including score
+                # values beyond each row's causal boundary that must be ignored.
+                scores = torch.randn(8192, columns, device="cuda")
+                lengths = torch.arange(8192, device="cuda", dtype=torch.int32) * 7
+                lengths.clamp_(max=columns * 4)
+                scores[0].zero_()
+                scores[1, ::3] = float("nan")
+                scores.view(torch.int32)[2, ::5] = -2147483648
+                lengths[:3] = columns * 4
+                for finite in (True, False):
+                    expected = self.reference(scores, lengths, finite)
+                    with patch.object(
+                        torch,
+                        "topk",
+                        side_effect=AssertionError("CUB did not dispatch"),
+                    ):
+                        actual = try_select_qsa_tokens(
+                            scores,
+                            lengths,
+                            compress_ratio=4,
+                            token_budget=2048,
+                            scores_are_masked=False,
+                            finite_only=finite,
+                        )
+                    self.assertIsNotNone(actual)
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_prefill_large_width_preserves_exact_order_and_live_graph_metadata(self):
+        with patch.dict("os.environ", RTP_QWEN4_PREFILL_TOPK_IMPL="cub"):
+            for columns in (4096, 6144, 8192, 16384):
+                scores = torch.randn(65, columns, device="cuda")
+                lengths = torch.arange(65, device="cuda", dtype=torch.int32) * 941
+                lengths.clamp_(max=columns * 4)
+                scores[0].zero_()
+                scores[1].copy_(torch.randint(-3, 4, (columns,), device="cuda"))
+                scores[2, ::5] = float("nan")
+                scores.view(torch.int32)[3, ::7] = -4194303
+                lengths[:4] = columns * 4
+                actual = cub.try_cub_qsa_tokens(scores, lengths)
+                self.assertIsNotNone(actual)
+                torch.testing.assert_close(
+                    actual, self.reference(scores, lengths), rtol=0, atol=0
+                )
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    replayed = cub.try_cub_qsa_tokens(scores, lengths)
+                scores.normal_()
+                lengths.clamp_(max=4099)
+                graph.replay()
+                torch.testing.assert_close(
+                    replayed, self.reference(scores, lengths), rtol=0, atol=0
+                )
+                graph.reset()
+
     def setUp(self):
         if torch.cuda.get_device_capability() != (12, 0):
             self.skipTest("SM120 pinned Torch ordering")

@@ -59,7 +59,8 @@ def _validate_geometry(
     tl.store(Flags + row, flags)
 
 
-def validate_geometry(lengths, prefixes, table, page_size, pages, padded):
+def geometry_flags(lengths, prefixes, table, page_size, pages, padded):
+    """Enqueue the complete check; its caller owns the host acceptance boundary."""
     flags = torch.empty(lengths.numel(), dtype=torch.int32, device=table.device)
     _validate_geometry[(lengths.numel(),)](
         lengths,
@@ -76,9 +77,10 @@ def validate_geometry(lengths, prefixes, table, page_size, pages, padded):
         padded,
         num_warps=4,
     )
-    verdict = 0
-    for flag in flags.cpu().tolist():
-        verdict |= flag
+    return flags
+
+
+def raise_geometry_error(verdict):
     if verdict & 1:
         raise RuntimeError(
             "qwen4_exp QSA paged sequence bases must be non-negative and query lengths positive"
@@ -95,3 +97,11 @@ def validate_geometry(lengths, prefixes, table, page_size, pages, padded):
         raise RuntimeError(
             "qwen4_exp QSA paged visible KV resolves to an unallocated or out-of-range physical block"
         )
+
+
+def validate_geometry(lengths, prefixes, table, page_size, pages, padded):
+    flags = geometry_flags(lengths, prefixes, table, page_size, pages, padded)
+    verdict = 0
+    for flag in flags.cpu().tolist():
+        verdict |= flag
+    raise_geometry_error(verdict)

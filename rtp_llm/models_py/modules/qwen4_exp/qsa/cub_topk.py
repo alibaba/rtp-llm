@@ -8,6 +8,7 @@ Compilation occurs during eager warmup; an unprimed CUDA graph falls back.
 
 import hashlib
 import logging
+import os
 import threading
 
 import torch
@@ -16,6 +17,7 @@ _TORCH_GIT = "70d99e998b4955e0049d13a98d77ae1b14db1f45"
 _MODULE = None
 _BUILD_FAILED = False
 _BUILD_LOCK = threading.Lock()
+_INITIALIZED_DEVICES = set()
 _LOGGER = logging.getLogger(__name__)
 
 _CUDA_SOURCE = r"""
@@ -34,8 +36,17 @@ struct QsaGreater {
         return a > b;
     }
 };
+template<int N, int Threads, bool UseMerge>
+union QsaSortStorage {
+    using FullSort = std::conditional_t<UseMerge,
+                                        cub::BlockMergeSort<uint32_t, Threads, N / Threads, uint32_t>,
+                                        cub::BlockRadixSort<uint32_t, Threads, N / Threads, uint32_t>>;
+    using SelectedSort = cub::BlockRadixSort<uint32_t, Threads, 512 / Threads, uint32_t>;
+    typename FullSort::TempStorage full;
+    typename SelectedSort::TempStorage selected;
+};
 template<int N, int Threads, bool UseMerge = false, bool DraftPacked = false>
-__global__ void qsaCubStableTopK(const float*   scores,
+__global__ __launch_bounds__(Threads) void qsaCubStableTopK(const float*   scores,
                                  const int32_t* lengths,
                                  int32_t*       output,
                                  int            columns,
@@ -48,10 +59,10 @@ __global__ void qsaCubStableTopK(const float*   scores,
                                              cub::BlockMergeSort<uint32_t, Threads, Items, uint32_t>,
                                              cub::BlockRadixSort<uint32_t, Threads, Items, uint32_t>>;
     using SelectedSort  = cub::BlockRadixSort<uint32_t, Threads, 512 / Threads, uint32_t>;
-    __shared__ union SharedSort {
-        typename FullSort::TempStorage     full;
-        typename SelectedSort::TempStorage selected;
-    } storage;
+    using SharedSort = QsaSortStorage<N, Threads, UseMerge>;
+    __shared__ __align__(16) unsigned char local_storage[N > 4096 ? 16 : sizeof(SharedSort)];
+    extern __shared__ __align__(16) unsigned char dynamic_storage[];
+    auto& storage = *reinterpret_cast<SharedSort*>(N > 4096 ? dynamic_storage : local_storage);
     __shared__ uint32_t chosen[512];
     __shared__ uint32_t cutoff;
     const int           row        = blockIdx.x;
@@ -167,6 +178,13 @@ __global__ void qsaCubStableTopK(const float*   scores,
 }
 }  // namespace rtp_llm
 
+void qsa_cub_init() {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(rtp_llm::qsaCubStableTopK<8192, 512>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, sizeof(rtp_llm::QsaSortStorage<8192, 512, false>)));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(rtp_llm::qsaCubStableTopK<16384, 512>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, sizeof(rtp_llm::QsaSortStorage<16384, 512, false>)));
+}
+
 void qsa_cub_topk(
     torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, int64_t threads, bool finite_only, bool merge) {
     TORCH_CHECK(scores.is_cuda() && lengths.is_cuda() && output.is_cuda());
@@ -177,13 +195,27 @@ void qsa_cub_topk(
     TORCH_CHECK(scores.device() == lengths.device() && scores.device() == output.device());
     TORCH_CHECK(scores.size(0) == lengths.numel() && output.size(0) == scores.size(0) && output.size(1) == 2051);
     TORCH_CHECK(scores.size(1) == 1023 || scores.size(1) == 1024 || scores.size(1) == 2047 || scores.size(1) == 2048
-                || scores.size(1) == 2144);
+                || (scores.size(1) >= 2144 && scores.size(1) <= 16384));
     TORCH_CHECK(threads == 128 || threads == 256 || threads == 512);
     c10::cuda::CUDAGuard guard(scores.device());
     auto                 stream = at::cuda::getCurrentCUDAStream().stream();
     const int            rows = scores.size(0), columns = scores.size(1);
     if (!rows)
         return;
+    if (columns > 2144) {
+        if (columns <= 4096) {
+            rtp_llm::qsaCubStableTopK<4096, 512><<<rows, 512, 0, stream>>>(
+                scores.data_ptr<float>(), lengths.data_ptr<int32_t>(), output.data_ptr<int32_t>(), columns, finite_only);
+        } else if (columns <= 8192) {
+            rtp_llm::qsaCubStableTopK<8192, 512><<<rows, 512, sizeof(rtp_llm::QsaSortStorage<8192, 512, false>), stream>>>(
+                scores.data_ptr<float>(), lengths.data_ptr<int32_t>(), output.data_ptr<int32_t>(), columns, finite_only);
+        } else {
+            rtp_llm::qsaCubStableTopK<16384, 512><<<rows, 512, sizeof(rtp_llm::QsaSortStorage<16384, 512, false>), stream>>>(
+                scores.data_ptr<float>(), lengths.data_ptr<int32_t>(), output.data_ptr<int32_t>(), columns, finite_only);
+        }
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+        return;
+    }
     // Measured 8K domains only. StableSort preserves equal-key column order;
     // the special-value second pass below remains the pinned Torch radix order.
     if (merge && (columns == 2047 || columns == 2048 || columns == 2144)) {
@@ -265,16 +297,22 @@ void qsa_cub_topk_draft(
 
 
 def is_supported(scores, lengths):
+    large_prefill = (
+        os.getenv("RTP_QWEN4_PREFILL_TOPK_IMPL", "native") in ("cub", "radix")
+        and scores.ndim == 2
+        and 2144 < scores.shape[1] <= 16384
+        and 1 <= scores.shape[0] <= 8192
+    )
     return (
         scores.is_cuda
         and torch.version.hip is None
         and torch.version.git_version == _TORCH_GIT
         and scores.dtype == torch.float32
         and scores.ndim == 2
-        and 1 <= scores.shape[0] <= 32
+        and (large_prefill or 1 <= scores.shape[0] <= 32)
         # The 8K MTP draft graph reserves three additional 128-token pages:
         # (64 + 3) * 32 compressed columns. Preserve the full-width Torch order.
-        and scores.shape[1] in (2047, 2048, 2144)
+        and (large_prefill or scores.shape[1] in (2047, 2048, 2144))
         and scores.is_contiguous()
         and lengths.dtype == torch.int32
         and lengths.shape == (scores.shape[0],)
@@ -288,6 +326,13 @@ def is_supported(scores, lengths):
 def _load_module(device):
     global _MODULE, _BUILD_FAILED
     if _MODULE is not None:
+        with torch.cuda.device(device):
+            index = torch.cuda.current_device()
+            if index not in _INITIALIZED_DEVICES:
+                if torch.cuda.is_current_stream_capturing():
+                    return None
+                _MODULE.qsa_cub_init()
+                _INITIALIZED_DEVICES.add(index)
         return _MODULE
     if _BUILD_FAILED:
         return None
@@ -312,15 +357,18 @@ def _load_module(device):
                 ).hexdigest()[:16]
                 _MODULE = load_inline(
                     name="qwen4_qsa_topk_" + identity,
-                    cpp_sources="void qsa_cub_topk(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, int64_t threads, bool finite_only, bool merge); void qsa_cub_topk_draft(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, torch::Tensor row_lengths, torch::Tensor cu);",
+                    cpp_sources="void qsa_cub_init(); void qsa_cub_topk(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, int64_t threads, bool finite_only, bool merge); void qsa_cub_topk_draft(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, torch::Tensor row_lengths, torch::Tensor cu);",
                     cuda_sources=_CUDA_SOURCE,
-                    functions=["qsa_cub_topk", "qsa_cub_topk_draft"],
+                    functions=["qsa_cub_init", "qsa_cub_topk", "qsa_cub_topk_draft"],
                     extra_cflags=["-O2"],
                     extra_cuda_cflags=flags,
                     with_cuda=True,
                     verbose=False,
                 )
+                _MODULE.qsa_cub_init()
+                _INITIALIZED_DEVICES.add(torch.cuda.current_device())
             except Exception:
+                _MODULE = None
                 _BUILD_FAILED = True
                 _LOGGER.warning(
                     "Qwen4 QSA CUB compilation unavailable; using native selection",

@@ -6,6 +6,7 @@ capture retains NCCL; captured local Head projection is unaffected.
 """
 
 import ctypes
+import os
 import threading
 
 import torch
@@ -18,7 +19,7 @@ _PROCESS_LIFETIME_IPC = []
 
 
 class Qwen4HeadIpcGather:
-    def __init__(self, group, device):
+    def __init__(self, group, device, *, max_rows=32):
         from flashinfer.comm import cuda_ipc
 
         from rtp_llm.ops.compute_ops import rtp_llm_ops
@@ -30,6 +31,9 @@ class Qwen4HeadIpcGather:
         self._last_stream = None
         self._lock = threading.Lock()
         self.closed = False
+        self.max_rows = max_rows
+        if type(max_rows) is not int or max_rows not in (32, 256):
+            raise ValueError("Qwen4 Head IPC max_rows must be32 or256")
         assert dist.get_world_size(group) == 2
         with torch.cuda.device(self.device):
             self.signals = cuda_ipc.create_shared_buffer(
@@ -52,7 +56,7 @@ class Qwen4HeadIpcGather:
             and local.device == self.device
             and local.dtype == torch.bfloat16
             and local.ndim == 2
-            and 1 <= local.shape[0] <= 32
+            and 1 <= local.shape[0] <= getattr(self, "max_rows", 32)
             and local.shape[1] == 124160
             and local.is_contiguous()
             and local.data_ptr() % 16 == 0
@@ -65,9 +69,16 @@ class Qwen4HeadIpcGather:
                 return None
             if self._last_stream is not None and self._last_stream != stream:
                 stream.wait_stream(self._last_stream)
-            output = self.ops.head_ipc_gather(
-                local, self.buffers, self.signals, self.rank
-            )
+            # Each native launch retains its measured <=32-row domain and
+            # closing peer barrier. The staging buffer is reused only after
+            # that barrier; concatenate in token order after FP32 expansion.
+            parts = [
+                self.ops.head_ipc_gather(
+                    local[start : start + 32], self.buffers, self.signals, self.rank
+                )
+                for start in range(0, local.shape[0], 32)
+            ]
+            output = parts[0] if len(parts) == 1 else torch.cat(parts, dim=0)
             self._last_stream = stream
         return output
 
@@ -81,6 +92,7 @@ class Qwen4HeadIpcGather:
 
 
 def prepare_head_ipc_gather(config, parallelism, head):
+    tiled = os.getenv("RTP_QWEN4_HEAD_GATHER_IMPL", "legacy") == "ipc_tiled"
     role = str(getattr(parallelism, "role_type", "")).rsplit(".", 1)[-1]
     if not (
         role == "DECODE"
@@ -90,7 +102,8 @@ def prepare_head_ipc_gather(config, parallelism, head):
         and parallelism.local_world_size == 2
         and head is not None
         and tuple(head.weight.shape) == (124160, 2560)
-        and head.weight.dtype == torch.float8_e4m3fn
+        and head.weight.dtype
+        in ((torch.float8_e4m3fn, torch.bfloat16) if tiled else (torch.float8_e4m3fn,))
         and head.weight.is_cuda
         and torch.version.hip is None
         and torch.cuda.get_device_capability(head.weight.device) == (12, 0)
@@ -103,4 +116,6 @@ def prepare_head_ipc_gather(config, parallelism, head):
 
     # Unsupported layouts return before any collective. An allocation/IPC error
     # is a startup failure; do not let one rank silently switch implementations.
-    return Qwen4HeadIpcGather(_get_group(Group.TP), head.weight.device)
+    return Qwen4HeadIpcGather(
+        _get_group(Group.TP), head.weight.device, max_rows=256 if tiled else 32
+    )

@@ -65,7 +65,9 @@ class Qwen4ExpMTPWeight(Qwen4ExpWeight):
         mixer = _MTP_PREFIX + "hyper_connection_mixer."
         return [
             # The draft checkpoint intentionally omits both vocabulary matrices;
-            # BaseModel aliases these descriptors from the validated target owner.
+            # BaseModel aliases compatible target storage. A source-BF16 draft
+            # may load these same checkpoint tensors independently when the
+            # target vocabulary has been quantized to FP8.
             AtomicWeight(
                 W.embedding,
                 [CkptWeightInfo("model.language_model.embed_tokens.weight", identity)],
@@ -108,6 +110,31 @@ class Qwen4ExpMTPWeight(Qwen4ExpWeight):
 
 class Qwen4ExpMTP(Qwen4Exp):
     """Released one-layer draft using the restricted QSA MTP correctness path."""
+
+    @staticmethod
+    def _configure_precision_recipe(config: ModelConfig) -> None:
+        Qwen4Exp._configure_precision_recipe(config)
+        if not config.is_mtp:
+            return
+        # This hook also runs during post-build precision finalization. Keep
+        # the draft choice there, rather than letting the target recipe reset
+        # it after _create_config has returned.
+        mode = os.getenv("RTP_QWEN4_MTP_DENSE_STORAGE", "inherit")
+        if mode not in ("inherit", "source_bf16", "source_bf16_shared_vocab"):
+            raise ValueError(
+                "RTP_QWEN4_MTP_DENSE_STORAGE must be inherit, source_bf16 or source_bf16_shared_vocab"
+            )
+        config._qwen4_mtp_dense_storage_mode = mode
+        if mode == "inherit":
+            if hasattr(config, "_qwen4_vocab_storage"):
+                delattr(config, "_qwen4_vocab_storage")
+            return
+        target_storage = config._qwen4_dense_storage
+        config._qwen4_dense_storage = "source_bf16"
+        config._qwen4_vocab_storage = (
+            target_storage if mode == "source_bf16_shared_vocab" else "source_bf16"
+        )
+        config.dense_weight_dtype = "bf16"
 
     @staticmethod
     def get_weight_cls():
@@ -163,8 +190,34 @@ class Qwen4ExpMTP(Qwen4Exp):
                 "qwen4_exp MTP cannot alias semantically incompatible target "
                 f"weights: {details}"
             )
+        target_storage = getattr(target_config, "_qwen4_dense_storage", "fp8")
+        draft_storage = getattr(draft_model_config, "_qwen4_dense_storage", "fp8")
+        mode = getattr(draft_model_config, "_qwen4_mtp_dense_storage_mode", "inherit")
+        preserve_source = mode in ("source_bf16", "source_bf16_shared_vocab")
+        if target_storage != draft_storage and not (
+            preserve_source
+            and target_storage == "fp8"
+            and draft_storage == "source_bf16"
+        ):
+            raise ValueError("qwen4_exp MTP requires matching dense storage modes")
+        target_vocab = getattr(target_config, "_qwen4_vocab_storage", target_storage)
+        draft_vocab = getattr(draft_model_config, "_qwen4_vocab_storage", draft_storage)
+        if target_vocab != draft_vocab:
+            if (
+                mode == "source_bf16"
+                and target_vocab == "fp8"
+                and draft_vocab == "source_bf16"
+            ):
+                # Returning no aliases keeps the target owner untouched. The
+                # existing loader reads the original BF16 vocabulary from the
+                # target checkpoint keys declared above, without FP8 scales.
+                return ()
+            raise ValueError("qwen4_exp MTP vocabulary storage is incompatible")
         names = (W.embedding, W.lm_head)
-        if getattr(target_config, "_qwen4_full_fp8_nvfp4", False) is True:
+        if (
+            getattr(target_config, "_qwen4_full_fp8_nvfp4", False) is True
+            and target_vocab != "source_bf16"
+        ):
             from rtp_llm.model_loader.fp8_weight import FP8_STORAGE_SCALE_SUFFIX
 
             return names + tuple(name + FP8_STORAGE_SCALE_SUFFIX for name in names)
@@ -209,6 +262,7 @@ class Qwen4ExpMTP(Qwen4Exp):
         config.num_layers = 1
         config.moe_layer_index = [0]
         config.is_mtp = True
+        cls._configure_precision_recipe(config)
         config.hybrid_attention_config.enable_hybrid_attention = True
         config.hybrid_attention_config.hybrid_attention_types = [
             HybridAttentionType.NONE

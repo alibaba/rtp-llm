@@ -144,7 +144,10 @@ def _gather_worker():
     rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", timeout=datetime.timedelta(seconds=90))
-    workspace = Qwen4HeadIpcGather(dist.group.WORLD, torch.device("cuda", rank))
+    tiled = os.environ.get("RTP_TEST_HEAD_TILED") == "1"
+    workspace = Qwen4HeadIpcGather(
+        dist.group.WORLD, torch.device("cuda", rank), max_rows=256 if tiled else 32
+    )
     if os.environ.get("RTP_TEST_HEAD_ASYMMETRIC_CLOSE") == "1":
         store = dist.distributed_c10d._get_default_store()
         if rank == 0:
@@ -160,7 +163,8 @@ def _gather_worker():
         return
     try:
         streams = (torch.cuda.Stream(), torch.cuda.Stream())
-        for iteration, rows in enumerate((1, 4, 32, 4)):
+        sizes = (1, 64, 33, 256, 4, 32) if tiled else (1, 4, 32, 4)
+        for iteration, rows in enumerate(sizes):
             with torch.cuda.stream(streams[iteration % 2]):
                 base = torch.arange(rows * 124160, device="cuda").reshape(rows, 124160)
                 base = base.remainder(37).float() - 18 + iteration
@@ -179,6 +183,22 @@ def _gather_worker():
 
 
 class HeadIpcGatherIntegrationTest(unittest.TestCase):
+    def test_tiled_target256_rows_and_alternating_streams(self):
+        self.assertEqual(torch.cuda.device_count(), 2)
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "torch.distributed.run",
+                "--standalone",
+                "--nproc-per-node=2",
+                __file__,
+            ],
+            env=dict(os.environ, RTP_TEST_HEAD_TILED="1"),
+            check=True,
+            timeout=240,
+        )
+
     def test_unilateral_close_does_not_wait_for_peer_cleanup(self):
         env = dict(os.environ, RTP_TEST_HEAD_ASYMMETRIC_CLOSE="1")
         subprocess.run(

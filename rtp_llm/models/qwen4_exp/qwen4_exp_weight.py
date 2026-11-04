@@ -314,7 +314,12 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
         if self._moe_only_fp4:
             from rtp_llm.models.qwen4_exp.moe_fp4 import Qwen4MoeFp4WeightInfo
 
-            return Qwen4MoeFp4WeightInfo(info.weights, info.layer_weights)
+            return Qwen4MoeFp4WeightInfo(
+                info.weights,
+                info.layer_weights,
+                dense_storage=getattr(self.model_config, "_qwen4_dense_storage", None),
+                vocab_storage=getattr(self.model_config, "_qwen4_vocab_storage", None),
+            )
         return info
 
     def _append_indexer_weights(self, layer_weights: List[List[WeightModule]]) -> None:

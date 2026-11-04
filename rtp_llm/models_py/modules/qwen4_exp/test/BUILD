@@ -384,6 +384,62 @@ qwen4_test(
 )
 
 qwen4_test(
+    name = "indexer_tensorcore_test",
+    src = "qsa/indexer_tensorcore_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    testlib = "//rtp_llm/models_py/standalone:auto_model",
+)
+
+qwen4_test(
+    name = "prefill_preflight_test",
+    src = "qsa/prefill_preflight_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    testlib = "//rtp_llm/models_py/standalone:auto_model",
+)
+
+qwen4_test(
+    name = "compute_weight_view_test",
+    src = "parity/compute_weight_view_test.py",
+    testlib = "//rtp_llm/models_py/standalone:auto_model",
+)
+
+qwen4_test(
+    name = "marlin_large_decode_test",
+    src = "moe/marlin_large_decode_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    testlib = "//rtp_llm/models_py/standalone:auto_model",
+)
+
+qwen4_test(
+    name = "gated_residual_bf16_test",
+    src = "parity/gated_residual_bf16_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    testlib = "//rtp_llm/models_py/standalone:auto_model",
+)
+
+qwen4_test(
+    name = "histogram_topk_test",
+    src = "qsa/histogram_topk_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    testlib = "//rtp_llm/models_py/standalone:auto_model",
+)
+
+qwen4_test(
+    name = "hc_prefill_mix_test",
+    src = "parity/hc_prefill_mix_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    testlib = "//rtp_llm/models_py/standalone:auto_model",
+)
+
+qwen4_test(
+    name = "chunk_paged_gqa_test",
+    src = "qsa/chunk_paged_gqa_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    testlib = "//rtp_llm/models_py/standalone:auto_model",
+    deps = [":sparse_paged_reference"],
+)
+
+qwen4_test(
     name = "grouped_fp8_test",
     src = "qsa/grouped_fp8_test.py",
     gpu = "RTX_5000_PRO_CU13",
@@ -788,6 +844,10 @@ test_suite(
     name = "qwen4_parity",
     tests = [
         ":gdn_upstream_parity_test",
+        ":hc_prefill_mix_test",
+        ":gated_residual_bf16_test",
+        ":compute_weight_view_test",
+        ":histogram_topk_test",
         ":upstream_parity_test",
     ],
 )
@@ -823,6 +883,9 @@ test_suite(
         ":draft_qsa_layout_test",
         ":draft_qsa_metadata_test",
         ":fp8_kv_test",
+        ":chunk_paged_gqa_test",
+        ":indexer_tensorcore_test",
+        ":prefill_preflight_test",
         ":grouped_fp8_test",
         ":indexer_compressor_test",
         ":indexer_cpu_contract_test",
@@ -861,6 +924,7 @@ test_suite(
 test_suite(
     name = "qwen4_moe",
     tests = [
+        ":marlin_large_decode_test",
         ":marlin_nvfp4_hopper_test",
         ":marlin_nvfp4_test",
         ":moe_align_triton_test",

@@ -236,8 +236,8 @@ class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
         ).unsqueeze(1)
         expected_hidden = (
             _raw_gamma_rms_norm(
-                target_hidden.reshape(tokens, hc_mult, hidden_size),
-                hidden_gamma.reshape(hc_mult, hidden_size),
+                target_hidden,
+                hidden_gamma,
                 eps,
             ).reshape(-1, hidden_size)
             @ hidden_fc
@@ -249,10 +249,12 @@ class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
         # but it erases the released head's hyper-connection semantics.
         pooled_hidden = (
             _raw_gamma_rms_norm(
-                target_hidden.reshape(tokens, hc_mult, hidden_size),
-                hidden_gamma.reshape(hc_mult, hidden_size),
+                target_hidden,
+                hidden_gamma,
                 eps,
-            ).mean(1)
+            )
+            .reshape(tokens, hc_mult, hidden_size)
+            .mean(1)
             @ hidden_fc
         )
         wrongly_pooled = (
@@ -270,9 +272,10 @@ class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
             embedding.pow(2).mean(-1, keepdim=True) + eps
         )
         hidden_groups = target_hidden.reshape(tokens, hc_mult, hidden_size)
-        normalized_hidden = hidden_groups * torch.rsqrt(
-            hidden_groups.pow(2).mean(-1, keepdim=True) + eps
-        )
+        normalized_hidden = (
+            target_hidden
+            * torch.rsqrt(target_hidden.pow(2).mean(-1, keepdim=True) + eps)
+        ).reshape_as(hidden_groups)
         folded_embedding_out = (
             normalized_embedding * folded_embedding.float()
         ) @ embedding_fc
@@ -284,6 +287,28 @@ class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
         ).reshape(tokens, hc_mult, hidden_size)
         folded = (folded_embedding_out.unsqueeze(1) + folded_hidden_out).flatten(-2)
         self.assertGreater(float((actual - folded).abs().max()), 1e-5)
+
+    def test_mtp_hidden_norm_spans_the_hyperconnection_stream(self):
+        """Unequal branch RMS distinguishes MTP norm from main HC norms."""
+        hidden_size, branches, eps = 4, 4, 1e-6
+        hidden = torch.arange(1, branches + 1, dtype=torch.float32)
+        hidden = hidden.repeat_interleave(hidden_size).unsqueeze(0)
+        embedding = torch.zeros(1, hidden_size)
+        args = (
+            torch.zeros(hidden_size),
+            torch.zeros(branches * hidden_size),
+            _Matmul(torch.eye(hidden_size)),
+            _Matmul(torch.eye(hidden_size)),
+        )
+        actual = Qwen4ExpMTPInputProjection(
+            *args, hidden_size=hidden_size, norm_eps=eps
+        )(embedding, hidden)
+        expected = hidden / torch.sqrt(hidden.square().mean(-1, keepdim=True) + eps)
+        torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-7)
+        legacy = Qwen4ExpMTPInputProjection(
+            *args, hidden_size=hidden_size, norm_eps=eps, global_hidden_norm=False
+        )(embedding, hidden)
+        self.assertGreater(float((actual - legacy).abs().max()), 0.4)
 
     def test_rejects_non_packed_or_mismatched_target_hidden_input(self):
         component = Qwen4ExpMTPInputProjection(
