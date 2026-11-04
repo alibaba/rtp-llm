@@ -447,9 +447,7 @@ class PpuFastPathTest(unittest.TestCase):
         q = torch.randn(64, 32, 128, dtype=torch.bfloat16, device="cuda")
         q[0].zero_()
         q[1, 0].zero_()
-        q[1, 0, :8] = q.new_tensor(
-            [1.5, 0.4, 1.0, 0.5, -0.0, -0.01, -0.0625, -0.125]
-        )
+        q[1, 0, :8] = q.new_tensor([1.5, 0.4, 1.0, 0.5, -0.0, -0.01, -0.0625, -0.125])
         payload, sf = _quant.quantize_indexer_q(q)
         self.assertEqual(
             payload[1, 0, :4].view(torch.uint8).cpu().tolist(),
