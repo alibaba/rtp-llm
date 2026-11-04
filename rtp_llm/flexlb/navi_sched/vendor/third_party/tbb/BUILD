@@ -1,4 +1,3 @@
-load("//rtp_llm/flexlb/navi_sched/vendor/bazel:defs.bzl", "rpm_library")
 hdrs = [
     "aggregator.h",
     "aligned_space.h",
@@ -92,13 +91,7 @@ hdrs = [
 
 shared_lib = "libtbb.so"
 
-rpm_library(
+cc_library(
     name = "tbb",
-    rpms = ["@tbb-package//file:file", "@tbb-devel-package//file:file"],
-    hdrs = hdrs,
-#    static_lib = static_lib,
-    shared_lib = shared_lib,
-    include_path = "usr/include/tbb",
-    lib_path = "usr/lib64",
-    include_prefix = "tbb",
+    linkopts = ["-ltbb"],
 )
