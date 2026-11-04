@@ -105,6 +105,23 @@ View 只读已完成实验，复制 TSDB 后启动独立指标服务，不重跑
 
 Case 字段、相对路径、共享资源、引用、断言、扩缩容与 Master 停启用法见 [Case 指南](docs/case-guide.md)。
 
+## 在 CI 中运行 Case
+
+从源码仓库根目录构建公共 Case 环境镜像：
+
+```sh
+docker build -f rtp_llm/flexlb/mock-framework/docker/ci-case-env.Dockerfile -t mock-case-env .
+```
+
+在该镜像内进入 Mock 框架目录，构建任务产出 Java runtime 归档。Case 任务在同一源码版本、相同平台的新工作目录恢复归档，再离线安装锁定的 Python 依赖并执行 Case。
+
+```sh
+./scripts/build-ci-case.sh /tmp/mock-runtime.tar.gz
+./scripts/run-ci-case.sh basic /tmp/mock-runtime.tar.gz /tmp/mock-basic-result
+```
+
+Case 任务归档输出目录，包含编译结果、启动配方和 `result/`。双 Master 的 Case 在支持多回环 IP 的 Linux worker 上运行。
+
 ## 开发检查与详细文档
 
 执行 Java 和 Python 检查：

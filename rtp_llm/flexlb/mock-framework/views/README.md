@@ -12,6 +12,8 @@ Prefill 和 Decode 分开提供吞吐/延迟/负载、PD RPC、KV、KV 分池、
 
 ViT 已接入共享 vision engine：QPS、成功/错误、图片数、Embedding 长度/请求等待耗时、队列深度/等待时间、Forward/合批大小和缓存命中/未命中/合并等待/淘汰/驻留 Tokens/Bytes。使用 real 的 `py_rtp_vit_*` 名称，耗时单位为毫秒。Forward、就绪排队加 Forward（py_rtp_vit_embedding_rt）和请求总耗时（py_rtp_vit_request_rt）分别记录；缓存命中不制造 Embedding/Forward 样本。真实 URL 图片准备提供总耗时、下载及非下载耗时（ms），成功读取另提供 fetch 耗时（μs）。非下载部分测量读尺寸、内容摘要和几何计算。跳过读取时这些面板无样本。预处理子进程、CUDA Graph、GreenNet 尚未模拟。py_rtp_vit_request_rt 覆盖阻塞媒体处理调用的成功或失败，包括下载和共享结果等待，不含异步提交 ACK、RPC 传输及输出编码。py_rtp_vit_preprocess_queue_size 统计准备尚未完成的媒体（排队＋执行中），不包含等待计算或发布的任务；没有独立 CPU 子进程，因此 dispatch/return 指标保持缺失。
 
+Client 的 `mock_client_tpot_seconds` 按成功请求首尾 token 的到达间隔除以首 token 后的 token 数。Decode 的 `mock_decode_estimate_tpot_us` 按执行步耗时除以该步每个产出请求平均提交的 token 数。两个指标分别展示，原有 draft 估算指标继续用于投机模型。
+
 ## 已实现与缺口
 
 Engine 的 waiting/running、Device 可用 Tokens、Device/Host 容量 Blocks、Device 不可用比例，以及 P/D TPS、终态 QPS 已接入原 RTP 指标名称及对应原面板。使用率为 0–100；used Blocks=total-free，不可用比例=(total-available)/total，不能混淆。Host 暂缺 available 与其引用分类，相关缺口保留。

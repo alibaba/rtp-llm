@@ -169,7 +169,7 @@ Python 维护一份权威的当前发现信息，增加、移除和重启换地�
 | --- | --- |
 | Python | 启动和监视各 JVM，调用 start/stop，最后通过已有指标查询路径执行 QPS 等 Case 检查。 |
 | client0 协调者 | 固定全部参与者，分配总请求数、QPS 和并发额度，协调准备/开始/停止，汇总执行异常与最终结果。 |
-| 播放器 Player | 读取并生成请求，控制产出速度。只有播放器做速率控制。 |
+| LoadClient 播放线程 | 读取分片并按统一的全局序号或源时间发送。 |
 | Client（LoadClient + NativeClient） | 管理小队列和在途并发，发送请求，消费完整响应，处理超时、取消和终态，产生实际调用指标。 |
 
 client0 同时参与本地发压，不增加协调进程或选主。单 Client 与多 Client 使用同一流程，client0 到本地和其他 Client 的控制都走 TCP。准备完成后，各 JVM 独立产出和发送，请求与响应不经 client0 中转。client0 意外退出使整体失败，不做接管。
@@ -209,9 +209,9 @@ Python 在 stop 或最终清理时收集异常，不增加实时发压监控。�
 
 client0 在 start 的步骤预算内流式校验整个输入，按全局序号 `k % Client 数` 写本轮压缩分片；校验、封口、关闭和发布全部完成后才 prepare/begin。分片位于 `components/client-0/coordinator/<轮次>/shards/`，直接写压缩 `.part`，成功后原子发布为 `.binpb.zst`。input.json 只记录条数和摘要等元数据，不保存可读请求副本。准备失败不启动播放；源文件在准备期间发生可检测的大小、修改时间或文件身份变化会报错。
 
-每份 worker 计划只包含分片路径、条数、全局序号起点/步长、请求 ID 起点、SHA-256 和发流参数。Player 使用同一 InputFile.Reader 按批次解压，交给原有小队列；不把完整输入放进堆，也不把请求/响应经 client0 转发。请求 ID 在多轮 start 之间单调分配，主动停止留下的未发请求不会重新分配给后续轮次。播放读失败、条数或完整读取后的 SHA-256 不符使整组失败；主动 stop 不扫描未消费的后缀，剩余请求计入 unsent。
+每份 worker 计划只包含分片路径、条数、全局序号起点/步长、请求 ID 起点、SHA-256 和发流参数。LoadClient 使用同一 ReplayInput.Reader 按批次解压，交给原有小队列；不把完整输入放进堆，也不把请求/响应经 client0 转发。请求 ID 在多轮 start 之间单调分配，主动停止留下的未发请求不会重新分配给后续轮次。播放读失败、条数或完整读取后的 SHA-256 不符使整组失败；主动 stop 不扫描未消费的后缀，剩余请求计入 unsent。
 
-masters 可省略，Client 默认持续发现本实验的全部 Master；显式填写时固定为该 step 的地址集合，播放期间只在其中选主备。qps 和 replay_speed 必须且只能提供一个正有限值。qps 模式按全局请求序号控制均匀发送；replay_speed 模式要求每条请求有 arrival_offset_ms，准备时检查时间非递减，Player 按 offset/replay_speed 发送。所有分片保留同一个源起点，不按各自首条请求重新归零；相同时间允许突发，不再叠加 QPS 限速。concurrency 是全局预算。queue_capacity 默认每 Client 16，允许 1–100000；request_timeout 和 drain_timeout 默认 30s，允许 1ms–1h 的整毫秒值。计划时长最多 24h；每个 Client 至少分到一个请求和并发槽。准备时间计入 start 的 within/phase timeout，大文件需明确足够的预算。
+masters 可省略，Client 默认持续发现本实验的全部 Master；显式填写时固定为该 step 的地址集合，播放期间只在其中选主备。qps 和 replay_speed 必须且只能提供一个正有限值。qps 模式按全局请求序号控制均匀发送；replay_speed 模式要求每条请求有 arrival_offset_ms，准备时检查时间非递减，播放线程按 offset/replay_speed 发送。所有分片保留同一个源起点，不按各自首条请求重新归零；相同时间允许突发，不再叠加 QPS 限速。concurrency 是全局预算。queue_capacity 默认每 Client 16，允许 1–100000；request_timeout 和 drain_timeout 默认 30s，允许 1ms–1h 的整毫秒值。计划时长最多 24h；每个 Client 至少分到一个请求和并发槽。准备时间计入 start 的 within/phase timeout，大文件需明确足够的预算。
 
 参与发压的 Client 在本轮固定；单请求 timeout 从 NativeClient 调用开始，不包含小队列等待。只支持本机多 JVM，未承诺跨机器时钟同步。准备后 30s 未收到 begin 的 Client 报错退出本轮。请求循环、多轮对话、ramp、动态参与者和运行时旧格式转换不在当前范围。
 
@@ -240,7 +240,7 @@ write_inputs("traffic.binpb.zst", (
 ))
 ```
 
-测试写入器拒绝覆盖已有文件，生成失败删除本次不完整文件。正常运行 Case 只传入标准二进制文件路径，由 Java InputFile/RequestFiles 校验、读取和分片，不导入 Python 输入辅助代码。基本 Case 直接携带标准二进制输入。控制接口仍传小型 HTTP 元数据，不在 JSON 控制报文中传请求数据。
+测试写入器拒绝覆盖已有文件，生成失败删除本次不完整文件。正常运行 Case 只传入标准二进制文件路径，由 Java ReplayInput 校验、读取和分片，不导入 Python 输入辅助代码。基本 Case 直接携带标准二进制输入。控制接口仍传小型 HTTP 元数据，不在 JSON 控制报文中传请求数据。
 
 `RequestFilesTest` 在独立 48 MiB 堆的 JVM 中分片并完整播放解压后超过 64 MiB 的输入，覆盖非法输入、截断、校验和、内容变化和准备取消。跨语言测试验证 Python 写→Java 读、Java 写→Python 读；真实 Master 接线测试在 1/2 个 Client JVM 中播放并校验分片总量、全局请求 ID 和发压窗口内的合计 QPS。这些是有界读取和功能接线验证，不测量最大可达 QPS。
 
@@ -318,7 +318,7 @@ Python 接口与 Java 内部协议已分开；Engine 已接通共享/独立宿�
 | `java/runtime/` | HTTP 接口绑定、参数和回执校验、调用上下文、实例生命周期句柄和进程监听地址。 |
 | `java/host/` | P/D/V 统一实例装配和可执行 JAR；单实例入口 EngineMain、本地多实例宿主 EngineHost。宿主不包含调度或集群策略。 |
 | `java/master/` | 真实 Master 的启动入口、生产状态到公共读取接口的适配、独立 ZK 启动入口。 |
-| `java/client/` | client0 协调、Player 控速、LoadClient 队列/并发/生命周期、NativeClient 原生收发与实际计时。 |
+| `java/client/` | client0 协调、LoadClient 控速/队列/并发/生命周期、NativeClient 原生收发与实际计时。 |
 | `java/shared/vit/` | 跨后端共用的 V Engine：图像编码、组批、embedding/hash 字节缓存和节点装配。 |
 | `java/shared/admission/` | 共享接入层：RPC、Batch/Fetch、PD 通信及零耗时传输执行器、输出编码与状态适配；不依赖后端实现。 |
 | `java/backend/rtp/` | RTP 配置解析、P/D 调度策略、资源申请时机、RtpMetrics 指标口径和节点装配。 |
