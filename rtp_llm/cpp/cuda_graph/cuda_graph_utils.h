@@ -6,6 +6,7 @@
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <torch/version.h>
 
+#include <cstdint>
 #include <string>
 
 namespace rtp_llm {
@@ -71,6 +72,7 @@ public:
 
 public:
     py::object               attn_pyobj_{py::none()};
+    int64_t                  decode_gate_max_kv_length{0};
     at::Tensor               decoder_layer_hidden_states_;
     at::Tensor               mtp_target_hidden_states_;
     torch_ext::PyModelInputs py_model_inputs_;

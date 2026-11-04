@@ -22,6 +22,14 @@ def init_engine_group_args(parser, runtime_config):
     ##############################################################################################################
     engine_group = parser.add_argument_group("Engine Configuration")
     engine_group.add_argument(
+        "--enable_accuracy_check",
+        env_name="ENABLE_ACCURACY_CHECK",
+        bind_to=(runtime_config, "enable_accuracy_check"),
+        type=str2bool,
+        default=False,
+        help="Run the decode-backend precision gate during startup; diagnostic when dynamic decode is disabled",
+    )
+    engine_group.add_argument(
         "--warm_up",
         env_name="WARM_UP",
         bind_to=(runtime_config, "warm_up"),

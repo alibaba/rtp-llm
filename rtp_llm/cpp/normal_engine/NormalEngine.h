@@ -54,6 +54,7 @@ private:
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);
     WarmUpResult                    decodeWarmUp(const EngineInitParams& params);
+    absl::Status                      runAttentionAccuracyCheck(const EngineInitParams& params);
     absl::StatusOr<GenerateStreamPtr> runPrefillWarmupShape(const std::shared_ptr<GenerateInput>& generate_input,
                                                             const ResourceContext& resource_context,
                                                             int                    reuse_length,

@@ -40,7 +40,7 @@ public:
     CacheStoreWriteCycleGuard(const std::shared_ptr<CacheStoreAsyncWriter>& writer,
                               bool                                          has_work,
                               bool                                          track_store_completions):
-        writer_(writer), active_(has_work), track_store_completions_(track_store_completions) {
+        writer_(writer), active_(has_work && writer != nullptr), track_store_completions_(track_store_completions) {
         if (active_) {
             writer_->init(track_store_completions_);
         }
@@ -616,6 +616,9 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
     if (inputs.warmup || inputs.skip_lm_head) {
         return std::nullopt;
     }
+    if (!cache_store_async_writer_) {
+        return std::nullopt;
+    }
     if (!inputs.pd_separation || !inputs.request_id.defined() || inputs.request_id.numel() == 0) {
         return std::nullopt;
     }
@@ -638,6 +641,9 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
 std::string PyWrappedModel::waitCacheStorePublication() {
     RTP_LLM_PROFILE_SCOPE("py_model.waitCacheStorePublication");
     if (!track_cache_store_completion_) {
+        return {};
+    }
+    if (!cache_store_async_writer_) {
         return {};
     }
     try {

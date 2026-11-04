@@ -6,12 +6,17 @@ cc_library(
     hdrs = glob([
         "*.h",
         "speculative/*.h",
+        "accuracy/*.h",
     ]),
     srcs = glob([
         "*.cc",
         "speculative/*.cc",
-    ]),
+    ]) + select({
+        "//:using_cuda": glob(["accuracy/*.cc"]),
+        "//conditions:default": [],
+    }),
     deps = [
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/config:role_types",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/models:logits_processor",
