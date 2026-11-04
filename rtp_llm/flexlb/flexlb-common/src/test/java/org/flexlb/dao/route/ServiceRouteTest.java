@@ -125,11 +125,17 @@ class ServiceRouteTest {
 
         Assertions.assertEquals(List.of(RoleType.VIT, RoleType.ENCODER), config.requiredRoles());
         Assertions.assertEquals(
-                "encoder", route.getRoleEndpoints(RoleType.ENCODER).getFirst().getAddress());
+                "encoder",
+                route.getAllEndpointsWithGroup(RoleType.ENCODER)
+                        .getFirst()
+                        .getRight()
+                        .getAddress());
         Assertions.assertEquals(
-                "g1", route.getRoleEndpoints(RoleType.ENCODER).getFirst().getGroup());
+                "g1",
+                route.getAllEndpointsWithGroup(RoleType.ENCODER).getFirst().getRight().getGroup());
         Assertions.assertEquals(
-                "vit", route.getRoleEndpoints(RoleType.VIT).getFirst().getAddress());
+                "vit",
+                route.getAllEndpointsWithGroup(RoleType.VIT).getFirst().getRight().getAddress());
         Assertions.assertEquals(RoleType.ENCODER, RoleType.fromString("ENCODER"));
         Assertions.assertEquals(
                 StrategyErrorType.NO_ENCODER_WORKER, RoleType.ENCODER.getErrorType());

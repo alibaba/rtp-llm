@@ -1,10 +1,13 @@
-package org.flexlb.discovery;
+package org.flexlb.mock.grpc;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.route.Endpoint;
+import org.flexlb.discovery.ServiceDiscovery;
+import org.flexlb.discovery.ServiceHostListener;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -46,6 +49,21 @@ public final class LocalServiceDiscovery implements ServiceDiscovery {
     public LocalServiceDiscovery(Map<String, List<String>> hosts) {
         this.file = null;
         this.lastGoodSnapshot = parseHosts(MAPPER.valueToTree(hosts));
+    }
+
+    @Override
+    public void validate(Endpoint endpoint) {
+        java.util.Objects.requireNonNull(endpoint.getAddress());
+    }
+
+    @Override
+    public List<WorkerHost> getHosts(Endpoint endpoint) {
+        return getHosts(endpoint.getAddress());
+    }
+
+    @Override
+    public void listen(Endpoint endpoint, ServiceHostListener listener) {
+        listen(endpoint.getAddress(), listener);
     }
 
     @Override

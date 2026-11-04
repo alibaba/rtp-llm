@@ -6,7 +6,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -35,6 +35,18 @@ class CustomRequestSchedulerContractTest {
             when(config.loadBalanceConfig()).thenReturn(scheduler.config);
             new org.springframework.boot.test.context.runner.ApplicationContextRunner()
                     .withUserConfiguration(PlacementConfiguration.class)
+                    .withBean(
+                            "environmentConfigSource",
+                            org.flexlb.service.config.ConfigSource.class,
+                            () -> mock(org.flexlb.service.config.ConfigSource.class))
+                    .withBean(
+                            "nacosConfigSource",
+                            org.flexlb.service.config.ConfigSource.class,
+                            () -> mock(org.flexlb.service.config.ConfigSource.class))
+                    .withBean(
+                            "uniConfigConfigSource",
+                            org.flexlb.service.config.ConfigSource.class,
+                            () -> mock(org.flexlb.service.config.ConfigSource.class))
                     .withBean(ConfigService.class, () -> config)
                     .withBean(RequestScheduler.class, () -> scheduler)
                     .run(
@@ -53,11 +65,11 @@ class CustomRequestSchedulerContractTest {
         try (ManualScheduler scheduler = new ManualScheduler(true)) {
             var context = RequestProtocolTestSupport.context(scheduler.config, 81004L);
             var result = scheduler.entry.submit(context);
-            var admission = scheduler.lifecycle.claimAdmissionHandle(81004L, result);
+            var admission = scheduler.lifecycle.claimAdmissionHandle("81004", result);
             assertNotNull(admission);
             try {
-                scheduler.entry.cancel(81004L, 0L, CancelReason.CLIENT_CANCELLED);
-                assertFalse(scheduler.lifecycle.isAdmissionOpen(81004L, result));
+                scheduler.entry.cancel("81004", 0L, CancelReason.CLIENT_CANCELLED);
+                assertFalse(scheduler.lifecycle.isAdmissionOpen("81004", result));
                 assertFalse(scheduler.advance());
             } finally {
                 admission.finish();
@@ -103,7 +115,7 @@ class CustomRequestSchedulerContractTest {
             var context = RequestProtocolTestSupport.context(scheduler.config, 81001L);
             var result = scheduler.entry.submit(context);
             assertFalse(result.isDone());
-            scheduler.entry.cancel(81001L, 0L, CancelReason.CLIENT_CANCELLED);
+            scheduler.entry.cancel("81001", 0L, CancelReason.CLIENT_CANCELLED);
             assertEquals(
                     StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                     result.get(2, TimeUnit.SECONDS).getCode());
@@ -153,6 +165,7 @@ class CustomRequestSchedulerContractTest {
     void customSchedulerOwnsDeadlineForBothRequestModes(boolean queued) throws Exception {
         var due = new java.util.concurrent.atomic.AtomicLong(Long.MAX_VALUE);
         var dispatched = new java.util.concurrent.atomic.AtomicLong();
+        var scheduled = new java.util.concurrent.CountDownLatch(1);
         try (var scheduler =
                 new ManualScheduler(true, queued) {
                     @Override
@@ -167,6 +180,7 @@ class CustomRequestSchedulerContractTest {
                         long now = System.nanoTime();
                         if (now < due.get()) throw new AssertionError("timer ran before deadline");
                         if (advance()) dispatched.set(now);
+                        scheduled.countDown();
                     }
                 }) {
             scheduler.start();
@@ -175,6 +189,7 @@ class CustomRequestSchedulerContractTest {
                             RequestProtocolTestSupport.context(scheduler.config, 81006L));
             assertFalse(future.isDone(), "admission must not bypass the scheduler's deadline");
             assertFalse(future.get(2, TimeUnit.SECONDS).isSuccess());
+            assertTrue(scheduled.await(2, TimeUnit.SECONDS));
             assertTrue(dispatched.get() >= due.get());
             verify(scheduler.selector).select(any(), isNull());
         }
@@ -263,7 +278,7 @@ class CustomRequestSchedulerContractTest {
                             this,
                             config,
                             SchedulingTestConfig.capacity(config),
-                            mock(RecentCacheKeyTraceReporter.class));
+                            mock(TheoryCacheHitReporter.class));
             entry = lifecycle;
             runtime.registerScheduler(this);
         }

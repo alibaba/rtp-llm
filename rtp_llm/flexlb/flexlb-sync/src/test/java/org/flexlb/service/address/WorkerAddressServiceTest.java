@@ -27,7 +27,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.when;
 
 /**
@@ -62,17 +61,20 @@ class WorkerAddressServiceTest {
     }
 
     @Test
-    void discoveryFailureRemainsDistinctFromAnEmptySuccessfulSnapshot() {
+    void discoveryFailureDoesNotPublishASuccessfulRawHostCount() {
         String modelName = "TestModel";
         String address = "TestAddress";
         when(modelMetaConfig.endpointsWithGroup(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(Pair.of("group1", endpoint(address))));
-        when(serviceDiscovery.getHosts(anyString()))
+        when(serviceDiscovery.getHosts(Mockito.any(Endpoint.class)))
                 .thenThrow(new IllegalStateException("discovery unavailable"));
 
         Assertions.assertThrows(
                 IllegalStateException.class,
                 () -> workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL));
+        Mockito.verify(engineHealthReporter, Mockito.never())
+                .reportRawServiceDiscoveryHostCount(
+                        Mockito.anyString(), Mockito.any(), Mockito.anyInt());
     }
 
     @Test
@@ -83,7 +85,7 @@ class WorkerAddressServiceTest {
                 List.of(new WorkerHost("127.0.0.1", 8080, 8081, 8082, "site1", "group1"));
         when(modelMetaConfig.endpointsWithGroup(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(Pair.of("group1", endpoint(address))));
-        when(serviceDiscovery.getHosts(anyString())).thenReturn(expectedHosts);
+        when(serviceDiscovery.getHosts(Mockito.any(Endpoint.class))).thenReturn(expectedHosts);
 
         List<WorkerHost> actualHosts =
                 workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL);
@@ -112,7 +114,7 @@ class WorkerAddressServiceTest {
                     }
                 };
         Mockito.lenient()
-                .when(serviceDiscovery.getHosts("address"))
+                .when(serviceDiscovery.getHosts(Mockito.any(Endpoint.class)))
                 .thenAnswer(
                         call -> {
                             release.await();
@@ -133,7 +135,7 @@ class WorkerAddressServiceTest {
                                     () ->
                                             workerAddressService.getEngineWorkerList(
                                                     "model", RoleType.PREFILL)));
-            Mockito.verify(serviceDiscovery, Mockito.never()).getHosts("address");
+            Mockito.verify(serviceDiscovery, Mockito.never()).getHosts(Mockito.any(Endpoint.class));
         } finally {
             executor.getQueue().clear();
             release.countDown();
@@ -147,7 +149,7 @@ class WorkerAddressServiceTest {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch exited = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        when(serviceDiscovery.getHosts("address"))
+        when(serviceDiscovery.getHosts(Mockito.any(Endpoint.class)))
                 .thenAnswer(
                         call -> {
                             entered.countDown();
@@ -162,7 +164,7 @@ class WorkerAddressServiceTest {
         Mockito.doThrow(telemetryFailure)
                 .when(engineHealthReporter)
                 .reportStatusCheckerFail(
-                        "model", org.flexlb.enums.BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+                        org.flexlb.enums.BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
         AtomicReference<Throwable> result = new AtomicReference<>();
         AtomicBoolean interrupted = new AtomicBoolean();
         Thread caller =
@@ -183,12 +185,7 @@ class WorkerAddressServiceTest {
             caller.join(2000);
             Assertions.assertFalse(caller.isAlive());
             Assertions.assertAll(
-                    () ->
-                            Assertions.assertInstanceOf(
-                                    InterruptedException.class, result.get().getCause()),
-                    () ->
-                            Assertions.assertSame(
-                                    telemetryFailure, result.get().getCause().getSuppressed()[0]),
+                    () -> Assertions.assertInstanceOf(IllegalStateException.class, result.get()),
                     () -> Assertions.assertTrue(interrupted.get()),
                     () ->
                             Assertions.assertTrue(

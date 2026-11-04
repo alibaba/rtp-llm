@@ -178,7 +178,7 @@ public final class SchedulerTestServices {
     public RequestLifecycle newLifecycle(
             org.flexlb.config.FlexlbConfig config,
             org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity capacity,
-            org.flexlb.service.RecentCacheKeyTraceReporter trace) {
+            org.flexlb.service.TheoryCacheHitReporter trace) {
         org.springframework.test.util.ReflectionTestUtils.setField(dispatcher, "decodeAdmissionCapacity", capacity);
         var owner =
                 new RequestLifecycle(requests(),
@@ -196,7 +196,7 @@ trace);
             RequestScheduler scheduler,
             org.flexlb.config.FlexlbConfig config,
             org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity capacity,
-            org.flexlb.service.RecentCacheKeyTraceReporter trace) {
+            org.flexlb.service.TheoryCacheHitReporter trace) {
         var lifecycle = newLifecycle(config, capacity, trace);
         lifecycle.bindScheduler(scheduler);
         return lifecycle;

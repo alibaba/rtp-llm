@@ -11,7 +11,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -86,9 +86,13 @@ class RequestLifetimeTest {
                         1_000L,
                         List.of(
                                 new WorkSnapshot.RequestWork(
-                                        1L, WorkSnapshot.Phase.ENGINE_RUNNING, 20_000L),
+                                        String.valueOf(1L),
+                                        WorkSnapshot.Phase.ENGINE_RUNNING,
+                                        20_000L),
                                 new WorkSnapshot.RequestWork(
-                                        2L, WorkSnapshot.Phase.ENGINE_QUEUED, 3_000L)),
+                                        String.valueOf(2L),
+                                        WorkSnapshot.Phase.ENGINE_QUEUED,
+                                        3_000L)),
                         List.of(),
                         0L);
         assertEquals(68_000L, visibilityDeadline(preceding, 20_000L, 1.5, 16_000L).orElseThrow());
@@ -101,18 +105,22 @@ class RequestLifetimeTest {
                         1_000L,
                         List.of(
                                 new WorkSnapshot.RequestWork(
-                                        1L, WorkSnapshot.Phase.ENGINE_RUNNING, 20_000L),
+                                        String.valueOf(1L),
+                                        WorkSnapshot.Phase.ENGINE_RUNNING,
+                                        20_000L),
                                 new WorkSnapshot.RequestWork(
-                                        2L, WorkSnapshot.Phase.ENGINE_QUEUED, 7_000L),
+                                        String.valueOf(2L),
+                                        WorkSnapshot.Phase.ENGINE_QUEUED,
+                                        7_000L),
                                 new WorkSnapshot.RequestWork(
-                                        3L, WorkSnapshot.Phase.COMMITTED, 3_000L)),
+                                        String.valueOf(3L), WorkSnapshot.Phase.COMMITTED, 3_000L)),
                         List.of(
                                 new WorkSnapshot.BatchWork(
-                                        List.of(4L),
+                                        List.of(4L).stream().map(String::valueOf).toList(),
                                         WorkSnapshot.Phase.ENGINE_RUNNING,
                                         OptionalLong.of(8_000L)),
                                 new WorkSnapshot.BatchWork(
-                                        List.of(5L),
+                                        List.of(5L).stream().map(String::valueOf).toList(),
                                         WorkSnapshot.Phase.ENGINE_QUEUED,
                                         OptionalLong.of(4_000L))),
                         0L);
@@ -129,7 +137,7 @@ class RequestLifetimeTest {
                         List.of(),
                         List.of(
                                 new WorkSnapshot.BatchWork(
-                                        List.of(1L),
+                                        List.of(1L).stream().map(String::valueOf).toList(),
                                         WorkSnapshot.Phase.COMMITTED,
                                         OptionalLong.empty())),
                         0L);
@@ -145,7 +153,9 @@ class RequestLifetimeTest {
                         1_000L,
                         List.of(
                                 new WorkSnapshot.RequestWork(
-                                        1L, WorkSnapshot.Phase.COMMITTED, Long.MAX_VALUE)),
+                                        String.valueOf(1L),
+                                        WorkSnapshot.Phase.COMMITTED,
+                                        Long.MAX_VALUE)),
                         List.of(),
                         0L);
         assertEquals(Long.MAX_VALUE, visibilityDeadline(preceding, 1L, 2, 60_000L).orElseThrow());
@@ -391,13 +401,13 @@ class RequestLifetimeTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         try {
             RequestContext context = RequestProtocolTestSupport.context(config, 202L);
             var future = RequestProtocolTestSupport.register(registry, context);
             PrefillEndpoint prefill = mock(PrefillEndpoint.class);
             DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
-            var reservation = new DecodeResources.ReservationHandle(1L, 202L, 1L);
+            var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(202L), 1L);
             RequestRoute item =
                     SchedulingTestConfig.createRoute(
                             context,
@@ -588,7 +598,8 @@ class RequestLifetimeTest {
             assertNotNull(fixture.requestContext.snapshot().deadlines().inactivity());
             timer.update(fixture.requestContext, fixture.requestContext.snapshot().deadlines());
             verify(registry, timeout(1000L).times(1)).onDeadline(any(), anyLong());
-            verify(registry, never()).cancel(anyLong(), anyLong(), any());
+            verify(registry, never())
+                    .cancel(org.mockito.ArgumentMatchers.anyString(), anyLong(), any());
         }
     }
 
@@ -931,11 +942,13 @@ class RequestLifetimeTest {
         org.springframework.test.util.ReflectionTestUtils.setField(owner, "requests", repository);
         context.data().register(owner, new RequestFuture((kind, response, failure) -> false));
         SchedulerTestSupport.bindOwner(context, owner);
-        context.register(101L, System.currentTimeMillis(), Long.MAX_VALUE, 60_000L);
+        context.register("101", System.currentTimeMillis(), Long.MAX_VALUE, 60_000L);
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
         DecodeEndpoint decode = separateDecode ? RequestProtocolTestSupport.decodeEndpoint() : null;
         var reservation =
-                separateDecode ? new DecodeResources.ReservationHandle(1L, 101L, 1L) : null;
+                separateDecode
+                        ? new DecodeResources.ReservationHandle(1L, String.valueOf(101L), 1L)
+                        : null;
         RequestRoute item =
                 SchedulingTestConfig.createRoute(
                         context,

@@ -9,8 +9,8 @@ import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.projection.RequestTimeEstimation.QueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
@@ -29,7 +29,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -69,7 +68,7 @@ class CostBasedPrefillStrategyBlockerTest {
                                 0L,
                                 true,
                                 BuiltinGroupPlanner.FIXED_WINDOW,
-                                Comparator.comparingLong(GroupPlanner.Item::requestId),
+                                Comparator.comparing(GroupPlanner.Item::requestId),
                                 new GroupPlanner.Constraints(1, Long.MAX_VALUE, 0L, 0L, 0L),
                                 List.of(),
                                 null),
@@ -81,11 +80,15 @@ class CostBasedPrefillStrategyBlockerTest {
             var projectedWorkers = new AtomicInteger();
             var directory = mock(EndpointRegistry.class);
             var cache = mock(CacheAwareService.class);
-            when(cache.findMatchingEngines(any(), any(), any()))
+            when(cache.findMatchingEngines(any()))
                     .thenAnswer(
                             invocation -> {
-                                assertEquals(expected, invocation.getArgument(2));
-                                return Map.of();
+                                assertEquals(
+                                        role,
+                                        ((org.flexlb.cache.domain.CacheMatchQuery)
+                                                        invocation.getArgument(0))
+                                                .roleType());
+                                return localMatches(Map.of());
                             });
             var strategy =
                     new StrategyTestSupport.PrefillRoutingFixture(
@@ -125,7 +128,7 @@ class CostBasedPrefillStrategyBlockerTest {
             var result =
                     StrategyTestSupport.select(
                             strategy,
-                            Request.builder().requestId(99L).seqLen(100L).build(),
+                            Request.builder().requestId("99").seqLen(100L).build(),
                             SchedulingMetadata.explicit(50, Long.MAX_VALUE),
                             role,
                             group);
@@ -148,7 +151,10 @@ class CostBasedPrefillStrategyBlockerTest {
             if (expected.isEmpty()) {
                 verifyNoInteractions(cache);
             } else {
-                verify(cache).findMatchingEngines(any(), eq(role), any());
+                verify(cache)
+                        .findMatchingEngines(
+                                org.mockito.ArgumentMatchers.argThat(
+                                        query -> query.roleType() == role));
             }
             for (int index = 0; index < shape.length(); index++) {
                 if (shape.charAt(index) == 'O') {
@@ -158,5 +164,16 @@ class CostBasedPrefillStrategyBlockerTest {
                 }
             }
         }
+    }
+
+    private static org.flexlb.cache.domain.CacheMatchResult localMatches(
+            Map<String, Integer> matches) {
+        return matches == null
+                ? null
+                : new org.flexlb.cache.domain.CacheMatchResult(
+                        org.flexlb.dao.cache.HostCacheMatch.fromLocalMatches(matches),
+                        org.flexlb.cache.domain.CacheMatchSource.LOCAL_SYNC,
+                        0L,
+                        0L);
     }
 }

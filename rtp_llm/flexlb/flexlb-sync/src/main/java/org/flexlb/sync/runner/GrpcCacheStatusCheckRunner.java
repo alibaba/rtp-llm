@@ -2,8 +2,8 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
@@ -59,7 +59,7 @@ public class GrpcCacheStatusCheckRunner extends AbstractStatusRunner {
         completePoll(
                 workerStatusRpcClient.getCacheStatusAsync(
                         workerStatus.getIp(),
-                        workerStatus.getGrpcPort(),
+                        workerStatus.getWorkerStatusPort(),
                         currentCacheVersion,
                         requestTimeoutMs,
                         roleType),
@@ -170,19 +170,13 @@ public class GrpcCacheStatusCheckRunner extends AbstractStatusRunner {
 
             engineHealthReporter.reportCacheStatusCheckRemoteInfo(
                     modelName, roleType.name(), startTime);
-            var cache = workerStatus.getCacheStatus();
             engineHealthReporter.reportCacheStatusCheckerSuccess(
-                    modelName,
-                    workerStatus.topologySnapshot(),
-                    workerStatus.committedEngineObservation(),
-                    successfulIntervalUs,
-                    cache == null ? null : cache.getBlockSize(),
-                    cache == null ? null : cache.getCacheKeySize());
+                    workerStatus, successfulIntervalUs);
         } catch (Throwable e) {
             pollLease.trace().record(Stage.CACHE_RESPONSE_FAILED, e);
             log("engine cache status check via gRPC exception, msg: " + e.getMessage(), e);
             engineHealthReporter.reportCacheStatusCheckerFail(
-                    modelName, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE, roleType);
+                    workerStatus, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE);
         }
     }
 
@@ -229,7 +223,7 @@ public class GrpcCacheStatusCheckRunner extends AbstractStatusRunner {
     private boolean updateLocalKvCache() {
         try {
             pollLease.trace().record(Stage.CACHE_INDEX_UPDATE_BEGIN);
-            WorkerCacheUpdateResult result = cacheAwareService.updateEngineBlockCache(workerStatus);
+            WorkerCacheUpdateResult result = cacheAwareService.updateFromWorkerStatus(workerStatus);
             if (result != null && result.isSuccess()) {
                 pollLease.trace().record(Stage.CACHE_INDEX_UPDATE_END);
                 return true;
@@ -241,7 +235,7 @@ public class GrpcCacheStatusCheckRunner extends AbstractStatusRunner {
                     workerStatus.getGenerationId(),
                     result == null ? "no update result" : result.getErrorMessage());
             engineHealthReporter.reportCacheStatusCheckerFail(
-                    modelName, BalanceStatusEnum.CACHE_UPDATE_FAILED, roleType);
+                    workerStatus, BalanceStatusEnum.CACHE_UPDATE_FAILED);
         } catch (Exception e) {
             pollLease.trace().record(Stage.CACHE_INDEX_UPDATE_FAILED, e);
             logger.debug(
@@ -250,7 +244,7 @@ public class GrpcCacheStatusCheckRunner extends AbstractStatusRunner {
                     workerStatus.getGenerationId(),
                     e.getMessage());
             engineHealthReporter.reportCacheStatusCheckerFail(
-                    modelName, BalanceStatusEnum.CACHE_UPDATE_FAILED, roleType);
+                    workerStatus, BalanceStatusEnum.CACHE_UPDATE_FAILED);
         }
         return false;
     }
@@ -270,11 +264,10 @@ public class GrpcCacheStatusCheckRunner extends AbstractStatusRunner {
     @Override
     protected void reportRpcFailure(boolean timeout) {
         engineHealthReporter.reportCacheStatusCheckerFail(
-                modelName,
+                workerStatus,
                 timeout
                         ? BalanceStatusEnum.CACHE_GRPC_TIMEOUT
-                        : BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE,
-                roleType);
+                        : BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE);
     }
 
     private long getCurrentCacheVersion() {

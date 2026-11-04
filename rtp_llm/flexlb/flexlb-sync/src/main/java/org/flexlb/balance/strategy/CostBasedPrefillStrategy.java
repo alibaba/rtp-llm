@@ -3,7 +3,7 @@ package org.flexlb.balance.strategy;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.scheduler.PlacementKey;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.SchedulingMetadata;
@@ -19,7 +19,6 @@ import java.util.Map;
 import java.util.function.LongSupplier;
 
 import static com.google.common.math.LongMath.saturatedAdd;
-import static com.google.common.math.LongMath.saturatedMultiply;
 
 public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
 
@@ -34,6 +33,7 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
     private final boolean queueScheduling;
     private final Long cacheAffinityExtraTtftMs;
     private final double cacheAffinityMinHitRate;
+    private final double remoteDiscount;
 
     public CostBasedPrefillStrategy(
             CacheAwareService cacheAwareService, ConfigService configService) {
@@ -42,6 +42,7 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
         priorityOrdering = config.isPriorityOrdering();
         queueScheduling = config.isQueue();
         var affinity = config.getRouter().getRoles().getPrefill().getCacheAffinity();
+        remoteDiscount = affinity == null ? 0.2 : affinity.getRemoteDiscount();
         cacheAffinityExtraTtftMs =
                 affinity == null ? null : Math.max(0L, affinity.getMaxExtraTtftMs());
         cacheAffinityMinHitRate =
@@ -63,22 +64,35 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
             candidates.capture(inputs, group);
             Map<String, Integer> rejections =
                     candidates.registeredCount == 0 ? Map.of() : new java.util.HashMap<>();
+            org.flexlb.cache.domain.CacheMatchResult cacheMatches = null;
             if (candidates.registeredCount != 0) {
-                var cacheMatches =
+                cacheMatches =
                         cacheAwareService.findMatchingEngines(
-                                request.getBlockCacheKeys(), roleType, candidates.addresses);
+                                new org.flexlb.cache.domain.CacheMatchQuery(
+                                        request.getRequestId(),
+                                        request.getBlockCacheKeys(),
+                                        request.getBlockSize(),
+                                        roleType,
+                                        group));
                 evaluateCandidates(
                         request, metadata, cacheMatches, rejections, candidates, clock.getAsLong());
             }
             if (candidates.size == 0) {
-                return blockedWithDiagnostics(
-                        Response.error(
-                                candidates.registeredCount == 0
-                                        ? roleType.getErrorType()
-                                        : StrategyErrorType.RESOURCE_EXHAUSTED),
-                        new PlacementKey(roleType, group, null),
-                        candidates.registeredCount,
-                        rejections);
+                return observe(
+                        blockedWithDiagnostics(
+                                Response.error(
+                                        candidates.registeredCount == 0
+                                                ? roleType.getErrorType()
+                                                : StrategyErrorType.RESOURCE_EXHAUSTED),
+                                new PlacementKey(roleType, group, null),
+                                candidates.registeredCount,
+                                rejections),
+                        candidates,
+                        -1,
+                        roleType,
+                        group,
+                        rejections,
+                        cacheMatches);
             }
             int selected =
                     selectBestCandidate(
@@ -87,9 +101,11 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                             roleType,
                             group,
                             request.getSeqLen());
-            return selected < 0
-                    ? PlacementResult.blocked(new PlacementKey(roleType, group, null))
-                    : selection(candidates, selected, roleType, metadata);
+            PlacementResult<Selection<I>, PlacementKey> result =
+                    selected < 0
+                            ? PlacementResult.blocked(new PlacementKey(roleType, group, null))
+                            : selection(candidates, selected, roleType, metadata, cacheMatches);
+            return observe(result, candidates, selected, roleType, group, rejections, cacheMatches);
         } finally {
             candidates.clear();
             candidates.inUse = false;
@@ -103,7 +119,8 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
             PrefillCandidateSet candidates,
             int selected,
             RoleType roleType,
-            SchedulingMetadata metadata) {
+            SchedulingMetadata metadata,
+            org.flexlb.cache.domain.CacheMatchResult cacheMatches) {
         @SuppressWarnings("unchecked")
         I winner = (I) candidates.capturedSources[selected];
         String block = candidates.admissionBlocks[selected];
@@ -147,7 +164,70 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                         candidates.maximumRoutingCacheMatchTokens,
                         candidates.affinityReason,
                         candidates.registeredCount,
-                        winner));
+                        winner,
+                        cacheMatches));
+    }
+
+    private static <I extends CandidateInput> PlacementResult<Selection<I>, PlacementKey> observe(
+            PlacementResult<Selection<I>, PlacementKey> result,
+            PrefillCandidateSet candidates,
+            int selected,
+            RoleType role,
+            String group,
+            Map<String, Integer> rejections,
+            org.flexlb.cache.domain.CacheMatchResult cacheMatches) {
+        var snapshot = new java.util.ArrayList<org.flexlb.dao.pv.RoutingDecision.Candidate>(5);
+        if (selected >= 0) snapshot.add(snapshotCandidate(candidates, selected, true));
+        for (int index = 0; index < candidates.size && snapshot.size() < 5; index++) {
+            if (index != selected) snapshot.add(snapshotCandidate(candidates, index, false));
+        }
+        var details = new java.util.HashMap<String, Object>();
+        if (result.diagnostics() != null) details.putAll(result.diagnostics());
+        details.put(
+                "routingDecision",
+                new org.flexlb.dao.pv.RoutingDecision(
+                        role,
+                        group,
+                        "CostBasedPrefill",
+                        candidates.affinityReason == null
+                                ? "COST_BASED"
+                                : candidates.affinityReason,
+                        System.currentTimeMillis(),
+                        0,
+                        selected < 0 ? null : candidates.endpointAddresses[selected],
+                        candidates.registeredCount,
+                        candidates.size,
+                        candidates.size > snapshot.size(),
+                        rejections,
+                        snapshot,
+                        null));
+        if (cacheMatches != null) details.put("cacheQuery", cacheMatches);
+        return new PlacementResult<>(
+                result.status(),
+                result.value(),
+                result.failure(),
+                result.blocker(),
+                details,
+                result.selection());
+    }
+
+    private static org.flexlb.dao.pv.RoutingDecision.Candidate snapshotCandidate(
+            PrefillCandidateSet candidates, int index, boolean selected) {
+        long ttft = candidates.projectedTtftMs[index];
+        return new org.flexlb.dao.pv.RoutingDecision.Candidate(
+                candidates.endpointAddresses[index],
+                selected,
+                ttft < 0 ? null : ttft,
+                null,
+                candidates.incomingPrefillMs[index],
+                candidates.cacheHitTokens[index],
+                candidates.routingCacheMatchTokens[index],
+                0L,
+                null,
+                null,
+                null,
+                ttft < 0 ? "UNMODELED_ENGINE_WORK" : "MODELED",
+                candidates.ownershipVersions[index]);
     }
 
     private static AdmissionRejectReason classifyWorkerCapacity(AdmissionSummary summary) {
@@ -284,7 +364,7 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
     private void evaluateCandidates(
             Request request,
             SchedulingMetadata metadata,
-            Map<String, Integer> cacheMatchResults,
+            org.flexlb.cache.domain.CacheMatchResult cacheMatchResults,
             Map<String, Integer> rejections,
             PrefillCandidateSet candidates,
             long planningAtMs) {
@@ -294,12 +374,30 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
         for (int i = 0; i < candidates.registeredCount; i++) {
             var input = candidates.capturedSources[i];
             String endpointAddress = candidates.endpointAddresses[i];
-            Integer prefix =
-                    cacheMatchResults == null ? null : cacheMatchResults.get(endpointAddress);
-            long blockSize = matchingBlockSize(request, input, prefix);
-            long rawHit = blockSize <= 0L ? 0L : saturatedMultiply(blockSize, prefix.longValue());
-            long routingCacheMatchTokens = Math.min(rawHit, Math.max(0L, seqLen));
-            long cacheHit = rawHit >= seqLen ? Math.max(0L, seqLen - blockSize) : rawHit;
+            var match =
+                    cacheMatchResults == null
+                            ? null
+                            : cacheMatchResults.hostMatch(
+                                    endpointAddress, input.physicalAddress(), input.engineCount());
+            double blocks =
+                    match == null
+                            ? 0
+                            : Math.max(0, match.localMatchBlocks())
+                                    + Math.max(
+                                                    0,
+                                                    match.globalMatchBlocks()
+                                                            - match.localMatchBlocks())
+                                            * remoteDiscount;
+            long blockSize = matchingBlockSize(request, input, cacheMatchResults);
+            long routingCacheMatchTokens =
+                    seqLen <= 0L
+                            ? 0L
+                            : org.flexlb.cache.domain.CacheMatchResult.matchedTokens(
+                                    blocks, blockSize, seqLen);
+            long cacheHit =
+                    routingCacheMatchTokens >= seqLen
+                            ? Math.max(0L, seqLen - blockSize)
+                            : routingCacheMatchTokens;
             RequestTimeEstimation.Inputs projectionInputs = input.projectionInputs();
             RequestTimeEstimation.CandidateView projection =
                     estimator.projectRankingView(
@@ -336,10 +434,14 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
         }
     }
 
-    private static long matchingBlockSize(Request request, CandidateInput input, Integer prefix) {
-        if (request.getSeqLen() <= 0L || prefix == null || prefix <= 0) return 0L;
-        long size = request.getCacheKeyBlockSize();
-        return size > 0L ? size : Math.max(0L, input.cacheBlockSize());
+    private static long matchingBlockSize(
+            Request request,
+            CandidateInput input,
+            org.flexlb.cache.domain.CacheMatchResult matches) {
+        if (matches != null && matches.blockSize() > 0) return matches.blockSize();
+        if (request.getBlockSize() > 0) return request.getBlockSize();
+        if (request.getCacheKeyBlockSize() > 0) return request.getCacheKeyBlockSize();
+        return Math.max(0, input.cacheBlockSize());
     }
 
     private void logProjection(

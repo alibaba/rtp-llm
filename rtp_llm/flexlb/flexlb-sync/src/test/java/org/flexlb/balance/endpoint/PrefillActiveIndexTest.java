@@ -101,9 +101,12 @@ class PrefillActiveIndexTest {
                 assertEquals(removedVersion, index.version());
             }
             assertTrue(index.version() > oldVersion);
-            assertEquals(oldItems.stream().map(RequestRoute::requestId).toList(), ids(old));
             assertEquals(
-                    expected.stream().map(RequestRoute::requestId).toList(), ids(index.capture()));
+                    oldItems.stream().map(item -> Long.parseLong(item.requestId())).toList(),
+                    ids(old));
+            assertEquals(
+                    expected.stream().map(item -> Long.parseLong(item.requestId())).toList(),
+                    ids(index.capture()));
             for (int priority = 0; priority <= 100; priority++) {
                 int exactPriority = priority;
                 assertEquals(
@@ -124,7 +127,9 @@ class PrefillActiveIndexTest {
             assertEquals(0, index.size(priority));
         }
         assertTrue(index.capture().items().isEmpty());
-        assertEquals(expected.stream().map(RequestRoute::requestId).toList(), ids(beforeClear));
+        assertEquals(
+                expected.stream().map(item -> Long.parseLong(item.requestId())).toList(),
+                ids(beforeClear));
     }
 
     @Test
@@ -200,9 +205,7 @@ class PrefillActiveIndexTest {
     }
 
     private static List<Long> ids(PrefillRequestQueue.Snapshot capture) {
-        return capture.items().stream()
-                .map(org.flexlb.balance.scheduler.RequestRoute::requestId)
-                .toList();
+        return capture.items().stream().map(route -> Long.parseLong(route.requestId())).toList();
     }
 
     @SuppressWarnings("unchecked")
@@ -212,7 +215,7 @@ class PrefillActiveIndexTest {
 
     private static RequestRoute item(long id, int priority) {
         var request = mock(RequestRoute.class);
-        when(request.requestId()).thenReturn(id);
+        when(request.requestId()).thenReturn(String.valueOf(id));
         when(request.enqueueSeq()).thenReturn(id);
         when(request.priority()).thenReturn(priority);
         when(request.seqLen()).thenReturn(10L);

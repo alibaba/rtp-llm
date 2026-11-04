@@ -8,7 +8,7 @@ import io.grpc.inprocess.InProcessServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
-import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
+import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
@@ -152,8 +152,8 @@ class EngineGrpcClientMonitoringTest {
                 .register(anyString(), any(FlexMetricType.class), any(FlexPriorityType.class));
         GrpcReporter reporter = new GrpcReporter(monitor);
         assertDoesNotThrow(reporter::init);
-        verify(monitor, times(2)).register(anyString(), any(FlexMetricType.class));
-        verify(monitor, times(6))
+        verify(monitor).register(anyString(), any(FlexMetricType.class));
+        verify(monitor, times(8))
                 .register(anyString(), any(FlexMetricType.class), any(FlexPriorityType.class));
         assertDoesNotThrow(() -> reporter.reportChannelPoolSize(3));
     }
@@ -218,12 +218,14 @@ class EngineGrpcClientMonitoringTest {
                             .start();
             client =
                     new EngineGrpcClient(
-                            mock(CustomNameResolver.class),
+                            mock(EngineAddressResolver.class),
                             mock(ThreadPoolExecutor.class),
                             mock(EventLoopGroup.class),
                             new GrpcReporter(monitor),
                             20,
-                            5000L) {
+                            5000L,
+                            org.mockito.Mockito.mock(
+                                    org.flexlb.config.CacheMatchConfiguration.class)) {
                         @Override
                         protected ManagedChannel createChannel(String channelKey) {
                             return InProcessChannelBuilder.forName(serverName)

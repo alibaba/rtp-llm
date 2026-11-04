@@ -1,7 +1,7 @@
 package org.flexlb.sync.runner;
 
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -46,7 +46,7 @@ class PollRunnerLifecycleTest {
                 RunnerTestSupport.discovered(
                         RoleType.DECODE, null, "127.0.0.1", 8080, 19000, "site");
         var registry = RunnerTestSupport.endpointRegistry(mock(ConfigService.class));
-        registry.currentOrDiscover(RoleType.DECODE, status.getIpPort(), () -> status);
+        registry.currentOrDiscover(RoleType.DECODE, status.getLogicalIpPort(), () -> status);
         WorkerStatusRpcClient grpc = mock(WorkerStatusRpcClient.class);
         CacheAwareService cache = mock(CacheAwareService.class);
         DynamicCacheIntervalService interval = mock(DynamicCacheIntervalService.class);
@@ -122,30 +122,30 @@ class PollRunnerLifecycleTest {
             if (cachePoll) {
                 verify(reporter)
                         .reportCacheStatusCheckerFail(
-                                "model",
+                                status,
                                 timeout
                                         ? org.flexlb.enums.BalanceStatusEnum.CACHE_GRPC_TIMEOUT
                                         : org.flexlb.enums.BalanceStatusEnum
-                                                .CACHE_SERVICE_UNAVAILABLE,
-                                RoleType.DECODE);
+                                                .CACHE_SERVICE_UNAVAILABLE);
             } else {
                 verify(reporter)
                         .reportStatusCheckerFail(
-                                "model",
                                 timeout
                                         ? org.flexlb.enums.BalanceStatusEnum
                                                 .WORKER_STATUS_GRPC_TIMEOUT
                                         : org.flexlb.enums.BalanceStatusEnum
                                                 .WORKER_SERVICE_UNAVAILABLE,
+                                status.getMetricIpPort(),
                                 RoleType.DECODE);
             }
         }
         if (failureAt.equals("CALLBACK")) {
             if (cachePoll) {
-                verify(reporter)
-                        .reportCacheStatusCheckerFail(eq("model"), any(), eq(RoleType.DECODE));
+                verify(reporter).reportCacheStatusCheckerFail(eq(status), any());
             } else {
-                verify(reporter).reportStatusCheckerFail(eq("model"), any(), eq(RoleType.DECODE));
+                verify(reporter)
+                        .reportStatusCheckerFail(
+                                any(), eq(status.getMetricIpPort()), eq(RoleType.DECODE));
             }
         }
         if (!cachePoll && (failureAt.equals("REPLY") || failureAt.equals("CALLBACK"))) {

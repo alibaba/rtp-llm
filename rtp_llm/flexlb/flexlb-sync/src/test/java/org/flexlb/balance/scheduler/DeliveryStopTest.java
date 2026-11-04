@@ -86,7 +86,6 @@ class DeliveryStopTest {
                             case REQUEST_FENCED -> ContextResult.CancelEvidenceKind.FENCED;
                             case ACCEPTED -> ContextResult.CancelEvidenceKind.ACKNOWLEDGED;
                             case NOT_FOUND -> ContextResult.CancelEvidenceKind.NOT_FOUND;
-                            case UNSUPPORTED -> ContextResult.CancelEvidenceKind.UNSUPPORTED;
                             case FAILED -> ContextResult.CancelEvidenceKind.UNKNOWN;
                         },
                         proof.kind());
@@ -404,7 +403,7 @@ class DeliveryStopTest {
                         claim.owner(),
                         1L,
                         new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
-                                1L, 41L, 1L),
+                                1L, String.valueOf(41L), 1L),
                         new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
         var closed = new java.util.concurrent.CompletableFuture<Void>();
         Thread closer = null;
@@ -650,7 +649,7 @@ class DeliveryStopTest {
                 claim.owner(),
                 attemptToken,
                 new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
-                        attemptToken, 41L, attemptToken),
+                        attemptToken, String.valueOf(41L), attemptToken),
                 new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
     }
 
@@ -842,7 +841,7 @@ class DeliveryStopTest {
                         claim.owner(),
                         1L,
                         new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
-                                1L, 41L, 1L),
+                                1L, String.valueOf(41L), 1L),
                         new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
         try {
             var preemption = dispatcher.preempt(registration, null, "priority preemption", 25L);
@@ -918,7 +917,7 @@ class DeliveryStopTest {
                         claim.owner(),
                         1L,
                         new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
-                                1L, 41L, 1L),
+                                1L, String.valueOf(41L), 1L),
                         new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
         try {
             assertEquals(
@@ -979,7 +978,7 @@ class DeliveryStopTest {
                             claim.owner(),
                             1L,
                             new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
-                                    1L, 41L, 1L),
+                                    1L, String.valueOf(41L), 1L),
                             new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
             var dispatcher =
                     new DeliveryDispatcher(
@@ -1213,7 +1212,7 @@ class DeliveryStopTest {
                             claim.owner(),
                             1L,
                             new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
-                                    1L, 41L, 1L),
+                                    1L, String.valueOf(41L), 1L),
                             new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
             var answer = cleanup.preempt(registration, null, "priority preemption", 500L);
             Runnable task;
@@ -1237,6 +1236,7 @@ class DeliveryStopTest {
 
     private static Delivery.Member claim(SchedulerTestServices runtime) {
         var context = mock(RequestContext.class, RETURNS_DEEP_STUBS);
+        when(context.data().getRequestId()).thenReturn("41");
         var scheduler = context.data().getLifecycle();
         when(scheduler.onPreemption(any(), any())).thenReturn(true);
         org.flexlb.balance.scheduler.SchedulerTestServices.bind(scheduler, runtime);

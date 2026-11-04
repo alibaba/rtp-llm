@@ -1,10 +1,10 @@
 package org.flexlb.service;
 
+import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.cache.match.theory.TheoryCacheKeyHistory;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
@@ -33,19 +33,44 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/**
- * Checks theoretical cache hits against prior requests and asynchronous trace reporting.
- */
 @ExtendWith(MockitoExtension.class)
 class TheoryCacheHitReporterTest {
+
     private final List<TheoryCacheHitReporter> reporters = new ArrayList<>();
 
-    @Mock private CacheMetricsReporter cacheMetricsReporter;
+    private TheoryCacheHitReporter newReporter() {
+        TheoryCacheHitReporter reporter = new TheoryCacheHitReporter();
+        reporters.add(reporter);
+        return reporter;
+    }
 
     @AfterEach
     void closeReporters() {
         reporters.forEach(TheoryCacheHitReporter::closeTheoryLog);
     }
+
+    private static void reportWithConfiguration(
+            TheoryCacheHitReporter reporter, RequestContext context) throws Exception {
+        ConfigService configService = mock(ConfigService.class);
+        FlexlbConfig config = context.data().getConfig();
+        Mockito.lenient()
+                .when(configService.loadBalanceConfig())
+                .thenReturn(config == null ? new FlexlbConfig() : config);
+        inject(reporter, "configService", configService);
+        reporter.report(context);
+    }
+
+    private static void awaitReports(TheoryCacheHitReporter reporter) throws Exception {
+        executor(reporter).submit(() -> {}).get(5L, TimeUnit.SECONDS);
+    }
+
+    private static ThreadPoolExecutor executor(TheoryCacheHitReporter reporter) throws Exception {
+        Field field = TheoryCacheHitReporter.class.getDeclaredField("theoryHitReportExecutor");
+        field.setAccessible(true);
+        return (ThreadPoolExecutor) field.get(reporter);
+    }
+
+    @Mock private CacheMetricsReporter cacheMetricsReporter;
 
     @Test
     void should_report_request_hits_against_prior_pool() throws Exception {
@@ -53,16 +78,16 @@ class TheoryCacheHitReporterTest {
         inject(reporter, "theoryCacheKeyHistory", smallWindow());
         inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
 
-        BalanceContext firstContext = mock(BalanceContext.class);
+        RequestContext firstContext = mockContext();
         Request firstRequest = mock(Request.class);
-        when(firstContext.getRequest()).thenReturn(firstRequest);
+        when(firstContext.data().getRequest()).thenReturn(firstRequest);
         when(firstRequest.getBlockCacheKeys()).thenReturn(List.of(1L, 2L, 3L));
         when(firstRequest.getSeqLen()).thenReturn(300L);
         when(firstRequest.getCacheKeyBlockSize()).thenReturn(100L);
 
-        BalanceContext secondContext = mock(BalanceContext.class);
+        RequestContext secondContext = mockContext();
         Request secondRequest = mock(Request.class);
-        when(secondContext.getRequest()).thenReturn(secondRequest);
+        when(secondContext.data().getRequest()).thenReturn(secondRequest);
         when(secondRequest.getBlockCacheKeys()).thenReturn(List.of(2L, 3L, 4L));
         when(secondRequest.getSeqLen()).thenReturn(300L);
         when(secondRequest.getCacheKeyBlockSize()).thenReturn(100L);
@@ -83,12 +108,12 @@ class TheoryCacheHitReporterTest {
 
         FlexlbConfig disabledConfig = new FlexlbConfig();
         disabledConfig.getObservability().getCacheHit().getRecentKeyWindow().setWriteEnabled(false);
-        BalanceContext skippedContext = contextWithConfig(disabledConfig);
+        RequestContext skippedContext = contextWithConfig(disabledConfig);
         reportWithConfiguration(reporter, skippedContext);
         awaitReports(reporter);
 
         FlexlbConfig enabledConfig = new FlexlbConfig();
-        BalanceContext nextContext = context(enabledConfig, List.of(1L, 2L));
+        RequestContext nextContext = context(enabledConfig, List.of(1L, 2L));
         reportWithConfiguration(reporter, nextContext);
         awaitReports(reporter);
 
@@ -103,13 +128,13 @@ class TheoryCacheHitReporterTest {
 
         FlexlbConfig metricOffConfig = new FlexlbConfig();
         metricOffConfig.getObservability().getCacheHit().setMetricsEnabled(false);
-        BalanceContext firstContext = context(metricOffConfig, List.of(1L, 2L));
+        RequestContext firstContext = context(metricOffConfig, List.of(1L, 2L));
         reportWithConfiguration(reporter, firstContext);
         awaitReports(reporter);
         verifyNoInteractions(cacheMetricsReporter);
 
         FlexlbConfig enabledConfig = new FlexlbConfig();
-        BalanceContext secondContext = context(enabledConfig, List.of(2L, 3L));
+        RequestContext secondContext = context(enabledConfig, List.of(2L, 3L));
         reportWithConfiguration(reporter, secondContext);
         awaitReports(reporter);
 
@@ -186,7 +211,7 @@ class TheoryCacheHitReporterTest {
         try {
             FlexlbConfig config = new FlexlbConfig();
             List<Long> keys = new ArrayList<>(List.of(1L));
-            BalanceContext submitted = context(config, keys, 128L, 64L);
+            RequestContext submitted = context(config, keys, 128L, 64L);
             assertTimeoutPreemptively(
                     Duration.ofSeconds(1L), () -> reportWithConfiguration(reporter, submitted));
             verifyNoInteractions(cacheMetricsReporter);
@@ -219,7 +244,7 @@ class TheoryCacheHitReporterTest {
             while (executor.getQueue().remainingCapacity() > 0) {
                 executor.execute(() -> {});
             }
-            BalanceContext input = contextWithConfig(new FlexlbConfig());
+            RequestContext input = contextWithConfig(new FlexlbConfig());
             assertTimeoutPreemptively(
                     Duration.ofSeconds(1L), () -> reportWithConfiguration(reporter, input));
             verifyNoInteractions(cacheMetricsReporter, historyWindow);
@@ -229,39 +254,6 @@ class TheoryCacheHitReporterTest {
         executor.shutdown();
         assertTrue(executor.awaitTermination(5L, TimeUnit.SECONDS));
         verifyNoInteractions(cacheMetricsReporter, historyWindow);
-    }
-
-    private TheoryCacheHitReporter newReporter() {
-        TheoryCacheHitReporter reporter = new TheoryCacheHitReporter();
-        reporters.add(reporter);
-        return reporter;
-    }
-
-    private static void reportWithConfiguration(
-            TheoryCacheHitReporter reporter, BalanceContext context) throws Exception {
-        ConfigService configService = mock(ConfigService.class);
-        FlexlbConfig config = context.getConfig();
-        Mockito.lenient()
-                .when(configService.loadBalanceConfig())
-                .thenReturn(config == null ? new FlexlbConfig() : config);
-        inject(reporter, "configService", configService);
-        reporter.report(context);
-    }
-
-    private static void inject(Object target, String fieldName, Object value) throws Exception {
-        Field field = TheoryCacheHitReporter.class.getDeclaredField(fieldName);
-        field.setAccessible(true);
-        field.set(target, value);
-    }
-
-    private static void awaitReports(TheoryCacheHitReporter reporter) throws Exception {
-        executor(reporter).submit(() -> {}).get(5L, TimeUnit.SECONDS);
-    }
-
-    private static ThreadPoolExecutor executor(TheoryCacheHitReporter reporter) throws Exception {
-        Field field = TheoryCacheHitReporter.class.getDeclaredField("theoryHitReportExecutor");
-        field.setAccessible(true);
-        return (ThreadPoolExecutor) field.get(reporter);
     }
 
     private static void awaitLatch(CountDownLatch latch) {
@@ -284,6 +276,12 @@ class TheoryCacheHitReporterTest {
         }
     }
 
+    private static void inject(Object target, String fieldName, Object value) throws Exception {
+        Field field = TheoryCacheHitReporter.class.getDeclaredField(fieldName);
+        field.setAccessible(true);
+        field.set(target, value);
+    }
+
     private static TheoryCacheKeyHistory smallWindow() {
         FlexlbConfig config = new FlexlbConfig();
         config.getObservability().getCacheHit().getRecentKeyWindow().setDurationMs(60_000L);
@@ -300,23 +298,90 @@ class TheoryCacheHitReporterTest {
         return new TheoryCacheKeyHistory(configService, workerStatuses);
     }
 
-    private static BalanceContext contextWithConfig(FlexlbConfig config) {
-        BalanceContext balanceContext = mock(BalanceContext.class);
-        when(balanceContext.getConfig()).thenReturn(config);
+    private static RequestContext mockContext() {
+        var context = mock(RequestContext.class);
+        var data = mock(org.flexlb.balance.scheduler.RequestData.class);
+        when(context.data()).thenReturn(data);
+        return context;
+    }
+
+    @Test
+    void requestReleaseDoesNotChangeQueuedCacheInput() throws Exception {
+        var reporter = newReporter();
+        inject(reporter, "theoryCacheKeyHistory", smallWindow());
+        inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
+        var blocked = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        executor(reporter)
+                .submit(
+                        () -> {
+                            blocked.countDown();
+                            try {
+                                release.await();
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                        });
+        assertTrue(blocked.await(5, TimeUnit.SECONDS));
+        var config = new FlexlbConfig();
+        var first = new RequestContext(config);
+        var keys = new ArrayList<>(List.of(11L, 22L));
+        first.data()
+                .setRequest(
+                        Request.builder()
+                                .requestId("17")
+                                .blockCacheKeys(keys)
+                                .seqLen(256)
+                                .cacheKeyBlockSize(128)
+                                .build());
+        try {
+            reportWithConfiguration(reporter, first);
+            keys.clear();
+            first.data().setRequest(Request.builder().requestId("17").seqLen(256).build());
+        } finally {
+            release.countDown();
+        }
+        awaitReports(reporter);
+        reportWithConfiguration(reporter, context(config, List.of(11L, 22L), 256, 128));
+        awaitReports(reporter);
+        assertTheoryRequests(0, 256, 256, 256);
+    }
+
+    @Test
+    void overflowingHitTokenProductIsCappedByRequestInput() throws Exception {
+        for (long blockSize : new long[] {Long.MAX_VALUE, 1L << 62, (1L << 62) + 1}) {
+            var reporter = newReporter();
+            var metrics = mock(CacheMetricsReporter.class);
+            inject(reporter, "theoryCacheKeyHistory", smallWindow());
+            inject(reporter, "cacheMetricsReporter", metrics);
+            var input = context(new FlexlbConfig(), List.of(11L, 22L, 33L, 44L), 1024, blockSize);
+            reportWithConfiguration(reporter, input);
+            awaitReports(reporter);
+            reportWithConfiguration(reporter, input);
+            awaitReports(reporter);
+            verify(metrics).reportTheoryCacheHitMetrics(1024, 1024);
+        }
+    }
+
+    private static RequestContext contextWithConfig(FlexlbConfig config) {
+        RequestContext balanceContext = mockContext();
+        when(balanceContext.data().getConfig()).thenReturn(config);
         return balanceContext;
     }
 
-    private static BalanceContext context(FlexlbConfig config, List<Long> cacheKeys) {
+    private static RequestContext context(FlexlbConfig config, List<Long> cacheKeys) {
         return context(config, cacheKeys, 1024L, 256L);
     }
 
-    private static BalanceContext context(
+    private static RequestContext context(
             FlexlbConfig config, List<Long> cacheKeys, long seqLen, long cacheKeyBlockSize) {
-        BalanceContext balanceContext = mock(BalanceContext.class);
+        RequestContext balanceContext = mockContext();
         Request request = mock(Request.class);
-        Mockito.lenient().when(balanceContext.getRequestId()).thenReturn("trace-request");
-        when(balanceContext.getConfig()).thenReturn(config);
-        when(balanceContext.getRequest()).thenReturn(request);
+        Mockito.lenient()
+                .when(balanceContext.data().getRequestId())
+                .thenReturn(String.valueOf("trace-request"));
+        when(balanceContext.data().getConfig()).thenReturn(config);
+        when(balanceContext.data().getRequest()).thenReturn(request);
         when(request.getBlockCacheKeys()).thenReturn(cacheKeys);
         when(request.getSeqLen()).thenReturn(seqLen);
         when(request.getCacheKeyBlockSize()).thenReturn(cacheKeyBlockSize);

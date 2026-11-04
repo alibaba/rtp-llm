@@ -39,9 +39,9 @@ class EndpointDiscoveryTest {
         WorkerStatus matching = status(RoleType.DECODE, "group1", 8080);
         WorkerStatus filtered = status(RoleType.DECODE, "group2", 8081);
         RunnerTestSupport.publishEndpoint(
-                registry, RoleType.DECODE, matching.getIpPort(), matching);
+                registry, RoleType.DECODE, matching.getLogicalIpPort(), matching);
         RunnerTestSupport.publishEndpoint(
-                registry, RoleType.DECODE, filtered.getIpPort(), filtered);
+                registry, RoleType.DECODE, filtered.getLogicalIpPort(), filtered);
 
         List<DecodeResources.DecodeRoutingView> result = decodeRoutingSnapshot(registry, "group1");
         assertEquals(1, result.size());
@@ -49,7 +49,7 @@ class EndpointDiscoveryTest {
                 registry.captureDecodeGeneration(result.getFirst())) {
             assertNotNull(pin);
             assertSame(matching, pin.endpoint().getStatus());
-            assertEquals(matching.getIpPort(), pin.endpoint().ipPort());
+            assertEquals(matching.getLogicalIpPort(), pin.endpoint().ipPort());
         }
     }
 
@@ -57,8 +57,10 @@ class EndpointDiscoveryTest {
     void should_capture_all_endpoint_generations_without_group_filter() {
         WorkerStatus first = status(RoleType.PREFILL, "group1", 8080);
         WorkerStatus second = status(RoleType.PREFILL, "group2", 8081);
-        RunnerTestSupport.publishEndpoint(registry, RoleType.PREFILL, first.getIpPort(), first);
-        RunnerTestSupport.publishEndpoint(registry, RoleType.PREFILL, second.getIpPort(), second);
+        RunnerTestSupport.publishEndpoint(
+                registry, RoleType.PREFILL, first.getLogicalIpPort(), first);
+        RunnerTestSupport.publishEndpoint(
+                registry, RoleType.PREFILL, second.getLogicalIpPort(), second);
 
         List<EndpointRegistry.PrefillRoutingEntry> result =
                 registry.prefillRoutingSnapshot(RoleType.PREFILL);
@@ -83,10 +85,11 @@ class EndpointDiscoveryTest {
     @Test
     void should_return_no_decode_candidates_when_no_group_matches() {
         WorkerStatus status = status(RoleType.DECODE, "group1", 8080);
-        RunnerTestSupport.publishEndpoint(registry, RoleType.DECODE, status.getIpPort(), status);
+        RunnerTestSupport.publishEndpoint(
+                registry, RoleType.DECODE, status.getLogicalIpPort(), status);
 
         assertTrue(decodeRoutingSnapshot(registry, "nonExistentGroup").isEmpty());
-        assertEquals(List.of(status.getIpPort()), decodeAddresses(null));
+        assertEquals(List.of(status.getLogicalIpPort()), decodeAddresses(null));
     }
 
     @Test
@@ -94,29 +97,30 @@ class EndpointDiscoveryTest {
         WorkerStatus matching = status(RoleType.DECODE, "groupA", 8080);
         WorkerStatus ungrouped = status(RoleType.DECODE, null, 8081);
         RunnerTestSupport.publishEndpoint(
-                registry, RoleType.DECODE, matching.getIpPort(), matching);
+                registry, RoleType.DECODE, matching.getLogicalIpPort(), matching);
         RunnerTestSupport.publishEndpoint(
-                registry, RoleType.DECODE, ungrouped.getIpPort(), ungrouped);
+                registry, RoleType.DECODE, ungrouped.getLogicalIpPort(), ungrouped);
 
         List<String> result = decodeAddresses("groupA");
 
-        assertEquals(List.of(matching.getIpPort()), result);
-        assertFalse(result.contains(ungrouped.getIpPort()));
+        assertEquals(List.of(matching.getLogicalIpPort()), result);
+        assertFalse(result.contains(ungrouped.getLogicalIpPort()));
     }
 
     @Test
     void should_include_grouped_and_ungrouped_endpoints_without_filter() {
         WorkerStatus grouped = status(RoleType.DECODE, "groupA", 8080);
         WorkerStatus ungrouped = status(RoleType.DECODE, null, 8081);
-        RunnerTestSupport.publishEndpoint(registry, RoleType.DECODE, grouped.getIpPort(), grouped);
         RunnerTestSupport.publishEndpoint(
-                registry, RoleType.DECODE, ungrouped.getIpPort(), ungrouped);
+                registry, RoleType.DECODE, grouped.getLogicalIpPort(), grouped);
+        RunnerTestSupport.publishEndpoint(
+                registry, RoleType.DECODE, ungrouped.getLogicalIpPort(), ungrouped);
 
         List<String> result = decodeAddresses(null);
 
         assertEquals(2, result.size());
-        assertTrue(result.contains(grouped.getIpPort()));
-        assertTrue(result.contains(ungrouped.getIpPort()));
+        assertTrue(result.contains(grouped.getLogicalIpPort()));
+        assertTrue(result.contains(ungrouped.getLogicalIpPort()));
     }
 
     @Test
@@ -126,11 +130,11 @@ class EndpointDiscoveryTest {
         discover(matching);
         discover(filtered);
         RunnerTestSupport.publishEndpoint(
-                registry, RoleType.DECODE, matching.getIpPort(), matching);
+                registry, RoleType.DECODE, matching.getLogicalIpPort(), matching);
         RunnerTestSupport.publishEndpoint(
-                registry, RoleType.DECODE, filtered.getIpPort(), filtered);
+                registry, RoleType.DECODE, filtered.getLogicalIpPort(), filtered);
 
-        assertEquals(List.of(matching.getIpPort()), decodeAddresses("group1"));
+        assertEquals(List.of(matching.getLogicalIpPort()), decodeAddresses("group1"));
         assertEquals(2, registry.counts(RoleType.DECODE).published());
     }
 
@@ -149,10 +153,11 @@ class EndpointDiscoveryTest {
     private void assertRoleEndpoint(RoleType role, int port) {
         WorkerStatus status = status(role, null, port);
         WorkerEndpoint registered =
-                RunnerTestSupport.publishEndpoint(registry, role, status.getIpPort(), status);
+                RunnerTestSupport.publishEndpoint(
+                        registry, role, status.getLogicalIpPort(), status);
 
-        assertEquals(List.of(status.getIpPort()), registry.endpointAddressSnapshot(role));
-        try (WorkerEndpoint.GenerationPin pin = registry.capture(role, status.getIpPort())) {
+        assertEquals(List.of(status.getLogicalIpPort()), registry.endpointAddressSnapshot(role));
+        try (WorkerEndpoint.GenerationPin pin = registry.capture(role, status.getLogicalIpPort())) {
             assertNotNull(pin);
             assertSame(registered, pin.endpoint());
         }
@@ -169,8 +174,9 @@ class EndpointDiscoveryTest {
         discover(prefill);
         discover(decode);
 
-        assertSame(prefill, registry.statusSnapshot(RoleType.PREFILL).get(prefill.getIpPort()));
-        assertSame(decode, registry.statusSnapshot(RoleType.DECODE).get(decode.getIpPort()));
+        assertSame(
+                prefill, registry.statusSnapshot(RoleType.PREFILL).get(prefill.getLogicalIpPort()));
+        assertSame(decode, registry.statusSnapshot(RoleType.DECODE).get(decode.getLogicalIpPort()));
         assertEquals(2, registry.discoveredCount());
         assertEquals(1, registry.counts(RoleType.PREFILL).discovered());
     }
@@ -180,7 +186,8 @@ class EndpointDiscoveryTest {
         WorkerStatus status = status(RoleType.VIT, "group", 8080);
         discover(status);
 
-        assertEquals(Map.of(status.getIpPort(), status), registry.statusSnapshot(RoleType.VIT));
+        assertEquals(
+                Map.of(status.getLogicalIpPort(), status), registry.statusSnapshot(RoleType.VIT));
         assertThrows(
                 UnsupportedOperationException.class,
                 () -> registry.statusSnapshot(RoleType.VIT).clear());
@@ -189,6 +196,7 @@ class EndpointDiscoveryTest {
     private void discover(WorkerStatus status) {
         assertSame(
                 status,
-                registry.currentOrDiscover(status.getRole(), status.getIpPort(), () -> status));
+                registry.currentOrDiscover(
+                        status.getRole(), status.getLogicalIpPort(), () -> status));
     }
 }

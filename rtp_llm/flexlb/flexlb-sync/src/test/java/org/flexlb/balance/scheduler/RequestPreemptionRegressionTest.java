@@ -16,7 +16,7 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -74,7 +74,7 @@ class RequestPreemptionRegressionTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         SchedulerTestSupport.timer(
                         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(scheduler))
                 .close();
@@ -93,7 +93,7 @@ class RequestPreemptionRegressionTest {
         context.data()
                 .setRequest(
                         Request.builder()
-                                .requestId(REQUEST_ID)
+                                .requestId(String.valueOf(REQUEST_ID))
                                 .seqLen(KV_TOKENS)
                                 .maxNewTokens(0)
                                 .build());
@@ -108,7 +108,12 @@ class RequestPreemptionRegressionTest {
         try (var pin = decode.tryPinGeneration()) {
             reservation =
                     decode.tryReserveQueuedRequest(
-                                    pin, REQUEST_ID, KV_TOKENS, KV_TOKENS, 50, CAPACITY)
+                                    pin,
+                                    String.valueOf(REQUEST_ID),
+                                    KV_TOKENS,
+                                    KV_TOKENS,
+                                    50,
+                                    CAPACITY)
                             .handle();
         }
         assertNotNull(reservation);
@@ -188,7 +193,7 @@ class RequestPreemptionRegressionTest {
                         scheduler, preemption, PreemptionCancelPhase.CANCEL_UNKNOWN));
         assertFalse(response.isDone(), "the RPC has started but its ACK has not arrived");
 
-        scheduler.cancel(REQUEST_ID, BATCH_ID, CancelReason.CLIENT_CANCELLED);
+        scheduler.cancel(String.valueOf(REQUEST_ID), BATCH_ID, CancelReason.CLIENT_CANCELLED);
         // Repeated nonterminal heartbeats must not gate the frontend cancellation on inactivity
         // expiry.
         for (int heartbeat = 0; heartbeat < 3; heartbeat++) {
@@ -244,7 +249,7 @@ class RequestPreemptionRegressionTest {
         var snapshot = decode.resourceSnapshot();
         // Exclude the incoming request's separate provisional charge from the victim's conservative
         // hold.
-        long incomingKv = snapshot.requests().get(INCOMING_ID).expectedKvTokens();
+        long incomingKv = snapshot.requests().get(String.valueOf(INCOMING_ID)).expectedKvTokens();
         long victimKv = snapshot.routing().realKvUsed() - incomingKv;
 
         assertAll(
@@ -296,7 +301,7 @@ class RequestPreemptionRegressionTest {
                 decode.beginPreemption(
                         ATTEMPT,
                         List.of(route.decodeReservation()),
-                        INCOMING_ID,
+                        String.valueOf(INCOMING_ID),
                         KV_TOKENS,
                         KV_TOKENS,
                         70,
@@ -317,7 +322,7 @@ class RequestPreemptionRegressionTest {
     }
 
     private boolean victimClaimed() {
-        var victim = decode.resourceSnapshot().requests().get(REQUEST_ID);
+        var victim = decode.resourceSnapshot().requests().get(String.valueOf(REQUEST_ID));
         return victim != null && victim.claimedForPreemption();
     }
 
@@ -329,7 +334,7 @@ class RequestPreemptionRegressionTest {
         report.setTotalKvCacheTokens(1000L);
         report.setAvailableKvCacheTokens(phase == TaskPhase.KV_ALLOCATED ? 900L : 1000L);
         var task = new TaskInfo();
-        task.setRequestId(REQUEST_ID);
+        task.setRequestId(String.valueOf(REQUEST_ID));
         task.setInputLength(KV_TOKENS);
         task.setPhase(phase);
         report.setRunningTaskInfo(

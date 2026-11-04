@@ -123,7 +123,7 @@ class RequestExecutionRequestCapacityTest {
             var first = committed.getFirst();
             assertFalse(
                     fixture.endpoint.releaseRequest(
-                            item(config, fixture.endpoint, first.requestId())));
+                            item(config, fixture.endpoint, Long.parseLong(first.requestId()))));
             assertFalse(fixture.endpoint.requestCapacityAvailable(4, 1));
             assertTrue(fixture.endpoint.releaseRequest(first));
             assertFalse(fixture.endpoint.releaseRequest(first));
@@ -393,7 +393,8 @@ class RequestExecutionRequestCapacityTest {
 
     private static RequestRoute item(
             FlexlbConfig config, PrefillEndpoint endpoint, long requestId, int priority) {
-        Request request = Request.builder().requestId(requestId).seqLen(100L).build();
+        Request request =
+                Request.builder().requestId(String.valueOf(requestId)).seqLen(100L).build();
         RequestContext context = new RequestContext(config);
         context.data().setRequest(request);
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));

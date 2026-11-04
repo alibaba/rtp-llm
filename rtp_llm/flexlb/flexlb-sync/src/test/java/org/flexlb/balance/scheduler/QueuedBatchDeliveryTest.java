@@ -19,7 +19,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -107,7 +107,7 @@ class QueuedBatchDeliveryTest {
                         service,
                         reporter,
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         grpc = mock(EngineGrpcClient.class);
         when(grpc.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenAnswer(
@@ -241,12 +241,12 @@ class QueuedBatchDeliveryTest {
         assertEquals(
                 Delivery.SendMode.NONE,
                 SchedulerTestSupport.repository(registry)
-                        .getRequestState(1L, 0L)
+                        .getRequestState("1", 0L)
                         .deliveryClaimKind());
         assertEquals(
                 Delivery.SendMode.NONE,
                 SchedulerTestSupport.repository(registry)
-                        .getRequestState(2L, 0L)
+                        .getRequestState("2", 0L)
                         .deliveryClaimKind());
         assertOccupancy(1, 2);
         for (RequestRoute item : all ? List.of(first, second) : List.of(first)) {
@@ -274,7 +274,7 @@ class QueuedBatchDeliveryTest {
         assertEquals(
                 Delivery.SendMode.NONE,
                 SchedulerTestSupport.repository(registry)
-                        .getRequestState(1L, 0L)
+                        .getRequestState("1", 0L)
                         .deliveryClaimKind());
         int survivors = all ? 0 : 1;
         if (all) {
@@ -300,7 +300,7 @@ class QueuedBatchDeliveryTest {
             assertEquals(
                     Delivery.SendMode.BATCH_ENQUEUE,
                     SchedulerTestSupport.repository(registry)
-                            .getRequestState(2L, 0L)
+                            .getRequestState("2", 0L)
                             .deliveryClaimKind());
             reply.complete(ack(2L));
             assertTrue(second.ctx().data().getFuture().get(5, TimeUnit.SECONDS).isSuccess());
@@ -312,7 +312,7 @@ class QueuedBatchDeliveryTest {
             DeliverySettlementTestSupport.decodeStatus(decode, 2L, true);
         }
         // Repeated terminal events cannot subtract the other member or leak a batch permit.
-        registry.cancel(1L, 0L, CancelReason.CLIENT_CANCELLED);
+        registry.cancel("1", 0L, CancelReason.CLIENT_CANCELLED);
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(0, decode.routingView().inflightHardKv());
@@ -330,7 +330,7 @@ class QueuedBatchDeliveryTest {
     void lateHandoffStartsOneBoundedObservationWindowWithoutFabricatingWorkerActivity(boolean ack)
             throws Exception {
         RequestRoute item = item(1L);
-        RequestContext requestContext = registry.requests.findActive(1L);
+        RequestContext requestContext = registry.requests.findActive("1");
         long lastStatus = System.currentTimeMillis() - TIMEOUT_MS + 10_000L;
         ReflectionTestUtils.setField(requestContext, "lastWorkerAtMs", lastStatus);
         ReflectionTestUtils.invokeMethod(
@@ -442,7 +442,7 @@ class QueuedBatchDeliveryTest {
         awaitDispatchTasks();
         reply.complete(ack(1L));
         RequestProtocolTestSupport.awaitCondition(
-                () -> SchedulerTestSupport.repository(registry).findTerminal(1L) != null);
+                () -> SchedulerTestSupport.repository(registry).findTerminal("1") != null);
         assertOccupancy(0, 0);
     }
 
@@ -639,7 +639,7 @@ class QueuedBatchDeliveryTest {
         } else {
             assertEquals(1, sent.size());
             assertEquals(
-                    survivors.stream().map(RequestRoute::requestId).toList(),
+                    survivors.stream().map(route -> Long.parseLong(route.requestId())).toList(),
                     sent.getFirst().getDpSlotsList().stream()
                             .flatMap(requestContext -> requestContext.getRequestsList().stream())
                             .map(request -> request.getInput().getRequestId())
@@ -649,7 +649,7 @@ class QueuedBatchDeliveryTest {
                     item ->
                             ack.addSuccesses(
                                     EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
-                                            .setRequestId(item.requestId())));
+                                            .setRequestId(Long.parseLong(item.requestId()))));
             reply.complete(ack.build());
             for (RequestRoute item : survivors) {
                 assertTrue(item.ctx().data().getFuture().get(5, TimeUnit.SECONDS).isSuccess());
@@ -661,7 +661,8 @@ class QueuedBatchDeliveryTest {
                                                 prefill,
                                                 RoleType.PREFILL,
                                                 requestStatus));
-                DeliverySettlementTestSupport.decodeStatus(decode, item.requestId(), true);
+                DeliverySettlementTestSupport.decodeStatus(
+                        decode, Long.parseLong(item.requestId()), true);
             }
         }
         SchedulerTestSupport.awaitRequestWork(
@@ -720,10 +721,10 @@ class QueuedBatchDeliveryTest {
         var ack = EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(201L);
         ack.addSuccesses(
                 EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
-                        .setRequestId(first.requestId()));
+                        .setRequestId(Long.parseLong(first.requestId())));
         ack.addSuccesses(
                 EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
-                        .setRequestId(second.requestId()));
+                        .setRequestId(Long.parseLong(second.requestId())));
         reply.complete(ack.build());
         assertTrue(callbackExited.await(2, TimeUnit.SECONDS));
         assertTrue(first.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
@@ -739,7 +740,8 @@ class QueuedBatchDeliveryTest {
                             status ->
                                     RequestProtocolTestSupport.applyPrefillStatus(
                                             registry, prefill, RoleType.PREFILL, status));
-            DeliverySettlementTestSupport.decodeStatus(decode, route.requestId(), true);
+            DeliverySettlementTestSupport.decodeStatus(
+                    decode, Long.parseLong(route.requestId()), true);
         }
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
@@ -800,10 +802,10 @@ class QueuedBatchDeliveryTest {
         var ack = EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(201L);
         ack.addSuccesses(
                 EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
-                        .setRequestId(first.requestId()));
+                        .setRequestId(Long.parseLong(first.requestId())));
         ack.addSuccesses(
                 EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
-                        .setRequestId(second.requestId()));
+                        .setRequestId(Long.parseLong(second.requestId())));
         reply.complete(ack.build());
         assertTrue(first.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
         assertTrue(second.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
@@ -818,7 +820,8 @@ class QueuedBatchDeliveryTest {
                             status ->
                                     RequestProtocolTestSupport.applyPrefillStatus(
                                             registry, prefill, RoleType.PREFILL, status));
-            DeliverySettlementTestSupport.decodeStatus(decode, route.requestId(), true);
+            DeliverySettlementTestSupport.decodeStatus(
+                    decode, Long.parseLong(route.requestId()), true);
         }
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
@@ -1330,7 +1333,7 @@ class QueuedBatchDeliveryTest {
                 assertEquals(1, sent.size());
                 assertEquals(
                         candidates.subList(0, overtaken).stream()
-                                .map(RequestRoute::requestId)
+                                .map(route -> Long.parseLong(route.requestId()))
                                 .toList(),
                         sent.getFirst().getDpSlotsList().stream()
                                 .flatMap(dp -> dp.getRequestsList().stream())

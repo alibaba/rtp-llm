@@ -22,6 +22,10 @@ public interface PrefillSelectionStrategy {
 
         long cacheBlockSize();
 
+        String physicalAddress();
+
+        int engineCount();
+
         RequestTimeEstimation.Inputs projectionInputs();
 
         /** Read-only current capacity. Selection never reserves a slot. */
@@ -55,7 +59,8 @@ public interface PrefillSelectionStrategy {
             long maximumRoutingCacheMatchTokens,
             String affinityReason,
             int workerCount,
-            I input) {}
+            I input,
+            org.flexlb.cache.domain.CacheMatchResult cacheMatches) {}
 
     <I extends CandidateInput> PlacementResult<Selection<I>, PlacementKey> select(
             Request request,

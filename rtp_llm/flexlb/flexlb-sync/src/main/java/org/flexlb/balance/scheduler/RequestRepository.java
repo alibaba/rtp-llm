@@ -1,9 +1,11 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
+import org.flexlb.dao.route.RequestPhase;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -18,8 +20,18 @@ public final class RequestRepository {
     }
 
     private final Object registrationLock = new Object();
-    private final ConcurrentMap<Long, RequestContext> activeRequests = new ConcurrentHashMap<>();
-    private final ConcurrentMap<Long, TerminalRecord> terminalRecords = new ConcurrentHashMap<>();
+    private final EnumMap<RequestPhase, ConcurrentMap<String, RequestContext>> activeByPhase =
+            new EnumMap<>(RequestPhase.class);
+    private final EnumMap<RequestPhase, ConcurrentMap<String, TerminalRecord>> terminalByPhase =
+            new EnumMap<>(RequestPhase.class);
+
+    public RequestRepository() {
+        for (RequestPhase phase : RequestPhase.values()) {
+            activeByPhase.put(phase, new ConcurrentHashMap<>());
+            terminalByPhase.put(phase, new ConcurrentHashMap<>());
+        }
+    }
+
     private volatile boolean closed;
     private volatile boolean stopping;
 
@@ -45,14 +57,17 @@ public final class RequestRepository {
             synchronized (context) {
                 var data = context.data();
                 synchronized (data) {
-                    long id = data.getRequestId();
+                    String id = data.getRequestId();
+                    var activeRequests = activeByPhase.get(data.getPhase());
+                    var terminalRecords = terminalByPhase.get(data.getPhase());
                     if (activeRequests.containsKey(id) || terminalRecords.containsKey(id)) {
                         return RegistrationResult.DUPLICATE_ID;
                     }
                     if (data.getLifecycle() != null || context.snapshot().key() != null) {
                         return RegistrationResult.CONTEXT_BOUND;
                     }
-                    if (data.getConfig().getDispatcher().requiresGenerateInput()
+                    if (data.getPhase() == RequestPhase.GENERATION
+                            && data.getConfig().getDispatcher().requiresGenerateInput()
                             && !data.hasGenerateInput()) {
                         return RegistrationResult.INPUT_REQUIRED;
                     }
@@ -62,7 +77,8 @@ public final class RequestRepository {
                         throw new IllegalArgumentException(
                                 "positive request inactivity timeout required");
                     }
-                    if (!data.getConfig().getDispatcher().requiresGenerateInput()) {
+                    if (data.getPhase() == RequestPhase.ENCODER
+                            || !data.getConfig().getDispatcher().requiresGenerateInput()) {
                         data.discardGenerateInput();
                     }
                     data.register(scheduler, response);
@@ -75,33 +91,48 @@ public final class RequestRepository {
         }
     }
 
-    public RequestContext findActive(long requestId) {
-        return activeRequests.get(requestId);
+    public RequestContext findActive(String requestId) {
+        return findActive(requestId, RequestPhase.GENERATION);
     }
 
-    public TerminalRecord findTerminal(long requestId) {
-        return terminalRecords.get(requestId);
+    public RequestContext findActive(String requestId, RequestPhase phase) {
+        return activeByPhase.get(phase).get(requestId);
     }
 
-    public RequestLifecycle ownerOf(long requestId) {
-        RequestContext context = findActive(requestId);
+    public TerminalRecord findTerminal(String requestId) {
+        return findTerminal(requestId, RequestPhase.GENERATION);
+    }
+
+    public TerminalRecord findTerminal(String requestId, RequestPhase phase) {
+        return terminalByPhase.get(phase).get(requestId);
+    }
+
+    public RequestLifecycle ownerOf(String requestId) {
+        return ownerOf(requestId, RequestPhase.GENERATION);
+    }
+
+    public RequestLifecycle ownerOf(String requestId, RequestPhase phase) {
+        RequestContext context = findActive(requestId, phase);
         if (context != null) {
             return context.data().getLifecycle();
         }
-        TerminalRecord terminal = findTerminal(requestId);
+        TerminalRecord terminal = findTerminal(requestId, phase);
         return terminal == null ? null : terminal.owner();
     }
 
     public List<RequestContext> snapshotActive() {
-        return List.copyOf(activeRequests.values());
+        return activeByPhase.values().stream().flatMap(map -> map.values().stream()).toList();
     }
 
-    public boolean retainsIdentity(long requestId) {
-        return activeRequests.containsKey(requestId) || terminalRecords.containsKey(requestId);
+    public boolean retainsIdentity(String requestId) {
+        return activeByPhase.values().stream().anyMatch(map -> map.containsKey(requestId))
+                || terminalByPhase.values().stream().anyMatch(map -> map.containsKey(requestId));
     }
 
     public boolean isCurrent(RequestContext exact) {
-        return exact != null && activeRequests.get(exact.data().getRequestId()) == exact;
+        return exact != null
+                && activeByPhase.get(exact.data().getPhase()).get(exact.data().getRequestId())
+                        == exact;
     }
 
     public boolean closeRegistration() {
@@ -156,13 +187,16 @@ public final class RequestRepository {
 
     void archive(RequestContext exact, RequestState terminal) {
         synchronized (registrationLock) {
-            if (activeRequests.get(exact.data().getRequestId()) != exact) {
+            if (activeByPhase.get(exact.data().getPhase()).get(exact.data().getRequestId())
+                    != exact) {
                 return;
             }
-            terminalRecords.put(
-                    exact.data().getRequestId(),
-                    new TerminalRecord(terminal, exact.data().getLifecycle()));
-            activeRequests.remove(exact.data().getRequestId(), exact);
+            terminalByPhase
+                    .get(exact.data().getPhase())
+                    .put(
+                            exact.data().getRequestId(),
+                            new TerminalRecord(terminal, exact.data().getLifecycle()));
+            activeByPhase.get(exact.data().getPhase()).remove(exact.data().getRequestId(), exact);
             exact.data().releaseSchedulingInput();
         }
     }
@@ -172,25 +206,30 @@ public final class RequestRepository {
             return false;
         }
         synchronized (registrationLock) {
-            if (terminalRecords.get(exact.state().requestId()) != exact) {
+            if (terminalByPhase.get(exact.state().requestPhase()).get(exact.state().requestId())
+                    != exact) {
                 return false;
             }
-            return terminalRecords.remove(exact.state().requestId(), exact);
+            return terminalByPhase
+                    .get(exact.state().requestPhase())
+                    .remove(exact.state().requestId(), exact);
         }
     }
 
     void expireTerminalRecords(long before) {
-        terminalRecords.forEach((id, record) -> removeExactTerminal(record, before));
+        terminalByPhase
+                .values()
+                .forEach(map -> map.forEach((id, record) -> removeExactTerminal(record, before)));
     }
 
     public int liveRequestCount() {
-        return activeRequests.size();
+        return activeByPhase.values().stream().mapToInt(Map::size).sum();
     }
 
     /** Count accepted QUEUE requests before delivery handoff, not just global queue entries. */
     public int pendingDeliveryRequestCount() {
         int pending = 0;
-        for (RequestContext context : activeRequests.values()) {
+        for (RequestContext context : snapshotActive()) {
             var state = context.snapshot();
             if (context.data().getConfig().isQueue()
                     && state.phase() == ContextResult.Phase.OPEN
@@ -203,18 +242,17 @@ public final class RequestRepository {
 
     public long oldestLiveRequestAgeMs() {
         long oldest = Long.MAX_VALUE;
-        for (RequestContext context : activeRequests.values()) {
+        for (RequestContext context : snapshotActive()) {
             oldest = Math.min(oldest, context.snapshot().createdAtMs());
         }
         return oldest == Long.MAX_VALUE ? 0L : Math.max(0L, System.currentTimeMillis() - oldest);
     }
 
     public List<RequestState> snapshotActiveRequests() {
-        List<RequestState> snapshots = new ArrayList<>(activeRequests.size());
-        for (Map.Entry<Long, RequestContext> candidate : activeRequests.entrySet()) {
-            RequestContext context = candidate.getValue();
+        List<RequestState> snapshots = new ArrayList<>(liveRequestCount());
+        for (RequestContext context : snapshotActive()) {
             synchronized (context) {
-                if (activeRequests.get(candidate.getKey()) == context
+                if (isCurrent(context)
                         && context.snapshot().phase() != ContextResult.Phase.CLOSED) {
                     snapshots.add(RequestState.from(context.snapshot()));
                 }
@@ -225,14 +263,19 @@ public final class RequestRepository {
                     int createdOrder = Long.compare(left.createdAtMs(), right.createdAtMs());
                     return createdOrder != 0
                             ? createdOrder
-                            : Long.compare(left.requestId(), right.requestId());
+                            : left.requestId().compareTo(right.requestId());
                 });
         return List.copyOf(snapshots);
     }
 
-    public RequestState getRequestState(long requestId, long expectedBatchId) {
-        RequestContext context = activeRequests.get(requestId);
-        TerminalRecord terminal = terminalRecords.get(requestId);
+    public RequestState getRequestState(String requestId, long expectedBatchId) {
+        return getRequestState(requestId, expectedBatchId, RequestPhase.GENERATION);
+    }
+
+    public RequestState getRequestState(
+            String requestId, long expectedBatchId, RequestPhase phase) {
+        RequestContext context = findActive(requestId, phase);
+        TerminalRecord terminal = findTerminal(requestId, phase);
         RequestState state =
                 context != null
                         ? RequestState.from(context.snapshot())

@@ -198,6 +198,7 @@ class SchedulingShutdownTest {
                             grpc,
                             mock(EngineHealthReporter.class),
                             new MockEnvironment(),
+                            new org.flexlb.listener.ApplicationWarmupState(),
                             0L);
             application.configureScheduling(scheduler, owner, requests, endpoints, preemption);
             application.configureExecution(deliveries, tasks, completions, dispatcher);

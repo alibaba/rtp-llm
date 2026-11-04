@@ -54,13 +54,19 @@ public record CacheMatchResult(
         if (workerStatus == null) {
             return null;
         }
-        HostCacheMatch exactMatch = exactHostMatch(workerStatus.getLogicalIpPort());
-        if (exactMatch != null
-                || source != CacheMatchSource.KVCM
-                || workerStatus.getMultiEngineNum() != 1) {
+        return hostMatch(
+                workerStatus.getLogicalIpPort(),
+                workerStatus.getPhysicalIpPort(),
+                workerStatus.getMultiEngineNum());
+    }
+
+    public HostCacheMatch hostMatch(
+            String logicalAddress, String physicalAddress, int engineCount) {
+        HostCacheMatch exactMatch = exactHostMatch(logicalAddress);
+        if (exactMatch != null || source != CacheMatchSource.KVCM || engineCount != 1) {
             return exactMatch;
         }
-        return exactHostMatch(workerStatus.getPhysicalIpPort());
+        return exactHostMatch(physicalAddress);
     }
 
     /**

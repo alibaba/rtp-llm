@@ -73,7 +73,7 @@ class DecodeSelectionAdmissionContractTest {
                     DecodeResources.ReservationHandle reservation =
                             endpoint.tryReserveQueuedRequest(
                                             pin,
-                                            request.getRequestId(),
+                                            String.valueOf(request.getRequestId()),
                                             request.getHardKvTokens(),
                                             request.getExpectedKvTokens(),
                                             70,
@@ -82,11 +82,14 @@ class DecodeSelectionAdmissionContractTest {
                     assertNotNull(
                             reservation, "the selected endpoint must pass the same placement gate");
                     try {
-                        assertEquals(requestId, reservation.requestId());
+                        assertEquals(String.valueOf(requestId), reservation.requestId());
                         assertTrue(
                                 EndpointTestSupport.isQueued(
-                                        endpoint.resourceSnapshot(), requestId));
-                        var reserved = endpoint.resourceSnapshot().requests().get(requestId);
+                                        endpoint.resourceSnapshot(), String.valueOf(requestId)));
+                        var reserved =
+                                endpoint.resourceSnapshot()
+                                        .requests()
+                                        .get(String.valueOf(requestId));
                         assertEquals(70, reserved.priority());
                         assertEquals(PROMPT_TOKENS, reserved.kvTokens());
                         assertEquals(EXPECTED_TOKENS, reserved.expectedKvTokens());
@@ -210,9 +213,13 @@ class DecodeSelectionAdmissionContractTest {
             try (WorkerEndpoint.GenerationPin pin = queued.tryPinGeneration()) {
                 assertNotNull(pin);
                 assertNotNull(
-                        queued.tryReserveQueuedRequest(pin, 1L, 0L, expectedKv, 50, null).handle());
+                        queued.tryReserveQueuedRequest(
+                                        pin, String.valueOf(1L), 0L, expectedKv, 50, null)
+                                .handle());
                 assertNotNull(
-                        queued.tryReserveQueuedRequest(pin, 2L, 0L, expectedKv, 50, null).handle());
+                        queued.tryReserveQueuedRequest(
+                                        pin, String.valueOf(2L), 0L, expectedKv, 50, null)
+                                .handle());
             }
         }
 
@@ -234,7 +241,7 @@ class DecodeSelectionAdmissionContractTest {
         private Request request(long requestId) {
             Request request =
                     Request.builder()
-                            .requestId(requestId)
+                            .requestId(String.valueOf(requestId))
                             .seqLen(100L)
                             .maxNewTokens(200)
                             .rawPriority(70)
@@ -281,8 +288,12 @@ class DecodeSelectionAdmissionContractTest {
                 DecodeResources.CapacityUsage freeUsage) {
             assertEquals(queuedUsage, queued.routingView().placementUsage());
             assertEquals(freeUsage, free.routingView().placementUsage());
-            assertFalse(EndpointTestSupport.isQueued(queued.resourceSnapshot(), requestId));
-            assertFalse(EndpointTestSupport.isQueued(free.resourceSnapshot(), requestId));
+            assertFalse(
+                    EndpointTestSupport.isQueued(
+                            queued.resourceSnapshot(), String.valueOf(requestId)));
+            assertFalse(
+                    EndpointTestSupport.isQueued(
+                            free.resourceSnapshot(), String.valueOf(requestId)));
         }
     }
 }

@@ -7,7 +7,7 @@ import org.flexlb.balance.scheduler.RequestTaskPool.RequestWorkQueue;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -771,14 +771,14 @@ class DeliveryClaimTest {
                     .thenReturn(
                             CompletableFuture.completedFuture(
                                     EngineGrpcClient.CancelReply.REQUEST_CLEANED));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
 
             var observed =
                     f.settlement()
                             .thenRun(
                                     () -> {
                                         assertFalse(Thread.holdsLock(f.context));
-                                        f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+                                        f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
                                     });
             f.driver();
             observed.get(5, TimeUnit.SECONDS);
@@ -958,6 +958,7 @@ class DeliveryClaimTest {
                             org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
             var entered = new java.util.concurrent.CountDownLatch(1);
             var release = new java.util.concurrent.CountDownLatch(1);
+            var cleanupRoute = f.claim.route();
             doAnswer(
                             call -> {
                                 assertFalse(Thread.holdsLock(f.context));
@@ -967,7 +968,7 @@ class DeliveryClaimTest {
                                 return true;
                             })
                     .when(f.prefill)
-                    .releaseRequest(f.claim.route());
+                    .releaseRequest(cleanupRoute);
             var shutdownFailure = new AtomicReference<Throwable>();
             Thread shutdown =
                     new Thread(
@@ -1167,7 +1168,7 @@ class DeliveryClaimTest {
     @Test
     void cancellationBeforeSendProducesNoRemoteCancel() throws Exception {
         try (var f = new Fixture()) {
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(f.owner.tryStartSend(f.claim));
             assertFalse(f.settlement().isDone(), "the sender still owns the prepared delivery");
             verifyNoInteractions(f.channel);
@@ -1186,12 +1187,12 @@ class DeliveryClaimTest {
     void earlyRemoteCleanupCannotReleaseTheSenderObligation() throws Exception {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             verify(f.channel, timeout(2_000))
                     .cancelAsync(
                             any(),
                             anyInt(),
-                            eq(CancelReason.CLIENT_CANCELLED.toRequest(41L)),
+                            eq(CancelReason.CLIENT_CANCELLED.toRequest(String.valueOf(41L))),
                             anyLong());
             f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             assertFalse(f.settlement().isDone());
@@ -1230,7 +1231,8 @@ class DeliveryClaimTest {
             f.recordDecodeStatus(
                     f.decode,
                     DecodeResources.DecodeRequestStatus.terminal(
-                            new DecodeResources.ReservationHandle(1L, 41L, 99L), 0L));
+                            new DecodeResources.ReservationHandle(1L, String.valueOf(41L), 99L),
+                            0L));
             f.owner.scheduleClose(f.claim.owner());
             assertFalse(f.settlement().isDone(), "another reservation is not proof");
             f.applyDecodeTerminal();
@@ -1251,7 +1253,7 @@ class DeliveryClaimTest {
                     .cancelAsync(
                             any(),
                             anyInt(),
-                            eq(CancelReason.CLIENT_CANCELLED.toRequest(41L)),
+                            eq(CancelReason.CLIENT_CANCELLED.toRequest(String.valueOf(41L))),
                             anyLong());
             assertTrue(
                     f.context.data().getFuture().join().isSuccess(),
@@ -1272,7 +1274,7 @@ class DeliveryClaimTest {
                     .shutdown();
             assertThrows(
                     RuntimeException.class,
-                    () -> f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED));
+                    () -> f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED));
             assertTrue(f.owner.requests.isCurrent(f.context));
             assertNull(f.cancel.getNow(null));
             assertNotNull(SchedulerTestSupport.failure(f.owner));
@@ -1283,7 +1285,7 @@ class DeliveryClaimTest {
     void cleanupTimeoutWithoutProofKeepsTheResourceObligationPending() throws Exception {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
@@ -1454,7 +1456,7 @@ class DeliveryClaimTest {
                     .when(f.prefill)
                     .releaseRequest(f.claim.route());
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim,
@@ -1497,7 +1499,7 @@ class DeliveryClaimTest {
     void lateCleanedAckAfterTimeoutArchivesOnlyTheOriginalRequest() throws Exception {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
@@ -1512,7 +1514,7 @@ class DeliveryClaimTest {
                     f.context.data().getFuture().join(),
                     "cleanup cannot replace the selected response");
 
-            var terminal = f.owner.requests.findTerminal(41L);
+            var terminal = f.owner.requests.findTerminal("41");
             assertTrue(f.owner.requests.removeExactTerminal(terminal, Long.MAX_VALUE));
             var replacement = RequestProtocolTestSupport.context(f.context.data().getConfig(), 41L);
             var replacementFuture = RequestProtocolTestSupport.register(f.owner, replacement);
@@ -1536,7 +1538,7 @@ class DeliveryClaimTest {
                 SchedulerTestSupport.awaitRequestWork(
                         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
 
-                assertSame(replacement, f.owner.requests.findActive(41L));
+                assertSame(replacement, f.owner.requests.findActive("41"));
                 assertFalse(
                         replacementFuture.isDone(),
                         "old cleanup facts cannot finish a reused request identity");
@@ -1552,7 +1554,7 @@ class DeliveryClaimTest {
     void endpointRetirementAfterCleanupTimeoutStillArchivesTheRequest() throws Exception {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
@@ -1576,7 +1578,7 @@ class DeliveryClaimTest {
     void lateFenceAfterTimeoutWaitsForTheExactDecodeTerminal() throws Exception {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
@@ -1616,12 +1618,14 @@ class DeliveryClaimTest {
                                     ? f.context.snapshot().route()
                                     : null),
                             DecodeResources.DecodeRequestStatus.terminal(
-                                            new DecodeResources.ReservationHandle(1L, 41L, 99L), 0L)
+                                            new DecodeResources.ReservationHandle(
+                                                    1L, String.valueOf(41L), 99L),
+                                            0L)
                                     .reservation(),
                             org.flexlb.dao.route.RoleType.DECODE,
                             (DecodeResources.DecodeRequestStatus.terminal(
                                                             new DecodeResources.ReservationHandle(
-                                                                    1L, 41L, 99L),
+                                                                    1L, String.valueOf(41L), 99L),
                                                             0L)
                                                     .kind()
                                             == DecodeResources.DecodeRequestStatus.Kind.ACTIVE
@@ -1629,14 +1633,18 @@ class DeliveryClaimTest {
                                     : DecodeResources.DecodeRequestStatus.terminal(
                                                                     new DecodeResources
                                                                             .ReservationHandle(
-                                                                            1L, 41L, 99L),
+                                                                            1L,
+                                                                            String.valueOf(41L),
+                                                                            99L),
                                                                     0L)
                                                             .errorCode()
                                                     == 0L
                                             ? ContextResult.EngineKind.COMPLETED
                                             : ContextResult.EngineKind.FAILED),
                             DecodeResources.DecodeRequestStatus.terminal(
-                                            new DecodeResources.ReservationHandle(1L, 41L, 99L), 0L)
+                                            new DecodeResources.ReservationHandle(
+                                                    1L, String.valueOf(41L), 99L),
+                                            0L)
                                     .errorCode(),
                             null,
                             System.currentTimeMillis()));
@@ -1657,7 +1665,7 @@ class DeliveryClaimTest {
     void lateCleanedAckAfterTimeoutStillWaitsForSenderExit() throws Exception {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
 
             assertEquals(
                     DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
@@ -1684,7 +1692,7 @@ class DeliveryClaimTest {
                             CompletableFuture.completedFuture(
                                     EngineGrpcClient.CancelReply.REQUEST_CLEANED));
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
 
             assertEquals(
                     DeliveryDispatcher.StopResult.REMOTE_CLEANED,
@@ -1712,7 +1720,7 @@ class DeliveryClaimTest {
     @ParameterizedTest
     @EnumSource(
             value = EngineGrpcClient.CancelReply.class,
-            names = {"ACCEPTED", "NOT_FOUND", "UNSUPPORTED", "FAILED"})
+            names = {"ACCEPTED", "NOT_FOUND", "FAILED"})
     void acknowledgementWithoutCleanupProofCannotReleaseAnUncertainSend(
             EngineGrpcClient.CancelReply ack) throws Exception {
         try (var f = new Fixture()) {
@@ -1748,7 +1756,7 @@ class DeliveryClaimTest {
             throws Exception {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             if (senderFirst) {
                 f.owner.onDeliveryResult(
                         new ContextResult.TransportResult(
@@ -1804,8 +1812,8 @@ class DeliveryClaimTest {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
             assertFalse(f.owner.tryStartSend(f.claim), "send qualification is consumed once");
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
-            f.owner.cancel(41L, 0L, CancelReason.SHUTDOWN);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.SHUTDOWN);
             f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
@@ -1813,7 +1821,7 @@ class DeliveryClaimTest {
                     .cancelAsync(
                             any(),
                             anyInt(),
-                            eq(CancelReason.CLIENT_CANCELLED.toRequest(41L)),
+                            eq(CancelReason.CLIENT_CANCELLED.toRequest(String.valueOf(41L))),
                             anyLong());
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
@@ -1826,7 +1834,7 @@ class DeliveryClaimTest {
                     .cancelAsync(
                             any(),
                             anyInt(),
-                            eq(CancelReason.CLIENT_CANCELLED.toRequest(41L)),
+                            eq(CancelReason.CLIENT_CANCELLED.toRequest(String.valueOf(41L))),
                             anyLong());
         }
     }
@@ -1837,7 +1845,7 @@ class DeliveryClaimTest {
             throws Exception {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             for (int index = 0; index < order.length(); index++) {
                 switch (order.charAt(index)) {
                     case 'S' ->
@@ -1923,7 +1931,7 @@ class DeliveryClaimTest {
     void foreignDecodeEvidenceCannotSettleTheExactDelivery(String mismatch) throws Exception {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim,
@@ -1936,10 +1944,12 @@ class DeliveryClaimTest {
                             : f.decode;
             var reservation =
                     switch (mismatch) {
-                        case "foreignToken" -> new DecodeResources.ReservationHandle(1L, 41L, 2L);
+                        case "foreignToken" ->
+                                new DecodeResources.ReservationHandle(1L, String.valueOf(41L), 2L);
                         case "foreignGeneration" ->
-                                new DecodeResources.ReservationHandle(2L, 41L, 1L);
-                        case "foreignRequest" -> new DecodeResources.ReservationHandle(1L, 42L, 1L);
+                                new DecodeResources.ReservationHandle(2L, String.valueOf(41L), 1L);
+                        case "foreignRequest" ->
+                                new DecodeResources.ReservationHandle(1L, String.valueOf(42L), 1L);
                         default -> f.reservation;
                     };
             var requestStatus =
@@ -1980,7 +1990,7 @@ class DeliveryClaimTest {
                                                 : EngineGrpcClient.CancelReply.NOT_FOUND);
                             });
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim,
@@ -1992,16 +2002,12 @@ class DeliveryClaimTest {
         }
     }
 
-    @ParameterizedTest
-    @EnumSource(
-            value = EngineGrpcClient.CancelReply.class,
-            names = {"REQUEST_CLEANED", "UNSUPPORTED"})
+    @Test
     @org.junit.jupiter.api.Timeout(15)
-    void receivedAckNeedsNoStopQueueAndPreventsFurtherRetries(EngineGrpcClient.CancelReply ack)
-            throws Exception {
+    void receivedCleanupNeedsNoStopQueueAndPreventsFurtherRetries() throws Exception {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim,
@@ -2032,7 +2038,7 @@ class DeliveryClaimTest {
             CompletableFuture<DeliveryDispatcher.StopResult> driver;
             try {
                 driver = f.driver();
-                f.cancel.complete(ack);
+                f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
                 verify(f.channel, timeout(2_000))
                         .cancelAsync(
                                 any(),
@@ -2045,9 +2051,7 @@ class DeliveryClaimTest {
                                 anyInt(),
                                 argThat(request -> request.getRequestId() == 41L),
                                 eq(500L));
-                assertEquals(
-                        ack == EngineGrpcClient.CancelReply.REQUEST_CLEANED,
-                        f.settlement().isDone());
+                assertTrue(f.settlement().isDone());
                 assertEquals(0, queued.size(), "reply application must not enqueue stop work");
                 verify(f.owner).onDeliveryResult(isA(ContextResult.CleanupAcknowledgement.class));
             } finally {
@@ -2059,14 +2063,6 @@ class DeliveryClaimTest {
                 while ((task = queued.poll()) != null) {
                     task.run();
                 }
-            }
-            if (ack == EngineGrpcClient.CancelReply.UNSUPPORTED) {
-                assertFalse(f.settlement().isDone(), "UNSUPPORTED is not cleanup proof");
-                f.owner.onDeliveryResult(
-                        new ContextResult.CleanupAcknowledgement(
-                                f.claim,
-                                ContextResult.CancelEvidenceKind.CLEANED,
-                                System.currentTimeMillis()));
             }
             f.assertArchivedAfterCleanup();
             driver.get(2, TimeUnit.SECONDS);
@@ -2087,7 +2083,7 @@ class DeliveryClaimTest {
             when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong()))
                     .thenReturn(first, new CompletableFuture<>());
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim,
@@ -2117,7 +2113,7 @@ class DeliveryClaimTest {
             when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong()))
                     .thenAnswer(call -> new CompletableFuture<>());
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim,
@@ -2149,7 +2145,7 @@ class DeliveryClaimTest {
                                             : CompletableFuture.completedFuture(
                                                     EngineGrpcClient.CancelReply.NOT_FOUND));
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim,
@@ -2175,7 +2171,7 @@ class DeliveryClaimTest {
             when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong()))
                     .thenAnswer(call -> CompletableFuture.completedFuture(ack));
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim,
@@ -2197,104 +2193,6 @@ class DeliveryClaimTest {
     }
 
     @ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
-    void unsupportedCancelStopsTransportWithoutProvingRelease(boolean timeout) throws Exception {
-        try (var logs = new CleanupLogs();
-                var f = new Fixture()) {
-            assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
-            f.owner.onDeliveryResult(
-                    new ContextResult.TransportResult(
-                            f.claim,
-                            Delivery.Result.uncertain(new IllegalStateException("reply lost")),
-                            System.currentTimeMillis()));
-            var driver = f.driver();
-            f.cancel.complete(EngineGrpcClient.CancelReply.UNSUPPORTED);
-            verify(f.channel, timeout(2_000))
-                    .cancelAsync(
-                            any(),
-                            anyInt(),
-                            argThat(request -> request.getRequestId() == 41L),
-                            anyLong());
-            assertEquals(
-                    DeliveryDispatcher.StopResult.UNSUPPORTED, driver.get(2, TimeUnit.SECONDS));
-            assertNull(SchedulerTestSupport.failure(f.owner));
-            assertFalse(f.settlement().isDone());
-            assertTrue(f.prefillOwned.get());
-            assertTrue(f.decodeOwned.get());
-            f.owner.onDeliveryResult(
-                    new ContextResult.CleanupAcknowledgement(
-                            f.claim,
-                            ContextResult.CancelEvidenceKind.CLEANED,
-                            System.currentTimeMillis()));
-            f.assertArchivedAfterCleanup();
-            if (!timeout) {
-                driver.get(2, TimeUnit.SECONDS);
-            }
-            verify(f.channel, times(1))
-                    .cancelAsync(
-                            any(),
-                            anyInt(),
-                            argThat(request -> request.getRequestId() == 41L),
-                            anyLong());
-            assertEquals(1, logs.count(ch.qos.logback.classic.Level.WARN));
-            assertDoesNotThrow(
-                    (org.junit.jupiter.api.function.Executable)
-                            () ->
-                                    SchedulerTestSupport.shutdown(
-                                            org.flexlb.balance.scheduler.SchedulerTestSupport
-                                                    .runtime(f.owner)));
-        }
-    }
-
-    @ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
-    void lateUnsupportedStopsQueuedOrInFlightRetryAndStillAcceptsProof(boolean retryStarted)
-            throws Exception {
-        try (var logs = new CleanupLogs();
-                var f = new Fixture()) {
-            var first = new CompletableFuture<EngineGrpcClient.CancelReply>();
-            var second = new CompletableFuture<EngineGrpcClient.CancelReply>();
-            when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong()))
-                    .thenReturn(first, second);
-            assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
-            f.owner.onDeliveryResult(
-                    new ContextResult.TransportResult(
-                            f.claim,
-                            Delivery.Result.uncertain(new IllegalStateException("reply lost")),
-                            System.currentTimeMillis()));
-            var driver = f.driver();
-            verify(f.channel, timeout(2_000).times(retryStarted ? 2 : 1))
-                    .cancelAsync(
-                            any(),
-                            anyInt(),
-                            argThat(request -> request.getRequestId() == 41L),
-                            anyLong());
-            first.complete(EngineGrpcClient.CancelReply.UNSUPPORTED);
-            if (retryStarted) {
-                second.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
-            } else {
-                f.owner.onDeliveryResult(
-                        new ContextResult.CleanupAcknowledgement(
-                                f.claim,
-                                ContextResult.CancelEvidenceKind.CLEANED,
-                                System.currentTimeMillis()));
-            }
-            f.assertArchivedAfterCleanup();
-            driver.get(2, TimeUnit.SECONDS);
-            verify(f.channel, times(retryStarted ? 2 : 1))
-                    .cancelAsync(
-                            any(),
-                            anyInt(),
-                            argThat(request -> request.getRequestId() == 41L),
-                            anyLong());
-            assertEquals(1, logs.count(ch.qos.logback.classic.Level.WARN));
-            assertNull(SchedulerTestSupport.failure(f.owner));
-        }
-    }
-
-    @ParameterizedTest
     @EnumSource(
             value = EngineGrpcClient.CancelReply.class,
             names = {"NOT_FOUND", "ACCEPTED", "FAILED"})
@@ -2305,7 +2203,7 @@ class DeliveryClaimTest {
             when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong()))
                     .thenReturn(first, new CompletableFuture<>());
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim,
@@ -2340,7 +2238,7 @@ class DeliveryClaimTest {
     @Test
     void unsentStopTimeoutRetainsResponsibilityUntilSenderExits() throws Exception {
         try (var f = new Fixture()) {
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             assertEquals(
                     DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
             SchedulerTestSupport.dispatcher(
@@ -2370,7 +2268,7 @@ class DeliveryClaimTest {
                             92L,
                             new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
             var registration = claim;
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim,
@@ -2396,7 +2294,7 @@ class DeliveryClaimTest {
                             CompletableFuture.completedFuture(
                                     EngineGrpcClient.CancelReply.REQUEST_CLEANED));
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             var record = f.stopRecord();
             var dispatcher =
                     SchedulerTestSupport.dispatcher(
@@ -2441,7 +2339,7 @@ class DeliveryClaimTest {
                                             f.owner))
                             .preempt(registration, f.decode, "priority preemption", 500L);
             verify(f.channel, timeout(2000)).cancelAsync(any(), anyInt(), any(), anyLong());
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
@@ -2517,7 +2415,7 @@ class DeliveryClaimTest {
                 assertTrue(f.decodeOwned.get());
             } finally {
                 org.mockito.Mockito.doCallRealMethod().when(timer).needsUpdate(any(), any());
-                f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+                f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
                 f.owner.onDeliveryResult(
                         new ContextResult.TransportResult(
                                 f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
@@ -2558,7 +2456,7 @@ class DeliveryClaimTest {
             verify(f.decode, never()).updatePreemption(anyLong(), any());
             verify(f.owner, never())
                     .onDeliveryResult(isA(ContextResult.CleanupAcknowledgement.class));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
@@ -2610,7 +2508,7 @@ class DeliveryClaimTest {
                     f.owner.onPreemption(
                             newAttempt,
                             new RequestLifecycle.PreemptionEvent(null, true, null, null, null)));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
@@ -2655,7 +2553,7 @@ class DeliveryClaimTest {
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
                 dispatcher.preempt(registration, f.decode, "priority preemption", 500L);
                 var record = f.stopRecord();
-                f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+                f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
                 var stopping = f.driver();
                 Runnable task;
                 while ((task = queued.poll()) != null) {
@@ -2716,7 +2614,7 @@ class DeliveryClaimTest {
                     f.stopRecord(),
                     "a new preemption advances the existing delivery record");
             verify(f.channel, times(2)).cancelAsync(any(), anyInt(), any(), anyLong());
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
@@ -2733,7 +2631,7 @@ class DeliveryClaimTest {
                     .when(f.owner)
                     .onDeliveryResult(isA(ContextResult.CleanupAcknowledgement.class));
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
@@ -2750,7 +2648,7 @@ class DeliveryClaimTest {
     void concurrentWakeupsRetainOneStopOwnerWithoutHoldingTheContextLock() throws Exception {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             var record = f.stopRecord();
             var driver = f.driver();
             var done = new java.util.concurrent.CountDownLatch(1_000);
@@ -2807,7 +2705,7 @@ class DeliveryClaimTest {
                     rejecting);
             try {
                 assertTrue(f.owner.tryStartSend(f.claim));
-                f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+                f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
                 var record = f.stopRecord();
                 SchedulerTestSupport.awaitRequestWork(
                         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
@@ -2854,7 +2752,7 @@ class DeliveryClaimTest {
                             })
                     .when(f.owner)
                     .onDeliveryResult(isA(ContextResult.CleanupAcknowledgement.class));
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
                             f.claim, Delivery.Result.delivered(), System.currentTimeMillis()));
@@ -2911,7 +2809,7 @@ class DeliveryClaimTest {
                 new java.util.concurrent.atomic.AtomicBoolean();
         final DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
         final DecodeResources.ReservationHandle reservation =
-                new DecodeResources.ReservationHandle(1L, 41L, 1L);
+                new DecodeResources.ReservationHandle(1L, String.valueOf(41L), 1L);
         final Delivery.Member claim;
 
         Fixture() {
@@ -2927,7 +2825,7 @@ class DeliveryClaimTest {
                             service,
                             mock(DeliveryMetricsReporter.class),
                             mock(RequestSchedulerReporter.class),
-                            mock(RecentCacheKeyTraceReporter.class));
+                            mock(TheoryCacheHitReporter.class));
             ReflectionTestUtils.setField(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner).dispatcher,
                     "grpcClient",

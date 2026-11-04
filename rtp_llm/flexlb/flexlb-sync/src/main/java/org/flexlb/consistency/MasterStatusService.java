@@ -1,7 +1,6 @@
 package org.flexlb.consistency;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.domain.consistency.LBConsistencyConfig;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
@@ -20,18 +19,16 @@ public class MasterStatusService implements MasterStatusView {
     public static final String MASTER_CHANGE_NOTIFY_PATH = "/rtp_llm/notify_master";
 
     private final ZookeeperMasterElectService zookeeperMasterElectService;
-    private final LBConsistencyConfig lbConsistencyConfig;
     private final ZookeeperMasterElectService.LocalNodeIdentity localNode;
 
     public MasterStatusService(ZookeeperMasterElectService zookeeperMasterElectService) {
         this.zookeeperMasterElectService = zookeeperMasterElectService;
-        lbConsistencyConfig = zookeeperMasterElectService.getLbConsistencyConfig();
         localNode = zookeeperMasterElectService.localNodeIdentity();
     }
 
     public void start() {
         if (!isNeedConsistency()) {
-            log.warn("start: lbConsistencyConfig is closed.");
+            log.warn("start: ZooKeeper consistency is disabled.");
             return;
         }
         this.zookeeperMasterElectService.start();
@@ -39,7 +36,7 @@ public class MasterStatusService implements MasterStatusView {
 
     public void offline() {
         if (!isNeedConsistency()) {
-            log.warn("offline: lbConsistencyConfig is closed.");
+            log.warn("offline: ZooKeeper consistency is disabled.");
             return;
         }
         this.zookeeperMasterElectService.offline();
@@ -48,7 +45,7 @@ public class MasterStatusService implements MasterStatusView {
     @PreDestroy
     public void destroy() {
         if (!isNeedConsistency()) {
-            log.warn("destroy: lbConsistencyConfig is closed.");
+            log.warn("destroy: ZooKeeper consistency is disabled.");
             return;
         }
         this.zookeeperMasterElectService.destroy();
@@ -56,7 +53,7 @@ public class MasterStatusService implements MasterStatusView {
 
     @Override
     public boolean isNeedConsistency() {
-        return lbConsistencyConfig.isNeedConsistency();
+        return zookeeperMasterElectService.isConsistencyEnabled();
     }
 
     @Override

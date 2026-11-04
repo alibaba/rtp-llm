@@ -1,10 +1,7 @@
 package org.flexlb.cache.match.theory;
 
-import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Array;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -15,9 +12,6 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
 
 /**
  * Checks bounded recent-cache-key snapshots and hit estimates.
@@ -49,49 +43,6 @@ class RecentCacheKeyWindowTest {
                     IllegalArgumentException.class,
                     () -> new RecentCacheKeyWindow(1000L, capacity, () -> 0L));
         }
-    }
-
-    @Test
-    void disabledWindowAllocatesNoPoolAndIgnoresRecords() throws Exception {
-        var config = new FlexlbConfig();
-        config.getObservability().getCacheHit().getRecentKeyWindow().setWriteEnabled(false);
-        var service = mock(ConfigService.class);
-        when(service.loadBalanceConfig()).thenReturn(config);
-        var window = new RecentCacheKeyWindow(service);
-
-        for (var field : RecentCacheKeyWindow.class.getDeclaredFields()) {
-            if (field.getType().isArray()) {
-                field.setAccessible(true);
-                assertEquals(0, Array.getLength(field.get(window)), field.getName());
-            }
-        }
-        List<Long> keys = mock();
-        var snapshot = window.record(keys);
-        assertEquals(RecentCacheKeyWindow.DEFAULT_TIME_WINDOW_MS, snapshot.getTimeWindowMs());
-        assertEquals(0L, snapshot.getRequestOccurrences());
-        assertEquals(0L, snapshot.getRequestHitOccurrences());
-        assertEquals(0L, window.record(List.of(11L)).getRequestOccurrences());
-        assertEquals(0L, window.record(List.of(11L)).getRequestHitOccurrences());
-        verifyNoInteractions(keys);
-    }
-
-    @Test
-    void enabledWindowRetainsConfiguredHistoryWhenMetricsAreDisabled() {
-        var config = new FlexlbConfig();
-        var cacheHit = config.getObservability().getCacheHit();
-        cacheHit.setMetricsEnabled(false);
-        cacheHit.getRecentKeyWindow().setDurationMs(60_000L);
-        cacheHit.getRecentKeyWindow().setMaxKeyOccurrences(3L);
-        var service = mock(ConfigService.class);
-        when(service.loadBalanceConfig()).thenReturn(config);
-        var window = new RecentCacheKeyWindow(service);
-
-        assertEquals(0L, window.record(List.of(11L, 22L)).getRequestHitOccurrences());
-        var next = window.record(List.of(22L, 33L));
-        assertEquals(60_000L, next.getTimeWindowMs());
-        assertEquals(2L, next.getRequestOccurrences());
-        assertEquals(1L, next.getRequestHitOccurrences());
-        assertEquals(0L, window.record(List.of(11L)).getRequestHitOccurrences());
     }
 
     @Test
@@ -208,8 +159,8 @@ class RecentCacheKeyWindowTest {
         window.record(List.of(11L, 22L));
         window.record(List.of(33L, 44L));
         assertEquals(1L, window.record(List.of(33L)).getRequestHitOccurrences());
-        // The oldest whole request was evicted to retain the preceding record.
-        assertEquals(2L, window.record(List.of(11L, 22L, 33L, 44L)).getRequestHitOccurrences());
+        // Reusing a key refreshes it without consuming another slot in the unique-key pool.
+        assertEquals(4L, window.record(List.of(11L, 22L, 33L, 44L)).getRequestHitOccurrences());
     }
 
     @Test

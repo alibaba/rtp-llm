@@ -173,9 +173,9 @@ class RoutePublicationTest {
                                 assertFalse(Thread.holdsLock(claim.route().ctx()));
                                 assertFalse(f.queueLock.isHeldByCurrentThread());
                                 assertFalse(f.handoffClosed.get());
-                                published.add(claim.route().requestId());
+                                published.add(Long.parseLong(claim.route().requestId()));
                                 f.predictions.put(
-                                        claim.route().requestId(),
+                                        Long.parseLong(claim.route().requestId()),
                                         f.duration(
                                                 ((RouteDelivered) call.getArgument(0))
                                                         .predictedAtMs(),
@@ -241,7 +241,7 @@ class RoutePublicationTest {
     void lostClaimDoesNotContributeToLaterRoutePrediction(int lostIndex) {
         try (var f = new LinearDeliveryFixture(false)) {
             var items = List.of(f.item(1, 10), f.item(2, 20), f.item(3, 30));
-            f.lostClaims.add(items.get(lostIndex).requestId());
+            f.lostClaims.add(Long.parseLong(items.get(lostIndex).requestId()));
             var cumulative = new CopyOnWriteArrayList<Long>();
             doAnswer(
                             call -> {
@@ -258,7 +258,7 @@ class RoutePublicationTest {
             long total = 0;
             var expected = new java.util.ArrayList<Long>();
             for (var item : items) {
-                if (f.lostClaims.contains(item.requestId())) {
+                if (f.lostClaims.contains(Long.parseLong(item.requestId()))) {
                     continue;
                 }
                 total += item.seqLen();
@@ -266,8 +266,9 @@ class RoutePublicationTest {
             }
             assertEquals(expected, cumulative);
             assertEquals(2, f.claims.size());
-            verify(f.permits.get(items.get(lostIndex).requestId()), never()).dispatch();
-            verify(f.permits.get(items.get(lostIndex).requestId())).release();
+            verify(f.permits.get(Long.parseLong(items.get(lostIndex).requestId())), never())
+                    .dispatch();
+            verify(f.permits.get(Long.parseLong(items.get(lostIndex).requestId()))).release();
         }
     }
 
@@ -280,8 +281,8 @@ class RoutePublicationTest {
                             call -> {
                                 RouteDelivered delivered = call.getArgument(0);
                                 Delivery.Member claim = delivered.delivery();
-                                published.add(claim.route().requestId());
-                                if (claim.route().requestId() == 1) {
+                                published.add(Long.parseLong(claim.route().requestId()));
+                                if (claim.route().requestId().equals("1")) {
                                     throw f.expectedShutdownFailure;
                                 }
                                 return null;
@@ -352,7 +353,7 @@ class RoutePublicationTest {
                                     DecodeResources.ReleaseReason.NOT_SENT)
                             .status());
             assertEquals(1, endpoint.resourceSnapshot().requests().size());
-            assertTrue(endpoint.resourceSnapshot().requests().containsKey(2L));
+            assertTrue(endpoint.resourceSnapshot().requests().containsKey(String.valueOf(2L)));
         }
     }
 
@@ -371,8 +372,12 @@ class RoutePublicationTest {
             assertEquals(1, snapshot.queuedCount());
             assertEquals(2, snapshot.requests().size());
             assertEquals(1, endpoint.routingView().engineCapacityUsed());
-            assertTrue(org.flexlb.balance.endpoint.EndpointTestSupport.isQueued(snapshot, 1));
-            assertFalse(org.flexlb.balance.endpoint.EndpointTestSupport.isQueued(snapshot, 2));
+            assertTrue(
+                    org.flexlb.balance.endpoint.EndpointTestSupport.isQueued(
+                            snapshot, String.valueOf(1)));
+            assertFalse(
+                    org.flexlb.balance.endpoint.EndpointTestSupport.isQueued(
+                            snapshot, String.valueOf(2)));
             assertEquals(List.of(2L), f.claimIds());
             assertEquals(
                     1,

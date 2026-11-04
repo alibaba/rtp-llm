@@ -59,7 +59,7 @@ class VitWorkerSelectorTest {
                 StrategyTestSupport.select(endpoints, strategy, 3L, RoleType.VIT, "group-a")) {
             assertNotNull(selected);
             assertEquals(RoleType.VIT, StrategyTestSupport.vit(selected).getRole());
-            assertEquals(3L, StrategyTestSupport.vit(selected).getRequestId());
+            assertEquals("3", StrategyTestSupport.vit(selected).getRequestId());
             assertEquals("127.0.0.3", StrategyTestSupport.vit(selected).getServerIp());
             assertEquals(8080, StrategyTestSupport.vit(selected).getHttpPort());
             assertEquals(8081, StrategyTestSupport.vit(selected).getGrpcPort());

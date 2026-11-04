@@ -10,6 +10,8 @@ public interface EndpointStats {
 
     Counts counts(RoleType role);
 
+    long blockSize(RoleType role);
+
     record DecodeCounts(
             int inflight, int totalLoad, long expectedKv, long hardKv, long oldestAgeMs) {}
 

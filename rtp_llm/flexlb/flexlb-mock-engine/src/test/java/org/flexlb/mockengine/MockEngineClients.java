@@ -46,7 +46,7 @@ final class MockEngineClients {
                                     && request.getReason()
                                             == RequestCancelReasonPB
                                                     .REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED) {
-                                return CompletableFuture.completedFuture(CancelReply.UNSUPPORTED);
+                                return CompletableFuture.completedFuture(CancelReply.FAILED);
                             }
                             return cancel(services.get(call.<Integer>getArgument(1)), request);
                         });
@@ -55,7 +55,7 @@ final class MockEngineClients {
     private static CompletableFuture<CancelReply> cancel(
             JavaMockEngineCluster.FastRpcService service, CancelRequestPB request) {
         if (service == null) {
-            return CompletableFuture.completedFuture(CancelReply.UNSUPPORTED);
+            return CompletableFuture.completedFuture(CancelReply.FAILED);
         }
         if (service.isStopped()) {
             return CompletableFuture.failedFuture(new IllegalStateException("engine stopped"));
@@ -124,7 +124,7 @@ final class MockEngineClients {
                 || ip == null
                 || ip.isBlank()
                 || port <= 0) {
-            return CompletableFuture.completedFuture(CancelReply.UNSUPPORTED);
+            return CompletableFuture.completedFuture(CancelReply.FAILED);
         }
         try {
             String body =
@@ -147,7 +147,7 @@ final class MockEngineClients {
 
     private static CancelReply readHttpReply(HttpResponse<String> response) {
         if (response.statusCode() == 404) {
-            return CancelReply.UNSUPPORTED;
+            return CancelReply.FAILED;
         }
         if (response.statusCode() != 200) {
             throw new IllegalStateException(

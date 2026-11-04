@@ -12,7 +12,7 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -71,11 +71,12 @@ class RequestExecutionSchedulingTest {
                         SchedulingTestConfig.configService(config),
                         mock(DeliveryMetricsReporter.class),
                         mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         var scheduler = (QueuedRequestScheduler) SchedulerTestServices.scheduler(runtime);
         var status = stableStatus();
         when(status.getRole()).thenReturn(RoleType.PREFILL);
-        when(status.getIpPort()).thenReturn("prefill:8080");
+        when(status.getLogicalIpPort()).thenReturn("prefill:8080");
+        when(status.getLogicalIpPort()).thenReturn("prefill:8080");
         when(status.topologySnapshot()).thenReturn(mock(WorkerStatus.TopologySnapshot.class));
         var endpoint =
                 spy(
@@ -131,13 +132,13 @@ class RequestExecutionSchedulingTest {
                         SchedulingTestConfig.configService(config),
                         mock(DeliveryMetricsReporter.class),
                         mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         var scheduler = (QueuedRequestScheduler) SchedulerTestServices.scheduler(owner);
         var status =
                 WorkerStatus.createDiscovered(
                         RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, null);
         var endpoint = stableEndpoint(status);
-        when(endpoint.ipPort()).thenReturn(status.getIpPort());
+        when(endpoint.ipPort()).thenReturn(status.getLogicalIpPort());
         var execution = mock(EndpointWork.class);
         ((java.util.Map<org.flexlb.balance.endpoint.PrefillEndpoint, EndpointWork>)
                         org.springframework.test.util.ReflectionTestUtils.getField(
@@ -194,13 +195,13 @@ class RequestExecutionSchedulingTest {
                         SchedulingTestConfig.configService(config),
                         mock(DeliveryMetricsReporter.class),
                         mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         var scheduler = (QueuedRequestScheduler) SchedulerTestServices.scheduler(owner);
         var status =
                 WorkerStatus.createDiscovered(
                         RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, null);
         var endpoint = stableEndpoint(status);
-        when(endpoint.ipPort()).thenReturn(status.getIpPort());
+        when(endpoint.ipPort()).thenReturn(status.getLogicalIpPort());
         var execution = mock(EndpointWork.class);
         ((java.util.Map<org.flexlb.balance.endpoint.PrefillEndpoint, EndpointWork>)
                         org.springframework.test.util.ReflectionTestUtils.getField(
@@ -262,13 +263,13 @@ class RequestExecutionSchedulingTest {
                         SchedulingTestConfig.configService(config),
                         mock(DeliveryMetricsReporter.class),
                         mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         var scheduler = (QueuedRequestScheduler) SchedulerTestServices.scheduler(owner);
         var status =
                 WorkerStatus.createDiscovered(
                         RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, null);
         var endpoint = stableEndpoint(status);
-        when(endpoint.ipPort()).thenReturn(status.getIpPort());
+        when(endpoint.ipPort()).thenReturn(status.getLogicalIpPort());
         var execution = mock(EndpointWork.class);
         ((java.util.Map<org.flexlb.balance.endpoint.PrefillEndpoint, EndpointWork>)
                         org.springframework.test.util.ReflectionTestUtils.getField(
@@ -328,13 +329,13 @@ class RequestExecutionSchedulingTest {
                         SchedulingTestConfig.configService(config),
                         mock(DeliveryMetricsReporter.class),
                         mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         var scheduler = (QueuedRequestScheduler) SchedulerTestServices.scheduler(owner);
         var status =
                 WorkerStatus.createDiscovered(
                         RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, null);
         var endpoint = stableEndpoint(status);
-        when(endpoint.ipPort()).thenReturn(status.getIpPort());
+        when(endpoint.ipPort()).thenReturn(status.getLogicalIpPort());
         var execution = mock(EndpointWork.class);
         ((java.util.Map<org.flexlb.balance.endpoint.PrefillEndpoint, EndpointWork>)
                         org.springframework.test.util.ReflectionTestUtils.getField(
@@ -513,7 +514,7 @@ class RequestExecutionSchedulingTest {
                         service,
                         mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
                         mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock();
         EndpointWork runtime = runningRuntime(config, endpoint, delivery);
@@ -541,7 +542,7 @@ class RequestExecutionSchedulingTest {
         CountDownLatch published = new CountDownLatch(1);
         CountDownLatch allowCommit = new CountDownLatch(1);
         try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
-                var routing = scheduler.claimAdmissionHandle(901L, future);
+                var routing = scheduler.claimAdmissionHandle("901", future);
                 var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(routing)) {
             assertNotNull(routing);
             var committed =
@@ -609,7 +610,7 @@ class RequestExecutionSchedulingTest {
                         mock(RequestLifecycle.class));
         RequestRoute route = spy(item(config, endpoint, 902L, 50, System.currentTimeMillis()));
         RequestContext context = route.ctx();
-        context.register(902L, System.currentTimeMillis(), Long.MAX_VALUE, 60_000L);
+        context.register("902", System.currentTimeMillis(), Long.MAX_VALUE, 60_000L);
         var operation = context.beginPlacement(null);
         context.bindPlacement(operation, route, ContextResult.PublicationResult.PREPARED);
         CountDownLatch sampled = new CountDownLatch(1);
@@ -1242,7 +1243,7 @@ class RequestExecutionSchedulingTest {
                         SchedulingTestConfig.configService(config),
                         mock(DeliveryMetricsReporter.class),
                         mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         var execution =
                 spy(
                         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(scheduler)
@@ -1410,7 +1411,11 @@ class RequestExecutionSchedulingTest {
             int priority,
             long enqueuedAtMs) {
         Request request =
-                Request.builder().requestId(requestId).rawPriority(priority).seqLen(10L).build();
+                Request.builder()
+                        .requestId(String.valueOf(requestId))
+                        .rawPriority(priority)
+                        .seqLen(10L)
+                        .build();
         RequestContext context = new RequestContext(config);
         context.data().setRequest(request);
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));

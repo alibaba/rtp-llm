@@ -5,6 +5,35 @@ package org.flexlb.constant;
  * Use with standard monitoring libraries like Micrometer/Prometheus
  */
 public class MetricConstant {
+    public static final String ROUTING_QUEUE_ENTRY_QPS = "app.routing.queue.entry.qps";
+    public static final String ROUTING_QUEUE_TIMEOUT_QPS = "app.routing.queue.timeout.qps";
+    public static final String ROUTING_QUEUE_REJECTED_QPS = "app.routing.queue.rejected.qps";
+    public static final String ROUTING_ROUTE_EXECUTION_TIME_MS =
+            "app.routing.route.execution.time.ms";
+    public static final String ROUTING_SUCCESS_QPS = "app.routing.success.qps";
+    public static final String ROUTING_FAILURE_QPS = "app.routing.failure.qps";
+    public static final String ROUTING_RETRY_QPS = "app.routing.retry.qps";
+    public static final String WORKER_PERMIT_CAPACITY = "app.worker.permit.capacity";
+    public static final String AUTO_TPM_REQUEST_SLO_MS = "auto_tpm.request.slo_ms";
+    public static final String AUTO_TPM_DEADLINE_MISS_COUNT = "auto_tpm.deadline_miss.count";
+    public static final String ENGINE_WORKER_NUMBER =
+            "app.engine.health.check.engine.worker.number";
+    public static final String ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT =
+            "app.engine.health.check.engine.worker.number.service.discovery.result";
+    public static final String ENGINE_STATUS_AVAILABLE_CONCURRENCY =
+            "app.engine.health.check.available.concurrency";
+    public static final String ENGINE_STATUS_VISITOR_SUCCESS_QPS =
+            "app.engine.health.check.visitor.success.qps";
+    public static final String DECODE_INFLIGHT_KV_RESERVED_TOKENS =
+            "app.flexlb.decode.inflight.kv.reserved.tokens";
+    public static final String DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS =
+            "app.flexlb.decode.inflight.hard.kv.reserved.tokens";
+    public static final String CACHE_RECENT_KEY_HIT_COUNT = "app.cache.recent.key.hit.count";
+    public static final String CACHE_RECENT_KEY_TOTAL_COUNT = "app.cache.recent.key.total.count";
+    public static final String DISPATCH_EXECUTOR_COMPLETED_TASKS =
+            "dispatch.executor.completed.tasks";
+    public static final String CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS =
+            "app.cache.routing.selected.match.total.tokens";
 
     /**
      * One increment per GC notification, tagged by gc, collector and pid.
@@ -15,12 +44,19 @@ public class MetricConstant {
      * Sum of GC notification pause durations in milliseconds, with the same tags as the count.
      */
     public static final String JVM_GC_PAUSE_TOTAL_MS = "app.jvm.gc.pause.total.ms";
+
     public static final String NETTY_DIRECT_RESERVED_BYTES = "app.netty.direct.reserved.bytes";
     public static final String NETTY_DIRECT_PINNED_BYTES = "app.netty.direct.pinned.bytes";
     public static final String NETTY_MEMORY_SAMPLE_DURATION_MS =
             "app.netty.memory.sample.duration.ms";
     public static final String NETTY_MEMORY_SAMPLE_TIMESTAMP_MS =
             "app.netty.memory.sample.timestamp.ms";
+
+    public static final String GRPC_SERVER_EXECUTOR_COMPLETED_TASKS =
+            "grpc.server.executor.completed.tasks";
+    public static final String GRPC_SERVER_EXECUTOR_CALLER_RUNS =
+            "grpc.server.executor.caller.runs";
+    public static final String GRPC_RESPONSE_SIZE = "app.grpc.response.size";
 
     /* ------------------------ Engine Status Metrics -------------------------- */
 
@@ -58,6 +94,7 @@ public class MetricConstant {
 
     /** Failed WorkerStatus gRPC check latency in microseconds. */
     public static final String ENGINE_STATUS_CHECK_FAIL_RT = "app.engine.health.check.fail.rt";
+
     public static final String STATUS_FAILURE_DETAIL = "app.status.failure.detail";
 
     /**

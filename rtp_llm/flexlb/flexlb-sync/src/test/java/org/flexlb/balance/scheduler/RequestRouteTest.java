@@ -83,7 +83,7 @@ class RequestRouteTest {
             metadata.setSuccess(false);
         }
         if (invalid.equals("request")) {
-            metadata.setRequestId(99L);
+            metadata.setRequestId(String.valueOf(99L));
         }
         if (invalid.equals("address")) {
             metadata.setHttpPort(9999);
@@ -406,7 +406,7 @@ class RequestRouteTest {
         var result =
                 ServerStatus.forWorker(
                         worker.getStatus().getRole(),
-                        42L,
+                        String.valueOf(42L),
                         worker.getStatus().topologySnapshot(),
                         worker.getStatus().committedEngineObservation());
         return result;

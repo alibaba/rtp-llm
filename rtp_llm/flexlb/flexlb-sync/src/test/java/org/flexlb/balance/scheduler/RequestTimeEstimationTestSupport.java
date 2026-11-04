@@ -21,13 +21,13 @@ public final class RequestTimeEstimationTestSupport {
 
     static final Comparator<GroupPlanner.Item> FIFO =
             Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
-                    .thenComparingLong(GroupPlanner.Item::requestId);
+                    .thenComparing(GroupPlanner.Item::requestId);
 
     static final Comparator<GroupPlanner.Item> PRIORITY =
             Comparator.comparingInt(GroupPlanner.Item::priority)
                     .reversed()
                     .thenComparingLong(GroupPlanner.Item::enqueueSeq)
-                    .thenComparingLong(GroupPlanner.Item::requestId);
+                    .thenComparing(GroupPlanner.Item::requestId);
 
     static final org.flexlb.config.DispatcherConfig.Type ROUTE =
             org.flexlb.config.DispatcherConfig.Type.NON_BATCH;
@@ -100,7 +100,13 @@ public final class RequestTimeEstimationTestSupport {
             long serviceTokens,
             long expiresAtMs) {
         return new GroupPlanner.Item(
-                requestId, priority, enqueueSequence, NOW_MS - 1L, expiresAtMs, serviceTokens, 0L);
+                String.valueOf(requestId),
+                priority,
+                enqueueSequence,
+                NOW_MS - 1L,
+                expiresAtMs,
+                serviceTokens,
+                0L);
     }
 
     static Probe probe(long requestId, int priority, long sequenceLength, long hitCache) {
@@ -168,7 +174,7 @@ public final class RequestTimeEstimationTestSupport {
                 RequestTimeEstimation.current()
                         .projectRankingView(
                                 inputs,
-                                probe.requestId(),
+                                String.valueOf(probe.requestId()),
                                 probe.priority(),
                                 probe.enqueuedAtMs(),
                                 probe.expiresAtMs(),

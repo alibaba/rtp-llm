@@ -89,14 +89,19 @@ public final class RequestContext {
     }
 
     public synchronized void register(
-            long requestId, long nowMs, long expiresAtMs, long inactivityTimeoutMs) {
+            String requestId, long nowMs, long expiresAtMs, long inactivityTimeoutMs) {
         if (key != null) {
             return;
         }
         if (inactivityTimeoutMs <= 0L) {
             throw new IllegalArgumentException("positive inactivity timeout required");
         }
-        key = new Identity(requestId, INCARNATIONS.incrementAndGet());
+        key =
+                new Identity(
+                        requestId,
+                        data.getOriginalNumericRequestId(),
+                        data.getPhase(),
+                        INCARNATIONS.incrementAndGet());
         createdAtMs = lastWorkerAtMs = nowMs;
         absoluteDeadline = expiresAtMs;
         inactivityMs = inactivityTimeoutMs;
@@ -150,7 +155,7 @@ public final class RequestContext {
             commitSnapshot(before.updatedAtMs());
             return true;
         }
-        if (acquired.requestId() != key.requestId()
+        if (!java.util.Objects.equals(acquired.requestId(), key.requestId())
                 || acquired.ctx() != this
                 || placement.published()
                 || (route != null && route != acquired)) {
@@ -357,13 +362,16 @@ public final class RequestContext {
         boolean ending =
                 isDecode
                         || evidence.role() == RoleType.PDFUSION
+                        || evidence.role() == RoleType.ENCODER
                         || evidence.kind() == EngineKind.FAILED
                         || evidence.kind() == EngineKind.PRIORITY_CANCELLED
                                 && preemption != null
                                 && !preemption.finished()
                                 && preemption.phase().acceptsPriorityTerminal();
         if (evidence.kind() == EngineKind.RETIRED && !isDecode) {
-            ending = delivery == null && !engine.decodeAccepted() && preemption == null;
+            ending =
+                    evidence.role() == RoleType.ENCODER
+                            || delivery == null && !engine.decodeAccepted() && preemption == null;
             if (placement != null && ending) {
                 placement = placement.withPendingRetirement(evidence);
                 return commitSnapshot(evidence.nowMs());
@@ -749,6 +757,8 @@ public final class RequestContext {
             terminalRecord =
                     new RequestState(
                             key.requestId(),
+                            key.originalNumericRequestId(),
+                            key.phase(),
                             outcome.phase(),
                             delivery == null ? Delivery.SendMode.NONE : delivery.identity().kind(),
                             delivery == null ? 0L : delivery.identity().batchId(),
@@ -860,7 +870,7 @@ public final class RequestContext {
                 || route != exact
                 || exact.ctx() != this
                 || role == null
-                || role != RoleType.DECODE && !role.supportsPrefill()) {
+                || role != RoleType.DECODE && role != RoleType.ENCODER && !role.supportsPrefill()) {
             return false;
         }
         return role != RoleType.DECODE || Objects.equals(route.decodeReservation(), reservation);

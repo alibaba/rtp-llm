@@ -41,7 +41,7 @@ public interface PrefillRequestQueue extends Iterable<RequestRoute> {
 
     /** Fields available to both live queue ordering and frozen prediction inputs. */
     interface QueueItem {
-        long requestId();
+        String requestId();
 
         int priority();
 

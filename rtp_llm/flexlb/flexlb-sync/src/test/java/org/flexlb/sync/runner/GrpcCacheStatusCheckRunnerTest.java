@@ -2,8 +2,8 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -81,7 +81,7 @@ class GrpcCacheStatusCheckRunnerTest {
     void testGrpcCacheStatusCheckRunner() {
         // Arrange
         String modelName = "test-model";
-        String ipPort = "127.0.0.1:8080";
+        String ipPort = "127.0.0.1:8080@0";
         String site = "test-site";
 
         WorkerStatus workerStatus = workerStatus();
@@ -97,7 +97,7 @@ class GrpcCacheStatusCheckRunnerTest {
         when(workerStatusRpcClient.getCacheStatusAsync(
                         anyString(), anyInt(), anyLong(), anyLong(), eq(RoleType.PREFILL)))
                 .thenReturn(CompletableFuture.completedFuture(cacheStatusPB));
-        when(localKvCacheAwareManager.updateEngineBlockCache(workerStatus))
+        when(localKvCacheAwareManager.updateFromWorkerStatus(workerStatus))
                 .thenReturn(WorkerCacheUpdateResult.builder().success(true).build());
 
         // Act
@@ -132,7 +132,7 @@ class GrpcCacheStatusCheckRunnerTest {
 
     @Test
     void failedCacheIndexUpdateRetriesTheSameWorkerVersion() {
-        String ipPort = "127.0.0.1:8080";
+        String ipPort = "127.0.0.1:8080@0";
         WorkerStatus workerStatus = workerStatus();
         EndpointRegistry directory = directory(workerStatus);
         EngineRpcService.CacheStatusPB firstResponse =
@@ -145,7 +145,7 @@ class GrpcCacheStatusCheckRunnerTest {
                         CompletableFuture.completedFuture(firstResponse),
                         CompletableFuture.completedFuture(secondResponse),
                         CompletableFuture.completedFuture(secondResponse));
-        when(localKvCacheAwareManager.updateEngineBlockCache(workerStatus))
+        when(localKvCacheAwareManager.updateFromWorkerStatus(workerStatus))
                 .thenReturn(
                         WorkerCacheUpdateResult.builder().success(true).build(),
                         WorkerCacheUpdateResult.builder()
@@ -173,7 +173,7 @@ class GrpcCacheStatusCheckRunnerTest {
 
     @Test
     void staleGenerationCallbackCannotPublishAddressCache() {
-        String ipPort = "127.0.0.1:8080";
+        String ipPort = "127.0.0.1:8080@0";
         WorkerStatus oldStatus = workerStatus();
         var config = Mockito.mock(org.flexlb.config.ConfigService.class);
         EndpointRegistry directory = RunnerTestSupport.endpointRegistry(config);
@@ -207,7 +207,7 @@ class GrpcCacheStatusCheckRunnerTest {
                         .setBlockSize(128)
                         .build());
 
-        verify(localKvCacheAwareManager, never()).updateEngineBlockCache(oldStatus);
+        verify(localKvCacheAwareManager, never()).updateFromWorkerStatus(oldStatus);
     }
 
     private void runCachePoll(
@@ -235,7 +235,7 @@ class GrpcCacheStatusCheckRunnerTest {
     private static EndpointRegistry directory(WorkerStatus status) {
         var config = Mockito.mock(org.flexlb.config.ConfigService.class);
         EndpointRegistry directory = RunnerTestSupport.endpointRegistry(config);
-        directory.currentOrDiscover(status.getRole(), status.getIpPort(), () -> status);
+        directory.currentOrDiscover(status.getRole(), status.getLogicalIpPort(), () -> status);
         return directory;
     }
 }

@@ -15,10 +15,10 @@ import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.PrefillSelectionStrategy;
 import org.flexlb.balance.strategy.VitSelectionStrategy;
 import org.flexlb.balance.strategy.VitWorkerSelector;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -92,7 +92,7 @@ public class PlacementConfiguration {
             DeliveryDispatcher dispatcher,
             ResponseCompletionExecutor completions,
             DeliveryMetricsReporter reporter,
-            RecentCacheKeyTraceReporter trace) {
+            TheoryCacheHitReporter trace) {
         return new RequestLifecycle(
                 requests, tasks, deadlines, dispatcher, completions, reporter, trace);
     }

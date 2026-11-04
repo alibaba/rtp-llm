@@ -243,7 +243,13 @@ class ZkLeaderElectionTest {
         Environment environment = mock(Environment.class);
 
         ZookeeperMasterElectService service =
-                new ZookeeperMasterElectService(httpService, healthReporter, environment);
+                new ZookeeperMasterElectService(
+                        httpService,
+                        healthReporter,
+                        environment,
+                        org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                                new org.flexlb.config.FlexlbConfig()),
+                        org.mockito.Mockito.mock(org.flexlb.config.DeploymentIdentity.class));
         ReflectionTestUtils.setField(
                 service,
                 "localNode",

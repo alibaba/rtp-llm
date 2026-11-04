@@ -85,7 +85,7 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
         long[] requestIds = {40001, 40002, 40003, 40004};
         CompletableFuture<Response>[] futures = new CompletableFuture[requestIds.length];
         for (int i = 0; i < requestIds.length; i++) {
-            futures[i] = submitRequest(String.valueOf(requestIds[i]));
+            futures[i] = submitRequest(requestIds[i]);
         }
 
         // 4. Wait for all requests to complete (ACK)

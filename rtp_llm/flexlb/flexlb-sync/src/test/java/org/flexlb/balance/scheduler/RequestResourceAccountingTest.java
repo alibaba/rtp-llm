@@ -18,7 +18,7 @@ import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.enums.TaskPhase;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -89,7 +89,7 @@ class RequestResourceAccountingTest {
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), ID);
         var prefill = mock(PrefillEndpoint.class);
         var decode = RequestProtocolTestSupport.decodeEndpoint();
-        var reservation = new DecodeResources.ReservationHandle(1L, ID, 1L);
+        var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(ID), 1L);
         var item =
                 SchedulingTestConfig.createRoute(
                         context,
@@ -130,7 +130,8 @@ class RequestResourceAccountingTest {
         try (Fixture f = new Fixture()) {
             f.assertReserved();
             switch (end) {
-                case CANCEL -> f.requests.cancel(ID, 0, CancelReason.CLIENT_CANCELLED);
+                case CANCEL ->
+                        f.requests.cancel(String.valueOf(ID), 0, CancelReason.CLIENT_CANCELLED);
                 case FUTURE_CANCEL -> assertTrue(f.item.ctx().data().getFuture().cancel(false));
                 case EXPIRE -> f.expire();
                 case SHUTDOWN -> {
@@ -176,7 +177,7 @@ class RequestResourceAccountingTest {
         try (Fixture f = new Fixture(true)) {
             f.assertReserved();
             if (reason == CancelReason.CLIENT_CANCELLED) {
-                f.requests.cancel(ID, 0, reason);
+                f.requests.cancel(String.valueOf(ID), 0, reason);
             } else {
                 f.expire();
             }
@@ -198,7 +199,7 @@ class RequestResourceAccountingTest {
             assertTrue(member.accepted());
             assertEquals(1, f.decode.resourceSnapshot().activeDispatchPermits());
             assertEquals(1, f.decode.routingView().engineCapacityUsed());
-            f.requests.cancel(ID, 0, CancelReason.CLIENT_CANCELLED);
+            f.requests.cancel(String.valueOf(ID), 0, CancelReason.CLIENT_CANCELLED);
             // The transaction's eventual rollback must remain harmless after request cleanup.
             assertNull(org.flexlb.util.Failures.close(member.value()));
             f.assertEmpty();
@@ -231,7 +232,7 @@ class RequestResourceAccountingTest {
                 assertTrue(f.item.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
             }
             f.assertHandedOff();
-            f.requests.cancel(ID, 0, CancelReason.CLIENT_CANCELLED);
+            f.requests.cancel(String.valueOf(ID), 0, CancelReason.CLIENT_CANCELLED);
             f.assertHandedOff();
             f.expire();
             f.assertHandedOff();
@@ -326,7 +327,7 @@ class RequestResourceAccountingTest {
                     DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                     acquisition.handle().dispatch().status());
             // Endpoint ownership can advance before its notification reaches the context.
-            f.requests.cancel(ID, 0, CancelReason.CLIENT_CANCELLED);
+            f.requests.cancel(String.valueOf(ID), 0, CancelReason.CLIENT_CANCELLED);
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.requests));
             assertEquals(1, SchedulerTestSupport.repository(f.requests).liveRequestCount());
@@ -423,7 +424,9 @@ class RequestResourceAccountingTest {
             f.decodeStatus(Map.of("101", stillPresent), Map.of(), TOTAL_KV);
             assertEquals(
                     RequestState.Phase.ACKNOWLEDGED,
-                    SchedulerTestSupport.repository(f.requests).getRequestState(ID, 0).state());
+                    SchedulerTestSupport.repository(f.requests)
+                            .getRequestState(String.valueOf(ID), 0)
+                            .state());
             // No inactivity expiry, sweep, sleep or shutdown is allowed to make this assertion
             // pass.
             f.decodeStatus(Map.of(), Map.of("101", task(ID)), TOTAL_KV);
@@ -512,7 +515,12 @@ class RequestResourceAccountingTest {
                             replacementRef.set(
                                     f.decode
                                             .tryReserveQueuedRequest(
-                                                    pin, ID, HARD_KV * 2, EXPECTED_KV * 2, 50, null)
+                                                    pin,
+                                                    String.valueOf(ID),
+                                                    HARD_KV * 2,
+                                                    EXPECTED_KV * 2,
+                                                    50,
+                                                    null)
                                             .handle());
                         }
                         return replacementRef.get() != null;
@@ -593,10 +601,7 @@ class RequestResourceAccountingTest {
             var requestReporter = mock(RequestSchedulerReporter.class);
             requests =
                     SchedulerTestSupport.create(
-                            service,
-                            reporter,
-                            requestReporter,
-                            mock(RecentCacheKeyTraceReporter.class));
+                            service, reporter, requestReporter, mock(TheoryCacheHitReporter.class));
             var channel = mock(EngineGrpcClient.class);
             when(channel.cancelAsync(any(), anyInt(), any(), anyLong())).thenReturn(cleanup);
             org.springframework.test.util.ReflectionTestUtils.setField(
@@ -628,7 +633,7 @@ class RequestResourceAccountingTest {
                         org.mockito.Mockito.spy(
                                 (PrefillEndpoint)
                                         endpoints.publishPreparedEndpoint(
-                                                worker.getIpPort(),
+                                                worker.getLogicalIpPort(),
                                                 worker,
                                                 worker.prepareNewStatus(
                                                         WorkerStatusTestSupport
@@ -651,7 +656,8 @@ class RequestResourceAccountingTest {
             decodeStatus(Map.of(), Map.of(), TOTAL_KV);
             try (var pin = decode.tryPinGeneration()) {
                 reservation =
-                        decode.tryReserveQueuedRequest(pin, ID, HARD_KV, EXPECTED_KV, 50, null)
+                        decode.tryReserveQueuedRequest(
+                                        pin, String.valueOf(ID), HARD_KV, EXPECTED_KV, 50, null)
                                 .handle();
             }
             assertNotNull(reservation);
@@ -669,7 +675,7 @@ class RequestResourceAccountingTest {
                             reservation,
                             System.currentTimeMillis());
             var held = new AtomicReference<PrefillEndpoint.RouteReservation>();
-            admission = requests.claimAdmissionHandle(ID, future);
+            admission = requests.claimAdmissionHandle(String.valueOf(ID), future);
             assertNotNull(admission);
             try (var pin = prefill.tryPinGeneration()) {
                 assertTrue(
@@ -771,7 +777,8 @@ class RequestResourceAccountingTest {
         void assertCapacityReusable() {
             try (var pin = decode.tryPinGeneration()) {
                 var next =
-                        decode.tryReserveQueuedRequest(pin, 999L, HARD_KV, EXPECTED_KV, 50, null)
+                        decode.tryReserveQueuedRequest(
+                                        pin, String.valueOf(999L), HARD_KV, EXPECTED_KV, 50, null)
                                 .handle();
                 assertNotNull(next);
                 var permit = decode.acquireDispatchPermit(next, capacity);
@@ -819,7 +826,7 @@ class RequestResourceAccountingTest {
         void expire() {
             RequestProtocolTestSupport.expireInactiveRequest(
                     requests,
-                    requests.requests.findActive(ID),
+                    requests.requests.findActive(String.valueOf(ID)),
                     System.currentTimeMillis() + TTL + 1);
         }
 
@@ -843,7 +850,7 @@ class RequestResourceAccountingTest {
 
     private static TaskInfo task(long id) {
         var task = new TaskInfo();
-        task.setRequestId(id);
+        task.setRequestId(String.valueOf(id));
         task.setInputLength(HARD_KV);
         task.setPhase(TaskPhase.RUNNING);
         return task;

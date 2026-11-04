@@ -110,7 +110,7 @@ class PriorityDecodePreemptionPolicyTest {
 
     private static DecodeRequestView accepted(long id, int priority, long kvTokens) {
         return new DecodeRequestView(
-                id,
+                String.valueOf(id),
                 priority,
                 kvTokens,
                 kvTokens,
@@ -183,7 +183,7 @@ class PriorityDecodePreemptionPolicyTest {
     private static DecodeEvictionProposal plan(
             int priority, long hardKvTokens, EndpointFixture ep, Map<String, String> failures) {
         return planDecode(
-                Request.builder().requestId(99L).seqLen(hardKvTokens).maxNewTokens(0).build(),
+                Request.builder().requestId("99").seqLen(hardKvTokens).maxNewTokens(0).build(),
                 priority,
                 ep.capacity(),
                 ep.snapshot(),
@@ -202,7 +202,7 @@ class PriorityDecodePreemptionPolicyTest {
                         : EnumSet.noneOf(VictimStage.class));
         var proposal =
                 planDecode(
-                        Request.builder().requestId(99L).seqLen(0L).maxNewTokens(0).build(),
+                        Request.builder().requestId("99").seqLen(0L).maxNewTokens(0).build(),
                         70,
                         engine.capacity(),
                         engine.snapshot(),
@@ -215,7 +215,7 @@ class PriorityDecodePreemptionPolicyTest {
         }
         var local =
                 new DecodeRequestView(
-                        2L,
+                        String.valueOf(2L),
                         10,
                         100L,
                         100L,
@@ -228,7 +228,7 @@ class PriorityDecodePreemptionPolicyTest {
         var localEndpoint = endpoint(1_000L, 1_000L, 1, 1, List.of(local));
         var localProposal =
                 planDecode(
-                        Request.builder().requestId(99L).seqLen(0L).maxNewTokens(0).build(),
+                        Request.builder().requestId("99").seqLen(0L).maxNewTokens(0).build(),
                         70,
                         localEndpoint.capacity(),
                         localEndpoint.snapshot(),
@@ -239,7 +239,7 @@ class PriorityDecodePreemptionPolicyTest {
     }
 
     private static List<Long> victimIds(DecodeEvictionProposal p) {
-        return p.victims().stream().map(DecodeRequestView::requestId).toList();
+        return p.victims().stream().map(view -> Long.parseLong(view.requestId())).toList();
     }
 
     @ParameterizedTest
@@ -292,7 +292,7 @@ class PriorityDecodePreemptionPolicyTest {
                     new PriorityDecodePreemptionPolicy()
                             .planDecode(
                                     Request.builder()
-                                            .requestId(99L)
+                                            .requestId("99")
                                             .seqLen(200L)
                                             .maxNewTokens(0)
                                             .build(),
@@ -335,7 +335,7 @@ class PriorityDecodePreemptionPolicyTest {
                     new PriorityDecodePreemptionPolicy()
                             .planDecode(
                                     Request.builder()
-                                            .requestId(99L)
+                                            .requestId("99")
                                             .seqLen(0L)
                                             .maxNewTokens(0)
                                             .build(),
@@ -357,7 +357,7 @@ class PriorityDecodePreemptionPolicyTest {
                     new PriorityDecodePreemptionPolicy()
                             .planDecode(
                                     Request.builder()
-                                            .requestId(99L)
+                                            .requestId("99")
                                             .seqLen(300L)
                                             .maxNewTokens(0)
                                             .build(),

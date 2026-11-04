@@ -159,7 +159,8 @@ public class DeliveryDispatcher {
                                     published
                                             ? PublicationResult.PUBLISHED
                                             : PublicationResult.NOT_PUBLISHED);
-            if (published && recorded) route.prefillEp().signal(PrefillEndpoint.Signal.INPUT);
+            if (published && recorded && route.prefillEp() != null)
+                route.prefillEp().signal(PrefillEndpoint.Signal.INPUT);
         } catch (Throwable problem) {
             failure = Failures.append(failure, problem);
         }
@@ -212,10 +213,11 @@ public class DeliveryDispatcher {
 
     /** Release preparation only; a physically published route belongs to RequestLifecycle. */
     private static void rollbackRoute(RequestRoute route, AdmissionHandle operation) {
-        if (route.prefillReservation() != null) return;
+        if (route.prefillReservation() != null || route.encoderCommitted()) return;
         Throwable failure = null;
         try {
-            route.prefillEp().releaseRequest(route);
+            if (route.encoderEp() != null) route.encoderEp().release(route);
+            else route.prefillEp().releaseRequest(route);
         } catch (Throwable problem) {
             failure = problem;
         }
@@ -316,6 +318,7 @@ public class DeliveryDispatcher {
             RequestRoute route) {
         var context = route.ctx();
         var lifecycle = context.data().getLifecycle();
+        if (route.encoderEp() != null) return commitEncoderRoute(route);
         if (!reserveDecode(route, null))
             return PlacementResult.blocked(route.placementKey(RoleType.DECODE));
         Delivery.Member member = null;
@@ -375,6 +378,37 @@ public class DeliveryDispatcher {
         }
     }
 
+    private PlacementResult<ContextResult.RouteDelivered, PlacementKey> commitEncoderRoute(
+            RequestRoute route) {
+        var context = route.ctx();
+        var lifecycle = context.data().getLifecycle();
+        synchronized (context) {
+            route.attachReservation(null);
+            var operation = lifecycle.beginRoute(route);
+            if (operation == null) return PlacementResult.closed();
+            var config = context.data().getConfig();
+            int limit =
+                    config.isQueue()
+                            ? config.getDispatcher().getMaxInflightPerEncoderWorker()
+                            : Integer.MAX_VALUE;
+            boolean published = route.encoderEp().commit(route.encoderPin(), route, limit);
+            if (published) route.markEncoderCommitted();
+            if (!recordRoute(operation, route, published, null)) return PlacementResult.closed();
+            if (!published)
+                return PlacementResult.blocked(
+                        new PlacementKey(
+                                RoleType.ENCODER,
+                                route.encoderEp().group(),
+                                route.encoderEp().ipPort()));
+            var claim = new Member(route, null).claimDelivery(Delivery.SendMode.ROUTE_DECISION, 0);
+            if (claim == null) return PlacementResult.closed();
+            long now = System.currentTimeMillis();
+            return PlacementResult.success(
+                    new ContextResult.RouteDelivered(
+                            claim, context.snapshot().inactivityExpiresAtMs(), now));
+        }
+    }
+
     private static Response reservationFailure(CapacityBoundary.Attempt<?> result) {
         if (result == null) return Response.error(StrategyErrorType.REQUEST_CANCELLED);
         var boundary = result.boundary();
@@ -422,7 +456,7 @@ public class DeliveryDispatcher {
                 switch (kind) {
                     case ACKNOWLEDGED, FENCED -> PreemptionCancelPhase.CANCEL_REQUESTED;
                     case NOT_FOUND -> PreemptionCancelPhase.NOT_FOUND_STALE;
-                    case UNKNOWN, UNSUPPORTED -> PreemptionCancelPhase.CANCEL_UNKNOWN;
+                    case UNKNOWN -> PreemptionCancelPhase.CANCEL_UNKNOWN;
                     case CLEANED -> null;
                 };
         boolean cleaned = kind == ContextResult.CancelEvidenceKind.CLEANED;
@@ -442,7 +476,6 @@ public class DeliveryDispatcher {
             case REQUEST_FENCED -> ContextResult.CancelEvidenceKind.FENCED;
             case ACCEPTED -> ContextResult.CancelEvidenceKind.ACKNOWLEDGED;
             case NOT_FOUND -> ContextResult.CancelEvidenceKind.NOT_FOUND;
-            case UNSUPPORTED -> ContextResult.CancelEvidenceKind.UNSUPPORTED;
             case FAILED -> ContextResult.CancelEvidenceKind.UNKNOWN;
         };
     }
@@ -845,7 +878,6 @@ public class DeliveryDispatcher {
          */
         REMOTE_CLEANED,
         UNRESOLVED,
-        UNSUPPORTED,
         ALREADY_SETTLED,
         STALE
     }
@@ -1242,24 +1274,9 @@ public class DeliveryDispatcher {
             } catch (RuntimeException | Error failed) {
                 owner.tasks.recordFailure(failed);
             } finally {
-                boolean unsupported;
                 synchronized (this) {
-                    unsupported =
-                            evidence == EngineGrpcClient.CancelReply.UNSUPPORTED
-                                    && terminal == null;
                     if (evidence == EngineGrpcClient.CancelReply.REQUEST_CLEANED) {
                         terminal = StopResult.REMOTE_CLEANED;
-                    } else if (unsupported) {
-                        terminal = StopResult.UNSUPPORTED;
-                    }
-                }
-                if (unsupported) {
-                    try {
-                        Logger.warn(
-                                "[delivery-cleanup] remote cancellation unsupported: request_id={}"
-                                        + "; waiting for Worker completion or retirement",
-                                context.data().getRequestId());
-                    } catch (RuntimeException | Error ignored) {
                     }
                 }
                 if (operation != null) {

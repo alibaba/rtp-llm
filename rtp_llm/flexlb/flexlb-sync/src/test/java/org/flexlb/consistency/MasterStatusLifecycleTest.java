@@ -1,6 +1,5 @@
 package org.flexlb.consistency;
 
-import org.flexlb.domain.consistency.LBConsistencyConfig;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
@@ -34,9 +33,7 @@ class MasterStatusLifecycleTest {
     @ValueSource(booleans = {true, false})
     void contextShutdownClosesOnlyEnabledElection(boolean enabled) {
         var election = mock(ZookeeperMasterElectService.class);
-        var config = new LBConsistencyConfig();
-        config.setNeedConsistency(enabled);
-        when(election.getLbConsistencyConfig()).thenReturn(config);
+        when(election.isConsistencyEnabled()).thenReturn(enabled);
         when(election.localNodeIdentity())
                 .thenReturn(
                         new ZookeeperMasterElectService.LocalNodeIdentity(
@@ -54,9 +51,7 @@ class MasterStatusLifecycleTest {
     @CsvSource({"true,true", "true,false", "false,true", "false,false"})
     void masterChangeRefreshesOnlyAnEnabledMatchingRole(boolean enabled, boolean matchingRole) {
         var election = mock(ZookeeperMasterElectService.class);
-        var config = new LBConsistencyConfig();
-        config.setNeedConsistency(enabled);
-        when(election.getLbConsistencyConfig()).thenReturn(config);
+        when(election.isConsistencyEnabled()).thenReturn(enabled);
         when(election.localNodeIdentity())
                 .thenReturn(
                         new ZookeeperMasterElectService.LocalNodeIdentity(
@@ -77,9 +72,12 @@ class MasterStatusLifecycleTest {
                     new ZookeeperMasterElectService(
                             mock(GeneralHttpNettyService.class),
                             mock(EngineHealthReporter.class),
-                            environment);
+                            environment,
+                            org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                                    new org.flexlb.config.FlexlbConfig()),
+                            org.mockito.Mockito.mock(org.flexlb.config.DeploymentIdentity.class));
 
-            assertFalse(election.getLbConsistencyConfig().isNeedConsistency());
+            assertFalse(election.isConsistencyEnabled());
             assertNull(ReflectionTestUtils.getField(election, "localNode"));
             hostLookup.verifyNoInteractions();
             verifyNoInteractions(environment);
@@ -97,7 +95,10 @@ class MasterStatusLifecycleTest {
                     new ZookeeperMasterElectService(
                             mock(GeneralHttpNettyService.class),
                             mock(EngineHealthReporter.class),
-                            environment);
+                            environment,
+                            org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                                    new org.flexlb.config.FlexlbConfig()),
+                            org.mockito.Mockito.mock(org.flexlb.config.DeploymentIdentity.class));
             hostLookup.verifyNoInteractions();
 
             var service = new MasterStatusService(election);
@@ -124,12 +125,16 @@ class MasterStatusLifecycleTest {
                 new ZookeeperMasterElectService(
                         mock(GeneralHttpNettyService.class),
                         mock(EngineHealthReporter.class),
-                        environment);
+                        environment,
+                        org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                                new org.flexlb.config.FlexlbConfig()),
+                        org.mockito.Mockito.mock(org.flexlb.config.DeploymentIdentity.class));
         var identity =
                 new ZookeeperMasterElectService.LocalNodeIdentity(
                         "127.0.0.8", "07001", "master-role");
         ReflectionTestUtils.setField(election, "localNode", identity);
-        election.getLbConsistencyConfig().setNeedConsistency(true);
+        ReflectionTestUtils.setField(
+                election, "consistencyConfig", new org.flexlb.config.ZookeeperConsistencyConfig());
         ReflectionTestUtils.setField(election, "isMaster", true);
         try (var hostLookup = mockStatic(InetAddress.class)) {
             var service = new MasterStatusService(election);

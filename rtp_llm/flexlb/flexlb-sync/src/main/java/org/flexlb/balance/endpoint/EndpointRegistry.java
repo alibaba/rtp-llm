@@ -6,7 +6,7 @@ import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.balance.strategy.PrefillSelectionStrategy;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.function.Function;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -41,7 +41,7 @@ import static com.google.common.base.Preconditions.checkState;
 
 /** Owns discovered worker identities and their published routing generations. */
 @Component
-public class EndpointRegistry implements EndpointStats {
+public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.WorkerStatusProvider {
 
     /**
      * One non-owning Prefill generation exposed to routing.
@@ -63,6 +63,14 @@ public class EndpointRegistry implements EndpointStats {
 
         public long generationId() {
             return endpoint.getStatus().getGenerationId();
+        }
+
+        public String physicalAddress() {
+            return endpoint.getStatus().getPhysicalIpPort();
+        }
+
+        public int engineCount() {
+            return endpoint.getStatus().getMultiEngineNum();
         }
 
         public long cacheBlockSize() {
@@ -167,6 +175,12 @@ public class EndpointRegistry implements EndpointStats {
             roleMaps(RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION, RoleType.VIT);
 
     /** Advisory Prefill generations, atomically replaced after each map write. */
+    private volatile List<EncoderEndpoint> encoderDirectory = List.of();
+
+    public List<EncoderEndpoint> encoderRoutingSnapshot() {
+        return encoderDirectory;
+    }
+
     private volatile List<PrefillRoutingEntry> prefillDirectory = List.of();
 
     /** PDFusion uses the same Prefill planning path but a distinct role map. */
@@ -477,7 +491,8 @@ public class EndpointRegistry implements EndpointStats {
             BiFunction<String, WorkerEndpoint, WorkerEndpoint> mutation) {
         boolean updatesPrefillDirectory = role != null && role.supportsPrefill();
         boolean updatesDecodeDirectory = role == RoleType.DECODE;
-        if (!updatesPrefillDirectory && !updatesDecodeDirectory) {
+        boolean updatesEncoderDirectory = role == RoleType.ENCODER;
+        if (!updatesPrefillDirectory && !updatesDecodeDirectory && !updatesEncoderDirectory) {
             return endpoints.compute(address, mutation);
         }
         synchronized (lifecycleGate) {
@@ -505,6 +520,14 @@ public class EndpointRegistry implements EndpointStats {
                                     Map.Entry::getKey,
                                     next == null ? null : Map.entry(address, (DecodeEndpoint) next))
                             : null;
+            List<EncoderEndpoint> nextEncoderDirectory =
+                    updatesEncoderDirectory
+                            ? directoryAfterMutation(
+                                    encoderDirectory,
+                                    address,
+                                    EncoderEndpoint::address,
+                                    (EncoderEndpoint) next)
+                            : null;
             WorkerEndpoint published =
                     endpoints.compute(
                             address,
@@ -522,8 +545,10 @@ public class EndpointRegistry implements EndpointStats {
                 } else {
                     pdFusionDirectory = nextPrefillDirectory;
                 }
-            } else {
+            } else if (updatesDecodeDirectory) {
                 this.decodeDirectory = nextDecodeDirectory;
+            } else {
+                encoderDirectory = nextEncoderDirectory;
             }
             return published;
         }
@@ -657,6 +682,7 @@ public class EndpointRegistry implements EndpointStats {
                             grouping,
                             workerQueues);
             case DECODE -> new DecodeEndpoint(status, requests, placementAvailability);
+            case ENCODER -> new EncoderEndpoint(status, placementAvailability);
             case VIT -> new WorkerEndpoint(status);
             case FRONTEND -> throw new AssertionError("validated above");
         };
@@ -672,6 +698,7 @@ public class EndpointRegistry implements EndpointStats {
                 prefillDirectory = List.of();
                 pdFusionDirectory = List.of();
                 decodeDirectory = List.of();
+                encoderDirectory = List.of();
             }
             completion = closeCompletion;
         }
@@ -826,6 +853,15 @@ public class EndpointRegistry implements EndpointStats {
     }
 
     @Override
+    public long blockSize(RoleType role) {
+        for (var worker : getWorkerStatuses(role, null)) {
+            long size = worker.committedEngineObservation().blockSize();
+            if (size > 0) return size;
+        }
+        return 0L;
+    }
+
+    @Override
     public Map<String, EndpointStats.Decode> decodeStats() {
         return statistics(RoleType.DECODE, EndpointStats.Decode.class);
     }
@@ -833,7 +869,11 @@ public class EndpointRegistry implements EndpointStats {
     private <T> Map<String, T> statistics(RoleType role, Class<T> type) {
         var values = new java.util.HashMap<String, T>();
         endpointSnapshot(role)
-                .forEach((address, endpoint) -> values.put(address, type.cast(endpoint)));
+                .forEach(
+                        (address, endpoint) ->
+                                values.put(
+                                        endpoint.getStatus().getMetricIpPort(),
+                                        type.cast(endpoint)));
         return Map.copyOf(values);
     }
 
@@ -852,7 +892,7 @@ public class EndpointRegistry implements EndpointStats {
      * @param retainForSchedulerCleanup current directory lookup, called outside endpoint locks;
      *                                  candidates are revalidated under the ledger lock before eviction
      */
-    public void evictExpiredOrphans(long ttlMs, LongPredicate retainForSchedulerCleanup) {
+    public void evictExpiredOrphans(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
         for (RoleType role : List.of(RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION)) {
             endpointsByRole
                     .get(role)
@@ -902,6 +942,17 @@ public class EndpointRegistry implements EndpointStats {
      * status identity only; its endpoint remains absent until the first valid
      * WorkerStatus response commits.
      */
+    @Override
+    public java.util.Collection<WorkerStatus> getWorkerStatuses(RoleType role, String group) {
+        if (role == null) return List.of();
+        return statusesByRole.get(role).values().stream()
+                .filter(
+                        worker ->
+                                worker.isAvailableForScheduling()
+                                        && (group == null || group.equals(worker.getGroup())))
+                .toList();
+    }
+
     public WorkerStatus currentOrDiscover(
             RoleType role, String address, Supplier<WorkerStatus> discoveredFactory) {
         Objects.requireNonNull(role, "role");
@@ -918,7 +969,7 @@ public class EndpointRegistry implements EndpointStats {
         WorkerStatus discovered =
                 Objects.requireNonNull(discoveredFactory.get(), "discovered status");
         checkArgument(
-                discovered.getRole() == role && address.equals(discovered.getIpPort()),
+                discovered.getRole() == role && address.equals(discovered.getLogicalIpPort()),
                 "Discovered WorkerStatus identity does not match directory key");
         synchronized (lifecycleGate) {
             checkState(closeCompletion == null, "EndpointRegistry is closing");

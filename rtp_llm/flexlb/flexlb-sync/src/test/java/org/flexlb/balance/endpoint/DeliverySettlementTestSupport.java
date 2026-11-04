@@ -27,7 +27,7 @@ public final class DeliverySettlementTestSupport {
 
     public DeliverySettlementTestSupport() {
         this(
-                Comparator.comparingLong(
+                Comparator.comparing(
                         org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem::requestId));
     }
 
@@ -84,12 +84,12 @@ public final class DeliverySettlementTestSupport {
 
     public List<PrefillEndpoint.PrefillRequestStatus> finish(long batchId, RequestRoute item) {
         TaskInfo finished = new TaskInfo();
-        finished.setRequestId(item.requestId());
+        finished.setRequestId(String.valueOf(item.requestId()));
         finished.setBatchId(batchId);
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
         response.setRunningTaskInfo(Map.of());
-        response.setFinishedTaskInfo(Map.of(Long.toString(item.requestId()), finished));
+        response.setFinishedTaskInfo(Map.of(item.requestId(), finished));
         var observation =
                 WorkerStatusTestSupport.freezeStatusResponse(
                         EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090),
@@ -131,7 +131,7 @@ public final class DeliverySettlementTestSupport {
     public static void decodeStatus(
             DecodeEndpoint endpoint, long requestId, boolean finished, long errorCode) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(String.valueOf(requestId));
         task.setErrorCode(errorCode);
         task.setPhase(finished ? null : TaskPhase.KV_ALLOCATED);
         WorkerStatusResponse response = new WorkerStatusResponse();

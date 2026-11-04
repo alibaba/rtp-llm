@@ -4,8 +4,8 @@ import com.google.common.math.StatsAccumulator;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
@@ -19,7 +19,6 @@ import org.flexlb.service.grpc.WorkerStatusRpcClient;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.runner.GrpcCacheStatusCheckRunner;
 import org.flexlb.sync.runner.GrpcWorkerStatusRunner;
-import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Failures;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -44,7 +43,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
 
 /**
@@ -243,7 +241,7 @@ public final class WorkerStatusSynchronizer {
                                     modelName, latestEngineWorkerList.size(), roleType.toString()));
             Set<String> latestValidIpPorts =
                     latestEngineWorkerList.stream()
-                            .map(WorkerHost::getIpPort)
+                            .map(WorkerHost::getLogicalIpPort)
                             .collect(Collectors.toSet());
             for (var entry : cachedWorkerStatuses.entrySet()) {
                 if (!latestValidIpPorts.contains(entry.getKey())) {
@@ -262,9 +260,7 @@ public final class WorkerStatusSynchronizer {
                     "Submitting status check tasks for {} workers", latestEngineWorkerList.size());
             for (WorkerHost host : latestEngineWorkerList) {
                 try {
-                    WorkerStatus workerStatus =
-                            getOrCreateWorkerStatus(
-                                    roleType, host.getIpPort(), host.getSite(), host.getGroup());
+                    WorkerStatus workerStatus = getOrCreateWorkerStatus(roleType, host);
                     if (workerStatus != null) {
                         pollWorker(workerStatus, syncCycleId);
                     }
@@ -273,7 +269,7 @@ public final class WorkerStatusSynchronizer {
                             "Worker sync failed, model={}, role={}, address={}",
                             modelName,
                             roleType,
-                            host.getIpPort(),
+                            host.getLogicalIpPort(),
                             failure);
                 }
             }
@@ -292,7 +288,7 @@ public final class WorkerStatusSynchronizer {
             reportTelemetry(
                     () ->
                             engineHealthReporter.reportStatusCheckerFail(
-                                    modelName, BalanceStatusEnum.UNKNOWN_ERROR, null));
+                                    BalanceStatusEnum.UNKNOWN_ERROR, null));
         } finally {
             reportTelemetry(() -> reportLoadVariance(roleType));
         }
@@ -316,6 +312,7 @@ public final class WorkerStatusSynchronizer {
                                 cacheAwareService,
                                 statusApplicationExecutor),
                 workerStatus.tryBeginStatusPoll(syncCycleId));
+        if (flexlbConfig.isKvcmCacheMatching()) return;
         long intervalCycles =
                 Math.max(
                         1L, cacheIntervalService.getCurrentIntervalMs() / syncEngineStatusInterval);
@@ -407,25 +404,39 @@ public final class WorkerStatusSynchronizer {
         }
     }
 
-    private WorkerStatus getOrCreateWorkerStatus(
-            RoleType roleType, String workerIpPort, String site, String group) {
+    private WorkerStatus getOrCreateWorkerStatus(RoleType roleType, WorkerHost host) {
+        if (host.getIp() == null || host.getIp().isBlank()) {
+            throw new IllegalArgumentException("Worker address must have a nonempty host");
+        }
+        String workerIpPort = host.getLogicalIpPort();
+        String site = host.getSite();
+        String group = host.getGroup();
         while (true) {
             WorkerStatus workerStatus =
                     endpointRegistry.currentOrDiscover(
                             roleType,
                             workerIpPort,
-                            () -> createWorkerStatus(roleType, workerIpPort, site, group));
+                            () -> WorkerStatus.createDiscovered(roleType, host));
 
             if (!workerStatus.isAvailableForScheduling()) {
                 return workerStatus;
             }
             WorkerStatus.TopologySnapshot topology = workerStatus.topologySnapshot();
-            if (Objects.equals(topology.group(), group) && Objects.equals(topology.site(), site)) {
+            boolean sameTransport =
+                    topology.grpcPort() == host.getGrpcPort()
+                            && topology.workerStatusPort() == host.getWorkerStatusPort()
+                            && topology.multiEngineNum() == host.getMultiEngineNum();
+            if (sameTransport
+                    && Objects.equals(topology.group(), group)
+                    && Objects.equals(topology.site(), site)
+                    && Objects.equals(topology.deploymentName(), host.getDeploymentName())) {
                 return workerStatus;
             }
             EndpointRegistry.Retirement retirement;
             if (!workerStatus.lock.tryLock()) {
-                return Objects.equals(topology.group(), group) ? workerStatus : null;
+                return sameTransport && Objects.equals(topology.group(), group)
+                        ? workerStatus
+                        : null;
             }
             try {
                 if (!endpointRegistry.isCurrentStatus(roleType, workerIpPort, workerStatus)) {
@@ -439,10 +450,10 @@ public final class WorkerStatusSynchronizer {
                 String currentGroup = workerStatus.getGroup();
                 boolean roleChanged = currentRole != roleType;
                 boolean groupChanged = !Objects.equals(currentGroup, group);
-                if (!roleChanged && !groupChanged) {
+                if (!roleChanged && !groupChanged && sameTransport) {
                     // Site changes do not change scheduling ownership. Publish
                     // the discovery labels atomically on the same generation.
-                    workerStatus.updateDiscoveryLabels(site, group);
+                    workerStatus.updateDiscoveryLabels(site, group, host.getDeploymentName());
                     return workerStatus;
                 }
 
@@ -470,25 +481,6 @@ public final class WorkerStatusSynchronizer {
             // real endpoint retirement removes this RETIRING holder.
             return workerStatus;
         }
-    }
-
-    private WorkerStatus createWorkerStatus(
-            RoleType roleType, String workerIpPort, String site, String group) {
-        int separator = workerIpPort.lastIndexOf(':');
-        checkArgument(
-                separator > 0 && separator != workerIpPort.length() - 1,
-                "Invalid worker address: %s",
-                workerIpPort);
-        String ip = workerIpPort.substring(0, separator);
-        int port = Integer.parseInt(workerIpPort.substring(separator + 1));
-        WorkerStatus discovered =
-                WorkerStatus.createDiscovered(
-                        roleType, group, ip, port, CommonUtils.toGrpcPort(port), site);
-        logger.info(
-                "Created WorkerStatus generation {} for worker: {}",
-                discovered.getGenerationId(),
-                workerIpPort);
-        return discovered;
     }
 
     @Scheduled(

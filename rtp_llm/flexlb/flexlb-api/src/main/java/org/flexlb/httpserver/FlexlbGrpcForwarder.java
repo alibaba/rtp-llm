@@ -12,7 +12,6 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.stub.AbstractStub;
 import io.grpc.stub.MetadataUtils;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.socket.nio.NioSocketChannel;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Context;
 import org.flexlb.config.ConfigService;
@@ -82,7 +81,7 @@ public class FlexlbGrpcForwarder {
 
     public CompletionStage<MasterForwardResult> forwardScheduleToMaster(
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB request) {
-        long requestId = request.getRequestId();
+        String requestId = org.flexlb.engine.grpc.RequestId.parse(request);
         ForwardGuard guard =
                 applyForwardGuard(requestId, request.getForwardHop(), ForwardOperation.SCHEDULE);
         if (guard.blocked()) {
@@ -254,7 +253,9 @@ public class FlexlbGrpcForwarder {
             FlexlbScheduleProtocol.FlexlbCancelRequestPB request) {
         ForwardGuard guard =
                 applyForwardGuard(
-                        request.getRequestId(), request.getForwardHop(), ForwardOperation.CANCEL);
+                        org.flexlb.engine.grpc.RequestId.parse(request),
+                        request.getForwardHop(),
+                        ForwardOperation.CANCEL);
         return forwardCancel(request, guard, null, entryTraceContext());
     }
 
@@ -292,7 +293,7 @@ public class FlexlbGrpcForwarder {
             Context traceContext) {
         ForwardGuard guard =
                 applyForwardGuard(
-                        request.getRequestId(),
+                        org.flexlb.engine.grpc.RequestId.parse(request),
                         request.getForwardHop(),
                         ForwardOperation.CANCEL,
                         originalMasterHostIpPort);
@@ -323,7 +324,8 @@ public class FlexlbGrpcForwarder {
             channel = masterChannel(masterHostIpPort);
         } catch (RuntimeException error) {
             return CompletableFuture.completedFuture(
-                    cancelForwardFailure(request.getRequestId(), guard, null, error));
+                    cancelForwardFailure(
+                            org.flexlb.engine.grpc.RequestId.parse(request), guard, null, error));
         }
         String masterIp = ipOf(masterHostIpPort);
         FlexlbScheduleProtocol.FlexlbCancelRequestPB forwardedRequest =
@@ -333,7 +335,7 @@ public class FlexlbGrpcForwarder {
                 new ForwardTrace(
                         "rtp_llm.flexlb.cancel",
                         traceContext,
-                        request.getRequestId(),
+                        org.flexlb.engine.grpc.RequestId.parse(request),
                         masterHostIpPort);
         try {
             FlexlbServiceGrpc.FlexlbServiceFutureStub stub =
@@ -345,7 +347,11 @@ public class FlexlbGrpcForwarder {
         } catch (RuntimeException error) {
             trace.finish(error);
             return CompletableFuture.completedFuture(
-                    cancelForwardFailure(request.getRequestId(), guard, channel, error));
+                    cancelForwardFailure(
+                            org.flexlb.engine.grpc.RequestId.parse(request),
+                            guard,
+                            channel,
+                            error));
         }
 
         CompletableFuture<CancelForwardResult> result = new CompletableFuture<>();
@@ -394,7 +400,10 @@ public class FlexlbGrpcForwarder {
                             trace.finish(error);
                             result.complete(
                                     cancelForwardFailure(
-                                            request.getRequestId(), guard, channel, error));
+                                            org.flexlb.engine.grpc.RequestId.parse(request),
+                                            guard,
+                                            channel,
+                                            error));
                         } finally {
                             result.complete(fallback);
                         }
@@ -405,7 +414,7 @@ public class FlexlbGrpcForwarder {
                         cancelForwardRpc(rpcFuture, trace, callbackRegistrationError);
                         result.complete(
                                 cancelForwardFailure(
-                                        request.getRequestId(),
+                                        org.flexlb.engine.grpc.RequestId.parse(request),
                                         guard,
                                         channel,
                                         callbackRegistrationError));
@@ -422,24 +431,28 @@ public class FlexlbGrpcForwarder {
     }
 
     private MasterForwardResult forwardFailure(
-            long requestId, ForwardGuard guard, ManagedChannel channel, Throwable error) {
+            String requestId, ForwardGuard guard, ManagedChannel channel, Throwable error) {
         return new MasterForwardResult(
                 null,
                 true,
-                recordForwardFailure(requestId, guard, channel, error),
+                recordForwardFailure(requestId, guard, channel, error, ForwardOperation.SCHEDULE),
                 nullToEmpty(guard.masterHostIpPort()),
                 error);
     }
 
     private CancelForwardResult cancelForwardFailure(
-            long requestId, ForwardGuard guard, ManagedChannel channel, Throwable error) {
+            String requestId, ForwardGuard guard, ManagedChannel channel, Throwable error) {
         return CancelForwardResult.failed(
-                recordForwardFailure(requestId, guard, channel, error),
+                recordForwardFailure(requestId, guard, channel, error, ForwardOperation.CANCEL),
                 nullToEmpty(guard.masterHostIpPort()));
     }
 
     private String recordForwardFailure(
-            long requestId, ForwardGuard guard, ManagedChannel channel, Throwable error) {
+            String requestId,
+            ForwardGuard guard,
+            ManagedChannel channel,
+            Throwable error,
+            ForwardOperation operation) {
         Status status = Status.fromThrowable(error);
         boolean grpcFailure =
                 error instanceof StatusException
@@ -451,21 +464,23 @@ public class FlexlbGrpcForwarder {
             boolean channelRetired = retirePanickedChannel(masterHost, channel, status);
             Throwable cause = status.getCause();
             Logger.warn(
-                    "event=flexlb_forward_failed request_id={} forward_hop={} master={} "
+                    "event=flexlb_forward_failed request_id={} operation={} forward_hop={} master={} "
                             + "local_ip={} status={} description={} cause={} channel_retired={}",
-                    requestId,
+                    errorDetail(requestId),
+                    operation.logValue(),
                     guard.nextHop(),
                     masterHost,
                     guard.localIp(),
                     status.getCode(),
                     errorDetail(status.getDescription()),
                     errorDetail(cause == null ? null : cause.toString()),
-                    channelRetired);
+                    channelRetired,
+                    error);
             reportForwardResult(ipOfOrLocal(masterHost), "GRPC_FAILED");
         } else {
             Logger.error(
                     "gRPC forward to master error: request_id={} master={}",
-                    requestId,
+                    errorDetail(requestId),
                     masterHost,
                     error);
             reportForwardResult(ipOfOrLocal(masterHost), "CONNECT_FAILED");
@@ -500,11 +515,11 @@ public class FlexlbGrpcForwarder {
     }
 
     private static String errorDetail(String text) {
-        return text == null
-                ? "UNKNOWN"
-                : text.substring(0, Math.min(text.length(), MAX_ERROR_DETAIL_CHARS))
-                        .replace('\n', ' ')
-                        .replace('\r', ' ');
+        if (text == null) return "UNKNOWN";
+        int end = Math.min(text.length(), MAX_ERROR_DETAIL_CHARS);
+        if (end > 0 && end < text.length() && Character.isHighSurrogate(text.charAt(end - 1)))
+            end--;
+        return text.substring(0, end).replace('\n', ' ').replace('\r', ' ');
     }
 
     private void reportForwardResult(String target, String result) {
@@ -583,7 +598,7 @@ public class FlexlbGrpcForwarder {
                     FlexlbScheduleProtocol.GetRequestStateRequestPB request) {
         ForwardGuard guard =
                 applyForwardGuard(
-                        request.getRequestId(),
+                        org.flexlb.engine.grpc.RequestId.parse(request),
                         request.getForwardHop(),
                         ForwardOperation.STATE_QUERY);
         if (guard.blocked() || guard.masterHostIpPort() == null) {
@@ -594,7 +609,12 @@ public class FlexlbGrpcForwarder {
         try {
             channel = masterChannel(master);
         } catch (RuntimeException error) {
-            recordForwardFailure(request.getRequestId(), guard, null, error);
+            recordForwardFailure(
+                    org.flexlb.engine.grpc.RequestId.parse(request),
+                    guard,
+                    null,
+                    error,
+                    ForwardOperation.STATE_QUERY);
             return CompletableFuture.completedFuture(null);
         }
         var forwardedRequest = request.toBuilder().setForwardHop(guard.nextHop()).build();
@@ -602,7 +622,7 @@ public class FlexlbGrpcForwarder {
                 new ForwardTrace(
                         "rtp_llm.flexlb.get_request_state",
                         entryTraceContext(),
-                        request.getRequestId(),
+                        org.flexlb.engine.grpc.RequestId.parse(request),
                         master);
         ListenableFuture<FlexlbScheduleProtocol.GetRequestStateResponsePB> rpc;
         try {
@@ -619,7 +639,12 @@ public class FlexlbGrpcForwarder {
             try {
                 trace.finish(error);
             } finally {
-                recordForwardFailure(request.getRequestId(), guard, channel, error);
+                recordForwardFailure(
+                        org.flexlb.engine.grpc.RequestId.parse(request),
+                        guard,
+                        channel,
+                        error,
+                        ForwardOperation.STATE_QUERY);
             }
             return CompletableFuture.completedFuture(null);
         }
@@ -646,7 +671,12 @@ public class FlexlbGrpcForwarder {
                             try {
                                 trace.finish(error);
                             } finally {
-                                recordForwardFailure(request.getRequestId(), guard, channel, error);
+                                recordForwardFailure(
+                                        org.flexlb.engine.grpc.RequestId.parse(request),
+                                        guard,
+                                        channel,
+                                        error,
+                                        ForwardOperation.STATE_QUERY);
                             }
                         } finally {
                             result.complete(null);
@@ -726,7 +756,7 @@ public class FlexlbGrpcForwarder {
         private final Context context;
         private final AtomicBoolean finished = new AtomicBoolean();
 
-        private ForwardTrace(String name, Context parent, long requestId, String masterHost) {
+        private ForwardTrace(String name, Context parent, String requestId, String masterHost) {
             span = FlexlbTrace.startClient(name, parent);
             context = FlexlbTrace.withSpan(span, parent);
             FlexlbTrace.setRequestAttributes(span, requestId);
@@ -782,13 +812,13 @@ public class FlexlbGrpcForwarder {
     }
 
     private ForwardGuard applyForwardGuard(
-            long requestId, int encodedHop, ForwardOperation operation) {
+            String requestId, int encodedHop, ForwardOperation operation) {
         return applyForwardGuard(
                 requestId, encodedHop, operation, masterStatusService.getMasterHostIpPort());
     }
 
     private ForwardGuard applyForwardGuard(
-            long requestId, int encodedHop, ForwardOperation operation, String masterHostIpPort) {
+            String requestId, int encodedHop, ForwardOperation operation, String masterHostIpPort) {
         long incomingHop = Integer.toUnsignedLong(encodedHop);
         String localIp = masterStatusService.getLocalHostIp();
         ForwardBlockReason blockReason =
@@ -894,7 +924,8 @@ public class FlexlbGrpcForwarder {
 
     private ManagedChannel createChannel(String ip, int port) {
         return NettyChannelBuilder.forAddress(ip, port)
-                .channelType(NioSocketChannel.class)
+                .channelType(
+                        org.flexlb.engine.grpc.core.GrpcChannelFactory.channelType(eventLoopGroup))
                 .eventLoopGroup(eventLoopGroup)
                 .executor(executor)
                 .usePlaintext()

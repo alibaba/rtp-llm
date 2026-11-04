@@ -16,7 +16,7 @@ import org.flexlb.engine.grpc.EngineRpcService.RequestCancelReasonPB;
 import org.flexlb.engine.grpc.EngineRpcService.StatusVersionPB;
 import org.flexlb.engine.grpc.EngineRpcService.WorkerStatusPB;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
-import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
+import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -41,7 +41,7 @@ class EngineGrpcClientCancelTest {
             value = RequestCancelReasonPB.class,
             names = {"REQUEST_CANCEL_REASON_UNSPECIFIED", "UNRECOGNIZED"},
             mode = EnumSource.Mode.EXCLUDE)
-    void preservesRequestAndChecksCapabilityOnlyForOrdinaryCleanup(RequestCancelReasonPB reason)
+    void preservesRequestAndSendsCancelWithoutAStatusQuery(RequestCancelReasonPB reason)
             throws Exception {
         try (var engine = new Engine()) {
             var request = request(reason);
@@ -49,11 +49,7 @@ class EngineGrpcClientCancelTest {
                     CancelReply.ACCEPTED,
                     engine.client.cancelAsync("127.0.0.1", 9090, request, 1000).get());
             assertEquals(request, engine.received);
-            assertEquals(
-                    reason == RequestCancelReasonPB.REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED
-                            ? 0
-                            : 1,
-                    engine.statusCalls.get());
+            assertEquals(0, engine.statusCalls.get());
             assertEquals(1, engine.cancelCalls.get());
         }
     }
@@ -92,24 +88,10 @@ class EngineGrpcClientCancelTest {
     }
 
     @Test
-    void unsupportedCleanupDoesNotSendCancel() throws Exception {
-        try (var engine = new Engine()) {
-            engine.supportsCleanup = false;
-            assertEquals(CancelReply.UNSUPPORTED, engine.cancel().get(2, TimeUnit.SECONDS));
-            assertEquals(0, engine.cancelCalls.get());
-            var priority = request(RequestCancelReasonPB.REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED);
-            assertEquals(
-                    CancelReply.ACCEPTED,
-                    engine.client.cancelAsync("127.0.0.1", 9090, priority, 1000).get());
-            assertEquals(1, engine.cancelCalls.get());
-        }
-    }
-
-    @Test
-    void callerDisconnectDoesNotCancelPendingCapabilityCheckOrCleanup() throws Exception {
+    void callerDisconnectDoesNotCancelPendingCleanup() throws Exception {
         try (var engine = new Engine();
                 var caller = Context.current().withCancellation()) {
-            engine.delayStatus = true;
+            engine.delayCancel = true;
             Context previous = caller.attach();
             Context activeCaller = Context.current();
             CompletableFuture<CancelReply> result;
@@ -118,42 +100,30 @@ class EngineGrpcClientCancelTest {
                 assertSame(activeCaller, Context.current());
                 assertFalse(result.isDone());
                 caller.cancel(new IllegalStateException("frontend disconnected"));
-                engine.replyStatus();
+                assertFalse(engine.cancelContext.isCancelled());
+                engine.replyCancel();
                 assertSame(activeCaller, Context.current());
             } finally {
                 caller.detach(previous);
             }
             assertEquals(CancelReply.ACCEPTED, result.get(2, TimeUnit.SECONDS));
-            assertFalse(engine.cancelContextCancelled);
             assertEquals(1, engine.cancelCalls.get());
         }
     }
 
-    @Test
-    void failedCapabilityCheckCompletesExceptionallyWithoutSendingCancel() throws Exception {
+    @ParameterizedTest
+    @EnumSource(
+            value = Status.Code.class,
+            names = {"UNAVAILABLE", "UNIMPLEMENTED", "PERMISSION_DENIED"})
+    void cancelFailureDoesNotProbeOrReplay(Status.Code code) throws Exception {
         try (var engine = new Engine()) {
-            engine.statusFailure = Status.PERMISSION_DENIED;
+            engine.cancelFailure = Status.fromCode(code).withDescription("Cancel failed");
             ExecutionException failure =
                     assertThrows(
                             ExecutionException.class,
                             () -> engine.cancel().get(2, TimeUnit.SECONDS));
-            assertEquals(
-                    Status.Code.PERMISSION_DENIED,
-                    Status.fromThrowable(failure.getCause()).getCode());
-            assertEquals(0, engine.cancelCalls.get());
-        }
-    }
-
-    @Test
-    void ambiguousCancelFailureIsNotReplayed() throws Exception {
-        try (var engine = new Engine()) {
-            engine.cancelFailure = Status.UNAVAILABLE.withDescription("Connection reset");
-            ExecutionException failure =
-                    assertThrows(
-                            ExecutionException.class,
-                            () -> engine.cancel().get(2, TimeUnit.SECONDS));
-            assertEquals(
-                    Status.Code.UNAVAILABLE, Status.fromThrowable(failure.getCause()).getCode());
+            assertEquals(code, Status.fromThrowable(failure.getCause()).getCode());
+            assertEquals(0, engine.statusCalls.get());
             assertEquals(1, engine.cancelCalls.get());
         }
     }
@@ -206,14 +176,11 @@ class EngineGrpcClientCancelTest {
         final AtomicInteger cancelCalls = new AtomicInteger();
         final Server server;
         final EngineGrpcClient client;
-        boolean supportsCleanup = true;
-        boolean delayStatus;
         boolean delayCancel;
-        boolean cancelContextCancelled;
-        Status statusFailure;
+        Context cancelContext;
         Status cancelFailure;
         CancelRequestPB received;
-        StreamObserver<WorkerStatusPB> pendingStatus;
+        StreamObserver<CancelResponsePB> pendingCancel;
         CancelResponsePB response =
                 CancelResponsePB.newBuilder()
                         .setStatus(CancelStatusPB.CANCEL_STATUS_ACCEPTED)
@@ -229,12 +196,14 @@ class EngineGrpcClientCancelTest {
                             .start();
             client =
                     new EngineGrpcClient(
-                            mock(CustomNameResolver.class),
+                            mock(EngineAddressResolver.class),
                             mock(ThreadPoolExecutor.class),
                             mock(EventLoopGroup.class),
                             mock(GrpcReporter.class),
                             20,
-                            5000) {
+                            5000,
+                            org.mockito.Mockito.mock(
+                                    org.flexlb.config.CacheMatchConfiguration.class)) {
                         @Override
                         protected ManagedChannel createChannel(String key) {
                             return InProcessChannelBuilder.forName(name).directExecutor().build();
@@ -254,35 +223,27 @@ class EngineGrpcClientCancelTest {
         public void getWorkerStatus(
                 StatusVersionPB request, StreamObserver<WorkerStatusPB> observer) {
             statusCalls.incrementAndGet();
-            if (statusFailure != null) {
-                observer.onError(statusFailure.asRuntimeException());
-                return;
-            }
-            pendingStatus = observer;
-            if (!delayStatus) {
-                replyStatus();
-            }
-        }
-
-        void replyStatus() {
-            pendingStatus.onNext(
-                    WorkerStatusPB.newBuilder().setSupportsRequestCleanup(supportsCleanup).build());
-            pendingStatus.onCompleted();
+            observer.onError(Status.UNIMPLEMENTED.asRuntimeException());
         }
 
         @Override
         public void cancel(CancelRequestPB request, StreamObserver<CancelResponsePB> observer) {
             cancelCalls.incrementAndGet();
             received = request;
-            cancelContextCancelled = Context.current().isCancelled();
+            cancelContext = Context.current();
+            pendingCancel = observer;
             if (cancelFailure != null) {
                 observer.onError(cancelFailure.asRuntimeException());
                 return;
             }
             if (!delayCancel) {
-                observer.onNext(response);
-                observer.onCompleted();
+                replyCancel();
             }
+        }
+
+        void replyCancel() {
+            pendingCancel.onNext(response);
+            pendingCancel.onCompleted();
         }
 
         @Override

@@ -17,7 +17,7 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
-import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
+import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -285,12 +285,13 @@ class EngineGrpcClientCancellationAuditTest {
         TestClient(
                 ThreadPoolExecutor executor, NioEventLoopGroup loop, boolean blockRetryCreation) {
             super(
-                    mock(CustomNameResolver.class),
+                    mock(EngineAddressResolver.class),
                     executor,
                     loop,
                     mock(GrpcReporter.class),
                     2000,
-                    5000);
+                    5000,
+                    mock(org.flexlb.config.CacheMatchConfiguration.class));
             this.blockRetryCreation = blockRetryCreation;
         }
 

@@ -12,7 +12,7 @@ import org.flexlb.balance.eviction.PriorityDecodePreemptionPolicy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -131,7 +131,9 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         runtime.newLifecycle(
                                 configService.loadBalanceConfig(),
                                 capacity,
-                                new org.flexlb.service.RecentCacheKeyTraceReporter()),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.service.TheoryCacheHitReporter.class,
+                                        org.mockito.Mockito.withSettings().stubOnly())),
                         configService.loadBalanceConfig(),
                         router,
                         decodePreemption,
@@ -187,7 +189,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 if (status == null) {
                     continue;
                 }
-                String address = status.getServerIp() + ":" + status.getHttpPort();
+                String address = status.getLogicalIpPort();
                 var pin = registry.capture(status.getRole(), address);
                 if (pin == null) {
                     throw new IllegalStateException(
@@ -219,11 +221,11 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         Objects.requireNonNull(status, "status");
         Objects.requireNonNull(response, "response");
         RoleType role = Objects.requireNonNull(response.getRole(), "response role");
-        WorkerEndpoint endpoint = registry.get(role, status.getIpPort(), status);
+        WorkerEndpoint endpoint = registry.get(role, status.getLogicalIpPort(), status);
         if (endpoint == null) {
             throw new IllegalStateException(
                     "status generation has no published endpoint: "
-                            + status.getIpPort()
+                            + status.getLogicalIpPort()
                             + "#"
                             + status.getGenerationId());
         }
@@ -274,10 +276,12 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     workers,
                     new CostBasedPrefillStrategy(
                             org.mockito.Mockito.mock(
-                                    org.flexlb.cache.service.CacheAwareService.class),
+                                    org.flexlb.cache.match.CacheAwareService.class),
                             configService),
                     new DecodeSelector(configService, capacity),
                     new VitWorkerSelector(),
+                    new org.flexlb.balance.strategy.EncoderStrategy(),
+                    org.mockito.Mockito.mock(org.flexlb.cache.match.CacheAwareService.class),
                     null,
                     org.mockito.Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class),
                     org.mockito.Mockito.mock(CacheMetricsReporter.class),

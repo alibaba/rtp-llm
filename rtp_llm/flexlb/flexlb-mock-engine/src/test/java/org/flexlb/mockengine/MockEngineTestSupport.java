@@ -39,7 +39,7 @@ final class MockEngineTestSupport {
 
     static boolean isReserved(
             org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot snapshot, long requestId) {
-        var request = snapshot.requests().get(requestId);
+        var request = snapshot.requests().get(String.valueOf(requestId));
         return request != null && !request.phase().isEngineConfirmed();
     }
 

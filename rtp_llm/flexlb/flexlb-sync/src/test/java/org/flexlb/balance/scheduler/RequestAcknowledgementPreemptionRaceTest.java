@@ -7,7 +7,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -37,7 +37,7 @@ class RequestAcknowledgementPreemptionRaceTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         SchedulerTestSupport.responseCompletions(
                         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner))
                 .close();
@@ -51,7 +51,7 @@ class RequestAcknowledgementPreemptionRaceTest {
                 "timer",
                 mock(ExpirationTimer.class));
         RequestProtocolTestSupport.register(owner, context);
-        var reservation = new DecodeResources.ReservationHandle(1L, 9741L, 3L);
+        var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(9741L), 3L);
         var decode = RequestProtocolTestSupport.decodeEndpoint();
         var prefill = mock(PrefillEndpoint.class);
         var server = new ServerStatus();

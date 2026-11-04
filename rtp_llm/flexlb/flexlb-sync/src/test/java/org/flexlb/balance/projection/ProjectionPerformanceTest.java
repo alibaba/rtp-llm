@@ -41,9 +41,11 @@ class ProjectionPerformanceTest {
                         1000,
                         true,
                         BuiltinGroupPlanner.FIXED_WINDOW,
-                        Comparator.comparingLong(GroupPlanner.Item::requestId),
+                        Comparator.comparing(GroupPlanner.Item::requestId),
                         new GroupPlanner.Constraints(4, 1000, 1000, 0, 30),
-                        List.of(new GroupPlanner.Item(1, 50, 1, 1000, Long.MAX_VALUE, 10, 0)),
+                        List.of(
+                                new GroupPlanner.Item(
+                                        String.valueOf(1), 50, 1, 1000, Long.MAX_VALUE, 10, 0)),
                         null);
         var inputs =
                 new RequestTimeEstimation.Inputs(
@@ -65,7 +67,15 @@ class ProjectionPerformanceTest {
             for (int index = 0; index < operations; index++) {
                 var result =
                         estimator.projectRankingView(
-                                inputs, 2 + index / 750, 50, 1000, Long.MAX_VALUE, 20, 0, 0, 1000);
+                                inputs,
+                                String.valueOf(2 + index / 750),
+                                50,
+                                1000,
+                                Long.MAX_VALUE,
+                                20,
+                                0,
+                                0,
+                                1000);
                 checksum += result.projectedTtftMsValue();
             }
             long elapsed = System.nanoTime() - start;

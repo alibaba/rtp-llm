@@ -19,7 +19,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService.CancelRequestPB;
 import org.flexlb.enums.DecodeTaskPhase;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -67,7 +67,7 @@ class DecodePreemptionProtocolTest {
                                 service,
                                 mock(DeliveryMetricsReporter.class),
                                 mock(RequestSchedulerReporter.class),
-                                mock(RecentCacheKeyTraceReporter.class)));
+                                mock(TheoryCacheHitReporter.class)));
     }
 
     @AfterEach
@@ -85,7 +85,7 @@ class DecodePreemptionProtocolTest {
 
     private static org.flexlb.dao.loadbalance.Request incoming() {
         return org.flexlb.dao.loadbalance.Request.builder()
-                .requestId(20L)
+                .requestId("20")
                 .seqLen(64L)
                 .maxNewTokens(0)
                 .build();
@@ -107,10 +107,10 @@ class DecodePreemptionProtocolTest {
                         invocation ->
                                 Optional.of(
                                         invocation
-                                                                .<DecodeResources.ReservationHandle>
-                                                                        getArgument(0)
-                                                                .requestId()
-                                                        == 11L
+                                                        .<DecodeResources.ReservationHandle>
+                                                                getArgument(0)
+                                                        .requestId()
+                                                        .equals("11")
                                                 ? first
                                                 : second));
 
@@ -154,29 +154,31 @@ class DecodePreemptionProtocolTest {
         assertFalse(
                 acquirer.awaitIdle(System.nanoTime()),
                 "cancelling a result is not resource settlement");
-        firstTerminal.complete(new VictimResolution(11L, VictimResolution.Outcome.REQUEST_END));
+        firstTerminal.complete(
+                new VictimResolution(String.valueOf(11L), VictimResolution.Outcome.REQUEST_END));
         assertEquals(cancelledResult, result.isDone(), "one terminal cannot release two victims");
-        secondTerminal.complete(new VictimResolution(12L, VictimResolution.Outcome.REQUEST_END));
+        secondTerminal.complete(
+                new VictimResolution(String.valueOf(12L), VictimResolution.Outcome.REQUEST_END));
 
         assertTrue(acquirer.awaitIdle(System.nanoTime() + TimeUnit.SECONDS.toNanos(1L)));
         if (cancelledResult) assertTrue(result.isCancelled());
         else {
             assertTrue(result.get(1, TimeUnit.SECONDS).committed());
             assertEquals(
-                    new DecodeResources.ReservationHandle(9L, 20L, 100L),
+                    new DecodeResources.ReservationHandle(9L, String.valueOf(20L), 100L),
                     result.join().reservation());
         }
         verify(engineClient)
                 .cancelAsync(
                         eq("10.0.0.1"),
                         eq(9090),
-                        eq(CancelReason.PRIORITY_PREEMPTED.toRequest(11L)),
+                        eq(CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(11L))),
                         anyLong());
         verify(engineClient)
                 .cancelAsync(
                         eq("10.0.0.1"),
                         eq(9090),
-                        eq(CancelReason.PRIORITY_PREEMPTED.toRequest(12L)),
+                        eq(CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(12L))),
                         anyLong());
         verify(endpoint).commitPreemption(1L);
         verify(endpoint, never()).abortPreemption(anyLong());
@@ -192,7 +194,8 @@ class DecodePreemptionProtocolTest {
             case "missing" -> resolution.complete(null);
             case "foreign" ->
                     resolution.complete(
-                            new VictimResolution(99L, VictimResolution.Outcome.REQUEST_END));
+                            new VictimResolution(
+                                    String.valueOf(99L), VictimResolution.Outcome.REQUEST_END));
             case "failed" ->
                     resolution.completeExceptionally(
                             new IllegalStateException("resolution failed"));
@@ -256,7 +259,8 @@ class DecodePreemptionProtocolTest {
         Fixture fixture = fixture();
         var resolution =
                 CompletableFuture.completedFuture(
-                        new VictimResolution(11L, VictimResolution.Outcome.DELIVERY_RESUMED));
+                        new VictimResolution(
+                                String.valueOf(11L), VictimResolution.Outcome.DELIVERY_RESUMED));
         var victimClaim = claim(fixture.requests(), 11L, resolution);
         when(fixture.requests().tryClaim(any(), anyLong())).thenReturn(Optional.of(victimClaim));
         when(fixture.endpoint().commitPreemption(anyLong())).thenReturn(null);
@@ -359,7 +363,8 @@ class DecodePreemptionProtocolTest {
                 terminal.isDone(),
                 "timing out admission must retain the victim terminal observation");
 
-        terminal.complete(new VictimResolution(11L, VictimResolution.Outcome.REQUEST_END));
+        terminal.complete(
+                new VictimResolution(String.valueOf(11L), VictimResolution.Outcome.REQUEST_END));
         assertSame(timedOut, outcome.join());
         verify(fixture.endpoint(), never()).commitPreemption(anyLong());
     }
@@ -378,10 +383,10 @@ class DecodePreemptionProtocolTest {
                         invocation ->
                                 Optional.of(
                                         invocation
-                                                                .<DecodeResources.ReservationHandle>
-                                                                        getArgument(0)
-                                                                .requestId()
-                                                        == 11L
+                                                        .<DecodeResources.ReservationHandle>
+                                                                getArgument(0)
+                                                        .requestId()
+                                                        .equals("11")
                                                 ? first
                                                 : second));
         EngineGrpcClient channel = mock(EngineGrpcClient.class);
@@ -412,7 +417,9 @@ class DecodePreemptionProtocolTest {
                         new DecodeResources.AdmissionCapacity(2L, 100L),
                         new PriorityDecodePreemptionPolicy());
         if (terminalBeforeSend) {
-            firstTerminal.complete(new VictimResolution(11L, VictimResolution.Outcome.REQUEST_END));
+            firstTerminal.complete(
+                    new VictimResolution(
+                            String.valueOf(11L), VictimResolution.Outcome.REQUEST_END));
         }
         var outcome =
                 preempt(
@@ -431,9 +438,11 @@ class DecodePreemptionProtocolTest {
                     .cancelAsync(
                             any(),
                             anyInt(),
-                            eq(CancelReason.PRIORITY_PREEMPTED.toRequest(11L)),
+                            eq(CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(11L))),
                             anyLong());
-            firstTerminal.complete(new VictimResolution(11L, VictimResolution.Outcome.REQUEST_END));
+            firstTerminal.complete(
+                    new VictimResolution(
+                            String.valueOf(11L), VictimResolution.Outcome.REQUEST_END));
             assertFalse(
                     outcome.isDone(),
                     "one of two terminal observations cannot finish the aggregate");
@@ -442,7 +451,7 @@ class DecodePreemptionProtocolTest {
                     .cancelAsync(
                             any(),
                             anyInt(),
-                            eq(CancelReason.PRIORITY_PREEMPTED.toRequest(11L)),
+                            eq(CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(11L))),
                             anyLong());
         }
         var timedOut = outcome.get(3L, TimeUnit.SECONDS);
@@ -452,7 +461,7 @@ class DecodePreemptionProtocolTest {
                 .cancelAsync(
                         any(),
                         anyInt(),
-                        eq(CancelReason.PRIORITY_PREEMPTED.toRequest(12L)),
+                        eq(CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(12L))),
                         anyLong());
         verify(fixture.requests(), never())
                 .onPreemption(
@@ -470,7 +479,8 @@ class DecodePreemptionProtocolTest {
                                                 .CANCEL_UNKNOWN)));
         assertFalse(secondTerminal.isDone());
         verify(fixture.endpoint()).abortPreemption(1L);
-        secondTerminal.complete(new VictimResolution(12L, VictimResolution.Outcome.REQUEST_END));
+        secondTerminal.complete(
+                new VictimResolution(String.valueOf(12L), VictimResolution.Outcome.REQUEST_END));
         assertSame(timedOut, outcome.join());
         verify(fixture.endpoint(), never()).commitPreemption(anyLong());
     }
@@ -491,10 +501,10 @@ class DecodePreemptionProtocolTest {
                         invocation ->
                                 Optional.of(
                                         invocation
-                                                                .<DecodeResources.ReservationHandle>
-                                                                        getArgument(0)
-                                                                .requestId()
-                                                        == 11L
+                                                        .<DecodeResources.ReservationHandle>
+                                                                getArgument(0)
+                                                        .requestId()
+                                                        .equals("11")
                                                 ? first
                                                 : second));
         when(fixture.requests()
@@ -508,7 +518,8 @@ class DecodePreemptionProtocolTest {
                         invocation -> {
                             secondTerminal.complete(
                                     new VictimResolution(
-                                            12L, VictimResolution.Outcome.REQUEST_END));
+                                            String.valueOf(12L),
+                                            VictimResolution.Outcome.REQUEST_END));
                             return true;
                         });
         CompletableFuture<EngineGrpcClient.CancelReply> firstAck = new CompletableFuture<>();
@@ -587,7 +598,8 @@ class DecodePreemptionProtocolTest {
                                         null,
                                         false,
                                         fixture.endpoint(),
-                                        new DecodeResources.ReservationHandle(9L, 12L, 102L),
+                                        new DecodeResources.ReservationHandle(
+                                                9L, String.valueOf(12L), 102L),
                                         "test"));
             }
             default -> throw new AssertionError("unexpected test reply");
@@ -595,9 +607,11 @@ class DecodePreemptionProtocolTest {
         assertFalse(result.isDone(), "ACKs cannot replace the first victim's terminal proof");
         if (secondReply != EngineGrpcClient.CancelReply.REQUEST_CLEANED) {
             secondTerminal.complete(
-                    new VictimResolution(12L, VictimResolution.Outcome.REQUEST_END));
+                    new VictimResolution(
+                            String.valueOf(12L), VictimResolution.Outcome.REQUEST_END));
         }
-        firstTerminal.complete(new VictimResolution(11L, VictimResolution.Outcome.REQUEST_END));
+        firstTerminal.complete(
+                new VictimResolution(String.valueOf(11L), VictimResolution.Outcome.REQUEST_END));
         assertTrue(result.get(1L, TimeUnit.SECONDS).committed());
         verify(fixture.endpoint()).commitPreemption(1L);
         verify(fixture.endpoint(), never()).abortPreemption(anyLong());
@@ -625,7 +639,8 @@ class DecodePreemptionProtocolTest {
                         invocation -> {
                             terminal.complete(
                                     new VictimResolution(
-                                            11L, VictimResolution.Outcome.REQUEST_END));
+                                            String.valueOf(11L),
+                                            VictimResolution.Outcome.REQUEST_END));
                             return true;
                         });
         EngineGrpcClient channel = mock(EngineGrpcClient.class);
@@ -675,9 +690,12 @@ class DecodePreemptionProtocolTest {
                     .updatePreemption(
                             1L,
                             DecodeResources.PreemptionUpdate.fenced(
-                                    new DecodeResources.ReservationHandle(9L, 11L, 101L)));
+                                    new DecodeResources.ReservationHandle(
+                                            9L, String.valueOf(11L), 101L)));
             verify(fixture.endpoint(), never()).commitPreemption(anyLong());
-            terminal.complete(new VictimResolution(11L, VictimResolution.Outcome.REQUEST_END));
+            terminal.complete(
+                    new VictimResolution(
+                            String.valueOf(11L), VictimResolution.Outcome.REQUEST_END));
         }
         assertTrue(outcome.get(1L, TimeUnit.SECONDS).committed());
         verify(fixture.endpoint()).commitPreemption(1L);
@@ -721,7 +739,13 @@ class DecodePreemptionProtocolTest {
                         first, new RequestLifecycle.PreemptionEvent(null, true, null, null, null));
         verify(fixture.endpoint(), never())
                 .beginPreemption(
-                        anyLong(), anyList(), anyLong(), anyLong(), anyLong(), anyInt(), any());
+                        anyLong(),
+                        anyList(),
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyLong(),
+                        anyLong(),
+                        anyInt(),
+                        any());
         org.mockito.Mockito.verifyNoInteractions(channel);
     }
 
@@ -767,7 +791,13 @@ class DecodePreemptionProtocolTest {
                         first, new RequestLifecycle.PreemptionEvent(null, true, null, null, null));
         verify(fixture.endpoint(), never())
                 .beginPreemption(
-                        anyLong(), anyList(), anyLong(), anyLong(), anyLong(), anyInt(), any());
+                        anyLong(),
+                        anyList(),
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyLong(),
+                        anyLong(),
+                        anyInt(),
+                        any());
         org.mockito.Mockito.verifyNoInteractions(channel);
     }
 
@@ -775,7 +805,7 @@ class DecodePreemptionProtocolTest {
     void staleEndpointGenerationCannotCancelANewerRouteWithTheSameRequestAndToken()
             throws Exception {
         Fixture fixture = fixture();
-        var stale = new DecodeResources.ReservationHandle(9L, 11L, 101L);
+        var stale = new DecodeResources.ReservationHandle(9L, String.valueOf(11L), 101L);
         when(fixture.requests().tryClaim(eq(stale), anyLong())).thenReturn(Optional.empty());
         EngineGrpcClient channel = mock(EngineGrpcClient.class);
         var acquirer =
@@ -808,7 +838,13 @@ class DecodePreemptionProtocolTest {
         verify(fixture.requests()).tryClaim(eq(stale), anyLong());
         verify(fixture.endpoint(), never())
                 .beginPreemption(
-                        anyLong(), anyList(), anyLong(), anyLong(), anyLong(), anyInt(), any());
+                        anyLong(),
+                        anyList(),
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyLong(),
+                        anyLong(),
+                        anyInt(),
+                        any());
         org.mockito.Mockito.verifyNoInteractions(channel);
     }
 
@@ -912,7 +948,8 @@ class DecodePreemptionProtocolTest {
                             call.<Runnable>getArgument(0).run();
                             terminal.complete(
                                     new VictimResolution(
-                                            11L, VictimResolution.Outcome.REQUEST_END));
+                                            String.valueOf(11L),
+                                            VictimResolution.Outcome.REQUEST_END));
                             return deadline;
                         })
                 .when(protocolRuntime)
@@ -1049,7 +1086,9 @@ class DecodePreemptionProtocolTest {
             verify(fixture.requests(), org.mockito.Mockito.timeout(2000))
                     .onPreemption(victimClaim, phaseEvent(PreemptionCancelPhase.CANCEL_REQUESTED));
             if (terminalWins) {
-                terminal.complete(new VictimResolution(11L, VictimResolution.Outcome.REQUEST_END));
+                terminal.complete(
+                        new VictimResolution(
+                                String.valueOf(11L), VictimResolution.Outcome.REQUEST_END));
             }
             assertTrue(settlementQueued.await(5, TimeUnit.SECONDS));
             assertFalse(outcome.isDone(), "settlement is paused before endpoint commit");
@@ -1058,7 +1097,9 @@ class DecodePreemptionProtocolTest {
             if (!terminalWins) {
                 assertFalse(
                         terminal.isDone(), "timeout retains the exact late resolution observer");
-                terminal.complete(new VictimResolution(11L, VictimResolution.Outcome.REQUEST_END));
+                terminal.complete(
+                        new VictimResolution(
+                                String.valueOf(11L), VictimResolution.Outcome.REQUEST_END));
             }
             outcome.thenRun(() -> afterSettlement.complete(true));
             var independent = new CompletableFuture<Void>();
@@ -1149,7 +1190,8 @@ class DecodePreemptionProtocolTest {
                 observed.equals(Thread.currentThread().getName())
                         || observed.startsWith("delivery-stop-"),
                 "apply directly on completion, including a reply already done at registration");
-        terminal.complete(new VictimResolution(11L, VictimResolution.Outcome.REQUEST_END));
+        terminal.complete(
+                new VictimResolution(String.valueOf(11L), VictimResolution.Outcome.REQUEST_END));
         outcome.get(2, TimeUnit.SECONDS);
     }
 
@@ -1233,7 +1275,9 @@ class DecodePreemptionProtocolTest {
         } finally {
             release.countDown();
             for (var terminal : terminals) {
-                terminal.complete(new VictimResolution(11L, VictimResolution.Outcome.REQUEST_END));
+                terminal.complete(
+                        new VictimResolution(
+                                String.valueOf(11L), VictimResolution.Outcome.REQUEST_END));
             }
             CompletableFuture.allOf(outcomes.toArray(CompletableFuture[]::new))
                     .get(3, TimeUnit.SECONDS);
@@ -1269,7 +1313,7 @@ class DecodePreemptionProtocolTest {
                         1L,
                         new DecodeResources.ReservationHandle(
                                 differentGeneration ? 10L : 9L,
-                                11L,
+                                String.valueOf(11L),
                                 differentGeneration ? 101L : 999L),
                         original.cancelTarget());
         when(f.requests().tryClaim(any(), anyLong())).thenReturn(Optional.of(stale));
@@ -1305,7 +1349,13 @@ class DecodePreemptionProtocolTest {
         assertTrue(result.detail().contains("mismatched_claim"));
         verify(f.endpoint(), never())
                 .beginPreemption(
-                        anyLong(), anyList(), anyLong(), anyLong(), anyLong(), anyInt(), any());
+                        anyLong(),
+                        anyList(),
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyLong(),
+                        anyLong(),
+                        anyInt(),
+                        any());
         verify(channel, never()).cancelAsync(any(), anyInt(), any(), anyLong());
         verify(f.requests())
                 .onPreemption(
@@ -1333,7 +1383,7 @@ class DecodePreemptionProtocolTest {
         when(endpoint.beginPreemption(
                         anyLong(),
                         anyList(),
-                        anyLong(),
+                        org.mockito.ArgumentMatchers.anyString(),
                         anyLong(),
                         anyLong(),
                         anyInt(),
@@ -1345,7 +1395,7 @@ class DecodePreemptionProtocolTest {
                                 org.flexlb.balance.endpoint.DecodeResources.MutationStatus.APPLIED,
                                 false));
         when(endpoint.commitPreemption(anyLong()))
-                .thenReturn(new DecodeResources.ReservationHandle(9L, 20L, 100L));
+                .thenReturn(new DecodeResources.ReservationHandle(9L, String.valueOf(20L), 100L));
         return new Fixture(requests, endpoint);
     }
 
@@ -1357,13 +1407,13 @@ class DecodePreemptionProtocolTest {
                 mock(
                         org.flexlb.balance.scheduler.RequestContext.class,
                         org.mockito.Mockito.RETURNS_DEEP_STUBS);
-        when(context.data().getRequestId()).thenReturn(requestId);
+        when(context.data().getRequestId()).thenReturn(String.valueOf(requestId));
         when(context.snapshot().delivery()).thenReturn(null);
         when(context.snapshot().cancellation()).thenReturn(null);
         when(context.data().getLifecycle()).thenReturn(owner);
         var reservation =
                 new DecodeResources.ReservationHandle(
-                        9L, requestId, requestId == 11L ? 101L : 102L);
+                        9L, String.valueOf(requestId), requestId == 11L ? 101L : 102L);
         var claim =
                 new PreemptionRegistration(
                         context, 1L, reservation, new CancelTarget("10.0.0.1", 9090));
@@ -1382,7 +1432,7 @@ class DecodePreemptionProtocolTest {
 
     private static DecodeRequestView victim(long requestId, long reservationToken) {
         return new DecodeRequestView(
-                requestId,
+                String.valueOf(requestId),
                 30,
                 64L,
                 64L,
@@ -1465,7 +1515,9 @@ class DecodePreemptionProtocolTest {
                     queued.await(2, TimeUnit.SECONDS),
                     "ACK continuation or timed-out settlement must be queued");
             assertThrows(TimeoutException.class, () -> outcome.get(150, TimeUnit.MILLISECONDS));
-            terminal.complete(new VictimResolution(11L, VictimResolution.Outcome.REQUEST_END));
+            terminal.complete(
+                    new VictimResolution(
+                            String.valueOf(11L), VictimResolution.Outcome.REQUEST_END));
             release.countDown();
             var result = outcome.get(2, TimeUnit.SECONDS);
             System.out.println(
@@ -1575,7 +1627,9 @@ class DecodePreemptionProtocolTest {
             if (!completedInTime) {
                 timeout.get().run();
             }
-            terminal.complete(new VictimResolution(11L, VictimResolution.Outcome.REQUEST_END));
+            terminal.complete(
+                    new VictimResolution(
+                            String.valueOf(11L), VictimResolution.Outcome.REQUEST_END));
             if (completedInTime) {
                 timeout.get().run();
             }
@@ -1608,8 +1662,8 @@ class DecodePreemptionProtocolTest {
                         call ->
                                 Optional.of(
                                         call.<DecodeResources.ReservationHandle>getArgument(0)
-                                                                .requestId()
-                                                        == 11L
+                                                        .requestId()
+                                                        .equals("11")
                                                 ? first
                                                 : second));
         var channel = mock(EngineGrpcClient.class);
@@ -1644,11 +1698,13 @@ class DecodePreemptionProtocolTest {
                                 "NOT_FOUND early rejection"));
         verify(f.requests(), org.mockito.Mockito.timeout(1000))
                 .onPreemption(second, phaseEvent(PreemptionCancelPhase.NOT_FOUND_STALE));
-        firstTerminal.complete(new VictimResolution(11L, VictimResolution.Outcome.REQUEST_END));
+        firstTerminal.complete(
+                new VictimResolution(String.valueOf(11L), VictimResolution.Outcome.REQUEST_END));
         var result = outcome.get(1, TimeUnit.SECONDS);
         assertFalse(result.committed());
         assertFalse(secondTerminal.isDone());
-        secondTerminal.complete(new VictimResolution(12L, VictimResolution.Outcome.REQUEST_END));
+        secondTerminal.complete(
+                new VictimResolution(String.valueOf(12L), VictimResolution.Outcome.REQUEST_END));
         assertSame(result, outcome.join());
         verify(f.endpoint(), never()).commitPreemption(anyLong());
         verify(f.endpoint()).abortPreemption(1L);
@@ -1743,7 +1799,7 @@ class DecodePreemptionProtocolTest {
                                 () ->
                                         terminal.complete(
                                                 new VictimResolution(
-                                                        11L,
+                                                        String.valueOf(11L),
                                                         VictimResolution.Outcome.REQUEST_END)));
         try {
             assertTrue(factVisible.await(2, TimeUnit.SECONDS));
@@ -1814,8 +1870,8 @@ class DecodePreemptionProtocolTest {
                         call ->
                                 Optional.of(
                                         call.<DecodeResources.ReservationHandle>getArgument(0)
-                                                                .requestId()
-                                                        == 11L
+                                                        .requestId()
+                                                        .equals("11")
                                                 ? first
                                                 : second));
         var channel = mock(EngineGrpcClient.class);
@@ -1864,7 +1920,9 @@ class DecodePreemptionProtocolTest {
         } else if (mixed) {
             verify(f.requests(), org.mockito.Mockito.timeout(1000))
                     .onPreemption(second, phaseEvent(PreemptionCancelPhase.NOT_FOUND_STALE));
-            firstTerminal.complete(new VictimResolution(11L, VictimResolution.Outcome.REQUEST_END));
+            firstTerminal.complete(
+                    new VictimResolution(
+                            String.valueOf(11L), VictimResolution.Outcome.REQUEST_END));
         }
         assertFalse(outcome.get(2, TimeUnit.SECONDS).committed());
         var unresolved = mixed ? second : first;

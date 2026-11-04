@@ -1,5 +1,6 @@
 package org.flexlb.cache.monitor;
 
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.metric.FlexMetricTags;
@@ -20,8 +21,6 @@ import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_BYTES;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
-import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
-import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS;
@@ -66,21 +65,18 @@ class CacheMetricsReporterTest {
         doThrow(failure).when(monitor).register(CACHE_ENGINE_LOCAL_COUNT, FlexMetricType.GAUGE);
         assertDoesNotThrow(reporter::init);
         verify(monitor).register(CACHE_ENGINE_LOCAL_BYTES, FlexMetricType.GAUGE);
-        var tags =
-                FlexMetricTags.of("engineIp", "10.0.0.1", "enginePort", "8080", "role", "PREFILL");
+        var tags = FlexMetricTags.of("engineIp", "10.0.0.1:8080", "role", "PREFILL");
         doThrow(failure).when(monitor).report(CACHE_ENGINE_LOCAL_COUNT, tags, 2);
         assertDoesNotThrow(() -> reporter.reportEngineLocalMetrics("10.0.0.1:8080", "PREFILL", 2));
         verify(monitor).report(CACHE_ENGINE_LOCAL_BYTES, tags, 272L);
     }
 
     @Test
-    void should_register_recent_cache_key_metrics_as_visible_series() {
+    void should_register_theory_and_routing_metrics_as_visible_series() {
         reporter.init();
 
-        verify(monitor).register(CACHE_RECENT_KEY_HIT_COUNT, FlexMetricType.GAUGE);
-        verify(monitor).register(CACHE_RECENT_KEY_TOTAL_COUNT, FlexMetricType.GAUGE);
-        verify(monitor).register(CACHE_THEORY_HIT_COUNT, FlexMetricType.GAUGE);
-        verify(monitor).register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.GAUGE);
+        verify(monitor).register(CACHE_THEORY_HIT_COUNT, FlexMetricType.COUNTER);
+        verify(monitor).register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.COUNTER);
         verify(monitor).register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
         verify(monitor).register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.QPS);
         verify(monitor).register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.QPS);
@@ -105,38 +101,34 @@ class CacheMetricsReporterTest {
     void should_report_engine_local_metrics_with_exact_worker_address(String address, String ip) {
         reporter.reportEngineLocalMetrics(address, "PREFILL", 2);
 
-        FlexMetricTags tags =
-                FlexMetricTags.of("engineIp", ip, "enginePort", "8080", "role", "PREFILL");
+        FlexMetricTags tags = FlexMetricTags.of("engineIp", address, "role", "PREFILL");
         verify(monitor).report(CACHE_ENGINE_LOCAL_COUNT, tags, 2);
         verify(monitor).report(CACHE_ENGINE_LOCAL_BYTES, tags, 272L);
     }
 
     @Test
     void should_report_zero_hit_token_request_as_visible_data_point() {
-        reporter.reportRecentCacheKeyHitMetrics(1800000L, 0L, 300L);
+        reporter.reportTheoryCacheHitMetrics(0L, 300L);
 
-        FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", "1800000");
-        verify(monitor).report(CACHE_RECENT_KEY_HIT_COUNT, tags, 0L);
-        verify(monitor).report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, 300L);
+        FlexMetricTags tags = FlexMetricTags.of();
+        verify(monitor).report(CACHE_THEORY_HIT_COUNT, tags, 0L);
+        verify(monitor).report(CACHE_THEORY_TOTAL_COUNT, tags, 300L);
     }
 
     @Test
     void should_skip_empty_token_request() {
-        reporter.reportRecentCacheKeyHitMetrics(1800000L, 0L, 0L);
+        reporter.reportTheoryCacheHitMetrics(0L, 0L);
 
-        FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", "1800000");
-        verify(monitor, never()).report(CACHE_RECENT_KEY_HIT_COUNT, tags, 0L);
-        verify(monitor, never()).report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, 0L);
+        FlexMetricTags tags = FlexMetricTags.of();
+        verify(monitor, never()).report(CACHE_THEORY_HIT_COUNT, tags, 0L);
+        verify(monitor, never()).report(CACHE_THEORY_TOTAL_COUNT, tags, 0L);
     }
 
     @Test
     void should_report_theory_cache_hit_metrics() {
-        CacheHitTheoryStats stats = new CacheHitTheoryStats(() -> 0L);
-        CacheHitTheoryStats.Snapshot snapshot = stats.record(2L, 4L, 0L);
+        reporter.reportTheoryCacheHitMetrics(2L, 4L);
 
-        reporter.reportTheoryCacheHitMetrics(snapshot);
-
-        FlexMetricTags allTags = FlexMetricTags.of("window", "all", "windowMs", "0");
+        FlexMetricTags allTags = FlexMetricTags.of();
         verify(monitor).report(CACHE_THEORY_HIT_COUNT, allTags, 2L);
         verify(monitor).report(CACHE_THEORY_TOTAL_COUNT, allTags, 4L);
         verify(monitor).report(CACHE_THEORY_HIT_RATIO, allTags, 0.5D);

@@ -63,7 +63,7 @@ class ExpirationTimerTest {
                         service,
                         mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
                         mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                        mock(org.flexlb.service.RecentCacheKeyTraceReporter.class));
+                        mock(org.flexlb.service.TheoryCacheHitReporter.class));
         var runtime = org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner);
         var timer = runtime.deadlines();
         var executor = mock(TaskTimer.class);
@@ -478,7 +478,10 @@ class ExpirationTimerTest {
     private static RequestContext registeredContext() {
         var context = mock(RequestContext.class);
         var snapshot = mock(ContextResult.Snapshot.class);
-        when(snapshot.key()).thenReturn(new ContextResult.Identity(1L, 1L));
+        when(snapshot.key())
+                .thenReturn(
+                        new ContextResult.Identity(
+                                "1", 1L, org.flexlb.dao.route.RequestPhase.GENERATION, 1L));
         when(context.snapshot()).thenReturn(snapshot);
         return context;
     }

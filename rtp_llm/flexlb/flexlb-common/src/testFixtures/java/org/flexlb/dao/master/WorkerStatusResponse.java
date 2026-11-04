@@ -66,6 +66,8 @@ public class WorkerStatusResponse {
     @JsonProperty("block_hash_lookahead_tokens")
     private int blockHashLookaheadTokens;
 
+    private long blockSize;
+
     @JsonProperty("cache_match_rollback_blocks")
     private int cacheMatchRollbackBlocks;
 

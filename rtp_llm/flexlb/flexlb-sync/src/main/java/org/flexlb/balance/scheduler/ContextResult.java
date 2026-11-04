@@ -49,8 +49,7 @@ public final class ContextResult {
         FENCED,
         ACKNOWLEDGED,
         NOT_FOUND,
-        UNKNOWN,
-        UNSUPPORTED
+        UNKNOWN
     }
 
     public enum EndKind {
@@ -73,7 +72,11 @@ public final class ContextResult {
         RETIRED
     }
 
-    public record Identity(long requestId, long incarnation) {}
+    public record Identity(
+            String requestId,
+            long originalNumericRequestId,
+            org.flexlb.dao.route.RequestPhase phase,
+            long incarnation) {}
 
     public record End(
             EndKind kind, RequestState.Phase phase, StrategyErrorType errorType, String detail) {

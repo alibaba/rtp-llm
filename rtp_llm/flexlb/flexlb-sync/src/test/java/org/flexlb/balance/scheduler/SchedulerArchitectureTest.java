@@ -181,7 +181,7 @@ class SchedulerArchitectureTest {
                         org.flexlb.balance.endpoint.WorkerEndpoint.GenerationPin.class,
                         RequestRoute.class,
                         org.flexlb.service.monitor.EngineHealthReporter.class,
-                        org.flexlb.cache.monitor.CacheMetricsReporter.class
+                        org.flexlb.cache.telemetry.CacheMetricsReporter.class
                     }) {
                 assertNoImplementationDependency(strategy, dependency);
             }
@@ -258,8 +258,10 @@ class SchedulerArchitectureTest {
                         "schedule",
                         "stop",
                         "awaitStopped",
+                        "blockedRequestCount",
                         "close"),
                 Arrays.stream(RequestScheduler.class.getDeclaredMethods())
+                        .filter(method -> !method.isSynthetic())
                         .map(java.lang.reflect.Method::getName)
                         .collect(java.util.stream.Collectors.toSet()));
         for (Class<?> type :

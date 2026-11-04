@@ -161,7 +161,11 @@ class TrafficPolicyConfigTest {
 
     private static Request request(long id, String apiKey, long inputTokens) {
         Request request =
-                Request.builder().requestId(id).apiKey(apiKey).seqLen(inputTokens).build();
+                Request.builder()
+                        .requestId(String.valueOf(Long.toString(id)))
+                        .apiKey(apiKey)
+                        .seqLen(inputTokens)
+                        .build();
         return request;
     }
 }

@@ -20,7 +20,7 @@ import org.flexlb.engine.grpc.EngineRpcService.MultimodalCacheStatusPB;
 import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
-import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
+import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -63,8 +63,8 @@ class VitCacheDirectoryTest {
     void setUp() {
         a = worker("10.0.0.1", "one");
         b = worker("10.0.0.2", "two");
-        live.put(a.getIpPort(), a);
-        live.put(b.getIpPort(), b);
+        live.put(a.getLogicalIpPort(), a);
+        live.put(b.getLogicalIpPort(), b);
         workers = mock(EndpointRegistry.class);
         when(workers.statusSnapshot(RoleType.VIT)).thenAnswer(call -> Map.copyOf(live));
         when(workers.endpointAddressSnapshot(RoleType.VIT))
@@ -97,7 +97,7 @@ class VitCacheDirectoryTest {
     private RequestContext context(String... keys) {
         Request request =
                 Request.builder()
-                        .requestId(123L)
+                        .requestId("123")
                         .cacheAffinityKeys(List.of(keys))
                         .generateTimeout(30000L)
                         .build();
@@ -139,11 +139,11 @@ class VitCacheDirectoryTest {
                         addresses -> {
                             calls.incrementAndGet();
                             assertEquals(
-                                    java.util.Set.of(a.getIpPort(), b.getIpPort()),
+                                    java.util.Set.of(a.getLogicalIpPort(), b.getLogicalIpPort()),
                                     java.util.Set.copyOf(addresses));
                             assertThrows(
                                     UnsupportedOperationException.class, () -> addresses.clear());
-                            return addresses.indexOf(b.getIpPort());
+                            return addresses.indexOf(b.getLogicalIpPort());
                         });
         var selected = custom.select(context("image"), null);
         assertEquals(1, calls.get(), "cache routing must invoke the injected VIT strategy");
@@ -198,7 +198,7 @@ class VitCacheDirectoryTest {
         assertEquals(
                 pendingWorker.getIp(),
                 selector.select(context("cold"), pendingWorker.getGroup()).getServerIp());
-        live.remove(other.getIpPort());
+        live.remove(other.getLogicalIpPort());
         assertEquals(pendingWorker.getIp(), selector.select(context("cold"), null).getServerIp());
     }
 
@@ -329,12 +329,13 @@ class VitCacheDirectoryTest {
         var eventLoop = new NioEventLoopGroup(1);
         var client =
                 new EngineGrpcClient(
-                        mock(CustomNameResolver.class),
+                        mock(EngineAddressResolver.class),
                         executor,
                         eventLoop,
                         mock(GrpcReporter.class),
                         1000,
-                        5000);
+                        5000,
+                        org.mockito.Mockito.mock(org.flexlb.config.CacheMatchConfiguration.class));
         try {
             var request = CacheVersionPB.newBuilder().setNeedCacheKeys(true).build();
             for (int i = 0; i < 2; i++) {
@@ -378,9 +379,9 @@ class VitCacheDirectoryTest {
     void cacheAffinityNeverOverridesGroupOrHealth() {
         snapshot(a, "a1", "image");
         assertEquals(b.getIp(), selector.select(context("image"), "two").getServerIp());
-        live.remove(a.getIpPort());
+        live.remove(a.getLogicalIpPort());
         assertEquals(b.getIp(), selector.select(context("image"), null).getServerIp());
-        live.remove(b.getIpPort());
+        live.remove(b.getLogicalIpPort());
         assertFalse(selector.select(context("image"), null).isSuccess());
     }
 
@@ -413,7 +414,7 @@ class VitCacheDirectoryTest {
     void rejectsStaleSnapshotAndInvalidSelectedWorker() {
         snapshot(a, "a1", "image");
         WorkerStatus replacement = worker(a.getIp(), "one");
-        live.put(a.getIpPort(), replacement);
+        live.put(a.getLogicalIpPort(), replacement);
         snapshot(a, "old", "image");
         snapshot(b, "b1", "image");
         assertEquals(b.getIp(), selector.select(context("image"), null).getServerIp());
@@ -422,7 +423,7 @@ class VitCacheDirectoryTest {
         ctx.data().setRequest(ctx.data().getRequest().toBuilder().selectedVit(selected).build());
         assertTrue(selector.validate(ctx, "two").isSuccess());
         assertFalse(selector.validate(ctx, "one").isSuccess());
-        live.remove(b.getIpPort());
+        live.remove(b.getLogicalIpPort());
         assertFalse(selector.validate(ctx, null).isSuccess());
     }
 
@@ -472,7 +473,7 @@ class VitCacheDirectoryTest {
             org.junit.jupiter.api.Assertions.assertNotNull(pinned);
             assertEquals(a.getGenerationId(), pinned.getWorkerGeneration());
         }
-        live.put(a.getIpPort(), worker(a.getIp(), "one"));
+        live.put(a.getLogicalIpPort(), worker(a.getIp(), "one"));
         assertFalse(selector.validate(ctx, "one").isSuccess());
         try (var scope = new org.flexlb.balance.scheduler.RequestRoute(ctx)) {
             org.junit.jupiter.api.Assertions.assertNull(selector.selectPinned(ctx, "one", scope));

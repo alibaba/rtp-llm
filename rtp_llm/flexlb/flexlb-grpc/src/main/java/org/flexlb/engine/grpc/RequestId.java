@@ -1,7 +1,5 @@
 package org.flexlb.engine.grpc;
 
-import com.google.protobuf.ByteString;
-import com.google.protobuf.InvalidProtocolBufferException;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 
 /**

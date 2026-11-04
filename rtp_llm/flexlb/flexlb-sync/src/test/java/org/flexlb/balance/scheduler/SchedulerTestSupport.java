@@ -5,7 +5,7 @@ import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.scheduler.ResponseCompletionExecutor.Registration;
 import org.flexlb.config.ConfigService;
 import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -15,7 +15,6 @@ import java.util.Map;
 import java.util.WeakHashMap;
 
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
-import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
@@ -122,8 +121,8 @@ public final class SchedulerTestSupport {
 
     private static RequestRepository mockRepository(RequestLifecycle owner) {
         var repository = mock(RequestRepository.class);
-        when(repository.ownerOf(anyLong())).thenReturn(owner);
-        when(repository.findActive(anyLong()))
+        when(repository.ownerOf(org.mockito.ArgumentMatchers.anyString())).thenReturn(owner);
+        when(repository.findActive(org.mockito.ArgumentMatchers.anyString()))
                 .thenAnswer(
                         call -> {
                             var context = mock(RequestContext.class);
@@ -387,7 +386,7 @@ public final class SchedulerTestSupport {
             ConfigService config,
             DeliveryMetricsReporter batches,
             RequestSchedulerReporter requests,
-            RecentCacheKeyTraceReporter trace) {
+            TheoryCacheHitReporter trace) {
         return create(
                 config,
                 batches,
@@ -404,7 +403,7 @@ public final class SchedulerTestSupport {
             ConfigService config,
             DeliveryMetricsReporter batches,
             RequestSchedulerReporter requests,
-            RecentCacheKeyTraceReporter trace,
+            TheoryCacheHitReporter trace,
             RequestWorkerSelector router,
             DecodePreemption eviction,
             PlacementAvailability availability) {
@@ -415,7 +414,7 @@ public final class SchedulerTestSupport {
             ConfigService config,
             DeliveryMetricsReporter batches,
             RequestSchedulerReporter requests,
-            RecentCacheKeyTraceReporter trace,
+            TheoryCacheHitReporter trace,
             RequestWorkerSelector router,
             DecodePreemption eviction,
             PlacementAvailability availability,
@@ -438,7 +437,7 @@ public final class SchedulerTestSupport {
             SchedulerTestServices runtime,
             ConfigService config,
             DeliveryMetricsReporter batches,
-            RecentCacheKeyTraceReporter trace,
+            TheoryCacheHitReporter trace,
             RequestWorkerSelector router,
             DecodePreemption eviction,
             PlacementAvailability availability) {
@@ -449,7 +448,7 @@ public final class SchedulerTestSupport {
             SchedulerTestServices runtime,
             ConfigService config,
             DeliveryMetricsReporter batches,
-            RecentCacheKeyTraceReporter trace,
+            TheoryCacheHitReporter trace,
             RequestWorkerSelector router,
             DecodePreemption eviction,
             PlacementAvailability availability,

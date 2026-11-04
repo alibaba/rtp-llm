@@ -59,21 +59,21 @@ class DecodeEndpointTest {
                             endpoint,
                             new DecodeResources.ReservationHandle(
                                     reservation.endpointGenerationId() + 1,
-                                    100L,
+                                    String.valueOf(100L),
                                     reservation.reservationToken())));
             assertFalse(
                     permit.belongsTo(
                             endpoint,
                             new DecodeResources.ReservationHandle(
                                     reservation.endpointGenerationId(),
-                                    101L,
+                                    String.valueOf(101L),
                                     reservation.reservationToken())));
             assertFalse(
                     permit.belongsTo(
                             endpoint,
                             new DecodeResources.ReservationHandle(
                                     reservation.endpointGenerationId(),
-                                    100L,
+                                    String.valueOf(100L),
                                     reservation.reservationToken() + 1)));
             assertEquals(1, endpoint.resourceSnapshot().activeDispatchPermits());
         } finally {
@@ -128,7 +128,7 @@ class DecodeEndpointTest {
                         : allocated
                                 ? DecodeTaskPhase.ACCEPTED_NOT_RUNNING
                                 : DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN,
-                endpoint.resourceSnapshot().requests().get(100L).phase());
+                endpoint.resourceSnapshot().requests().get(String.valueOf(100L)).phase());
 
         endpoint.publishStatus(
                 endpoint.applyStatusHeartbeat(
@@ -165,7 +165,7 @@ class DecodeEndpointTest {
                                                         == org.flexlb.balance.scheduler
                                                                 .ContextResult.EngineKind.COMPLETED
                                                 && e.errorCode() == 0L));
-        assertFalse(endpoint.resourceSnapshot().requests().containsKey(100L));
+        assertFalse(endpoint.resourceSnapshot().requests().containsKey(String.valueOf(100L)));
         assertEquals(0, endpoint.resourceSnapshot().reservedCount());
     }
 
@@ -257,7 +257,7 @@ class DecodeEndpointTest {
 
     @Test
     void ipPort_format() {
-        assertEquals("10.0.0.1:8080", endpoint.ipPort());
+        assertEquals("10.0.0.1:8080@0", endpoint.ipPort());
     }
 
     // ==================== PR-C: getEngineLoad O(1) + queuedPhaseCount drift ===========
@@ -277,7 +277,7 @@ class DecodeEndpointTest {
         markQueued(2L);
         assertEquals(1, endpoint.routingView().engineLoad());
 
-        var queued = endpoint.resourceSnapshot().requests().get(1L);
+        var queued = endpoint.resourceSnapshot().requests().get(String.valueOf(1L));
         assertTrue(queued.phase().isMasterQueued());
         assertEquals(DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED, queued.phase());
         assertFalse(endpoint.ownership(reservations.get(1L)).confirmed());
@@ -285,7 +285,7 @@ class DecodeEndpointTest {
         // Commit req 1's pre-delivery permit → back to engine load 2.
         assertEquals(TRANSFERRED, acquirePermit(1L).dispatch().status());
         assertEquals(2, endpoint.routingView().engineLoad());
-        var dispatched = endpoint.resourceSnapshot().requests().get(1L);
+        var dispatched = endpoint.resourceSnapshot().requests().get(String.valueOf(1L));
         assertFalse(dispatched.phase().isMasterQueued());
         assertEquals(DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN, dispatched.phase());
         assertTrue(
@@ -326,12 +326,17 @@ class DecodeEndpointTest {
         running.setPhase(TaskPhase.KV_ALLOCATED);
         updateStatus(Map.of("1", running), null, 10000);
 
-        var confirmed = endpoint.resourceSnapshot().requests().get(1L);
-        assertEquals(1L, confirmed.requestId());
+        var confirmed = endpoint.resourceSnapshot().requests().get(String.valueOf(1L));
+        assertEquals("1", confirmed.requestId());
         assertEquals(DecodeTaskPhase.ACCEPTED_NOT_RUNNING, confirmed.phase());
         assertFalse(confirmed.phase().isMasterQueued());
         assertTrue(endpoint.ownership(reservations.get(1L)).confirmed());
-        assertTrue(endpoint.resourceSnapshot().requests().get(2L).phase().isMasterQueued());
+        assertTrue(
+                endpoint.resourceSnapshot()
+                        .requests()
+                        .get(String.valueOf(2L))
+                        .phase()
+                        .isMasterQueued());
 
         // req 2 still queued, inflight=1 (req2), confirmed=1 (req1)
         // engineLoad = confirmed(1) + max(0, inflight(1) - queued(1)) = 1
@@ -455,7 +460,7 @@ class DecodeEndpointTest {
 
     private TaskInfo task(long requestId) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(String.valueOf(requestId));
         return task;
     }
 

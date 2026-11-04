@@ -130,7 +130,8 @@ class SchedulingErrorCodeMatrixTest {
                 var original = fixture.service.submit(fixture.context());
                 assertFailure(fixture.schedule(malformed), 8406, UNSPECIFIED, "duplicate");
                 assertFalse(original.isDone());
-                fixture.service.cancel(REQUEST_ID, 0L, CancelReason.CLIENT_CANCELLED);
+                fixture.service.cancel(
+                        String.valueOf(REQUEST_ID), 0L, CancelReason.CLIENT_CANCELLED);
                 assertFailure(original.get(5, TimeUnit.SECONDS), 8504, UNSPECIFIED, "cancel");
             } else if (scenario.equals("expired")) {
                 malformed
@@ -282,7 +283,7 @@ class SchedulingErrorCodeMatrixTest {
             assertFailure(
                     fixture.schedule(fixture.context()), 8406, UNSPECIFIED, "duplicate request_id");
             assertFalse(original.isDone());
-            fixture.service.cancel(REQUEST_ID, 0L, CancelReason.CLIENT_CANCELLED);
+            fixture.service.cancel(String.valueOf(REQUEST_ID), 0L, CancelReason.CLIENT_CANCELLED);
             assertFailure(original.get(5, TimeUnit.SECONDS), 8504, UNSPECIFIED, "cancel");
             assertEquals(1, fixture.harness.decodeEndpoint(0).resourceSnapshot().reservedCount());
             assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
@@ -311,7 +312,7 @@ class SchedulingErrorCodeMatrixTest {
         assertSame(failure, context.data().getResponse());
         PvLogData pv =
                 new PvLogData(
-                        context,
+                        context.data(),
                         failure.isSuccess(),
                         failure.getErrorMessage(),
                         failure.getCode(),

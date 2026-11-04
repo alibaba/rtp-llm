@@ -34,6 +34,18 @@ class PlacementComponentsContractTest {
         var victims = mock(DecodePreemptionPolicy.class);
         new ApplicationContextRunner()
                 .withUserConfiguration(PlacementConfiguration.class)
+                .withBean(
+                        "environmentConfigSource",
+                        org.flexlb.service.config.ConfigSource.class,
+                        () -> mock(org.flexlb.service.config.ConfigSource.class))
+                .withBean(
+                        "nacosConfigSource",
+                        org.flexlb.service.config.ConfigSource.class,
+                        () -> mock(org.flexlb.service.config.ConfigSource.class))
+                .withBean(
+                        "uniConfigConfigSource",
+                        org.flexlb.service.config.ConfigSource.class,
+                        () -> mock(org.flexlb.service.config.ConfigSource.class))
                 .withBean(ConfigService.class, () -> config)
                 .withBean(RequestScheduler.class, () -> scheduler)
                 .withBean(PlacementQueue.class, () -> queue)

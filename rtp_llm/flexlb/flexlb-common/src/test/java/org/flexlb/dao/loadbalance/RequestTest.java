@@ -54,7 +54,7 @@ class RequestTest {
                 """,
                         Request.class);
 
-        assertEquals(12345L, request.getRequestId());
+        assertEquals("12345", request.getRequestId());
         assertEquals(8192L, request.getSeqLen());
         assertEquals(1024L, request.getCacheKeyBlockSize());
         assertEquals(3, request.getBlockCacheKeys().size());
@@ -66,7 +66,7 @@ class RequestTest {
 
     @Test
     void should_not_include_api_key_in_to_string() {
-        Request request = Request.builder().requestId(12345L).apiKey("secret-api-key").build();
+        Request request = Request.builder().requestId("12345").apiKey("secret-api-key").build();
 
         assertFalse(request.toString().contains("secret-api-key"));
     }
@@ -82,7 +82,7 @@ class RequestTest {
     void constructionCopiesCacheKeysAndBuilderReuseDoesNotChangeTheRequest() {
         var keys = new ArrayList<>(List.of(11L, 22L));
         var builder =
-                Request.builder().requestId(7L).blockCacheKeys(keys).seqLen(64L).maxNewTokens(32);
+                Request.builder().requestId("7").blockCacheKeys(keys).seqLen(64L).maxNewTokens(32);
         var request = builder.build();
         keys.clear();
         builder.seqLen(1L).maxNewTokens(2);

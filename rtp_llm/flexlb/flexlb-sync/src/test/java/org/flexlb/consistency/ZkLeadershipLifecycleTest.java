@@ -33,7 +33,10 @@ class ZkLeadershipLifecycleTest {
                 new ZookeeperMasterElectService(
                         mock(GeneralHttpNettyService.class),
                         mock(EngineHealthReporter.class),
-                        mock(Environment.class));
+                        mock(Environment.class),
+                        org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                                new org.flexlb.config.FlexlbConfig()),
+                        org.mockito.Mockito.mock(org.flexlb.config.DeploymentIdentity.class));
         var selector = mock(LeaderSelector.class);
         var oldLeader = mock(Participant.class);
         var newLeader = mock(Participant.class);
@@ -76,7 +79,10 @@ class ZkLeadershipLifecycleTest {
                 new ZookeeperMasterElectService(
                         mock(GeneralHttpNettyService.class),
                         mock(EngineHealthReporter.class),
-                        mock(Environment.class));
+                        mock(Environment.class),
+                        org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                                new org.flexlb.config.FlexlbConfig()),
+                        org.mockito.Mockito.mock(org.flexlb.config.DeploymentIdentity.class));
         var selector = mock(LeaderSelector.class);
         var oldLeader = mock(Participant.class);
         when(oldLeader.getId()).thenReturn("127.0.0.9");
@@ -122,7 +128,12 @@ class ZkLeadershipLifecycleTest {
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         ZookeeperMasterElectService service =
                 new ZookeeperMasterElectService(
-                        mock(GeneralHttpNettyService.class), reporter, mock(Environment.class));
+                        mock(GeneralHttpNettyService.class),
+                        reporter,
+                        mock(Environment.class),
+                        org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                                new org.flexlb.config.FlexlbConfig()),
+                        org.mockito.Mockito.mock(org.flexlb.config.DeploymentIdentity.class));
         assertThrows(
                 CancelLeadershipException.class,
                 () -> service.stateChanged(null, ConnectionState.SUSPENDED));
@@ -144,7 +155,12 @@ class ZkLeadershipLifecycleTest {
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         ZookeeperMasterElectService service =
                 new ZookeeperMasterElectService(
-                        mock(GeneralHttpNettyService.class), reporter, mock(Environment.class));
+                        mock(GeneralHttpNettyService.class),
+                        reporter,
+                        mock(Environment.class),
+                        org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                                new org.flexlb.config.FlexlbConfig()),
+                        org.mockito.Mockito.mock(org.flexlb.config.DeploymentIdentity.class));
         org.springframework.test.util.ReflectionTestUtils.setField(
                 service,
                 "localNode",

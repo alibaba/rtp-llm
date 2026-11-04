@@ -6,8 +6,8 @@ import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -21,7 +21,7 @@ import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.enums.TaskPhase;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -123,7 +123,7 @@ class PdfusionSchedulingTest {
         worker.lock.lock();
         try {
             endpoints.publishPreparedEndpoint(
-                    worker.getIpPort(),
+                    worker.getLogicalIpPort(),
                     worker,
                     worker.prepareNewStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(worker, status)));
@@ -132,7 +132,7 @@ class PdfusionSchedulingTest {
         }
         EndpointRegistry directory = endpoints;
         CacheAwareService cache = mock(CacheAwareService.class);
-        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
+        when(cache.findMatchingEngines(any())).thenReturn(localMatches(Map.of()));
         ModelMetaConfig model = mock(ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
         RequestWorkerSelector router =
@@ -150,6 +150,9 @@ class PdfusionSchedulingTest {
                                                         SchedulingTestConfig.newConfig())
                                                 .loadBalanceConfig())),
                         new VitWorkerSelector(),
+                        org.mockito.Mockito.mock(
+                                org.flexlb.balance.strategy.EncoderSelectionStrategy.class),
+                        org.mockito.Mockito.mock(org.flexlb.cache.match.CacheAwareService.class),
                         null,
                         mock(EngineHealthReporter.class),
                         org.mockito.Mockito.mock(CacheMetricsReporter.class),
@@ -170,7 +173,7 @@ class PdfusionSchedulingTest {
                         runtime,
                         service,
                         reporter,
-                        mock(RecentCacheKeyTraceReporter.class),
+                        mock(TheoryCacheHitReporter.class),
                         router,
                         mock(DecodePreemption.class),
                         availability);
@@ -196,17 +199,17 @@ class PdfusionSchedulingTest {
             assertEquals(0, endpoints.counts(RoleType.DECODE).published());
             assertEquals(1, SchedulerTestSupport.repository(lifecycle).liveRequestCount());
             PrefillEndpoint endpoint =
-                    (PrefillEndpoint) endpoints.get(RoleType.PDFUSION, worker.getIpPort());
+                    (PrefillEndpoint) endpoints.get(RoleType.PDFUSION, worker.getLogicalIpPort());
             assertEquals(1, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
             var committedWork = endpoint.captureRouteProjectionInputs().work();
-            assertTrue(committedWork.containsRequest(requestId));
+            assertTrue(committedWork.containsRequest(String.valueOf(requestId)));
             TaskInfo finished = new TaskInfo();
-            finished.setRequestId(requestId);
+            finished.setRequestId(String.valueOf(requestId));
             finished.setBatchId(
                     direct
                             ? 0L
                             : SchedulerTestSupport.repository(lifecycle)
-                                    .getRequestState(requestId, 0L)
+                                    .getRequestState(String.valueOf(requestId), 0L)
                                     .batchId());
             finished.setPhase(TaskPhase.RUNNING);
             finished.setErrorCode(0L);
@@ -231,16 +234,31 @@ class PdfusionSchedulingTest {
             assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
             assertEquals(0, endpoint.stats().batchCount());
             assertTrue(
-                    committedWork.containsRequest(requestId), "published snapshots stay immutable");
-            assertTrue(!endpoint.captureRouteProjectionInputs().work().containsRequest(requestId));
+                    committedWork.containsRequest(String.valueOf(requestId)),
+                    "published snapshots stay immutable");
+            assertTrue(
+                    !endpoint.captureRouteProjectionInputs()
+                            .work()
+                            .containsRequest(String.valueOf(requestId)));
             assertEquals(
                     RequestState.Phase.COMPLETED,
                     SchedulerTestSupport.repository(lifecycle)
-                            .getRequestState(requestId, 0L)
+                            .getRequestState(String.valueOf(requestId), 0L)
                             .state());
             assertEquals(0, SchedulerTestSupport.repository(lifecycle).liveRequestCount());
         } finally {
             SchedulerTestSupport.shutdown(runtime);
         }
+    }
+
+    private static org.flexlb.cache.domain.CacheMatchResult localMatches(
+            Map<String, Integer> matches) {
+        return matches == null
+                ? null
+                : new org.flexlb.cache.domain.CacheMatchResult(
+                        org.flexlb.dao.cache.HostCacheMatch.fromLocalMatches(matches),
+                        org.flexlb.cache.domain.CacheMatchSource.LOCAL_SYNC,
+                        0L,
+                        0L);
     }
 }

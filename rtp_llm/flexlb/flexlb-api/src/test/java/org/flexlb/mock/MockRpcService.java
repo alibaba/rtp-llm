@@ -213,7 +213,6 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
 
         EngineRpcService.WorkerStatusPB.Builder builder =
                 EngineRpcService.WorkerStatusPB.newBuilder()
-                        .setSupportsRequestCleanup(true)
                         .setAlive(true)
                         .setRoleType(beh.getRoleType())
                         .setAvailableConcurrency(beh.getAvailableConcurrency())

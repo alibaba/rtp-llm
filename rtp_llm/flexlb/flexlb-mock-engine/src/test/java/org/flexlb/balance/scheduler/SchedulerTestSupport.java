@@ -23,7 +23,8 @@ public final class SchedulerTestSupport {
         lock.lock();
         try {
             if (!Boolean.TRUE.equals(
-                    ReflectionTestUtils.invokeMethod(state, "requestIdAvailable", requestId))) {
+                    ReflectionTestUtils.invokeMethod(
+                            state, "requestIdAvailable", String.valueOf(requestId)))) {
                 throw new IllegalStateException("Decode request id is already owned: " + requestId);
             }
             DecodeResources.Acquisition<
@@ -32,7 +33,7 @@ public final class SchedulerTestSupport {
                             ReflectionTestUtils.invokeMethod(
                                     state,
                                     "createReservation",
-                                    requestId,
+                                    String.valueOf(requestId),
                                     hardKv,
                                     expectedKv,
                                     priority,
@@ -53,7 +54,7 @@ public final class SchedulerTestSupport {
 
     private static DecodeResources.ReservationHandle decodeReservation(
             DecodeResources.ResourceSnapshot snapshot, long requestId) {
-        var request = snapshot.requests().get(requestId);
+        var request = snapshot.requests().get(String.valueOf(requestId));
         if (request == null || request.reservationToken() <= 0L) {
             return null;
         }
@@ -61,7 +62,7 @@ public final class SchedulerTestSupport {
             case LOCAL_RESERVED, MASTER_QUEUED_NOT_DISPATCHED, ENGINE_MAY_HAVE_SEEN ->
                     new DecodeResources.ReservationHandle(
                             snapshot.routing().generationId(),
-                            requestId,
+                            String.valueOf(requestId),
                             request.reservationToken());
             default -> null;
         };

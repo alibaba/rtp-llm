@@ -16,7 +16,7 @@ class PriorityOrderingTest {
             Comparator.comparingInt(Node::priority)
                     .reversed()
                     .thenComparingLong(Node::enqueueSeq)
-                    .thenComparingLong(Node::requestId);
+                    .thenComparing(node -> Long.toString(node.requestId()));
 
     @Test
     void primitiveTotalOrderMatchesReferenceComparatorAcrossRandomKeys() {
@@ -51,10 +51,10 @@ class PriorityOrderingTest {
                         PriorityOrdering.compareWithRequestId(
                                 left.priority(),
                                 left.enqueueSeq(),
-                                left.requestId(),
+                                Long.toString(left.requestId()),
                                 right.priority(),
                                 right.enqueueSeq(),
-                                right.requestId()));
+                                Long.toString(right.requestId())));
         assertEquals(expected, actual);
     }
 

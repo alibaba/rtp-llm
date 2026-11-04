@@ -114,7 +114,7 @@ class PrefillAdmissionFailurePerformanceTest {
                         new java.util.concurrent.locks.ReentrantLock(),
                         PrefillActiveIndex.ordered(
                                 4,
-                                java.util.Comparator.comparingLong(
+                                java.util.Comparator.comparing(
                                         org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
                                                 ::requestId)),
                         System::currentTimeMillis);

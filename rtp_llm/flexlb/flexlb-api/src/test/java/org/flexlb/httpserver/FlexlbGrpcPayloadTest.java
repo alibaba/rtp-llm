@@ -74,7 +74,8 @@ class FlexlbGrpcPayloadTest {
                         config,
                         environment,
                         serverGroup,
-                        NoOpFlexMonitor.getInstance(),
+                        new org.flexlb.engine.grpc.monitor.GrpcReporter(
+                                NoOpFlexMonitor.getInstance()),
                         new GrpcServerTimingInterceptor(),
                         new GrpcQosHeaderInterceptor());
         MasterStatusService election = mock(MasterStatusService.class);

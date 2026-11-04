@@ -148,7 +148,7 @@ class PrefillPlanningInputChangeTest {
                         org.mockito.ArgumentMatchers.any());
         RequestContext context = new RequestContext(config);
         context.data()
-                .setRequest(Request.builder().requestId(51L).rawPriority(0).seqLen(10L).build());
+                .setRequest(Request.builder().requestId("51").rawPriority(0).seqLen(10L).build());
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(0, Long.MAX_VALUE));
         RequestRoute route =
                 SchedulingTestConfig.createRoute(

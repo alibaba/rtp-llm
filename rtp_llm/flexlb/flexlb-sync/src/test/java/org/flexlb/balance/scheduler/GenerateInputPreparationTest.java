@@ -6,7 +6,7 @@ import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.config.ConfigService;
 import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -54,9 +54,9 @@ class GenerateInputPreparationTest {
         var parsed = context.data().getGenerateInput();
         assertEquals(valid, GenerateInputPB.parseFrom(parsed.toBuilder().build().toByteString()));
         assertSame(parsed, context.data().getGenerateInput());
-        assertEquals(71, context.data().getGenerateInput().toBuilder().getRequestId());
+        assertEquals(71L, context.data().getGenerateInput().toBuilder().getRequestId());
         parsed.toBuilder().setRequestId(72).build();
-        assertEquals(71, context.data().getGenerateInput().toBuilder().getRequestId());
+        assertEquals(71L, context.data().getGenerateInput().toBuilder().getRequestId());
         context.data().setGenerateInputPb(ByteString.EMPTY);
         assertFalse(context.data().hasGenerateInput());
         assertNull(context.data().getGenerateInput());
@@ -92,7 +92,7 @@ class GenerateInputPreparationTest {
                 IllegalStateException.class,
                 () -> context.data().setGenerateInputPb(ByteString.EMPTY));
         repository.archive(context, RequestState.from(context.snapshot()));
-        assertNull(repository.findActive(71L));
+        assertNull(repository.findActive("71"));
         assertFalse(context.data().hasGenerateInput());
         assertNull(context.data().getGenerateInput());
         if (reader != null) {
@@ -137,7 +137,7 @@ class GenerateInputPreparationTest {
                         service,
                         reporter,
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class),
+                        mock(TheoryCacheHitReporter.class),
                         router,
                         mock(DecodePreemption.class),
                         new PlacementAvailability());
@@ -154,7 +154,7 @@ class GenerateInputPreparationTest {
             if (deadline) {
                 clockAdvanced.set(true);
             } else {
-                registry.cancel(17001L, 0L, CancelReason.CLIENT_CANCELLED);
+                registry.cancel("17001", 0L, CancelReason.CLIENT_CANCELLED);
                 assertEquals(
                         8504,
                         future.get(2, TimeUnit.SECONDS).getCode(),

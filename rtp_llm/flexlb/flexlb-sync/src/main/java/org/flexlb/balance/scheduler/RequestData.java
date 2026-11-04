@@ -11,9 +11,13 @@ import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.pv.DecisionGroup;
+import org.flexlb.dao.pv.RoutingDecision;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.util.Failures;
 
+import java.util.EnumMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CancellationException;
@@ -33,6 +37,9 @@ public final class RequestData {
     private final long startTime = System.currentTimeMillis();
     private final long serviceStartNanos = System.nanoTime();
     private volatile Request request;
+    private long originalNumericRequestId;
+    private org.flexlb.dao.route.RequestPhase phase = org.flexlb.dao.route.RequestPhase.GENERATION;
+    private java.util.List<org.flexlb.dao.route.RoleType> requestedRoles = java.util.List.of();
     private volatile SchedulingMetadata schedulingMetadata;
     private volatile CompletableFuture<Response> future;
     private volatile RequestLifecycle lifecycle;
@@ -57,6 +64,37 @@ public final class RequestData {
     @Setter private String planType = "";
     @Setter private long planCost;
     @Setter private int victimCount;
+
+    @Setter private Long requestMessageBytes;
+    @Setter private Long requestBodyBytes;
+    @Setter private DecisionGroup decisionGroup;
+    private long totalTimeUs;
+    private Long requestArrivalDelayMs;
+    private Long requestBodyReadAndDeserializeTimeUs;
+    private String cacheSource;
+    private long cacheQueryUs;
+    private int cacheQueryCount;
+    private final EnumMap<RoleType, CacheMatchSelection> cacheSelections =
+            new EnumMap<>(RoleType.class);
+    private final EnumMap<RoleType, String> selectionReasons = new EnumMap<>(RoleType.class);
+    private final EnumMap<RoleType, RoutingDecision> routingDecisions =
+            new EnumMap<>(RoleType.class);
+    private final EnumMap<RoleType, Integer> routingAttempts = new EnumMap<>(RoleType.class);
+
+    public synchronized void setOriginalNumericRequestId(long id) {
+        checkState(lifecycle == null, "registered request identity is immutable");
+        originalNumericRequestId = id;
+    }
+
+    public synchronized void setPhase(org.flexlb.dao.route.RequestPhase value) {
+        checkState(lifecycle == null, "registered request phase is immutable");
+        phase = Objects.requireNonNull(value);
+    }
+
+    public synchronized void setRequestedRoles(java.util.List<RoleType> roles) {
+        checkState(lifecycle == null, "registered requested roles are immutable");
+        requestedRoles = java.util.List.copyOf(roles);
+    }
 
     public RequestData(FlexlbConfig config) {
         this.config = Objects.requireNonNull(config, "config");
@@ -106,13 +144,13 @@ public final class RequestData {
                 : StrategyErrorType.BATCH_SLO_EXPIRED;
     }
 
-    public long getRequestId() {
+    public String getRequestId() {
         return request.getRequestId();
     }
 
     public int getPriority() {
         return schedulingMetadata == null
-                ? request.getRawPriority()
+                ? (request == null ? 0 : request.getRawPriority())
                 : schedulingMetadata.priority();
     }
 
@@ -214,4 +252,97 @@ public final class RequestData {
             ackAtNanos = nowNanos;
         }
     }
+
+    public synchronized void recordRequestTiming(
+            long requestTimeMs, Long bodyReadAndDeserializeTimeUs) {
+        if (requestTimeMs > 0) {
+            this.requestArrivalDelayMs = startTime - requestTimeMs;
+        }
+        this.requestBodyReadAndDeserializeTimeUs = bodyReadAndDeserializeTimeUs;
+    }
+
+    public void finishRequestTiming() {
+        this.totalTimeUs = (System.nanoTime() - serviceStartNanos) / 1_000;
+    }
+
+    public synchronized void recordCacheQuery(String source, long queryTimeUs) {
+        cacheSource = source;
+        cacheQueryUs += Math.max(0L, queryTimeUs);
+        cacheQueryCount++;
+    }
+
+    public synchronized void recordCacheSelection(
+            RoleType role, String selectedIp, long hitCacheTokens) {
+        cacheSelections.put(role, new CacheMatchSelection(role, selectedIp, hitCacheTokens));
+    }
+
+    public synchronized void beginRoutingAttempt(RoleType role) {
+        routingAttempts.merge(role, 1, Integer::sum);
+        cacheSelections.remove(role);
+        selectionReasons.remove(role);
+        routingDecisions.remove(role);
+    }
+
+    public synchronized void recordRoutingDecision(RoutingDecision decision) {
+        Objects.requireNonNull(decision.role(), "role");
+        Objects.requireNonNull(decision.selectionReason(), "selectionReason");
+        selectionReasons.put(decision.role(), decision.selectionReason());
+        routingDecisions.put(
+                decision.role(),
+                new RoutingDecision(
+                        decision.role(),
+                        decision.group(),
+                        decision.strategy(),
+                        decision.selectionReason(),
+                        decision.decisionTimeMs(),
+                        routingAttempt(decision.role()),
+                        decision.selectedEndpoint(),
+                        decision.totalWorkerCount(),
+                        decision.candidateWorkerCount(),
+                        decision.snapshotTruncated(),
+                        decision.rejections(),
+                        decision.candidates(),
+                        decision.prefillPolicy()));
+    }
+
+    public synchronized void recordSelectionReason(RoleType role, String selectionReason) {
+        selectionReasons.put(role, Objects.requireNonNull(selectionReason, "selectionReason"));
+    }
+
+    public synchronized int routingAttempt(RoleType role) {
+        return routingAttempts.getOrDefault(role, 0);
+    }
+
+    public synchronized String selectionReason(RoleType role) {
+        return selectionReasons.get(role);
+    }
+
+    public synchronized RoutingTelemetry getRoutingTelemetry() {
+        return new RoutingTelemetry(
+                cacheSource,
+                cacheQueryUs,
+                cacheQueryCount,
+                cacheSelections,
+                selectionReasons,
+                routingDecisions,
+                routingAttempts);
+    }
+
+    public record RoutingTelemetry(
+            String cacheSource,
+            long cacheQueryUs,
+            int cacheQueryCount,
+            Map<RoleType, CacheMatchSelection> cacheSelections,
+            Map<RoleType, String> selectionReasons,
+            Map<RoleType, RoutingDecision> routingDecisions,
+            Map<RoleType, Integer> routingAttempts) {
+        public RoutingTelemetry {
+            cacheSelections = Map.copyOf(cacheSelections);
+            selectionReasons = Map.copyOf(selectionReasons);
+            routingDecisions = Map.copyOf(routingDecisions);
+            routingAttempts = Map.copyOf(routingAttempts);
+        }
+    }
+
+    public record CacheMatchSelection(RoleType role, String selectedIp, long hitCacheTokens) {}
 }

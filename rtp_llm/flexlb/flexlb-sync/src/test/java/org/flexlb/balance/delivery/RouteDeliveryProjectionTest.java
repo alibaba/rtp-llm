@@ -183,7 +183,14 @@ class RouteDeliveryProjectionTest {
         for (int i = 0; i < tokens.length; i++) {
             if (i != probeIndex) {
                 active.add(
-                        new GroupPlanner.Item(i + 1, 0, i + 1, 1000, Long.MAX_VALUE, tokens[i], 0));
+                        new GroupPlanner.Item(
+                                String.valueOf(i + 1),
+                                0,
+                                i + 1,
+                                1000,
+                                Long.MAX_VALUE,
+                                tokens[i],
+                                0));
             }
         }
         var queue =
@@ -191,7 +198,7 @@ class RouteDeliveryProjectionTest {
                         1000,
                         true,
                         BuiltinGroupPlanner.FIXED_WINDOW,
-                        Comparator.comparingLong(GroupPlanner.Item::requestId),
+                        Comparator.comparing(GroupPlanner.Item::requestId),
                         new GroupPlanner.Constraints(64, Long.MAX_VALUE, Long.MAX_VALUE, budget, 0),
                         active,
                         null);

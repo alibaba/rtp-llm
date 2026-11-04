@@ -47,10 +47,10 @@ class RequestTimeEstimationTest {
                 work(
                         List.of(
                                 new WorkSnapshot.RequestWork(
-                                        1L, WorkSnapshot.Phase.ENGINE_RUNNING, 7L)),
+                                        String.valueOf(1L), WorkSnapshot.Phase.ENGINE_RUNNING, 7L)),
                         List.of(
                                 new WorkSnapshot.BatchWork(
-                                        List.of(2L, 3L),
+                                        List.of(2L, 3L).stream().map(String::valueOf).toList(),
                                         WorkSnapshot.Phase.ENGINE_QUEUED,
                                         OptionalLong.of(11L))),
                         0L);
@@ -230,7 +230,9 @@ class RequestTimeEstimationTest {
                 work(
                         List.of(
                                 new WorkSnapshot.RequestWork(
-                                        1L, WorkSnapshot.Phase.ENGINE_RUNNING, 100L)),
+                                        String.valueOf(1L),
+                                        WorkSnapshot.Phase.ENGINE_RUNNING,
+                                        100L)),
                         List.of(),
                         0L);
 
@@ -279,14 +281,17 @@ class RequestTimeEstimationTest {
         WorkSnapshot committed =
                 work(
                         List.of(
-                                new WorkSnapshot.RequestWork(1L, WorkSnapshot.Phase.COMMITTED, 10L),
                                 new WorkSnapshot.RequestWork(
-                                        2L, WorkSnapshot.Phase.ENGINE_QUEUED, 20L),
+                                        String.valueOf(1L), WorkSnapshot.Phase.COMMITTED, 10L),
                                 new WorkSnapshot.RequestWork(
-                                        3L, WorkSnapshot.Phase.ENGINE_RUNNING, 30L)),
+                                        String.valueOf(2L), WorkSnapshot.Phase.ENGINE_QUEUED, 20L),
+                                new WorkSnapshot.RequestWork(
+                                        String.valueOf(3L),
+                                        WorkSnapshot.Phase.ENGINE_RUNNING,
+                                        30L)),
                         List.of(
                                 new WorkSnapshot.BatchWork(
-                                        List.of(4L, 5L),
+                                        List.of(4L, 5L).stream().map(String::valueOf).toList(),
                                         WorkSnapshot.Phase.ENGINE_RUNNING,
                                         OptionalLong.of(40L))),
                         0L);
@@ -500,7 +505,7 @@ class RequestTimeEstimationTest {
                         List.of(),
                         List.of(
                                 new WorkSnapshot.BatchWork(
-                                        List.of(1L),
+                                        List.of(1L).stream().map(String::valueOf).toList(),
                                         WorkSnapshot.Phase.ENGINE_RUNNING,
                                         OptionalLong.empty())),
                         0L);
@@ -814,7 +819,9 @@ class RequestTimeEstimationTest {
                         work(
                                 List.of(
                                         new WorkSnapshot.RequestWork(
-                                                99L, WorkSnapshot.Phase.ENGINE_RUNNING, 20L)),
+                                                String.valueOf(99L),
+                                                WorkSnapshot.Phase.ENGINE_RUNNING,
+                                                20L)),
                                 List.of(),
                                 0L),
                         TOKEN_EVALUATOR,

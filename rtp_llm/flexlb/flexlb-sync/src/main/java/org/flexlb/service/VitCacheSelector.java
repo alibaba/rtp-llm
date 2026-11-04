@@ -76,7 +76,7 @@ public class VitCacheSelector {
                 bestScore = score;
             }
             if (comparison >= 0) {
-                best.add(candidate.worker().getIpPort());
+                best.add(candidate.worker().getLogicalIpPort());
             }
         }
         if (best.isEmpty()) {
@@ -101,9 +101,7 @@ public class VitCacheSelector {
         if (selected == null) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
-        try (var pin =
-                workers.capture(
-                        RoleType.VIT, selected.getServerIp() + ":" + selected.getHttpPort())) {
+        try (var pin = workers.capture(RoleType.VIT, selected.getLogicalIpPort())) {
             WorkerStatus worker = pin == null ? null : pin.endpoint().getStatus();
             if (selected.getRole() != RoleType.VIT
                     || worker == null
@@ -127,8 +125,7 @@ public class VitCacheSelector {
         if (!result.isSuccess()) {
             return null;
         }
-        WorkerEndpoint.GenerationPin pin =
-                workers.capture(RoleType.VIT, result.getServerIp() + ":" + result.getHttpPort());
+        WorkerEndpoint.GenerationPin pin = workers.capture(RoleType.VIT, result.getLogicalIpPort());
         if (pin == null) {
             return null;
         }
@@ -152,6 +149,9 @@ public class VitCacheSelector {
         status.setWorkerGeneration(worker.getGenerationId());
         status.setServerIp(worker.getIp());
         status.setHttpPort(worker.getPort());
+        status.setSelectedEngineIndex(
+                worker.topologySnapshot().engineIndex(),
+                worker.topologySnapshot().multiEngineNum());
         status.setGrpcPort(worker.getGrpcPort());
         status.setGroup(worker.getGroup());
         status.setRequestId(requestId);

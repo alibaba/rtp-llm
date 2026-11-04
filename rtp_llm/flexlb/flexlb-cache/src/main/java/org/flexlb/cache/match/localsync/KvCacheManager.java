@@ -3,7 +3,6 @@ package org.flexlb.cache.match.localsync;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
-import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
@@ -46,7 +45,8 @@ public class KvCacheManager implements EngineCacheInvalidator {
      */
     @Autowired private CacheMetricsReporter cacheMetricsReporter;
 
-    private final Map<String, String> physicalIpPortByLogicalIpPort = new ConcurrentHashMap<>();
+    private final Map<String, WorkerStatus> workersByLogicalAddress = new ConcurrentHashMap<>();
+
     /** The owning generation's cache lock serializes each address and its retry. */
     private final Map<String, Long> pendingAdditions = new ConcurrentHashMap<>();
 
@@ -110,20 +110,10 @@ public class KvCacheManager implements EngineCacheInvalidator {
         if (workerStatus == null) {
             return;
         }
-        updateEngineCache(
-                workerStatus.getWorkerIdentity(),
-                workerStatus.getMetricIpPort(),
-                role,
-                newCacheBlocks);
-    }
-
-    private void updateEngineCache(
-            WorkerIdentity identity, String metricIpPort, String role, Set<Long> newCacheBlocks) {
-        String engineIPort = identity == null ? null : identity.getLogicalIpPort();
-        if (engineIPort == null || newCacheBlocks == null) {
-            return;
-        }
-        physicalIpPortByLogicalIpPort.put(engineIPort, identity.getPhysicalIpPort());
+        String engineIPort = workerStatus.getLogicalIpPort();
+        String metricIpPort = workerStatus.getMetricIpPort();
+        if (engineIPort == null || newCacheBlocks == null) return;
+        workersByLogicalAddress.put(engineIPort, workerStatus);
 
         Long pending = pendingAdditions.get(engineIPort);
         if (pending != null) {
@@ -133,11 +123,14 @@ public class KvCacheManager implements EngineCacheInvalidator {
 
         // Calculate diff
         DiffResult diffResult = engineLocalView.calculateDiff(engineIPort, newCacheBlocks);
-        cacheMetricsReporter.reportCacheDiffMetrics(
-                metricIpPort,
-                role,
-                diffResult.getAddedBlocks().size(),
-                diffResult.getRemovedBlocks().size());
+        SafeFlexMonitor.run(
+                "cache.diff",
+                () ->
+                        cacheMetricsReporter.reportCacheDiffMetrics(
+                                metricIpPort,
+                                role,
+                                diffResult.getAddedBlocks().size(),
+                                diffResult.getRemovedBlocks().size()));
         if (!diffResult.hasChanges()) {
             return;
         }
@@ -195,11 +188,13 @@ public class KvCacheManager implements EngineCacheInvalidator {
         Set<Long> ownedKeys = engineLocalView.getEngineCacheBlocks(engineIpPort);
         globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort, ownedKeys);
         engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
-        physicalIpPortByLogicalIpPort.remove(engineIpPort);
+        var worker = workersByLogicalAddress.remove(engineIpPort);
         pendingAdditions.remove(engineIpPort);
         SafeFlexMonitor.run(
                 "cache.local.remove",
-                () -> cacheMetricsReporter.removeEngineLocalMetrics(engineIpPort));
+                () ->
+                        cacheMetricsReporter.removeEngineLocalMetrics(
+                                worker == null ? engineIpPort : worker.getMetricIpPort()));
         reportIndexMetrics();
     }
 
@@ -214,15 +209,14 @@ public class KvCacheManager implements EngineCacheInvalidator {
         Set<String> activePhysicalIpPorts = new HashSet<>(activeEngineIpPorts);
         Set<String> staleEngineIpPorts = new HashSet<>(engineLocalView.getAllEngineIpPorts());
         staleEngineIpPorts.removeIf(
-                engineIpPort ->
-                        activePhysicalIpPorts.contains(
-                                physicalIpPortByLogicalIpPort.getOrDefault(
-                                        engineIpPort, engineIpPort)));
+                engineIpPort -> {
+                    var worker = workersByLogicalAddress.get(engineIpPort);
+                    return activePhysicalIpPorts.contains(
+                            worker == null ? engineIpPort : worker.getPhysicalIpPort());
+                });
         for (String staleEngineIpPort : staleEngineIpPorts) {
             long startTime = System.nanoTime() / 1000;
-            engineLocalView.removeAllCacheBlockOfEngine(staleEngineIpPort);
-            globalCacheIndex.removeAllCacheBlockOfEngine(staleEngineIpPort);
-            physicalIpPortByLogicalIpPort.remove(staleEngineIpPort);
+            removeEngineCache(staleEngineIpPort);
             log.info(
                     "Removed stale engine cache: {}, cost={}us",
                     staleEngineIpPort,
@@ -237,7 +231,7 @@ public class KvCacheManager implements EngineCacheInvalidator {
 
         globalCacheIndex.clear();
         engineLocalView.clear();
-        physicalIpPortByLogicalIpPort.clear();
+        workersByLogicalAddress.clear();
         pendingAdditions.clear();
 
         // Report

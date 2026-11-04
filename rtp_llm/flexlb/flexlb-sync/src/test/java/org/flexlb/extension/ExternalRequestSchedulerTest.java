@@ -34,7 +34,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -128,7 +128,7 @@ class ExternalRequestSchedulerTest {
         try (var fixture = new Fixture()) {
             var request = fixture.request(98102L);
             var response = fixture.entry.submit(request);
-            fixture.entry.cancel(98102L, 0L, CancelReason.CLIENT_CANCELLED);
+            fixture.entry.cancel("98102", 0L, CancelReason.CLIENT_CANCELLED);
             fixture.scheduler.schedule();
             assertFalse(response.get(2, TimeUnit.SECONDS).isSuccess());
             verifyNoInteractions(fixture.selector);
@@ -288,7 +288,7 @@ class ExternalRequestSchedulerTest {
                             dispatcher,
                             responses,
                             reporter,
-                            mock(RecentCacheKeyTraceReporter.class));
+                            mock(TheoryCacheHitReporter.class));
             scheduler =
                     new ManualScheduler(
                             lifecycle,
@@ -360,7 +360,9 @@ class ExternalRequestSchedulerTest {
 
         RequestContext request(long id) {
             var context = new RequestContext(config);
-            context.data().setRequest(Request.builder().requestId(id).seqLen(16L).build());
+            context.data()
+                    .setRequest(
+                            Request.builder().requestId(String.valueOf(id)).seqLen(16L).build());
             context.data()
                     .setGenerateInputPb(
                             EngineRpcService.GenerateInputPB.newBuilder()

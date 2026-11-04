@@ -270,7 +270,7 @@ class StopExecutorSafetyTest {
                                 context,
                                 i,
                                 new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
-                                        1, i + 1, i + 1),
+                                        1, String.valueOf(i + 1), i + 1),
                                 new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
                 answers.add(cleanup.preempt(claim, null, "priority preemption", 500L));
             }
@@ -291,7 +291,9 @@ class StopExecutorSafetyTest {
     }
 
     private RequestContext context() {
-        return mock(RequestContext.class, RETURNS_DEEP_STUBS);
+        var context = mock(RequestContext.class, RETURNS_DEEP_STUBS);
+        when(context.data().getRequestId()).thenReturn("41");
+        return context;
     }
 
     private SchedulerTestServices runtime() {

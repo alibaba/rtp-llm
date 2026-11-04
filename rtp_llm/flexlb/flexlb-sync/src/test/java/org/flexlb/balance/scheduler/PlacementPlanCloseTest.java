@@ -24,7 +24,7 @@ class PlacementPlanCloseTest {
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 2L);
         var route = mock(RequestRoute.class);
         var endpoint = mock(DecodeEndpoint.class);
-        var reservation = new DecodeResources.ReservationHandle(1L, 2L, 3L);
+        var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(2L), 3L);
         var failure = new IllegalStateException("cleanup failed");
         var plan = RequestProtocolTestSupport.plan(context, route);
         var handle = mock(AdmissionHandle.class);

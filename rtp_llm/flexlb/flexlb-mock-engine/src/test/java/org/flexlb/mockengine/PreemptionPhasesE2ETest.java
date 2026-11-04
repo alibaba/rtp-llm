@@ -278,7 +278,7 @@ class PreemptionPhasesE2ETest {
                 assertFalse(
                         decodeEp.resourceSnapshot().requests().values().stream()
                                 .filter(request -> request.phase().isEngineConfirmed())
-                                .anyMatch(task -> task.requestId() == 301L));
+                                .anyMatch(task -> task.requestId().equals("301")));
                 assertFalse(high.isDone(), "high request waits for dispatch capacity");
                 assertEquals(1, decodeEp.resourceSnapshot().reservedCount());
 
@@ -293,7 +293,7 @@ class PreemptionPhasesE2ETest {
                 assertEquals(0, MockEngineTestSupport.getUpstreamOwnershipCount(decodeEngine));
 
                 // The test deliberately leaves incoming work paused; settle it before draining.
-                h.scheduler.cancel(302L, 0L, CancelReason.CLIENT_CANCELLED);
+                h.scheduler.cancel("302", 0L, CancelReason.CLIENT_CANCELLED);
                 assertFalse(high.get(2, TimeUnit.SECONDS).isSuccess());
                 assertEquals(0, decodeEp.resourceSnapshot().reservedCount());
             }
@@ -368,7 +368,7 @@ class PreemptionPhasesE2ETest {
                 assertFalse(
                         decodeEp.resourceSnapshot().requests().values().stream()
                                 .filter(request -> request.phase().isEngineConfirmed())
-                                .anyMatch(task -> task.requestId() == 311L));
+                                .anyMatch(task -> task.requestId().equals("311")));
                 assertEquals(0, decodeEngine.getRunningCount());
                 assertEquals(0, decodeEp.resourceSnapshot().reservedCount());
                 assertEquals(0L, decodeEp.routingView().inflightHardKv());

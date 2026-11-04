@@ -16,8 +16,8 @@ import org.flexlb.balance.scheduler.RequestWorkerSelector;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.DecisionPolicyConfig;
@@ -405,7 +405,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         WorkerStatus ws = publishEndpoint(role, svc);
         String ipPort = "127.0.0.1:" + httpPort;
         statusByPort.put(grpcPort, ws);
-        ipPortByEnginePort.put(grpcPort, ipPort);
+        ipPortByEnginePort.put(grpcPort, ipPort + "@0");
     }
 
     private static int httpPort(int grpcPort) {
@@ -429,7 +429,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
             WorkerStatus.PreparedStatus prepared =
                     status.prepareNewStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(status, initial));
-            endpointRegistry.publishPreparedEndpoint(status.getIpPort(), status, prepared);
+            endpointRegistry.publishPreparedEndpoint(status.getLogicalIpPort(), status, prepared);
         } finally {
             status.lock.unlock();
         }
@@ -531,10 +531,12 @@ final class AutoTpmE2EHarness implements AutoCloseable {
      */
     Response defaultRoute(RequestContext ctx) {
         int prefillIndex = prefillSelector.apply(ctx);
-        ServerStatus prefill = prefillServer(prefillIndex, ctx.data().getRequestId());
+        ServerStatus prefill =
+                prefillServer(prefillIndex, Long.parseLong(ctx.data().getRequestId()));
         Response response = new Response();
         response.setSuccess(true);
-        response.setServerStatus(List.of(prefill, decodeServer(0, ctx.data().getRequestId())));
+        response.setServerStatus(
+                List.of(prefill, decodeServer(0, Long.parseLong(ctx.data().getRequestId()))));
         return response;
     }
 
@@ -545,7 +547,10 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     private RequestWorkerSelector productionRouter() {
         EndpointRegistry workers = endpointRegistry;
         CacheAwareService cache = mock(CacheAwareService.class);
-        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
+        when(cache.findMatchingEngines(any()))
+                .thenReturn(
+                        org.flexlb.cache.domain.CacheMatchResult.empty(
+                                org.flexlb.cache.domain.CacheMatchSource.LOCAL_SYNC));
         EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
         ModelMetaConfig modelMeta = mock(ModelMetaConfig.class);
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.DECODE, RoleType.PREFILL));
@@ -557,6 +562,9 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                         new org.flexlb.balance.scheduler.PlacementConfiguration()
                                 .decodeAdmissionCapacity(configService)),
                 new VitWorkerSelector(),
+                org.mockito.Mockito.mock(
+                        org.flexlb.balance.strategy.EncoderSelectionStrategy.class),
+                org.mockito.Mockito.mock(org.flexlb.cache.match.CacheAwareService.class),
                 null,
                 healthReporter,
                 org.mockito.Mockito.mock(CacheMetricsReporter.class),
@@ -574,7 +582,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         status.setGrpcPort(grpcPort);
         status.setDpRank(0);
         status.setGroup("g1");
-        status.setRequestId(requestId);
+        status.setRequestId(String.valueOf(requestId));
         return status;
     }
 
@@ -587,7 +595,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     RequestContext context(long requestId, int priority, long seqLen, int maxNewTokens) {
         Request request =
                 Request.builder()
-                        .requestId(requestId)
+                        .requestId(String.valueOf(requestId))
                         .seqLen(seqLen)
                         .maxNewTokens(maxNewTokens)
                         .numBeams(1)
@@ -662,7 +670,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
     static TaskInfo toTaskInfo(EngineRpcService.TaskInfoPB task) {
         TaskInfo info = new TaskInfo();
-        info.setRequestId(task.getRequestId());
+        info.setRequestId(String.valueOf(task.getRequestId()));
         info.setInputLength(task.getInputLength());
         info.setBatchId(task.getBatchId());
         info.setErrorCode(task.getErrorInfo().getErrorCode());

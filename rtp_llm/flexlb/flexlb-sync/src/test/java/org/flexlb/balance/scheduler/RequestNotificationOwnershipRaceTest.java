@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.config.ConfigService;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -50,7 +50,7 @@ class RequestNotificationOwnershipRaceTest {
                                         service,
                                         mock(DeliveryMetricsReporter.class),
                                         mock(RequestSchedulerReporter.class),
-                                        mock(RecentCacheKeyTraceReporter.class)));
+                                        mock(TheoryCacheHitReporter.class)));
         var runtime =
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
                         SchedulerTestServices.lifecycle(owner));
@@ -113,7 +113,7 @@ class RequestNotificationOwnershipRaceTest {
             assertFalse(context.snapshot().close().notificationsAttempted());
             assertFalse(context.snapshot().close().notificationsDone());
             assertEquals(1, runtime.requests().liveRequestCount());
-            assertSame(context, runtime.requests().findActive(9401L));
+            assertSame(context, runtime.requests().findActive("9401"));
             assertTrue(
                     publications(runtime) == 0,
                     "the frontend publisher releases its own registration only");

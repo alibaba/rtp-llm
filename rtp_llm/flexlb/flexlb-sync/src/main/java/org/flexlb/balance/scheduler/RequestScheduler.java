@@ -17,6 +17,11 @@ public interface RequestScheduler extends AutoCloseable {
 
     void onEndpointChanged(WorkerEndpoint endpoint);
 
+    /** Number of requests waiting for placement capacity or preemption availability. */
+    default int blockedRequestCount() {
+        return 0;
+    }
+
     /** Stop producing scheduling work and cancel owned timers; do not close shared facilities. */
     void stop();
 

@@ -262,10 +262,16 @@ class FlexlbForwardHopGuardNettyTest {
                 Client client = Client.connect(originalMaster.grpcPort())) {
             when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                     originalMaster.requestState)
-                            .getRequestState(requestId, 0L))
+                            .getRequestState(
+                                    String.valueOf(requestId),
+                                    0L,
+                                    org.flexlb.dao.route.RequestPhase.GENERATION))
                     .thenReturn(requestState(requestId, RequestState.Phase.ACKNOWLEDGED));
             when(originalMaster.requestScheduler.cancel(
-                            requestId, 0L, CancelReason.CLIENT_CANCELLED))
+                            String.valueOf(requestId),
+                            0L,
+                            CancelReason.CLIENT_CANCELLED,
+                            org.flexlb.dao.route.RequestPhase.GENERATION))
                     .thenReturn(requestState(requestId, RequestState.Phase.CANCELLED));
 
             originalMaster.isMaster.set(true);
@@ -295,7 +301,11 @@ class FlexlbForwardHopGuardNettyTest {
                     FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_CANCELLED,
                     response.getLifecycle().getState());
             verify(originalMaster.requestScheduler)
-                    .cancel(requestId, 0L, CancelReason.CLIENT_CANCELLED);
+                    .cancel(
+                            String.valueOf(requestId),
+                            0L,
+                            CancelReason.CLIENT_CANCELLED,
+                            org.flexlb.dao.route.RequestPhase.GENERATION);
             assertEquals(2, originalMaster.inboundCalls.get());
             originalMaster.awaitExecutorIdle();
         }
@@ -312,10 +322,16 @@ class FlexlbForwardHopGuardNettyTest {
             follower.masterAddress.set(currentMaster.httpAddress());
             currentMaster.isMaster.set(true);
             when(follower.requestScheduler.cancel(
-                            unrelatedLocalId, 0L, CancelReason.CLIENT_CANCELLED))
+                            String.valueOf(unrelatedLocalId),
+                            0L,
+                            CancelReason.CLIENT_CANCELLED,
+                            org.flexlb.dao.route.RequestPhase.GENERATION))
                     .thenReturn(requestState(unrelatedLocalId, RequestState.Phase.CANCELLED));
             when(currentMaster.requestScheduler.cancel(
-                            requestedId, 0L, CancelReason.CLIENT_CANCELLED))
+                            String.valueOf(requestedId),
+                            0L,
+                            CancelReason.CLIENT_CANCELLED,
+                            org.flexlb.dao.route.RequestPhase.GENERATION))
                     .thenReturn(requestState(requestedId, RequestState.Phase.CANCELLED));
 
             FlexlbScheduleProtocol.FlexlbCancelResponsePB response =
@@ -331,11 +347,23 @@ class FlexlbForwardHopGuardNettyTest {
             assertFalse(response.getFound());
             assertFalse(response.hasLifecycle());
             verify(follower.requestScheduler)
-                    .cancel(requestedId, 0L, CancelReason.CLIENT_CANCELLED);
+                    .cancel(
+                            String.valueOf(requestedId),
+                            0L,
+                            CancelReason.CLIENT_CANCELLED,
+                            org.flexlb.dao.route.RequestPhase.GENERATION);
             verify(follower.requestScheduler, never())
-                    .cancel(unrelatedLocalId, 0L, CancelReason.CLIENT_CANCELLED);
+                    .cancel(
+                            String.valueOf(unrelatedLocalId),
+                            0L,
+                            CancelReason.CLIENT_CANCELLED,
+                            org.flexlb.dao.route.RequestPhase.GENERATION);
             verify(currentMaster.requestScheduler, never())
-                    .cancel(anyLong(), anyLong(), any(CancelReason.class));
+                    .cancel(
+                            org.mockito.ArgumentMatchers.anyString(),
+                            anyLong(),
+                            any(CancelReason.class),
+                            any(org.flexlb.dao.route.RequestPhase.class));
             assertEquals(1, follower.inboundCalls.get());
             assertEquals(0, currentMaster.inboundCalls.get());
             follower.awaitExecutorIdle();
@@ -351,7 +379,16 @@ class FlexlbForwardHopGuardNettyTest {
     }
 
     private static RequestState requestState(long requestId, RequestState.Phase phase) {
-        return new RequestState(requestId, phase, Delivery.SendMode.NONE, 0L, 1L, 2L, phase.name());
+        return new RequestState(
+                String.valueOf(requestId),
+                requestId,
+                org.flexlb.dao.route.RequestPhase.GENERATION,
+                phase,
+                Delivery.SendMode.NONE,
+                0L,
+                1L,
+                2L,
+                phase.name());
     }
 
     /**

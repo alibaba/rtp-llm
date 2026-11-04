@@ -31,11 +31,13 @@ class RequestTimeEstimationTest {
     @Test
     void frozenWorkCanBeReadConcurrentlyWithoutAnExtraCaptureObject() throws Exception {
         var requests = new java.util.ArrayList<WorkSnapshot.RequestWork>();
-        requests.add(new WorkSnapshot.RequestWork(7L, WorkSnapshot.Phase.ENGINE_RUNNING, 30L));
+        requests.add(
+                new WorkSnapshot.RequestWork(
+                        String.valueOf(7L), WorkSnapshot.Phase.ENGINE_RUNNING, 30L));
         var batches = new java.util.ArrayList<WorkSnapshot.BatchWork>();
         batches.add(
                 new WorkSnapshot.BatchWork(
-                        List.of(9L, 8L),
+                        List.of(9L, 8L).stream().map(String::valueOf).toList(),
                         WorkSnapshot.Phase.COMMITTED,
                         java.util.OptionalLong.of(40L)));
         var snapshot = new WorkSnapshot(100L, requests, batches, 0L);
@@ -48,10 +50,10 @@ class RequestTimeEstimationTest {
                         readers.submit(
                                 () -> {
                                     assertEquals(60L, snapshot.knownRemainingWorkMsAt(110L));
-                                    assertTrue(snapshot.containsRequest(7L));
-                                    assertTrue(snapshot.containsRequest(8L));
-                                    assertTrue(snapshot.containsRequest(9L));
-                                    assertFalse(snapshot.containsRequest(10L));
+                                    assertTrue(snapshot.containsRequest("7"));
+                                    assertTrue(snapshot.containsRequest("8"));
+                                    assertTrue(snapshot.containsRequest("9"));
+                                    assertFalse(snapshot.containsRequest("10"));
                                     assertFalse(snapshot.hasUnknownWork());
                                     assertSame(snapshot, snapshot.calculate());
                                 }));
@@ -70,7 +72,9 @@ class RequestTimeEstimationTest {
                         planner,
                         Comparator.comparingLong(GroupPlanner.Item::enqueuedAtMs),
                         new GroupPlanner.Constraints(16, 1000, 1000, 0, 0),
-                        List.of(new GroupPlanner.Item(1, 0, 1, 10, Long.MAX_VALUE, 10, 0)),
+                        List.of(
+                                new GroupPlanner.Item(
+                                        String.valueOf(1), 0, 1, 10, Long.MAX_VALUE, 10, 0)),
                         null);
         var inputs =
                 new RequestTimeEstimation.Inputs(
@@ -96,7 +100,9 @@ class RequestTimeEstimationTest {
                                 .reversed()
                                 .thenComparingLong(GroupPlanner.Item::enqueuedAtMs),
                         new GroupPlanner.Constraints(1, 1000, 1000, 0, 0),
-                        List.of(new GroupPlanner.Item(1, 0, 1, 10, Long.MAX_VALUE, 10, 0)),
+                        List.of(
+                                new GroupPlanner.Item(
+                                        String.valueOf(1), 0, 1, 10, Long.MAX_VALUE, 10, 0)),
                         null);
         var inputs =
                 new RequestTimeEstimation.Inputs(
@@ -146,9 +152,11 @@ class RequestTimeEstimationTest {
                         31L,
                         true,
                         BuiltinGroupPlanner.FIXED_WINDOW,
-                        Comparator.comparingLong(GroupPlanner.Item::requestId),
+                        Comparator.comparing(GroupPlanner.Item::requestId),
                         new GroupPlanner.Constraints(1, 1000, 1000, 0, 30),
-                        List.of(new GroupPlanner.Item(1, 0, 1, 13, Long.MAX_VALUE, 10, 0)),
+                        List.of(
+                                new GroupPlanner.Item(
+                                        String.valueOf(1), 0, 1, 13, Long.MAX_VALUE, 10, 0)),
                         null);
         var evaluator =
                 new PrefillTimePredictor.Evaluator() {
@@ -239,9 +247,11 @@ class RequestTimeEstimationTest {
                         31L,
                         true,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
-                        Comparator.comparingLong(GroupPlanner.Item::requestId),
+                        Comparator.comparing(GroupPlanner.Item::requestId),
                         new GroupPlanner.Constraints(4, 1000, 1000, 100, 30),
-                        List.of(new GroupPlanner.Item(1, 0, 1, 13, Long.MAX_VALUE, 10, 0)),
+                        List.of(
+                                new GroupPlanner.Item(
+                                        String.valueOf(1), 0, 1, 13, Long.MAX_VALUE, 10, 0)),
                         null);
         var result =
                 project(
@@ -263,7 +273,9 @@ class RequestTimeEstimationTest {
                         Long.MIN_VALUE,
                         List.of(
                                 new WorkSnapshot.RequestWork(
-                                        1L, WorkSnapshot.Phase.ENGINE_RUNNING, Long.MAX_VALUE)),
+                                        String.valueOf(1L),
+                                        WorkSnapshot.Phase.ENGINE_RUNNING,
+                                        Long.MAX_VALUE)),
                         List.of(),
                         0L);
 
@@ -277,19 +289,19 @@ class RequestTimeEstimationTest {
                 new ArrayList<>(
                         List.of(
                                 new WorkSnapshot.RequestWork(
-                                        5L, WorkSnapshot.Phase.ENGINE_RUNNING, 30L),
+                                        String.valueOf(5L), WorkSnapshot.Phase.ENGINE_RUNNING, 30L),
                                 new WorkSnapshot.RequestWork(
-                                        1L, WorkSnapshot.Phase.COMMITTED, 20L)));
+                                        String.valueOf(1L), WorkSnapshot.Phase.COMMITTED, 20L)));
         var members = new ArrayList<>(List.of(3L, 2L));
         var batches =
                 new ArrayList<>(
                         List.of(
                                 new WorkSnapshot.BatchWork(
-                                        members,
+                                        members.stream().map(String::valueOf).toList(),
                                         WorkSnapshot.Phase.ENGINE_QUEUED,
                                         OptionalLong.of(40L)),
                                 new WorkSnapshot.BatchWork(
-                                        List.of(4L),
+                                        List.of(4L).stream().map(String::valueOf).toList(),
                                         WorkSnapshot.Phase.ENGINE_RUNNING,
                                         OptionalLong.of(10L))));
         WorkSnapshot snapshot = new WorkSnapshot(100L, requests, batches, 0L);
@@ -298,11 +310,11 @@ class RequestTimeEstimationTest {
         members.clear();
 
         for (long id = 1L; id <= 5L; id++) {
-            assertTrue(snapshot.containsRequest(id));
+            assertTrue(snapshot.containsRequest(String.valueOf(id)));
         }
-        assertFalse(snapshot.containsRequest(90L), "an uncaptured request identity is absent");
-        assertFalse(snapshot.containsRequest(Long.MIN_VALUE));
-        assertFalse(snapshot.containsRequest(Long.MAX_VALUE));
+        assertFalse(snapshot.containsRequest("90"), "an uncaptured request identity is absent");
+        assertFalse(snapshot.containsRequest(String.valueOf(Long.MIN_VALUE)));
+        assertFalse(snapshot.containsRequest(String.valueOf(Long.MAX_VALUE)));
         assertFalse(snapshot.hasUnknownWork());
         assertEquals(100L, snapshot.capturedAtMs());
         assertEquals(100L, snapshot.totalRemainingWorkMs().orElseThrow());
@@ -318,17 +330,19 @@ class RequestTimeEstimationTest {
                         100L,
                         List.of(
                                 new WorkSnapshot.RequestWork(
-                                        1L, WorkSnapshot.Phase.ENGINE_RUNNING, 20L)),
+                                        String.valueOf(1L),
+                                        WorkSnapshot.Phase.ENGINE_RUNNING,
+                                        20L)),
                         List.of(
                                 new WorkSnapshot.BatchWork(
-                                        List.of(3L, 2L),
+                                        List.of(3L, 2L).stream().map(String::valueOf).toList(),
                                         WorkSnapshot.Phase.ENGINE_QUEUED,
                                         OptionalLong.empty())),
                         0L);
         assertTrue(snapshot.hasUnknownWork());
-        assertTrue(snapshot.containsRequest(1L));
-        assertTrue(snapshot.containsRequest(2L));
-        assertTrue(snapshot.containsRequest(3L));
+        assertTrue(snapshot.containsRequest("1"));
+        assertTrue(snapshot.containsRequest("2"));
+        assertTrue(snapshot.containsRequest("3"));
         assertTrue(snapshot.totalRemainingWorkMs().isEmpty());
         assertEquals(15L, snapshot.knownRemainingWorkMsAt(105L));
         assertThrows(
@@ -354,7 +368,7 @@ class RequestTimeEstimationTest {
 
     @Test
     void emptyFixedWindowMatchesTheGenericPlannerWithoutBuildingAGroup() {
-        var expired = List.of(new GroupPlanner.Item(1L, 0, 1L, 0L, 99L, 1L, 0L));
+        var expired = List.of(new GroupPlanner.Item(String.valueOf(1L), 0, 1L, 0L, 99L, 1L, 0L));
         var work =
                 List.of(
                         emptyWork(100L),
@@ -362,14 +376,16 @@ class RequestTimeEstimationTest {
                                 100L,
                                 List.of(
                                         new WorkSnapshot.RequestWork(
-                                                1L, WorkSnapshot.Phase.COMMITTED, 200L)),
+                                                String.valueOf(1L),
+                                                WorkSnapshot.Phase.COMMITTED,
+                                                200L)),
                                 List.of(),
                                 0L),
                         new WorkSnapshot(
                                 100L,
                                 List.of(
                                         new WorkSnapshot.RequestWork(
-                                                1L,
+                                                String.valueOf(1L),
                                                 WorkSnapshot.Phase.ENGINE_RUNNING,
                                                 Long.MAX_VALUE)),
                                 List.of(),
@@ -458,7 +474,13 @@ class RequestTimeEstimationTest {
                                             constraints,
                                             List.of(
                                                     new GroupPlanner.Item(
-                                                            1L, 0, 1L, 0L, 99L, 1L, 0L))),
+                                                            String.valueOf(1L),
+                                                            0,
+                                                            1L,
+                                                            0L,
+                                                            99L,
+                                                            1L,
+                                                            0L))),
                                     emptyWork(100L),
                                     0L,
                                     genericEvaluator,
@@ -484,7 +506,7 @@ class RequestTimeEstimationTest {
                                             100L,
                                             true,
                                             org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE,
-                                            Comparator.comparingLong(GroupPlanner.Item::requestId),
+                                            Comparator.comparing(GroupPlanner.Item::requestId),
                                             constraints,
                                             List.of(),
                                             null),
@@ -501,11 +523,17 @@ class RequestTimeEstimationTest {
                                             100L,
                                             true,
                                             org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE,
-                                            Comparator.comparingLong(GroupPlanner.Item::requestId),
+                                            Comparator.comparing(GroupPlanner.Item::requestId),
                                             constraints,
                                             List.of(
                                                     new GroupPlanner.Item(
-                                                            1L, 0, 1L, 0L, 99L, 1L, 0L)),
+                                                            String.valueOf(1L),
+                                                            0,
+                                                            1L,
+                                                            0L,
+                                                            99L,
+                                                            1L,
+                                                            0L)),
                                             null),
                                     emptyWork(100L),
                                     0L,
@@ -522,7 +550,7 @@ class RequestTimeEstimationTest {
                         100L,
                         true,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE,
-                        Comparator.comparingLong(GroupPlanner.Item::requestId),
+                        Comparator.comparing(GroupPlanner.Item::requestId),
                         new GroupPlanner.Constraints(16, 1_000L, 1_000L, 0L, 0L),
                         List.of(),
                         null);
@@ -582,7 +610,13 @@ class RequestTimeEstimationTest {
         for (int i = 0; i < 1024; i++) {
             items.add(
                     new GroupPlanner.Item(
-                            i, i / 256, i, 0L, i % 2 == 0 ? 13L : Long.MAX_VALUE, 1L, 0L));
+                            String.valueOf(i),
+                            i / 256,
+                            i,
+                            0L,
+                            i % 2 == 0 ? 13L : Long.MAX_VALUE,
+                            1L,
+                            0L));
         }
         Comparator<GroupPlanner.Item> order = Comparator.comparingInt(GroupPlanner.Item::priority);
         var queue =
@@ -615,8 +649,8 @@ class RequestTimeEstimationTest {
         for (long expiry : new long[] {-1L, 0L, 12L, 13L, 14L, Long.MAX_VALUE}) {
             var items =
                     List.of(
-                            new GroupPlanner.Item(99L, 0, 1L, 0L, 13L, 1L, 0L),
-                            new GroupPlanner.Item(99L, 0, 2L, 0L, expiry, 1L, 0L));
+                            new GroupPlanner.Item(String.valueOf(99L), 0, 1L, 0L, 13L, 1L, 0L),
+                            new GroupPlanner.Item(String.valueOf(99L), 0, 2L, 0L, expiry, 1L, 0L));
             var queue =
                     new QueueSnapshot(
                             13L,
@@ -655,7 +689,7 @@ class RequestTimeEstimationTest {
     @Test
     void sameFrozenMembershipExpiresAtTheLaterPlanningClock() {
         var items = new java.util.ArrayList<GroupPlanner.Item>();
-        items.add(new GroupPlanner.Item(99L, 0, 1L, 0L, 14L, 1L, 0L));
+        items.add(new GroupPlanner.Item(String.valueOf(99L), 0, 1L, 0L, 14L, 1L, 0L));
         var queue =
                 new QueueSnapshot(
                         13L,
@@ -684,7 +718,9 @@ class RequestTimeEstimationTest {
                         13L,
                         List.of(
                                 new WorkSnapshot.RequestWork(
-                                        1L, WorkSnapshot.Phase.ENGINE_RUNNING, 1_000L)),
+                                        String.valueOf(1L),
+                                        WorkSnapshot.Phase.ENGINE_RUNNING,
+                                        1_000L)),
                         List.of(),
                         0L);
         WorkSnapshot current =
@@ -692,7 +728,9 @@ class RequestTimeEstimationTest {
                         20L,
                         List.of(
                                 new WorkSnapshot.RequestWork(
-                                        1L, WorkSnapshot.Phase.ENGINE_RUNNING, 993L)),
+                                        String.valueOf(1L),
+                                        WorkSnapshot.Phase.ENGINE_RUNNING,
+                                        993L)),
                         List.of(),
                         0L);
         assertEquals(
@@ -798,7 +836,7 @@ class RequestTimeEstimationTest {
                 capturedAtMs,
                 true,
                 org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
-                Comparator.comparingLong(GroupPlanner.Item::requestId),
+                Comparator.comparing(GroupPlanner.Item::requestId),
                 new GroupPlanner.Constraints(1, 1_000_000L, 1_000_000L, 0L, 30L),
                 List.of(),
                 null);

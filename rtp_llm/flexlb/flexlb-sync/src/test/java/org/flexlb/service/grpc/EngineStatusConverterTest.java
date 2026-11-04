@@ -62,7 +62,7 @@ class EngineStatusConverterTest {
                                         .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING))
                         .build();
 
-        var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
+        var observation = WorkerStatusRpcClient.convertToStatusObservation(owner, status);
         var activeTasks = observation.activeTasks();
 
         assertEquals(
@@ -81,8 +81,8 @@ class EngineStatusConverterTest {
         assertEquals(TaskPhase.PENDING, activeTasks.get("legacy-waiting").phase());
         assertEquals(TaskPhase.RUNNING, activeTasks.get("legacy-running").phase());
         assertEquals(Set.of("finished"), observation.finishedTasks().keySet());
-        assertEquals(2, observation.runningQueryLen());
-        assertEquals(4, observation.waitingQueryLen());
+        assertEquals(2, observation.engine().runningQueryLen());
+        assertEquals(4, observation.engine().waitingQueryLen());
     }
 
     @Test
@@ -108,7 +108,7 @@ class EngineStatusConverterTest {
         var nativeTask = EngineRpcService.TaskInfoPB.parseFrom(nativeBytes.toByteArray());
         status.addRunningTaskInfo(nativeTask).addFinishedTaskList(nativeTask);
 
-        var observation = EngineStatusConverter.convertToStatusObservation(owner, status.build());
+        var observation = WorkerStatusRpcClient.convertToStatusObservation(owner, status.build());
 
         var expected = Set.of("req-a-p-001", "req-b-p-002", "00123", "123");
         assertEquals(expected, observation.activeTasks().keySet());
@@ -140,7 +140,7 @@ class EngineStatusConverterTest {
                         .setRole("RoleType.DECODE")
                         .build();
 
-        var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
+        var observation = WorkerStatusRpcClient.convertToStatusObservation(owner, status);
         var step = observation.engine().lastStepMetrics();
 
         assertEquals(42, step.stepId());
@@ -151,7 +151,7 @@ class EngineStatusConverterTest {
         assertEquals(32000, step.tokenBudget());
         assertEquals(0.002, step.budgetFillRatio());
         assertNull(
-                EngineStatusConverter.convertToStatusObservation(owner, statusBuilder().build())
+                WorkerStatusRpcClient.convertToStatusObservation(owner, statusBuilder().build())
                         .engine()
                         .lastStepMetrics());
     }
@@ -172,7 +172,7 @@ class EngineStatusConverterTest {
                         .addFinishedTaskList(finishedTask)
                         .build();
 
-        var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
+        var observation = WorkerStatusRpcClient.convertToStatusObservation(owner, status);
 
         assertEquals("123", observation.activeTasks().get("123").requestId());
         assertEquals(42, observation.activeTasks().get("123").batchId());
@@ -187,7 +187,7 @@ class EngineStatusConverterTest {
                                 EngineRpcService.KvCacheGroupModePB.KV_CACHE_GROUP_MODE_WITH_MAMBA)
                         .build();
 
-        var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
+        var observation = WorkerStatusRpcClient.convertToStatusObservation(owner, status);
 
         assertEquals(KvCacheGroupMode.WITH_MAMBA, observation.engine().kvCacheGroupMode());
     }
@@ -202,7 +202,7 @@ class EngineStatusConverterTest {
                         .build();
         var status = statusBuilder().addRunningTaskInfo(runningTask).build();
 
-        var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
+        var observation = WorkerStatusRpcClient.convertToStatusObservation(owner, status);
         var task = observation.activeTasks().get("1");
 
         assertEquals(128, task.prefixLength());
@@ -228,7 +228,7 @@ class EngineStatusConverterTest {
                         .build();
         var status = statusBuilder().addFinishedTaskList(finishedTask).build();
 
-        var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
+        var observation = WorkerStatusRpcClient.convertToStatusObservation(owner, status);
         var telemetry = observation.finishedTasks().get("1").telemetry();
 
         assertEquals(1000, telemetry.inputQueueEnqueueTimeMs());
@@ -252,7 +252,7 @@ class EngineStatusConverterTest {
                         .setCacheMatchRollbackBlocks(1)
                         .build();
 
-        var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
+        var observation = WorkerStatusRpcClient.convertToStatusObservation(owner, status);
 
         assertEquals(1, observation.engine().blockHashLookaheadTokens());
         assertEquals(1, observation.engine().cacheMatchRollbackBlocks());
@@ -279,7 +279,7 @@ class EngineStatusConverterTest {
                                         .setLastCompletedPrefillStepId(9))
                         .build();
 
-        var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
+        var observation = WorkerStatusRpcClient.convertToStatusObservation(owner, status);
         var missing = observation.activeTasks().get("old-engine").telemetry();
         assertNull(missing.completedPrefillTokens());
         assertNull(missing.remainingPrefillTokens());
@@ -304,7 +304,7 @@ class EngineStatusConverterTest {
                                         .setRequestIdStr(" "));
         assertEquals(
                 Set.of("123"),
-                EngineStatusConverter.convertToStatusObservation(owner, status.build())
+                WorkerStatusRpcClient.convertToStatusObservation(owner, status.build())
                         .activeTasks()
                         .keySet());
     }
@@ -326,7 +326,7 @@ class EngineStatusConverterTest {
                         .setCacheMatchRollbackBlocks(1)
                         .build();
 
-        var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
+        var observation = WorkerStatusRpcClient.convertToStatusObservation(owner, status);
         var engine = observation.engine();
 
         assertEquals(2, engine.dpSize());

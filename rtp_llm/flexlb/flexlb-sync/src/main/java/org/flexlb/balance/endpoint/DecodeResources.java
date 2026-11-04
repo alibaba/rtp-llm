@@ -15,7 +15,7 @@ public final class DecodeResources {
     private DecodeResources() {}
 
     public record ReservationHandle(
-            long endpointGenerationId, long requestId, long reservationToken) {
+            long endpointGenerationId, String requestId, long reservationToken) {
 
         public ReservationHandle {
             checkArgument(
@@ -275,7 +275,7 @@ public final class DecodeResources {
     /** One immutable request table and capacity view captured under the admission lock. */
     public record ResourceSnapshot(
             DecodeRoutingView routing,
-            Map<Long, DecodeRequestView> requests,
+            Map<String, DecodeRequestView> requests,
             int queuedCount,
             int activeDispatchPermits) {
         public ResourceSnapshot {
@@ -350,7 +350,7 @@ public final class DecodeResources {
     }
 
     public record DecodeRequestView(
-            long requestId,
+            String requestId,
             int priority,
             long kvTokens,
             long expectedKvTokens,

@@ -16,7 +16,7 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -59,10 +59,7 @@ class RequestConfirmationTimeoutTest {
         var requestReporter = mock(RequestSchedulerReporter.class);
         var requests =
                 SchedulerTestSupport.create(
-                        service,
-                        reporter,
-                        requestReporter,
-                        mock(RecentCacheKeyTraceReporter.class));
+                        service, reporter, requestReporter, mock(TheoryCacheHitReporter.class));
         var projector = requests;
         var endpoints =
                 new EndpointRegistry(
@@ -92,7 +89,7 @@ class RequestConfirmationTimeoutTest {
                 prefill =
                         (PrefillEndpoint)
                                 endpoints.publishPreparedEndpoint(
-                                        prefillWorker.getIpPort(),
+                                        prefillWorker.getLogicalIpPort(),
                                         prefillWorker,
                                         prefillWorker.prepareNewStatus(
                                                 WorkerStatusTestSupport.freezeStatusResponse(
@@ -109,7 +106,8 @@ class RequestConfirmationTimeoutTest {
             DecodeResources.ReservationHandle reservation;
             try (var pin = decode.tryPinGeneration()) {
                 reservation =
-                        decode.tryReserveQueuedRequest(pin, REQUEST_ID, 16L, 32L, 50, capacity)
+                        decode.tryReserveQueuedRequest(
+                                        pin, String.valueOf(REQUEST_ID), 16L, 32L, 50, capacity)
                                 .handle();
                 assertNotNull(reservation);
                 var acquired = decode.acquireDispatchPermit(reservation, capacity);
@@ -122,7 +120,8 @@ class RequestConfirmationTimeoutTest {
             }
             var context = RequestProtocolTestSupport.context(config, REQUEST_ID);
             var future = RequestProtocolTestSupport.register(requests, context);
-            RequestContext requestContext = requests.requests.findActive(REQUEST_ID);
+            RequestContext requestContext =
+                    requests.requests.findActive(String.valueOf(REQUEST_ID));
             ServerStatus prefillMetadata = new ServerStatus();
             prefillMetadata.setRole(RoleType.PREFILL);
             prefillMetadata.setServerIp("127.0.0.1");
@@ -140,7 +139,7 @@ class RequestConfirmationTimeoutTest {
                             requestContext.snapshot().createdAtMs());
             AtomicReference<PrefillEndpoint.RouteReservation> routeReservation =
                     new AtomicReference<>();
-            try (var mutation = requests.claimAdmissionHandle(REQUEST_ID, future);
+            try (var mutation = requests.claimAdmissionHandle(String.valueOf(REQUEST_ID), future);
                     var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(mutation);
                     var pin = prefill.tryPinGeneration()) {
                 assertNotNull(mutation);
@@ -231,7 +230,7 @@ class RequestConfirmationTimeoutTest {
             assertEquals(
                     RequestState.Phase.TIMED_OUT,
                     SchedulerTestSupport.repository(requests)
-                            .getRequestState(REQUEST_ID, 0L)
+                            .getRequestState(String.valueOf(REQUEST_ID), 0L)
                             .state());
             SchedulerTestSupport.awaitRequestWork(SchedulerTestSupport.runtime(requests));
             RequestProtocolTestSupport.awaitCondition(
@@ -246,7 +245,9 @@ class RequestConfirmationTimeoutTest {
             // Admission resumes only after delivery settlement and exact local cleanup.
             try (var pin = decode.tryPinGeneration()) {
                 var next =
-                        decode.tryReserveQueuedRequest(pin, 102L, 16L, 32L, 50, capacity).handle();
+                        decode.tryReserveQueuedRequest(
+                                        pin, String.valueOf(102L), 16L, 32L, 50, capacity)
+                                .handle();
                 assertNotNull(next);
                 var acquired = decode.acquireDispatchPermit(next, capacity);
                 assertEquals(
@@ -266,7 +267,7 @@ class RequestConfirmationTimeoutTest {
             assertEquals(
                     RequestState.Phase.TIMED_OUT,
                     SchedulerTestSupport.repository(requests)
-                            .getRequestState(REQUEST_ID, 0L)
+                            .getRequestState(String.valueOf(REQUEST_ID), 0L)
                             .state());
             SchedulerTestSupport.awaitRequestWork(SchedulerTestSupport.runtime(requests));
             RequestProtocolTestSupport.awaitCondition(

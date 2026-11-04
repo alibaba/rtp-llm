@@ -1,7 +1,7 @@
 package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -42,7 +42,7 @@ abstract class AbstractStatusRunner implements Runnable {
             CacheAwareService cacheAwareService,
             long requestTimeoutMs,
             Executor callbackExecutor) {
-        this.ipPort = workerStatus.getIpPort();
+        this.ipPort = workerStatus.getLogicalIpPort();
         this.modelName = modelName;
         this.roleType = workerStatus.getRole();
         this.workerStatus = workerStatus;

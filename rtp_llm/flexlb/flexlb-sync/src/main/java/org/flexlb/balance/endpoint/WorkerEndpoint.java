@@ -1,6 +1,5 @@
 package org.flexlb.balance.endpoint;
 
-import lombok.Getter;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
@@ -28,6 +27,13 @@ public class WorkerEndpoint {
     /** Passive status facts. The sync workflow publishes them after releasing the generation lock. */
     public sealed interface StatusChange {
         record None() implements StatusChange {}
+
+        record Encoder(java.util.List<EncoderEndpoint.RequestStatus> requests)
+                implements StatusChange {
+            public Encoder {
+                requests = java.util.List.copyOf(requests);
+            }
+        }
 
         record Prefill(
                 java.util.List<PrefillEndpoint.PrefillRequestStatus> requestStatuses,
@@ -60,6 +66,10 @@ public class WorkerEndpoint {
                     Thread.ofPlatform().daemon().name("flexlb-endpoint-retirement-", 1).factory());
 
     private final WorkerStatus status;
+
+    public WorkerStatus getStatus() {
+        return status;
+    }
 
     private enum RetirementPhase {
         ACCEPTING_HANDOFFS,

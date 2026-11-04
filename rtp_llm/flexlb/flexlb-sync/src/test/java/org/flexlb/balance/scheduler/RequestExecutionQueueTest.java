@@ -12,7 +12,7 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -73,7 +73,7 @@ class RequestExecutionQueueTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         RuntimeException observerFailure =
                 new IllegalStateException("queue-removal observer failed");
         RuntimeException preparationFailure =
@@ -101,7 +101,7 @@ class RequestExecutionQueueTest {
             doAnswer(
                             call -> {
                                 List<RequestRoute> selected = call.getArgument(0);
-                                if (selected.getFirst().requestId() == 930L) {
+                                if (selected.getFirst().requestId().equals("930")) {
                                     return CapacityBoundary.failed(preparationFailure);
                                 }
                                 laterSelected.countDown();
@@ -149,7 +149,8 @@ class RequestExecutionQueueTest {
                                 decode,
                                 reservation,
                                 System.currentTimeMillis());
-                try (AdmissionHandle admission = owner.claimAdmissionHandle(id, future);
+                try (AdmissionHandle admission =
+                                owner.claimAdmissionHandle(String.valueOf(id), future);
                         var completed = RequestProtocolTestSupport.finishOnExit(admission)) {
                     assertNotNull(admission);
                     assertEquals(
@@ -177,7 +178,7 @@ class RequestExecutionQueueTest {
                     assertTrue(
                             laterSelected.await(5L, TimeUnit.SECONDS),
                             "an observer failure must not stop the worker from planning the later request");
-                    owner.cancel(id, 0L, CancelReason.CLIENT_CANCELLED);
+                    owner.cancel(String.valueOf(id), 0L, CancelReason.CLIENT_CANCELLED);
                     assertFalse(future.get(5L, TimeUnit.SECONDS).isSuccess());
                     RequestProtocolTestSupport.awaitCondition(
                             () -> !owner.requests.isCurrent(context));
@@ -395,7 +396,7 @@ class RequestExecutionQueueTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         try {
             EndpointWork runtime =
                     RequestExecutionTestSupport.create(
@@ -449,7 +450,7 @@ class RequestExecutionQueueTest {
                                 }
                                 return released;
                             });
-            try (AdmissionHandle admission = registry.claimAdmissionHandle(907L, future);
+            try (AdmissionHandle admission = registry.claimAdmissionHandle("907", future);
                     var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertEquals(
                         PlacementResult.Status.SUCCESS,
@@ -492,18 +493,18 @@ class RequestExecutionQueueTest {
                 RequestProtocolTestSupport.awaitCondition(
                         () ->
                                 SchedulerTestSupport.repository(registry)
-                                                .getRequestState(907L, 0L)
+                                                .getRequestState("907", 0L)
                                                 .state()
                                         == RequestState.Phase.CANCELLED);
             } else {
-                RequestState cancelled = registry.cancel(907L, 0L, CancelReason.CLIENT_CANCELLED);
+                RequestState cancelled = registry.cancel("907", 0L, CancelReason.CLIENT_CANCELLED);
                 assertEquals(RequestState.Phase.CANCELLED, cancelled.state());
                 assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
             }
             RequestProtocolTestSupport.awaitCondition(
                     () ->
                             SchedulerTestSupport.repository(registry)
-                                                    .getRequestState(907L, 0L)
+                                                    .getRequestState("907", 0L)
                                                     .state()
                                             == RequestState.Phase.CANCELLED
                                     && RequestExecutionTestSupport.state(runtime)
@@ -522,7 +523,7 @@ class RequestExecutionQueueTest {
                             RequestExecutionTestSupport.state(runtime), queued));
             assertEquals(
                     RequestState.Phase.CANCELLED,
-                    SchedulerTestSupport.repository(registry).getRequestState(907L, 0L).state());
+                    SchedulerTestSupport.repository(registry).getRequestState("907", 0L).state());
             assertNotNull(cleanupThread.get());
             org.mockito.Mockito.verify(prefillEndpoint).releaseRequest(queued);
             org.mockito.Mockito.verify(prefillEndpoint, org.mockito.Mockito.times(2))
@@ -734,7 +735,11 @@ class RequestExecutionQueueTest {
     private RequestRoute item(
             long requestId, int priority, long expiresAtMs, long enqueuedAtMs, long seqLen) {
         Request request =
-                Request.builder().requestId(requestId).seqLen(seqLen).rawPriority(priority).build();
+                Request.builder()
+                        .requestId(String.valueOf(requestId))
+                        .seqLen(seqLen)
+                        .rawPriority(priority)
+                        .build();
         RequestContext context = new RequestContext(config);
         context.data().setRequest(request);
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(priority, expiresAtMs));
@@ -744,7 +749,7 @@ class RequestExecutionQueueTest {
     }
 
     private static List<Long> requestIds(List<RequestRoute> items) {
-        return items.stream().map(RequestRoute::requestId).toList();
+        return items.stream().map(item -> Long.parseLong(item.requestId())).toList();
     }
 
     private static PrefillEndpoint stablePrefillEndpoint() {

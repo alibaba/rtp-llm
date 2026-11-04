@@ -356,7 +356,7 @@ class BatchDeliveryTest {
             var items = List.of(f.item(1, 10), f.item(2, 20), f.item(3, 30));
             try (var blocker = f.blockExecution()) {
                 f.process(items, OptionalLong.of(999));
-                f.lostClaims.add(items.get(lostIndex).requestId());
+                f.lostClaims.add(Long.parseLong(items.get(lostIndex).requestId()));
                 // Changing the endpoint predictor after queue commit must not change the captured
                 // evaluator.
                 var changed = mock(PrefillTimePredictor.class);
@@ -367,16 +367,24 @@ class BatchDeliveryTest {
             f.drain();
             var expected =
                     items.stream()
-                            .filter(item -> !f.lostClaims.contains(item.requestId()))
+                            .filter(
+                                    item ->
+                                            !f.lostClaims.contains(
+                                                    Long.parseLong(item.requestId())))
                             .toList();
-            assertEquals(expected.stream().map(RequestRoute::requestId).toList(), f.sentIds());
+            assertEquals(
+                    expected.stream().map(route -> Long.parseLong(route.requestId())).toList(),
+                    f.sentIds());
             long prediction = expected.stream().mapToLong(RequestRoute::seqLen).sum();
             expected.forEach(
                     item ->
                             assertEquals(
-                                    prediction, f.predictions.get(item.requestId()).longValue()));
-            assertFalse(f.results.containsKey(items.get(lostIndex).requestId()));
-            verify(f.permits.get(items.get(lostIndex).requestId())).release();
+                                    prediction,
+                                    f.predictions
+                                            .get(Long.parseLong(item.requestId()))
+                                            .longValue()));
+            assertFalse(f.results.containsKey(Long.parseLong(items.get(lostIndex).requestId())));
+            verify(f.permits.get(Long.parseLong(items.get(lostIndex).requestId()))).release();
             verify(f.evaluator).predictBatchMs(argThat(features -> features.items().size() == 2));
         }
     }
@@ -475,17 +483,20 @@ class BatchDeliveryTest {
             f.drain();
             var expected =
                     items.stream()
-                            .filter(item -> !f.refusedSends.contains(item.requestId()))
-                            .map(RequestRoute::requestId)
+                            .filter(
+                                    item ->
+                                            !f.refusedSends.contains(
+                                                    Long.parseLong(item.requestId())))
+                            .map(route -> Long.parseLong(route.requestId()))
                             .toList();
             assertEquals(expected, f.sentIds());
             for (var item : items) {
                 assertEquals(
-                        f.refusedSends.contains(item.requestId())
+                        f.refusedSends.contains(Long.parseLong(item.requestId()))
                                 ? Delivery.Result.Status.NOT_SENT
                                 : Delivery.Result.Status.DELIVERED,
-                        f.result(item.requestId()).status());
-                assertEquals(1, f.completionCounts.get(item.requestId()));
+                        f.result(Long.parseLong(item.requestId())).status());
+                assertEquals(1, f.completionCounts.get(Long.parseLong(item.requestId())));
             }
             if (expected.isEmpty()) {
                 verifyNoInteractions(f.grpc);
@@ -745,8 +756,8 @@ final class LinearDeliveryFixture implements AutoCloseable {
                         call -> {
                             Delivery.Member member = call.getArgument(0);
                             RequestRoute item = member.route();
-                            events.add("claim-" + item.requestId());
-                            if (lostClaims.contains(item.requestId())) {
+                            events.add("claim-" + Long.parseLong(item.requestId()));
+                            if (lostClaims.contains(Long.parseLong(item.requestId()))) {
                                 return null;
                             }
                             var claim =
@@ -764,32 +775,37 @@ final class LinearDeliveryFixture implements AutoCloseable {
                 .thenAnswer(
                         call ->
                                 !refusedSends.contains(
-                                        ((Delivery.Member) call.getArgument(0))
-                                                .route()
-                                                .requestId()));
+                                        Long.parseLong(
+                                                ((Delivery.Member) call.getArgument(0))
+                                                        .route()
+                                                        .requestId())));
         doAnswer(
                         call -> {
                             DeliveryEvidence evidence = call.getArgument(0);
                             if (evidence instanceof Prediction prediction) {
                                 predictions.put(
-                                        prediction.delivery().route().requestId(),
+                                        Long.parseLong(prediction.delivery().route().requestId()),
                                         duration(prediction.predictedAtMs(), prediction.nowMs()));
                             } else if (evidence instanceof RouteDelivered delivered) {
                                 predictions.put(
-                                        delivered.delivery().route().requestId(),
+                                        Long.parseLong(delivered.delivery().route().requestId()),
                                         duration(delivered.predictedAtMs(), delivered.nowMs()));
                             } else if (evidence instanceof TransportResult result) {
                                 var claim = result.delivery();
                                 beforeCompletion.accept(claim);
-                                results.put(claim.route().requestId(), result.result());
-                                completionCounts.merge(claim.route().requestId(), 1, Integer::sum);
-                                events.add("complete-" + claim.route().requestId());
-                                if (claim.route().requestId() == throwCompletionFor) {
+                                results.put(
+                                        Long.parseLong(claim.route().requestId()), result.result());
+                                completionCounts.merge(
+                                        Long.parseLong(claim.route().requestId()), 1, Integer::sum);
+                                events.add("complete-" + Long.parseLong(claim.route().requestId()));
+                                if (Long.parseLong(claim.route().requestId())
+                                        == throwCompletionFor) {
                                     throw expectedShutdownFailure;
                                 }
                             } else if (evidence instanceof PreparationFailure failed) {
                                 preparationFailures.put(
-                                        failed.route().requestId(), failed.detail());
+                                        Long.parseLong(failed.route().requestId()),
+                                        failed.detail());
                             }
                             return null;
                         })
@@ -799,7 +815,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
                 .thenAnswer(
                         call -> {
                             DecodeResources.ReservationHandle handle = call.getArgument(0);
-                            return blockedDecode.contains(handle.requestId())
+                            return blockedDecode.contains(Long.parseLong(handle.requestId()))
                                     ? new org.flexlb.balance.endpoint.DecodeResources.Acquisition<>(
                                             DecodeResources.EngineDispatchPermitAcquireStatus
                                                     .CAPACITY_FULL,
@@ -807,7 +823,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
                                     : new org.flexlb.balance.endpoint.DecodeResources.Acquisition<>(
                                             DecodeResources.EngineDispatchPermitAcquireStatus
                                                     .ACQUIRED,
-                                            permits.get(handle.requestId()));
+                                            permits.get(Long.parseLong(handle.requestId())));
                         });
         when(grpc.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenAnswer(
@@ -837,10 +853,16 @@ final class LinearDeliveryFixture implements AutoCloseable {
                         org.flexlb.balance.endpoint.DecodeResources.ResourceChange.of(
                                 DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                                 false));
-        when(permit.belongsTo(decode, new DecodeResources.ReservationHandle(1, id, id)))
+        when(permit.belongsTo(
+                        decode, new DecodeResources.ReservationHandle(1, String.valueOf(id), id)))
                 .thenReturn(true);
         permits.put(id, permit);
-        return item(id, seqLen, decode, new DecodeResources.ReservationHandle(1, id, id), payload);
+        return item(
+                id,
+                seqLen,
+                decode,
+                new DecodeResources.ReservationHandle(1, String.valueOf(id), id),
+                payload);
     }
 
     RequestRoute item(
@@ -859,7 +881,12 @@ final class LinearDeliveryFixture implements AutoCloseable {
             ByteString payload) {
         var context = new RequestContext(config);
         context.data()
-                .setRequest(Request.builder().requestId(id).seqLen(seqLen).rawPriority(50).build());
+                .setRequest(
+                        Request.builder()
+                                .requestId(String.valueOf(id))
+                                .seqLen(seqLen)
+                                .rawPriority(50)
+                                .build());
         context.data().setFuture(new CompletableFuture<>());
         context.data()
                 .setGenerateInputPb(
@@ -873,7 +900,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
                                         .toByteString());
         context.data().register(owner, new RequestFuture((kind, response, failure) -> false));
         long now = System.currentTimeMillis();
-        context.register(id, now, Long.MAX_VALUE, 60_000L);
+        context.register(String.valueOf(id), now, Long.MAX_VALUE, 60_000L);
         var route =
                 SchedulingTestConfig.createRoute(
                         context, null, null, null, prefill, endpoint, handle, now);
@@ -911,7 +938,9 @@ final class LinearDeliveryFixture implements AutoCloseable {
     RequestRoute realItem(DecodeEndpoint endpoint, long id, long seqLen) {
         DecodeResources.ReservationHandle handle;
         try (var pin = endpoint.tryPinGeneration()) {
-            handle = endpoint.tryReserveQueuedRequest(pin, id, 100, 200, 50, null).handle();
+            handle =
+                    endpoint.tryReserveQueuedRequest(pin, String.valueOf(id), 100, 200, 50, null)
+                            .handle();
         }
         assertNotNull(handle);
         return item(id, seqLen, endpoint, handle);
@@ -941,7 +970,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
     }
 
     List<Long> claimIds() {
-        return claims.stream().map(claim -> claim.route().requestId()).toList();
+        return claims.stream().map(claim -> Long.parseLong(claim.route().requestId())).toList();
     }
 
     List<Long> sentIds() {

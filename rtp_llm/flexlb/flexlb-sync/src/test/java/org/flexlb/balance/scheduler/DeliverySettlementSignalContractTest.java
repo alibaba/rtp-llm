@@ -8,7 +8,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -154,7 +154,7 @@ class DeliverySettlementSignalContractTest {
                             service,
                             mock(DeliveryMetricsReporter.class),
                             mock(RequestSchedulerReporter.class),
-                            mock(RecentCacheKeyTraceReporter.class));
+                            mock(TheoryCacheHitReporter.class));
             runtime = org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(scheduler);
             dispatcher = SchedulerTestSupport.dispatcher(runtime);
             when(channel.cancelAsync(
@@ -206,7 +206,9 @@ class DeliverySettlementSignalContractTest {
             decode.publishStatus(projection);
             DecodeResources.ReservationHandle reservation;
             try (var pin = decode.tryPinGeneration()) {
-                reservation = decode.tryReserveQueuedRequest(pin, ID, 10L, 10L, 50, null).handle();
+                reservation =
+                        decode.tryReserveQueuedRequest(pin, String.valueOf(ID), 10L, 10L, 50, null)
+                                .handle();
             }
             assertNotNull(reservation);
             context = RequestProtocolTestSupport.context(config, ID);
@@ -222,7 +224,7 @@ class DeliverySettlementSignalContractTest {
                             reservation,
                             System.currentTimeMillis());
             var state = prefill;
-            try (var admission = scheduler.claimAdmissionHandle(ID, future)) {
+            try (var admission = scheduler.claimAdmissionHandle(String.valueOf(ID), future)) {
                 assertNotNull(admission);
                 assertEquals(
                         org.flexlb.balance.PlacementResult.Status.SUCCESS,
@@ -308,7 +310,7 @@ class DeliverySettlementSignalContractTest {
                             Delivery.Result.uncertain(
                                     new IllegalStateException("transport response lost")),
                             System.currentTimeMillis()));
-            scheduler.cancel(ID, BATCH, CancelReason.CLIENT_CANCELLED);
+            scheduler.cancel(String.valueOf(ID), BATCH, CancelReason.CLIENT_CANCELLED);
             session = cleanupSession();
             assertFalse(settled.isDone());
             proof.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);

@@ -1,4 +1,4 @@
-package org.flexlb.engine.grpc.client;
+package org.flexlb.engine.grpc;
 
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
@@ -7,8 +7,6 @@ import io.grpc.inprocess.InProcessServerBuilder;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.master.WorkerHost;
-import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.engine.grpc.core.GrpcTarget;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
@@ -54,7 +52,7 @@ class EngineGrpcClientTest {
                         });
 
         EngineGrpcClient client =
-                new EngineGrpcClient(
+                createClient(
                         addressResolver, channelFactory, grpcReporter, cacheMatchConfiguration);
         ArgumentCaptor<EngineAddressResolver.Listener> listener =
                 ArgumentCaptor.forClass(EngineAddressResolver.Listener.class);
@@ -72,7 +70,7 @@ class EngineGrpcClientTest {
             verify(channel).shutdown();
         }
 
-        client.shutdown();
+        client.shutdownChannelPool();
     }
 
     @Test
@@ -85,7 +83,7 @@ class EngineGrpcClientTest {
         when(channelFactory.create(any())).thenReturn(mock(ManagedChannel.class));
 
         EngineGrpcClient client =
-                new EngineGrpcClient(
+                createClient(
                         addressResolver, channelFactory, grpcReporter, cacheMatchConfiguration);
         ArgumentCaptor<EngineAddressResolver.Listener> listener =
                 ArgumentCaptor.forClass(EngineAddressResolver.Listener.class);
@@ -98,7 +96,7 @@ class EngineGrpcClientTest {
         verify(channelFactory, times(2)).create(new GrpcTarget("10.0.0.1", 8081));
         verify(channelFactory, times(2)).create(new GrpcTarget("10.0.0.1", 18002));
 
-        client.shutdown();
+        client.shutdownChannelPool();
     }
 
     @Test
@@ -109,7 +107,7 @@ class EngineGrpcClientTest {
         CacheMatchConfiguration cacheMatchConfiguration = mock(CacheMatchConfiguration.class);
         when(channelFactory.create(any())).thenReturn(mock(ManagedChannel.class));
         EngineGrpcClient client =
-                new EngineGrpcClient(
+                createClient(
                         addressResolver, channelFactory, grpcReporter, cacheMatchConfiguration);
         ArgumentCaptor<EngineAddressResolver.Listener> listener =
                 ArgumentCaptor.forClass(EngineAddressResolver.Listener.class);
@@ -126,7 +124,7 @@ class EngineGrpcClientTest {
         verify(channelFactory, times(2)).create(new GrpcTarget("10.0.0.1", 8081));
         verify(channelFactory, times(4)).create(new GrpcTarget("10.0.0.1", 18002));
         verify(channelFactory, times(4)).create(new GrpcTarget("10.0.0.1", 18003));
-        client.shutdown();
+        client.shutdownChannelPool();
     }
 
     @Test
@@ -159,10 +157,11 @@ class EngineGrpcClientTest {
                 .thenAnswer(
                         invocation ->
                                 InProcessChannelBuilder.forName(serverName)
+                                        .propagateCauseWithStatus(true)
                                         .directExecutor()
                                         .build());
         EngineGrpcClient client =
-                new EngineGrpcClient(
+                createClient(
                         addressResolver, channelFactory, grpcReporter, cacheMatchConfiguration);
         ArgumentCaptor<EngineAddressResolver.Listener> listener =
                 ArgumentCaptor.forClass(EngineAddressResolver.Listener.class);
@@ -185,7 +184,7 @@ class EngineGrpcClientTest {
                             .getAlive());
             verify(channelFactory, times(4)).create(new GrpcTarget("10.0.0.1", 18002));
         } finally {
-            client.shutdown();
+            client.shutdownChannelPool();
             server.shutdownNow().awaitTermination(2, TimeUnit.SECONDS);
         }
     }
@@ -208,8 +207,11 @@ class EngineGrpcClientTest {
                                                     observer) {
                                         if (workerStatusCalls.incrementAndGet() == 1) {
                                             observer.onError(
-                                                    io.grpc.Status.INTERNAL
+                                                    io.grpc.Status.UNAVAILABLE
                                                             .withDescription("Connection reset")
+                                                            .withCause(
+                                                                    new java.net.SocketException(
+                                                                            "Connection reset"))
                                                             .asRuntimeException());
                                             return;
                                         }
@@ -227,8 +229,11 @@ class EngineGrpcClientTest {
                                                     observer) {
                                         batchCalls.incrementAndGet();
                                         observer.onError(
-                                                io.grpc.Status.INTERNAL
+                                                io.grpc.Status.UNAVAILABLE
                                                         .withDescription("Connection reset")
+                                                        .withCause(
+                                                                new java.net.SocketException(
+                                                                        "Connection reset"))
                                                         .asRuntimeException());
                                     }
 
@@ -239,8 +244,11 @@ class EngineGrpcClientTest {
                                                     observer) {
                                         cancelCalls.incrementAndGet();
                                         observer.onError(
-                                                io.grpc.Status.INTERNAL
+                                                io.grpc.Status.UNAVAILABLE
                                                         .withDescription("Connection reset")
+                                                        .withCause(
+                                                                new java.net.SocketException(
+                                                                        "Connection reset"))
                                                         .asRuntimeException());
                                     }
                                 })
@@ -253,10 +261,11 @@ class EngineGrpcClientTest {
                 .thenAnswer(
                         invocation ->
                                 InProcessChannelBuilder.forName(serverName)
+                                        .propagateCauseWithStatus(true)
                                         .directExecutor()
                                         .build());
         EngineGrpcClient client =
-                new EngineGrpcClient(
+                createClient(
                         addressResolver,
                         channelFactory,
                         grpcReporter,
@@ -309,8 +318,34 @@ class EngineGrpcClientTest {
             verify(channelFactory, times(5)).create(new GrpcTarget("10.0.0.1", 18002));
             verify(channelFactory, times(2)).create(new GrpcTarget("10.0.0.1", 8081));
         } finally {
-            client.shutdown();
+            client.shutdownChannelPool();
             server.shutdownNow().awaitTermination(2, TimeUnit.SECONDS);
         }
+    }
+
+    private static EngineGrpcClient createClient(
+            EngineAddressResolver resolver,
+            GrpcChannelFactory factory,
+            GrpcReporter reporter,
+            CacheMatchConfiguration cacheConfig) {
+        return new EngineGrpcClient(
+                resolver,
+                mock(java.util.concurrent.ThreadPoolExecutor.class),
+                mock(io.netty.channel.EventLoopGroup.class),
+                reporter,
+                2000,
+                5000,
+                cacheConfig) {
+            @Override
+            protected ManagedChannel createChannel(String key) {
+                int serviceSeparator = key.lastIndexOf(':');
+                int portSeparator = key.lastIndexOf(':', serviceSeparator - 1);
+                return factory.create(
+                        new GrpcTarget(
+                                key.substring(0, portSeparator),
+                                Integer.parseInt(
+                                        key.substring(portSeparator + 1, serviceSeparator))));
+            }
+        };
     }
 }

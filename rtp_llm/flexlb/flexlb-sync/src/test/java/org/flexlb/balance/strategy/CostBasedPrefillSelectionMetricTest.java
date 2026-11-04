@@ -7,8 +7,8 @@ import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.DispatcherConfig;
@@ -86,7 +86,7 @@ class CostBasedPrefillSelectionMetricTest {
         publish("10.0.0.1", 8080);
 
         cache = mock(CacheAwareService.class);
-        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
+        when(cache.findMatchingEngines(any())).thenReturn(localMatches(Map.of()));
         reporter = mock(EngineHealthReporter.class);
         cacheReporter = mock(CacheMetricsReporter.class);
         strategy =
@@ -99,7 +99,7 @@ class CostBasedPrefillSelectionMetricTest {
 
         Request request =
                 Request.builder()
-                        .requestId(10_001L)
+                        .requestId(String.valueOf(10_001L))
                         .seqLen(1_000L)
                         .rawPriority(50)
                         .blockCacheKeys(List.of())
@@ -368,18 +368,21 @@ class CostBasedPrefillSelectionMetricTest {
     void cacheLookupReentryCannotChangeTheOuterFleet() {
         publish("10.0.0.2", 8080);
         AtomicBoolean reentered = new AtomicBoolean();
-        when(cache.findMatchingEngines(any(), any(), any()))
+        when(cache.findMatchingEngines(any()))
                 .thenAnswer(
                         invocation -> {
-                            List<String> addresses = invocation.getArgument(2);
-                            assertEquals(List.of("10.0.0.1:8080", "10.0.0.2:8080"), addresses);
+                            var query =
+                                    (org.flexlb.cache.domain.CacheMatchQuery)
+                                            invocation.getArgument(0);
+                            var keys = List.copyOf(query.blockCacheKeys());
+                            assertEquals(keys, query.blockCacheKeys());
                             if (reentered.compareAndSet(false, true)) {
                                 try (RequestRoute inner = select()) {
                                     assertTrue(inner.prefill().isSuccess());
                                 }
-                                assertEquals(List.of("10.0.0.1:8080", "10.0.0.2:8080"), addresses);
+                                assertEquals(keys, query.blockCacheKeys());
                             }
-                            return Map.of();
+                            return localMatches(Map.of());
                         });
         try (RequestRoute outer = select()) {
             assertTrue(outer.prefill().isSuccess());
@@ -392,7 +395,7 @@ class CostBasedPrefillSelectionMetricTest {
     void cacheLookupFailureReleasesTheEntireCapturedFleet() {
         publish("10.0.0.2", 8080);
         var failure = new IllegalStateException("cache unavailable");
-        when(cache.findMatchingEngines(any(), any(), any())).thenThrow(failure);
+        when(cache.findMatchingEngines(any())).thenThrow(failure);
         assertSame(failure, assertThrows(IllegalStateException.class, this::select));
         assertReleased(candidateWorkspace().get());
     }
@@ -427,13 +430,17 @@ class CostBasedPrefillSelectionMetricTest {
                 };
         regroup.accept(first, "target");
         regroup.accept(second, "other");
-        when(cache.findMatchingEngines(any(), any(), any()))
+        when(cache.findMatchingEngines(any()))
                 .thenAnswer(
                         invocation -> {
-                            assertEquals(List.of("10.0.0.1:8080"), invocation.getArgument(2));
+                            assertEquals(
+                                    "target",
+                                    ((org.flexlb.cache.domain.CacheMatchQuery)
+                                                    invocation.getArgument(0))
+                                            .group());
                             regroup.accept(first, "other");
                             regroup.accept(second, "target");
-                            return Map.of();
+                            return localMatches(Map.of());
                         });
         try (RequestRoute selected =
                 StrategyTestSupport.select(
@@ -465,8 +472,8 @@ class CostBasedPrefillSelectionMetricTest {
                         context.data().getRequest().toBuilder()
                                 .cacheKeyBlockSize(blockSize)
                                 .build());
-        when(cache.findMatchingEngines(any(), any(), any()))
-                .thenReturn(Map.of("10.0.0.1:8080", prefix));
+        when(cache.findMatchingEngines(any()))
+                .thenReturn(localMatches(Map.of("10.0.0.1:8080", prefix)));
         try (RequestRoute selected = select()) {
             assertEquals(effectiveHit, selected.prefill().getDebugInfo().getHitCacheLen());
         }
@@ -542,7 +549,11 @@ class CostBasedPrefillSelectionMetricTest {
         PrefillEndpoint endpoint =
                 (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
         Request queuedRequest =
-                Request.builder().requestId(9_001L).seqLen(1_000L).rawPriority(10).build();
+                Request.builder()
+                        .requestId(String.valueOf(9_001L))
+                        .seqLen(1_000L)
+                        .rawPriority(10)
+                        .build();
         RequestContext queuedContext = new RequestContext(config);
         queuedContext.data().setRequest(queuedRequest);
         queuedContext
@@ -575,7 +586,7 @@ class CostBasedPrefillSelectionMetricTest {
                         null);
 
         assertEquals(expectedStatus, result.status());
-        verify(cache).findMatchingEngines(any(), any(), any());
+        verify(cache).findMatchingEngines(any());
         if (result.status() == PlacementResult.Status.SUCCESS) {
             try (RequestRoute selected = result.value()) {
                 assertEquals("10.0.0.1", selected.prefill().getServerIp());
@@ -769,8 +780,8 @@ class CostBasedPrefillSelectionMetricTest {
             publish(ip, 8080);
             cacheLeader = ip;
         }
-        when(cache.findMatchingEngines(any(), any(), any()))
-                .thenReturn(Map.of(cacheLeader + ":8080", 5));
+        when(cache.findMatchingEngines(any()))
+                .thenReturn(localMatches(Map.of(cacheLeader + ":8080", 5)));
 
         try (RequestRoute selected = select()) {
             assertEquals(
@@ -790,7 +801,7 @@ class CostBasedPrefillSelectionMetricTest {
             context.data()
                     .setRequest(
                             context.data().getRequest().toBuilder()
-                                    .requestId(30_000L + index)
+                                    .requestId(String.valueOf(30_000L + index))
                                     .build());
             try (RequestRoute selected = select()) {
                 selectedIps.add(selected.prefill().getServerIp());
@@ -846,7 +857,10 @@ class CostBasedPrefillSelectionMetricTest {
             assertEquals("10.0.0.2", selected.prefill().getServerIp());
         }
         context.data()
-                .setRequest(context.data().getRequest().toBuilder().requestId(20_002L).build());
+                .setRequest(
+                        context.data().getRequest().toBuilder()
+                                .requestId(String.valueOf(20_002L))
+                                .build());
 
         try (RequestRoute selected = select()) {
             assertEquals("10.0.0.2", selected.prefill().getServerIp());
@@ -868,7 +882,7 @@ class CostBasedPrefillSelectionMetricTest {
                         1_000_000L,
                         status.appliedStatusCursor().statusVersion() + 1L);
         var task = new TaskInfo();
-        task.setRequestId(1L);
+        task.setRequestId(String.valueOf(1L));
         task.setPhase(TaskPhase.RUNNING);
         task.setInputLength(missingTokenDemand ? 0L : 100L);
         response.setRunningQueryLen(1L);
@@ -887,7 +901,10 @@ class CostBasedPrefillSelectionMetricTest {
         assertTrue(endpoint.captureRouteProjectionInputs().work().hasUnknownWork());
 
         context.data()
-                .setRequest(context.data().getRequest().toBuilder().requestId(40_001L).build());
+                .setRequest(
+                        context.data().getRequest().toBuilder()
+                                .requestId(String.valueOf(40_001L))
+                                .build());
         var result =
                 StrategyTestSupport.select(
                         strategy,
@@ -1063,7 +1080,10 @@ class CostBasedPrefillSelectionMetricTest {
 
         publish("10.0.0.2", 8080);
         context.data()
-                .setRequest(context.data().getRequest().toBuilder().requestId(20_001L).build());
+                .setRequest(
+                        context.data().getRequest().toBuilder()
+                                .requestId(String.valueOf(20_001L))
+                                .build());
         context.data()
                 .setRequest(
                         context.data().getRequest().toBuilder()
@@ -1072,7 +1092,7 @@ class CostBasedPrefillSelectionMetricTest {
         context.data()
                 .setRequest(
                         context.data().getRequest().toBuilder().cacheKeyBlockSize(100L).build());
-        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of("10.0.0.2:8080", 5));
+        when(cache.findMatchingEngines(any())).thenReturn(localMatches(Map.of("10.0.0.2:8080", 5)));
     }
 
     private void publish(String ip, int port) {
@@ -1080,5 +1100,16 @@ class CostBasedPrefillSelectionMetricTest {
                 StrategyTestSupport.workerStatus(
                         RoleType.PREFILL, null, ip, port, port + 1, true, 1_000_000L, 1_000_000L);
         StrategyTestSupport.publishEndpoint(registry, RoleType.PREFILL, ip + ":" + port, status);
+    }
+
+    private static org.flexlb.cache.domain.CacheMatchResult localMatches(
+            Map<String, Integer> matches) {
+        return matches == null
+                ? null
+                : new org.flexlb.cache.domain.CacheMatchResult(
+                        org.flexlb.dao.cache.HostCacheMatch.fromLocalMatches(matches),
+                        org.flexlb.cache.domain.CacheMatchSource.LOCAL_SYNC,
+                        0L,
+                        0L);
     }
 }
