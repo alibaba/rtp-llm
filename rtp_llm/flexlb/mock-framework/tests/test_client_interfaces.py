@@ -27,7 +27,7 @@ def context():
 
 
 def args():
-    return {'masters': ['master:1'], 'requests_file': str(Path(__file__).resolve().parents[1] / 'cases/basic/requests.binpb.zst'),
+    return {'masters': ['master:1'], 'requests_file': str(Path(__file__).resolve().parents[1] / 'data/traffic/basic.binpb.zst'),
             'qps': 10, 'concurrency': 2}
 
 
@@ -301,3 +301,18 @@ def test_playback_requires_exactly_one_finite_positive_rate(rate):
     values = args(); values.pop('qps'); values.update(rate)
     with pytest.raises(ConfigError):
         Registry.standard().get('client/start').arguments(values)
+
+
+def test_shared_requests_resolve_independently_of_case_directory(monkeypatch, tmp_path):
+    ctx = context()
+    ctx.runtime.case.directory = tmp_path / 'cases/example'
+    ctx.runtime.case.shared_root = tmp_path / 'shared'
+    source = ctx.runtime.case.shared_root / 'data/traffic/example.binpb.zst'
+    source.parent.mkdir(parents=True)
+    source.touch()
+    async def start(body, query_time, timeout):
+        assert body['requests_file'] == str(source)
+        return True
+    monkeypatch.setattr(ctx.runtime.clients, 'start_playback', start)
+    values = args() | {'requests_file': 'data/traffic/example.binpb.zst'}
+    assert asyncio.run(Registry.standard().get('client/start').invoke(ctx, values))
