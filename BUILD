@@ -9,6 +9,11 @@ config_setting(
 )
 
 config_setting(
+    name = "hack_get_set_env",
+    define_values = {"hack_get_set_env": "true"},
+)
+
+config_setting(
     name = "enable_triton",
     values = {"define": "enable_triton=true"},
 )
