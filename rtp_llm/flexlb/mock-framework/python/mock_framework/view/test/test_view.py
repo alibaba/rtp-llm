@@ -1,3 +1,4 @@
+from mock_framework.execution.test.helpers import FRAMEWORK
 import asyncio
 from copy import deepcopy
 from dataclasses import replace
@@ -17,7 +18,7 @@ from mock_framework.view.service import handler, serve
 from mock_framework.view.grafana import dashboard, provision
 from mock_framework.view.records import experiment, gate_text
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = FRAMEWORK
 
 
 def test_page_initializes_filters_before_the_first_grafana_load():
@@ -26,7 +27,7 @@ def test_page_initializes_filters_before_the_first_grafana_load():
     node = shutil.which('node')
     if node is None:
         pytest.skip('Node.js is required to execute the View page script')
-    subprocess.run([node, str(ROOT / 'tests/view_page_load.cjs'),
+    subprocess.run([node, str(Path(__file__).with_name('view_page_load.cjs')),
                     str(ROOT / 'python/mock_framework/view/page.html')], check=True, timeout=10)
 
 

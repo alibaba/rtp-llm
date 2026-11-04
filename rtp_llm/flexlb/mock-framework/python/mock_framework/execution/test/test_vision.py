@@ -1,3 +1,4 @@
+from mock_framework.execution.test.helpers import FRAMEWORK
 """Real Master plus shared/cross-process V/P/D, using the standard binary playback path."""
 import asyncio
 import json
@@ -11,13 +12,13 @@ from mock_framework.config import compile_case
 from mock_framework.execution.step.registry import Registry
 from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
-from helpers.input import pb, write_inputs
-from test_master import configuration
+from mock_framework.execution.test.helpers.input import pb, write_inputs
+from mock_framework.execution.test.test_master import configuration
 
 
 @pytest.mark.parametrize('mode', ['shared', 'isolated'])
 def test_vision_playback_through_real_master(tmp_path, mode):
-    root = Path(__file__).resolve().parents[1]
+    root = FRAMEWORK
     java = str(Path(os.environ['JAVA_HOME']) / 'bin/java')
     master_classpath = os.pathsep.join([str(root / 'java/master/target/classes'),
         (root / 'java/master/target/dependencies.txt').read_text().strip()])

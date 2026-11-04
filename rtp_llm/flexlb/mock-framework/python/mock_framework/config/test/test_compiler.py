@@ -1,3 +1,4 @@
+from mock_framework.execution.test.helpers import FRAMEWORK
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -10,7 +11,7 @@ from mock_framework.execution.step.registry import register_step, Bounds
 from mock_framework.config.environment import expand_config
 
 
-@pytest.mark.parametrize('path', sorted((Path(__file__).resolve().parents[1] / 'cases').glob('*/case.yaml')),
+@pytest.mark.parametrize('path', sorted((FRAMEWORK / 'cases').glob('*/case.yaml')),
                          ids=lambda path: path.parent.name)
 def test_shipped_cases_compile_and_reference_existing_inputs(path, registry):
     case = compile_case(path, registry)

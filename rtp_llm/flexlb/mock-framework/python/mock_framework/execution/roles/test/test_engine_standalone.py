@@ -1,3 +1,4 @@
+from mock_framework.execution.test.helpers import FRAMEWORK
 """Single-engine service startup owns no Case files and exits with its worker."""
 import json
 import os
@@ -10,7 +11,7 @@ from urllib.request import urlopen
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = FRAMEWORK
 
 
 def ports():

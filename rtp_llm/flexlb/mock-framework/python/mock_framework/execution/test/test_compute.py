@@ -1,3 +1,4 @@
+from mock_framework.execution.test.helpers import FRAMEWORK
 import json
 import os
 from pathlib import Path
@@ -8,7 +9,7 @@ import pytest
 from mock_framework.config import ConfigError
 from mock_framework.execution.run_trace import write_json
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = FRAMEWORK
 
 
 def test_top_level_compute_is_rejected(case_data, compile_data):

@@ -1,3 +1,4 @@
+from mock_framework.execution.test.helpers import FRAMEWORK
 """Validate the image context contract without requiring a container daemon."""
 import importlib.util
 import json
@@ -8,7 +9,7 @@ import zipfile
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = FRAMEWORK
 
 
 def packager():

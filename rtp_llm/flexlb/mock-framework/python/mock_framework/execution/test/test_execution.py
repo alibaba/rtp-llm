@@ -376,3 +376,33 @@ def test_trace_correlates_steps_and_gates_across_streams(setup, tmp_path):
     assert gates
     for gate in gates:
         assert starts[gate['phase_id'], gate['step_id'], gate['action']] < gate['seq']
+
+
+def test_background_step_can_be_stopped_without_replaying_write(setup, tmp_path):
+    result, out = run(setup, tmp_path, [
+        step('write', background=True, args={'delay': 10}),
+        step(interface='step/stop', args={'target': 'write'}, expect={'eq': True}),
+    ])
+    assert result['status'] == 'PASS'
+    finished = [event for event in events(out) if event['event'] == 'step_finished']
+    assert [(event['step_id'], event['status']) for event in finished] == [('write', 'CANCELLED'), ('read', 'PASS')]
+    assert finished[0]['outcome_unknown']
+    assert sum(event['event'] == 'mutation' for event in events(out)) == 1
+
+
+def test_background_failure_interrupts_foreground_and_reaps_process(setup, tmp_path):
+    result, out = run(setup, tmp_path, [
+        step(background=True, args={'delay': .05}, expect={'eq': 3}),
+        step('write', args={'delay': 10}),
+    ])
+    assert result['status'] == 'FAIL'
+    finished = {event['step_id']: event['status'] for event in events(out) if event['event'] == 'step_finished'}
+    assert finished == {'read': 'FAIL', 'write': 'CANCELLED'}
+
+
+def test_phase_waits_for_background_to_finish(setup, tmp_path):
+    result, out = run(setup, tmp_path, [step(background=True, args={'delay': .05}, expect={'eq': 2})])
+    assert result['status'] == 'PASS'
+    records = events(out)
+    assert next(x['seq'] for x in records if x['event'] == 'step_finished') < next(
+        x['seq'] for x in records if x['event'] == 'phase_finished')

@@ -1,3 +1,4 @@
+from mock_framework.execution.test.helpers import FRAMEWORK
 from mock_framework.execution.step.step import Step
 import asyncio
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ from mock_framework.execution.step.registry import register_step
 from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = FRAMEWORK
 
 
 @dataclass(frozen=True)
