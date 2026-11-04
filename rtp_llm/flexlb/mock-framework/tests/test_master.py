@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from mock_framework.execution.master import master_environment
+from mock_framework.execution.roles.master import master_environment
 from mock_framework.execution.transport import ExecutionError
 
 
@@ -56,7 +56,7 @@ def test_generic_transport_probe_does_not_require_a_native_master(tmp_path):
     (1, False, False, False, False), (2, False, False, False, False), (1, True, False, False, False), (2, True, False, False, False), (1, False, True, False, False), (1, False, False, True, True), (1, False, False, False, True),
 ], ids=['single-one-master', 'single-two-masters', 'batch-one-master', 'batch-two-masters', 'late-master-after-history-overflow', 'kvcm-cold-warm', 'vit-local-sync'])
 def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replicas, history_overflow, kvcm, vision, native_kvcm):
-    from mock_framework.execution.master import master_port
+    from mock_framework.execution.roles.master import master_port
     try:
         master_port(replicas)
     except ExecutionError as error:
@@ -305,7 +305,7 @@ def test_replacement_master_can_discover_roles_scaled_to_zero(tmp_path):
 
 def test_restart_port_probe_still_rejects_an_active_listener():
     import socket
-    from mock_framework.execution.master import check_master_ports
+    from mock_framework.execution.roles.master import check_master_ports
     with socket.socket() as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(('127.0.0.1', 0))

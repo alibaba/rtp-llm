@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Annotated
 
 from ._records import RequestRecord, read_requests
-from ...execution.client_group import ClientResult
+from ...execution.roles.client import ClientResult
 from ...config.registry import Bounds, case_interface
 from ...config.validation import duration
 from ...execution.runner import CaseContext
@@ -54,13 +54,13 @@ async def start(ctx: CaseContext, args: Start) -> bool:
     body['requests_file'] = str(path)
     body['request_timeout_ms'] = int(duration(body.pop('request_timeout')) * 1000)
     body['drain_timeout_ms'] = int(duration(body.pop('drain_timeout')) * 1000)
-    return await ctx.runtime.clients.start(body, ctx.query_time, ctx.timeout)
+    return await ctx.runtime.clients.start_playback(body, ctx.query_time, ctx.timeout)
 
 
 @case_interface('client/stop', effect='write')
 async def stop(ctx: CaseContext, args: Empty) -> dict[str, ClientResult]:
     """Stop all Clients and collect bounded cleanup; natural completion returns its saved result."""
-    return await ctx.runtime.clients.collect(ctx.query_time, ctx.timeout)
+    return await ctx.runtime.clients.stop_playback(ctx.query_time, ctx.timeout)
 
 
 @dataclass(frozen=True)

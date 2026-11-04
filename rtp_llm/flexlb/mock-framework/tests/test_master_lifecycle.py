@@ -12,7 +12,7 @@ from mock_framework.config import Registry, compile_case
 from mock_framework.config.registry import case_interface
 from mock_framework.execution import prepare_launch, run_case
 from mock_framework.execution.processes import ProcessSupervisor
-from mock_framework.execution.master import master_port
+from mock_framework.execution.roles.master import master_port
 from mock_framework.execution.launch import local_launch
 from mock_framework.execution.transport import ExecutionError, post
 
@@ -106,7 +106,7 @@ def test_partial_stop_failure_aborts_and_keeps_completed_operations(tmp_path, mo
 
 
 def test_master_cleanup_waits_for_peer_exit_and_slow_graceful_shutdown(tmp_path):
-    from mock_framework.execution.master import MasterGroup
+    from mock_framework.execution.roles.master import MasterRole
     from mock_framework.execution.run_trace import RunTrace
     case, _, launch = generic(tmp_path, [step('masters', 'master/get')])
     output = tmp_path / 'run'
@@ -127,7 +127,7 @@ while True: time.sleep(1)
     async def exercise():
         records = RunTrace(output, case, launch)
         supervisor = ProcessSupervisor(records)
-        group = MasterGroup(component=None, recipe=None, election={}, launcher=None,
+        group = MasterRole(component=None, recipe=None, election={}, launcher=None,
             supervisor=supervisor, topology=None, records=records, monitoring=None)
         try:
             for name in ('master-0', 'master-1'):

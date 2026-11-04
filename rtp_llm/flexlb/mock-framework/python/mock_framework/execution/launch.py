@@ -2,8 +2,8 @@
 from pathlib import Path
 from ..config.validation import duration, fields, text
 from .transport import ExecutionError
-from .monitoring import prepare_prometheus
-from .engines import ROLES
+from .roles.prometheus import prepare_prometheus
+from .roles.engine import ROLES
 
 
 def prepare_launch(raw, case, base):
