@@ -844,7 +844,7 @@ class ScopeTest(JitCacheTestBase):
                 with _fake_probes(
                     hip="6.2.41133" if scenario == "rocm" else None
                 ), mock.patch.object(
-                    wrapper_cache.Path, "home", return_value=self.root / "home"
+                    cache_env.Path, "home", return_value=self.root / "home"
                 ):
                     wrapper_cache.setup_jit_cache(packages=[])
                     before = {

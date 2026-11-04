@@ -255,12 +255,45 @@ class ExpertWeightDtypeSizeTest(unittest.TestCase):
                 config.eval_model_weight_size(), legacy_size, delta=2.0
             )
 
-    def test_unknown_expert_dtype_fails_fast(self):
+    def test_expert_dtype_aliases_and_unknown_fallback(self):
+        # Checkpoints spell the narrow dtype several ways ("fp4_e2m1",
+        # "float4_e2m1fn", "nvfp4"); every 4-bit spelling prices at the
+        # packed width, 8-bit spellings keep the model-wide width, and an
+        # unrecognized spelling falls back to the model-wide width (what an
+        # uninterpreted declaration meant before this field existed)
+        # instead of failing startup before the weights load.
         with TemporaryDirectory() as ckpt_path:
             _write_quant_config(ckpt_path)
-            config = _moe_model_config(ckpt_path, V4_PRO_SHAPE, "e5m2")
-            with self.assertRaises(ValueError):
-                config.eval_model_weight_size()
+            legacy_size = _moe_model_config(
+                ckpt_path, V4_PRO_SHAPE
+            ).eval_model_weight_size()
+            fp4_size = _moe_model_config(
+                ckpt_path, V4_PRO_SHAPE, "fp4"
+            ).eval_model_weight_size()
+            self.assertNotAlmostEqual(fp4_size, legacy_size, delta=1e9)
+            for alias in ("fp4_e2m1", "float4_e2m1fn", "nvfp4"):
+                self.assertAlmostEqual(
+                    _moe_model_config(
+                        ckpt_path, V4_PRO_SHAPE, alias
+                    ).eval_model_weight_size(),
+                    fp4_size,
+                    delta=2.0,
+                )
+            for alias in ("float8_e4m3fn", "uint8"):
+                self.assertAlmostEqual(
+                    _moe_model_config(
+                        ckpt_path, V4_PRO_SHAPE, alias
+                    ).eval_model_weight_size(),
+                    legacy_size,
+                    delta=2.0,
+                )
+            self.assertAlmostEqual(
+                _moe_model_config(
+                    ckpt_path, V4_PRO_SHAPE, "e5m2"
+                ).eval_model_weight_size(),
+                legacy_size,
+                delta=2.0,
+            )
 
     def test_expert_only_quant_prices_dense_slice_at_bf16(self):
         # Kimi-K2.5 / quark MXFP4 / mixed-attention NVFP4 shape: the
