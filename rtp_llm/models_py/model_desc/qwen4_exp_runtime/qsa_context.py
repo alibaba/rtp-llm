@@ -35,6 +35,7 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
     restore_indexer_cache,
     write_indexer_cache,
 )
+from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 
 from . import qsa_decode, qsa_geometry, qsa_prefill, qsa_target
@@ -58,6 +59,15 @@ class Qwen4ExpQSARuntimeContext:
     _target_verify_plan: TargetVerifyPlan | None = field(
         default=None, init=False, repr=False, compare=False
     )
+    _prewrite_checks: DeviceChecks | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
+    def take_prewrite_checks(self) -> DeviceChecks:
+        """Consume flags once; the side writer verifies them before any mutation."""
+        checks = self._prewrite_checks
+        object.__setattr__(self, "_prewrite_checks", None)
+        return DeviceChecks() if checks is None else checks
 
     def host_values(self, tensor: torch.Tensor) -> list[int]:
         # This cache belongs to one forward invocation, never a graph buffer's

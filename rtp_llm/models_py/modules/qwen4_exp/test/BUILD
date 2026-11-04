@@ -816,6 +816,11 @@ qwen4_test(
 )
 
 qwen4_test(
+    name = "eager_validation_test",
+    src = "qsa/eager_validation_test.py",
+)
+
+qwen4_test(
     name = "indexer_cpu_contract_test",
     src = "qsa/indexer_cpu_contract_test.py",
     deps = [

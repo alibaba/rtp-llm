@@ -44,6 +44,7 @@ def select_decode_tokens(
     then rotated and scored against every visible compressed entry.
     """
     graph_decode = bool(self.main_inputs.is_cuda_graph)
+    checks = self.take_prewrite_checks()
     input_lengths = self._validate_mode_and_metadata(
         expect_prefill=False, allow_graph_decode=graph_decode
     )
@@ -159,6 +160,7 @@ def select_decode_tokens(
                 dtype=raw_keys.dtype,
                 device=raw_keys.device,
                 logical_positions=decode_logical_positions,
+                checks=checks,
             )
     except ValueError as error:
         raise RuntimeError(f"qwen4_exp QSA ordinary decode {error}") from error
@@ -229,7 +231,12 @@ def select_decode_tokens(
             required_kv_columns,
             pool_blocks=int(kv_pool.shape[0]),
             tag=INDEXER_KV_TAG,
+            checks=checks,
         )
+        try:
+            checks.verify()
+        except ValueError as error:
+            raise RuntimeError(f"qwen4_exp QSA ordinary decode {error}") from error
 
     # Only rows that close a compression group consume these values. Build
     # one block-start RoPE row per request instead of [0, context_len).

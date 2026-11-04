@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -10,6 +11,41 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
 
 
 class IndexerCudaContractTest(unittest.TestCase):
+    def test_base_axes_and_logical_positions_use_one_verdict(self):
+        config = SimpleNamespace(style="Base", index_factor=3, dim=8, base=10000)
+        logical = torch.tensor([2, 5], device="cuda", dtype=torch.int32)
+        positions = logical[:, None].expand(-1, 3).contiguous().reshape(-1)
+        item = torch.Tensor.item
+        reads = []
+
+        def counted(tensor, *args, **kwargs):
+            if tensor.is_cuda:
+                reads.append(tensor.numel())
+            return item(tensor, *args, **kwargs)
+
+        def build():
+            return build_qsa_rope(
+                positions,
+                config,
+                token_count=2,
+                dtype=torch.float32,
+                device=logical.device,
+                logical_positions=logical,
+            )
+
+        with patch.object(torch.Tensor, "item", counted), patch.object(
+            torch, "equal", side_effect=AssertionError("must use device predicates")
+        ):
+            build()
+        self.assertEqual(reads, [1])
+        positions[2] += 1
+        with self.assertRaisesRegex(ValueError, "three axes"):
+            build()
+        positions[2] -= 1
+        logical[0] += 1
+        with self.assertRaisesRegex(ValueError, "logical cache positions"):
+            build()
+
     def test_generated_text_positions_capture_and_replay(self):
         self.assertTrue(torch.cuda.is_available(), "CUDA replay target requires a GPU")
         device = torch.device("cuda")

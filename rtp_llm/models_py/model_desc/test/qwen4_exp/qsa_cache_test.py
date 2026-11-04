@@ -22,6 +22,101 @@ from rtp_llm.ops.compute_ops import PyCacheStoreInputs
 
 
 class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
+    @skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_eager_decode_combines_main_geometry_rope_and_side_verdict(self):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa import fmha_validation
+
+        self.D = self.KV_TOKENS_PER_BLOCK = self.STATE_TOKENS_PER_BLOCK = 128
+        self.indexer.k_norm_gamma = torch.randn(128, device="cuda").bfloat16()
+        indexer = self._decode_indexer()
+        rope = self._base_rope_config(3)
+        rope.dim = 64
+        q = torch.randn(1, 2, 128, device="cuda", dtype=torch.bfloat16)
+        raw = torch.randn(1, 128, device="cuda", dtype=torch.bfloat16)
+        item = torch.Tensor.item
+        for corruption in (None, "main", "axes", "logical", "side"):
+            with self.subTest(corruption=corruption):
+                kv = torch.zeros(7, 32 * 128 * 2, device="cuda", dtype=torch.uint8)
+                state = torch.zeros(8, 8 * 128, device="cuda")
+                context = self._single_request_context(
+                    kv,
+                    state,
+                    is_prefill=False,
+                    input_length=1,
+                    sequence_length=3,
+                    position_ids=[[3, 3, 3]],
+                )
+                # Use the existing host metadata ABI; no GPU length readback is
+                # needed to construct the request's logical position.
+                for name in ("input_lengths", "prefix_lengths", "sequence_lengths"):
+                    value = getattr(context.main_inputs, name).cpu()
+                    for inputs in (
+                        context.main_inputs,
+                        context.indexer_kv_inputs,
+                        context.indexer_state_inputs,
+                    ):
+                        setattr(inputs, name, value)
+                main = torch.zeros(3, 32768, device="cuda", dtype=torch.bfloat16)
+                context.main_cache.kv_cache_base = main
+                table = torch.tensor([[1, 2]], device="cuda", dtype=torch.int32)
+                context.main_inputs.kv_cache_kernel_block_id_device = table
+                owner = SimpleNamespace(
+                    attn_inputs=context.main_inputs,
+                    attn_configs=SimpleNamespace(kernel_tokens_per_block=128),
+                    head_dim=128,
+                    kv_head_num=1,
+                    is_prefill=False,
+                    is_target_verify=False,
+                    _selected_indices=None,
+                    _is_draft_graph=lambda: False,
+                    _is_prefix_reuse_prefill=lambda: False,
+                    _paged_kv_scale_args=lambda cache: None,
+                )
+                owner._validate_main_paged_geometry = lambda *args, **kwargs: fmha_validation._validate_main_paged_geometry(
+                    owner, *args, **kwargs
+                )
+                if corruption == "main":
+                    table[0, 1] = 100
+                elif corruption == "axes":
+                    context.main_inputs.combo_position_ids[2] = 4
+                elif corruption == "logical":
+                    context.main_inputs.combo_position_ids.fill_(4)
+                elif corruption == "side":
+                    context.indexer_kv_inputs.kv_cache_kernel_block_id_device.zero_()
+                reads = []
+
+                def counted(tensor, *args, **kwargs):
+                    if tensor.is_cuda:
+                        reads.append(tensor.numel())
+                    return item(tensor, *args, **kwargs)
+
+                with patch.object(torch.Tensor, "item", counted):
+                    fmha_validation.validate_qsa_before_side_write(
+                        owner, context, indexer, raw
+                    )
+                    self.assertEqual(reads, [])
+                    if corruption is None:
+                        context.select_decode_tokens(
+                            q, raw, indexer=indexer, rope_config=rope
+                        )
+                        context.finalize_side_cache()
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            context.select_decode_tokens(
+                                q, raw, indexer=indexer, rope_config=rope
+                            )
+                self.assertIsNone(context._prewrite_checks)
+                if corruption is None:
+                    self.assertEqual(reads, [1])
+                else:
+                    torch.testing.assert_close(kv, torch.zeros_like(kv), atol=0, rtol=0)
+                    torch.testing.assert_close(
+                        state, torch.zeros_like(state), atol=0, rtol=0
+                    )
+                    torch.testing.assert_close(
+                        main, torch.zeros_like(main), atol=0, rtol=0
+                    )
+
     def test_step_metadata_cache_reuses_views_and_never_survives_next_forward(self):
         from types import SimpleNamespace
 

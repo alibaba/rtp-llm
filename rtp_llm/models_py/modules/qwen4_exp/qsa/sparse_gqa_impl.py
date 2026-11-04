@@ -176,6 +176,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         query_lengths: torch.Tensor,
         device: torch.device,
         graph_capture: bool = False,
+        checks=None,
     ) -> int:
         return fmha_validation._validate_main_paged_geometry(
             self,
@@ -185,6 +186,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             query_lengths,
             device,
             graph_capture,
+            checks,
         )
 
     def validate_qsa_before_side_write(

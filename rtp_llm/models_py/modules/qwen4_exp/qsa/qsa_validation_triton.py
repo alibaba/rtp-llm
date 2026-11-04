@@ -30,13 +30,23 @@ def _validate_required_blocks_kernel(
         mask=active,
         other=0,
     )
-    invalid = active & (
-        (required < 0)
-        | (required > WIDTH)
-        | (block >= POOL_BLOCKS)
-        | ((column < required) & (block <= 0))
+    flags = (
+        (tl.max((active & (required < 0)).to(tl.int32), 0))
+        | (tl.max((active & (required > WIDTH)).to(tl.int32), 0) << 1)
+        | (
+            tl.max(
+                (
+                    active
+                    & (column < required)
+                    & ((block <= 0) | (block >= POOL_BLOCKS))
+                ).to(tl.int32),
+                0,
+            )
+            << 2
+        )
+        | (tl.max((active & (block >= POOL_BLOCKS)).to(tl.int32), 0) << 3)
     )
-    tl.store(result_ptr, tl.max(invalid.to(tl.int32), 0))
+    tl.store(result_ptr, flags)
 
 
 def is_supported(table: torch.Tensor, required_columns: torch.Tensor) -> bool:
@@ -55,10 +65,10 @@ def is_supported(table: torch.Tensor, required_columns: torch.Tensor) -> bool:
     )
 
 
-def required_blocks_are_valid(
+def required_block_flags(
     table: torch.Tensor, required_columns: torch.Tensor, pool_blocks: int
-) -> bool:
-    """Return one device-computed verdict, synchronizing only for that scalar."""
+) -> torch.Tensor:
+    """Return device error bits for combination with other write preflights."""
     batch, width = table.shape
     result = torch.empty((), dtype=torch.int32, device=table.device)
     _validate_required_blocks_kernel[(1,)](
@@ -73,4 +83,10 @@ def required_blocks_are_valid(
         POOL_BLOCKS=pool_blocks,
         N=triton.next_power_of_2(batch * width),
     )
-    return not bool(result.item())
+    return result
+
+
+def required_blocks_are_valid(
+    table: torch.Tensor, required_columns: torch.Tensor, pool_blocks: int
+) -> bool:
+    return not bool(required_block_flags(table, required_columns, pool_blocks).item())

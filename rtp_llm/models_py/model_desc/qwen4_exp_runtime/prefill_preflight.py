@@ -88,14 +88,8 @@ def main_geometry_preflight(entries):
         pending.append((impl, receipt))
     if flags:
         # A single acceptance boundary precedes embedding and all cache writes.
-        values = torch.cat(flags).cpu().tolist()
-        offset = 0
-        for (_, receipt), flag in zip(pending, flags):
-            verdict = 0
-            for value in values[offset : offset + flag.numel()]:
-                verdict |= value
+        for verdict in torch.stack(flags).cpu().tolist():
             raise_geometry_error(verdict)
-            offset += flag.numel()
     try:
         for impl, receipt in pending:
             receipts = getattr(impl, "_model_prefill_geometry", None)

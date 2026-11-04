@@ -26,7 +26,11 @@ def _validate_geometry(
     bad_sequence = (prefix < 0) | (length <= 0)
     # Compare against remaining capacity before adding potentially invalid lengths.
     exceeds = prefix > WIDTH.to(tl.int64) * PAGE - length
-    required = tl.cdiv(prefix + length, PAGE)
+    capacity = WIDTH.to(tl.int64) * PAGE
+    end = tl.minimum(tl.maximum(prefix, 0), capacity) + tl.minimum(
+        tl.maximum(length, 0), capacity + 1
+    )
+    required = tl.cdiv(end, PAGE)
     column = tl.arange(0, 128)
     bad_pool = False
     invalid = False
@@ -56,12 +60,12 @@ def _validate_geometry(
         + exceeds.to(tl.int32) * 16
         + invalid.to(tl.int32) * 32
     )
-    tl.store(Flags + row, flags)
+    tl.atomic_or(Flags, flags, flags != 0, sem="relaxed")
 
 
 def geometry_flags(lengths, prefixes, table, page_size, pages, padded):
     """Enqueue the complete check; its caller owns the host acceptance boundary."""
-    flags = torch.empty(lengths.numel(), dtype=torch.int32, device=table.device)
+    flags = torch.zeros((), dtype=torch.int32, device=table.device)
     _validate_geometry[(lengths.numel(),)](
         lengths,
         prefixes,
@@ -100,8 +104,6 @@ def raise_geometry_error(verdict):
 
 
 def validate_geometry(lengths, prefixes, table, page_size, pages, padded):
-    flags = geometry_flags(lengths, prefixes, table, page_size, pages, padded)
-    verdict = 0
-    for flag in flags.cpu().tolist():
-        verdict |= flag
-    raise_geometry_error(verdict)
+    raise_geometry_error(
+        int(geometry_flags(lengths, prefixes, table, page_size, pages, padded).item())
+    )

@@ -841,6 +841,101 @@ class SparseGqaImplForwardTest(unittest.TestCase):
         selected[:, 0] = 0
         return impl, qkv, cache, selected
 
+    def test_fallback_geometry_has_one_read_and_preserves_wide_lengths(self):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa import fmha_validation
+
+        impl, qkv, cache, _ = self._incremental_plan_case()
+        prefixes = impl.attn_inputs.prefix_lengths.to(device=_DEV, dtype=torch.int64)
+        lengths = impl.attn_inputs.input_lengths.to(device=_DEV, dtype=torch.int64)
+        original_item = torch.Tensor.item
+        reads = []
+
+        def item(tensor, *args, **kwargs):
+            if tensor.is_cuda:
+                reads.append(tensor.numel())
+            return original_item(tensor, *args, **kwargs)
+
+        def validate():
+            return impl._validate_main_paged_geometry(
+                cache.kv_cache_base,
+                impl.attn_inputs.kv_cache_kernel_block_id_device,
+                prefixes,
+                lengths,
+                qkv.device,
+            )
+
+        with patch.object(
+            fmha_validation, "_try_validate_main_paged_geometry", return_value=None
+        ):
+            with patch.object(torch.Tensor, "item", item):
+                self.assertEqual(validate(), 4)
+            self.assertEqual(reads, [1])
+            for invalid in (2**32 + 3, torch.iinfo(torch.int64).max):
+                prefixes[0] = invalid
+                with self.assertRaisesRegex(RuntimeError, "cover the visible KV"):
+                    validate()
+            prefixes[0] = -1
+            with self.assertRaisesRegex(RuntimeError, "non-negative"):
+                validate()
+
+    def test_device_incremental_partition_and_verdict_share_one_read(self):
+        impl, qkv, cache, selected = self._incremental_plan_case()
+        impl.attn_inputs.input_lengths = impl.attn_inputs.input_lengths.cuda()
+        impl.attn_inputs.prefix_lengths = impl.attn_inputs.prefix_lengths.cuda()
+        original_item, original_tolist = torch.Tensor.item, torch.Tensor.tolist
+        reads = []
+
+        def item(tensor, *args, **kwargs):
+            if tensor.is_cuda:
+                reads.append("item")
+            return original_item(tensor, *args, **kwargs)
+
+        def tolist(tensor, *args, **kwargs):
+            if tensor.is_cuda:
+                reads.append("tolist")
+            return original_tolist(tensor, *args, **kwargs)
+
+        with (
+            patch.object(torch.Tensor, "item", item),
+            patch.object(torch.Tensor, "tolist", tolist),
+        ):
+            plan = impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
+        self.assertEqual(reads, ["tolist"])
+        self.assertEqual([(r.start, r.end) for r in plan.requests], [(0, 3), (3, 5)])
+        impl.attn_inputs.cu_seqlens_device[1] = 2
+        with self.assertRaisesRegex(ValueError, "cu_seqlens"):
+            impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
+        impl.attn_inputs.cu_seqlens_device[1] = 3
+        selected[3, 0] = 8
+        with self.assertRaisesRegex(ValueError, "visible KV"):
+            impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
+        selected[3, 0] = -2
+        with self.assertRaisesRegex(ValueError, "padding"):
+            impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
+        selected[3, 0] = -1
+        impl.attn_inputs.prefix_lengths.zero_()
+        with self.assertRaisesRegex(RuntimeError, "explicit prefix"):
+            impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
+
+    def test_paged_verdict_ors_repeated_request_error_bits(self):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.paged_validation import (
+            geometry_flags,
+            validate_geometry,
+        )
+
+        table = torch.zeros((2, 2), device=_DEV, dtype=torch.int32)
+        lengths = torch.ones(2, device=_DEV, dtype=torch.int32)
+        prefixes = torch.zeros_like(lengths)
+        flags = geometry_flags(lengths, prefixes, table, 4, 8, False)
+        self.assertEqual(flags.shape, torch.Size([]))
+        self.assertEqual(flags.item(), 32)
+        with self.assertRaisesRegex(RuntimeError, "unallocated"):
+            validate_geometry(lengths, prefixes, table, 4, 8, False)
+        prefixes.fill_(-1)
+        self.assertTrue(
+            int(geometry_flags(lengths, prefixes, table, 4, 8, False).item()) & 1
+        )
+
     def test_paged_geometry_rechecks_strided_metadata_and_all_physical_pages(self):
         for device in ("cpu", _DEV):
             for dtype in (torch.int32, torch.int64):

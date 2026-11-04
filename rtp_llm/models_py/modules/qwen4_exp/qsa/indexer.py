@@ -34,6 +34,8 @@ from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     exact_head_rms_norm,
 )
 
+from .validation import DeviceChecks
+
 
 def _normalized_rope_style_name(style: Any) -> str:
     """Read pybind, string and integer RopeStyle representations lazily."""
@@ -92,6 +94,7 @@ def _validate_logical_cache_positions(
     logical_positions: torch.Tensor,
     *,
     rope_name: str,
+    checks: Optional[DeviceChecks] = None,
 ) -> None:
     expected = (
         logical_positions.to(device=positions.device, dtype=torch.long)
@@ -103,15 +106,22 @@ def _validate_logical_cache_positions(
             f"qwen4 QSA {rope_name} logical cache positions have "
             f"{expected.numel()} values, expected {positions.shape[0]}"
         )
-    if not bool(torch.equal(positions, expected.unsqueeze(1).expand_as(positions))):
+
+    def message():
         actual_head = positions[:6].reshape(-1).tolist()
         actual_tail = positions[-3:].reshape(-1).tolist()
-        raise ValueError(
+        return (
             f"qwen4 QSA {rope_name} positions must equal the logical cache positions"
             f" (rows={positions.shape[0]}, cols={positions.shape[1]},"
             f" actual[:6]={actual_head}, actual[-3:]={actual_tail},"
             f" expected_rows={expected.numel()})"
         )
+
+    own_checks = checks is None
+    checks = DeviceChecks() if checks is None else checks
+    checks.add((positions != expected[:, None]).any(), message, ValueError)
+    if own_checks:
+        checks.verify()
 
 
 def build_interleaved_mrope(
@@ -201,6 +211,7 @@ def build_base_rope(
     logical_positions: Optional[torch.Tensor] = None,
     validate_position_axes: bool = True,
     inv_freq: Optional[torch.Tensor] = None,
+    checks: Optional[DeviceChecks] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Build one-axis Base RoPE for the Qwen4 MTP draft indexer.
 
@@ -227,19 +238,21 @@ def build_base_rope(
         index_factor=index_factor,
         device=device,
     )
-    if (
-        index_factor == 3
-        and validate_position_axes
-        and not bool(torch.equal(positions, positions[:, :1].expand_as(positions)))
-    ):
-        raise ValueError(
+    own_checks = checks is None
+    checks = DeviceChecks() if checks is None else checks
+    if index_factor == 3 and validate_position_axes:
+        checks.add(
+            (positions != positions[:, :1]).any(),
             "qwen4 QSA Base RoPE factor=3 only supports draft text-only "
-            "positions whose three axes are equal"
+            "positions whose three axes are equal",
+            ValueError,
         )
     if logical_positions is not None:
         _validate_logical_cache_positions(
-            positions, logical_positions, rope_name="Base RoPE"
+            positions, logical_positions, rope_name="Base RoPE", checks=checks
         )
+    if own_checks:
+        checks.verify()
 
     scale = _rope_scale(rope_config, "Base RoPE")
     if inv_freq is not None and positions.is_cuda and torch.version.hip is None:
@@ -276,6 +289,7 @@ def build_qsa_rope(
     dtype: torch.dtype,
     device: torch.device,
     logical_positions: Optional[torch.Tensor] = None,
+    checks: Optional[DeviceChecks] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Dispatch the QSA indexer RoPE builder from ``rope_config.style``.
 
@@ -293,6 +307,7 @@ def build_qsa_rope(
             dtype=dtype,
             device=device,
             logical_positions=logical_positions,
+            checks=checks,
         )
     if is_qsa_rope_style(rope_config, "Mrope"):
         if logical_positions is not None:
@@ -303,7 +318,7 @@ def build_qsa_rope(
                 device=device,
             )
             _validate_logical_cache_positions(
-                positions, logical_positions, rope_name="text-only MRoPE"
+                positions, logical_positions, rope_name="text-only MRoPE", checks=checks
             )
         return build_interleaved_mrope(
             position_ids,
