@@ -164,10 +164,10 @@ def _silu_mul_mxfp8_quant_act_packed_kernel(
             tl.float32
         )
 
-        # Match the unfused path: SiLU/multiply followed by a BF16 materialized
-        # activation, then groupwise MXFP8 quantization.
-        y = (gate / (1.0 + tl.exp(-gate))) * up
-        y = y.to(tl.bfloat16).to(tl.float32)
+        # vLLM rounds SiLU to BF16 before multiplying by up, then rounds again
+        # before MXFP8 quantization. Both rounding points affect FP8 bins.
+        silu = (gate / (1.0 + tl.exp(-gate))).to(tl.bfloat16).to(tl.float32)
+        y = (silu * up).to(tl.bfloat16).to(tl.float32)
 
         absmax = tl.max(tl.abs(y), axis=2)
         scale_exponent = _float_to_ue8m0(

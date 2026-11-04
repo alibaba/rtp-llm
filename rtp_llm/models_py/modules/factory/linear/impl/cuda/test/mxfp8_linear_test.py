@@ -88,7 +88,8 @@ class Mxfp8QuantActPackedTest(unittest.TestCase):
     def _check_silu_mul_exact(self, gate_up: torch.Tensor) -> None:
         import flashinfer
 
-        activated = flashinfer.activation.silu_and_mul(gate_up)
+        gate, up = gate_up.chunk(2, dim=-1)
+        activated = torch.nn.functional.silu(gate) * up
         ref_q, ref_scale_u8 = flashinfer.mxfp8_quantize(
             activated,
             is_sf_swizzled_layout=False,
@@ -106,7 +107,7 @@ class Mxfp8QuantActPackedTest(unittest.TestCase):
         self.assertEqual(ref_scale.stride(), actual_scale.stride())
         self.assertTrue(torch.equal(ref_scale, actual_scale))
 
-    def test_silu_mul_mxfp8_matches_flashinfer_for_random_and_boundaries(self):
+    def test_silu_mul_mxfp8_bf16_rounding_for_random_and_boundaries(self):
         for m in (1, 3, 32):
             with self.subTest(kind="random", m=m):
                 torch.manual_seed(20260918 + m)
@@ -189,7 +190,9 @@ class CudaMxfp8LinearTest(unittest.TestCase):
         mlp.up_proj = self.linear
         mlp.down_proj = torch.nn.Identity()
         mlp.act_fn = torch.nn.Identity()
+        mlp.is_gated = False
         mlp._fuse_silu_quant = False
+        mlp._fuse_silu_mxfp8_quant = False
         mlp.parallelism_config = type(
             "Parallelism", (), {"get_ffn_tp_size": lambda self: 1}
         )()
@@ -209,6 +212,7 @@ class CudaMxfp8LinearTest(unittest.TestCase):
         mlp.up_proj = torch.nn.Identity()
         mlp.down_proj = self.linear
         mlp.act_fn = FusedSiluAndMul()
+        mlp.is_gated = True
         mlp._fuse_silu_quant = False
         mlp._fuse_silu_mxfp8_quant = fuse_silu_quant
         mlp.parallelism_config = type(

@@ -183,7 +183,16 @@ class DenseMLP(nn.Module):
             )
             output = self.down_proj(fp8_out, input_scales=scale_out)
         else:
-            activated = self.act_fn(up)
+            if (
+                self.is_gated
+                and CudaMxfp8Linear is not None
+                and isinstance(self.down_proj, CudaMxfp8Linear)
+                and up.dtype == torch.bfloat16
+            ):
+                gate, value = up.chunk(2, dim=-1)
+                activated = torch.nn.functional.silu(gate) * value
+            else:
+                activated = self.act_fn(up)
             output = self.down_proj(activated)
         if not skip_allreduce and self.parallelism_config.get_ffn_tp_size() > 1:
             output = all_reduce(output, group=Group.TP)
