@@ -37,10 +37,15 @@ fi
 if (( ${#BUILD_PROFILE_ARGS[@]} )); then
     BUILD_COMMAND+=("${BUILD_PROFILE_ARGS[@]}")
 fi
-"${BUILD_COMMAND[@]}" \
-    //rtp_llm/flexlb/navi_sched:libnavi_sched.so \
-    //rtp_llm/flexlb/navi_sched:navi_sched_public_api_compile \
+BUILD_COMMAND+=(
+    //rtp_llm/flexlb/navi_sched:libnavi_sched.so
+    //rtp_llm/flexlb/navi_sched:navi_sched_public_api_compile
     //rtp_llm/flexlb/navi_sched:rtp_llm_adapter_public_api_compile
+)
+if [[ "${NAVI_SCHED_CLEAR_DELETED_PACKAGES:-}" == "1" ]]; then
+    BUILD_COMMAND+=("--deleted_packages=__navi_sched_no_deleted_packages__")
+fi
+"${BUILD_COMMAND[@]}"
 OUTPUT_BIN=$(navi_sched_bazel_output_bin "${BUILD_ARGS[@]}")
 
 find "${PACKAGE_DIR}" -depth -delete 2>/dev/null || true
