@@ -20,14 +20,14 @@ class RtpConfigTest {
         var root = root();
         var values = (ObjectNode) root.path("component").path("config");
         var defaults = load(root);
-        try (var cache = new org.flexlb.mock.engine.cache.KvCache(16, 8, 0, org.flexlb.mock.engine.cache.KvCache.EvictionPolicy.LRU);
+        try (var cache = new org.flexlb.mock.engine.cache.KvCache(16, 8, 0);
              var scheduler = RtpScheduler.factory(defaults).create(new Object(), cache, new org.flexlb.mock.engine.scheduler.TaskHistory())) {
             assertInstanceOf(RtpScheduler.class, scheduler);
             assertEquals("fifo", defaults.effective().path("mock.scheduler.mode").asText());
         }
         values.put("mock.scheduler.mode", "group");
         var grouped = load(root);
-        try (var cache = new org.flexlb.mock.engine.cache.KvCache(16, 8, 0, org.flexlb.mock.engine.cache.KvCache.EvictionPolicy.LRU);
+        try (var cache = new org.flexlb.mock.engine.cache.KvCache(16, 8, 0);
              var scheduler = RtpScheduler.factory(grouped).create(new Object(), cache, new org.flexlb.mock.engine.scheduler.TaskHistory())) {
             assertInstanceOf(RtpGroupScheduler.class, scheduler);
             assertEquals("group", grouped.effective().path("mock.scheduler.mode").asText());
@@ -115,13 +115,13 @@ class RtpConfigTest {
     @Test void acceptsOnlyLocalLru() throws Exception {
         var root = root();
         var config = (ObjectNode) root.path("component").path("config");
-        assertEquals("lru", load(root).effective().path("device_eviction_policy").asText());
+        assertFalse(load(root).effective().has("device_eviction_policy"));
         config.put("device_eviction_policy", "lfu");
         assertThrows(IllegalArgumentException.class, () -> load(root));
         config.put("device_eviction_policy", "LRU").put("enable_memory_cache", true);
         assertThrows(IllegalArgumentException.class, () -> load(root));
         config.put("enable_memory_cache", false);
-        assertEquals("lru", load(root).effective().path("device_eviction_policy").asText());
+        assertFalse(load(root).effective().has("device_eviction_policy"));
     }
 
     @Test void bindsParallelismToTheFormulaWithoutImplicitScaling() throws Exception {

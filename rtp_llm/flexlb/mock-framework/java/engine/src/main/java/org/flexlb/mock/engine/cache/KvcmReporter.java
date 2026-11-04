@@ -9,7 +9,6 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.LongSupplier;
-import static org.flexlb.mock.engine.cache.CacheMetadata.Medium.*;
 
 /** KVCM Meta reporting only. Cache locks enqueue immutable changes; snapshots and heartbeats never block mutation reports. */
 public final class KvcmReporter implements AutoCloseable {
@@ -75,8 +74,7 @@ public final class KvcmReporter implements AutoCloseable {
         this.config = Objects.requireNonNull(config); this.identity = Objects.requireNonNull(identity);
         this.cache = Objects.requireNonNull(cache);
         observation = config.events() ? cache.observeMetadata(change -> {
-            if (change.before() == HBM || change.after() == HBM)
-                if (!changes.offer(change)) snapshotRequired.set(true);
+            if (!changes.offer(change)) snapshotRequired.set(true);
         }) : () -> {};
         worker.scheduleWithFixedDelay(this::tick, 0, 20, TimeUnit.MILLISECONDS);
         snapshots.scheduleWithFixedDelay(this::sendSnapshot, 0, 20, TimeUnit.MILLISECONDS);
@@ -108,7 +106,7 @@ public final class KvcmReporter implements AutoCloseable {
             .put("uri", "event_report://" + identity.address() + "/hbm");
     }
     private String snapshot() throws java.io.IOException {
-        var snapshot = cache.metadataKeys(HBM);
+        var snapshot = cache.metadataKeys();
         var text = new java.io.StringWriter();
         try (var out = JSON.getFactory().createGenerator(text)) {
             out.writeStartObject();
@@ -143,7 +141,7 @@ public final class KvcmReporter implements AutoCloseable {
         }
         var root = report(); var events = (ArrayNode) root.path("events");
         for (var change : batch.values()) {
-            boolean add = change.after() == HBM;
+            boolean add = change.added();
             var event = events.addObject().put("event_type", add ? "EVENT_BLOCK_ADD" : "EVENT_BLOCK_DELETE");
             var body = event.putObject(add ? "block_add" : "block_delete")
                 .put("block_key", Long.toString(change.key())).put("medium", "hbm");

@@ -206,7 +206,6 @@ Mock 专用参数使用小写点号名称，例如 `mock.compute.forward.express
 | cp_rotate_method | DISABLED | 沿用 real PrefillCPConfig；ALL_GATHER、ALL_GATHER_WITH_OVERLAP、ALLTOALL 开启通用 CP，cpSize=tp_size、cpEnabled=1，否则为 1/0。PREFILL_CP 是独立策略，当前未模拟，prefill_cp_size 等专用参数忽略。 |
 | max_batch_tokens_size | 0 | P 的 batch token/矩形准入；0 仍可执行 singleton。 |
 | max_batch_tokens_without_cache / max_inited_kv_cache_streams | 0 / 0 | 仅 P 生效；0 不启用对应限制。 |
-| device_eviction_policy | lru | 仅支持 LRU。 |
 | disable_decode_first_malloc_device_reuse | false | real 内部 CacheConfig 属性，文件输入；不杜撰公开 ENV 名。 |
 | gpu_max_batch_size / gpu_batch_wait_ms | 1 / 10 ms | 仅 V；batch=1 为逐请求执行且等待为 0；>1 同时限制 Forward 工作块数与媒体数，较大图片组分轮执行。 |
 | vit_concurrency / vit_max_queue_size | 64 / 64 | 异步工作线程上限 / 额外等待额度；总准入和 GPU 就绪队列容量为两者之和。 |
@@ -249,6 +248,8 @@ ViT 的 GetWorkerStatus 总是显式提供 `mm_inflight_inputs`（包括真实�
 V 仍按 URL/预处理 key 缓存和合并在途请求，命中时不重新下载；同 URL 内容变化需等缓存失效后重新读取。同一份文件通过不同 URL 获取时，在模型几何参数相同的条件下产生相同模拟特征身份；不同文件编码不保证 hash 相同，也不承诺与真实权重的 hash 数值一致。本地 `mock.vit.skip.download=true` 使用输入宽高和原有模拟身份，其余调度与计算路径相同。
 
 P 在 GENERATE 阶段发送 `prefill_kv_handoff.computed_kv_end`，为已计算 prompt 的排他边界，不包含首个采样 token。D 校验请求身份、已 LOAD 阶段和边界；缺省字段保留原生旧调用兼容，显式错误断言拒绝。未实现的 logprobs 请求明确返回 UNIMPLEMENTED，不伪造概率输出。
+
+本地块池固定采用 LRU。旧 Case 中显式写的 `device_eviction_policy: lru` 仍可读取。
 
 缓存元信息由 `engine/cache/CacheMetadata` 描述，来自 KvCache/BlockTree 已提交的本地有效块。提交、淘汰和清空推进版本。Master 的原生 GetCacheStatus 返回可复用集合与容量，版本未改变时省略 key。
 

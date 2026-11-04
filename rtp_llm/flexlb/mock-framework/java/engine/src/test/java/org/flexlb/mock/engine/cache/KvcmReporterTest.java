@@ -27,7 +27,7 @@ class KvcmReporterTest {
         var expire = new AtomicBoolean(registrationLost); var hint = new AtomicBoolean();
         var bodies = new CopyOnWriteArrayList<String>(); var added = new AtomicBoolean();
         var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        try (var threads = Executors.newVirtualThreadPerTaskExecutor(); var cache = new KvCache(1, 8, 0, KvCache.EvictionPolicy.LRU)) {
+        try (var threads = Executors.newVirtualThreadPerTaskExecutor(); var cache = new KvCache(1, 8, 0)) {
             server.setExecutor(threads);
             server.createContext("/api/", exchange -> {
                 try (exchange) {
@@ -124,7 +124,7 @@ class KvcmReporterTest {
 
     @ParameterizedTest @ValueSource(booleans = {false, true})
     void allItemResultsAreScannedEvenAfterHeaderOrEarlierItemFailure(boolean headerFailure) throws Exception {
-        try (var meta = new Meta(); var cache = new KvCache(1, 8, 0, KvCache.EvictionPolicy.LRU)) {
+        try (var meta = new Meta(); var cache = new KvCache(1, 8, 0)) {
             var reject = new AtomicBoolean(true);
             meta.reply = (request, response) -> {
                 if (Meta.type(request).equals("EVENT_HEARTBEAT") && reject.compareAndSet(true, false)) {
@@ -141,7 +141,7 @@ class KvcmReporterTest {
     }
 
     @Test void repeatedHeartbeatHintsTriggerOneSnapshotAndFalseRearmsTheHint() throws Exception {
-        try (var meta = new Meta(); var cache = new KvCache(1, 8, 0, KvCache.EvictionPolicy.LRU)) {
+        try (var meta = new Meta(); var cache = new KvCache(1, 8, 0)) {
             var hint = new AtomicBoolean(false); var expire = new AtomicBoolean();
             meta.reply = (request, response) -> {
                 if (Meta.type(request).equals("EVENT_HEARTBEAT")) {
@@ -167,7 +167,7 @@ class KvcmReporterTest {
     }
 
     @Test void missingNormalAckRecoversAtSixtySecondsOnceAndRegistrationDoesNotRearmIt() throws Exception {
-        try (var meta = new Meta(); var cache = new KvCache(1, 8, 0, KvCache.EvictionPolicy.LRU)) {
+        try (var meta = new Meta(); var cache = new KvCache(1, 8, 0)) {
             var clock = new AtomicLong(1); var fail = new AtomicBoolean(true);
             meta.reply = (request, response) -> {
                 if (Meta.type(request).equals("EVENT_HEARTBEAT") && fail.get())
@@ -191,7 +191,7 @@ class KvcmReporterTest {
 
     @Test void aLaterMutationAckRefreshesTheRecoveryWindowWhileHeartbeatsFail() throws Exception {
         var releaseHeartbeat = new CountDownLatch(1);
-        try (var meta = new Meta(); var cache = new KvCache(1, 8, 0, KvCache.EvictionPolicy.LRU)) {
+        try (var meta = new Meta(); var cache = new KvCache(1, 8, 0)) {
             var now = new AtomicLong(1);
             var observed = new AtomicReference<>(new CountDownLatch(1));
             meta.reply = (request, response) -> {

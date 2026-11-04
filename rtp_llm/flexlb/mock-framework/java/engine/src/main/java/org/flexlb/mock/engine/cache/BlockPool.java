@@ -4,7 +4,7 @@ import java.util.*;
 
 /** Physical block accounting, independent of cache keys, engine, tier, or eviction policy. */
 public final class BlockPool {
-    public enum Kind { REQUEST, CACHE, LOAD, STORE, EVICTION }
+    public enum Kind { REQUEST, CACHE }
     public record Snapshot(int total, int free, int available, int active) {}
     private final int capacity;
     private final int[] referenced = new int[Kind.values().length];

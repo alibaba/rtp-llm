@@ -10,11 +10,10 @@ import java.nio.file.Path;
 import java.util.*;
 import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.engine.forward.*;
-import org.flexlb.mock.engine.cache.KvCache.EvictionPolicy;
 import org.flexlb.mock.api.model.DecodeSpec;
 
 /** Native RTP names/units stay native; resolved pool capacity excludes the native null block. */
-public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, int reserveBlocks, EvictionPolicy evictionPolicy,
+public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, int reserveBlocks,
                         boolean reuseCache, boolean deviceCache, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
                         int maxGenerateBatchSize, int maxInitedKvStreams, int maxUncachedBatchTokens, int cpSize, boolean cpEnabled, int tpSize, int dpSize,
                         JsonNode business, ComputeModel compute, int imageToken, long cacheKeySeed) {
@@ -26,7 +25,6 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
                 || maxSeqLen < 1 || maxBatchTokens < 0 || maxGenerateBatchSize < 1 || maxInitedKvStreams < 0 || maxUncachedBatchTokens < 0 || cpSize < 1 || tpSize < 1 || dpSize < 1)
             throw new IllegalArgumentException("Invalid RTP node configuration");
         business = business.deepCopy();
-        Objects.requireNonNull(evictionPolicy);
         Objects.requireNonNull(compute);
     }
 
@@ -68,7 +66,10 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         int blocks = nativeInt(config, "test_block_num", null, 2, Integer.MAX_VALUE) - 1;
         int ratio = nativeInt(config, "reserve_block_ratio", 5, 0, 100);
         int reserve = (int) ((long) blocks * ratio / 100);
-        var policy = policy(config, "device_eviction_policy");
+        // Accept the legacy case setting only when it requests the built-in LRU.
+        var legacyPolicy = ((ObjectNode) config).remove("device_eviction_policy");
+        if (legacyPolicy != null && (!legacyPolicy.isTextual() || !"lru".equalsIgnoreCase(legacyPolicy.textValue())))
+            throw new IllegalArgumentException("Invalid device_eviction_policy: expected lru");
         int tpSize = nativeInt(config, "tp_size", 1, 1, Integer.MAX_VALUE);
         int dpSize = nativeInt(config, "dp_size", 1, 1, Integer.MAX_VALUE);
         String cpMethod = cpMethod(config);
@@ -82,7 +83,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             throw new IllegalArgumentException("Decode progress settings belong in Decode compute");
         if (!root.path("id").isTextual()) throw new IllegalArgumentException("Node id must be a string");
         return new RtpConfig(root.path("id").textValue(), role,
-            blockSize, blocks, reserve, policy,
+            blockSize, blocks, reserve,
             nativeBool(config, "reuse_cache", false), nativeBool(config, "enable_device_cache", true),
             nativeBool(config, "disable_decode_first_malloc_device_reuse", false),
             maxSeqLen, maxBatchTokens,
@@ -109,7 +110,6 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         result.put("id", id).put("role", role.name()).put("seq_size_per_block", blockSize)
             .put("reserve_block_ratio", nativeInt(business, "reserve_block_ratio", 5, 0, 100))
             .put("test_block_num", deviceBlocks + 1).put("device_blocks", deviceBlocks).put("reserve_blocks", reserveBlocks)
-            .put("device_eviction_policy", evictionPolicy.name().toLowerCase(Locale.ROOT))
             .put("reuse_cache", reuseCache).put("enable_device_cache", deviceCache)
             .put("disable_decode_first_malloc_device_reuse", disableDecodeFirstReuse)
             .put("max_seq_len", maxSeqLen).put("max_batch_tokens_size", maxBatchTokens)
@@ -161,15 +161,6 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         throw new IllegalArgumentException("Invalid cp_rotate_method");
     }
 
-    private static EvictionPolicy policy(JsonNode config, String key) {
-        var value = config.get(key);
-        try {
-            if (value != null && !value.isTextual()) throw new IllegalArgumentException();
-            return EvictionPolicy.valueOf(value == null ? "LRU" : value.textValue().toUpperCase(Locale.ROOT));
-        } catch (IllegalArgumentException error) {
-            throw new IllegalArgumentException("Invalid " + key + ": expected lru", error);
-        }
-    }
     private static double ratio(JsonNode config, String key, double fallback) {
         if (!config.has(key)) return fallback;
         var value = config.get(key);

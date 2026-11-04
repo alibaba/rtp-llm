@@ -8,7 +8,6 @@ enable_device_cache: true
 # 本 Case 关闭 Host cache。
 enable_disk_cache: false
 reserve_block_ratio: 1
-device_eviction_policy: lru
 # 异步队列背压未模拟，以下 real 参数忽略。
 block_tree_business_queue_max_size: 10000
 block_tree_transfer_queue_max_size: 10000
