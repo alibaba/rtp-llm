@@ -12,9 +12,13 @@ uv run --locked mock-case compile <case目录>/case.yaml \
   --output <输出目录>/compiled.json
 ```
 
-每个 Case 独立目录组织自己的配置，数据集可共享。私有相对路径基于 Case 目录；显式提供共享根时，`data/`、`datasets/`、`views/` 基于共享根。编译不启动进程、不查询指标，也不检查数据内容。Client 只接受 start 参数 requests_file 指向的标准 Protobuf＋Zstd 文件，不提供运行时旧格式兼容。
+每个 Case 保存自己的声明和角色配置。回放数据放在共享的 `data/traffic/`。例如 `requests_file: data/traffic/basic.binpb.zst` 默认从框架目录解析，也可以用 `--shared-root` 指定共享根。普通相对输入路径仍从 Case 目录解析。输入使用 Protobuf + Zstd，编译阶段检查 Case 声明，播放时检查文件内容。
 
-顶层为 `id`、可选 `name`、`describe`、`environment`、`phases` 和可选 `view`。phase 和 step 完全顺序执行；每个 step 直接写 `interface` 与 `args`，可选 `expect`、`within` 和 `wait_after`；不再使用 call/check 外壳或 run 字段。phase 必须有正的 `timeout`。ID 全局唯一，引用必须来自前置步骤或允许的全局发现字段。
+顶层为 `id`、可选 `name`、`describe`、`environment`、`phases` 和可选 `view`。Phase 顺序执行。每个 Step 直接写 `interface` 与 `args`，可选 `expect`、`within`、`wait_after` 和 `background`。phase 必须有正的 `timeout`。ID 全局唯一，引用必须来自前置步骤或允许的全局发现字段。
+
+Step 默认在前台运行。`background: true` 让 Runner 在当前 Phase 并行执行该 Step。Phase 结束前等待未完成的后台 Step，时间计入 Phase 预算。一个后台 Step 失败时，Runner 取消同 Phase 的其他在途 Step 并回收。后续 Phase 可以引用已成功完成的后台结果。
+
+`step/stop` 的 `args.target` 是当前 Phase 中已启动的后台 Step ID。它取消该任务并等待退出，实际取消返回 `true`，目标已正常结束或已停止时返回 `false`。它管理 Python Step 任务。回放已经启动时，通过 `client/stop` 或实验回收收齐 Java 侧终态。
 
 固定等待写成 step 的 `wait_after: 5s`，默认 `0s`，必须是非负的带单位时长。执行顺序为“调用接口 → 检查 expect → wait_after → 下一步”；最后一个 step 也执行等待。等待计入该 step 的 within 和 phase 的 timeout，期间继续监视组件退出并响应取消；调用或断言失败不执行等待。返回值和 ref 仍是原调用结果，等待不会刷新结果或查询时间；等待后的检查需要下一次接口调用。
 
