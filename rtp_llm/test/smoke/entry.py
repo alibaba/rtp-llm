@@ -4,11 +4,37 @@ import json
 import logging
 import os
 import shutil
+import sys
 from typing import Any, Dict, List, Type, Union
 
 logging.basicConfig(
     level="INFO", format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
+
+
+def _configure_data_root(argv: List[str]) -> None:
+    """Select the declared Bazel data tree before comparers capture REL_PATH."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--data_root", choices=("oss", "internal"))
+    args, _ = parser.parse_known_args(argv)
+    if args.data_root is None:
+        return
+
+    roots = {
+        "oss": "rtp_llm/test/smoke",
+        "internal": "internal_source/rtp_llm/test/smoke",
+    }
+    selected = os.path.abspath(roots[args.data_root])
+    if not os.path.isdir(selected):
+        raise FileNotFoundError(f"Selected smoke data root is missing: {selected}")
+
+    from rtp_llm.test.smoke import common_def
+
+    common_def.REL_PATH = selected
+
+
+if __name__ == "__main__":
+    _configure_data_root(sys.argv[1:])
 
 from rtp_llm.test.smoke.case_runner import CaseRunner
 from rtp_llm.test.smoke.common_def import REL_PATH
@@ -62,6 +88,9 @@ def _parse_kv_list(raw: str) -> Dict[str, str]:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="smoke runner")
+    parser.add_argument(
+        "--data_root", choices=("oss", "internal"), help="Declared Bazel smoke data tree"
+    )
     parser.add_argument("--suite_name", type=str, required=True, help="suite_name")
     parser.add_argument("--task_info", type=str, required=True, help="task_info")
     parser.add_argument("--envs", type=str, required=False, default="", help="envs")

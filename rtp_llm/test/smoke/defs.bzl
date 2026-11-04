@@ -239,6 +239,7 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
         legacy_create_init=0,
         args = [
             "--suite_name", name,
+            "--data_root", "internal" if native.package_name().startswith("internal_source/") else "oss",
             "--task_info", task_info,
             "--envs", env_str,
             "--gpu_card", gpu,
