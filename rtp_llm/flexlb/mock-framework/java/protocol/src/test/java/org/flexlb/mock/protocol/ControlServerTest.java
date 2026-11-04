@@ -7,7 +7,7 @@ import java.time.Instant;
 import java.util.*;
 import org.junit.jupiter.api.*;
 
-class ApiServerTest {
+class ControlServerTest {
     private ControlServer server;
     private static final HttpClient CLIENT = HttpClient.newHttpClient();
 
