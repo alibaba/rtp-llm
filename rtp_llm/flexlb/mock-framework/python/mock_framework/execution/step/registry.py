@@ -136,9 +136,11 @@ class Interface:
 
 def register_step(name, *, effect, unit=''):
     def decorate(step_type):
+        if not isinstance(step_type, type) or not issubclass(step_type, Step):
+            raise ConfigError('Case actions must inherit Step')
         function = step_type.execute
-        if not issubclass(step_type, Step) or effect not in ('read', 'write') or not name or not iscoroutinefunction(function):
-            raise ConfigError('Case interfaces need a name, read/write effect and async function')
+        if effect not in ('read', 'write') or not name or not iscoroutinefunction(function) or step_type.__abstractmethods__:
+            raise ConfigError('Case steps need a name, read/write effect and async execute method')
         parameters = list(signature(function).parameters.values())
         hints = get_type_hints(function, include_extras=True)
         if len(parameters) != 2 or parameters[1].name not in hints or 'return' not in hints:
@@ -154,13 +156,13 @@ def register_step(name, *, effect, unit=''):
 
 
 class Registry:
-    def __init__(self, functions=()):
+    def __init__(self, steps=()):
         self._interfaces = {}
-        for function in functions:
-            self.register(function)
+        for step in steps:
+            self.register(step)
 
-    def register(self, function):
-        definition = getattr(function, 'definition', None)
+    def register(self, step):
+        definition = getattr(step, 'definition', None)
         if definition is None:
             raise ConfigError('Missing interface decorator')
         if definition.name in self._interfaces:

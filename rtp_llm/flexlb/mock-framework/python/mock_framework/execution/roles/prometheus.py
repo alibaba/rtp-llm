@@ -52,7 +52,7 @@ class Prometheus:
         self.targets, self.baselined = {}, False
         self.metadata = {'job': self.JOB, 'recipe': recipe, 'complete': False}
 
-    def save(self):
+    def _save(self):
         write_json(self.directory / 'collection.json', self.metadata)
 
     async def start(self):
@@ -65,7 +65,7 @@ class Prometheus:
         command = [self.recipe['binary'], '--config.file=' + str(self.directory / 'prometheus.yaml'),
                    '--web.listen-address=127.0.0.1:0', '--storage.tsdb.path=' + str(self.directory / 'data'), '--log.format=json']
         self.metadata['command'] = command
-        self.save()
+        self._save()
         self.child = await self.supervisor.spawn('prometheus', command, str(self.directory), dict(os.environ), self.directory, zero_exit=True)
         while self.url is None:
             # Discover the actual bound port from this process's structured log, not a guessed free port.
@@ -86,7 +86,7 @@ class Prometheus:
                 value = await asyncio.to_thread(_get, self.url + '/api/v1/status/buildinfo')
                 if value.get('status') == 'success':
                     self.metadata.update(url=self.url, build=value['data'])
-                    self.save()
+                    self._save()
                     self.records.emit(event='process_ready', node='prometheus', url=self.url)
                     return
             except (OSError, ValueError):
@@ -109,16 +109,16 @@ class Prometheus:
                               '__scheme__': address.scheme, '__metrics_path__': address.path or '/metrics'}}
         write_json(self.directory / 'targets.json', list(self.targets.values()))
         self.metadata['targets'] = dict(self.targets)
-        self.save()
+        self._save()
 
     def retire(self, node):
         self.targets.pop(node)
         self.metadata.get('final_scrapes', {}).pop(node, None)
         write_json(self.directory / 'targets.json', list(self.targets.values()))
         self.metadata['targets'] = dict(self.targets)
-        self.save()
+        self._save()
 
-    async def scrapes(self):
+    async def _scrapes(self):
         result = await asyncio.to_thread(_get, self.url + '/api/v1/targets?state=active')
         if result.get('status') != 'success':
             raise ExecutionError('Prometheus target query failed')
@@ -132,13 +132,13 @@ class Prometheus:
             raise ExecutionError('Managed Prometheus has no metrics targets')
         seen = {node: set() for node in (self.targets if nodes is None else nodes)}
         while True:
-            for node, target in (await self.scrapes()).items():
+            for node, target in (await self._scrapes()).items():
                 if node in seen and target['health'] == 'up':
                     seen[node].add(target['lastScrape'])
             if all(len(times) >= 2 for times in seen.values()):
                 self.baselined = True
                 self.metadata.setdefault('baseline_at', timestamp())
-                self.save()
+                self._save()
                 self.records.emit(event='collection_ready', url=self.url, targets=sorted(self.targets))
                 return
             await asyncio.sleep(.05)
@@ -155,12 +155,12 @@ class Prometheus:
                 for node, child in self.supervisor.children:
                     if node in self.targets and child.returncode is not None:
                         raise ExecutionError(f'{node} exited before final collection')
-                targets = await self.scrapes()
+                targets = await self._scrapes()
                 if selected <= targets.keys() and all(targets[node]['health'] == 'up' and
                         _epoch(targets[node]['lastScrape']) >= _epoch(marker) for node in selected):
                     self.metadata.setdefault('final_scrapes', {}).update({node: targets[node]['lastScrape'] for node in selected})
                     self.records.emit(event='collection_finished', after=marker, scrapes=self.metadata['final_scrapes'])
-                    self.save()
+                    self._save()
                     return
                 await asyncio.sleep(.05)
 
@@ -169,7 +169,7 @@ class Prometheus:
             return
         self.metadata.update(complete=self.baselined and 'final_scrapes' in self.metadata and not errors,
                              finished_at=timestamp(), errors=list(errors))
-        self.save()
+        self._save()
 
     async def close(self):
         return await self.supervisor.stop(['prometheus'], 5)

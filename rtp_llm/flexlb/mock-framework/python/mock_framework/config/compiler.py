@@ -173,12 +173,12 @@ def compile_case(path: str | Path, registry: Registry | None = None, *, shared_r
     for phase in raw['phases']:
         phases.append(_compile_phase(phase, registry, ids, previous))
     framework = Path(__file__).resolve().parents[3]
-    shared_root = framework if shared_root is None else Path(shared_root).resolve()
+    data_root = framework if shared_root is None else Path(shared_root).resolve()
     view = framework / 'views/default.json'
     if 'view' in raw:
         view = _view_path(raw['view'], path.parent, shared_root)
     return CompiledCase(id=case_id, describe=description, name=name, directory=path.parent,
-                        environment=environment, phases=tuple(phases), view=view, source=path, shared_root=shared_root)
+                        environment=environment, phases=tuple(phases), view=view, source=path, shared_root=data_root)
 
 
 _RESOURCE = re.compile(r'^[1-9]\d*(?:\.\d+)?(?:KiB|MiB|GiB|TiB|[kmgtKMGT]i?|B)?$')
