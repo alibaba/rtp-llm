@@ -181,6 +181,11 @@ public:
         return written_keys_;
     }
 
+    CacheKeysType writtenKeyValues() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return written_key_values_;
+    }
+
     size_t matchCalls() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return match_calls_;
@@ -217,6 +222,7 @@ protected:
         std::lock_guard<std::mutex> lock(mutex_);
         ++write_calls_;
         written_keys_ += request.handles.size();
+        written_key_values_.insert(written_key_values_.end(), request.keys->begin(), request.keys->end());
     }
 
 private:
@@ -230,6 +236,7 @@ private:
     size_t                  read_calls_{0};
     size_t                  write_calls_{0};
     size_t                  written_keys_{0};
+    CacheKeysType           written_key_values_;
 };
 
 class StreamCacheResourceTest: public DeviceTestBase {
@@ -275,8 +282,11 @@ protected:
                                         bool                    reuse_cache,
                                         RoleType                role_type,
                                         const KVCacheConfig&    kv_cache_config = {}) {
+        PDSepConfig pd_sep_config;
+        pd_sep_config.role_type = role_type;
         cache_manager_ = std::make_shared<KVCacheManager>(
-            cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr, kv_cache_config);
+            cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr, kv_cache_config,
+            ParallelismConfig{}, RuntimeConfig{}, SpeculativeExecutionConfig{}, pd_sep_config);
         ASSERT_TRUE(cache_manager_->init());
         size_t expected_free_blocks = 0;
         for (const auto& group : cache_manager_->cacheConfig().topology().groups()) {
@@ -308,9 +318,11 @@ protected:
                                                                             RoleType role_type     = RoleType::PDFUSION,
                                                                             bool     seed_resident = false,
                                                                             std::chrono::milliseconds timeout =
-                                                                                std::chrono::seconds(10)) {
+                                                                                std::chrono::seconds(10),
+                                                                            int min_replica_count = 0) {
         KVCacheConfig kv_cache_config;
         kv_cache_config.enable_remote_cache   = true;
+        kv_cache_config.kvcm_min_replica_count = min_replica_count;
         kv_cache_config.enable_memory_cache   = seed_host;
         kv_cache_config.memory_cache_size_mb  = seed_host ? 1 : 0;
         KVCacheConfig manager_kv_cache_config = kv_cache_config;
@@ -1252,6 +1264,66 @@ TEST_F(StreamCacheResourceTest, StorageMatchDefersReusePublicationUntilReadCompl
     EXPECT_EQ(resource.kvCache().cacheResource(0).storageBackendReuseBlockNum(), 2u);
 }
 
+TEST_F(StreamCacheResourceTest, RequestFinishFiltersRemoteReuseOnlyForSingleReplicaPrefill) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION, RoleType::DECODE}) {
+        SCOPED_TRACE(role);
+        for (const int replicas : {0, 1, 2}) {
+            SCOPED_TRACE(replicas);
+            auto backend = prepareStorageBackendResource(false, false, role, false,
+                                                           std::chrono::seconds(10), replicas);
+            auto& resource = stream_->streamCacheResource();
+            ASSERT_TRUE(resource.initKVBlock().ok());
+            ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
+            auto& counts = resource.batch_kv_cache_resource_->cacheResource(0);
+            counts.setDeviceReuseBlockNum(1);
+            counts.setStorageBackendReuseBlockNum(1);
+            auto expected = counts.cacheKeys();
+            ASSERT_EQ(expected.size(), 3u);
+            if (role == RoleType::PREFILL && replicas <= 1) {
+                expected.erase(expected.begin() + 1);
+            }
+            stream_->generate_status_->status = StreamState::FINISHED;
+            stream_->fillSubGenerateStatus(StreamState::FINISHED);
+            stream_->releaseResource();
+            backend->shutdown();
+            EXPECT_EQ(backend->writtenKeyValues(), expected);
+            EXPECT_TRUE(resource.isResourceReleased());
+        }
+    }
+}
+
+TEST_F(StreamCacheResourceTest, AdoptedRemoteCountsControlRequestFinishWrites) {
+    for (const int outcome : {0, 1, 2}) {
+        SCOPED_TRACE(outcome);  // Success, read failure, read timeout.
+        auto backend = prepareStorageBackendResource(false, true, RoleType::PREFILL);
+        if (outcome == 1) {
+            backend->failNextRead();
+        } else if (outcome == 2) {
+            backend->timeoutNextRead();
+        }
+        auto& resource = stream_->streamCacheResource();
+        initCacheKeys(resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), 2);
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
+        ASSERT_FALSE(stream_->hasError());
+        const auto& counts = resource.kvCache().cacheResource(0);
+        EXPECT_EQ(counts.memoryReuseBlockNum(), 1u);
+        EXPECT_EQ(counts.storageBackendReuseBlockNum(), outcome == 0 ? 1u : 0u);
+        auto expected = counts.cacheKeys();
+        ASSERT_EQ(expected.size(), 3u);
+        if (outcome == 0) {
+            expected.erase(expected.begin() + 1);
+        }
+        stream_->generate_status_->status = StreamState::FINISHED;
+        stream_->fillSubGenerateStatus(StreamState::FINISHED);
+        stream_->releaseResource();
+        backend->shutdown();
+        EXPECT_EQ(backend->writtenKeyValues(), expected);
+        EXPECT_TRUE(resource.isResourceReleased());
+    }
+}
+
 TEST_F(StreamCacheResourceTest, OverallDeadlineReturnsBeforeReadAndLateCompletionCannotPublishReuse) {
     auto backend = prepareStorageBackendResource(false, false, RoleType::PREFILL, false, std::chrono::seconds(1));
     auto& resource = stream_->streamCacheResource();
@@ -1286,6 +1358,7 @@ TEST_F(StreamCacheResourceTest, OverallDeadlineReturnsBeforeReadAndLateCompletio
     EXPECT_EQ(stream_->reuseLength(), 0);
     EXPECT_EQ(resource.kvCache().curBlocksNum(), 0);
     EXPECT_FALSE(pool->isAllocated(original_blocks.front()));
+    EXPECT_EQ(backend->writeCalls(), 0u);
 }
 
 TEST_F(StreamCacheResourceTest, RemoteTimeoutKeepsHostPrefixAndReplacesFrozenSuffix) {
