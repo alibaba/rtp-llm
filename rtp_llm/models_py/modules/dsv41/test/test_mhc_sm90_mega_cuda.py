@@ -9,6 +9,7 @@ from rtp_llm.models_py.modules.dsv41.hc.mhc_sm90_vllm_two_kernel import (
     _WARMED_STREAMS,
 )
 from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import try_fused_post_pre
+from rtp_llm.models_py.modules.dsv41.moe.shared_expert import PendingCombine
 
 DIM = 5120
 HC = 4
@@ -73,11 +74,20 @@ def _golden(case):
     return residual, normalized, post, comb, case["next_hc"].pre_mix_out
 
 
-def _candidate(case):
-    result = try_fused_post_pre(**case)
+def _candidate(case, combine=None):
+    result = try_fused_post_pre(**case, combine=combine)
     if result is None:
         raise AssertionError("SM90 two-kernel MegaMHC unexpectedly fell back")
     return (*result, case["next_hc"].pre_mix_out)
+
+
+def _candidate_pair(case):
+    """Drive the deferred-combine seam with ``case["pair"]``."""
+    pair = case["pair"]
+    return _candidate(
+        {key: value for key, value in case.items() if key != "pair"},
+        combine=(pair.routed, pair.shared),
+    )
 
 
 def _assert_outputs(test, actual, expected):
@@ -118,6 +128,46 @@ class MhcSm90MegaCudaTest(unittest.TestCase):
                 _assert_outputs(self, actual, expected)
 
     @torch.inference_mode()
+    def test_add_cast_fold(self):
+        """The deferred routed/shared pair must replace add+cast bit-exactly.
+
+        ``_add_cast_kernel`` stores ``bf16(fp32(routed) + fp32(shared))``. The
+        fused post kernel rebuilds that value, so it may read the two BF16
+        operands directly. A fold that skips the intermediate BF16 rounding is
+        not equivalent, which the last assertion pins down.
+        """
+        for tokens in (1, 3, 4, 16, 32):
+            with self.subTest(tokens=tokens):
+                reference = _case(tokens, 20261105 + tokens)
+                candidate = _case(tokens, 20261105 + tokens)
+                routed = torch.randn_like(reference["attn_out"].float()).bfloat16()
+                shared = (torch.randn_like(routed.float()) * 0.5).bfloat16()
+                pair = PendingCombine(routed, shared, torch.bfloat16)
+
+                reference["attn_out"] = pair.materialize()
+                expected = tuple(value.clone() for value in _golden(reference))
+                candidate["attn_out"] = pair.routed
+                actual = _candidate(
+                    candidate, combine=(pair.routed, pair.shared)
+                )
+                torch.cuda.synchronize()
+                self.assertTrue(torch.equal(actual[0], expected[0]), "residual")
+                self.assertTrue(torch.equal(actual[1], expected[1]), "normalized")
+
+                # The arithmetic reason the round trip is load-bearing.
+                naive = (
+                    candidate["post"].float()
+                    * (routed.float() + shared.float()).unsqueeze(-2)
+                    + torch.matmul(
+                        candidate["comb"].float().transpose(-1, -2),
+                        candidate["residual"].float(),
+                    )
+                ).to(torch.bfloat16)
+                self.assertFalse(
+                    torch.equal(naive, expected[0]), "unrounded fold must differ"
+                )
+
+    @torch.inference_mode()
     def test_alternating_input_graph_replay(self):
         for tokens in (1, 8, 32):
             with self.subTest(tokens=tokens):
@@ -150,6 +200,68 @@ class MhcSm90MegaCudaTest(unittest.TestCase):
                             case[key].copy_(value)
                         case["previous"].pre_mix_out.copy_(previous_pre)
                     expected = tuple(value.clone() for value in _candidate(eager))
+                    stream.wait_stream(torch.cuda.current_stream())
+                    graph.replay()
+                    torch.cuda.synchronize()
+                    actual = tuple(value.clone() for value in outputs)
+                    for name, got, ref in zip(
+                        ("residual", "normalized", "post", "comb"), actual, expected
+                    ):
+                        self.assertTrue(torch.equal(got, ref), name)
+
+
+    @torch.inference_mode()
+    def test_deferred_combine_graph_replay(self):
+        """The deferred pair must replay identically under a captured graph."""
+        for tokens in (1, 8, 32):
+            with self.subTest(tokens=tokens):
+                eager = _case(tokens, 20400000 + tokens)
+                captured_case = _case(tokens, 20400000 + tokens)
+                for case in (eager, captured_case):
+                    case["pair"] = PendingCombine(
+                        torch.randn_like(case["attn_out"].float()).bfloat16(),
+                        (torch.randn_like(case["attn_out"].float()) * 0.5).bfloat16(),
+                        torch.bfloat16,
+                    )
+                    case["attn_out"] = case["pair"].routed
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        _candidate_pair(captured_case)
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    outputs = _candidate_pair(captured_case)
+
+                for amplitude in (1.0, -0.75, 2.0):
+                    # One set of inputs, replayed into both cases in place.
+                    values = dict(
+                        routed=(
+                            torch.randn_like(eager["pair"].routed.float()) * amplitude
+                        ).bfloat16(),
+                        shared=(
+                            torch.randn_like(eager["pair"].shared.float()) * amplitude
+                        ).bfloat16(),
+                        residual=(
+                            torch.randn_like(eager["residual"].float()) * amplitude
+                        ).bfloat16(),
+                        post=torch.rand_like(eager["post"]),
+                        comb=torch.randn_like(eager["comb"]).softmax(-1),
+                        previous_pre=torch.rand_like(eager["previous"].pre_mix_out),
+                    )
+                    for case in (eager, captured_case):
+                        for name in ("routed", "shared", "residual", "post", "comb"):
+                            target = (
+                                getattr(case["pair"], name)
+                                if name in ("routed", "shared")
+                                else case[name]
+                            )
+                            target.copy_(values[name])
+                        case["previous"].pre_mix_out.copy_(values["previous_pre"])
+                    expected = tuple(
+                        value.clone() for value in _candidate_pair(eager)
+                    )
                     stream.wait_stream(torch.cuda.current_stream())
                     graph.replay()
                     torch.cuda.synchronize()

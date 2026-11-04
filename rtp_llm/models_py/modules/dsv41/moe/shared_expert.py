@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import torch
 import torch.nn as nn
@@ -21,13 +22,19 @@ from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from .warmup_sync import cuda_graph_warmup_forward_enabled
 
 try:
+    from ..sm90_deepgemm_dense import native_mn_major_scales
     from ..utils import V41MXFP8Linear
-    from ._silu_mul_bf16_triton import silu_mul_fp8_g32_quant
+    from ._silu_mul_bf16_triton import (
+        silu_mul_fp8_g32_quant,
+        silu_mul_fp8_g32_quant_mn_major,
+    )
 
     _MXFP8_FUSED_SILU_OK = True
 except Exception:
     V41MXFP8Linear = ()
     silu_mul_fp8_g32_quant = None
+    silu_mul_fp8_g32_quant_mn_major = None
+    native_mn_major_scales = None
     _MXFP8_FUSED_SILU_OK = False
 
 
@@ -194,9 +201,16 @@ class W13SharedExpert(nn.Module):
         with record_function_range("dsv4.shared_expert.w13"):
             gate_up = self.w13(x)
         with record_function_range("dsv4.shared_expert.silu_mul"):
-            hidden_q, hidden_s = silu_mul_fp8_g32_quant(
-                gate_up, clamp_limit=self.swiglu_limit
+            # The SM90 adapter consumes FP32 MN-major scales natively, so the
+            # producer writes them directly instead of packing words that the
+            # consumer would immediately unpack. Other backends keep the
+            # packed UE8M0 contract their DeepGEMM entry point requires.
+            quantize = (
+                silu_mul_fp8_g32_quant_mn_major
+                if native_mn_major_scales(self.w2)
+                else silu_mul_fp8_g32_quant
             )
+            hidden_q, hidden_s = quantize(gate_up, clamp_limit=self.swiglu_limit)
         with record_function_range("dsv4.shared_expert.w2"):
             return self.w2.forward_quantized(hidden_q, hidden_s)
 
@@ -637,3 +651,52 @@ def combine_routed_and_shared(
         if strict_fused_moe_enabled():
             raise
         return (routed.float() + shared.float()).to(out_dtype)
+
+
+class PendingCombine(NamedTuple):
+    """Deferred ``bf16(routed + shared)`` MoE output.
+
+    ``_add_cast_kernel`` computes exactly ``bf16(fp32(routed) + fp32(shared))``
+    and stores one BF16 tensor.  A consumer that performs the same FP32 add and
+    the same single BF16 rounding reproduces that tensor bit-for-bit, so it can
+    read the two BF16 operands directly and the standalone kernel disappears.
+    Consumers that cannot (they need one materialized tensor) call
+    ``materialize``, which is the unchanged path.
+    """
+
+    routed: torch.Tensor
+    shared: torch.Tensor
+    dtype: torch.dtype
+
+    def materialize(self) -> torch.Tensor:
+        """Run the unchanged add+cast kernel on the pair."""
+        shape = self.routed.shape
+        flat = combine_routed_and_shared(
+            self.routed.reshape(-1, shape[-1]),
+            self.shared.reshape(-1, shape[-1]),
+            self.dtype,
+        )
+        return flat.view(shape)
+
+
+def can_defer_combine(
+    routed: torch.Tensor, shared: torch.Tensor, out_dtype: torch.dtype
+) -> bool:
+    """Whether ``PendingCombine`` is bit-identical to ``combine_routed_and_shared``.
+
+    The ``DSV4_SHARED_EXPERT_BF16_ADD`` A/B knob rounds both addends to the
+    output dtype before adding, which the deferred FP32 add does not reproduce.
+    Both operands must already be BF16 and contiguous so that a consumer can
+    load them without a staging copy.
+    """
+    if os.environ.get("DSV4_SHARED_EXPERT_BF16_ADD", "0") == "1":
+        return False
+    return (
+        routed.dtype == torch.bfloat16
+        and shared.dtype == torch.bfloat16
+        and routed.dtype == out_dtype
+        and routed.shape == shared.shape
+        and routed.is_contiguous()
+        and shared.is_contiguous()
+        and routed.device == shared.device
+    )

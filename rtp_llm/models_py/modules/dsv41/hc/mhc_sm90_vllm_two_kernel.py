@@ -31,18 +31,32 @@ DIM = 5120
 MIX = 24
 SPLITS = 8
 THREADS = 128
+# Largest token count the fused two-kernel seam still beats the standalone
+# chain at. Measured on SM90 (L20Z): 1.24x at 64 rows, 0.84x at 128, with the
+# crossover at ~92 rows; 64 is also the largest decode CUDA-graph bucket.
+MAX_TOKENS = 64
 _WARMED_STREAMS: set[tuple[int, int]] = set()
 
 
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
-        tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True,
-    },
-)
-def _mhc_fused_post_projection(tile_n: int):
-    """Fuse post mapping and split projection for low-token decode."""
+_PASS_CONFIGS = {
+    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
+    tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True,
+}
+
+
+def _build_post_projection(tile_n: int, combine: bool):
+    """Build the fused post-mapping plus split-projection kernel.
+
+    ``combine`` selects how the sublayer output element is obtained.  The plain
+    variant loads the materialized BF16 tensor.  The deferred-combine variant
+    rebuilds ``bf16(routed + shared)`` from the two BF16 operands: the FP32 sum
+    is rounded once to BF16 and widened back, which is bit-for-bit the value
+    ``_add_cast_kernel`` had stored, so the standalone combine kernel and its
+    round trip through memory disappear.  Skipping that intermediate round trip
+    is *not* equivalent -- both BF16 addends lose up to one ULP -- which is why
+    the fold is only exact inside a consumer that can redo the rounding.
+    """
     num_tokens = T.dynamic("num_tokens")
     hidden_per_split = DIM // SPLITS
     hidden_iters = hidden_per_split // THREADS
@@ -50,21 +64,20 @@ def _mhc_fused_post_projection(tile_n: int):
     num_projection_tiles = MIX // tile_n
 
     @T.prim_func
-    def kernel(
+    def mhc_fused_post_projection(
         comb_mix: T.Tensor[(num_tokens, HC, HC), T.float32],
         residual_in: T.Tensor[(num_tokens, HC, DIM), T.bfloat16],
         post_mix: T.Tensor[(num_tokens, HC), T.float32],
-        x_in: T.Tensor[(num_tokens, DIM), T.bfloat16],
+        routed_in: T.Tensor[(num_tokens, DIM), T.bfloat16],
+        shared_in: T.Tensor[(num_tokens, DIM), T.bfloat16],
         weight: T.Tensor[(MIX, HC, DIM), T.float32],
         partials: T.Tensor[(SPLITS, num_tokens, MIX), T.float32],
         square_partials: T.Tensor[(SPLITS, num_tokens), T.float32],
         residual_out: T.Tensor[(num_tokens, HC, DIM), T.bfloat16],
     ) -> None:
-        with T.Kernel(num_tokens, num_projection_tiles, SPLITS, threads=THREADS) as (
-            token,
-            projection_tile,
-            split,
-        ):
+        with T.Kernel(
+            num_tokens, num_projection_tiles, SPLITS, threads=THREADS
+        ) as (token, projection_tile, split):
             tid = T.get_thread_binding()
             warp = tid // 32
             lane = tid % 32
@@ -90,8 +103,16 @@ def _mhc_fused_post_projection(tile_n: int):
 
             for iteration in T.serial(hidden_iters):
                 hidden = hidden_start + iteration * THREADS + tid
+                if combine:
+                    # The retired add+cast kernel's exact value.
+                    x = T.bfloat16(
+                        T.float32(routed_in[token, hidden])
+                        + T.float32(shared_in[token, hidden])
+                    )
+                else:
+                    x = routed_in[token, hidden]
                 for dst in T.unroll(HC):
-                    new_residual[dst] = post_local[dst] * x_in[token, hidden]
+                    new_residual[dst] = post_local[dst] * x
                     for src in T.unroll(HC):
                         new_residual[dst] += (
                             comb_local[src, dst] * residual_in[token, src, hidden]
@@ -137,7 +158,19 @@ def _mhc_fused_post_projection(tile_n: int):
                         value += warp_sums[source_warp, tile_n]
                     square_partials[split, token] = value
 
-    return kernel
+    return mhc_fused_post_projection
+
+
+@tilelang.jit(pass_configs=_PASS_CONFIGS)
+def _mhc_fused_post_projection(tile_n: int):
+    """Fuse post mapping and split projection for low-token decode."""
+    return _build_post_projection(tile_n, combine=False)
+
+
+@tilelang.jit(pass_configs=_PASS_CONFIGS)
+def _mhc_fused_post_projection_combine(tile_n: int):
+    """Same kernel, consuming the deferred ``bf16(routed + shared)`` operands."""
+    return _build_post_projection(tile_n, combine=True)
 
 
 def run(
@@ -156,11 +189,19 @@ def run(
     sinkhorn_eps: float,
     sinkhorn_repeat: int,
     rmsnorm_eps: float,
+    combine: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return residual, normalized input, next pre, post and combine mixes."""
+    """Return residual, normalized input, next pre, post and combine mixes.
+
+    ``combine`` carries the deferred ``(routed, shared)`` MoE pair.  When it is
+    supplied the fused kernel rebuilds ``bf16(routed + shared)`` inline and
+    ``x`` is used only for its token count and geometry.
+    """
     tokens = x.shape[0]
-    if not 0 < tokens <= 32:
-        raise ValueError(f"vLLM SM90 two-kernel mHC requires 1..32 tokens, got {tokens}")
+    if not 0 < tokens <= MAX_TOKENS:
+        raise ValueError(
+            f"vLLM SM90 two-kernel mHC requires 1..{MAX_TOKENS} tokens, got {tokens}"
+        )
     tile_n = 2 if tokens < 16 else 6
     residual_out = torch.empty_like(residual)
     partials = torch.empty(
@@ -174,16 +215,31 @@ def run(
     next_comb = torch.empty((tokens, HC * HC), dtype=torch.float32, device=x.device)
     normalized = torch.empty((tokens, DIM), dtype=torch.bfloat16, device=x.device)
 
-    _mhc_fused_post_projection(tile_n)(
-        comb,
-        residual,
-        post,
-        x,
-        weight.view(MIX, HC, DIM),
-        partials,
-        square_partials,
-        residual_out,
-    )
+    if combine is None:
+        _mhc_fused_post_projection(tile_n)(
+            comb,
+            residual,
+            post,
+            x,
+            x,  # unused by the plain specialization
+            weight.view(MIX, HC, DIM),
+            partials,
+            square_partials,
+            residual_out,
+        )
+    else:
+        routed, shared = combine
+        _mhc_fused_post_projection_combine(tile_n)(
+            comb,
+            residual,
+            post,
+            routed,
+            shared,
+            weight.view(MIX, HC, DIM),
+            partials,
+            square_partials,
+            residual_out,
+        )
     _mhc_pre_big_fuse_with_norm(
         partials,
         square_partials,
@@ -228,8 +284,15 @@ def try_vllm_two_kernel_post_pre(
     previous,
     next_hc,
     norm: torch.nn.Module,
+    *,
+    combine: tuple[torch.Tensor, torch.Tensor] | None = None,
 ):
-    """Run the low-token SM90 path, returning ``None`` outside its contract."""
+    """Run the low-token SM90 path, returning ``None`` outside its contract.
+
+    ``combine`` is the deferred ``(routed, shared)`` MoE pair.  ``attn_out`` is
+    then only the geometry proxy for the combined sublayer output; the fused
+    kernel rebuilds ``bf16(routed + shared)`` itself.
+    """
     if (
         not isinstance(attn_out, torch.Tensor)
         or attn_out.device.type != "cuda"
@@ -237,10 +300,21 @@ def try_vllm_two_kernel_post_pre(
         or attn_out.ndim != 3
         or attn_out.shape[-1] != DIM
         or not attn_out.is_contiguous()
-        or not 0 < attn_out.numel() // DIM <= 32
+        or not 0 < attn_out.numel() // DIM <= MAX_TOKENS
     ):
         return None
     device = attn_out.device
+    if combine is not None:
+        tokens = attn_out.numel() // DIM
+        for operand in combine:
+            if (
+                not isinstance(operand, torch.Tensor)
+                or operand.dtype != torch.bfloat16
+                or operand.device != device
+                or not operand.is_contiguous()
+                or operand.numel() != tokens * DIM
+            ):
+                return None
     try:
         if tuple(torch.cuda.get_device_capability(device)) != (9, 0):
             return None
@@ -311,6 +385,14 @@ def try_vllm_two_kernel_post_pre(
             sinkhorn_eps=next_hc.hc_eps,
             sinkhorn_repeat=next_hc.hc_sinkhorn_iters,
             rmsnorm_eps=norm.variance_epsilon,
+            combine=(
+                None
+                if combine is None
+                else (
+                    combine[0].view(tokens, DIM),
+                    combine[1].view(tokens, DIM),
+                )
+            ),
         )
         if not capturing:
             _WARMED_STREAMS.add(_stream_key(device))

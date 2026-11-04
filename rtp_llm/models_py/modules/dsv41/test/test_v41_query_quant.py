@@ -11,8 +11,12 @@ import torch
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import strided_q_rmsnorm
+from rtp_llm.models_py.modules.dsv41._sm90_quant_scale_fused import (
+    unpack_ue8m0_to_fp32,
+)
 from rtp_llm.models_py.modules.dsv41._v41_query_quant import (
     query_norm_quant,
+    query_norm_quant_mn_major,
     try_project_quantized_qkv,
 )
 from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
@@ -123,6 +127,30 @@ class QueryQuantCudaTest(unittest.TestCase):
             x.copy_(torch.randn_like(x) * scale)
             graph.replay()
             self.assert_same(result, reference(x, w))
+
+    def test_mn_major_variant_matches_packed_after_unpack(self):
+        """Native FP32 scales must be the exact decode of the packed words."""
+        torch.manual_seed(29)
+        for rows in (1, 4, 7, 16):
+            for width in (128, 1280):
+                with self.subTest(rows=rows, width=width):
+                    x = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
+                    w = torch.randn(width, device="cuda", dtype=torch.bfloat16)
+                    norm_p, (q_p, sf_p) = query_norm_quant(x, w, 1e-6)
+                    norm_n, (q_n, sf_n) = query_norm_quant_mn_major(x, w, 1e-6)
+                    self.assertTrue(torch.equal(norm_p, norm_n))
+                    self.assertTrue(
+                        torch.equal(q_p.view(torch.uint8), q_n.view(torch.uint8))
+                    )
+                    self.assertEqual(sf_n.dtype, torch.float32)
+                    self.assertEqual(sf_n.shape, (rows, width // 32))
+                    self.assertEqual(sf_n.stride(), (1, max(4, -(-rows // 4) * 4)))
+                    expected = unpack_ue8m0_to_fp32(sf_p, mn_major=True)[
+                        :, : width // 32
+                    ]
+                    self.assertTrue(
+                        torch.equal(sf_n.view(torch.int32), expected.view(torch.int32))
+                    )
 
     def test_native_consumer_and_output_buffer(self):
         x = torch.randn(4, 6, 1280, device="cuda", dtype=torch.bfloat16)

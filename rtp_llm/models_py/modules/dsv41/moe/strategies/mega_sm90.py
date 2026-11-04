@@ -15,10 +15,12 @@ the checkpoint bytes. See DeepGEMM ``opt_sm90/h20_mega_moe_sm90.md``.
 
 from __future__ import annotations
 
+import os
 from typing import Dict
 
 import torch
 
+from ..._profiler import record_function_range
 from ..mega_sm90_buf import (
     _get_or_create_mega_sm90_buf,
     _get_or_create_mega_sm90_output,
@@ -39,6 +41,36 @@ _SM90_ACTIVATION = "swiglu"
 # transform for the small token counts served here.  Split-K is intentionally
 # left disabled in the kernel call because it regresses this workload.
 _SM90_WEIGHT_LAYOUT = "tiled"
+
+_GATE_PACK_KERNEL = None
+_GATE_PACK_KERNEL_UNAVAILABLE = False
+
+# Largest token count where the merged launch still beats the two-launch path.
+# The merged kernel runs one program per (token, K128 tile), so its block count
+# grows as ``T * hidden / 128``; past ~128 rows that block-dispatch overhead
+# outweighs the saved launch. Measured on L20Z over a 42-layer step (CUDA-graph
+# replay): T=32 saves 41 us, T=64 saves 55 us, T=128 saves 39-45 us, while
+# T=256 costs 29-33 us and T=512 costs 275 us. Larger buckets keep the
+# shipped gate + packer path.
+_GATE_PACK_MAX_TOKENS = 128
+
+
+def _get_gate_pack_kernel():
+    """Lazily import the merged router-gate + SM90 input-pack launcher.
+
+    ``_gate_fused_triton`` needs Triton at import time, so probe it once and
+    keep the two-launch path when it is unavailable.
+    """
+    global _GATE_PACK_KERNEL, _GATE_PACK_KERNEL_UNAVAILABLE
+    if _GATE_PACK_KERNEL is not None or _GATE_PACK_KERNEL_UNAVAILABLE:
+        return _GATE_PACK_KERNEL
+    try:
+        from ..._gate_fused_triton import fused_sqrtsoftplus_gate_pack
+    except Exception:  # noqa: BLE001 - CPU-only / Triton-less hosts
+        _GATE_PACK_KERNEL_UNAVAILABLE = True
+        return None
+    _GATE_PACK_KERNEL = fused_sqrtsoftplus_gate_pack
+    return _GATE_PACK_KERNEL
 
 
 @register_strategy
@@ -143,18 +175,57 @@ class SM90MegaMoEStrategy(RoutedExpertsStrategy):
         )
         self._input_packer = get_mega_sm90_input_packer()
 
-    def forward(
-        self, x: torch.Tensor, weights: torch.Tensor, indices: torch.Tensor
-    ) -> torch.Tensor:
-        """Run the fused Hopper kernel and return BF16 ``[T, dim]`` routed rows."""
+    def can_use_gate_pack_static(self, gate) -> bool:
+        """Whether router + input staging can collapse into one launch.
+
+        Decode only: prefill keeps its own router path (chunked gate projection
+        and the CED row projection), which the merged kernel must not absorb.
+        """
+        return (
+            os.environ.get("DSV4_GATE_FUSED", "1") != "0"
+            and os.environ.get("DSV4_GATE_FP32", "0") != "1"
+            and bool(self.cfg.is_decode_role)
+            and not gate.hash
+            and gate.bias is not None
+            and gate.score_func == "sqrtsoftplus"
+            and 1 <= int(gate.topk) <= 32
+            and self.cfg.dim % 128 == 0
+            and _get_gate_pack_kernel() is not None
+        )
+
+    def _gate_pack_ready(self, x: torch.Tensor, gate) -> bool:
+        """Runtime guards the static check cannot see (debug, CED, dtype)."""
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+        return (
+            x.dim() == 2
+            and x.is_cuda
+            and x.dtype == torch.bfloat16
+            # Row-major rows are enough: the kernel takes the row stride, so a
+            # padded [T, dim] view stages without a copy.
+            and x.stride(1) == 1
+            and x.size(0) > 0
+            and x.size(0) <= _GATE_PACK_MAX_TOKENS
+            and x.size(1) == self.cfg.dim
+            and not gate.hash
+            and gate.bias is not None
+            and gate.score_func == "sqrtsoftplus"
+            and 1 <= int(gate.topk) <= 32
+            # CED prefill projects compacted rows; the pack must see the same
+            # rows the router scored.
+            and getattr(gate, "_ced_row_projection", None) is None
+            and not getattr(gate, "_prefill_gate_chunk_rows", 0)
+            and not getattr(gate, "_has_visual_tokens", False)
+            and getattr(gate, "_dbg_prefix", None) is None
+            and not _rt.ENABLED
+            and os.environ.get("MOEDBG", "0") == "0"
+            and _get_gate_pack_kernel() is not None
+        )
+
+    def _launch(self, y: torch.Tensor, tokens: int) -> None:
+        """Launch the Hopper fused kernel over the staged collective buffer."""
         import deep_gemm
 
-        if self._mega_buf is None or self._mega_y is None:
-            self.setup_runtime()
-        T = x.size(0)
-        buf = self._mega_buf
-        self._input_packer.pack(x, weights, indices, buf, T)
-        y = self._mega_y[:T]
         if y.device.index != torch.cuda.current_device():
             raise RuntimeError(
                 "SM90 MegaMoE requires the current CUDA device to match the "
@@ -164,7 +235,7 @@ class SM90MegaMoEStrategy(RoutedExpertsStrategy):
             y,
             self._mega_l1,
             self._mega_l2,
-            buf,
+            self._mega_buf,
             recipe=_SM90_ROUTED_RECIPE,
             activation=_SM90_ACTIVATION,
             activation_clamp=(
@@ -173,8 +244,50 @@ class SM90MegaMoEStrategy(RoutedExpertsStrategy):
             fast_math=True,
             # Every EP rank stages the same local row count, so the per-rank
             # count is also the common upper bound the kernel requires.
-            num_tokens_bound=T,
+            num_tokens_bound=tokens,
         )
+
+    def forward(
+        self, x: torch.Tensor, weights: torch.Tensor, indices: torch.Tensor
+    ) -> torch.Tensor:
+        """Run the fused Hopper kernel and return BF16 ``[T, dim]`` routed rows."""
+        if self._mega_buf is None or self._mega_y is None:
+            self.setup_runtime()
+        T = x.size(0)
+        self._input_packer.pack(x, weights, indices, self._mega_buf, T)
+        y = self._mega_y[:T]
+        self._launch(y, T)
+        return y
+
+    def forward_with_gate_pack(
+        self, x: torch.Tensor, gate, input_ids: torch.Tensor | None
+    ) -> torch.Tensor:
+        """Router gate + SM90 input staging + MegaMoE in one fewer launch."""
+        kernel = _get_gate_pack_kernel()
+        if kernel is None or not self._gate_pack_ready(x, gate):
+            weights, indices = gate(x, input_ids)
+            return self.forward(x, weights, indices)
+        if self._mega_buf is None or self._mega_y is None:
+            self.setup_runtime()
+        T = x.size(0)
+        buf = self._mega_buf
+        with record_function_range("dsv4.moe.gate_linear_bf16"):
+            scores = gate._project_scores(x, gate._weight_bf16())
+        with record_function_range("dsv4.moe.mega_sm90_gate_pack"):
+            kernel(
+                scores.contiguous(),
+                gate.bias.contiguous(),
+                x,
+                buf.x[:T],
+                buf.x_sf[:T],
+                buf.topk_weights[:T],
+                buf.topk_idx[:T],
+                topk=int(gate.topk),
+                route_scale=float(gate.route_scale),
+                norm_eps=1e-12,
+            )
+        y = self._mega_y[:T]
+        self._launch(y, T)
         return y
 
 

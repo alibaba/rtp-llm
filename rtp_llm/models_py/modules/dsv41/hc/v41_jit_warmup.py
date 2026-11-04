@@ -209,6 +209,22 @@ def _launch_sm90_mega(pair, tokens, device):
         is None
     ):
         raise RuntimeError("V4.1 HC warmup SM90 mega_mhc rejected a reachable shape")
+    # The decode seam hands over the deferred routed/shared pair instead of the
+    # materialized bf16(routed + shared); that is a distinct kernel variant.
+    if (
+        v41_mega_mhc.try_fused_post_pre(
+            hidden,
+            residual,
+            post,
+            comb,
+            previous,
+            next_hc,
+            norm,
+            combine=(torch.zeros_like(hidden), torch.zeros_like(hidden)),
+        )
+        is None
+    ):
+        raise RuntimeError("V4.1 HC warmup SM90 combine rejected a reachable shape")
 
 
 def _launch_fused_pre(unit, tokens, device):

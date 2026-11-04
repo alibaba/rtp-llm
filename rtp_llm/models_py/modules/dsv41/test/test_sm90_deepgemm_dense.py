@@ -12,6 +12,9 @@ from rtp_llm.models_py.modules.dsv41.sm90_deepgemm_dense import (
     Sm90DeepGEMMMXFP8Linear,
     select_sm90_dense_backend,
 )
+from rtp_llm.models_py.modules.dsv41._sm90_quant_scale_fused import (
+    unpack_ue8m0_to_fp32,
+)
 from rtp_llm.models_py.modules.dsv41.sm90_dense import unpack_ue8m0_input_scales
 from rtp_llm.models_py.modules.dsv41.test.sm90_dense_reference import (
     SHAPES,
@@ -220,6 +223,35 @@ def _run_graph_case(rows, n, k, leading, *, strict_reference):
         assert all(not o["tolerance_violations"] for o in observations), json.dumps(
             observations
         )
+
+
+@pytest.mark.parametrize("rows", [1, 4, 7, 16])
+def test_forward_quantized_accepts_native_mn_major_scales(rows):
+    """A producer-written FP32 layout must match the packed decode bitwise."""
+    linear, _, _ = _linear(256, 512)
+    x = torch.randn(rows, 512, device="cuda", dtype=torch.bfloat16)
+    q, packed = linear._quantize_input(x)
+    native = unpack_ue8m0_to_fp32(packed, mn_major=True)[:, : 512 // 32]
+    assert native.dtype == torch.float32
+    assert native.shape == (rows, 512 // 32)
+    assert native.stride() == (1, max(4, -(-rows // 4) * 4))
+    torch.testing.assert_close(
+        linear.forward_quantized(q, native),
+        linear.forward_quantized(q, packed),
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_forward_quantized_rejects_a_wrong_native_layout():
+    linear, _, _ = _linear(256, 512)
+    q = torch.empty(7, 512, device="cuda", dtype=torch.float8_e4m3fn)
+    # Row-major FP32 scales are not the TMA MN-major layout.
+    with pytest.raises(ValueError, match="MN-major FP32"):
+        linear.forward_quantized(q, torch.empty(7, 16, device="cuda"))
+    # MN-major strides but the wrong logical shape.
+    with pytest.raises(ValueError, match="MN-major FP32"):
+        linear.forward_quantized(q, torch.empty(16, 8, device="cuda").T)
 
 
 def test_single_group_output_projection_uses_native_weight():

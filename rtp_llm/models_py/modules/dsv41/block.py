@@ -288,6 +288,16 @@ class Block(nn.Module):
             shape
         )
 
+    # ``MoE`` alone can hand the deferred routed/shared pair to the mHC post;
+    # every other FFN keeps the original two-argument call.
+    _FFN_DEFER_COMBINE_KW: Dict[str, bool] = {"defer_combine": True}
+    _FFN_NO_KW: Dict[str, bool] = {}
+
+    def _ffn_extra_kwargs(self, defer_ffn_post: bool) -> Dict[str, bool]:
+        if defer_ffn_post and isinstance(self.ffn, MoE):
+            return self._FFN_DEFER_COMBINE_KW
+        return self._FFN_NO_KW
+
     def _try_mega_mhc(self, attn_out, residual, post, comb, *, original_tokens=None):
         """Fuse the intra-layer delayed mHC seam and FFN RMSNorm."""
         from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import try_fused_post_pre
@@ -448,10 +458,13 @@ class Block(nn.Module):
             _, x_pre, post, comb = fused_mhc
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
+        ffn_extra = self._ffn_extra_kwargs(_defer_ffn_post)
         ffn_out = (
-            self.ffn(x_pre, input_ids)
+            self.ffn(x_pre, input_ids, **ffn_extra)
             if routing_metadata is None
-            else self.ffn(x_pre, input_ids, routing_metadata=routing_metadata)
+            else self.ffn(
+                x_pre, input_ids, routing_metadata=routing_metadata, **ffn_extra
+            )
         )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
@@ -590,6 +603,9 @@ class Block(nn.Module):
             x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
         else:
             _, x_pre, post, comb = fused_mhc
+        # Prefill keeps the materialized combine: its row counts and the
+        # engram/aux-hidden boundaries mean the SM90 seam rarely applies, and
+        # the eager add+cast is already amortized over many rows.
         ffn_out = (
             self.ffn(x_pre, input_ids)
             if routing_metadata is None

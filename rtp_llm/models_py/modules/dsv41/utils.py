@@ -87,11 +87,14 @@ class V41MXFP8Linear(torch.nn.Module):
         ), scales
 
     def forward_quantized(self, x_q: torch.Tensor, x_s: torch.Tensor, out=None):
-        """Consume group32 E4M3/packed UE8M0 without another quantization.
+        """Consume group32 E4M3 with native FP32 or packed UE8M0 scales.
 
-        Deliberately no quantize_input method: the V4 input-reuse gate must
-        remain closed for this linear. The caller owns the BF16 norm tensor.
-        Input layout and disjoint BF16 output storage are caller preconditions.
+        ``x_s`` is either the FP32 MN-major tensor the SM90 adapter wants or
+        packed int32 UE8M0 words for the SM10x ``fp8_fp4_gemm_nt`` contract;
+        the adapter dispatches on dtype. Deliberately no quantize_input
+        method: the V4 input-reuse gate must remain closed for this linear.
+        The caller owns the BF16 norm tensor. Input layout and disjoint BF16
+        output storage are caller preconditions.
         """
         if getattr(self, "_sm90_linear", None) is not None:
             return self._sm90_linear.forward_quantized(x_q, x_s, out=out)

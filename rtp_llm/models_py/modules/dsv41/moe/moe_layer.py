@@ -35,7 +35,9 @@ from rtp_llm.models_py.modules.dsv41.chunk_env import (
 from .gate import Gate
 from .routing_metadata import GateRoutingMetadata
 from .shared_expert import (
+    PendingCombine,
     W13SharedExpert,
+    can_defer_combine,
     combine_routed_and_shared,
     get_shared_expert_executor,
 )
@@ -385,7 +387,15 @@ class MoE(nn.Module):
         input_ids: torch.Tensor,
         *,
         routing_metadata: Optional[GateRoutingMetadata] = None,
-    ) -> torch.Tensor:
+        defer_combine: bool = False,
+    ) -> "torch.Tensor | PendingCombine":
+        """Run the MoE.
+
+        ``defer_combine`` returns the routed/shared pair instead of the combined
+        BF16 tensor when the consumer can rebuild ``bf16(routed + shared)``
+        inline, which retires the standalone add+cast kernel for that layer.
+        Callers that cannot must call ``PendingCombine.materialize``.
+        """
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
         _dbg = _rt.should_record_layer(self.layer_id)
@@ -515,6 +525,10 @@ class MoE(nn.Module):
                     y[dbg_pos_mask].contiguous(),
                 )
             return y.type_as(x).view(shape)
+        if defer_combine and can_defer_combine(y, shared_y, x.dtype):
+            # The consumer rebuilds bf16(routed + shared) itself, so the
+            # add+cast kernel and its round trip through memory are skipped.
+            return PendingCombine(y.view(shape), shared_y.view(shape), x.dtype)
         with record_function_range("dsv4.moe.add_shared"):
             T = x.size(0)
             out = _get_or_create_final_out(

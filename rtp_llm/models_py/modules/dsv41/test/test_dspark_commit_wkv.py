@@ -114,7 +114,12 @@ class DSparkCommitWKVTest(unittest.TestCase):
             import os
 
             os.environ.pop("DSV4_DSPARK_COMMIT_WKV", None)
-            automatic = commit_wkv.prepare_dspark_commit_wkv(self.linears)
+            # The default is baseline (shared WKV is opt-in); auto dispatch is
+            # exercised explicitly so this test keeps covering both branches.
+            self.assertEqual(
+                commit_wkv.prepare_dspark_commit_wkv(self.linears).mode, "baseline"
+            )
+            automatic = commit_wkv.prepare_dspark_commit_wkv(self.linears, "auto")
         self.assertEqual(automatic.mode, "auto")
         self.assertIsNotNone(automatic.stacked)
         for rows in (1, 3072, 3073):

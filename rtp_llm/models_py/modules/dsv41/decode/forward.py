@@ -19,6 +19,8 @@ decode impl.
 
 from __future__ import annotations
 
+import functools
+
 from contextlib import nullcontext
 from typing import Any, Dict, Optional, Tuple
 
@@ -347,8 +349,9 @@ def forward_layers(
     layer_forward_range = _profiler.make_layer_forward_range()
     for layer_idx, layer in enumerate(v4.layers):
         with layer_forward_range(layer_idx):
-            if layer_idx in capture_ids:
-                v4.capture_aux_hidden(layer_idx, h)
+            # The aux-hidden hook is served from inside forward_decode_layer,
+            # after the deferred boundary is materialized, so a capture layer no
+            # longer forces the preceding layer's post out of the fused seam.
             h = forward_decode_layer(
                 layer,
                 h,
@@ -357,9 +360,14 @@ def forward_layers(
                 next_layer=(
                     v4.layers[layer_idx + 1] if layer_idx + 1 < len(v4.layers) else None
                 ),
-                preserve_output=layer_idx + 1 in capture_ids or _rt_on,
+                preserve_output=_rt_on,
                 kv_cache=kv_cache,
                 routing_metadata=routing_metadata,
+                capture_aux_hidden=(
+                    functools.partial(v4.capture_aux_hidden, layer_idx)
+                    if layer_idx in capture_ids
+                    else None
+                ),
             )
             if _rt_on:
                 _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)

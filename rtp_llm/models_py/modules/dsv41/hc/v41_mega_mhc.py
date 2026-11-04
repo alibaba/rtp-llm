@@ -67,6 +67,11 @@ def _is_dense_tensor(value, shape, dtype, device) -> bool:
     )
 
 
+from rtp_llm.models_py.modules.dsv41.hc.mhc_sm90_vllm_two_kernel import (
+    MAX_TOKENS as _TWO_KERNEL_MAX_TOKENS,
+)
+
+
 def _stream_key(device: torch.device) -> tuple[int, int]:
     stream = torch.cuda.current_stream(device)
     return stream.device.index, stream.cuda_stream
@@ -78,7 +83,8 @@ def _can_try_sm90_mega_mhc(attn_out: torch.Tensor) -> bool:
         or attn_out.device.type != "cuda"
         or attn_out.ndim != 3
         or attn_out.shape[-1] != 5120
-        or not 0 < attn_out.numel() // attn_out.shape[-1] <= 32
+        # ``numel // dim`` is the token count the fused kernel consumes.
+        or not 0 < attn_out.numel() // attn_out.shape[-1] <= _TWO_KERNEL_MAX_TOKENS
     ):
         return False
     return tuple(torch.cuda.get_device_capability(attn_out.device)) == (9, 0)
@@ -260,6 +266,7 @@ def try_fused_post_pre(
     original_tokens: int | None = None,
     reuse_residual: bool = False,
     output_fp8: bool = False,
+    combine: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> MHCOutput | MHCQuantizedOutput | None:
     """Return ``(residual, normalized_input, post, comb)`` or use the old path.
 
@@ -277,7 +284,23 @@ def try_fused_post_pre(
     DeepGEMM quantization and TMA-aligned GEMM scales. Its minimum scale
     is 2**-22 (legacy/v3: 2**-33), so tiny inputs may underflow to zero
     and are not bitwise equivalent to the legacy quantization path.
+    ``combine`` carries the deferred ``(routed, shared)`` MoE pair; ``attn_out``
+    is then only its geometry proxy. The SM90 two-kernel backend rebuilds
+    ``bf16(routed + shared)`` inline -- the exact value the standalone add+cast
+    kernel had materialized -- and any other backend returns ``None`` so the
+    caller materializes the pair first.
     """
+    if combine is not None:
+        if original_tokens is not None or reuse_residual or output_fp8:
+            return None
+        if not _can_try_sm90_mega_mhc(attn_out):
+            return None
+        sm90_backend = _get_sm90_mega_mhc()
+        if sm90_backend is None:
+            return None
+        return sm90_backend.try_vllm_two_kernel_post_pre(
+            attn_out, residual, post, comb, previous, next_hc, norm, combine=combine
+        )
     if (
         original_tokens is None
         and not reuse_residual

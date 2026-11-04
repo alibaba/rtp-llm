@@ -259,7 +259,13 @@ def prepare_dspark_commit_wkv(
     if not _supported(linears):
         return None
     if mode is None:
-        mode = os.environ.get("DSV4_DSPARK_COMMIT_WKV", "auto").strip().lower()
+        # Measured on SM90 at the production decode regime (batch 1-4, gamma 3):
+        # sharing the input quantization saves 3.1-3.6 us per step, i.e. ~0.03%
+        # of a 9 ms TPOT, which is below run-to-run noise. The shared path also
+        # selects its quantization policy by tensor size (v2 above 4M elements),
+        # so the same cache can be written under two numerical policies across
+        # prefill and decode. Not worth either cost; opt in explicitly.
+        mode = os.environ.get("DSV4_DSPARK_COMMIT_WKV", "baseline").strip().lower()
     if layer_weights is not None and len(layer_weights) != len(linears):
         raise ValueError("DSpark WKV requires one checkpoint dictionary per layer")
     if merged_linears is not None and len(merged_linears) != len(linears):

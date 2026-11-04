@@ -206,9 +206,29 @@ def _output(out, shape, dtype, device, operands):
     return out
 
 
+def mn_major_row_stride(rows):
+    """Physical row stride of a TMA MN-major scale tensor for ``rows`` tokens.
+
+    DeepGEMM's MN-major scale load covers a four-row block, so the stride is
+    the token count rounded up to a multiple of four (and at least four).
+    """
+    return max(4, triton.cdiv(rows, 4) * 4)
+
+
+def mn_major_scale_output(rows, columns, device):
+    """Allocate the FP32 MN-major scale tensor DeepGEMM consumes.
+
+    Shape ``(rows, columns)`` with stride ``(1, mn_major_row_stride(rows))``:
+    one FP32 scale per 32-element group, contiguous down a column. Producers
+    that already own the UE8M0 exponent write this layout directly and skip
+    the pack/unpack round trip entirely.
+    """
+    return _scale_output(rows, columns, device, mn_major=True)[0]
+
+
 def _scale_output(rows, columns, device, *, groups=1, mn_major=False):
     if mn_major:
-        padded_rows = max(4, triton.cdiv(rows, 4) * 4)
+        padded_rows = mn_major_row_stride(rows)
         return torch.empty_strided(
             (groups, rows, columns),
             (padded_rows * columns, 1, padded_rows),
@@ -225,9 +245,9 @@ def quantize_g32(x, *, out_q=None, out_scale=None, mn_major=False):
     v2 = use_v2(rows, width)
     q = _output(out_q, x.shape, torch.float8_e4m3fn, x.device, (x,))
     if mn_major:
-        expected = (1, max(4, triton.cdiv(rows, 4) * 4))
+        expected = (1, mn_major_row_stride(rows))
         if out_scale is None:
-            scale = _scale_output(rows, width // 32, x.device, mn_major=True)[0]
+            scale = mn_major_scale_output(rows, width // 32, x.device)
         elif (
             out_scale.shape != (rows, width // 32)
             or out_scale.dtype != torch.float32

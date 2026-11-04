@@ -424,6 +424,10 @@ def warmup_v41_dense_jit(model, *, max_m, device):
 
 def _shared_expert_signatures(model):
     """Collect the standalone native-group32 path, without running its executor."""
+    from rtp_llm.models_py.modules.dsv41.sm90_deepgemm_dense import (
+        native_mn_major_scales,
+    )
+
     signatures = {}
     for name, moe in model.named_modules():
         executor = getattr(moe, "_shared_executor", None)
@@ -462,7 +466,13 @@ def _shared_expert_signatures(model):
         else:
             raise ValueError(f"unknown V41 routed output contract: {strategy.name}")
         clamp = max(float(shared.swiglu_limit), 0.0)
-        signatures.setdefault((dim, inter, clamp, routed_dtype, routed_stride), name)
+        # The scale store specializes on the output dtype, and the consumer
+        # picks the variant: the SM90 adapter takes native FP32 MN-major
+        # scales, every other backend takes packed UE8M0 words.
+        fp32_scales = native_mn_major_scales(getattr(shared, "w2", None))
+        signatures.setdefault(
+            (dim, inter, clamp, routed_dtype, routed_stride, fp32_scales), name
+        )
     return signatures
 
 
@@ -480,6 +490,7 @@ def warmup_v41_shared_expert_jit(model, *, max_m, device):
     )
     from rtp_llm.models_py.modules.dsv41.moe._silu_mul_bf16_triton import (
         silu_mul_fp8_g32_quant,
+        silu_mul_fp8_g32_quant_mn_major,
     )
 
     # Rows, scale stride and quantization policy do not specialize the kernel.
@@ -489,15 +500,19 @@ def warmup_v41_shared_expert_jit(model, *, max_m, device):
     key = (str(device), frozenset(signatures), rows_grid, fused_add)
     if key in _SHARED_WARMED:
         return
-    for (dim, inter, clamp, routed_dtype, routed_stride), name in signatures.items():
+    for signature, name in signatures.items():
+        dim, inter, clamp, routed_dtype, routed_stride, fp32_scales = signature
+        quantize = (
+            silu_mul_fp8_g32_quant_mn_major if fp32_scales else silu_mul_fp8_g32_quant
+        )
         for rows in rows_grid:
             gate_up = torch.zeros(
                 (rows, 2 * inter), dtype=torch.bfloat16, device=device
             )
             common._run_triton_warmup_launch_with_retry(
                 "DSV41 SharedExpert",
-                f"{name} silu M={rows} D={inter} clamp={clamp}",
-                partial(silu_mul_fp8_g32_quant, gate_up, clamp_limit=clamp),
+                f"{name} silu M={rows} D={inter} clamp={clamp} fp32_sf={fp32_scales}",
+                partial(quantize, gate_up, clamp_limit=clamp),
                 device=device,
             )
         if fused_add:
@@ -676,6 +691,18 @@ def _decode_query_quant_ms(max_m):
     return tuple(m for m in (1, 2, 3, 4, 16, 17) if m <= int(max_m))
 
 
+def _decode_query_fp32_scales(attn):
+    """Mirror ``try_project_quantized_qkv``'s scale-format gate exactly."""
+    from rtp_llm.models_py.modules.dsv41.sm90_deepgemm_dense import (
+        native_mn_major_scales,
+    )
+
+    index_wq = getattr(attn, "index_wq", None)
+    return native_mn_major_scales(attn.wq_b) and (
+        index_wq is None or native_mn_major_scales(index_wq)
+    )
+
+
 @torch.inference_mode()
 def warmup_v41_decode_query_jit(model, *, max_m, device):
     if (
@@ -707,22 +734,29 @@ def warmup_v41_decode_query_jit(model, *, max_m, device):
             or rank >= int(linear.N)
         ):
             continue
-        signatures.setdefault((rank, int(linear.N), float(attn.eps)), (name, norm))
+        signatures.setdefault(
+            (rank, int(linear.N), float(attn.eps), _decode_query_fp32_scales(attn)),
+            (name, norm),
+        )
     if not signatures:
         return
     rows_grid = _decode_query_quant_ms(max_m)
     key = (str(device), frozenset(signatures), rows_grid)
     if key in _DECODE_QUERY_WARMED:
         return
-    from rtp_llm.models_py.modules.dsv41._v41_query_quant import query_norm_quant
+    from rtp_llm.models_py.modules.dsv41._v41_query_quant import (
+        query_norm_quant,
+        query_norm_quant_mn_major,
+    )
 
-    for (rank, width, eps), (name, norm) in signatures.items():
+    for (rank, width, eps, fp32_scales), (name, norm) in signatures.items():
+        quantize = query_norm_quant_mn_major if fp32_scales else query_norm_quant
         for rows in rows_grid:
             projected = torch.zeros((rows, width), dtype=torch.bfloat16, device=device)
             common._run_triton_warmup_launch_with_retry(
                 "DSV41 DecodeQuery",
-                f"{name} M={rows} rank={rank} stride={width}",
-                partial(query_norm_quant, projected[:, :rank], norm, eps),
+                f"{name} M={rows} rank={rank} stride={width} fp32_sf={fp32_scales}",
+                partial(quantize, projected[:, :rank], norm, eps),
                 device=device,
             )
     common._sync_cuda(device)

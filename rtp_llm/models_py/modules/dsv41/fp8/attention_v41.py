@@ -1145,6 +1145,11 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention.pop("decode_rope_metadata", None)
             self._shared_attention.pop("mega_positions", None)
             self._shared_attention.pop("source_pool_views", None)
+            # Per-forward compressed-index → global-slot translations, one per
+            # index-source group (see ``_decode_global_slots``).  Dropped with
+            # the rest of the per-forward shared state so a later forward can
+            # never observe a stale entry.
+            self._shared_attention.pop("decode_cmp_global_slots", None)
 
     def _owner(self):
         return self._shared_attention["layers"][self.kv_source_layer_id]
@@ -3310,7 +3315,29 @@ class AttentionV41FP8(AttentionFP8):
         return output
 
     def _decode_global_slots(self, selected, req):
-        """Translate compressed indices without materializing token positions."""
+        """Translate compressed indices without materializing token positions.
+
+        ``translate_local_to_global_slots`` is a pure function of
+        ``(selected, req, block table, pool geometry)``.  ``selected`` is the
+        *index-source* layer's top-k tensor: ``_select_indices_decode``
+        publishes it once per source group and every layer in that group
+        re-reads the very same object (``shared["topk"][source_id]``).  The
+        remaining inputs are per-request/per-step constants (``req_id_per_token``
+        is the same ``arange``-derived view, the block table is the same
+        framework tensor, and the pool geometry is fixed for the run), so all
+        layers of one source group compute an identical translation.  V4.1
+        has 38 compressed layers but only 8 index-source groups, i.e. 30 of the
+        38 per-step launches are provably redundant.
+
+        Cache the result per ``(index_source_layer_id, region)`` for the
+        duration of one forward.  ``_shared_attention`` is reset in
+        ``_begin_forward`` (layer 0, every forward), so an entry can never
+        outlive the step that produced it.  Identity of ``selected`` is
+        re-checked on every hit: a recycled allocator address yields a new
+        object, so a stale entry can never be served.  Values are bit-identical
+        by construction — the cached tensor is produced by the same kernel with
+        the same arguments, only fewer times.
+        """
         region = self._global_region()
         pool = self._source_pool(region)
         table = self._block_tables_by_type[region]
@@ -3332,13 +3359,28 @@ class AttentionV41FP8(AttentionFP8):
                 translate_local_to_global_slots,
             )
 
-            return translate_local_to_global_slots(
+            # ``_shared_attention`` / ``index_source_layer_id`` are absent on
+            # partial objects built by unit tests; skip the cache there.
+            shared = getattr(self, "_shared_attention", None)
+            source_id = getattr(self, "index_source_layer_id", None)
+            cache = None
+            key = None
+            if shared is not None and source_id is not None:
+                cache = shared.setdefault("decode_cmp_global_slots", {})
+                key = (source_id, region)
+                cached = cache.get(key)
+                if cached is not None and cached[0] is selected and cached[1] is table:
+                    return cached[2]
+            slots = translate_local_to_global_slots(
                 req,
                 table,
                 selected,
                 entries_per_block=pool.shape[1],
                 tokens_per_block_for_block_table=logical_entries,
             )
+            if cache is not None:
+                cache[key] = (selected, table, slots)
+            return slots
         slots = self._slots(
             region,
             (selected.long().clamp_min(0) + 1).reshape(-1) * self.compress_ratio - 1,

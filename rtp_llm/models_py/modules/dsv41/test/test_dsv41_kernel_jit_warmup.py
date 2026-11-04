@@ -1160,7 +1160,9 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         base = "rtp_llm.models_py.modules.dsv41"
         modules = {
             f"{base}.moe._silu_mul_bf16_triton": fake_module(
-                "silu", silu_mul_fp8_g32_quant=silu
+                "silu",
+                silu_mul_fp8_g32_quant=silu,
+                silu_mul_fp8_g32_quant_mn_major=silu,
             ),
             f"{base}.moe._shared_expert_triton": fake_module(
                 "combine", fused_moe_epilogue=combine
@@ -1203,7 +1205,11 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         model, _, combine = self.shared_fixture()
         model.moe._strategy = types.SimpleNamespace(name="mega")
         signatures = warmup._shared_expert_signatures(model)
-        self.assertEqual(set(signatures), {(8, 12, 7.0, torch.bfloat16, (8, 1))})
+        # The scale-store variant is part of the kernel contract: this fixture's
+        # w2 has no SM90 adapter, so it keeps the packed UE8M0 store.
+        self.assertEqual(
+            set(signatures), {(8, 12, 7.0, torch.bfloat16, (8, 1), False)}
+        )
         warmup.warmup_v41_shared_expert_jit(model, max_m=4, device="cuda:0")
         routed, shared, output_dtype = combine.call_args.args
         self.assertEqual(routed.dtype, torch.bfloat16)
@@ -1276,7 +1282,14 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         name = "rtp_llm.models_py.modules.dsv41._v41_query_quant"
         self.stack.enter_context(
             mock.patch.dict(
-                sys.modules, {name: fake_module(name, query_norm_quant=operation)}
+                sys.modules,
+                {
+                    name: fake_module(
+                        name,
+                        query_norm_quant=operation,
+                        query_norm_quant_mn_major=operation,
+                    )
+                },
             )
         )
         for name, replacement in {

@@ -7,6 +7,22 @@ from functools import lru_cache
 import torch
 
 
+def native_mn_major_scales(linear) -> bool:
+    """True when ``linear`` consumes native FP32 MN-major activation scales.
+
+    Only this adapter owns the TMA-ready FP32 layout, so a quantization
+    producer that already computes the UE8M0 exponent can write it directly
+    and skip the pack/unpack round trip. Every other consumer needs packed
+    int32 words: the SM10x ``fp8_fp4_gemm_nt`` contract, and the merged Q-B
+    linear that concatenates two packed weight-scale tensors.
+
+    Kept in this import-light module so CPU-only warmup contract tests can use
+    it without importing the linear stack (whose kernel bindings probe the
+    device at module scope).
+    """
+    return getattr(linear, "_sm90_linear", None) is not None
+
+
 def select_sm90_dense_backend(n, k):
     """Choose once per layer; P/D may supply different process-local maps."""
     default = os.environ.get("DSV41_SM90_DENSE_BACKEND", "deepgemm").strip().lower()
@@ -70,6 +86,13 @@ class Sm90DeepGEMMMXFP8Linear:
         self.weight_scale = scales.float().contiguous()
 
     def forward_quantized(self, x_q, x_s, out=None):
+        """Consume E4M3 activations with either native or packed G32 scales.
+
+        ``x_s`` may be the FP32 MN-major tensor ``_forward_with_scales`` wants
+        (written directly by the quantization kernel) or legacy packed int32
+        UE8M0 words. Only the packed form costs an unpack launch, so producers
+        that own the UE8M0 exponent should emit the native layout.
+        """
         if (
             x_q.dtype != torch.float8_e4m3fn
             or x_q.shape[-1] != self.K
@@ -78,15 +101,25 @@ class Sm90DeepGEMMMXFP8Linear:
         ):
             raise ValueError("Expected same-device prequantized E4M3 activations")
         rows = x_q.numel() // self.K
-        if x_s.dtype != torch.int32 or tuple(x_s.shape) != (
-            rows,
-            (self.K // 32 + 3) // 4,
-        ):
+        return self._forward_with_scales(x_q, self._activation_scales(x_s, rows), out)
+
+    def _activation_scales(self, x_s, rows):
+        """Return FP32 MN-major activation scales for ``rows`` tokens."""
+        columns = self.K // 32
+        if x_s.dtype == torch.float32:
+            from ._sm90_quant_scale_fused import mn_major_row_stride
+
+            if tuple(x_s.shape) != (rows, columns) or x_s.stride() != (
+                1,
+                mn_major_row_stride(rows),
+            ):
+                raise ValueError("Expected MN-major FP32 group32 activation scales")
+            return x_s
+        if x_s.dtype != torch.int32 or tuple(x_s.shape) != (rows, (columns + 3) // 4):
             raise ValueError("Expected packed group32 UE8M0 int32 scales")
         from ._sm90_quant_scale_fused import unpack_ue8m0_to_fp32
 
-        scales = unpack_ue8m0_to_fp32(x_s, mn_major=True)[:, : self.K // 32]
-        return self._forward_with_scales(x_q, scales, out)
+        return unpack_ue8m0_to_fp32(x_s, mn_major=True)[:, :columns]
 
     def forward_bf16(self, x, out=None):
         from ._sm90_quant_scale_fused import quantize_g32
