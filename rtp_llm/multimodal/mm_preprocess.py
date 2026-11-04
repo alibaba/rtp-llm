@@ -41,6 +41,14 @@ _worker_preprocess_func: Optional[Callable] = None
 _worker_inspection = None
 
 
+class _PreprocessTaskError(Exception):
+    """Keep task I/O failures distinct from broken pool communication."""
+
+    def __init__(self, error: Exception):
+        super().__init__(error)
+        self.error = error
+
+
 @dataclass
 class PreprocessTaskResult:
     result: Any
@@ -150,9 +158,15 @@ def _worker_process_task(
             _worker_inspection.started(inspection_task)
         if deadline is not None and time.monotonic() >= deadline:
             raise TimeoutError("ViT request expired before CPU preprocessing")
-        payload = _run_preprocess_task(
-            _worker_preprocess_func, mm_inputs, _worker_vit_config, params
-        )
+        try:
+            payload = _run_preprocess_task(
+                _worker_preprocess_func, mm_inputs, _worker_vit_config, params
+            )
+        except (OSError, EOFError) as error:
+            # For example, PIL's UnidentifiedImageError is an OSError. Letting it
+            # escape as a pool error would terminate healthy workers and discard
+            # unrelated requests that are already queued in the same pool.
+            raise _PreprocessTaskError(error) from error
         if inspection_task is not None:
             result = payload.result
             if not isinstance(result, MMPreprocessResult) or len(
@@ -571,6 +585,9 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             with self._pool_lock:
                 self._consecutive_timeouts = 0
             _report_preprocess_timing(preprocess_time, download_time)
+        except _PreprocessTaskError as e:
+            logging.error("Preprocessing task failed: %s", e.error, exc_info=True)
+            raise e.error from e
         except multiprocessing.pool.TimeoutError:
             with self._pool_lock:
                 self._consecutive_timeouts += 1
