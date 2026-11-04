@@ -1243,6 +1243,10 @@ bool CoordinatorCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batc
                 auto& fork = staged_resource.cacheResource(i);
                 fork.initGroups(config_.topologyPtr(), /*materialize_layer_views=*/false);
                 fork.setCacheKeys(old_resource.cacheKeys());
+                fork.setDeviceReuseBlockNum(old_resource.deviceReuseBlockNum());
+                fork.setMemoryReuseBlockNum(old_resource.memoryReuseBlockNum());
+                fork.setDiskReuseBlockNum(old_resource.diskReuseBlockNum());
+                fork.setStorageBackendReuseBlockNum(old_resource.storageBackendReuseBlockNum());
                 auto& block_ids = fork.mutableBlockIds(tag);
                 block_ids.assign(old_resource.blocks(tag));
                 if (copy_last_block && !block_ids.blocks().empty()) {
@@ -1409,12 +1413,18 @@ bool CoordinatorCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batc
         if (fork_count == 1) {
             batch_kv_cache_resource->moveBatchResource(new_batch_idx, std::move(old_resources[old_batch_idx]));
         } else {
-            batch_kv_cache_resource->setBatchCacheKeys(new_batch_idx, old_resources[old_batch_idx].cacheKeys());
+            const auto& old_resource = old_resources[old_batch_idx];
+            auto&       fork         = batch_kv_cache_resource->cacheResource(new_batch_idx);
+            batch_kv_cache_resource->setBatchCacheKeys(new_batch_idx, old_resource.cacheKeys());
+            fork.setDeviceReuseBlockNum(old_resource.deviceReuseBlockNum());
+            fork.setMemoryReuseBlockNum(old_resource.memoryReuseBlockNum());
+            fork.setDiskReuseBlockNum(old_resource.diskReuseBlockNum());
+            fork.setStorageBackendReuseBlockNum(old_resource.storageBackendReuseBlockNum());
             for (int group_id = 0; group_id < group_nums; ++group_id) {
                 const auto& tag       = config_.groupTags()[static_cast<size_t>(group_id)];
                 auto&       block_ids = batch_kv_cache_resource->mutableBlockIds(new_batch_idx, tag);
                 kv_cache_groups_[static_cast<size_t>(group_id)]->reference(block_ids,
-                                                                           old_resources[old_batch_idx].blocks(tag));
+                                                                           old_resource.blocks(tag));
 
                 if (copy_last_block && !block_ids.blocks().empty()) {
                     const int  old_block       = block_ids.popBack();
