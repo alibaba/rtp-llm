@@ -7,23 +7,30 @@ from pathlib import Path
 from typing import Set
 
 
-def _parse_nodes(value: str) -> Set[int]:
+def parse_nodes(value: str) -> Set[int]:
     nodes = set()
     for part in value.strip().split(","):
-        bounds = part.split("-", 1)
+        bounds = [bound.strip() for bound in part.split("-", 1)]
+        if any(not b.isascii() or not b.isdecimal() for b in bounds):
+            raise ValueError("Invalid NUMA node list")
         first = int(bounds[0])
         last = int(bounds[-1])
+        if not 0 <= first <= last <= 65535:
+            raise ValueError("Invalid NUMA node range")
         nodes.update(range(first, last + 1))
     if not nodes:
         raise ValueError("NUMA node list is empty")
     return nodes
 
 
-def _available_memory_nodes() -> Set[int]:
-    memory_nodes = _parse_nodes(Path("/sys/devices/system/node/has_memory").read_text())
-    for line in Path("/proc/self/status").read_text().splitlines():
+def available_memory_nodes(
+    sysfs=Path("/sys/devices/system/node"), status=Path("/proc/self/status")
+) -> Set[int]:
+    """Memory-bearing NUMA nodes allowed by the current process cpuset."""
+    memory_nodes = parse_nodes((sysfs / "has_memory").read_text())
+    for line in status.read_text().splitlines():
         if line.startswith("Mems_allowed_list:"):
-            return memory_nodes & _parse_nodes(line.split(":", 1)[1])
+            return memory_nodes & parse_nodes(line.split(":", 1)[1])
     raise RuntimeError("Mems_allowed_list is missing from /proc/self/status")
 
 
@@ -58,11 +65,11 @@ def configure_numa_interleave() -> None:
         return
     try:
         if configured is None:
-            nodes = _available_memory_nodes()
+            nodes = available_memory_nodes()
             if len(nodes) != 2:
                 return
         else:
-            nodes = _parse_nodes(configured)
+            nodes = parse_nodes(configured)
         _set_interleave(nodes)
     except (OSError, ValueError, RuntimeError) as error:
         if not automatic:

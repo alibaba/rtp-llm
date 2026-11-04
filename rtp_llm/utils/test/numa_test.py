@@ -37,7 +37,7 @@ class NumaTest(unittest.TestCase):
             with self.subTest(value=value), mock.patch.dict(
                 os.environ, {"NUMA_INTERLEAVE_NODES": value}, clear=True
             ), mock.patch.object(
-                numa, "_available_memory_nodes"
+                numa, "available_memory_nodes"
             ) as detect, mock.patch.object(
                 numa, "_set_interleave"
             ) as apply:
@@ -54,7 +54,7 @@ class NumaTest(unittest.TestCase):
             with self.subTest(configured=configured), mock.patch.dict(
                 os.environ, env, clear=True
             ), mock.patch.object(numa.sys, "platform", "linux"), mock.patch.object(
-                numa, "_available_memory_nodes", return_value={0, 1}
+                numa, "available_memory_nodes", return_value={0, 1}
             ), mock.patch.object(
                 numa, "_set_interleave", side_effect=PermissionError("denied")
             ), mock.patch(

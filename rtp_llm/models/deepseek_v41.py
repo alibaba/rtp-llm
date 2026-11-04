@@ -137,6 +137,7 @@ class DeepSeekV41(DeepSeekV4):
 
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.deepseek_v41_model import DeepSeekV41Model
+        from rtp_llm.models_py.modules.dsv41.engram_distributed import process_runtime
 
         self.py_model = DeepSeekV41Model(
             self.model_config,
@@ -147,6 +148,7 @@ class DeepSeekV41(DeepSeekV4):
             fmha_config=self.fmha_config,
             py_hw_kernel_config=self.hw_kernel_config,
             device_resource_config=self.device_resource_config,
+            engram_runtime=process_runtime,
         )
 
     @staticmethod

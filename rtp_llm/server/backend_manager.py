@@ -45,6 +45,31 @@ class BackendManager(object):
     def start(self):
         """Initialize backend server without entering service loop"""
         self._distributed_server.start(self.py_env_configs)
+        # One-shot metadata exchange before model loading/NCCL capture. Reuse the
+        # existing gang topology/Store; cohort representatives use TCPStore.
+        from rtp_llm.models_py.modules.dsv41.engram_distributed import (
+            EngramStartup,
+            process_runtime,
+            shard_publisher,
+        )
+
+        pc = self.py_env_configs.parallelism_config
+        world_info = self._distributed_server.get_world_info(
+            self.py_env_configs.server_config, self.py_env_configs.distribute_config, pc
+        )
+        EngramStartup(
+            getattr(self._distributed_server, "store", None),
+            rank=pc.world_rank,
+            world_size=pc.world_size,
+            local_device=pc.local_rank,
+            publish=shard_publisher.publish,
+            install=process_runtime.install,
+            gang_hosts=tuple(
+                w.ip for w in sorted(world_info.members, key=lambda w: w.world_rank)
+            ),
+            # Already resolved from an oss:// URI to the local fuse mount.
+            checkpoint=getattr(self.py_env_configs.model_args, "ckpt_path", None),
+        ).run()
         # Create EngineConfig from py_env_configs (server/distribute config already adjusted for this rank)
         engine_config = EngineConfig.create(
             self.py_env_configs,

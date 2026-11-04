@@ -6,6 +6,8 @@ batch/query rows over eight attention pre/post windows in L10..L13. Empty
 pieces launch no kernels. Unsupported producers keep the serial lookup route.
 """
 
+import logging
+
 import torch
 
 from . import _engram_decode_prefetch as prefetch
@@ -33,10 +35,7 @@ def _eligible(module):
     return (
         getattr(module, "_direct_fp8_lookup", False) is True
         and module.q_weight.is_cuda
-        and getattr(embedding, "_quantized_lookup_supported", False)
-        and embedding._uva is not None
-        and embedding._pinned is not None
-        and embedding._device_scale_lease is not None
+        and getattr(embedding, "supports_decode_prefetch", False)
         and module.layout.n_hash_cols == 24
         and module.layout.head_dim == 256
     )
@@ -68,7 +67,7 @@ def prepare_module(module, target):
     state = _ScheduleStream(module, target)
     state.stream.wait_stream(torch.cuda.current_stream(module.q_weight.device))
     try:
-        with torch.cuda.stream(state.stream):
+        with module.embed_tokens.lookup_guard(), torch.cuda.stream(state.stream):
             ids = torch.zeros((9, 24), dtype=torch.int64, device=module.q_weight.device)
             outputs = direct.allocate_outputs(ids)
             weight, scales = module.embed_tokens._uva
@@ -88,6 +87,13 @@ def prepare_module(module, target):
         state.stream.synchronize()
     state.ready = True
     module._decode_scheduled_stream = state
+    logging.info(
+        "Engram decode prefetch prepared: layer=%d grid=%d scale_shards=%d external=%s",
+        target,
+        state.grid,
+        getattr(module.embed_tokens, "_scale_shard_count", 1),
+        getattr(module.embed_tokens, "_external_storage", None) is not None,
+    )
     return state
 
 
@@ -125,7 +131,7 @@ class _ScheduledWork:
             tensor.record_stream(self.state.stream)
         # Even a failed enqueue must be drained by the enclosing plan's close.
         self.epoch += 1
-        with torch.cuda.stream(self.state.stream):
+        with embedding.lookup_guard(), torch.cuda.stream(self.state.stream):
             try:
                 weight, scales = embedding._uva
                 if self.state.target == 1:

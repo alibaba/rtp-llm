@@ -202,6 +202,24 @@ cc_binary(
 )
 
 cc_binary(
+    name = "fabric_memory",
+    copts = copts(),
+    linkopts = [
+        "-Wl,-rpath='$$ORIGIN'",
+    ],
+    linkshared = 1,
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/models_py/modules/dsv41/engram_distributed/native:fabric_memory_lib",
+    ],
+    target_compatible_with = select({
+        ":using_cuda13_arm": [],
+        ":using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+cc_binary(
     name = "th_transformer",
     srcs = [
         ":rtp_compute_ops",

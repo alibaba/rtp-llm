@@ -5,6 +5,7 @@ import pathlib
 import sys
 import threading
 import traceback
+from types import ModuleType
 from typing import List, Optional
 
 import torch
@@ -385,6 +386,13 @@ def ensure_engine_ops_loaded() -> None:
 
 def ensure_rdma_ops_loaded() -> None:
     _load_rdma_ops(required=True)
+
+
+def load_engram_ops() -> ModuleType:
+    """Load optional Engram bindings from the shared RTP-LLM library path."""
+    import libfabric_memory
+
+    return libfabric_memory
 
 
 def __getattr__(name: str):

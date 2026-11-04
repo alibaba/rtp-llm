@@ -32,18 +32,22 @@ class _LookupStream:
         self.embedding = embedding
         self.uva = embedding._uva
         self.pinned = embedding._pinned
+        self.storage = getattr(embedding, "_external_storage", None)
+        self.device_scale_lease = embedding._device_scale_resources()
         self.stream = torch.cuda.Stream(device=device, priority=0)
         # An external record node also updates the event on graph replay.
         # Host-table unregister must wait for actual reads, not capture time.
         self.done = torch.cuda.Event(external=True)
         self.done.record(torch.cuda.current_stream(device))
-        self.pinned._lookup_events.append(self.done)
+        embedding.register_lookup_event(self.done)
 
     def matches(self, embedding):
         return (
             embedding is self.embedding
             and embedding._uva is self.uva
             and embedding._pinned is self.pinned
+            and getattr(embedding, "_external_storage", None) is self.storage
+            and embedding._device_scale_lease is self.device_scale_lease
         )
 
 
@@ -92,15 +96,7 @@ class DecodeEngramPrefetch:
         self._schedule = None
         self._capture_permit = self._capture_metadata = None
         asynchronous = enabled()
-        device_scales = os.getenv("DSV41_ENGRAM_DEVICE_SCALES", "1") == "1"
-        if not asynchronous and not device_scales:
-            return
         capture_permit_type = None
-        if device_scales and torch.cuda.is_current_stream_capturing():
-            from rtp_llm.models_py.modules.dsv41.engram import _DeviceScaleCapturePermit
-
-            capture_permit_type = _DeviceScaleCapturePermit
-            capture_permit_type.check_available()
         resources = getattr(metadata, "_engram_decode_tables", None)
         if resources is not None:
             resources.validate()
@@ -110,13 +106,18 @@ class DecodeEngramPrefetch:
             if module is None:
                 continue
             embedding = module.embed_tokens
-            if (
-                device_scales
-                and getattr(embedding, "_device_scale_lease", None) is not None
-            ):
+            # Ownership follows the resources actually used by lookup. GPU
+            # backing always has a lease, even when host scale caching is off.
+            if getattr(embedding, "_device_scale_lease", None) is not None:
                 table_entries.append((index, module, _TableSnapshot(embedding)))
         try:
             if table_entries and torch.cuda.is_current_stream_capturing():
+                from rtp_llm.models_py.modules.dsv41.engram import (
+                    _DeviceScaleCapturePermit,
+                )
+
+                capture_permit_type = _DeviceScaleCapturePermit
+                capture_permit_type.check_available()
                 resources = _GraphTables(model, tuple(table_entries))
                 if capture_permit_type is not None:
                     capture_permit_type.check_available()

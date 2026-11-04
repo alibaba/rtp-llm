@@ -12,6 +12,10 @@ from rtp_llm.models_py.model_desc.deepseek_v41_base_model import (
     DeepSeekV4Model,
     _is_decode_fmha,
 )
+from rtp_llm.models_py.modules.dsv41.engram_distributed import (
+    EngramModelAttachment,
+    EngramRuntime,
+)
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import as_tagged_attention_inputs
 
 
@@ -46,70 +50,88 @@ def configure_v41(model, model_config) -> None:
 
 
 class DeepSeekV41Model(DeepSeekV4Model):
-    def __init__(self, model_config, *args, **kwargs) -> None:
+    def __init__(
+        self, model_config, *args, engram_runtime: EngramRuntime | None = None, **kwargs
+    ) -> None:
         super().__init__(model_config, *args, **kwargs)
+        self._engram_runtime = (
+            engram_runtime if engram_runtime is not None else EngramRuntime()
+        )
         configure_v41(self, model_config)
-        self._engram_hash_state = None
-        self._engram_layers = ()
+        self._engram_attachment: EngramModelAttachment | None = None
         self._image_plan = None
         self._engram_forward_active = False
         self._engram_cpu_runtime = None
+
+    @property
+    def _engram_hash_state(self):
+        attachment = self._engram_attachment
+        return attachment.hash_state if attachment is not None else None
+
+    @property
+    def _engram_layers(self):
+        attachment = self._engram_attachment
+        return attachment.layer_indices if attachment is not None else ()
 
     def cuda_graph_engram_window_size(self) -> int:
         return 4
 
     def _load_extra_weights(self, weights) -> None:
-        from rtp_llm.models_py.modules.dsv41.engram import (
-            Engram,
-            EngramLayout,
-            NgramHashState,
-        )
+        from rtp_llm.models_py.modules.dsv41.engram import EngramLayout
 
         if not isinstance(self.v4.embed, _V41ImageEmbedding):
             self.v4.embed = _V41ImageEmbedding(self.v4.embed, self)
         config = self._v4_args.v41_config
         layout = EngramLayout(config)
-        if not layout.layer_ids:
+        scale_group = None
+        if layout.layer_ids:
+            device = self.v4.embed.weight.device
+            from rtp_llm.models_py.modules.dsv41._engram_scale_shards import (
+                select_scale_group,
+            )
+
+            scale_group = select_scale_group(
+                device,
+                signature={
+                    "checkpoint": config["checkpoint_path"],
+                    "layers": [i for i in layout.layer_ids if i < len(self.v4.layers)],
+                },
+                enabled=(
+                    os.getenv("DSV41_ENGRAM_SHARD_SCALES", "1") == "1"
+                    and os.getenv("DSV41_ENGRAM_DEVICE_SCALES", "1") == "1"
+                    and os.getenv("DSV41_ENGRAM_DIRECT_FP8", "1") == "1"
+                    and layout.head_dim == 256
+                    and layout.n_hash_cols == 24
+                ),
+            )
+        attachment = EngramModelAttachment.bind(
+            self, self._engram_runtime, scale_group=scale_group
+        )
+        if attachment.phase == "EMPTY":
             return
-        checkpoint_path = config["checkpoint_path"]
-        modules = []
-        device = self.v4.embed.weight.device
-        self._engram_hash_state = NgramHashState(layout, checkpoint_path, device=device)
-        from rtp_llm.models_py.modules.dsv41._engram_scale_shards import (
-            select_scale_group,
+        logging.info(
+            "DeepSeek V4.1 Engram initialized on layers %s (external=%s)",
+            [layer_id for layer_id, _ in attachment.layer_indices],
+            attachment.external,
         )
 
-        scale_group = select_scale_group(
-            device,
-            signature={
-                "checkpoint": checkpoint_path,
-                "layers": [i for i in layout.layer_ids if i < len(self.v4.layers)],
-            },
-            enabled=(
-                os.getenv("DSV41_ENGRAM_SHARD_SCALES", "1") == "1"
-                and os.getenv("DSV41_ENGRAM_DEVICE_SCALES", "1") == "1"
-                and os.getenv("DSV41_ENGRAM_DIRECT_FP8", "1") == "1"
-                and layout.head_dim == 256
-                and layout.n_hash_cols == 24
-            ),
-        )
-        for layer_id in layout.layer_ids:
-            if layer_id >= len(self.v4.layers):
-                continue
-            layer = self.v4.layers[layer_id]
-            layer.engram = Engram.from_checkpoint(
-                config, layer_id, checkpoint_path, device, scale_group=scale_group
+    def prepare_fmha_impl(self, inputs, is_cuda_graph: bool = False):
+        attn = as_tagged_attention_inputs(getattr(inputs, "attention_inputs", None))
+        attachment = self._engram_attachment
+        if attachment is not None:
+            attachment.require_ready(
+                self,
+                is_cuda_graph=is_cuda_graph,
+                is_prefill=bool(getattr(attn, "is_prefill", False)),
+                is_target_verify=bool(getattr(attn, "is_target_verify", False)),
             )
-            modules.append((layer_id, layout.layer_ids.index(layer_id)))
-        self._engram_layers = tuple(modules)
-        logging.info(
-            "DeepSeek V4.1 Engram initialized on layers %s",
-            [layer_id for layer_id, _ in modules],
-        )
+        return super().prepare_fmha_impl(inputs, is_cuda_graph=is_cuda_graph)
 
     def _prepare_engram(self, inputs) -> None:
-        if not self._engram_layers:
+        attachment = self._engram_attachment
+        if attachment is None or not attachment.layer_indices:
             return
+        hash_state = attachment.hash_state
         windows = inputs.engram_token_windows
         config = self._v4_args.v41_config
         windows = windows.to(device=self.v4.embed.weight.device, non_blocking=True)
@@ -120,17 +142,17 @@ class DeepSeekV41Model(DeepSeekV4Model):
             hashes, token_mask = _engram_triton.hash_token_windows(
                 windows,
                 None,
-                self._engram_hash_state.prepare_device(windows.device),
-                self._engram_hash_state.layout,
-                self._engram_hash_state.pad_id,
+                hash_state.prepare_device(windows.device),
+                hash_state.layout,
+                hash_state.pad_id,
                 image_token=image_token,
             )
         else:
-            hashes = self._engram_hash_state.hash_token_windows(
+            hashes = hash_state.hash_token_windows(
                 windows, dead_mask=windows == image_token
             )
             token_mask = (windows[:, 0] >= 0) & (windows[:, 0] != image_token)
-        for layer_id, hash_index in self._engram_layers:
+        for layer_id, hash_index in attachment.layer_indices:
             layer = self.v4.layers[layer_id]
             layer.engram_hashes = hashes[:, hash_index].contiguous()
             layer.engram_token_mask = token_mask
@@ -236,6 +258,16 @@ class DeepSeekV41Model(DeepSeekV4Model):
 
     @torch.inference_mode()
     def forward(self, inputs, fmha_impl: Any = None):
+        attn = as_tagged_attention_inputs(getattr(inputs, "attention_inputs", None))
+        attachment = self._engram_attachment
+        layer_indices = attachment.layer_indices if attachment is not None else ()
+        if attachment is not None:
+            attachment.require_ready(
+                self,
+                capture_check=torch.cuda.is_current_stream_capturing,
+                is_prefill=bool(getattr(attn, "is_prefill", False)),
+                is_target_verify=bool(getattr(attn, "is_target_verify", False)),
+            )
         from rtp_llm.models_py.modules.dsv41.engram import (
             EngramCPULookupPrefetch,
             EngramLookupPrefetch,
@@ -271,7 +303,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
                     ):
                         prefetch = EngramLookupPrefetch(
                             (layer_id, self.v4.layers[layer_id])
-                            for layer_id, _ in self._engram_layers
+                            for layer_id, _ in layer_indices
                         )
                         # GPU lookup starts after metadata and embedding; CPU
                         # lookup can safely run during those preceding steps.
@@ -286,7 +318,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 self.v4._engram_lookup_prefetch = previous_prefetch
                 self._engram_forward_active = False
                 # Request-local rows must not keep whole prompt tensors live.
-                for layer_id, _ in self._engram_layers:
+                for layer_id, _ in layer_indices:
                     layer = self.v4.layers[layer_id]
                     layer.engram_hashes = None
                     layer.engram_token_mask = None

@@ -119,6 +119,7 @@ py_library(
         ":rocm_fp8_ptpc_hipb_solutions",
     ],
     deps = [
+        "//rtp_llm/models_py/modules/dsv41/engram_distributed:runtime",
         ":utils",
         ":kernels",
         ":tile_kernels_mhc",
@@ -242,5 +243,49 @@ py_library(
         "@//:using_cuda12_9_x86": ["//rtp_llm:tilelang"],
         "//conditions:default": [],
     }),
+    visibility = ["//visibility:public"],
+)
+
+# CPU adapters for the existing model, scale and warmup implementations.
+py_library(
+    name = "engram_model_cpu",
+    testonly = True,
+    srcs = [
+        "modules/__init__.py",
+        "modules/dsv41/__init__.py",
+        "modules/dsv41/engram.py",
+        "modules/dsv41/_engram_decode_prefetch.py",
+    ],
+    data = ["//rtp_llm:__init__.py"],
+    deps = [
+        "//rtp_llm/models_py/modules/dsv41/engram_distributed:core",
+        "//rtp_llm:numpy",
+        "//rtp_llm:safetensors",
+        "//rtp_llm:torch",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "engram_scale_source_cpu",
+    testonly = True,
+    srcs = ["modules/dsv41/_engram_scale_shards.py"],
+    deps = [":engram_model_cpu"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "engram_warmup_cpu",
+    testonly = True,
+    srcs = [
+        "modules/dsv41/_engram_decode_prefetch.py",
+        "modules/dsv41/dsv4_kernel_jit_warmup.py",
+        "modules/dsv41/dsv41_kernel_jit_warmup.py",
+    ],
+    deps = [
+        ":engram_model_cpu",
+        "//rtp_llm:torch",
+        "//rtp_llm:warmup",
+    ],
     visibility = ["//visibility:public"],
 )

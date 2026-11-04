@@ -1,9 +1,20 @@
 load("@arch_config//:arch_select.bzl", "copy_all_so")
-load("//bazel:defs.bzl", "copy_files")
+load("//bazel:defs.bzl", "copy_files", "copy_so")
 
 package(default_visibility = ["//rtp_llm:__subpackages__"])
 
 copy_all_so()
+
+copy_so("//:fabric_memory")
+
+filegroup(
+    name = "fabric_memory_libs",
+    srcs = select({
+        "//:using_cuda13_arm": [":libfabric_memory_so"],
+        "//:using_cuda13_x86": [":libfabric_memory_so"],
+        "//conditions:default": [],
+    }),
+)
 
 copy_files(
     name = "copy_nvcomp_lib",
@@ -45,6 +56,7 @@ filegroup(
     name = "libs",
     srcs = [],
     data = [
+        ":fabric_memory_libs",
         ":copy_nvcomp_lib",
         ":copy_hf3fs_libs",
         ":copy_remote_kv_cache_manager_client_libs",
@@ -57,6 +69,7 @@ filegroup(
     name = "whl_package_libs",
     srcs = [],
     data = [
+        ":fabric_memory_libs",
         ":copy_nvcomp_lib",
         ":copy_hf3fs_libs",
         ":copy_remote_kv_cache_manager_client_libs",

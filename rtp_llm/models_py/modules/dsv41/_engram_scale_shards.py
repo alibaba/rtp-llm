@@ -355,10 +355,14 @@ class ShardedScaleDescriptor:
         return True
 
 
-def _scale_input_valid(scales):
+def _scale_input_valid(scales, *, external_source=False, device=None):
     return (
         isinstance(scales, torch.Tensor)
-        and scales.device.type == "cpu"
+        and (
+            scales.device == device and scales.device.type == "cuda"
+            if external_source
+            else scales.device.type == "cpu"
+        )
         and scales.dtype == torch.uint8
         and scales.ndim == 2
         and scales.shape[0] > 0
@@ -382,21 +386,31 @@ def _require_votes(votes, phase):
         )
 
 
-def create_sharded_scales(scales_cpu, group, device, source_identity):
+def create_sharded_scales(
+    scales_cpu, group, device, source_identity, *, external_source=False
+):
     """Copy only this rank's immutable scale rows into final symmetric storage.
 
     None/singleton groups retain the original full local GPU-scale behavior.
     Multi-rank setup is collective, including cache-hit agreement. All successful
     descriptors are process-lifetime objects; different identities retain their
     old generations rather than freeing storage still reachable by peer graphs.
+
+    The default source remains a CPU tensor. ``external_source=True`` admits an
+    immutable Fabric-mapped CUDA tensor on exactly ``device``: copy only this
+    rank's slice directly into symmetric storage, after cache-hit agreement.
+    A singleton still owns an independent local copy, never the remote mapping.
     """
     device = _device(device)
     if group is None or (dist.is_initialized() and dist.get_world_size(group) == 1):
-        if not _scale_input_valid(scales_cpu):
-            raise ValueError("Expected contiguous CPU uint8 scales[table_rows,8]")
+        if not _scale_input_valid(
+            scales_cpu, external_source=external_source, device=device
+        ):
+            location = "same-device CUDA" if external_source else "CPU"
+            raise ValueError(f"Expected contiguous {location} uint8 scales[table_rows,8]")
         if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
             raise RuntimeError("Engram scale allocation is startup-only")
-        return scales_cpu.to(device)
+        return scales_cpu.clone() if external_source else scales_cpu.to(device)
     if not dist.is_initialized() or dist.get_rank(group) < 0:
         raise ValueError("Scale-shard group must be initialized and contain this rank")
     import torch.distributed._symmetric_memory as symm
@@ -404,7 +418,9 @@ def create_sharded_scales(scales_cpu, group, device, source_identity):
     members = _members(group)
     group_size, rank = len(members), dist.get_rank(group)
     info = _local_metadata(device, True)
-    valid_input = _scale_input_valid(scales_cpu)
+    valid_input = _scale_input_valid(
+        scales_cpu, external_source=external_source, device=device
+    )
     try:
         if source_identity is None or source_identity == "":
             raise ValueError("A nonempty immutable table identity is required")
