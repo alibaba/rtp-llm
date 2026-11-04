@@ -6,10 +6,6 @@ import org.flexlb.mock.engine.Scheduler;
 
 /** Translation at the native RTP boundary; scheduling state contains no protobuf objects. */
 final class RpcTasks {
-    static Scheduler.Input input(GenerateInputPB input, String identity, long started, long rpcDeadline,
-                                    boolean retained, int blockSize, long seed) {
-        return input(org.flexlb.mock.multimodal.MediaInput.text(input), identity, started, rpcDeadline, retained, blockSize, seed);
-    }
     static Scheduler.Input input(org.flexlb.mock.multimodal.MediaInput.Prepared prepared, String identity, long started, long rpcDeadline,
                                  boolean retained, int blockSize, long seed) {
         var input = prepared.input();

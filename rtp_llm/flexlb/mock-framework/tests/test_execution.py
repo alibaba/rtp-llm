@@ -13,7 +13,7 @@ from mock_framework.config import Registry, compile_case
 from mock_framework.config.registry import case_interface, Bounds
 from mock_framework.config.compiled_case import Reference
 from mock_framework.execution import ExecutionError, prepare_launch, run_case
-from mock_framework.execution.runner import resolve
+from mock_framework.execution.runner import resolve_refs
 
 
 @dataclass(frozen=True)
@@ -156,10 +156,10 @@ def test_existing_output_is_not_overwritten(setup, tmp_path):
 
 
 def test_refs_do_not_eval_and_require_actual_fields():
-    assert resolve(Reference('x', ('value',)), {'x': {'value': 2}}, {}) == 2
-    assert resolve(Reference('globals', ('masters',)), {}, {'masters': ['a:1']}) == ['a:1']
+    assert resolve_refs(Reference('x', ('value',)), {'x': {'value': 2}}, {}) == 2
+    assert resolve_refs(Reference('globals', ('masters',)), {}, {'masters': ['a:1']}) == ['a:1']
     with pytest.raises(ExecutionError):
-        resolve(Reference('x', ('missing',)), {'x': {}}, {})
+        resolve_refs(Reference('x', ('missing',)), {'x': {}}, {})
 
 
 def test_cli_compiles_without_java_catalog(setup, tmp_path):

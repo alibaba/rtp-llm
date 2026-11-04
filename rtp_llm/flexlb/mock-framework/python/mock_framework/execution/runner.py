@@ -5,26 +5,40 @@ from pathlib import Path
 
 from ..config.compiled_case import Reference
 from ..config.validation import duration, validate
-from .assertions import compare
 from .environment import RunEnvironment
 from .run_trace import RunTrace, timestamp, write_json
 from .transport import ExecutionError
 
 
-def resolve(value, results, globals):
+def resolve_refs(value, results, case_globals):
     if isinstance(value, Reference):
         try:
-            result = globals if value.source == 'globals' else results[value.source]
+            result = case_globals if value.source == 'globals' else results[value.source]
             for part in value.path:
                 result = result[part]
             return result
         except (KeyError, TypeError) as error:
             raise ExecutionError(f'Cannot resolve {value.source}.{value.path}') from error
     if isinstance(value, dict):
-        return {k: resolve(v, results, globals) for k, v in value.items()}
+        return {k: resolve_refs(v, results, case_globals) for k, v in value.items()}
     if isinstance(value, list):
-        return [resolve(v, results, globals) for v in value]
+        return [resolve_refs(v, results, case_globals) for v in value]
     return value
+
+
+def _matches_expectation(actual, expected):
+    for operator, target in expected.items():
+        if operator == 'eq':
+            good = actual == target
+        elif operator == 'count':
+            good = len(actual) == target
+        elif operator == 'gte':
+            good = actual >= target
+        else:
+            good = actual <= target
+        if not good:
+            return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -73,9 +87,9 @@ async def run_case(case, registry, launch, directory):
                     records.emit(event='step_started', phase=phase.id, step=step.id, interface=step.interface,
                                  describe=step.describe, query_time=context.query_time)
                     try:
-                        args = resolve(step.args, results, context.globals())
+                        args = resolve_refs(step.args, results, context.globals())
                         arguments = interface.arguments(args)
-                        expected = resolve(step.expect.comparisons, results, context.globals()) if step.expect else None
+                        expected = resolve_refs(step.expect.comparisons, results, context.globals()) if step.expect else None
                         if expected is not None:
                             for op, value in expected.items():
                                 validate(value, {'type': 'integer', 'minimum': 0} if op == 'count' else interface.returns, 'expect.' + op)
@@ -89,7 +103,7 @@ async def run_case(case, registry, launch, directory):
                         results[step.id] = actual
                         stage = 'expect'
                         if gate is not None:
-                            gate.update(actual=actual, status='PASS' if compare(actual, expected) else 'FAIL')
+                            gate.update(actual=actual, status='PASS' if _matches_expectation(actual, expected) else 'FAIL')
                             records.emit('gates', **gate)
                             if gate['status'] == 'FAIL':
                                 raise GateFailure(f'Gate {step.id} failed')
