@@ -14,6 +14,11 @@ config_setting(
 )
 
 config_setting(
+    name = "arm_cpu",
+    define_values = {"arm_cpu": "true"},
+)
+
+config_setting(
     name = "enable_triton",
     values = {"define": "enable_triton=true"},
 )
