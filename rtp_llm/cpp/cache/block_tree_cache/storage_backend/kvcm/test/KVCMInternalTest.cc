@@ -176,6 +176,41 @@ TEST(KVCMInternalTest, FullLinearPolicyPreservesTheSameCanonicalFullIdentityAndS
                                         "tp1_Lz_linear"}));
 }
 
+TEST(KVCMInternalTest, Dsv41CompactGroupsPreserveSpecsAndWriteSelection) {
+    const std::vector<std::string> tags{"hca_kv", "csa_kv", "indexer_kv", "csa_state", "swa_kv"};
+    std::vector<GroupBase> groups;
+    for (size_t i = 0; i < tags.size(); ++i) {
+        auto group = makeGroup(tags[i], 0, i < 3 ? CacheGroupType::FULL : CacheGroupType::SWA);
+        group.policy.enable_prefix_reuse = true;
+        groups.push_back(std::move(group));
+    }
+    auto topology = CacheTopology::create(std::move(groups), {{0, tags}});
+    FullLinearLayerGroupPolicy policy(
+        *topology, unusedResolver(), {tags[0], tags[1], tags[2]}, {tags[3], tags[4]});
+    ASSERT_TRUE(policy.init());
+    const std::vector<StorageBlockHandle> full_handles{{tags[0], 1}, {tags[1], 1}, {tags[2], 1}};
+    auto all_handles = full_handles;
+    all_handles.insert(all_handles.end(), {{tags[3], 1}, {tags[4], 1}});
+    GroupPolicy::LocationSpecGroups location_groups;
+    for (const bool merge_full : {false, true}) {
+        SCOPED_TRACE(merge_full);
+        ASSERT_TRUE(policy.buildLocationSpecGroups(1, location_groups, "DeepSeekV41", merge_full));
+        const GroupPolicy::SpecNames full_specs = merge_full ? GroupPolicy::SpecNames{"F_TP0"} :
+                                                               GroupPolicy::SpecNames{"F1_TP0", "F0_TP0", "F2_TP0"};
+        auto all_specs = full_specs;
+        all_specs.insert(all_specs.end(), {"S3_TP0", "S4_TP0"});
+        GroupPolicy::LocationSpecGroups expected{
+            {"F", full_specs}, {"FL", all_specs}, {"L3", {"S3_TP0"}}, {"L4", {"S4_TP0"}}};
+        if (!merge_full) {
+            expected.insert({{"F0", {"F0_TP0"}}, {"F1", {"F1_TP0"}}, {"F2", {"F2_TP0"}}});
+        }
+        EXPECT_EQ(location_groups, expected);
+        std::vector<std::string> selected;
+        ASSERT_TRUE(policy.getNeedWriteGroups(makeStorageRequest({full_handles, all_handles}), 2, selected));
+        EXPECT_EQ(selected, (std::vector<std::string>{"F", "FL"}));
+    }
+}
+
 TEST(KVCMInternalTest, InvalidAggregateBuildDoesNotPublishPartialState) {
     auto topology = CacheTopology::create({makeGroup("full", 0, CacheGroupType::FULL)}, {{0, {"full"}}});
     InvalidAggregatePolicy policy(*topology, unusedResolver(), /*full_group_tags=*/{"full"}, /*other_group_tags=*/{});
