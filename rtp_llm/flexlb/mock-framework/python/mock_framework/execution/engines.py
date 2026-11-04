@@ -101,6 +101,7 @@ class EngineProcesses:
                 errors = await self.supervisor.stop_expected(node)
                 if errors:
                     raise ExecutionError('; '.join(errors))
+                (self.records.directory / 'components' / node / 'ready.json').unlink(missing_ok=True)
                 self.processes.remove(node)
                 self.instances.remove(node)
                 self.topology.retire(node)
@@ -117,4 +118,8 @@ class EngineProcesses:
 
     async def close(self):
         names = [name for name, _ in self.supervisor.children if name in self.processes]
-        return await self.supervisor.stop(names, 3)
+        errors = await self.supervisor.stop(names, 3)
+        active = {name for name, _ in self.supervisor.children}
+        for node in self.processes - active:
+            (self.records.directory / 'components' / node / 'ready.json').unlink(missing_ok=True)
+        return errors
