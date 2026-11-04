@@ -4,7 +4,7 @@ import json
 import re
 from pathlib import Path
 
-from .parser import load_yaml
+from .yaml_loader import load_yaml
 from .validation import ConfigError, fields, number, text
 
 _RESOURCE = re.compile(r'^[1-9]\d*(?:\.\d+)?(?:KiB|MiB|GiB|TiB|[kmgtKMGT]i?|B)?$')

@@ -41,7 +41,7 @@ def load_yaml(path: str | Path) -> dict:
     except (yaml.YAMLError, OSError, RecursionError) as error:
         raise ConfigError(str(error)) from error
     if not isinstance(value, dict):
-        raise ConfigError('Case must be a mapping')
+        raise ConfigError('YAML document must be a mapping')
     # Prevent alias cycles from reaching recursive validation or JSON serialization.
     def walk(node, stack):
         if not isinstance(node, (dict, list)):
