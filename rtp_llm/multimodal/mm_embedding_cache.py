@@ -398,8 +398,12 @@ def _copy_pooled_result_to_devices(result: Any, devices: Any) -> Any:
                 )
             return copied[identity]
         if isinstance(value, tuple):
+            if target is None:
+                return tuple(visit(item, None) for item in value)
             return tuple(visit(item, target[i]) for i, item in enumerate(value))
         if isinstance(value, list):
+            if target is None:
+                return [visit(item, None) for item in value]
             return [visit(item, target[i]) for i, item in enumerate(value)]
         if isinstance(value, dict):
             return {key: visit(item, target[key]) for key, item in value.items()}
@@ -473,8 +477,12 @@ def _copy_result_to_devices(result: Any, devices: Any) -> Any:
                 )
             return copied[identity]
         if isinstance(value, tuple):
+            if target is None:
+                return tuple(visit(item, None) for item in value)
             return tuple(visit(item, target[i]) for i, item in enumerate(value))
         if isinstance(value, list):
+            if target is None:
+                return [visit(item, None) for item in value]
             return [visit(item, target[i]) for i, item in enumerate(value)]
         if isinstance(value, dict):
             return {key: visit(item, target[key]) for key, item in value.items()}
@@ -1503,9 +1511,7 @@ class MMEmbeddingCache:
             return
         self._on_complete_sync(cache_key, entry, result)
 
-    def _drop_pending_entry(
-        self, cache_key: str, entry: MMEmbeddingCacheEntry
-    ) -> None:
+    def _drop_pending_entry(self, cache_key: str, entry: MMEmbeddingCacheEntry) -> None:
         """Remove an unqueued PENDING entry without taking the transfer lock."""
         with self._lock:
             if self._entries.get(cache_key) is entry:
@@ -1527,24 +1533,18 @@ class MMEmbeddingCache:
         if drop:
             with self._lock:
                 self._stats["publish_drop"] += 1
-            logging.warning(
-                "ViT cache publication queue full; dropping %s", cache_key
-            )
+            logging.warning("ViT cache publication queue full; dropping %s", cache_key)
             self._drop_pending_entry(cache_key, entry)
             return
         try:
-            self._publish_queue.put_nowait(
-                (cache_key, entry, result, before_publish)
-            )
+            self._publish_queue.put_nowait((cache_key, entry, result, before_publish))
         except queue.Full:
             with self._publish_cond:
                 self._publish_pending -= 1
                 self._publish_cond.notify_all()
             with self._lock:
                 self._stats["publish_drop"] += 1
-            logging.warning(
-                "ViT cache publication queue full; dropping %s", cache_key
-            )
+            logging.warning("ViT cache publication queue full; dropping %s", cache_key)
             self._drop_pending_entry(cache_key, entry)
 
     def _publish_worker(self) -> None:
@@ -1622,6 +1622,8 @@ class MMEmbeddingCache:
             result = entry.result
             events = entry.ready_events
             owners = list(entry.pool_owners)
+            if devices is None:
+                devices = _map_tensors(result, lambda tensor: tensor.device)
             if not owners:
                 self._ready_result(result, events)
                 entry.ready_events = []
@@ -1732,6 +1734,12 @@ class MMEmbeddingCache:
         *,
         before_publish: Optional[Callable[[], None]] = None,
     ) -> bool:
+        # Prepare reader-visible metadata BEFORE the entry publishes its event.
+        # The deferred (async publication) path wakes waiters before the
+        # publication thread runs _on_complete_sync; without this a waiter can
+        # observe original_devices=None and crash in _copy_result_to_devices.
+        entry.original_devices = _map_tensors(result, lambda tensor: tensor.device)
+        entry.ready_events = self._record_ready_events(result)
         return entry.complete(
             result,
             before_publish=before_publish,
