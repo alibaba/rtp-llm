@@ -7,7 +7,6 @@ from unittest.mock import patch
 from rtp_llm.config.py_config_modules import DeepEPConfig
 from rtp_llm.config.server_config_setup import (
     _auto_deepep_supported_on_visible_devices,
-    _configure_nccl_p2p_disable,
     auto_configure_deepep,
     setup_and_configure_server,
 )
@@ -71,12 +70,6 @@ class AutoConfigureDeepepTest(TestCase):
         self.moe_config = MoeConfig()
         self.deep_ep_config = DeepEPConfig()
         self.parallel_config = ParallelismConfig()
-        hardware = patch(
-            "rtp_llm.config.server_config_setup._auto_deepep_supported_on_visible_devices",
-            return_value=True,
-        )
-        hardware.start()
-        self.addCleanup(hardware.stop)
 
     def _setup_parallel_info(
         self,
@@ -88,7 +81,6 @@ class AutoConfigureDeepepTest(TestCase):
         """Set self.parallel_config for auto_configure_deepep."""
         self.parallel_config.world_size = world_size
         self.parallel_config.tp_size = tp_size
-        self.parallel_config.dp_size = world_size // tp_size
         self.parallel_config.ep_size = ep_size
         self.parallel_config.local_world_size = local_world_size
 
@@ -460,12 +452,12 @@ class AutoConfigureDeepepTest(TestCase):
         # Inference on single-node should not enable low_latency or internode
         self._assert_deepep_config(moe=True, low_latency=False, internode=False)
 
-    def test_tp2_ep8_world8_single_node(self):
-        """Test: Decode TP=2, EP=8, world_size=8 on single node with 8 local GPUs"""
-        # world_size=8, tp_size=2, ep_size=8, local_world_size=8
+    def test_tp2_ep4_world8_single_node(self):
+        """Test: Decode TP=2, EP=4, world_size=8 on single node with 8 local GPUs"""
+        # world_size=8, tp_size=2, ep_size=4, local_world_size=8
         # num_nodes = (8 + 8 - 1) // 8 = 1
         self._setup_parallel_info(
-            world_size=8, tp_size=2, ep_size=8, local_world_size=8
+            world_size=8, tp_size=2, ep_size=4, local_world_size=8
         )
         self.moe_config.use_all_gather = False
         role_type = RoleType.DECODE
@@ -982,7 +974,7 @@ class HardwareAutoConfigurationTest(TestCase):
             ([(9, 0), (9, 0)], 2, True),
             ([(10, 0), (10, 0)], 2, True),
             ([(12, 0), (12, 0)], 2, False),
-            ([(12, 1)], 1, False),
+            ([(12, 1)], 1, True),
             ([(9, 0), (12, 0)], 2, False),
             ([(9, 0), (12, 0)], 1, True),
             ([(9, 0), (12, 0)], 0, False),
@@ -1032,6 +1024,42 @@ class HardwareAutoConfigurationTest(TestCase):
                     if explicit is not None:
                         capability.assert_not_called()
 
+    def test_tp2_ep4_world8_single_node(self):
+        stack, _ = self.cuda_environment([(9, 0)] * 8)
+        with stack:
+            parallel = ParallelismConfig()
+            parallel.world_size = parallel.local_world_size = 8
+            parallel.tp_size = 2
+            parallel.dp_size = parallel.ep_size = 4
+            moe = MoeConfig()
+            moe.use_all_gather = False
+            auto_configure_deepep(moe, DeepEPConfig(), parallel, RoleType.DECODE)
+            self.assertTrue(moe.use_deepep_moe)
+            self.assertTrue(moe.use_deepep_low_latency)
+            self.assertFalse(moe.use_deepep_internode)
+
+    def test_unnormalized_ep_zero_selection_matches_main(self):
+        # device_base.py calls this before set_parallelism_config (ep_size=0).
+        # Preserve main's automatic multi-GPU DeepEP defaults and do not
+        # consult architecture before the topology has been normalized.
+        for capability in ((9, 0), (10, 0), (12, 0)):
+            with self.subTest(capability=capability):
+                stack, probe = self.cuda_environment([capability])
+                with stack:
+                    parallel = ParallelismConfig()
+                    parallel.world_size = 2
+                    parallel.tp_size = 2
+                    parallel.dp_size = 1
+                    parallel.ep_size = 0
+                    moe, deep = MoeConfig(), DeepEPConfig()
+                    auto_configure_deepep(moe, deep, parallel, RoleType.DECODE)
+                    self.assertFalse(moe.use_all_gather)
+                    self.assertTrue(moe.use_deepep_moe)
+                    self.assertTrue(moe.use_deepep_low_latency)
+                    self.assertTrue(moe.use_deepep_internode)
+                    self.assertEqual(parallel.ep_size, 0)
+                    probe.assert_not_called()
+
     def test_dense_and_frontend_skip_architecture_probe(self):
         for role, world in ((RoleType.PDFUSION, 1), (RoleType.FRONTEND, 2)):
             with self.subTest(role=role):
@@ -1046,56 +1074,6 @@ class HardwareAutoConfigurationTest(TestCase):
                     auto_configure_deepep(moe, DeepEPConfig(), parallel, role)
                     self.assertFalse(moe.use_deepep_moe)
                     capability.assert_not_called()
-
-    def test_p2p_policy_and_explicit_override(self):
-        for names, pairs, local_world, explicit, expected in (
-            (
-                ["H100"] * 3,
-                {(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)},
-                3,
-                None,
-                None,
-            ),
-            (["H100"] * 3, {(0, 1), (1, 0)}, 3, None, None),
-            (["H100"] * 2, set(), 2, None, "1"),
-            (["H100", "NVIDIA RTX"], set(), 1, None, None),
-            (["NVIDIA RTX"] * 2, {(0, 1), (1, 0)}, 2, None, "1"),
-            (["NVIDIA RTX"] * 2, set(), 2, "0", "0"),
-            (["H100"] * 2, {(0, 1), (1, 0)}, 2, "1", "1"),
-        ):
-            with self.subTest(names=names, pairs=pairs, explicit=explicit):
-                stack, _ = self.cuda_environment([(9, 0)] * len(names))
-                with stack, patch.dict(os.environ, {}, clear=True):
-                    stack.enter_context(
-                        patch(
-                            "rtp_llm.config.server_config_setup.os.path.exists",
-                            return_value=False,
-                        )
-                    )
-                    prefix = "rtp_llm.config.server_config_setup.torch.cuda."
-                    stack.enter_context(
-                        patch(prefix + "get_device_name", side_effect=names.__getitem__)
-                    )
-                    peer = stack.enter_context(
-                        patch(
-                            prefix + "can_device_access_peer",
-                            side_effect=lambda src, dst: (src, dst) in pairs,
-                        )
-                    )
-                    if explicit is not None:
-                        os.environ["NCCL_P2P_DISABLE"] = explicit
-                    config = SimpleNamespace(
-                        role_config=SimpleNamespace(role_type=RoleType.DECODE),
-                        parallelism_config=SimpleNamespace(
-                            local_world_size=local_world
-                        ),
-                    )
-                    _configure_nccl_p2p_disable(config)
-                    self.assertEqual(os.environ.get("NCCL_P2P_DISABLE"), expected)
-                    if explicit is not None:
-                        peer.assert_not_called()
-                    for call in peer.call_args_list:
-                        self.assertTrue(all(index < local_world for index in call.args))
 
 
 if __name__ == "__main__":

@@ -51,7 +51,6 @@ not exercise CP4-only compact transport or asynchronous head prebuild.
 | Variable | Default | Behavior |
 | --- | --- | --- |
 | `RTP_LLM_DECODE_FIXED_BS` | `0` | Selects fixed decode padding when positive; zero disables the override. Read at engine initialization, and only in the SM120 aligned DP decode profile (`sm120_decode` MoE with CUDA graph, TP=1, DP=EP=world size above 1). Must be at least `max_generate_batch_size` when enabled. Other engines log a warning and ignore it. |
-| `RTP_LLM_DP_FAKE_STREAM_WAIT_MS` | `10` | Idle-DP fake-stream wait in milliseconds, clamped to 1 through 10. Reducing it trades CPU activity for scheduling latency. Read once by the scheduler. |
 
 Use RTP's timeline profiling controls for performance analysis. Removed
 prefill print/dump probes and import-path overrides are not deployment settings.

@@ -393,6 +393,60 @@ def _ue8m0_reference_max_scale(token_nope_bf16: torch.Tensor) -> float:
     return max_scale
 
 
+class DirectTritonFastPathSupportedTest(unittest.TestCase):
+    """Pin ``direct_triton_fast_path_supported`` for known device inputs.
+
+    CUDA cases mock ``torch.cuda.get_device_capability`` so the class runs
+    on CPU-only hosts.  The helper caches through
+    ``_direct_triton_fast_path_supported_cached`` (``functools.lru_cache``),
+    so each mocked case clears that cache first and ``setUp`` schedules a
+    cleanup clear to keep mocked capabilities from leaking into later tests.
+    """
+
+    def setUp(self):
+        cached = _swa_dequant_triton._direct_triton_fast_path_supported_cached
+        cached.cache_clear()
+        self.addCleanup(cached.cache_clear)
+
+    def test_cpu_device_is_unsupported(self):
+        self.assertFalse(
+            _swa_dequant_triton.direct_triton_fast_path_supported(torch.device("cpu"))
+        )
+
+    def test_cuda_capability_major_gates_support(self):
+        device = torch.device("cuda:0")
+        cases = (
+            ((9, 0), True),
+            ((10, 0), True),
+            ((12, 0), False),  # SM120 is intentionally unsupported
+            ((12, 1), False),
+            ((8, 0), False),
+        )
+        cached = _swa_dequant_triton._direct_triton_fast_path_supported_cached
+        for capability, expected in cases:
+            with self.subTest(capability=capability):
+                cached.cache_clear()
+                with mock.patch.object(
+                    torch.cuda, "get_device_capability", return_value=capability
+                ):
+                    self.assertEqual(
+                        _swa_dequant_triton.direct_triton_fast_path_supported(device),
+                        expected,
+                    )
+
+    def test_capability_lookup_failure_is_unsupported(self):
+        with mock.patch.object(
+            torch.cuda,
+            "get_device_capability",
+            side_effect=RuntimeError("capability lookup failed"),
+        ):
+            self.assertFalse(
+                _swa_dequant_triton.direct_triton_fast_path_supported(
+                    torch.device("cuda:0")
+                )
+            )
+
+
 class SwaFp8KvRoundtripTest(unittest.TestCase):
 
     def setUp(self):
@@ -992,10 +1046,12 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                 fallback, fallback_calls = run(False)
                 direct, direct_fallback_calls = run(True)
                 self.assertEqual(fallback_calls, 1)
-                direct_supported = (
-                    _swa_dequant_triton.direct_triton_fast_path_supported(self.device)
-                )
-                self.assertEqual(direct_fallback_calls, 0 if direct_supported else 1)
+                major, _ = torch.cuda.get_device_capability(self.device)
+                # Direct Triton scatter exists on SM90/SM100 only. Main pinned 0
+                # fallback calls because those hosts were SM90. SM120 and other
+                # majors use the PyTorch dequant fallback (1 call).
+                expected_direct_fallback_calls = 0 if major in (9, 10) else 1
+                self.assertEqual(direct_fallback_calls, expected_direct_fallback_calls)
                 self.assertTrue(
                     torch.equal(direct.view(torch.int16), fallback.view(torch.int16))
                 )

@@ -285,15 +285,22 @@ py_test(
     tags = ["L20_CU13"],
 )
 
-[
-    dsv4_sm120_py_test(
-        name = name + "_sm120",
-        src = name + ".py",
-        deps = ["//rtp_llm:sdk", "//rtp_llm:testlib", "//rtp_llm:utils"],
-        visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
-    )
-    for name in ["start_server_warmup_test", "auto_configure_deepep_test"]
-]
+dsv4_sm120_py_test(
+    name = "start_server_warmup_test_sm120",
+    src = "start_server_warmup_test.py",
+    deps = ["//rtp_llm:sdk", "//rtp_llm:testlib", "//rtp_llm:utils"],
+    visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
+)
+
+dsv4_sm120_py_test(
+    name = "auto_configure_deepep_test_sm120",
+    src = "auto_configure_deepep_test.py",
+    # Keep the -k expression in env: Bazel/test argv splitting turns
+    # args=["-k", "A or B"] into a bare "or" file path for pytest.
+    env = {"PYTEST_ADDOPTS": "-k 'HardwareAutoConfigurationTest or ModelSpecificStartupTest'"},
+    deps = ["//rtp_llm:sdk", "//rtp_llm:testlib", "//rtp_llm:utils"],
+    visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
+)
 
 py_test(
     name = "glm4_moe_detector_test",

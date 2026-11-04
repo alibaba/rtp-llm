@@ -8,25 +8,15 @@ from unittest.mock import Mock, patch
 
 import torch
 
-from rtp_llm.models_py.model_desc.deepseek_v4_ppu.base_model import (
-    Dsv4MtpHiddenBufferSpec,
-    Dsv4SharedRuntimeBufferStore,
-)
-from rtp_llm.models_py.model_desc.deepseek_v4_ppu.model import (
-    PpuDeepSeekV4Model as DeepSeekV4Model,
-)
-from rtp_llm.models_py.model_desc.deepseek_v4_ppu.mtp_model import (
-    PpuDeepSeekV4MtpModel as DeepSeekV4MtpModel,
-)
-from rtp_llm.models_py.modules.dsv4.ppu.transformer import (
-    PpuV4Transformer as V4Transformer,
-)
+from rtp_llm.models_py.model_desc.deepseek_v4_ppu.base_model import Dsv4MtpHiddenBufferSpec, Dsv4SharedRuntimeBufferStore
+from rtp_llm.models_py.model_desc.deepseek_v4_ppu.model import PpuDeepSeekV4Model as DeepSeekV4Model
+from rtp_llm.models_py.model_desc.deepseek_v4_ppu.mtp_model import PpuDeepSeekV4MtpModel as DeepSeekV4MtpModel
+from rtp_llm.models_py.modules.dsv4.ppu.transformer import PpuV4Transformer as V4Transformer
+from rtp_llm.models_py.model_desc.deepseek_v4_mtp_model import DeepSeekV4MtpModel as GenericDeepSeekV4MtpModel
 from rtp_llm.models_py.modules.dsv4.transformer import (
     V4Transformer as GenericV4Transformer,
 )
-from rtp_llm.models_py.model_desc.deepseek_v4_mtp_model import (
-    DeepSeekV4MtpModel as GenericDeepSeekV4MtpModel,
-)
+
 
 
 class _RuntimeModule(torch.nn.Module):

@@ -183,6 +183,13 @@ _DSV4_SM120_ONLY = select({
     "//conditions:default": ["@platforms//:incompatible"],
 })
 
+# Matches plain cuda13 and the stricter cuda13_sm120 (superset), so these
+# targets run as blocking tests in the fat-build SM120 lanes.
+_DSV4_CUDA13_X86 = select({
+    "@//:using_cuda13_x86": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
 filegroup(
     name = "cpu_test_support",
     srcs = ["cpu_test_utils.py"],
@@ -228,7 +235,7 @@ _TRITON_SOURCE_CPU_TESTS = [
             ":cpu_test_support",
         ] + (["//rtp_llm:device_type_source"] if name == "test_mhc_prenorm_dg_cpu" else []),
         env = {"CUDA_VISIBLE_DEVICES": ""},
-        target_compatible_with = _DSV4_SM120_ONLY if name in _TRITON_SOURCE_CPU_TESTS else [],
+        target_compatible_with = _DSV4_CUDA13_X86 if name in _TRITON_SOURCE_CPU_TESTS else [],
     )
     for name in _SOURCE_CPU_TESTS
 ]
@@ -248,10 +255,10 @@ py_test(
     data = ["//rtp_llm/models_py:prefill_optimization_source_data"],
     tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
-    target_compatible_with = _DSV4_SM120_ONLY,
+    target_compatible_with = _DSV4_CUDA13_X86,
 )
 
-# Exact-SM120 hardware tests; built only by cuda13_sm120.
+# SM120 hardware contracts; the fat cuda13 build runs them on the RTX pool too.
 [
     dsv4_sm120_py_test(
         name = name,
@@ -270,12 +277,14 @@ dsv4_sm120_py_test(
     name = "test_fp4_native_indexer",
     extra_srcs = ["test_fp4_indexer_contract.py"],
     deps = _MODEL_TEST_DEPS,
+    sm120_build_only = True,  # DeepGEMM 2.8.2 fp8_fp4 MQA logits
 )
 
 dsv4_sm120_py_test(
     name = "test_sm120_ordered_reduce_scatter",
     gpu_count = 8,
     deps = _MODEL_TEST_DEPS,
+    sm120_build_only = True,  # 8 GPUs
 )
 
 _SM120_CPU_CONTRACT_TESTS = [":test_cpu_test_utils", ":test_prefill_integration_policy"] + [":" + name for name in _SOURCE_CPU_TESTS]

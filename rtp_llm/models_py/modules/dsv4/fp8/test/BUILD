@@ -140,6 +140,7 @@ dsv4_sm120_py_test(
     deps = _DSV4_FP8_TEST_DEPS,
 )
 
+# Fork-only sparse MLA decode plus the ENABLE_FP8_SM120 blockwise linear.
 py_test(
     name = "test_sm120_sparse_mla_hardware",
     srcs = ["test_sm120_sparse_mla_hardware.py"],
@@ -152,6 +153,7 @@ py_test(
     target_compatible_with = _DSV4_SM120_ONLY,
 )
 
+# The topk_v3 fatbin only carries an sm_120 cubin in the exact SM120 build.
 py_test(
     name = "test_sm120_indexer_hardware",
     srcs = ["test_sm120_indexer_hardware.py"],

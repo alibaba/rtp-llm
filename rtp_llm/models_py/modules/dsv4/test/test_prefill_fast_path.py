@@ -1050,6 +1050,9 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         v4._mtp_hidden_buffer = aux_buffer
         v4.capture_aux_hidden = V4Transformer.capture_aux_hidden.__get__(v4)
         v4._note_aux_hidden_rows = V4Transformer._note_aux_hidden_rows.__get__(v4)
+        v4._ensure_mtp_hidden_capacity = (
+            V4Transformer._ensure_mtp_hidden_capacity.__get__(v4)
+        )
         capture_layer_ids = (1, 0)
         capture_context = CaptureContext.configured(
             capture_layer_ids,
