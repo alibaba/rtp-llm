@@ -38,6 +38,15 @@ def precompute_freqs_cis(
     When `original_seq_len > 0`, applies YaRN frequency interpolation.
     When `device` is given, returns the tensor on that device and shares
     it across all callers with the same params+device tuple."""
+    target_device = torch.device(device) if device is not None else None
+    if target_device is not None and target_device.type == "cuda":
+        # Resolve the current device before memoization: ``cuda`` must not
+        # reuse another rank's table when the process changes CUDA devices.
+        if target_device.index is None:
+            target_device = torch.device("cuda", torch.cuda.current_device())
+        compute_device = target_device
+    else:
+        compute_device = None
     key = (
         dim,
         seqlen,
@@ -46,7 +55,7 @@ def precompute_freqs_cis(
         factor,
         beta_fast,
         beta_slow,
-        str(device) if device is not None else None,
+        str(target_device) if target_device is not None else None,
     )
     cached = _FREQS_CIS_CACHE.get(key)
     if cached is not None:
@@ -67,10 +76,18 @@ def precompute_freqs_cis(
     def linear_ramp_factor(min_, max_, dim_):
         if min_ == max_:
             max_ = max_ + 0.001
-        linear_func = (torch.arange(dim_, dtype=torch.float32) - min_) / (max_ - min_)
+        linear_func = (
+            torch.arange(dim_, dtype=torch.float32, device=compute_device) - min_
+        ) / (max_ - min_)
         return torch.clamp(linear_func, 0, 1)
 
-    freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+    # Build CUDA tables on CUDA, including the inverse frequencies. Moving a
+    # CPU table afterward preserves CPU pow rounding; a one-ULP difference can
+    # become a visible phase difference at long positions.
+    freqs = 1.0 / (
+        base
+        ** (torch.arange(0, dim, 2, dtype=torch.float32, device=compute_device) / dim)
+    )
     if original_seq_len > 0:
         low, high = find_correction_range(
             beta_fast, beta_slow, dim, base, original_seq_len
@@ -78,11 +95,15 @@ def precompute_freqs_cis(
         smooth = 1 - linear_ramp_factor(low, high, dim // 2)
         freqs = freqs / factor * (1 - smooth) + freqs * smooth
 
-    t = torch.arange(seqlen)
+    t = torch.arange(
+        seqlen,
+        dtype=torch.float32 if compute_device is not None else None,
+        device=compute_device,
+    )
     freqs = torch.outer(t, freqs)
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
-    if device is not None and freqs_cis.device != torch.device(device):
-        freqs_cis = freqs_cis.to(device)
+    if target_device is not None and freqs_cis.device != target_device:
+        freqs_cis = freqs_cis.to(target_device)
     _FREQS_CIS_CACHE[key] = freqs_cis
     return freqs_cis
 

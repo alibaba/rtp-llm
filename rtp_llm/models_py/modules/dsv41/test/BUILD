@@ -123,7 +123,7 @@ _TESTS = [
         }),
         legacy_create_init = 0,
     )
-    for name in _TESTS if name not in ["test_prefill_workspace", "test_strategy_select", "test_gate_routing_metadata", "test_v41_aux_capture_mhc", "test_v41_cross_layer_mhc", "test_v41_mega_mhc", "test_mega_gate", "test_mhc_moe_inputs", "test_v41_query_quant", "test_silu_mul_bf16", "test_dsv41_kernel_jit_warmup"] + _ENGRAM_SM100_TESTS
+    for name in _TESTS if name not in ["test_prefill_workspace", "test_strategy_select", "test_gate_routing_metadata", "test_v41_aux_capture_mhc", "test_v41_cross_layer_mhc", "test_v41_mega_mhc", "test_mega_gate", "test_mhc_moe_inputs", "test_v41_query_quant", "test_silu_mul_bf16", "test_dsv41_kernel_jit_warmup", "test_v41_decode_rope_metadata"] + _ENGRAM_SM100_TESTS
 ]
 
 py_test(
@@ -156,7 +156,7 @@ py_test(
         tags = ["dsv41_cuda13"],
         legacy_create_init = 0,
     )
-    for name in ["test_silu_mul_bf16", "test_prefill_workspace", "test_strategy_select", "test_gate_routing_metadata", "test_v41_aux_capture_mhc", "test_v41_cross_layer_mhc", "test_v41_mega_mhc", "test_mega_gate", "test_private_gate_pack_eplb", "test_mhc_moe_inputs", "test_fake_balance_expert", "test_v41_query_quant", "test_dsv41_kernel_jit_warmup", "test_engram_decode_prefetch", "test_engram_quantized"] + _ENGRAM_SM100_TESTS
+    for name in ["test_v41_decode_rope_metadata", "test_silu_mul_bf16", "test_prefill_workspace", "test_strategy_select", "test_gate_routing_metadata", "test_v41_aux_capture_mhc", "test_v41_cross_layer_mhc", "test_v41_mega_mhc", "test_mega_gate", "test_private_gate_pack_eplb", "test_mhc_moe_inputs", "test_fake_balance_expert", "test_v41_query_quant", "test_dsv41_kernel_jit_warmup", "test_engram_decode_prefetch", "test_engram_quantized"] + _ENGRAM_SM100_TESTS
 ]
 
 dsv4_sm100_py_test(
