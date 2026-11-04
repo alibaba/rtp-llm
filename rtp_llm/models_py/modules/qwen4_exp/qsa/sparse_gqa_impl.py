@@ -745,6 +745,11 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             ),
             **self._paged_kv_scale_args(kv_cache),
             **({"graph_capture": True} if self.attn_inputs.is_cuda_graph else {}),
+            **(
+                {"_validated_plan": plan}
+                if plan.validated_cache_blocks is not None
+                else {}
+            ),
         )
         return output.transpose(1, 2).reshape(tokens, self.q_width)
 

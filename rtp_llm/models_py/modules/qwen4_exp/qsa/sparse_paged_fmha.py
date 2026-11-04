@@ -286,6 +286,7 @@ def sparse_paged_gqa_attn(
     output_gate: torch.Tensor | None = None,
     selected_has_count: bool = False,
     fp16_pv: bool = False,
+    _validated_plan=None,
 ) -> torch.Tensor:
     """Attend to request-local token indices in a paged main MHA cache.
 
@@ -400,13 +401,28 @@ def sparse_paged_gqa_attn(
         )
     if int(block_table.shape[1]) == 0:
         raise ValueError("block_table must contain at least one logical block")
+    prevalidated = False
+    if _validated_plan is not None:
+        from .fmha_plans import PagedInputs
+
+        prevalidated = (
+            isinstance(_validated_plan, PagedInputs)
+            and _validated_plan.validated_cache_blocks == cache_blocks
+            and _validated_plan.page_size == page_size
+            and _validated_plan.block_table is block_table
+            and _validated_plan.kv_lens is kv_lens
+            and _validated_plan.selected_indices is selected
+            and not selected_has_count
+        )
+        if not prevalidated:
+            raise ValueError("QSA validated plan does not own these paged operands")
     if graph_capture:
         warmup = os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
         if not torch.cuda.is_current_stream_capturing() and not warmup:
             raise RuntimeError(
                 "qwen4 sparse paged GQA graph_capture requires an active capture or graph warmup"
             )
-    else:
+    elif not prevalidated:
         if selected_has_count:
             count = selected[..., -1]
             slots = torch.arange(2051, device=selected.device)

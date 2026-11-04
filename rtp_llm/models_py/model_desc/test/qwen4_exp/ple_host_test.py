@@ -10,6 +10,35 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_cache_views import PLECa
 
 @skipUnless(torch.cuda.is_available(), "CUDA page-table validation is required")
 class PLEHostPagePairsTest(TestCase):
+    def test_native_eager_decode_reads_authoritative_host_table_without_gpu_item(self):
+        from rtp_llm.ops.compute_ops import PyAttentionInputs
+
+        inputs = PyAttentionInputs()
+        inputs.is_prefill = False
+        inputs.is_cuda_graph = False
+        inputs.kv_cache_block_id = torch.tensor(
+            [[1, 2], [3, 4]], dtype=torch.int32, device="cpu"
+        ).pin_memory()
+        inputs.kv_cache_block_id_device = inputs.kv_cache_block_id.to("cuda")
+        pages = torch.tensor([1, 0], dtype=torch.long, device="cpu")
+        original_item = torch.Tensor.item
+
+        def no_gpu_item(tensor, *args, **kwargs):
+            if tensor.is_cuda:
+                raise AssertionError("eager decode read GPU metadata on the host")
+            return original_item(tensor, *args, **kwargs)
+
+        with patch.object(torch.Tensor, "item", no_gpu_item):
+            blocks = PLECacheViews._physical_blocks(
+                inputs, PLE_STATE_TAG, pages, 5, torch.device("cuda")
+            )
+        self.assertEqual(blocks.tolist(), [2, 3])
+        inputs.kv_cache_block_id[0, 1] = 5
+        with self.assertRaisesRegex(RuntimeError, "physical block id exceeds"):
+            PLECacheViews._physical_blocks(
+                inputs, PLE_STATE_TAG, pages, 5, torch.device("cuda")
+            )
+
     def test_trusted_prefill_host_table_avoids_gpu_scalar_read(self):
         from rtp_llm.ops.compute_ops import PyAttentionInputs
 

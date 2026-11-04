@@ -120,16 +120,16 @@ TEST(MtpExecutorPolicyTest, HybridCacheWaitsBeforeReadingNextRoundHostState) {
 }
 
 TEST(MtpExecutorPolicyTest, MtpSequenceUpperBoundChainsUntilBookkeepingCatchesUp) {
-    constexpr int width       = 8;
-    const int     first_next  = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
-                                    /*pending=*/false, /*previous_next_bound=*/-1, /*host_seq_len=*/96)
-                                + width;
-    const int     second_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
-                                    /*pending=*/true, /*previous_next_bound=*/first_next, /*host_seq_len=*/96)
-                                + width;
-    const int     third_next  = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
-                                    /*pending=*/true, /*previous_next_bound=*/second_next, /*host_seq_len=*/96)
-                                + width;
+    constexpr int width      = 8;
+    const int     first_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
+                               /*pending=*/false, /*previous_next_bound=*/-1, /*host_seq_len=*/96)
+                           + width;
+    const int second_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
+                                /*pending=*/true, /*previous_next_bound=*/first_next, /*host_seq_len=*/96)
+                            + width;
+    const int third_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
+                               /*pending=*/true, /*previous_next_bound=*/second_next, /*host_seq_len=*/96)
+                           + width;
     EXPECT_EQ(104, first_next);
     EXPECT_EQ(112, second_next);
     EXPECT_EQ(120, third_next);
@@ -889,13 +889,13 @@ public:
         ResourceContext            resource_context;
         SpeculativeExecutionConfig sp_config;
 
-        model_config.max_seq_len                           = test_config.max_seq_len;
-        model_config.vocab_size                            = test_config.vocab_size;
-        model_config.num_layers                            = test_config.num_layers;
-        model_config.attn_config.rope_config.index_factor  = test_config.position_id_len_factor;
-        sp_config.type                                     = test_config.sp_type;
-        sp_config.gen_num_per_cycle                        = test_config.gen_num_per_cycle;
-        sp_config.sp_dspark_mask_token_id                  = test_config.dspark_mask_token_id;
+        model_config.max_seq_len                          = test_config.max_seq_len;
+        model_config.vocab_size                           = test_config.vocab_size;
+        model_config.num_layers                           = test_config.num_layers;
+        model_config.attn_config.rope_config.index_factor = test_config.position_id_len_factor;
+        sp_config.type                                    = test_config.sp_type;
+        sp_config.gen_num_per_cycle                       = test_config.gen_num_per_cycle;
+        sp_config.sp_dspark_mask_token_id                 = test_config.dspark_mask_token_id;
 
         resource_context.cache_manager =
             std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
@@ -930,12 +930,12 @@ public:
         test_kv_cache_config.kernel_seq_size_per_block = 2;
 
         auto configure_cache_model = [](ModelConfig& cache_model_config) {
-            cache_model_config.data_type                    = rtp_llm::TYPE_INT8;
-            cache_model_config.attn_config.kv_head_num      = 128;
-            cache_model_config.attn_config.size_per_head    = 256;
+            cache_model_config.data_type                           = rtp_llm::TYPE_INT8;
+            cache_model_config.attn_config.kv_head_num             = 128;
+            cache_model_config.attn_config.size_per_head           = 256;
             cache_model_config.attn_config.tokens_per_block        = 2;
             cache_model_config.attn_config.kernel_tokens_per_block = 2;
-            cache_model_config.attn_config.kv_cache_dtype   = KvCacheDataType::BASE;
+            cache_model_config.attn_config.kv_cache_dtype          = KvCacheDataType::BASE;
         };
         configure_cache_model(score_cache_model_config);
         configure_cache_model(propose_cache_model_config);
@@ -1287,9 +1287,9 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
         if (with_linear) {
             config.layer_num = single_layer ? 1 : 2;
             config.fromGroupedSpecs({test::makeLinearSpec("linear", 4, TYPE_FP16, 1, 1), full},
-                                    {{0}, {single_layer ? 0 : 1}},
-                                    {CacheGroupType::LINEAR, CacheGroupType::FULL},
-                                    {"linear", "full"});
+                                               {{0}, {single_layer ? 0 : 1}},
+                                               {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                               {"linear", "full"});
         }
         auto groups = config.topology().groups();
         for (auto& group : groups) {
@@ -1376,57 +1376,76 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
 
 INSTANTIATE_TEST_SUITE_P(CacheTopology, MtpCacheStrideTest, ::testing::Values(0, 1, 2));
 
-TEST_F(MtpExecutorTest, testMixedCacheSnapshotsRegatherCommittedTokensLengthsAndPositions) {
-    MtpExecutorTestConfig config;
-    config.gen_num_per_cycle = 3;
-    auto components          = createMtpExecutorComponents(config);
-    auto initial =
-        StreamSpecUpdateInfo{torch::tensor({{3}}, torch::kInt32), 1, 2, torch::ones({1, 2}), torch::ones({1, 4})};
-    auto steady = createDecodeStream(
-        components.model_config, components.runtime_config, components.resource_context, {0, 1, 2}, initial);
-    auto fresh = createDecodeStream(
-        components.model_config, components.runtime_config, components.resource_context, {1, 2}, initial);
-    const auto&                         cache = components.executor->cache_manager_->cacheConfig();
-    GenerateStream::MtpAsyncDeviceState state;
-    state.next_kv_cache_block_id_gpu =
-        torch::ones({cache.groupNums(), 1, 2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    state.next_kv_cache_kernel_block_id_gpu = state.next_kv_cache_block_id_gpu.clone();
-    steady->setMtpAsyncDeviceState(std::move(state));
-
-    auto model_config                    = components.model_config;
-    model_config.has_positional_encoding = true;
-    SpeculativeExecutionConfig speculative;
-    speculative.gen_num_per_cycle = 3;
-    MtpBatchStreamProcessor processor(
-        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, speculative, false);
-    TensorHolder holder;
-    auto         before = processor.gatherModelInput(StreamGroups({steady, fresh}), holder);
-    ASSERT_TRUE(before.ok());
-    EXPECT_EQ(before->sequence_lengths[0].item<int32_t>(), 0);
-
-    steady->incPendingAsyncBookkeeping();
-    components.executor->spec_bookkeeping_runner_.launch([steady]() {
+TEST_F(MtpExecutorTest, MixedCacheSnapshotsPrepareTokensLengthsAndPositionsWithoutWaiting) {
+    const char* previous = std::getenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
+    struct EnvGuard {
+        std::optional<std::string> previous;
+        ~EnvGuard() {
+            if (previous)
+                setenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE", previous->c_str(), 1);
+            else
+                unsetenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
+        }
+    } env_guard{previous ? std::optional<std::string>(previous) : std::nullopt};
+    setenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "1", 1);
+    for (int width : {1, 3}) {
+        SCOPED_TRACE(width);
+        MtpExecutorTestConfig config;
+        config.gen_num_per_cycle = width;
+        auto components          = createMtpExecutorComponents(config);
+        auto initial =
+            StreamSpecUpdateInfo{torch::tensor({{3}}, torch::kInt32), 1, 2, torch::ones({1, 2}), torch::ones({1, 4})};
+        auto steady = createDecodeStream(
+            components.model_config, components.runtime_config, components.resource_context, {0, 1, 2}, initial);
+        auto fresh = createDecodeStream(
+            components.model_config, components.runtime_config, components.resource_context, {1, 2}, initial);
+        const auto&                         cache = components.executor->cache_manager_->cacheConfig();
+        GenerateStream::MtpAsyncDeviceState state;
+        state.next_kv_cache_block_id_gpu =
+            torch::ones({cache.groupNums(), 1, 2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        state.next_kv_cache_kernel_block_id_gpu = state.next_kv_cache_block_id_gpu.clone();
+        state.accept_tokens_gpu                 = torch::tensor({{1, 3}}, torch::kInt32).cuda();
+        state.accept_len_gpu                    = torch::tensor({2}, torch::kInt32).cuda();
+        state.next_seq_len_gpu                  = torch::tensor({6}, torch::kInt32).cuda();
+        state.propose_tokens_gpu                = torch::tensor({{1}}, torch::kInt32).cuda();
+        state.last_hidden_states_gpu            = torch::ones({1, 2}).cuda();
+        steady->setMtpAsyncDeviceState(std::move(state));
+        steady->incPendingAsyncBookkeeping();
         struct PendingGuard {
             GenerateStreamPtr stream;
             ~PendingGuard() {
                 stream->decPendingAsyncBookkeepingAndMaybeRelease();
             }
-        } guard{steady};
-        steady->specUpdate({torch::tensor({{1, 3}}, torch::kInt32), 2, 1, torch::ones({1, 2}), torch::ones({1, 4})});
-    });
-    components.executor->waitPreviousBookkeepingBeforeStreamPreparation({steady, fresh});
-    ASSERT_FALSE(steady->hasPendingAsyncBookkeeping());
-    ASSERT_FALSE(steady->hasMtpCacheSnapshot());
-    ASSERT_FALSE(fresh->hasMtpCacheSnapshot());
-
-    auto gathered = processor.gatherDecodeModelInput(StreamGroups({steady, fresh}), holder);
-    ASSERT_TRUE(gathered.ok());
-    EXPECT_EQ((std::vector<int>{3, 3}), toVec<int>(gathered->combo_tokens));
-    EXPECT_EQ((std::vector<int>{5, 2}), toVec<int>(gathered->sequence_lengths));
-    EXPECT_EQ((std::vector<int>{5, 2}), toVec<int>(gathered->combo_position_ids));
-    processor.prepareDecodeDraftModelInput(StreamGroups({steady, fresh}), *gathered, holder);
-    EXPECT_EQ((std::vector<int>{1, 2}), toVec<int>(gathered->combo_tokens));
-    EXPECT_EQ((std::vector<int>{5, 2}), toVec<int>(gathered->prefix_lengths));
+        } pending{steady};
+        auto model_config                    = components.model_config;
+        model_config.has_positional_encoding = true;
+        SpeculativeExecutionConfig speculative;
+        speculative.gen_num_per_cycle = width;
+        MtpBatchStreamProcessor processor(
+            model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, speculative, false);
+        TensorHolder holder;
+        // There is no worker to finish this counter: an added fallback wait
+        // would deadlock instead of consuming the immutable snapshot.
+        components.executor->waitPreviousBookkeepingBeforeStreamPreparation({steady, fresh});
+        ASSERT_TRUE(steady->hasPendingAsyncBookkeeping());
+        ASSERT_TRUE(steady->hasMtpCacheSnapshot());
+        auto input = processor.gatherDecodeModelInput(StreamGroups({steady, fresh}), holder);
+        ASSERT_TRUE(input.ok());
+        if (width == 1) {
+            processor.prepareOneStepSpecDecodeModelInput(StreamGroups({steady, fresh}), *input, holder);
+            EXPECT_EQ((std::vector<int>{3, 1, 3, 2}), toVec<int>(input->combo_tokens));
+            EXPECT_EQ((std::vector<int>{5, 6, 2, 3}), toVec<int>(input->combo_position_ids));
+        } else {
+            processor.prepareDecodeDraftModelInput(StreamGroups({steady, fresh}), *input, holder);
+            EXPECT_EQ((std::vector<int>{1, 2}), toVec<int>(input->combo_tokens));
+            EXPECT_EQ((std::vector<int>{5, 2}), toVec<int>(input->combo_position_ids));
+        }
+        EXPECT_EQ((std::vector<int>{5, 2}), toVec<int>(input->prefix_lengths));
+        EXPECT_TRUE(steady->hasPendingAsyncBookkeeping());
+        fresh->incPendingAsyncBookkeeping();
+        EXPECT_THROW(processor.expandTargetVerifyPositionIds(StreamGroups({fresh}), *input), std::runtime_error);
+        fresh->decPendingAsyncBookkeepingAndMaybeRelease();
+    }
 }
 
 TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
@@ -1885,21 +1904,21 @@ TEST_F(MtpExecutorTest, testCPChunkedPrefillRestoresGlobalPositionIds) {
     // Use the real CP splitter with fake model forwards and TP collectives.
     for (const bool explicit_position_ids : {false, true}) {
         for (const bool middle_chunk : {false, true}) {
-            SCOPED_TRACE(testing::Message() << "explicit_position_ids=" << explicit_position_ids
-                                           << ", middle_chunk=" << middle_chunk);
+            SCOPED_TRACE(testing::Message()
+                         << "explicit_position_ids=" << explicit_position_ids << ", middle_chunk=" << middle_chunk);
             MtpExecutorTestConfig test_config;
-            test_config.gen_num_per_cycle      = 2;
-            test_config.mm_position_ids_style  = explicit_position_ids ? MROPE : DEFAULT;
-            test_config.position_id_len_factor = explicit_position_ids ? 3 : 1;
-            auto  components = createMtpExecutorComponents(test_config);
-            auto& executor = *components.executor;
+            test_config.gen_num_per_cycle                         = 2;
+            test_config.mm_position_ids_style                     = explicit_position_ids ? MROPE : DEFAULT;
+            test_config.position_id_len_factor                    = explicit_position_ids ? 3 : 1;
+            auto  components                                      = createMtpExecutorComponents(test_config);
+            auto& executor                                        = *components.executor;
             executor.parallelism_config_.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
             executor.warm_up_ = true;  // Stop after draft forward, before draft sampling.
 
             constexpr int prefix_len = 4;
             constexpr int chunk_len  = 8;
             const int     prompt_len = prefix_len + chunk_len + (middle_chunk ? 2 : 0);
-            vector<int> prompt{0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1};
+            vector<int>   prompt{0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1};
             prompt.resize(prompt_len);
             auto stream = createContextStream(
                 components.model_config, components.runtime_config, components.resource_context, prompt);
@@ -1910,8 +1929,9 @@ TEST_F(MtpExecutorTest, testCPChunkedPrefillRestoresGlobalPositionIds) {
 
             torch::Tensor prompt_positions;
             if (explicit_position_ids) {
-                prompt_positions = (torch::arange(prompt_len, torch::kInt32).unsqueeze(1) * 10
-                                    + torch::arange(3, torch::kInt32)).flatten();
+                prompt_positions =
+                    (torch::arange(prompt_len, torch::kInt32).unsqueeze(1) * 10 + torch::arange(3, torch::kInt32))
+                        .flatten();
                 stream->setContextPositionIds(prompt_positions);
             }
 
@@ -1945,14 +1965,14 @@ TEST_F(MtpExecutorTest, testCPChunkedPrefillRestoresGlobalPositionIds) {
                 input.combo_position_ids = local_positions;
             };
 
-            GptModelInputs draft_input = target_input;
+            GptModelInputs draft_input     = target_input;
             draft_input.combo_tokens       = torch::tensor({1, 2, 3, 0, 1, 2, 3, middle_chunk ? 0 : 2}, torch::kInt32);
             draft_input.last_hidden_states = target_output.all_hidden_states;
             if (explicit_position_ids) {
                 auto tail = middle_chunk ? torch::tensor({120, 121, 122}, torch::kInt32) :
                                            torch::tensor({112, 112, 112}, torch::kInt32);
-                draft_input.combo_position_ids = torch::cat(
-                    {prompt_positions.narrow(0, (prefix_len + 1) * 3, (chunk_len - 1) * 3), tail});
+                draft_input.combo_position_ids =
+                    torch::cat({prompt_positions.narrow(0, (prefix_len + 1) * 3, (chunk_len - 1) * 3), tail});
             }
             components.fake_draft_model->setInputs({draft_input});
             components.fake_draft_model->setOutputs({GptModelOutputs{}});
@@ -2759,9 +2779,9 @@ TEST_F(MtpExecutorTest, testDSparkDraftUsesFlashInferSamplingAndReturnsExactQ) {
     stream->generateConfig()->temperature = 0.5f;
     StreamGroups stream_groups({stream});
 
-    auto base_logits   = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.4f, 0.3f, 0.2f, 0.7f, 0.1f, 0.0f, -0.1f})
-                             .reshape({1, gamma, vocab_size})
-                             .to(torch::kCUDA);
+    auto base_logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.4f, 0.3f, 0.2f, 0.7f, 0.1f, 0.0f, -0.1f})
+                           .reshape({1, gamma, vocab_size})
+                           .to(torch::kCUDA);
     auto anchors       = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     auto padded_logits = torch::cat(
         {base_logits.reshape({gamma, vocab_size}),
@@ -2937,8 +2957,8 @@ TEST_F(MtpExecutorTest, testDSparkReducedVocabFeedsMappedTargetTokenIntoMarkovCh
     auto anchors     = torch::tensor({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     auto temperature = torch::ones({1}, cuda_float);
     auto markov_w1   = torch::tensor({0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f}, torch::kFloat32)
-                           .reshape({target_vocab_size, 1})
-                           .to(torch::kCUDA);
+                         .reshape({target_vocab_size, 1})
+                         .to(torch::kCUDA);
     auto markov_w2 =
         torch::tensor({-100.0f, 0.0f, 100.0f}, torch::kFloat32).reshape({draft_vocab_size, 1}).to(torch::kCUDA);
 
@@ -3403,11 +3423,11 @@ TEST_F(MtpExecutorTest, testFakeDecodeUsesHyperConnectionInputHiddenSize) {
     ModelConfig     model_config;
     RuntimeConfig   runtime_config;
     ResourceContext resource_context;
-    model_config.max_seq_len           = 64;
-    model_config.vocab_size            = vocab_size;
-    model_config.hidden_size           = 8;
-    model_config.hc_mult               = 4;
-    model_config.data_type             = TYPE_FP16;
+    model_config.max_seq_len = 64;
+    model_config.vocab_size  = vocab_size;
+    model_config.hidden_size = 8;
+    model_config.hc_mult     = 4;
+    model_config.data_type   = TYPE_FP16;
 
     auto stream = MtpExecutor::createMinFakeDecodeStream(
         gamma, model_config, runtime_config, resource_context, vocab_size, false);
@@ -3417,13 +3437,49 @@ TEST_F(MtpExecutorTest, testFakeDecodeUsesHyperConnectionInputHiddenSize) {
     EXPECT_EQ((std::vector<int64_t>{1, 32}), sp_buffer->hidden_states.sizes().vec());
 }
 
+TEST_F(MtpExecutorTest, MixedPreviousTargetTokensUseDeviceStateWithoutBookkeepingWait) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto steady =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    auto fresh =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {1, 2});
+    auto stale    = std::make_shared<SpeculativeExecutorStreamOutput>();
+    stale->tokens = torch::tensor({-999}, torch::kInt32);
+    steady->setSPOutputBuffer(stale);
+    auto initial    = std::make_shared<SpeculativeExecutorStreamOutput>();
+    initial->tokens = torch::tensor({20}, torch::kInt32);
+    fresh->setSPOutputBuffer(initial);
+    GenerateStream::MtpAsyncDeviceState state;
+    state.accept_tokens_gpu = torch::tensor({10, 11, 12}, torch::kInt32).cuda();
+    state.accept_len_gpu    = torch::tensor({2}, torch::kInt32).cuda();
+    steady->setMtpAsyncDeviceState(state);
+    steady->incPendingAsyncBookkeeping();
+    bool          from_device = false;
+    torch::Tensor result;
+    try {
+        result = components.executor->gatherPreviousTargetTokens(StreamGroups({steady, fresh}), 2, true, from_device);
+    } catch (...) {
+        steady->decPendingAsyncBookkeepingAndMaybeRelease();
+        throw;
+    }
+    // No worker will finish until the call above returns, so an inserted join
+    // would deadlock. The poisoned host row must never reach the output.
+    EXPECT_TRUE(steady->hasPendingAsyncBookkeeping());
+    steady->decPendingAsyncBookkeepingAndMaybeRelease();
+    EXPECT_TRUE(from_device);
+    EXPECT_EQ((std::vector<int>{11, 20}), toVec<int>(result));
+    initial->tokens.fill_(21);
+    result = components.executor->gatherPreviousTargetTokens(StreamGroups({fresh}), 1, true, from_device);
+    EXPECT_FALSE(from_device);
+    EXPECT_EQ((std::vector<int>{21}), toVec<int>(result));
+}
+
 TEST_F(MtpExecutorTest, HostTargetStatusDoesNotAllocateDeviceStatusAndPropagatesFailure) {
     auto  components = createMtpExecutorComponents(MtpExecutorTestConfig{});
     auto* model      = components.fake_target_model.get();
     model->enableSpeculativeTargetCommit();
     components.executor->setTargetModel(std::move(components.fake_target_model));
-    components.executor->parallelism_config_.tp_size        = 2;
-    components.executor->speculative_target_prepare_status_ = torch::Tensor();
+    components.executor->parallelism_config_.tp_size = 2;
     std::vector<bool> seen;
     model->host_status_reducer = [&seen](bool ok) -> std::optional<bool> {
         seen.push_back(ok);
@@ -3432,10 +3488,11 @@ TEST_F(MtpExecutorTest, HostTargetStatusDoesNotAllocateDeviceStatusAndPropagates
     EXPECT_FALSE(components.executor->reduceSpeculativeTargetPrepareStatus(true));
     EXPECT_FALSE(components.executor->reduceSpeculativeTargetPrepareStatus(false));
     EXPECT_EQ(seen, (std::vector<bool>{true, false}));
-    EXPECT_FALSE(components.executor->speculative_target_prepare_status_.defined());
     model->host_status_reducer = [](bool ok) -> std::optional<bool> { return ok; };
     EXPECT_TRUE(components.executor->reduceSpeculativeTargetPrepareStatus(true));
     model->host_status_reducer = [](bool) -> std::optional<bool> { throw std::runtime_error("poisoned host status"); };
+    EXPECT_THROW(components.executor->reduceSpeculativeTargetPrepareStatus(true), std::runtime_error);
+    model->host_status_reducer = {};
     EXPECT_THROW(components.executor->reduceSpeculativeTargetPrepareStatus(true), std::runtime_error);
     // TP1 remains local and never enters the transport, even when configured.
     components.executor->parallelism_config_.tp_size = 1;

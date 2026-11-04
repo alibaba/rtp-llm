@@ -17,6 +17,7 @@ class PagedInputs:
     kv_lens: torch.Tensor
     block_table: torch.Tensor
     page_size: int
+    validated_cache_blocks: Optional[int] = None
 
 
 @dataclass(frozen=True)

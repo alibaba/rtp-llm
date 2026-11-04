@@ -1437,6 +1437,15 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 PrepareOnlySpeculativeCommitBridgeModel(), "has_hooks"
             )
 
+    def test_speculative_commit_explicit_capability_disables_inactive_hooks(self):
+        model = SpeculativeCommitBridgeModel()
+        self.assertTrue(run_speculative_commit_bridge(model, "has_hooks"))
+        model.requires_speculative_target_commit = lambda: False
+        self.assertFalse(run_speculative_commit_bridge(model, "has_hooks"))
+        model.requires_speculative_target_commit = lambda: True
+        self.assertTrue(run_speculative_commit_bridge(model, "has_hooks"))
+        self.assertFalse(run_speculative_commit_bridge(model, "has_hooks", False))
+
     def test_cpu_status_bridge_preserves_false_and_ignores_non_target(self):
         model = SpeculativeCommitBridgeModel()
         calls = []
@@ -1556,9 +1565,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             ["301", "301", "302"],
         )
         middle = _record_for_request(result, 302)
-        self.assertTrue(
-            all("_tag_full" in block["key"] for block in middle["blocks"])
-        )
+        self.assertTrue(all("_tag_full" in block["key"] for block in middle["blocks"]))
         blocks = _blocks_by_key(result)
         for tag, stride, expected in (
             ("swa", 24, {3103: 3, 3104: 4}),
@@ -1914,10 +1921,13 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             scenarios += ["capture_fp8", "capture_cp"]
         for scenario in scenarios:
             namespace = (
-                "ProfileActor" + "A" * 256 if scenario == "capture_bf16" else "TestActor"
+                "ProfileActor" + "A" * 256
+                if scenario == "capture_bf16"
+                else "TestActor"
             )
-            with self.subTest(scenario=scenario), patch.dict(
-                os.environ, {_MOONCAKE_STORE_KEY_NAMESPACE_ENV: namespace}
+            with (
+                self.subTest(scenario=scenario),
+                patch.dict(os.environ, {_MOONCAKE_STORE_KEY_NAMESPACE_ENV: namespace}),
             ):
                 model_type = (
                     PositionAwareCaptureModel
@@ -1940,7 +1950,8 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 self.assertEqual(result["hidden_width"], baseline["hidden_width"])
                 for name in _CAPTURE_QPS_METRICS | _CAPTURE_STATUS_METRICS:
                     self.assertEqual(
-                        result["capture_metrics"][name], baseline["capture_metrics"][name]
+                        result["capture_metrics"][name],
+                        baseline["capture_metrics"][name],
                     )
                 self.assertEqual(
                     len(result["forward_hidden_states"]),
@@ -2001,7 +2012,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 children = {e.name: e for e in events if e.cpu_parent is publish[0]}
                 if scenario == "capture_non_owner":
                     self.assertNotIn("hidden_state_capture.gil_acquire", children)
-                    self.assertNotIn("hidden_state_capture.observe_async_errors", children)
+                    self.assertNotIn(
+                        "hidden_state_capture.observe_async_errors", children
+                    )
                     self.assertNotIn("hidden_state_capture.prepare_payload", children)
                     self.assertNotIn("hidden_state_capture.put_batch_admit", children)
                     self.assertNotIn("hidden_state_capture.flush", children)
@@ -2017,7 +2030,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                     if scenario == "capture_bf16":
                         self.assertGreater(len(marker.name), 256)
                     self.assertIs(marker.cpu_parent, publish[0])
-                    self.assertLessEqual(prepare.time_range.end, marker.time_range.start)
+                    self.assertLessEqual(
+                        prepare.time_range.end, marker.time_range.start
+                    )
                     self.assertLessEqual(marker.time_range.start, marker.time_range.end)
                     self.assertLessEqual(marker.time_range.end, admit.time_range.start)
                     self.assertLessEqual(prepare.time_range.end, admit.time_range.start)
@@ -2083,11 +2098,15 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                     return None
                 return errors
 
-            with self.subTest(failure=failure, poll=poll_failure_at), patch.multiple(
-                _FakeEagleMooncakeStore,
-                fail_put=failure == "fail_put",
-                fail_flush=failure == "fail_flush",
-            ), patch.object(_FakeEagleMooncakeStore, "take_async_errors", poll):
+            with (
+                self.subTest(failure=failure, poll=poll_failure_at),
+                patch.multiple(
+                    _FakeEagleMooncakeStore,
+                    fail_put=failure == "fail_put",
+                    fail_flush=failure == "fail_flush",
+                ),
+                patch.object(_FakeEagleMooncakeStore, "take_async_errors", poll),
+            ):
                 store_calls = []
                 _FakeEagleMooncakeStore.events = store_calls
                 with torch.profiler.profile(
@@ -2103,8 +2122,12 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 self.assertEqual(
                     metrics[f"{_CAPTURE_METRIC_PREFIX}publish_success_qps"], 0
                 )
-                self.assertEqual(metrics[f"{_CAPTURE_METRIC_PREFIX}store_failure_qps"], 1)
-                self.assertEqual(metrics[f"{_CAPTURE_METRIC_PREFIX}prepare_failure_qps"], 0)
+                self.assertEqual(
+                    metrics[f"{_CAPTURE_METRIC_PREFIX}store_failure_qps"], 1
+                )
+                self.assertEqual(
+                    metrics[f"{_CAPTURE_METRIC_PREFIX}prepare_failure_qps"], 0
+                )
                 self.assertCaptureStatus(metrics, enabled=1, broken=0)
                 events = prof.events()
                 self.assertCaptureProfileStoreCalls(events, store_calls)
@@ -3359,8 +3382,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             if missing_method is not None
             else contextlib.nullcontext()
         )
-        with missing_method_patch, patch.object(
-            _FakeMooncakeConfig, "from_env", tracked_from_env
+        with (
+            missing_method_patch,
+            patch.object(_FakeMooncakeConfig, "from_env", tracked_from_env),
         ):
             result = initialize_capture_publisher_with_core_dump()
         self.assertTrue(result["core_dump_enabled"])

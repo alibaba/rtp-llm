@@ -788,10 +788,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
     parallelism_config_ = params.parallelism_config;
-    if (parallelism_config_.tp_size > 1) {
-        speculative_target_prepare_status_ =
-            torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    }
     if (is_dspark_ && parallelism_config_.tp_size > 1) {
         dspark_cache_store_status_ =
             torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
@@ -1987,8 +1983,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 #if USE_PPU
     // PPU host rejection selects rows from the normalized target output.
     // Reading the raw buffer's prefix again would undo that selection.
-    preserve_compacted_hidden = model_input.last_hidden_states.defined()
-                                && model_output.all_hidden_states.defined()
+    preserve_compacted_hidden = model_input.last_hidden_states.defined() && model_output.all_hidden_states.defined()
                                 && model_input.last_hidden_states.dim() == 2
                                 && model_output.all_hidden_states.dim() == 2
                                 && model_input.last_hidden_states.size(0) < model_output.all_hidden_states.size(0);
@@ -2073,18 +2068,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 }
 
 void MtpExecutor::waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams) {
-    const auto snapshots =
-        std::count_if(streams.begin(), streams.end(), [](const auto& stream) { return stream->hasMtpCacheSnapshot(); });
-    const bool mixed_snapshots      = snapshots > 0 && static_cast<size_t>(snapshots) != streams.size();
-    bool       cache_snapshot_ready = true;
+    bool cache_snapshot_ready = true;
     for (const auto& stream : streams) {
         if (stream->hasPendingAsyncBookkeeping() && (!useDeviceInput() || !stream->hasMtpCacheSnapshot())) {
             cache_snapshot_ready = false;
             break;
         }
     }
-    if (!mixed_snapshots
-        && !mustWaitBeforeStreamPreparation(
+    if (!mustWaitBeforeStreamPreparation(
             useStreamAsync(), useDropBroadSync(), is_linear_attention_model_, cache_snapshot_ready)) {
         return;
     }
@@ -2097,14 +2088,6 @@ void MtpExecutor::waitPreviousBookkeepingBeforeStreamPreparation(const std::list
     // DROP_BROAD_SYNC keeps its device-state overlap unchanged.
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.wait_prev_bookkeeping(stream_count=%zu)", streams.size());
     spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
-    if (mixed_snapshots) {
-        // A fresh stream can force the whole batch onto host-input fallback.
-        // Snapshot rows deliberately contain token/length/position sentinels;
-        // regather all fields from committed host state after the worker joins.
-        for (const auto& stream : streams) {
-            stream->clearMtpCacheSnapshot();
-        }
-    }
 }
 
 bool MtpExecutor::mustWaitBeforeStreamPreparation(bool stream_async,
@@ -2349,12 +2332,9 @@ bool MtpExecutor::reduceSpeculativeTargetPrepareStatus(bool local_ok) {
             return *host_status;
         }
     }
-    RTP_LLM_CHECK_WITH_INFO(speculative_target_prepare_status_.defined(),
-                            "speculative target TP prepare status buffer is not initialized");
-    speculative_target_prepare_status_.fill_(local_ok ? 1 : 0);
-    auto global_status =
-        execAllReduce({speculative_target_prepare_status_, ReduceOp::Min, false, ParallelMode::TP}).buffer;
-    return global_status.item<int32_t>() != 0;
+    // The status originates on the host. A model enabling transactions must
+    // provide a host control transport rather than draining the CUDA stream.
+    throw std::runtime_error("speculative target transactions require a CPU TP status reducer");
 }
 
 void MtpExecutor::rollbackSpeculativeTargetStateOrFailStop(const char* phase) {
@@ -3056,6 +3036,70 @@ bool MtpExecutor::updateEplbConfig(const EPLBConfig& config) {
     return true;
 }
 
+torch::Tensor MtpExecutor::gatherPreviousTargetTokens(const StreamGroups& stream_groups,
+                                                      int64_t             batch_size,
+                                                      bool                use_device_state,
+                                                      bool&               from_device_state) {
+    const auto all_streams = stream_groups.allStreams();
+    const auto cuda_i32    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    from_device_state      = false;
+    if (all_streams.empty()) {
+        return torch::empty({batch_size}, cuda_i32);
+    }
+    RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(all_streams.size()) == batch_size, "MTP token batch mismatch");
+    std::vector<GenerateStream::MtpAsyncDeviceState> states;
+    std::vector<torch::Tensor>                       accept_tokens, accept_lengths;
+    states.reserve(batch_size);
+    for (const auto& stream : all_streams) {
+        auto state = use_device_state ? stream->getMtpAsyncDeviceState() : GenerateStream::MtpAsyncDeviceState{};
+        if (state.accept_tokens_gpu.defined() && state.accept_tokens_gpu.is_cuda() && state.accept_len_gpu.defined()
+            && state.accept_len_gpu.is_cuda()) {
+            accept_tokens.push_back(state.accept_tokens_gpu.reshape({1, -1}));
+            accept_lengths.push_back(state.accept_len_gpu.reshape({1}));
+        }
+        states.push_back(std::move(state));
+    }
+    if (static_cast<int64_t>(accept_tokens.size()) == batch_size) {
+        // The usual steady batch keeps its single batched GPU gather.
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.draft_model_decode(pre_target_device_gather)");
+        auto indices      = (torch::cat(accept_lengths).to(torch::kInt64) - 1).reshape({batch_size, 1});
+        from_device_state = true;
+        return torch::cat(accept_tokens).gather(1, indices).reshape({batch_size}).to(torch::kInt32);
+    }
+    RTP_LLM_PROFILE_SCOPE("executor.mtp.draft_model_decode(pre_target_host_fallback)");
+    auto host_tokens = torch::zeros({batch_size}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+    std::vector<torch::Tensor> rows(batch_size);
+    int64_t                    row = 0;
+    for (const auto& stream : all_streams) {
+        const auto& state = states[row];
+        if (state.accept_tokens_gpu.defined() && state.accept_tokens_gpu.is_cuda() && state.accept_len_gpu.defined()
+            && state.accept_len_gpu.is_cuda()) {
+            // A fresh/PD stream must not force other rows to read host buffers
+            // still owned by bookkeeping. Their published GPU state is ready.
+            auto index        = state.accept_len_gpu.to(torch::kInt64).reshape({1}) - 1;
+            rows[row]         = state.accept_tokens_gpu.reshape({-1}).gather(0, index).to(torch::kInt32);
+            from_device_state = true;
+        } else {
+            // Device state is published before the worker starts. Missing both
+            // states is an ownership violation, never a reason to add a wait.
+            RTP_LLM_CHECK_WITH_INFO(!stream->hasPendingAsyncBookkeeping(),
+                                    "pending MTP bookkeeping requires published device tokens");
+            host_tokens.data_ptr<int32_t>()[row] = stream->getSPOutputBuffer()->tokens.data_ptr<int32_t>()[0];
+        }
+        ++row;
+    }
+    auto uploaded = toCudaWithHostHold(host_tokens, buffer_holder_);
+    if (!from_device_state) {
+        return uploaded;
+    }
+    for (int64_t i = 0; i < batch_size; ++i) {
+        if (!rows[i].defined()) {
+            rows[i] = uploaded.narrow(0, i, 1);
+        }
+    }
+    return torch::cat(rows);
+}
+
 void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    const StreamGroups&         stream_groups,
                                    std::vector<torch::Tensor>& draft_probs_list,
@@ -3094,69 +3138,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         // model_input.combo_tokens assignments do not mutate this storage.
         pre_propose_token_t_raw = to_cuda_i32_flat(model_input.combo_tokens);
     }
-    const auto all_streams = stream_groups.allStreams();
-
-    torch::Tensor pre_target_token_t;
-    bool          pre_target_from_device_state = false;
-    // Prefer device state published before the bookkeeping worker launches.
-    // Batch gather: pre_target_token[i] = accept_tokens[i, accept_len[i]-1]
-    {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.draft_model_decode(pre_target_device_gather)");
-        bool all_device_state = (useStreamAsync() || useAsyncDeviceState()) && !all_streams.empty();
-        if (all_device_state) {
-            // Check all streams have device state and collect batch tensors
-            std::vector<torch::Tensor> accept_tokens_slices;
-            std::vector<torch::Tensor> accept_len_slices;
-            accept_tokens_slices.reserve(batch_size);
-            accept_len_slices.reserve(batch_size);
-            for (const auto& stream : all_streams) {
-                const auto  state         = stream->getMtpAsyncDeviceState();
-                const auto& accept_tokens = state.accept_tokens_gpu;
-                const auto& accept_len    = state.accept_len_gpu;
-                if (!accept_tokens.defined() || !accept_tokens.is_cuda() || !accept_len.defined()
-                    || !accept_len.is_cuda()) {
-                    all_device_state = false;
-                    break;
-                }
-                accept_tokens_slices.push_back(accept_tokens.reshape({1, -1}));
-                accept_len_slices.push_back(accept_len.reshape({1}));
-            }
-            if (all_device_state) {
-                // Batch gather: [batch, propose_step+1] -> pick column [accept_len-1] per row
-                auto accept_tokens_2d = torch::cat(accept_tokens_slices, 0);  // [batch, cols]
-                auto accept_len_batch = torch::cat(accept_len_slices, 0);     // [batch]
-                auto idx_long         = (accept_len_batch.to(torch::kInt64) - 1).reshape({(int64_t)batch_size, 1});
-                pre_target_token_t =
-                    accept_tokens_2d.gather(1, idx_long).reshape({(int64_t)batch_size}).to(torch::kInt32);
-                pre_target_from_device_state = true;
-            }
-        }
-        if (!all_device_state && all_streams.empty()) {
-            pre_target_token_t =
-                torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-        }
-    }
-
-    if (!pre_target_token_t.defined()) {
-        // Legacy fallback for streams without MtpAsyncDeviceState, such as old
-        // PD-disaggregate init paths. Unsafe while a previous worker is in
-        // flight with DROP_BROAD_SYNC=1.
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.draft_model_decode(pre_target_host_fallback)");
-        for (const auto& stream : all_streams) {
-            if (stream->hasPendingAsyncBookkeeping()) {
-                stream->waitPendingAsyncBookkeeping();
-            }
-        }
-        auto pre_target_token =
-            torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
-        int batch_idx = 0;
-        for (const auto& stream : all_streams) {
-            int* propose_tokens                         = stream->getSPOutputBuffer()->tokens.data_ptr<int>();
-            pre_target_token.data_ptr<int>()[batch_idx] = propose_tokens[0];
-            batch_idx++;
-        }
-        pre_target_token_t = toCudaWithHostHold(pre_target_token, buffer_holder_);
-    }
+    bool pre_target_from_device_state = false;
+    auto pre_target_token_t           = gatherPreviousTargetTokens(
+        stream_groups, batch_size, useStreamAsync() || useAsyncDeviceState(), pre_target_from_device_state);
     draft_token_columns.push_back(to_cuda_i32_flat(pre_target_token_t));
     draft_token_columns.push_back(pre_propose_token_t_raw);
 

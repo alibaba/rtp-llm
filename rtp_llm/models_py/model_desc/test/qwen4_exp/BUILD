@@ -53,6 +53,16 @@ qwen4_test(
 )
 
 qwen4_test(
+    name = "ple_graph_test_sm120",
+    src = "ple_graph_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    deps = [
+        ":fixtures",
+        ":qsa_fixtures",
+    ],
+)
+
+qwen4_test(
     name = "ple_host_test",
     src = "ple_host_test.py",
     gpu = "L20_CU13",

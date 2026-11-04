@@ -359,11 +359,11 @@ def userbuffers_send(tensor: torch.Tensor, handler: int, srcoffset: int, dstoffs
     """
     Send data via user buffers to peer
     """
-def cpu_status_size() -> int:
+def cpu_status_size(world_size: int = 2) -> int:
     """
-    Byte size of one TP2 CPU status slot
+    Byte size of one local TP CPU status mapping
     """
-def cpu_status_initialize(pointer: int, bytes: int) -> int:
+def cpu_status_initialize(pointer: int, bytes: int, world_size: int = 2) -> int:
     """
     Initialize the status slot at an aligned shared mapping; returns 0 on success
     """

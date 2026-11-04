@@ -45,12 +45,16 @@ class PLECacheViews:
         blocks: torch.Tensor,
         pool_rows: int,
     ) -> torch.Tensor:
-        if bool((blocks <= 0).any().item()):
+        verdict = (
+            (blocks <= 0).any().to(torch.int32)
+            | ((blocks >= pool_rows).any().to(torch.int32) << 1)
+        ).item()
+        if verdict & 1:
             raise RuntimeError(
                 f"PLE cache {tag!r} has an unallocated logical page; "
                 f"blocks={blocks.tolist()[:32]} pool_rows={pool_rows}"
             )
-        if bool((blocks >= pool_rows).any().item()):
+        if verdict & 2:
             raise RuntimeError(f"PLE cache {tag!r} physical block id exceeds its pool")
         return blocks.to(torch.long)
 
@@ -71,7 +75,23 @@ class PLECacheViews:
             logical_pages.numel()
         ):
             raise RuntimeError(f"PLE cache {tag!r} block-table batch is inconsistent")
-        pages = logical_pages.to(device=table.device, dtype=torch.long)
+        host_table = getattr(attention_inputs, "kv_cache_block_id", None)
+        use_host_table = (
+            not graph_capture
+            and type(attention_inputs) is PyAttentionInputs
+            and not bool(attention_inputs.is_cuda_graph)
+            and logical_pages.device.type == "cpu"
+            and table.is_cuda
+            and isinstance(host_table, torch.Tensor)
+            and host_table.device.type == "cpu"
+            and host_table.dtype == table.dtype
+            and host_table.shape == table.shape
+        )
+        # Native eager inputs upload this exact host table in PyWrappedModel.
+        # Graph/device snapshots have no authoritative host table and retain
+        # the device checks below. Never copy device metadata back for decode.
+        lookup_table = host_table if use_host_table else table
+        pages = logical_pages.to(device=lookup_table.device, dtype=torch.long)
         if graph_capture:
             # The graph runner owns the fixed-size device table and refreshes
             # it each step. Clamp invalid indices to
@@ -93,15 +113,24 @@ class PLECacheViews:
             return torch.where(valid_page & valid_block, blocks, 0).to(
                 device=device, dtype=torch.long
             )
-        if not pages.numel() or bool((pages < 0).any().item()):
+        if not pages.numel():
             raise RuntimeError(f"PLE cache {tag!r} has an invalid logical page")
-        if bool((pages >= int(table.shape[1])).any().item()):
+        verdict = (
+            (pages < 0).any().to(torch.int32)
+            | ((pages >= int(table.shape[1])).any().to(torch.int32) << 1)
+        ).item()
+        if verdict & 1:
+            raise RuntimeError(f"PLE cache {tag!r} has an invalid logical page")
+        if verdict & 2:
             raise RuntimeError(
                 f"PLE cache {tag!r} logical page exceeds its block table"
             )
-        return cls._check_physical_blocks(
-            tag, table.gather(1, pages.unsqueeze(1)).squeeze(1), pool_rows
-        ).to(device=device)
+        blocks = cls._check_physical_blocks(
+            tag, lookup_table.gather(1, pages.unsqueeze(1)).squeeze(1), pool_rows
+        )
+        if blocks.device.type == "cpu" and device.type == "cuda":
+            blocks = blocks.pin_memory()
+        return blocks.to(device=device, non_blocking=True)
 
     @classmethod
     def _commit_physical_blocks(

@@ -100,11 +100,11 @@ def _draft_incremental_prefill_geometry(
             "qwen4_exp QSA draft incremental prefill requires int32 "
             "prefix_lengths [B]"
         )
+    host_prefixes = self.host_values(prefixes)
     prefixes = prefixes.to(
         device=device, dtype=torch.int64, non_blocking=True
     ).contiguous()
-    invalid_prefixes = prefixes <= 0 if draft else prefixes < 0
-    if bool(torch.any(invalid_prefixes).item()):
+    if any(value <= 0 if draft else value < 0 for value in host_prefixes):
         requirement = "nonzero" if draft else "non-negative"
         raise RuntimeError(
             f"qwen4_exp QSA {label} requires every prefix length to be "
@@ -131,11 +131,14 @@ def _draft_incremental_prefill_geometry(
         )
     expected_cu_kv = torch.zeros_like(expected_cu)
     visible_ends = prefixes + torch.tensor(lengths, dtype=torch.int64, device=device)
-    if bool(torch.any(visible_ends > torch.iinfo(torch.int32).max).item()):
+    host_visible_ends = [
+        prefix + length for prefix, length in zip(host_prefixes, lengths)
+    ]
+    if max(host_visible_ends) > torch.iinfo(torch.int32).max:
         raise RuntimeError(
             "qwen4_exp QSA draft incremental prefill positions exceed int32"
         )
-    if int(visible_ends.sum().item()) > torch.iinfo(torch.int32).max:
+    if sum(host_visible_ends) > torch.iinfo(torch.int32).max:
         raise RuntimeError(
             "qwen4_exp QSA draft incremental prefill cumulative KV lengths "
             "exceed int32"
@@ -165,7 +168,7 @@ def _draft_incremental_prefill_geometry(
                 "cu_kv_seqlens metadata"
             )
 
-    prefix_values = prefixes.tolist()
+    prefix_values = host_prefixes
     logical_positions = torch.cat(
         [
             torch.arange(prefix, prefix + length, device=device)
@@ -277,6 +280,7 @@ def _draft_incremental_prefill_geometry(
     # A completed group may read committed raw keys preceding the new rows.
     # Validate that source tail and every destination absolute state page.
     state_table_width = int(state_table.shape[1])
+    state_pairs = []
     for request_idx, (prefix, length) in enumerate(zip(prefix_values, lengths)):
         first_needed = prefix - (prefix % ratio)
         logical_blocks = {
@@ -289,12 +293,12 @@ def _draft_incremental_prefill_geometry(
                     "QSA cache 'indexer_state' block table does not cover the "
                     "draft incremental tail"
                 )
-            block_id = int(state_table[request_idx, logical_block].item())
-            if block_id <= 0 or block_id >= int(state_pool.shape[0]):
-                raise RuntimeError(
-                    "QSA cache 'indexer_state' draft incremental tail resolves "
-                    "to an unallocated or out-of-range physical block"
-                )
+            state_pairs.append((request_idx, logical_block))
+    from .qsa_cache_views import _validate_state_pairs
+
+    _validate_state_pairs(
+        state_table, state_pairs, int(state_pool.shape[0]), "draft incremental tail"
+    )
 
     block_starts = logical_positions - logical_positions.remainder(ratio)
     try:
@@ -421,7 +425,8 @@ def _target_verify_geometry(
         )
     if graph_target and prefixes.device.type != "cpu":
         raise RuntimeError("qwen4_exp QSA target Graph requires host prefixes")
-    if graph_target and bool(torch.any(prefixes < 0).item()):
+    prefix_values = self.host_values(prefixes)
+    if any(prefix < 0 for prefix in prefix_values):
         raise RuntimeError(
             "qwen4_exp QSA target-verify prefix lengths must be non-negative"
         )
@@ -429,10 +434,6 @@ def _target_verify_geometry(
     prefixes_device = prefix_source.to(
         device=device, dtype=torch.int32, non_blocking=True
     ).contiguous()
-    if not graph_target and bool(torch.any(prefixes_device < 0).item()):
-        raise RuntimeError(
-            "qwen4_exp QSA target-verify prefix lengths must be non-negative"
-        )
 
     expected_cu = torch.arange(
         0,
@@ -572,11 +573,7 @@ def _target_verify_geometry(
         active = state_table.ne(0).any(dim=1, keepdim=True)
         visible_lengths = torch.where(active, visible_lengths, 0)
         compressed_lengths = torch.where(active, compressed_lengths, 0)
-    max_ctx_len = (
-        (int(prefixes.max().item()) + query_len) // ratio
-        if prefixes.device.type == "cpu"
-        else int(compressed_lengths.max().item())
-    )
+    max_ctx_len = (max(prefix_values) + query_len) // ratio
     if graph_target:
         required_host = (max_ctx_len + kv_entries_per_block - 1) // kv_entries_per_block
         if required_host > int(kv_table.shape[1]):
@@ -598,9 +595,8 @@ def _target_verify_geometry(
     # absolute logical-page columns (including sentinel holes). Validate the
     # small committed-tail + candidate window explicitly before any write.
     state_table_width = int(state_table.shape[1])
-    for request_idx, prefix in enumerate(
-        prefixes.tolist() if graph_target else prefixes_device.tolist()
-    ):
+    state_pairs = []
+    for request_idx, prefix in enumerate(prefix_values):
         first_needed = max(0, prefix - (prefix % ratio))
         logical_blocks = {
             position // state_tokens_per_block
@@ -613,12 +609,13 @@ def _target_verify_geometry(
                     "target-verify tail"
                 )
             if not graph_target:
-                block_id = int(state_table[request_idx, logical_block].item())
-                if block_id <= 0 or block_id >= int(state_pool.shape[0]):
-                    raise RuntimeError(
-                        "QSA cache 'indexer_state' target-verify tail resolves to "
-                        "an unallocated or out-of-range physical block"
-                    )
+                state_pairs.append((request_idx, logical_block))
+    if not graph_target:
+        from .qsa_cache_views import _validate_state_pairs
+
+        _validate_state_pairs(
+            state_table, state_pairs, int(state_pool.shape[0]), "target-verify tail"
+        )
 
     return TargetVerifyPlan(
         **{

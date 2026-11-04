@@ -550,8 +550,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // stream, so it never blocks on kernels enqueued after the copies (fills,
     // dummy-row installs) that do not feed the host mirrors.
     torch::Event host_mirror_copy_event = cuda_graph::makeGraphEvent();
-    auto stridedCopyHost = [&pending_host_mirror_d2h, &host_mirror_copy_event](
-        const torch::Tensor& src, torch::Tensor& dst) {
+    auto         stridedCopyHost        = [&pending_host_mirror_d2h, &host_mirror_copy_event](const torch::Tensor& src,
+                                                                               torch::Tensor&       dst) {
         if (!dst.defined() || dst.is_cuda()) {
             return;
         }
@@ -877,8 +877,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         // mirrors synchronously on the CPU (host fill_params / fa2 replan), so the
         // copies must land first. Main's host pipeline used synchronous host
         // memcpy here and never observed stale values.
-        auto copyToHostMirror = [&pending_host_mirror_d2h, &host_mirror_copy_event](
-                                    const torch::Tensor& src, torch::Tensor& dst, size_t size) {
+        auto copyToHostMirror = [&pending_host_mirror_d2h,
+                                 &host_mirror_copy_event](const torch::Tensor& src, torch::Tensor& dst, size_t size) {
             optimizedCopyAsync(src, dst, size);
             if (src.defined() && src.numel() > 0 && src.is_cuda() && dst.defined() && !dst.is_cuda()) {
                 host_mirror_copy_event.record(cuda_graph::graphGetCurrentStream());
@@ -887,14 +887,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         };
 
         if (!isGenerationPrefillCudaGraph()) {
-            // Device-side metadata construction publishes only the CUDA
-            // cumulative lengths. Refresh the pinned mirror from that source
-            // so prepare_cuda_graph observes the same partition as replay.
-            const auto& host_cu_seqlens   = inputs.attention_inputs.cu_seqlens;
-            const auto& cu_seqlens_source = host_cu_seqlens.defined() && host_cu_seqlens.numel() > 0 ?
-                                                host_cu_seqlens :
-                                                inputs.attention_inputs.cu_seqlens_device;
-            copyToHostMirror(cu_seqlens_source,
+            copyToHostMirror(inputs.attention_inputs.cu_seqlens,
                              py_model_inputs_.attention_inputs.cu_seqlens,
                              (state.current_batch_size + 1) * sizeof(int));
         }
@@ -1784,9 +1777,9 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
         inputs.attention_inputs.padding_offset = torch::zeros({padding_offset_capacity}, options_cpu_int32_);
         inputs.attention_inputs.padding_offset = inputs.attention_inputs.padding_offset.pin_memory();
     }
-    inputs.attention_inputs.dtype                     = model_data_type_;
-    inputs.attention_inputs.is_s_padded               = true;
-    auto sequence_lengths_plus_1                      = inputs.attention_inputs.sequence_lengths.add(1).pin_memory();
+    inputs.attention_inputs.dtype       = model_data_type_;
+    inputs.attention_inputs.is_s_padded = true;
+    auto sequence_lengths_plus_1        = inputs.attention_inputs.sequence_lengths.add(1).pin_memory();
     inputs.attention_inputs.sequence_lengths_plus_1_device = sequence_lengths_plus_1.cuda();
     // Step=1 is intentional: when num_tokens_per_bs_ > 1 (target verify), is_prefill is set to true
     // so the factory selects PREFILL impls (which use cu_seqlens, not decode_cu_seqlens).
@@ -2178,7 +2171,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     // Request-lane MTP draft prefill has fixed lanes per captured request,
     // while each graph key captures only its own request capacity.
     const int token_slice_len = seq_len_or_tokens;
-    inputs.input_ids = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
+    inputs.input_ids          = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
     if (engram_window_size_ > 0) {
         inputs.engram_token_windows =
             capture_mem_hold_.py_model_inputs_.engram_token_windows.slice(0, 0, token_slice_len);
@@ -2263,9 +2256,9 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     }
 
     // Common direct assignments (no slice needed)
-    inputs.attention_inputs.dtype                     = capture_mem_hold_.py_model_inputs_.attention_inputs.dtype;
-    inputs.bert_embedding_inputs                      = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;
-    inputs.attention_inputs.is_s_padded               = true;
+    inputs.attention_inputs.dtype       = capture_mem_hold_.py_model_inputs_.attention_inputs.dtype;
+    inputs.bert_embedding_inputs        = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;
+    inputs.attention_inputs.is_s_padded = true;
     refreshTaggedAttentionInputs(inputs);
 }
 

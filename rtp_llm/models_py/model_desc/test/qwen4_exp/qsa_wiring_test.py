@@ -132,6 +132,10 @@ class Qwen4ExpQSAConstructionTest(TestCase):
 
     def _runtime(self, attention, inputs):
         class _Runtime:
+            @staticmethod
+            def host_values(tensor):
+                return tensor.tolist()
+
             main_cache = None
             main_inputs = inputs
             is_mtp_draft = attention.is_mtp_draft

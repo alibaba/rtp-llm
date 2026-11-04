@@ -151,8 +151,8 @@ protected:
     // decodeStep helpers — extracted to keep decodeStep readable. Each helper
     // owns a single phase (prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
-    void            waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
-    void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
+    void waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
+    void launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
     // post_rejection=true forks with the final post-commit input, which is
     // safe under speculative target hooks; the default pre-rejection fork
     // keeps its historical useAsyncPrepare() gate.
@@ -191,6 +191,11 @@ protected:
                                       SamplerOutput                                draft_prefill_sampler_output,
                                       std::shared_ptr<torch::Event>                rejection_event,
                                       std::shared_ptr<torch::Event>                draft_event);
+
+    torch::Tensor gatherPreviousTargetTokens(const StreamGroups& stream_groups,
+                                             int64_t             batch_size,
+                                             bool                use_device_state,
+                                             bool&               from_device_state);
 
     void draftModelDecode(GptModelInputs&             model_input,
                           const StreamGroups&         stream_groups,
@@ -353,9 +358,7 @@ private:
     torch::Tensor             dspark_cache_store_status_;
     std::function<bool(bool)> dspark_cache_store_status_reducer_for_test_;
 
-    // Reused TP consensus scalar for validation, prepare, tentative commit,
-    // rollback, and finalize phases of a target side-state transaction.
-    torch::Tensor             speculative_target_prepare_status_;
+    // Test seam for the host transaction control transport.
     std::function<bool(bool)> speculative_target_status_reducer_for_test_;
     std::function<void()>     before_model_forward_;
     std::function<void()>     after_model_forward_;

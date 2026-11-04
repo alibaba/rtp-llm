@@ -69,11 +69,9 @@ def _resolve_accepted_pair(
 class AcceptedPairResolution:
     """Deferred verdict for the fused PLE commit metadata resolution.
 
-    begin_accepted_pair_resolution launches the resolve kernel plus an
-    8-byte device-to-pinned verdict copy and returns without blocking, so the
-    caller can enqueue the dependent gather kernels first. verify() then
-    waits only for that copy rather than for the gathers, keeping gather
-    launch latency and execution off the step critical path.
+    begin_accepted_pair_resolution queues an 8-byte device-to-pinned verdict
+    copy without blocking. verify() records after the dependent prepare
+    kernels and waits once for both the verdict and the immutable undo values.
 
     The payload layout is [combined flag, accept-range flag, state verdict
     flags (4), ctx verdict flags (4), state blocks (B), ctx blocks (B),
@@ -81,7 +79,16 @@ class AcceptedPairResolution:
     speculative gather cannot read out of bounds before the verdict lands.
     """
 
-    __slots__ = ("payload", "batch", "stage", "tags", "query_len", "pinned", "event")
+    __slots__ = (
+        "payload",
+        "batch",
+        "stage",
+        "tags",
+        "query_len",
+        "pinned",
+        "event",
+        "stream",
+    )
 
     def __init__(self, payload, batch, stage, tags, query_len, pinned, event):
         self.payload = payload
@@ -91,6 +98,7 @@ class AcceptedPairResolution:
         self.query_len = query_len
         self.pinned = pinned
         self.event = event
+        self.stream = torch.cuda.current_stream(payload.device)
 
     @property
     def accepted(self):
@@ -107,6 +115,9 @@ class AcceptedPairResolution:
         ]
 
     def verify(self):
+        # All prepare kernels have now been enqueued on this stream. One event
+        # observes both their completion and the earlier verdict D2H copy.
+        self.event.record(self.stream)
         self.event.synchronize()
         if int(self.pinned[0].item()):
             self._raise_verdict()
@@ -233,7 +244,6 @@ def begin_accepted_pair_resolution(transaction, accept_len):
     )
     pinned, event = _verdict_channel(accept_len.device)
     pinned.copy_(payload[:1], non_blocking=True)
-    event.record()
     return AcceptedPairResolution(
         payload=payload,
         batch=batch,

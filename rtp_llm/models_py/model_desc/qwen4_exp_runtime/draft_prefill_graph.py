@@ -73,17 +73,11 @@ class DraftPrefillGraphReplay(Mapping):
         anchor = groups[next(iter(self.impls))]
         lengths = anchor.input_lengths
         prefixes = anchor.prefix_lengths
-        cu = anchor.cu_seqlens
-        if any(value.device.type != "cpu" for value in (lengths, prefixes, cu)):
+        if any(value.device.type != "cpu" for value in (lengths, prefixes)):
             raise RuntimeError("QSA draft graph replay requires host length mirrors")
         lengths = lengths.tolist()
         prefixes = prefixes.tolist()
-        starts = cu.tolist()
-        if (
-            not lengths
-            or len(prefixes) != len(lengths)
-            or len(starts) != len(lengths) + 1
-        ):
+        if not lengths or len(prefixes) != len(lengths):
             raise RuntimeError("QSA draft graph replay has invalid length geometry")
         expected = [0]
         lanes = draft_graph_lanes(anchor, self.token_capacity)
@@ -98,15 +92,9 @@ class DraftPrefillGraphReplay(Mapping):
                 )
             expected.append(expected[-1] + length)
             positions.extend(range(prefix, prefix + length))
-        live_batch = next(
-            (i for i, length in enumerate(lengths) if length == 0), len(lengths)
-        )
-        # Only the live prefix of the host cu_seqlens mirror is copied by the
-        # runner. Its device padding tail is filled separately for every replay.
-        if (
-            starts[: live_batch + 1] != expected[: live_batch + 1]
-            or expected[-1] > self.token_capacity
-        ):
+        # Derive the host partition from the same current length mirror; a
+        # device-only CU tensor must not add a public GraphRunner D2H copy.
+        if expected[-1] > self.token_capacity:
             raise RuntimeError(
                 "QSA draft graph cu_seqlens do not partition the live token capacity"
             )
@@ -208,9 +196,23 @@ class DraftPrefillGraphReplay(Mapping):
             ]
             invalid_positions = (actual != expected_positions.unsqueeze(1)).any()
             invalid_replay = invalid_state | invalid_positions
+        cu = getattr(anchor, "cu_seqlens_device", None)
+        if (
+            not isinstance(cu, torch.Tensor)
+            or cu.dtype != torch.int32
+            or tuple(cu.shape) != (len(expected),)
+        ):
+            raise RuntimeError(
+                "QSA draft graph requires int32 device cu_seqlens matching the request capacity"
+            )
+        expected_cu = torch.tensor(
+            expected, device="cpu", dtype=cu.dtype, pin_memory=cu.is_cuda
+        )
+        expected_cu = expected_cu.to(device=cu.device, non_blocking=True)
+        invalid_replay = invalid_replay | torch.any(cu != expected_cu)
         if bool(invalid_replay.item()):
             raise RuntimeError(
-                "QSA draft graph has invalid raw-state pages or positions disagree with logical cache positions"
+                "QSA draft graph has invalid raw-state pages, cu_seqlens or positions disagree with logical cache positions"
             )
         for tag, impl in self.impls.items():
             impl.prepare_cuda_graph(groups[tag])

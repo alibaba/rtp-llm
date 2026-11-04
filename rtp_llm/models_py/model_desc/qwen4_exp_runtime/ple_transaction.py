@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Optional
 
 import torch
+
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import PLE_NGRAM_CTX_TAG, PLE_STATE_TAG
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpPLELayer
 from rtp_llm.ops.compute_ops import PyAttentionInputs
@@ -101,7 +102,7 @@ class PLETransactionCoordinator:
         prefixes_device = prefix_source.to(
             device=hyper_states.device, dtype=torch.long, non_blocking=True
         ).contiguous()
-        if not graph_capture and bool(torch.any(prefixes_device <= 0).item()):
+        if not graph_capture and bool(torch.any(prefixes <= 0).item()):
             raise RuntimeError(
                 "qwen4_exp PLE target verify requires a non-empty committed history"
             )
@@ -137,8 +138,18 @@ class PLETransactionCoordinator:
         if gathered is not None:
             initial_state, initial_context, history = gathered
         else:
+            # Graph fallback must read the live device mirror, including B>32
+            # where the fused gather is unavailable. Host page arithmetic both
+            # freezes capture-time metadata and creates an unpinned H2D copy.
             read_pages = torch.div(
-                prefixes_device - 1, page_size, rounding_mode="floor"
+                (
+                    prefixes
+                    if not graph_capture and prefixes.device.type == "cpu"
+                    else prefixes_device
+                )
+                - 1,
+                page_size,
+                rounding_mode="floor",
             )
             state_read_blocks = self._physical_blocks(
                 state_inputs,
@@ -472,7 +483,8 @@ class PLETransactionCoordinator:
         # streams (async bookkeeping) the way a device-wide sync does.
         if resolution is not None:
             resolution.verify()
-        self._synchronize_ple_transaction(transaction)
+        else:
+            self._synchronize_ple_transaction(transaction)
         owner.prepared_writes = prepared_writes
 
     def _prepare_boundary_slots(

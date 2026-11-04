@@ -113,8 +113,8 @@ private:
     torch_ext::PyEmbeddingInputs  buildPyEmbeddingInputs(const GptModelInputs& inputs);
     torch_ext::PyMultimodalInputs buildPyMultimodalInputs(const GptModelInputs& inputs);
     torch_ext::BertEmbeddingInputs
-    buildBertEmbeddingInputs(const GptModelInputs& inputs,
-                             const torch::Tensor&  prepared_position_ids = torch::Tensor());
+                                    buildBertEmbeddingInputs(const GptModelInputs& inputs,
+                                                             const torch::Tensor&  prepared_position_ids = torch::Tensor());
     torch_ext::AttentionInputsByTag setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                    const GptModelInputs&         inputs);
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
@@ -366,8 +366,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
-    py_model_                 = py_instance;
-    supports_micro_batch_     = py::hasattr(py_model_, "forward_micro_batch");
+    py_model_             = py_instance;
+    supports_micro_batch_ = py::hasattr(py_model_, "forward_micro_batch");
     // MtpExecutor passes use_spec_decoding only to its target wrapper. The
     // normal and draft wrappers may share the same Python class, but must not
     // activate target transactions.
@@ -381,7 +381,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                 "Python speculative target model must implement prepare_speculative_target_commit and "
                                 "finish_speculative_target_commit as a pair, together with "
                                 "finalize_speculative_target_commit");
-        has_speculative_target_commit_hooks_ = has_prepare_speculative_target_commit;
+        has_speculative_target_commit_hooks_ =
+            has_prepare_speculative_target_commit
+            && (!py::hasattr(py_model_, "requires_speculative_target_commit")
+                || py_model_.attr("requires_speculative_target_commit")().cast<bool>());
         if (has_speculative_target_commit_hooks_ && py::hasattr(py_model_, "has_speculative_target_status_reducer")) {
             has_speculative_target_status_reducer_ =
                 py_model_.attr("has_speculative_target_status_reducer")().cast<bool>();
@@ -396,6 +399,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                     "speculative target CUDA Graph requires capture, save and replay transaction "
                                     "hooks to preserve side-state across graph instances");
         }
+        RTP_LLM_CHECK_WITH_INFO(!has_speculative_target_commit_hooks_ || params.parallelism_config.tp_size <= 1
+                                    || has_speculative_target_status_reducer_,
+                                "speculative target transactions require a CPU TP status reducer");
     }
 
     auto py_initialize_method = py_model_.attr("initialize");

@@ -1284,7 +1284,16 @@ class SparseGqaImplForwardTest(unittest.TestCase):
             *,
             page_size,
             kv_head_num,
+            _validated_plan,
         ):
+            from rtp_llm.models_py.modules.qwen4_exp.qsa.fmha_plans import PagedInputs
+
+            self.assertIsInstance(_validated_plan, PagedInputs)
+            self.assertIs(_validated_plan.block_table, block_table)
+            self.assertIs(_validated_plan.kv_lens, kv_lens)
+            self.assertIs(_validated_plan.selected_indices, indices)
+            self.assertEqual(_validated_plan.page_size, page_size)
+            self.assertEqual(_validated_plan.validated_cache_blocks, cache.shape[0])
             observed.update(
                 q_shape=tuple(q.shape),
                 cache=cache,

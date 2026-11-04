@@ -6,6 +6,7 @@ import math
 from typing import Any
 
 import torch
+
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
     INDEXER_STATE_TAG,
@@ -77,14 +78,10 @@ def select_decode_tokens(
     # writer accepts contiguous rows, and this copy is captured in Graph.
     raw_keys = raw_keys.contiguous()
 
-    # The engine keeps decode lengths on pinned CPU memory. Derive the
-    # scorer's output width there, before the H2D copy, rather than
-    # synchronizing a GPU max reduction after every sparse layer.
-    host_max_compressed = (
-        (int(sequence_lengths.max().item()) + 1) // ratio
-        if sequence_lengths.device.type == "cpu"
-        else None
-    )
+    # Device-input eager batches share one immutable metadata snapshot across
+    # sparse layers. Host-input/Graph batches read their existing host mirror.
+    host_lengths = self.host_values(sequence_lengths)
+    host_max_compressed = (max(host_lengths) + 1) // ratio
     # Replay refreshes this device tensor before launching the captured graph.
     # Reading the pinned mirror inside capture would freeze an H2D dependency.
     sequence_lengths = (
@@ -92,11 +89,7 @@ def select_decode_tokens(
         if graph_decode
         else sequence_lengths.to(device=q.device, dtype=torch.int32, non_blocking=True)
     ).contiguous()
-    invalid_lengths = (
-        bool(torch.any(sequence_lengths < 0).item())
-        if host_max_compressed is None
-        else bool(torch.any(self.main_inputs.sequence_lengths < 0).item())
-    )
+    invalid_lengths = any(length < 0 for length in host_lengths)
     if invalid_lengths:
         raise RuntimeError("qwen4_exp QSA sequence_lengths must be non-negative")
     position_ids = self.main_inputs.combo_position_ids
@@ -221,11 +214,7 @@ def select_decode_tokens(
         visible_token_lengths = torch.where(active, visible_token_lengths, 0)
         compressed_lengths = torch.where(active, compressed_lengths, 0)
     compressed_capacity = int(kv_table.shape[1]) * kv_entries_per_block
-    exceeds_capacity = (
-        host_max_compressed > compressed_capacity
-        if host_max_compressed is not None
-        else bool(torch.any(compressed_lengths > compressed_capacity).item())
-    )
+    exceeds_capacity = host_max_compressed > compressed_capacity
     if exceeds_capacity:
         raise RuntimeError(
             "qwen4_exp QSA compressed decode length exceeds its tag-local "
@@ -342,11 +331,7 @@ def select_decode_tokens(
         # _validate_required_blocks checked every visible physical ID;
         # the score kernel also masks invalid IDs before reading the pool.
         validate_block_table=False,
-        max_ctx_len=(
-            host_max_compressed
-            if host_max_compressed is not None
-            else int(compressed_lengths.max().item())
-        ),
+        max_ctx_len=host_max_compressed,
     )
     return select_qsa_paged_tokens(
         block_logits,

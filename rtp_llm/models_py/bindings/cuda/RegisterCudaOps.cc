@@ -15,10 +15,15 @@
 namespace rtp_llm {
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
-    rtp_ops_m.def("cpu_status_size", &cpu_status_size);
-    rtp_ops_m.def("cpu_status_initialize", [](uintptr_t pointer, size_t bytes) {
-        return cpu_status_initialize(reinterpret_cast<void*>(pointer), bytes);
-    });
+    rtp_ops_m.def("cpu_status_size", &cpu_status_size, py::arg("world_size") = 2);
+    rtp_ops_m.def(
+        "cpu_status_initialize",
+        [](uintptr_t pointer, size_t bytes, int world_size) {
+            return cpu_status_initialize(reinterpret_cast<void*>(pointer), bytes, world_size);
+        },
+        py::arg("pointer"),
+        py::arg("bytes"),
+        py::arg("world_size") = 2);
     rtp_ops_m.def("cpu_status_break",
                   [](uintptr_t pointer) { return cpu_status_break(reinterpret_cast<void*>(pointer)); });
     rtp_ops_m.def(

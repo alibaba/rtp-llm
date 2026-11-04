@@ -22,6 +22,22 @@ from rtp_llm.ops.compute_ops import PyCacheStoreInputs
 
 
 class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
+    def test_step_metadata_cache_reuses_views_and_never_survives_next_forward(self):
+        from types import SimpleNamespace
+
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
+            Qwen4ExpQSARuntimeContext,
+        )
+
+        values = torch.tensor([1, 2], dtype=torch.int32)
+        owner = SimpleNamespace(metadata_cache={})
+        host_values = Qwen4ExpQSARuntimeContext.host_values
+        first = host_values(owner, values)
+        self.assertIs(host_values(owner, values.view_as(values)), first)
+        values.add_(1)
+        next_step = SimpleNamespace(metadata_cache={})
+        self.assertEqual(host_values(next_step, values), [2, 3])
+
     def test_metadata_alias_fast_path_preserves_distinct_tensor_validation(self):
         values = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
         alias = values.view_as(values)

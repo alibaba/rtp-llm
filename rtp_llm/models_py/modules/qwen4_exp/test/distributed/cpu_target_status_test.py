@@ -1,3 +1,4 @@
+import contextlib
 import ctypes
 import datetime
 import errno
@@ -62,15 +63,63 @@ def _startup_worker(rank, store):
     dist.destroy_process_group()
 
 
+def _gloo_policy_worker(rank, store):
+    dist.init_process_group(
+        "gloo",
+        init_method="file://" + store,
+        rank=rank,
+        world_size=2,
+        timeout=datetime.timedelta(seconds=60),
+    )
+    # Exercise cross-host control and a peer without native SHM bindings. Every
+    # rank must select the same CPU transport even for asymmetric capabilities.
+    for mode in ("remote", "missing_native_peer"):
+        native = (
+            patch.object(ops, "cpu_status_size", None)
+            if mode == "missing_native_peer" and rank == 1
+            else contextlib.nullcontext()
+        )
+        hostname = f"worker-{rank}" if mode == "remote" else "one-host"
+        with (
+            native,
+            patch(
+                "rtp_llm.models_py.distributed.collective_torch._get_group",
+                return_value=dist.group.WORLD,
+            ),
+            patch.object(policy.socket, "gethostname", return_value=hostname),
+        ):
+            owner = policy.prepare_cpu_target_status(
+                SimpleNamespace(is_mtp=False, enable_qwen4_ple=True),
+                SimpleNamespace(role_type="DECODE", tp_size=2),
+            )
+        assert isinstance(owner, policy._GlooTargetStatus)
+        assert owner.value.device.type == "cpu"
+        for generation in range(1, 501):
+            assert owner.reduce(generation % (rank + 7) != 0) == bool(
+                generation % 7 and generation % 8
+            )
+        owner.close()
+        owner.close()
+        try:
+            owner.reduce(True)
+        except RuntimeError as error:
+            assert "closed" in str(error)
+        else:
+            raise AssertionError("closed CPU transport accepted a phase")
+    dist.destroy_process_group()
+
+
 class CpuTargetStatusTest(unittest.TestCase):
-    def mapping(self):
-        mapping = mmap.mmap(-1, max(mmap.PAGESIZE, ops.cpu_status_size()))
+    def mapping(self, world_size=2):
+        mapping = mmap.mmap(-1, max(mmap.PAGESIZE, ops.cpu_status_size(world_size)))
         pointer = ctypes.addressof(ctypes.c_char.from_buffer(mapping))
-        self.assertEqual(ops.cpu_status_initialize(pointer, len(mapping)), 0)
+        self.assertEqual(
+            ops.cpu_status_initialize(pointer, len(mapping), world_size), 0
+        )
         self.addCleanup(mapping.close)
         return mapping, pointer
 
-    def test_unsupported_layouts_do_not_bootstrap(self):
+    def test_disabled_transactions_do_not_bootstrap(self):
         config = SimpleNamespace(is_mtp=False, enable_qwen4_ple=True)
         pc = SimpleNamespace(
             role_type="DECODE", tp_size=2, dp_size=1, local_world_size=2
@@ -78,9 +127,7 @@ class CpuTargetStatusTest(unittest.TestCase):
         with patch.object(policy, "create_cpu_tp_status", side_effect=AssertionError):
             for key, value in [
                 ("role_type", "PREFILL"),
-                ("tp_size", 4),
-                ("dp_size", 2),
-                ("local_world_size", 4),
+                ("tp_size", 1),
             ]:
                 altered = SimpleNamespace(**{**vars(pc), key: value})
                 self.assertIsNone(policy.prepare_cpu_target_status(config, altered))
@@ -116,7 +163,7 @@ class CpuTargetStatusTest(unittest.TestCase):
         self.assertEqual(ops.cpu_status_reduce(pointer, 0, 1, 1, 20), -errno.ETIMEDOUT)
         self.assertEqual(ops.cpu_status_reduce(pointer, 1, 1, 1, 20), -errno.ECANCELED)
         owner = status.CpuTpStatus(ops, mapping, 1, timeout_ms=20)
-        with self.assertRaisesRegex(RuntimeError, "TP2 CPU status failed"):
+        with self.assertRaisesRegex(RuntimeError, "TP CPU status failed"):
             owner.reduce(True)
 
     def test_bad_generation_and_unaligned_pointer(self):
@@ -124,6 +171,78 @@ class CpuTargetStatusTest(unittest.TestCase):
         self.assertEqual(ops.cpu_status_reduce(pointer + 1, 0, 1, 1, 20), -errno.EINVAL)
         self.assertEqual(ops.cpu_status_reduce(pointer, 0, 3, 1, 20), -errno.EPROTO)
         self.assertEqual(ops.cpu_status_reduce(pointer, 1, 1, 1, 20), -errno.ECANCELED)
+
+    def test_tp4_tp8_generations_and_false_are_rank_symmetric(self):
+        for world_size in (4, 8):
+            _, pointer = self.mapping(world_size)
+            failures = []
+
+            def run(rank):
+                try:
+                    for generation in range(1, 2001):
+                        if generation % 113 == rank:
+                            time.sleep(0.0001)
+                        local_ok = generation % (rank + 7) != 0
+                        actual = ops.cpu_status_reduce(
+                            pointer, rank, generation, int(local_ok), 5000
+                        )
+                        expected = int(
+                            all(
+                                generation % (peer + 7) != 0
+                                for peer in range(world_size)
+                            )
+                        )
+                        if actual != expected:
+                            failures.append((rank, generation, actual, expected))
+                            ops.cpu_status_break(pointer)
+                            return
+                except BaseException as error:
+                    failures.append(error)
+                    ops.cpu_status_break(pointer)
+
+            threads = [
+                threading.Thread(target=run, args=(rank,)) for rank in range(world_size)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=30)
+                self.assertFalse(thread.is_alive())
+            self.assertEqual(failures, [])
+
+    def test_tp8_departed_rank_poisoning_wakes_every_waiter(self):
+        _, pointer = self.mapping(8)
+        results = {}
+        threads = [
+            threading.Thread(
+                target=lambda rank: results.update(
+                    {rank: ops.cpu_status_reduce(pointer, rank, 1, 1, 30)}
+                ),
+                args=(rank,),
+            )
+            for rank in range(7)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(len(results), 7)
+        self.assertTrue(
+            all(
+                value in (-errno.ETIMEDOUT, -errno.ECANCELED)
+                for value in results.values()
+            )
+        )
+
+    def test_invalid_world_size_does_not_initialize_mapping(self):
+        mapping, pointer = self.mapping()
+        for world_size in (-1, 0, 1, 257):
+            self.assertEqual(ops.cpu_status_size(world_size), 0)
+            self.assertEqual(
+                ops.cpu_status_initialize(pointer, len(mapping), world_size),
+                -errno.EINVAL,
+            )
 
     def test_file_identity_check_rejects_changed_inode(self):
         with tempfile.TemporaryDirectory() as root:
@@ -136,6 +255,15 @@ class CpuTargetStatusTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "identity"):
                 status._unlink_owned(str(a), status._identity(b.stat()))
             self.assertTrue(a.exists())
+
+    def test_cross_host_policy_uses_cpu_gloo(self):
+        with tempfile.TemporaryDirectory() as root:
+            mp.spawn(
+                _gloo_policy_worker,
+                args=(str(Path(root) / "store"),),
+                nprocs=2,
+                join=True,
+            )
 
     def test_collective_startup_generations_restart_and_peer_failure(self):
         with tempfile.TemporaryDirectory() as root:

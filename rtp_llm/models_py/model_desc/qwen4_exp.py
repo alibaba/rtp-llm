@@ -233,11 +233,14 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 **({"raw_query": True} if raw_query else {}),
             )
         prefixes = qsa_runtime.main_inputs.prefix_lengths
-        has_prefix = bool(prefixes.numel()) and bool(torch.any(prefixes != 0).item())
+        prefix_values = qsa_runtime.host_values(prefixes)
+        has_prefix = any(value != 0 for value in prefix_values)
         if not bool(qsa_runtime.main_inputs.is_target_verify) and has_prefix:
             if self.is_mtp_draft:
                 input_lengths = qsa_runtime.main_inputs.input_lengths
-                max_input_length = max(int(length) for length in input_lengths.tolist())
+                max_input_length = max(
+                    int(length) for length in qsa_runtime.host_values(input_lengths)
+                )
                 # PD prefix hits retain local draft-prefill cu_kv coordinates
                 # even when only one token remains. Publication distinguishes
                 # them from post-rejection commits, whose KV ends are absolute.
@@ -247,7 +250,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 )
                 # A first prefill may mix cold requests with short prefix hits.
                 # Post-rejection commits always have a nonzero prefix per row.
-                has_cold_request = bool(torch.any(prefixes == 0).item())
+                has_cold_request = 0 in prefix_values
                 if (
                     pd_prefill
                     or has_cold_request
@@ -1133,6 +1136,15 @@ class Qwen4ExpModel(Qwen35Model):
         if head_graph is not None:
             head_graph.activate(graph_key)
 
+    def requires_speculative_target_commit(self) -> bool:
+        parallelism = getattr(self, "parallelism_config", None)
+        role = str(getattr(parallelism, "role_type", "PDFUSION")).rsplit(".", 1)[-1]
+        return (
+            role in ("DECODE", "PDFUSION")
+            and bool(self.ple_layers)
+            and not bool(getattr(self.config, "is_mtp", False))
+        )
+
     def has_speculative_target_status_reducer(self) -> bool:
         return self.__dict__.get("_cpu_target_status") is not None
 
@@ -1247,6 +1259,7 @@ class Qwen4ExpModel(Qwen35Model):
         main_cache: LayerKVCache,
         main_inputs: PyAttentionInputs,
         attention_inputs: Any,
+        metadata_cache=None,
     ) -> Qwen4ExpQSARuntimeContext:
         if self.kv_cache is None or not isinstance(attention_inputs, Mapping):
             raise RuntimeError(
@@ -1266,6 +1279,7 @@ class Qwen4ExpModel(Qwen35Model):
                 attention_inputs, INDEXER_STATE_TAG
             ),
             is_mtp_draft=bool(getattr(self.config, "is_mtp", False)),
+            metadata_cache=metadata_cache,
         )
 
     def _build_output_head(
@@ -1448,6 +1462,7 @@ class Qwen4ExpModel(Qwen35Model):
             and hyper_states.dtype == torch.bfloat16
             and torch.cuda.get_device_capability(hyper_states.device) == (12, 0)
         )
+        qsa_metadata_cache = {}
         for i, decoder_layer in enumerate(self.layers):
             if str(i) in self.ple_layers:
                 if pending_injection is not None:
@@ -1492,6 +1507,7 @@ class Qwen4ExpModel(Qwen35Model):
                     layer_kv_cache,
                     layer_attention_inputs,
                     attention_inputs,
+                    metadata_cache=qsa_metadata_cache,
                 )
             layer_kwargs = dict(
                 kv_cache=layer_kv_cache,

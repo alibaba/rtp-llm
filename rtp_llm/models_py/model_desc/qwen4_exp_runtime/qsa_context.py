@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
+
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
     INDEXER_STATE_TAG,
@@ -50,12 +51,30 @@ class Qwen4ExpQSARuntimeContext:
     indexer_state_cache: LayerKVCache
     indexer_state_inputs: PyAttentionInputs
     is_mtp_draft: bool = False
+    metadata_cache: dict | None = field(default=None, repr=False, compare=False)
     _side_cache_undo: IndexerCacheUndo | None = field(
         default=None, init=False, repr=False, compare=False
     )
     _target_verify_plan: TargetVerifyPlan | None = field(
         default=None, init=False, repr=False, compare=False
     )
+
+    def host_values(self, tensor: torch.Tensor) -> list[int]:
+        # This cache belongs to one forward invocation, never a graph buffer's
+        # address across steps. Keep the tensor owner alongside the host values.
+        cache = self.metadata_cache
+        key = (
+            tensor.data_ptr(),
+            tensor.shape,
+            tensor.stride(),
+            tensor.dtype,
+            tensor.device,
+        )
+        if cache is None:
+            return tensor.tolist()
+        if key not in cache:
+            cache[key] = (tensor, tensor.tolist())
+        return cache[key][1]
 
     def _write_indexer_cache_transactional(self, *args, **kwargs) -> dict:
         if self._side_cache_undo is not None:
@@ -149,7 +168,7 @@ class Qwen4ExpQSARuntimeContext:
                 and not allow_draft_incremental
                 and not allow_prefix_reuse
                 and prefixes.numel()
-                and bool(torch.any(prefixes != 0).item())
+                and any(value != 0 for value in self.host_values(prefixes))
             ):
                 raise RuntimeError("qwen4_exp QSA prefix reuse is not implemented")
 
@@ -183,7 +202,9 @@ class Qwen4ExpQSARuntimeContext:
                     f"qwen4_exp QSA cache-region metadata {name!r} is inconsistent"
                 )
 
-        lengths = [int(value) for value in self.main_inputs.input_lengths.tolist()]
+        lengths = [
+            int(value) for value in self.host_values(self.main_inputs.input_lengths)
+        ]
         minimum = 0 if self.main_inputs.is_s_padded and not expect_prefill else 1
         if not lengths or any(length < minimum for length in lengths):
             raise RuntimeError(f"qwen4_exp QSA has invalid input_lengths={lengths}")

@@ -17,6 +17,76 @@ from rtp_llm.models_py.model_desc.test.qwen4_exp.fixtures import (
 
 
 class Qwen4ExpPLEGraphTest(PLERuntimeFixture, TestCase):
+    def test_target_graph_batch64_fallback_uses_live_device_prefixes(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required for Graph replay")
+        device = torch.device("cuda")
+        self._move_ple_to_cuda(device)
+        batch, query_len = 64, 4
+        self.state_blocks = self.state_blocks.repeat(batch // 2, 1)
+        self.ctx_blocks = self.ctx_blocks.repeat(batch // 2, 1)
+        inputs = self._target_inputs((self._PAGE,) * batch, query_len)
+        for value in inputs.values():
+            value.is_cuda_graph = value.is_s_padded = True
+            self.assertFalse(value.prefix_lengths.is_pinned())
+        ids = torch.randint(1, 7, (batch, query_len), device=device)
+        hyper = torch.randn(
+            batch * query_len, _HC * _HIDDEN, device=device, dtype=torch.bfloat16
+        )
+        self.model._apply_ple(1, hyper, ids.flatten(), inputs)
+        self.model.on_cuda_graph_warmup(SimpleNamespace(attention_inputs=inputs))
+        graph = torch.cuda.CUDAGraph()
+        try:
+            with torch.cuda.graph(graph):
+                actual = self.model._apply_ple(1, hyper, ids.flatten(), inputs)
+            self.model.on_cuda_graph_capture(
+                batch, SimpleNamespace(attention_inputs=inputs)
+            )
+            state_table, ctx_table = self.state_blocks.clone(), self.ctx_blocks.clone()
+            for step in range(3):
+                hyper.normal_()
+                ids.random_(1, 7)
+                self.state_base.normal_()
+                self.ctx_base.random_(1, 7)
+                self.state_blocks.copy_(state_table.roll(step, dims=1))
+                self.ctx_blocks.copy_(ctx_table.roll(step, dims=1))
+                prefixes = torch.arange(batch, device=device) % 10 + 6
+                prefixes[::5] = 0
+                for value in inputs.values():
+                    value.prefix_lengths_device.copy_(prefixes)
+                # The host mirror deliberately stays stale and unpinned.
+                self.assertTrue(
+                    torch.all(inputs[PLE_STATE_TAG].prefix_lengths == self._PAGE)
+                )
+                pages = (prefixes - 1) // self._PAGE
+                rows = torch.arange(batch, device=device)
+                valid = pages >= 0
+                state_rows = torch.where(
+                    valid, self.state_blocks[rows, pages.clamp_min(0)], 0
+                ).long()
+                ctx_rows = torch.where(
+                    valid, self.ctx_blocks[rows, pages.clamp_min(0)], 0
+                ).long()
+                state_pool = self.state_base.view(12, self.ple.short_conv_state_len, -1)
+                expected, _, _ = self._target_baseline(
+                    hyper.view(batch, query_len, -1),
+                    ids,
+                    state_pool[state_rows],
+                    self.ctx_base[ctx_rows],
+                )
+                before_state, before_ctx = (
+                    self.state_base.clone(),
+                    self.ctx_base.clone(),
+                )
+                graph.replay()
+                torch.testing.assert_close(actual, hyper + expected.flatten(0, 1))
+                torch.testing.assert_close(
+                    self.state_base, before_state, rtol=0, atol=0
+                )
+                torch.testing.assert_close(self.ctx_base, before_ctx, rtol=0, atol=0)
+        finally:
+            graph.reset()
+
     def test_target_graph_transaction_survives_replay_commit_and_rollback(self):
         prefixes = (self._PAGE - 1, self._PAGE)
         query_len = 5

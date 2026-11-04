@@ -14,6 +14,20 @@ from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 _same_tensor_metadata = same_tensor_metadata
 
 
+def _validate_state_pairs(table, pairs, pool_blocks, label):
+    if not pairs:
+        return
+    # Resolve the small tail of the whole batch in one device operation.
+    indices = torch.tensor(pairs, device="cpu", dtype=torch.long, pin_memory=True)
+    indices = indices.to(device=table.device, non_blocking=True)
+    blocks = table[indices[:, 0], indices[:, 1]]
+    if bool(((blocks <= 0) | (blocks >= pool_blocks)).any().item()):
+        raise RuntimeError(
+            f"QSA cache 'indexer_state' {label} resolves to "
+            "an unallocated or out-of-range physical block"
+        )
+
+
 def _typed_2d_pool(
     cache: LayerKVCache,
     *,

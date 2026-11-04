@@ -1,4 +1,4 @@
-"""Optional local TP2 host consensus for speculative transaction status.
+"""Local TP host consensus for speculative transaction status.
 
 Only startup uses Torch distributed collectives. Each inference rendezvous
 publishes the host boolean through acquire/release atomics in shared memory,
@@ -17,13 +17,14 @@ import torch.distributed as dist
 
 
 class CpuTpStatus:
-    def __init__(self, ops, mapping, rank, timeout_ms=60000):
+    def __init__(self, ops, mapping, rank, timeout_ms=60000, world_size=2):
         if (
-            rank not in (0, 1)
-            or len(mapping) < ops.cpu_status_size()
+            not 0 <= rank < world_size
+            or not ops.cpu_status_size(world_size)
+            or len(mapping) < ops.cpu_status_size(world_size)
             or timeout_ms <= 0
         ):
-            raise ValueError("Invalid TP2 status mapping or rank")
+            raise ValueError("Invalid TP status mapping or rank")
         self.ops = ops
         self.mapping = mapping
         self.pointer = ctypes.addressof(ctypes.c_char.from_buffer(mapping))
@@ -49,7 +50,7 @@ class CpuTpStatus:
             )
             if rc < 0:
                 raise RuntimeError(
-                    f"TP2 CPU status failed: errno={-rc}, generation={self.generation}"
+                    f"TP CPU status failed: errno={-rc}, generation={self.generation}"
                 )
             return bool(rc)
 
@@ -95,8 +96,10 @@ def _unlink_owned(path, identity):
 
 def create_cpu_tp_status(group, ops, timeout_ms=60000):
     """Collective startup; all ranks either map the same file or raise."""
-    if dist.get_world_size(group) != 2:
-        raise ValueError("CPU target status requires TP2")
+    world_size = dist.get_world_size(group)
+    required_bytes = ops.cpu_status_size(world_size)
+    if not required_bytes:
+        raise ValueError("Unsupported CPU target status group size")
     rank = dist.get_rank(group)
     descriptor = [None]
     if rank == 0:
@@ -105,13 +108,13 @@ def create_cpu_tp_status(group, ops, timeout_ms=60000):
         try:
             fd, path = tempfile.mkstemp(prefix="rtp-tp-status-", dir="/dev/shm")
             try:
-                size = max(mmap.PAGESIZE, ops.cpu_status_size())
+                size = max(mmap.PAGESIZE, required_bytes)
                 os.ftruncate(fd, size)
                 identity = _identity(os.fstat(fd))
                 with mmap.mmap(fd, size) as mapped:
                     pointer = ctypes.addressof(ctypes.c_char.from_buffer(mapped))
-                    if ops.cpu_status_initialize(pointer, size) != 0:
-                        raise RuntimeError("TP2 status initialization failed")
+                    if ops.cpu_status_initialize(pointer, size, world_size) != 0:
+                        raise RuntimeError("TP status initialization failed")
             finally:
                 os.close(fd)
             descriptor[0] = dict(path=path, identity=identity)
@@ -130,10 +133,10 @@ def create_cpu_tp_status(group, ops, timeout_ms=60000):
     error = None
     try:
         mapped = _open_mapping(data["path"], data["identity"])
-        owner = CpuTpStatus(ops, mapped, rank, timeout_ms)
+        owner = CpuTpStatus(ops, mapped, rank, timeout_ms, world_size)
     except Exception as exc:
         error = str(exc)
-    errors = [None, None]
+    errors = [None] * world_size
     dist.all_gather_object(errors, error, group=group)
     # All ranks have opened (or reported failure) before the creator unlinks.
     # Transfer any unlink error too, so rank admission remains collective.

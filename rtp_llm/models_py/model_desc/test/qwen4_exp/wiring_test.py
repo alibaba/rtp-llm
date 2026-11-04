@@ -184,6 +184,22 @@ class Qwen4ExpSpecFaultInjectionTest(TestCase):
 
 
 class Qwen4ExpMetadataTest(TestCase):
+    def test_target_transactions_require_enabled_ple_not_method_presence(self):
+        from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpModel
+
+        model = SimpleNamespace(ple_layers={}, config=SimpleNamespace(is_mtp=False))
+        self.assertFalse(Qwen4ExpModel.requires_speculative_target_commit(model))
+        model.ple_layers = {"1": object()}
+        self.assertTrue(Qwen4ExpModel.requires_speculative_target_commit(model))
+        for role in ("DECODE", "PDFUSION", "PREFILL"):
+            model.parallelism_config = SimpleNamespace(role_type=role)
+            self.assertEqual(
+                Qwen4ExpModel.requires_speculative_target_commit(model),
+                role != "PREFILL",
+            )
+        model.config.is_mtp = True
+        self.assertFalse(Qwen4ExpModel.requires_speculative_target_commit(model))
+
     def test_ple_region_alias_avoids_equality_sync_but_checks_distinct_values(self):
         values = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
         left = SimpleNamespace(input_lengths=values)

@@ -113,10 +113,6 @@ def _prepare_paged_inputs(
         sequence_lengths = device_source.to(
             device=qkv.device, dtype=torch.int32, non_blocking=True
         ).contiguous()
-        if not graph_paged and bool(torch.any(sequence_lengths < 0).item()):
-            raise ValueError(
-                "qwen4_exp sparse GQA sequence lengths must be non-negative"
-            )
         query_offsets = torch.arange(
             1, query_len + 1, device=qkv.device, dtype=torch.int32
         )
@@ -129,23 +125,16 @@ def _prepare_paged_inputs(
     if self.attn_inputs.is_s_padded:
         kv_lens = torch.where(block_table.ne(0).any(dim=1, keepdim=True), kv_lens, 0)
 
-    if not graph_paged:
-        required_columns = (kv_lens[:, -1] + page_size - 1) // page_size
-    exceeds_capacity = (
-        bool(
+    if graph_paged:
+        if bool(
             torch.any(
                 (lengths_source + query_len + page_size - 1) // page_size
                 > int(block_table.shape[1])
             ).item()
-        )
-        if graph_paged
-        else bool(torch.any(required_columns > int(block_table.shape[1])).item())
-    )
-    if exceeds_capacity:
-        raise RuntimeError(
-            "qwen4_exp sparse GQA main block table does not cover the visible KV"
-        )
-    if graph_paged:
+        ):
+            raise RuntimeError(
+                "qwen4_exp sparse GQA main block table does not cover the visible KV"
+            )
         return PagedInputs(
             **{
                 "batch": batch,
@@ -157,27 +146,50 @@ def _prepare_paged_inputs(
                 "page_size": page_size,
             }
         )
+    required_columns = (kv_lens[:, -1].to(torch.int64) + page_size - 1) // page_size
     columns = torch.arange(
         int(block_table.shape[1]), device=block_table.device
     ).unsqueeze(0)
     required = columns < required_columns.unsqueeze(1)
     invalid = required & ((block_table <= 0) | (block_table >= cache_blocks))
-    if bool(torch.any(invalid).item()):
+    selected_indices = selected_indices.contiguous()
+    # One host verdict for the complete plan, before the main cache writer.
+    # The private FMHA consumer reuses this exact plan in the same invocation.
+    verdict = (
+        ((sequence_lengths < 0).any() | (kv_lens < 0).any()).to(torch.int32)
+        | ((required_columns > int(block_table.shape[1])).any().to(torch.int32) << 1)
+        | (invalid.any().to(torch.int32) << 2)
+        | ((block_table >= cache_blocks).any().to(torch.int32) << 3)
+        | ((selected_indices < -1).any().to(torch.int32) << 4)
+        | (
+            ((selected_indices >= 0) & (selected_indices >= kv_lens.unsqueeze(-1)))
+            .any()
+            .to(torch.int32)
+            << 5
+        )
+    ).item()
+    if verdict & 1:
+        raise ValueError("qwen4_exp sparse GQA sequence lengths must be non-negative")
+    if verdict & 2:
+        raise RuntimeError(
+            "qwen4_exp sparse GQA main block table does not cover the visible KV"
+        )
+    if verdict & 4:
         raise RuntimeError(
             "qwen4_exp sparse GQA visible KV resolves to an unallocated or "
             "out-of-range physical block"
         )
 
-    if selected_indices.numel():
-        if int(selected_indices.min().item()) < -1:
-            raise ValueError("selected indices may only use -1 as padding")
-        invalid_visible = (selected_indices >= 0) & (
-            selected_indices >= kv_lens.unsqueeze(-1)
+    if verdict & 8:
+        raise RuntimeError(
+            "qwen4_exp QSA paged main block table contains an out-of-range physical block"
         )
-        if bool(torch.any(invalid_visible).item()):
-            raise ValueError(
-                "selected indices contain a token outside the row's visible KV"
-            )
+    if verdict & 16:
+        raise ValueError("selected indices may only use -1 as padding")
+    if verdict & 32:
+        raise ValueError(
+            "selected indices contain a token outside the row's visible KV"
+        )
 
     return PagedInputs(
         **{
@@ -188,6 +200,7 @@ def _prepare_paged_inputs(
             "kv_lens": kv_lens,
             "block_table": block_table,
             "page_size": page_size,
+            "validated_cache_blocks": cache_blocks,
         }
     )
 

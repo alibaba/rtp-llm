@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -84,6 +84,7 @@ class DraftPrefillGraphTest(unittest.TestCase):
                 input_lengths=lengths,
                 prefix_lengths=prefixes,
                 cu_seqlens=cu,
+                cu_seqlens_device=cu.to(device).clone(),
                 input_lengths_device=lengths.to(device),
                 prefix_lengths_device=prefixes.to(device),
                 combo_position_ids=positions,
@@ -120,6 +121,35 @@ class DraftPrefillGraphTest(unittest.TestCase):
         hook.prepare_cuda_graph(groups)
         delegate.prepare_cuda_graph.assert_called_once()
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA replay mirrors are required")
+    def test_device_cu_validation_uses_existing_verdict_without_host_copy(self):
+        hook, groups, delegate = self._replay(device="cuda")
+        groups["full"].cu_seqlens[1] = 999  # Public host mirror can be stale.
+        reads = []
+        original_item, original_tolist = torch.Tensor.item, torch.Tensor.tolist
+
+        def item(tensor, *args, **kwargs):
+            if tensor.is_cuda:
+                reads.append(1)
+            return original_item(tensor, *args, **kwargs)
+
+        def tolist(tensor, *args, **kwargs):
+            self.assertFalse(tensor.is_cuda, "draft graph copied device CU to host")
+            return original_tolist(tensor, *args, **kwargs)
+
+        with (
+            patch.object(torch.Tensor, "item", item),
+            patch.object(torch.Tensor, "tolist", tolist),
+        ):
+            hook.prepare_cuda_graph(groups)
+        self.assertEqual(len(reads), 1)
+        delegate.prepare_cuda_graph.assert_called_once()
+        delegate.reset_mock()
+        groups["full"].cu_seqlens_device[1] = 999
+        with self.assertRaisesRegex(RuntimeError, "cu_seqlens"):
+            hook.prepare_cuda_graph(groups)
+        delegate.prepare_cuda_graph.assert_not_called()
+
     def test_replay_rejects_state_pages_positions_and_length_changes(self):
         for defect in ("state", "position", "length", "cu"):
             with self.subTest(defect=defect):
@@ -132,7 +162,7 @@ class DraftPrefillGraphTest(unittest.TestCase):
                 elif defect == "length":
                     anchor.input_lengths[2] = 5
                 else:
-                    anchor.cu_seqlens[2] = 6
+                    anchor.cu_seqlens_device[2] = 6
                 with self.assertRaises(RuntimeError):
                     hook.prepare_cuda_graph(groups)
                 delegate.prepare_cuda_graph.assert_not_called()

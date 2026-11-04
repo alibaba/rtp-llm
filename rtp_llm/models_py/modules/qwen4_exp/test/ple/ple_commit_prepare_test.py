@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -140,6 +141,37 @@ class PLECommitPrepareTest(unittest.TestCase):
             batch, 4, stage.prefixes, frozenset({1}), {1: stage}
         )
         return coordinator, stage, accepted, state_blocks, ctx_blocks
+
+    @unittest.skipUnless(
+        torch.cuda.get_device_capability() == (12, 0), "fused metadata requires SM120"
+    )
+    def test_prepare_combines_verdict_and_values_completion_wait(self):
+        owner, _, accepted, _, _ = self.transaction_fixture()
+        complete = torch.cuda.Event()
+
+        def prepare(*args, **kwargs):
+            values = prepare_commit_values(*args, **kwargs)
+            complete.record()
+            return values
+
+        with (
+            patch(
+                "rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_prepare_triton.prepare_commit_values",
+                side_effect=prepare,
+            ),
+            patch.object(
+                owner,
+                "_synchronize_ple_transaction",
+                side_effect=AssertionError(
+                    "prepare inserted a second GPU completion wait"
+                ),
+            ),
+        ):
+            owner.prepare_speculative_target_commit(accepted.int())
+        # query() cannot wait for GPU work: the combined verdict wait must also
+        # have completed the immutable prepared values and undo buffers.
+        self.assertTrue(complete.query())
+        self.assertIsNotNone(owner.active_transaction.prepared_writes)
 
     def test_full_transaction_commit_rollback_and_finalize(self):
         owner, stage, accepted, sb, cb = self.transaction_fixture()
