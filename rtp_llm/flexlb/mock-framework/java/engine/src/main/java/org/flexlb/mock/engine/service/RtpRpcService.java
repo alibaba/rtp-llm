@@ -26,7 +26,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         this.config = config;
         this.groups = groups;
         this.cache = cache;
-        prefill = config.role() == org.flexlb.mock.api.model.Types.Role.prefill
+        prefill = config.role() == org.flexlb.mock.protocol.Role.prefill
             ? new PrefillRpcServer(config, executionLock, finished, engine) : null;
         decode = prefill == null ? new DecodeRpcServer(config, executionLock, engine) : null;
     }

@@ -1,4 +1,4 @@
-package org.flexlb.mock.api.model;
+package org.flexlb.mock.engine.forward;
 
 import org.flexlb.mock.api.Argument;
 

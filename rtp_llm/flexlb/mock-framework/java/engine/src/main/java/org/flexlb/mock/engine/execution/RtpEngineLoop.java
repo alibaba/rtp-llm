@@ -4,7 +4,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
-import org.flexlb.mock.api.model.Types.Role;
+import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.cache.KvCache;
 import org.flexlb.mock.engine.forward.*;
 import org.flexlb.mock.engine.scheduler.RequestFailure;

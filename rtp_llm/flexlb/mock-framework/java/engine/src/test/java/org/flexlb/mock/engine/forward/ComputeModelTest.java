@@ -4,7 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.file.*;
 import java.time.Duration;
-import org.flexlb.mock.api.model.Types.Role;
+import org.flexlb.mock.protocol.Role;
 import org.junit.jupiter.api.Test;
 
 class ComputeModelTest {

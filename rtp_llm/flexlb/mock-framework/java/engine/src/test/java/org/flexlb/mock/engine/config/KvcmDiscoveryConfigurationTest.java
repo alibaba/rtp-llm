@@ -7,7 +7,7 @@ import io.grpc.stub.StreamObserver;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.flexlb.kvcm.grpc.*;
-import org.flexlb.mock.api.model.Types.Role;
+import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.execution.RtpNode;
 import org.flexlb.mock.engine.scheduler.RtpNodeTest;
 import org.junit.jupiter.api.Test;

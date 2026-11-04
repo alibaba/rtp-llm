@@ -5,7 +5,8 @@ import org.flexlb.MasterNode.MasterReads;
 import static org.junit.jupiter.api.Assertions.*;
 import java.util.*;
 import java.util.concurrent.atomic.*;
-import org.flexlb.mock.api.model.Types.*;
+import org.flexlb.MasterNode.*;
+import org.flexlb.mock.protocol.Role;
 import org.junit.jupiter.api.Test;
 
 class MasterReadsTest {

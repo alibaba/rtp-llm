@@ -1,7 +1,6 @@
 package org.flexlb.mock.engine.forward;
 
 import java.util.SplittableRandom;
-import org.flexlb.mock.api.model.DecodeSpec;
 
 /** Plan verification before Forward; sample accepted output only after Forward completes. */
 public record DecodeStepModel(DecodeSpec configuration) {

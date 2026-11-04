@@ -1,4 +1,4 @@
-package org.flexlb.mock.api.model;
+package org.flexlb.mock.protocol;
 
 import org.flexlb.mock.api.Argument;
 import org.flexlb.mock.api.Checks;

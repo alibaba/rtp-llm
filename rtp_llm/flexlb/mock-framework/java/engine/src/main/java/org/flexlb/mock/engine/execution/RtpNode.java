@@ -128,7 +128,7 @@ public final class RtpNode implements AutoCloseable {
     }
     public KvCache cache() { return cache; }
     public Map<String, Object> endpoints() {
-        boolean prefill = config.role() == org.flexlb.mock.api.model.Types.Role.prefill;
+        boolean prefill = config.role() == org.flexlb.mock.protocol.Role.prefill;
         var result = new LinkedHashMap<String, Object>();
         result.put("id", config.id()); result.put("role", config.role().name()); result.put("engine", "rtp");
         result.put("rpc", rpcAddress()); result.put("control", address.http(api.port()));

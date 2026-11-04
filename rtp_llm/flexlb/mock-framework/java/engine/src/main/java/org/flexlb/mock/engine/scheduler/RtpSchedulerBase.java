@@ -1,7 +1,7 @@
 package org.flexlb.mock.engine.scheduler;
 
 import java.util.*;
-import org.flexlb.mock.api.model.Types.Role;
+import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.engine.cache.KvCache;
 import org.flexlb.mock.engine.config.RtpConfig;

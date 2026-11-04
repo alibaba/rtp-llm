@@ -1,7 +1,7 @@
 package org.flexlb.mock.engine.service;
 
 import java.util.Objects;
-import org.flexlb.mock.api.model.Types.Role;
+import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.forward.ComputeModel;
 
 /** Values needed to bind the native protocol and RtpEngineLoop; contains no queue policy settings. */

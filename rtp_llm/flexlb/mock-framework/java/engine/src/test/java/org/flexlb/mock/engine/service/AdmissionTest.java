@@ -10,7 +10,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
-import org.flexlb.mock.api.model.Types.Role;
+import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.engine.cache.KvCache;
 import org.flexlb.mock.engine.forward.ComputeModel;
