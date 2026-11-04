@@ -37,13 +37,15 @@ def _pack_payload(codes):
 
 
 def _reference_global(kv):
-    """Independent 288B encoder (rtp fp4-codec oracle conventions)."""
+    """Independent 288B encoder with the pinned NV reciprocal boundary."""
     rows = kv.shape[0]
     x = kv.float().reshape(rows, KV_DIM // GROUP16, GROUP16)
     maximum = x.abs().amax(dim=-1)
     scales = (maximum.clamp_min(6.0 * 2.0**-9) / 6.0).to(torch.float8_e4m3fn)
     scale_bytes = scales.view(torch.uint8)
-    normalized = x / scales.float().unsqueeze(-1)
+    # Compute the correctly rounded FP32 reciprocal independently in FP64.
+    inverse = scales.double().reciprocal().float()
+    normalized = x * inverse.unsqueeze(-1)
     codes = _nearest_codes(normalized).reshape(rows, KV_DIM)
     payload = _pack_payload(codes)
     return torch.cat((payload, scale_bytes), dim=1)
@@ -196,6 +198,18 @@ class ScaleByteTest(unittest.TestCase):
 
 
 class GlobalKv288Test(unittest.TestCase):
+    def test_reciprocal_multiply_matches_nv_fp4_rounding_boundary(self):
+        # max=11.25 gives E4M3 scale 1.875 (byte 0x3f). The pinned NV
+        # cache kernel multiplies by its FP32 reciprocal before E2M1 RNE.
+        # 4.6875 / 1.875 is exactly the midpoint 2.5, but the prescribed
+        # FP32 reciprocal product is 2.500000238418579 and rounds to 3.0.
+        kv = torch.zeros(1, KV_DIM, dtype=torch.bfloat16)
+        kv[0, :3] = torch.tensor([11.25, 4.6875, -4.6875])
+        packed = _quant.quantize_global_kv_rows(kv)
+        self.assertEqual(packed[0, 256].item(), 0x3F)
+        self.assertEqual(packed[0, 0].item(), 0x57)
+        self.assertEqual(packed[0, 1].item(), 0x0D)
+
     def test_bytes_match_independent_reference(self):
         torch.manual_seed(7)
         kv = torch.randn(9, KV_DIM, dtype=torch.bfloat16)

@@ -211,12 +211,15 @@ def quantize_global_kv_rows(kv: torch.Tensor) -> torch.Tensor:
     """``kv bf16 [N,512]`` -> uint8 ``[N,288]``.
 
     NaN elements poison their group: NaN E4M3 scale byte and zero codes.
+    Preserve the NV cache kernel's FP32 reciprocal followed by multiplication;
+    direct division can land on a different E2M1 rounding boundary.
     """
     rows = kv.shape[0]
     x = kv.float().reshape(rows, KV_DIM // FP4_GROUP, FP4_GROUP)
     amax = x.abs().amax(dim=-1)
     scale, scale_bytes = global_group_scale(amax)
-    codes = _e2m1_codes(x / scale.unsqueeze(-1))
+    inverse_scale = torch.reciprocal(scale)
+    codes = _e2m1_codes(x * inverse_scale.unsqueeze(-1))
     codes = codes.reshape(rows, KV_DIM)
     payload = codes[:, 0::2] | (codes[:, 1::2] << 4)
     return torch.cat((payload, scale_bytes), dim=1).contiguous()

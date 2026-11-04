@@ -22,7 +22,9 @@ def _independent_global(kv):
     scale_bytes = scales.view(torch.uint8)
     levels = torch.tensor([0.0, 1.0, 2.0, 4.0, 0.5, 1.5, 3.0, 6.0])
     order = torch.tensor([0, 2, 4, 6, 1, 3, 5, 7], dtype=torch.uint8)
-    normalized = x / scales.float().unsqueeze(-1)
+    # Independent FP64 calculation of the pinned NV FP32 reciprocal.
+    inverse = scales.double().reciprocal().float()
+    normalized = x * inverse.unsqueeze(-1)
     nearest = (normalized.abs().unsqueeze(-1) - levels).abs().argmin(dim=-1)
     sign = torch.signbit(normalized).to(torch.uint8) << 3
     codes = (order[nearest] | sign).reshape(rows, KV_DIM)
