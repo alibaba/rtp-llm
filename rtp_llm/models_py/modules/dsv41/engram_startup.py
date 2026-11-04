@@ -372,7 +372,7 @@ def _tls(env, index, instances):
                 instance_cert_sha256=fingerprints)
 
 
-def build_group(env, world_size, *, rank=0, gang_hosts=None):
+def build_group(env, world_size, *, rank=0, gang_hosts=None, checkpoint=None):
     """Derive membership from explicit sharing inputs and the completed gang.
 
     The address list may come from the environment, from the topology directory
@@ -414,7 +414,9 @@ def build_group(env, world_size, *, rank=0, gang_hosts=None):
             raise ExchangeError('STORAGE_HOST_COUNT_MUST_MATCH_COHORT')
     else:
         raise ExchangeError('STORAGE_HOST_COUNT_REQUIRED')
-    checkpoint = env.get(CHECKPOINT_ENV) or env.get('CHECKPOINT_PATH')
+    # The launcher resolves an oss:// checkpoint to its local fuse mount before
+    # the engine starts; prefer that over the raw URI, which is not readable here.
+    checkpoint = env.get(CHECKPOINT_ENV) or checkpoint or env.get('CHECKPOINT_PATH')
     if not checkpoint:
         raise ExchangeError('CHECKPOINT_REQUIRED')
     revision = env.get(REVISION_ENV) or _checkpoint_revision(checkpoint)
@@ -464,9 +466,10 @@ def build_group(env, world_size, *, rank=0, gang_hosts=None):
     )
 
 
-def build_config(env, world_size, *, rank=0, gang_hosts=None):
+def build_config(env, world_size, *, rank=0, gang_hosts=None, checkpoint=None):
     """Add local allocation policy and optional mTLS material."""
-    config = build_group(env, world_size, rank=rank, gang_hosts=gang_hosts)
+    config = build_group(env, world_size, rank=rank, gang_hosts=gang_hosts,
+                         checkpoint=checkpoint)
     if config is None:
         return None
     if 'RTP_ENGRAM_LOCAL_DESCRIPTORS' in env:
@@ -524,11 +527,13 @@ def exchange_leaders(config, documents, deadline, build=None):
         thread.join(timeout=5)
 
 
-def prepare_static_engram(store, *, rank, world_size, environ=None, gang_hosts=None, leader_exchange=exchange_leaders):
+def prepare_static_engram(store, *, rank, world_size, environ=None, gang_hosts=None,
+                          checkpoint=None, leader_exchange=exchange_leaders):
     """All ranks enter once; only host representatives use cross-gang RPC."""
     env = os.environ if environ is None else environ
     started = time.monotonic()
-    config = build_config(env, world_size, rank=rank, gang_hosts=gang_hosts)
+    config = build_config(env, world_size, rank=rank, gang_hosts=gang_hosts,
+                          checkpoint=checkpoint)
     if config is None:
         return None
     group = config['group']

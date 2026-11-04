@@ -597,6 +597,18 @@ class TopologySourceTest(unittest.TestCase):
         with self.assertRaisesRegex(e.ExchangeError, 'INVALID_GANGINFO'):
             s.build_group(env, 4, gang_hosts=['10.0.0.1'] * 4)
 
+    def test_resolved_checkpoint_wins_over_an_object_store_uri(self):
+        # Whale passes CHECKPOINT_PATH as oss://; the launcher resolves it to a
+        # local fuse mount before the engine starts, and that is what we read.
+        env = {s.COUNT_ENV: '2', s.REVISION_ENV: 'rev',
+               'CHECKPOINT_PATH': 'oss://bucket/model/?OSS_ENDPOINT=internal'}
+        hosts = ['10.0.0.1'] * 2 + ['10.0.0.2'] * 2
+        cfg = s.build_group(env, 4, gang_hosts=hosts, checkpoint='/mnt/fuse/abc')
+        self.assertEqual(cfg['checkpoint'], '/mnt/fuse/abc')
+        env[s.CHECKPOINT_ENV] = '/explicit'
+        cfg = s.build_group(env, 4, gang_hosts=hosts, checkpoint='/mnt/fuse/abc')
+        self.assertEqual(cfg['checkpoint'], '/explicit')
+
     def test_explicit_cohort_still_overrides_the_annotation(self):
         with tempfile.TemporaryDirectory() as directory:
             path = self._annotation(directory, [

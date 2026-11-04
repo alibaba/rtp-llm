@@ -56,6 +56,8 @@ class BackendManager(object):
             getattr(self._distributed_server, "store", None),
             rank=pc.world_rank, world_size=pc.world_size,
             gang_hosts=tuple(w.ip for w in sorted(world_info.members, key=lambda w: w.world_rank)),
+            # Already resolved from an oss:// URI to the local fuse mount.
+            checkpoint=getattr(self.py_env_configs.model_args, "ckpt_path", None),
         )
         # Create EngineConfig from py_env_configs (server/distribute config already adjusted for this rank)
         engine_config = EngineConfig.create(
