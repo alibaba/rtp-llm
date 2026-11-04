@@ -57,6 +57,9 @@ class AccMetrics(Enum):
     VIT_QPS_METRIC = "py_rtp_vit_qps"
     VIT_ERROR_QPS_METRIC = "py_rtp_vit_error_qps"
     VIT_SUCCESS_QPS_METRIC = "py_rtp_vit_success_qps"
+    # Accumulated embedding rows; AccMetric normalizes by the flush interval,
+    # so the reported value is visual tokens/s.
+    VIT_EMBEDDING_TPS_METRIC = "py_rtp_vit_embedding_tps"
     # Incremented when a submission is rejected because the scheduler's waiting
     # queue is full (overload / stalled forward backpressure).
     VIT_EMBEDDING_OVERLOAD_QPS_METRIC = "py_rtp_vit_embedding_overload_qps"
