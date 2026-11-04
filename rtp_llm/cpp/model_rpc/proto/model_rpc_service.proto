@@ -801,6 +801,9 @@ message MemoryOperationRequestPB {
     uint64 transfer_trace_id = 4;
     int64 transfer_request_id = 5;
     bool has_transfer_request_id = 6;
+    // Optional diagnostics. Older peers omit these and retain task-local grouping.
+    uint64 transfer_workflow_id = 7;
+    uint64 transfer_parent_id = 8;
 }
 
 message MemoryOperationResponsePB {

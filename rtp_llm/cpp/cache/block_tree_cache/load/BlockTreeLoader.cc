@@ -496,7 +496,7 @@ void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
 void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&           task,
                                                 const std::shared_ptr<LoadAsyncContext>& context) {
     const auto& descriptors = task ? task->load_descs : context->loadDescs();
-    uint64_t    transfer_id = 0;
+    uint64_t    transfer_id = context->workflowId();
     if (task) {
         transfer_id = task->completionTransfer().traceId();
     }
@@ -523,7 +523,7 @@ void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&  
             {
                 std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
                 {
-                    CompletionStageScope wait(observation, "completion_lock_wait", "business_completion");
+                    CompletionStageScope wait(observation, "completion_lock_wait", "business_completion", AsyncProfileKind::Wait);
                     lock.lock();
                 }
                 CompletionStageScope tree(observation, "completion_settle", "business_completion");
