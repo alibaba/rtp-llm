@@ -42,7 +42,7 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.server.host_service import HostService
 from rtp_llm.server.mm_cache_metadata import MAX_METADATA_BYTES, metadata_from_proto
-from rtp_llm.server.request_headers import dashscope_greennet_metadata
+from rtp_llm.server.request_headers import dashscope_greennet_metadata, extract_qos_priority
 from rtp_llm.server.worker_status import _coerce_role_type
 from rtp_llm.telemetry import attributes as trace_attrs
 from rtp_llm.telemetry import start_client_span
@@ -541,28 +541,7 @@ class MasterClient:
 
     @staticmethod
     def _extract_priority(input: GenerateInput) -> int:
-        """QoS priority from x-dashscope-inner-qos-level header; returns 50
-        (default priority) when the header is absent so FlexLB participates in
-        Auto-TPM scheduling instead of opting out via NO_PRIORITY. Pure
-        passthrough, no range validation here."""
-        # 1. Try GenerateInput.headers (available when enqueue runs in the
-        #    same process that received the HTTP request).
-        headers = getattr(input, "headers", None)
-        if headers:
-            value = headers.get("x-dashscope-inner-qos-level")
-            if value is not None:
-                try:
-                    return int(str(value).strip())
-                except (TypeError, ValueError):
-                    pass  # fall through to generate_config fallback
-        # 2. Fallback: generate_config.qos_priority survives IPC to the
-        #    dash_sc enqueue loop where GenerateInput.headers may be absent.
-        gc = getattr(input, "generate_config", None)
-        if gc is not None:
-            qos_priority = getattr(gc, "qos_priority", None)
-            if qos_priority is not None and qos_priority > 0:
-                return qos_priority
-        return 50
+        return extract_qos_priority(input)
 
     async def get_vit_cache_metadata(
         self, address: RoleAddr, keys: List[str], input: Optional[GenerateInput] = None

@@ -36,6 +36,7 @@ from rtp_llm.server.request_headers import (
     dashscope_greennet_metadata,
     extract_correlation_request_id,
     extract_trace_id,
+    extract_qos_priority,
 )
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.telemetry import attributes as trace_attrs
@@ -524,6 +525,7 @@ def _trans_jsonable_options(
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
+    input_pb.priority = extract_qos_priority(input_py)
     # The frontend forwards only the tokenizer output and generic media
     # descriptors. ViT output shape and model-specific token expansion are
     # backend responsibilities and must never cross this RPC boundary.
