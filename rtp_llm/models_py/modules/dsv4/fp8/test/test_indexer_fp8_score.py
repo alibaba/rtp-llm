@@ -14,13 +14,23 @@ Verifies end-to-end that the 132B/slot UE8M0 layout we just locked in
   1. K bf16 → UE8M0 quant → 132B pool packing  (matches rtp-llm fused writer)
   2. Q bf16 → per-(token,head) fp8 quant + scale-fold into weights
   3. DeepGEMM ``fp8_paged_mqa_logits`` reads the 132B pool directly
-  4. Compare returned logits to the pure-PyTorch reference math:
-        score[b,n,k_pos] = sum_h relu(sum_d Q[b,n,h,d] * K_dequant[b,k_pos,d]) * w[b,n,h]
+  4. Compare returned logits to a reference built from the SAME quantized
+     operands the kernels consume:
+        score[b,n,t] = sum_h relu(sum_d q_fp8[b,n,h,d] * K_f32[b,t,d]) * w_fold[b,n,h]
+     where K_f32 is dequantized in fp32 from the same fp8 bytes + UE8M0
+     scales that step 1 packs into the pool; the scales are powers of two,
+     so that dequant is exact.
 
-Tolerance covers: fp8 quant of both Q and K (~scale/127 each), UE8M0
-power-of-2 rounding on K scale, and DeepGEMM's reduction order. We
-allow up to ~5% relative error on the dominant logits and absolute
-error <1.0 on the smaller ones.
+Tolerance covers fp32 accumulation order only: the reference reuses the
+exact fp8 q/k values plus the fp32 UE8M0 scales and folded weights, all
+exact in fp32, so quantization noise no longer enters the comparison.
+Because the reference reuses ``indexer_q_fp8_quant_fold``'s outputs, the
+Q quant/fold numerics themselves are not checked here; they are covered
+by ``test_indexer_q_fp8_quant.py``.
+DeepGEMM's internal accumulation precision is not observable from here;
+the check allows ~1% relative on the dominant logits (>= max(5% of the
+row max, 1e-3)) and 1e-3 * max(1, row_absmax) absolute elsewhere, per
+request.
 """
 
 from __future__ import annotations
@@ -145,15 +155,16 @@ def _pack_132B(fp8_bytes, scales, *, slot_indices, num_blocks, block_size):
     return pool
 
 
-def _ref_indexer_score(Q_bf16, K_dequant_bf16, weights_fp32):
-    """Pure-PyTorch reference for the indexer score:
-    out[b,n,k_pos] = sum_h relu(sum_d Q[b,n,h,d] * K[b,k_pos,d]) * w[b,n,h]
+def _ref_indexer_score(q_fp32, k_dequant_fp32, weights_fp32):
+    """Pure-PyTorch fp32 reference on the exact quantized operands:
+    out[b,n,k_pos] = sum_h relu(sum_d q_fp8[b,n,h,d] * K_dequant[b,k_pos,d])
+                     * w_fold[b,n,h]
     """
     # einsum -> [B, N, H, T]
     qk = torch.einsum(
         "bnhd,btd->bnht",
-        Q_bf16.to(torch.float32),
-        K_dequant_bf16.to(torch.float32),
+        q_fp32.to(torch.float32),
+        k_dequant_fp32.to(torch.float32),
     )
     qk = torch.relu(qk)
     out = (qk * weights_fp32.unsqueeze(-1)).sum(dim=2)  # [B, N, T]
@@ -164,7 +175,8 @@ def _ref_indexer_score(Q_bf16, K_dequant_bf16, weights_fp32):
 # on SM90/SM100 and ``block_kv == 32`` on SM100 only.
 @pytest.mark.parametrize("block_size", [32, 64])
 def test_fp8_paged_indexer_score_via_deepgemm(block_size, monkeypatch):
-    """rtp-llm 132B pool → DeepGEMM ``fp8_paged_mqa_logits`` ≈ bf16 reference."""
+    """rtp-llm 132B pool → DeepGEMM ``fp8_paged_mqa_logits`` ≈ quantized-input
+    reference (q_fp8 + w_fold + fp32-dequantized K)."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
     # Run on every device: when the predicate is False the wrapper must serve
@@ -252,43 +264,55 @@ def test_fp8_paged_indexer_score_via_deepgemm(block_size, monkeypatch):
     )  # [B*next_n, max_ctx_len] fp32
     logits_dg = logits_dg.view(B, next_n, max_ctx_len)[..., :T_per_req]
 
-    # ── Reference: dequant K from pool the SAME way the writer did the
-    # forward quant; this isolates "is the pool consumable by DeepGEMM?"
-    # from "is the pool data correct?" — the latter is locked by
-    # test_indexer_fp8_writer.py. ──
+    # ── Reference: dequant K in fp32 from the exact bytes quantized above
+    # and score them with the SAME quantized q and folded weights the
+    # kernels received (q_fp8 + w_fold).  UE8M0 scales are powers of two,
+    # so the fp32 dequant is exact and fp8→fp32 is exact; the reference
+    # therefore differs from the kernels ONLY by fp32 accumulation order,
+    # never by quantization noise.  Re-reading the writer's quantized
+    # outputs (rather than decoding the packed pool) isolates "is the pool
+    # consumable?" from "is the pool data correct?" — the latter is locked
+    # by test_indexer_fp8_writer.py. ──
     K_dequant_per_req = []
     for b in range(B):
         idx = b * T_per_req + torch.arange(T_per_req, device=device)
-        # Decode pool by re-reading the bytes we packed.
         fp8_b = fp8_bytes[idx].view(torch.float8_e4m3fn).to(torch.float32)
         scale_b = scales[idx].unsqueeze(-1)
-        K_b = (fp8_b * scale_b).to(torch.bfloat16)  # [T, D]
+        K_b = fp8_b * scale_b  # [T, D] fp32
         K_dequant_per_req.append(K_b)
     K_dequant = torch.stack(K_dequant_per_req, dim=0)  # [B, T, D]
 
-    logits_ref = _ref_indexer_score(Q, K_dequant, weights.to(torch.float32))
+    logits_ref = _ref_indexer_score(q_fp8.float(), K_dequant, w_fold)
 
     # ── Compare ──
-    # For relu-summed scores the dominant terms can be large (sum over 64
-    # heads × 128 dims of fp8*fp8 products). 5% relative is a comfortable
-    # bound for combined Q-fp8 + K-fp8 quant noise + DeepGEMM reduction
-    # order. Check each request independently so one correctly packed request
-    # cannot hide another request reading an all-zero block. Relative error is
-    # evaluated on dominant logits to avoid dividing by near-zero values.
+    # The kernels reduce the SAME fp8 operands with fp32 accumulators:
+    # fp8→bf16/fp32 is exact (every e4m3 value is representable), UE8M0
+    # scales and folded weights are exact fp32, so the only divergence from
+    # the reference is fp32 accumulation order in the D=128 dot and the
+    # H=64 head sum.  Bound that per request: 1e-3 * max(1, row_absmax)
+    # absolute on every logit plus ~1% relative on the dominant logits
+    # (those >= max(5% of the row max, 1e-3) — near-zero references would
+    # otherwise divide by ~0).  Both bounds must hold (`and`); a real
+    # drift fails at least one of them, and loosening to `or` would let
+    # each bound hide the other's failures.  Check each request
+    # independently so one correctly packed request cannot hide another
+    # request reading an all-zero block.
     for b in range(B):
         actual = logits_dg[b]
         expected = logits_ref[b]
         diff = (actual - expected).abs()
         max_abs = diff.max().item()
-        dominant = expected.abs() >= torch.clamp(expected.abs().max() * 0.05, min=1e-3)
+        row_absmax = expected.abs().max().item()
+        atol = 1e-3 * max(1.0, row_absmax)
+        dominant = expected.abs() >= max(row_absmax * 0.05, 1e-3)
         max_rel = (diff[dominant] / expected[dominant].abs()).max().item()
         mean_abs = diff.mean().item()
 
         assert actual.abs().max().item() > 1e-3, f"request {b} read an all-zero K pool"
-        assert max_abs < 5.0 and max_rel < 0.10, (
-            f"request {b} DeepGEMM logits diverge from bf16 reference: "
-            f"max_abs={max_abs:.3f}, max_rel={max_rel:.3%}, "
-            f"mean_abs={mean_abs:.3f}"
+        assert max_abs < atol and max_rel < 1e-2, (
+            f"request {b} logits diverge from the quantized-input reference: "
+            f"max_abs={max_abs:.6f} (atol={atol:.6f}), max_rel={max_rel:.3%}, "
+            f"mean_abs={mean_abs:.6f}"
         )
     expected_deepgemm = 1 if expects_deepgemm else 0
     expected_fallback = 0 if expects_deepgemm else 1
