@@ -64,6 +64,7 @@ class GlobalQueueProgressTest {
         policy.setExpectedWaitThresholdMs(1_000L);
         policy.setMaxWaitMs(3_000L);
         try (Fixture f = new Fixture(RoleType.PREFILL, false, policy)) {
+            when(f.router.isPrefillClusterOverloaded("a")).thenReturn(true);
             when(f.router.coldPrefillAdmission(any(), nullable(String.class)))
                     .thenReturn(org.flexlb.balance.strategy.CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY);
             when(f.router.estimateQueuedWork(any(), nullable(String.class))).thenAnswer(call -> {

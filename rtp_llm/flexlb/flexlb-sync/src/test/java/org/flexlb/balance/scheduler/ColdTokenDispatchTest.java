@@ -239,6 +239,125 @@ class ColdTokenDispatchTest {
         }
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void lowEngineQueueDeliversColdAndCacheFirstHotRequestsDespiteLegacyLimits(boolean batch, boolean hot) throws Exception {
+        try (var f = new Fixture(batch, false, false, true)) {
+            f.updateWaiting(f.a, 10L, 0L);
+            f.updateWaiting(f.b, 10L, 0L);
+            var a = f.occupy(f.a, 90);
+            var b = f.occupy(f.b, 91);
+            if (hot) { when(f.cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(f.a.ipPort(), 9)); }
+            try {
+                // Three deliveries exceed the one-slot limit on at least one of the two workers.
+                for (long id = 92; id <= 94; id++) {
+                    var context = f.context(id);
+                    var response = f.scheduler.submit(context).get(2, TimeUnit.SECONDS);
+                    assertTrue(response.isSuccess(), response.getErrorMessage());
+                    assertEquals(batch, response.isEnqueuedByMaster());
+                    var route = context.snapshot().route();
+                    assertNotNull(route);
+                    if (hot) { assertSame(f.a, route.prefillEp()); assertEquals(900L, route.hitCache()); }
+                    assertEquals(0, f.a.ownership.progress().queueDepth() + f.b.ownership.progress().queueDepth());
+                    assertTrue(route.prefillEp().ownership.tokenWorkload().pendingTokens() > 1L);
+                }
+                if (batch) { assertEquals(3, f.a.ownership.stats().batchCount() + f.b.ownership.stats().batchCount()); }
+            } finally { f.a.release(a, null); f.b.release(b, null); }
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"false,false,false", "false,true,false", "true,false,false", "true,true,false",
+            "false,false,true", "false,true,true", "true,false,true", "true,true,true"})
+    void liveEngineWaitingTasksStopDeliveryAndRecoveryWakesIt(boolean batch, boolean hot, boolean heartbeat) throws Exception {
+        try (var f = new Fixture(batch, false, false, true)) {
+            // Observe the default five-second interval without sleeping on wall time.
+            f.updateWaitingTasks(f.a, 32, heartbeat);
+            var policy = ReflectionTestUtils.getField(f.a, "engineQueueAdmission");
+            ReflectionTestUtils.setField(policy, "aboveSinceMs", System.nanoTime() / 1_000_000L - 5001L);
+            f.updateWaitingTasks(f.a, 32, heartbeat);
+            assertTrue(f.a.engineQueueCongested());
+            if (hot) { when(f.cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(f.a.ipPort(), 9)); }
+            var request = f.context(100);
+            var response = f.scheduler.submit(request);
+            if (hot) {
+                awaitCondition(() -> f.scheduler.getLatestQueueWaitSnapshot().containsKey("role"));
+                assertFalse(response.isDone());
+                assertNull(request.snapshot().route());
+                assertEquals(0, f.a.ownership.tokenWorkload().pendingTokens());
+                f.updateWaitingTasks(f.a, 10, heartbeat);
+                assertFalse(f.a.engineQueueCongested());
+            }
+            assertTrue(response.get(2, TimeUnit.SECONDS).isSuccess());
+            assertSame(hot ? f.a : f.b, request.snapshot().route().prefillEp());
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"false,0", "false,1", "false,2", "false,3", "false,4",
+            "true,0", "true,1", "true,2", "true,3", "true,4"})
+    void fourWorkerConcurrentBurstPreservesColdBalanceAndCacheFirst(boolean batch, int cacheMode) throws Exception {
+        try (var f = new Fixture(batch, false, false, true, config -> {
+            var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
+            balance.setMinPrefixHitPercent(5);
+            balance.setEnableWindow(false);
+            balance.setMaxPendingComputeTokens(2_000_000L);
+            config.getDispatcher().setMaxInflightPerPrefillWorker(256);
+        })) {
+            var c = (PrefillEndpoint) f.publish(RoleType.PREFILL, "127.0.0.3");
+            var d = (PrefillEndpoint) f.publish(RoleType.PREFILL, "127.0.0.4");
+            var workers = List.of(f.a, f.b, c, d);
+            Map<String, Integer> hits = switch (cacheMode) {
+                case 1 -> Map.of(f.a.ipPort(), 1);
+                case 2 -> Map.of(f.a.ipPort(), 45, f.b.ipPort(), 45, c.ipPort(), 45, d.ipPort(), 45);
+                case 3 -> Map.of(f.a.ipPort(), 45);
+                case 4 -> Map.of(f.a.ipPort(), 3);
+                default -> Map.of();
+            };
+            when(f.cache.findMatchingEngines(any(), any(), any())).thenReturn(hits);
+            var counts = new java.util.concurrent.ConcurrentHashMap<PrefillEndpoint, java.util.concurrent.atomic.AtomicInteger>();
+            var start = new CountDownLatch(1);
+            try (var clients = java.util.concurrent.Executors.newFixedThreadPool(8)) {
+                var runs = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+                for (int client = 0; client < 8; client++) {
+                    final int clientId = client;
+                    runs.add(clients.submit(() -> {
+                        assertTrue(start.await(3, TimeUnit.SECONDS));
+                        var requests = new java.util.ArrayList<RequestContext>();
+                        var responses = new java.util.ArrayList<java.util.concurrent.CompletableFuture<org.flexlb.dao.loadbalance.Response>>();
+                        for (int i = 0; i < 50; i++) {
+                            var request = f.context(10_000 + clientId * 50 + i);
+                            request.data().setRequest(request.data().getRequest().toBuilder().seqLen(50_000L)
+                                    .blockCacheKeys(java.util.stream.LongStream.rangeClosed(1, 50).boxed().toList())
+                                    .cacheKeyBlockSize(1000L).build());
+                            requests.add(request);
+                            responses.add(f.scheduler.submit(request));
+                        }
+                        for (int i = 0; i < responses.size(); i++) {
+                            var response = responses.get(i).get(10, TimeUnit.SECONDS);
+                            assertTrue(response.isSuccess(), response.getErrorMessage());
+                            var route = requests.get(i).snapshot().route();
+                            assertEquals(cacheMode < 2, route.coldTokenBalance());
+                            counts.computeIfAbsent(route.prefillEp(), ignored -> new java.util.concurrent.atomic.AtomicInteger()).incrementAndGet();
+                        }
+                        return null;
+                    }));
+                }
+                start.countDown();
+                for (var run : runs) { run.get(15, TimeUnit.SECONDS); }
+            }
+            var distribution = workers.stream().map(worker -> counts.getOrDefault(worker,
+                    new java.util.concurrent.atomic.AtomicInteger()).get()).toList();
+            assertEquals(cacheMode >= 3 ? List.of(400, 0, 0, 0) : List.of(100, 100, 100, 100), distribution);
+            System.out.println("four-worker burst batch=" + batch + " cacheMode=" + cacheMode + " distribution=" + distribution);
+            for (var worker : workers) {
+                assertEquals(0L, worker.ownership.tokenWorkload().plannedTokens());
+                assertEquals((cacheMode < 2 ? 50_000L : cacheMode == 4 ? 47_000L : 5_000L) * counts.getOrDefault(worker,
+                        new java.util.concurrent.atomic.AtomicInteger()).get(), worker.ownership.tokenWorkload().pendingTokens());
+            }
+        }
+    }
+
     private static final class Fixture implements AutoCloseable {
         final FlexlbConfig config = SchedulingTestConfig.newConfig();
         final EndpointRegistry endpoints;
@@ -255,7 +374,13 @@ class ColdTokenDispatchTest {
 
         Fixture(boolean batch) { this(batch, false, false); }
 
-        Fixture(boolean batch, boolean separateDecode, boolean priority) {
+        Fixture(boolean batch, boolean separateDecode, boolean priority) { this(batch, separateDecode, priority, false); }
+
+        Fixture(boolean batch, boolean separateDecode, boolean priority, boolean engineAdmissionTest) {
+            this(batch, separateDecode, priority, engineAdmissionTest, ignored -> {});
+        }
+        Fixture(boolean batch, boolean separateDecode, boolean priority, boolean engineAdmissionTest,
+                java.util.function.Consumer<FlexlbConfig> customize) {
             SchedulingTestConfig.useFifoQueue(config);
             if (priority) { SchedulingTestConfig.usePriorityQueue(config); }
             config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
@@ -265,6 +390,14 @@ class ColdTokenDispatchTest {
             config.queueScheduler().getDecision().setMaxRequests(8);
             config.queueScheduler().getDecision().setMaxCollectionWaitMs(60_000L);
             config.getRouter().getRoles().getPrefill().setTokenBalance(new RoutingConfig.TokenBalanceConfig());
+            if (engineAdmissionTest) {
+                config.queueScheduler().getDecision().setType(org.flexlb.config.DecisionPolicyConfig.Type.SINGLE);
+                config.getRouter().getRoles().getPrefill().getTokenBalance().setMaxPendingComputeTokens(1L);
+            } else {
+                // These cases exercise the explicitly retained legacy capacity policy.
+                config.getRouter().getRoles().getPrefill().getTokenBalance().setEngineQueueAdmissionThreshold(null);
+            }
+            customize.accept(config);
             var service = SchedulingTestConfig.configService(config);
             var reporter = mock(DeliveryMetricsReporter.class);
             var grpc = mock(org.flexlb.engine.grpc.EngineGrpcClient.class);
@@ -329,6 +462,46 @@ class ColdTokenDispatchTest {
                 status.setAvailableKvCacheTokens(1_000_000L);
                 return endpoints.publishPreparedEndpoint(worker.getIpPort(), worker,
                         worker.prepareNewStatus(WorkerStatusTestSupport.freezeStatusResponse(worker, status)));
+            } finally { worker.lock.unlock(); }
+        }
+
+        void updateWaitingTasks(PrefillEndpoint endpoint, int waiting, boolean heartbeat) throws Exception {
+            var worker = endpoint.getStatus();
+            var proto = org.flexlb.engine.grpc.EngineRpcService.WorkerStatusPB.newBuilder()
+                    .setRoleType(org.flexlb.engine.grpc.EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                    .setAlive(true).setStatusVersion(worker.appliedStatusCursor().statusVersion() + (heartbeat ? 0 : 1))
+                    .setTotalKvCache(1_000_000L).setAvailableKvCache(1_000_000L);
+            for (int i = 0; i < waiting; i++) {
+                proto.addRunningTaskInfo(org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB.newBuilder()
+                        .setRequestId(1000 + i).setInputLength(1000).setIsWaiting(true)
+                        .setPhase(org.flexlb.engine.grpc.EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED));
+            }
+            var observation = org.flexlb.service.grpc.EngineStatusConverter.convertToStatusObservation(worker,
+                    org.flexlb.engine.grpc.EngineRpcService.WorkerStatusPB.parseFrom(proto.build().toByteArray()));
+            org.flexlb.balance.endpoint.WorkerEndpoint.StatusChange change;
+            worker.lock.lock();
+            try {
+                change = heartbeat ? endpoint.applyStatusHeartbeat(worker, observation)
+                        : endpoint.applyPreparedStatus(worker, worker.prepareNewStatus(observation));
+            } finally { worker.lock.unlock(); }
+            endpoint.publishStatus(change);
+        }
+
+        void updateWaiting(PrefillEndpoint endpoint, long waiting, long availableKv) {
+            var worker = endpoint.getStatus();
+            worker.lock.lock();
+            try {
+                var status = new WorkerStatusResponse();
+                status.setRole(RoleType.PREFILL);
+                status.setAlive(true);
+                status.setStatusVersion(worker.appliedStatusCursor().statusVersion() + 1L);
+                status.setRunningTaskInfo(Map.of());
+                status.setFinishedTaskInfo(Map.of());
+                status.setTotalKvCacheTokens(1_000_000L);
+                status.setAvailableKvCacheTokens(availableKv);
+                status.setWaitingQueryLen(waiting);
+                endpoint.publishStatus(endpoint.applyPreparedStatus(worker,
+                        worker.prepareNewStatus(WorkerStatusTestSupport.freezeStatusResponse(worker, status))));
             } finally { worker.lock.unlock(); }
         }
 

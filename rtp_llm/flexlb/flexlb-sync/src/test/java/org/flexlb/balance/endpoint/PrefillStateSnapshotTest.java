@@ -95,6 +95,33 @@ class PrefillStateSnapshotTest {
     }
 
     @Test
+    void engineQueuePolicyOverridesBothTokensAndRequestCountsAndStopsOnCongestion() {
+        var pressure = new java.util.concurrent.atomic.AtomicReference<>(EngineQueueAdmission.State.AVAILABLE);
+        state.configureEngineQueueAdmission(pressure::get);
+        state.enableTokenWorkload(90);
+        var leases = new java.util.ArrayList<PrefillState.RouteReservation>();
+        for (int i = 0; i < 300; i++) {
+            var lease = state.reserveUnqueuedRoute(item(5000 + i), 1, 2).reservation();
+            assertNotNull(lease);
+            leases.add(lease);
+        }
+        var queued = item(6000);
+        assertSame(queued, state.updateQueue(PrefillState.QueueChange.ENQUEUE, queued, 2, 0));
+        pressure.set(EngineQueueAdmission.State.CONGESTED);
+        assertNull(state.reserveUnqueuedRoute(item(6001), 1, 0).reservation());
+        assertNull(state.updateQueue(PrefillState.QueueChange.ENQUEUE, item(6002), 0, 0));
+        for (var lease : leases) { state.release(lease, null); }
+        state.release(null, queued);
+        // Even an empty Master ledger cannot override a congested Engine queue.
+        assertNull(state.reserveUnqueuedRoute(item(6003), 1, 0).reservation());
+        pressure.set(EngineQueueAdmission.State.AVAILABLE);
+        var recovered = state.reserveUnqueuedRoute(item(6004), 1, 1).reservation();
+        assertNotNull(recovered);
+        state.release(recovered, null);
+        assertEquals(0, state.tokenWorkload().pendingTokens());
+    }
+
+    @Test
     void stableAdmissionSummaryIsReusedOnlyForTheExactInputs() {
         var first = state.admissionSummary(50, 1L);
         assertSame(first, state.admissionSummary(50, 1L));
