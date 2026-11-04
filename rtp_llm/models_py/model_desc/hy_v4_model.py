@@ -306,6 +306,7 @@ class Hy4Model(GptModelBase):
     def _forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
+        fmha_impl.pinned_mla_groups = self.pinned_mla_groups
         fmha_impl.layered_prefill_cache = self.layered_prefill_cache
         if self.layered_prefill_cache is not None:
             self.layered_prefill_cache.begin_forward(fmha_impl)

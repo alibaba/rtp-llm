@@ -1,16 +1,38 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import torch
 from torch import nn
 from torch.nn import functional as F
 
 from rtp_llm.models_py.model_desc.generic_moe_mtp import GenericMoeMTPModel
+from rtp_llm.models_py.model_desc.hy_v4_model import Hy4Model
 from rtp_llm.models_py.model_desc.hy_v4_mtp_model import Hy4MtpModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 
 
 class SharedDecoderInputsTest(unittest.TestCase):
+    def test_hy4_binds_current_pinned_cache_before_forward(self):
+        class ForwardReached(Exception):
+            pass
+
+        for supplied in (False, True):
+            with self.subTest(supplied_fmha=supplied):
+                fmha = SimpleNamespace(pinned_mla_groups={99: object()})
+                model = SimpleNamespace(
+                    prepare_fmha_impl=Mock(return_value=fmha),
+                    pinned_mla_groups={0: (object(), 0)},
+                    layered_prefill_cache=None,
+                    embed_tokens=Mock(side_effect=ForwardReached),
+                )
+                inputs = SimpleNamespace(input_ids=None)
+                for groups in (model.pinned_mla_groups, {0: (object(), 0)}, {}):
+                    model.pinned_mla_groups = groups
+                    with self.assertRaises(ForwardReached):
+                        Hy4Model._forward(model, inputs, fmha if supplied else None)
+                    self.assertIs(fmha.pinned_mla_groups, groups)
+
     def test_layer_selection_preserves_group_tables_and_layer_caches(self):
         tables = [torch.tensor([[10]]), torch.tensor([[20]])]
         caches = [torch.tensor([layer]) for layer in range(3)]
