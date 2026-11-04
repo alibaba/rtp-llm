@@ -297,6 +297,14 @@ void qsa_cub_topk_draft(
 
 
 def is_supported(scores, lengths):
+    # Opt in only the two MTP3 target buckets captured with an 8K KV capacity.
+    # Other row counts/column widths retain their existing dispatch domain.
+    mtp3_target = (
+        os.getenv("RTP_QWEN4_TARGET_TOPK_IMPL", "native") == "cub"
+        and scores.ndim == 2
+        and scores.shape[0] in (64, 256)
+        and scores.shape[1] == 2048
+    )
     large_prefill = (
         os.getenv("RTP_QWEN4_PREFILL_TOPK_IMPL", "native") in ("cub", "radix")
         and scores.ndim == 2
@@ -309,7 +317,7 @@ def is_supported(scores, lengths):
         and torch.version.git_version == _TORCH_GIT
         and scores.dtype == torch.float32
         and scores.ndim == 2
-        and (large_prefill or 1 <= scores.shape[0] <= 32)
+        and (large_prefill or mtp3_target or 1 <= scores.shape[0] <= 32)
         # The 8K MTP draft graph reserves three additional 128-token pages:
         # (64 + 3) * 32 compressed columns. Preserve the full-width Torch order.
         and (large_prefill or scores.shape[1] in (2047, 2048, 2144))
