@@ -88,6 +88,7 @@ cc_library(
         "test_cluster/NaviFuncClosure.h",
     ]),
     include_prefix = "navi",
+    visibility = ["//visibility:public"],
     deps = [
         ":navi_proto_cc_proto_headers",
         ":navi_builder_headers",
