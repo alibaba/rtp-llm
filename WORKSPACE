@@ -38,6 +38,13 @@ http_archive(
     sha256 = "5dea48d1fcddc3ec571ce2058e13910a0d4a6bab4cc09a809d8b1dd1c88ae6f2",
 )
 
+http_archive(
+    name = "lz4_pkg",
+    urls = ["https://github.com/lz4/lz4/archive/refs/tags/v1.9.4.tar.gz"],
+    strip_prefix = "lz4-1.9.4",
+    build_file = "//3rdparty/lz4:BUILD",
+)
+
 load("//3rdparty/cuda_config:cuda_configure.bzl", "cuda_configure")
 load("//3rdparty/gpus:rocm_configure.bzl", "rocm_configure")
 load("//3rdparty/py:python_configure.bzl", "python_configure")
