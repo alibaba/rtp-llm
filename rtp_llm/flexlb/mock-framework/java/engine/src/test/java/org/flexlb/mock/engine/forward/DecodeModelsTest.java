@@ -1,7 +1,6 @@
 package org.flexlb.mock.engine.forward;
 
 import static org.junit.jupiter.api.Assertions.*;
-import org.flexlb.mock.api.model.*;
 import org.junit.jupiter.api.Test;
 
 class DecodeModelsTest {

@@ -606,7 +606,7 @@ class PdGenerationTest {
     }
 
     @Test void eosLengthIsStableAcrossSpeculationAndNeverOvershootsTheLastRound() throws Exception {
-        int expected = new org.flexlb.mock.engine.forward.StoppingModel(new org.flexlb.mock.api.model.StoppingSpec(.2, 42L)).complete("77", 0, 20, 3, 20, false).committedTokens();
+        int expected = new org.flexlb.mock.engine.forward.StoppingModel(new org.flexlb.mock.engine.forward.StoppingSpec(.2, 42L)).complete("77", 0, 20, 3, 20, false).committedTokens();
         for (int draft : new int[]{0, 3}) {
             try (var p = node("prefill", 16, 1, Map.of("eos", Map.of("probability", .2, "seed", 42)));
                     var d = node("decode", 16, 1, Map.of("decode", Map.of("draft.tokens", draft, "acceptance.rate", 1), "eos", Map.of("probability", .2, "seed", 42)))) {

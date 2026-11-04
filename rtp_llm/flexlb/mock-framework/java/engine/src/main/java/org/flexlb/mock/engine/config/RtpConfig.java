@@ -8,9 +8,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.*;
-import org.flexlb.mock.api.model.Types.Role;
-import org.flexlb.mock.engine.forward.*;
-import org.flexlb.mock.api.model.DecodeSpec;
+import org.flexlb.mock.protocol.Role;
+import org.flexlb.mock.engine.forward.ComputeModel;
+import org.flexlb.mock.engine.forward.DecodeSpec;
 
 /** Native RTP names/units stay native; resolved pool capacity excludes the native null block. */
 public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, int reserveBlocks,

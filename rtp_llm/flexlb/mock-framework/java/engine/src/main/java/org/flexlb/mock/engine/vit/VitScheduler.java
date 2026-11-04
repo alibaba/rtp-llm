@@ -3,7 +3,7 @@ package org.flexlb.mock.engine.vit;
 import io.grpc.Status;
 import java.util.*;
 import java.util.concurrent.*;
-import org.flexlb.mock.api.model.Types.Role;
+import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.forward.*;
 
 /** One Forward lane; only prepared, deduplicated media enter this queue. */

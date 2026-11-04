@@ -11,7 +11,6 @@ import java.util.*;
 import java.util.concurrent.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
-import org.flexlb.mock.api.model.Types.None;
 
 import org.junit.jupiter.api.Test;
 

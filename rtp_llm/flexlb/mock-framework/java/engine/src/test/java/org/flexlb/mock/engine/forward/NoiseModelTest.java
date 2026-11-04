@@ -4,7 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
-import org.flexlb.mock.api.model.ComputeSpec.Noise;
+import org.flexlb.mock.engine.forward.ComputeSpec.Noise;
 import org.junit.jupiter.api.Test;
 
 class NoiseModelTest {

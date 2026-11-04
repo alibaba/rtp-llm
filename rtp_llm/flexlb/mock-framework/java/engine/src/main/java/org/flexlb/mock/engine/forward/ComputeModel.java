@@ -6,8 +6,7 @@ import com.fasterxml.jackson.databind.*;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.io.IOException;
 import java.util.*;
-import org.flexlb.mock.api.model.ComputeSpec;
-import org.flexlb.mock.api.model.Types.Role;
+import org.flexlb.mock.protocol.Role;
 
 /** Composes Forward timing, Decode acceptance and EOS/length completion without mutating request state. */
 public final class ComputeModel {

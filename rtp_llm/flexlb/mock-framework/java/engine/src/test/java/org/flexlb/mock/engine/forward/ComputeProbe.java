@@ -6,7 +6,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
-import org.flexlb.mock.api.model.Types.Role;
+import org.flexlb.mock.protocol.Role;
 
 /** Cross-language component test only; not an Engine or production launcher. */
 public final class ComputeProbe {

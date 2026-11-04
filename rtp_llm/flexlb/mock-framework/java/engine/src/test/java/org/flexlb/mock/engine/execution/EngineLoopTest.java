@@ -2,8 +2,8 @@ package org.flexlb.mock.engine.execution;
 
 import java.util.*;
 import java.util.concurrent.*;
-import org.flexlb.mock.api.model.ComputeSpec;
-import org.flexlb.mock.api.model.Types.Role;
+import org.flexlb.mock.engine.forward.ComputeSpec;
+import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.forward.*;
 import org.flexlb.mock.engine.scheduler.QueueSnapshot;
 import org.flexlb.mock.engine.scheduler.RequestFailure;

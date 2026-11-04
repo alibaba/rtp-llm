@@ -1,7 +1,6 @@
 package org.flexlb.mock.engine.forward;
 
 import java.util.SplittableRandom;
-import org.flexlb.mock.api.model.StoppingSpec;
 
 /** shortcut: constant per-output-token EOS probability; calibrate a richer model when workload data requires it. */
 public record StoppingModel(StoppingSpec configuration) {

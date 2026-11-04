@@ -5,7 +5,6 @@ import java.nio.charset.StandardCharsets;
 import java.security.*;
 import java.time.Duration;
 import java.util.SplittableRandom;
-import org.flexlb.mock.api.model.ComputeSpec;
 
 /** One keyed draw per invocation; no shared RNG or invocation-order counter. */
 public final class NoiseModel {

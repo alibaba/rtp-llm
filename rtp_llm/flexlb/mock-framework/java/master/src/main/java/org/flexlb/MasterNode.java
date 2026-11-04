@@ -1,7 +1,7 @@
 package org.flexlb;
 
 import java.util.function.*;
-import org.flexlb.mock.api.model.Types.*;
+import org.flexlb.mock.protocol.Role;
 
 import com.fasterxml.jackson.databind.*;
 import java.net.*;
@@ -75,6 +75,12 @@ public final class MasterNode {
         } finally { context.close(); }
     }
     private static String required(String key) { return Objects.requireNonNull(System.getenv(key), "Missing " + key); }
+
+    public record None() {}
+    public record MasterRef(String id) {}
+    public record MasterSet(List<MasterRef> instances) {}
+    public record PerMasterEngines(Map<String, List<String>> instances) {}
+    public record EngineSelection(Role role) {}
 
     public static final class MasterReads {
         private final String id;

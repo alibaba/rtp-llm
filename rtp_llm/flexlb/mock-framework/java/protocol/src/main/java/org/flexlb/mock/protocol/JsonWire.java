@@ -7,7 +7,7 @@ import java.math.BigDecimal;
 import java.util.*;
 import java.util.regex.Pattern;
 import org.flexlb.mock.api.Variant;
-import org.flexlb.mock.api.model.Types;
+import org.flexlb.mock.api.TimeRange;
 
 /** The generated schema validates both network input and component output. */
 final class JsonWire {
@@ -120,10 +120,10 @@ final class JsonWire {
             return Collections.unmodifiableMap(values);
         }
         var clazz = (Class<?>) type;
-        if (clazz == Types.Duration.class) return new Types.Duration(node.textValue());
-        if (clazz == Types.TimeRange.class) {
-            if (node.isTextual()) return node.textValue().equals("all") ? new Types.All() : new Types.Latest();
-            return new Types.Interval(new Types.Duration(node.get(0).textValue()), new Types.Duration(node.get(1).textValue()));
+        if (clazz == TimeRange.Duration.class) return new TimeRange.Duration(node.textValue());
+        if (clazz == TimeRange.class) {
+            if (node.isTextual()) return node.textValue().equals("all") ? new TimeRange.All() : new TimeRange.Latest();
+            return new TimeRange.Interval(new TimeRange.Duration(node.get(0).textValue()), new TimeRange.Duration(node.get(1).textValue()));
         }
         if (clazz.isSealed()) {
             for (var variant : clazz.getPermittedSubclasses()) {

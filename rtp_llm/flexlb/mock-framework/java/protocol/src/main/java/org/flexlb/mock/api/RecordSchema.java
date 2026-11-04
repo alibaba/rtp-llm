@@ -2,7 +2,6 @@ package org.flexlb.mock.api;
 
 import java.lang.reflect.*;
 import java.util.*;
-import org.flexlb.mock.api.model.Types;
 
 /** Derives validation rules from the typed control request and response records. */
 public final class RecordSchema {
@@ -22,8 +21,8 @@ public final class RecordSchema {
             return Map.of("type", "integer", "bits", c == int.class || c == Integer.class ? 32 : 64);
         if (c == double.class || c == Double.class) return Map.of("type", "number");
         if (c == boolean.class || c == Boolean.class) return Map.of("type", "boolean");
-        if (c == Types.Duration.class) return Map.of("type", "duration");
-        if (c == Types.TimeRange.class) return Map.of("type", "range");
+        if (c == TimeRange.Duration.class) return Map.of("type", "duration");
+        if (c == TimeRange.class) return Map.of("type", "range");
         if (c.isSealed()) {
             List<Map<String, Object>> variants = new ArrayList<>();
             for (Class<?> subtype : c.getPermittedSubclasses()) {
