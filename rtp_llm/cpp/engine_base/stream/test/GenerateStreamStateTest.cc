@@ -444,6 +444,39 @@ TEST_F(GenerateStreamStateTest, testPrefillFallbackDecodeGrowsBlocksAfterContext
     EXPECT_EQ(stream->curBlocksNum(), 2u);
 }
 
+TEST_F(GenerateStreamStateTest, testPdPrefillWaitsForFirstTokenCommitWithoutDecodeAllocation) {
+    for (const auto state : {StreamState::RUNNING, StreamState::WAITING}) {
+        for (const bool cancel : {false, true}) {
+            SCOPED_TRACE(testing::Message() << "state=" << static_cast<int>(state) << " cancel=" << cancel);
+            auto stream = createStream({1, 2}, /*reuse_cache=*/false, RoleType::PREFILL);
+            stream->generate_input_->generate_config->pd_separation = true;
+            stream->reportEvent(StreamEvents::CanRun);
+            ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+            ASSERT_EQ(stream->curBlocksNum(), 1u);
+            const auto pool = cache_manager_->coordinator_manager_->groupBlockPools().front();
+            const auto free_before_commit = pool->freeBlocksNum();
+
+            // Async execution publishes the next length before updateOutput
+            // publishes GenerateDone/NeedRemoteGenerate for the PD handoff.
+            stream->setIsContextStream(false);
+            stream->setSeqLength(3);
+            stream->generate_status_->status = state;
+            EXPECT_EQ(stream->moveToNext(), StreamState::RUNNING);
+            EXPECT_EQ(stream->curBlocksNum(), 1u);
+            EXPECT_EQ(pool->freeBlocksNum(), free_before_commit);
+            if (cancel) {
+                stream->reportError(ErrorCode::CANCELLED, "cancel during PD commit");
+            } else {
+                stream->reportEvent(StreamEvents::GenerateDone);
+            }
+            EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+            EXPECT_EQ(stream->curBlocksNum(), 0u);
+            EXPECT_EQ(pool->freeBlocksNum(), free_before_commit + 1);
+            EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
+        }
+    }
+}
+
 TEST_F(GenerateStreamStateTest, testIncrementalAsyncAllocationTerminatesBeforeModelAndReleasesOnce) {
     using ::testing::_;
     using ::testing::Return;

@@ -26,6 +26,7 @@ class DsaPreparedKVBlock:
     native_table: object = None
     native_schedule: object = None
     indexer_decode_positions: object = None
+    fp8_dequant_metadata: object = None
 
 
 def _prefill_block_layout(block, request_count, device):
@@ -85,12 +86,14 @@ class DsaKVExecution:
             owner.other_resident_bytes(phase),
             owner.native_exact_topk,
             owner.indexer_use_fp8,
+            owner.sfa_use_fp8,
         )
 
     def __init__(self, params, name):
         owner = params.workspace_owner
         self.owner, self.name = owner, name
         self.fp8_indexer = name == "indexer" and owner.indexer_use_fp8
+        self.fp8_sfa = name == "sfa" and owner.sfa_use_fp8
         self.prefill = params.is_prefill
         self.rows = (
             params.query_positions.numel()
@@ -132,7 +135,7 @@ class DsaKVExecution:
         features = (
             (132 if self.fp8_indexer else owner.index_dim)
             if name == "indexer"
-            else owner.latent_dim + owner.suffix_dim
+            else (656 if self.fp8_sfa else owner.latent_dim + owner.suffix_dim)
         )
         staged_sfa = self.prefill and name == "sfa"
         total_history = sum(lengths)
@@ -164,7 +167,8 @@ class DsaKVExecution:
         else:
             kernel_heads = 64 if owner.heads <= 64 else 128
             external += (
-                capacity_rows * (3 * owner.heads + kernel_heads) * features * 2
+                capacity_rows * (3 * owner.heads + kernel_heads)
+                * (owner.latent_dim + owner.suffix_dim) * 2
                 + capacity_rows * kernel_heads * (owner.latent_dim * 2 + 8)
                 + capacity_rows * owner.heads * owner.value_dim * 4
                 + capacity_rows * owner.topk * 4
@@ -187,7 +191,7 @@ class DsaKVExecution:
 
             if self.prefill:
                 pages = block.owner_pages(params.page_size, self.shards)
-                dtype = torch.uint8 if self.fp8_indexer else torch.bfloat16
+                dtype = torch.uint8 if self.fp8_indexer or self.fp8_sfa else torch.bfloat16
                 add("cache.pack", (pages, params.page_size, features), dtype)
                 add(
                     "cache.gather",
@@ -195,6 +199,12 @@ class DsaKVExecution:
                     dtype,
                 )
                 add("cache.restore", (width, features), dtype)
+                if self.fp8_sfa:
+                    add(
+                        "cache.dequant",
+                        (width, owner.latent_dim + owner.suffix_dim),
+                        torch.bfloat16,
+                    )
             elif name == "indexer":
                 if self.fp8_indexer:
                     add("cache.native64", (1 + capacity_batch * (width // 64), 64, 1, 132), torch.uint8)
@@ -298,6 +308,8 @@ class DsaKVExecution:
             return selection + native
 
         def metadata_bytes(plan):
+            if self.fp8_sfa and self.prefill:
+                return len(plan.blocks) * 3 * 4
             if self.graph and not self.prefill:
                 # All capture buckets/cache groups remain live. Reserve their
                 # mutable metadata up front, not just the current bucket.
@@ -405,6 +417,13 @@ class DsaKVExecution:
                         requests,
                         slices,
                         host_slices=host_slices,
+                        fp8_dequant_metadata=(
+                            (
+                                torch.zeros((1, 1), device=device, dtype=torch.int32),
+                                torch.full((1,), block.tokens, device=device, dtype=torch.int32),
+                                torch.zeros((1,), device=device, dtype=torch.int32),
+                            ) if self.fp8_sfa else None
+                        ),
                     )
                 )
             else:

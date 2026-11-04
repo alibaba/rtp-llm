@@ -6,6 +6,8 @@ from functools import lru_cache
 
 import torch
 
+from rtp_llm.ops import KvCacheDataType
+
 
 def _budget(name, default_mib):
     value = int(os.environ.get(name, default_mib))
@@ -173,6 +175,7 @@ class DsaWorkspaceOwner:
         index_heads=32,
         index_dim=128,
         indexer_use_fp8=False,
+        sfa_use_fp8=False,
         topk=2048,
         heads=96,
         latent_dim=512,
@@ -189,6 +192,9 @@ class DsaWorkspaceOwner:
     ):
         self.index_heads, self.index_dim, self.topk = index_heads, index_dim, topk
         self.indexer_use_fp8 = indexer_use_fp8
+        self.sfa_use_fp8 = sfa_use_fp8
+        if sfa_use_fp8 and (latent_dim, suffix_dim) != (512, 64):
+            raise ValueError("fp8_ds_mla requires 512 latent and 64 physical suffix dimensions")
         self.indexer_score = None
         self.heads, self.latent_dim = heads, latent_dim
         self.suffix_dim, self.value_dim = suffix_dim, value_dim
@@ -233,6 +239,7 @@ class DsaWorkspaceOwner:
             index_heads=dsa.index_num_heads,
             index_dim=dsa.index_head_dim,
             indexer_use_fp8=dsa.indexer_use_fp8,
+            sfa_use_fp8=a.kv_cache_dtype == KvCacheDataType.FP8,
             topk=dsa.index_topk,
             heads=a.head_num,
             latent_dim=a.kv_lora_rank,

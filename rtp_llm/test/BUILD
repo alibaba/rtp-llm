@@ -633,6 +633,13 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_fp8_modeling_policy_test",
+    srcs = ["kimi_k3_fp8_modeling_policy_test.py"],
+    data = ["//rtp_llm:models", "//rtp_llm/models_py:models"],
+    env = {"GPU_COUNT": "0"},
+)
+
+py_test(
     name = "kimi_k31_kda_metadata_cuda_test",
     srcs = ["kimi_k31_kda_metadata_test.py"],
     main = "kimi_k31_kda_metadata_test.py",

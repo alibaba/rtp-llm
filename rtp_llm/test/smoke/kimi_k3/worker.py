@@ -453,7 +453,10 @@ class Worker:
             or self.config.get("moe_strategy")
             or ("mega_moe" if self.role == "prefill" else "mega_moe_se"),
         ]
-        for key in ("fp8_gemm", "fp8_kv_cache", "warm_up", "model_warm_up"):
+        for key in ("fp8_gemm", "fp8_kv_cache"):
+            if key in self.config:
+                command.append(("--" if self.config[key] else "--no-") + key.replace("_", "-"))
+        for key in ("warm_up", "model_warm_up"):
             if self.config.get(key, False):
                 command.append("--" + key.replace("_", "-"))
         if "expected_draft_shards" in self.host:

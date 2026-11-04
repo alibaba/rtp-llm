@@ -135,13 +135,12 @@ void GenerateStateMachine::handleWaiting() {
         return;
     }
 
-    // A PREFILL role normally runs only the context pass, so it must not call
-    // incrKVBlock while the stream is still a context stream. With PD fallback,
-    // the same role can continue into decode after GenerateStream::update()
-    // flips isContextStream() to false; from that point block tables must grow
-    // exactly like a decode stream.
+    // Pure PD Prefill waits for the first-token commit/handoff even after
+    // async execution flips isContextStream(). Only a local fallback needs
+    // decode slots; queryPdSep() distinguishes it from that commit window.
+    const auto stream = stream_cache_resource_->stream();
     if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
-        && stream_cache_resource_->isContextStream()) {
+        && (stream_cache_resource_->isContextStream() || (stream != nullptr && stream->queryPdSep()))) {
         transitionToRunning();
         return;
     }
@@ -192,8 +191,10 @@ void GenerateStateMachine::handleRunning() {
         releaseResource();
         return;
     }
+    const auto prefill_stream = stream_cache_resource_->stream();
     if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
-        && stream_cache_resource_->isContextStream()) {
+        && (stream_cache_resource_->isContextStream()
+            || (prefill_stream != nullptr && prefill_stream->queryPdSep()))) {
         return;
     }
     // A pending MTP round may already own a complete device page-table

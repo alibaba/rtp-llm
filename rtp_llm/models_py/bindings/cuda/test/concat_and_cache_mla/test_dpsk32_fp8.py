@@ -1,3 +1,4 @@
+import math
 import random
 import sys
 import unittest
@@ -35,6 +36,7 @@ class TestConcatAndCacheDSMLA(unittest.TestCase):
         num_blocks: int,
         dtype: torch.dtype,
         seed: int,
+        use_ue8m0: bool = False,
     ) -> None:
         """
         Helper method to run concat_and_cache_ds_mla test
@@ -84,7 +86,8 @@ class TestConcatAndCacheDSMLA(unittest.TestCase):
 
         # Call the concat_and_cache_mla kernel with fp8_ds_mla
         compute_ops.concat_and_cache_mla(
-            kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
+            kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale,
+            **({"use_ue8m0": True} if use_ue8m0 else {}),
         )
 
         # For DeepSeek MLA, just verify the kernel runs without error
@@ -182,6 +185,8 @@ class TestConcatAndCacheDSMLA(unittest.TestCase):
                 # tile_scale = max(tile_scale, FLT_MIN)
                 max_abs = tile_values_original.abs().max().item()
                 expected_scale = max(max_abs / 448.0, 1.1754944e-38)  # FLT_MIN
+                if use_ue8m0:
+                    expected_scale = 2.0 ** math.ceil(math.log2(expected_scale))
 
                 # Scale should match expected value (with small tolerance for float precision)
                 self.assertAlmostEqual(
@@ -253,6 +258,18 @@ class TestConcatAndCacheDSMLA(unittest.TestCase):
             num_blocks=8,
             dtype=torch.bfloat16,
             seed=0,
+        )
+
+    def test_concat_and_cache_ds_mla_power_of_two_scales(self):
+        self._run_concat_and_cache_ds_mla(
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            num_tokens=42,
+            block_size=64,
+            num_blocks=8,
+            dtype=torch.bfloat16,
+            seed=17,
+            use_ue8m0=True,
         )
 
     def test_concat_and_cache_ds_mla_float16(self):

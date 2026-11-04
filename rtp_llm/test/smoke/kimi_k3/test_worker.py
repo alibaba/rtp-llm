@@ -19,6 +19,7 @@ from unittest.mock import patch
 import pd_config
 import server_launcher as launcher
 import worker
+import two_host_launcher
 
 
 def config():
@@ -40,6 +41,13 @@ def config():
 
 
 class NativePdSmokeTest(unittest.TestCase):
+    def test_k31_default_decode_dp_and_explicit_cluster_override(self):
+        for selected, expected in ((None,2),(1,1),(2,2)):
+            item=config();item['model_type']='kimi_k31'
+            item.pop('decode_dp')
+            if selected is not None:item['decode_dp']=selected
+            self.assertEqual(two_host_launcher.decode_dp_size(item),expected)
+
     def test_native_config_rejects_transport_fields_and_same_host(self):
         self.assertEqual(
             pd_config.validate_config(config(), local_role="prefill"), config()

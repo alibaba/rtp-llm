@@ -1,5 +1,6 @@
 """K3.1 sparse policy composed from shared K3 projections and Indexer kernels."""
 
+import torch
 
 from rtp_llm.models_py.distributed.collective_torch import (
     Group, all_gather, reduce_scatter_bf16,
@@ -18,6 +19,10 @@ from rtp_llm.ops import RoleType
 class KimiK31DSA(KimiK3MLA):
     """Local-Q Prefill and replicated-Q Decode over owner-local cache."""
 
+    # Indexer K/head-gate projections also consume the BF16 hidden rows.
+    # AttnRes must not replace those rows with an FP8-only activation.
+    supports_fp8_activation = False
+
     def __init__(self, config, parallelism, weights, layer_idx, hardware=None):
         super().__init__(config, parallelism, weights, layer_idx, hardware)
         policy = config.k3_runtime_config.dsa
@@ -32,6 +37,13 @@ class KimiK31DSA(KimiK3MLA):
             if self.prefill_query_cp or parallelism.role_type == RoleType.DECODE
             else self.heads
         )
+        qkv_rows = self.q_rank + self.kv_rank + self.suffix_dim
+        self._input_padding = self.input.weight.shape[0] - qkv_rows - self.heads * self.v_dim
+        expected_padding = (
+            (-qkv_rows) % 128 if self.input.weight.dtype == torch.float8_e4m3fn else 0
+        )
+        if self._input_padding != expected_padding:
+            raise ValueError("K3.1 input projection does not match its Q/KV/gate FP8 block layout")
         self._gate_stream = None
         if policy.indexer_use_fp8:
             from rtp_llm.models_py.modules.base.cuda.fp8_indexer_op import Fp8IndexerOp
@@ -91,12 +103,13 @@ class KimiK31DSA(KimiK3MLA):
             and getattr(metadata, "query_layout", None) is not None
         )
         collective = self._bf16_collective
-        use_collective = (
+        use_bf16_collective = (
             not local_query
+            and not self._fp8_output_gate
             and collective is not None
             and collective.eligible(hidden.shape[0], attention_inputs, metadata)
         )
-        if use_collective:
+        if use_bf16_collective:
             with profile_scope("RTP::attention.bf16_ag_gemm"):
                 projected, full = collective.all_gather_gemm(
                     hidden,
@@ -116,8 +129,9 @@ class KimiK31DSA(KimiK3MLA):
                 )
             with profile_scope("RTP::attention.mla.qkv_gate_input_proj"):
                 projected = self.input(full)
-        qkv, gate = projected.split(
-            [self.q_rank + self.kv_rank + self.suffix_dim, self.heads * self.v_dim],
+        qkv, _, gate = projected.split(
+            [self.q_rank + self.kv_rank + self.suffix_dim,
+             self._input_padding, self.heads * self.v_dim],
             dim=-1,
         )
         del projected
@@ -132,20 +146,48 @@ class KimiK31DSA(KimiK3MLA):
             )
         )
         with profile_scope("RTP::attention.mla.output_gate_quant"):
-            output = gate_sigmoid_mul(output, gate, mask)
-        if use_collective:
+            if self._fp8_output_gate:
+                from rtp_llm.models_py.triton_kernels.common.activation import (
+                    sigmoid_mul_per_token_group_quant_fp8,
+                )
+
+                # Mask both operands: an inactive gate may contain NaN, and
+                # zero * sigmoid(NaN) must not enter the FP8 scale reduction.
+                if mask is not None:
+                    output = torch.where(mask[:, None], output, 0)
+                    gate = torch.where(mask[:, None], gate, 0)
+                values, scales = sigmoid_mul_per_token_group_quant_fp8(output, gate)
+            else:
+                output = gate_sigmoid_mul(output, gate, mask)
+        use_fused_rs = (
+            not local_query
+            and self._fp8_output_gate
+            and self._fp8_collective is not None
+            and self._fp8_collective.eligible_rs(
+                values.shape[0], attention_inputs, metadata, True
+            )
+        )
+        if use_fused_rs:
+            with profile_scope("RTP::attention.fp8_gemm_rs"):
+                output = self._fp8_collective.gemm_reduce_scatter(
+                    values, scales, self.output
+                )
+        elif use_bf16_collective:
             with profile_scope("RTP::attention.bf16_gemm_rs"):
                 output = collective.gemm_reduce_scatter(output, self.output)
         else:
             with profile_scope("RTP::attention.mla.output_proj"):
-                output = self.output(output)
-            if not local_query and self.tp_size > 1:
-                with profile_scope("RTP::attention.output_reduce_scatter"):
-                    output = (
-                        self._mtp_bf16_collectives.reduce_scatter(output)
-                        if self._mtp_bf16_collectives is not None
-                        else reduce_scatter_bf16(output, Group.TP)
-                    )
+                output = (
+                    self.output.forward_quantized(values, scales)
+                    if self._fp8_output_gate else self.output(output)
+                )
+        if not (use_fused_rs or use_bf16_collective) and not local_query and self.tp_size > 1:
+            with profile_scope("RTP::attention.output_reduce_scatter"):
+                output = (
+                    self._mtp_bf16_collectives.reduce_scatter(output)
+                    if self._mtp_bf16_collectives is not None
+                    else reduce_scatter_bf16(output, Group.TP)
+                )
         owner = getattr(next(iter(fmha.values())), "workspace_owner", None)
         if owner is not None:
             owner.release_eager_buffers()

@@ -317,7 +317,8 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("kv_cache"),
                   py::arg("slot_mapping"),
                   py::arg("kv_cache_dtype"),
-                  py::arg("scale"));
+                  py::arg("scale"),
+                  py::arg("use_ue8m0") = false);
 
     rtp_ops_m.def("mla_decode_q_concat_cache_insert",
                   &rtp_llm::mla_decode_q_concat_cache_insert,

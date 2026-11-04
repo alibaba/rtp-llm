@@ -39,11 +39,25 @@ class K31LaunchContract(unittest.TestCase):
                         self.assertEqual(env['SP_TYPE'],'mtp');self.assertEqual(env['GEN_NUM_PER_CIRCLE'],'3')
                         self.assertEqual(env['RTP_MTP_ACCEPTANCE_STATS'],'1')
                         self.assertEqual(env['ACT_TYPE'],'BF16');self.assertEqual(env['SP_ACT_TYPE'],'BF16')
+                        self.assertEqual(env['QUANTIZATION'],'FP8_PER_BLOCK')
+                        self.assertEqual(env['FP8_KV_CACHE'],'1')
+                        self.assertEqual(env['FP8_MLA'],'0')
+                        self.assertEqual(env['SP_QUANTIZATION'],'')
                         self.assertEqual(options['--seq_size_per_block'],'1024');self.assertEqual(options['--kernel_seq_size_per_block'],'128')
                         self.assertEqual(options['--max_seq_len'],'2097152')
                         self.assertGreater(int(options['--max_seq_len']),655360+256)
                         self.assertEqual(options['--prefill_cp_size'],'8');self.assertEqual(options['--prefill_cp_kv_cache_sharded'],'1')
+                        self.assertEqual(options['--enable_device_cache'],'1')
+                        self.assertEqual(options['--enable_memory_cache'],str(int(role=='PREFILL')))
+                        self.assertEqual(options['--reuse_cache'],str(int(role=='PREFILL')))
+                        self.assertEqual(options['--load_method'],'fastsafetensors')
                         self.assertEqual(options['--enable_cuda_graph'],str(int(role=='DECODE')))
+                        if role=='PREFILL':
+                            self.assertEqual(env['PREFILL_CHUNK_SIZE'],'65536')
+                        else:
+                            self.assertEqual(env['ENABLE_LINEAR_REPLAY'],'1')
+                            self.assertEqual(options['--decode_capture_config'],
+                                             '1,2,4,8,16,32' if dp==2 else '1,2,4,8,16,32,64')
                         self.assertNotIn('force_sp_accept',options)
                         self.assertEqual(options['--cp_force_single_prefill'],'0')
                         self.assertEqual(options['--concurrency_limit'],
@@ -57,6 +71,19 @@ class K31LaunchContract(unittest.TestCase):
             path=args.draft_checkpoint/'config.json';config=json.loads(path.read_text())
             config['rtp_llm_fixture']={'synthetic':True,'trained':False};path.write_text(json.dumps(config))
             with self.assertRaisesRegex(ValueError,'real native K3 MLA draft'):launch.launch_config(args)
+
+    def test_default_decode_has_dp_but_cluster_can_explicitly_select_tp8(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args=self.fixture(Path(tmp),93)
+            for role,requested_dp,expected in (('PREFILL',None,('8','1')),
+                    ('DECODE',None,('4','2')),('DECODE',1,('8','1'))):
+                args.role=role;args.tp_size=None;args.dp_size=requested_dp;args.ep_size=None
+                with patch.object(launch.socket,'socket') as route:
+                    route.return_value.getsockname.return_value=('127.0.0.1',0)
+                    _,argv=launch.launch_config(args)
+                options=dict(zip(argv[1::2],argv[2::2]))
+                self.assertEqual((options['--tp_size'],options['--dp_size']),expected)
+                self.assertEqual(options['--ep_size'],'8')
 
     def test_target_only_is_a_real_non_speculative_baseline(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -104,13 +131,32 @@ class K31LaunchContract(unittest.TestCase):
                 path.write_text(json.dumps(index))
                 with self.assertRaisesRegex(ValueError,error):launch.launch_config(args)
 
-    def test_fp8_sfa_or_kda_does_not_sneak_into_indexer_migration(self):
+    def test_fp8_projections_and_kv_keep_sparse_compute_and_draft_bf16(self):
         with tempfile.TemporaryDirectory() as tmp:
             args=self.fixture(Path(tmp),4)
+            args.fp8_gemm=args.fp8_kv_cache=False
             for flag in ('fp8_gemm','fp8_kv_cache'):
                 setattr(args,flag,True)
-                with self.assertRaisesRegex(ValueError,'FP8 Indexer with BF16'):launch.launch_config(args)
+                with patch.object(launch.socket,'socket') as route:
+                    route.return_value.getsockname.return_value=('127.0.0.1',0)
+                    env,argv=launch.launch_config(args)
+                self.assertEqual(env['QUANTIZATION'],'FP8_PER_BLOCK' if flag=='fp8_gemm' else '')
+                self.assertEqual(env['FP8_KV_CACHE'],str(int(flag=='fp8_kv_cache')))
+                self.assertEqual(env['FP8_MLA'],'0')
+                self.assertEqual(env['SP_QUANTIZATION'],'')
                 setattr(args,flag,False)
+
+    def test_explicit_bf16_and_unspecified_precision_are_distinct(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args=self.fixture(Path(tmp),4)
+            for value in (None,False,True):
+                args.fp8_gemm=args.fp8_kv_cache=value
+                with patch.object(launch.socket,'socket') as route:
+                    route.return_value.getsockname.return_value=('127.0.0.1',0)
+                    env,_=launch.launch_config(args)
+                self.assertEqual(env['QUANTIZATION'],'' if value is False else 'FP8_PER_BLOCK')
+                self.assertEqual(env['FP8_KV_CACHE'],'0' if value is False else '1')
+                self.assertEqual(env['SP_QUANTIZATION'],'')
 
     def test_explicit_query_fixture_capacity_preserves_mtp_and_default(self):
         with tempfile.TemporaryDirectory() as tmp:

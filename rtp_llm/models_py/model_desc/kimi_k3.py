@@ -189,6 +189,7 @@ class KimiK3DecoderLayer(nn.Module):
             produce_fp8 = (
                 fp8_ag is not None
                 and fp8_ag.enable_ag
+                and getattr(self.attention, "supports_fp8_activation", False)
                 and hidden.is_cuda
                 and hidden.shape[0] >= 4096
                 and fp8_ag.can_run_ag(hidden.shape[0])
@@ -391,22 +392,14 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
         # Native MTP subclasses this model but keeps its projections in BF16.
         if type(self) is not KimiK3Model or self.tp_size == 1:
             return
-        projections = [
-            projection
-            for layer in self.layers
-            for projection in (layer.attention.input, layer.attention.output)
-        ]
-        if not projections or all(
-            projection.weight.dtype == torch.bfloat16 for projection in projections
-        ):
+        quant = getattr(self.config, "attention_projection_quant_config", None)
+        if quant is None or quant.get_method() != "FP8_PER_BLOCK":
             return
-        if any(
-            projection.weight.dtype != torch.float8_e4m3fn
-            or not getattr(projection, "scale_ue8m0", False)
-            for projection in projections
-        ):
-            raise ValueError("FP8 collective fusion requires grouped E4M3 projections")
-        if self.config.k3_runtime_config.attn_res_block_size:
+        decode_staging = self.parallelism_config.role_type == RoleType.DECODE
+        # Projection precision selects its matching modeling path. Runtime
+        # eligibility still handles phase, capacity, Graph and query layout.
+        enable_ag = enable_rs = True
+        if enable_ag and self.config.k3_runtime_config.attn_res_block_size:
             if self.config.hidden_size != 7168 or any(
                 (layer.index + layer.block_size - 1) // layer.block_size > 8
                 for layer in self.layers
@@ -415,28 +408,43 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
                     "FP8 AttnRes fusion requires hidden_size=7168 and at most "
                     "8 residual blocks; validate the checkpoint before serving"
                 )
+        for layer in self.layers:
+            attention = layer.attention
+            if (enable_ag and not getattr(attention.input, "scale_ue8m0", False)) or (
+                enable_rs and not getattr(attention.output, "scale_ue8m0", False)
+            ):
+                raise ValueError(
+                    "FP8 collective fusion requires grouped E4M3 projections"
+                )
         from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_comm_fusion import (
             Fp8CollectiveProjection,
         )
 
         device = self.layers[0].attention.input.weight.device
-        decode_staging = self.parallelism_config.role_type == RoleType.DECODE
+        max_m = self._max_moe_tokens
         self._fp8_collective = Fp8CollectiveProjection(
             _get_group(Group.TP),
             device,
-            max_m=self._max_moe_tokens,
+            max_m=max_m,
             hidden_size=self.config.hidden_size,
+            enable_ag=enable_ag,
+            enable_rs=enable_rs,
             decode_staging=decode_staging,
         )
         for layer in self.layers:
             layer.attention._fp8_collective = self._fp8_collective
             if layer.block_size:
-                layer.attention_residual.configure_verify_fp8(decode_staging)
-            if decode_staging and isinstance(layer.mlp, KimiK3DenseMLP):
+                layer.attention_residual.configure_verify_fp8(
+                    decode_staging
+                    and getattr(layer.attention, "supports_fp8_activation", False)
+                )
+            if decode_staging and enable_rs and isinstance(layer.mlp, KimiK3DenseMLP):
                 layer.mlp.output_transition = self._fp8_collective.reduce_scatter_bf16
         logging.info(
-            "FP8 TP projection fusion enabled: ag=True rs=True max_m=%d",
-            self._max_moe_tokens,
+            "FP8 TP projection fusion enabled: ag=%s rs=%s max_m=%d",
+            enable_ag,
+            enable_rs,
+            max_m,
         )
         return
 

@@ -48,10 +48,29 @@ class PageRRSparseMlaOp(SparseMlaOp):
             raise ValueError(
                 "BF16 sparse FlashMLA currently supports at most 128 heads"
             )
+        # Retain every capture bucket's scheduler tensors across preparations.
+        self._fp8_schedules = {}
 
     def plan(self, params, block_table, attn_inputs=None):
         self.params = params
         self.execute = self._prefill if params.is_prefill else self._decode
+        if self.workspace_owner.sfa_use_fp8 and not params.is_prefill:
+            from rtp_llm.models_py.utils.flash_mla_legacy import get_mla_metadata
+
+            rows = params.positions_d.numel()
+            key = (rows, self.kernel_heads, params.kernel_page_size, self.top_k)
+            if key not in self._fp8_schedules:
+                if params.forbid_realloc:
+                    raise ValueError("FP8 SFA scheduler was not prepared before graph replay")
+                self._fp8_schedules[key] = get_mla_metadata(
+                    cache_seqlens=None,
+                    num_q_tokens_per_head_k=rows * self.kernel_heads,
+                    num_heads_q=self.kernel_heads,
+                    num_heads_k=1,
+                    is_fp8_kvcache=True,
+                    topk=self.top_k,
+                )
+            self._fp8_metadata, self._fp8_num_splits = self._fp8_schedules[key]
 
     projects_values = True
 
@@ -61,6 +80,24 @@ class PageRRSparseMlaOp(SparseMlaOp):
             return query.new_empty(
                 (0, self.kernel_heads, self.kv_lora_rank)
             ), query.new_empty((0, self.kernel_heads), dtype=torch.float32)
+        if self.workspace_owner.sfa_use_fp8 and not self.params.is_prefill:
+            from rtp_llm.models_py.utils.flash_mla_legacy import flash_mla_with_kvcache
+
+            output, lse = flash_mla_with_kvcache(
+                q=query.unsqueeze(1),
+                k_cache=kv.view(torch.uint8).view(-1, self.params.kernel_page_size, 1, 656),
+                block_table=self.params.block_table,
+                cache_seqlens=None,
+                head_dim_v=self.kv_lora_rank,
+                tile_scheduler_metadata=self._fp8_metadata,
+                num_splits=self._fp8_num_splits,
+                is_fp8_kvcache=True,
+                indices=slots.unsqueeze(1),
+                softmax_scale=self.scale,
+            )
+            # The public decode result is natural-log LSE [rows, heads, 1].
+            # Keep the existing BF16 V-up and projected-state DCP merge.
+            return output.squeeze(1), lse.squeeze(-1)
         output, _, lse = flash_mla_sparse_fwd(
             query, kv, slots.unsqueeze(1), self.scale, d_v=self.kv_lora_rank
         )
@@ -96,11 +133,31 @@ class PageRRSparseMlaOp(SparseMlaOp):
             running.zero_()
             running_lse.fill_(-float("inf"))
         raw_cache = kv.view(-1, params.kernel_page_size, kv.shape[-1])
+        if self.workspace_owner.sfa_use_fp8:
+            raw_cache = raw_cache.view(torch.uint8)
         for block in execution.blocks:
             history = params.cache_adapter.read_prefix_chunk(
                 raw_cache, params.block_table, block.descriptor, workspace=workspace,
                 allow_reserved_block_zero=params.is_warmup,
             )
+            if self.workspace_owner.sfa_use_fp8:
+                from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+                dense = workspace(
+                    "cache.dequant",
+                    (history.shape[0], self.kv_lora_rank + self.qk_rope_head_dim),
+                    torch.bfloat16,
+                )
+                table, lengths, starts = block.fp8_dequant_metadata
+                # Reuse the existing 656-byte codec on a canonical chunk;
+                # only this bounded BF16 chunk is materialized after transport.
+                with profile_scope("RTP::attention.dsa.sfa.kv_dequant"):
+                    rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache(
+                        history.view(1, history.shape[0], 656),
+                        dense[:, :self.kv_lora_rank], dense[:, self.kv_lora_rank:],
+                        table, lengths, starts, 1,
+                    )
+                history = dense
             with profile_scope("RTP::attention.dsa.sfa.chunk_slot_map"):
                 map_dsa_chunk_slots(topk_indices, params, block, slots)
             with profile_scope("RTP::attention.dsa.sfa.chunk_qk_pv"):
@@ -256,6 +313,9 @@ class SparseMlaPageRRImpl(SparseMlaImpl):
             apply_rope=False,
             fmha_impl_kwargs={"workspace_owner": workspace_owner},
         )
+        # SM100 sparse Decode loads FP32 scales through E8M0 conversion.
+        # Prefill and Decode must therefore write the same power-of-two scales.
+        self.kv_cache_write_op.use_ue8m0 = workspace_owner.sfa_use_fp8
 
     def create_params(self, inputs):
         self.fmha_params = self.page_rr_params

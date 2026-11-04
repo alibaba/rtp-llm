@@ -16,7 +16,7 @@ spec.loader.exec_module(launch)
 
 
 class CheckpointSourceTest(unittest.TestCase):
-    def test_merge_profiles_select_role_executor_and_precision(self):
+    def test_merge_profiles_select_role_executor_and_projection_precision(self):
         with tempfile.TemporaryDirectory() as tmp:
             target, draft = Path(tmp) / "target", Path(tmp) / "draft"
             target.mkdir()
@@ -56,6 +56,8 @@ class CheckpointSourceTest(unittest.TestCase):
                     self.assertEqual(
                         env["QUANTIZATION"], "FP8_PER_BLOCK" if fp8 else ""
                     )
+                    self.assertNotIn("RTP_LLM_FP8_AG_GEMM", env)
+                    self.assertNotIn("RTP_LLM_FP8_GEMM_RS", env)
                     self.assertEqual(
                         env["KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD"],
                         "1" if role == "PREFILL" else "0",
@@ -168,9 +170,9 @@ class CheckpointSourceTest(unittest.TestCase):
                     )
                 environment.assert_called_once_with(run.resolve(), str(ipc))
                 actual = execute.call_args.args[2]
-                self.assertEqual(actual["TMPDIR"], str(runtime_tmp))
-                self.assertEqual(actual["LOG_PATH"], str(run / "logs"))
-                self.assertEqual(actual["RTP_LLM_CPU_TP_BROADCASTER_DIR"], str(ipc))
+                self.assertEqual(actual["TMPDIR"], str(runtime_tmp.resolve()))
+                self.assertEqual(actual["LOG_PATH"], str(run.resolve() / "logs"))
+                self.assertEqual(actual["RTP_LLM_CPU_TP_BROADCASTER_DIR"], str(ipc.resolve()))
                 recorded = json.loads((run / "launch.json").read_text())["environment"]
                 poll_interval = "GRPC_CLIENT_CHANNEL_BACKUP_POLL_INTERVAL_MS"
                 self.assertEqual(actual[poll_interval], "500")

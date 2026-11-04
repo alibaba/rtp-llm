@@ -6,6 +6,7 @@ py_library(
         "checkpoint_guard.py",
         "grammar_smoke.py",
         "jit_smoke.py",
+        "k31_chunk_fixture.py",
         "logprobs_smoke.py",
         "mtp_contract.py",
         "k31_full_smoke.py",
@@ -23,7 +24,7 @@ py_library(
 
 py_library(
     name = "pd_test_support",
-    srcs = ["pd_config.py", "worker.py"],
+    srcs = ["pd_config.py", "two_host_launcher.py", "worker.py"],
     deps = [":smoke_lib"],
 )
 
@@ -48,6 +49,7 @@ _OFFLINE_TESTS = [
     "test_text_smoke_mtp",
     "test_mtp_contract",
     "test_k31_full_smoke",
+    "test_k31_chunk_fixture",
     "test_audit_k31_full_smoke",
     "test_worker",
 ]
@@ -57,6 +59,7 @@ _OFFLINE_TESTS = [
         name = name,
         srcs = [name + ".py"],
         main = name + ".py",
+        data = ["//rtp_llm/models_py:models"] if name == "test_k31_chunk_fixture" else [],
         deps = [":pd_test_support", ":remote_pd_support", ":smoke_lib"],
         env = {"GPU_COUNT": "0"},
     )

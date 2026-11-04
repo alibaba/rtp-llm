@@ -112,6 +112,8 @@ def _mla_aux_stream(device):
 
 
 class KimiK3MLA(nn.Module):
+    supports_fp8_activation = True
+
     def __init__(self, config, parallelism, weights, layer_idx, hardware=None):
         super().__init__()
         self._fp8_collective = None
@@ -275,6 +277,7 @@ class KimiK3MLA(nn.Module):
             valid_mask = attention_inputs.valid_token_mask
             if valid_mask is not None:
                 output = torch.where(valid_mask[:, None], output, 0)
+                gate = torch.where(valid_mask[:, None], gate, 0)
             if self._fp8_output_gate:
                 from rtp_llm.models_py.triton_kernels.common.activation import (
                     sigmoid_mul_per_token_group_quant_fp8,

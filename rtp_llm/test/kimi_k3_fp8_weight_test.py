@@ -6,12 +6,34 @@ import torch
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import per_block_cast_to_fp8
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
-from rtp_llm.models.kimi_k3.fp8_weight import KimiK3LoadFp8Weight
+from rtp_llm.models.kimi_k3.fp8_weight import KimiK3LoadFp8Weight, KimiK31LoadAttentionFp8Weight
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.utils.model_weight import W, identity
 
 
 class KimiK3Fp8WeightTest(unittest.TestCase):
+    def test_k31_quantizes_kda_and_external_sfa_without_absorbed_weights(self):
+        names = KimiK31LoadAttentionFp8Weight.w8a8_weight_list
+        self.assertEqual(set(names), {K3W.KDA_INPUT, W.linear_attn_f_b_w,
+                                    W.linear_attn_out_w, W.mla_fusedqkrope_w,
+                                    W.mla_q_b_w, W.attn_o_w})
+
+    def test_k31_fused_input_isolates_replicated_suffix_scale_blocks(self):
+        source = CustomAtomicWeight(W.mla_fusedqkrope_w, [], process_fun=identity)
+        source.config = SimpleNamespace(head_num=96, v_head_dim=128)
+        for tp in (1, 8):
+            wrapper = KimiK31LoadAttentionFp8Weight(
+                source, Fp8BlockWiseQuantConfig(),
+                projection_tp_size=tp, projection_tp_rank=0,
+            )
+            gate = 96 // tp * 128
+            matrix = torch.arange(2112 + gate, dtype=torch.float32)[:, None].expand(-1, 128)
+            result = wrapper._prepare_matrix(matrix)
+            self.assertEqual(result.shape, (2176 + gate, 128))
+            torch.testing.assert_close(result[:2112], matrix[:2112], rtol=0, atol=0)
+            self.assertFalse(bool(result[2112:2176].any()))
+            torch.testing.assert_close(result[2176:], matrix[2112:], rtol=0, atol=0)
+
     def test_beta_scale_crossing_is_rejected_on_every_rank(self):
         for heads, tp in ((192, 2), (192, 8), (384, 2)):
             cfg = SimpleNamespace(

@@ -1,4 +1,4 @@
-"""Launch one BF16-compute PD endpoint; FP8 operands are explicit options.
+"""Launch one BF16-compute PD endpoint; K3.1 defaults to FP8 operands.
 
 Run the declared server binary inside one Bazel remote action. The paired
 worker owns GPU allocation, output directories, and process cleanup.
@@ -19,9 +19,25 @@ from pathlib import Path
 from rtp_llm.test.smoke.kimi_k3.mtp_contract import native_mla_draft
 
 
+def smoke_topology(args):
+    dp = getattr(args, "dp_size", None)
+    if dp is None:
+        dp = 2 if getattr(args, "model_type", "kimi_k3") == "kimi_k31" and args.role == "DECODE" else 1
+    dp = int(dp)
+    if dp < 1:
+        raise ValueError("PD topology requires positive TP/DP")
+    tp = getattr(args, "tp_size", None)
+    tp = int(8 // dp if tp is None else tp)
+    ep = getattr(args, "ep_size", None)
+    return tp, dp, int(tp * dp if ep is None else ep)
+
+
 def launch_config(args):
-    fp8_gemm = bool(getattr(args, "fp8_gemm", False))
-    fp8_kv_cache = bool(getattr(args, "fp8_kv_cache", False))
+    model_type = getattr(args, "model_type", "kimi_k3")
+    fp8_gemm = getattr(args, "fp8_gemm", None)
+    fp8_kv_cache = getattr(args, "fp8_kv_cache", None)
+    fp8_gemm = model_type == "kimi_k31" if fp8_gemm is None else bool(fp8_gemm)
+    fp8_kv_cache = model_type == "kimi_k31" if fp8_kv_cache is None else bool(fp8_kv_cache)
     warm_up = bool(getattr(args, "warm_up", False))
     model_warm_up = bool(getattr(args, "model_warm_up", False))
     if model_warm_up and not warm_up:
@@ -31,7 +47,6 @@ def launch_config(args):
     draft = None if target_only else Path(args.draft_checkpoint).resolve(strict=True)
     config = json.loads((checkpoint / "config.json").read_text())
     text = config.get("text_config", config)
-    model_type = getattr(args, "model_type", "kimi_k3")
     expected_layers = int(getattr(args, "expected_target_layers", 93))
     if model_type == "kimi_k3" and (
         expected_layers != 93 or text.get("num_hidden_layers") != 93
@@ -40,14 +55,12 @@ def launch_config(args):
     if expected_layers not in (4, 93) or text.get("num_hidden_layers") != expected_layers:
         raise ValueError("Smoke target must match its explicit four/93-layer contract")
     if model_type == "kimi_k31":
-        if config.get("model_type") != "kimi_k31" or fp8_gemm or fp8_kv_cache:
-            raise ValueError("K3.1 requires FP8 Indexer with BF16 SFA/KDA")
+        if config.get("model_type") != "kimi_k31":
+            raise ValueError("K3.1 requires a kimi_k31 checkpoint")
         if not target_only:
             native_mla_draft(draft, config)
     orthogonal_smoke = bool(getattr(args, "orthogonal_smoke", False))
-    tp_size = int(getattr(args, "tp_size", 8))
-    dp_size = int(getattr(args, "dp_size", 1))
-    ep_size = int(getattr(args, "ep_size", tp_size * dp_size))
+    tp_size, dp_size, ep_size = smoke_topology(args)
     world_size = tp_size * dp_size
     prefill_capacity = getattr(args, "prefill_token_capacity", None)
     if prefill_capacity is not None and (
@@ -144,7 +157,7 @@ def launch_config(args):
         "QUANTIZATION": "FP8_PER_BLOCK" if fp8_gemm else "",
         "SP_QUANTIZATION": "",
         "FP8_KV_CACHE": str(int(fp8_kv_cache)),
-        "FP8_MLA": str(int(fp8_kv_cache)),
+        "FP8_MLA": "0" if model_type == "kimi_k31" else str(int(fp8_kv_cache)),
         "MEGA_MOE_INPUT_PACKER_IMPL": packer_impl,
         "START_PORT": str(args.start_port),
         "LOCAL_WORLD_SIZE": str(world_size),
@@ -561,8 +574,8 @@ def require_gpu_capacity(
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--role", required=True, choices=["PREFILL", "DECODE"])
-    parser.add_argument("--tp-size", type=int, default=8)
-    parser.add_argument("--dp-size", type=int, default=1)
+    parser.add_argument("--tp-size", type=int, help="Defaults to 8 / DP")
+    parser.add_argument("--dp-size", type=int, help="Defaults to 2 for K3.1 Decode, otherwise 1")
     parser.add_argument("--ep-size", type=int, help="Defaults to TP×DP")
     parser.add_argument(
         "--prefill-source-tp-size",
@@ -620,12 +633,13 @@ def main():
     )
     parser.add_argument("--print-config", action="store_true")
     parser.add_argument(
-        "--fp8-gemm", action="store_true", help="Enable FP8 projection GEMM"
+        "--fp8-gemm", action=argparse.BooleanOptionalAction, default=None,
+        help="FP8 projection GEMM (default: enabled for K3.1)"
     )
     parser.add_argument(
         "--fp8-kv-cache",
-        action="store_true",
-        help="Enable ordinary E4M3 MLA operands and KV cache via the existing FP8_KV_CACHE setting",
+        action=argparse.BooleanOptionalAction, default=None,
+        help="FP8 KV cache (default: enabled for K3.1); K3.1 retains BF16 sparse attention compute",
     )
     parser.add_argument(
         "--warm-up", action="store_true", help="Enable startup request warmup"
@@ -679,8 +693,7 @@ def main():
         parser.error("MTP requires --draft-checkpoint; synthetic fallback is disabled")
     if args.expected_draft_shards is not None and args.expected_draft_shards < 1:
         parser.error("--expected-draft-shards requires a positive count")
-    if args.ep_size is None:
-        args.ep_size = args.tp_size * args.dp_size
+    args.tp_size, args.dp_size, args.ep_size = smoke_topology(args)
     environment, command = launch_config(args)
     if args.print_config:
         print(json.dumps({"environment": environment, "command": command}, indent=2))
@@ -710,6 +723,12 @@ def main():
             raise ValueError(f"Unset inherited {name} before precision validation")
     inherited = os.environ.copy()
     inherited.update(environment)
+    if (args.model_type == "kimi_k31" and args.role == "PREFILL"
+            and args.orthogonal_smoke and args.execution_evidence
+            and environment["QUANTIZATION"] == "FP8_PER_BLOCK"):
+        from rtp_llm.test.smoke.kimi_k3.k31_chunk_fixture import fixture_environment
+        fixture = fixture_environment(run, inherited)
+        environment.update(fixture); inherited.update(fixture)
     jit_cache_root = os.environ.get("RTP_LLM_JIT_CACHE_ROOT")
     if jit_cache_root:
         jit_cache_root = Path(jit_cache_root).resolve()
@@ -789,7 +808,7 @@ def main():
         json.dumps(
             {
                 "profile": (
-                    f"{'fp8' if args.fp8_kv_cache or args.fp8_gemm else 'bf16'}-"
+                    f"{'fp8' if environment['FP8_KV_CACHE'] == '1' or environment['QUANTIZATION'] else 'bf16'}-"
                     f"real{args.expected_target_layers}-"
                     f"dp{args.dp_size}-tp{args.tp_size}-ep{args.ep_size}-"
                     f"{'target-only' if args.target_only else 'native-mla-mtp3'}-rdma"

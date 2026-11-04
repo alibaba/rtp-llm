@@ -23,11 +23,19 @@ import tempfile
 import time
 import urllib.request
 
+def decode_dp_size(config):
+    return config.get("decode_dp", 2)
+
 ROLES = ("prefill", "decode")
 SCRIPT = "rtp_llm/test/smoke/kimi_k3/two_host_launcher.py"
 
 
 def validate(config):
+    if type(decode_dp_size(config)) is not int or decode_dp_size(config) not in (1, 2):
+        raise ValueError("The smoke supports Decode DP1 or DP2")
+    for key in ("fp8_gemm", "fp8_kv_cache"):
+        if key in config and type(config[key]) is not bool:
+            raise ValueError(f"{key} must be boolean")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", config["run_id"]):
         raise ValueError("run_id must contain only letters, digits, _ and -")
     user = config.get("container_user", "luohaocheng.lhc")
@@ -174,6 +182,7 @@ def serve(config, role):
     sys.path.insert(0, str(source / Path(SCRIPT).parent))
     from checkpoint_guard import preflight
     from server_launcher import launch_config, require_gpu_capacity, validate_rdma_hcas
+    from k31_chunk_fixture import fixture_environment
     host, peer = config[role], config["decode" if role == "prefill" else "prefill"]
     directory = owned_data(run_dir(config, role))
     if (directory / "instance.json").exists():
@@ -244,9 +253,11 @@ def serve(config, role):
     atomic(directory / "rdma-preflight.json", dict(active_hcas=candidates,
         usable_hcas=usable, selected_hcas=hcas.split(","), link_layer=next(iter(layers))))
     binary = (source / host.get("server", "bazel-bin/rtp_llm/rtp_llm_server")).resolve(strict=True)
+    dp = 1 if role == "prefill" else decode_dp_size(config)
     args = argparse.Namespace(role=role.upper(), server=str(binary), checkpoint=host["checkpoint"],
         draft_checkpoint=host["draft_checkpoint"], model_type="kimi_k31", expected_target_layers=93,
-        tp_size=8 if role == "prefill" else 4, dp_size=1 if role == "prefill" else 2, ep_size=8,
+        tp_size=8 // dp, dp_size=dp, ep_size=8,
+        fp8_gemm=config.get("fp8_gemm"), fp8_kv_cache=config.get("fp8_kv_cache"),
         prefill_source_tp_size=8, peer_ip=peer["ip"], peer_port=peer["port"], start_port=host["port"],
         orthogonal_smoke=True, warm_up=False, model_warm_up=False,
         execution_evidence=True, reserve_runtime_mem_mb=host.get("reserve_runtime_mem_mb",14336),
@@ -275,6 +286,9 @@ def serve(config, role):
     (directory / "logs").mkdir()
     explicit["LOG_PATH"] = str(directory / "logs")
     env = runtime_environment(source, binary); env.update(explicit)
+    if explicit["QUANTIZATION"] == "FP8_PER_BLOCK" and role == "prefill":
+        fixture = fixture_environment(directory, env)
+        env.update(fixture); explicit.update(fixture)
     stop = False
     def on_signal(_signum, _frame):
         nonlocal stop
@@ -366,7 +380,7 @@ def status(config, role):
         if start_ticks(identity["manager_pid"]) != identity["manager_start_ticks"]:
             return {"healthy":False,"error":"manager PID changed"}
     except FileNotFoundError: return {"healthy":False,"error":"manager exited"}
-    endpoints=pd_endpoints(config[role]["port"],1 if role=="prefill" else 2)
+    endpoints=pd_endpoints(config[role]["port"],1 if role=="prefill" else decode_dp_size(config))
     listeners=listening_tcp_ports(config[role]["ip"])
     missing=[x for x in endpoints if x["port"] not in listeners]
     opener=urllib.request.build_opener(urllib.request.ProxyHandler({}));unhealthy=[]

@@ -41,6 +41,12 @@ class KimiK31Weight(KimiK3Weight):
     def _replicate_mla_query_heads(self):
         return self.prefill_query_cp or self.role_type == RoleType.DECODE
 
+    @staticmethod
+    def _attention_fp8_weight_cls():
+        from rtp_llm.models.kimi_k3.fp8_weight import KimiK31LoadAttentionFp8Weight
+
+        return KimiK31LoadAttentionFp8Weight
+
     # Verified against the weight index at 546f79b5ee100f74d7ef432f0c078d92dc92bab6.
     _INDEXER_SUFFIXES = (
         "self_attn.indexer.wq_b.weight",

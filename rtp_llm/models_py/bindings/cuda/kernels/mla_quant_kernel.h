@@ -30,7 +30,8 @@ void concat_and_cache_mla(torch::Tensor&     kv_c,          // [num_tokens, kv_l
                           torch::Tensor&     kv_cache,      // [num_blocks, block_size, (kv_lora_rank + pe_dim)]
                           torch::Tensor&     slot_mapping,  // [num_tokens] or [num_actual_tokens]
                           const std::string& kv_cache_dtype,
-                          torch::Tensor&     scale);
+                          torch::Tensor&     scale,
+                          bool               use_ue8m0 = false);
 
 // BF16, no-RoPE epilogue: q_out = [q_latent | q_position], and
 // cache[slot] = [kv_latent | k_position] for slot >= 0 (including slot 0).

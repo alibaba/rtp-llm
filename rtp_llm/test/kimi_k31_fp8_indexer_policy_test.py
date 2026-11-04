@@ -9,7 +9,7 @@ import torch
 from rtp_llm.config.dsa_config import DsaConfig
 from rtp_llm.models.kimi_k3.kimi_k31 import KimiK31ModelConfig
 from rtp_llm.models.kimi_k3.fp8_weight import KimiK31LoadIndexerFp8Weight
-from rtp_llm.ops import DataType
+from rtp_llm.ops import DataType, KvCacheDataType
 from rtp_llm.utils.model_weight import W
 
 
@@ -18,17 +18,18 @@ class Runtime:
     dsa: DsaConfig
 
 
-def config(kind="kimi_k31"):
+def config(kind="kimi_k31", *, quantization="", fp8_kv=False):
     result = KimiK31ModelConfig()
     result.model_type = kind
     result.is_mtp = kind == "kimi_k31_mtp"
     result.config_dtype = "bf16"
+    result.quantization = quantization
     result.k3_runtime_config = Runtime(DsaConfig(
         layers=(3,), index_num_heads=32, index_head_dim=128, index_topk=2048,
         index_rope_dim=0, index_k_norm_type="layernorm", indexer_use_fp8=kind != "kimi_k31_mtp",
         index_topk_freq=1, index_skip_topk_offset=1,
     ))
-    result.init_precision_config(None, "bf16")
+    result.init_precision_config(SimpleNamespace(fp8_kv_cache=fp8_kv), "bf16")
     return result
 
 
@@ -38,6 +39,16 @@ class KimiK31Fp8IndexerPolicyTest(unittest.TestCase):
         self.assertTrue(cfg.k3_runtime_config.dsa.indexer_use_fp8)
         self.assertEqual(cfg.indexer_projection_quant_config.get_method(), "FP8_PER_BLOCK")
         self.assertEqual(cfg.k3_runtime_config.dsa.index_cache_entry_bytes, 132)
+
+    def test_projection_and_kv_fp8_keep_bf16_sparse_compute_and_draft(self):
+        target = config(quantization="FP8_PER_BLOCK", fp8_kv=True)
+        draft = config("kimi_k31_mtp", fp8_kv=True)
+        target.apply_override_args('{"indexer_use_fp8":true}')
+        self.assertEqual(target.attention_projection_quant_config.get_method(), "FP8_PER_BLOCK")
+        self.assertEqual(target.attn_config.kv_cache_dtype, KvCacheDataType.FP8)
+        self.assertFalse(target.attn_config.mla_fp8_compute)
+        self.assertIsNone(draft.attention_projection_quant_config)
+        self.assertEqual(draft.attn_config.kv_cache_dtype, KvCacheDataType.BASE)
 
     def test_target_override_does_not_quantize_sfa_kda_or_a_separate_draft(self):
         target, draft = config(), config("kimi_k31_mtp")
@@ -77,7 +88,7 @@ class KimiK31Fp8IndexerPolicyTest(unittest.TestCase):
         cfg = config()
         before = cfg.k3_runtime_config
         cfg.attn_config.mla_fp8_compute = True
-        with self.assertRaisesRegex(ValueError, "independent BF16 SFA/KDA"):
+        with self.assertRaisesRegex(ValueError, "BF16 SFA compute"):
             cfg.apply_override_args('{"indexer_use_fp8":true}')
         self.assertIs(cfg.k3_runtime_config, before)
         self.assertEqual(cfg.indexer_projection_quant_config.get_method(), "FP8_PER_BLOCK")

@@ -25,6 +25,8 @@ _AG_LOCAL_FP8_OVERLAP_MIN_ROWS = 4096
 
 
 class KdaAttention(nn.Module):
+    supports_fp8_activation = True
+
     def __init__(
         self,
         *,
@@ -153,6 +155,7 @@ class KdaAttention(nn.Module):
         if valid_mask is not None:
             # Paged KDA skips null-block rows, leaving their output unspecified.
             output = torch.where(valid_mask[:, None], output.reshape(-1, self.width), 0)
+            gate = torch.where(valid_mask[:, None], gate, 0)
         with profile_scope("RTP::attention.kda.output_norm_quant"):
             if self._fp8_output_norm:
                 from rtp_llm.models_py.triton_kernels.common.activation import (

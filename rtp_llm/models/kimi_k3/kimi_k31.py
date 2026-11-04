@@ -3,6 +3,7 @@
 from dataclasses import dataclass, replace
 import copy
 import json
+import logging
 
 from rtp_llm.config.dsa_config import DsaConfig
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
@@ -16,6 +17,7 @@ from rtp_llm.ops import (
     HybridAttentionType,
     KVCacheSpecDesc,
     KVCacheSpecType,
+    KvCacheDataType,
     OpaqueBlockEntryCountMode,
     CPRotateMethod,
 )
@@ -36,14 +38,26 @@ class KimiK31ModelConfig(KimiK3ModelConfig):
             raise ValueError("K3.1 target requires FP8 Indexer; BF16 is draft-only")
         if enabled and self.model_type == "kimi_k31_mtp":
             raise ValueError("K3.1 synthetic draft Indexer must remain BF16")
-        if enabled and (self.attention_projection_quant_config is not None
-                        or self.attn_config.mla_fp8_compute):
-            raise ValueError("FP8 Indexer requires the independent BF16 SFA/KDA policy")
+        if enabled and self.attn_config.mla_fp8_compute:
+            raise ValueError("FP8 Indexer requires BF16 SFA compute")
         self.indexer_projection_quant_config = Fp8BlockWiseQuantConfig() if enabled else None
 
     def init_precision_config(self, kv_cache_config, act_type):
         super().init_precision_config(kv_cache_config, act_type)
+        if not self.is_mtp:
+            self.attn_config.kv_cache_dtype = (
+                KvCacheDataType.FP8
+                if kv_cache_config is not None and kv_cache_config.fp8_kv_cache
+                else KvCacheDataType.BASE
+            )
         self._bind_indexer_precision()
+        logging.info(
+            "K3.1 precision: projections=%s indexer=%s sfa_compute=BF16 "
+            "sfa_cache=%s absorb_bmm=BF16 kda_recurrent=FP32 conv_state=BF16",
+            "FP8" if self.attention_projection_quant_config is not None else "BF16",
+            "FP8" if self.indexer_projection_quant_config is not None else "BF16",
+            "fp8_ds_mla" if self.attn_config.kv_cache_dtype == KvCacheDataType.FP8 else "BF16",
+        )
 
     def apply_override_args(self, json_model_override_args):
         args = json.loads(json_model_override_args)
@@ -55,9 +69,8 @@ class KimiK31ModelConfig(KimiK3ModelConfig):
                 raise ValueError("K3.1 target requires FP8 Indexer; BF16 is draft-only")
             if enabled and self.model_type == "kimi_k31_mtp":
                 raise ValueError("K3.1 synthetic draft Indexer must remain BF16")
-            if enabled and (self.attention_projection_quant_config is not None
-                            or self.attn_config.mla_fp8_compute):
-                raise ValueError("FP8 Indexer requires the independent BF16 SFA/KDA policy")
+            if enabled and self.attn_config.mla_fp8_compute:
+                raise ValueError("FP8 Indexer requires BF16 SFA compute")
             self.k3_runtime_config = replace(
                 self.k3_runtime_config,
                 dsa=replace(self.k3_runtime_config.dsa, indexer_use_fp8=enabled),
@@ -102,6 +115,15 @@ class KimiK31(KimiK3):
         dsa = config.k3_runtime_config.dsa
         descs = config.kv_cache_spec_descs
         for layer, layer_descs in enumerate(descs):
+            for desc in layer_descs:
+                if desc.cache_type == KVCacheSpecType.MLA:
+                    desc.dtype = (
+                        DataType.TYPE_FP8_E4M3
+                        if config.attn_config.kv_cache_dtype == KvCacheDataType.FP8
+                        else DataType.TYPE_BF16
+                    )
+                elif desc.cache_type == KVCacheSpecType.LINEAR:
+                    desc.dtype = DataType.TYPE_BF16
             if not dsa.has_layer(layer):
                 continue
             if config.hybrid_attention_config.hybrid_attention_types[layer] == HybridAttentionType.LINEAR:

@@ -846,6 +846,12 @@ class KimiK3Weight(ModelDeployWeightInfo):
             )
         return weights
 
+    @staticmethod
+    def _attention_fp8_weight_cls():
+        from rtp_llm.models.kimi_k3.fp8_weight import KimiK3LoadFp8Weight
+
+        return KimiK3LoadFp8Weight
+
     def _get_weight_info(self) -> ModelWeightInfo:
         layer_weights: List[List[WeightModule]] = []
         moe_layers = set(self.model_config.moe_layer_index)
@@ -865,21 +871,27 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 else self._mla_weights()
             )
             if self.model_config.attention_projection_quant_config is not None:
-                from rtp_llm.models.kimi_k3.fp8_weight import KimiK3LoadFp8Weight
-
+                fp8_weight = self._attention_fp8_weight_cls()
+                projection_tp = (
+                    (self.tp_size, self.tp_rank)
+                    if layer_type == HybridAttentionType.LINEAR
+                    else self._mla_projection_parallelism()
+                )
                 converted = []
                 for source in attention:
+                    if source.name not in fp8_weight.w8a8_weight_list:
+                        converted.append(source)
+                        continue
                     derive_mla = isinstance(source, _KimiK3MlaKVWeight)
                     if derive_mla:
                         source = source.sub_weights[W.mla_kv_b_w]
-                    if source.name in KimiK3LoadFp8Weight.w8a8_weight_list:
-                        converted.append(KimiK3LoadFp8Weight(
-                            source, self.model_config.attention_projection_quant_config,
-                            derive_mla=derive_mla, layer_id=layer_id,
-                            replicate_q_weights=self.role_type == RoleType.DECODE,
-                        ))
-                    else:
-                        converted.append(source)
+                    converted.append(fp8_weight(
+                        source, self.model_config.attention_projection_quant_config,
+                        derive_mla=derive_mla, layer_id=layer_id,
+                        replicate_q_weights=self._replicate_mla_query_heads(),
+                        projection_tp_size=projection_tp[0],
+                        projection_tp_rank=projection_tp[1],
+                    ))
                 attention = converted
             weights.extend(attention)
             weights.extend(
