@@ -1094,9 +1094,9 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                 var domain = new PlacementKey(victim.lastBlocker.role(), pool, null);
                 long observed = availability.lastChangedSequence(domain);
                 var admission = router.coldPrefillAdmission(victim.context, victim.routingGroup);
-                if (admission != org.flexlb.balance.strategy.CostBasedPrefillStrategy.ColdAdmission.FULL
+                if (admission != org.flexlb.balance.strategy.CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY
                         || availability.lastChangedSequence(domain) != observed) {
-                    // Historical overload never overrides a current dispatch opportunity. Replan
+                    // Enough current headroom vetoes historical overload. Replan
                     // without pinning a worker; cold selection still happens at real admission.
                     lock.lock();
                     try {

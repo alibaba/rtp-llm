@@ -626,7 +626,7 @@ class CostBasedPrefillSelectionMetricTest {
                 when(busy.seqLen()).thenReturn(2_100_000L);
                 leases.add(endpoint.ownership.reserveUnqueuedRoute(busy, 1, 0).reservation());
             }
-            assertEquals(CostBasedPrefillStrategy.ColdAdmission.FULL, coldAdmission(null));
+            assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission(null));
             b.ownership.release(leases.removeLast(), null);
             assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission(null));
             assertEquals(0L, b.ownership.tokenWorkload().pendingTokens());
@@ -652,7 +652,7 @@ class CostBasedPrefillSelectionMetricTest {
         var lease = b.ownership.reserveUnqueuedRoute(busy, 1, 0).reservation();
         try {
             assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission(null));
-            assertEquals(CostBasedPrefillStrategy.ColdAdmission.FULL, coldAdmission("other"));
+            assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission("other"));
             assertEquals(CostBasedPrefillStrategy.ColdAdmission.UNKNOWN, coldAdmission("missing"));
         } finally { b.ownership.release(lease, null); }
     }
@@ -668,12 +668,112 @@ class CostBasedPrefillSelectionMetricTest {
                 when(busy.requestId()).thenReturn(23000L + i); when(busy.seqLen()).thenReturn(i == 0 ? 2_100_000L : 1L);
                 leases.add(a.ownership.reserveUnqueuedRoute(busy, 1, 0).reservation());
             }
-            assertEquals(CostBasedPrefillStrategy.ColdAdmission.FULL, coldAdmission(null));
+            assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission(null));
             a.ownership.release(leases.removeLast(), null);
             assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission(null), "Engine queue override admits full token backlog");
             updateEngineQueue(a, 1, 0);
-            assertEquals(CostBasedPrefillStrategy.ColdAdmission.FULL, coldAdmission(null));
+            assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission(null));
         } finally { for (var lease : leases) { a.ownership.release(lease, null); } }
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "100, 9, 10, false", "100, 10, 10, true", "100, 11, 10, true",
+            "11, 1, 10, false", "11, 2, 10, true",
+            "1, 0, 10, false", "1, 1, 10, true",
+            "2, 1, 50, true", "2, 1, 50.1, false",
+            "20, 1, 7.5, false", "20, 2, 7.5, true",
+            "2, 1, 100, false", "2, 2, 100, true"
+    })
+    void coldSheddingVetoRequiresConfiguredFractionOfWholePool(
+            int workers, int accepting, double percent, boolean available) {
+        var policy = new org.flexlb.config.PrefillQueueSheddingConfig();
+        policy.setMinAcceptingWorkerPercent(percent);
+        config.queueScheduler().setPrefillQueueShedding(policy);
+        configureEngineQueueAdmission();
+        var leases = new java.util.LinkedHashMap<PrefillEndpoint, org.flexlb.balance.endpoint.PrefillState.RouteReservation>();
+        try {
+            for (int i = 1; i <= workers; i++) {
+                if (i > 1) { publish("10.0.0." + i, 8080); }
+                var endpoint = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0." + i + ":8080");
+                updateEngineQueue(endpoint, 1, 0);
+                if (i > accepting) {
+                    var busy = mock(RequestRoute.class);
+                    when(busy.requestId()).thenReturn(30000L + i);
+                    when(busy.seqLen()).thenReturn(2_100_000L);
+                    leases.put(endpoint, endpoint.ownership.reserveUnqueuedRoute(busy, 1, 0).reservation());
+                }
+            }
+            assertEquals(available ? CostBasedPrefillStrategy.ColdAdmission.AVAILABLE
+                    : CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission(null));
+            for (var entry : registry.prefillRoutingSnapshot(RoleType.PREFILL)) {
+                assertEquals(leases.containsKey(entry.endpoint()) ? 2_100_000L : 0L,
+                        entry.endpoint().ownership.tokenWorkload().pendingTokens());
+                assertEquals(0L, entry.endpoint().ownership.tokenWorkload().plannedTokens());
+            }
+            Mockito.verifyNoInteractions(cache);
+        } finally { leases.forEach((endpoint, lease) -> endpoint.ownership.release(lease, null)); }
+    }
+
+    @Test
+    void requestCountBlockedWorkersRemainInPercentageDenominator() {
+        configureEngineQueueAdmission();
+        var leases = new java.util.LinkedHashMap<PrefillEndpoint, java.util.List<org.flexlb.balance.endpoint.PrefillState.RouteReservation>>();
+        try {
+            for (int i = 2; i <= 11; i++) {
+                publish("10.0.0." + i, 8080);
+                var endpoint = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0." + i + ":8080");
+                var owned = new java.util.ArrayList<org.flexlb.balance.endpoint.PrefillState.RouteReservation>();
+                leases.put(endpoint, owned);
+                for (int j = 0; j < 10; j++) {
+                    var busy = mock(RequestRoute.class);
+                    when(busy.requestId()).thenReturn(40000L + i * 10 + j);
+                    when(busy.seqLen()).thenReturn(1L);
+                    owned.add(endpoint.ownership.reserveUnqueuedRoute(busy, 1, 0).reservation());
+                }
+            }
+            // One accepting worker out of eleven is below the default 10%, despite spare tokens.
+            assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission(null));
+            var freed = leases.entrySet().iterator().next();
+            freed.getKey().ownership.release(freed.getValue().removeLast(), null);
+            assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission(null));
+        } finally { leases.forEach((endpoint, owned) -> owned.forEach(lease -> endpoint.ownership.release(lease, null))); }
+    }
+
+    @Test
+    void percentageDenominatorExcludesWorkersOutsideTheRequestGroup() {
+        configureEngineQueueAdmission();
+        for (int i = 2; i <= 21; i++) { publish("10.0.0." + i, 8080); }
+        var status = StrategyTestSupport.workerStatus(RoleType.PREFILL, "isolated", "10.0.1.1", 8080, 8081,
+                true, 1_000_000L, 1_000_000L);
+        StrategyTestSupport.publishEndpoint(registry, RoleType.PREFILL, "10.0.1.1:8080", status);
+        // The sole accepting worker in this request's pool is 100%, not 1/22.
+        assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission("isolated"));
+        assertEquals(CostBasedPrefillStrategy.ColdAdmission.UNKNOWN, coldAdmission("missing"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"10, 2", "50, 6", "100, 11"})
+    void engineQueueReliefCannotBypassTheConfiguredWorkerFraction(double percent, int required) {
+        var policy = new org.flexlb.config.PrefillQueueSheddingConfig();
+        policy.setMinAcceptingWorkerPercent(percent);
+        config.queueScheduler().setPrefillQueueShedding(policy);
+        configureEngineQueueAdmission();
+        for (int i = 1; i <= 11; i++) {
+            if (i > 1) { publish("10.0.0." + i, 8080); }
+            updateEngineQueue((PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0." + i + ":8080"), 1, 0);
+        }
+        for (int i = 1; i <= required; i++) {
+            assertEquals(false, strategy.hasEngineQueueAdmission(RoleType.PREFILL, null));
+            updateEngineQueue((PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0." + i + ":8080"), 0, 0);
+        }
+        assertTrue(strategy.hasEngineQueueAdmission(RoleType.PREFILL, null));
+        assertEquals(false, strategy.hasEngineQueueAdmission(RoleType.PREFILL, "missing"));
+        // Group isolation applies to the early Engine-queue relief check as well.
+        var status = StrategyTestSupport.workerStatus(RoleType.PREFILL, "isolated", "10.0.1.1", 8080, 8081,
+                true, 1_000_000L, 1_000_000L);
+        StrategyTestSupport.publishEndpoint(registry, RoleType.PREFILL, "10.0.1.1:8080", status);
+        assertTrue(strategy.hasEngineQueueAdmission(RoleType.PREFILL, "isolated"));
     }
 
     private CostBasedPrefillStrategy.ColdAdmission coldAdmission(String group) {

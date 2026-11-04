@@ -16,6 +16,20 @@ class PrefillQueueSheddingConfigTest {
                 .getPrefillQueueShedding().isSustainedOverloadProtection());
     }
 
+    @Test void acceptingWorkerPercentDefaultsToTenAndAcceptsOverrides() {
+        assertEquals(10.0, parse("{}").queueScheduler().getPrefillQueueShedding().getMinAcceptingWorkerPercent());
+        for (double percent : new double[]{0.1, 10.0, 25.5, 100.0}) {
+            assertEquals(percent, parse("{\"minAcceptingWorkerPercent\":" + percent + "}")
+                    .queueScheduler().getPrefillQueueShedding().getMinAcceptingWorkerPercent());
+        }
+    }
+
+    @Test void rejectsInvalidAcceptingWorkerPercent() {
+        for (String percent : new String[]{"0", "-1", "100.01", "1e309", "\"NaN\"", "null"}) {
+            assertThrows(RuntimeException.class, () -> parse("{\"minAcceptingWorkerPercent\":" + percent + "}"), percent);
+        }
+    }
+
     @Test void appliesDefaultThresholdsAndHardDeadline() {
         var config = parse("{}");
         assertEquals(30_000L, config.queueScheduler().getPrefillQueueShedding().getExpectedWaitThresholdMs());

@@ -65,7 +65,7 @@ class GlobalQueueProgressTest {
         policy.setMaxWaitMs(3_000L);
         try (Fixture f = new Fixture(RoleType.PREFILL, false, policy)) {
             when(f.router.coldPrefillAdmission(any(), nullable(String.class)))
-                    .thenReturn(org.flexlb.balance.strategy.CostBasedPrefillStrategy.ColdAdmission.FULL);
+                    .thenReturn(org.flexlb.balance.strategy.CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY);
             when(f.router.estimateQueuedWork(any(), nullable(String.class))).thenAnswer(call -> {
                 RequestContext ctx = call.getArgument(0);
                 return new PrefillQueueShedding.Estimate(100, ctx.data().getRequestId() == 1201L ? 0 : 90, 600, 1);

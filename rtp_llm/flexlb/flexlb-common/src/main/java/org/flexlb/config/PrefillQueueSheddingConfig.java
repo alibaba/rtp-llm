@@ -7,6 +7,7 @@ import lombok.Setter;
 @Getter
 @Setter
 public final class PrefillQueueSheddingConfig {
+    public static final double DEFAULT_MIN_ACCEPTING_WORKER_PERCENT = 10.0;
     /** Actual placement-queue age before soft eviction may start; not predicted work. */
     private long expectedWaitThresholdMs = 30_000L;
     /** Hard request waiting deadline; recovery never extends it. */
@@ -15,6 +16,10 @@ public final class PrefillQueueSheddingConfig {
     private RecoveryConfig recovery;
     /** Gradually withdraw cold-request age exemption after sustained actual queue hard timeouts. */
     private boolean sustainedOverloadProtection = true;
+    /** Minimum accepting percentage for cold shedding veto and pool-wide Engine queue relief.
+     * Includes capacity-blocked workers in the denominator; does not gate ordinary routing.
+     */
+    private double minAcceptingWorkerPercent = DEFAULT_MIN_ACCEPTING_WORKER_PERCENT;
 
     @Getter
     @Setter
