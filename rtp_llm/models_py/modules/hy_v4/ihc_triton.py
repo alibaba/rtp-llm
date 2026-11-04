@@ -5,8 +5,7 @@ small FP32 projection plus square sum. Triton reduces those split-K partials and
 fuses gate activation, four-channel mixing, and the following RMSNorm. Other
 CUDA devices use an FP32 GEMM surrounded by Triton cast/reduction epilogues.
 
-Set ``RTP_LLM_HY4_IHC_TRITON=0`` to force eager execution, or set
-``RTP_LLM_HY4_IHC_PRE_BACKEND=triton`` to bypass the TF32 DeepGEMM path.
+Set ``RTP_LLM_HY4_IHC_PRE_BACKEND=triton`` to bypass the TF32 DeepGEMM path.
 Unsupported inputs return ``None`` so callers preserve the eager fallback.
 """
 
@@ -29,22 +28,12 @@ from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
 )
 
 
-_IHC_TRITON_ENV = "RTP_LLM_HY4_IHC_TRITON"
 _IHC_PRE_BACKEND_ENV = "RTP_LLM_HY4_IHC_PRE_BACKEND"
 _HC_MULT = 4
 _PRE_BLOCK_K = 4096
 _EPILOGUE_BLOCK_H = 1024
 _DEEPGEMM_EPILOGUE_BLOCK_H = 2048
 _POST_BLOCK_H = 512
-
-
-def _triton_enabled() -> bool:
-    return os.environ.get(_IHC_TRITON_ENV, "1").strip().lower() not in (
-        "0",
-        "false",
-        "off",
-        "no",
-    )
 
 
 def _requested_pre_backend() -> str:
@@ -111,7 +100,7 @@ def ihc_pre_is_supported(
     scale: torch.Tensor,
     base: torch.Tensor,
 ) -> bool:
-    if not _triton_enabled() or _has_enabled_grad(channels, fn_weight, scale, base):
+    if _has_enabled_grad(channels, fn_weight, scale, base):
         return False
     if channels.dim() != 3 or channels.shape[1] != _HC_MULT:
         return False
@@ -141,7 +130,7 @@ def ihc_post_is_supported(
     channels: torch.Tensor,
     post_gate: torch.Tensor,
 ) -> bool:
-    if not _triton_enabled() or _has_enabled_grad(block_output, channels, post_gate):
+    if _has_enabled_grad(block_output, channels, post_gate):
         return False
     if channels.dim() != 3 or channels.shape[1] != _HC_MULT:
         return False
@@ -167,7 +156,7 @@ def ihc_head_is_supported(
     scale: torch.Tensor,
     base: torch.Tensor,
 ) -> bool:
-    if not _triton_enabled() or _has_enabled_grad(channels, fn_weight, scale, base):
+    if _has_enabled_grad(channels, fn_weight, scale, base):
         return False
     if channels.dim() != 3 or channels.shape[1] != _HC_MULT:
         return False

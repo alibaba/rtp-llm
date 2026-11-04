@@ -5,6 +5,7 @@ from unittest import mock
 import torch
 
 from rtp_llm.models_py.model_desc.hy_v4_model import Hy4DecoderLayer
+from rtp_llm.models_py.modules.hy_v4 import ihc as ihc_module
 from rtp_llm.models_py.modules.hy_v4.ihc import Hy4IHCHead, Hy4IHCUnit
 from rtp_llm.models_py.modules.hy_v4.ihc_triton import (
     maybe_fused_ihc_head,
@@ -241,13 +242,12 @@ class Hy4IhcTest(unittest.TestCase):
 
         channels = torch.randn(tokens, hc, hidden, dtype=torch.bfloat16)
         prev_topk_indices = torch.arange(tokens * 2).reshape(tokens, 2)
-        with mock.patch.dict(os.environ, {"RTP_LLM_HY4_IHC_TRITON": "0"}):
-            actual = layer(
-                channels,
-                fmha_impl=object(),
-                kv_cache=object(),
-                prev_topk_indices=prev_topk_indices,
-            )
+        actual = layer(
+            channels,
+            fmha_impl=object(),
+            kv_cache=object(),
+            prev_topk_indices=prev_topk_indices,
+        )
 
         attn_read, attn_post = self._vllm_pre_oracle(
             channels,
@@ -553,15 +553,14 @@ class Hy4IhcTest(unittest.TestCase):
             7, hidden, dtype=torch.bfloat16, device=device
         )
 
-        with torch.no_grad(), mock.patch.dict(
-            os.environ, {"RTP_LLM_HY4_IHC_TRITON": "0"}
-        ):
+        with torch.no_grad(), mock.patch.object(
+            ihc_module, "maybe_fused_ihc_pre", return_value=None
+        ), mock.patch.object(ihc_module, "maybe_fused_ihc_post", return_value=None):
             eager_read, eager_gate = unit.pre(channels)
             eager_post = unit.post(block_output, channels, eager_gate)
         with torch.no_grad(), mock.patch.dict(
             os.environ,
             {
-                "RTP_LLM_HY4_IHC_TRITON": "1",
                 "RTP_LLM_HY4_IHC_PRE_BACKEND": "triton",
             },
         ):
@@ -603,15 +602,14 @@ class Hy4IhcTest(unittest.TestCase):
             7, hc, hidden, dtype=torch.bfloat16, device=device
         )
 
-        with torch.no_grad(), mock.patch.dict(
-            os.environ, {"RTP_LLM_HY4_IHC_TRITON": "0"}
+        with torch.no_grad(), mock.patch.object(
+            ihc_module, "maybe_fused_ihc_pre", return_value=None
         ):
             eager_read, eager_gate = unit.pre(channels)
             eager_normed = norm(eager_read)
         with torch.no_grad(), mock.patch.dict(
             os.environ,
             {
-                "RTP_LLM_HY4_IHC_TRITON": "1",
                 "RTP_LLM_HY4_IHC_PRE_BACKEND": "deepgemm",
             },
         ):
@@ -655,7 +653,6 @@ class Hy4IhcTest(unittest.TestCase):
             tokens, hc, hidden, dtype=torch.bfloat16, device=device
         )
         env = {
-            "RTP_LLM_HY4_IHC_TRITON": "1",
             "RTP_LLM_HY4_IHC_PRE_BACKEND": "deepgemm",
             # Keep the reference as the production FlashInfer + scale-pack
             # chain, independent of the new one-launch quant kernel.
@@ -702,7 +699,6 @@ class Hy4IhcTest(unittest.TestCase):
         )
         replay_channels = torch.randn_like(static_channels)
         env = {
-            "RTP_LLM_HY4_IHC_TRITON": "1",
             "RTP_LLM_HY4_IHC_PRE_BACKEND": "deepgemm",
         }
         with torch.no_grad(), mock.patch.dict(os.environ, env):
@@ -753,13 +749,11 @@ class Hy4IhcTest(unittest.TestCase):
             7, hc, hidden, dtype=torch.bfloat16, device=device
         )
 
-        with torch.no_grad(), mock.patch.dict(
-            os.environ, {"RTP_LLM_HY4_IHC_TRITON": "0"}
+        with torch.no_grad(), mock.patch.object(
+            ihc_module, "maybe_fused_ihc_head", return_value=None
         ):
             eager = head(channels)
-        with torch.no_grad(), mock.patch.dict(
-            os.environ, {"RTP_LLM_HY4_IHC_TRITON": "1"}
-        ):
+        with torch.no_grad():
             fused = head(channels)
 
         self.assertEqual(fused.dtype, torch.bfloat16)
@@ -813,16 +807,17 @@ class Hy4IhcTest(unittest.TestCase):
             tokens, hidden, dtype=torch.bfloat16, device=device
         )
 
-        with torch.no_grad(), mock.patch.dict(
-            os.environ, {"RTP_LLM_HY4_IHC_TRITON": "0"}
-        ):
+        with torch.no_grad(), mock.patch.object(
+            ihc_module, "maybe_fused_ihc_pre_normed", return_value=None
+        ), mock.patch.object(
+            ihc_module, "maybe_fused_ihc_post", return_value=None
+        ), mock.patch.object(ihc_module, "maybe_fused_ihc_head", return_value=None):
             eager_read, eager_gate = unit.pre_normed(channels, norm)
             eager_post = unit.post(block_output, channels, eager_gate)
             eager_head = head(eager_post)
         with torch.no_grad(), mock.patch.dict(
             os.environ,
             {
-                "RTP_LLM_HY4_IHC_TRITON": "1",
                 "RTP_LLM_HY4_IHC_PRE_BACKEND": "triton",
             },
         ):
