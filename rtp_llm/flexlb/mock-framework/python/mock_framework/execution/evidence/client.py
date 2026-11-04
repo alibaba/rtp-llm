@@ -66,7 +66,7 @@ EVENT_TEXT = ('kind', 'master', 'grpc_code', 'message', 'outcome')
 
 
 def _integer(value):
-    # ProtoJSON uses strings for 64-bit integers to preserve their precision.
+    # JSONL stores 64-bit integers as strings to preserve their precision.
     if isinstance(value, str):
         digits = value.removeprefix('-')
         if digits.isascii() and digits.isdecimal():
