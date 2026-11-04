@@ -13,6 +13,7 @@ import org.flexlb.mock.engine.execution.RtpNode;
 import org.flexlb.mock.engine.scheduler.RtpNodeTest;
 import org.flexlb.mock.engine.scheduler.RtpScheduler;
 import org.flexlb.mock.engine.scheduler.RtpTestMetrics;
+import org.flexlb.mock.engine.scheduler.Scheduler;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
