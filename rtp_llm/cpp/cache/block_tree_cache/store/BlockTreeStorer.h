@@ -41,7 +41,9 @@ public:
                                  Tier                                              target_tier,
                                  bool                                              is_resident,
                                  size_t&                                           resident_prefix_length,
-                                 std::optional<int64_t>                            request_id = {});
+                                 std::optional<int64_t>                            request_id = {},
+                                 size_t                                            remote_reuse_begin = 0,
+                                 size_t                                            remote_reuse_end = 0);
     void             stopAdmissionLocked();
 
 private:
@@ -54,7 +56,9 @@ private:
                                        size_t&                                           resident_prefix_length);
     StorageRequest makeStorageRequest(const CacheKeysType&                              cache_keys,
                                       const std::vector<std::vector<GroupSetResource>>& resources,
-                                      const std::optional<int64_t>&                     request_id) const;
+                                      const std::optional<int64_t>&                     request_id,
+                                      size_t                                            remote_reuse_begin,
+                                      size_t                                            remote_reuse_end) const;
     void           submitLowerTierLocked(const CacheKeysType&                              cache_keys,
                                          const std::vector<std::vector<GroupSetResource>>& resources,
                                          Tier                                              target_tier,
