@@ -26,7 +26,7 @@ def context():
 
 
 def args():
-    return {'masters': ['master:1'], 'requests_file': str(Path(__file__).resolve().parents[1] / 'cases/basic/requests.binpb.zst'),
+    return {'masters': ['master:1'], 'requests_file': str(Path(__file__).resolve().parents[1] / 'datasets/basic/requests.jsonl'),
             'qps': 10, 'concurrency': 2}
 
 

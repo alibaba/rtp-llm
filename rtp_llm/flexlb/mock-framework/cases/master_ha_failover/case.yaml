@@ -52,7 +52,7 @@ phases:
     describe: 按 0.1 倍速回放完整 DeepSeek trace，先等待 30 秒建立基线。
     interface: client/start
     args:
-      requests_file: deepseek.binpb.zst
+      requests_file: ../../datasets/master_ha_failover/deepseek.binpb.zst
       concurrency: 4096
       queue_capacity: 4096
       request_timeout: 120s

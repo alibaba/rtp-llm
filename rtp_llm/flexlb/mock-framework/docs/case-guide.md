@@ -192,3 +192,7 @@ environment:
 编译时读取文件并沿用内联配置的重复键、点路径冲突和 Master JSON 校验，结果展开到原有组件配置和运行产物，Runner/Java 不需要重新读取源文件。不增加文件继承或覆盖合并；小配置与测试夹具仍可直接使用内联 mapping。
 
 Engine 配置名、Mock 参数命名、ENV 映射和忽略规则见[组件配置参考](component-reference.md#engine-配置规则)。Case 使用每实例文件作为唯一配置源；本地 Engine 不从进程 ENV 覆盖业务配置。
+
+### 可读回放数据
+
+Case 的 `client/start.args.requests_file` 可以引用独立数据集。示例见 `datasets/basic/requests.jsonl`，路径按 Case 所在目录解析，也接受本机绝对路径。JSONL 每行一条请求，字段为 `token_ids`、`max_new_tokens`，以及可选的 `priority`、`arrival_offset_ms`、`images`。Client 完整校验输入后才发布分片。现有 `.binpb.zst` 大流量数据可继续回放。
