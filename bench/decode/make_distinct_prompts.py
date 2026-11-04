@@ -61,6 +61,12 @@ def main():
         default=5,
         help="tokens the server chat template adds (5 for DeepSeek-V4-Flash)",
     )
+    ap.add_argument(
+        "--min-sentences",
+        type=int,
+        default=100,
+        help="lower bound of the body-sentence binary search (use ~1 for prompts shorter than ~4K)",
+    )
     ap.add_argument("--out", default="prompts_32k_x64_distinct.json")
     args = ap.parse_args()
     tok = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
@@ -70,7 +76,7 @@ def main():
 
     prompts, lens = [], []
     for i in range(args.count):
-        lo, hi = 100, 4000
+        lo, hi = args.min_sentences, 4000
         while lo < hi:
             mid = (lo + hi + 1) // 2
             if isl(build(i, mid)) <= args.target:
