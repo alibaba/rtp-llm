@@ -93,8 +93,8 @@ arch_with_version_dep = select({
 # Epsilon is a private wheel and is not published to any configured PyPI
 # index.  Keep the architecture-specific OSS wheels in the wheel metadata so
 # installing rtp_llm can resolve the dependency directly.
-epsilon_x86_wheel = "epsilon@https://kangaroo-epsilon.oss-cn-hangzhou-zmf.aliyuncs.com/test/83180405/amd64/wheels/epsilon-0.2.7%2B77cf448a-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl#sha256=33a603c5637f5e00402ebd4d88234834af9f1f15434ff081a3348dc02ff9534f"
-epsilon_arm_wheel = "epsilon@https://kangaroo-epsilon.oss-cn-hangzhou-zmf.aliyuncs.com/test/83180405/arm64/wheels/epsilon-0.2.7%2B77cf448a-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl#sha256=136def78e90472cd7bb75cdf7f7a2ee952aa93957dc8a296d412a132a1e119c8"
+epsilon_x86_wheel = "epsilon@https://kangaroo-epsilon.oss-cn-hangzhou-zmf.aliyuncs.com/test/55275136/amd64/wheels/epsilon-0.2.7%2B95d46bb4-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl#sha256=6eccbc16dacae75979e6879d78e048408a492d5dcc960e4abee24a2abc4037e0"
+epsilon_arm_wheel = "epsilon@https://kangaroo-epsilon.oss-cn-hangzhou-zmf.aliyuncs.com/test/55275136/arm64/wheels/epsilon-0.2.7%2B95d46bb4-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl#sha256=632d82c8ca31496e6136af4bbd12615dacacbe7b53f6c08f3cce1b83bacf0ace"
 epsilon_deps = select({
     "@//:using_cuda13_arm": [epsilon_arm_wheel],
     "@//:using_cuda12_arm": [epsilon_arm_wheel],
