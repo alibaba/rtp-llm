@@ -155,6 +155,10 @@ final class FlexlbConfigValidator {
             positive(shedding.getExpectedWaitThresholdMs(), "scheduler.prefillQueueShedding.expectedWaitThresholdMs");
             require(shedding.getMaxWaitMs() >= shedding.getExpectedWaitThresholdMs(),
                     "scheduler.prefillQueueShedding.maxWaitMs", "must be at least expectedWaitThresholdMs");
+            require(Double.isFinite(shedding.getMinAcceptingWorkerPercent())
+                            && shedding.getMinAcceptingWorkerPercent() > 0.0
+                            && shedding.getMinAcceptingWorkerPercent() <= 100.0,
+                    "scheduler.prefillQueueShedding.minAcceptingWorkerPercent", "must be finite and in (0, 100]");
             var recovery = shedding.getRecovery();
             if (recovery != null) {
                 positive(recovery.getWindowMs(), "scheduler.prefillQueueShedding.recovery.windowMs");

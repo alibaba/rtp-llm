@@ -430,7 +430,7 @@ class QueueRegistrationCancellationTest {
 
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.EnumSource(value = org.flexlb.balance.strategy.CostBasedPrefillStrategy.ColdAdmission.class,
-            names = {"AVAILABLE", "UNKNOWN", "FULL"})
+            names = {"AVAILABLE", "UNKNOWN", "INSUFFICIENT_CAPACITY"})
     void currentAdmissionVetoesHistoricalProtectionAndWakesColdRequests(
             org.flexlb.balance.strategy.CostBasedPrefillStrategy.ColdAdmission admission) throws Exception {
         var policy = new org.flexlb.config.PrefillQueueSheddingConfig();
@@ -446,7 +446,7 @@ class QueueRegistrationCancellationTest {
             });
             when(f.router.coldPrefillAdmission(any(), nullable(String.class))).thenAnswer(call -> {
                 probes.incrementAndGet();
-                if (admission == org.flexlb.balance.strategy.CostBasedPrefillStrategy.ColdAdmission.FULL) {
+                if (admission == org.flexlb.balance.strategy.CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY) {
                     f.availability.changed(PlacementKey.anyGroup(org.flexlb.dao.route.RoleType.PREFILL));
                 }
                 return admission;
@@ -488,7 +488,7 @@ class QueueRegistrationCancellationTest {
 
         Fixture(org.flexlb.config.PrefillQueueSheddingConfig policy, boolean batch, java.util.function.LongSupplier clock) {
             when(router.coldPrefillAdmission(any(), nullable(String.class)))
-                    .thenReturn(org.flexlb.balance.strategy.CostBasedPrefillStrategy.ColdAdmission.FULL);
+                    .thenReturn(org.flexlb.balance.strategy.CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY);
             config.queueScheduler().setPrefillQueueShedding(policy);
             SchedulingTestConfig.useFifoQueue(config);
             if (policy != null) {

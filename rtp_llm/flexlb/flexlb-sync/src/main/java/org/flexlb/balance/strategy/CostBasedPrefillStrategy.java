@@ -14,6 +14,7 @@ import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.PrefillQueueSheddingConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.SchedulingMetadata;
@@ -59,6 +60,7 @@ public class CostBasedPrefillStrategy {
     private final String deliveryMode;
     private final int maxInflightBatches;
     private final RoutingConfig.TokenBalanceConfig tokenBalance;
+    private final double minAcceptingWorkerPercent;
     private final Object tokenSelectionLock = new Object();
 
     public CostBasedPrefillStrategy(EndpointRegistry endpointRegistry,
@@ -76,6 +78,9 @@ public class CostBasedPrefillStrategy {
         deliveryMode = config.getDispatcher().typeName();
         maxInflightBatches = config.getDispatcher().requiresGenerateInput() ? config.getDispatcher().getMaxInflightPerPrefillWorker() : 0;
         tokenBalance = config.getRouter().getRoles().getPrefill().getTokenBalance();
+        var shedding = config.isQueue() ? config.queueScheduler().getPrefillQueueShedding() : null;
+        minAcceptingWorkerPercent = shedding == null
+                ? PrefillQueueSheddingConfig.DEFAULT_MIN_ACCEPTING_WORKER_PERCENT : shedding.getMinAcceptingWorkerPercent();
         var affinity = config.getRouter().getRoles().getPrefill().getCacheAffinity();
         cacheAffinity = affinity;
         cacheAffinityMinHitRate = affinity == null ? 0.0 : normalizedHitRate(affinity.getMinPrefixHitPercent());
@@ -566,13 +571,23 @@ public class CostBasedPrefillStrategy {
         return false;
     }
 
+    /** Pool-wide shedding relief needs the same minimum fraction as the per-request cold veto. */
     public boolean hasEngineQueueAdmission(RoleType role, String group) {
-        return endpointRegistry.prefillRoutingSnapshot(role).stream()
-                .filter(entry -> group == null || group.equals(entry.endpoint().getStatus().topologySnapshot().group()))
-                .anyMatch(entry -> entry.endpoint().engineQueueAllowsAdmission());
+        int workers = 0;
+        int accepting = 0;
+        for (var entry : endpointRegistry.prefillRoutingSnapshot(role)) {
+            if (group != null && !group.equals(entry.endpoint().getStatus().topologySnapshot().group())) { continue; }
+            workers++;
+            if (entry.endpoint().engineQueueAllowsAdmission()) { accepting++; }
+        }
+        return enoughAcceptingWorkers(accepting, workers);
     }
 
-    public enum ColdAdmission { AVAILABLE, FULL, UNKNOWN }
+    private boolean enoughAcceptingWorkers(int accepting, int workers) {
+        return workers > 0 && accepting > 0 && accepting * 100.0 >= workers * minAcceptingWorkerPercent;
+    }
+
+    public enum ColdAdmission { AVAILABLE, INSUFFICIENT_CAPACITY, UNKNOWN }
 
     /** Read-only veto for cold shedding. Use the routing admission filters, never a TTFT threshold.
      * No cache affinity, route pin, soft token reservation or round-robin state is acquired here.
@@ -582,20 +597,29 @@ public class CostBasedPrefillStrategy {
         try {
             var discovery = discoverAvailableEndpoints(request, metadata, role, group);
             if (discovery.registeredCount() == 0) { return ColdAdmission.UNKNOWN; }
-            if (discovery.candidates().isEmpty()) { return ColdAdmission.FULL; }
+            if (discovery.candidates().isEmpty()) { return ColdAdmission.INSUFFICIENT_CAPACITY; }
             var blockers = new EnumMap<RoleType, Integer>(RoleType.class);
             var candidates = new PrefillCandidateSet();
             evaluateCandidates(discovery, request, metadata, Map.of(), new java.util.HashMap<>(), blockers,
                     candidates, true);
             // A different role or an indeterminate projection is not proof of Prefill overload.
             if (candidates.size() == 0) { return ColdAdmission.UNKNOWN; }
+            int accepting = 0;
             for (int i = 0; i < candidates.size(); i++) {
                 var endpoint = candidates.endpoint(i);
                 var work = endpoint.ownership.tokenWorkload();
                 if (PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())
-                        || endpoint.engineQueueAllowsAdmission()) { return ColdAdmission.AVAILABLE; }
+                        || endpoint.engineQueueAllowsAdmission()) {
+                    accepting++;
+                    // Count the whole matching pool, including request-count and token-full workers.
+                    if (enoughAcceptingWorkers(accepting, discovery.registeredCount())) {
+                        return ColdAdmission.AVAILABLE;
+                    }
+                }
             }
-            return ColdAdmission.FULL;
+            // Unresolved projections cannot prove that the accepting fraction is below the threshold.
+            if (candidates.size() < discovery.candidates().size()) { return ColdAdmission.UNKNOWN; }
+            return ColdAdmission.INSUFFICIENT_CAPACITY;
         } catch (RuntimeException failure) {
             // Missing/invalid telemetry must not become evidence authorizing early rejection.
             Logger.debug("Cold Prefill admission check unavailable, request_id={}", request.getRequestId(), failure);
