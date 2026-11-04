@@ -137,7 +137,7 @@ EnqueueBatch/EnqueueGroup 先并行准备各成员 D 资源，收齐准备结果
 
 接入层在接受有效请求时固定 started 和绝对 deadline，单请求、多模态准备和显式组提交沿用同一预算。取消与提交使用同一执行锁，旧句柄不能删除或结束同身份的新请求。显式组中已取消的成员不再提交，其他合法成员继续准入。
 
-TaskHistory 位于共享 engine 模块，每个 Engine 只有一份 finished 版本序列，由接入层创建，经 EngineLoop 传给 Scheduler.Factory。提交前失败由接入 Session 发布，提交后由 Scheduler 在本地终态和资源清理条件满足时发布；不另外维护一份活动执行状态。错误保留 RequestFailure，到 RpcTasks 编码时才转换原生协议错误。准备中的任务不计入 Scheduler waiting/running，不占 KV；协议输出容器和 Fetch 保留结果同样不计入执行负载。P 交接完成后的本地 finished 与其继续代理 D 输出的会话结束是两个边界，后续网络结束不重复发布 P 的本地终态。
+TaskHistory 位于共享 engine 模块，每个 Engine 只有一份 finished 版本序列，由接入层创建，经 EngineLoop 传给 Scheduler.Factory。提交前失败由接入 Session 发布，提交后由 Scheduler 在本地终态和资源清理条件满足时发布；不另外维护一份活动执行状态。错误保留 RequestFailure，到 RpcMessages 编码时才转换原生协议错误。准备中的任务不计入 Scheduler waiting/running，不占 KV；协议输出容器和 Fetch 保留结果同样不计入执行负载。P 交接完成后的本地 finished 与其继续代理 D 输出的会话结束是两个边界，后续网络结束不重复发布 P 的本地终态。
 
 ### PD 数据就绪与资源生命周期
 
@@ -353,7 +353,7 @@ ViT 的终态分三步：VitScheduler 只完成已准备图片的计算阶段 Fu
 
 KvTransfer 是接入层使用的零耗时异步 PD 传输执行器，放在 admission 包内，不作为公共调度接口。传输开始与完成仍通过 EngineLoop 交给 Scheduler 处理；移动执行器不改变资源使用权和 LOAD ACK 顺序。KvCache/BlockTree 目前固定为 RTP Full-KV，保留已有模块，不声明仅替换 Scheduler 就能兼容任意后端，也不增加缓存抽象或新模块。
 
-共享指代码复用，不是不同实例共享资源。RpcService 只路由协议入口和编码查询结果；PrefillAdmission 统一管理 P 的本地单 token、P/D 和显式组接入，DecodeAdmission 管理 D 的协议会话。两者保留原生校验、输入准备、协议顺序和响应投递，通过 Scheduler.Request 句柄与 EngineLoop 交互。RpcTasks 转换完整输入和观测快照，RpcErrors 转换原生错误码；KV、队列、计算和本地完成条件由后端 Scheduler 管理。Control/TransferResult 是现有原生接入与 RTP 后端的协议约定；共享 Scheduler 只提供扩展点，不定义所有后端必须经历的状态推进序列。RtpScheduler 负责普通 FIFO 准入，RtpGroupScheduler 单独负责显式组调度；两者共用基类，无 gRPC/protobuf/执行器依赖。
+共享指代码复用，不是不同实例共享资源。RtpRpcService 负责协议路由和查询结果编码。PrefillRpcServer 管理 P 的本地单 token、P/D 和显式组接入，DecodeRpcServer 管理 D 的协议会话。两者保留原生校验、输入准备、协议顺序和响应投递，通过 Scheduler.Request 句柄与 EngineLoop 交互。RpcMessages 转换完整输入和观测快照，RpcErrors 转换原生错误码；KV、队列、计算和本地完成条件由后端 Scheduler 管理。RtpEvents 定义 Scheduler 接受的 RTP 生成许可和交接结果；共享 Scheduler 只提供扩展点，不定义所有后端必须经历的状态推进序列。RtpScheduler 负责普通 FIFO 准入，RtpGroupScheduler 单独负责显式组调度；两者共用基类，无 gRPC/protobuf/执行器依赖。
 
 RequestState 是共享的请求进度、终态和资源清理机制。调度器决定何时申请和成功发布缓存；公共机制确保终态只通知一次、发布失败也尝试释放、取消请求不能再提交进度。Forward 持有资源使用权，终止请求不会提前释放仍被使用的块；EngineLoop 对执行对象做身份校验，晚到回调不能影响下一次执行。当前模拟 Forward 使用可取消计时；单成员取消保留整批执行，全部成员终止或关闭 Engine 时才取消计时并释放使用权。
 

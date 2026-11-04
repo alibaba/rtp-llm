@@ -1,6 +1,5 @@
 package org.flexlb.mock.engine.config;
 
-import org.flexlb.mock.engine.service.RtpServiceConfig;
 import org.flexlb.mock.protocol.ConfigInput;
 
 import com.fasterxml.jackson.databind.*;
@@ -99,10 +98,6 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
 
     public boolean groupScheduling() {
         return role == Role.prefill && business.path("mock.scheduler.mode").asText("fifo").equals("group");
-    }
-
-    public RtpServiceConfig endpoint() {
-        return new RtpServiceConfig(id, role, blockSize, tpSize, dpSize, maxSeqLen, maxBatchTokens, compute, imageToken, cacheKeySeed);
     }
 
     public ObjectNode effective() {

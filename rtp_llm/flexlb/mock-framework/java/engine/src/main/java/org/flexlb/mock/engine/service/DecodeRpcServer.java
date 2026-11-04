@@ -7,11 +7,12 @@ import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.engine.execution.RtpEngineLoop;
 import org.flexlb.mock.engine.scheduler.RequestFailure;
+import org.flexlb.mock.engine.scheduler.RtpEvents;
 import org.flexlb.mock.engine.scheduler.Scheduler;
 
 /** Native ALLOCATE/LOAD/GENERATE protocol. Queue membership and progress stay behind Scheduler. */
 final class DecodeRpcServer implements AutoCloseable {
-    private final RtpServiceConfig config;
+    private final RtpRpcService.Config config;
     private final RtpEngineLoop engine;
     private final Object executionLock;
     private final ExecutorService transport = Executors.newVirtualThreadPerTaskExecutor();
@@ -19,7 +20,7 @@ final class DecodeRpcServer implements AutoCloseable {
     private enum Stage { ALLOCATING, ALLOCATED, LOADING, LOADED, GENERATING, FINISHING }
     private boolean closed;
 
-    DecodeRpcServer(RtpServiceConfig config, Object executionLock, RtpEngineLoop engine) {
+    DecodeRpcServer(RtpRpcService.Config config, Object executionLock, RtpEngineLoop engine) {
         this.config = config;
         this.executionLock = executionLock;
         this.engine = engine;
@@ -45,7 +46,7 @@ final class DecodeRpcServer implements AutoCloseable {
         Call(ServerCallStreamObserver<GenerateOutputsPB> response, Context context) {
             this.response = response;
             rpcDeadline = context.getDeadline() == null ? Long.MAX_VALUE
-                : RpcTasks.after(started, context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
+                : RpcMessages.after(started, context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
             delivery = new BufferedOutput(transport, TimeUnit.MINUTES.toMillis(10));
             delivery.attach(response, () -> {
                 boolean expired = context.getDeadline() != null && context.getDeadline().isExpired();
@@ -63,7 +64,7 @@ final class DecodeRpcServer implements AutoCloseable {
         @Override public boolean cancelled() { return response.isCancelled(); }
         @Override public void allocated(Scheduler.Request request) { acknowledge(this); }
         @Override public void output(Scheduler.Request request, Scheduler.Output progress) {
-            var output = LocalResponse.token(input, token, progress.generated(), progress.committed(), request.reused(),
+            var output = RpcMessages.token(input, token, progress.generated(), progress.committed(), request.reused(),
                 System.nanoTime() - started, progress.finished(), true).toBuilder();
             output.getFlattenOutputBuilder().getAuxInfoBuilder(0).setIterCount(progress.iterations() + 1);
             send(this, output.build());
@@ -82,8 +83,8 @@ final class DecodeRpcServer implements AutoCloseable {
                     validate(frame);
                     call.input = frame.getInput();
                     call.client = frame.getClientId();
-                    call.request = engine.input(RpcTasks.input(new org.flexlb.mock.protocol.MediaInput.Prepared(call.input, frame.getMultimodalCacheSpansList()), call.client + "/" + call.input.getRequestId(),
-                        call.started, RpcTasks.deadline(call.input, call.started, call.rpcDeadline), false, config.blockSize(), config.cacheKeySeed()), call);
+                    call.request = engine.input(RpcMessages.input(new org.flexlb.mock.protocol.MediaInput.Prepared(call.input, frame.getMultimodalCacheSpansList()), call.client + "/" + call.input.getRequestId(),
+                        call.started, RpcMessages.deadline(call.input, call.started, call.rpcDeadline), false, config.blockSize(), config.cacheKeySeed()), call);
                     return;
                 }
                 if (frame.getRequestId() != call.input.getRequestId()
@@ -96,7 +97,7 @@ final class DecodeRpcServer implements AutoCloseable {
                             || call.input.getGenerateConfig().getIgnoreEos() && call.input.getGenerateConfig().getMaxNewTokens() != 1)
                         throw Status.FAILED_PRECONDITION.withDescription("Invalid Prefill-only completion").asRuntimeException();
                     call.stage = Stage.FINISHING;
-                    engine.control(call.request, Control.PREFILL_COMPLETE);
+                    engine.control(call.request, RtpEvents.Control.PREFILL_COMPLETE);
                 } else if (frame.getStage() == RemoteStage.GENERATE && call.stage == Stage.LOADED) {
                     if (frame.hasPrefillKvHandoff() && (!frame.getClientId().equals(call.client)
                             || frame.getPrefillKvHandoff().getComputedKvEnd() != call.input.getTokenIdsCount()))
@@ -107,7 +108,7 @@ final class DecodeRpcServer implements AutoCloseable {
                         throw Status.FAILED_PRECONDITION.withDescription("Single-token request is already complete at Prefill").asRuntimeException();
                     call.stage = Stage.GENERATING;
                     call.token = frame.getFirstGenerateTokenId();
-                    engine.control(call.request, new Control.Generate(call.token));
+                    engine.control(call.request, new RtpEvents.Control.Generate(call.token));
                 } else {
                     throw Status.FAILED_PRECONDITION.withDescription("Expected ALLOCATE, LOAD, then GENERATE or PREFILL_COMPLETE").asRuntimeException();
                 }
@@ -124,7 +125,7 @@ final class DecodeRpcServer implements AutoCloseable {
                 || request.getInput().getRequestId() != request.getRequestId())
             throw RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid ALLOCATE frame or identity"), 605);
         var input = request.getInput(); var generation = input.getGenerateConfig();
-        RequestValidation.supported(input);
+        RpcMessages.supported(input);
         if (org.flexlb.mock.protocol.MediaInput.present(input))
             throw Status.FAILED_PRECONDITION.withDescription("Decode ALLOCATE requires the prepared P input").asRuntimeException();
         if (input.getTokenIdsCount() < 1
@@ -158,7 +159,7 @@ final class DecodeRpcServer implements AutoCloseable {
                 outcome.state() == KvTransfer.State.CANCELLED ? RequestFailure.Reason.CANCELLED : RequestFailure.Reason.INTERNAL,
                 "KV transfer " + outcome.state(), outcome.error());
             try {
-                engine.transferCompleted(call.request, new TransferResult(false, failure));
+                engine.transferCompleted(call.request, new RtpEvents.TransferResult(false, failure));
                 if (failure != null) return;
                 call.stage = Stage.LOADED;
                 send(call, GenerateOutputsPB.newBuilder().setRequestId(call.input.getRequestId())

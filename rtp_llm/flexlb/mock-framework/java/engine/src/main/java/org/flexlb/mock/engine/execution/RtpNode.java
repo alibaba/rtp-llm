@@ -45,7 +45,7 @@ public final class RtpNode implements AutoCloseable {
             if (samples != null) metricSource = new MetricSource(lock, samples);
             engine = new RtpEngineLoop(lock, scheduler, finished, cache, config.compute(), config.role(), config.id());
             try {
-                service = new RtpRpcService(config.endpoint(), cache, lock, finished, engine, config.groupScheduling());
+                service = new RtpRpcService(RtpRpcService.Config.from(config), cache, lock, finished, engine, config.groupScheduling());
             } catch (RuntimeException | Error failure) {
                 engine.close();
                 throw failure;
