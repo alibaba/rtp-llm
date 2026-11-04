@@ -3,7 +3,6 @@ from pathlib import Path
 import time
 
 from ..config.validation import duration
-from . import ExecutionError
 from .environment import RunEnvironment
 from .run_trace import RunTrace, timestamp, write_json
 from .step.step import GateFailure, StepContext
@@ -12,31 +11,14 @@ from .step.step import GateFailure, StepContext
 class _PhaseTasks:
     def __init__(self):
         self._background = {}
-        self._stopping = set()
 
     def start(self, step_id, operation):
         self._background[step_id] = asyncio.create_task(operation, name=step_id)
 
-    async def stop(self, step_id):
-        task = self._background.get(step_id)
-        if task is None:
-            raise ExecutionError(f'No background Step {step_id!r} in this Phase')
-        if task.done():
-            self._check(step_id, task)
-            return False
-        self._stopping.add(step_id)
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        self._check(step_id, task)
-        return task.cancelled()
-
-    def _check(self, step_id, task):
-        if task.done() and not (task.cancelled() and step_id in self._stopping):
-            task.result()
-
     def check(self):
-        for step_id, task in self._background.items():
-            self._check(step_id, task)
+        for task in self._background.values():
+            if task.done():
+                task.result()
 
     async def run(self, operation):
         pending = {task for task in self._background.values() if not task.done()}
@@ -91,7 +73,7 @@ async def run_case(case, registry, launch, directory):
                     tasks.check()
                     deadline = min(phase_deadline, time.monotonic() + float(duration(step.within))) if step.within else phase_deadline
                     context = StepContext(runtime, records, timestamp(), deadline,
-                                          phase_id=phase.id, results=results, stop_step=tasks.stop)
+                                          phase_id=phase.id, results=results)
                     if step.background:
                         tasks.start(step.id, step.run(context))
                     else:

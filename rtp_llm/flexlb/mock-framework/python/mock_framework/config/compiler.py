@@ -136,8 +136,6 @@ def _compile_step(raw, registry, ids, previous):
     background = raw.get('background', False)
     if type(background) is not bool:
         raise ConfigError(f'{step_id}.background: expected a boolean')
-    if background and not interface.step_type.allow_background:
-        raise ConfigError(f'{step_id}: {interface.name} must run in the foreground')
     previous[step_id] = None if background else interface.returns
     return interface.step_type(step_id, description, interface.name, args, expect, within, wait_after, background)
 

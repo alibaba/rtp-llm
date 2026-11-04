@@ -18,8 +18,6 @@ uv run --locked mock-case compile <case目录>/case.yaml \
 
 Step 默认在前台运行。`background: true` 让 Runner 在当前 Phase 并行执行该 Step。Phase 结束前等待未完成的后台 Step，时间计入 Phase 预算。一个后台 Step 失败时，Runner 取消同 Phase 的其他在途 Step 并回收。后续 Phase 可以引用已成功完成的后台结果。
 
-`step/stop` 的 `args.target` 是当前 Phase 中已启动的后台 Step ID。它取消该任务并等待退出，实际取消返回 `true`，目标已正常结束或已停止时返回 `false`。它管理 Python Step 任务。回放已经启动时，通过 `client/stop` 或实验回收收齐 Java 侧终态。
-
 固定等待写成 step 的 `wait_after: 5s`，默认 `0s`，必须是非负的带单位时长。执行顺序为“调用接口 → 检查 expect → wait_after → 下一步”；最后一个 step 也执行等待。等待计入该 step 的 within 和 phase 的 timeout，期间继续监视组件退出并响应取消；调用或断言失败不执行等待。返回值和 ref 仍是原调用结果，等待不会刷新结果或查询时间；等待后的检查需要下一次接口调用。
 
 不再登记 `runtime/wait`，旧 Case 的等待步骤应迁到前一个业务 step 的 `wait_after`，不保留兼容入口或只等待的空 step。接口成功后等待超时/中断，记录保留其 result 和 `error_stage: wait_after`，不能把已知成功的写操作标成 outcome_unknown，也不会重试动作。
