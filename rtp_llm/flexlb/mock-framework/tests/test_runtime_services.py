@@ -94,7 +94,6 @@ def test_cleanup_continues_in_order_after_domain_failures(tmp_path):
                     raise ExecutionError(name + ' failed')
                 return errors
             return run
-        runtime.engines.stop_monitor = operation('health')
         runtime.clients.drain = operation('drain', raises=True)
         runtime.clients.close = operation('clients', errors=['client cleanup failed'])
         runtime.masters.close = operation('masters')
@@ -105,7 +104,7 @@ def test_cleanup_continues_in_order_after_domain_failures(tmp_path):
         runtime.monitoring = SimpleNamespace(final_scrape=operation('scrape', raises=True),
             close=operation('prometheus'), finish=lambda errors: finished.extend(errors))
         errors = await runtime.close()
-        assert order == ['health', 'drain', 'scrape', 'clients', 'masters', 'engines', 'election', 'prometheus', 'fallback']
+        assert order == ['drain', 'scrape', 'clients', 'masters', 'engines', 'election', 'prometheus', 'fallback']
         assert len(errors) == 3 and finished == errors
         assert 'drain failed' in errors[0] and 'scrape failed' in errors[1]
         assert errors[2] == 'client cleanup failed'

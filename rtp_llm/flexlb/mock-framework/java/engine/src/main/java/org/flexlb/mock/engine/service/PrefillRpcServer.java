@@ -9,7 +9,6 @@ import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.engine.*;
-import org.flexlb.mock.engine.cache.KvCache;
 import org.flexlb.mock.engine.execution.RtpEngineLoop;
 import org.flexlb.mock.engine.scheduler.RequestFailure;
 import org.flexlb.mock.engine.scheduler.RequestState;
@@ -20,9 +19,9 @@ import org.flexlb.mock.protocol.MediaInput;
 /** P protocol sessions, input preparation and output delivery. Scheduler owns local execution and KV. */
 final class PrefillRpcServer implements AutoCloseable {
     private final RtpServiceConfig config;
-    private final Object executionLock = new Object();
+    private final Object executionLock;
     private final RtpEngineLoop engine;
-    private final TaskHistory finished = new TaskHistory();
+    private final TaskHistory finished;
     // Local request lifetime; output/Fetch sessions may outlive these entries. Guarded by executionLock.
     private final Map<Long, Session> sessions = new LinkedHashMap<>();
     private final org.flexlb.mock.protocol.VitClient vision;
@@ -38,9 +37,11 @@ final class PrefillRpcServer implements AutoCloseable {
     private long nextOutputSweep;
     private volatile boolean closed;
 
-    PrefillRpcServer(RtpServiceConfig config, KvCache cache, Scheduler.Factory schedulers) {
+    PrefillRpcServer(RtpServiceConfig config, Object executionLock, TaskHistory finished, RtpEngineLoop engine) {
         this.config = config;
-        engine = new RtpEngineLoop(executionLock, schedulers, finished, cache, config.compute(), config.role(), config.id());
+        this.executionLock = executionLock;
+        this.finished = finished;
+        this.engine = engine;
         vision = new org.flexlb.mock.protocol.VitClient(config.imageToken());
         deadlines.setRemoveOnCancelPolicy(true);
     }

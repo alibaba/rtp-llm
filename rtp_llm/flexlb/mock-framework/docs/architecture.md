@@ -137,7 +137,7 @@ EnqueueBatch/EnqueueGroup 先并行准备各成员 D 资源，收齐准备结果
 
 接入层在接受有效请求时固定 started 和绝对 deadline，单请求、多模态准备和显式组提交沿用同一预算。取消与提交使用同一执行锁，旧句柄不能删除或结束同身份的新请求。显式组中已取消的成员不再提交，其他合法成员继续准入。
 
-TaskHistory 位于Engine 模块，每个 Engine 只有一份 finished 版本序列，由接入层创建，经 RtpEngineLoop 传给 Scheduler.Factory。提交前失败由接入 Session 发布，提交后由 Scheduler 在本地终态和资源清理条件满足时发布；不另外维护一份活动执行状态。错误保留 RequestFailure，到 RpcTasks 编码时才转换原生协议错误。准备中的任务不计入 Scheduler waiting/running，不占 KV；协议输出容器和 Fetch 保留结果同样不计入执行负载。P 交接完成后的本地 finished 与其继续代理 D 输出的会话结束是两个边界，后续网络结束不重复发布 P 的本地终态。
+TaskHistory 位于Engine 模块，每个 Engine 只有一份 finished 版本序列，由 RtpNode 创建并注入执行和接入边界。提交前失败由接入 Session 发布，提交后由 Scheduler 在本地终态和资源清理条件满足时发布；不另外维护一份活动执行状态。错误保留 RequestFailure，到 RpcTasks 编码时才转换原生协议错误。准备中的任务不计入 Scheduler waiting/running，不占 KV；协议输出容器和 Fetch 保留结果同样不计入执行负载。P 交接完成后的本地 finished 与其继续代理 D 输出的会话结束是两个边界，后续网络结束不重复发布 P 的本地终态。
 
 ### PD 数据就绪与资源生命周期
 
@@ -408,7 +408,7 @@ Master HA Case 在 environment 中声明两个独立 Master JVM，启动后通�
 
 接入层只处理原生 RPC 的解析、响应关联和异步输出；Scheduler 是队列、计算进度、容量和终态的唯一来源。D 的网络不可写只阻塞输出缓冲发送，不再阻塞 Decode Forward 或 KV 释放；缓冲仍受请求生成长度和整体输出保留策略约束。PD 交接只保留 ALLOCATE→Prefill 完成→LOAD/ACK→GENERATE 或 PREFILL_COMPLETE，不实现额外来源注册表、Reader 所有权及自定义 proto。Wire 阶段仅用于拒绝乱序帧，不代替 Scheduler 的调度状态。
 
-接入实现位于 `java/engine` 中的 `service` 包。对外入口为 `RtpRpcService`，接收 `RtpServiceConfig`、实例自己的 `KvCache` 和现有 `Scheduler.Factory`；RtpNode 额外传入启动时确定的显式组接口开关，关闭时 EnqueueBatch/EnqueueGroup 返回 UNIMPLEMENTED。`RtpServiceConfig` 只含身份、角色、块大小、TP、序列/批 Token 上限和 ComputeModel，不包含排队、抢占或组批策略。RTP 后端通过 `RtpConfig.endpoint()` 提供这些值，由 `RtpNode` 装配 `RtpScheduler.factory(config)`：P 的 `mock.scheduler.mode=fifo`（默认）选择 RtpScheduler，`group` 显式选择 RtpGroupScheduler；D 始终使用普通调度。换 Scheduler 不需要复制接入代码。模块只有当前这一套 RPC，不增加协议选择、接入基类或插件注册机制。
+接入实现位于 `java/engine` 中的 `service` 包。对外入口为 `RtpRpcService`，接收 `RtpServiceConfig`、实例的 `KvCache` 和已装配的 `RtpEngineLoop`；RtpNode 额外传入启动时确定的显式组接口开关，关闭时 EnqueueBatch/EnqueueGroup 返回 UNIMPLEMENTED。`RtpServiceConfig` 只含身份、角色、块大小、TP、序列/批 Token 上限和 ComputeModel，不包含排队、抢占或组批策略。RTP 后端通过 `RtpConfig.endpoint()` 提供这些值，由 `RtpNode` 装配 `RtpScheduler.factory(config)`：P 的 `mock.scheduler.mode=fifo`（默认）选择 RtpScheduler，`group` 显式选择 RtpGroupScheduler；D 始终使用普通调度。换 Scheduler 不需要复制接入代码。模块只有当前这一套 RPC，不增加协议选择、接入基类或插件注册机制。
 
 接入层的独立测试只依赖共享组件，用独立测试 Scheduler 验证 P/D 入队、错误返回和锁归属；真实 RTP 策略的 RPC/PD 集成测试仍在后端模块中运行。模块依赖方向为后端→接入层→共享运行组件，不存在接入层→后端依赖。
 
