@@ -90,17 +90,19 @@ class Glm53LocalRouterTest(unittest.TestCase):
     def tearDown(self):
         torch.backends.cuda.matmul.allow_tf32 = self.old_tf32
 
-    def test_decode_grouping_and_reordering_preserve_single_token_routes(self):
+    def test_decode_grouping_and_reordering_use_batched_fp32_projection(self):
+        import torch.nn.functional as functional
+
         gate = Glm53FP32Router(torch.randn(4096, 288, device="cuda") / 64)
         bias = torch.randn(288, device="cuda") / 100
         for dtype in (torch.bfloat16, torch.float32):
             x = torch.randn(4, 4096, device="cuda", dtype=dtype)
-            single = torch.cat([gate(x[i : i + 1]) for i in range(4)])
-            for count in (2, 3, 4):
+            for count in (1, 2, 3, 4):
                 with self.subTest(dtype=dtype, tokens=count):
+                    expected = functional.linear(x[:count].float(), gate.weight)
                     actual = gate(x[:count])
-                    torch.testing.assert_close(actual, single[:count], rtol=0, atol=0)
-                    expected_weights, expected_ids = route(single[:count], bias)
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                    expected_weights, expected_ids = route(expected, bias)
                     weights, ids = route(actual, bias)
                     torch.testing.assert_close(ids, expected_ids, rtol=0, atol=0)
                     torch.testing.assert_close(
@@ -108,23 +110,39 @@ class Glm53LocalRouterTest(unittest.TestCase):
                     )
                     order = torch.arange(count - 1, -1, -1, device="cuda")
                     torch.testing.assert_close(
-                        gate(x[order]), single[order], rtol=0, atol=0
+                        gate(x[order]),
+                        functional.linear(x[order].float(), gate.weight),
+                        rtol=0,
+                        atol=0,
                     )
 
-    def test_decode_and_verify_scopes_preserve_multi_request_routes(self):
+    def test_decode_and_verify_scopes_use_one_batched_fp32_projection(self):
+        import torch.nn.functional as functional
+
         gate = Glm53FP32Router(torch.randn(4096, 288, device="cuda") / 64)
         bias = torch.randn(288, device="cuda") / 100
         for dtype in (torch.bfloat16, torch.float32):
             x = torch.randn(192, 4096, device="cuda", dtype=dtype)
-            single = torch.cat([gate(row) for row in x.split(1)])
             for verify in (False, True):
                 model = _RouterModel(gate, mtp=verify)
                 inputs = _router_inputs(prefill=verify, verify=verify)
-                for count in (5, 8, 12, 24, 48, 96, 192):
+                for count in (0, 1, 2, 3, 4, 5, 8, 12, 24, 48, 96, 192):
                     with self.subTest(dtype=dtype, verify=verify, tokens=count):
                         order = torch.randperm(count, device="cuda")
-                        actual = model(inputs, x[order])
-                        expected = single[order]
+                        selected = x[order]
+                        with patch.object(
+                            functional, "linear", wraps=functional.linear
+                        ) as linear:
+                            actual = model(inputs, selected)
+                        self.assertEqual(linear.call_count, 1)
+                        self.assertEqual(linear.call_args.args[0].shape, selected.shape)
+                        self.assertEqual(
+                            linear.call_args.args[0].dtype, torch.float32
+                        )
+                        self.assertEqual(
+                            linear.call_args.args[1].dtype, torch.float32
+                        )
+                        expected = functional.linear(selected.float(), gate.weight)
                         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
                         actual_weights, actual_ids = route(actual, bias)
                         expected_weights, expected_ids = route(expected, bias)
@@ -155,12 +173,14 @@ class Glm53LocalRouterTest(unittest.TestCase):
         self.assertIsNone(metadata_cache())
         torch.testing.assert_close(model(prefill, x), expected, rtol=0, atol=0)
 
-    def test_decode_scope_shards_and_cuda_graph_match_single_tokens(self):
+    def test_decode_scope_shards_and_cuda_graph_match_batched_projection(self):
+        import torch.nn.functional as functional
+
         gate = Glm53FP32Router(torch.randn(4096, 288, device="cuda") / 64)
         model = _RouterModel(gate)
         inputs = _router_inputs(prefill=True, verify=True)
         x = torch.randn(48, 4096, device="cuda", dtype=torch.bfloat16)
-        expected = torch.cat([gate(row) for row in x.split(1)])
+        expected = functional.linear(x.float(), gate.weight)
         for rank in range(8):
             layout = token_shard_layout(48, 8, rank)
             actual = model(inputs, shard_tokens(x, layout), layout=layout)
@@ -180,7 +200,7 @@ class Glm53LocalRouterTest(unittest.TestCase):
             actual = model(inputs, x)
         x.normal_()
         graph.replay()
-        expected = torch.cat([gate(row) for row in x.split(1)])
+        expected = functional.linear(x.float(), gate.weight)
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         self.assertFalse(tokenwise_router_enabled())
 

@@ -95,8 +95,8 @@ def scoped_forward_metadata(function):
         if not inputs.attention_inputs.is_prefill or getattr(
             inputs.attention_inputs, "is_target_verify", False
         ):
-            # Decode batches and MTP verification may regroup the same tokens
-            # between steps. Keep the router's FP32 reduction independent of M.
+            # Keep Decode and MTP verification outside the fixed-size Prefill
+            # projection policy; both use batched FP32 router projections.
             router_token = _TOKENWISE_ROUTER.set(True)
             mhc_token = _BATCH_INVARIANT_MHC.set(True)
             try:

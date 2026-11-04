@@ -30,18 +30,9 @@ class Glm53FP32Router(nn.Module):
             raise RuntimeError("GLM-5.3 FP32 router requires matmul.allow_tf32=False")
         if metadata_cache() is not None and not tokenwise_router_enabled():
             return self._fixed_projection(hidden_states, _PREFILL_PROJECTION_ROWS)
-        # Match the one-token Decode projection throughout Decode and target
-        # verification, including batches of multiple requests. cuBLAS may
-        # otherwise change its FP32 reduction with M; the last-bit differences
-        # can cross a later FP8 KV rounding boundary. Keep the small direct-call
-        # path consistent when no model-forward scope is installed.
-        if hidden_states.shape[0] > 1 and (
-            hidden_states.shape[0] <= 4 or tokenwise_router_enabled()
-        ):
-            return torch.cat(
-                [F.linear(row.float(), self.weight) for row in hidden_states.split(1)],
-                dim=0,
-            )
+        # Project Decode and MTP verification rows together in FP32. Splitting
+        # them into single-token GEMVs creates a large graph of tiny kernels.
+        # FP32 reduction order may vary with the batch shape.
         if hidden_states.shape[0] <= self.chunk_rows:
             return F.linear(hidden_states.float(), self.weight)
         return torch.cat(
