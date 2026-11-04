@@ -16,7 +16,7 @@ public final class InputProbe {
             }).toList());
         } else if (args[0].equals("read")) {
             int count = 0;
-            try (var reader = new InputFile.Reader(path)) {
+            try (var reader = new ReplayInput.Reader(path)) {
                 Request request;
                 while ((request = reader.next()) != null) {
                     if (!request.hasArrivalOffsetMs() || request.getArrivalOffsetMs() != count * 7L

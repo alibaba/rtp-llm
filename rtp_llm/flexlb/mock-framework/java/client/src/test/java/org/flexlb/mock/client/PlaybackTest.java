@@ -14,7 +14,7 @@ class PlaybackTest {
     static org.flexlb.mock.client.input.ClientInput.Request input() { return InputFixture.request(); }
     Shard shard(String master, int count, double qps, int slots, int queue) throws Exception {
         var start = InputFixture.plan(directory, List.of(master), count, qps, slots, queue, 3000, 1000);
-        var part = RequestFiles.split(start, directory.resolve(UUID.randomUUID().toString()), 1, () -> false).getFirst();
+        var part = ReplayInput.split(start, directory.resolve(UUID.randomUUID().toString()), 1, () -> false).getFirst();
         return new Shard(1, start.masters(), part.path(), part.count(), 0, 1, 1, part.sha256(), qps, null, slots, queue, 3000, 1000);
     }
     Path topology(NativeClientTest.Harness h) throws Exception {
