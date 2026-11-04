@@ -296,7 +296,7 @@
         {
           "id": 5,
           "type": "timeseries",
-          "title": "Client TTFT",
+          "title": "Client TTFT / TPOT",
           "gridPos": {
             "x": 0,
             "y": 19,
@@ -311,7 +311,7 @@
             {
               "refId": "A",
               "expr": "sum by(${client_group})(rate(mock_client_ttft_seconds_sum{instance=~\"${client_instance}\"}[$__rate_interval])) / sum by(${client_group})(rate(mock_client_ttft_seconds_count{instance=~\"${client_instance}\"}[$__rate_interval]))",
-              "legendFormat": "平均 · {{${client_group}}}",
+              "legendFormat": "TTFT 平均 · {{${client_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -320,7 +320,7 @@
             {
               "refId": "B",
               "expr": "histogram_quantile(0.95,sum by(${client_group},le)(rate(mock_client_ttft_seconds_bucket{instance=~\"${client_instance}\"}[$__rate_interval])))",
-              "legendFormat": "P95 · {{${client_group}}}",
+              "legendFormat": "TTFT P95 · {{${client_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -329,7 +329,16 @@
             {
               "refId": "C",
               "expr": "histogram_quantile(0.99,sum by(${client_group},le)(rate(mock_client_ttft_seconds_bucket{instance=~\"${client_instance}\"}[$__rate_interval])))",
-              "legendFormat": "P99 · {{${client_group}}}",
+              "legendFormat": "TTFT P99 · {{${client_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            },
+            {
+              "refId": "D",
+              "expr": "sum by(${client_group})(rate(mock_client_tpot_seconds_sum{instance=~\"${client_instance}\"}[$__rate_interval])) / sum by(${client_group})(rate(mock_client_tpot_seconds_count{instance=~\"${client_instance}\"}[$__rate_interval]))",
+              "legendFormat": "TPOT 平均 · {{${client_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -378,7 +387,7 @@
               ]
             }
           },
-          "description": "从开始原生调用到首 Token；仅包含已观察到首 Token 的请求。均值按请求加权，分位数合并 Histogram 后计算。"
+          "description": "TTFT 是发起调用到收到首 token 的时间。TPOT 按成功请求首尾 token 到达时间差除以首 token 之后的 token 数。"
         },
         {
           "id": 6,
@@ -12508,7 +12517,7 @@
         {
           "id": 210112,
           "type": "timeseries",
-          "title": "TPOT(估计值)",
+          "title": "Decode TPOT（步耗时估计）",
           "gridPos": {
             "x": 0,
             "y": 773,
@@ -12522,7 +12531,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_sp_estimate_tpot_us{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "avg by(${decode_group})(mock_decode_estimate_tpot_us{instance=~\"${decode_instance}\",role=\"decode\"})",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -12571,7 +12580,7 @@
               ]
             }
           },
-          "description": "Speculative step 耗时除以每个参与流平均验收 token，包含 bonus，单位微秒。 仅在模拟 draft 验收的 Decode 执行步采样。",
+          "description": "Mock Decode 步耗时 ÷ 每条产出请求本轮提交的平均 token 数。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -19576,695 +19585,6 @@
       "gridPos": {
         "x": 0,
         "y": 1091,
-        "w": 24,
-        "h": 1
-      }
-    },
-    {
-      "id": 500012,
-      "title": "Decode · 投机采样指标",
-      "type": "row",
-      "collapsed": true,
-      "panels": [
-        {
-          "id": 200546,
-          "type": "timeseries",
-          "title": "TPOT(估计值)",
-          "gridPos": {
-            "x": 0,
-            "y": 1228,
-            "w": 12,
-            "h": 9
-          },
-          "datasource": {
-            "type": "prometheus",
-            "uid": "mock-prometheus"
-          },
-          "targets": [
-            {
-              "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_sp_estimate_tpot_us{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · {{${decode_group}}}",
-              "datasource": {
-                "type": "prometheus",
-                "uid": "mock-prometheus"
-              }
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "µs",
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "fillOpacity": 0,
-                "showPoints": "auto",
-                "spanNulls": false
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            },
-            "legend": {
-              "displayMode": "table",
-              "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
-            }
-          },
-          "description": "Speculative step 耗时除以每个参与流平均验收 token，包含 bonus，单位微秒。 仅在模拟 draft 验收的 Decode 执行步采样。",
-          "links": [
-            {
-              "title": "RTP-LLM 原面板",
-              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=546",
-              "targetBlank": true
-            }
-          ]
-        },
-        {
-          "id": 200548,
-          "type": "timeseries",
-          "title": "接受率",
-          "gridPos": {
-            "x": 12,
-            "y": 1228,
-            "w": 12,
-            "h": 9
-          },
-          "datasource": {
-            "type": "prometheus",
-            "uid": "mock-prometheus"
-          },
-          "targets": [
-            {
-              "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_sp_avg_accept_rate{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · {{${decode_group}}}",
-              "datasource": {
-                "type": "prometheus",
-                "uid": "mock-prometheus"
-              }
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "percentunit",
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "fillOpacity": 0,
-                "showPoints": "auto",
-                "spanNulls": false
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            },
-            "legend": {
-              "displayMode": "table",
-              "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
-            }
-          },
-          "description": "验收 token / (提议 token + 参与流数)，包含每流一个 bonus。 仅在模拟 draft 验收的 Decode 执行步采样。",
-          "links": [
-            {
-              "title": "RTP-LLM 原面板",
-              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=548",
-              "targetBlank": true
-            }
-          ]
-        },
-        {
-          "id": 200549,
-          "type": "timeseries",
-          "title": "接受率(不算入bonus)",
-          "gridPos": {
-            "x": 0,
-            "y": 1237,
-            "w": 12,
-            "h": 9
-          },
-          "datasource": {
-            "type": "prometheus",
-            "uid": "mock-prometheus"
-          },
-          "targets": [
-            {
-              "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_sp_avg_fix_accept_rate{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · {{${decode_group}}}",
-              "datasource": {
-                "type": "prometheus",
-                "uid": "mock-prometheus"
-              }
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "percentunit",
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "fillOpacity": 0,
-                "showPoints": "auto",
-                "spanNulls": false
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            },
-            "legend": {
-              "displayMode": "table",
-              "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
-            }
-          },
-          "description": "(验收 token − 参与流数) / 提议 token。 仅在模拟 draft 验收的 Decode 执行步采样。",
-          "links": [
-            {
-              "title": "RTP-LLM 原面板",
-              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=549",
-              "targetBlank": true
-            }
-          ]
-        },
-        {
-          "id": 200402,
-          "type": "timeseries",
-          "title": "每步平均token数目",
-          "gridPos": {
-            "x": 12,
-            "y": 1237,
-            "w": 12,
-            "h": 9
-          },
-          "datasource": {
-            "type": "prometheus",
-            "uid": "mock-prometheus"
-          },
-          "targets": [
-            {
-              "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_sp_avg_accept_token_num{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · {{${decode_group}}}",
-              "datasource": {
-                "type": "prometheus",
-                "uid": "mock-prometheus"
-              }
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "short",
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "fillOpacity": 0,
-                "showPoints": "auto",
-                "spanNulls": false
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            },
-            "legend": {
-              "displayMode": "table",
-              "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
-            }
-          },
-          "description": "验收 token / 参与流数，包含每流一个 bonus。 仅在模拟 draft 验收的 Decode 执行步采样。",
-          "links": [
-            {
-              "title": "RTP-LLM 原面板",
-              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=402",
-              "targetBlank": true
-            }
-          ]
-        },
-        {
-          "id": 210153,
-          "type": "timeseries",
-          "title": "sp_accept_rate · 待埋点",
-          "gridPos": {
-            "x": 0,
-            "y": 1246,
-            "w": 12,
-            "h": 9
-          },
-          "datasource": {
-            "type": "prometheus",
-            "uid": "mock-prometheus"
-          },
-          "targets": [
-            {
-              "refId": "A",
-              "expr": "avg by(${decode_group})(py_rtp_frontend_speculative_accept_rate{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · {{${decode_group}}}",
-              "datasource": {
-                "type": "prometheus",
-                "uid": "mock-prometheus"
-              }
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "percentunit",
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "fillOpacity": 0,
-                "showPoints": "auto",
-                "spanNulls": false
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            },
-            "legend": {
-              "displayMode": "table",
-              "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
-            }
-          },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10153。",
-          "links": [
-            {
-              "title": "RTP-LLM 原面板",
-              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=10153",
-              "targetBlank": true
-            }
-          ]
-        },
-        {
-          "id": 210155,
-          "type": "timeseries",
-          "title": "sp_total_accepted_token_num · 待埋点",
-          "gridPos": {
-            "x": 12,
-            "y": 1246,
-            "w": 12,
-            "h": 9
-          },
-          "datasource": {
-            "type": "prometheus",
-            "uid": "mock-prometheus"
-          },
-          "targets": [
-            {
-              "refId": "A",
-              "expr": "avg by(${decode_group})(py_rtp_frontend_speculative_avg_accept_length{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · {{${decode_group}}}",
-              "datasource": {
-                "type": "prometheus",
-                "uid": "mock-prometheus"
-              }
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "short",
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "fillOpacity": 0,
-                "showPoints": "auto",
-                "spanNulls": false
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            },
-            "legend": {
-              "displayMode": "table",
-              "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
-            }
-          },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10155。",
-          "links": [
-            {
-              "title": "RTP-LLM 原面板",
-              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=10155",
-              "targetBlank": true
-            }
-          ]
-        },
-        {
-          "id": 200178,
-          "type": "timeseries",
-          "title": "sp_step_latency",
-          "gridPos": {
-            "x": 0,
-            "y": 1255,
-            "w": 12,
-            "h": 9
-          },
-          "datasource": {
-            "type": "prometheus",
-            "uid": "mock-prometheus"
-          },
-          "targets": [
-            {
-              "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_sp_step_latency_us{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · {{${decode_group}}}",
-              "datasource": {
-                "type": "prometheus",
-                "uid": "mock-prometheus"
-              }
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "µs",
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "fillOpacity": 0,
-                "showPoints": "auto",
-                "spanNulls": false
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            },
-            "legend": {
-              "displayMode": "table",
-              "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
-            }
-          },
-          "description": "启用了 draft token 模型的 Decode 执行步耗时，单位微秒。 仅在模拟 draft 验收的 Decode 执行步采样。",
-          "links": [
-            {
-              "title": "RTP-LLM 原面板",
-              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=178",
-              "targetBlank": true
-            }
-          ]
-        },
-        {
-          "id": 200176,
-          "type": "timeseries",
-          "title": "sp_total_accepted_token_num",
-          "gridPos": {
-            "x": 12,
-            "y": 1255,
-            "w": 12,
-            "h": 9
-          },
-          "datasource": {
-            "type": "prometheus",
-            "uid": "mock-prometheus"
-          },
-          "targets": [
-            {
-              "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_sp_total_accepted_token_num{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · {{${decode_group}}}",
-              "datasource": {
-                "type": "prometheus",
-                "uid": "mock-prometheus"
-              }
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "short",
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "fillOpacity": 0,
-                "showPoints": "auto",
-                "spanNulls": false
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            },
-            "legend": {
-              "displayMode": "table",
-              "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
-            }
-          },
-          "description": "每个 speculative step 验收 token 数，包含 bonus，取停止条件截断前的值。 仅在模拟 draft 验收的 Decode 执行步采样。",
-          "links": [
-            {
-              "title": "RTP-LLM 原面板",
-              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=176",
-              "targetBlank": true
-            }
-          ]
-        },
-        {
-          "id": 200182,
-          "type": "timeseries",
-          "title": "sp_total_propose_token_num",
-          "gridPos": {
-            "x": 0,
-            "y": 1264,
-            "w": 12,
-            "h": 9
-          },
-          "datasource": {
-            "type": "prometheus",
-            "uid": "mock-prometheus"
-          },
-          "targets": [
-            {
-              "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_sp_total_propose_token_num{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · {{${decode_group}}}",
-              "datasource": {
-                "type": "prometheus",
-                "uid": "mock-prometheus"
-              }
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "short",
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "fillOpacity": 0,
-                "showPoints": "auto",
-                "spanNulls": false
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            },
-            "legend": {
-              "displayMode": "table",
-              "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
-            }
-          },
-          "description": "每个 speculative step 实际参与验收的 draft token 数。 仅在模拟 draft 验收的 Decode 执行步采样。",
-          "links": [
-            {
-              "title": "RTP-LLM 原面板",
-              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=182",
-              "targetBlank": true
-            }
-          ]
-        }
-      ],
-      "gridPos": {
-        "x": 0,
-        "y": 1227,
         "w": 24,
         "h": 1
       }

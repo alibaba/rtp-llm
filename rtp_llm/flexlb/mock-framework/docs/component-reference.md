@@ -69,7 +69,7 @@ P/D 都按实际 Forward 计时，token 是重复输入末 token 的模拟载荷
 
 请求总预算取 timeout_ms 和 RPC deadline 较早者，不逐阶段重置；取消、超时和关闭只释放一次，旧回调不能影响复用身份的新请求。602/603/605 使用原生 ErrorDetailsPB。P 转发采用受控拉取/有限 Inbox，遵守发送就绪；共享连接不随单请求取消关闭。请求数不叠加固定保护上限，TaskHistory 保留 1024 项。旧游标越过历史窗口时，按 real 的恢复方式继续返回完整当前状态、仍保留的完成记录和推进后的游标，不以 OUT_OF_RANGE 阻断健康同步；超前游标不倒退。每次缺口读取在组件日志中记录 `finished_history_gap`，包含 requested_version、dropped_through、latest_version、retained，不能把这段完成记录当成完整请求历史。生产 proto 没有历史完整性字段，缺口证据保存在实验组件日志；需要完整逐请求证据时不能依赖 WorkerStatus 的有限窗口。real 当前为 1000 条/5s 保留，Mock 的 1024 条是明确的模拟边界，不宣称保留策略完全相同。
 
-WorkerStatus 报真实等待/执行任务、finished/version，available_concurrency 保持生产默认 0，KV 以 token 为单位；CacheStatus 提供 block size 与版本。P/D 入队前检查 prompt 的最大 KV 容纳长度及上下文预留；临时容量不足仍等待。期望输出可以超过剩余上下文，实际生成长度取 max_new_tokens 与 max_seq_len−reserveStep−input 的较小值。P 的首 token 已达到 D 上限时，D 只回送结束标志，不执行 Forward 或重复输出 token。显式投机按 RTP reserveStep 预留，成功且 reuse 与缓存层开启时提交完整有效块；P 提交 prompt，D 提交 prompt 与已计算的生成前缀，失败不提交。没有完整动态 batch、GPU 或混合 KV 布局模拟。
+WorkerStatus 报真实等待/执行任务、finished/version，available_concurrency 保持生产默认 0，KV 以 token 为单位；CacheStatus 提供 block size 与版本。P/D 入队前检查 prompt 的最大 KV 容纳长度及上下文预留；临时容量不足仍等待。期望输出可以超过剩余上下文，实际生成长度取 max_new_tokens 与 max_seq_len−input 的较小值。P 的首 token 已达到 D 上限时，D 只回送结束标志，不执行 Forward 或重复输出 token。成功且 reuse 与缓存层开启时提交完整有效块；P 提交 prompt，D 提交 prompt 与已计算的生成前缀，失败不提交。没有完整动态 batch、GPU 或混合 KV 布局模拟。
 
 ## Block 容量与 RTP 缓存
 
@@ -168,7 +168,7 @@ environment:
 
 RtpConfig 只加载 ComputeSpec；ComputeModel 组合 FormulaForward、可选噪声、DecodeStepModel 和 StoppingModel。非默认 Decode 进度参数只允许配置在 D，P/D 都可以配置 EOS。旧字段、未知字段、null、错误类型或缺少必要 seed 明确拒绝，没有别名和兼容分支。模型校验来自 Java，Python 只编译组件配置结构。effective-config 只保存生效值及解析后的模型参数，原始输入由 Runner 的 config.json 保留；不再产生 pending_config。
 
-调度前 Compute.prepare 固定请求快照和本轮验证量/KV 需求，不抽投机接受量。Forward 完成后 Compute.completed 依次计算接受后的候选产出、EOS 和长度截断，返回 committedTokens/finished。Scheduler 只校验请求仍有效并提交结果、更新队列、处理资源和 PD；不判断正常结束是 EOS 还是达到上限。取消、超时、关闭和计算失败仍走独立失败路径，不能成为正常 finished，也不能因旧回调再提交 token。
+调度前 Compute.prepare 固定请求快照、本轮进度和 KV 需求。Forward 完成后 Compute.completed 按 EOS 和长度上限截断本轮输出，返回 committedTokens/finished。Scheduler 只校验请求仍有效并提交结果、更新队列、处理资源和 PD；不判断正常结束是 EOS 还是达到上限。取消、超时、关闭和计算失败仍走独立失败路径，不能成为正常 finished，也不能因旧回调再提交 token。
 
 P 每轮只产首 token，finished 表示整个请求是否结束，不表示 Prefill 阶段是否完成。P 阶段完成后退出计算集合，保留传输需要的 KV；即使首 token EOS，也仍完成 LOAD 确认，再通过 PREFILL_COMPLETE 让 D 结束，不启动 D Forward。PD 不再传预测的 stop_after，不由 P 决定 D 的未来停止长度。
 
@@ -178,11 +178,9 @@ ForwardBatch 保留请求长度、实际缓存命中、已生成长度、stepTok
 
 倍率直接乘入 forward.expression，不提供独立 scale/noise.scale。噪声位于 forward.noise，默认 stddev.ms/stddev.ratio=0；启用时要求 seed 和正 max.deviation.ms，扰动有界、最终耗时不小于 0。seed、Engine 身份、角色和 batch 身份固定一次耗时样本，取消批次不补完成指标。当前 DeepSeek Case 不启用噪声。
 
-Decode 有两种互斥模型。默认普通模式每轮一个 token；平均模式 tokens.per.step>=1 按 ceil((n+1)*v)−ceil(n*v) 产生候选数量，每轮每请求计一个 target 输入，不虚构 draft/accept 统计。显式投机模式配置 draft.tokens、acceptance.rate、seed：抽取接受前缀 A，候选产出为 A+1；固定独立接受率 α、草稿长 k 时 E[C]=1+α+…+α^k。这是可复现的统计近似，不模拟真实 MTP 的 logits、draft 张量和独立 draft KV；P 的初始化成本包含在 P 整体公式中。
+Decode 只配置每轮平均输出量 `tokens.per.step`，默认 1。小数用相邻两轮累计目标的差分实现，例如 2.6 每轮输出 2 或 3 个 token。每轮每请求计一个计算输入。EOS 或长度上限可以截短本轮输出，KV 只为本轮可能提交的前缀预留。
 
-长度边界在接受结果后统一处理。显式投机模式按固定 k 个草稿、k+1 个验证位置及 seq_len+k+1 的 KV 预留执行（普通 Decode reserveStep=0），对齐当前 RTP 的固定验证窗口；不能因为只剩 R 个输出位置就提前缩小验证量。候选产出 5 个而只剩 4 个时，只提交 4 个并返回 finished=true，验证成本仍按完整计划累计。平均进度模型每轮仍计一个 target 输入，KV 仅覆盖最终可能提交的输出前缀。EOS 只检查接受后的候选 token，按绝对输出位置生成固定概率事件；相同 seed、请求身份和概率下，改变 batch、轮宽、接受模型或调用顺序不会重抽已经走过的位置。拒绝的草稿不参与结束判断。
-
-StoppingModel 遵守 min_new_tokens，ignore_eos 只屏蔽 EOS，不屏蔽长度上限。完成判定的上限同时受 max_new_tokens 与 maxSequence−inputTokens 约束；RTP 调度器传入已扣除 reserveStep 的有效上下文上限；显式投机在首次分配和后续增长中另外预留 reserveStep。EOS 位于本轮中间时截断实际产出，但本轮已执行的验证成本和在途资源引用不撤销。固定概率只是 Mock EOS hazard，不宣称真实输出分布。标准回放发送 ignore_eos=true，所以 Case 可保留 P/D 的 EOS 参数而不再次缩短数据中的目标长度。
+EOS 由 `StoppingModel` 按请求和绝对 token 位置决定，遵守 `min_new_tokens`。`ignore_eos` 屏蔽 EOS，实际输出仍受 `max_new_tokens` 和上下文长度限制。标准回放使用 `ignore_eos=true`，按输入文件给出的目标长度回放。
 
 real 依据：MtpExecutor::decodeStep 先 target verify Forward，再执行 speculative_sampler；MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo 提取接受后的 token，GenerateStream::specUpdate 经 NormalGenerateStream::updateOutput 检查 EOS/max；CompleteTokenIds::matchEosToken 截断到第一个 EOS。PrefillRpcServer::remoteLoadCacheEnd 保留 LOAD ACK、释放源 KV 和 PREFILL_COMPLETE 顺序。当前 Mock 不支持 stop words/beam search 等未实现条件，显式请求会拒绝。
 
@@ -223,7 +221,6 @@ real 默认值和映射以 `rtp_llm/server/server_args`、`rtp_llm/config/engine
 | mock.compute.forward.expression | 必填，Forward 公式，结果单位 ms。 |
 | mock.compute.forward.noise.stddev.ms / stddev.ratio / max.deviation.ms / seed | 有界噪声，详见 Compute；数值后缀均相对 mock.compute.forward.noise。 |
 | mock.compute.decode.tokens.per.step | D 平均每轮进度，与真实投机机制不同。 |
-| mock.compute.decode.draft.tokens / acceptance.rate / seed | D 简化投机模型；相对 mock.compute.decode。 |
 | mock.compute.eos.probability / seed | P/D 的概率停止模型。 |
 
 ### ENV 输入
@@ -301,8 +298,9 @@ RTP 后端的 RtpMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独
 | rtp_llm_forward_tokens_total | Counter，kind=input/compute/output | 完成 Forward 的 token；input/compute 汇总本批全部执行成员，output 只计有效提交。全部取消的 Forward 不补完成样本。 |
 | rtp_llm_model_forward_us | Gauge | Prefill 完成 Forward 的采集窗口均值，微秒。当前生产 MTP 兼容口径下 Decode 缺席。 |
 | rtp_llm_step_latency_us | Gauge | P/D 完成的非空执行步耗时，微秒，从调度返回到处理完本轮输出。 |
-| rtp_llm_{context,generate,total}_tps | Gauge | 有效执行时间内的 token/s。P 的 context 计未命中计算量，with_cache 计输入；D 的 draft 模型计停止条件截断前的验收量（含 bonus）。 |
-| rtp_llm_sp_* | Gauge | 仅 D 的 draft 模型记录步耗时、提议/验收、每流验收、接受率及估计 TPOT。估计 TPOT 为步耗时除以每流平均验收量。 |
+| rtp_llm_{context,generate,total}_tps | Gauge | 有效执行时间内的 token/s。P 的 context 计未命中计算量，with_cache 计输入；D 计实际提交的输出量。 |
+| mock_decode_estimate_tpot_us | Gauge | Decode 步耗时除以该步每条产出请求提交的平均 token 数，单位微秒。 |
+| mock_client_tpot_seconds | Histogram | 成功请求收到首尾 token 的时间差，除以首 token 后的 token 数。单 token 请求不采样。 |
 | mock_model_forward_actual_us | Gauge | P/D 最近一次完成 Forward 的模拟实际耗时，微秒，用于与计划值对照。 |
 | mock_model_forward_planned_us | Gauge | 同一个完成 Forward 的计划耗时，微秒，包含公式和可选噪声。 |
 | rtp_llm_model_forward_seconds | Histogram | 完成 Forward 实际耗时秒，含 bucket/sum/count，排除排队，不是 TTFT。 |
@@ -311,7 +309,7 @@ RTP 后端的 RtpMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独
 
 RTP 原生观测直接导出：`rtp_llm_wait_stream_size`、`rtp_llm_running_stream_size`、`rtp_llm_kv_cache_left_seq`（Tokens）、`rtp_llm_kv_cache_{total,free,available,used}_blocks`（Blocks）和 `rtp_llm_kv_cache_used_ratio`（0–100，不可用比例）。Host 暂只上报 total/free/used Blocks，不用 free 冒充 available。loading/ready 仍是调度器阶段辅助观测，不冒充 real 的加载缓存队列。
 
-Prefill 的 context TPS 用计算 Tokens／执行时间，含缓存 TPS 用输入 Tokens／执行时间；墙钟 TPS 用对应 Tokens／实际窗口。Decode generate TPS 统计提交的输出 Tokens，total TPS 统计模型计算 Tokens，二者在投机采样时不同。`rtp_llm_framework_qps` 统计终态，不是接纳；error 包含 timeout，cancel 单列。上述速率 Gauge 的窗口是两次采集间的单调时钟间隔，无后台采样线程；空闲窗口报告零。real 默认按后台周期报告，窗口边界可能不同，不能要求逐点相等。
+Prefill 的 context TPS 用计算 Tokens／执行时间，含缓存 TPS 用输入 Tokens／执行时间；墙钟 TPS 用对应 Tokens／实际窗口。Decode 的 generate TPS 和 total TPS 均以提交的输出 token 为分子，计算 token 另计入 Forward 计数器。`rtp_llm_framework_qps` 统计终态，不是接纳；error 包含 timeout，cancel 单列。上述速率 Gauge 的窗口是两次采集间的单调时钟间隔，无后台采样线程；空闲窗口报告零。real 默认按后台周期报告，窗口边界可能不同，不能要求逐点相等。
 
 没有 real 同名指标的真实观测，以 RTP Prometheus 辅助 Counter/Histogram 保留供 Python 门禁和统计使用，不拿它们的累计值直接冒充线上 QPS/TPS Gauge。理论 Forward、ViT 运行图片数和 hash 缓存预算保留 `mock_` 前缀。此次更名不保留旧 `mock_engine_*` 别名；旧实验保持原始 view.json 和 TSDB，不承诺新查询可以直接读取旧指标名。
 

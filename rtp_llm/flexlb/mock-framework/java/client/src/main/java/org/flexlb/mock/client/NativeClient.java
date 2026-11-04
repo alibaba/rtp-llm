@@ -17,7 +17,7 @@ import org.flexlb.mock.protocol.*;
 public final class NativeClient implements AutoCloseable {
     public enum Outcome { success, error, cancelled, timeout }
     public record Result(long requestId, Instant sentAt, Long ttftNanos, long elapsedNanos,
-                         int outputTokens, Outcome outcome, String grpcCode, long errorCode, String message) {}
+                         int outputTokens, Outcome outcome, String grpcCode, long errorCode, String message, Long tpotNanos) {}
     private final java.util.function.Supplier<List<String>> masters;
     private final java.util.function.Consumer<ObjectNode> events;
     private final VitClient vision;
@@ -99,6 +99,7 @@ public final class NativeClient implements AutoCloseable {
         private final Instant sentAt = Instant.now();
         private final long started = System.nanoTime();
         private Long ttft;
+        private long lastTokenNanos;
         private long batchId;
         private int outputTokens, scheduleAttempt;
         private boolean pendingSchedule;
@@ -241,7 +242,10 @@ public final class NativeClient implements AutoCloseable {
                             }
                             // Native Engine may finish at its context limit, even with ignore_eos or a larger minimum.
                             outputTokens = flat.getAuxInfo(0).getOutputLen(); finalFrame = flat.getFinished(0);
-                            if (ttft == null) { ttft = System.nanoTime() - started; emit("FIRST_TOKEN"); firstToken.complete(ttft); }
+                            if (width > 0) {
+                                lastTokenNanos = System.nanoTime() - started;
+                                if (ttft == null) { ttft = lastTokenNanos; emit("FIRST_TOKEN"); firstToken.complete(ttft); }
+                            }
                             if (!terminal) stream.request(1);
                         }
                     }
@@ -305,8 +309,9 @@ public final class NativeClient implements AutoCloseable {
                 .put("error_code", Long.toString(code)).put("message", message(status)).put("output_tokens", outputTokens);
             if (ttft != null) ended.put("ttft_nanos", Long.toString(ttft));
             events.accept(ended);
+            Long tpot = ttft != null && outputTokens > 1 ? (lastTokenNanos - ttft) / (outputTokens - 1) : null;
             result.complete(new Result(request.getRequestId(), sentAt, ttft, ended.path("elapsed_nanos").asLong(), outputTokens,
-                outcome, status.getCode().name(), code, status.getDescription() == null ? "" : status.getDescription()));
+                outcome, status.getCode().name(), code, status.getDescription() == null ? "" : status.getDescription(), tpot));
         }
     }
     private static String message(Status status) {

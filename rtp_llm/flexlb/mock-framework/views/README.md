@@ -6,7 +6,7 @@
 
 ## P / D 与 ViT
 
-Prefill 和 Decode 分开提供吞吐/延迟/负载、PD RPC、KV、KV 分池、Host Memory KV 和 Mock 模拟质量分区；投机采样只放在 Decode。Prefill 的缓存复用、输入 TPS 不混入 Decode；Decode 的输出 TPS、生成 Batch、输出长度不混入 Prefill。每条 Engine 查询显式使用 `role="prefill"` 或 `role="decode"`，再叠加全局 Engine 地址筛选。Mock 专有指标单列，不能当作名字相近的 real 指标。
+Prefill 和 Decode 分开提供吞吐/延迟/负载、PD RPC、KV、KV 分池、Host Memory KV 和 Mock 模拟质量分区。Decode 展示按步耗时估算的 TPOT，Client 展示按请求实际到达时间计算的 TPOT。Prefill 的缓存复用、输入 TPS 不混入 Decode；Decode 的输出 TPS、生成 Batch、输出长度不混入 Prefill。每条 Engine 查询显式使用 `role="prefill"` 或 `role="decode"`，再叠加全局 Engine 地址筛选。Mock 专有指标单列，不能当作名字相近的 real 指标。
 
 线上 Engine 查询主要使用全局 `hippo_role`，并非每个面板都硬编码了 Prefill/Decode。源码语义、线上 PD 分离分区和局部业务过滤共同决定本地归属；Master 的 `role=PREFILL/DECODE/PDFUSION` 是被观察 Worker 的角色，不是 Master 自己的角色，保留原查询的具体限制，不能替换为 Engine 自报的小写 role。
 
@@ -62,7 +62,7 @@ View 的 `annotation_steps` 只配置默认选择，省略则全部显示，空�
 |---|---|---|
 | Forward 组装 | `rtp_llm_context_batch_size` / `generate_batch_size`，`execute_token_size`，`max_seq_len`；含 Context 的条件系列只在 P 上产生 | Decode 执行 Token 取 verify/step，不拿整段历史输入相加；不把 running 请求数当作本批大小 |
 | 执行步 | P/D `rtp_llm_step_latency_us` | 完成的非空执行步，从调度返回到处理完输出，微秒；包含 Mock 执行和输出处理 |
-| 投机验收 | D `rtp_llm_sp_*` 的步耗时、提议/验收、接受率和估计 TPOT | 仅 draft 模型。real 生产 MTP（`5f026a038`）的验收数据跨步流水，Mock 同步记录本步验收，保留统计分子和分母；没有独立 propose/score/sampler 耗时 |
+| 每输出 token 耗时 | D `mock_decode_estimate_tpot_us`、Client `mock_client_tpot_seconds` | D 按步耗时和实际提交量估算。Client 按成功请求首尾 token 到达间隔计算。 |
 | 请求终态 | `rtp_llm_latency_us`、`wait_latency_us`、`first_token_latency_us`、`input_token_length`、`output_token_length`、`iterate_count`、`query_batch_size` | 如 real，仅 success/cancel/timeout 产生流统计；无首 Token 则不报首 Token 耗时；query batch 是 beam 数，当前为 1 |
 | D Loading | `rtp_llm_stream_loading_cache_latency_us` | 从实际 beginTransfer 到 transferCompleted，不含等待 P 计算；其他 loading 阶段不混用 |
 | ViT 调度 | `py_rtp_vit_embedding_queue_size` / `queue_wait_rt` / `batch_size` / `forward_rt` | 队列项是提交的工作 chunk；运行图片数另为 Mock 辅助项 |

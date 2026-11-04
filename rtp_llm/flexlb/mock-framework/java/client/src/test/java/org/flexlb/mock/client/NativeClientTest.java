@@ -123,6 +123,11 @@ class NativeClientTest {
             assertTrue(call.firstToken().toCompletableFuture().get(2, TimeUnit.SECONDS) >= TimeUnit.MILLISECONDS.toNanos(60));
             var result = h.result(call); assertEquals(NativeClient.Outcome.success, result.outcome());
             assertEquals(3, result.outputTokens()); assertNotNull(result.ttftNanos()); assertTrue(result.elapsedNanos() >= result.ttftNanos());
+            assertNotNull(result.tpotNanos());
+            assertTrue(result.tpotNanos() > 0 && result.tpotNanos() * 2 <= result.elapsedNanos() - result.ttftNanos());
+            var metrics = new ClientMetrics();
+            metrics.finished(result);
+            assertTrue(metrics.scrape().contains("mock_client_tpot_seconds_count{role=\"client\",} 1.0"));
             assertEquals(1, h.generates.get()); assertEquals(0, h.fetches.get());
             assertEquals(RoleAddrPB.RoleType.PREFILL, h.generated.get().getGenerateConfig().getRoleAddrs(0).getRole());
         }

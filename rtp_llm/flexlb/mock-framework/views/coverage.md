@@ -148,7 +148,7 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | decode | 10588 | stream loading cache latency | 已上报 | rtp_llm_stream_loading_cache_latency_us |
 | decode | 10098 | model inputs dump latency | 待埋点 | rtp_llm_model_inputs_log_us |
 | decode | 232 | sample rt | 待埋点 | rtp_llm_sample_input_us |
-| decode | 10112 | TPOT(估计值) | 已上报（draft 模式） | rtp_llm_sp_estimate_tpot_us |
+| decode | 10112 | TPOT(估计值) | Mock 步耗时估计 | mock_decode_estimate_tpot_us |
 | decode | 10586 | py framework error qps | 待埋点 | py_rtp_master_queue_reject_qps |
 | decode | 10589 | stream enqueue to canrun latency | 待埋点 | rtp_llm_stream_enqueue_to_canrun_us |
 | decode | 10629 | stream update rt | 待埋点 | rtp_llm_stream_update_latency_us |
@@ -232,15 +232,6 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | decode | 10420 | Memory copy pool active threads | 待埋点 | rtp_llm_kv_cache_memory_cache_copy_pool_active_threads |
 | decode | 10421 | Memory copy pool pending tasks | 待埋点 | rtp_llm_kv_cache_memory_cache_copy_pool_pending_tasks |
 | decode | 10424 | Memory copy throughput | 待埋点 | rtp_llm_kv_cache_memory_cache_copy_throughput_bytes_per_second |
-| decode | 546 | TPOT(估计值) | 已上报（draft 模式） | rtp_llm_sp_estimate_tpot_us |
-| decode | 548 | 接受率 | 已上报（draft 模式） | rtp_llm_sp_avg_accept_rate |
-| decode | 549 | 接受率(不算入bonus) | 已上报（draft 模式） | rtp_llm_sp_avg_fix_accept_rate |
-| decode | 402 | 每步平均token数目 | 已上报（draft 模式） | rtp_llm_sp_avg_accept_token_num |
-| decode | 10153 | sp_accept_rate | 待埋点 | py_rtp_frontend_speculative_accept_rate |
-| decode | 10155 | sp_total_accepted_token_num | 待埋点 | py_rtp_frontend_speculative_avg_accept_length |
-| decode | 178 | sp_step_latency | 已上报（draft 模式） | rtp_llm_sp_step_latency_us |
-| decode | 176 | sp_total_accepted_token_num | 已上报（draft 模式） | rtp_llm_sp_total_accepted_token_num |
-| decode | 182 | sp_total_propose_token_num | 已上报（draft 模式） | rtp_llm_sp_total_propose_token_num |
 | vit | 449 | vit qps | 已上报 | py_rtp_vit_qps |
 | vit | 458 | vit success qps | 已上报 | py_rtp_vit_success_qps |
 | vit | 457 | vit error qps | 已上报 | py_rtp_vit_error_qps |
