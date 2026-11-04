@@ -1,13 +1,5 @@
-load("//rtp_llm/flexlb/navi_sched/vendor/bazel:defs.bzl", "rpm_library")
-
-rpm_library(
+cc_library(
     name = "libev",
-    rpms = ["@libev//file:file",
-            "@libev-devel//file:file"
-    ],
-    lib_path = "usr/lib64",
-    include_path = "usr/include",
-    shared_lib = "libev.so",
-    hdrs = ["ev.h", "ev++.h"],
-    alwayslink = 1,
+    linkopts = ["-lev"],
+    alwayslink = True,
 )
