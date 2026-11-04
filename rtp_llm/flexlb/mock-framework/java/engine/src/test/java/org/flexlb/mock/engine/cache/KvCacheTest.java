@@ -7,7 +7,7 @@ import org.junit.jupiter.api.Test;
 
 class KvCacheTest {
     @Test void releaseIsIdempotentAndCannotPublishAfterCancellation() {
-        try (var cache = new KvCache(1, 8, 0, KvCache.EvictionPolicy.LRU)) {
+        try (var cache = new KvCache(1, 8, 0)) {
             var lease = cache.acquire(2, List.of()).lease();
             assertEquals(6, cache.snapshot(-1, false).availableBlocks());
             lease.close(); lease.close();
@@ -18,7 +18,7 @@ class KvCacheTest {
     }
 
     @Test void completionKeepsLruAvailableAndSharingChargesEachPhysicalBlockOnce() {
-        try (var cache = new KvCache(1, 8, 0, KvCache.EvictionPolicy.LRU)) {
+        try (var cache = new KvCache(1, 8, 0)) {
             var first = cache.acquire(2, List.of()).lease(); first.publish(List.of(1L, 2L), 2); first.close();
             var snapshot = cache.snapshot(-1, true);
             assertEquals(8, snapshot.availableBlocks()); assertEquals(6, snapshot.freeBlocks());
@@ -32,7 +32,7 @@ class KvCacheTest {
     }
 
     @Test void failedAdmissionRollsBackPinsAndClassifiesHugeDemandWithoutIntegerOverflow() {
-        try (var cache = new KvCache(1, 8, 1, KvCache.EvictionPolicy.LRU)) {
+        try (var cache = new KvCache(1, 8, 1)) {
             var seed = cache.acquire(2, List.of()).lease(); seed.publish(List.of(1L, 2L), 2); seed.close();
             var owner = cache.acquire(5, List.of()).lease();
             assertNotNull(owner);
@@ -44,7 +44,7 @@ class KvCacheTest {
     }
 
     @Test void growthFailureRollsBackAndRetainsOnlyTheOriginalLease() {
-        try (var cache = new KvCache(1, 4, 0, KvCache.EvictionPolicy.LRU)) {
+        try (var cache = new KvCache(1, 4, 0)) {
             var lease = cache.acquire(1, List.of()).lease();
             assertEquals(KvCache.Failure.PERMANENT, lease.ensureCapacity(6));
             assertEquals(3, cache.snapshot(-1, false).availableBlocks());
@@ -53,7 +53,7 @@ class KvCacheTest {
     }
 
     @Test void completionCancellationRaceHasOneOwnershipTransition() throws Exception {
-        try (var cache = new KvCache(1, 8, 0, KvCache.EvictionPolicy.LRU); var callers = Executors.newVirtualThreadPerTaskExecutor()) {
+        try (var cache = new KvCache(1, 8, 0); var callers = Executors.newVirtualThreadPerTaskExecutor()) {
             for (int i = 0; i < 100; i++) {
                 var lease = cache.acquire(2, List.of()).lease();
                 var ready = new CountDownLatch(1);
@@ -67,14 +67,14 @@ class KvCacheTest {
     }
 
     @Test void closeInvalidatesAllLeasesAndPublicationCannotResurrectCache() {
-        var cache = new KvCache(1, 4, 0, KvCache.EvictionPolicy.LRU);
+        var cache = new KvCache(1, 4, 0);
         var lease = cache.acquire(2, List.of()).lease(); cache.close(); cache.close();
         lease.close(); assertFalse(lease.publish(List.of(1L, 2L), 2));
         assertThrows(IllegalStateException.class, () -> cache.acquire(1, List.of()));
         assertEquals(4, cache.snapshot(-1, false).freeBlocks());
     }
     @Test void tokenCapacityRoundsUpWithoutShrinkingAndRejectsOverflowWithoutMutation() {
-        try (var cache = new KvCache(128, 4, 0, KvCache.EvictionPolicy.LRU)) {
+        try (var cache = new KvCache(128, 4, 0)) {
             try (var lease = cache.acquire(1, List.of()).lease()) {
                 assertEquals(3, cache.snapshot(0, false).freeBlocks());
                 assertNull(lease.ensureCapacity(128)); assertEquals(3, cache.snapshot(0, false).freeBlocks());

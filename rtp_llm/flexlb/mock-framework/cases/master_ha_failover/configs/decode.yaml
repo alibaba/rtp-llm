@@ -6,7 +6,6 @@ reuse_cache: false
 enable_device_cache: true
 enable_disk_cache: false
 reserve_block_ratio: 8
-device_eviction_policy: lru
 # 异步队列背压未模拟，以下 real 参数忽略。
 block_tree_business_queue_max_size: 10000
 block_tree_transfer_queue_max_size: 10000

@@ -59,7 +59,7 @@ class AdmissionTest {
             var created = new AtomicReference<RejectingScheduler>();
             var lock = new Object();
             var history = new TaskHistory();
-            try (var cache = new KvCache(2, 8, 0, KvCache.EvictionPolicy.LRU);
+            try (var cache = new KvCache(2, 8, 0);
                  var engine = new org.flexlb.mock.engine.execution.RtpEngineLoop(lock, (domain, supplied, finished) -> {
                      assertSame(lock, domain);
                      assertSame(cache, supplied);

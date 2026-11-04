@@ -17,23 +17,23 @@ class BlockPoolTest {
         assertEquals(new BlockPool.Snapshot(4, 2, 3, 1), pool.snapshot());
         second.close();
         assertEquals(new BlockPool.Snapshot(4, 2, 4, 0), pool.snapshot());
-        var transfer = pool.retain(cached.getFirst(), LOAD);
+        var reader = pool.retain(cached.getFirst(), REQUEST);
         cached.forEach(BlockPool.Reference::close);
         assertEquals(new BlockPool.Snapshot(4, 3, 3, 1), pool.snapshot());
-        transfer.close();
+        reader.close();
         assertEquals(new BlockPool.Snapshot(4, 4, 4, 0), pool.snapshot());
-        assertThrows(IllegalArgumentException.class, () -> pool.retain(transfer, REQUEST));
+        assertThrows(IllegalArgumentException.class, () -> pool.retain(reader, REQUEST));
     }
-    @Test void deviceAndHostUseTheSameCodeWithIndependentCapacities() {
-        var device = new BlockPool(2); var host = new BlockPool(3);
-        var source = device.allocate(2, CACHE);
-        assertNull(device.allocate(1, REQUEST));
-        assertThrows(IllegalArgumentException.class, () -> host.retain(source.getFirst(), LOAD));
-        var target = host.allocate(2, STORE);
-        assertEquals(1, host.snapshot().available());
+    @Test void referencesCannotCrossPools() {
+        var firstPool = new BlockPool(2); var secondPool = new BlockPool(3);
+        var source = firstPool.allocate(2, CACHE);
+        assertNull(firstPool.allocate(1, REQUEST));
+        assertThrows(IllegalArgumentException.class, () -> secondPool.retain(source.getFirst(), REQUEST));
+        var target = secondPool.allocate(2, REQUEST);
+        assertEquals(1, secondPool.snapshot().available());
         source.forEach(BlockPool.Reference::close);
-        assertEquals(2, device.snapshot().free());
-        assertEquals(1, host.snapshot().free());
+        assertEquals(2, firstPool.snapshot().free());
+        assertEquals(1, secondPool.snapshot().free());
         target.forEach(BlockPool.Reference::close);
     }
     @Test void oversizedAllocationDoesNotPartiallyConsumeCapacityAndReleaseWakesWaiter() throws Exception {

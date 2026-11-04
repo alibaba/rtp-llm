@@ -6,7 +6,6 @@ import static org.flexlb.mock.engine.cache.BlockPool.Kind.*;
 /** One local RTP Full-KV pool with synchronous LRU reclamation. */
 public final class KvCache implements AutoCloseable {
     public enum Failure { PERMANENT, RETRYABLE }
-    public enum EvictionPolicy { LRU }
     public record Admission(Lease lease, Failure failure, long generation) {}
     public record Snapshot(int totalBlocks, int availableBlocks, int freeBlocks, int heldBlocks,
                            int referencedBlocks, long version, Set<Long> keys) {}
@@ -22,9 +21,8 @@ public final class KvCache implements AutoCloseable {
     /** The observer must only signal; it must never acquire an Engine scheduling lock. */
     public synchronized void onChange(Runnable observer) { changed = Objects.requireNonNull(observer); }
 
-    public KvCache(int blockSize, int blocks, int reserve, EvictionPolicy policy) {
+    public KvCache(int blockSize, int blocks, int reserve) {
         this(blockSize, blocks, reserve, true);
-        Objects.requireNonNull(policy);
     }
 
     public KvCache(int blockSize, int blocks, int reserve, boolean deviceCache) {
@@ -62,8 +60,7 @@ public final class KvCache implements AutoCloseable {
     }
 
     /** Snapshot and subscription share the cache monitor. Observers must only enqueue, never block. */
-    public synchronized CacheMetadata.SnapshotKeys metadataKeys(CacheMetadata.Medium medium) { return tree.metadataKeys(medium); }
-    public synchronized CacheMetadata.Snapshot metadata() { return tree.metadata(); }
+    public synchronized CacheMetadata.SnapshotKeys metadataKeys() { return tree.metadataKeys(); }
     public synchronized AutoCloseable observeMetadata(java.util.function.Consumer<CacheMetadata.Change> observer) {
         if (closed) throw new IllegalStateException("Cache is closed");
         if (metadataObserver != null) throw new IllegalStateException("Cache metadata already has a reporter");

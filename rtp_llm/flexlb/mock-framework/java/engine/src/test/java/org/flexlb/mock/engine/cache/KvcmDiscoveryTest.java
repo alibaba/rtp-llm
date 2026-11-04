@@ -109,7 +109,7 @@ class KvcmDiscoveryTest {
 
     @ParameterizedTest @ValueSource(booleans = {false, true})
     void httpFailureOrNotLeaderRediscoversAndRepairsTheSnapshot(boolean notLeader) throws Exception {
-        try (var first = new Meta(); var second = new Meta(); var cache = new KvCache(1, 4, 0, KvCache.EvictionPolicy.LRU)) {
+        try (var first = new Meta(); var second = new Meta(); var cache = new KvCache(1, 4, 0)) {
             var vip = new Vip(); vip.hosts.set(List.of(first.host()));
             var resolver = new KvcmDiscovery(null, "kvcm-domain", "shared_128", vip);
             try (var lease = cache.acquire(1, List.of()).lease()) { lease.publish(List.of(99L), 1); }

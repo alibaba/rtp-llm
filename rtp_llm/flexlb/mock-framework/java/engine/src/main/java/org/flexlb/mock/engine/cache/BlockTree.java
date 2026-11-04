@@ -25,8 +25,8 @@ final class BlockTree {
     private long sequence, version;
     private java.util.function.Consumer<CacheMetadata.Change> observer = change -> {};
     void observe(java.util.function.Consumer<CacheMetadata.Change> observer) { this.observer = observer; }
-    private void changed(long key, CacheMetadata.Medium before, CacheMetadata.Medium after) {
-        observer.accept(new CacheMetadata.Change(++version, key, before, after));
+    private void changed(long key, boolean added) {
+        observer.accept(new CacheMetadata.Change(++version, key, added));
     }
 
     List<Node> match(List<Long> keys) {
@@ -58,7 +58,7 @@ final class BlockTree {
         nodes.put(key, node);
         (parent == null ? roots : parent.children).put(key, node);
         leaves.add(node);
-        changed(key, CacheMetadata.Medium.NONE, CacheMetadata.Medium.HBM);
+        changed(key, true);
         return node;
     }
 
@@ -71,26 +71,20 @@ final class BlockTree {
             (node.parent == null ? roots : node.parent.children).remove(node.key);
             node.cache.close();
             if (node.parent != null && node.parent.children.isEmpty()) leaves.add(node.parent);
-            changed(node.key, CacheMetadata.Medium.HBM, CacheMetadata.Medium.NONE);
+            changed(node.key, false);
             return true;
         }
         return false;
     }
 
     long version() { return version; }
-    CacheMetadata.Snapshot metadata() {
-        var blocks = new HashMap<Long, CacheMetadata.Medium>();
-        nodes.forEach((key, node) -> blocks.put(key, CacheMetadata.Medium.HBM));
-        return new CacheMetadata.Snapshot(version, blocks);
-    }
-    CacheMetadata.SnapshotKeys metadataKeys(CacheMetadata.Medium medium) {
-        long[] keys = medium == CacheMetadata.Medium.HBM ? nodes.keySet().stream().mapToLong(Long::longValue).toArray() : new long[0];
-        return new CacheMetadata.SnapshotKeys(version, keys);
+    CacheMetadata.SnapshotKeys metadataKeys() {
+        return new CacheMetadata.SnapshotKeys(version, nodes.keySet().stream().mapToLong(Long::longValue).toArray());
     }
     Set<Long> keys() { return Set.copyOf(nodes.keySet()); }
     void clear() {
         for (var node : nodes.values()) {
-            node.cache.close(); changed(node.key, CacheMetadata.Medium.HBM, CacheMetadata.Medium.NONE);
+            node.cache.close(); changed(node.key, false);
         }
         nodes.clear(); roots.clear(); leaves.clear();
     }
