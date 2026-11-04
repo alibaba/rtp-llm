@@ -1,5 +1,6 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
+#include "rtp_llm/models_py/bindings/core/SampleTemperature.h"
 
 #include <limits>
 
@@ -250,18 +251,26 @@ bool repetitionPenaltyActive(const GreedyParams& params, int64_t batch_size) {
                           [](auto t) { return t != 0.0f; });
 }
 
+// apply_temperature=false is only legal for a caller that will fold the
+// temperature into a later, narrower consumer (see
+// greedyTemperatureInSelect / flashinferSampleGreedy): the logits it leaves
+// behind are untempered, so anything that softmaxes the full row directly
+// would change distribution. Default true keeps every other call site on the
+// legacy behaviour.
 void processLogits(const GreedyParams&  params,
                    const torch::Tensor& device_tokens,
-                   const torch::Tensor& transposed_tokens) {
+                   const torch::Tensor& transposed_tokens,
+                   bool                 apply_temperature = true) {
     const auto vocab_size_padded  = params.logits.size(1);
     const auto decoder_batch_size = params.sequence_lengths.size(0);
     const auto batch_size         = params.logits.size(0);
     const auto step               = params.step;
     auto       cur_stream         = at::cuda::getCurrentCUDAStream().stream();
 
-    if (std::any_of(params.temperature.data_ptr<float>(),
-                    params.temperature.data_ptr<float>() + batch_size,
-                    [&](auto t) { return t != 1.0f; })) {
+    if (apply_temperature
+        && std::any_of(params.temperature.data_ptr<float>(),
+                       params.temperature.data_ptr<float>() + batch_size,
+                       [&](auto t) { return t != 1.0f; })) {
         auto temperature_gpu = params.temperature.to(torch::kCUDA, true);
         invokeBatchApplyTemperaturePenalty(params.logits.data_ptr<float>(),
                                            (float*)nullptr,  // embedding_bias
@@ -396,9 +405,108 @@ void fusedGreedyTop1Renorm(const torch::Tensor& logits,
                                             samples.stride(samples.dim() - 1)));
 }
 
+// Fixed candidate width of the DSpARK target-sampling path
+// (GreedyParams::force_topk). Moved verbatim out of flashinferSampleGreedy so
+// sampleGreedy can pose the same question *before* processLogits: the
+// full-vocabulary temperature pass may be skipped exactly when the force_topk
+// branch below will consume the temperature itself. Every gate returns 0
+// unless that branch runs and no other consumer needs the full-width
+// probability row, so the caller's decision and the branch's decision can only
+// agree (see greedyTemperatureInSelect).
+int64_t greedyForceTopk(const GreedyParams& params, int64_t batch_size, bool fused_greedy_top1) {
+    if (params.force_topk <= 0 || fused_greedy_top1 || !params.skip_logits_probs_restore
+        || params.return_original_all_probs || params.cum_log_probs.has_value()
+        || !params.output_all_probs.has_value()) {
+        return 0;
+    }
+    const bool compact_output = params.output_all_probs_indices.has_value();
+    if (compact_output) {
+        RTP_LLM_CHECK_WITH_INFO(params.output_all_probs->size(1) == params.force_topk
+                                    && params.output_all_probs_indices->sizes() == params.output_all_probs->sizes(),
+                                "compact sampling probabilities and candidate IDs must be [rows, force_topk]");
+        return params.force_topk < params.logits.size(1) ? params.force_topk : 0;
+    }
+    if (params.output_all_probs->sizes() != params.logits.sizes()) {
+        return 0;
+    }
+    const auto* ks = params.top_k.data_ptr<int32_t>();
+    if (std::all_of(ks, ks + batch_size, [](int32_t k) { return k == 1; })
+        || !std::all_of(ks, ks + batch_size, [](int32_t k) { return k <= 0; })) {
+        return 0;
+    }
+    const auto* ps = params.top_p.data_ptr<float>();
+    if (std::any_of(ps, ps + batch_size, [](float p) { return std::abs(p) < 1e-7f || std::abs(p - 1.0f) < 1e-7f; })) {
+        return 0;
+    }
+    return params.force_topk < params.logits.size(1) ? params.force_topk : 0;
+}
+
+// True when processLogits will rewrite the logits row with a step that does not
+// commute with moving the temperature to the candidates:
+//  * repetition / presence / frequency penalties are elementwise and are applied
+//    *after* the temperature in the legacy chain, so a tempered row is
+//    rep(x / T), while folding would later produce rep(x) / T — not the same
+//    distribution (and not the same top-k set);
+//  * the no-repeat-ngram ban writes a constant mask value, which does commute
+//    with a positive scale, but an all-banned row would turn the legacy
+//    -FLT_MAX into -inf under the fold — keep it on the same side of the gate.
+// Any active penalty therefore keeps the full-vocabulary temperature pass.
+bool logitsPenaltyActive(const GreedyParams& params, int64_t batch_size) {
+    if (repetitionPenaltyActive(params, batch_size)) {
+        return true;
+    }
+    const auto decoder_batch_size = params.sequence_lengths.size(0);
+    if (!decoder_batch_size || !params.no_repeat_ngram_size.has_value()) {
+        return false;
+    }
+    const auto* sizes = params.no_repeat_ngram_size.value().data_ptr<int32_t>();
+    return std::any_of(sizes, sizes + decoder_batch_size, [](int32_t s) { return s != 0; });
+}
+
+// Sampler-side query: will this round apply the temperature to the force_topk
+// candidates instead of the full [batch, vocab] logits row? The shared rules
+// (env flag + temperature rules + output contract + penalty ordering) live in
+// SampleTemperature.h so upstream callers reach the same answer; this wrapper
+// only contributes the sampler-specific facts (the effective force_topk width
+// and whether a logits penalty is active). See greedyTemperatureFoldedForRequest
+// for the monotonicity argument and the full list of disqualifiers.
+bool greedyTemperatureInSelect(const GreedyParams& params, int64_t batch_size, bool has_do_sample_false_row) {
+    const int64_t force_topk = greedyForceTopk(params, batch_size, /*fused_greedy_top1=*/false);
+    return greedyTemperatureFoldedForRequest(batch_size,
+                                             params.temperature.data_ptr<float>(),
+                                             static_cast<int>(force_topk),
+                                             has_do_sample_false_row,
+                                             params.cum_log_probs.has_value(),
+                                             params.return_original_all_probs,
+                                             logitsPenaltyActive(params, batch_size));
+}
+
+// Per-row logits scale, [batch_size, 1], reproducing batchApplyTemperaturePenalty
+// bit-for-bit (sampleTemperatureInvScale holds the kernel's 1 / (T + 1e-6)
+// factor). Built on the host from the batch-sized CPU temperature array the
+// sampler already reads, then copied to the logits device: 256 B, i.e. noise
+// next to the [batch, vocab] pass it replaces.
+//
+// The staging buffer is pinned explicitly (Tensor::options() does not carry
+// pinned_memory), so the H2D below takes the same asynchronous copy path
+// processLogits used for its temperature vector; a pageable 256 B copy would
+// work too but would turn non_blocking into a no-op and is not legal under a
+// capturing stream.
+torch::Tensor greedyTemperatureScale(const GreedyParams& params, int64_t batch_size) {
+    static const auto pinned_f32      = torch::TensorOptions(torch::kFloat32).pinned_memory(true);
+    auto              scale           = torch::empty({batch_size}, pinned_f32);
+    const auto*       temperature_ptr = params.temperature.data_ptr<float>();
+    auto*             scale_ptr       = scale.data_ptr<float>();
+    for (int64_t i = 0; i < batch_size; ++i) {
+        scale_ptr[i] = sampleTemperatureInvScale(temperature_ptr[i]);
+    }
+    return scale.to(params.logits.device(), /*non_blocking=*/true).unsqueeze(1);
+}
+
 }  // anonymous namespace
 
-static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transposed_tokens) {
+static GreedyOutput
+flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transposed_tokens, bool temperature_folded) {
     const auto batch_size = params.logits.size(0);
     auto       cur_stream = at::cuda::getCurrentCUDAStream().stream();
 
@@ -452,34 +560,14 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     // The fused greedy top-1 path skips both: its caller declared the logits
     // buffer private (skip_logits_probs_restore) and the one-hot(argmax)
     // output does not depend on softmax values.
-    const auto force_topk = [&]() -> int64_t {
-        if (params.force_topk <= 0 || fused_greedy_top1 || !params.skip_logits_probs_restore
-            || params.return_original_all_probs || params.cum_log_probs.has_value()
-            || !params.output_all_probs.has_value()) {
-            return 0;
-        }
-        const bool compact_output = params.output_all_probs_indices.has_value();
-        if (compact_output) {
-            RTP_LLM_CHECK_WITH_INFO(params.output_all_probs->size(1) == params.force_topk
-                                        && params.output_all_probs_indices->sizes() == params.output_all_probs->sizes(),
-                                    "compact sampling probabilities and candidate IDs must be [rows, force_topk]");
-            return params.force_topk < params.logits.size(1) ? params.force_topk : 0;
-        }
-        if (params.output_all_probs->sizes() != params.logits.sizes()) {
-            return 0;
-        }
-        const auto* ks = params.top_k.data_ptr<int32_t>();
-        if (std::all_of(ks, ks + batch_size, [](int32_t k) { return k == 1; })
-            || !std::all_of(ks, ks + batch_size, [](int32_t k) { return k <= 0; })) {
-            return 0;
-        }
-        const auto* ps = params.top_p.data_ptr<float>();
-        if (std::any_of(
-                ps, ps + batch_size, [](float p) { return std::abs(p) < 1e-7f || std::abs(p - 1.0f) < 1e-7f; })) {
-            return 0;
-        }
-        return params.force_topk < params.logits.size(1) ? params.force_topk : 0;
-    }();
+    const auto force_topk = greedyForceTopk(params, batch_size, fused_greedy_top1);
+    // sampleGreedy folded the temperature into the candidate scaling below
+    // instead of tempering the whole [batch, vocab] row (see
+    // greedyTemperatureInSelect). force_topk == 0 here contradicts that
+    // decision only if greedyForceTopk's gates ever drift; the fallback branch
+    // then pays for the full-row temperature pass so correctness never depends
+    // on the proof.
+    const bool    scale_temperature = temperature_folded && force_topk > 0;
     torch::Tensor topk_indices;
     torch::Tensor probs_t;
     {
@@ -488,9 +576,24 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
             if (force_topk > 0) {
                 auto selected = torch_ext::deepselect_fp32_topk(params.logits, force_topk);
                 topk_indices  = std::get<1>(selected);
-                probs_t       = torch::softmax(std::get<0>(selected), -1);
+                // Monotonicity argument: for T > 0 the scale is positive, so
+                // x -> x * inv(T) preserves the ordering and the selected
+                // indices are exactly the ones the legacy tempered-logits pass
+                // selected; only the values need the temperature before their
+                // softmax. inv(T) is the kernel's own 1/(T + 1e-6), so the
+                // scaled candidates are the tempered values bit-for-bit.
+                probs_t = scale_temperature ?
+                              torch::softmax(std::get<0>(selected) * greedyTemperatureScale(params, batch_size), -1) :
+                              torch::softmax(std::get<0>(selected), -1);
             } else {
-                probs_t = torch::softmax(params.logits, -1);
+                // temperature_folded with force_topk == 0 is unreachable while
+                // greedyForceTopk's gates stay as they are (a folded decision
+                // requires a non-fused force_topk result), but degrade to a
+                // correct full-row pass instead of silently dropping the
+                // temperature if they ever diverge.
+                probs_t = temperature_folded ?
+                              torch::softmax(params.logits * greedyTemperatureScale(params, batch_size), -1) :
+                              torch::softmax(params.logits, -1);
                 params.logits.copy_(probs_t, true);
             }
         }
@@ -778,6 +881,14 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         transposed_tokens = device_tokens.transpose(0, 1).contiguous();
     }
 
+    // Fold this round's temperature into the force_topk candidate scaling when
+    // that branch will run (see greedyTemperatureInSelect): the candidate set is
+    // invariant under the positive, monotone scaling x -> x * inv(T), so the
+    // full [batch, vocab] tempering read+write in processLogits is redundant.
+    // Batches with a do_sample == false row stay on the legacy path: those rows
+    // are restored to untouched logits before sampling and never scored by
+    // temperature.
+    bool temperature_folded = false;
     if (need_do_sample) {
         torch::Tensor selected_logits;
         torch::Tensor mask_tensor;
@@ -786,8 +897,9 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
             mask_tensor        = do_sample_gpu.reshape({(int64_t)batch_size, 1}).logical_not();
             selected_logits    = params.logits.masked_select(mask_tensor);
         }
+        temperature_folded = greedyTemperatureInSelect(params, batch_size, has_not_do_sample);
         RTP_LLM_PROFILE_SCOPE("sampler.greedy(process_logits)");
-        processLogits(params, device_tokens, transposed_tokens);
+        processLogits(params, device_tokens, transposed_tokens, /*apply_temperature=*/!temperature_folded);
         if (has_not_do_sample) {
             params.logits.masked_scatter_(mask_tensor, selected_logits);
         }
@@ -807,7 +919,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     }
 
     RTP_LLM_PROFILE_SCOPE("sampler.greedy(flashinfer)");
-    return flashinferSampleGreedy(params, transposed_tokens);
+    return flashinferSampleGreedy(params, transposed_tokens, temperature_folded);
 }
 
 torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
@@ -1195,6 +1307,10 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     auto transposed_tokens = device_tokens.transpose(0, 1).contiguous();
 
     // 1. Apply temperature penalty
+    // NOTE: this is the ROCm sampleGreedy, a separate compilation branch from
+    // the CUDA one; its sampler has no force_topk/compact-candidate branch, so
+    // it cannot fold the temperature into a narrower consumer and keeps the
+    // full-vocabulary pass (RTP_LLM_SAMPLE_TEMPERATURE_IN_SELECT does not apply).
     if (std::any_of(params.temperature.data_ptr<float>(),
                     params.temperature.data_ptr<float>() + batch_size,
                     [&](auto t) { return t != 1.0f; })) {
@@ -1606,6 +1722,9 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         }
     }
 
+    // NOTE: generic PyTorch-fallback sampleGreedy (no CUDA flashinfer sampler,
+    // no force_topk branch), so the temperature has to stay on the full logits
+    // row; RTP_LLM_SAMPLE_TEMPERATURE_IN_SELECT only affects the CUDA path.
     if (std::any_of(params.temperature.data_ptr<float>(),
                     params.temperature.data_ptr<float>() + batch_size,
                     [](auto temperature) { return temperature != 1.0f; })) {

@@ -265,10 +265,26 @@ void deepselect_fp32(const torch::Tensor& logits,
 
 std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_topk(const torch::Tensor& logits, int64_t k) {
 #if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
+    // Fast-path gate, not a shape contract: whatever fails here falls back to
+    // ATen topk below. It mirrors the checks deepselect_fp32_impl applies, so a
+    // tensor that passes can never be rejected there (a rejection would be a
+    // hard TORCH_CHECK, not a fallback).
+    //
+    // "Contiguous" is deliberately *not* required: the impl reads every element
+    // through logits.stride(0) (aligned row pointer, see markovScaledLogitsKernel
+    // and TopkSelectArgs::stride_input_batch), so a row-major view with unit
+    // inner stride, a row stride covering the width and 1024B (256 element)
+    // row alignment plus a 16B-aligned base is consumed exactly like a
+    // contiguous buffer. The target-verify gather relies on this: it hands the
+    // sampler `model_output.logits.narrow(1, 0, vocab_size)`, whose row stride is
+    // the (TP-padded) lm_head width and therefore non-contiguous whenever that
+    // width exceeds the vocabulary.
+    const bool logits_row_major_view = logits.dim() == 2 && logits.stride(1) == 1 && logits.stride(0) >= logits.size(1)
+                                       && logits.stride(0) % 256 == 0
+                                       && reinterpret_cast<uintptr_t>(logits.data_ptr()) % 16 == 0;
     if ((k == 4096 || (k > 0 && k <= 512)) && logits.is_cuda() && logits.scalar_type() == torch::kFloat32
         && logits.dim() == 2 && logits.size(1) >= (k == 4096 ? 4096 : 512) && logits.size(1) < MAX_VOCAB_SIZE
-        && logits.is_contiguous() && logits.stride(0) % 256 == 0
-        && at::cuda::getDeviceProperties(logits.get_device())->major == 10
+        && logits_row_major_view && at::cuda::getDeviceProperties(logits.get_device())->major == 10
         && (at::cuda::getDeviceProperties(logits.get_device())->minor == 0
             || at::cuda::getDeviceProperties(logits.get_device())->minor == 3)) {
         const int64_t width   = k == 4096 ? 4096 : 512;

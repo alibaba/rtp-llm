@@ -282,3 +282,17 @@ custom_smoke_test(
     tags = ["dsv41_cuda13", "model_contract", "dspark_contract"],
     data = ["//rtp_llm:sdk", "deepseek_v41_contract_test.py"],
 )
+
+# SM103 x86 twin of the case above: same target/draft/DSpARK graph coverage,
+# single-node execution (--use_local 1) instead of the PD/CP2 multi-node shape,
+# so it fits the 4-GPU SM103 x86 pool. Checkpoint comes from CHECKPOINT_PATH
+# (DeepSeek-V4.1-Flash); the DSpARK draft weights live in the same release
+# checkpoint and the test sets --sp_checkpoint_path itself.
+custom_smoke_test(
+    name = "deepseek_v41_flash_dspark_tp4_ep4_graph_sm103_x86",
+    main = "deepseek_v41_dspark_contract_test.py",
+    smoke_args = "--tp_size 4 --ep_size 4 --dp_size 1 --world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --enable_cuda_graph 1 --reuse_cache 1 --load_method fastsafetensors --reserver_runtime_mem_mb 32768 --use_local 1 --cache_store_rdma_mode 0 --sp_type dspark --sp_model_type deepseek_v41_dspark --sp_act_type BF16 --gen_num_per_cycle 3 --decode_capture_config 1,2,4",
+    gpu_type = [cuda13_x86_test_gpu()],
+    tags = ["dsv41_cuda13", "model_contract", "dspark_contract"],
+    data = ["//rtp_llm:sdk", "deepseek_v41_contract_test.py"],
+)

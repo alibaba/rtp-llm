@@ -64,6 +64,12 @@ cc_library(
     name = "common_defines",
     hdrs = [
         "CommonDefines.h",
+        # Header-only sampling-temperature policy (env flag + the shared
+        # "temperature is folded into the force_topk candidates" predicate).
+        # Exported here because every target that compiles CudaSampleOp.cc
+        # already depends on :common_defines; RTP_LLM_CHECK_WITH_INFO comes from
+        # those targets' existing utils deps.
+        "SampleTemperature.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

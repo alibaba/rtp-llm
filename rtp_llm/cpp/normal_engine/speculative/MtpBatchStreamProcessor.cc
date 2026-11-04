@@ -3,6 +3,10 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+// Shared sampling-temperature policy (env flag + "temperature is folded into the
+// force_topk candidates" predicate), so the logits-ownership decision here and
+// the sampler read the same switch.
+#include "rtp_llm/models_py/bindings/core/SampleTemperature.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
@@ -16,6 +20,8 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
+#include <cstdint>
 #include <cstdlib>
 #include <map>
 #include <numeric>
@@ -996,6 +1002,159 @@ AcceptedMtpLogprobSelection collectAcceptedMtpLogprobRows(const StreamGroups&  s
     return selection;
 }
 
+#if USING_CUDA
+// ---------------------------------------------------------------------------
+// Target-verify logits ownership: when may the sampler read the model output
+// row in place instead of a private [rows, vocab] clone?
+// ---------------------------------------------------------------------------
+
+// RTP_LLM_SPEC_LOGITS_NO_CLONE=0 restores the defensive clone. It is an
+// independent switch from RTP_LLM_SAMPLE_TEMPERATURE_IN_SELECT: the elision
+// additionally requires the temperature fold (whose predicate lives in
+// SampleTemperature.h and is shared with the sampler), so turning that one off
+// falls back to the clone as well.
+bool specLogitsNoCloneEnabled() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("RTP_LLM_SPEC_LOGITS_NO_CLONE");
+        if (value == nullptr) {
+            return true;
+        }
+        char* end = nullptr;
+        errno     = 0;
+        long flag = std::strtol(value, &end, 10);
+        RTP_LLM_CHECK_WITH_INFO(errno == 0 && end != value && *end == '\0' && (flag == 0 || flag == 1),
+                                "RTP_LLM_SPEC_LOGITS_NO_CLONE must be 0 or 1, got '%s'",
+                                value);
+        return flag == 1;
+    }();
+    return enabled;
+}
+
+bool allTemperaturesOne(int64_t batch_size, const float* temperatures_host) {
+    return batch_size > 0 && temperatures_host != nullptr
+           && std::all_of(temperatures_host, temperatures_host + batch_size, [](float t) { return t == 1.0f; });
+}
+
+// Every in-place writer of `GreedyParams::logits` in the CUDA sampling chain
+// (rtp_llm/models_py/bindings/core/CudaSampleOp.cc and the ops it calls), i.e.
+// every reason the gather used to hand the sampler a private copy:
+//
+//  1. processLogits: temperature. `invokeBatchApplyTemperaturePenalty` multiplies
+//     the whole [rows, vocab] row by 1/(T+1e-6) in place. Removed by the
+//     candidate-scaling fold (RTP_LLM_SAMPLE_TEMPERATURE_IN_SELECT); when the
+//     batch has no temperature at all (every row T == 1.0f) the legacy chain
+//     skips the kernel, so it is inactive there too.
+//  2. processLogits: repetition/presence/frequency penalty.
+//     `invokeBatchApplyRepetitionPenalty` rewrites logits elementwise, *after*
+//     the temperature step in the legacy chain, so it cannot commute with the
+//     fold and keeps the full-vocabulary path.
+//  3. processLogits: no-repeat-ngram ban. `invokeBanRepeatNgram` writes the
+//     banned value (-inf/-FLT_MAX) into the row in place.
+//  4. sampleGreedy: a do_sample == false row is restored from the pre-penalty
+//     snapshot via `params.logits.masked_scatter_`.
+//  5. flashinferSampleGreedy: when neither the fused all-greedy top-1 path nor
+//     the force_topk candidate branch runs, the full-vocabulary softmax result
+//     is copied back into logits (`params.logits.copy_(probs_t)`) to preserve
+//     the legacy "logits become probs" contract.
+//  6. SpecLogitsVerifyRunner::applyMaskToLogits masks the allowed vocabulary in
+//     place through `runtimeApplyPackedMaskLogits`.
+//  7. LogitsProcessorStates::batchProcess (Sampler::preprocessLogits) applies
+//     logits processors in place when a processor state is attached.
+//
+// The fused all-greedy top-1 kernel (fusedGreedyTop1Renorm) and the force_topk
+// candidate branch only *read* logits. `skip_logits_probs_restore`, which the
+// MTP gather sets unconditionally, is what suppresses writer 5 on the candidate
+// branch.
+//
+// Callers must pass the *effective* force_topk width: the value is 0 whenever
+// the sampler's own output-contract gates decline the compact branch (no
+// compact all_probs/all_probs_indices, return_original_all_probs, cum_log_probs,
+// compact width >= vocab), and writer 5 then runs.
+struct SpecLogitsWriters {
+    int64_t              batch_size                    = 0;
+    const float*         temperatures_host             = nullptr;  // GreedyParams::temperature
+    const torch::Tensor* logits                        = nullptr;  // the candidate view handed to the sampler
+    int                  effective_force_topk          = 0;
+    bool                 has_active_processor          = false;  // writer 6
+    bool                 has_logits_processor          = false;  // writer 7
+    bool                 has_do_sample_false_row       = false;  // writer 4
+    bool                 has_active_logits_penalty     = false;  // writers 2 + 3
+    bool                 has_cum_log_probs             = false;
+    bool                 has_return_original_all_probs = false;
+};
+
+// The row-stride contract `deepselect_fp32_impl` imposes on its input
+// (rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.cu): unit inner
+// stride, a row stride that covers the width and is a multiple of 256 elements
+// (1024B TMA rows), and a 16B-aligned base pointer. A model-output view that
+// satisfies it is consumed at full speed without ever being made contiguous.
+bool logitsViewDeepSelectReady(const torch::Tensor& logits) {
+    return logits.dim() == 2 && logits.is_cuda() && logits.scalar_type() == torch::kFloat32 && logits.stride(1) == 1
+           && logits.stride(0) >= logits.size(1) && logits.stride(0) % 256 == 0
+           && reinterpret_cast<uintptr_t>(logits.data_ptr()) % 16 == 0;
+}
+
+// True when `sampler_inputs.logits` must stay a private copy.
+//
+// Argument that the alias path is exact: `logits` is the only tensor whose
+// contents the sampler might change, and writers 1-7 are the complete list of
+// in-place mutations in the CUDA chain. The predicate above makes every one of
+// them unreachable, so the sampled token, the compact candidate indices and
+// their renormalized probabilities are computed from exactly the same values as
+// on the clone path (identical inputs, identical kernels) - bit-for-bit, not
+// merely within a tolerance. The clone only ever existed to keep a *copy* of the
+// values for the model output; with no writer active there is nothing to
+// protect, and the only remaining reader of the model output - the MTP target
+// logprobs payload, which retains an O(1) view of the same rows and computes its
+// row statistics after sampling - also sees untouched values (MtpExecutor.cc:
+// captureMtpDecodeTargetLogprobs before the gather, row statistics in the
+// post-sampling finalize).
+bool needsPrivateLogits(const SpecLogitsWriters& writers) {
+    if (!specLogitsNoCloneEnabled()) {
+        return true;
+    }
+    if (writers.has_active_processor || writers.has_logits_processor) {
+        return true;  // writers 6, 7
+    }
+    if (writers.effective_force_topk <= 0) {
+        return true;  // writer 5 would overwrite the row with probabilities
+    }
+    if (writers.has_do_sample_false_row) {
+        return true;  // writer 4
+    }
+    if (writers.has_active_logits_penalty) {
+        return true;  // writers 2, 3
+    }
+    if (writers.has_cum_log_probs || writers.has_return_original_all_probs) {
+        // Both need the full-width probability row, which only the
+        // full-vocabulary softmax branch produces; that branch is writer 5.
+        return true;
+    }
+    // The temperature fold removes writer 1 for a batch that actually has a
+    // non-unit temperature, but the fold is illegal for a greedy (T == 0) row,
+    // so it leaves those batches on the full-vocabulary pass. A batch whose
+    // temperatures are all exactly 1.0f needs neither.
+    const bool temperature_untouched = rtp_llm::greedyTemperatureFoldedForRequest(writers.batch_size,
+                                                                                  writers.temperatures_host,
+                                                                                  writers.effective_force_topk,
+                                                                                  writers.has_do_sample_false_row,
+                                                                                  writers.has_cum_log_probs,
+                                                                                  writers.has_return_original_all_probs,
+                                                                                  writers.has_active_logits_penalty)
+                                       || allTemperaturesOne(writers.batch_size, writers.temperatures_host);
+    if (!temperature_untouched) {
+        return true;  // writer 1 would temper the row in place
+    }
+    // The candidate branch reads the row through deepselect_fp32_topk, which
+    // accepts a strided [rows, vocab] view only when the kernel's row-stride
+    // contract holds (see logitsViewDeepSelectReady). A view that fails it would
+    // fall back to ATen topk, which is slower than cloning into the contiguous
+    // DeepSelect layout, so keep the clone (the copy also makes the row
+    // contiguous) instead of trading the clone for the slow select.
+    return writers.logits == nullptr || !logitsViewDeepSelectReady(*writers.logits);
+}
+#endif  // USING_CUDA
+
 }  // namespace
 
 torch::Tensor MtpBatchStreamProcessor::collectDSparkPositionBases(const StreamGroups& stream_groups,
@@ -1690,11 +1849,31 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     // lm_head shards may contain TP-alignment padding. Synthetic columns must
     // not participate in target sampling or the rejection distribution.
     //
-    // Alias only when all downstream logits writers are inactive and the
-    // fused top-1 path can consume the complete contiguous FP32 vocabulary.
+    // The view may be consumed in place - no private [rows, vocab] copy - only
+    // when every in-place logits writer is provably inactive for this round.
+    // Two independent proofs, each documented next to its predicate:
+    //  * the all-greedy point-mass path: the fused top-1 kernel only reads the
+    //    row, but needs the complete contiguous FP32 vocabulary;
+    //  * the compact force_topk candidate path with the temperature folded into
+    //    the candidate scaling (see needsPrivateLogits above).
     // Masking, penalties, trimmed padding and other backends keep a clone.
-    sampler_inputs.logits          = model_output.logits.narrow(1, 0, static_cast<int64_t>(vocab_size_));
-    bool logits_alias_model_output = false;
+    sampler_inputs.logits = model_output.logits.narrow(1, 0, static_cast<int64_t>(vocab_size_));
+    // DSpARK fixes the sampling candidate width; the sampler takes that branch
+    // only when the gather materialized compact [rows, K] candidate outputs,
+    // which is one of the facts the logits-ownership decision below evaluates.
+    if (is_dspark_) {
+        sampler_inputs.force_topk = speculative::dsparkForceTopK();
+    }
+    // The logits buffer below is either a per-round private clone or, under one
+    // of the elision gates, a read-only view of the model output. Either way no
+    // writer touches it for the rest of the round: target all_probs feeds
+    // rejection sampling from its own tensor, streams consume the draft-side
+    // probabilities, and the next round recomputes logits from scratch.
+    // Declare it so the CUDA greedy sampler may skip the softmax-probs writeback
+    // into logits (writer 5 of needsPrivateLogits) and take its fused top-1 or
+    // compact-candidate path.
+    sampler_inputs.skip_logits_probs_restore = true;
+    bool logits_alias_model_output           = false;
 #if USING_CUDA
     {
         auto*      temperature_ptr = sampler_inputs.temperature.data_ptr<float>();
@@ -1705,18 +1884,53 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         auto*      beams_in_ptr    = sampler_inputs.num_beams_in.data_ptr<int64_t>();
         auto*      beams_out_ptr   = sampler_inputs.num_beams_out.data_ptr<int64_t>();
         const auto count           = static_cast<int64_t>(total_batch_size);
+        // Writers 2 + 3 of needsPrivateLogits (repetition/presence/frequency and
+        // no-repeat-ngram), shared by both elision gates below.
+        const bool penalties_active =
+            std::any_of(repetition_ptr, repetition_ptr + count, [](float v) { return v != 1.0f; })
+            || std::any_of(presence_ptr, presence_ptr + count, [](float v) { return v != 0.0f; })
+            || std::any_of(frequency_ptr, frequency_ptr + count, [](float v) { return v != 0.0f; })
+            || std::any_of(ngram_ptr, ngram_ptr + count, [](int32_t v) { return v != 0; });
+        // Beam slices take Sampler::forward's beam-search branch, which rewrites
+        // the logits slice in place ("logits is modified inplace" in
+        // BeamSearchParams) and never reaches the greedy sampler at all. Keep
+        // both elision gates on the single-beam decode shape.
+        const bool single_beam_batch =
+            std::all_of(beams_in_ptr, beams_in_ptr + count, [](int64_t n) { return n == 1; })
+            && std::all_of(beams_out_ptr, beams_out_ptr + count, [](int64_t n) { return n == 1; });
         logits_alias_model_output =
             target_point_mass && !spec_logits_result.has_active_processor && vocab_size_ < (1u << 24)
             && model_output.logits.dim() == 2 && model_output.logits.size(1) == static_cast<int64_t>(vocab_size_)
             && model_output.logits.is_cuda() && model_output.logits.is_contiguous()
             && model_output.logits.scalar_type() == torch::kFloat32
             && std::all_of(temperature_ptr, temperature_ptr + count, [](float v) { return v == 1.0f; })
-            && std::all_of(repetition_ptr, repetition_ptr + count, [](float v) { return v == 1.0f; })
-            && std::all_of(presence_ptr, presence_ptr + count, [](float v) { return v == 0.0f; })
-            && std::all_of(frequency_ptr, frequency_ptr + count, [](float v) { return v == 0.0f; })
-            && std::all_of(ngram_ptr, ngram_ptr + count, [](int32_t v) { return v == 0; })
-            && std::all_of(beams_in_ptr, beams_in_ptr + count, [](int64_t n) { return n == 1; })
-            && std::all_of(beams_out_ptr, beams_out_ptr + count, [](int64_t n) { return n == 1; });
+            && !penalties_active && single_beam_batch;
+        if (!logits_alias_model_output) {
+            SpecLogitsWriters writers;
+            writers.batch_size        = count;
+            writers.temperatures_host = temperature_ptr;
+            writers.logits            = &sampler_inputs.logits;
+            // Effective candidate width the sampler will use: the force_topk
+            // branch additionally needs skip_logits_probs_restore (set above),
+            // no cum_log_probs / return_original_all_probs (checked by the
+            // predicate) and a cap narrower than the vocabulary. The gather
+            // built the compact [rows, K] outputs exactly when it took the
+            // compact target branch, so their presence is the local proof.
+            writers.effective_force_topk =
+                single_beam_batch && sampler_inputs.all_probs_indices.defined() && sampler_inputs.force_topk > 0
+                        && static_cast<int64_t>(sampler_inputs.force_topk) < sampler_inputs.logits.size(1) ?
+                    sampler_inputs.force_topk :
+                    0;
+            writers.has_active_processor          = spec_logits_result.has_active_processor;
+            writers.has_logits_processor          = sampler_inputs.logits_processor_states_ptr != nullptr;
+            writers.has_do_sample_false_row       = std::any_of(sampler_inputs.do_sample.data_ptr<bool>(),
+                                                          sampler_inputs.do_sample.data_ptr<bool>() + count,
+                                                          [](bool v) { return !v; });
+            writers.has_active_logits_penalty     = penalties_active;
+            writers.has_cum_log_probs             = sampler_inputs.cum_log_probs.defined();
+            writers.has_return_original_all_probs = sampler_inputs.return_original_all_probs;
+            logits_alias_model_output             = !needsPrivateLogits(writers);
+        }
     }
 #endif
     if (!logits_alias_model_output) {
@@ -1730,18 +1944,9 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         }
         SpecLogitsVerifyRunner::applyMaskToLogits(sampler_inputs.logits, spec_logits_result, sampler_inputs.vocab_size);
     }
-    // The logits buffer above is either a per-round private clone or, under
-    // the elision gate, a read-only view of the model output. Either way no
-    // writer touches it for the rest of the round and nothing reads it after
-    // sampling on the MTP path (target all_probs feeds rejection sampling
-    // from its own tensor, streams consume the draft-side probabilities, and
-    // the next round recomputes logits from scratch). Declare it so the CUDA
-    // greedy sampler may skip the softmax-probs writeback into logits and
-    // take its fused top-1 path.
-    sampler_inputs.skip_logits_probs_restore = true;
-    if (is_dspark_) {
-        sampler_inputs.force_topk = speculative::dsparkForceTopK();
-    }
+    // The logits buffer is now either a per-round private clone or a read-only
+    // view of the model output; `skip_logits_probs_restore` (set above) already
+    // declared that to the sampler.
 
     // TODO(async): debug formatting is CPU-only. Keep the .cpu() explicit
     // and do not route this through the model-input fast path.
