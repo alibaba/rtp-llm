@@ -1,4 +1,4 @@
-package org.flexlb.mock.engine;
+package org.flexlb.mock.engine.scheduler;
 
 /** Scheduling failures carry facts; protocol adapters choose wire codes. */
 public final class RequestFailure extends RuntimeException {

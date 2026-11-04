@@ -1,11 +1,5 @@
 package org.flexlb.mock.engine.service;
 
-import org.flexlb.mock.engine.rtp.RtpConfig;
-import org.flexlb.mock.engine.rtp.RtpNode;
-import org.flexlb.mock.engine.rtp.RtpScheduler;
-import org.flexlb.mock.engine.rtp.RtpNodeTest;
-
-import static org.junit.jupiter.api.Assertions.*;
 import com.fasterxml.jackson.databind.*;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.grpc.*;
@@ -17,8 +11,13 @@ import java.util.function.BooleanSupplier;
 import java.util.stream.IntStream;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.mock.engine.config.RtpConfig;
+import org.flexlb.mock.engine.execution.RtpNode;
+import org.flexlb.mock.engine.scheduler.RtpNodeTest;
+import org.flexlb.mock.engine.scheduler.RtpScheduler;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import static org.junit.jupiter.api.Assertions.*;
 
 class DecodeAdmissionTest {
     @TempDir Path directory;

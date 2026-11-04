@@ -1,9 +1,9 @@
 package org.flexlb.mock.engine.service;
 
 import io.grpc.*;
-import org.flexlb.mock.engine.RequestFailure;
-import static org.flexlb.mock.engine.RequestFailure.Reason.*;
 import org.flexlb.engine.grpc.EngineRpcService.ErrorDetailsPB;
+import org.flexlb.mock.engine.scheduler.RequestFailure;
+import static org.flexlb.mock.engine.scheduler.RequestFailure.Reason.*;
 
 /** Native C++ grpc::Status.error_details wire encoding, shared by P and D. */
 public final class RpcErrors {

@@ -2,21 +2,21 @@ package org.flexlb.mock.engine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.util.Locale;
-import java.util.function.Supplier;
-import org.flexlb.mock.api.model.Types.Role;
-import org.flexlb.mock.engine.rtp.RtpConfig;
-import org.flexlb.mock.engine.rtp.RtpNode;
-import org.flexlb.mock.protocol.EngineAddress;
-import org.flexlb.mock.protocol.ConfigInput;
-import org.flexlb.mock.engine.vit.VitConfig;
-import org.flexlb.mock.engine.vit.VitNode;
+import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
+import org.flexlb.mock.api.model.Types.Role;
+import org.flexlb.mock.engine.config.RtpConfig;
+import org.flexlb.mock.engine.execution.RtpNode;
+import org.flexlb.mock.engine.vit.VitConfig;
+import org.flexlb.mock.engine.vit.VitNode;
+import org.flexlb.mock.protocol.ConfigInput;
 
 /** Foreground single-engine service. The platform owns discovery and process replacement. */
 public final class EngineMain {
@@ -81,7 +81,7 @@ public final class EngineMain {
 
     private static Started startEnvironment(Map<String, String> env, int rpcPort, int controlPort) throws Exception {
         String role = env.getOrDefault("ROLE_TYPE", "").toLowerCase(Locale.ROOT);
-        String id = env.getOrDefault("MOCK_NODE_ID", role + "-" + EngineAddress.local().advertise());
+        String id = env.getOrDefault("MOCK_NODE_ID", role + "-" + Address.local().advertise());
         if (id == null || !id.startsWith(role + "-")) throw new IllegalArgumentException("Missing/invalid MOCK_NODE_ID for ROLE_TYPE");
         if (role.equals("vit")) {
             var config = VitConfig.fromEnvironment(id, env);
@@ -109,5 +109,24 @@ public final class EngineMain {
         var config = RtpConfig.load(root);
         var node = RtpNode.start(config, rpcPort, controlPort);
         return new Started(node::close, node::checkHealthy, node::endpoints, config.effective());
+    }
+
+    public record Address(String bind, String advertise) {
+        public static Address local() {
+            String bind=System.getenv().getOrDefault("MOCK_BIND_HOST","127.0.0.1");
+            String advertise=System.getenv("MOCK_ADVERTISE_HOST");
+            if (advertise == null) {
+                if (bind.equals("0.0.0.0") || bind.equals("::")) {
+                    try { advertise = java.net.InetAddress.getLocalHost().getHostAddress(); }
+                    catch (java.net.UnknownHostException error) { throw new IllegalStateException("Cannot determine Engine advertise address", error); }
+                } else advertise = bind;
+            }
+            if(bind.isBlank() || advertise.isBlank() || advertise.equals("0.0.0.0") || advertise.equals("::") || advertise.contains("/"))
+                throw new IllegalArgumentException("Invalid Engine bind/advertise host");
+            return new Address(bind,advertise);
+        }
+        public InetSocketAddress listener(int port) { return new InetSocketAddress(bind,port); }
+        public String rpc(int port) { return (advertise.contains(":")?"["+advertise+"]":advertise)+":"+port; }
+        public String http(int port) { return "http://"+rpc(port); }
     }
 }

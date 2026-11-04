@@ -1,13 +1,13 @@
-package org.flexlb.mock.engine.rtp;
-
+package org.flexlb.mock.engine.scheduler;
 
 import java.util.*;
 import org.flexlb.mock.api.model.Types.Role;
-import org.flexlb.mock.engine.forward.*;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.engine.cache.KvCache;
-import static org.flexlb.mock.engine.RequestFailure.Reason.*;
-import static org.flexlb.mock.engine.rtp.RtpSchedulerBase.Phase.*;
+import org.flexlb.mock.engine.config.RtpConfig;
+import org.flexlb.mock.engine.forward.*;
+import static org.flexlb.mock.engine.scheduler.RequestFailure.Reason.*;
+import static org.flexlb.mock.engine.scheduler.RtpSchedulerBase.Phase.*;
 
 /** Shared RTP request, KV, PD and Forward lifecycle; admission policies own their queues. */
 abstract class RtpSchedulerBase implements Scheduler {

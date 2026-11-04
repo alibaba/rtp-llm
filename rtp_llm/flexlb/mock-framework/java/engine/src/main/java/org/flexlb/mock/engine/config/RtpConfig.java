@@ -1,4 +1,4 @@
-package org.flexlb.mock.engine.rtp;
+package org.flexlb.mock.engine.config;
 
 import org.flexlb.mock.engine.service.RtpServiceConfig;
 import org.flexlb.mock.protocol.ConfigInput;
@@ -178,7 +178,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             return Double.parseDouble(value.asText());
         } catch (NumberFormatException error) { throw new IllegalArgumentException("Invalid " + key, error); }
     }
-    static int nativeInt(JsonNode config, String key, Integer fallback, int min, int max) {
+    public static int nativeInt(JsonNode config, String key, Integer fallback, int min, int max) {
         var value = config.get(key);
         if (value == null && fallback != null) return fallback;
         return integer(value, key, min, max);
@@ -193,7 +193,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         }
         throw new IllegalArgumentException("Invalid/missing integer setting: " + key);
     }
-    static boolean nativeBool(JsonNode config, String key, boolean fallback) {
+    public static boolean nativeBool(JsonNode config, String key, boolean fallback) {
         var value = config.get(key);
         if (value == null) return fallback;
         if (value.isBoolean()) return value.booleanValue();

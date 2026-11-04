@@ -1,18 +1,19 @@
-package org.flexlb.mock.engine.rtp;
-
-import io.prometheus.client.Collector.MetricFamilySamples;
-import org.flexlb.mock.engine.service.RtpRpcService;
-import org.flexlb.mock.metrics.MetricTags;
+package org.flexlb.mock.engine.execution;
 
 import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
+import io.prometheus.client.Collector.MetricFamilySamples;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.flexlb.mock.engine.cache.KvCache;
 import org.flexlb.mock.engine.cache.KvcmReporter;
-import org.flexlb.mock.engine.Scheduler;
+import org.flexlb.mock.engine.config.RtpConfig;
+import org.flexlb.mock.engine.scheduler.RtpScheduler;
+import org.flexlb.mock.engine.scheduler.Scheduler;
+import org.flexlb.mock.engine.service.RtpRpcService;
+import org.flexlb.mock.metrics.MetricTags;
 import org.flexlb.mock.protocol.ControlServer;
 
 /** One owned RTP P/D object with independent listeners and resources. Does not contain the case runner or a cluster controller. */
@@ -21,14 +22,14 @@ public final class RtpNode implements AutoCloseable {
     private final KvCache cache;
     private final RtpRpcService service;
     private final AtomicBoolean closed = new AtomicBoolean();
-    private final org.flexlb.mock.protocol.EngineAddress address = org.flexlb.mock.protocol.EngineAddress.local();
+    private final org.flexlb.mock.engine.EngineMain.Address address = org.flexlb.mock.engine.EngineMain.Address.local();
     private Server rpc;
     private ControlServer api;
     private org.flexlb.mock.metrics.MetricsOutput metrics;
     private KvcmReporter publisher;
     private MetricSource metricSource;
 
-    private record MetricSource(Object lock, RtpMetrics metrics) {}
+    private record MetricSource(Object lock, java.util.function.Supplier<List<MetricFamilySamples>> metrics) {}
 
     private RtpNode(RtpConfig config, Scheduler.Factory schedulers) {
         this.config = Objects.requireNonNull(config);
@@ -37,8 +38,8 @@ public final class RtpNode implements AutoCloseable {
         try {
             service = new RtpRpcService(config.endpoint(), cache, (lock, storage, finished) -> {
                 var scheduler = schedulers.create(lock, storage, finished);
-                if (scheduler instanceof RtpSchedulerBase rtp)
-                    metricSource = new MetricSource(lock, rtp.metrics());
+                var samples = RtpScheduler.metricsFor(scheduler);
+                if (samples != null) metricSource = new MetricSource(lock, samples);
                 return scheduler;
             }, config.groupScheduling());
         }
@@ -78,7 +79,7 @@ public final class RtpNode implements AutoCloseable {
         if (metricSource == null) return List.of();
         synchronized (metricSource.lock()) {
             service.checkHealthy();
-            return metricSource.metrics().collect();
+            return metricSource.metrics().get();
         }
     }
 

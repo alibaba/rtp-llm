@@ -1,4 +1,4 @@
-package org.flexlb.mock.engine;
+package org.flexlb.mock.engine.execution;
 
 import java.util.List;
 import java.util.Objects;
@@ -7,6 +7,10 @@ import java.util.function.Supplier;
 import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.engine.cache.KvCache;
 import org.flexlb.mock.engine.forward.*;
+import org.flexlb.mock.engine.scheduler.RequestFailure;
+import org.flexlb.mock.engine.scheduler.RequestState;
+import org.flexlb.mock.engine.scheduler.Scheduler;
+import org.flexlb.mock.engine.scheduler.TaskHistory;
 
 /** Event/deadline driven execution. Only short state transitions hold the scheduling lock. */
 public final class RtpEngineLoop implements AutoCloseable {

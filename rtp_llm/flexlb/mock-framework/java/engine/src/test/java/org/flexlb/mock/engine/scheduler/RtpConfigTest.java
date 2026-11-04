@@ -1,11 +1,12 @@
-package org.flexlb.mock.engine.rtp;
+package org.flexlb.mock.engine.scheduler;
 
-import static org.junit.jupiter.api.Assertions.*;
 import com.fasterxml.jackson.databind.*;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.file.*;
+import org.flexlb.mock.engine.config.RtpConfig;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import static org.junit.jupiter.api.Assertions.*;
 
 class RtpConfigTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -20,14 +21,14 @@ class RtpConfigTest {
         var values = (ObjectNode) root.path("component").path("config");
         var defaults = load(root);
         try (var cache = new org.flexlb.mock.engine.cache.KvCache(16, 8, 0, org.flexlb.mock.engine.cache.KvCache.EvictionPolicy.LRU);
-             var scheduler = RtpScheduler.factory(defaults).create(new Object(), cache, new org.flexlb.mock.engine.TaskHistory())) {
+             var scheduler = RtpScheduler.factory(defaults).create(new Object(), cache, new org.flexlb.mock.engine.scheduler.TaskHistory())) {
             assertInstanceOf(RtpScheduler.class, scheduler);
             assertEquals("fifo", defaults.effective().path("mock.scheduler.mode").asText());
         }
         values.put("mock.scheduler.mode", "group");
         var grouped = load(root);
         try (var cache = new org.flexlb.mock.engine.cache.KvCache(16, 8, 0, org.flexlb.mock.engine.cache.KvCache.EvictionPolicy.LRU);
-             var scheduler = RtpScheduler.factory(grouped).create(new Object(), cache, new org.flexlb.mock.engine.TaskHistory())) {
+             var scheduler = RtpScheduler.factory(grouped).create(new Object(), cache, new org.flexlb.mock.engine.scheduler.TaskHistory())) {
             assertInstanceOf(RtpGroupScheduler.class, scheduler);
             assertEquals("group", grouped.effective().path("mock.scheduler.mode").asText());
         }

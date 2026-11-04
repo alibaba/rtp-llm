@@ -1,6 +1,6 @@
 package org.flexlb.mock.engine.service;
 
-import org.flexlb.mock.engine.Scheduler;
+import org.flexlb.mock.engine.scheduler.Scheduler;
 
 /** Generation protocol permits; these are not universal Scheduler states. */
 public enum Control implements Scheduler.Control {

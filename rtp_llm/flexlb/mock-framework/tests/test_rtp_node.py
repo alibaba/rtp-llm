@@ -61,7 +61,7 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                 with urllib.request.urlopen(endpoints['control'] + '/health', timeout=2) as response:
                     assert json.load(response)['interfaces'] == []
                 probe_result = tmp_path / f'{role}.json'
-                command = [str(java), '-cp', classpath, 'org.flexlb.mock.engine.rtp.NativeProbe', endpoints['rpc'], str(probe_result)]
+                command = [str(java), '-cp', classpath, 'org.flexlb.mock.engine.scheduler.NativeProbe', endpoints['rpc'], str(probe_result)]
                 if role == 'decode':
                     prefill = json.loads((output / 'components/prefill-0/endpoints.json').read_text())
                     command.append(prefill['rpc'])
