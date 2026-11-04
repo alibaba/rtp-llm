@@ -443,6 +443,11 @@ class MoE(nn.Module):
                 raise
             with record_function_range("dsv4.moe.shared_expert_finish"):
                 shared_y = self._shared_executor.finish()
+            if defer_combine and can_defer_combine(y, shared_y, x.dtype):
+                # Same deferral as the non-gate-pack branch: the gate-pack path
+                # used to return before reaching it, so the add+cast kernel
+                # survived on every layer that took the fused router.
+                return PendingCombine(y.view(shape), shared_y.view(shape), x.dtype)
             with record_function_range("dsv4.moe.add_shared"):
                 T = x.size(0)
                 out = _get_or_create_final_out(
