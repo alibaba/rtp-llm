@@ -65,10 +65,10 @@ Mock Engine 启动不读取 checkpoint 或请求 C2 Fuse 挂载。P/D 使用显�
 | Role | 开启 | 关闭 |
 | --- | --- | --- |
 | Master（全部主备） | `FLEXLB_CONFIG.cacheMatching.type=KVCM`，配置 `MODEL_SERVICE_CONFIG.kvcm` 的服务地址、端口和 namespace | `cacheMatching.type=LOCAL_SYNC` |
-| P/D | `KV_CACHE_EVENT_PUBLISHER_TYPE=kvcm`，配置原生 `RECO_*` 发现参数及共享 `KV_CACHE_EVENT_INSTANCE_ID` | `KV_CACHE_EVENT_PUBLISHER_TYPE=none`、`ENABLE_REMOTE_CACHE=false` |
+| P/D | `KV_CACHE_EVENT_PUBLISHER_TYPE=kvcm`，配置原生 `RECO_*` 发现参数及共享 `KV_CACHE_EVENT_INSTANCE_ID` | `KV_CACHE_EVENT_PUBLISHER_TYPE=none` |
 | Frontend、ViT | 保持原有链路和配置 | 相同 |
 
-这里只启用缓存元信息查询和上报，未实现远端 KV 数据加载，开启组的 `ENABLE_REMOTE_CACHE` 也保持 false。Engine 的共享 instance_id 必须等于 Master 查询的 `<namespace>_<cacheKeyBlockSize>`，host 身份必须与 Master 发现结果一致。更改 Master 查询模式需要重启。
+这里只启用缓存元信息查询和上报，未实现远端 KV 数据加载。Engine 的共享 instance_id 必须等于 Master 查询的 `<namespace>_<cacheKeyBlockSize>`，host 身份必须与 Master 发现结果一致。更改 Master 查询模式需要重启。
 
 
 ## 监控自动选择

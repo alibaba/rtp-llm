@@ -96,12 +96,12 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
                      'max_seq_len': 4096, 'mock.compute.forward.expression': '1 + batchSize'}
     if vision:
         engine_config['image_token_id'] = 1000
-        engine_config.update(reuse_cache=True, enable_memory_cache=False)
+        engine_config["reuse_cache"] = True
         route = json.loads(master_config['MODEL_SERVICE_CONFIG'])
         route['role_endpoints'][0]['vit_endpoint'] = {'address': 'v-domain', 'protocol': 'grpc'}
         master_config['MODEL_SERVICE_CONFIG'] = json.dumps(route)
     if kvcm:
-        engine_config.update(reuse_cache=True, enable_memory_cache=False,
+        engine_config.update(reuse_cache=True,
             kv_cache_event_publisher_type='kvcm', kvcm_server_address=f"127.0.0.1:{meta['rpc_port']}",
             kv_cache_event_instance_id='mock_16', kv_cache_event_instance_group='test')
     document = {'id': 'production_master_probe', 'describe': '真实Master与新P/D及Client接线验证',

@@ -29,8 +29,7 @@ def check_service(jar, backend):
         env.update(ROLE_TYPE='PREFILL', CACHE_KEY_HASH_SEED=str(0x4453563431494631),
                    START_PORT='18088', MOCK_BIND_HOST='127.0.0.1', MOCK_ADVERTISE_HOST='127.0.0.1',
                    TEST_BLOCK_NUM='17', SEQ_SIZE_PER_BLOCK='128', MAX_SEQ_LEN='2048',
-                   MOCK_COMPUTE_FORWARD_EXPRESSION='1', KV_CACHE_EVENT_PUBLISHER_TYPE='none',
-                   ENABLE_REMOTE_CACHE='false')
+                   MOCK_COMPUTE_FORWARD_EXPRESSION='1', KV_CACHE_EVENT_PUBLISHER_TYPE='none')
         with (model / 'startup.log').open('w+') as log:
             process = subprocess.Popen([str(java), '-jar', str(jar)], env=env, stdout=log, stderr=subprocess.STDOUT)
             try:
