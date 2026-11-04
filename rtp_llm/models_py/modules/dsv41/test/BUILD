@@ -300,3 +300,16 @@ py_test(
     legacy_create_init = 0,
 )
 
+py_test(
+    name = "test_engram_exchange",
+    size = "small",
+    srcs = ["test_engram_exchange.py"],
+    main = "test_engram_exchange.py",
+    deps = [
+        "//rtp_llm/models_py:engram_exchange_cpu",
+        "//tools/engram_sidecar/framework:exchange_test_certs",
+    ],
+    # Uses localhost TLS sockets and the test host's openssl command.
+    tags = ["requires-network", "requires-openssl"],
+    legacy_create_init = 0,
+)
