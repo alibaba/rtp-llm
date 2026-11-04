@@ -39,7 +39,14 @@ class ClientStart(Step):
     async def execute(ctx: StepContext, args: Start) -> bool:
         """Start the same finite plan on all Clients; rate and concurrency are global budgets."""
         body = {key: value for key, value in asdict(args).items() if value is not None}
-        path = (ctx.runtime.case.directory / Path(args.requests_file)).resolve()
+        case = ctx.runtime.case
+        candidate = Path(args.requests_file)
+        if candidate.parts and candidate.parts[0] == 'data':
+            path = (case.shared_root / candidate).resolve()
+            if not path.is_relative_to((case.shared_root / 'data').resolve()):
+                raise ExecutionError(f'Client requests_file escapes shared data: {candidate}')
+        else:
+            path = (case.directory / candidate).resolve()
         if not path.is_file():
             raise ExecutionError(f'Client requests_file is not a regular file: {path}')
         body['requests_file'] = str(path)

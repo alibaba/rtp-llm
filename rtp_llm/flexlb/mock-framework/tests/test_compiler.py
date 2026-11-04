@@ -17,7 +17,7 @@ def test_shipped_cases_compile_and_reference_existing_inputs(path, registry):
     for phase in case.phases:
         for step in phase.steps:
             if step.interface == 'client/start':
-                assert (case.directory / step.args['requests_file']).is_file()
+                assert (case.shared_root / step.args['requests_file']).is_file()
 
 
 def test_compiles_without_java_catalog_and_read_can_have_no_assertion(case_data, compile_data):
