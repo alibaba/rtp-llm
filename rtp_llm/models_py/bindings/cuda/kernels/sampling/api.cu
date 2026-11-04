@@ -18,6 +18,79 @@
 #include "flashinfer/air_top_p.cuh"
 #include "flashinfer/sampling.cuh"
 
+namespace flashinfer {
+namespace sampling {
+
+template<uint32_t             BLOCK_THREADS,
+         BlockScanAlgorithm   SCAN_ALGORITHM,
+         BlockReduceAlgorithm REDUCE_ALGORITHM,
+         uint32_t             VEC_SIZE,
+         bool                 DETERMINISTIC,
+         typename DType,
+         typename IdType>
+__global__ void SamplingFromProbDeviceScalarSeedKernel(DType*    probs,
+                                                       IdType*   output,
+                                                       bool*     valid,
+                                                       IdType*   indices,
+                                                       uint32_t  d,
+                                                       uint32_t  row_stride,
+                                                       uint64_t* seed_scalar,
+                                                       uint64_t* offset_scalar) {
+    curandStatePhilox4_32_10_t state;
+    const uint32_t             bx = blockIdx.x, tx = threadIdx.x;
+
+    // Scalar-seed semantics: the batch shares one (seed, offset); the Philox
+    // subsequence is the row index (SamplingPhiloxSubsequence without a seed array).
+    curand_init(*seed_scalar, static_cast<uint64_t>(bx), *offset_scalar, &state);
+    const uint32_t row_idx = indices == nullptr ? bx : indices[bx];
+
+    extern __shared__ __align__(alignof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM>))
+        uint8_t       smem_sampling[];
+    auto&             temp_storage =
+        reinterpret_cast<SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM>&>(smem_sampling);
+    temp_storage.sampled_id    = d;
+    temp_storage.last_valid_id = -1;
+    __syncthreads();
+
+    vec_t<float, VEC_SIZE> probs_vec;
+    float                  aggregate(0);
+    float                  u = curand_uniform(&state);
+
+#pragma unroll 2
+    for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
+        probs_vec.fill(0);
+        if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
+            probs_vec.cast_load(probs + static_cast<size_t>(row_idx) * row_stride + i * BLOCK_THREADS * VEC_SIZE
+                                + tx * VEC_SIZE);
+        }
+
+        DeviceSamplingFromProb<VEC_SIZE, BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, DETERMINISTIC>(
+            i, d, [](float x) { return x > 0; }, u, probs_vec, aggregate, &temp_storage);
+        if (float(aggregate) > u) {
+            break;
+        }
+    }
+    int sampled_id = temp_storage.sampled_id;
+    if (sampled_id == d) {
+        // u is very close to 1 and the probability sum is smaller than u.
+        if (temp_storage.last_valid_id == -1) {
+            if (tx == 0) {
+                output[bx] = 0;
+                valid[bx]  = false;
+            }
+            return;
+        }
+        sampled_id = temp_storage.last_valid_id;
+    }
+    if (tx == 0) {
+        output[bx] = sampled_id;
+        valid[bx]  = true;
+    }
+}
+
+}  // namespace sampling
+}  // namespace flashinfer
+
 namespace rtp_llm {
 namespace {
 
@@ -177,6 +250,76 @@ void get_sampling_seed_offsets(const std::vector<at::Generator>& generators,
         }
         begin = end;
     }
+}
+
+
+void sampling_from_probs_device_scalar_seed(torch::Tensor                probs,
+                                            torch::Tensor                output,
+                                            torch::Tensor                valid,
+                                            std::optional<torch::Tensor> maybe_indices,
+                                            bool                         deterministic,
+                                            const torch::Tensor&         seed_scalar,
+                                            const torch::Tensor&         offset_scalar,
+                                            int64_t                      cuda_stream) {
+    check_sampling_inputs(probs, output, valid, /*allow_row_stride=*/true);
+    const auto scalar_ok = [](const torch::Tensor& tensor, const char* name) {
+        TORCH_CHECK(tensor.defined() && tensor.is_cuda() && tensor.scalar_type() == at::kLong && tensor.numel() == 1
+                        && tensor.is_contiguous(),
+                    name,
+                    " must be a one-element contiguous CUDA int64 tensor");
+    };
+    scalar_ok(seed_scalar, "seed_scalar");
+    scalar_ok(offset_scalar, "offset_scalar");
+    TORCH_CHECK(seed_scalar.device() == probs.device() && offset_scalar.device() == probs.device(),
+                "seed_scalar/offset_scalar must live on the probs device");
+    // RTP always samples with the deterministic scan; keeping the check here means
+    // only one template instantiation is emitted.
+    TORCH_CHECK(deterministic, "device-scalar-seed sampling requires the deterministic scan");
+
+    using namespace flashinfer::sampling;
+    at::cuda::CUDAGuard device_guard(probs.device());
+    const auto          batch_size = static_cast<uint32_t>(output.size(0));
+    // Non-const so their addresses can go into the kernel argument array.
+    uint32_t            vocab_size = static_cast<uint32_t>(probs.size(1));
+    uint32_t            row_stride = static_cast<uint32_t>(probs.stride(0));
+    auto                indices    = prepare_optional_index(maybe_indices, batch_size, probs.device());
+    auto                stream     = resolve_stream(cuda_stream);
+
+    float*   probs_ptr   = static_cast<float*>(probs.data_ptr());
+    int32_t* output_ptr  = static_cast<int32_t*>(output.data_ptr());
+    bool*    valid_ptr   = static_cast<bool*>(valid.data_ptr());
+    int32_t* indices_ptr = indices.defined() ? static_cast<int32_t*>(indices.data_ptr()) : nullptr;
+    uint64_t* seed_ptr   = reinterpret_cast<uint64_t*>(const_cast<int64_t*>(seed_scalar.data_ptr<int64_t>()));
+    uint64_t* offset_ptr = reinterpret_cast<uint64_t*>(const_cast<int64_t*>(offset_scalar.data_ptr<int64_t>()));
+
+    // Mirror flashinfer::sampling::SamplingFromProb's launch configuration exactly
+    // (same vec_size derivation, same block-size dispatch) so the two kernels issue
+    // identical work per row.
+    const uint32_t vec_size =
+        std::gcd(std::gcd(16 / sizeof(float), vocab_size),
+                 std::gcd(row_stride, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(probs_ptr) / sizeof(float))));
+
+    auto compute_capacity = flashinfer::GetCudaComputeCapability();
+    DISPATCH_COMPUTE_CAP_NUM_THREADS(compute_capacity, BLOCK_THREADS, {
+        dim3  nblks(batch_size);
+        dim3  nthrs(BLOCK_THREADS);
+        void* args[] = {
+            &probs_ptr, &output_ptr, &valid_ptr, &indices_ptr, &vocab_size, &row_stride, &seed_ptr, &offset_ptr};
+        const uint32_t smem_size = sizeof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>);
+        DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
+            auto kernel = SamplingFromProbDeviceScalarSeedKernel<BLOCK_THREADS,
+                                                                 SCAN_ALGO,
+                                                                 REDUCE_ALGO,
+                                                                 VEC_SIZE,
+                                                                 /*DETERMINISTIC=*/true,
+                                                                 float,
+                                                                 int32_t>;
+            const cudaError_t status = cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream);
+            TORCH_CHECK(status == cudaSuccess,
+                        "device-scalar-seed sampling launch failed: ",
+                        cudaGetErrorString(status));
+        });
+    });
 }
 
 void sampling_from_probs(torch::Tensor                probs,

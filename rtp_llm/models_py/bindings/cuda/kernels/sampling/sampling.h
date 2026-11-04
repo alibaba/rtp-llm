@@ -21,6 +21,21 @@ void get_sampling_seed_offsets(const std::vector<at::Generator>& generators,
                                int64_t*                          seeds,
                                int64_t*                          offsets);
 
+// Sampling identical to flashinfer's scalar-seed SamplingFromProb path, with the
+// seed/offset read from one-element device tensors instead of by value. Used by the
+// DSpARK stochastic draft CUDA graph: a captured graph freezes by-value arguments,
+// so the scalars must live in device memory to be refreshable on replay. The row
+// index remains the Philox subsequence (the scalar semantic), so results are
+// bit-identical to the eager scalar path for the same (seed, offset).
+void sampling_from_probs_device_scalar_seed(torch::Tensor                probs,
+                                            torch::Tensor                output,
+                                            torch::Tensor                valid,
+                                            std::optional<torch::Tensor> maybe_indices,
+                                            bool                         deterministic,
+                                            const torch::Tensor&         seed_scalar,
+                                            const torch::Tensor&         offset_scalar,
+                                            int64_t                      cuda_stream);
+
 void sampling_from_probs(torch::Tensor                probs,
                          torch::Tensor                output,
                          torch::Tensor                valid,

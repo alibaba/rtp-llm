@@ -957,6 +957,35 @@ torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
     return token_ids;
 }
 
+// Graph-replayable variant: the seed/offset come from one-element device tensors
+// instead of the host generator, so a captured CUDA graph can be replayed with a
+// refreshed RNG state. The kernel is a verbatim copy of flashinfer's scalar-seed
+// sampling path (same Philox subsequence = row), so the token is bit-identical to
+// the eager call for the same (seed, offset).
+torch::Tensor sampleFromProbsDeviceScalarSeed(const torch::Tensor& probabilities,
+                                              const torch::Tensor& seed_scalar,
+                                              const torch::Tensor& offset_scalar) {
+    RTP_LLM_CHECK_WITH_INFO(probabilities.defined() && probabilities.is_cuda() && probabilities.dim() == 2
+                                && probabilities.scalar_type() == torch::kFloat32 && probabilities.stride(1) == 1
+                                && probabilities.stride(0) >= probabilities.size(1),
+                            "probability sampling expects row-major CUDA FP32 [batch,vocab] probabilities");
+    const auto batch_size = probabilities.size(0);
+    at::cuda::CUDAGuard device_guard(probabilities.device());
+
+    auto token_ids =
+        torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(probabilities.device()));
+    auto valid = torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kBool).device(probabilities.device()));
+    sampling_from_probs_device_scalar_seed(probabilities,
+                                           token_ids,
+                                           valid,
+                                           std::nullopt,
+                                           /*deterministic=*/true,
+                                           seed_scalar,
+                                           offset_scalar,
+                                           reinterpret_cast<intptr_t>(at::cuda::getCurrentCUDAStream().stream()));
+    return token_ids;
+}
+
 void rejectionSampling(const RejectionSamplingParams& params) {
     auto config = validateRejectionSamplingParams(params);
     auto stream = at::cuda::getCurrentCUDAStream().stream();
@@ -1577,6 +1606,19 @@ torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
     // process-local default generator. The regular ROCm sampler above uses the
     // same fallback because FlashInfer sampling is not stable for TP > 1.
     return torch::multinomial(probabilities, 1, /*replacement=*/false).squeeze(-1).to(torch::kInt32);
+}
+
+torch::Tensor sampleFromProbsDeviceScalarSeed(const torch::Tensor& probabilities,
+                                              const torch::Tensor& seed_scalar,
+                                              const torch::Tensor& offset_scalar) {
+    // Only the CUDA stochastic-draft CUDA graph uses this entry point.
+    RTP_LLM_CHECK_WITH_INFO(false,
+                            "device-scalar-seed probability sampling requires the CUDA backend "
+                            "(seed numel=%ld, offset numel=%ld, probs numel=%ld)",
+                            seed_scalar.numel(),
+                            offset_scalar.numel(),
+                            probabilities.numel());
+    return torch::Tensor();
 }
 
 }  // namespace rtp_llm

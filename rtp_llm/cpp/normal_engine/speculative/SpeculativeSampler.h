@@ -140,7 +140,20 @@ private:
                                                                     size_t               draft_vocab_size,
                                                                     bool                 batch_all_greedy,
                                                                     int                  force_topk,
-                                                                    int                  joint_max_top_k) const;
+                                                                    int                  joint_max_top_k,
+                                                                    // Optional [propose_step] CUDA
+                                                                    // int64 buffers. When defined, step
+                                                                    // `s` samples with the scalar (seed,
+                                                                    // offset) read from slot s on the
+                                                                    // device instead of the host
+                                                                    // generator, which makes the whole
+                                                                    // Markov chain CUDA-graph capturable.
+                                                                    // Bit-identical to the
+                                                                    // host-generator path for the same
+                                                                    // scalars.
+                                                                    const torch::Tensor& step_seeds = torch::Tensor(),
+                                                                    const torch::Tensor& step_offsets =
+                                                                        torch::Tensor()) const;
     std::shared_ptr<DSparkSamplingGraphs>    dspark_graphs_;
     std::shared_ptr<RejectionSamplingGraphs> rejection_graphs_;
     bool                                     replayRejectionGraph(SpeculativeSamplerOutput& output,

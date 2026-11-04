@@ -782,6 +782,17 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
         auto top_p        = torch::full({batch}, kTopP, fp32);
         auto logits       = torch::randn({batch * kGamma, kVocab}, fp32);
 
+        // Capture the stochastic draft graph for this batch, exactly as
+        // MtpExecutor does at engine start: the served path replays one graph
+        // instead of submitting ~25 kernels per step, and the fixture's stable
+        // logits pointer + markov weights satisfy the replay gate. Without this
+        // the bench would keep timing the eager fallback.
+        sampler.prepareDSparkDraftGraphs(logits,
+                                         markov_w1,
+                                         markov_w2,
+                                         static_cast<size_t>(kVocab),
+                                         {static_cast<int>(batch)});
+
         auto run = [&]() {
             sampler.sampleDSparkDraft(logits,
                                       anchors,

@@ -102,6 +102,12 @@ void fusedStridedCopy(const FusedStridedCopyParams& params);
 
 GreedyOutput     execSampleGreedy(const GreedyParams& params);
 torch::Tensor    execSampleFromProbs(const torch::Tensor& probabilities);
+// Same sampling as execSampleFromProbs, with the Philox seed/offset read from
+// one-element device tensors so a CUDA graph can replay with refreshed RNG state.
+// Bit-identical to execSampleFromProbs for the same scalar (seed, offset).
+torch::Tensor    execSampleFromProbsDeviceScalarSeed(const torch::Tensor& probabilities,
+                                                     const torch::Tensor& seed_scalar,
+                                                     const torch::Tensor& offset_scalar);
 BeamSearchOutput execSampleBeamSearch(BeamSearchParams params);
 void             execRejectionSampling(const RejectionSamplingParams& params);
 // CUDA finalizes every output element, including forced rows and zero padding.

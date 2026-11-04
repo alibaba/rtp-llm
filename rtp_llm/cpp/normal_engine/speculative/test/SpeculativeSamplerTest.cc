@@ -31,6 +31,7 @@
 #include "torch/csrc/autograd/profiler_kineto.h"
 // Markov-fusion UT: device properties are needed to skip on non-Blackwell hosts.
 #include <ATen/cuda/CUDAContext.h>
+#include <ATen/cuda/CUDAGraph.h>
 #endif
 
 namespace rtp_llm {
@@ -2372,6 +2373,258 @@ TEST(DSparkSamplerTest, NarrowDraftKeepsOnlyTargetSupportTokens) {
         EXPECT_TRUE(in_target(emitted)) << "emitted token " << emitted << " is outside the target candidate cap";
         EXPECT_NE(emitted, 900);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Random (top_p < 1) DSpARK draft CUDA-graph support.
+//
+// Step 0: is the selector/softmax/renorm prefix even capturable? deepselect issues
+//   cudaFuncSetAttribute + cuTensorMapEncodeTiled inside its launcher, which the
+//   existing greedy draft graph never exercises (greedy uses cudaMarkovArgmaxStep).
+// Step 1: the device-scalar-seed sampling kernel must reproduce the eager
+//   scalar-seed sampler bit for bit (that is what lets the graph keep the exact
+//   RNG semantics instead of switching to per-row seed arrays).
+// Step 2: the captured stochastic draft chain must match eager bit for bit, be
+//   repeatable, and actually read the refreshed seed buffer.
+// ---------------------------------------------------------------------------
+
+TEST(DSparkSamplingGraphTest, DeepSelectTopKSoftmaxRenormSurviveCapture) {
+#if USING_CUDA
+    if (!deepSelectKernelAvailable()) {
+        GTEST_SKIP() << "DeepSelect FP32 requires SM100 or SM103";
+    }
+    const c10::cuda::CUDAGuard guard(0);
+    const auto                 floats = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    constexpr int64_t          k = 1024, vocab = 8192, batch = 16;
+
+    torch::manual_seed(20261106);
+    auto logits = torch::randn({batch, vocab}, floats) * 2.0f;
+    auto top_p  = torch::full({batch}, 0.95f, floats);
+
+    // The prefix of the stochastic draft step: select -> softmax -> top-p renorm.
+    auto run = [&]() {
+        auto selected = torch_ext::deepselect_fp32_topk(logits, k);
+        auto probs    = torch::softmax(std::get<0>(selected), -1);
+        auto renorm   = torch::empty_like(probs);
+        top_p_renorm_probs(
+            probs,
+            renorm,
+            top_p,
+            1.0,
+            static_cast<int64_t>(reinterpret_cast<uintptr_t>(at::cuda::getCurrentCUDAStream().stream())));
+        return std::make_tuple(std::get<1>(selected), probs, renorm);
+    };
+
+    auto eager = run();
+    at::cuda::getCurrentCUDAStream().synchronize();
+
+    auto                                                    capture_stream = at::cuda::getStreamFromPool();
+    at::cuda::CUDAGraph                                     graph;
+    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> captured;
+    try {
+        const c10::cuda::CUDAStreamGuard stream_guard(capture_stream);
+        run();
+        run();
+        capture_stream.synchronize();
+        graph.capture_begin(at::cuda::graph_pool_handle());
+        captured = run();
+        graph.capture_end();
+    } catch (const std::exception& error) {
+        GTEST_SKIP() << "deepselect prefix is not CUDA-graph capturable: " << error.what();
+    }
+    graph.replay();
+    capture_stream.synchronize();
+
+    EXPECT_TRUE(torch::equal(std::get<0>(captured), std::get<0>(eager)))
+        << "candidate indices changed inside the graph";
+    EXPECT_TRUE(torch::equal(std::get<1>(captured).view(torch::kInt32), std::get<1>(eager).view(torch::kInt32)))
+        << "softmax probabilities changed inside the graph";
+    EXPECT_TRUE(torch::equal(std::get<2>(captured).view(torch::kInt32), std::get<2>(eager).view(torch::kInt32)))
+        << "top-p renormalized probabilities changed inside the graph";
+#else
+    GTEST_SKIP() << "CUDA only";
+#endif
+}
+
+TEST(DSparkSamplingGraphTest, DeviceScalarSeedSamplingMatchesEagerScalarPath) {
+#if USING_CUDA
+    const c10::cuda::CUDAGuard guard(0);
+    const auto                 floats = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const auto                 longs  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt64);
+    const auto                 ints   = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    const auto                 bools  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kBool);
+    torch::manual_seed(20261107);
+
+    // A few (seed, offset) pairs, including the fresh-generator shape.
+    const std::vector<std::pair<int64_t, int64_t>> seeds{{0, 0}, {123456789, 16}, {20261107, 4096}};
+    int                                            cases = 0;
+    for (const int64_t vocab : {int64_t{1024}, int64_t{4096}}) {
+        for (const int64_t batch : {int64_t{1}, int64_t{16}, int64_t{64}}) {
+            for (const auto& [seed, offset] : seeds) {
+                SCOPED_TRACE("vocab=" + std::to_string(vocab) + " batch=" + std::to_string(batch)
+                             + " seed=" + std::to_string(seed));
+                // Normalized random distributions, as the draft sampler produces.
+                auto probs = torch::rand({batch, vocab}, floats);
+                probs.div_(probs.sum(-1, true));
+
+                auto eager_tokens = torch::empty({batch}, ints);
+                auto eager_valid  = torch::empty({batch}, bools);
+                rtp_llm::sampling_from_probs(
+                    probs,
+                    eager_tokens,
+                    eager_valid,
+                    std::nullopt,
+                    /*deterministic=*/true,
+                    std::nullopt,
+                    static_cast<uint64_t>(seed),
+                    std::nullopt,
+                    static_cast<uint64_t>(offset),
+                    static_cast<int64_t>(reinterpret_cast<uintptr_t>(at::cuda::getCurrentCUDAStream().stream())));
+
+                auto seed_scalar   = torch::tensor({seed}, longs);
+                auto offset_scalar = torch::tensor({offset}, longs);
+                auto graph_tokens  = torch::empty({batch}, ints);
+                auto graph_valid   = torch::empty({batch}, bools);
+                rtp_llm::sampling_from_probs_device_scalar_seed(
+                    probs,
+                    graph_tokens,
+                    graph_valid,
+                    std::nullopt,
+                    /*deterministic=*/true,
+                    seed_scalar,
+                    offset_scalar,
+                    static_cast<int64_t>(reinterpret_cast<uintptr_t>(at::cuda::getCurrentCUDAStream().stream())));
+
+                // Same scalar RNG state => same token, bit for bit (see the *values*
+                // too, not just the ids, so a silent distribution change cannot pass).
+                EXPECT_TRUE(torch::equal(eager_tokens, graph_tokens))
+                    << "device-scalar-seed kernel diverged from the scalar-seed kernel";
+                EXPECT_TRUE(torch::equal(eager_valid, graph_valid));
+                // gather requires an index tensor with the input's rank: [batch, 1].
+                auto eager_gathered = probs.gather(1, eager_tokens.to(torch::kLong).unsqueeze(1)).squeeze(1);
+                auto graph_gathered = probs.gather(1, graph_tokens.to(torch::kLong).unsqueeze(1)).squeeze(1);
+                EXPECT_TRUE(torch::equal(eager_gathered.view(torch::kInt32), graph_gathered.view(torch::kInt32)));
+                ++cases;
+            }
+        }
+    }
+    EXPECT_EQ(cases, 2 * 3 * 3);
+#else
+    GTEST_SKIP() << "CUDA only";
+#endif
+}
+
+TEST(DSparkSamplingGraphTest, StochasticDraftGraphMatchesEagerBitForBit) {
+#if USING_CUDA
+    if (!deepSelectKernelAvailable()) {
+        GTEST_SKIP() << "DeepSelect FP32 requires SM100 or SM103";
+    }
+    const c10::cuda::CUDAGuard guard(0);
+    const auto                 floats = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const auto                 ints   = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    torch::manual_seed(20261108);
+
+    constexpr int64_t gamma = 3;
+    constexpr int64_t vocab = 8192;  // >= the draft cap and 256-aligned (deepselect TMA gate)
+    constexpr int64_t rank  = 256;
+    // The stochastic graph is captured at the production draft cap, which is
+    // min(kDraftCandidateCap=1024, dsparkForceTopK()). Wider draft caps are covered
+    // by the kernel-level test above; this one pins the graph plumbing.
+    constexpr int draft_cap = 1024;
+
+    auto w1    = torch::randn({vocab, rank}, floats).to(torch::kBFloat16);
+    auto w2    = torch::randn({vocab, rank}, floats).to(torch::kBFloat16);
+    auto top_p = torch::full({1}, 0.95f, floats);  // resized per batch below
+
+    int cases = 0;
+    for (const int64_t batch : {int64_t{1}, int64_t{16}, int64_t{64}}) {
+        SCOPED_TRACE("batch=" + std::to_string(batch));
+        // Nearly uniform draft distribution ON PURPOSE. At temperature 0.3 a
+        // `randn * 2` fixture leaves a nucleus of ~10 candidates whose top token
+        // carries ~63% of the mass, so two independent seeds collide on the same
+        // token about half the time (~100% of the rows for batch=1) and the
+        // seed-sensitivity assertion below would fail for reasons unrelated to the
+        // graph. With `* 0.05` the per-row collision probability is ~1e-3, so a stale
+        // seed buffer cannot hide behind a coincidence and the assertion stays sharp.
+        auto logits_buffer = torch::randn({batch * gamma, vocab}, floats) * 0.05f;
+        auto anchors       = torch::randint(0, vocab, {batch}, ints);
+        auto temperatures  = torch::full({batch}, 0.3f, floats);
+        top_p              = torch::full({batch}, 0.95f, floats);
+
+        SpeculativeSampler eager_sampler(torch::Tensor(), gamma);
+        SpeculativeSampler graph_sampler(torch::Tensor(), gamma);
+        graph_sampler.prepareDSparkDraftGraphs(logits_buffer, w1, w2, vocab, {static_cast<int>(batch)});
+
+        auto run = [&](SpeculativeSampler& sampler, int64_t seed) {
+            torch::manual_seed(seed);
+            return sampler.sampleDSparkDraft(logits_buffer,
+                                             anchors,
+                                             temperatures,
+                                             /*top_k=*/torch::Tensor(),
+                                             top_p,
+                                             w1,
+                                             w2,
+                                             static_cast<size_t>(vocab),
+                                             /*batch_all_greedy=*/false,
+                                             draft_cap,
+                                             /*joint_max_top_k=*/0,
+                                             /*copy_token_ids=*/true);
+        };
+
+        constexpr int64_t seed   = 424242;
+        auto              eager  = run(eager_sampler, seed);
+        auto              replay = run(graph_sampler, seed);
+
+        ASSERT_TRUE(eager.token_ids.defined() && replay.token_ids.defined());
+        ASSERT_TRUE(eager.all_probs.defined() && replay.all_probs.defined());
+        ASSERT_TRUE(eager.all_probs_indices.defined() && replay.all_probs_indices.defined());
+        // Same host RNG stream -> same per-step (seed, offset) -> the graph must
+        // reproduce the eager run exactly.
+        EXPECT_TRUE(torch::equal(eager.token_ids, replay.token_ids)) << "graph draft tokens differ from eager";
+        EXPECT_TRUE(torch::equal(eager.all_probs.view(torch::kInt32), replay.all_probs.view(torch::kInt32)))
+            << "graph draft probabilities differ from eager";
+        EXPECT_TRUE(torch::equal(eager.all_probs_indices, replay.all_probs_indices))
+            << "graph draft candidate ids differ from eager";
+
+        // Snapshot before further replays: the graph hands out borrowed buffers, so
+        // `replay` is only valid until the next replay of the same graph.
+        auto replay_tokens  = replay.token_ids.clone();
+        auto replay_indices = replay.all_probs_indices.clone();
+
+        // Replaying again with the same seed buffer must be reproducible.
+        torch::manual_seed(seed);
+        auto replay_again = run(graph_sampler, seed);
+        EXPECT_TRUE(torch::equal(replay_tokens, replay_again.token_ids))
+            << "graph replay is not reproducible for the same seeds";
+        EXPECT_TRUE(torch::equal(replay_indices, replay_again.all_probs_indices));
+
+        // Seed sensitivity: the graph must read the refreshed device scalars instead
+        // of the capture-time constants. Checked across three distinct seed buffers
+        // and asserted as "not all identical": a stale buffer cannot satisfy it, and
+        // it cannot flake on a coincidence (per-row collision ~1e-3).
+        bool any_differ = false;
+        for (int64_t delta = 1; delta <= 3; ++delta) {
+            auto other = run(graph_sampler, seed + delta);
+            any_differ = any_differ || !torch::equal(replay_tokens, other.token_ids);
+        }
+        EXPECT_TRUE(any_differ)
+            << "graph ignored the refreshed seed buffer: every seed variant produced identical draft tokens";
+
+        // Round trip: restoring the original seed buffer must restore the original
+        // tokens. Together with the check above this proves the refresh works in both
+        // directions -- a graph stuck on the capture-time values fails both, a graph
+        // reading a stale allocation fails the round trip.
+        torch::manual_seed(seed);
+        auto restored = run(graph_sampler, seed);
+        EXPECT_TRUE(torch::equal(replay_tokens, restored.token_ids))
+            << "restoring the original seed buffer did not restore the original draft tokens";
+        EXPECT_TRUE(torch::equal(replay_indices, restored.all_probs_indices));
+        ++cases;
+    }
+    EXPECT_EQ(cases, 3);
+#else
+    GTEST_SKIP() << "CUDA only";
+#endif
 }
 
 }  // namespace
