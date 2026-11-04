@@ -268,7 +268,7 @@ def test_intentional_stop_retains_unreaped_process_for_final_cleanup(exit_code, 
 
 def test_master_ports_avoid_ephemeral_range_and_retry_busy_pair(monkeypatch):
     import socket
-    from mock_framework.execution import master as master_runtime
+    from mock_framework.execution.roles import master as master_runtime
     first = master_runtime.master_port(1)
     assert 10000 <= first < 30000
     with socket.socket() as busy:

@@ -6,8 +6,8 @@ from mock_framework.config import Registry
 from mock_framework.config import ConfigError
 from mock_framework.interfaces import metrics
 from mock_framework.execution.transport import ExecutionError
-from mock_framework.execution import client_group as client_runtime
-from mock_framework.execution.client_group import ClientGroup
+from mock_framework.execution.roles import client as client_runtime
+from mock_framework.execution.roles.client import ClientRole
 from helpers.input import read_inputs, write_inputs, pb
 
 
@@ -19,7 +19,7 @@ def context():
         {'id': 'client-1', 'role': 'client', 'rpc': 'c:2', 'control': 'http://c:2'}]
     topology = SimpleNamespace(active=lambda role=None: [item for item in nodes if role is None or item['role'] == role])
     records = SimpleNamespace(emit=lambda **v: events.append(v))
-    clients = ClientGroup(component=None, recipe=None, launcher=None, supervisor=None,
+    clients = ClientRole(component=None, recipe=None, supervisor=None,
         topology=topology, records=records, monitoring=None)
     return SimpleNamespace(runtime=SimpleNamespace(topology=topology, clients=clients, case=SimpleNamespace(directory=Path(__file__).resolve().parents[1])), nodes=nodes,
         query_time='2026-10-28T00:00:00Z', timeout=20, records=records, events=events)
@@ -218,7 +218,7 @@ def test_teardown_collects_unstopped_playback_before_final_scrape(failed, tmp_pa
         runtime = RunEnvironment(SimpleNamespace(environment={}), {'components': {}, 'engine_mode': 'shared'},
             SimpleNamespace(directory=tmp_path, emit=lambda **event: None))
         runtime.clients.pending = True
-        runtime.clients.collect = collect
+        runtime.clients.stop_playback = collect
         runtime.monitoring = SimpleNamespace(final_scrape=scrape, close=close_monitor, finish=lambda errors: None)
         return await runtime.close()
     errors = asyncio.run(exercise())
@@ -287,7 +287,7 @@ def test_replay_speed_replaces_qps_and_is_forwarded_without_timestamp_conversion
     async def start(body, query_time, timeout):
         calls.append(body)
         return True
-    monkeypatch.setattr(ctx.runtime.clients, 'start', start)
+    monkeypatch.setattr(ctx.runtime.clients, 'start_playback', start)
     values = args(); values.pop('qps'); values['replay_speed'] = 5
     assert asyncio.run(Registry.standard().get('client/start').invoke(ctx, values))
     assert calls[0]['replay_speed'] == 5 and 'qps' not in calls[0]

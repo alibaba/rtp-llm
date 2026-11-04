@@ -8,10 +8,11 @@ import secrets
 import socket
 import uuid
 from urllib.parse import urlsplit
-from ..config.validation import duration
+from ...config.validation import duration
 
-from .run_trace import write_json
-from .transport import ExecutionError
+from ..processes import launch_component
+from ..run_trace import write_json
+from ..transport import ExecutionError
 
 
 def _environment(config, topology, directory, *, require_engines):
@@ -78,39 +79,23 @@ def refresh_discovery(config, topology, directory):
         _environment(config, topology, directory, require_engines=False)
 
 
-class MasterGroup:
-    def __init__(self, *, component, recipe, election, launcher, supervisor, topology, records, monitoring):
+class MasterRole:
+    def __init__(self, *, component, recipe, election, supervisor, topology, records, monitoring, environment=None):
         self.component, self.recipe, self.election = component, recipe, election
-        self.launcher, self.supervisor, self.topology = launcher, supervisor, topology
+        self.supervisor, self.topology = supervisor, topology
+        self._configuration = environment
         self.records, self.monitoring = records, monitoring
         self.environment, self._owned = {}, []
         self._next = 0
         self._instances = {}
         self._lock = asyncio.Lock()
 
-    async def prepare(self):
-        if self.election is None:
-            return
-        recipe = self.election
+    def configure_election(self, connect):
         directory = self.records.directory / 'zookeeper'
-        directory.mkdir()
-        ready = directory / 'ready.json'
-        await self.supervisor.spawn('zookeeper', recipe['command'], recipe['cwd'],
-            {**os.environ, **recipe['env'], 'MOCK_OUTPUT_DIR': str(directory), 'MOCK_READY_FILE': str(ready)}, directory)
-        async def await_ready():
-            while not ready.exists():
-                await asyncio.sleep(.02)
-            value = json.loads(ready.read_text())
-            host, port = value['connect'].split(':')
-            if host != '127.0.0.1' or not 0 < int(port) < 65536:
-                raise ExecutionError('Invalid ZooKeeper readiness address')
-            return value['connect']
-        connect = await self.supervisor.guard(await_ready(), float(duration(recipe['startup_timeout'])))
         self.environment = {'HIPPO_ROLE': 'mock-' + uuid.uuid4().hex,
             'FLEXLB_SYNC_CONSISTENCY_CONFIG': json.dumps({'needConsistency': True,
                 'zookeeperConfig': {'zkHost': connect, 'zkTimeoutMs': 6000}}),
             'MOCK_MASTER_PORT': str(master_port(self.component['deployment']['replicas']))}
-        self.records.emit(event='process_ready', node='zookeeper', connect=connect)
         write_json(directory / 'master-environment.json', self.environment)
 
     def _environment(self, index, directory):
@@ -152,10 +137,14 @@ class MasterGroup:
         if attempt:
             address = next(address for address, item in self._instances.items() if item['index'] == index)
             self._instances[address]['directory'] = directory
-        endpoint = await self.launcher.start('master', index, self.recipe,
-            configure=lambda directory: self._environment(index, directory),
-            validate=lambda value, control: self._validate(name, index, value, control),
-            require_endpoints=bool(self.environment), attempt=attempt)
+        control, endpoint = await launch_component(
+            self.supervisor, self.records, self._configuration, 'master', index, self.recipe,
+            configure=lambda directory: self._environment(index, directory), attempt=attempt)
+        if endpoint is None and self.environment:
+            raise ExecutionError('Native Master did not publish endpoints')
+        if endpoint is not None:
+            self._validate(name, index, endpoint, control)
+        self.topology.register(name, 'master', control, endpoint)
         if self.monitoring:
             self.monitoring.discover(name, directory)
             if self.monitoring.baselined:
@@ -163,7 +152,11 @@ class MasterGroup:
         return endpoint, {'index': index, 'attempt': attempt, 'process': process,
                           'directory': directory, 'name': name}
 
-    async def start(self, count):
+    async def start(self, count=None):
+        if count is None:
+            if self.component is None:
+                return []
+            count = self.component['deployment']['replicas']
         async with self._lock:
             if self.recipe is None or not 1 <= count <= 1024:
                 raise ExecutionError('master/start requires configured Masters and count in 1..1024')
@@ -234,9 +227,6 @@ class MasterGroup:
         for process in reversed(self._owned):
             errors.extend(await self.supervisor.stop([process], self._stop_grace()))
         return errors
-
-    async def close_election(self):
-        return await self.supervisor.stop(['zookeeper'], 5)
 
 
 def master_port(count):

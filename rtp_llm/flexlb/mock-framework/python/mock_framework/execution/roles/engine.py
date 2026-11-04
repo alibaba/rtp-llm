@@ -4,14 +4,14 @@ import copy
 import json
 import os
 import socket
-from ..config.validation import duration
-from .run_trace import timestamp, write_json
-from .transport import post, ExecutionError
+from ...config.validation import duration
+from ..run_trace import timestamp, write_json
+from ..transport import post, ExecutionError
 
 ROLES = ('prefill', 'decode', 'vit')
 
 
-class EngineHosts:
+class EngineRole:
     def __init__(self, *, supervisor, topology, records, environment, recipes, mode, monitoring):
         self.supervisor, self.topology, self.records = supervisor, topology, records
         self.environment, self.recipes, self.mode, self.monitoring = environment, recipes, mode, monitoring

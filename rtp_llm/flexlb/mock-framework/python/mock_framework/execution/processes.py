@@ -1,7 +1,10 @@
 """Own OS processes and interrupt operations when one exits unexpectedly."""
 import asyncio
+import json
 import os
 import signal
+from ..config.validation import duration
+from .run_trace import write_json
 from .transport import ExecutionError
 
 
@@ -140,3 +143,32 @@ class ProcessSupervisor:
                 monitor.cancel()
         await asyncio.gather(*self._monitors, return_exceptions=True)
         return errors
+
+
+async def launch_component(supervisor, records, environment, role, index, recipe, *, configure=None, attempt=0):
+    name = f'{role}-{index}'
+    directory = records.directory / 'components' / name
+    process = name if attempt == 0 else f'{name}-restart-{attempt}'
+    if attempt:
+        directory = directory / f'restart-{attempt}'
+    directory.mkdir(parents=True)
+    config, ready = directory / 'config.json', directory / 'ready.json'
+    write_json(config, {'component_role': role, 'component': environment[role],
+                       'environment': environment, 'index': index, 'id': name})
+    env = {} if configure is None else configure(directory)
+    await supervisor.spawn(process, recipe['command'], recipe['cwd'],
+        {**os.environ, **recipe['env'], **env, 'MOCK_TOPOLOGY_FILE': str(records.directory / 'topology.json'),
+         'MOCK_NODE_ID': name, 'MOCK_COMPONENT': role, 'MOCK_CONFIG_FILE': str(config),
+         'MOCK_READY_FILE': str(ready), 'MOCK_OUTPUT_DIR': str(directory)}, directory)
+    async def await_ready():
+        while not ready.exists():
+            await asyncio.sleep(.02)
+        value = json.loads(ready.read_text())
+        if set(value) != {'url'} or not isinstance(value['url'], str):
+            raise ExecutionError(f'Invalid readiness file for {name}')
+        return value['url']
+    control = await supervisor.guard(await_ready(), float(duration(recipe['startup_timeout'])))
+    records.emit(event='process_ready', node=process, url=control)
+    path = directory / 'endpoints.json'
+    endpoint = json.loads(path.read_text()) if path.is_file() else None
+    return control, endpoint

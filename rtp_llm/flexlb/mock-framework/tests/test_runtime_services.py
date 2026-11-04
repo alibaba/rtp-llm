@@ -8,12 +8,12 @@ import pytest
 
 from mock_framework.execution.environment import RunEnvironment
 from mock_framework.execution.processes import ProcessSupervisor
-from mock_framework.execution.topology import Topology
+from mock_framework.execution.environment import EndpointRegistry
 from mock_framework.execution.transport import ExecutionError
 
 
 def test_topology_readers_and_publishers_cannot_mutate_current_instances(tmp_path):
-    topology = Topology(tmp_path)
+    topology = EndpointRegistry(tmp_path)
     received = []
     topology.add_publisher(lambda nodes: nodes[0].update(rpc='corrupted') if nodes else None)
     topology.add_publisher(lambda nodes: received.append(nodes))
@@ -36,13 +36,13 @@ def test_topology_readers_and_publishers_cannot_mutate_current_instances(tmp_pat
 
 def test_discovery_failure_after_launch_still_reaps_process(tmp_path, monkeypatch):
     from mock_framework.execution import run_case
-    from mock_framework.execution.master import MasterGroup
+    from mock_framework.execution.roles.master import MasterRole
     from test_master_lifecycle import generic, logs, assert_reaped, step
 
     def publish(self, nodes):
         if nodes:
             raise OSError('discovery unavailable')
-    monkeypatch.setattr(MasterGroup, 'publish_discovery', publish)
+    monkeypatch.setattr(MasterRole, 'publish_discovery', publish)
     case, registry, launch = generic(tmp_path, [step('never', 'master/stop')])
     output = tmp_path / 'run'
     result = asyncio.run(run_case(case, registry, launch, output))
@@ -95,11 +95,14 @@ def test_cleanup_continues_in_order_after_domain_failures(tmp_path):
                 return errors
             return run
         runtime.engines.stop_monitor = operation('health')
-        runtime.clients.drain = operation('drain', raises=True)
+        runtime.clients.stop_playback = operation('drain', raises=True)
         runtime.clients.close = operation('clients', errors=['client cleanup failed'])
         runtime.masters.close = operation('masters')
         runtime.engines.close = operation('engines')
-        runtime.masters.close_election = operation('election')
+        async def stop_election(names, grace):
+            assert names == ['zookeeper']
+            order.append('election')
+        runtime.supervisor.stop = stop_election
         runtime.supervisor.close = operation('fallback')
         finished = []
         runtime.monitoring = SimpleNamespace(final_scrape=operation('scrape', raises=True),
@@ -133,7 +136,7 @@ def test_health_failure_at_teardown_still_fails_without_a_process_exit(tmp_path)
 
 
 def test_collection_removes_retired_target_without_retaining_a_ledger(tmp_path):
-    from mock_framework.execution.monitoring import Prometheus
+    from mock_framework.execution.roles.prometheus import Prometheus
     monitor = Prometheus(None, SimpleNamespace(directory=tmp_path),
         {'startup_timeout': '1s', 'scrape_interval': '100ms'})
     monitor.directory.mkdir()

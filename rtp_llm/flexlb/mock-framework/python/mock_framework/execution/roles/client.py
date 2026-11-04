@@ -3,9 +3,11 @@ import asyncio
 from dataclasses import dataclass
 import json
 from typing import Annotated
-from ..config.registry import Bounds, schema
-from ..config.validation import validate
-from .transport import ExecutionError, post
+from ...config.registry import Bounds, schema
+from ...config.validation import validate
+from ..processes import launch_component
+from ..run_trace import timestamp
+from ..transport import ExecutionError, post
 
 
 @dataclass(frozen=True)
@@ -22,9 +24,10 @@ class ClientResult:
     errors: list[str]
 
 
-class ClientGroup:
-    def __init__(self, *, component, recipe, launcher, supervisor, topology, records, monitoring):
-        self.component, self.recipe, self.launcher = component, recipe, launcher
+class ClientRole:
+    def __init__(self, *, component, recipe, supervisor, topology, records, monitoring, environment=None):
+        self.component, self.recipe = component, recipe
+        self._configuration = environment
         self.supervisor, self.topology, self.records, self.monitoring = supervisor, topology, records, monitoring
         self.pending, self.stop_timeout = False, 30
         self._owned = []
@@ -35,7 +38,9 @@ class ClientGroup:
         for index in range(self.component['deployment']['replicas']):
             name = f'client-{index}'
             self._owned.append(name)
-            await self.launcher.start('client', index, self.recipe)
+            control, endpoint = await launch_component(
+                self.supervisor, self.records, self._configuration, 'client', index, self.recipe)
+            self.topology.register(name, 'client', control, endpoint)
             if self.monitoring:
                 self.monitoring.discover(name, self.records.directory / 'components' / name)
 
@@ -52,7 +57,7 @@ class ClientGroup:
             raise ExecutionError('Client control parameters exceed the 1 MiB limit')
         return await post(self.coordinator(), envelope)
 
-    async def start(self, body, query_time, timeout):
+    async def start_playback(self, body, query_time, timeout):
         clients = self.topology.active('client')
         if not clients or body['concurrency'] < len(clients):
             raise ExecutionError('Need at least one concurrency slot per Client')
@@ -69,7 +74,15 @@ class ClientGroup:
             raise ExecutionError('Invalid Client start acknowledgement')
         return True
 
-    async def collect(self, query_time, timeout):
+    async def stop_playback(self, query_time=None, timeout=None):
+        if timeout is None:
+            if not self.pending:
+                return {}
+            async with asyncio.timeout(self.stop_timeout):
+                return await self._stop_playback(timestamp(), self.stop_timeout)
+        return await self._stop_playback(query_time, timeout)
+
+    async def _stop_playback(self, query_time, timeout):
         result = await self.control('client/stop', {}, query_time, timeout)
         self.records.emit(event='client_result', result=result)
         if not isinstance(result, dict) or set(result) != {'clients', 'errors'}:
@@ -87,12 +100,6 @@ class ClientGroup:
         self.pending = False
         by_address = {node['control']: node['rpc'] for node in clients}
         return {by_address[url]: value for url, value in result['clients'].items()}
-
-    async def drain(self):
-        if self.pending:
-            from .run_trace import timestamp
-            async with asyncio.timeout(self.stop_timeout):
-                await self.collect(timestamp(), self.stop_timeout)
 
     async def close(self):
         return await self.supervisor.stop(self._owned, 3)

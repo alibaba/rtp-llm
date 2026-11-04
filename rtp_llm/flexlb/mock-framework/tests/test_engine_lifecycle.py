@@ -102,7 +102,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
         if owner.monitoring:
             # Keep an obsolete discovery target present while new instances are already serving.
             from mock_framework.execution.run_trace import write_json
-            from mock_framework.execution.monitoring import _get
+            from mock_framework.execution.roles.prometheus import _get
             prom = owner.monitoring
             retired = {'targets': [urllib.parse.urlsplit(first['metrics']).netloc], 'labels': {'instance': first['rpc'], '__metrics_path__': '/metrics'}}
             write_json(prom.directory / 'targets.json', list(prom.targets.values()) + [{key: retired[key] for key in ('targets', 'labels')}])
@@ -190,8 +190,8 @@ def test_shared_host_rejects_conflicting_process_environment_and_bad_mode(tmp_pa
 
 
 def test_allocator_exhaustion_fails_without_reusing_a_retired_listener(monkeypatch):
-    from mock_framework.execution.engines import EngineHosts
-    owner = EngineHosts(supervisor=None, topology=None, records=None, environment={}, recipes={}, mode='shared', monitoring=None)
+    from mock_framework.execution.roles.engine import EngineRole
+    owner = EngineRole(supervisor=None, topology=None, records=None, environment={}, recipes={}, mode='shared', monitoring=None)
     owner.used_ports.add(12345)
     class Probe:
         def __enter__(self): return self
@@ -241,7 +241,7 @@ def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_addr
         from datetime import datetime
         from mock_framework.interfaces.master import engines, EngineSelection
         from mock_framework.execution.run_trace import write_json
-        from mock_framework.execution.monitoring import _get
+        from mock_framework.execution.roles.prometheus import _get
         directory = ctx.records.directory / 'traffic'
         directory.mkdir()
         classpath = os.pathsep.join([str(ROOT / 'java/client/target/test-classes'), str(ROOT / 'java/client/target/classes'),
