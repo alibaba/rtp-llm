@@ -39,7 +39,6 @@ class AdmissionTest {
         @Override public Work schedule() { locked(); return null; }
         @Override public List<Request> requests() { locked(); return List.of(); }
         @Override public QueueSnapshot queues() { locked(); return new QueueSnapshot(0, 0, 0, 0); }
-        @Override public String scrapeMetrics() { locked(); return "injected_scheduler 1\n"; }
         @Override public List<Runnable> takeNotifications() { locked(); return List.of(); }
         @Override public void close() { locked(); closed = true; }
         public List<InputResult> input(List<InputItem> batch) { throw new UnsupportedOperationException(); }

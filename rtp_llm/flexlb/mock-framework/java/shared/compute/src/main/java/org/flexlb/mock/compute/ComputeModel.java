@@ -37,8 +37,8 @@ public final class ComputeModel {
         public int verifyTokens() { return progress.verifyTokens(); }
         public int additionalKvTokens() { return progress.additionalKvTokens(); }
     }
-    public record Result(int committedTokens, boolean finished) {
-        public Result { if (committedTokens < 1) throw new IllegalArgumentException("Empty generation result"); }
+    public record Result(int committedTokens, boolean finished, int candidates) {
+        public Result { if (committedTokens < 1 || candidates < committedTokens) throw new IllegalArgumentException("Invalid generation result"); }
     }
 
     public ComputeModel(ComputeSpec spec) {

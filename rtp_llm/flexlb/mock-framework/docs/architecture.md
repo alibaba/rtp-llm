@@ -278,7 +278,7 @@ write_inputs("traffic.binpb.zst", (
 
 ### Python 指标查询与公共指标
 
-Java 产生指标，公共构建暴露 `/metrics`，内部镜像使用 KMonitor 上报；Python 直接调用 Prometheus HTTP API，不经过 Engine 查询代理，也不新增 Java 查询服务。原始 PromQL 可在 Prometheus 存活期间查询其已采集的数据，框架不维护实例历史。
+RTP Scheduler 记录请求和执行步的观测数据，RtpNode 按调度锁读取指标快照。公共构建通过 `/metrics` 导出，内部镜像通过 KMonitor 上报同一来源的数据。Python 直接调用 Prometheus HTTP API。原始 PromQL 可在 Prometheus 存活期间查询其已采集的数据，框架不维护实例历史。
 
 公共 Engine 使用同一组指标含义和采集事件，Python 默认只实现一套公共语义查询。公共客户端处理 HTTP、超时和响应解析，指标函数处理 PromQL、单位、目标范围和结果形态。确有后端原生指标差异时，映射和公式放在 RTP/vLLM 对应 Python 模块中，Runner 直接调用；不为相同指标复制两份实现。原始 `prometheus/query` 走公共查询客户端，不进行后端改写或自动附加过滤。
 
@@ -286,12 +286,13 @@ Java 产生指标，公共构建暴露 `/metrics`，内部镜像使用 KMonitor 
 
 去掉业务指标上的 RTP/vLLM `engine`、逻辑 `node`、JVM 和主动添加的实验 ID 标签，保留必要的角色与实例地址区分。独立采集端点可使用 Prometheus `instance`；共享 `/metrics` 时必须在样本上区分实例服务地址，不能让同名同标签序列碰撞或重复采集。`host_ip`/`container_ip` 保持物理含义，共 JVM 时不能仅靠相同 IP 区分 Engine。实验默认独占 Prometheus，跨实验合并分析时再补来源标签，不能在合并后无法区分数据来源。
 
-一个真实完成的 Forward batch 记录一次耗时，不能按 batch 中请求数重复记录。请求终态按请求计数，token 按本轮实际计算和提交分别统计。新增两项 Forward 指标，不增加对应服务接口：
+一个真实完成的 Forward batch 记录一次耗时，不能按 batch 中请求数重复记录。请求终态按请求计数，token 按本轮实际计算和提交分别统计。Forward 指标分三种口径：
 
-- `rtp_llm_model_forward_us`：模拟 Forward 的实际耗时，单位微秒；对齐 real 模型 Forward 调用区间的含义，不包含请求排队或网络 TTFT。
+- `rtp_llm_model_forward_us`：Prefill 完成 Forward 的窗口均值，单位微秒。目标生产 MTP Decode 版本缺少该时序。
+- `mock_model_forward_actual_us`：P/D 最近一轮完成的模拟 Forward 实际耗时，单位微秒。
 - `mock_model_forward_planned_us`：公式和可选噪声确定的本轮计划耗时，单位微秒。
 
-实际计时从提交本轮计算到公共执行层收到完成通知，包含计时器延迟和回调调度等待，在处理结果及提交 token/KV 前结束。计划和实际对同一完成 batch 各记一次，取消批次不补完成样本。差值可以揭示宿主调度/GC 等干扰，不能单独归因为 CPU 不足；Client TTFT 仍取真实接收时间。本仓 real `NormalExecutor.cc` 围绕 model_->forward 计时，`RtpLLMMetrics.cc` 将该字段注册并报告为 Gauge；本轮因此采用同名微秒 Gauge，计划耗时也用 Gauge。Gauge 保留最近一批，不能拿采样点平均值冒充逐批平均；吞吐仍使用累计 token 与耗时 Histogram 的 sum/count。KMonitor 与 Prometheus 的采样、聚合管线不据此宣称完全相同。
+实际计时从提交本轮计算到公共执行层收到完成通知，包含计时器延迟和回调调度等待，在处理结果及提交 token/KV 前结束。计划和实际对同一完成 batch 各记一次，取消批次不补完成样本。差值可以揭示宿主调度/GC 等干扰，不能单独归因为 CPU 不足；Client TTFT 仍取真实接收时间。本仓 real `NormalExecutor.cc` 围绕 model_->forward 计时，`RtpLLMMetrics.cc` 将该字段注册并报告为 Gauge；Prefill 的同名 Gauge 取采集窗口内完成批次的均值。Mock 的实际和计划 Gauge 保留最近一批。KMonitor 与 Prometheus 的采样、聚合管线不据此宣称完全相同。
 
 ### 落地顺序与待定边界
 

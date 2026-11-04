@@ -18,9 +18,9 @@ public record StoppingModel(StoppingSpec configuration) {
             for (long offset = Math.max(1, minimum - generated); offset <= count; offset++) {
                 // Absolute output position makes EOS independent of batch membership and Decode round width.
                 if (p == 1 || new SplittableRandom(seed ^ ((long) generated + offset)).nextDouble() < p)
-                    return new ComputeModel.Result((int) offset, true);
+                    return new ComputeModel.Result((int) offset, true, candidates);
             }
         }
-        return new ComputeModel.Result(count, generated + count == maximum);
+        return new ComputeModel.Result(count, generated + count == maximum, candidates);
     }
 }

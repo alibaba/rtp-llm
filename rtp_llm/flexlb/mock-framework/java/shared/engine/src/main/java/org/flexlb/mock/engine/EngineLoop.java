@@ -75,10 +75,6 @@ public final class EngineLoop implements AutoCloseable {
         }
     }
     public void checkHealthy() { synchronized (lock) { ensureOpen(); } }
-    public List<io.prometheus.client.Collector.MetricFamilySamples> collectMetrics() {
-        synchronized (lock) { checkFailure(); return scheduler.collectMetrics(); }
-    }
-    public String scrapeMetrics() { synchronized (lock) { checkFailure(); return scheduler.scrapeMetrics(); } }
 
     private <T> T change(Supplier<T> operation) {
         try { synchronized (lock) { return operation.get(); } }

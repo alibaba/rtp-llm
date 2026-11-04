@@ -15,6 +15,14 @@ final class RtpMetrics {
     public static final String FORWARD_TOKENS = "rtp_llm_forward_tokens_total";
     public static final String FORWARD_SECONDS = "rtp_llm_model_forward_seconds";
     public enum Outcome { success, cancelled, timeout, error }
+    record RequestStats(long elapsedNanos, long waitNanos, long enqueueToCanRunNanos,
+                        long canRunToRunningNanos,
+                        long firstTokenNanos, int inputTokens, int outputTokens, int iterations, int reusedTokens) {}
+
+    record StepStats(int context, int generate, long maxSequence, long scheduleToCompletionNanos, long stepNanos,
+                     long forwardNanos, long plannedNanos, long input, long computed, long output,
+                     long proposed, long accepted, long speculativeStreams) {}
+
     public record State(long waiting, long running, long loading, long ready, long totalTokens, long availableTokens,
                         long freeTokens, long heldTokens, long hostTotalTokens, long hostFreeTokens, int blockSize) {
         public State {
@@ -39,7 +47,7 @@ final class RtpMetrics {
     private final Object observations = new Object();
     private final LongSupplier clock;
     private final boolean prefill;
-    private long windowStarted, windowInput, windowComputed, windowOutput, windowComputeNanos, windowInputNanos;
+    private long windowStarted, windowInput, windowComputed, windowTpsTokens, windowTpsNanos, windowComputeNanos, windowInputNanos;
     private double lastFinished, lastErrors, lastCancelled;
 
     public RtpMetrics(String role, Supplier<State> state) { this(role, state, System::nanoTime); }
@@ -69,7 +77,7 @@ final class RtpMetrics {
         for (String kind : List.of("input", "compute", "output")) tokens.put(kind, work.labels(role, kind));
         forward = Histogram.build().name(FORWARD_SECONDS).help("Elapsed time of completed simulated forwards, excluding request queue time.")
             .labelNames(LABELS).register(registry).labels(identity);
-        actualForward = Gauge.build().name("rtp_llm_model_forward_us").help("Actual simulated Forward duration in microseconds.")
+        actualForward = Gauge.build().name("mock_model_forward_actual_us").help("Latest completed simulated Forward duration in microseconds.")
             .labelNames(LABELS).register(registry).labels(identity);
         plannedForward = Gauge.build().name("mock_model_forward_planned_us").help("Planned Forward duration in microseconds.")
             .labelNames(LABELS).register(registry).labels(identity);
@@ -104,7 +112,7 @@ final class RtpMetrics {
                     };
                     blocks.addMetric(List.of(role, "device", "DEVICE"), device / value.blockSize());
                     // Host available includes evictable entries; free alone cannot represent it.
-                    if (!name.equals("available") && !name.equals("active")) {
+                    if (value.hostTotalTokens() > 0 && !name.equals("available") && !name.equals("active")) {
                         long hostValue = name.equals("total") ? value.hostTotalTokens() : name.equals("free")
                             ? value.hostFreeTokens() : value.hostTotalTokens() - value.hostFreeTokens();
                         blocks.addMetric(List.of(role, "host", "HOST"), hostValue / value.blockSize());
@@ -120,20 +128,20 @@ final class RtpMetrics {
                     long now = clock.getAsLong(), elapsed = now - windowStarted;
                     if (elapsed > 0) {
                         double seconds = elapsed / 1_000_000_000.0;
-                        if (role.equals("prefill")) {
-                            result.add(gauge("rtp_llm_context_tokens", "Computed Prefill tokens in the scrape window.", role, windowComputed));
-                            result.add(gauge("rtp_llm_context_tokens_with_cache", "Input Prefill tokens in the scrape window.", role, windowInput));
-                            result.add(gauge("rtp_llm_context_tps", "Computed Prefill tokens per active Forward second.", role,
-                                windowComputeNanos == 0 ? 0 : windowComputed * 1_000_000_000.0 / windowComputeNanos));
-                            result.add(gauge("rtp_llm_context_tps_with_cache", "Input Prefill tokens per active Forward second.", role,
-                                windowInputNanos == 0 ? 0 : windowInput * 1_000_000_000.0 / windowInputNanos));
+                        boolean idle = windowTpsNanos == 0 && (!prefill || windowInputNanos == 0);
+                        if (prefill) {
+                            if (idle || windowComputeNanos > 0)
+                                result.add(gauge("rtp_llm_context_tps", "Computed Prefill tokens per active execution second.", role, tps(windowComputed, windowComputeNanos)));
+                            if (idle || windowInputNanos > 0)
+                                result.add(gauge("rtp_llm_context_tps_with_cache", "Input Prefill tokens per active execution second.", role, tps(windowInput, windowInputNanos)));
                             result.add(gauge("rtp_llm_context_wall_tps", "Computed Prefill tokens per wall second.", role, windowComputed / seconds));
                             result.add(gauge("rtp_llm_context_wall_tps_with_cache", "Input Prefill tokens per wall second.", role, windowInput / seconds));
                             result.add(gauge("rtp_llm_wall_tps_report_interval_us", "Actual wall-clock report window, microseconds.", role, elapsed / 1000.0));
-                        } else if (role.equals("decode")) {
-                            result.add(gauge("rtp_llm_generate_tps", "Committed Decode output tokens per wall second.", role, windowOutput / seconds));
+                        } else {
+                            result.add(gauge("rtp_llm_generate_tps", "Decode tokens per active execution second.", role, tps(windowTpsTokens, windowTpsNanos)));
                         }
-                        result.add(gauge("rtp_llm_total_tps", "Model-computed tokens per wall second.", role, windowComputed / seconds));
+                        if (idle || windowTpsNanos > 0)
+                            result.add(gauge("rtp_llm_total_tps", "Executor tokens per active execution second.", role, tps(windowTpsTokens, windowTpsNanos)));
                         double done = finished.values().stream().mapToDouble(Counter.Child::get).sum();
                         double errors = finished.get(Outcome.error).get() + finished.get(Outcome.timeout).get();
                         double cancelled = finished.get(Outcome.cancelled).get();
@@ -142,12 +150,16 @@ final class RtpMetrics {
                         result.add(gauge("rtp_llm_cancel_qps", "Terminal cancellations per wall second.", role, (cancelled - lastCancelled) / seconds));
                         lastFinished = done; lastErrors = errors; lastCancelled = cancelled;
                         windowStarted = now;
-                        windowInput = windowComputed = windowOutput = windowComputeNanos = windowInputNanos = 0;
+                        windowInput = windowComputed = windowTpsTokens = windowTpsNanos = windowComputeNanos = windowInputNanos = 0;
                     }
                 }
                 return result;
             }
         }.register(registry);
+    }
+
+    private static double tps(long tokens, long nanos) {
+        return nanos == 0 ? 0 : tokens * 1_000_000_000.0 / nanos;
     }
 
     private static GaugeMetricFamily gauge(String name, String help, String role, double value) {
@@ -159,38 +171,104 @@ final class RtpMetrics {
     private Counter counter(String name, String help) {
         return Counter.build().name(name).help(help).labelNames(LABELS).register(registry);
     }
-    public void observe(String name, double value) { events.observe(name, value); }
     public void started() { started.inc(); }
-    public void finished(Outcome outcome) { finished.get(Objects.requireNonNull(outcome)).inc(); }
+
+    void requestFinished(Outcome outcome, RequestStats stats) {
+        // Real emits stream timings for success, cancellation and timeout, not arbitrary internal errors.
+        if (outcome != Outcome.error) {
+            events.observe("rtp_llm_latency_us", stats.elapsedNanos() / 1000.0);
+            events.observe("rtp_llm_wait_latency_us", stats.waitNanos() / 1000.0);
+            positiveMicros("rtp_llm_stream_enqueue_to_canrun_us", stats.enqueueToCanRunNanos());
+            positiveMicros("rtp_llm_stream_canrun_to_running_us", stats.canRunToRunningNanos());
+            if (stats.firstTokenNanos() >= 0) events.observe("rtp_llm_first_token_latency_us", stats.firstTokenNanos() / 1000.0);
+            events.observe("rtp_llm_input_token_length", stats.inputTokens());
+            events.observe("rtp_llm_output_token_length", stats.outputTokens());
+            events.observe("rtp_llm_iterate_count", stats.iterations());
+            events.observe("rtp_llm_reuse_length", stats.reusedTokens());
+            events.observe("rtp_llm_query_batch_size", 1); // Native query batch is beams, not the scheduler batch.
+        }
+        finished.get(outcome).inc();
+    }
+
+    // Native stream REPORT_GAUGE omits zero samples; allocator event gauges do not.
+    private void positiveMicros(String name, long nanos) { if (nanos >= 1000) events.observe(name, nanos / 1000); }
+
     public void cacheLookup(long input, long reused) {
         if (input < 0 || reused < 0 || reused > input) throw new IllegalArgumentException("Invalid cache observation");
         cacheInputs.inc(input); cacheHits.inc(reused);
     }
-    void positiveMicros(String name, long nanos) { if (nanos >= 1000) events.observe(name, nanos / 1000); }
     void cacheReuse(long input, long reused, long memoryReused) {
         events.observe("rtp_llm_device_input_length", input);
         events.observe("rtp_llm_kv_cache_reuse_length", reused);
         events.observe("rtp_llm_stream_cache_device_reuse_length", reused - memoryReused);
         events.observe("rtp_llm_stream_cache_memory_reuse_length", memoryReused);
     }
-    public void forwardCompleted(long elapsedNanos, long plannedNanos, long input, long computed, long output) {
-        if (elapsedNanos < 0 || plannedNanos < 0 || input < 0 || computed < 0 || computed > input || output < 0)
-            throw new IllegalArgumentException("Invalid forward observation");
-        synchronized (observations) {
-            windowInput += input; windowComputed += computed; windowOutput += output;
-            if (computed > 0) {
-                windowComputeNanos += elapsedNanos;
-                if (prefill) contextSeconds.inc(elapsedNanos / 1_000_000_000.0);
-            }
-            if (input > 0) {
-                windowInputNanos += elapsedNanos;
-                if (prefill) contextWithCacheSeconds.inc(elapsedNanos / 1_000_000_000.0);
-            }
-            tokens.get("input").inc(input); tokens.get("compute").inc(computed); tokens.get("output").inc(output);
+    private void recordBatch(int context, int generate, long tokens, long maxSequence) {
+        observePositive("rtp_llm_context_batch_size", context);
+        observePositive("rtp_llm_generate_batch_size", generate);
+        observePositive("rtp_llm_execute_token_size", tokens);
+        observePositive("rtp_llm_max_seq_len", maxSequence);
+        if (context > 0) {
+            observePositive("rtp_llm_context_batch_size_when_has_context", context);
+            observePositive("rtp_llm_generate_batch_size_when_has_context", generate);
+            observePositive("rtp_llm_execute_token_size_when_has_context", tokens);
+            observePositive("rtp_llm_max_seq_len_when_has_context", maxSequence);
         }
-        forward.observe(elapsedNanos / 1_000_000_000.0);
-        actualForward.set(elapsedNanos / 1000.0);
-        plannedForward.set(plannedNanos / 1000.0);
+    }
+
+    private void observePositive(String name, long value) {
+        if (value > 0) events.observe(name, value);
+    }
+
+    void stepCompleted(StepStats step) {
+        long executionNanos = prefill ? step.scheduleToCompletionNanos() : step.stepNanos();
+        if (step.forwardNanos() < 0 || step.plannedNanos() < 0 || step.input() < 0 || step.computed() < 0
+            || step.computed() > step.input() || step.output() < 0 || executionNanos < 0 || step.stepNanos() < 0
+            || step.proposed() < 0 || step.accepted() < 0 || step.speculativeStreams() < 0
+            || (step.proposed() > 0 && (step.speculativeStreams() == 0 || step.accepted() < step.speculativeStreams())))
+            throw new IllegalArgumentException("Invalid step observation");
+        recordBatch(step.context(), step.generate(), step.proposed() > 0 ? step.accepted() : step.computed(), step.maxSequence());
+        recordStepLatency(step.stepNanos(), step.proposed(), step.accepted(), step.speculativeStreams());
+        long tpsTokens = prefill ? step.computed() : step.proposed() > 0 ? step.accepted() : step.output();
+        recordForward(step, executionNanos, tpsTokens);
+    }
+
+    private void recordStepLatency(long elapsedNanos, long proposed, long accepted, long speculativeStreams) {
+        positiveMicros("rtp_llm_step_latency_us", elapsedNanos);
+        if (prefill || proposed == 0) return;
+        double micros = elapsedNanos / 1000;
+        double acceptedPerStream = (double) accepted / speculativeStreams;
+        events.observe("rtp_llm_sp_step_latency_us", micros);
+        events.observe("rtp_llm_sp_total_propose_token_num", proposed);
+        events.observe("rtp_llm_sp_total_accepted_token_num", accepted);
+        events.observe("rtp_llm_sp_avg_accept_token_num", acceptedPerStream);
+        events.observe("rtp_llm_sp_avg_accept_rate", (double) accepted / (proposed + speculativeStreams));
+        events.observe("rtp_llm_sp_avg_fix_accept_rate", (double) (accepted - speculativeStreams) / proposed);
+        events.observe("rtp_llm_sp_estimate_tpot_us", micros / acceptedPerStream);
+    }
+
+    private void recordForward(StepStats step, long executionNanos, long tpsTokens) {
+        synchronized (observations) {
+            if (tpsTokens > 0) {
+                windowTpsTokens += tpsTokens;
+                windowTpsNanos += executionNanos;
+            }
+            windowInput += step.input(); windowComputed += step.computed();
+            if (step.computed() > 0) {
+                windowComputeNanos += executionNanos;
+                if (prefill) contextSeconds.inc(step.forwardNanos() / 1_000_000_000.0);
+            }
+            if (step.input() > 0) {
+                windowInputNanos += executionNanos;
+                if (prefill) contextWithCacheSeconds.inc(step.forwardNanos() / 1_000_000_000.0);
+            }
+            tokens.get("input").inc(step.input()); tokens.get("compute").inc(step.computed()); tokens.get("output").inc(step.output());
+        }
+        forward.observe(step.forwardNanos() / 1_000_000_000.0);
+        // Compatibility baseline: production MTP Decode does not emit this collector field.
+        if (prefill && step.forwardNanos() > 0) events.observe("rtp_llm_model_forward_us", step.forwardNanos() / 1000.0);
+        actualForward.set(step.forwardNanos() / 1000.0);
+        plannedForward.set(step.plannedNanos() / 1000.0);
     }
     public List<Collector.MetricFamilySamples> collect() { return MetricTags.collect(registry, tags); }
     public String scrape() { return MetricTags.scrape(registry, tags); }

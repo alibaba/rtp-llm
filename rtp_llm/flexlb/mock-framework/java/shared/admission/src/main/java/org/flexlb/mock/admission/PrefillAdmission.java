@@ -234,8 +234,6 @@ final class PrefillAdmission implements AutoCloseable {
         }
     }
     void checkHealthy() { engine.checkHealthy(); }
-    java.util.List<io.prometheus.client.Collector.MetricFamilySamples> collectMetrics() { return engine.collectMetrics(); }
-    String scrapeMetrics() { return engine.scrapeMetrics(); }
 
     void generate(GenerateInputPB input, StreamObserver<GenerateOutputsPB> observer) {
         var response = (ServerCallStreamObserver<GenerateOutputsPB>) observer;

@@ -280,7 +280,11 @@ RTP 后端的 RtpMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独
 | rtp_llm_host_kv_tokens | Gauge | 本地 Host total/free token 容量，与 Device 分开。 |
 | rtp_llm_cache_lookup_tokens_total / rtp_llm_cache_hit_tokens_total | Counter | 分配时实际输入/历史命中 token，取消不撤销已发生查找。 |
 | rtp_llm_forward_tokens_total | Counter，kind=input/compute/output | 完成 Forward 的 token；input/compute 汇总本批全部执行成员，output 只计有效提交。全部取消的 Forward 不补完成样本。 |
-| rtp_llm_model_forward_us | Gauge | 最近一个完成 Forward 的实际耗时，微秒；计时到执行完成通知，不包含等待调度域锁和结果提交。 |
+| rtp_llm_model_forward_us | Gauge | Prefill 完成 Forward 的采集窗口均值，微秒。当前生产 MTP 兼容口径下 Decode 缺席。 |
+| rtp_llm_step_latency_us | Gauge | P/D 完成的非空执行步耗时，微秒，从调度返回到处理完本轮输出。 |
+| rtp_llm_{context,generate,total}_tps | Gauge | 有效执行时间内的 token/s。P 的 context 计未命中计算量，with_cache 计输入；D 的 draft 模型计停止条件截断前的验收量（含 bonus）。 |
+| rtp_llm_sp_* | Gauge | 仅 D 的 draft 模型记录步耗时、提议/验收、每流验收、接受率及估计 TPOT。估计 TPOT 为步耗时除以每流平均验收量。 |
+| mock_model_forward_actual_us | Gauge | P/D 最近一次完成 Forward 的模拟实际耗时，微秒，用于与计划值对照。 |
 | mock_model_forward_planned_us | Gauge | 同一个完成 Forward 的计划耗时，微秒，包含公式和可选噪声。 |
 | rtp_llm_model_forward_seconds | Histogram | 完成 Forward 实际耗时秒，含 bucket/sum/count，排除排队，不是 TTFT。 |
 | rtp_llm_scheduler_requests | Gauge，state=waiting/running/loading/ready | 调度器报告的四类互斥请求数。 |
@@ -288,15 +292,15 @@ RTP 后端的 RtpMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独
 
 RTP 原生观测直接导出：`rtp_llm_wait_stream_size`、`rtp_llm_running_stream_size`、`rtp_llm_kv_cache_left_seq`（Tokens）、`rtp_llm_kv_cache_{total,free,available,used,active}_blocks`（Blocks）和 `rtp_llm_kv_cache_used_ratio`（0–100，不可用比例）。Host 暂只上报 total/free/used Blocks，不用 free 冒充 available。loading/ready 仍是调度器阶段辅助观测，不冒充 real 的加载缓存队列。
 
-Prefill 的 context TPS 用计算 Tokens／执行时间，含缓存 TPS 用输入 Tokens／执行时间；墙钟 TPS 用对应 Tokens／实际窗口。Decode generate TPS 统计提交的输出 Tokens，total TPS 统计模型计算 Tokens，二者在投机采样时不同。`rtp_llm_framework_qps` 统计终态，不是接纳；error 包含 timeout，cancel 单列。上述速率 Gauge 的窗口是两次采集间的单调时钟间隔，无后台采样线程；空闲窗口报告零。real 默认按后台周期报告，窗口边界可能不同，不能要求逐点相等。
+Prefill 的 context TPS 用计算 Tokens／执行时间，含缓存 TPS 用输入 Tokens／执行时间；墙钟 TPS 用对应 Tokens／实际窗口。纯 Decode 的 generate/total TPS 使用同一执行时间口径。显式 draft 模型计停止条件截断前的验收量（含 bonus），普通 Decode 计输出量。实际提交的输出墙钟 TPS 使用输出 Counter 单独计算。`rtp_llm_framework_qps` 统计终态，不是接纳；error 包含 timeout，cancel 单列。上述速率 Gauge 的窗口是两次采集间的单调时钟间隔，无后台采样线程；空闲窗口报告零。real 默认按后台周期报告，窗口边界可能不同，不能要求逐点相等。
 
 没有 real 同名指标的真实观测，以 RTP Prometheus 辅助 Counter/Histogram 保留供 Python 门禁和统计使用，不拿它们的累计值直接冒充线上 QPS/TPS Gauge。理论 Forward、ViT 运行图片数和 hash 缓存预算保留 `mock_` 前缀。此次更名不保留旧 `mock_engine_*` 别名；旧实验保持原始 view.json 和 TSDB，不承诺新查询可以直接读取旧指标名。
 
-P/D 已补 `rtp_llm_{context,generate}_batch_size`、执行 Token 数、最长序列、逐请求等待/首 Token/总延迟、输入/输出长度与迭代数；缓存加载延迟只用于真实缓存准备阶段，不用 Decode 的 PD 协议等待代替。Query batch 的 native 语义是 beam 数，不能用调度批大小代替。
+P/D 已补 `rtp_llm_{context,generate}_batch_size`、执行 Token 数、最长序列、逐请求等待/首 Token/总延迟、输入/输出长度与迭代数；main 的本地缓存加载同步完成，未导出异步缓存加载耗时。Query batch 的 native 语义是 beam 数，不能用调度批大小代替。
 
-ViT 使用相同的物理元数据与 Prometheus instance 发现；QPS、Embedding 队列/等待/Forward/合批、请求图片数/输出长度，以及缓存命中/未命中/在途合并/淘汰和逻辑驻留量均按 real 名称导出。下载分别上报 real 的 `py_rtp_vit_download_rt`（ms）与 `rtp_llm_vit_image_fetch_rt_us`（μs）。请求总耗时、就绪等待加计算、Forward 分别统计，命中不制造计算耗时；跳过下载及未模拟的预处理子进程、CUDA Graph 不补零。详见 [指标覆盖与边界](../views/README.md)。
+ViT 使用相同的物理元数据与 Prometheus instance 发现；QPS、Embedding 队列/等待/Forward/合批、请求图片数/输出长度，以及缓存命中/未命中/在途合并/淘汰和逻辑驻留量均按 real 名称导出。实际读取时提供 rtp_llm_vit_image_fetch_rt_us（μs）；成功完成图片准备后采样总耗时、下载及其余耗时（ms）。其余耗时包括读尺寸、内容摘要和几何计算。跳过读取时这些指标无样本。py_rtp_vit_preprocess_queue_size 是尚未完成准备的工作数（含排队和执行），py_rtp_vit_embedding_rt 仅计成功工作的就绪排队加 Forward，py_rtp_vit_request_rt 覆盖阻塞媒体调用的成功/失败全程，包括缓存命中等待但不含 RPC 传输和输出编码。未实现的像素预处理和 CUDA Graph 指标不补零。详见 [指标覆盖与边界](../views/README.md)。
 
-新增事件 Gauge 为采集窗口均值，无事件的窗口不发耗时样本；其 `_sum` / `_count` 辅助累计量不清零。QPS 使用真实窗口秒数换算，空闲归零；窗口与 KMonitor 固定周期不保证逐点相同。原有 Forward 最近值与 Histogram 口径保持不变。
+新增事件 Gauge 为采集窗口均值，无事件的窗口不发耗时样本；其 `_sum` / `_count` 辅助累计量不清零。QPS 使用真实窗口秒数换算，空闲归零；窗口与 KMonitor 固定周期不保证逐点相同。Forward 最近值统一使用 `mock_model_forward_actual_us`，Histogram 仍以秒记录完成的模拟 Forward。下表的 `engine/decode/tps` 用于衡量按墙钟计的已提交输出 token 速率。
 
 累计量预建 0，抓取不清零；分母为 0 不补比率。以下查询在 Python `interfaces/metrics.py` 实现，直接调用本次托管 Prometheus：
 
