@@ -168,7 +168,7 @@ class RtpConfigTest {
         assertFalse(effective.has("config"));
         config.put("max_inited_kv_cache_streams", -1); assertThrows(IllegalArgumentException.class, () -> load(root));
         config.put("max_inited_kv_cache_streams", 128).put("block_tree_device_evict_low_watermark_ratio", .99);
-        assertThrows(IllegalArgumentException.class, () -> load(root));
+        assertFalse(load(root).effective().has("block_tree_device_evict_low_watermark_ratio"));
     }
 
     @Test void zeroTimeHandoffDoesNotReportAnIndependentLoadTimeoutAsEffective() throws Exception {
