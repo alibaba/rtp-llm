@@ -43,13 +43,13 @@ class EngramTransitionCudaTest(unittest.TestCase):
                 )
 
     def make_pair(self, m):
-        from rtp_llm.models_py.modules.dsv41.test.test_v41_mega_mhc import make_case
-        from rtp_llm.models_py.modules.dsv41.engram import gated_engram_residual
-        from rtp_llm.models_py.modules.dsv41.hc.engram_cuda import State
-        from rtp_llm.models_py.modules.dsv41.hc.v41_prenorm import prepare_tf32_weight
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
             sgl_per_token_group_quant_fp8_v3,
         )
+        from rtp_llm.models_py.modules.dsv41.engram import gated_engram_residual
+        from rtp_llm.models_py.modules.dsv41.hc.engram_cuda import State
+        from rtp_llm.models_py.modules.dsv41.hc.v41_prenorm import prepare_tf32_weight
+        from rtp_llm.models_py.modules.dsv41.test.test_v41_mega_mhc import make_case
 
         case = make_case((m,))
         previous, next_hc = case["previous"], case["next_hc"]
@@ -93,9 +93,12 @@ class EngramTransitionCudaTest(unittest.TestCase):
 
     @torch.inference_mode()
     @patch.dict(
-        os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "auto", "DSV4_FP8_QUANT_KERNEL": "v3"}
+        os.environ,
+        {"DSV4_MHC_PRE_GEMM_BACKEND": "auto", "DSV4_FP8_QUANT_KERNEL": "auto"},
     )
     def test_eager_and_graph_all_tile_and_split_boundaries(self):
+        # Auto dispatch selects v3 for these dense BF16/group32 inputs;
+        # "v3" itself is not a supported dispatch-policy setting.
         # Cover all twelve WKV configurations and all eight resident Pre split counts.
         for m in (
             1,
