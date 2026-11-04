@@ -168,7 +168,8 @@ async def launch_component(supervisor, records, environment, role, index, recipe
             raise ExecutionError(f'Invalid readiness file for {name}')
         return value['url']
     control = await supervisor.guard(await_ready(), float(duration(recipe['startup_timeout'])))
-    records.emit(event='process_ready', node=process, url=control)
+    records.emit(event='process_ready', node=process, url=control, role=role,
+                 instance_id=name, generation=attempt)
     path = directory / 'endpoints.json'
     endpoint = json.loads(path.read_text()) if path.is_file() else None
     return control, endpoint
