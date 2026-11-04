@@ -119,15 +119,16 @@ PROMETHEUS_BIN="$PROMETHEUS_BIN" ./scripts/test-framework.sh
 
 `test-framework.sh` 会先调用 `build-java.sh`，再运行 Python 测试。缺少 Prometheus 时会跳过真实采集集成测试；macOS 缺少回环别名时跳过双 Master 测试。报告检查结果时说明跳过项，测试通过不代替完整 Case 验收。
 
-## CI 基础 Case
+## CI Case
 
-CI 使用预制的 CPU 测试环境，每次检出待测源码，干净构建一次后运行同一个 `cases/basic/case.yaml`：
+CI 使用预制的 CPU 测试环境，每次检出待测源码，干净构建一次后运行所选 Case：
 
 ```sh
-./scripts/run-ci-case.sh /absolute/path/to/new-output
+./scripts/build-ci-case.sh /absolute/path/to/mock-case-runtime.tar.gz
+./scripts/run-ci-case.sh basic /absolute/path/to/mock-case-runtime.tar.gz /absolute/path/to/new-output
 ```
 
-预先设置 `JAVA_HOME`、`PROMETHEUS_BIN`，并准备 uv 依赖缓存。脚本离线安装锁定的 Python 依赖，清理 Maven 构建输出，禁用内部构建 profile，再构建并执行 Case。此脚本跳过 Java 单测执行，但编译测试代码；需要执行 Java 单测时使用 `scripts/build-java.sh`。Case 失败或执行错误以非零状态退出；产物目录包含构建日志、启动配方和完整实验结果。SIGTERM 会进入取消和进程清理流程。
+构建脚本使用 Java 21，清理旧 Maven 产物，禁用内部构建 profile，编译 Java 并打包可在其他 worker 使用的运行产物。Case 脚本需要 `JAVA_HOME`、`PROMETHEUS_BIN` 和 uv 依赖缓存，离线安装锁定依赖后运行指定 Case。输出目录保存启动配方和完整实验结果。SIGTERM 会进入取消和进程清理流程。Java 单测请用 `scripts/build-java.sh` 执行。
 
 预制环境在源码仓库根目录构建：
 
@@ -137,9 +138,9 @@ docker build -f rtp_llm/flexlb/mock-framework/docker/ci-case-env.Dockerfile -t m
 
 镜像包含 JDK 21、Python 3.12.12、uv、Prometheus 3.5.0，以及 Python/Maven 依赖缓存。预热阶段的 Mock 源码、JAR 和 class 不进入最终镜像。项目依赖变化时重建预制镜像；Python 缓存缺失会明确失败，不在每次 Job 中下载。Maven 新增依赖仍可按 Maven 仓库配置下载。
 
-外层内部仓库的 `.aoneci/image-base.yaml` 提供 `mock-ci-image` 任务，通过 `mock-ci-image=true` 构建并发布预制镜像；同时将其他不需要的镜像开关设为 false，并指定待测源码的 `github_commit` 和 `github_source_repo`。在 `.aoneci/main.yaml` 使用 `pre-jobs=["mock-ci-case"]` 和 `mock-case-image=<已发布的固定版本或 digest>` 单独运行 `mock-ci-case`。两者复用现有源码检出和产物上传能力，不启动 Whale 镜像构建。
+外层内部仓库的 `.aoneci/image-base.yaml` 提供 `mock-ci-image` 任务，通过 `mock-ci-image=true` 构建并发布预制镜像；同时将其他不需要的镜像开关设为 false，并指定待测源码的 `github_commit` 和 `github_source_repo`。在 `.aoneci/main.yaml` 使用 `pre-jobs=["mock-ci-case"]`，传入 `mock-case-image=<已发布的固定版本或 digest>`。可用 `mock-cases=["basic","master_ha_failover"]` 同时选择两个 Case，省略时只跑 `basic`。
 
-基础 Job 会先上传成功或失败的结果，再传播 Case 退出码。首次验证采用显式选择，尚未加入默认 MR 门禁列表；发布并验证预制镜像后，固定镜像版本并将 `mock-ci-case` 加入默认 `pre-jobs` 才会自动阻断 MR。
+`mock-ci-case-build` 构建一次，选中的 Case 各用一个 Job，可由 AoneCI 并行调度。每个 Job 上传独立报告，再传播 Case 的退出码。Mock Case 未加入默认 MR 门禁。
 
 Case 使用本次独占的 Prometheus。若误用 KMonitor Engine 产物，采集启动阶段会明确报错，不回退或同时启用两个后端。Whale 镜像打包和自动上报规则保持不变。
 
