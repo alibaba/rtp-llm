@@ -23,6 +23,14 @@ objects through their fingerprints (the build validated the values once with
 the legacy ``torch.equal`` chain), replacing the per-layer value comparison
 that hid host synchronizations.
 
+``RTP_LLM_DEVICE_INPUT=1`` engines keep ``input_lengths``/``prefix_lengths``
+on the device.  :func:`host_input_mirror` reads such a source back exactly
+once per model step (keyed by the source tensor's identity and guarded by
+its fingerprint) so the gate, the plan build, the hit validation, the
+per-layer dispatch checks and the FMHA input planning all consume host
+values without per-layer synchronizations.  Host sources pass through with
+zero copies.
+
 ``RTP_LLM_QSA_STRICT_VALIDATION=1`` bypasses the cache entirely: every call
 rebuilds through the legacy per-check host validation chain with its exact
 diagnostics, so tests and CI keep per-call semantics.
@@ -88,12 +96,13 @@ _STEP_PLAN_STATS = {"hits": 0, "misses": 0, "invalidations": 0}
 
 def step_plan_cache_stats() -> dict:
     """Cache counters for benches and diagnostics (hits/misses/invalidations)."""
-    return dict(_STEP_PLAN_STATS)
+    return dict(_STEP_PLAN_STATS, mirror_readbacks=_MIRROR_STATS["readbacks"])
 
 
 def clear_step_plan_cache() -> None:
     """Drop every cached plan (tests isolate cases that share inputs objects)."""
     _STEP_PLAN_CACHE.clear()
+    _MIRROR_CACHE.clear()
 
 
 def _tensor_fingerprint(tensor: Any) -> tuple[int, int] | None:
@@ -108,6 +117,60 @@ def _tensor_fingerprint(tensor: Any) -> tuple[int, int] | None:
         # the fingerprinted metadata tensors in place.
         return (int(tensor.data_ptr()), -1)
     return (int(tensor.data_ptr()), int(tensor._version))
+
+
+# Per-step CPU mirrors for the [B] metadata tensors that
+# ``RTP_LLM_DEVICE_INPUT=1`` engines keep on the device (input_lengths /
+# prefix_lengths).  The P3 gate, the plan build and the per-layer hit
+# validation all need those values; a device source is read back exactly once
+# per step and every later read of the same (inputs object, attribute) pair
+# reuses the mirror without synchronizing.
+# One model step's working set is up to 12 source tensors (target + MTP
+# draft forward, each with three cache-region inputs objects carrying
+# prefix_lengths/input_lengths); a handful of recent steps makes the bound
+# below comfortably exceed it, so the layers of one step never evict each
+# other's mirrors.
+_MIRROR_CACHE_LIMIT = 64
+_MIRROR_CACHE: "OrderedDict[tuple, tuple[Any, torch.Tensor, tuple]]" = OrderedDict()
+_MIRROR_STATS = {"readbacks": 0}
+
+
+def host_input_mirror(main_inputs: Any, name: str) -> torch.Tensor | None:
+    """CPU mirror of a small metadata tensor on the inputs object.
+
+    Host sources pass through unchanged (the exact tensor, zero copies).  A
+    device source is read back once per step: the mirror is keyed by the
+    source tensor's identity and validated by its fingerprint, so every reader
+    of the same tensor (the gate, the plan build, the per-layer dispatch
+    checks and the three cache regions, which share one inputs tensor per
+    attribute) reuses a single readback, and a fresh step that materialises
+    new tensors refreshes it.  In-place device edits that keep the same storage
+    are outside the fingerprint's reach -- the same bet the plan fingerprints
+    already make (the engine materialises fresh inference tensors per step and
+    the runtime never rewrites the fingerprinted metadata tensors in place).
+    """
+    tensor = getattr(main_inputs, name, None)
+    if not isinstance(tensor, torch.Tensor):
+        return None
+    if tensor.device.type == "cpu":
+        return tensor
+    fingerprint = _tensor_fingerprint(tensor)
+    key = id(tensor)
+    entry = _MIRROR_CACHE.get(key)
+    if entry is not None:
+        owner, mirror, cached = entry
+        if owner is tensor and cached == fingerprint:
+            _MIRROR_CACHE.move_to_end(key)
+            return mirror
+        del _MIRROR_CACHE[key]
+    mirror = tensor.detach().to("cpu").contiguous()
+    _MIRROR_STATS["readbacks"] += 1
+    # The entry holds the source tensor alive so its id stays unique while
+    # the mirror exists.
+    _MIRROR_CACHE[key] = (tensor, mirror, fingerprint)
+    while len(_MIRROR_CACHE) > _MIRROR_CACHE_LIMIT:
+        _MIRROR_CACHE.popitem(last=False)
+    return mirror
 
 
 def rope_signature(rope_config: Any) -> tuple:
@@ -291,11 +354,18 @@ def _step_plan_applies(
     for name, fingerprint in plan.source_fingerprints.items():
         if _tensor_fingerprint(getattr(context.main_inputs, name, None)) != fingerprint:
             return False
-    lengths = [int(value) for value in context.main_inputs.input_lengths.tolist()]
-    if lengths != plan.lengths:
+    # Per-step CPU mirrors: a device source (RTP_LLM_DEVICE_INPUT) was read
+    # back once for this step; the layers of one step compare host values
+    # without another synchronization.
+    lengths_mirror = host_input_mirror(context.main_inputs, "input_lengths")
+    if lengths_mirror is None:
         return False
-    prefixes = [int(value) for value in context.main_inputs.prefix_lengths.tolist()]
-    if prefixes != plan.prefix_values:
+    if [int(value) for value in lengths_mirror.tolist()] != plan.lengths:
+        return False
+    prefixes_mirror = host_input_mirror(context.main_inputs, "prefix_lengths")
+    if prefixes_mirror is None:
+        return False
+    if [int(value) for value in prefixes_mirror.tolist()] != plan.prefix_values:
         return False
     if (plan.kv_tokens_per_block, plan.state_tokens_per_block) != (
         int(context.indexer_kv_cache.seq_size_per_block),
@@ -477,18 +547,21 @@ def build_incremental_step_plan(
             f"the {token_count} packed draft tokens"
         )
 
-    prefixes_host = main_inputs.prefix_lengths
+    prefix_source = main_inputs.prefix_lengths
     if (
-        prefixes_host.dim() != 1
-        or int(prefixes_host.numel()) != batch_size
-        or prefixes_host.dtype != torch.int32
+        prefix_source.dim() != 1
+        or int(prefix_source.numel()) != batch_size
+        or prefix_source.dtype != torch.int32
     ):
         raise RuntimeError(
             "qwen4_exp QSA draft incremental prefill requires int32 "
             "prefix_lengths [B]"
         )
-    # Request-data checks stay on the pinned host mirror (free fail-fast) and
-    # the host values replace every later device readback of the prefixes.
+    # Request-data checks stay on the CPU mirror (free fail-fast) and the
+    # host values replace every later device readback of the prefixes.  A
+    # device source (RTP_LLM_DEVICE_INPUT) is read back once per step; the
+    # device copies below cast the source tensor without a host round trip.
+    prefixes_host = host_input_mirror(main_inputs, "prefix_lengths")
     prefix_values = prefixes_host.tolist()
     invalid_prefix = any(
         value <= 0 if draft else value < 0 for value in prefix_values
@@ -499,10 +572,10 @@ def build_incremental_step_plan(
             f"qwen4_exp QSA {label} requires every prefix length to be "
             f"{requirement}"
         )
-    prefixes = prefixes_host.to(
+    prefixes = prefix_source.to(
         device=device, dtype=torch.int64, non_blocking=True
     ).contiguous()
-    prefixes_i32 = prefixes_host.to(
+    prefixes_i32 = prefix_source.to(
         device=device, dtype=torch.int32, non_blocking=True
     ).contiguous()
     input_lengths_i32 = main_inputs.input_lengths.to(
@@ -850,7 +923,9 @@ def build_cold_step_plan(
         or prefix_tensor.dtype != torch.int32
     ):
         raise RuntimeError("qwen4_exp QSA prefill requires int32 prefix_lengths [B]")
-    prefix_values = prefix_tensor.tolist()
+    # Device sources (RTP_LLM_DEVICE_INPUT) read back once per step; host
+    # sources pass through.  The device cast below uses the source tensor.
+    prefix_values = host_input_mirror(main_inputs, "prefix_lengths").tolist()
     start_positions = prefix_tensor.to(
         device=device, dtype=torch.int64, non_blocking=True
     ).contiguous()

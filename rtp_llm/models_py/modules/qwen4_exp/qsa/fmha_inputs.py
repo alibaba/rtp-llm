@@ -10,6 +10,7 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
     qsa_strict_validation_enabled,
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+    host_input_mirror,
     lookup_prefill_step_plan,
 )
 from rtp_llm.ops.compute_ops import LayerKVCache
@@ -287,15 +288,19 @@ def _prepare_incremental_prefill_inputs(
     batch = int(input_lengths.numel())
     if batch <= 0 or int(prefixes.numel()) != batch:
         raise ValueError("qwen4_exp incremental prefill lengths and prefixes disagree")
-    # Request-data checks run on the pinned host mirrors; free fail-fast.
-    if bool(torch.any(input_lengths <= 0)):
+    # Request-data checks run on the per-step CPU mirrors; a device source
+    # (RTP_LLM_DEVICE_INPUT) was already read back once this step by the
+    # gate/plan build, so these fail-fast checks stay host-side and free.
+    lengths_mirror = host_input_mirror(self.attn_inputs, "input_lengths")
+    prefix_mirror = host_input_mirror(self.attn_inputs, "prefix_lengths")
+    if bool(torch.any(lengths_mirror <= 0)):
         raise ValueError("qwen4_exp incremental prefill input lengths must be positive")
-    if bool(torch.any(prefixes < 0)):
+    if bool(torch.any(prefix_mirror < 0)):
         raise ValueError("qwen4_exp incremental prefill prefixes must be non-negative")
     # The frozen step plan (when this step's QSA pass produced one) replaces
     # the device mirrors, the cu reconstruction and the per-request KV rows.
-    lengths_list = input_lengths.tolist()
-    prefix_list = prefixes.tolist()
+    lengths_list = lengths_mirror.tolist()
+    prefix_list = prefix_mirror.tolist()
     step = lookup_prefill_step_plan(self.attn_inputs, sum(lengths_list))
     if (
         step is not None
