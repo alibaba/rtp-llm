@@ -34,6 +34,8 @@ http_archive(
     name = "fmt",
     urls = ["https://github.com/fmtlib/fmt/archive/refs/tags/9.1.0.tar.gz"],
     strip_prefix = "fmt-9.1.0",
+    build_file = "//3rdparty/fmt:BUILD",
+    sha256 = "5dea48d1fcddc3ec571ce2058e13910a0d4a6bab4cc09a809d8b1dd1c88ae6f2",
 )
 
 load("//3rdparty/cuda_config:cuda_configure.bzl", "cuda_configure")
