@@ -296,3 +296,16 @@ custom_smoke_test(
     tags = ["dsv41_cuda13", "model_contract", "dspark_contract"],
     data = ["//rtp_llm:sdk", "deepseek_v41_contract_test.py"],
 )
+
+# Non-speculative SM103 x86 twin: the same request contract without
+# --sp_type dspark. It exists as a control for the shared decode path - a
+# prefix-reuse mismatch that reproduces here as well is not DSpARK's - and as
+# plain decode coverage for the single-node SM103 lane.
+custom_smoke_test(
+    name = "deepseek_v41_flash_tp4_ep4_graph_sm103_x86",
+    main = "deepseek_v41_contract_test.py",
+    smoke_args = "--tp_size 4 --ep_size 4 --dp_size 1 --world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --enable_cuda_graph 1 --reuse_cache 1 --load_method fastsafetensors --reserver_runtime_mem_mb 32768 --use_local 1 --cache_store_rdma_mode 0",
+    gpu_type = [cuda13_x86_test_gpu()],
+    tags = ["dsv41_cuda13", "model_contract", "no_dspark_control"],
+    data = ["//rtp_llm:sdk", "deepseek_v41_contract_test.py"],
+)
