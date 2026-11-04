@@ -295,7 +295,7 @@ def test_native_restart_preserves_address_and_refreshes_only_current_discovery(t
             step('killed', 'master/stop', args={'targets': {'ref': 'steps.a'}, 'mode': 'kill'}),
             step('restored', 'master/restart', args={'targets': {'ref': 'steps.a'}}, within='60s', wait_after='2s'),
             step('leader', 'master/get', args={'is_leader': True}, expect={'eq': {'ref': 'steps.a'}}),
-            step('added', 'engine/scale_out', args={'role': 'prefill', 'count': 1}, expect={'count': 1})])])
+            step('added', 'engine/scale', args={'direction': 'out', 'role': 'prefill', 'count': 1}, expect={'count': 1})])])
     source = tmp_path / 'case.yaml'; source.write_text(yaml.safe_dump(document))
     registry = Registry.standard(); case = compile_case(source, registry)
     launch = local_launch(case, Path(os.environ['JAVA_HOME']) / 'bin/java', os.environ['PROMETHEUS_BIN'], framework=root)
