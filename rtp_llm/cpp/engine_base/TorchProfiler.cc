@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/AsyncProfileTrace.h"
 #include "autil/TimeUtility.h"
 #include <c10/core/impl/VirtualGuardImpl.h>
 #include <algorithm>
@@ -92,6 +93,18 @@ std::unique_ptr<tap::ProfilerResult> tryDisableProfiler(DisableProfilerFn       
 
 // ---- TorchProfile ----
 
+void CollectedProfile::save(const std::string& path) {
+    kineto->save(path);
+    try {
+        appendAsyncProfileTrace(path, async_events);
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR(
+            "failed to append cache transfer events; native trace retained at %s: %s", path.c_str(), e.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("failed to append cache transfer events; native trace retained at %s", path.c_str());
+    }
+}
+
 std::atomic<size_t> TorchProfile::count_{0};
 
 TorchProfile::TorchProfile(const std::string& prefix, std::string output_dir):
@@ -118,7 +131,7 @@ void TorchProfile::start() {
     async_profile_ = AsyncProfileSession::start();
 }
 
-std::pair<std::unique_ptr<tap::ProfilerResult>, std::string> TorchProfile::stopAndCollect() {
+std::pair<std::unique_ptr<CollectedProfile>, std::string> TorchProfile::stopAndCollect() {
     if (stopped_) {
         return {nullptr, ""};
     }
@@ -126,7 +139,8 @@ std::pair<std::unique_ptr<tap::ProfilerResult>, std::string> TorchProfile::stopA
     // trace. Mark this wrapper stopped first so an exception is never retried
     // from the destructor.
     stopped_ = true;
-    auto res = detail::tryDisableProfiler(&tap::disableProfiler, [this] {
+    std::vector<AsyncProfileEvent> async_events;
+    auto res = detail::tryDisableProfiler(&tap::disableProfiler, [this, &async_events] {
         try {
             drainProfileDevice(profile_device_);
         } catch (...) {
@@ -137,11 +151,14 @@ std::pair<std::unique_ptr<tap::ProfilerResult>, std::string> TorchProfile::stopA
             throw;
         }
         if (async_profile_) {
-            const auto events = async_profile_->finish();
-            async_profile_.reset();
-            for (const auto& event : events) {
-                tap::reportBackendEventToActiveKinetoProfiler(
-                    event.start_us, event.end_us, -1, at::RecordScope::FUNCTION, event.name, "RTP-LLM cache transfer");
+            auto session = std::move(async_profile_);
+            try {
+                async_events = session->finish();
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_ERROR("failed to collect cache transfer events; retaining native capture: %s", e.what());
+            } catch (...) {
+                RTP_LLM_LOG_ERROR(
+                    "failed to collect cache transfer events; retaining native capture");
             }
         }
     });
@@ -149,7 +166,10 @@ std::pair<std::unique_ptr<tap::ProfilerResult>, std::string> TorchProfile::stopA
         return {nullptr, ""};
     }
     std::string file_name = output_dir_ + "/" + prefix_ + std::to_string(count_) + ".json";
-    return {std::move(res), std::move(file_name)};
+    auto        collected   = std::make_unique<CollectedProfile>();
+    collected->kineto       = std::move(res);
+    collected->async_events = std::move(async_events);
+    return {std::move(collected), std::move(file_name)};
 }
 
 void TorchProfile::stop() {
@@ -172,7 +192,7 @@ ProfilerSaveWorker::~ProfilerSaveWorker() {
     thread_.join();
 }
 
-void ProfilerSaveWorker::enqueue(std::unique_ptr<tap::ProfilerResult> result, std::string file_name) {
+void ProfilerSaveWorker::enqueue(std::unique_ptr<CollectedProfile> result, std::string file_name) {
     {
         std::lock_guard<std::mutex> lock(mu_);
         tasks_.push({std::move(result), std::move(file_name)});

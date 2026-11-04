@@ -1012,6 +1012,7 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
                                    std::optional<int64_t>(request.mem_request().transfer_request_id()) :
                                    std::nullopt);
     transfer_task.setTraceId(request.mem_request().transfer_trace_id());
+    transfer_task.setWorkflow(request.mem_request().transfer_workflow_id(), request.mem_request().transfer_parent_id());
     const auto status = block_tree_cache_->executeTransfer(std::move(transfer_task));
     BlockTransferRequestConverter::encodeTransferResult(*memory_response, status);
     if (!status.ok()) {

@@ -146,7 +146,7 @@ DeviceDiskTransferExecutor::executeDiskToDevice(TransferTask task, const std::ve
         auto       batch_timer = TransferStageTimer::create(
             metrics_reporter_, "worker_batch_total", request_id, begin, end, world_rank_, "worker_batch", transfer_id);
         auto staging_timer = TransferStageTimer::create(
-            metrics_reporter_, "staging_wait", request_id, begin, end, world_rank_, "worker_batch", transfer_id);
+            metrics_reporter_, "staging_wait", request_id, begin, end, world_rank_, "worker_batch", transfer_id, {}, AsyncProfileKind::Wait);
         pool->requestBatch(
             end - begin,
             deadline,
@@ -187,7 +187,9 @@ DeviceDiskTransferExecutor::executeDiskToDevice(TransferTask task, const std::ve
                                                                        end,
                                                                        world_rank_,
                                                                        "worker_batch",
-                                                                       transfer_id);
+                                                                       transfer_id,
+                                                                       {},
+                                                                       AsyncProfileKind::Wait);
                 auto on_timeout = [this, stage_state, indices, begin, end, queue_begin, queue_timer, batch_timer]() {
                     queue_timer.finish(false);
                     batch_timer.finish(false);
@@ -316,7 +318,7 @@ std::shared_ptr<TransferAsyncContext> DeviceDiskTransferExecutor::executeDeviceT
     auto            total         = TransferStageTimer::create(
         metrics_reporter_, "worker_batch_total", request_id, 0, 1, world_rank_, "worker_batch", transfer_id, identity);
     auto staging = TransferStageTimer::create(
-        metrics_reporter_, "staging_wait", request_id, 0, 1, world_rank_, "worker_batch", transfer_id, identity);
+        metrics_reporter_, "staging_wait", request_id, 0, 1, world_rank_, "worker_batch", transfer_id, identity, AsyncProfileKind::Wait);
     const auto complete = [context, total](TransferResult result) {
         total.finish(result.ok());
         context->complete(std::move(result));
@@ -347,7 +349,8 @@ std::shared_ptr<TransferAsyncContext> DeviceDiskTransferExecutor::executeDeviceT
                                                                    world_rank_,
                                                                    "worker_batch",
                                                                    transfer_id,
-                                                                   identity);
+                                                                   identity,
+                                                                   AsyncProfileKind::Wait);
             auto          on_timeout  = [this, complete, queue_begin, queue]() {
                 queue.finish(false);
                 if (metrics_reporter_ != nullptr) {

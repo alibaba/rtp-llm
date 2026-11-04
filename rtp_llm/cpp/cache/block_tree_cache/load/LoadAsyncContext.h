@@ -58,6 +58,12 @@ public:
     std::optional<int64_t> requestId() const {
         return request_id_;
     }
+    uint64_t workflowId() const {
+        return backend_task_.traceId();
+    }
+    void traceDependency(uint64_t owner_workflow) const noexcept {
+        AsyncProfileSession::taskLink(workflowId(), workflowId(), 0, request_id_.value_or(-1), "load", owner_workflow);
+    }
     size_t localMatchedBlocks() const;
     size_t matchedBlocks() const;
     size_t matchedBlocks(Tier tier) const;
@@ -112,8 +118,6 @@ private:
     ErrorInfo completionErrorLocked() const;
     void notifyCompletion();
 
-    ErrorInfo completionErrorLocked() const;
-
     std::shared_ptr<LoadContextCoordinator> coordinator_;
     const uint64_t                          context_id_;
     std::vector<TransferDescriptor>         load_descs_;
@@ -154,6 +158,8 @@ private:
     SettlementReadyCallback   settlement_ready_callback_;
     std::vector<DoneCallback> callbacks_;
 
+    AsyncProfileSpan  workflow_span_, join_span_;
+    std::atomic<bool> workflow_trace_finished_{false}, join_trace_finished_{false};
     friend class LoadContextCoordinator;
 };
 
@@ -162,7 +168,8 @@ public:
     using CommitCallback = std::function<bool(const std::shared_ptr<LoadAsyncContext>& context)>;
     using AbortCallback  = std::function<void(LoadAsyncContext& context)>;
 
-    LoadContextCoordinator(CommitCallback commit_callback, AbortCallback abort_callback,
+    LoadContextCoordinator(CommitCallback                             commit_callback,
+                           AbortCallback                              abort_callback,
                            std::function<bool(std::function<void()>)> defer_cleanup = {});
 
     std::shared_ptr<LoadAsyncContext> create(std::vector<TransferDescriptor> load_descs,

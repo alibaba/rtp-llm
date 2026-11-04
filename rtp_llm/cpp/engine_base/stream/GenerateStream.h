@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
+
 #include "absl/status/statusor.h"
 #include "autil/TimeUtility.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -1060,6 +1062,8 @@ protected:
 
     // prefill TP size queried from prefill server (used for asymmetric TP)
     int prefill_tp_size_ = -1;
+private:
+    AsyncProfileRequest request_profile_;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;

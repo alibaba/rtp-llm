@@ -43,6 +43,7 @@ cc_library(
     ],
     deps = [
         "//rtp_llm/cpp/utils:async_profiling_scope",
+        "//rtp_llm/cpp/utils:async_profile_trace",
         "//rtp_llm/cpp/utils:core_utils",
         "//:rtp_compute_ops",
     ],

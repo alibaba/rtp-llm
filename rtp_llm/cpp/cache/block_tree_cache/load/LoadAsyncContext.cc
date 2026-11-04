@@ -35,6 +35,8 @@ LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>              
     remaining_transfer_count_(std::count_if(load_descs_.begin(), load_descs_.end(), [](const auto& desc) {
         return desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK;
     })) {
+    workflow_span_ = AsyncProfileSpan("workflow_total", request_id_.value_or(-1), 0, load_descs_.size(), 0, -1,
+                                       workflowId(), "load", AsyncProfileKind::Lifecycle);
     if (need_backend_match_) {
         storage_request_.transfer_task = backend_task_.subtask({});
     }
@@ -297,6 +299,8 @@ void LoadAsyncContext::startJoinWait(int64_t start_time_us) {
     assert(remaining_join_count_.load(std::memory_order_relaxed) != 0);
     assert(join_start_time_us_ == 0);
     join_start_time_us_ = start_time_us;
+    join_span_          = AsyncProfileSpan(
+        "join_wait", request_id_.value_or(-1), 0, 0, start_time_us, -1, workflowId(), "load", AsyncProfileKind::Wait);
 }
 
 bool LoadAsyncContext::completeJoinedOne(bool success, bool& join_completed, int64_t& join_wait_latency_us) {
@@ -309,6 +313,8 @@ bool LoadAsyncContext::completeJoinedOne(bool success, bool& join_completed, int
     assert(previous_count != 0);
     if (previous_count == 1) {
         assert(join_start_time_us_ != 0);
+        if (!join_trace_finished_.exchange(true))
+            join_span_.finish();
         join_completed       = true;
         join_wait_latency_us = currentTimeUs() - join_start_time_us_;
     }
@@ -470,6 +476,12 @@ ErrorInfo LoadAsyncContext::completionErrorLocked() const {
 }
 
 void LoadAsyncContext::notifyCompletion() {
+    block_tree_cache_detail::ScopeRollback finish_trace([this] {
+        if (!workflow_trace_finished_.exchange(true))
+            workflow_span_.finish();
+    });
+    if (!join_trace_finished_.exchange(true))
+        join_span_.finish();
     std::vector<DoneCallback> callbacks;
     ErrorInfo                 error = ErrorInfo::OkStatus();
     {
@@ -485,8 +497,7 @@ void LoadAsyncContext::notifyCompletion() {
 
 bool LoadAsyncContext::done() const {
     const State state = state_.load();
-    if (state == State::PENDING && backend_deadline_state_.load() == State::PENDING
-        && backend_task_.expired()) {
+    if (state == State::PENDING && backend_deadline_state_.load() == State::PENDING && backend_task_.expired()) {
         State expected = State::PENDING;
         backend_deadline_state_.compare_exchange_strong(expected, State::FAILED);
     }
@@ -511,8 +522,7 @@ void LoadAsyncContext::deferRelease(std::shared_ptr<BatchKVCacheResource> resour
                    self->markAborted();
                } else if (self->deadlineExceeded()) {
                    // I/O pins remain with StorageBackend until the payload has settled.
-                   self->onBackendRead(
-                       ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "match-to-ready deadline exceeded"));
+                   self->onBackendRead(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "match-to-ready deadline exceeded"));
                }
                for (int batch = 0; batch < resource->batchSize(); ++batch) {
                    for (const auto& tag : self->storage_backend_->topology().groupTags()) {
@@ -534,7 +544,8 @@ MallocStatus LoadAsyncContext::mallocStatus() const {
     return malloc_status_.load(std::memory_order_acquire);
 }
 
-LoadContextCoordinator::LoadContextCoordinator(CommitCallback commit_callback, AbortCallback abort_callback,
+LoadContextCoordinator::LoadContextCoordinator(CommitCallback                             commit_callback,
+                                               AbortCallback                              abort_callback,
                                                std::function<bool(std::function<void()>)> defer_cleanup):
     commit_callback_(std::move(commit_callback)),
     abort_callback_(std::move(abort_callback)),
