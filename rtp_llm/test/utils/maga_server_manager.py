@@ -280,9 +280,7 @@ class MagaServerManager(object):
 
         if server_process is not None and server_process.pid is not None:
             try:
-                # 如果只kill start_server，会残留 backend/frontend 占用显存。
-                # 部署时容器整体会回收，但测试时需要自己递归 kill
-                # 不适用 setsid/killpg 是因为 setsid 可能会在 test 父进程意外退出的情况遗留 start_server 占用测试资源
+                # 只 kill start_server 会残留 frontend/dash_sc/vit；测试侧须在此递归 kill。
                 logging.info("stop server and children: %d", server_process.pid)
                 parent = psutil.Process(server_process.pid)
                 children = list(
@@ -307,7 +305,12 @@ class MagaServerManager(object):
                     if self._server_process is server_process:
                         self._server_process = None
             except Exception as e:
-                logging.warning("failed to get process with: " + str(e))
+                logging.error(
+                    "stop_server: pid=%s already gone (%s); its children are "
+                    "orphaned and will not be reclaimed here",
+                    getattr(server_process, "pid", "?"),
+                    e,
+                )
                 with self._state_lock:
                     if self._server_process is server_process:
                         self._server_process = None
@@ -342,7 +345,7 @@ class MagaServerManager(object):
         for _ in range(retry_times):
             try:
                 logging.info(f"curl {url} -d '{json.dumps(query)}'")
-                response = requests.post(url, json=query)
+                response = requests.post(url, json=query, timeout=self._REQUEST_TIMEOUT)
                 if response.status_code in expected_status_codes:
                     logging.debug("%s", response.text)
                 else:
@@ -372,6 +375,8 @@ class MagaServerManager(object):
     # what CI log-size caps truncate, and the traceback usually sits early in a
     # server log, so it is the first thing lost.
     _LOG_CHUNK_LINES = 200
+    # (connect, read) socket timeouts so a stalled engine surfaces as an exception, not an infinite recv.
+    _REQUEST_TIMEOUT = (30, 600)
     # Hard ceiling for a "full" dump so a multi-GB engine log cannot blow up the
     # CI log. Head is kept for load-time errors, tail for shutdown state.
     _FULL_DUMP_MAX_LINES = 4000

@@ -174,11 +174,14 @@ class CaseRunner(object):
             return task_states
         if str_to_bool(os.environ.get("SMOKE_KEEP_SERVER_ALIVE", "False")):
             return self._keep_server_alive(server_manager, enable_remote_cache)
-        task_states = self.curl_server(server_manager)
+        assert server_manager is not None, "server manager should not be None"
+        try:
+            task_states = self.curl_server(server_manager)
+        finally:
+            # Reclaim the server on the failure path too; __del__ is not a guaranteed backstop.
+            server_manager.stop_server()
         if task_states.ret != True:
             return task_states
-        assert server_manager is not None, "server manager should not be None"
-        server_manager.stop_server()
         if enable_remote_cache and self.remote_kvcm_server is not None:
             self.remote_kvcm_server.stop_server()
             self.remote_kvcm_server.copy_logs()

@@ -185,8 +185,8 @@ class ProcessManager:
         self.process_groups[shutdown_group] = self.processes.copy()
 
     def add_process(self, process: Process, shutdown_group: str = "default"):
-        """Add a single process to manage"""
-        if process:
+        """Add a single process to manage (idempotent: re-adding is a no-op)"""
+        if process and process not in self.processes:
             self.processes.append(process)
             self._register_group(shutdown_group)
             self.process_groups[shutdown_group].append(process)
@@ -881,7 +881,8 @@ class ProcessManager:
                     logging.info(f"{process_name} is ready")
                     return
             except Exception as e:
-                logging.debug(f"{process_name} health check exception: {str(e)}")
+                # WARNING not DEBUG: a raising check is the only symptom while the parent waits.
+                logging.warning(f"{process_name} health check exception: {str(e)}")
             time.sleep(retry_interval)
 
     def start_parallel_health_checks(self):
@@ -925,8 +926,13 @@ class ProcessManager:
             f"Waiting for {len(self.health_check_threads)} health checks to complete..."
         )
 
+        # Shared deadline: per-thread full timeout would make the worst case N * timeout.
+        deadline = None if timeout is None else time.time() + timeout
         for thread in self.health_check_threads:
-            thread.join(timeout=timeout)
+            if deadline is None:
+                thread.join()
+            else:
+                thread.join(timeout=max(0.0, deadline - time.time()))
 
         # Check results
         all_ready = True
