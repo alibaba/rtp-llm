@@ -791,13 +791,11 @@ void execSyncCommunication(ParallelMode mode, bool timeout) {
 // initRuntime — one-time runtime init (side effects only)
 // ============================================================
 
-MlaOpsType initRuntime(size_t device_id, bool trace_memory, bool enable_comm_overlap, MlaOpsType mla_ops_type) {
-    MlaOpsType resolved_mla_ops_type = mla_ops_type;
-
+void initRuntime(size_t device_id, bool trace_memory, bool enable_comm_overlap) {
     // Guard against double-init
     if (g_runtime_initialized.load(std::memory_order_acquire)) {
         RTP_LLM_LOG_WARNING("Runtime is already initialized! will do nothing.");
-        return resolved_mla_ops_type;
+        return;
     }
 
     std::call_once(g_init_flag, [&]() {
@@ -812,11 +810,6 @@ MlaOpsType initRuntime(size_t device_id, bool trace_memory, bool enable_comm_ove
         RTP_LLM_LOG_INFO("Initialize runtime. device_id=%zu", device_id);
         check_cuda_value(cudaSetDevice(device_id));
         at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream());
-
-        if (resolved_mla_ops_type == MlaOpsType::AUTO) {
-            auto* prop            = at::cuda::getCurrentDeviceProperties();
-            resolved_mla_ops_type = prop->major >= 9 ? MlaOpsType::FLASH_MLA : MlaOpsType::FLASH_INFER;
-        }
 #elif USING_ROCM
         RTP_LLM_LOG_INFO("Initialize runtime (ROCm). device_id=%zu", device_id);
         ROCM_CHECK(hipSetDevice(device_id));
@@ -830,7 +823,6 @@ MlaOpsType initRuntime(size_t device_id, bool trace_memory, bool enable_comm_ove
     });
 
     RTP_LLM_LOG_INFO("init devices done");
-    return resolved_mla_ops_type;
 }
 
 // === MOE / EPLB ===
@@ -863,13 +855,12 @@ void registerExecCtxOps(pybind11::module& m) {
 
     m.def(
         "init_exec_ctx",
-        [](size_t device_id, bool trace_memory, bool enable_comm_overlap, int mla_ops_type) {
-            (void)initRuntime(device_id, trace_memory, enable_comm_overlap, static_cast<MlaOpsType>(mla_ops_type));
+        [](size_t device_id, bool trace_memory, bool enable_comm_overlap) {
+            initRuntime(device_id, trace_memory, enable_comm_overlap);
         },
         py::arg("device_id"),
         py::arg("trace_memory"),
-        py::arg("enable_comm_overlap"),
-        py::arg("mla_ops_type"));
+        py::arg("enable_comm_overlap"));
 
     m.def(
         "register_comm_ops",

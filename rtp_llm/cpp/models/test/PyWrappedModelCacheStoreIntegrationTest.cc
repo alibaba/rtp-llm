@@ -1100,8 +1100,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     std::call_once(runtime_once, []() {
         initRuntime(/*device_id=*/0,
                     /*trace_memory=*/false,
-                    /*enable_comm_overlap=*/false,
-                    MlaOpsType::AUTO);
+                    /*enable_comm_overlap=*/false);
     });
 
     RTP_LLM_CHECK_WITH_INFO(forward_count > 0, "forward_count must be positive");
@@ -1168,7 +1167,6 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                               ConcurrencyConfig{},
                               SpeculativeExecutionConfig{},
                               scenario.device_resources,
-                              MlaOpsType::AUTO,
                               /*max_seq_len=*/64,
                               scenario.hidden_size,
                               manager,
@@ -1286,8 +1284,7 @@ py::dict runDirtyGenerationPrefillCaptureScenario(py::object py_model) {
     std::call_once(runtime_once, []() {
         initRuntime(/*device_id=*/0,
                     /*trace_memory=*/false,
-                    /*enable_comm_overlap=*/false,
-                    MlaOpsType::AUTO);
+                    /*enable_comm_overlap=*/false);
     });
 
     bool                          saw_dirty_capture_error = false;
@@ -1332,7 +1329,6 @@ py::dict runDirtyGenerationPrefillCaptureScenario(py::object py_model) {
                                   ConcurrencyConfig{},
                                   SpeculativeExecutionConfig{},
                                   DeviceResourceConfig{},
-                                  MlaOpsType::AUTO,
                                   /*max_seq_len=*/4,
                                   /*hidden_size=*/4,
                                   manager,
@@ -1363,8 +1359,7 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
     std::call_once(runtime_once, []() {
         initRuntime(/*device_id=*/0,
                     /*trace_memory=*/false,
-                    /*enable_comm_overlap=*/false,
-                    MlaOpsType::AUTO);
+                    /*enable_comm_overlap=*/false);
     });
 
     auto config  = makeCacheConfig({{"full", 4, 64}});
@@ -1408,7 +1403,6 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
                               ConcurrencyConfig{},
                               SpeculativeExecutionConfig{},
                               DeviceResourceConfig{},
-                              MlaOpsType::AUTO,
                               /*max_seq_len=*/4,
                               /*hidden_size=*/4,
                               manager,
@@ -1493,7 +1487,7 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
 // Only decoder math is replaced; all routing and post-layers code is production.
 py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor indexes, bool python_norm) {
     static std::once_flag runtime_once;
-    std::call_once(runtime_once, []() { initRuntime(0, false, false, MlaOpsType::AUTO); });
+    std::call_once(runtime_once, []() { initRuntime(0, false, false); });
     constexpr int     width             = 4;
     constexpr int64_t block_table_width = 2;
     const bool        enable_graph      = python_norm;

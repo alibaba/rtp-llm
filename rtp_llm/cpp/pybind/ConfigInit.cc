@@ -6,7 +6,6 @@
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/config/SpecialTokens.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
-#include "rtp_llm/cpp/model_utils/MlaConfig.h"
 #include "rtp_llm/cpp/model_utils/QuantInfo.h"
 #include "rtp_llm/cpp/model_utils/activation_types.h"
 #include "rtp_llm/cpp/model_utils/layernorm_types.h"
@@ -205,12 +204,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("SPARSE_FLASHMLA", FMHAType::SPARSE_FLASHMLA)
         .value("CP_SPARSE_FLASHMLA", FMHAType::CP_SPARSE_FLASHMLA)
         .value("HEADWISE", FMHAType::HEADWISE);
-
-    py::enum_<MlaOpsType>(m, "MlaOpsType")
-        .value("AUTO", MlaOpsType::AUTO)
-        .value("MHA", MlaOpsType::MHA)
-        .value("FLASH_INFER", MlaOpsType::FLASH_INFER)
-        .value("FLASH_MLA", MlaOpsType::FLASH_MLA);
 
     // Register LayerNormType enum
     py::enum_<LayerNormType>(m, "LayerNormType")
@@ -2179,10 +2172,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error("task_type must be TaskType enum or string");
                 }
             })
-        .def_property(
-            "mla_ops_type",
-            [](const ModelConfig& self) { return self.mla_ops_type; },
-            [](ModelConfig& self, const std::string& value) { self.set_mla_ops_type(value); })
         // Fields merged from PyModelConfig
         .def_readwrite("extra_data_path", &ModelConfig::extra_data_path)
         .def_readwrite("local_extra_data_path", &ModelConfig::local_extra_data_path)

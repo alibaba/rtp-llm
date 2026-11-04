@@ -298,7 +298,7 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
                                 std::unique_ptr<ProposeModelEngineInitParams>& propose_params) {
     if (propose_params_) {
         executor_.reset(new MtpExecutor(
-            params, propose_params, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_));
+            params, propose_params, resource_context_.cache_manager, kv_cache_group_num_));
     } else {
         executor_.reset(new NormalExecutor(
             params,
@@ -306,7 +306,6 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
             false,
             false,
             0,
-            mla_ops_type_,
             [this]() { step_profiler_.startStep(); },
             [this]() { step_profiler_.finishStep(); }));
     }
@@ -565,7 +564,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
                                                    params.sp_config.type);
         if (!generation_prefill_cuda_graph_requested) {
             rtp_llm::setTraceMemory(true);
-            executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
+            executor_.reset(new NormalExecutor(params, nullptr, true, false, 0));
             THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
             const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
             rtp_llm::setTraceMemory(false);
@@ -589,7 +588,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         const auto baseline_reserved  = cuda_graph::graphReservedBytes();
 
         rtp_llm::setTraceMemory(true);
-        executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0, mla_ops_type_));
+        executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0));
         {
             // NormalGenerateStream snapshots ResourceContext at construction. Bind
             // the same temporary manager used by NormalExecutor so fakeInitKVBlock
@@ -637,7 +636,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         // Create it before tracing and destroy it before sampling production cache capacity.
         rtp_llm::setTraceMemory(true);
         auto memory_tracker = std::make_unique<WarmupMemoryTracker>();
-        executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0, mla_ops_type_));
+        executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0));
         auto token_heavy_result = runPrefillWarmupShape(fake_input, warmup_resource_context, 0, token_budget);
         THROW_IF_STATUSOR_ERROR(token_heavy_result);
         max_consumed = memory_tracker->maxConsumedBytes();
@@ -697,7 +696,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     rtp_llm::setTraceMemory(true);
 
     auto cache_manager = createWarmupCacheManager();
-    executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, mla_ops_type_));
+    executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0));
     // preRun creates its stream through resource_context_; expose the same
     // finalized warmup topology that the temporary executor owns.
     {

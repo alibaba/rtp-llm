@@ -484,7 +484,6 @@ def init_exec_ctx(
     device_id: int,
     trace_memory: bool,
     enable_comm_overlap: bool,
-    mla_ops_type: int,
 ) -> None: ...
 
 def register_comm_ops(broadcast_fn: typing.Callable, allreduce_fn: typing.Callable, allgather_fn: typing.Callable) -> None:

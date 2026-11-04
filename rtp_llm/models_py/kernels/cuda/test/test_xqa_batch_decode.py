@@ -335,7 +335,6 @@ class TestXQABatchDecode(unittest.TestCase):
             device_id=0,
             trace_memory=False,
             enable_comm_overlap=False,
-            mla_ops_type=int(model_config.mla_ops_type),
         )
 
     def _test_xqa_decode_impl(
@@ -736,10 +735,10 @@ class TestXQABatchDecode(unittest.TestCase):
                     torch.empty(1, dtype=DTYPE_MAP["bf16"], device=GPU_DEVICE)
                 )
                 rep_inputs.total_tokens = capture_batch_size * q_len_per_req
-                rep_inputs.decode_cu_seqlens_device = generate_cumsum_lens(padded_q_lens)
-                rep_inputs.decode_cu_seqlens = generate_cumsum_lens(
+                rep_inputs.decode_cu_seqlens_device = generate_cumsum_lens(
                     padded_q_lens
-                ).cpu()
+                )
+                rep_inputs.decode_cu_seqlens = generate_cumsum_lens(padded_q_lens).cpu()
                 rep_inputs.cu_seqlens_device = generate_cumsum_lens(padded_q_lens).cpu()
                 padded_full_seq_lens = torch.cat(
                     [
@@ -1326,10 +1325,10 @@ class TestXQABatchDecode(unittest.TestCase):
                     torch.empty(1, dtype=DTYPE_MAP["bf16"], device=GPU_DEVICE)
                 )
                 rep_inputs.total_tokens = capture_batch_size * q_len_per_req
-                rep_inputs.decode_cu_seqlens_device = generate_cumsum_lens(padded_q_lens)
-                rep_inputs.decode_cu_seqlens = generate_cumsum_lens(
+                rep_inputs.decode_cu_seqlens_device = generate_cumsum_lens(
                     padded_q_lens
-                ).cpu()
+                )
+                rep_inputs.decode_cu_seqlens = generate_cumsum_lens(padded_q_lens).cpu()
                 rep_inputs.cu_seqlens_device = generate_cumsum_lens(padded_q_lens).cpu()
                 padded_full_seq_lens = torch.cat(
                     [

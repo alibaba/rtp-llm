@@ -99,7 +99,6 @@ public:
 
 protected:
     ResourceContext                resource_context_;
-    MlaOpsType                     mla_ops_type_       = MlaOpsType::AUTO;
     int32_t                        kv_cache_group_num_ = 1;
     std::unique_ptr<SchedulerBase> scheduler_          = nullptr;
     bool                           pause_              = false;

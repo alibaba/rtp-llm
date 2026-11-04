@@ -39,8 +39,7 @@ using CacheStoreCompletionRegistrar = std::function<CacheStoreCompletionCallback
 // ===================================================================
 
 // Perform one-time runtime init: cudaSetDevice, global flags, etc.
-// Returns the resolved MlaOpsType (AUTO → FLASH_MLA/FLASH_INFER based on GPU arch).
-MlaOpsType initRuntime(size_t device_id, bool trace_memory, bool enable_comm_overlap, MlaOpsType mla_ops_type);
+void initRuntime(size_t device_id, bool trace_memory, bool enable_comm_overlap);
 
 bool isRuntimeInitialized();
 

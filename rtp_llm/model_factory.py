@@ -492,7 +492,6 @@ class ModelFactory:
         propose_model_args.tokenizer_path = model_args.tokenizer_path
         propose_model_args.model_type = sp_config.model_type
         propose_model_args.act_type = model_args.act_type
-        propose_model_args.mla_ops_type = model_args.mla_ops_type
         propose_model_args.enable_fp32_lm_head = model_args.enable_fp32_lm_head
 
         # Create propose ModelConfig using _create_config

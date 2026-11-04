@@ -114,8 +114,7 @@ public:
     static void SetUpTestSuite() {
         initRuntime(/*device_id=*/0,
                     /*trace_memory=*/false,
-                    /*enable_comm_overlap=*/false,
-                    MlaOpsType::AUTO);
+                    /*enable_comm_overlap=*/false);
         device_initialized_ = isRuntimeInitialized();
     }
 

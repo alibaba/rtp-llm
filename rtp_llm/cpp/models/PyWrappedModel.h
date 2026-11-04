@@ -151,7 +151,6 @@ private:
     const bool                                      enable_prefill_cp_;
     const DSparkModelRole                           dspark_model_role_;
     const bool                                      track_cache_store_completion_;
-    const rtp_llm::MlaOpsType                       mla_ops_type_;
     const size_t                                    layer_num_;
     const GptModelDescription                       description_;
     std::optional<rtp_llm::GroupedCacheLayerLayout> kv_cache_layer_layout_;
@@ -217,7 +216,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     enable_prefill_cp_(device_props_.enable_prefill_cp),
     dspark_model_role_(dspark_model_role),
     track_cache_store_completion_(track_cache_store_completion),
-    mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
     description_(params.description),
     cache_manager_(params.cache_manager),

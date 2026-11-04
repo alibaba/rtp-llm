@@ -36,7 +36,6 @@ from rtp_llm.ops import (
     HWKernelConfig,
     KVCacheSpecDesc,
     KVCacheSpecType,
-    MlaOpsType,
     MoeConfig,
     ParallelismConfig,
 )
@@ -272,10 +271,7 @@ class BaseModel(object):
             return
 
         desc = KVCacheSpecDesc()
-        if (
-            model_config.attn_config.use_mla
-            and model_config.mla_ops_type != MlaOpsType.MHA
-        ):
+        if model_config.attn_config.use_mla:
             desc.cache_type = KVCacheSpecType.MLA
         else:
             desc.cache_type = KVCacheSpecType.MHA

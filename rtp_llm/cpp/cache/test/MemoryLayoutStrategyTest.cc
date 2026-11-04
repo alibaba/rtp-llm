@@ -40,8 +40,7 @@ protected:
 
         rtp_llm::initRuntime(/*device_id=*/0,
                              /*trace_memory=*/false,
-                             /*enable_comm_overlap=*/false,
-                             rtp_llm::MlaOpsType::AUTO);
+                             /*enable_comm_overlap=*/false);
         ASSERT_TRUE(rtp_llm::isRuntimeInitialized());
     }
 

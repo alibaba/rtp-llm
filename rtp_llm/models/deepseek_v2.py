@@ -31,7 +31,6 @@ from rtp_llm.ops import (
     DataType,
     KVCacheSpecDesc,
     KVCacheSpecType,
-    MlaOpsType,
     OpaqueBlockEntryCountMode,
 )
 from rtp_llm.utils.model_weight import (
@@ -74,8 +73,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             kv_lora_rank=self.kv_lora_rank,
             ope_head_dim=self.nope_head_dim,
             v_head_dim=self.v_head_dim,
-            use_mla=self.model_config.attn_config.use_mla
-            and self.model_config.mla_ops_type != MlaOpsType.MHA,
+            use_mla=self.model_config.attn_config.use_mla,
             q_use_lora=self.q_use_lora,
         )
         layer_weights: List[WeightModule] = [
@@ -245,10 +243,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 ]
             )
 
-        if (
-            self.model_config.attn_config.use_mla
-            and self.model_config.mla_ops_type != MlaOpsType.MHA
-        ):
+        if self.model_config.attn_config.use_mla:
             mla_layer_weights.append(
                 MlaAttnAtomicWeight(
                     W.mla_kc,
@@ -472,8 +467,6 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             ]
 
     def _create_rope_w(self) -> Optional[AtomicWeight]:
-        if self.model_config.mla_ops_type == MlaOpsType.MHA:
-            return None
         config = self.model_config
 
         def __create_rope_w(ts: List[torch.Tensor], config: ModelConfig):
@@ -693,10 +686,7 @@ class DeepSeekV2(BaseModel):
             config.attn_config.rope_config.dim = config.attn_config.rope_head_dim
 
             # yarn rotary config
-            if config.mla_ops_type != MlaOpsType.MHA:
-                config.attn_config.rope_config.style = 0
-            else:
-                config.attn_config.rope_config.style = 5
+            config.attn_config.rope_config.style = 0
             # Check rope_scaling for YaRN (DeepSeek V2/V3 style)
             rope_scaling = config_json.get("rope_scaling")
             if rope_scaling is not None:

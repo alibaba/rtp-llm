@@ -4,7 +4,6 @@
 #include "rtp_llm/cpp/model_utils/activation_types.h"
 #include "rtp_llm/cpp/model_utils/quantization.h"
 #include "rtp_llm/cpp/model_utils/RopeConfig.h"
-#include "rtp_llm/cpp/model_utils/MlaConfig.h"
 #include "rtp_llm/cpp/model_utils/QuantInfo.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -55,9 +54,6 @@ public:
     AttentionConfigs      attn_config;
     LinearAttentionConfig linear_attention_config;
     HybridAttentionConfig hybrid_attention_config;
-
-    // mla ops type (not in AttentionConfigs)
-    MlaOpsType mla_ops_type = MlaOpsType::AUTO;
 
     // rope config for deepseek
     double deepseek_rope_mscale    = 1.0;
@@ -162,7 +158,6 @@ public:
     void             set_task_type(std::string task);
     void             set_activation_type(std::string activation_type_str);
     void             set_data_type(std::string data_type_str);
-    void             set_mla_ops_type(std::string mla_ops_type_str);
     bool             isGatedActivation() const;
     AttentionConfigs getAttentionConfigs(int64_t tp_size) const;
     bool             isKvCacheQuant() const;

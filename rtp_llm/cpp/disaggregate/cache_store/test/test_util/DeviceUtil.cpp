@@ -11,8 +11,7 @@ namespace rtp_llm {
 DeviceUtil::DeviceUtil(const DeviceResourceConfig device_resource_config) {
     rtp_llm::initRuntime(/*device_id=*/0,
                          /*trace_memory=*/false,
-                         device_resource_config.enable_comm_overlap,
-                         rtp_llm::MlaOpsType::AUTO);
+                         device_resource_config.enable_comm_overlap);
 }
 
 DeviceUtil::~DeviceUtil() {}

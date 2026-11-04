@@ -23,8 +23,7 @@ EmbeddingEngine::EmbeddingEngine(const EngineInitParams& params, py::object hand
         size_t device_id = params.parallelism_config.world_rank % params.parallelism_config.local_world_size;
         rtp_llm::initRuntime(device_id,
                              params.profiling_debug_logging_config.trace_memory,
-                             params.device_resource_config.enable_comm_overlap,
-                             params.model_config_.mla_ops_type);
+                             params.device_resource_config.enable_comm_overlap);
     }
     warmupNoBlockCopy();
     executor_.reset(new EmbeddingExecutor(params, handler));

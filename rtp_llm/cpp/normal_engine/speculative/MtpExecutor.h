@@ -43,7 +43,6 @@ public:
     explicit MtpExecutor(const EngineInitParams&                        params,
                          std::unique_ptr<ProposeModelEngineInitParams>& propose_params,
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
-                         MlaOpsType                                     mla_ops_type       = MlaOpsType::AUTO,
                          int32_t                                        kv_cache_group_num = 1,
                          bool                                           warm_up            = false);
 
