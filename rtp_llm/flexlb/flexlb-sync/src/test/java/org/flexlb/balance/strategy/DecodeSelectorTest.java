@@ -89,7 +89,10 @@ class DecodeSelectorTest {
     }
 
     private static Request request(long sequenceLength, long requestId) {
-        return Request.builder().seqLen(sequenceLength).requestId(requestId).build();
+        return Request.builder()
+                .seqLen(sequenceLength)
+                .requestId(String.valueOf(requestId))
+                .build();
     }
 
     @Test
@@ -102,7 +105,9 @@ class DecodeSelectorTest {
             Assertions.assertSame(empty, endpoint.admissionSummary());
             try (var pin = endpoint.tryPinGeneration()) {
                 var reservation =
-                        endpoint.tryReserveQueuedRequest(pin, 42L, 128L, 256L, 70, null).handle();
+                        endpoint.tryReserveQueuedRequest(
+                                        pin, String.valueOf(42L), 128L, 256L, 70, null)
+                                .handle();
                 var queued = endpoint.admissionSummary();
                 Assertions.assertNotSame(empty, queued);
                 Assertions.assertSame(queued, endpoint.admissionSummary());
@@ -745,7 +750,7 @@ class DecodeSelectorTest {
         Assertions.assertTrue(fifoResult.isSuccess());
         Assertions.assertEquals(inputs.getRequestId(), fifoResult.getRequestId());
         Assertions.assertFalse(
-                EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 3L),
+                EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), String.valueOf(3L)),
                 "selection must not mutate Decode reservation ownership");
         fifoSelection.close();
     }
@@ -824,7 +829,7 @@ class DecodeSelectorTest {
                         EndpointTestSupport.isQueued(
                                 decodeEndpoint(registry, selected.decode().getServerIp() + ":8080")
                                         .resourceSnapshot(),
-                                requestId),
+                                String.valueOf(requestId)),
                         "selection cannot claim capacity");
             }
         }
@@ -886,7 +891,7 @@ class DecodeSelectorTest {
         int higherLoadSelections = 0;
 
         for (int index = 0; index < 20; index++) {
-            inputs = inputs.toBuilder().requestId(30_000L + index).build();
+            inputs = inputs.toBuilder().requestId(String.valueOf(30_000L + index)).build();
             ServerStatus selected = selectStatus(strategy, inputs, null);
             if ("127.0.0.1".equals(selected.getServerIp())) {
                 lowerLoadSelections++;
@@ -913,7 +918,7 @@ class DecodeSelectorTest {
 
         StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(registry);
 
-        Request request = Request.builder().seqLen(1).requestId(500L).build();
+        Request request = Request.builder().seqLen(1).requestId("500").build();
 
         ServerStatus status = selectStatus(strategy, request, null);
         Assertions.assertTrue(status.isSuccess());
@@ -954,7 +959,7 @@ class DecodeSelectorTest {
 
     private static TaskInfo task(long requestId, TaskPhase phase) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(String.valueOf(requestId));
         task.setPhase(phase);
         return task;
     }
@@ -978,7 +983,12 @@ class DecodeSelectorTest {
             int priority) {
         try (var pin = endpoint.tryPinGeneration()) {
             endpoint.tryReserveQueuedRequest(
-                            pin, requestId, kvTokens, expectedKvTokens, priority, null)
+                            pin,
+                            String.valueOf(requestId),
+                            kvTokens,
+                            expectedKvTokens,
+                            priority,
+                            null)
                     .handle();
         }
     }

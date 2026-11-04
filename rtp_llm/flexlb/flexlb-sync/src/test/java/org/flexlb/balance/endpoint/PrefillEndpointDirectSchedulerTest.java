@@ -114,7 +114,7 @@ class PrefillEndpointDirectSchedulerTest {
 
     private static org.flexlb.balance.scheduler.RequestRoute item(long requestId) {
         var item = mock(org.flexlb.balance.scheduler.RequestRoute.class);
-        org.mockito.Mockito.when(item.requestId()).thenReturn(requestId);
+        org.mockito.Mockito.when(item.requestId()).thenReturn(String.valueOf(requestId));
         org.mockito.Mockito.when(item.seqLen()).thenReturn(128L);
         return item;
     }

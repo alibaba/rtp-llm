@@ -37,7 +37,7 @@ class PrefillResourceLockContractTest {
                 new ReentrantLock(),
                 PrefillActiveIndex.ordered(
                         16,
-                        Comparator.comparingLong(
+                        Comparator.comparing(
                                 org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
                                         ::requestId)),
                 () -> 0L);

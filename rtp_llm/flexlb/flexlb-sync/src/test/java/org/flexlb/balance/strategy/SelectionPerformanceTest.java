@@ -6,8 +6,8 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestWorkerSelector;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.ModelMetaConfig;
@@ -24,7 +24,6 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 import java.lang.management.ManagementFactory;
 import java.util.List;
-import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -74,12 +73,13 @@ class SelectionPerformanceTest {
                                     true,
                                     1000000L,
                                     1000000L);
-                    StrategyTestSupport.publishEndpoint(registry, role, worker.getIpPort(), worker);
+                    StrategyTestSupport.publishEndpoint(
+                            registry, role, worker.getLogicalIpPort(), worker);
                 }
             }
             var selector = selector(service, registry);
             var context = new RequestContext(service.loadBalanceConfig());
-            context.data().setRequest(Request.builder().requestId(91001L).seqLen(1000L).build());
+            context.data().setRequest(Request.builder().requestId("91001").seqLen(1000L).build());
             context.data().setSchedulingMetadata(SchedulingMetadata.explicit(50, Long.MAX_VALUE));
             var bean = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
             assertTrue(bean.isThreadAllocatedMemorySupported());
@@ -129,10 +129,11 @@ class SelectionPerformanceTest {
         ReflectionTestUtils.setField(metrics, "monitor", monitor);
         var health = new EngineHealthReporter(monitor, registry);
         var cache =
-                new CacheAwareService() {
-                    public Map<String, Integer> findMatchingEngines(
-                            List<Long> keys, RoleType role, List<String> addresses) {
-                        return Map.of();
+                new CacheAwareService(null, null, null, null) {
+                    public org.flexlb.cache.domain.CacheMatchResult findMatchingEngines(
+                            org.flexlb.cache.domain.CacheMatchQuery query) {
+                        return org.flexlb.cache.domain.CacheMatchResult.empty(
+                                org.flexlb.cache.domain.CacheMatchSource.LOCAL_SYNC);
                     }
 
                     public WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus status) {
@@ -148,6 +149,9 @@ class SelectionPerformanceTest {
                 new CostBasedPrefillStrategy(cache, service),
                 new DecodeSelector(service, new AdmissionCapacity(1000, 100)),
                 new VitWorkerSelector(),
+                org.mockito.Mockito.mock(
+                        org.flexlb.balance.strategy.EncoderSelectionStrategy.class),
+                org.mockito.Mockito.mock(org.flexlb.cache.match.CacheAwareService.class),
                 null,
                 health,
                 metrics,

@@ -9,7 +9,7 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
-import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
+import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -51,7 +51,13 @@ class EngineGrpcClientTransportTest {
     private final GrpcReporter reporter = mock(GrpcReporter.class);
     private final EngineGrpcClient client =
             new EngineGrpcClient(
-                    mock(CustomNameResolver.class), executor, eventLoopGroup, reporter, 2000, 5000);
+                    mock(EngineAddressResolver.class),
+                    executor,
+                    eventLoopGroup,
+                    reporter,
+                    2000,
+                    5000,
+                    org.mockito.Mockito.mock(org.flexlb.config.CacheMatchConfiguration.class));
     private final CountDownLatch releaseCallbacks = new CountDownLatch(1);
     private Server server;
 
@@ -80,7 +86,12 @@ class EngineGrpcClientTransportTest {
         assertEquals("RESPONSE_TRAILERS_RECEIVED", trace.stage().toString());
         assertTrue(trace.callbackDelayMs() >= 0L);
         assertTrue(trace.responseDeliveryMs() >= 0L);
-        verify(reporter).reportCallMetrics(eq("GetWorkerStatus"), anyLong(), eq(false));
+        verify(reporter)
+                .reportCallMetrics(
+                        eq("GetWorkerStatus"),
+                        anyLong(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        eq(false));
         verify(reporter, never())
                 .reportCallFailure(anyString(), anyBoolean(), anyString(), any(), any());
     }
@@ -142,7 +153,12 @@ class EngineGrpcClientTransportTest {
         // This handler never calls onNext/sendHeaders: grpc-java sends no response headers.
         assertEquals("WAITING_RESPONSE", trace.getValue().stage().toString());
         assertEquals(-1.0, trace.getValue().responseDeliveryMs());
-        verify(reporter, never()).reportCallMetrics(anyString(), anyLong(), anyBoolean());
+        verify(reporter, never())
+                .reportCallMetrics(
+                        anyString(),
+                        anyLong(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        anyBoolean());
     }
 
     @Test
@@ -163,7 +179,12 @@ class EngineGrpcClientTransportTest {
                 .reportCallFailure(
                         eq("worker"), eq(true), eq("CALL_RESULT"), detail.capture(), any());
         assertEquals(GrpcFailure.Kind.CONNECT_REFUSED, detail.getValue().kind());
-        verify(reporter, never()).reportCallMetrics(anyString(), anyLong(), anyBoolean());
+        verify(reporter, never())
+                .reportCallMetrics(
+                        anyString(),
+                        anyLong(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        anyBoolean());
     }
 
     @Test
@@ -177,7 +198,12 @@ class EngineGrpcClientTransportTest {
                         .get(5, TimeUnit.SECONDS));
 
         assertEquals(2, attempts.get());
-        verify(reporter).reportCallMetrics(eq("GetWorkerStatus"), anyLong(), eq(true));
+        verify(reporter)
+                .reportCallMetrics(
+                        eq("GetWorkerStatus"),
+                        anyLong(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        eq(true));
         verify(reporter, never())
                 .reportCallFailure(anyString(), anyBoolean(), anyString(), any(), any());
         assertEquals(GrpcCallTrace.Stage.RESPONSE_TRAILERS_RECEIVED, captureDelivery(true).stage());
@@ -213,7 +239,12 @@ class EngineGrpcClientTransportTest {
         assertEquals(GrpcFailure.Kind.RPC_FAILURE, detail.getValue().kind());
         assertEquals("PEER_EOF", trace.getValue().transportEvent());
         assertEquals(GrpcFailure.Kind.UNEXPECTED_EOF, trace.getValue().transportCauseKind());
-        verify(reporter, never()).reportCallMetrics(anyString(), anyLong(), anyBoolean());
+        verify(reporter, never())
+                .reportCallMetrics(
+                        anyString(),
+                        anyLong(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        anyBoolean());
     }
 
     private void startPeerClosingServer(AtomicInteger attempts, boolean closeEveryAttempt)

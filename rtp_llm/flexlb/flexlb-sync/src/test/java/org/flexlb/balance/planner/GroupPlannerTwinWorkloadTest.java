@@ -45,10 +45,10 @@ class GroupPlannerTwinWorkloadTest {
                     BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(
                             timeout, limits, arrival + 400L));
             assertEquals(1, timeout.items().size());
-            sparseDispatched.add(timeout.items().getFirst().requestId());
+            sparseDispatched.add(Long.parseLong(timeout.items().getFirst().requestId()));
         }
         assertEquals(
-                burst.stream().map(Item::requestId).toList(),
+                burst.stream().map(item -> Long.parseLong(item.requestId())).toList(),
                 sparseDispatched,
                 "both arrival profiles must dispatch the same 16 request IDs exactly once");
     }
@@ -81,7 +81,9 @@ class GroupPlannerTwinWorkloadTest {
         Constraints limits = new Constraints(8, 2_000L, 22_000_000L, 0L, 400L);
         Selection<Item> result = BuiltinGroupPlanner.FIXED_WINDOW.select(arrivals, limits, null);
 
-        assertEquals(List.of(1L, 2L), result.items().stream().map(Item::requestId).toList());
+        assertEquals(
+                List.of(1L, 2L),
+                result.items().stream().map(item -> Long.parseLong(item.requestId())).toList());
         assertEquals(1_800L, result.paddedTokens());
         assertTrue(result.fitsCompute(2_000L));
         assertEquals(
@@ -90,6 +92,6 @@ class GroupPlannerTwinWorkloadTest {
     }
 
     private static Item item(long id, long arrivalMs, long tokens) {
-        return new Item(id, 0, id, arrivalMs, Long.MAX_VALUE, tokens, 0L);
+        return new Item(String.valueOf(id), 0, id, arrivalMs, Long.MAX_VALUE, tokens, 0L);
     }
 }

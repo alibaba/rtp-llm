@@ -297,7 +297,7 @@ class IncrementalPredictionTest {
                         1000,
                         true,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
-                        Comparator.comparingLong(GroupPlanner.Item::requestId),
+                        Comparator.comparing(GroupPlanner.Item::requestId),
                         new GroupPlanner.Constraints(64, 100_000, 100_000, budget, 0),
                         active,
                         null);
@@ -312,6 +312,7 @@ class IncrementalPredictionTest {
     }
 
     private static GroupPlanner.Item item(long id, long input, int priority, long expires) {
-        return new GroupPlanner.Item(id, priority, id, 1000, expires, input, input / 3);
+        return new GroupPlanner.Item(
+                String.valueOf(id), priority, id, 1000, expires, input, input / 3);
     }
 }

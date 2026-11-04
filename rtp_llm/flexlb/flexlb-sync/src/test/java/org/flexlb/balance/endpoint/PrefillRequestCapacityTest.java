@@ -37,7 +37,7 @@ class PrefillRequestCapacityTest {
                     lock,
                     PrefillActiveIndex.ordered(
                             16,
-                            Comparator.comparingLong(
+                            Comparator.comparing(
                                     org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
                                             ::requestId)),
                     System::currentTimeMillis);
@@ -305,7 +305,8 @@ class PrefillRequestCapacityTest {
                         }
                         throw new IllegalStateException("queue insertion failed");
                     }
-                    return Long.compare(left.requestId(), right.requestId());
+                    return Long.compare(
+                            Long.parseLong(left.requestId()), Long.parseLong(right.requestId()));
                 };
         PrefillEndpoint ledger =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
@@ -417,7 +418,7 @@ class PrefillRequestCapacityTest {
         when(engine.runningTaskList()).thenReturn(tasks);
         when(engine.waitingQueryLen()).thenReturn(reportedActive);
         when(observation.engine()).thenReturn(engine);
-        when(observation.runningTasks()).thenReturn(tasks);
+        when(observation.activeTasks()).thenReturn(tasks);
         lock.lock();
         try {
             state.commitStatusLocked(
@@ -429,7 +430,7 @@ class PrefillRequestCapacityTest {
 
     private static WorkerStatus.TaskObservation observed(long id) {
         return new WorkerStatus.TaskObservation(
-                id,
+                String.valueOf(id),
                 0L,
                 0L,
                 0L,
@@ -442,12 +443,13 @@ class PrefillRequestCapacityTest {
                 0L,
                 TaskPhase.RUNNING,
                 0L,
-                PriorityPreemptionProgress.NONE);
+                PriorityPreemptionProgress.NONE,
+                null);
     }
 
     private static RequestRoute item(long id) {
         RequestRoute item = mock(RequestRoute.class);
-        when(item.requestId()).thenReturn(id);
+        when(item.requestId()).thenReturn(String.valueOf(id));
         return item;
     }
 }

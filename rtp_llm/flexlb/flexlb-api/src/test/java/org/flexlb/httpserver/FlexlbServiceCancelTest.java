@@ -60,7 +60,11 @@ class FlexlbServiceCancelTest {
     @Test
     void localCancelReturnsAuthoritativePendingLifecycle() {
         RequestState pending = snapshot(101L, RequestState.Phase.CANCEL_REQUESTED, 301L);
-        when(requestScheduler.cancel(101L, 301L, CancelReason.DEADLINE_EXCEEDED))
+        when(requestScheduler.cancel(
+                        "101",
+                        301L,
+                        CancelReason.DEADLINE_EXCEEDED,
+                        org.flexlb.dao.route.RequestPhase.GENERATION))
                 .thenReturn(pending);
         StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer =
                 mock(StreamObserver.class);
@@ -88,7 +92,12 @@ class FlexlbServiceCancelTest {
     @Test
     void localCancelPreservesExistingTerminalLifecycle() {
         RequestState completed = snapshot(102L, RequestState.Phase.COMPLETED, 0);
-        when(requestScheduler.cancel(102L, 0, CancelReason.CLIENT_CANCELLED)).thenReturn(completed);
+        when(requestScheduler.cancel(
+                        "102",
+                        0,
+                        CancelReason.CLIENT_CANCELLED,
+                        org.flexlb.dao.route.RequestPhase.GENERATION))
+                .thenReturn(completed);
         StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer =
                 mock(StreamObserver.class);
 
@@ -111,7 +120,12 @@ class FlexlbServiceCancelTest {
 
     @Test
     void unknownRequestIsTheOnlyLocalNotFoundResponse() {
-        when(requestScheduler.cancel(103L, 0, CancelReason.CLIENT_CANCELLED)).thenReturn(null);
+        when(requestScheduler.cancel(
+                        "103",
+                        0,
+                        CancelReason.CLIENT_CANCELLED,
+                        org.flexlb.dao.route.RequestPhase.GENERATION))
+                .thenReturn(null);
         StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer =
                 mock(StreamObserver.class);
 
@@ -157,7 +171,12 @@ class FlexlbServiceCancelTest {
 
         verify(observer, times(1)).onNext(masterResponse);
         verify(observer, times(1)).onCompleted();
-        verify(requestScheduler).cancel(104L, 0L, CancelReason.CLIENT_CANCELLED);
+        verify(requestScheduler)
+                .cancel(
+                        "104",
+                        0L,
+                        CancelReason.CLIENT_CANCELLED,
+                        org.flexlb.dao.route.RequestPhase.GENERATION);
     }
 
     @Test
@@ -184,7 +203,12 @@ class FlexlbServiceCancelTest {
         verify(observer).onError(error.capture());
         assertEquals(Status.Code.UNAVAILABLE, Status.fromThrowable(error.getValue()).getCode());
         verify(observer, never()).onNext(any());
-        verify(requestScheduler, times(1)).cancel(105L, 0L, CancelReason.CLIENT_CANCELLED);
+        verify(requestScheduler, times(1))
+                .cancel(
+                        "105",
+                        0L,
+                        CancelReason.CLIENT_CANCELLED,
+                        org.flexlb.dao.route.RequestPhase.GENERATION);
     }
 
     @Test
@@ -205,7 +229,12 @@ class FlexlbServiceCancelTest {
                         FlexlbScheduleProtocol.CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED),
                 observer);
 
-        verify(requestScheduler, times(1)).cancel(106L, 0, CancelReason.CLIENT_CANCELLED);
+        verify(requestScheduler, times(1))
+                .cancel(
+                        "106",
+                        0,
+                        CancelReason.CLIENT_CANCELLED,
+                        org.flexlb.dao.route.RequestPhase.GENERATION);
         org.mockito.ArgumentCaptor<FlexlbScheduleProtocol.FlexlbCancelResponsePB> response =
                 org.mockito.ArgumentCaptor.forClass(
                         FlexlbScheduleProtocol.FlexlbCancelResponsePB.class);
@@ -269,7 +298,9 @@ class FlexlbServiceCancelTest {
 
     private static RequestState snapshot(long requestId, RequestState.Phase state, long batchId) {
         return new RequestState(
+                String.valueOf(requestId),
                 requestId,
+                org.flexlb.dao.route.RequestPhase.GENERATION,
                 state,
                 batchId > 0 ? Delivery.SendMode.BATCH_ENQUEUE : Delivery.SendMode.NONE,
                 batchId,

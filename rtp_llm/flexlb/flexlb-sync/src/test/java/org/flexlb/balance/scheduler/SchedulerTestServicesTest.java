@@ -8,7 +8,7 @@ import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -57,7 +57,7 @@ class SchedulerTestServicesTest {
                 runtime.newLifecycle(
                         config,
                         SchedulingTestConfig.capacity(config),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         owner.bindScheduler(scheduler);
         org.springframework.test.util.ReflectionTestUtils.setField(scheduler, "lifecycle", owner);
         owner.register(
@@ -215,7 +215,7 @@ class SchedulerTestServicesTest {
                     .data()
                     .setRequest(
                             org.flexlb.dao.loadbalance.Request.builder()
-                                    .requestId(991L)
+                                    .requestId("991")
                                     .seqLen(1L)
                                     .build());
             wrongMode
@@ -370,7 +370,7 @@ class SchedulerTestServicesTest {
                             f.runtime.newLifecycle(
                                     f.config,
                                     SchedulingTestConfig.capacity(f.config),
-                                    mock(RecentCacheKeyTraceReporter.class)));
+                                    mock(TheoryCacheHitReporter.class)));
             var installedResult =
                     RequestProtocolTestSupport.register(
                             installed, RequestProtocolTestSupport.context(f.config, 9103L));
@@ -399,7 +399,7 @@ class SchedulerTestServicesTest {
                                     f.runtime.newLifecycle(
                                             f.config,
                                             SchedulingTestConfig.capacity(f.config),
-                                            mock(RecentCacheKeyTraceReporter.class))));
+                                            mock(TheoryCacheHitReporter.class))));
             var lifecycle = SchedulerTestSupport.spyLifecycle(other);
             var otherContext = RequestProtocolTestSupport.context(f.config, 9105L);
             var otherResult = RequestProtocolTestSupport.register(other, otherContext);
@@ -448,7 +448,7 @@ class SchedulerTestServicesTest {
                                     runtime.newLifecycle(
                                             config,
                                             SchedulingTestConfig.capacity(config),
-                                            mock(RecentCacheKeyTraceReporter.class))));
+                                            mock(TheoryCacheHitReporter.class))));
             var lifecycle = SchedulerTestSupport.spyLifecycle(owner);
             var context = RequestProtocolTestSupport.context(config, 9107L);
             var result = RequestProtocolTestSupport.register(owner, context);
@@ -707,7 +707,7 @@ class SchedulerTestServicesTest {
                                     config,
                                     SchedulingTestConfig.capacity(config),
                                     org.mockito.Mockito.mock(
-                                            org.flexlb.service.RecentCacheKeyTraceReporter.class)),
+                                            org.flexlb.service.TheoryCacheHitReporter.class)),
                             config,
                             mock(RequestWorkerSelector.class),
                             mock(DecodePreemption.class),

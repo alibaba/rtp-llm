@@ -21,7 +21,7 @@ import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -292,7 +292,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                             runtime.newLifecycle(
                                     config,
                                     new DecodeResources.AdmissionCapacity(64L, 90),
-                                    mock(RecentCacheKeyTraceReporter.class)),
+                                    mock(TheoryCacheHitReporter.class)),
                             availability,
                             new OrderedRequestQueue(config.isPriorityOrdering()),
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(config));
@@ -360,7 +360,7 @@ class QueuedDeliveryWithdrawalRaceTest {
             context.data()
                     .setRequest(
                             Request.builder()
-                                    .requestId(909001L)
+                                    .requestId("909001")
                                     .rawPriority(50)
                                     .seqLen(16L)
                                     .build());
@@ -368,7 +368,7 @@ class QueuedDeliveryWithdrawalRaceTest {
             context.data()
                     .setGenerateInputPb(
                             EngineRpcService.GenerateInputPB.newBuilder()
-                                    .setRequestId(context.data().getRequestId())
+                                    .setRequestId(Long.parseLong(context.data().getRequestId()))
                                     .addTokenIds(1)
                                     .build()
                                     .toByteString());
@@ -378,7 +378,12 @@ class QueuedDeliveryWithdrawalRaceTest {
             try (var pin = decode.tryPinGeneration()) {
                 reservation =
                         decode.tryReserveQueuedRequest(
-                                        pin, context.data().getRequestId(), 16L, 16L, 50, null)
+                                        pin,
+                                        String.valueOf(context.data().getRequestId()),
+                                        16L,
+                                        16L,
+                                        50,
+                                        null)
                                 .handle();
             }
             assertNotNull(reservation);

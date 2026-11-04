@@ -51,7 +51,7 @@ class RequestSchedulerReporterTest {
         var victims =
                 java.util.List.of(
                         new org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView(
-                                1L,
+                                String.valueOf(1L),
                                 20,
                                 100L,
                                 120L,
@@ -60,7 +60,7 @@ class RequestSchedulerReporterTest {
                                 1L,
                                 true),
                         new org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView(
-                                2L,
+                                String.valueOf(2L),
                                 30,
                                 200L,
                                 220L,
@@ -68,7 +68,8 @@ class RequestSchedulerReporterTest {
                                 true,
                                 2L,
                                 true));
-        observed.reportPreemptionVictims(3L, 70, "decode", "capacity", victims, cancelled);
+        observed.reportPreemptionVictims(
+                String.valueOf(3L), 70, "decode", "capacity", victims, cancelled);
         verify(observed)
                 .reportVictim(20, 70, cancelled ? "decode_running" : "decode_reserved", "capacity");
         verify(observed)

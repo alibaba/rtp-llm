@@ -17,7 +17,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.LongPredicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -191,13 +190,13 @@ class RequestOrchestratorsTest {
         AtomicBoolean exactOwnershipPredicateObserved = new AtomicBoolean();
         doAnswer(
                         invocation -> {
-                            java.util.function.LongPredicate owns = invocation.getArgument(1);
-                            exactOwnershipPredicateObserved.set(owns.test(91L));
+                            java.util.function.Predicate<String> owns = invocation.getArgument(1);
+                            exactOwnershipPredicateObserved.set(owns.test(String.valueOf(91L)));
                             return null;
                         })
                 .when(registry)
                 .evictExpiredOrphans(anyLong(), any());
-        when(requests.retainsIdentity(91L)).thenReturn(true);
+        when(requests.retainsIdentity("91")).thenReturn(true);
         runtime(requests, registry).maintainExpiration();
         verify(registry).evictExpiredOrphans(anyLong(), any());
         org.junit.jupiter.api.Assertions.assertTrue(exactOwnershipPredicateObserved.get());
@@ -366,13 +365,15 @@ class RequestOrchestratorsTest {
         var service = mock(ConfigService.class);
         var config = SchedulingTestConfig.newConfig();
         when(service.loadBalanceConfig()).thenReturn(config);
-        when(requests.retainsIdentity(91L)).thenReturn(true);
+        when(requests.retainsIdentity("91")).thenReturn(true);
         org.mockito.Mockito.doAnswer(
                         call -> {
                             assertEquals(10_000L, call.getArgument(0, Long.class));
-                            LongPredicate retained = call.getArgument(1);
-                            org.junit.jupiter.api.Assertions.assertTrue(retained.test(91L));
-                            org.junit.jupiter.api.Assertions.assertFalse(retained.test(92L));
+                            java.util.function.Predicate<String> retained = call.getArgument(1);
+                            org.junit.jupiter.api.Assertions.assertTrue(
+                                    retained.test(String.valueOf(91L)));
+                            org.junit.jupiter.api.Assertions.assertFalse(
+                                    retained.test(String.valueOf(92L)));
                             return null;
                         })
                 .when(endpoints)

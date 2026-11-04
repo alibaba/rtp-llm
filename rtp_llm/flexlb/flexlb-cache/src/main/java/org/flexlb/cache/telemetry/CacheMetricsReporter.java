@@ -1,6 +1,5 @@
 package org.flexlb.cache.telemetry;
 
-import com.google.common.net.HostAndPort;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.dao.route.RoleType;
@@ -43,6 +42,7 @@ import static org.flexlb.constant.MetricConstant.CACHE_MATCH_STANDBY_FALLBACK_QP
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
@@ -124,6 +124,7 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.COUNTER);
         monitor.register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
         monitor.register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.QPS);
+        monitor.register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.QPS);
         monitor.register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.QPS);
         monitor.register(CACHE_AFFINITY_DECISION, FlexMetricType.QPS);
         monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS);
@@ -165,8 +166,9 @@ public class CacheMetricsReporter {
         // Calculate cache count and bytes
         long cacheBytes = calculateEngineCacheBytes(cacheCount);
 
-        FlexMetricTags tags = engineTags.computeIfAbsent(
-                ipIndex, address -> FlexMetricTags.of("engineIp", address, "role", role));
+        FlexMetricTags tags =
+                engineTags.computeIfAbsent(
+                        ipIndex, address -> FlexMetricTags.of("engineIp", address, "role", role));
 
         monitor.report(CACHE_ENGINE_LOCAL_COUNT, tags, cacheCount);
         monitor.report(CACHE_ENGINE_LOCAL_BYTES, tags, cacheBytes);
@@ -333,8 +335,10 @@ public class CacheMetricsReporter {
             return;
         }
 
-        monitor.report(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS,
-                FlexMetricTags.of("role", roleType.name()), hitTokens);
+        monitor.report(
+                CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS,
+                FlexMetricTags.of("role", roleType.name()),
+                hitTokens);
     }
 
     /** Effective hits and routing matches belong to the same successfully selected request. */

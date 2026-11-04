@@ -6,7 +6,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -23,7 +23,7 @@ public final class PrefillCleanupDeadlockFixture {
                     lock,
                     PrefillActiveIndex.ordered(
                             4,
-                            Comparator.comparingLong(
+                            Comparator.comparing(
                                     org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
                                             ::requestId)),
                     clock::get);
@@ -64,12 +64,12 @@ public final class PrefillCleanupDeadlockFixture {
         clock.set(200);
     }
 
-    public void sweepBatches(LongPredicate retain) {
+    public void sweepBatches(Predicate<String> retain) {
         assertEquals(0, EndpointTestSupport.evictPrefill(state, 10L, retain));
         assertEquals(1, state.stats().batchCount());
     }
 
-    public void sweepIndividuals(LongPredicate retain) {
+    public void sweepIndividuals(Predicate<String> retain) {
         assertEquals(0, EndpointTestSupport.evictPrefill(state, 10L, retain));
         assertEquals(1, state.stats().individuallyOwnedRequests());
     }
@@ -94,7 +94,7 @@ public final class PrefillCleanupDeadlockFixture {
 
     private static RequestRoute item(long id) {
         RequestRoute item = mock(RequestRoute.class);
-        when(item.requestId()).thenReturn(id);
+        when(item.requestId()).thenReturn(String.valueOf(id));
         when(item.seqLen()).thenReturn(100L);
         return item;
     }

@@ -16,7 +16,6 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import static org.flexlb.constant.MetricConstant.CACHE_AVAILABLE_KV_CACHE_TOKENS;
-import static org.flexlb.constant.MetricConstant.CACHE_BLOCK_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_KEY_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_SUCCESS_PERIOD;
 import static org.flexlb.constant.MetricConstant.CACHE_TOTAL_KV_CACHE_TOKENS;
@@ -28,7 +27,6 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -82,34 +80,37 @@ class EngineHealthReporterSelectionMetricTest {
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void cacheMetricsKeepEngineAndRoleDimensions(boolean populated) {
-        var topology = mock(WorkerStatus.TopologySnapshot.class);
+        var worker = mock(WorkerStatus.class);
         var observation = mock(WorkerStatus.EngineObservation.class);
-        when(topology.ip()).thenReturn("10.0.0.1");
+        when(worker.getIp()).thenReturn("10.0.0.1");
+        when(worker.getRole()).thenReturn(RoleType.PREFILL);
+        when(worker.committedEngineObservation()).thenReturn(observation);
+        when(worker.pollHealth()).thenReturn(mock(WorkerStatus.PollHealth.class));
         when(observation.role()).thenReturn(RoleType.PREFILL);
         if (populated) {
             when(observation.totalKvCacheTokens()).thenReturn(100L);
             when(observation.availableKvCacheTokens()).thenReturn(40L);
+            when(worker.getCacheStatus())
+                    .thenReturn(
+                            org.flexlb.dao.master.CacheStatus.builder().cacheKeySize(7L).build());
         }
-        reporter.reportCacheStatusCheckerSuccess(
-                "model",
-                topology,
-                observation,
-                populated ? 20L : 0L,
-                populated ? 16L : null,
-                populated ? 7L : null);
-        FlexMetricTags engine =
-                FlexMetricTags.of("model", "model", "engineIp", "10.0.0.1", "role", "PREFILL");
-        FlexMetricTags role = FlexMetricTags.of("model", "model", "role", "PREFILL");
+        reporter.reportStatusCheckerSuccess(worker, java.util.OptionalLong.empty(), 0, 0);
+        reporter.reportCacheStatusCheckerSuccess(worker, populated ? 20L : 0L);
+        FlexMetricTags engine = FlexMetricTags.of("engineIp", "10.0.0.1", "role", "PREFILL");
         if (populated) {
             verify(monitor).report(CACHE_STATUS_CHECK_SUCCESS_PERIOD, engine, 20.0);
-            verify(monitor).report(CACHE_BLOCK_SIZE, role, 16.0);
             verify(monitor).report(CACHE_KEY_SIZE, engine, 7.0);
             verify(monitor).report(CACHE_USED_KV_CACHE_RATIO, engine, 60.0);
+            verify(monitor).report(CACHE_USED_KV_CACHE_TOKENS, engine, 60.0);
+            verify(monitor).report(CACHE_AVAILABLE_KV_CACHE_TOKENS, engine, 40.0);
+            verify(monitor).report(CACHE_TOTAL_KV_CACHE_TOKENS, engine, 100.0);
+        } else {
+            verify(monitor, org.mockito.Mockito.never())
+                    .report(
+                            org.mockito.ArgumentMatchers.eq(CACHE_TOTAL_KV_CACHE_TOKENS),
+                            org.mockito.ArgumentMatchers.any(),
+                            org.mockito.ArgumentMatchers.anyDouble());
         }
-        verify(monitor).report(CACHE_USED_KV_CACHE_TOKENS, engine, populated ? 60.0 : 0.0);
-        verify(monitor).report(CACHE_AVAILABLE_KV_CACHE_TOKENS, engine, populated ? 40.0 : 0.0);
-        verify(monitor).report(CACHE_TOTAL_KV_CACHE_TOKENS, role, populated ? 100.0 : 0.0);
-        verifyNoMoreInteractions(monitor);
     }
 
     @Test

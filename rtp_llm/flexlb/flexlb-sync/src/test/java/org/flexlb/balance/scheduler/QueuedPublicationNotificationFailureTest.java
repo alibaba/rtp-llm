@@ -14,7 +14,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -92,7 +92,7 @@ class QueuedPublicationNotificationFailureTest {
             var incoming = fixture.context(9312L, 80);
             var handle =
                     SchedulerTestServices.lifecycle(fixture.queue)
-                            .claimAdmissionHandle(9312L, incoming.data().getFuture());
+                            .claimAdmissionHandle("9312", incoming.data().getFuture());
             assertNotNull(handle);
             var failure = new IllegalStateException("physical offer failed before enqueue");
             fixture.physicalFailure = failure;
@@ -124,7 +124,7 @@ class QueuedPublicationNotificationFailureTest {
         try (var fixture = new Fixture()) {
             var context = fixture.context(9341L, 50);
             var lifecycle = SchedulerTestServices.lifecycle(fixture.queue);
-            var admission = lifecycle.claimAdmissionHandle(9341L, context.data().getFuture());
+            var admission = lifecycle.claimAdmissionHandle("9341", context.data().getFuture());
             var failure = new IllegalStateException("placement notification failed");
             org.mockito.Mockito.doThrow(failure)
                     .when(fixture.prefill)
@@ -186,7 +186,7 @@ class QueuedPublicationNotificationFailureTest {
                                             service,
                                             mock(DeliveryMetricsReporter.class),
                                             reporter,
-                                            mock(RecentCacheKeyTraceReporter.class)));
+                                            mock(TheoryCacheHitReporter.class)));
             prefill =
                     spy(
                             EndpointTestSupport.realPrefill(

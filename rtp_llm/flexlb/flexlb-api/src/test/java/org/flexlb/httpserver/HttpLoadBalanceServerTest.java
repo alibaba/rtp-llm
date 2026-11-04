@@ -25,18 +25,19 @@ class HttpLoadBalanceServerTest {
 
     @Test
     void inflightStatusExposesExactBlockedRequestCount() {
-        RequestScheduler scheduler = mock(RequestScheduler.class);
-        when(scheduler.getTrackedRequestCount()).thenReturn(9);
-        when(scheduler.getBlockedRequestCount()).thenReturn(2);
+        RequestRepository scheduler = mock(RequestRepository.class);
+        when(scheduler.liveRequestCount()).thenReturn(9);
+        var scheduling = mock(org.flexlb.balance.scheduler.RequestScheduler.class);
+        when(scheduling.blockedRequestCount()).thenReturn(2);
         HttpLoadBalanceServer server =
                 new HttpLoadBalanceServer(
-                        mock(LBStatusConsistencyService.class),
+                        mock(MasterStatusService.class),
                         mock(ConfigService.class, RETURNS_DEEP_STUBS),
                         scheduler,
                         mock(EndpointRegistry.class),
-                        mock(WorkerDirectory.class),
-                        mock(MasterEngineSynchronizer.class),
+                        mock(WorkerStatusSynchronizer.class),
                         new ServerScheduleLatencyRecorder());
+        server.configureScheduling(scheduling);
         WebTestClient client =
                 WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();
 
@@ -54,7 +55,7 @@ class HttpLoadBalanceServerTest {
                 .jsonPath("$.scheduler_blocked")
                 .isEqualTo(2);
 
-        verify(scheduler).getBlockedRequestCount();
+        verify(scheduling).blockedRequestCount();
     }
 
     @org.junit.jupiter.params.ParameterizedTest

@@ -7,7 +7,6 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.util.Map;
 import java.util.WeakHashMap;
 
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -23,7 +22,7 @@ public final class SchedulerTestSupport {
 
     private static DecodeResources.ReservationHandle decodeReservation(
             DecodeResources.ResourceSnapshot snapshot, long requestId) {
-        var request = snapshot.requests().get(requestId);
+        var request = snapshot.requests().get(String.valueOf(requestId));
         if (request == null || request.reservationToken() <= 0L) {
             return null;
         }
@@ -31,7 +30,7 @@ public final class SchedulerTestSupport {
             case LOCAL_RESERVED, MASTER_QUEUED_NOT_DISPATCHED, ENGINE_MAY_HAVE_SEEN ->
                     new DecodeResources.ReservationHandle(
                             snapshot.routing().generationId(),
-                            requestId,
+                            String.valueOf(requestId),
                             request.reservationToken());
             default -> null;
         };
@@ -51,8 +50,8 @@ public final class SchedulerTestSupport {
 
     private static RequestRepository mockRepository(RequestLifecycle owner) {
         var repository = mock(RequestRepository.class);
-        when(repository.ownerOf(anyLong())).thenReturn(owner);
-        when(repository.findActive(anyLong()))
+        when(repository.ownerOf(org.mockito.ArgumentMatchers.anyString())).thenReturn(owner);
+        when(repository.findActive(org.mockito.ArgumentMatchers.anyString()))
                 .thenAnswer(
                         call -> {
                             var context = mock(RequestContext.class);

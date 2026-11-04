@@ -103,7 +103,7 @@ class QueueRegistrationCancellationTest {
             f.queue.close();
             assertEquals(
                     RequestState.Phase.CANCELLED,
-                    f.runtime.requests().getRequestState(908L, 0L).state());
+                    f.runtime.requests().getRequestState("908", 0L).state());
             verify(f.router, never()).select(any(), nullable(String.class));
         }
     }
@@ -214,7 +214,7 @@ class QueueRegistrationCancellationTest {
                                         assertNotNull(
                                                 SchedulerTestServices.lifecycle(f.queue)
                                                         .cancel(
-                                                                902L,
+                                                                "902",
                                                                 0L,
                                                                 CancelReason.CLIENT_CANCELLED));
                                     });
@@ -251,7 +251,7 @@ class QueueRegistrationCancellationTest {
                 assertTrue(registered.await(2L, TimeUnit.SECONDS));
                 assertNotNull(
                         SchedulerTestServices.lifecycle(f.queue)
-                                .cancel(903L, 0L, CancelReason.CLIENT_CANCELLED));
+                                .cancel("903", 0L, CancelReason.CLIENT_CANCELLED));
                 SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(f.queue));
 
                 assertFalse(submitted.isDone(), "a cancelled hook holds no scheduling resources");
@@ -322,9 +322,7 @@ class QueueRegistrationCancellationTest {
                                     runtime.newLifecycle(
                                             config,
                                             SchedulingTestConfig.capacity(config),
-                                            mock(
-                                                    org.flexlb.service.RecentCacheKeyTraceReporter
-                                                            .class)),
+                                            mock(org.flexlb.service.TheoryCacheHitReporter.class)),
                                     config,
                                     router,
                                     mock(DecodePreemption.class),

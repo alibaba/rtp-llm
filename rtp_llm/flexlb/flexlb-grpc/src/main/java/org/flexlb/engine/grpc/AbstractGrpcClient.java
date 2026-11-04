@@ -3,14 +3,13 @@ package org.flexlb.engine.grpc;
 import io.grpc.Deadline;
 import io.grpc.ManagedChannel;
 import lombok.Getter;
+import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
-import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
-import org.flexlb.util.CommonUtils;
+import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.flexlb.util.Logger;
 import org.springframework.scheduling.annotation.Scheduled;
 
 import javax.annotation.PreDestroy;
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -24,7 +23,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * description:
  * date: 2025/4/23
  */
-public abstract class AbstractGrpcClient implements CustomNameResolver.Listener {
+public abstract class AbstractGrpcClient implements EngineAddressResolver.Listener {
 
     /**
      * Maintain different channel for different service type.
@@ -44,37 +43,43 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
      * Handle service address update event
      * When service discovery detects worker list changes, synchronously update gRPC channel pool and cache view
      *
-     * @param ipPortList Latest worker address list in format ip:httpPort
+     * @param hosts Latest worker address list in format ip:httpPort
      */
     @Override
-    public void onAddressUpdate(List<String /*ip:port*/> ipPortList) {
-        if (ipPortList == null) {
+    public void onAddressUpdate(List<WorkerHost> hosts) {
+        if (hosts == null) {
             Logger.error("received null ipPort list");
             return;
         }
 
         // Update gRPC channel pool
-        updateGrpcChannelPool(ipPortList);
+        updateGrpcChannelPool(hosts);
     }
 
     /**
-     * Update gRPC channel pool based on latest ipPortList
+     * Update gRPC channel pool based on latest hosts
      * Create new channels for newly online workers, remove channels for offline workers
      *
-     * @param ipPortList Latest worker address list in format ip:httpPort
+     * @param hosts Latest worker address list in format ip:httpPort
      */
-    private void updateGrpcChannelPool(List<String> ipPortList) {
+    protected boolean precreate(ServiceType service) {
+        return true;
+    }
+
+    private void updateGrpcChannelPool(List<WorkerHost> hosts) {
         Set<String /*ip:port:serviceType*/> currentKeys = new HashSet<>(channelPool.keySet());
-        List<String /*ip:port:serviceType*/> addedKeys = new ArrayList<>();
+        Set<String /*ip:port:serviceType*/> addedKeys = new HashSet<>();
 
         // Identify new and retained workers, mark channels to be removed
-        for (String ipPort : ipPortList) {
-            String[] parts = ipPort.split(":");
-            String ip = parts[0];
-            int httpPort = Integer.parseInt(parts[1]);
-            int grpcPort = CommonUtils.toGrpcPort(httpPort);
-
+        for (WorkerHost host : hosts) {
+            String ip = host.getIp();
             for (ServiceType serviceType : ServiceType.values()) {
+                if (!precreate(serviceType)) continue;
+                int grpcPort =
+                        serviceType == ServiceType.BATCH_ENQUEUE
+                                        || serviceType == ServiceType.ENGINE_CANCEL
+                                ? host.getGrpcPort()
+                                : host.getWorkerStatusPort();
                 String serviceKey = createKey(ip, grpcPort, serviceType);
                 boolean contained = currentKeys.remove(serviceKey);
                 if (!contained) {
@@ -118,7 +123,7 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
 
         Logger.info(
                 "gRPC channel pool changed: hosts={}, addedChannels={}, removedChannels={}, totalChannels={}",
-                ipPortList.size(),
+                hosts.size(),
                 addedChannelCount,
                 removedChannelCount,
                 channelPool.size());

@@ -21,7 +21,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -93,7 +93,7 @@ class RequestWorkerSelectorTest {
                                 configService,
                                 mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
                                 mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                                mock(org.flexlb.service.RecentCacheKeyTraceReporter.class)));
+                                mock(org.flexlb.service.TheoryCacheHitReporter.class)));
         var algorithm =
                 org.mockito.Mockito.mock(
                         DirectRequestScheduler.class,
@@ -104,8 +104,7 @@ class RequestWorkerSelectorTest {
                                                 config,
                                                 SchedulingTestConfig.capacity(config),
                                                 org.mockito.Mockito.mock(
-                                                        org.flexlb.service
-                                                                .RecentCacheKeyTraceReporter
+                                                        org.flexlb.service.TheoryCacheHitReporter
                                                                 .class)))
                                 .defaultAnswer(
                                         invocation -> {
@@ -118,20 +117,18 @@ class RequestWorkerSelectorTest {
                                         }));
         requests = org.mockito.Mockito.spy(SchedulerTestServices.lifecycle(algorithm));
         ReflectionTestUtils.setField(algorithm, "lifecycle", requests);
-        var registered = new java.util.concurrent.ConcurrentHashMap<Long, RequestContext>();
         org.mockito.Mockito.doAnswer(
                         call ->
                                 RequestProtocolTestSupport.admissionHandle(
-                                        registered.get(call.<Long>getArgument(0))))
+                                        call.getArgument(0, RequestContext.class)))
                 .when(requests)
-                .claimAdmissionHandle(anyLong(), any());
+                .claimAdmissionHandle(any(RequestContext.class));
         org.mockito.Mockito.doAnswer(
                         call -> {
                             var context = call.getArgument(0, RequestContext.class);
                             var future = new CompletableFuture<Response>();
                             context.data().setFuture(future);
                             SchedulerTestSupport.bindOwner(context, requests);
-                            registered.put(context.data().getRequestId(), context);
                             return future;
                         })
                 .when(requests)
@@ -209,7 +206,7 @@ class RequestWorkerSelectorTest {
         PrefillEndpoint.RouteReservation registration =
                 mock(PrefillEndpoint.RouteReservation.class);
         DecodeResources.ReservationHandle reservation =
-                new DecodeResources.ReservationHandle(1L, 7L, 2L);
+                new DecodeResources.ReservationHandle(1L, String.valueOf(7L), 2L);
         when(prefillSelector.select(
                         org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
                         org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
@@ -231,7 +228,7 @@ class RequestWorkerSelectorTest {
                 .thenReturn(CapacityBoundary.Attempt.accepted(registration));
         when(((DecodeEndpoint) decode.endpoint)
                         .tryReserveQueuedRequest(
-                                eq(decode.pin), eq(7L), eq(32L), eq(48L), eq(50), isNull()))
+                                eq(decode.pin), eq("7"), eq(32L), eq(48L), eq(50), isNull()))
                 .thenReturn(
                         new org.flexlb.balance.endpoint.DecodeResources.Acquisition<>(
                                 org.flexlb.balance.endpoint.DecodeResources.ReserveStatus.ACQUIRED,
@@ -282,7 +279,7 @@ class RequestWorkerSelectorTest {
         SelectionFixture prefill = selection(RoleType.PREFILL, 8L, "p", 8001, "g1");
         SelectionFixture decode = selection(RoleType.DECODE, 8L, "d", 8002, "g1");
         DecodeResources.ReservationHandle reservation =
-                new DecodeResources.ReservationHandle(1L, 8L, 2L);
+                new DecodeResources.ReservationHandle(1L, String.valueOf(8L), 2L);
         when(prefillSelector.select(
                         org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
                         org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
@@ -301,7 +298,7 @@ class RequestWorkerSelectorTest {
         stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
         when(((DecodeEndpoint) decode.endpoint)
                         .tryReserveQueuedRequest(
-                                eq(decode.pin), eq(8L), eq(32L), eq(48L), eq(50), isNull()))
+                                eq(decode.pin), eq("8"), eq(32L), eq(48L), eq(50), isNull()))
                 .thenReturn(
                         new org.flexlb.balance.endpoint.DecodeResources.Acquisition<>(
                                 org.flexlb.balance.endpoint.DecodeResources.ReserveStatus.ACQUIRED,
@@ -385,11 +382,11 @@ class RequestWorkerSelectorTest {
                         configService,
                         mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
                         mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         try {
             SelectionFixture prefill = selection(RoleType.PREFILL, 9L, "p", 8001, "g1");
             SelectionFixture decode = selection(RoleType.DECODE, 9L, "d", 8002, "g1");
-            var reservation = new DecodeResources.ReservationHandle(1L, 9L, 2L);
+            var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(9L), 2L);
             when(prefillSelector.select(
                             org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
                             org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
@@ -414,7 +411,7 @@ class RequestWorkerSelectorTest {
                                     mock(PrefillEndpoint.RouteReservation.class)));
             when(((DecodeEndpoint) decode.endpoint)
                             .tryReserveQueuedRequest(
-                                    eq(decode.pin), eq(9L), eq(32L), eq(48L), eq(50), isNull()))
+                                    eq(decode.pin), eq("9"), eq(32L), eq(48L), eq(50), isNull()))
                     .thenReturn(
                             new org.flexlb.balance.endpoint.DecodeResources.Acquisition<>(
                                     org.flexlb.balance.endpoint.DecodeResources.ReserveStatus
@@ -429,7 +426,7 @@ class RequestWorkerSelectorTest {
                             .get(2L, TimeUnit.SECONDS)
                             .isSuccess());
             assertTrue(context.data().getFuture().get(2L, TimeUnit.SECONDS).isSuccess());
-            RequestContext requestContext = requests.requests.findActive(9L);
+            RequestContext requestContext = requests.requests.findActive("9");
             synchronized (requestContext) {
                 assertTrue(requestContext.snapshot().engine().decodeAccepted());
                 assertTrue(requestContext.snapshot().phase() == ContextResult.Phase.OPEN);
@@ -450,7 +447,7 @@ class RequestWorkerSelectorTest {
                                     .getTimeoutMs());
             assertEquals(
                     RequestState.Phase.TIMED_OUT,
-                    SchedulerTestSupport.repository(requests).getRequestState(9L, 0L).state());
+                    SchedulerTestSupport.repository(requests).getRequestState("9", 0L).state());
             assertEquals(0, SchedulerTestSupport.repository(requests).liveRequestCount());
             verify((DecodeEndpoint) decode.endpoint)
                     .release(reservation, DecodeResources.ReleaseReason.EXPIRED);
@@ -475,7 +472,7 @@ class RequestWorkerSelectorTest {
                         configService,
                         mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
                         mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         try {
             Throwable failure =
                     fatal
@@ -498,7 +495,7 @@ class RequestWorkerSelectorTest {
             assertEquals("DISPATCH_FAILED", response.getErrorMessage());
             assertEquals(
                     RequestState.Phase.FAILED,
-                    SchedulerTestSupport.repository(requests).getRequestState(10L, 0L).state());
+                    SchedulerTestSupport.repository(requests).getRequestState("10", 0L).state());
             SchedulerTestSupport.awaitRequestWork(SchedulerTestSupport.runtime(requests));
             if (fatal)
                 assertSame(
@@ -572,9 +569,14 @@ class RequestWorkerSelectorTest {
         var prefill = selection(RoleType.PREFILL, 701L, "10.0.0.1", 8080, "g1");
         var selectedDecode = selection(RoleType.DECODE, 701L, "10.0.0.2", 8080, "g1");
         var decode = (DecodeEndpoint) selectedDecode.endpoint();
-        var reservation = new DecodeResources.ReservationHandle(1L, 701L, 1L);
+        var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(701L), 1L);
         when(decode.tryReserveQueuedRequest(
-                        any(), anyLong(), anyLong(), anyLong(), anyInt(), eq(capacity)))
+                        any(),
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyLong(),
+                        anyLong(),
+                        anyInt(),
+                        eq(capacity)))
                 .thenReturn(
                         new org.flexlb.balance.endpoint.DecodeResources.Acquisition<>(
                                 org.flexlb.balance.endpoint.DecodeResources.ReserveStatus.ACQUIRED,
@@ -616,10 +618,15 @@ class RequestWorkerSelectorTest {
                 verify(decode).acquireDispatchPermit(reservation, capacity);
                 verify(decode)
                         .tryReserveQueuedRequest(
-                                any(), eq(701L), eq(hardKv), eq(expectedKv), eq(73), eq(capacity));
+                                any(), eq("701"), eq(hardKv), eq(expectedKv), eq(73), eq(capacity));
                 verify(decode, never())
                         .tryReserveQueuedRequest(
-                                any(), anyLong(), anyLong(), anyLong(), anyInt(), isNull());
+                                any(),
+                                org.mockito.ArgumentMatchers.anyString(),
+                                anyLong(),
+                                anyLong(),
+                                anyInt(),
+                                isNull());
             }
         }
         // Published queue membership now owns the reservation; closing the selection cannot release
@@ -634,7 +641,7 @@ class RequestWorkerSelectorTest {
         var prefill = selection(RoleType.PREFILL, 702L, "p", 8001, "g1");
         var selectedDecode = selection(RoleType.DECODE, 702L, "d", 8002, "g1");
         var decode = (DecodeEndpoint) selectedDecode.endpoint();
-        var reservation = new DecodeResources.ReservationHandle(1L, 702L, 1L);
+        var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(702L), 1L);
         var adoptionFailure = new IllegalStateException("adoption failed");
         var cleanupFailure = new IllegalStateException("cleanup failed");
         if (adoptionThrows) {
@@ -670,7 +677,7 @@ class RequestWorkerSelectorTest {
         var prefill = selection(RoleType.PREFILL, 703L, "p", 8001, "g1");
         var decode = selection(RoleType.DECODE, 703L, "d", 8002, "g1");
         var endpoint = (DecodeEndpoint) decode.endpoint();
-        var reservation = new DecodeResources.ReservationHandle(1L, 703L, 1L);
+        var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(703L), 1L);
         var cleanupFailure = new IllegalStateException("pin cleanup failed after publication");
         var route = selectedRoute(context, prefill, decode);
         var scheduler = queueScheduler(context);
@@ -748,9 +755,14 @@ class RequestWorkerSelectorTest {
         var prefill = selection(RoleType.PREFILL, 703L, "p", 8001, "g1");
         var decode = selection(RoleType.DECODE, 703L, "d", 8002, "g1");
         var endpoint = (DecodeEndpoint) decode.endpoint();
-        var reservation = new DecodeResources.ReservationHandle(1L, 703L, 1L);
+        var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(703L), 1L);
         when(endpoint.tryReserveQueuedRequest(
-                        any(), anyLong(), anyLong(), anyLong(), anyInt(), any()))
+                        any(),
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyLong(),
+                        anyLong(),
+                        anyInt(),
+                        any()))
                 .thenReturn(
                         new DecodeResources.Acquisition<>(
                                 DecodeResources.ReserveStatus.ACQUIRED, reservation));
@@ -797,7 +809,7 @@ class RequestWorkerSelectorTest {
         var context = context(706L);
         var prefill = selection(RoleType.PREFILL, 706L, "p", 8001, "g1");
         var decode = selection(RoleType.DECODE, 706L, "d", 8002, "g1");
-        decode.status().setRequestId(999L);
+        decode.status().setRequestId(String.valueOf(999L));
         assertThrows(IllegalStateException.class, () -> selectedRoute(context, prefill, decode));
         verify(prefill.pin()).close();
         verify(decode.pin()).close();
@@ -810,11 +822,16 @@ class RequestWorkerSelectorTest {
         var prefill = selection(RoleType.PREFILL, 704L, "p", 8001, "g1");
         var decode = selection(RoleType.DECODE, 704L, "d", 8002, "g1");
         var endpoint = (DecodeEndpoint) decode.endpoint();
-        var reservation = new DecodeResources.ReservationHandle(1L, 704L, 1L);
+        var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(704L), 1L);
         stubDecodePermit(endpoint, reservation);
         stubPrefillCommit((PrefillEndpoint) prefill.endpoint());
         when(endpoint.tryReserveQueuedRequest(
-                        any(), anyLong(), anyLong(), anyLong(), anyInt(), any()))
+                        any(),
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyLong(),
+                        anyLong(),
+                        anyInt(),
+                        any()))
                 .thenReturn(
                         new org.flexlb.balance.endpoint.DecodeResources.Acquisition<>(
                                 org.flexlb.balance.endpoint.DecodeResources.ReserveStatus.ACQUIRED,
@@ -872,8 +889,8 @@ class RequestWorkerSelectorTest {
         var prefill = selection(RoleType.PREFILL, 705L, "p", 8001, "g1");
         var decode = selection(RoleType.DECODE, 705L, "d", 8002, "g1");
         var endpoint = (DecodeEndpoint) decode.endpoint();
-        var existing = new DecodeResources.ReservationHandle(1L, 705L, 1L);
-        var incoming = new DecodeResources.ReservationHandle(1L, 705L, 2L);
+        var existing = new DecodeResources.ReservationHandle(1L, String.valueOf(705L), 1L);
+        var incoming = new DecodeResources.ReservationHandle(1L, String.valueOf(705L), 2L);
         when(endpoint.markQueued(decode.pin(), existing))
                 .thenReturn(
                         org.flexlb.balance.endpoint.DecodeResources.ResourceChange.of(
@@ -926,7 +943,7 @@ class RequestWorkerSelectorTest {
                                                         SchedulingTestConfig.capacity(config),
                                                         org.mockito.Mockito.mock(
                                                                 org.flexlb.service
-                                                                        .RecentCacheKeyTraceReporter
+                                                                        .TheoryCacheHitReporter
                                                                         .class)),
                                         new PlacementAvailability(),
                                         new OrderedRequestQueue(config.isPriorityOrdering()),
@@ -1170,7 +1187,12 @@ class RequestWorkerSelectorTest {
         RequestWorkerSelector router = router();
         RequestContext context = context(21L);
         SelectionFixture prefill =
-                selection(RoleType.PREFILL, context.data().getRequestId(), "p", 8001, "g1");
+                selection(
+                        RoleType.PREFILL,
+                        Long.parseLong(context.data().getRequestId()),
+                        "p",
+                        8001,
+                        "g1");
         when(prefillSelector.select(
                         org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
                         org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
@@ -1387,7 +1409,8 @@ class RequestWorkerSelectorTest {
                                                 1,
                                                 new EndpointRegistry.PrefillRoutingEntry(
                                                         "p:8001",
-                                                        (PrefillEndpoint) foreign.endpoint()))));
+                                                        (PrefillEndpoint) foreign.endpoint()),
+                                                null)));
 
         var handoff = router.select(context, router.resolvePolicyGroup(context));
         assertEquals(PlacementResult.Status.ENDPOINT_CHANGED, handoff.status());
@@ -1405,7 +1428,7 @@ class RequestWorkerSelectorTest {
         var context = context(62L);
         selection(RoleType.PREFILL, 62L, "p", 8001, "g1");
         var reporter =
-                (org.flexlb.cache.monitor.CacheMetricsReporter)
+                (org.flexlb.cache.telemetry.CacheMetricsReporter)
                         ReflectionTestUtils.getField(router, "cacheReporter");
         if (reporterFails) {
             doThrow(new IllegalStateException("metrics unavailable"))
@@ -1514,9 +1537,12 @@ class RequestWorkerSelectorTest {
                 prefillSelector,
                 decodeSelector,
                 vitSelector,
+                org.mockito.Mockito.mock(
+                        org.flexlb.balance.strategy.EncoderSelectionStrategy.class),
+                org.mockito.Mockito.mock(org.flexlb.cache.match.CacheAwareService.class),
                 null,
                 mock(org.flexlb.service.monitor.EngineHealthReporter.class),
-                mock(org.flexlb.cache.monitor.CacheMetricsReporter.class),
+                mock(org.flexlb.cache.telemetry.CacheMetricsReporter.class),
                 configService,
                 modelMeta);
     }
@@ -1630,7 +1656,11 @@ class RequestWorkerSelectorTest {
 
     private static RequestContext context(long requestId, FlexlbConfig config) {
         Request request =
-                Request.builder().requestId(requestId).seqLen(32L).maxNewTokens(16).build();
+                Request.builder()
+                        .requestId(String.valueOf(requestId))
+                        .seqLen(32L)
+                        .maxNewTokens(16)
+                        .build();
         RequestContext context = new RequestContext(config);
         context.data().setRequest(request);
         context.data()
@@ -1658,7 +1688,7 @@ class RequestWorkerSelectorTest {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);
-        status.setRequestId(requestId);
+        status.setRequestId(String.valueOf(requestId));
         status.setServerIp(ip);
         status.setHttpPort(httpPort);
         status.setGrpcPort(httpPort + 1);
@@ -1734,7 +1764,8 @@ class RequestWorkerSelectorTest {
                             0L,
                             null,
                             1,
-                            new EndpointRegistry.PrefillRoutingEntry(address, endpoint)));
+                            new EndpointRegistry.PrefillRoutingEntry(address, endpoint),
+                            null));
         }
         if (selected.endpoint() instanceof DecodeEndpoint endpoint) {
             return PlacementResult.success(endpoint.routingView());

@@ -238,12 +238,13 @@ class FlexlbGrpcForwarderRecoveryTest {
                                                 FlexlbScheduleRequestPB request,
                                                 StreamObserver<FlexlbScheduleResponsePB> observer) {
                                             received.add(request.getRequestId());
-                                            if (request.getRequestId() == 10
-                                                    || request.getRequestId() == 12) {
+                                            if (request.getRequestId() == 10L
+                                                    || request.getRequestId() == 12L) {
                                                 observer.onError(
                                                         Status.INTERNAL
                                                                 .withDescription(
-                                                                        request.getRequestId() == 10
+                                                                        request.getRequestId()
+                                                                                        == 10L
                                                                                 ? "ordinary application failure"
                                                                                 : "Panic! This is a bug!")
                                                                 .asRuntimeException());

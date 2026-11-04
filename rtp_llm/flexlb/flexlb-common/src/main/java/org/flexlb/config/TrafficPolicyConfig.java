@@ -19,7 +19,7 @@ public final class TrafficPolicyConfig {
     private List<Target> defaultTargets = new ArrayList<>();
     private List<Rule> rules = new ArrayList<>();
 
-    public Optional<String> resolveTargetGroup(long requestId, String apiKey, long seqLen) {
+    public Optional<String> resolveTargetGroup(String requestId, String apiKey, long seqLen) {
         for (Rule rule : rules) {
             if (rule.match != null && rule.match.matches(apiKey, seqLen)) {
                 return chooseWeightedTarget(
@@ -87,7 +87,7 @@ public final class TrafficPolicyConfig {
     }
 
     private static Optional<String> chooseWeightedTarget(
-            List<Target> targets, long requestId, String apiKey, long seqLen, String salt) {
+            List<Target> targets, String requestId, String apiKey, long seqLen, String salt) {
         if (targets == null || targets.isEmpty()) {
             return Optional.empty();
         }
@@ -103,7 +103,7 @@ public final class TrafficPolicyConfig {
         throw new IllegalStateException("validated weighted target selection fell through");
     }
 
-    private static long hashRequest(long requestId, String apiKey, long seqLen, String salt) {
+    private static long hashRequest(String requestId, String apiKey, long seqLen, String salt) {
         CRC32 crc32 = new CRC32();
         String key = requestId + "|" + apiKey + "|" + seqLen + "|" + salt;
         crc32.update(key.getBytes(StandardCharsets.UTF_8));

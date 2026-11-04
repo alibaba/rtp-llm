@@ -215,7 +215,7 @@ public class RequestSchedulerReporter {
     /** Report one snapshot: local reservations, accepted/running Engine tasks and Engine-facing load. */
     /** Read committed victim facts; neither publication nor metric failure changes the attempt. */
     public void reportPreemptionVictims(
-            long requestId,
+            String requestId,
             int incomingPriority,
             String endpoint,
             String evictionCase,

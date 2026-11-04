@@ -34,7 +34,7 @@ class DispatchFailureTest extends FlexLBMockTestBase {
 
     @Test
     void dispatchFailure_requestFailsAndRecovers() throws Exception {
-        CompletableFuture<Response> future = submitRequest("7001");
+        CompletableFuture<Response> future = submitRequest(7001L);
         Response response = future.get(5, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess(), "Request should fail when EnqueueBatch returns error");
@@ -45,7 +45,7 @@ class DispatchFailureTest extends FlexLBMockTestBase {
         InflightAssertions.assertResourcesReleasedWithin(getPrefillEndpoint(), null, 5_000L);
 
         mockPrefillWorker.setBehavior(MockWorkerBehavior.builder().build());
-        Response recovered = submitRequest("7002").get(5, TimeUnit.SECONDS);
+        Response recovered = submitRequest(7002L).get(5, TimeUnit.SECONDS);
         assertTrue(recovered.isSuccess(), "Subsequent request should succeed after recovery");
         assertEquals(2, mockPrefillWorker.getEnqueueCount());
     }

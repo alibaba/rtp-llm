@@ -1194,10 +1194,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler {
                                     lifecycle.cancel(
                                             entry.context, 0L, CancelReason.DEADLINE_EXCEEDED);
                                 } else {
-                                    plan.handle =
-                                            lifecycle.claimAdmissionHandle(
-                                                    entry.context.data().getRequestId(),
-                                                    entry.context.data().getFuture());
+                                    plan.handle = lifecycle.claimAdmissionHandle(entry.context);
                                     if (plan.handle != null) {
                                         plan.result =
                                                 Objects.requireNonNull(
@@ -1349,6 +1346,17 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler {
                     }
                     case SUCCESS -> {
                         RequestRoute routing = result.value();
+                        if (routing.encoderEp() != null) {
+                            var publication =
+                                    lifecycle.dispatcher.submitRoute(routing, plan.handle);
+                            if (publication.status() == PlacementResult.Status.BLOCKED) {
+                                plan.waitKey = publication.blocker();
+                                return Outcome.BLOCKED;
+                            }
+                            if (publication.status() == PlacementResult.Status.REJECTED)
+                                completeDecisionResponse(entry, publication.failure());
+                            break;
+                        }
                         var publication = lifecycle.dispatcher.enqueueRoute(routing, queueSettings);
                         if (reclaimed && publication.status() != PlacementResult.Status.SUCCESS) {
                             rejection =
@@ -1444,6 +1452,16 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler {
                         || status == DecodeResources.ReservationReleaseResult.STALE,
                 "unaccepted preemption retained Decode resources");
         return new DecodePreemption.PreemptionResult(null, false, "plan_no_longer_current");
+    }
+
+    @Override
+    public int blockedRequestCount() {
+        lock.lock();
+        try {
+            return waitingRequests.size() + preemptionQuotaWaiters.size();
+        } finally {
+            lock.unlock();
+        }
     }
 
     private boolean park(PlacementPlan plan, Map<String, Object> diagnostics) {
@@ -1643,7 +1661,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler {
                         || route == null
                         || route.decodeEp() != endpoint
                         || route.decodeReservation() != null
-                        || reservation.requestId() != route.requestId()
+                        || !java.util.Objects.equals(reservation.requestId(), route.requestId())
                         || ctx.data().getFuture().isDone()
                         || state.phase() != Phase.OPEN
                         || state.cancellation() != null

@@ -80,7 +80,7 @@ final class BatchEnqueueHelper {
     /** Remove abandoned members from an already complete immutable payload without parsing again. */
     static EngineRpcService.EnqueueBatchRequestPB retain(
             EngineRpcService.EnqueueBatchRequestPB prepared, List<Delivery.Member> sending) {
-        var ids = new HashSet<Long>();
+        var ids = new HashSet<String>();
         for (Delivery.Member claim : sending) {
             ids.add(claim.route().requestId());
         }
@@ -88,7 +88,7 @@ final class BatchEnqueueHelper {
         for (var slot : prepared.getDpSlotsList()) {
             var selected = slot.toBuilder().clearRequests();
             for (var member : slot.getRequestsList()) {
-                if (ids.contains(member.getInput().getRequestId())) {
+                if (ids.contains(org.flexlb.engine.grpc.RequestId.parse(member.getInput()))) {
                     selected.addRequests(member);
                 }
             }
@@ -117,11 +117,11 @@ final class BatchEnqueueHelper {
             }
             return Collections.nCopies(claims.size(), Delivery.Result.uncertain(problem));
         }
-        var expected = HashMap.<Long, Integer>newHashMap(claims.size());
+        var expected = HashMap.<String, Integer>newHashMap(claims.size());
         var results = new Delivery.Result[claims.size()];
         var violations = new ArrayList<String>();
         for (int i = 0; i < claims.size(); i++) {
-            long id = claims.get(i).route().requestId();
+            String id = claims.get(i).route().requestId();
             if (expected.put(id, i) != null) {
                 violations.add("duplicate sending request_id=" + id);
             }
@@ -135,11 +135,11 @@ final class BatchEnqueueHelper {
             acknowledge(
                     expected,
                     results,
-                    error.getRequestId(),
+                    org.flexlb.engine.grpc.RequestId.parse(error),
                     Delivery.Result.prefillRejected(
                             new RuntimeException(
                                     "EnqueueBatch rejected request "
-                                            + error.getRequestId()
+                                            + org.flexlb.engine.grpc.RequestId.parse(error)
                                             + " error_code="
                                             + code
                                             + ": "
@@ -150,7 +150,7 @@ final class BatchEnqueueHelper {
             acknowledge(
                     expected,
                     results,
-                    success.getRequestId(),
+                    org.flexlb.engine.grpc.RequestId.parse(success),
                     Delivery.Result.delivered(),
                     violations);
         }
@@ -172,9 +172,9 @@ final class BatchEnqueueHelper {
     }
 
     private static void acknowledge(
-            Map<Long, Integer> expected,
+            Map<String, Integer> expected,
             Delivery.Result[] results,
-            long id,
+            String id,
             Delivery.Result result,
             List<String> violations) {
         String kind = result.status() == Delivery.Result.Status.DELIVERED ? "success" : "error";
@@ -213,7 +213,8 @@ final class BatchEnqueueHelper {
         }
         var input = prepared.toBuilder();
         checkArgument(
-                input.getRequestId() == item.requestId(),
+                java.util.Objects.equals(
+                        org.flexlb.engine.grpc.RequestId.parse(input), item.requestId()),
                 "request_id mismatch between schedule request and GenerateInputPB");
         if (FlexlbTrace.isEnabled() && data.getTraceContext() != null) {
             try {
@@ -254,7 +255,7 @@ final class BatchEnqueueHelper {
             return cached;
         }
         return EngineRpcService.RoleAddrPB.newBuilder()
-                .setRole(RoleTypeProtoConverter.toLegacyProto(role))
+                .setRole(RoleTypeProtoConverter.toRoleAddrProto(role))
                 .setRoleStr(role.getCode())
                 .setIp(status.getServerIp())
                 .setHttpPort(status.getHttpPort())

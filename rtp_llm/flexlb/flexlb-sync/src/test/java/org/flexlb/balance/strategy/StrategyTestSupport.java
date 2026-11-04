@@ -29,9 +29,9 @@ final class StrategyTestSupport {
 
         PrefillRoutingFixture(
                 EndpointRegistry registry,
-                org.flexlb.cache.service.CacheAwareService cache,
+                org.flexlb.cache.match.CacheAwareService cache,
                 org.flexlb.service.monitor.EngineHealthReporter health,
-                org.flexlb.cache.monitor.CacheMetricsReporter metrics,
+                org.flexlb.cache.telemetry.CacheMetricsReporter metrics,
                 ConfigService config) {
             policy = new CostBasedPrefillStrategy(cache, config);
             routing =
@@ -40,6 +40,10 @@ final class StrategyTestSupport {
                             policy,
                             Mockito.mock(DecodeSelector.class),
                             Mockito.mock(VitWorkerSelector.class),
+                            org.mockito.Mockito.mock(
+                                    org.flexlb.balance.strategy.EncoderSelectionStrategy.class),
+                            org.mockito.Mockito.mock(
+                                    org.flexlb.cache.match.CacheAwareService.class),
                             null,
                             health,
                             metrics,
@@ -83,9 +87,13 @@ final class StrategyTestSupport {
                             Mockito.mock(CostBasedPrefillStrategy.class),
                             new DecodeSelector(config, capacity),
                             Mockito.mock(VitWorkerSelector.class),
+                            org.mockito.Mockito.mock(
+                                    org.flexlb.balance.strategy.EncoderSelectionStrategy.class),
+                            org.mockito.Mockito.mock(
+                                    org.flexlb.cache.match.CacheAwareService.class),
                             null,
                             Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class),
-                            Mockito.mock(org.flexlb.cache.monitor.CacheMetricsReporter.class),
+                            Mockito.mock(org.flexlb.cache.telemetry.CacheMetricsReporter.class),
                             config,
                             Mockito.mock(org.flexlb.config.ModelMetaConfig.class));
         }
@@ -170,7 +178,10 @@ final class StrategyTestSupport {
             RoleType role,
             String group) {
         RequestRoute route =
-                scope(org.flexlb.dao.loadbalance.Request.builder().requestId(id).build());
+                scope(
+                        org.flexlb.dao.loadbalance.Request.builder()
+                                .requestId(String.valueOf(id))
+                                .build());
         com.google.common.base.Preconditions.checkArgument(role == RoleType.VIT);
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(config());
@@ -180,14 +191,17 @@ final class StrategyTestSupport {
                         Mockito.mock(PrefillSelectionStrategy.class),
                         Mockito.mock(DecodeSelectionStrategy.class),
                         selector,
+                        org.mockito.Mockito.mock(
+                                org.flexlb.balance.strategy.EncoderSelectionStrategy.class),
+                        org.mockito.Mockito.mock(org.flexlb.cache.match.CacheAwareService.class),
                         null,
                         Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class),
-                        Mockito.mock(org.flexlb.cache.monitor.CacheMetricsReporter.class),
+                        Mockito.mock(org.flexlb.cache.telemetry.CacheMetricsReporter.class),
                         configService,
                         Mockito.mock(org.flexlb.config.ModelMetaConfig.class));
         try {
             if (org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                            router, "selectVit", id, group, route)
+                            router, "selectVit", String.valueOf(id), group, route)
                     != null) {
                 return route;
             }

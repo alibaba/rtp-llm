@@ -10,7 +10,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.LongPredicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -26,7 +25,7 @@ public final class EndpointCleanupTestSupport {
 
     public static void confirmDecode(DecodeEndpoint endpoint, long requestId) {
         TaskInfo running = new TaskInfo();
-        running.setRequestId(requestId);
+        running.setRequestId(String.valueOf(requestId));
         running.setPhase(TaskPhase.KV_ALLOCATED);
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRunningTaskInfo(Map.of(Long.toString(requestId), running));
@@ -45,7 +44,7 @@ public final class EndpointCleanupTestSupport {
                         lock,
                         PrefillActiveIndex.ordered(
                                 4,
-                                Comparator.comparingLong(
+                                Comparator.comparing(
                                         org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
                                                 ::requestId)),
                         clock::get);
@@ -61,7 +60,7 @@ public final class EndpointCleanupTestSupport {
 
         public Owner commit(long requestId, long batchId, long predictedMs) {
             RequestRoute item = mock(RequestRoute.class);
-            when(item.requestId()).thenReturn(requestId);
+            when(item.requestId()).thenReturn(String.valueOf(requestId));
             when(item.seqLen()).thenReturn(100L);
             if (batch) {
                 lock.lock();
@@ -109,7 +108,7 @@ public final class EndpointCleanupTestSupport {
             clock.addAndGet(100L);
         }
 
-        public int sweep(LongPredicate retain) {
+        public int sweep(java.util.function.Predicate<String> retain) {
             return EndpointTestSupport.evictPrefill(state, 10L, retain);
         }
 

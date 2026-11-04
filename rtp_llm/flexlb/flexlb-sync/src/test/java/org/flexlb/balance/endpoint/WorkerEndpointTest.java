@@ -185,7 +185,7 @@ class WorkerEndpointTest {
 
     @Test
     void ipPort_format() {
-        assertEquals("10.0.0.1:8080", endpoint.ipPort());
+        assertEquals("10.0.0.1:8080@0", endpoint.ipPort());
     }
 
     @Test
@@ -363,7 +363,7 @@ class WorkerEndpointTest {
     }
 
     private RequestContext ctx(long requestId, long seqLen) {
-        Request req = Request.builder().requestId(requestId).seqLen(seqLen).build();
+        Request req = Request.builder().requestId(String.valueOf(requestId)).seqLen(seqLen).build();
         RequestContext ctx = new RequestContext(SchedulingTestConfig.newConfig());
         ctx.data().setRequest(req);
         return ctx;
@@ -371,7 +371,7 @@ class WorkerEndpointTest {
 
     private TaskInfo task(long requestId, long inputLength, long prefixLength, long batchId) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(String.valueOf(requestId));
         task.setInputLength(inputLength);
         task.setPrefixLength(prefixLength);
         task.setBatchId(batchId);

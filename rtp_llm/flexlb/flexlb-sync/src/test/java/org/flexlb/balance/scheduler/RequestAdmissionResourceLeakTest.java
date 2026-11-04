@@ -8,7 +8,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -49,7 +49,7 @@ class RequestAdmissionResourceLeakTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
     }
 
     @AfterEach
@@ -67,7 +67,7 @@ class RequestAdmissionResourceLeakTest {
     @Test
     void declinedPublicationLeavesNoCanonicalItem() {
         Registered registered = registerItem(1L);
-        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(1L, registered.future());
+        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle("1", registered.future());
                 var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertEquals(
@@ -78,7 +78,7 @@ class RequestAdmissionResourceLeakTest {
                             RequestProtocolTestSupport.publication(() -> false)));
             rollbackUnpublished(admission, registered);
             assertNull(activeRoute(1L));
-            assertTrue(lifecycle.isAdmissionOpen(1L, registered.future()));
+            assertTrue(lifecycle.isAdmissionOpen("1", registered.future()));
             verify(registered.item().decodeEp(), never())
                     .release(any(), eq(DecodeResources.ReleaseReason.COUNTERPART_FINISHED));
         }
@@ -87,7 +87,7 @@ class RequestAdmissionResourceLeakTest {
     @Test
     void throwingPublicationLeavesTheExactRegistrationRetryable() {
         Registered registered = registerItem(2L);
-        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(2L, registered.future());
+        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle("2", registered.future());
                 var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertThrows(
@@ -103,7 +103,7 @@ class RequestAdmissionResourceLeakTest {
                                             })));
             rollbackUnpublished(admission, registered);
             assertNull(activeRoute(2L));
-            assertTrue(lifecycle.isAdmissionOpen(2L, registered.future()));
+            assertTrue(lifecycle.isAdmissionOpen("2", registered.future()));
         }
     }
 
@@ -120,7 +120,7 @@ class RequestAdmissionResourceLeakTest {
         assertSame(registered.item(), activeRoute(3L));
         verify(registered.item().decodeEp(), never())
                 .release(any(), eq(DecodeResources.ReleaseReason.COUNTERPART_FINISHED));
-        lifecycle.cancel(3L, 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.cancel("3", 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(
                 StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 registered.future().join().getCode());
@@ -135,7 +135,7 @@ class RequestAdmissionResourceLeakTest {
     @Test
     void cancellationWaitsForPublicationMutationBeforeReleasingReservation() {
         Registered registered = registerItem(4L);
-        AdmissionHandle admission = lifecycle.claimAdmissionHandle(4L, registered.future());
+        AdmissionHandle admission = lifecycle.claimAdmissionHandle("4", registered.future());
         assertNotNull(admission);
         try {
             assertEquals(
@@ -146,7 +146,7 @@ class RequestAdmissionResourceLeakTest {
                             RequestProtocolTestSupport.publication(() -> true)));
             assertEquals(
                     RequestState.Phase.CANCEL_REQUESTED,
-                    lifecycle.cancel(4L, 0L, CancelReason.CLIENT_CANCELLED).state());
+                    lifecycle.cancel("4", 0L, CancelReason.CLIENT_CANCELLED).state());
             verify(registered.item().decodeEp(), never())
                     .release(any(), eq(DecodeResources.ReleaseReason.COUNTERPART_FINISHED));
         } finally {
@@ -173,7 +173,10 @@ class RequestAdmissionResourceLeakTest {
                         executor.submit(
                                 () -> {
                                     RequestProtocolTestSupport.await(start);
-                                    lifecycle.cancel(requestId, 0L, CancelReason.CLIENT_CANCELLED);
+                                    lifecycle.cancel(
+                                            String.valueOf(requestId),
+                                            0L,
+                                            CancelReason.CLIENT_CANCELLED);
                                 });
                 var completed =
                         executor.submit(
@@ -230,12 +233,12 @@ class RequestAdmissionResourceLeakTest {
                 "Worker scheduling queue rejected request: endpoint publication failed",
                 response.getErrorMessage());
         lifecycle.rejectRoute(victim.item(), null);
-        lifecycle.cancel(61L, 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.cancel("61", 0L, CancelReason.CLIENT_CANCELLED);
         verify(victim.item().decodeEp(), times(1))
                 .release(
                         victim.item().decodeReservation(),
                         DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
-        assertTrue(lifecycle.isAdmissionOpen(62L, incoming.future()));
+        assertTrue(lifecycle.isAdmissionOpen("62", incoming.future()));
     }
 
     @org.junit.jupiter.params.ParameterizedTest
@@ -245,7 +248,7 @@ class RequestAdmissionResourceLeakTest {
             throws Exception {
         Registered registered = registerItem(71L);
         var context = registered.item().ctx();
-        AdmissionHandle admission = lifecycle.claimAdmissionHandle(71L, registered.future());
+        AdmissionHandle admission = lifecycle.claimAdmissionHandle("71", registered.future());
         assertNotNull(admission);
         try {
             var publication =
@@ -257,7 +260,7 @@ class RequestAdmissionResourceLeakTest {
                                     RequestProtocolTestSupport.expireInactiveRequest(
                                             lifecycle, context, Long.MAX_VALUE);
                                 } else {
-                                    lifecycle.cancel(71L, 0L, reason);
+                                    lifecycle.cancel("71", 0L, reason);
                                 }
                                 org.junit.jupiter.api.Assertions.assertFalse(
                                         registered.future().isDone(),
@@ -302,7 +305,7 @@ class RequestAdmissionResourceLeakTest {
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
         assertEquals(0, lifecycle.requests.liveRequestCount());
         org.junit.jupiter.api.Assertions.assertFalse(
-                lifecycle.isAdmissionOpen(71L, registered.future()));
+                lifecycle.isAdmissionOpen("71", registered.future()));
         // A scheduling deadline is canceled by the published Prefill queue owner;
         // an actual inactivity expiry retains separate EXPIRED cleanup proof.
         verify(registered.item().decodeEp(), times(publicationOutcome.equals("SUCCESS") ? 1 : 0))
@@ -311,7 +314,7 @@ class RequestAdmissionResourceLeakTest {
                         inactivityExpired
                                 ? DecodeResources.ReleaseReason.EXPIRED
                                 : DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
-        lifecycle.cancel(71L, 0L, CancelReason.SHUTDOWN);
+        lifecycle.cancel("71", 0L, CancelReason.SHUTDOWN);
         assertSame(response, registered.future().join());
     }
 
@@ -359,7 +362,7 @@ class RequestAdmissionResourceLeakTest {
     }
 
     private RequestRoute activeRoute(long requestId) {
-        RequestContext requestContext = lifecycle.requests.findActive(requestId);
+        RequestContext requestContext = lifecycle.requests.findActive(String.valueOf(requestId));
         synchronized (requestContext) {
             return requestContext.snapshot().route();
         }
@@ -369,7 +372,7 @@ class RequestAdmissionResourceLeakTest {
         RequestContext context = RequestProtocolTestSupport.context(config, requestId);
         var future = RequestProtocolTestSupport.register(lifecycle, context);
         DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
-        var reservation = new DecodeResources.ReservationHandle(1L, requestId, 1L);
+        var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(requestId), 1L);
         context.data().setFuture(future);
         return new Registered(
                 org.flexlb.balance.scheduler.SchedulingTestConfig.createRoute(

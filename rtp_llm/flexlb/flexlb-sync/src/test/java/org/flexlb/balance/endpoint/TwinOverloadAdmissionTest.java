@@ -186,7 +186,9 @@ class TwinOverloadAdmissionTest {
             try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
                 assertNotNull(pin);
                 assertNotNull(
-                        endpoint.tryReserveQueuedRequest(pin, id, 128L, 256L, 50, null).handle());
+                        endpoint.tryReserveQueuedRequest(
+                                        pin, String.valueOf(id), 128L, 256L, 50, null)
+                                .handle());
             }
         }
         for (long id = 1; id <= 8; id++) {
@@ -277,7 +279,7 @@ class TwinOverloadAdmissionTest {
     }
 
     private static RequestRoute item(PrefillEndpoint endpoint, FlexlbConfig config, long id) {
-        Request request = Request.builder().requestId(id).seqLen(128L).build();
+        Request request = Request.builder().requestId(String.valueOf(id)).seqLen(128L).build();
         RequestContext context = new RequestContext(config);
         context.data().setRequest(request);
         ServerStatus selected = new ServerStatus();
@@ -294,7 +296,7 @@ class TwinOverloadAdmissionTest {
         Map<String, TaskInfo> result = new LinkedHashMap<>();
         for (long id = firstId; id < firstId + count; id++) {
             TaskInfo task = new TaskInfo();
-            task.setRequestId(id);
+            task.setRequestId(String.valueOf(id));
             task.setBatchId(batchId);
             task.setPhase(phase);
             task.setInputLength(128L);

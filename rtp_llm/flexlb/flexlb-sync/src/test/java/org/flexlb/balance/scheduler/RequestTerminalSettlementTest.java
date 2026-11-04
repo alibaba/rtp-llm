@@ -44,7 +44,7 @@ import static org.mockito.Mockito.when;
 class RequestTerminalSettlementTest {
 
     private static final DecodeResources.ReservationHandle RESERVATION =
-            new DecodeResources.ReservationHandle(1L, 2L, 3L);
+            new DecodeResources.ReservationHandle(1L, String.valueOf(2L), 3L);
 
     @Test
     void latePlacementDiagnosticsCannotOverwriteQueueTimeoutEvidence() {
@@ -81,7 +81,7 @@ class RequestTerminalSettlementTest {
                 requestOwner,
                 context,
                 RequestProtocolTestSupport.decodeEndpoint(),
-                new DecodeResources.ReservationHandle(1L, 4202L, 7L));
+                new DecodeResources.ReservationHandle(1L, String.valueOf(4202L), 7L));
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requestOwner));
         assertTrue((context.snapshot().phase() == Phase.OPEN));
@@ -99,7 +99,7 @@ class RequestTerminalSettlementTest {
                         ? RESERVATION
                         : new DecodeResources.ReservationHandle(
                                 RESERVATION.endpointGenerationId(),
-                                RESERVATION.requestId(),
+                                String.valueOf(RESERVATION.requestId()),
                                 RESERVATION.reservationToken() + 1);
 
         RequestProtocolTestSupport.decodeRetired(
@@ -851,7 +851,7 @@ class RequestTerminalSettlementTest {
         var wrongVictim =
                 new DecodeResources.ReservationHandle(
                         RESERVATION.endpointGenerationId(),
-                        RESERVATION.requestId() + 1L,
+                        String.valueOf(RESERVATION.requestId() + 1L),
                         RESERVATION.reservationToken());
         var before = f.requestContext().snapshot();
         assertFalse(
@@ -981,7 +981,7 @@ class RequestTerminalSettlementTest {
         var config = SchedulingTestConfig.newConfig();
         config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
         RequestContext context =
-                RequestProtocolTestSupport.context(config, RESERVATION.requestId());
+                RequestProtocolTestSupport.context(config, Long.parseLong(RESERVATION.requestId()));
         var publisher = mock(ResponseCompletionExecutor.class);
         var timer = mock(ExpirationTimer.class);
         RequestLifecycle requestOwner =

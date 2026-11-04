@@ -90,7 +90,7 @@ class FlexlbGrpcForwarderAsyncTest {
                                             .build());
                             observer.onCompleted();
                         })) {
-            LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
+            MasterStatusService consistency = mock(MasterStatusService.class);
             when(consistency.getMasterHostIpPort())
                     .thenReturn(
                             "127.0.0.1:"

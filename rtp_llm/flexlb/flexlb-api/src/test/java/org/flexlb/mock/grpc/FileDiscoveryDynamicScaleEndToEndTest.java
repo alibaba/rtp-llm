@@ -5,14 +5,13 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestWorkerSelector;
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.discovery.LocalServiceDiscovery;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
@@ -261,7 +260,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                                 && mockDecodeWorker.getWorkerStatusCallCount() > 0
                                 && endpointRegistry
                                         .endpointAddressSnapshot(RoleType.DECODE)
-                                        .contains(decodeIpPort)
+                                        .contains(decodeIpPort + "@0")
                                 && prefillAddressesRoutable(prefillIpPort, workerIpPort(workerB)),
                 "discovery loop should poll both initial workers and publish "
                         + "routable prefill endpoints for both");
@@ -304,7 +303,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                         + " ms "
                         + "of appearing in the discovery file");
         assertNotNull(
-                endpointRegistry.get(RoleType.PREFILL, cIpPort),
+                endpointRegistry.get(RoleType.PREFILL, cIpPort + "@0"),
                 "worker C must be registered in the EndpointRegistry after discovery");
 
         // ─── Phase 3: remove A from the file → A must stop receiving new requests ───
@@ -313,7 +312,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         long removeStartMs = System.nanoTime();
         awaitUntil(
                 CONVERGENCE_CAP_MS,
-                () -> endpointRegistry.get(RoleType.PREFILL, prefillIpPort) == null,
+                () -> endpointRegistry.get(RoleType.PREFILL, prefillIpPort + "@0") == null,
                 "worker A should be evicted from the EndpointRegistry after removal from the file");
         long removeConvergenceMs = elapsedMs(removeStartMs);
 
@@ -388,16 +387,19 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                             String chosen =
                                     candidates.get(
                                             routerCounter.getAndIncrement() % candidates.size());
-                            String[] parts = chosen.split(":");
-                            String ip = parts[0];
-                            int httpPort = Integer.parseInt(parts[1]);
+                            var worker = endpointRegistry.get(RoleType.PREFILL, chosen).getStatus();
+                            String ip = worker.getIp();
+                            int httpPort = worker.getPort();
                             // admittedRoute() pins the exact worker generations. The scheduler
                             // reserves Decode capacity before publishing the Prefill queue entry;
                             // the batcher later acquires a permit against that exact reservation.
                             return admittedRoute(
                                     ctx,
                                     routeResponse(
-                                            ctx.data().getRequestId(), ip, httpPort, httpPort + 1));
+                                            Long.parseLong(ctx.data().getRequestId()),
+                                            ip,
+                                            httpPort,
+                                            httpPort + 1));
                         });
         return roundRobin;
     }
@@ -433,7 +435,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         status.setGrpcPort(grpcPort);
         status.setDpRank(0);
         status.setGroup("test-group");
-        status.setRequestId(requestId);
+        status.setRequestId(String.valueOf(requestId));
         return status;
     }
 
@@ -476,7 +478,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     private boolean prefillAddressesRoutable(String... ipPorts) {
         List<String> routable = endpointRegistry.endpointAddressSnapshot(RoleType.PREFILL);
         for (String ipPort : ipPorts) {
-            if (!routable.contains(ipPort)) {
+            if (!routable.contains(ipPort + "@0")) {
                 return false;
             }
         }

@@ -12,7 +12,7 @@ import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.Failures;
@@ -66,7 +66,7 @@ public class RequestLifecycle {
     final ResponseCompletionExecutor responseCompletions;
     final DeliveryMetricsReporter deliveryReporter;
 
-    private final RecentCacheKeyTraceReporter cacheTrace;
+    private final TheoryCacheHitReporter cacheTrace;
 
     private final Object admissionLock = new Object();
     private boolean admitting = true;
@@ -147,7 +147,7 @@ public class RequestLifecycle {
             DeliveryDispatcher dispatcher,
             ResponseCompletionExecutor responseCompletions,
             DeliveryMetricsReporter deliveryReporter,
-            RecentCacheKeyTraceReporter cacheTrace) {
+            TheoryCacheHitReporter cacheTrace) {
         this.requests = Objects.requireNonNull(requests);
         this.tasks = Objects.requireNonNull(tasks);
         this.expirationTimer = Objects.requireNonNull(deadlines);
@@ -171,7 +171,7 @@ public class RequestLifecycle {
             return null;
         var state = request.snapshot();
         if (state.delivery() != null) return Map.of("cause", message);
-        return state.route() == null
+        return state.route() == null || state.route().encoderEp() != null
                 ? request.data().getSchedulingDiagnostics()
                 : state.route().prefillEp().getLatestQueueWaitSnapshot();
     }
@@ -284,9 +284,14 @@ public class RequestLifecycle {
         return future;
     }
 
-    public final RequestState cancel(long id, long batchId, CancelReason reason) {
+    public final RequestState cancel(String id, long batchId, CancelReason reason) {
+        return cancel(id, batchId, reason, org.flexlb.dao.route.RequestPhase.GENERATION);
+    }
+
+    public final RequestState cancel(
+            String id, long batchId, CancelReason reason, org.flexlb.dao.route.RequestPhase phase) {
         Objects.requireNonNull(reason);
-        var ctx = requests.findActive(id);
+        var ctx = requests.findActive(id, phase);
         if (ctx != null) {
             if (ctx.data().getLifecycle() != this) {
                 return null;
@@ -296,7 +301,7 @@ public class RequestLifecycle {
                 return result;
             }
         }
-        var terminal = requests.findTerminal(id);
+        var terminal = requests.findTerminal(id, phase);
         return terminal != null
                         && terminal.owner() == this
                         && terminal.state().matchesBatch(batchId)
@@ -354,7 +359,8 @@ public class RequestLifecycle {
                 tasks.recordFailure(failure);
             }
             Failures.rethrow(failure, "cancellation effects failed");
-            return requests.getRequestState(ctx.data().getRequestId(), batchId);
+            return requests.getRequestState(
+                    ctx.data().getRequestId(), batchId, ctx.data().getPhase());
         }
     }
 
@@ -482,7 +488,7 @@ public class RequestLifecycle {
         return ctx.recordDeadline(token, nowMs, diagnosis);
     }
 
-    public boolean isAdmissionOpen(long id, CompletableFuture<?> future) {
+    public boolean isAdmissionOpen(String id, CompletableFuture<?> future) {
         var ctx = requests.findActive(id);
         if (requests.isClosed()
                 || ctx == null
@@ -498,16 +504,20 @@ public class RequestLifecycle {
         }
     }
 
-    public AdmissionHandle claimAdmissionHandle(long id, CompletableFuture<?> future) {
+    public AdmissionHandle claimAdmissionHandle(String id, CompletableFuture<?> future) {
+        var context = requests.findActive(id);
+        return context != null && context.data().getFuture() == future
+                ? claimAdmissionHandle(context)
+                : null;
+    }
+
+    public AdmissionHandle claimAdmissionHandle(RequestContext ctx) {
         if (!registerAdmission()) {
             return null;
         }
         boolean transferred = false;
         try {
-            var ctx = requests.findActive(id);
-            if (ctx == null
-                    || ctx.data().getLifecycle() != this
-                    || ctx.data().getFuture() != future) {
+            if (ctx == null || ctx.data().getLifecycle() != this) {
                 return null;
             }
             synchronized (ctx) {
@@ -1286,7 +1296,8 @@ public class RequestLifecycle {
         Throwable failure = null;
         try {
             if (!prefill) {
-                route.prefillEp().releaseRequest(route);
+                if (route.encoderEp() != null) route.encoderEp().release(route);
+                else route.prefillEp().releaseRequest(route);
                 prefill = true;
             }
         } catch (Throwable problem) {
@@ -1327,7 +1338,9 @@ public class RequestLifecycle {
                             deliveryReporter.reportLatency(
                                     DeliveryMetricsReporter.Latency.DISPATCH_ACK,
                                     RoleType.PREFILL.name(),
-                                    delivery.identity().route().prefillEp().getIp(),
+                                    delivery.identity().route().encoderEp() != null
+                                            ? delivery.identity().route().encoderEp().getIp()
+                                            : delivery.identity().route().prefillEp().getIp(),
                                     Math.max(0L, ctx.data().getAckAtMs() - delivery.startedAtMs()));
                         } catch (Throwable ignored) {
                         }

@@ -1,4 +1,4 @@
-package org.flexlb.engine.grpc.client;
+package org.flexlb.engine.grpc;
 
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.grpc.Status;

@@ -13,7 +13,6 @@ import lombok.ToString;
 import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.util.CommonUtils;
 
 import java.util.List;
 
@@ -100,7 +99,7 @@ public class ServerStatus {
 
     public static ServerStatus forWorker(
             RoleType role,
-            long requestId,
+            String requestId,
             WorkerStatus.TopologySnapshot topology,
             WorkerStatus.EngineObservation observation) {
         ServerStatus result = new ServerStatus();
@@ -110,7 +109,8 @@ public class ServerStatus {
         result.setGroup(topology.group());
         result.setServerIp(topology.ip());
         result.setHttpPort(topology.port());
-        result.setGrpcPort(CommonUtils.toGrpcPort(topology.port()));
+        result.setGrpcPort(topology.grpcPort());
+        result.setSelectedEngineIndex(topology.engineIndex(), topology.multiEngineNum());
         result.setDpRank(observation.dpRank());
         return result;
     }

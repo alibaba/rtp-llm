@@ -9,8 +9,8 @@ import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.projection.RequestTimeEstimation.QueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.PlacementKey;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.dao.SchedulingMetadata;
@@ -71,12 +71,12 @@ class PrefillSelectionContractTest {
         when(service.loadBalanceConfig()).thenReturn(config);
         registry = StrategyTestSupport.endpointRegistry(service);
         cache = mock(CacheAwareService.class);
-        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
+        when(cache.findMatchingEngines(any())).thenReturn(localMatches(Map.of()));
         metrics = mock(CacheMetricsReporter.class);
         strategy = strategy(registry);
         request =
                 Request.builder()
-                        .requestId(91001L)
+                        .requestId("91001")
                         .seqLen(1000L)
                         .blockCacheKeys(List.of(1L))
                         .build();
@@ -97,9 +97,17 @@ class PrefillSelectionContractTest {
                         BuiltinGroupPlanner.SINGLE,
                         Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
                         new GroupPlanner.Constraints(1, 10000L, 10000L, 0L, 0L),
-                        List.of(new GroupPlanner.Item(1L, 50, 1L, 1000L, Long.MAX_VALUE, 10L, 0L)),
+                        List.of(
+                                new GroupPlanner.Item(
+                                        String.valueOf(1L),
+                                        50,
+                                        1L,
+                                        1000L,
+                                        Long.MAX_VALUE,
+                                        10L,
+                                        0L)),
                         new QueueSnapshot.AdmissionBlock(
-                                1L,
+                                String.valueOf(1L),
                                 1L,
                                 new RequestTimeEstimation.AdmissionBlockSemantics(
                                         "PREFILL_CAPACITY",
@@ -158,7 +166,9 @@ class PrefillSelectionContractTest {
                         BuiltinGroupPlanner.SINGLE,
                         Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
                         new GroupPlanner.Constraints(1, 1000L, 1000L, 0L, 0L),
-                        List.of(new GroupPlanner.Item(1L, 50, 1L, 1000L, 1500L, 10L, 0L)),
+                        List.of(
+                                new GroupPlanner.Item(
+                                        String.valueOf(1L), 50, 1L, 1000L, 1500L, 10L, 0L)),
                         null);
         var snapshot =
                 new RequestTimeEstimation.Inputs(
@@ -172,11 +182,11 @@ class PrefillSelectionContractTest {
         when(candidate.address()).thenReturn(endpoint.ipPort());
         when(candidate.projectionInputs()).thenReturn(snapshot);
         var inputs = List.of(candidate);
-        when(cache.findMatchingEngines(any(), any(), any()))
+        when(cache.findMatchingEngines(any()))
                 .thenAnswer(
                         call -> {
                             clock.set(2000L);
-                            return Map.of();
+                            return localMatches(Map.of());
                         });
 
         var selected =
@@ -289,8 +299,10 @@ class PrefillSelectionContractTest {
         when(candidate.projectionInputs())
                 .thenAnswer(call -> endpoint.captureRouteProjectionInputs());
         var inputs = List.of(candidate);
-        when(cache.findMatchingEngines(any(), any(), any()))
-                .thenReturn(Map.of(endpoint.ipPort(), 1), Map.of(endpoint.ipPort(), 2));
+        when(cache.findMatchingEngines(any()))
+                .thenReturn(
+                        localMatches(Map.of(endpoint.ipPort(), 1)),
+                        localMatches(Map.of(endpoint.ipPort(), 2)));
         var policy = new CostBasedPrefillStrategy(cache, service);
         var firstRequest = request.toBuilder().cacheKeyBlockSize(100L).build();
         var first =
@@ -298,7 +310,7 @@ class PrefillSelectionContractTest {
                         .value();
         var second =
                 policy.select(
-                                firstRequest.toBuilder().requestId(91002L).seqLen(2000L).build(),
+                                firstRequest.toBuilder().requestId("91002").seqLen(2000L).build(),
                                 metadata,
                                 RoleType.PREFILL,
                                 "g",
@@ -338,8 +350,8 @@ class PrefillSelectionContractTest {
             status.cacheMutationLock.unlock();
         }
         request = request.toBuilder().seqLen(tokens).cacheKeyBlockSize(requestBlock).build();
-        when(cache.findMatchingEngines(any(), any(), any()))
-                .thenReturn(Map.of(endpoint.ipPort(), prefix));
+        when(cache.findMatchingEngines(any()))
+                .thenReturn(localMatches(Map.of(endpoint.ipPort(), prefix)));
 
         try (var route = StrategyTestSupport.scope(request)) {
             var result = strategy.select(request, metadata, RoleType.PREFILL, "g", route);
@@ -357,8 +369,8 @@ class PrefillSelectionContractTest {
     void absentCacheResultsPreserveUncachedSelection(boolean nullResults) {
         publish(registry, RoleType.PREFILL);
         request = request.toBuilder().cacheKeyBlockSize(100L).build();
-        when(cache.findMatchingEngines(any(), any(), any()))
-                .thenReturn(nullResults ? null : Map.of());
+        when(cache.findMatchingEngines(any()))
+                .thenReturn(localMatches(nullResults ? null : Map.of()));
         try (var route = StrategyTestSupport.scope(request)) {
             var result = strategy.select(request, metadata, RoleType.PREFILL, "g", route);
             assertEquals(PlacementResult.Status.SUCCESS, result.status());
@@ -375,7 +387,8 @@ class PrefillSelectionContractTest {
                     StrategyTestSupport.workerStatus(
                             role, "g", "10.0.1." + index, 8080, 8081, true, 100000L, 100000L);
             var endpoint =
-                    StrategyTestSupport.publishEndpoint(registry, role, source.getIpPort(), source);
+                    StrategyTestSupport.publishEndpoint(
+                            registry, role, source.getLogicalIpPort(), source);
             ReflectionTestUtils.setField(endpoint, "predictor", null);
         }
         long started = System.currentTimeMillis();
@@ -506,6 +519,18 @@ class PrefillSelectionContractTest {
                 StrategyTestSupport.workerStatus(
                         role, "g", "10.0.0.1", 8080, 8081, true, 100000L, 100000L);
         return (PrefillEndpoint)
-                StrategyTestSupport.publishEndpoint(directory, role, source.getIpPort(), source);
+                StrategyTestSupport.publishEndpoint(
+                        directory, role, source.getLogicalIpPort(), source);
+    }
+
+    private static org.flexlb.cache.domain.CacheMatchResult localMatches(
+            Map<String, Integer> matches) {
+        return matches == null
+                ? null
+                : new org.flexlb.cache.domain.CacheMatchResult(
+                        org.flexlb.dao.cache.HostCacheMatch.fromLocalMatches(matches),
+                        org.flexlb.cache.domain.CacheMatchSource.LOCAL_SYNC,
+                        0L,
+                        0L);
     }
 }

@@ -7,7 +7,7 @@ import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -146,7 +146,7 @@ class RequestSchedulerModeTest {
                                             directConfig,
                                             SchedulingTestConfig.capacity(directConfig),
                                             mock(
-                                                    org.flexlb.service.RecentCacheKeyTraceReporter
+                                                    org.flexlb.service.TheoryCacheHitReporter
                                                             .class)))) {
                 SchedulerTestSupport.startScheduling(directScheduler);
                 var future = SchedulerTestServices.entry(directScheduler).submit(laterDirect);
@@ -279,7 +279,7 @@ class RequestSchedulerModeTest {
                             service,
                             reporter,
                             mock(RequestSchedulerReporter.class),
-                            mock(RecentCacheKeyTraceReporter.class),
+                            mock(TheoryCacheHitReporter.class),
                             router,
                             mock(DecodePreemption.class),
                             new PlacementAvailability());

@@ -25,8 +25,8 @@ import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -339,23 +339,37 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     @Override
     protected RequestWorkerSelector createRouter() {
         CacheAwareService cache =
-                new CacheAwareService() {
+                new CacheAwareService(null, null, null, null) {
                     @Override
-                    public Map<String, Integer> findMatchingEngines(
-                            List<Long> blockCacheKeys,
-                            RoleType roleType,
-                            List<String> candidateEngineIpPorts) {
-                        return Map.of();
+                    public org.flexlb.cache.domain.CacheMatchResult findMatchingEngines(
+                            org.flexlb.cache.domain.CacheMatchQuery query) {
+                        return org.flexlb.cache.domain.CacheMatchResult.empty(
+                                org.flexlb.cache.domain.CacheMatchSource.LOCAL_SYNC);
                     }
 
                     @Override
-                    public WorkerCacheUpdateResult updateEngineBlockCache(
+                    public WorkerCacheUpdateResult updateFromWorkerStatus(
                             WorkerStatus workerStatus) {
                         return null;
                     }
 
                     @Override
                     public void removeEngineBlockCache(String engineIpPort) {}
+
+                    @Override
+                    public void trackRoutingPrediction(
+                            String requestId,
+                            RoleType role,
+                            String group,
+                            WorkerStatus worker,
+                            long inputTokens,
+                            long predictedHitTokens,
+                            org.flexlb.cache.domain.CacheMatchResult result) {}
+
+                    @Override
+                    public void updateFromRoutedRequest(
+                            org.flexlb.dao.loadbalance.Request request,
+                            List<org.flexlb.dao.loadbalance.ServerStatus> selectedWorkers) {}
                 };
         // Real reporters avoid Mockito invocation locks on the concurrent routing path.
         CacheMetricsReporter cacheMetrics = new CacheMetricsReporter();
@@ -372,6 +386,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                         new org.flexlb.balance.scheduler.PlacementConfiguration()
                                 .decodeAdmissionCapacity(configService)),
                 new VitWorkerSelector(),
+                new org.flexlb.balance.strategy.EncoderStrategy(),
+                cache,
                 null,
                 createNoOpEngineHealthReporter(),
                 cacheMetrics,
@@ -1072,7 +1088,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 long requestId = firstRequestId + index;
                 System.out.printf(
                         "FlexLB Master exceptional request: request_id=%d state=%s%n",
-                        requestId, requestRegistry().getRequestState(requestId, 0L));
+                        requestId,
+                        requestRegistry().getRequestState(String.valueOf(requestId), 0L));
             }
             throw failure;
         }
@@ -1307,13 +1324,13 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                     for (var target : route.accepted().addresses().entrySet()) {
                         RoleType role = target.getKey();
                         String address = target.getValue();
-                        WorkerEndpoint endpoint = endpointRegistry.get(role, address);
+                        WorkerEndpoint endpoint = endpointRegistry.get(role, address + "@0");
                         assertTrue(
                                 endpoint != null,
                                 "completed route must retain its actual worker endpoint: "
                                         + address);
                         TaskInfo task = new TaskInfo();
-                        task.setRequestId(route.requestId());
+                        task.setRequestId(String.valueOf(route.requestId()));
                         task.setInputLength(route.accepted().inputLength());
                         task.setBatchId(route.accepted().batchId());
                         task.setDpRank(endpoint.getStatus().getDpRank());
@@ -2008,7 +2025,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                             context.data().getAckAtNanos(),
                             responseCompletedNanos);
             super.recordCompletion(context, responseCompletedNanos);
-            if (responseTimings.putIfAbsent(context.data().getRequestId(), timing) != null) {
+            if (responseTimings.putIfAbsent(Long.parseLong(context.data().getRequestId()), timing)
+                    != null) {
                 duplicateResponses.incrementAndGet();
             }
         }

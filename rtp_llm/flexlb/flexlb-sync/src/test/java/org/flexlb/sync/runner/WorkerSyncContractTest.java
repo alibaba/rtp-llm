@@ -2,8 +2,8 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
@@ -61,7 +61,7 @@ class WorkerSyncContractTest {
         when(config.loadBalanceConfig())
                 .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         registry = RunnerTestSupport.endpointRegistry(config);
-        registry.currentOrDiscover(status.getRole(), status.getIpPort(), () -> status);
+        registry.currentOrDiscover(status.getRole(), status.getLogicalIpPort(), () -> status);
     }
 
     @AfterEach
@@ -99,12 +99,13 @@ class WorkerSyncContractTest {
         assertEquals(-1L, status.appliedStatusCursor().statusVersion());
         poll(true, 1L, Runnable::run);
         assertEquals(1L, status.appliedStatusCursor().statusVersion());
-        assertNotNull(registry.get(status.getRole(), status.getIpPort()));
+        assertNotNull(registry.get(status.getRole(), status.getLogicalIpPort()));
     }
 
     @Test
     void thirdNotAliveResponseFencesRoutingEvenWhileAnOlderApplicationIsQueued() {
-        RunnerTestSupport.publishEndpoint(registry, status.getRole(), status.getIpPort(), status);
+        RunnerTestSupport.publishEndpoint(
+                registry, status.getRole(), status.getLogicalIpPort(), status);
         ArrayDeque<Runnable> applications = new ArrayDeque<>();
         poll(true, 2L, applications::add);
         for (int i = 0; i < 3; i++) {
@@ -113,7 +114,7 @@ class WorkerSyncContractTest {
         assertEquals(
                 WorkerStatus.RetirementReason.CONSECUTIVE_WORKER_FAILURES,
                 status.retirementReason());
-        assertNull(registry.capture(status.getRole(), status.getIpPort()));
+        assertNull(registry.capture(status.getRole(), status.getLogicalIpPort()));
         applications.remove().run();
         org.flexlb.sync.runner.RunnerTestSupport.awaitCondition(
                 () -> registry.statusSnapshot(status.getRole()).isEmpty());
@@ -121,7 +122,7 @@ class WorkerSyncContractTest {
                 1L,
                 status.appliedStatusCursor().statusVersion(),
                 "older queued alive response cannot revive the generation");
-        verify(cache).removeEngineBlockCache(status.getIpPort());
+        verify(cache).removeEngineBlockCache(status.getLogicalIpPort());
     }
 
     @Test
@@ -133,7 +134,7 @@ class WorkerSyncContractTest {
         endpoint.setProtocol("http");
         when(metadata.endpointsWithGroup("model", status.getRole()))
                 .thenReturn(List.of(org.apache.commons.lang3.tuple.Pair.of("", endpoint)));
-        when(discoverySource.getHosts("workers"))
+        when(discoverySource.getHosts(endpoint))
                 .thenThrow(new IllegalStateException("discovery unavailable"));
         WorkerAddressService addresses =
                 new WorkerAddressService(reporter, metadata, discoverySource, config);
@@ -172,7 +173,8 @@ class WorkerSyncContractTest {
                         .retireUnavailableWorkers();
                 assertNull(status.retirementReason());
                 assertSame(
-                        status, registry.statusSnapshot(status.getRole()).get(status.getIpPort()));
+                        status,
+                        registry.statusSnapshot(status.getRole()).get(status.getLogicalIpPort()));
                 awaitCondition(
                         () -> {
                             try (var lease = status.tryBeginStatusPoll()) {
@@ -181,7 +183,7 @@ class WorkerSyncContractTest {
                         });
                 doReturn(List.of(new WorkerHost("127.0.0.1", 8080)))
                         .when(discoverySource)
-                        .getHosts("workers");
+                        .getHosts(endpoint);
                 discovery.submit(runner).get(2, TimeUnit.SECONDS);
                 verify(grpc, timeout(2000).times(2))
                         .getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any());
@@ -197,7 +199,7 @@ class WorkerSyncContractTest {
     void blockedCacheWriteDoesNotBlockHeartbeatAndCannotCrossReplacement() throws Exception {
         CountDownLatch updating = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        when(cache.updateEngineBlockCache(status))
+        when(cache.updateFromWorkerStatus(status))
                 .thenAnswer(
                         invocation -> {
                             assertFalse(status.lock.isHeldByCurrentThread());
@@ -216,7 +218,7 @@ class WorkerSyncContractTest {
                 status.markRemovedFromDiscovery();
                 var retirement =
                         registry.beginRequestedRetirement(
-                                status.getRole(), status.getIpPort(), status);
+                                status.getRole(), status.getLogicalIpPort(), status);
                 assertNotNull(retirement);
                 retirement.completeAsync(cache, org.slf4j.LoggerFactory.getLogger(getClass()));
                 WorkerStatus replacement =
@@ -225,7 +227,7 @@ class WorkerSyncContractTest {
                 assertSame(
                         status,
                         registry.currentOrDiscover(
-                                status.getRole(), status.getIpPort(), () -> replacement));
+                                status.getRole(), status.getLogicalIpPort(), () -> replacement));
                 release.countDown();
                 writing.get(2, TimeUnit.SECONDS);
                 org.flexlb.sync.runner.RunnerTestSupport.awaitCondition(
@@ -233,10 +235,10 @@ class WorkerSyncContractTest {
                 assertSame(
                         replacement,
                         registry.currentOrDiscover(
-                                status.getRole(), status.getIpPort(), () -> replacement));
+                                status.getRole(), status.getLogicalIpPort(), () -> replacement));
                 var order = inOrder(cache);
-                order.verify(cache).updateEngineBlockCache(status);
-                order.verify(cache).removeEngineBlockCache(status.getIpPort());
+                order.verify(cache).updateFromWorkerStatus(status);
+                order.verify(cache).removeEngineBlockCache(status.getLogicalIpPort());
                 assertFalse(
                         status.cacheIndexSnapshot().indexInitialized(),
                         "a retired writer cannot advance its cursor");
@@ -248,7 +250,7 @@ class WorkerSyncContractTest {
 
     @Test
     void sameVersionReusesKeysButRefreshesCapacityWithoutReindexing() {
-        when(cache.updateEngineBlockCache(status))
+        when(cache.updateFromWorkerStatus(status))
                 .thenReturn(WorkerCacheUpdateResult.builder().success(true).build());
         when(grpc.getCacheStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
                 .thenReturn(
@@ -259,7 +261,7 @@ class WorkerSyncContractTest {
         cachePoll(Runnable::run);
         assertSame(keys, status.getCacheStatus().getCachedKeys());
         assertEquals(200L, status.getCacheStatus().getAvailableKvCache());
-        verify(cache, times(1)).updateEngineBlockCache(status);
+        verify(cache, times(1)).updateFromWorkerStatus(status);
     }
 
     private void poll(boolean alive, long version, Executor executor) {

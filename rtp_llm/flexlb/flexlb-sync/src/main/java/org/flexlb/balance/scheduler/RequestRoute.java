@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillRequestQueue;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
@@ -32,7 +33,8 @@ public final class RequestRoute
     private byte constructionState = BUILDING;
     private final RequestContext ctx;
     private Response routeResponse;
-    private WorkerEndpoint.GenerationPin prefillPin, decodePin, vitPin;
+    private WorkerEndpoint.GenerationPin prefillPin, decodePin, vitPin, encoderPin;
+    private boolean encoderCommitted;
     private ArrayList<ServerStatus> assignments;
     private ServerStatus prefill;
     private ServerStatus decode;
@@ -86,6 +88,11 @@ public final class RequestRoute
                 prefill = frozen;
                 prefillWorkMs = workMs;
                 prefillVersion = version;
+            } else if (role == RoleType.ENCODER) {
+                checkState(
+                        encoderPin == null && endpoint instanceof EncoderEndpoint,
+                        "one exact Encoder assignment required");
+                encoderPin = pin;
             } else if (role == RoleType.DECODE) {
                 checkState(
                         decodePin == null && endpoint instanceof DecodeEndpoint,
@@ -119,11 +126,13 @@ public final class RequestRoute
                 ServerStatus.copyOf(Objects.requireNonNull(status, "worker metadata"));
         checkArgument(frozen.isSuccess(), "route requires successful Worker metadata");
         checkState(
-                frozen.getRequestId() == requestId(), "selected Worker belongs to another request");
+                java.util.Objects.equals(frozen.getRequestId(), requestId()),
+                "selected Worker belongs to another request");
         WorkerEndpoint endpoint = pin.endpoint();
         checkArgument(
                 Objects.equals(frozen.getServerIp(), endpoint.getIp())
-                        && frozen.getHttpPort() == endpoint.getHttpPort(),
+                        && frozen.getHttpPort() == endpoint.getHttpPort()
+                        && frozen.getRoutingEngineIndex() == endpoint.getStatus().getEngineIndex(),
                 "selection metadata does not match pinned endpoint address");
         checkArgument(version >= 0L, "placementVersion must be non-negative");
         return frozen;
@@ -134,12 +143,21 @@ public final class RequestRoute
         checkState(constructionState == BUILDING, "route selection is not building");
         constructionState =
                 ABORTED; // Every unsuccessful completion leaves this construction unusable.
-        checkState(prefillPin != null, "selection must complete its own Prefill route");
         checkState(
-                prefillPin.isOpen()
+                prefillPin != null || encoderPin != null, "one Prefill or Encoder route required");
+        checkState(
+                (encoderPin == null || encoderPin.isOpen())
+                        && (prefillPin == null || prefillPin.isOpen())
                         && (decodePin == null || decodePin.isOpen())
                         && (vitPin == null || vitPin.isOpen()),
                 "selected endpoint generation is closed");
+        // A combined generation route returns Encoder metadata without reserving an Encoder task.
+        // Encoder-only requests retain the pin until their execution is settled.
+        if (prefillPin != null && encoderPin != null) {
+            var selectedEncoder = encoderPin;
+            encoderPin = null;
+            selectedEncoder.close();
+        }
         if (vitPin != null) {
             var selectedVit = vitPin;
             vitPin = null;
@@ -166,7 +184,8 @@ public final class RequestRoute
         var inputs = Objects.requireNonNull(ctx.data().getRequest(), "request inputs");
         Objects.requireNonNull(ctx.data().getSchedulingMetadata(), "scheduling metadata");
         checkArgument(
-                reservation == null || reservation.requestId() == inputs.getRequestId(),
+                reservation == null
+                        || java.util.Objects.equals(reservation.requestId(), inputs.getRequestId()),
                 "Decode reservation belongs to another request");
         decodeReservation = reservation;
         constructionState = RESERVED;
@@ -191,6 +210,22 @@ public final class RequestRoute
         ServerStatus status = role == RoleType.DECODE ? decode : prefill;
         WorkerEndpoint endpoint = role == RoleType.DECODE ? decodeEp() : prefillEp();
         return PlacementKey.exact(status.getRole(), status.getGroup(), endpoint.ipPort());
+    }
+
+    public EncoderEndpoint encoderEp() {
+        return encoderPin == null ? null : (EncoderEndpoint) encoderPin.endpoint();
+    }
+
+    WorkerEndpoint.GenerationPin encoderPin() {
+        return encoderPin;
+    }
+
+    boolean encoderCommitted() {
+        return encoderCommitted;
+    }
+
+    void markEncoderCommitted() {
+        encoderCommitted = true;
     }
 
     WorkerEndpoint.GenerationPin prefillPin() {
@@ -226,7 +261,7 @@ public final class RequestRoute
     }
 
     public PrefillEndpoint prefillEp() {
-        return (PrefillEndpoint) prefillPin().endpoint();
+        return prefillPin == null ? null : (PrefillEndpoint) prefillPin.endpoint();
     }
 
     public DecodeEndpoint decodeEp() {
@@ -272,7 +307,7 @@ public final class RequestRoute
 
     // -- derived accessors --
 
-    public long requestId() {
+    public String requestId() {
         return ctx.data().getRequestId();
     }
 
@@ -298,7 +333,9 @@ public final class RequestRoute
             var pin =
                     role.supportsPrefill()
                             ? prefillPin
-                            : role == RoleType.DECODE ? decodePin : vitPin;
+                            : role == RoleType.DECODE
+                                    ? decodePin
+                                    : role == RoleType.ENCODER ? encoderPin : vitPin;
             if (pin != null && pin.isOpen()) {
                 failure = Failures.append(failure, Failures.close(pin));
             }

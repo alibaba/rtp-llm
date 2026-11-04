@@ -111,7 +111,7 @@ class BatchEnqueueHelperTest {
         var retained = BatchEnqueueHelper.retain(prepared, List.of(second));
         assertEquals(2, prepared.getDpSlots(0).getRequestsCount());
         assertEquals(1, retained.getDpSlots(0).getRequestsCount());
-        assertEquals(2, retained.getDpSlots(0).getRequests(0).getInput().getRequestId());
+        assertEquals(2L, retained.getDpSlots(0).getRequests(0).getInput().getRequestId());
         assertEquals(123, retained.getFetchAttachTimeoutMs());
         verify(data1, never()).getGenerateInput();
         verify(data2, never()).getGenerateInput();
@@ -158,7 +158,7 @@ class BatchEnqueueHelperTest {
         var ctx = spy(new RequestContext(SchedulingTestConfig.batchConfig()));
         var route = mock(RequestRoute.class);
         when(route.ctx()).thenReturn(ctx);
-        when(route.requestId()).thenReturn(id);
+        when(route.requestId()).thenReturn(String.valueOf(id));
         return DeliveryTestSupport.member(route, Delivery.SendMode.BATCH_ENQUEUE, 17);
     }
 }

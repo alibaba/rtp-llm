@@ -72,7 +72,7 @@ final class PlacementCapacityWaitQueue {
     }
 
     int size() {
-        return waiting.size();
+        return membership.size();
     }
 
     void resumeReady(int limit, Consumer<GlobalQueueEntry> resume) {

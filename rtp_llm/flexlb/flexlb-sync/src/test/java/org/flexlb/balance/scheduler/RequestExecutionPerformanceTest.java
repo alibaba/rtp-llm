@@ -353,7 +353,11 @@ class RequestExecutionPerformanceTest {
             long enqueuedAtMs,
             long seqLen) {
         Request request =
-                Request.builder().requestId(requestId).seqLen(seqLen).rawPriority(priority).build();
+                Request.builder()
+                        .requestId(String.valueOf(requestId))
+                        .seqLen(seqLen)
+                        .rawPriority(priority)
+                        .build();
         RequestContext context = new RequestContext(config);
         context.data().setRequest(request);
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));

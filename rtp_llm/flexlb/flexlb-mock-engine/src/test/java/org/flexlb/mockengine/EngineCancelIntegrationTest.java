@@ -83,12 +83,15 @@ class EngineCancelIntegrationTest {
             assertEquals(
                     CancelReply.REQUEST_CLEANED,
                     channel.cancelAsync(
-                                    "127.0.0.1", prefill.getGrpcPort(), reason.toRequest(id), 500L)
+                                    "127.0.0.1",
+                                    prefill.getGrpcPort(),
+                                    reason.toRequest(String.valueOf(id)),
+                                    500L)
                             .get(1, TimeUnit.SECONDS));
             channel.cancelAsync(
                             "127.0.0.1",
                             prefill.getGrpcPort(),
-                            CancelReason.PRIORITY_PREEMPTED.toRequest(id),
+                            CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(id)),
                             500L)
                     .get();
             var response =
@@ -132,7 +135,10 @@ class EngineCancelIntegrationTest {
             assertEquals(
                     CancelReply.REQUEST_CLEANED,
                     channel.cancelAsync(
-                                    "127.0.0.1", prefill.getGrpcPort(), reason.toRequest(id), 500L)
+                                    "127.0.0.1",
+                                    prefill.getGrpcPort(),
+                                    reason.toRequest(String.valueOf(id)),
+                                    500L)
                             .get(1, TimeUnit.SECONDS));
             assertEquals(0, decode.getInflightCount());
             assertEquals(0, prefill.getInflightCount());
@@ -153,7 +159,7 @@ class EngineCancelIntegrationTest {
                     channel.cancelAsync(
                                     "127.0.0.1",
                                     prefill.getGrpcPort(),
-                                    CancelReason.CLIENT_CANCELLED.toRequest(id),
+                                    CancelReason.CLIENT_CANCELLED.toRequest(String.valueOf(id)),
                                     500L)
                             .get(1, TimeUnit.SECONDS));
             assertEquals(
@@ -189,7 +195,7 @@ class EngineCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefill.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(1L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(1L)),
                                 2_000)
                         .get(2, TimeUnit.SECONDS);
         assertEquals(CancelReply.ACCEPTED, outcome, "mid-flight cancel must register the intent");
@@ -238,7 +244,7 @@ class EngineCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefill.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(51L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(51L)),
                                 2_000)
                         .get(2, TimeUnit.SECONDS);
 
@@ -287,7 +293,7 @@ class EngineCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefill.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(11L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(11L)),
                                 2_000)
                         .get(2, TimeUnit.SECONDS);
         // Production-faithful branch (C++ Cancel handler):
@@ -316,7 +322,7 @@ class EngineCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefill.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(21L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(21L)),
                                 2_000)
                         .get(2, TimeUnit.SECONDS);
         assertEquals(CancelReply.ACCEPTED, first);
@@ -325,7 +331,7 @@ class EngineCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefill.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(21L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(21L)),
                                 2_000)
                         .get(2, TimeUnit.SECONDS);
         assertEquals(
@@ -359,7 +365,7 @@ class EngineCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefill.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(424242L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(424242L)),
                                 2_000)
                         .get(2, TimeUnit.SECONDS);
         // Never-seen rid: REQUEST_FENCED — the ABSENT_FENCE record is
@@ -372,7 +378,7 @@ class EngineCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefill.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(424242L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(424242L)),
                                 2_000)
                         .get(2, TimeUnit.SECONDS);
         assertEquals(CancelReply.REQUEST_FENCED, retry);
@@ -419,7 +425,7 @@ class EngineCancelIntegrationTest {
                 channel.cancelAsync(
                         "127.0.0.1",
                         decodeServices.get(0).getGrpcPort(),
-                        CancelReason.PRIORITY_PREEMPTED.toRequest(31L),
+                        CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(31L)),
                         2_000);
         assertThrows(
                 ExecutionException.class,
@@ -441,10 +447,10 @@ class EngineCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 59999,
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(1L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(1L)),
                                 2_000)
                         .get(2, TimeUnit.SECONDS);
-        assertEquals(CancelReply.UNSUPPORTED, outcome);
+        assertEquals(CancelReply.FAILED, outcome);
     }
 
     // ---- cancel fault injections: RPC-layer failures, engine state untouched ----
@@ -470,7 +476,7 @@ class EngineCancelIntegrationTest {
                     channel.cancelAsync(
                             "127.0.0.1",
                             prefill.getGrpcPort(),
-                            CancelReason.PRIORITY_PREEMPTED.toRequest(41L),
+                            CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(41L)),
                             2_000);
             assertThrows(
                     TimeoutException.class,
@@ -501,7 +507,7 @@ class EngineCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefill.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(41L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(41L)),
                                 2_000)
                         .get(2, TimeUnit.SECONDS);
         assertEquals(CancelReply.ACCEPTED, outcome);
@@ -523,7 +529,7 @@ class EngineCancelIntegrationTest {
                     channel.cancelAsync(
                             "127.0.0.1",
                             prefill.getGrpcPort(),
-                            CancelReason.PRIORITY_PREEMPTED.toRequest(424243L),
+                            CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(424243L)),
                             2_000);
             ExecutionException failure =
                     assertThrows(
@@ -582,7 +588,7 @@ class EngineCancelIntegrationTest {
                     channel.cancelAsync(
                             "127.0.0.1",
                             prefill.getGrpcPort(),
-                            CancelReason.PRIORITY_PREEMPTED.toRequest(424244L),
+                            CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(424244L)),
                             2_000);
             ExecutionException failure =
                     assertThrows(

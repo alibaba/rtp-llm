@@ -6,7 +6,7 @@ import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.domain.CacheMatchStatus;
 import org.flexlb.cache.match.CacheMatchQueryOrchestrator;
 import org.flexlb.config.CacheMatchMode;
-import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.dao.kvcm.KvcmHealthState;
 import org.flexlb.enums.LogLevel;
 import org.flexlb.service.monitor.FlexlbLogManager;
@@ -38,7 +38,7 @@ import static org.mockito.Mockito.when;
 class FlexlbControlServerTest {
 
     @Mock private GeneralHttpNettyService generalHttpNettyService;
-    @Mock private LBStatusConsistencyService lbStatusConsistencyService;
+    @Mock private MasterStatusService lbStatusConsistencyService;
     @Mock private CacheMatchQueryOrchestrator cacheMatchQueryOrchestrator;
     @Mock private FlexlbLogManager flexlbLogManager;
     private WebTestClient webTestClient;

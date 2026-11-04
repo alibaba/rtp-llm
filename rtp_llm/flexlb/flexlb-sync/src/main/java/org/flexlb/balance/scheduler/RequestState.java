@@ -8,6 +8,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 public record RequestState(
         String requestId,
         long originalNumericRequestId,
+        org.flexlb.dao.route.RequestPhase requestPhase,
         Phase state,
         Delivery.SendMode deliveryClaimKind,
         long batchId,
@@ -81,6 +82,8 @@ public record RequestState(
                                                 : "queued";
         return new RequestState(
                 snapshot.key().requestId(),
+                snapshot.key().originalNumericRequestId(),
+                snapshot.key().phase(),
                 phase,
                 delivery == null ? Delivery.SendMode.NONE : delivery.identity().kind(),
                 delivery == null ? 0L : delivery.identity().batchId(),

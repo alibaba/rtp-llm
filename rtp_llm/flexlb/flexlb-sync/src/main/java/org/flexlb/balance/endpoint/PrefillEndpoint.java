@@ -40,8 +40,8 @@ import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.LongPredicate;
 import java.util.function.LongSupplier;
+import java.util.function.Predicate;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
@@ -63,7 +63,7 @@ public class PrefillEndpoint extends WorkerEndpoint implements EndpointStats.Pre
     private PrefillRequestQueue activeIndex = PrefillActiveIndex.disabled();
 
     /** Canonical request ownership, changed only under the endpoint lock. */
-    private final Map<Long, RouteReservation> requests = new HashMap<>();
+    private final Map<String, RouteReservation> requests = new HashMap<>();
 
     private final LongSupplier clock = System::currentTimeMillis;
 
@@ -674,7 +674,7 @@ public class PrefillEndpoint extends WorkerEndpoint implements EndpointStats.Pre
     /**
      * Evict endpoint orphans while retaining IDs still registered by the scheduler.
      */
-    public int evictExpiredInflight(long ttlMs, LongPredicate retainForSchedulerCleanup) {
+    public int evictExpiredInflight(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
         var orphanCandidates = new java.util.HashSet<RequestRoute>();
         for (RequestRoute route : cleanupCandidates()) {
             if (!retainForSchedulerCleanup.test(route.requestId())) {
@@ -1259,7 +1259,7 @@ public class PrefillEndpoint extends WorkerEndpoint implements EndpointStats.Pre
     public static final class StatusReduction {
         final PrefillEndpoint owner;
         long version;
-        final Map<Long, TerminalObservation> terminals;
+        final Map<String, TerminalObservation> terminals;
         final Map<RouteReservation, Phase> individualPhases = new IdentityHashMap<>();
         final Map<BatchReservation, Phase> batchPhases = new IdentityHashMap<>();
         final Map<BatchReservation, BatchOutcome> batchOutcomes;
@@ -1269,7 +1269,7 @@ public class PrefillEndpoint extends WorkerEndpoint implements EndpointStats.Pre
         Map<Long, List<RequestRoute>> predictionInputs;
         StatusChange.Prefill result;
 
-        StatusReduction(PrefillEndpoint owner, Map<Long, TerminalObservation> terminals) {
+        StatusReduction(PrefillEndpoint owner, Map<String, TerminalObservation> terminals) {
             this.owner = owner;
             this.terminals = terminals;
             this.batchOutcomes = terminals.isEmpty() ? Map.of() : new IdentityHashMap<>();
@@ -1374,7 +1374,7 @@ public class PrefillEndpoint extends WorkerEndpoint implements EndpointStats.Pre
                             .map(entry -> entry.route)
                             .sorted(
                                     Comparator.comparingLong(RequestRoute::enqueueSeq)
-                                            .thenComparingLong(RequestRoute::requestId))
+                                            .thenComparing(RequestRoute::requestId))
                             .toList();
             List<BatchCompletion> completions =
                     batches.values().stream()
@@ -1558,7 +1558,7 @@ public class PrefillEndpoint extends WorkerEndpoint implements EndpointStats.Pre
             if (batch.generationHandoff != null) {
                 continue;
             }
-            List<Long> members = new ArrayList<>(batch.members.size());
+            List<String> members = new ArrayList<>(batch.members.size());
             for (RouteReservation member : batch.members) {
                 members.add(member.route.requestId());
             }
@@ -1654,7 +1654,7 @@ public class PrefillEndpoint extends WorkerEndpoint implements EndpointStats.Pre
                     && reduction.batchPhases.get(batch) != Phase.ENGINE_RUNNING) {
                 survivors.sort(
                         Comparator.comparingLong(RequestRoute::enqueueSeq)
-                                .thenComparingLong(RequestRoute::requestId));
+                                .thenComparing(RequestRoute::requestId));
                 inputs.put(batch.batchId, List.copyOf(survivors));
             }
         }
@@ -1676,9 +1676,9 @@ public class PrefillEndpoint extends WorkerEndpoint implements EndpointStats.Pre
         return reduction;
     }
 
-    private Map<Long, TerminalObservation> terminals(
+    private Map<String, TerminalObservation> terminals(
             Map<String, WorkerStatus.TaskObservation> tasks) {
-        Map<Long, TerminalObservation> facts = new HashMap<>();
+        Map<String, TerminalObservation> facts = new HashMap<>();
         for (var task : tasks.values()) {
             var entry = requests.get(task.requestId());
             if (entry == null
@@ -1712,7 +1712,7 @@ public class PrefillEndpoint extends WorkerEndpoint implements EndpointStats.Pre
             WorkerStatus.EngineObservation engine,
             StatusReduction reduction,
             List<PrefillRequestStatus> statuses) {
-        Set<Long> unknown = new HashSet<>(), known = new HashSet<>();
+        Set<String> unknown = new HashSet<>(), known = new HashSet<>();
         for (var task : engine.runningTaskList().values()) {
             if (reduction.terminals.containsKey(task.requestId())) {
                 continue;

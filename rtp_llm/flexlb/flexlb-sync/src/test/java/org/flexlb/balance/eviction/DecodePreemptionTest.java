@@ -72,7 +72,7 @@ class DecodePreemptionTest {
         org.mockito.Mockito.doCallRealMethod()
                 .when(reporter)
                 .reportPreemptionVictims(
-                        org.mockito.ArgumentMatchers.anyLong(),
+                        org.mockito.ArgumentMatchers.anyString(),
                         anyInt(),
                         any(),
                         any(),
@@ -146,7 +146,7 @@ class DecodePreemptionTest {
         var view = mock(DecodeResources.ResourceSnapshot.class);
         var victim =
                 new DecodeResources.DecodeRequestView(
-                        901L,
+                        String.valueOf(901L),
                         30,
                         128L,
                         128L,
@@ -163,7 +163,7 @@ class DecodePreemptionTest {
                 .thenReturn(new DecodeResources.CapacityUsage(1L, 20_000L, 10_000L, 0L, 10_000L));
 
         var completion = new CompletableFuture<DecodePreemption.PreemptionResult>();
-        var incoming = Request.builder().requestId(902L).seqLen(128L).rawPriority(70).build();
+        var incoming = Request.builder().requestId("902").seqLen(128L).rawPriority(70).build();
         var context = new RequestContext(config);
         context.data().setRequest(incoming);
         context.data()
@@ -178,14 +178,14 @@ class DecodePreemptionTest {
         var frozenRequest = context.data().getRequest();
         configureAdmission(config);
         org.mockito.Mockito.doReturn(completion).when(acquirer).preempt(any(), any());
-        when(requests.isAdmissionOpen(902L, future)).thenReturn(admissionOpen);
+        when(requests.isAdmissionOpen("902", future)).thenReturn(admissionOpen);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(99L);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxKvUsagePercent(1L);
         var changed = incoming.toBuilder().seqLen(4_096L).maxNewTokens(1_024).build();
         assertEquals(4_096L, changed.getSeqLen());
 
         var outcome = acquirer.tryReclaim(context, endpoint);
-        verify(requests).isAdmissionOpen(902L, future);
+        verify(requests).isAdmissionOpen("902", future);
         verifyNoMoreInteractions(requests);
         if (!admissionOpen) {
             assertNull(outcome);
@@ -205,7 +205,7 @@ class DecodePreemptionTest {
         assertSame(frozenRequest, command.getValue().request());
         assertEquals(List.of(victim), command.getValue().victims());
 
-        var exact = new DecodeResources.ReservationHandle(7L, 902L, 31L);
+        var exact = new DecodeResources.ReservationHandle(7L, String.valueOf(902L), 31L);
         completion.complete(new DecodePreemption.PreemptionResult(exact, false, "committed"));
         assertSame(exact, outcome.join().reservation());
         assertNull(
@@ -254,9 +254,9 @@ class DecodePreemptionTest {
         when(snapshot.requests())
                 .thenReturn(
                         Map.of(
-                                901L,
+                                "901",
                                 new DecodeResources.DecodeRequestView(
-                                        901L,
+                                        String.valueOf(901L),
                                         70,
                                         128L,
                                         128L,

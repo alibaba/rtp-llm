@@ -98,6 +98,19 @@ public class CacheAwareService {
             CacheMatchResult result) {
         if (result.source() == CacheMatchSource.KVCM && result.querySucceeded()) {
             try {
+                var match = result.hostMatch(worker);
+                cacheMetricsReporter.reportKvcmSelectedMatch(
+                        role,
+                        worker.getMetricIpPort(),
+                        match == null
+                                ? 0L
+                                : CacheMatchResult.matchedTokens(
+                                        match.localMatchBlocks(), result.blockSize(), inputTokens),
+                        match == null
+                                ? 0L
+                                : CacheMatchResult.matchedTokens(
+                                        match.globalMatchBlocks(), result.blockSize(), inputTokens),
+                        inputTokens);
                 cacheMetricsReporter.reportKvcmPrediction(
                         role, worker.getMetricIpPort(), predictedHitTokens, inputTokens);
             } catch (RuntimeException error) {

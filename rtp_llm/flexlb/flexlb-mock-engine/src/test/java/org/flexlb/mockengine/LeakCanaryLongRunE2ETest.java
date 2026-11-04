@@ -80,7 +80,7 @@ class LeakCanaryLongRunE2ETest {
             // Priority ordering and exact terminal cleanup remain active without preemption.
             // 小批次与快速派发维持持续流量。
             h.config.getRequestLifecycle().getRequest().setTimeoutMs(INACTIVITY_TIMEOUT_MS);
-            h.prefillSelector = ctx -> (int) (ctx.data().getRequestId() % 2);
+            h.prefillSelector = ctx -> (int) (Long.parseLong(ctx.data().getRequestId()) % 2);
             h.startAutoPump(10);
 
             JavaMockEngineCluster.FastRpcService faultTarget = h.prefillEngines.get(0);

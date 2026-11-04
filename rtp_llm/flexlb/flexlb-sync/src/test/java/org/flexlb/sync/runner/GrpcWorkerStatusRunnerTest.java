@@ -2,7 +2,7 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -48,14 +48,14 @@ class GrpcWorkerStatusRunnerTest {
         directory(registry, status);
         WorkerEndpoint endpoint =
                 RunnerTestSupport.publishEndpoint(
-                        registry, status.getRole(), status.getIpPort(), status);
+                        registry, status.getRole(), status.getLogicalIpPort(), status);
         CacheAwareService cache = mock(CacheAwareService.class);
         WorkerStatusRpcClient grpc = mock(WorkerStatusRpcClient.class);
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         if (telemetryFails) {
             org.mockito.Mockito.doThrow(new IllegalStateException("monitor unavailable"))
                     .when(reporter)
-                    .reportStatusCheckerFail(anyString(), any(), any());
+                    .reportStatusCheckerFail(any(), anyString(), any());
         }
         when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
                 .thenReturn(
@@ -75,7 +75,7 @@ class GrpcWorkerStatusRunnerTest {
                                 Runnable::run)
                         .run();
             }
-            assertSame(endpoint, registry.get(status.getRole(), status.getIpPort()));
+            assertSame(endpoint, registry.get(status.getRole(), status.getLogicalIpPort()));
             assertEquals(0L, status.pollHealth().consecutiveWorkerFailures());
             assertNull(status.retirementReason());
             verifyNoInteractions(cache);
@@ -86,7 +86,7 @@ class GrpcWorkerStatusRunnerTest {
 
     @Test
     void newGenerationPublishesUnderLockAndLaterStatusProjectsOutsideLock() {
-        String ipPort = "127.0.0.1:8080";
+        String ipPort = "127.0.0.1:8080@0";
         WorkerStatus status =
                 RunnerTestSupport.discovered(
                         RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test-site");
@@ -189,7 +189,7 @@ class GrpcWorkerStatusRunnerTest {
 
     @Test
     void sameVersionResponseProjectsExactEndpointActivity() {
-        String ipPort = "127.0.0.1:8080";
+        String ipPort = "127.0.0.1:8080@0";
         WorkerStatus status =
                 RunnerTestSupport.alive(
                         RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test-site");
@@ -259,8 +259,8 @@ class GrpcWorkerStatusRunnerTest {
         verify(endpoint)
                 .applyStatusHeartbeat(org.mockito.Mockito.eq(status), observation.capture());
         assertTrue(
-                observation.getValue().runningTasks().values().stream()
-                        .anyMatch(active -> active.requestId() == 123L));
+                observation.getValue().activeTasks().values().stream()
+                        .anyMatch(active -> active.requestId().equals("123")));
         assertTrue(projected.get());
         verify(endpoint, org.mockito.Mockito.never()).applyPreparedStatus(any(), any());
         WorkerStatus.PollLease nextPoll = status.tryBeginStatusPoll();
@@ -279,7 +279,9 @@ class GrpcWorkerStatusRunnerTest {
                 org.mockito.Mockito.spy(
                         RunnerTestSupport.endpointRegistry(mock(ConfigService.class)));
         directory(registry, status);
-        assertNull(registry.get(role, status.getIpPort()), "the committed cursor has no endpoint");
+        assertNull(
+                registry.get(role, status.getLogicalIpPort()),
+                "the committed cursor has no endpoint");
         WorkerStatus.PollLease lease = status.tryBeginStatusPoll();
         assertNotNull(lease);
         EngineRpcService.WorkerStatusPB response =
@@ -310,7 +312,7 @@ class GrpcWorkerStatusRunnerTest {
         assertNull(
                 status.tryBeginStatusPoll(),
                 "a missing committed endpoint retires its status generation");
-        assertNull(registry.get(role, status.getIpPort()));
+        assertNull(registry.get(role, status.getLogicalIpPort()));
         verify(registry, org.mockito.Mockito.never())
                 .publishPreparedEndpoint(
                         anyString(),
@@ -331,7 +333,7 @@ class GrpcWorkerStatusRunnerTest {
         directory(registry, status);
         if (published) {
             RunnerTestSupport.publishEndpoint(
-                    registry, RoleType.PREFILL, status.getIpPort(), status);
+                    registry, RoleType.PREFILL, status.getLogicalIpPort(), status);
         }
         var committed = status.committedWorkerStatus();
         WorkerStatus.PollLease lease = status.tryBeginStatusPoll();
@@ -371,13 +373,13 @@ class GrpcWorkerStatusRunnerTest {
         org.flexlb.sync.runner.RunnerTestSupport.awaitCondition(
                 () -> registry.statusSnapshot(RoleType.PREFILL).isEmpty());
         assertTrue(registry.statusSnapshot(RoleType.DECODE).isEmpty());
-        assertNull(registry.get(RoleType.PREFILL, status.getIpPort()));
-        assertNull(registry.get(RoleType.DECODE, status.getIpPort()));
+        assertNull(registry.get(RoleType.PREFILL, status.getLogicalIpPort()));
+        assertNull(registry.get(RoleType.DECODE, status.getLogicalIpPort()));
     }
 
     private static EndpointRegistry directory(EndpointRegistry registry, WorkerStatus status) {
         EndpointRegistry directory = registry;
-        directory.currentOrDiscover(status.getRole(), status.getIpPort(), () -> status);
+        directory.currentOrDiscover(status.getRole(), status.getLogicalIpPort(), () -> status);
         return directory;
     }
 }

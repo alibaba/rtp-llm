@@ -30,7 +30,7 @@ public final class RequestTimeEstimation {
     private final ProjectedQueue ordered = new ProjectedQueue();
     private GroupPlanner.Item incoming;
     private boolean inUse;
-    private long requestId;
+    private String requestId;
     private int priority;
     private long enqueuedAtMs;
     private long expiresAtMs;
@@ -47,7 +47,7 @@ public final class RequestTimeEstimation {
     /** Borrowed ranking result; admission is applied separately by the selection strategy. */
     public CandidateView projectRankingView(
             Inputs inputs,
-            long requestId,
+            String requestId,
             int priority,
             long enqueuedAtMs,
             long expiresAtMs,
@@ -193,7 +193,7 @@ public final class RequestTimeEstimation {
             long committedMs,
             long incomingPrefillMs) {
         if (incoming == null
-                || incoming.requestId() != requestId
+                || !java.util.Objects.equals(incoming.requestId(), requestId)
                 || incoming.priority() != priority
                 || incoming.enqueuedAtMs() != enqueuedAtMs
                 || incoming.expiresAtMs() != expiresAtMs
@@ -288,7 +288,8 @@ public final class RequestTimeEstimation {
                 long nowMs) {
             for (int index = 0; index < active.size(); index++) {
                 var item = active.get(index);
-                if (item.requestId() == probe.requestId() && !expiredAt(item, nowMs)) {
+                if (java.util.Objects.equals(item.requestId(), probe.requestId())
+                        && !expiredAt(item, nowMs)) {
                     return false;
                 }
             }
@@ -630,7 +631,7 @@ public final class RequestTimeEstimation {
         private PrefillTimePredictor.Evaluator evaluator;
         private boolean batch;
         private PrefillTimePredictor.BatchPrediction batchPrediction;
-        private long probeId;
+        private String probeId;
         private boolean probeReached;
         private double batchMs;
         private long totalMs;
@@ -726,7 +727,7 @@ public final class RequestTimeEstimation {
             }
         }
 
-        private void startGroup(long probeId) {
+        private void startGroup(String probeId) {
             this.probeId = probeId;
             probeReached = false;
             batchMs = 0.0;
@@ -756,7 +757,7 @@ public final class RequestTimeEstimation {
                     totalMs = saturatedAdd(totalMs, itemMs);
                 }
                 computedSize++;
-                probeReached = added.requestId() == probeId;
+                probeReached = java.util.Objects.equals(added.requestId(), probeId);
             }
             return batch ? batchMs : totalMs;
         }
@@ -787,7 +788,7 @@ public final class RequestTimeEstimation {
         private List<BatchWork> batches;
         private long knownNonRunningWorkMs;
         private long[] runningWorkMs = EMPTY_LONGS;
-        private long[] requestIds = EMPTY_LONGS;
+        private String[] requestIds = new String[0];
         private boolean unknownWork;
         private volatile boolean calculated;
 
@@ -843,7 +844,7 @@ public final class RequestTimeEstimation {
 
             this.knownNonRunningWorkMs = nonRunningMs;
             this.runningWorkMs = runningCount == 0 ? EMPTY_LONGS : new long[runningCount];
-            this.requestIds = requestIdCount == 0 ? EMPTY_LONGS : new long[requestIdCount];
+            this.requestIds = new String[requestIdCount];
             this.unknownWork = hasUnknown;
             indexRequests();
         }
@@ -858,7 +859,7 @@ public final class RequestTimeEstimation {
                 }
             }
             for (BatchWork batch : batches) {
-                for (long requestId : batch.requestIds()) {
+                for (String requestId : batch.requestIds()) {
                     requestIds[requestIdIndex++] = requestId;
                 }
                 if (batch.phase() == Phase.ENGINE_RUNNING && batch.remainingWorkMs().isPresent()) {
@@ -880,7 +881,7 @@ public final class RequestTimeEstimation {
         }
 
         /** One individually delivered request, identified by request id. */
-        public record RequestWork(long requestId, Phase phase, long remainingWorkMs) {
+        public record RequestWork(String requestId, Phase phase, long remainingWorkMs) {
 
             public RequestWork {
                 checkArgument(remainingWorkMs >= 0L, "remaining request work must be non-negative");
@@ -888,7 +889,8 @@ public final class RequestTimeEstimation {
         }
 
         /** One shared EnqueueBatch work unit and its live request identities. */
-        public record BatchWork(List<Long> requestIds, Phase phase, OptionalLong remainingWorkMs) {
+        public record BatchWork(
+                List<String> requestIds, Phase phase, OptionalLong remainingWorkMs) {
 
             public BatchWork {
                 requestIds = List.copyOf(requestIds);
@@ -903,7 +905,7 @@ public final class RequestTimeEstimation {
             return unknownWork;
         }
 
-        public boolean containsRequest(long requestId) {
+        public boolean containsRequest(String requestId) {
             calculate();
             return Arrays.binarySearch(requestIds, requestId) >= 0;
         }
@@ -964,7 +966,7 @@ public final class RequestTimeEstimation {
                 checkArgument(!activeItems.isEmpty(), "admission block requires an ACTIVE head");
                 GroupPlanner.Item head = activeItems.getFirst();
                 checkArgument(
-                        head.requestId() == admissionBlock.requestId()
+                        java.util.Objects.equals(head.requestId(), admissionBlock.requestId())
                                 && head.enqueueSeq() == admissionBlock.enqueueSeq(),
                         "admission block must identify the exact ACTIVE head");
             }
@@ -975,7 +977,7 @@ public final class RequestTimeEstimation {
          * Null semantics mean the wait only limits delivery, not queue publication.
          */
         public record AdmissionBlock(
-                long requestId,
+                String requestId,
                 long enqueueSeq,
                 RequestTimeEstimation.AdmissionBlockSemantics semantics) {}
     }

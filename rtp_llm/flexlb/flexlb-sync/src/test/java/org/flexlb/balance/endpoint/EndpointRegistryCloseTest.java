@@ -2,7 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.RequestLifecycle;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -58,10 +58,11 @@ class EndpointRegistryCloseTest {
                 var status =
                         EndpointTestSupport.workerStatus(
                                 RoleType.DECODE, "127.0.0.1", 8600 + i, 8700 + i);
-                registry.currentOrDiscover(RoleType.DECODE, status.getIpPort(), () -> status);
+                registry.currentOrDiscover(
+                        RoleType.DECODE, status.getLogicalIpPort(), () -> status);
                 var endpoint =
                         EndpointTestSupport.publishEndpoint(
-                                registry, RoleType.DECODE, status.getIpPort(), status);
+                                registry, RoleType.DECODE, status.getLogicalIpPort(), status);
                 pins.add(endpoint.tryPinGeneration());
                 statuses.add(status);
             }
@@ -76,7 +77,7 @@ class EndpointRegistryCloseTest {
                 status.markRemovedFromDiscovery();
                 var retirement =
                         registry.beginRequestedRetirement(
-                                RoleType.DECODE, status.getIpPort(), status);
+                                RoleType.DECODE, status.getLogicalIpPort(), status);
                 assertNotNull(retirement);
                 retirement.completeAsync(cache, LoggerFactory.getLogger(getClass()));
             }
@@ -116,7 +117,10 @@ class EndpointRegistryCloseTest {
                     executor.submit(
                             () ->
                                     EndpointTestSupport.publishEndpoint(
-                                            registry, RoleType.DECODE, status.getIpPort(), status));
+                                            registry,
+                                            RoleType.DECODE,
+                                            status.getLogicalIpPort(),
+                                            status));
             try {
                 assertTrue(publicationEntered.await(2, TimeUnit.SECONDS));
                 assertFalse(decodeRoutingSnapshot(registry, null).isEmpty());
@@ -145,7 +149,7 @@ class EndpointRegistryCloseTest {
                         IllegalStateException.class,
                         () ->
                                 EndpointTestSupport.publishEndpoint(
-                                        registry, RoleType.VIT, late.getIpPort(), late));
+                                        registry, RoleType.VIT, late.getLogicalIpPort(), late));
                 assertThrows(TimeoutException.class, () -> owner.get(50, TimeUnit.MILLISECONDS));
                 assertThrows(TimeoutException.class, () -> waiter.get(50, TimeUnit.MILLISECONDS));
                 finishPublication.countDown();
@@ -240,7 +244,7 @@ class EndpointRegistryCloseTest {
     void closeWaitsForAlreadyDetachedGeneration() throws Exception {
         EndpointRegistry registry = registry();
         var status = EndpointTestSupport.workerStatus(RoleType.VIT, "127.0.0.1", 8200, 8201);
-        String address = status.getIpPort();
+        String address = status.getLogicalIpPort();
         registry.currentOrDiscover(RoleType.VIT, address, () -> status);
         EndpointTestSupport.publishEndpoint(registry, RoleType.VIT, address, status);
         EndpointRegistry.Retirement detached;
@@ -283,7 +287,7 @@ class EndpointRegistryCloseTest {
             throws Exception {
         EndpointRegistry registry = registry();
         var status = EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8500, 8501);
-        String address = status.getIpPort();
+        String address = status.getLogicalIpPort();
         registry.currentOrDiscover(RoleType.PREFILL, address, () -> status);
         if (published) {
             EndpointTestSupport.publishEndpoint(registry, RoleType.PREFILL, address, status);
@@ -361,11 +365,11 @@ class EndpointRegistryCloseTest {
     void lateRpcFrameCannotRepopulateRetiredDecodeLedger() {
         EndpointRegistry registry = registry();
         var status = EndpointTestSupport.workerStatus(RoleType.DECODE, "127.0.0.1", 8600, 8601);
-        registry.currentOrDiscover(RoleType.DECODE, status.getIpPort(), () -> status);
+        registry.currentOrDiscover(RoleType.DECODE, status.getLogicalIpPort(), () -> status);
         DecodeEndpoint endpoint =
                 (DecodeEndpoint)
                         EndpointTestSupport.publishEndpoint(
-                                registry, RoleType.DECODE, status.getIpPort(), status);
+                                registry, RoleType.DECODE, status.getLogicalIpPort(), status);
         long committedVersion = status.appliedStatusCursor().statusVersion();
         CompletableFuture<EngineRpcService.WorkerStatusPB> response = new CompletableFuture<>();
         WorkerStatusRpcClient rpc = mock(WorkerStatusRpcClient.class);
@@ -389,23 +393,23 @@ class EndpointRegistryCloseTest {
                 "an already-drained Decode generation must not acquire late Engine ownership");
         assertEquals(committedVersion, status.appliedStatusCursor().statusVersion());
         assertFalse(status.isActiveGeneration());
-        assertFalse(registry.isCurrentStatus(RoleType.DECODE, status.getIpPort(), status));
+        assertFalse(registry.isCurrentStatus(RoleType.DECODE, status.getLogicalIpPort(), status));
         assertThrows(
                 IllegalStateException.class,
                 () ->
                         registry.currentOrDiscover(
-                                RoleType.DECODE, status.getIpPort(), () -> status));
+                                RoleType.DECODE, status.getLogicalIpPort(), () -> status));
     }
 
     @Test
     void closeWaitsForAlreadyAdmittedGenerationTransactionBeforeDraining() throws Exception {
         EndpointRegistry registry = registry();
         var status = EndpointTestSupport.workerStatus(RoleType.DECODE, "127.0.0.1", 8700, 8701);
-        registry.currentOrDiscover(RoleType.DECODE, status.getIpPort(), () -> status);
+        registry.currentOrDiscover(RoleType.DECODE, status.getLogicalIpPort(), () -> status);
         DecodeEndpoint endpoint =
                 (DecodeEndpoint)
                         EndpointTestSupport.publishEndpoint(
-                                registry, RoleType.DECODE, status.getIpPort(), status);
+                                registry, RoleType.DECODE, status.getLogicalIpPort(), status);
         status.lock.lock();
         try (var executor = Executors.newSingleThreadExecutor()) {
             Future<?> closing = executor.submit(registry::close);
@@ -414,7 +418,7 @@ class EndpointRegistryCloseTest {
                         java.time.Duration.ofSeconds(2),
                         () -> {
                             while (registry.isCurrentStatus(
-                                    RoleType.DECODE, status.getIpPort(), status)) {
+                                    RoleType.DECODE, status.getLogicalIpPort(), status)) {
                                 Thread.onSpinWait();
                             }
                         });
@@ -426,7 +430,8 @@ class EndpointRegistryCloseTest {
                                 status,
                                 runningStatus(status.appliedStatusCursor().statusVersion() + 1L));
                 endpoint.applyPreparedStatus(status, status.prepareNewStatus(observation));
-                assertTrue(endpoint.resourceSnapshot().requests().containsKey(123L));
+                assertTrue(
+                        endpoint.resourceSnapshot().requests().containsKey(String.valueOf(123L)));
             } finally {
                 status.lock.unlock();
             }
@@ -442,7 +447,7 @@ class EndpointRegistryCloseTest {
         EndpointRegistry registry = registry();
         ReflectionTestUtils.setField(registry, "retirementTimeoutMs", 25L);
         var status = EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 9000, 9001);
-        String address = status.getIpPort();
+        String address = status.getLogicalIpPort();
         registry.currentOrDiscover(RoleType.PREFILL, address, () -> status);
         WorkerEndpoint endpoint =
                 EndpointTestSupport.publishEndpoint(registry, RoleType.PREFILL, address, status);
@@ -523,10 +528,10 @@ class EndpointRegistryCloseTest {
     void discoveryRemovalLoggingCannotLoseRetirementCapability() {
         EndpointRegistry registry = registry();
         var status = EndpointTestSupport.workerStatus(RoleType.DECODE, "127.0.0.1", 9100, 9101);
-        registry.currentOrDiscover(RoleType.DECODE, status.getIpPort(), () -> status);
+        registry.currentOrDiscover(RoleType.DECODE, status.getLogicalIpPort(), () -> status);
         WorkerEndpoint endpoint =
                 EndpointTestSupport.publishEndpoint(
-                        registry, RoleType.DECODE, status.getIpPort(), status);
+                        registry, RoleType.DECODE, status.getLogicalIpPort(), status);
         var loggingFailed = new java.util.concurrent.atomic.AtomicBoolean();
         ch.qos.logback.classic.Logger syncLogger =
                 (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("syncLogger");
@@ -567,10 +572,10 @@ class EndpointRegistryCloseTest {
         PlacementAvailability availability = mock(PlacementAvailability.class);
         EndpointRegistry registry = registry(availability);
         var status = EndpointTestSupport.workerStatus(RoleType.VIT, "127.0.0.1", 8900, 8901);
-        registry.currentOrDiscover(RoleType.VIT, status.getIpPort(), () -> status);
+        registry.currentOrDiscover(RoleType.VIT, status.getLogicalIpPort(), () -> status);
         WorkerEndpoint endpoint =
                 EndpointTestSupport.publishEndpoint(
-                        registry, RoleType.VIT, status.getIpPort(), status);
+                        registry, RoleType.VIT, status.getLogicalIpPort(), status);
         var notifiedOutsideLock = new java.util.concurrent.atomic.AtomicBoolean();
         doAnswer(
                         call -> {
@@ -582,7 +587,7 @@ class EndpointRegistryCloseTest {
         EndpointRegistry.Retirement retirement;
         status.lock.lock();
         try {
-            retirement = registry.beginRetirement(RoleType.VIT, status.getIpPort(), status);
+            retirement = registry.beginRetirement(RoleType.VIT, status.getLogicalIpPort(), status);
         } finally {
             status.lock.unlock();
         }
@@ -612,7 +617,7 @@ class EndpointRegistryCloseTest {
                             () ->
                                     registry.currentOrDiscover(
                                             RoleType.VIT,
-                                            status.getIpPort(),
+                                            status.getLogicalIpPort(),
                                             () -> {
                                                 factoryEntered.countDown();
                                                 try {

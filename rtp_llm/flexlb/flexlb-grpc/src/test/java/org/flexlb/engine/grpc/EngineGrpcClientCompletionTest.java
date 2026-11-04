@@ -14,7 +14,7 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2Exception;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
-import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
+import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -127,7 +127,12 @@ class EngineGrpcClientCompletionTest {
         assertEquals(2, calls.get());
         verify(reporter, never())
                 .reportCallFailure(anyString(), anyBoolean(), anyString(), any(), any());
-        verify(reporter).reportCallMetrics(eq("GetWorkerStatus"), anyLong(), eq(true));
+        verify(reporter)
+                .reportCallMetrics(
+                        eq("GetWorkerStatus"),
+                        anyLong(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        eq(true));
     }
 
     @ParameterizedTest
@@ -189,7 +194,11 @@ class EngineGrpcClientCompletionTest {
         startServer(EngineGrpcClientCompletionTest::succeed);
         doThrow(new IllegalStateException("metrics backend unavailable"))
                 .when(reporter)
-                .reportCallMetrics(anyString(), anyLong(), anyBoolean());
+                .reportCallMetrics(
+                        anyString(),
+                        anyLong(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        anyBoolean());
 
         try (var logs = new MetricWarnings()) {
             for (int i = 0; i < 3; i++) {
@@ -225,7 +234,11 @@ class EngineGrpcClientCompletionTest {
                 });
         doThrow(new LinkageError("metrics implementation unavailable"))
                 .when(reporter)
-                .reportCallMetrics(anyString(), anyLong(), anyBoolean());
+                .reportCallMetrics(
+                        anyString(),
+                        anyLong(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        anyBoolean());
 
         var result = client.getWorkerStatusAsync("127.0.0.1", 8081, request(), 5000);
         succeed(response.get(5, TimeUnit.SECONDS));
@@ -246,7 +259,11 @@ class EngineGrpcClientCompletionTest {
                             }
                         })
                 .when(reporter)
-                .reportCallMetrics(anyString(), anyLong(), anyBoolean());
+                .reportCallMetrics(
+                        anyString(),
+                        anyLong(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        anyBoolean());
 
         assertEquals(
                 EngineRpcService.WorkerStatusPB.getDefaultInstance(),
@@ -259,7 +276,11 @@ class EngineGrpcClientCompletionTest {
         startServer(EngineGrpcClientCompletionTest::succeed);
         doThrow(new IllegalStateException("bad\nmetrics\r" + "x".repeat(1000)))
                 .when(reporter)
-                .reportCallMetrics(anyString(), anyLong(), anyBoolean());
+                .reportCallMetrics(
+                        anyString(),
+                        anyLong(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        anyBoolean());
         try (var logs = new MetricWarnings()) {
             client.getWorkerStatusAsync("127.0.0.1", 8081, request(), 1000)
                     .get(5, TimeUnit.SECONDS);
@@ -314,6 +335,7 @@ class EngineGrpcClientCompletionTest {
                 .reportCallMetrics(
                         eq(AbstractGrpcClient.ServiceType.CACHE_STATUS.getOperationName()),
                         anyLong(),
+                        org.mockito.ArgumentMatchers.anyInt(),
                         eq(retry));
     }
 
@@ -728,12 +750,13 @@ class EngineGrpcClientCompletionTest {
 
         private TestClient(String name, ThreadPoolExecutor executor, GrpcReporter reporter) {
             super(
-                    mock(CustomNameResolver.class),
+                    mock(EngineAddressResolver.class),
                     executor,
                     mock(EventLoopGroup.class),
                     reporter,
                     20,
-                    5000);
+                    5000,
+                    mock(org.flexlb.config.CacheMatchConfiguration.class));
             this.name = name;
         }
 

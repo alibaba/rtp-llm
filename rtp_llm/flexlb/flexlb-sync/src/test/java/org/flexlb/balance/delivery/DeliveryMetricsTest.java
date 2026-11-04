@@ -1,49 +1,53 @@
 package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.scheduler.ScheduledRequest;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.scheduler.Delivery;
+import org.flexlb.balance.scheduler.DeliveryDispatcher;
+import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class DeliveryMetricsTest {
-
     @ParameterizedTest
     @CsvSource({"true,true", "true,false", "false,true", "false,false"})
     void missingWorkerRoleDoesNotDiscardDeliveryMetrics(boolean routeDelivery, boolean hasStatus) {
-        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
-        if (hasStatus) {
-            WorkerStatus status = mock(WorkerStatus.class);
-            when(status.getMetricIpPort()).thenReturn("10.0.0.1:8080");
-            when(endpoint.getStatus()).thenReturn(status);
-        }
-        ScheduledRequest item = mock(ScheduledRequest.class);
-        when(item.prefillEp()).thenReturn(endpoint);
-        when(item.priority()).thenReturn(50);
+        var reporter = mock(DeliveryMetricsReporter.class);
+        var endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.getIp()).thenReturn("10.0.0.1");
+        if (hasStatus) when(endpoint.getStatus()).thenReturn(mock(WorkerStatus.class));
+        var route = mock(RequestRoute.class);
+        when(route.prefillEp()).thenReturn(endpoint);
+        when(route.priority()).thenReturn(50);
+        var member = mock(Delivery.Member.class);
+        when(member.route()).thenReturn(route);
+        var dispatcher = mock(DeliveryDispatcher.class, CALLS_REAL_METHODS);
+        ReflectionTestUtils.setField(dispatcher, "telemetry", reporter);
         if (routeDelivery) {
-            when(item.ctx()).thenReturn(mock(BalanceContext.class));
-        }
-        DeliveryMetrics metrics = new DeliveryMetrics(reporter);
-
-        if (routeDelivery) {
-            metrics.routesDelivered(3, List.of(item));
+            ReflectionTestUtils.invokeMethod(
+                    dispatcher, "reportRoutes", new Delivery.Member[] {member}, 1, 3);
+            verify(reporter).reportBatcherQueueSize("PREFILL", "10.0.0.1", 3);
         } else {
-            metrics.batchDispatched(1L, "deadline", 3, List.of(item), 100L);
+            var batch = mock(Delivery.class);
+            when(batch.batchId()).thenReturn(1L);
+            when(batch.reason()).thenReturn("deadline");
+            when(batch.remainingQueueDepth()).thenReturn(3);
+            ReflectionTestUtils.invokeMethod(
+                    dispatcher, "reportDelivery", batch, List.of(member), 100L);
+            verify(reporter)
+                    .reportBatchDelivery("PREFILL", "10.0.0.1", 1, "deadline", 3, 1, 0, 0, 100);
         }
-
-        String engineIp = hasStatus ? "10.0.0.1:8080" : "";
-        verify(reporter).reportBatcherQueueSize("PREFILL", engineIp, 3);
-        verify(reporter).reportBatchWaitTimeMs(eq("PREFILL"), eq(engineIp), anyLong(), eq(50));
+        verify(reporter).reportBatchWaitTimeMs(eq("PREFILL"), eq("10.0.0.1"), anyLong(), eq(50));
     }
 }

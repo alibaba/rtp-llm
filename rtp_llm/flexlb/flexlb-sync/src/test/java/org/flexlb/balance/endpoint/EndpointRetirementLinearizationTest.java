@@ -2,7 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.RequestRoute;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -43,8 +43,8 @@ class EndpointRetirementLinearizationTest {
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                 configService.loadBalanceConfig()),
                         order -> org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(16, order));
-        String prefillAddress = "127.0.0.1:8100";
-        String decodeAddress = "127.0.0.1:8200";
+        String prefillAddress = "127.0.0.1:8100@0";
+        String decodeAddress = "127.0.0.1:8200@0";
         WorkerStatus prefillStatus = status(RoleType.PREFILL, 8100);
         WorkerStatus decodeStatus = status(RoleType.DECODE, 8200);
         registry.currentOrDiscover(RoleType.PREFILL, prefillAddress, () -> prefillStatus);

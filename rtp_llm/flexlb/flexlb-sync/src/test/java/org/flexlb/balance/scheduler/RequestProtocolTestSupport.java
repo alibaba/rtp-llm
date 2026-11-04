@@ -483,7 +483,7 @@ final class RequestProtocolTestSupport {
                 service,
                 org.mockito.Mockito.mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
                 org.mockito.Mockito.mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class));
+                org.mockito.Mockito.mock(org.flexlb.service.TheoryCacheHitReporter.class));
     }
 
     static RequestLifecycle initialize(
@@ -499,8 +499,7 @@ final class RequestProtocolTestSupport {
                                 org.flexlb.service.monitor.DeliveryMetricsReporter.class),
                         org.mockito.Mockito.mock(
                                 org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.service.RecentCacheKeyTraceReporter.class));
+                        org.mockito.Mockito.mock(org.flexlb.service.TheoryCacheHitReporter.class));
         org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner),
                 "responseCompletions",
@@ -654,7 +653,8 @@ final class RequestProtocolTestSupport {
     }
 
     static RequestContext context(FlexlbConfig config, long requestId) {
-        Request request = Request.builder().requestId(requestId).seqLen(16L).build();
+        Request request =
+                Request.builder().requestId(String.valueOf(requestId)).seqLen(16L).build();
         SchedulingTestConfig.configureRequiredValues(config);
         RequestContext context = new RequestContext(config);
         context.data().setRequest(request);

@@ -1,6 +1,5 @@
 package org.flexlb.mock.grpc;
 
-import com.google.protobuf.ByteString;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -60,9 +59,9 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
 
     @Test
     void nonNumericRoutingIdDoesNotInventAnEngineInputId() {
-        var context = createBalanceContext("request-a");
-        assertEquals("request-a", context.getRequestId());
-        assertEquals(ByteString.EMPTY, context.getGenerateInputPb());
+        var context = createRequestContext("request-a");
+        assertEquals("request-a", context.data().getRequestId());
+        assertEquals(0, context.data().getGenerateInputSize());
     }
 
     @Override
@@ -79,7 +78,7 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
     @Timeout(20)
     void workerStatusSync_masterPerceivesConcurrencyChange() throws Exception {
         // 1. Submit request — normal operation with concurrency=10
-        CompletableFuture<Response> future = submitRequest("30001");
+        CompletableFuture<Response> future = submitRequest(30001L);
         Response ackResponse = future.get(5, TimeUnit.SECONDS);
         assertTrue(ackResponse.isSuccess(), "Request should succeed with concurrency=10");
 

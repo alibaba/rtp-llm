@@ -664,9 +664,9 @@ class DeliveryDispatcherTest {
                 (exactItem, completion) -> {
                     RequestRoute item = assertInstanceOf(RequestRoute.class, exactItem);
                     if (completion.status() == Delivery.Result.Status.NOT_SENT) {
-                        failures.merge(item.requestId(), 1, Integer::sum);
+                        failures.merge(Long.parseLong(item.requestId()), 1, Integer::sum);
                         attempted.countDown();
-                        if (item.requestId() == 1L) {
+                        if (item.requestId().equals("1")) {
                             throw new IllegalStateException("first callback failed");
                         }
                     } else if (completion.status() == Delivery.Result.Status.UNCERTAIN) {
@@ -699,9 +699,9 @@ class DeliveryDispatcherTest {
                     if (completion.status() == Delivery.Result.Status.NOT_SENT) {
                         failures.incrementAndGet();
                     } else if (completion.status() == Delivery.Result.Status.UNCERTAIN) {
-                        uncertain.merge(item.requestId(), 1, Integer::sum);
+                        uncertain.merge(Long.parseLong(item.requestId()), 1, Integer::sum);
                         attempted.countDown();
-                        if (item.requestId() == 1L) {
+                        if (item.requestId().equals("1")) {
                             throw new IllegalStateException("first callback failed");
                         }
                     }
@@ -1382,7 +1382,9 @@ class DeliveryDispatcherTest {
                             return CompletableFuture.completedFuture(
                                     ackResponse(
                                             8L,
-                                            items.stream().map(RequestRoute::requestId).toList()));
+                                            items.stream()
+                                                    .map(item -> Long.parseLong(item.requestId()))
+                                                    .toList()));
                         });
         submit(items, 8L, 100L, "role-cache", callback);
         var batch = sent.get(5, TimeUnit.SECONDS);
@@ -1396,7 +1398,7 @@ class DeliveryDispatcherTest {
             assertEquals(
                     items.stream()
                             .filter(item -> item.prefill().getDpRank() == slot.getDpRank())
-                            .map(RequestRoute::requestId)
+                            .map(route -> Long.parseLong(route.requestId()))
                             .toList(),
                     slot.getRequestsList().stream()
                             .map(input -> input.getInput().getRequestId())
@@ -1407,7 +1409,10 @@ class DeliveryDispatcherTest {
         }
         assertEquals(items.size(), inputs.size());
         for (RequestRoute item : items) {
-            var roles = inputs.get(item.requestId()).getGenerateConfig().getRoleAddrsList();
+            var roles =
+                    inputs.get(Long.parseLong(item.requestId()))
+                            .getGenerateConfig()
+                            .getRoleAddrsList();
             assertEquals(item.decode() == null ? 1 : 2, roles.size());
             assertEquals(RoleType.PREFILL, RoleTypeProtoConverter.fromRoleAddr(roles.getFirst()));
             assertEquals(item.prefill().getServerIp(), roles.getFirst().getIp());
@@ -1696,7 +1701,7 @@ class DeliveryDispatcherTest {
                 10L,
                 "partial-cancel",
                 (item, result) -> {
-                    results.put(item.requestId(), result.status());
+                    results.put(Long.parseLong(item.requestId()), result.status());
                     completed.countDown();
                 });
         var batch = sent.get(2, TimeUnit.SECONDS);
@@ -1736,7 +1741,7 @@ class DeliveryDispatcherTest {
                             .tryStartSend(items.get(index).ctx().snapshot().delivery().identity()))
                     .thenReturn(accepted);
             if (accepted) {
-                acceptedIds.add(items.get(index).requestId());
+                acceptedIds.add(Long.parseLong(items.get(index).requestId()));
             }
         }
         var sent = new CompletableFuture<EngineRpcService.EnqueueBatchRequestPB>();
@@ -1756,7 +1761,7 @@ class DeliveryDispatcherTest {
                 (item, result) -> {
                     assertEquals(
                             null,
-                            results.putIfAbsent(item.requestId(), result.status()),
+                            results.putIfAbsent(Long.parseLong(item.requestId()), result.status()),
                             "one result per member");
                     completed.countDown();
                 });
@@ -1766,7 +1771,7 @@ class DeliveryDispatcherTest {
                     (refusedMask & (1 << index)) == 0
                             ? Delivery.Result.Status.DELIVERED
                             : Delivery.Result.Status.NOT_SENT;
-            assertEquals(expected, results.get(items.get(index).requestId()));
+            assertEquals(expected, results.get(Long.parseLong(items.get(index).requestId())));
             verify(items.get(index).ctx().data().getLifecycle())
                     .tryStartSend(items.get(index).ctx().snapshot().delivery().identity());
         }
@@ -1814,7 +1819,11 @@ class DeliveryDispatcherTest {
             PrefillEndpoint prefillEp,
             int priority) {
         Request request =
-                Request.builder().requestId(requestId).seqLen(seqLen).rawPriority(priority).build();
+                Request.builder()
+                        .requestId(String.valueOf(requestId))
+                        .seqLen(seqLen)
+                        .rawPriority(priority)
+                        .build();
 
         RequestContext ctx = new RequestContext(config);
         ctx.data().setRequest(request);
@@ -1840,7 +1849,7 @@ class DeliveryDispatcherTest {
         ctx.data().setFuture(new CompletableFuture<>());
         SchedulerTestSupport.bindOwner(ctx, mock(RequestLifecycle.class));
         long now = System.currentTimeMillis();
-        ctx.register(requestId, now, Long.MAX_VALUE, 60_000L);
+        ctx.register(String.valueOf(requestId), now, Long.MAX_VALUE, 60_000L);
         var route =
                 SchedulingTestConfig.createRoute(
                         ctx, null, prefill, null, prefillEp, null, null, now);

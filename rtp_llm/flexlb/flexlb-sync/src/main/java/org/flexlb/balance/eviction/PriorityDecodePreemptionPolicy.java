@@ -43,7 +43,7 @@ public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPol
     static final Comparator<DecodeRequestView> DECODE_SLOT_ORDER =
             Comparator.comparingInt(DecodeRequestView::priority)
                     .thenComparingInt(v -> v.phase().ordinal())
-                    .thenComparingLong(DecodeRequestView::requestId);
+                    .thenComparing(DecodeRequestView::requestId);
 
     /**
      * Candidate preference for KV eviction (design doc 12.4): priority asc →
@@ -56,7 +56,7 @@ public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPol
                     .thenComparing(
                             v -> PriorityCostFunction.kvBucket(v.kvTokens()),
                             Comparator.reverseOrder())
-                    .thenComparingLong(DecodeRequestView::requestId);
+                    .thenComparing(DecodeRequestView::requestId);
 
     /** Plan the cheapest single-ownership eviction for this snapshot's capacity deficit. */
     @Override
@@ -161,7 +161,7 @@ public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPol
                                 capacity.kvBudget(ep.routing().placementUsage().totalKvTokens()));
         var first = kvPressure >= slotPressure ? kv : slots;
         if (!first.ok()) return first;
-        Set<Long> excluded = new java.util.HashSet<>(first.victims().size());
+        Set<String> excluded = new java.util.HashSet<>(first.victims().size());
         for (var victim : first.victims()) excluded.add(victim.requestId());
         var remaining = new ArrayList<>(candidates);
         remaining.removeIf(victim -> excluded.contains(victim.requestId()));
@@ -192,8 +192,11 @@ public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPol
         if (victims == null
                 || !victims.ok()
                 || !deficit(request, capacity, ep, victims.release()).fits()) return null;
-        long tieBreak = Long.MAX_VALUE;
-        for (var victim : victims.victims()) tieBreak = Math.min(tieBreak, victim.requestId());
+        String tieBreak =
+                victims.victims().stream()
+                        .map(DecodeRequestView::requestId)
+                        .min(String::compareTo)
+                        .orElse("");
         return new Selection(
                 ep.routing().address(),
                 victims.victims(),
@@ -309,11 +312,11 @@ public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPol
             String evictionCase,
             long freedKvTokens,
             PriorityHarmProfile harm,
-            long tieBreak) {
+            String tieBreak) {
         private static final Comparator<Selection> ORDER =
                 Comparator.comparing(Selection::harm)
                         .thenComparingInt(value -> value.victims().size())
-                        .thenComparingLong(Selection::tieBreak)
+                        .thenComparing(Selection::tieBreak)
                         .thenComparing(Selection::endpointId);
 
         DecodeEvictionProposal result() {

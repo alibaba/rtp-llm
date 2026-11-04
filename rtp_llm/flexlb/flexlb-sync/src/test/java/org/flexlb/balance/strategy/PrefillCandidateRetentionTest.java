@@ -1,8 +1,8 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.dao.SchedulingMetadata;
@@ -43,7 +43,7 @@ class PrefillCandidateRetentionTest {
         } else {
             when(second.group()).thenReturn("g");
             when(second.address()).thenReturn("second");
-            when(cache.findMatchingEngines(any(), any(), any()))
+            when(cache.findMatchingEngines(any()))
                     .thenThrow(new IllegalStateException("cache failed"));
         }
         var policy = new CostBasedPrefillStrategy(cache, service);
@@ -55,7 +55,7 @@ class PrefillCandidateRetentionTest {
                     IllegalStateException.class,
                     () ->
                             policy.select(
-                                    Request.builder().requestId(9L).seqLen(100L).build(),
+                                    Request.builder().requestId("9").seqLen(100L).build(),
                                     SchedulingMetadata.explicit(50, Long.MAX_VALUE),
                                     RoleType.PREFILL,
                                     "g",
@@ -106,28 +106,35 @@ class PrefillCandidateRetentionTest {
         var status =
                 StrategyTestSupport.workerStatus(
                         RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, true, 100_000L, 100_000L);
-        StrategyTestSupport.publishEndpoint(registry, RoleType.PREFILL, status.getIpPort(), status);
+        StrategyTestSupport.publishEndpoint(
+                registry, RoleType.PREFILL, status.getLogicalIpPort(), status);
         CacheAwareService cache = mock(CacheAwareService.class);
-        when(cache.findMatchingEngines(any(), any(), any()))
+        when(cache.findMatchingEngines(any()))
                 .thenAnswer(
                         invocation ->
-                                Map.of(
-                                        status.getIpPort(),
-                                        invocation.getArgument(0).equals(List.of(1L)) ? 1 : 2));
+                                localMatches(
+                                        Map.of(
+                                                status.getLogicalIpPort(),
+                                                ((org.flexlb.cache.domain.CacheMatchQuery)
+                                                                        invocation.getArgument(0))
+                                                                .blockCacheKeys()
+                                                                .equals(List.of(1L))
+                                                        ? 1
+                                                        : 2)));
         var metrics = mock(CacheMetricsReporter.class);
         var strategy =
                 new StrategyTestSupport.PrefillRoutingFixture(
                         registry, cache, mock(EngineHealthReporter.class), metrics, service);
         var outer =
                 Request.builder()
-                        .requestId(90002L)
+                        .requestId("90002")
                         .seqLen(1000L)
                         .blockCacheKeys(List.of(1L))
                         .cacheKeyBlockSize(100L)
                         .build();
         var nested =
                 outer.toBuilder()
-                        .requestId(90003L)
+                        .requestId("90003")
                         .seqLen(2000L)
                         .blockCacheKeys(List.of(2L, 3L))
                         .build();
@@ -181,8 +188,8 @@ class PrefillCandidateRetentionTest {
                         RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, true, 100_000L, 100_000L);
         WorkerEndpoint endpoint =
                 StrategyTestSupport.publishEndpoint(
-                        registry, RoleType.PREFILL, status.getIpPort(), status);
-        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
+                        registry, RoleType.PREFILL, status.getLogicalIpPort(), status);
+        when(cache.findMatchingEngines(any())).thenReturn(localMatches(Map.of()));
         var strategy =
                 new StrategyTestSupport.PrefillRoutingFixture(
                         registry,
@@ -191,7 +198,11 @@ class PrefillCandidateRetentionTest {
                         mock(CacheMetricsReporter.class),
                         service);
         var request =
-                Request.builder().requestId(90001L).seqLen(1000L).blockCacheKeys(List.of()).build();
+                Request.builder()
+                        .requestId("90001")
+                        .seqLen(1000L)
+                        .blockCacheKeys(List.of())
+                        .build();
         try {
             try (var selected =
                     StrategyTestSupport.select(
@@ -208,5 +219,16 @@ class PrefillCandidateRetentionTest {
         } finally {
             registry.close();
         }
+    }
+
+    private static org.flexlb.cache.domain.CacheMatchResult localMatches(
+            Map<String, Integer> matches) {
+        return matches == null
+                ? null
+                : new org.flexlb.cache.domain.CacheMatchResult(
+                        org.flexlb.dao.cache.HostCacheMatch.fromLocalMatches(matches),
+                        org.flexlb.cache.domain.CacheMatchSource.LOCAL_SYNC,
+                        0L,
+                        0L);
     }
 }

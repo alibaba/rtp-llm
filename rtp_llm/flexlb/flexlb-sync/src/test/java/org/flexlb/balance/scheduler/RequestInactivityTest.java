@@ -9,7 +9,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -74,7 +74,7 @@ class RequestInactivityTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
 
         var channel = mock(EngineGrpcClient.class);
         when(channel.cancelAsync(
@@ -89,7 +89,7 @@ class RequestInactivityTest {
                 channel);
         RequestContext context = RequestProtocolTestSupport.context(config, REQUEST_ID);
         CompletableFuture<Response> future = RequestProtocolTestSupport.register(registry, context);
-        requestContext = registry.requests.findActive(REQUEST_ID);
+        requestContext = registry.requests.findActive(String.valueOf(REQUEST_ID));
         registeredAtMs = requestContext.snapshot().createdAtMs();
         prefill = mock(PrefillEndpoint.class);
         decode = RequestProtocolTestSupport.decodeEndpoint();
@@ -97,7 +97,7 @@ class RequestInactivityTest {
         prefillStatus.setRole(RoleType.PREFILL);
         prefillStatus.setServerIp("127.0.0.1");
         prefillStatus.setGrpcPort(8081);
-        var reservation = new DecodeResources.ReservationHandle(1L, REQUEST_ID, 1L);
+        var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(REQUEST_ID), 1L);
         context.data().setFuture(future);
         item =
                 org.flexlb.balance.scheduler.SchedulingTestConfig.createRoute(
@@ -486,7 +486,8 @@ class RequestInactivityTest {
         acknowledgeDelivery();
         assertEquals(
                 RequestState.Phase.CANCEL_REQUESTED,
-                registry.cancel(REQUEST_ID, 0L, CancelReason.CLIENT_CANCELLED).state());
+                registry.cancel(String.valueOf(REQUEST_ID), 0L, CancelReason.CLIENT_CANCELLED)
+                        .state());
         assertEquals(1, registry.requests.liveRequestCount());
         assertFalse(claim.completion().toCompletableFuture().isDone());
 
@@ -533,8 +534,10 @@ class RequestInactivityTest {
         } else {
             reservation =
                     source == StaleFact.DECODE_GENERATION
-                            ? new DecodeResources.ReservationHandle(2L, REQUEST_ID, 1L)
-                            : new DecodeResources.ReservationHandle(1L, REQUEST_ID, 2L);
+                            ? new DecodeResources.ReservationHandle(
+                                    2L, String.valueOf(REQUEST_ID), 1L)
+                            : new DecodeResources.ReservationHandle(
+                                    1L, String.valueOf(REQUEST_ID), 2L);
         }
         var before = requestContext.snapshot();
         registry.onEngineEvidence(
@@ -625,7 +628,7 @@ class RequestInactivityTest {
         assertEquals(
                 expectedState,
                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
-                        .getRequestState(REQUEST_ID, 0L)
+                        .getRequestState(String.valueOf(REQUEST_ID), 0L)
                         .state());
         synchronized (requestContext) {
             assertFalse(requestContext.snapshot().phase() != Phase.CLOSED);

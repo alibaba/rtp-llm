@@ -110,6 +110,7 @@ class PrefillEndpointTest {
         try (var pin = endpoint.tryPinGeneration()) {
             assertThrows(IllegalArgumentException.class, () -> endpoint.enableQueue(different));
             var route = mock(RequestRoute.class);
+            org.mockito.Mockito.when(route.requestId()).thenReturn("1");
             var context = new org.flexlb.balance.scheduler.RequestContext(config);
             org.flexlb.balance.scheduler.SchedulerTestSupport.bindOwner(
                     context, requestRuntime.events());
@@ -162,7 +163,7 @@ class PrefillEndpointTest {
                                         List.of(selected), null, new long[] {10L}, null, nowMs)));
                 assertEquals(List.of(queued), state.captureQueue(2).items());
                 WorkSnapshot committed = state.committedSnapshot();
-                assertFalse(committed.containsRequest(999L));
+                assertFalse(committed.containsRequest("999"));
                 assertEquals(0L, committed.totalRemainingWorkMs().orElseThrow());
             } finally {
                 state.resourceLock().unlock();
@@ -194,7 +195,7 @@ class PrefillEndpointTest {
                     var reserved = direct.captureRouteProjectionInputs();
                     assertNotSame(empty, reserved);
                     assertSame(reserved, direct.captureRouteProjectionInputs());
-                    assertTrue(reserved.work().containsRequest(999L));
+                    assertTrue(reserved.work().containsRequest("999"));
                     assertEquals(0, direct.progress().queueDepth());
                     direct.signal(org.flexlb.balance.endpoint.PrefillEndpoint.Signal.INPUT);
                     var changed = direct.captureRouteProjectionInputs();
@@ -202,7 +203,7 @@ class PrefillEndpointTest {
                     assertSame(changed.work(), reserved.work());
                 }
             }
-            assertFalse(direct.captureRouteProjectionInputs().work().containsRequest(999L));
+            assertFalse(direct.captureRouteProjectionInputs().work().containsRequest("999"));
             assertEquals(0, direct.admissionSummary(0, direct.requestLimit).occupiedRequests());
         } finally {
             direct.close();
@@ -396,10 +397,12 @@ class PrefillEndpointTest {
             assertTrue(actual.offerQueued(longRequest));
             var projection = actual.captureRouteProjectionInputs().queue();
             var execution = actual.captureQueue(4).items();
-            assertEquals(List.of(2L, 1L), execution.stream().map(RequestRoute::requestId).toList());
+            assertEquals(
+                    List.of(2L, 1L),
+                    execution.stream().map(item -> Long.parseLong(item.requestId())).toList());
             var incoming =
                     new org.flexlb.balance.planner.GroupPlanner.Item(
-                            3L,
+                            String.valueOf(3L),
                             0,
                             Long.MAX_VALUE,
                             System.currentTimeMillis(),
@@ -410,7 +413,8 @@ class PrefillEndpointTest {
             projected.add(incoming);
             projected.sort(projection.ordering());
             assertEquals(
-                    List.of(2L, 3L, 1L), projected.stream().map(item -> item.requestId()).toList());
+                    List.of(2L, 3L, 1L),
+                    projected.stream().map(item -> Long.parseLong(item.requestId())).toList());
         } finally {
             for (var route : actual.closeQueue()) actual.releaseRequest(route);
             actual.close();
@@ -499,9 +503,9 @@ class PrefillEndpointTest {
 
         assertEquals(1, endpoint.stats().batchCount());
         WorkSnapshot committed = endpoint.captureRouteProjectionInputs().work();
-        assertTrue(committed.containsRequest(1L));
+        assertTrue(committed.containsRequest("1"));
         assertEquals(100L, committed.totalRemainingWorkMs().orElseThrow());
-        assertFalse(empty.containsRequest(1L));
+        assertFalse(empty.containsRequest("1"));
         assertEquals(0L, empty.totalRemainingWorkMs().orElseThrow());
         assertEquals(1, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
     }
@@ -515,9 +519,9 @@ class PrefillEndpointTest {
 
         assertEquals(0, endpoint.stats().batchCount());
         WorkSnapshot released = endpoint.captureRouteProjectionInputs().work();
-        assertFalse(released.containsRequest(1L));
+        assertFalse(released.containsRequest("1"));
         assertEquals(0L, released.totalRemainingWorkMs().orElseThrow());
-        assertTrue(committed.containsRequest(1L));
+        assertTrue(committed.containsRequest("1"));
         assertEquals(100L, committed.totalRemainingWorkMs().orElseThrow());
     }
 
@@ -536,11 +540,11 @@ class PrefillEndpointTest {
         assertEquals(1, endpoint.stats().batchCount());
         assertEquals(1, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
         WorkSnapshot remaining = endpoint.captureRouteProjectionInputs().work();
-        assertFalse(remaining.containsRequest(101L));
-        assertTrue(remaining.containsRequest(102L));
+        assertFalse(remaining.containsRequest("101"));
+        assertTrue(remaining.containsRequest("102"));
         assertEquals(100L, remaining.totalRemainingWorkMs().orElseThrow());
-        assertTrue(committed.containsRequest(101L));
-        assertTrue(committed.containsRequest(102L));
+        assertTrue(committed.containsRequest("101"));
+        assertTrue(committed.containsRequest("102"));
         assertEquals(100L, committed.totalRemainingWorkMs().orElseThrow());
 
         assertTrue(endpoint.releaseRequest(sibling));
@@ -548,10 +552,10 @@ class PrefillEndpointTest {
         assertEquals(0, endpoint.stats().locallyOwnedRequests());
         assertEquals(0, endpoint.stats().batchCount());
         WorkSnapshot released = endpoint.captureRouteProjectionInputs().work();
-        assertFalse(released.containsRequest(101L));
-        assertFalse(released.containsRequest(102L));
+        assertFalse(released.containsRequest("101"));
+        assertFalse(released.containsRequest("102"));
         assertEquals(0L, released.totalRemainingWorkMs().orElseThrow());
-        assertTrue(remaining.containsRequest(102L));
+        assertTrue(remaining.containsRequest("102"));
         assertEquals(100L, remaining.totalRemainingWorkMs().orElseThrow());
         assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
     }
@@ -596,8 +600,8 @@ class PrefillEndpointTest {
         assertEquals(1, endpoint.stats().batchCount());
         assertEquals(1, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
         WorkSnapshot remaining = endpoint.captureRouteProjectionInputs().work();
-        assertTrue(remaining.containsRequest(1L));
-        assertFalse(remaining.containsRequest(2L));
+        assertTrue(remaining.containsRequest("1"));
+        assertFalse(remaining.containsRequest("2"));
         assertFalse(remaining.hasUnknownWork());
         assertEquals(100L, remaining.totalRemainingWorkMs().orElseThrow());
     }
@@ -610,7 +614,7 @@ class PrefillEndpointTest {
         assertTrue(endpoint.releaseRequest(item1));
         assertEquals(0, endpoint.stats().batchCount());
         WorkSnapshot released = endpoint.captureRouteProjectionInputs().work();
-        assertFalse(released.containsRequest(1L));
+        assertFalse(released.containsRequest("1"));
         assertEquals(0L, released.totalRemainingWorkMs().orElseThrow());
     }
 
@@ -632,8 +636,8 @@ class PrefillEndpointTest {
                             .admissionSummary(0, invalidPredictorEndpoint.requestLimit)
                             .occupiedRequests(),
                     "membership settlement must not depend on prediction");
-            assertTrue(snapshot.containsRequest(1L));
-            assertFalse(snapshot.containsRequest(2L));
+            assertTrue(snapshot.containsRequest("1"));
+            assertFalse(snapshot.containsRequest("2"));
             assertEquals(360L, snapshot.totalRemainingWorkMs().orElseThrow());
             assertFalse(snapshot.hasUnknownWork());
             assertEquals(
@@ -687,8 +691,8 @@ class PrefillEndpointTest {
         reportRejectedBatchMember(endpoint, 1L, 2L);
         assertEquals(1, predictions.get());
         WorkSnapshot remaining = endpoint.captureRouteProjectionInputs().work();
-        assertTrue(remaining.containsRequest(1L));
-        assertFalse(remaining.containsRequest(2L));
+        assertTrue(remaining.containsRequest("1"));
+        assertFalse(remaining.containsRequest("2"));
         assertEquals(55L, remaining.totalRemainingWorkMs().orElseThrow());
         assertTrue(endpoint.releaseRequest(survivor));
         assertEquals(0, endpoint.stats().batchCount());
@@ -723,9 +727,9 @@ class PrefillEndpointTest {
         reportRejectedBatchMember(endpoint, 1L, 2L);
         assertEquals(removeAll ? 1 : 2, predictions.get());
         var remaining = endpoint.captureRouteProjectionInputs().work();
-        assertEquals(!removeAll, remaining.containsRequest(1L));
-        assertFalse(remaining.containsRequest(2L));
-        assertFalse(remaining.containsRequest(3L));
+        assertEquals(!removeAll, remaining.containsRequest("1"));
+        assertFalse(remaining.containsRequest("2"));
+        assertFalse(remaining.containsRequest("3"));
         assertEquals(removeAll ? 0L : 55L, remaining.totalRemainingWorkMs().orElseThrow());
         if (!removeAll) assertTrue(endpoint.releaseRequest(survivor));
         assertEquals(0, endpoint.stats().batchCount());
@@ -896,7 +900,7 @@ class PrefillEndpointTest {
 
         Map<String, TaskInfo> finished = new HashMap<>();
         TaskInfo successTask = new TaskInfo();
-        successTask.setRequestId(1L);
+        successTask.setRequestId(String.valueOf(1L));
         successTask.setBatchId(1L);
         successTask.setErrorCode(0);
         finished.put("1", successTask);
@@ -929,7 +933,7 @@ class PrefillEndpointTest {
 
         Map<String, TaskInfo> finished = new HashMap<>();
         TaskInfo failedTask = new TaskInfo();
-        failedTask.setRequestId(2L);
+        failedTask.setRequestId(String.valueOf(2L));
         failedTask.setBatchId(1L);
         failedTask.setErrorCode(500);
         failedTask.setErrorMessage("engine error");
@@ -1169,7 +1173,7 @@ class PrefillEndpointTest {
 
         Map<String, TaskInfo> finished = new HashMap<>();
         TaskInfo badTask = new TaskInfo();
-        badTask.setRequestId(999L); // non-colliding: won't match batchId=1
+        badTask.setRequestId(String.valueOf(999L)); // non-colliding: won't match batchId=1
         badTask.setBatchId(-1);
         badTask.setErrorCode(0);
         finished.put("1", badTask);
@@ -1196,7 +1200,7 @@ class PrefillEndpointTest {
         assertEquals(1, endpoint.stats().individuallyOwnedRequests());
 
         TaskInfo finished = new TaskInfo();
-        finished.setRequestId(101L);
+        finished.setRequestId(String.valueOf(101L));
         finished.setBatchId(-1L);
         finished.setErrorCode(0);
         calibrate(Map.of("101", finished), Map.of());
@@ -1242,7 +1246,7 @@ class PrefillEndpointTest {
                 "a terminal without a valid batch id retires no batch member");
 
         TaskInfo survivingSuccess = new TaskInfo();
-        survivingSuccess.setRequestId(102L);
+        survivingSuccess.setRequestId(String.valueOf(102L));
         survivingSuccess.setBatchId(700L);
         survivingSuccess.setErrorCode(0);
         calibrate(Map.of("102", survivingSuccess), Map.of());
@@ -1263,8 +1267,8 @@ class PrefillEndpointTest {
         registerDirect(endpoint, 101L, 100L);
         assertEquals(1, endpoint.stats().batchCount());
         WorkSnapshot committed = endpoint.captureRouteProjectionInputs().work();
-        assertTrue(committed.containsRequest(101L));
-        assertTrue(committed.containsRequest(201L));
+        assertTrue(committed.containsRequest("101"));
+        assertTrue(committed.containsRequest("201"));
         assertEquals(200L, committed.totalRemainingWorkMs().orElseThrow());
         assertEquals(1, endpoint.stats().individuallyOwnedRequests());
 
@@ -1272,16 +1276,16 @@ class PrefillEndpointTest {
 
         assertEquals(1, endpoint.stats().batchCount());
         WorkSnapshot remaining = endpoint.captureRouteProjectionInputs().work();
-        assertFalse(remaining.containsRequest(101L));
-        assertTrue(remaining.containsRequest(201L));
+        assertFalse(remaining.containsRequest("101"));
+        assertTrue(remaining.containsRequest("201"));
         assertEquals(100L, remaining.totalRemainingWorkMs().orElseThrow());
-        assertTrue(committed.containsRequest(101L));
+        assertTrue(committed.containsRequest("101"));
         assertEquals(200L, committed.totalRemainingWorkMs().orElseThrow());
         assertEquals(0, endpoint.stats().individuallyOwnedRequests());
         assertEquals(1, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
 
         TaskInfo foreignBatchMemberSuccess = new TaskInfo();
-        foreignBatchMemberSuccess.setRequestId(201L);
+        foreignBatchMemberSuccess.setRequestId(String.valueOf(201L));
         foreignBatchMemberSuccess.setBatchId(101L);
         foreignBatchMemberSuccess.setErrorCode(0);
         calibrate(Map.of("201", foreignBatchMemberSuccess), Map.of());
@@ -1290,10 +1294,10 @@ class PrefillEndpointTest {
                 endpoint.stats().batchCount(),
                 "the matching QUEUE batch id must survive until its own member finishes");
         WorkSnapshot released = endpoint.captureRouteProjectionInputs().work();
-        assertFalse(released.containsRequest(101L));
-        assertFalse(released.containsRequest(201L));
+        assertFalse(released.containsRequest("101"));
+        assertFalse(released.containsRequest("201"));
         assertEquals(0L, released.totalRemainingWorkMs().orElseThrow());
-        assertTrue(remaining.containsRequest(201L));
+        assertTrue(remaining.containsRequest("201"));
         assertEquals(100L, remaining.totalRemainingWorkMs().orElseThrow());
     }
 
@@ -1362,9 +1366,9 @@ class PrefillEndpointTest {
 
         assertEquals(0, endpoint.stats().batchCount());
         WorkSnapshot completed = endpoint.captureRouteProjectionInputs().work();
-        assertFalse(completed.containsRequest(101L));
+        assertFalse(completed.containsRequest("101"));
         assertEquals(0L, completed.totalRemainingWorkMs().orElseThrow());
-        assertTrue(committed.containsRequest(101L));
+        assertTrue(committed.containsRequest("101"));
         assertEquals(100L, committed.totalRemainingWorkMs().orElseThrow());
         assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
 
@@ -1447,7 +1451,7 @@ class PrefillEndpointTest {
         assertFalse(endpoint.releaseRequest(item));
         assertEquals(0, endpoint.stats().batchCount());
         WorkSnapshot completed = endpoint.captureRouteProjectionInputs().work();
-        assertFalse(completed.containsRequest(101L));
+        assertFalse(completed.containsRequest("101"));
         assertEquals(0L, completed.totalRemainingWorkMs().orElseThrow());
         assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
     }
@@ -1480,7 +1484,7 @@ class PrefillEndpointTest {
         Map<String, TaskInfo> finished = new HashMap<>();
         TaskInfo foreignTask = new TaskInfo();
         foreignTask.setBatchId(1L);
-        foreignTask.setRequestId(999L);
+        foreignTask.setRequestId(String.valueOf(999L));
         foreignTask.setErrorCode(0);
         finished.put("999", foreignTask);
 
@@ -1497,7 +1501,7 @@ class PrefillEndpointTest {
         Map<String, TaskInfo> finished = new HashMap<>();
         TaskInfo task = new TaskInfo();
         task.setBatchId(1L);
-        task.setRequestId(100L);
+        task.setRequestId(String.valueOf(100L));
         task.setErrorCode(0);
         finished.put("100", task);
 
@@ -1513,7 +1517,7 @@ class PrefillEndpointTest {
 
         TaskInfo siblingSuccess = new TaskInfo();
         siblingSuccess.setBatchId(7L);
-        siblingSuccess.setRequestId(102L);
+        siblingSuccess.setRequestId(String.valueOf(102L));
         siblingSuccess.setErrorCode(0);
         calibrate(Map.of("102", siblingSuccess), Map.of());
 
@@ -1525,7 +1529,7 @@ class PrefillEndpointTest {
 
         TaskInfo ambiguousMemberSuccess = new TaskInfo();
         ambiguousMemberSuccess.setBatchId(7L);
-        ambiguousMemberSuccess.setRequestId(101L);
+        ambiguousMemberSuccess.setRequestId(String.valueOf(101L));
         ambiguousMemberSuccess.setErrorCode(0);
         calibrate(Map.of("101", ambiguousMemberSuccess), Map.of());
         assertEquals(
@@ -1590,7 +1594,7 @@ class PrefillEndpointTest {
         // Mark the batch as running so elapsed time counts
         Map<String, TaskInfo> running = new HashMap<>();
         TaskInfo runningTask = new TaskInfo();
-        runningTask.setRequestId(1L);
+        runningTask.setRequestId(String.valueOf(1L));
         runningTask.setBatchId(1L);
         runningTask.setPhase(TaskPhase.RUNNING);
         running.put("1", runningTask);
@@ -1752,7 +1756,7 @@ class PrefillEndpointTest {
             org.flexlb.balance.projection.RequestTimeEstimation.Inputs snapshot =
                     handoffEndpoint.captureRouteProjectionInputs();
             assertEquals(1, snapshot.queue().activeItems().size());
-            assertEquals(111L, snapshot.queue().activeItems().getFirst().requestId());
+            assertEquals("111", snapshot.queue().activeItems().getFirst().requestId());
         } finally {
             handoffEndpoint.close();
         }
@@ -1778,7 +1782,7 @@ class PrefillEndpointTest {
                             .occupiedRequests());
             assertEquals(0, handoffEndpoint.progress().queueDepth());
             WorkSnapshot committed = handoffEndpoint.captureRouteProjectionInputs().work();
-            assertTrue(committed.containsRequest(requestId));
+            assertTrue(committed.containsRequest(String.valueOf(requestId)));
             assertEquals(100L, committed.totalRemainingWorkMs().orElseThrow());
         } finally {
             handoffEndpoint.close();
@@ -1944,7 +1948,8 @@ class PrefillEndpointTest {
                     org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
             DecodeResources.ReservationHandle decodeReservation =
                     mock(DecodeResources.ReservationHandle.class);
-            org.mockito.Mockito.when(decodeReservation.requestId()).thenReturn(8_201L);
+            org.mockito.Mockito.when(decodeReservation.requestId())
+                    .thenReturn(String.valueOf(8_201L));
             DecodeEndpoint.EngineDispatchPermit permit =
                     mock(DecodeEndpoint.EngineDispatchPermit.class);
             org.mockito.Mockito.when(
@@ -2221,7 +2226,10 @@ class PrefillEndpointTest {
                         .toList();
         assertEquals(
                 List.of(100L, 200L),
-                retiredItems.stream().map(RequestRoute::requestId).sorted().toList(),
+                retiredItems.stream()
+                        .map(item -> Long.parseLong(item.requestId()))
+                        .sorted()
+                        .toList(),
                 "both immediate and queued routes reach their canonical retirement owner");
         assertTrue(retiredItems.contains(route));
     }
@@ -2278,7 +2286,11 @@ class PrefillEndpointTest {
             PrefillEndpoint owner, long requestId, int priority) {
         long now = System.currentTimeMillis();
         Request request =
-                Request.builder().requestId(requestId).seqLen(500).rawPriority(priority).build();
+                Request.builder()
+                        .requestId(String.valueOf(requestId))
+                        .seqLen(500)
+                        .rawPriority(priority)
+                        .build();
 
         RequestContext ctx = new RequestContext(config);
         ctx.data().setRequest(request);
@@ -2384,7 +2396,8 @@ class PrefillEndpointTest {
             long hitCacheLen,
             DecodeEndpoint decode,
             DecodeResources.ReservationHandle decodeReservation) {
-        Request request = Request.builder().requestId(requestId).seqLen(seqLen).build();
+        Request request =
+                Request.builder().requestId(String.valueOf(requestId)).seqLen(seqLen).build();
 
         RequestContext ctx = new RequestContext(requestConfig);
         ctx.data().setRequest(request);
@@ -2431,7 +2444,7 @@ class PrefillEndpointTest {
 
     private static TaskInfo priorityCanceledTask(long requestId, long batchId) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(String.valueOf(requestId));
         task.setBatchId(batchId);
         task.setErrorCode(8429);
         task.setErrorMessage("priority preempted");
@@ -2442,7 +2455,7 @@ class PrefillEndpointTest {
     private static TaskInfo taskInfo(
             long requestId, long batchId, TaskPhase phase, int errorCode, long executionTimeMs) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(String.valueOf(requestId));
         task.setBatchId(batchId);
         task.setPhase(phase);
         task.setErrorCode(errorCode);

@@ -57,7 +57,8 @@ class OperationCompletionTest {
                         1L,
                         mock(DecodeResources.ReservationHandle.class),
                         new CancelTarget("127.0.0.1", 9000));
-        var result = new VictimResolution(1L, VictimResolution.Outcome.DELIVERY_RESUMED);
+        var result =
+                new VictimResolution(String.valueOf(1L), VictimResolution.Outcome.DELIVERY_RESUMED);
         var callbacks = new AtomicInteger();
         var start = new CountDownLatch(1);
         try (var workers = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -84,11 +85,13 @@ class OperationCompletionTest {
             for (var future : observed)
                 assertSame(result, future.get(2, TimeUnit.SECONDS).get(2, TimeUnit.SECONDS));
         }
-        operation.complete(new VictimResolution(1L, VictimResolution.Outcome.REQUEST_END));
+        operation.complete(
+                new VictimResolution(String.valueOf(1L), VictimResolution.Outcome.REQUEST_END));
         assertSame(result, operation.result());
         assertEquals(16, callbacks.get());
         var forged = operation.completion().toCompletableFuture();
-        forged.obtrudeValue(new VictimResolution(2L, VictimResolution.Outcome.REQUEST_END));
+        forged.obtrudeValue(
+                new VictimResolution(String.valueOf(2L), VictimResolution.Outcome.REQUEST_END));
         assertSame(result, operation.completion().toCompletableFuture().get(2, TimeUnit.SECONDS));
     }
 }

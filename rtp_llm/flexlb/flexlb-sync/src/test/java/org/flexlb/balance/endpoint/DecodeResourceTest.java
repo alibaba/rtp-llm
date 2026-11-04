@@ -123,7 +123,7 @@ class DecodeResourceTest {
                 EndpointTestSupport.reserveQueuedDecode(state, 1, 100, 200, 50, CAPACITY).handle();
         var first = state.acquireDispatchPermit(reservation, CAPACITY).handle();
         assertTrue(state.dispatch(first, DispatchOutcome.ABANDONED).capacityReleased());
-        assertTrue(EndpointTestSupport.isQueued(state.resourceSnapshot(), 1));
+        assertTrue(EndpointTestSupport.isQueued(state.resourceSnapshot(), String.valueOf(1)));
 
         var replacement = state.acquireDispatchPermit(reservation, CAPACITY).handle();
         assertEquals(OWNERSHIP_LOST, state.dispatch(first, DispatchOutcome.ENGINE_OWNED).status());
@@ -187,11 +187,13 @@ class DecodeResourceTest {
         var stale =
                 new DecodeResources.ReservationHandle(
                         reservation.endpointGenerationId(),
-                        1,
+                        String.valueOf(1),
                         reservation.reservationToken() + 100);
         var foreign =
                 new DecodeResources.ReservationHandle(
-                        reservation.endpointGenerationId() + 1, 1, reservation.reservationToken());
+                        reservation.endpointGenerationId() + 1,
+                        String.valueOf(1),
+                        reservation.reservationToken());
         assertEquals(STALE, state.release(stale, reason).status());
         assertEquals(STALE, state.release(foreign, reason).status());
         assertEquals(version, state.placementVersion());
@@ -236,7 +238,7 @@ class DecodeResourceTest {
                 EndpointTestSupport.reserveQueuedDecode(state, 2, 100, 200, 50, CAPACITY).handle();
         var permit = state.acquireDispatchPermit(reservation, CAPACITY).handle();
         TaskInfo task = new TaskInfo();
-        task.setRequestId(2L);
+        task.setRequestId(String.valueOf(2L));
         task.setPhase(TaskPhase.KV_ALLOCATED);
         var accepted = calibrate(state, status, Map.of("2", task), Map.of());
         assertEquals(reservation, accepted.getFirst().reservation());
@@ -293,7 +295,7 @@ class DecodeResourceTest {
         var stale =
                 new DecodeResources.ReservationHandle(
                         reservation.endpointGenerationId(),
-                        1,
+                        String.valueOf(1),
                         reservation.reservationToken() + 100);
         assertEquals(STALE, state.release(stale, ReleaseReason.EXPIRED).status());
         assertTrue(state.ownership(reservation).owned());
@@ -419,7 +421,9 @@ class DecodeResourceTest {
         try {
             DecodeResources.ReservationHandle reservation;
             try (var pin = owner.tryPinGeneration()) {
-                reservation = owner.tryReserveQueuedRequest(pin, 3, 100, 200, 50, null).handle();
+                reservation =
+                        owner.tryReserveQueuedRequest(pin, String.valueOf(3), 100, 200, 50, null)
+                                .handle();
             }
             var permit = owner.acquireDispatchPermit(reservation, CAPACITY).handle();
             assertThrows(
@@ -504,7 +508,7 @@ class DecodeResourceTest {
                 state.beginPreemption(
                         1,
                         java.util.List.of(victim),
-                        11,
+                        String.valueOf(11),
                         100,
                         200,
                         80,
@@ -581,7 +585,7 @@ class DecodeResourceTest {
         TaskInfo running = task(10, TaskPhase.RUNNING);
         running.setInputLength(900L);
         var repeated = calibrate(state, status, Map.of("10", running), Map.of());
-        var owner = state.resourceSnapshot().requests().get(10L);
+        var owner = state.resourceSnapshot().requests().get(String.valueOf(10L));
         assertEquals(100L, owner.kvTokens());
         assertEquals(100L, owner.expectedKvTokens());
         assertEquals(DecodeTaskPhase.RUNNING, owner.phase());
@@ -614,7 +618,7 @@ class DecodeResourceTest {
                 state.beginPreemption(
                         1,
                         java.util.List.of(victim),
-                        11,
+                        String.valueOf(11),
                         100,
                         200,
                         80,
@@ -658,7 +662,13 @@ class DecodeResourceTest {
         assertEquals(
                 DecodeResources.PreemptionBeginResult.SUCCESS,
                 state.beginPreemption(
-                        1L, List.of(victim), 11L, 100L, 200L, 80, new AdmissionCapacity(1L, 100L)));
+                        1L,
+                        List.of(victim),
+                        String.valueOf(11L),
+                        100L,
+                        200L,
+                        80,
+                        new AdmissionCapacity(1L, 100L)));
         var incoming = EndpointTestSupport.decodeReservation(state, 11L);
         if (handedOff) {
             assertTrue(
@@ -667,15 +677,19 @@ class DecodeResourceTest {
                             .applied());
         }
         calibrate(state, status, Map.of(), Map.of());
-        var candidate = state.cleanupCandidates().get(11L);
+        var candidate = state.cleanupCandidates().get("11");
 
-        var cleanup = state.expireReservations(-1L, Map.of(11L, candidate));
+        var cleanup = state.expireReservations(-1L, Map.of("11", candidate));
         assertEquals(1, cleanup.expiredReservations());
         assertFalse(state.ownership(incoming).owned());
         assertNull(state.finishPreemption(1L, true));
         assertNull(state.finishPreemption(1L, false));
         assertEquals(
-                handedOff, state.resourceSnapshot().requests().get(10L).claimedForPreemption());
+                handedOff,
+                state.resourceSnapshot()
+                        .requests()
+                        .get(String.valueOf(10L))
+                        .claimedForPreemption());
         assertEquals(handedOff ? 100L : 0L, 10_000L - state.routingView().realKvAvailable());
 
         var replacement =
@@ -703,7 +717,13 @@ class DecodeResourceTest {
         assertEquals(
                 DecodeResources.PreemptionBeginResult.SUCCESS,
                 state.beginPreemption(
-                        1L, List.of(victim), 11L, 100L, 200L, 80, new AdmissionCapacity(1L, 100L)));
+                        1L,
+                        List.of(victim),
+                        String.valueOf(11L),
+                        100L,
+                        200L,
+                        80,
+                        new AdmissionCapacity(1L, 100L)));
         var incoming = EndpointTestSupport.decodeReservation(state, 11L);
         calibrate(
                 state,
@@ -739,7 +759,13 @@ class DecodeResourceTest {
         assertEquals(
                 DecodeResources.PreemptionBeginResult.SUCCESS,
                 state.beginPreemption(
-                        1L, List.of(victim), 11L, 100L, 200L, 80, new AdmissionCapacity(1L, 100L)));
+                        1L,
+                        List.of(victim),
+                        String.valueOf(11L),
+                        100L,
+                        200L,
+                        80,
+                        new AdmissionCapacity(1L, 100L)));
         var incoming = EndpointTestSupport.decodeReservation(state, 11L);
         if (handedOff) {
             assertTrue(
@@ -763,7 +789,11 @@ class DecodeResourceTest {
                 "FULL absence must end the incoming admission attempt");
         assertNull(state.finishPreemption(1L, false));
         assertEquals(
-                handedOff, state.resourceSnapshot().requests().get(10L).claimedForPreemption());
+                handedOff,
+                state.resourceSnapshot()
+                        .requests()
+                        .get(String.valueOf(10L))
+                        .claimedForPreemption());
         assertEquals(1, state.routingView().totalLoad());
 
         calibrate(state, status, Map.of(), Map.of());
@@ -817,13 +847,17 @@ class DecodeResourceTest {
                                 state.beginPreemption(
                                         1L,
                                         List.of(victim),
-                                        11L,
+                                        String.valueOf(11L),
                                         100L,
                                         200L,
                                         80,
                                         new AdmissionCapacity(1L, 100L))));
         assertEquals(1, state.routingView().totalLoad());
-        assertFalse(state.resourceSnapshot().requests().get(10L).claimedForPreemption());
+        assertFalse(
+                state.resourceSnapshot()
+                        .requests()
+                        .get(String.valueOf(10L))
+                        .claimedForPreemption());
         assertNotNull(
                 EndpointTestSupport.reserveQueuedDecode(state, 11L, 100L, 200L, 80, CAPACITY)
                         .handle(),
@@ -890,7 +924,7 @@ class DecodeResourceTest {
 
     private static TaskInfo task(long requestId, TaskPhase phase) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(String.valueOf(requestId));
         task.setInputLength(100L);
         task.setPhase(phase);
         return task;

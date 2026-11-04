@@ -35,6 +35,12 @@ public final class Request {
     @JsonProperty("vit_route_only")
     private final boolean vitRouteOnly;
 
+    @JsonProperty("block_size")
+    private final long blockSize;
+
+    @JsonProperty("encoder_cache_hit_len")
+    private final Long encoderCacheHitLen;
+
     @JsonProperty("seq_len")
     private final long seqLen;
 
@@ -42,7 +48,7 @@ public final class Request {
     private final long cacheKeyBlockSize;
 
     @JsonProperty("request_id")
-    private final long requestId;
+    private final String requestId;
 
     /** Upstream generation timeout retained for transport compatibility. */
     @JsonProperty("generate_timeout")
@@ -83,9 +89,11 @@ public final class Request {
             List<String> cacheAffinityKeys,
             ServerStatus selectedVit,
             boolean vitRouteOnly,
+            long blockSize,
+            Long encoderCacheHitLen,
             long seqLen,
             long cacheKeyBlockSize,
-            long requestId,
+            String requestId,
             long generateTimeout,
             long requestTimeMs,
             String apiKey,
@@ -99,6 +107,8 @@ public final class Request {
                 cacheAffinityKeys == null ? List.of() : List.copyOf(cacheAffinityKeys);
         this.selectedVit = ServerStatus.copyOf(selectedVit);
         this.vitRouteOnly = vitRouteOnly;
+        this.blockSize = blockSize;
+        this.encoderCacheHitLen = encoderCacheHitLen;
         this.seqLen = seqLen;
         this.cacheKeyBlockSize = cacheKeyBlockSize;
         this.requestId = requestId;

@@ -137,7 +137,7 @@ class DecodeRequestExpirationTest {
                 endpoint.release(
                                 new DecodeResources.ReservationHandle(
                                         original.endpointGenerationId() + 1L,
-                                        1L,
+                                        String.valueOf(1L),
                                         original.reservationToken()),
                                 DecodeResources.ReleaseReason.EXPIRED)
                         .status());
@@ -146,7 +146,7 @@ class DecodeRequestExpirationTest {
                 endpoint.release(
                                 new DecodeResources.ReservationHandle(
                                         original.endpointGenerationId(),
-                                        1L,
+                                        String.valueOf(1L),
                                         original.reservationToken() + 1L),
                                 DecodeResources.ReleaseReason.EXPIRED)
                         .status());
@@ -294,7 +294,7 @@ class DecodeRequestExpirationTest {
     private boolean isConfirmed(long requestId) {
         return endpoint.resourceSnapshot().requests().values().stream()
                 .filter(request -> request.phase().isEngineConfirmed())
-                .anyMatch(view -> view.requestId() == requestId);
+                .anyMatch(view -> view.requestId().equals(String.valueOf(requestId)));
     }
 
     private int confirmedCount() {
@@ -311,7 +311,7 @@ class DecodeRequestExpirationTest {
         return endpoint.beginPreemption(
                 attemptToken,
                 victimIds.stream().map(reservations::get).toList(),
-                incomingRequestId,
+                String.valueOf(incomingRequestId),
                 hardKv,
                 expectedKv,
                 priority,
@@ -321,7 +321,7 @@ class DecodeRequestExpirationTest {
 
     private static TaskInfo task(long requestId, TaskPhase phase, long inputLength) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(String.valueOf(requestId));
         task.setPhase(phase);
         task.setInputLength(inputLength);
         task.setErrorCode(0);

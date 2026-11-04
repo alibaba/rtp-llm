@@ -9,7 +9,7 @@ import org.flexlb.config.DispatcherConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -71,6 +71,18 @@ class PlacementConfigurationTest {
         RequestRepository repository;
         try (var spring = new AnnotationConfigApplicationContext()) {
             spring.setEnvironment(environment);
+            spring.registerBean(
+                    "nacosConfigSource",
+                    org.flexlb.service.config.ConfigSource.class,
+                    () -> mock(org.flexlb.service.config.ConfigSource.class));
+            spring.registerBean(
+                    "uniConfigConfigSource",
+                    org.flexlb.service.config.ConfigSource.class,
+                    () -> mock(org.flexlb.service.config.ConfigSource.class));
+            spring.registerBean(
+                    "environmentConfigSource",
+                    org.flexlb.service.config.ConfigSource.class,
+                    () -> mock(org.flexlb.service.config.ConfigSource.class));
             spring.registerBean(ConfigService.class, () -> service);
             spring.registerBean(RequestWorkerSelector.class, () -> router);
             spring.registerBean(
@@ -83,8 +95,7 @@ class PlacementConfigurationTest {
             spring.registerBean(
                     RequestSchedulerReporter.class, () -> mock(RequestSchedulerReporter.class));
             spring.registerBean(
-                    RecentCacheKeyTraceReporter.class,
-                    () -> mock(RecentCacheKeyTraceReporter.class));
+                    TheoryCacheHitReporter.class, () -> mock(TheoryCacheHitReporter.class));
             spring.registerBean(EngineGrpcClient.class, () -> mock(EngineGrpcClient.class));
             spring.registerBean(DeliveryDispatcher.class, () -> batchDispatcher);
             spring.register(

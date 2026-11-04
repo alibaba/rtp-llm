@@ -30,6 +30,7 @@ import static org.flexlb.constant.MetricConstant.GRPC_CALL_FAILURE;
 import static org.flexlb.constant.MetricConstant.GRPC_CHANNEL_POOL_SIZE;
 import static org.flexlb.constant.MetricConstant.GRPC_CONNECTION_DURATION;
 import static org.flexlb.constant.MetricConstant.GRPC_DELIVERY_DELAY;
+import static org.flexlb.constant.MetricConstant.GRPC_RESPONSE_SIZE;
 
 /**
  * Reporter for gRPC channel pool metrics.
@@ -227,6 +228,15 @@ public class GrpcReporter {
      * @param duration Call duration in milliseconds
      * @param isRetry Whether this is a retry call
      */
+    public void reportCallMetrics(
+            String serviceType, long duration, int responseBytes, boolean isRetry) {
+        reportCallMetrics(serviceType, duration, isRetry);
+        monitor.report(
+                GRPC_RESPONSE_SIZE,
+                FlexMetricTags.of("service", serviceType, "retry", String.valueOf(isRetry)),
+                responseBytes);
+    }
+
     public void reportCallMetrics(String serviceType, long duration, boolean isRetry) {
         FlexMetricTags tags =
                 FlexMetricTags.of("service", serviceType, "retry", String.valueOf(isRetry));

@@ -49,7 +49,7 @@ class PrefillResourceSnapshotTest {
     private final PrefillActiveIndex waiting =
             PrefillActiveIndex.ordered(
                     4,
-                    Comparator.comparingLong(
+                    Comparator.comparing(
                             org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem::requestId));
     private final PrefillEndpoint state =
             org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
@@ -651,7 +651,8 @@ class PrefillResourceSnapshotTest {
             }
         }
         clock.set(110);
-        assertEquals(1, EndpointTestSupport.evictPrefill(state, 10, id -> id == first.requestId()));
+        assertEquals(
+                1, EndpointTestSupport.evictPrefill(state, 10, id -> id.equals(first.requestId())));
         assertEquals(
                 3,
                 state.stats().locallyOwnedRequests(),
@@ -712,7 +713,7 @@ class PrefillResourceSnapshotTest {
         assertSame(before.active(), after.active());
         assertNoWork(before.work().calculate(), 1L, 2L);
         assertWork(after.work().calculate(), 20L, 2L);
-        assertFalse(after.work().calculate().containsRequest(1L));
+        assertFalse(after.work().calculate().containsRequest("1"));
         enqueue(item(3));
         var added = capture();
         assertNotSame(after.active(), added.active());
@@ -785,7 +786,7 @@ class PrefillResourceSnapshotTest {
         var config = new FlexlbConfig();
         config.getDispatcher().setType(DispatcherConfig.Type.NON_BATCH);
         var context = new RequestContext(config);
-        var request = Request.builder().requestId(id).seqLen(100L).build();
+        var request = Request.builder().requestId(String.valueOf(id)).seqLen(100L).build();
         context.data().setRequest(request);
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(50, Long.MAX_VALUE));
         return SchedulingTestConfig.createRoute(context, null, null, null, null, null, null, 100L);
@@ -832,7 +833,7 @@ class PrefillResourceSnapshotTest {
         assertTrue(state.releaseRequest(first));
         assertFalse(state.releaseRequest(first));
         assertWork(state.committedSnapshot(), 100L, 2L);
-        assertFalse(state.committedSnapshot().containsRequest(1L));
+        assertFalse(state.committedSnapshot().containsRequest("1"));
         assertEquals(1L, state.admissionSummary(0, 0L).occupiedRequests());
         assertEquals(1, state.queueCounters().batchSlots());
         assertTrue(state.releaseRequest(second));
@@ -848,7 +849,7 @@ class PrefillResourceSnapshotTest {
         try (var preparation = EndpointTestSupport.preparation(immediateReservation)) {
             assertEquals(List.of(queued), waitingItems());
             assertWork(state.committedSnapshot(), 40L, 2L);
-            assertFalse(state.committedSnapshot().containsRequest(1L));
+            assertFalse(state.committedSnapshot().containsRequest("1"));
             try (var handoff =
                     EndpointTestSupport.commitQueuedRoutes(
                             state, List.of(queued), new long[] {30L})) {
@@ -938,7 +939,7 @@ class PrefillResourceSnapshotTest {
                 org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
                         state, committed, committedReservation)) {
             assertWork(state.committedSnapshot(), 50L, 2L, 3L);
-            assertFalse(state.committedSnapshot().containsRequest(1L));
+            assertFalse(state.committedSnapshot().containsRequest("1"));
         }
         var retired = state.retireResources();
 
@@ -1333,11 +1334,11 @@ class PrefillResourceSnapshotTest {
                 assertTrue(EndpointTestSupport.releaseRequest(state, incoming));
                 clock.set(190L);
                 WorkSnapshot frozen = handoff.precedingWork().calculate();
-                assertTrue(frozen.containsRequest(81L));
+                assertTrue(frozen.containsRequest("81"));
                 assertEquals(250L, frozen.knownRemainingWorkMsAt(150L));
                 assertEquals(210L, frozen.knownRemainingWorkMsAt(190L));
                 assertFalse(
-                        frozen.containsRequest(82L), "the incoming batch is not preceding work");
+                        frozen.containsRequest("82"), "the incoming batch is not preceding work");
                 assertNoWork(state.committedSnapshot(), 81L, 82L);
                 assertEquals(0, state.stats().batchCount());
             }
@@ -1363,9 +1364,9 @@ class PrefillResourceSnapshotTest {
 
         clock.set(150);
         assertTrue(EndpointTestSupport.releaseRequest(state, a));
-        assertTrue(state.committedSnapshot().containsRequest(2L));
-        assertTrue(state.committedSnapshot().containsRequest(3L));
-        assertFalse(state.committedSnapshot().containsRequest(1L));
+        assertTrue(state.committedSnapshot().containsRequest("2"));
+        assertTrue(state.committedSnapshot().containsRequest("3"));
+        assertFalse(state.committedSnapshot().containsRequest("1"));
         assertEquals(250L, remainingWork());
         clock.set(190);
         assertTrue(EndpointTestSupport.releaseRequest(state, b));
@@ -1618,7 +1619,7 @@ class PrefillResourceSnapshotTest {
                                         requestStatus.kind()
                                                 == PrefillEndpoint.PrefillRequestStatus.Kind
                                                         .COMPLETED)
-                        .map(requestStatus -> requestStatus.route().requestId())
+                        .map(requestStatus -> Long.parseLong(requestStatus.route().requestId()))
                         .sorted()
                         .toList());
         assertEquals(1, outcome.batchCompletions().size());
@@ -1635,10 +1636,10 @@ class PrefillResourceSnapshotTest {
                 remainingWork(),
                 "the batch without terminal events still advances to RUNNING");
         WorkSnapshot remaining = state.committedSnapshot();
-        assertTrue(remaining.containsRequest(3L));
-        assertTrue(remaining.containsRequest(4L));
-        assertFalse(remaining.containsRequest(1L));
-        assertFalse(remaining.containsRequest(2L));
+        assertTrue(remaining.containsRequest("3"));
+        assertTrue(remaining.containsRequest("4"));
+        assertFalse(remaining.containsRequest("1"));
+        assertFalse(remaining.containsRequest("2"));
     }
 
     @Test
@@ -1740,7 +1741,7 @@ class PrefillResourceSnapshotTest {
         assertEquals(1, state.stats().locallyOwnedRequests());
         assertEquals(List.of(11L), batchIds());
         assertWork(state.committedSnapshot(), 100L, 1L);
-        assertFalse(state.committedSnapshot().containsRequest(2L));
+        assertFalse(state.committedSnapshot().containsRequest("2"));
         assertFalse(
                 EndpointTestSupport.releaseRequest(state, first),
                 "old item cannot settle the replacement");
@@ -2063,14 +2064,14 @@ class PrefillResourceSnapshotTest {
         assertFalse(snapshot.hasUnknownWork());
         assertEquals(expectedMs, snapshot.totalRemainingWorkMs().orElseThrow());
         for (long id : includedIds) {
-            assertTrue(snapshot.containsRequest(id), "missing request " + id);
+            assertTrue(snapshot.containsRequest(String.valueOf(id)), "missing request " + id);
         }
     }
 
     private static void assertNoWork(WorkSnapshot snapshot, long... excludedIds) {
         assertWork(snapshot, 0L);
         for (long id : excludedIds) {
-            assertFalse(snapshot.containsRequest(id), "retained request " + id);
+            assertFalse(snapshot.containsRequest(String.valueOf(id)), "retained request " + id);
         }
     }
 
@@ -2111,7 +2112,7 @@ class PrefillResourceSnapshotTest {
     private static TaskInfo task(
             long requestId, TaskPhase phase, long errorCode, long executionMs) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(String.valueOf(requestId));
         task.setBatchId(10L);
         task.setPhase(phase);
         task.setErrorCode(errorCode);
@@ -2121,7 +2122,7 @@ class PrefillResourceSnapshotTest {
 
     private static RequestRoute item(long id) {
         var item = mock(RequestRoute.class);
-        when(item.requestId()).thenReturn(id);
+        when(item.requestId()).thenReturn(String.valueOf(id));
         when(item.seqLen()).thenReturn(100L);
         return item;
     }

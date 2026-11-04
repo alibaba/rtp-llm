@@ -16,7 +16,7 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.WriteBufferWaterMark;
 import lombok.Getter;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
-import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
+import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -57,6 +57,7 @@ public class EngineGrpcClient extends AbstractGrpcClient {
     private static final long DEFAULT_ENQUEUE_TIMEOUT_MILLIS = 5000L;
     private final int connectTimeoutMillis;
     private final long enqueueTimeoutMillis;
+    private final boolean cacheStatusEnabled;
 
     private enum MetricOperation {
         CALL_METRICS,
@@ -73,15 +74,17 @@ public class EngineGrpcClient extends AbstractGrpcClient {
 
     @Autowired
     public EngineGrpcClient(
-            CustomNameResolver nameResolver,
+            EngineAddressResolver nameResolver,
             @Qualifier("managedChannelThreadPoolExecutor") ThreadPoolExecutor executor,
             @Qualifier("managedChannelEventLoopGroup") EventLoopGroup eventLoopGroup,
             GrpcReporter grpcReporter,
             @Value("${" + CONNECT_TIMEOUT_PROPERTY + ":" + DEFAULT_CONNECT_TIMEOUT_MILLIS + "}")
                     int connectTimeoutMillis,
             @Value("${" + ENQUEUE_TIMEOUT_PROPERTY + ":" + DEFAULT_ENQUEUE_TIMEOUT_MILLIS + "}")
-                    long enqueueTimeoutMillis) {
+                    long enqueueTimeoutMillis,
+            org.flexlb.config.CacheMatchConfiguration cacheMatchConfiguration) {
         super(grpcReporter);
+        cacheStatusEnabled = !cacheMatchConfiguration.isKvcmEnabled();
         if (enqueueTimeoutMillis <= 0L) {
             throw new IllegalArgumentException("enqueueTimeoutMillis must be positive");
         }
@@ -92,7 +95,14 @@ public class EngineGrpcClient extends AbstractGrpcClient {
         this.executor = executor;
         this.eventLoopGroup = eventLoopGroup;
         this.connectTimeoutMillis = connectTimeoutMillis;
-        nameResolver.start(this);
+        nameResolver.subscribe(this);
+    }
+
+    @Override
+    protected boolean precreate(ServiceType service) {
+        return cacheStatusEnabled
+                || service != ServiceType.CACHE_STATUS
+                        && service != ServiceType.MULTIMODAL_CACHE_STATUS;
     }
 
     static boolean retriesBrokenConnections(ServiceType serviceType) {
@@ -190,7 +200,8 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                             }
                             callTrace.markCallbackStarted();
                             try {
-                                reportSuccessfulCall(serviceType, startTime, false, ip, port);
+                                reportSuccessfulCall(
+                                        serviceType, startTime, false, ip, port, response);
                                 reportDeliveryDelay(serviceType, false, callTrace, ip, port);
                             } finally {
                                 resultFuture.complete(response);
@@ -349,7 +360,7 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                             callTrace.markCallbackStarted();
                             try {
                                 reportSuccessfulCall(
-                                        serviceType, originalStartTime, true, ip, port);
+                                        serviceType, originalStartTime, true, ip, port, response);
                                 reportDeliveryDelay(serviceType, true, callTrace, ip, port);
                             } finally {
                                 resultFuture.complete(response);
@@ -445,10 +456,23 @@ public class EngineGrpcClient extends AbstractGrpcClient {
     }
 
     private void reportSuccessfulCall(
-            ServiceType serviceType, long originalStartTime, boolean retry, String ip, int port) {
+            ServiceType serviceType,
+            long originalStartTime,
+            boolean retry,
+            String ip,
+            int port,
+            Object response) {
         try {
             long duration = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - originalStartTime);
-            grpcReporter.reportCallMetrics(serviceType.getOperationName(), duration, retry);
+            grpcReporter.reportCallMetrics(
+                    serviceType.getOperationName(),
+                    duration,
+                    serviceType != ServiceType.CACHE_STATUS
+                                    && serviceType != ServiceType.MULTIMODAL_CACHE_STATUS
+                                    && response instanceof com.google.protobuf.MessageLite message
+                            ? message.getSerializedSize()
+                            : 0,
+                    retry);
         } catch (RuntimeException | Error failure) {
             // Metrics cannot change the response or prevent Future completion.
             logMetricsFailure(MetricOperation.CALL_METRICS, serviceType, ip, port, failure);
@@ -643,14 +667,13 @@ public class EngineGrpcClient extends AbstractGrpcClient {
         NOT_FOUND, // Request absent, without a fence against a racing Enqueue.
         REQUEST_FENCED, // Prefill rejects any later Enqueue for this request id.
         REQUEST_CLEANED, // Fence plus explicit downstream cleanup proof.
-        UNSUPPORTED, // Engine does not advertise ordinary request cleanup.
         FAILED // Unspecified or unrecognized protocol response; outcome is unknown.
     }
 
     /**
-     * One cancellation attempt against the original Prefill. Ordinary cleanup first checks
-     * capability; priority preemption remains compatible with the original Cancel protocol.
-     * Transport failures complete exceptionally. Retry and settlement belong to the caller.
+     * Sends one cancellation attempt to the original Prefill using a detached gRPC context.
+     * Engines must support ordinary cancellation and report downstream cleanup results.
+     * Transport failures complete exceptionally; the caller owns retry and resource release.
      */
     public CompletableFuture<CancelReply> cancelAsync(
             String ip, int port, EngineRpcService.CancelRequestPB request, long requestTimeoutMs) {
@@ -658,65 +681,33 @@ public class EngineGrpcClient extends AbstractGrpcClient {
             checkArgument(
                     ip != null && !ip.isBlank() && port > 0, "Cancel requires a routable Prefill");
             checkArgument(request != null, "Cancel request is required");
-            long timeoutMs = Math.max(1, requestTimeoutMs);
             Context detached = Context.current().fork();
             Context previous = detached.attach();
             try {
-                if (request.getReason()
-                        == EngineRpcService.RequestCancelReasonPB
-                                .REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED) {
-                    return sendCancel(ip, port, request, timeoutMs, detached);
-                }
-                return getWorkerStatusAsync(
+                // A transport failure is not proof that Cancel was rejected; never replay it here.
+                return executeGrpcCallAsync(
                                 ip,
                                 port,
-                                EngineRpcService.StatusVersionPB.getDefaultInstance(),
-                                timeoutMs)
-                        .thenCompose(
-                                status ->
-                                        status.getSupportsRequestCleanup()
-                                                ? sendCancel(ip, port, request, timeoutMs, detached)
-                                                : CompletableFuture.completedFuture(
-                                                        CancelReply.UNSUPPORTED));
+                                stub -> stub.getRpcServiceFutureStub().cancel(request),
+                                Math.max(1, requestTimeoutMs),
+                                ServiceType.ENGINE_CANCEL)
+                        .thenApply(
+                                response ->
+                                        switch (response.getStatus()) {
+                                            case CANCEL_STATUS_ACCEPTED -> CancelReply.ACCEPTED;
+                                            case CANCEL_STATUS_NOT_FOUND -> CancelReply.NOT_FOUND;
+                                            case CANCEL_STATUS_TOMBSTONED ->
+                                                    response.getDecodeCleanupComplete()
+                                                            ? CancelReply.REQUEST_CLEANED
+                                                            : CancelReply.REQUEST_FENCED;
+                                            case CANCEL_STATUS_UNSPECIFIED, UNRECOGNIZED ->
+                                                    CancelReply.FAILED;
+                                        });
             } finally {
                 detached.detach(previous);
             }
         } catch (RuntimeException | Error failure) {
             return CompletableFuture.failedFuture(failure);
-        }
-    }
-
-    private CompletableFuture<CancelReply> sendCancel(
-            String ip,
-            int port,
-            EngineRpcService.CancelRequestPB request,
-            long timeoutMs,
-            Context detached) {
-        // The capability response may arrive after the frontend call has ended.
-        Context previous = detached.attach();
-        try {
-            // Never replay Cancel after an ambiguous failure: a later NOT_FOUND is not a negative
-            // ACK.
-            return executeGrpcCallAsync(
-                            ip,
-                            port,
-                            stub -> stub.getRpcServiceFutureStub().cancel(request),
-                            timeoutMs,
-                            ServiceType.ENGINE_CANCEL)
-                    .thenApply(
-                            response ->
-                                    switch (response.getStatus()) {
-                                        case CANCEL_STATUS_ACCEPTED -> CancelReply.ACCEPTED;
-                                        case CANCEL_STATUS_NOT_FOUND -> CancelReply.NOT_FOUND;
-                                        case CANCEL_STATUS_TOMBSTONED ->
-                                                response.getDecodeCleanupComplete()
-                                                        ? CancelReply.REQUEST_CLEANED
-                                                        : CancelReply.REQUEST_FENCED;
-                                        case CANCEL_STATUS_UNSPECIFIED, UNRECOGNIZED ->
-                                                CancelReply.FAILED;
-                                    });
-        } finally {
-            detached.detach(previous);
         }
     }
 

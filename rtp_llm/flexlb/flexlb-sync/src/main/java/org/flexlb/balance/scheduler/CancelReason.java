@@ -19,7 +19,7 @@ public enum CancelReason {
         return message;
     }
 
-    public EngineRpcService.CancelRequestPB toRequest(long requestId) {
+    public EngineRpcService.CancelRequestPB toRequest(String requestId) {
         var reason =
                 switch (this) {
                     case CLIENT_CANCELLED ->
@@ -35,7 +35,7 @@ public enum CancelReason {
                                     .REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED;
                 };
         return EngineRpcService.CancelRequestPB.newBuilder()
-                .setRequestId(requestId)
+                .setRequestId(org.flexlb.engine.grpc.RequestId.toEngineRequestId(requestId))
                 .setReason(reason)
                 .build();
     }

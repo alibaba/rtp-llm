@@ -25,10 +25,14 @@ public final class WorkerStatusTestSupport {
                 response.getDpSize(),
                 response.getTpSize(),
                 response.getDpRank(),
+                response.getBlockSize(),
+                response.getBlockHashLookaheadTokens(),
+                response.getCacheMatchRollbackBlocks(),
+                response.getKvCacheGroupMode(),
                 response.getMaxSeqLen(),
                 response.getMaxBatchTokensSize(),
                 response.getRunningQueryLen(),
-                response.getWaitingQueryLen());
+                response.getWaitingQueryLen(), response.getLastStepMetrics());
         return status.bindStatusObservation(
                 engine,
                 response.isAlive(),
@@ -66,6 +70,14 @@ public final class WorkerStatusTestSupport {
                 task.getBatchId(),
                 task.getPhase(),
                 task.getExecutionTimeMs(),
-                task.getPriorityPreemptionProgress());
+                task.getPriorityPreemptionProgress(), new WorkerStatus.TaskTelemetry(
+                        task.isPrefixLengthValid(), task.getRequestReceivedTimeMs(),
+                        task.getInputQueueEnqueueTimeMs(), task.getInputQueueDrainTimeMs(),
+                        task.getWaitingEnteredTimeMs(), task.getRunningEnteredTimeMs(),
+                        task.getRemoteKvWaitMs(), task.getFirstTokenTimeMs(),
+                        task.getHbmLocalMatchTokens(), task.getRemoteKvAddedMatchTokens(),
+                        task.getFirstPrefillStepId(), task.getLastPrefillStepId(), task.getPrefillStepCount(),
+                        task.getPrefillNonfinalChunkTokensMin(), task.getPrefillNonfinalChunkTokensMax(),
+                        task.getCompletedPrefillTokens(), task.getRemainingPrefillTokens() < 0 ? null : task.getRemainingPrefillTokens(), task.getLastCompletedPrefillStepId()));
     }
 }

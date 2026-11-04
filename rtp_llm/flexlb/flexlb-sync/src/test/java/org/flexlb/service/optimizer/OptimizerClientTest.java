@@ -381,12 +381,12 @@ class OptimizerClientTest {
     }
 
     private static Request traceRequest(List<Long> blockCacheKeys) {
-        Request request = new Request();
-        request.setRequestId("1");
-        request.setBlockCacheKeys(blockCacheKeys);
-        request.setBlockSize(16L);
-        request.setSeqLen(64L);
-        return request;
+        return Request.builder()
+                .requestId("1")
+                .blockCacheKeys(blockCacheKeys)
+                .blockSize(16L)
+                .seqLen(64L)
+                .build();
     }
 
     private void resolvesTestInstanceId() {

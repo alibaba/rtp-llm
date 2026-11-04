@@ -6,7 +6,7 @@ import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -470,7 +470,7 @@ class RequestPublicationFailureOwnershipTest {
                             null,
                             null,
                             System.currentTimeMillis());
-            try (var admission = f.owner.claimAdmissionHandle(9303L, future)) {
+            try (var admission = f.owner.claimAdmissionHandle("9303", future)) {
                 assertNotNull(admission);
                 assertEquals(
                         org.flexlb.balance.PlacementResult.Status.SUCCESS,
@@ -631,7 +631,7 @@ class RequestPublicationFailureOwnershipTest {
                             service,
                             mock(DeliveryMetricsReporter.class),
                             mock(RequestSchedulerReporter.class),
-                            mock(RecentCacheKeyTraceReporter.class));
+                            mock(TheoryCacheHitReporter.class));
             runtime = org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner);
         }
 

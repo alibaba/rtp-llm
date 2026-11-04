@@ -66,8 +66,8 @@ class WorkerStatusResponseTest {
         StatusObservation response = convert(proto);
 
         assertEquals(RoleType.PREFILL, response.role());
-        assertEquals(org.flexlb.enums.TaskPhase.PENDING, response.runningTasks().get("1").phase());
-        assertEquals(org.flexlb.enums.TaskPhase.RUNNING, response.runningTasks().get("2").phase());
+        assertEquals(org.flexlb.enums.TaskPhase.PENDING, response.activeTasks().get("1").phase());
+        assertEquals(org.flexlb.enums.TaskPhase.RUNNING, response.activeTasks().get("2").phase());
     }
 
     @Test
@@ -89,7 +89,7 @@ class WorkerStatusResponseTest {
 
         assertEquals(RoleType.DECODE, response.role());
         assertEquals(
-                org.flexlb.enums.TaskPhase.KV_ALLOCATED, response.runningTasks().get("3").phase());
+                org.flexlb.enums.TaskPhase.KV_ALLOCATED, response.activeTasks().get("3").phase());
     }
 
     @Test
@@ -130,9 +130,9 @@ class WorkerStatusResponseTest {
 
         StatusObservation response = convert(status);
 
-        assertEquals(org.flexlb.enums.TaskPhase.RECEIVED, response.runningTasks().get("4").phase());
+        assertEquals(org.flexlb.enums.TaskPhase.RECEIVED, response.activeTasks().get("4").phase());
         assertEquals(
-                org.flexlb.enums.TaskPhase.KV_ALLOCATED, response.runningTasks().get("5").phase());
+                org.flexlb.enums.TaskPhase.KV_ALLOCATED, response.activeTasks().get("5").phase());
     }
 
     @Test
@@ -151,7 +151,7 @@ class WorkerStatusResponseTest {
 
         StatusObservation response = convert(status);
 
-        assertEquals(org.flexlb.enums.TaskPhase.RUNNING, response.runningTasks().get("6").phase());
+        assertEquals(org.flexlb.enums.TaskPhase.RUNNING, response.activeTasks().get("6").phase());
     }
 
     @Test

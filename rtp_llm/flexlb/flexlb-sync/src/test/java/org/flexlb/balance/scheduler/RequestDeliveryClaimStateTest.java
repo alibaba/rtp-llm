@@ -37,9 +37,9 @@ class RequestDeliveryClaimStateTest {
     @Test
     void deliveryPreparationDoesNotPublishUntransferredOwnership() {
         var context = new RequestContext(mock(FlexlbConfig.class));
-        context.register(7503L, 1000L, 100_000L, 10_000L);
+        context.register("7503", 1000L, 100_000L, 10_000L);
         var route = mock(RequestRoute.class);
-        when(route.requestId()).thenReturn(7503L);
+        when(route.requestId()).thenReturn(String.valueOf(7503L));
         when(route.ctx()).thenReturn(context);
         var placement = RequestCleanupPassTest.requireValue(context.beginPlacement(null));
         org.junit.jupiter.api.Assertions.assertTrue(
@@ -441,15 +441,18 @@ class RequestDeliveryClaimStateTest {
 
     static Fixture fixture(Delivery.SendMode kind, boolean fusion) {
         var context = new RequestContext(mock(FlexlbConfig.class));
-        context.register(7502L, 1000L, 100_000L, 10_000L);
+        context.register("7502", 1000L, 100_000L, 10_000L);
         var prefill = mock(PrefillEndpoint.class);
         var decode =
                 fusion
                         ? null
                         : org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
-        var reservation = fusion ? null : new DecodeResources.ReservationHandle(1L, 7502L, 1L);
+        var reservation =
+                fusion
+                        ? null
+                        : new DecodeResources.ReservationHandle(1L, String.valueOf(7502L), 1L);
         var route = mock(RequestRoute.class);
-        when(route.requestId()).thenReturn(7502L);
+        when(route.requestId()).thenReturn(String.valueOf(7502L));
         when(route.ctx()).thenReturn(context);
         when(route.prefillEp()).thenReturn(prefill);
         when(route.decodeEp()).thenReturn(decode);

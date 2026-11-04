@@ -86,7 +86,7 @@ class PrefillEndpointConcurrencyTest {
                     workers.submit(
                             () -> {
                                 var task = new TaskInfo();
-                                task.setRequestId(2L);
+                                task.setRequestId(String.valueOf(2L));
                                 task.setBatchId(1L);
                                 task.setErrorCode(500);
                                 task.setExecutionTimeMs(0L);
@@ -134,9 +134,9 @@ class PrefillEndpointConcurrencyTest {
                     };
             assertEquals(expected, work.totalRemainingWorkMs().orElseThrow());
             assertEquals(change == Change.REMOVE_ONE ? 2 : 1, calls.get());
-            assertFalse(work.containsRequest(2L));
-            assertFalse(work.containsRequest(3L));
-            assertEquals(expected != 0, work.containsRequest(1L));
+            assertFalse(work.containsRequest("2"));
+            assertFalse(work.containsRequest("3"));
+            assertEquals(expected != 0, work.containsRequest("1"));
             assertFalse(endpoint.releaseRequest(removed), "late old cleanup must be harmless");
             if (change == Change.REPLACE_REQUEST_ID) {
                 assertFalse(
@@ -162,7 +162,7 @@ class PrefillEndpointConcurrencyTest {
 
     private static RequestRoute route(PrefillEndpoint endpoint, FlexlbConfig config, long id) {
         var ctx = new RequestContext(config);
-        ctx.data().setRequest(Request.builder().requestId(id).seqLen(100L).build());
+        ctx.data().setRequest(Request.builder().requestId(String.valueOf(id)).seqLen(100L).build());
         var server = new ServerStatus();
         server.setRole(RoleType.PREFILL);
         server.setServerIp("127.0.0.1");

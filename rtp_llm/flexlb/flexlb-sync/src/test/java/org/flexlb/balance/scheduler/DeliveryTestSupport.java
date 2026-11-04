@@ -318,7 +318,7 @@ public final class DeliveryTestSupport {
     static RequestRoute item(
             long requestId, int priority, long enqueuedAtMs, long seqLen, long hitCache) {
         RequestRoute item = Mockito.mock(RequestRoute.class);
-        Mockito.when(item.requestId()).thenReturn(requestId);
+        Mockito.when(item.requestId()).thenReturn(String.valueOf(requestId));
         Mockito.when(item.priority()).thenReturn(priority);
         Mockito.when(item.enqueuedAtMs()).thenReturn(enqueuedAtMs);
         Mockito.when(item.seqLen()).thenReturn(seqLen);

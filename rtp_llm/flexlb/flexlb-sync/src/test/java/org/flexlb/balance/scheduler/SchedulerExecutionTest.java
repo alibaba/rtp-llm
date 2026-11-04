@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -111,7 +111,7 @@ class SchedulerExecutionTest {
                 SchedulingTestConfig.configService(SchedulingTestConfig.batchConfig()),
                 mock(DeliveryMetricsReporter.class),
                 mock(RequestSchedulerReporter.class),
-                mock(RecentCacheKeyTraceReporter.class));
+                mock(TheoryCacheHitReporter.class));
     }
 
     private static WorkerEndpoint endpoint() {
@@ -120,7 +120,7 @@ class SchedulerExecutionTest {
                 WorkerStatus.createDiscovered(
                         RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, null);
         when(endpoint.getStatus()).thenReturn(status);
-        when(endpoint.ipPort()).thenReturn(status.getIpPort());
+        when(endpoint.ipPort()).thenReturn(status.getLogicalIpPort());
         return endpoint;
     }
 }

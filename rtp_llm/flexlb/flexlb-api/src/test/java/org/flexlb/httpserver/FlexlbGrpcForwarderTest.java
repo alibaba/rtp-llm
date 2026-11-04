@@ -108,12 +108,12 @@ class FlexlbGrpcForwarderTest {
 
     @Test
     void grpcFailureLogsStatusDescriptionAndThrowableForScheduleAndCancel() throws Exception {
-        LBStatusConsistencyService consistency = masterAt("10.0.0.2:7001");
+        MasterStatusService consistency = masterAt("10.0.0.2:7001");
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
         ManagedChannel channel = mock(ManagedChannel.class);
         String description = "stream reset\nfrom peer";
-        int expectedDescriptionLimit = 512;
+        int expectedDescriptionLimit = 256;
         description +=
                 "x".repeat(expectedDescriptionLimit - 1 - description.length())
                         + "\uD83D\uDE00tail";
@@ -170,7 +170,9 @@ class FlexlbGrpcForwarderTest {
                 assertTrue(event.getFormattedMessage().contains("status=UNKNOWN"));
                 assertEquals(
                         expectedDescription,
-                        event.getFormattedMessage().split(" description=", 2)[1]);
+                        event.getFormattedMessage()
+                                .split(" description=", 2)[1]
+                                .split(" cause=", 2)[0]);
                 assertFalse(event.getFormattedMessage().contains("\n"));
                 assertFalse(event.getFormattedMessage().contains("\r"));
                 assertFalse(event.getFormattedMessage().contains("\uD83D"));

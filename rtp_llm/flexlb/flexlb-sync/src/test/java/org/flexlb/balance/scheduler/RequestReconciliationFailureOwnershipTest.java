@@ -8,7 +8,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -49,13 +49,13 @@ class RequestReconciliationFailureOwnershipTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner),
                 "timer",
                 mock(ExpirationTimer.class));
         RequestProtocolTestSupport.register(owner, context);
-        var reservation = new DecodeResources.ReservationHandle(1L, 9721L, 3L);
+        var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(9721L), 3L);
         var decode = RequestProtocolTestSupport.decodeEndpoint();
         var prefill = mock(PrefillEndpoint.class);
         var server = new ServerStatus();

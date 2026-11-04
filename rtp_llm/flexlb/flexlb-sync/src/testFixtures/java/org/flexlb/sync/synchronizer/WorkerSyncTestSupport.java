@@ -1,8 +1,8 @@
 package org.flexlb.sync.synchronizer;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.address.WorkerAddressService;

@@ -11,7 +11,7 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.strategy.DecodeSelectionStrategy;
 import org.flexlb.balance.strategy.PrefillSelectionStrategy;
 import org.flexlb.balance.strategy.VitSelectionStrategy;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.SchedulingMetadata;
@@ -40,6 +40,8 @@ public class RequestWorkerSelector {
     private final DecodeSelectionStrategy decodeSelector;
     private final DecodeSelectionStrategy.CapacityReader capacityReader = this::readDecodeCapacity;
     private final VitSelectionStrategy vitSelector;
+    private final org.flexlb.balance.strategy.EncoderSelectionStrategy encoderSelector;
+    private final org.flexlb.cache.match.CacheAwareService cacheService;
     private final List<RoleType> requiredRoles;
     private final VitCacheSelector vitCacheSelector;
     private final EndpointRegistry endpoints;
@@ -55,12 +57,16 @@ public class RequestWorkerSelector {
             PrefillSelectionStrategy prefillSelector,
             DecodeSelectionStrategy decodeSelector,
             VitSelectionStrategy vitSelector,
+            org.flexlb.balance.strategy.EncoderSelectionStrategy encoderSelector,
+            org.flexlb.cache.match.CacheAwareService cacheService,
             VitCacheSelector vitCacheSelector,
             EngineHealthReporter healthReporter,
             CacheMetricsReporter cacheReporter,
             ConfigService configService,
             ModelMetaConfig modelMetaConfig) {
         this.endpoints = Objects.requireNonNull(endpoints, "endpoints");
+        this.encoderSelector = Objects.requireNonNull(encoderSelector);
+        this.cacheService = Objects.requireNonNull(cacheService);
         this.vitCacheSelector = vitCacheSelector;
         this.healthReporter = Objects.requireNonNull(healthReporter);
         this.cacheReporter = Objects.requireNonNull(cacheReporter);
@@ -105,10 +111,24 @@ public class RequestWorkerSelector {
                 }
                 group = vit.getGroup();
             }
-            for (RoleType role : requiredRoles) {
+            var requested = context.data().getRequestedRoles();
+            if ((!requested.isEmpty() && !requiredRoles.containsAll(requested))
+                    || context.data().getPhase() == org.flexlb.dao.route.RequestPhase.ENCODER
+                            && !requiredRoles.contains(RoleType.ENCODER)) {
+                return PlacementResult.rejected(Response.error(StrategyErrorType.INVALID_REQUEST));
+            }
+            var roles =
+                    requested.isEmpty()
+                            ? (context.data().getPhase()
+                                            == org.flexlb.dao.route.RequestPhase.ENCODER
+                                    ? List.of(RoleType.ENCODER)
+                                    : requiredRoles)
+                            : requiredRoles.stream().filter(requested::contains).toList();
+            for (RoleType role : roles) {
                 if (role == RoleType.VIT && request.getSelectedVit() != null) {
                     continue;
                 }
+                context.data().beginRoutingAttempt(role);
                 PlacementResult<ServerStatus, PlacementKey> result =
                         selectRole(request, metadata, role, group, routing);
                 if (result.status() != PlacementResult.Status.SUCCESS) {
@@ -195,6 +215,7 @@ public class RequestWorkerSelector {
         return switch (role) {
             case PREFILL, PDFUSION -> selectPrefill(request, metadata, role, group, routing);
             case DECODE -> selectDecode(request, metadata, group, routing);
+            case ENCODER -> selectEncoder(request, group, routing);
             case VIT -> {
                 var selected = selectVit(request.getRequestId(), group, routing);
                 yield selected == null
@@ -207,7 +228,45 @@ public class RequestWorkerSelector {
         };
     }
 
-    private ServerStatus selectVit(long requestId, String group, RequestRoute route) {
+    private PlacementResult<ServerStatus, PlacementKey> selectEncoder(
+            Request request, String group, RequestRoute route) {
+        var directory = endpoints.encoderRoutingSnapshot();
+        var config = route.ctx().data().getConfig();
+        var selection =
+                encoderSelector.select(
+                        directory,
+                        group,
+                        request.getEncoderCacheHitLen() != null,
+                        config.isQueue()
+                                ? config.getDispatcher().getMaxInflightPerEncoderWorker()
+                                : Integer.MAX_VALUE);
+        if (selection.status() != PlacementResult.Status.SUCCESS) return selection.asFailure();
+        var selected = selection.value();
+        com.google.common.base.Preconditions.checkArgument(
+                directory.stream().anyMatch(candidate -> candidate == selected),
+                "Encoder strategy must return an original candidate");
+        WorkerEndpoint.GenerationPin pin = endpoints.capture(RoleType.ENCODER, selected.address());
+        try {
+            if (pin == null || pin.endpoint() != selected)
+                return PlacementResult.endpointChanged(
+                        new PlacementKey(RoleType.ENCODER, group, null), selection);
+            var status = pin.endpoint().getStatus();
+            var assignment =
+                    ServerStatus.forWorker(
+                            RoleType.ENCODER,
+                            request.getRequestId(),
+                            status.topologySnapshot(),
+                            status.committedEngineObservation());
+            var owned = pin;
+            pin = null;
+            route.add(owned, assignment, 0, 0);
+            return PlacementResult.success(assignment);
+        } finally {
+            if (pin != null) pin.close();
+        }
+    }
+
+    private ServerStatus selectVit(String requestId, String group, RequestRoute route) {
         List<String> choices = endpoints.endpointAddressSnapshot(RoleType.VIT);
         ArrayList<String> remaining = null;
         while (!choices.isEmpty()) {
@@ -227,7 +286,7 @@ public class RequestWorkerSelector {
     }
 
     private ServerStatus captureVit(
-            String address, String group, long requestId, RequestRoute route) {
+            String address, String group, String requestId, RequestRoute route) {
         WorkerEndpoint.GenerationPin pin = endpoints.capture(RoleType.VIT, address);
         if (pin == null) {
             return null;
@@ -261,6 +320,17 @@ public class RequestWorkerSelector {
         var result =
                 prefillSelector.select(
                         request, metadata, role, group, directory, System::currentTimeMillis);
+        if (result.diagnostics() != null) {
+            var data = route.ctx().data();
+            if (result.diagnostics().get("routingDecision")
+                    instanceof org.flexlb.dao.pv.RoutingDecision decision) {
+                data.recordRoutingDecision(decision);
+            }
+            if (result.diagnostics().get("cacheQuery")
+                    instanceof org.flexlb.cache.domain.CacheMatchResult query) {
+                data.recordCacheQuery(query.source().name(), query.queryTimeUs());
+            }
+        }
         if (result.status() != PlacementResult.Status.SUCCESS) {
             if (result.diagnostics() != null
                     && result.diagnostics().get("details") instanceof Map<?, ?> details
@@ -301,7 +371,24 @@ public class RequestWorkerSelector {
             var ownedPin = pin;
             pin = null;
             route.add(ownedPin, assignment, selected.prefillWorkMs(), selected.ownershipVersion());
+            route.ctx()
+                    .data()
+                    .recordCacheSelection(role, endpoint.getIp(), selected.cacheHitTokens());
             reportSelection(role, endpoint.getIp(), request.getSeqLen(), selected);
+            if (selected.cacheMatches() != null) {
+                try {
+                    cacheService.trackRoutingPrediction(
+                            request.getRequestId(),
+                            role,
+                            group,
+                            status,
+                            request.getSeqLen(),
+                            selected.cacheHitTokens(),
+                            selected.cacheMatches());
+                } catch (RuntimeException failure) {
+                    Logger.warn("Cache prediction observation failed", failure);
+                }
+            }
             return PlacementResult.success(assignment);
         } finally {
             if (pin != null) {

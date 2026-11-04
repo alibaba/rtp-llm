@@ -1,6 +1,6 @@
 package org.flexlb.dao.pv;
 
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.scheduler.RequestData;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.route.RequestPhase;
@@ -19,9 +19,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PvLogDataTest {
 
+    private static PvLogData pv(RequestData data) {
+        var response = data.getResponse();
+        return new PvLogData(
+                data,
+                response != null && response.isSuccess(),
+                response == null ? null : response.getErrorMessage(),
+                response == null ? 0 : response.getCode(),
+                null,
+                "LOCAL_MASTER",
+                0,
+                null,
+                null,
+                System.currentTimeMillis());
+    }
+
     @Test
     void keepsCacheSelectionWhenSelectedCandidateHasNoEndpoint() {
-        BalanceContext context = new BalanceContext();
+        RequestData context = new RequestData(new org.flexlb.config.FlexlbConfig());
         context.recordCacheSelection(RoleType.PREFILL, "10.0.0.2", 512L);
         context.recordRoutingDecision(
                 new RoutingDecision(
@@ -42,7 +57,7 @@ class PvLogDataTest {
                                         "MODELED", 1L)),
                         null));
 
-        PvLogData data = new PvLogData(context);
+        PvLogData data = pv(context);
 
         assertEquals(1, data.getCacheMatchSelections().size());
         assertEquals("10.0.0.2", data.getCacheMatchSelections().getFirst().selectedIp());
@@ -50,15 +65,14 @@ class PvLogDataTest {
 
     @Test
     void includesPhaseToDistinguishTwoDecisionsWithTheSameRequestId() throws Exception {
-        BalanceContext context = new BalanceContext();
-        context.setRequestPhase(RequestPhase.ENCODER);
-        Request request = new Request();
-        request.setRequestId("shared-id");
+        RequestData context = new RequestData(new org.flexlb.config.FlexlbConfig());
+        context.setPhase(RequestPhase.ENCODER);
+        Request request = Request.builder().requestId("shared-id").build();
         context.setRequest(request);
 
         var json =
                 new com.fasterxml.jackson.databind.ObjectMapper()
-                        .readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
+                        .readTree(JsonUtils.toStringOrEmpty(pv(context)));
 
         assertEquals("shared-id", json.path("requestId").asText());
         assertEquals("ENCODER", json.path("phase").asText());
@@ -66,34 +80,33 @@ class PvLogDataTest {
 
     @Test
     void includesEncoderCacheHitLengthOnlyWhenClientProvidesIt() throws Exception {
-        BalanceContext context = new BalanceContext();
-        Request request = new Request();
-        request.setRequestId("encoder-stage");
+        RequestData context = new RequestData(new org.flexlb.config.FlexlbConfig());
+        Request request = Request.builder().requestId("encoder-stage").build();
         context.setRequest(request);
         var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
 
-        var omitted = mapper.readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
+        var omitted = mapper.readTree(JsonUtils.toStringOrEmpty(pv(context)));
         assertFalse(omitted.has("encoderCacheHitLen"));
 
-        request.setEncoderCacheHitLen(0L);
-        var knownMiss = mapper.readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
+        context.setRequest(request.toBuilder().encoderCacheHitLen(0L).build());
+        var knownMiss = mapper.readTree(JsonUtils.toStringOrEmpty(pv(context)));
         assertTrue(knownMiss.has("encoderCacheHitLen"));
         assertEquals(0L, knownMiss.path("encoderCacheHitLen").asLong());
     }
 
     @Test
     void terminalResponseUsesFinalOutcomeWithoutMutatingRoutingResponse() throws Exception {
-        BalanceContext context = new BalanceContext();
+        RequestData context = new RequestData(new org.flexlb.config.FlexlbConfig());
         Response routed =
                 Response.error(org.flexlb.dao.loadbalance.StrategyErrorType.REQUEST_CANCELLED);
-        context.setResponse(routed);
-        context.setSuccess(false);
-        context.setErrorMessage("Schedule RPC deadline exceeded");
+        context.setFuture(java.util.concurrent.CompletableFuture.completedFuture(routed));
         int deadlineCode =
                 org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode();
         PvLogData data =
                 new PvLogData(
                         context,
+                        false,
+                        "Schedule RPC deadline exceeded",
                         deadlineCode,
                         null,
                         "LOCAL_MASTER",
@@ -120,9 +133,8 @@ class PvLogDataTest {
 
     @Test
     void compactPvKeepsProtocolIdentityAndRuntimeGroupFields() throws Exception {
-        BalanceContext context = new BalanceContext();
-        Request request = new Request();
-        request.setRequestId("compact");
+        RequestData context = new RequestData(new org.flexlb.config.FlexlbConfig());
+        Request request = Request.builder().requestId("compact").build();
         context.setRequest(request);
         org.flexlb.dao.loadbalance.ServerStatus worker =
                 new org.flexlb.dao.loadbalance.ServerStatus();
@@ -132,7 +144,7 @@ class PvLogDataTest {
         worker.setServerIp("10.0.0.1");
         Response response = new Response();
         response.setServerStatus(List.of(worker));
-        context.setResponse(response);
+        context.setFuture(java.util.concurrent.CompletableFuture.completedFuture(response));
         context.setDecisionGroup(
                 new DecisionGroup(
                         "group",
@@ -162,7 +174,7 @@ class PvLogDataTest {
                         List.of(),
                         policy));
         var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-        var json = mapper.readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
+        var json = mapper.readTree(JsonUtils.toStringOrEmpty(pv(context)));
         assertEquals("compact", json.path("requestId").asText());
         assertFalse(json.path("response").path("server_status").get(0).has("request_id"));
         assertFalse(json.path("response").path("server_status").get(0).has("prefill_time"));
@@ -186,9 +198,8 @@ class PvLogDataTest {
 
     @Test
     void pvKeepsDecodePreemptRequestIdsUnderServerStatusCompaction() throws Exception {
-        BalanceContext context = new BalanceContext();
-        Request request = new Request();
-        request.setRequestId("incoming");
+        RequestData context = new RequestData(new org.flexlb.config.FlexlbConfig());
+        Request request = Request.builder().requestId("incoming").build();
         context.setRequest(request);
         org.flexlb.dao.loadbalance.ServerStatus decode =
                 new org.flexlb.dao.loadbalance.ServerStatus();
@@ -204,11 +215,11 @@ class PvLogDataTest {
         prefill.setServerIp("10.0.0.1");
         Response response = new Response();
         response.setServerStatus(List.of(decode, prefill));
-        context.setResponse(response);
+        context.setFuture(java.util.concurrent.CompletableFuture.completedFuture(response));
 
         var json =
                 new com.fasterxml.jackson.databind.ObjectMapper()
-                        .readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
+                        .readTree(JsonUtils.toStringOrEmpty(pv(context)));
 
         var statuses = json.path("response").path("server_status");
         var decodeIds = statuses.get(0).path("preempt_request_ids");
@@ -225,24 +236,23 @@ class PvLogDataTest {
 
     @Test
     void omitsRoutingDecisionWhenSnapshotIsAbsent() {
-        Request request = new Request();
-        request.setRequestId("1001");
+        Request request = Request.builder().requestId("1001").build();
 
-        BalanceContext context = new BalanceContext();
+        RequestData context = new RequestData(new org.flexlb.config.FlexlbConfig());
         context.setRequest(request);
-        context.setResponse(new Response());
+        context.setFuture(java.util.concurrent.CompletableFuture.completedFuture(new Response()));
 
-        String json = JsonUtils.toStringOrEmpty(new PvLogData(context));
+        String json = JsonUtils.toStringOrEmpty(pv(context));
 
         assertFalse(json.contains("routingDecisions"));
     }
 
     @Test
     void includesSelectionReasonWithoutDecisionSnapshot() {
-        BalanceContext context = new BalanceContext();
+        RequestData context = new RequestData(new org.flexlb.config.FlexlbConfig());
         context.recordSelectionReason(RoleType.PREFILL, "SHORTEST_TTFT_FALLBACK");
 
-        String json = JsonUtils.toStringOrEmpty(new PvLogData(context));
+        String json = JsonUtils.toStringOrEmpty(pv(context));
 
         assertTrue(json.contains("\"selectionReasons\":{\"PREFILL\":\"SHORTEST_TTFT_FALLBACK\"}"));
         assertFalse(json.contains("routingDecisions"));
@@ -250,16 +260,12 @@ class PvLogDataTest {
 
     @Test
     void includesKvcmTimings() {
-        Request request = new Request();
-        request.setRequestId("1");
-        request.setSeqLen(128);
-        request.setRequestTimeMs(1000);
+        Request request = Request.builder().requestId("1").seqLen(128).requestTimeMs(1000).build();
 
-        BalanceContext context = new BalanceContext();
-        context.setStartTime(1500);
+        RequestData context = new RequestData(new org.flexlb.config.FlexlbConfig());
         context.setRequest(request);
-        context.setResponse(new Response());
-        context.recordRequestTiming(request.getRequestTimeMs(), 9L);
+        context.setFuture(java.util.concurrent.CompletableFuture.completedFuture(new Response()));
+        context.recordRequestTiming(context.getStartTime() - 500, 9L);
         context.recordCacheQuery("KVCM", 56);
         context.recordCacheSelection(RoleType.PREFILL, "10.0.0.1", 256);
         context.recordCacheQuery("KVCM", 78);
@@ -298,7 +304,7 @@ class PvLogDataTest {
                         null));
         context.finishRequestTiming();
 
-        PvLogData data = new PvLogData(context);
+        PvLogData data = pv(context);
 
         assertEquals(context.getTotalTimeUs(), data.getTotalUs());
         assertEquals(500, data.getArrivalMs());
@@ -333,16 +339,14 @@ class PvLogDataTest {
 
     @Test
     void includesSequenceLengthAndOmitsPayloadDiagnostics() {
-        Request request = new Request();
-        request.setRequestId("2");
-        request.setSeqLen(999);
+        Request request = Request.builder().requestId("2").seqLen(999).build();
 
-        BalanceContext context = new BalanceContext();
+        RequestData context = new RequestData(new org.flexlb.config.FlexlbConfig());
         context.setRequest(request);
         context.setRequestMessageBytes(1234L);
         context.setRequestBodyBytes(1_234L);
 
-        PvLogData data = new PvLogData(context);
+        PvLogData data = pv(context);
 
         assertEquals(Long.valueOf(999), data.getSeqLen());
         assertEquals(Long.valueOf(1_234), data.getRequestBodyBytes());
@@ -355,12 +359,10 @@ class PvLogDataTest {
 
     @Test
     void keepsFailurePvWhenRequestBodyCannotBeDeserialized() {
-        BalanceContext context = new BalanceContext();
-        context.setSuccess(false);
-        context.setErrorMessage("Exceeded limit on max bytes to buffer");
+        RequestData context = new RequestData(new org.flexlb.config.FlexlbConfig());
         context.setRequestBodyBytes(5_242_881L);
 
-        PvLogData data = new PvLogData(context);
+        PvLogData data = pv(context);
 
         assertNull(data.getRequestId());
         assertNull(data.getSeqLen());
@@ -375,7 +377,7 @@ class PvLogDataTest {
 
     @Test
     void retainedPvSnapshotDoesNotChangeAfterSequentialRoutingUpdates() throws Exception {
-        BalanceContext context = new BalanceContext();
+        RequestData context = new RequestData(new org.flexlb.config.FlexlbConfig());
         var published = new java.util.concurrent.CountDownLatch(1);
         var resume = new java.util.concurrent.CountDownLatch(1);
         try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor()) {
@@ -413,12 +415,12 @@ class PvLogDataTest {
                             });
             try {
                 assertTrue(published.await(5, java.util.concurrent.TimeUnit.SECONDS));
-                PvLogData terminalPv = new PvLogData(context);
+                PvLogData terminalPv = pv(context);
                 String terminalJson = JsonUtils.toStringOrEmpty(terminalPv);
                 resume.countDown();
                 writer.get(5, java.util.concurrent.TimeUnit.SECONDS);
                 for (int i = 0; i < 1_000; i++) {
-                    PvLogData snapshot = new PvLogData(context);
+                    PvLogData snapshot = pv(context);
                     assertEquals(snapshot.getCacheMatchCount() * 2L, snapshot.getCacheMatchUs());
                     for (RoutingDecision decision : snapshot.getRoutingDecisions()) {
                         assertFalse(snapshot.getSelectionReasons().containsKey(decision.role()));
@@ -428,7 +430,7 @@ class PvLogDataTest {
                 writer.get(5, java.util.concurrent.TimeUnit.SECONDS);
                 assertEquals(terminalJson, JsonUtils.toStringOrEmpty(terminalPv));
                 assertEquals(1, terminalPv.getCacheMatchCount());
-                assertEquals(1_000, new PvLogData(context).getCacheMatchCount());
+                assertEquals(1_000, pv(context).getCacheMatchCount());
             } finally {
                 resume.countDown();
             }
@@ -437,7 +439,7 @@ class PvLogDataTest {
 
     @Test
     void completedProcessingPublishesTimingFieldsToFinalReader() throws Exception {
-        BalanceContext context = new BalanceContext();
+        RequestData context = new RequestData(new org.flexlb.config.FlexlbConfig());
         try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor()) {
             executor.submit(
                             () -> {
@@ -447,19 +449,18 @@ class PvLogDataTest {
                             })
                     .get(5, java.util.concurrent.TimeUnit.SECONDS);
         }
-        PvLogData result = new PvLogData(context);
+        PvLogData result = pv(context);
         assertEquals(5_000, result.getCacheMatchCount());
         assertEquals(10_000, result.getCacheMatchUs());
     }
 
     @Test
     void rejectedSelectionReasonCannotCorruptLaterPvSnapshot() {
-        BalanceContext context = new BalanceContext();
+        RequestData context = new RequestData(new org.flexlb.config.FlexlbConfig());
         context.recordSelectionReason(RoleType.PREFILL, "BEST_ONLY");
         assertThrows(
                 NullPointerException.class,
                 () -> context.recordSelectionReason(RoleType.PREFILL, null));
-        assertEquals(
-                "BEST_ONLY", new PvLogData(context).getSelectionReasons().get(RoleType.PREFILL));
+        assertEquals("BEST_ONLY", pv(context).getSelectionReasons().get(RoleType.PREFILL));
     }
 }

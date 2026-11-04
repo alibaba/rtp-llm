@@ -6,7 +6,7 @@ import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.RequestExecutionTestSupport;
 import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestRoute;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
@@ -202,7 +202,8 @@ public final class EndpointTestSupport {
                     int priority,
                     DecodeResources.AdmissionCapacity capacity) {
         try (var pin = endpoint.tryPinGeneration()) {
-            return endpoint.tryReserveQueuedRequest(pin, id, hard, expected, priority, capacity);
+            return endpoint.tryReserveQueuedRequest(
+                    pin, String.valueOf(id), hard, expected, priority, capacity);
         }
     }
 
@@ -236,12 +237,12 @@ public final class EndpointTestSupport {
         return List.copyOf(views);
     }
 
-    public static boolean isQueued(DecodeResources.ResourceSnapshot snapshot, long requestId) {
+    public static boolean isQueued(DecodeResources.ResourceSnapshot snapshot, String requestId) {
         var request = snapshot.requests().get(requestId);
         return request != null && request.phase().isMasterQueued();
     }
 
-    public static boolean isReserved(DecodeResources.ResourceSnapshot snapshot, long requestId) {
+    public static boolean isReserved(DecodeResources.ResourceSnapshot snapshot, String requestId) {
         var request = snapshot.requests().get(requestId);
         return request != null && !request.phase().isEngineConfirmed();
     }
@@ -288,7 +289,7 @@ public final class EndpointTestSupport {
         try {
             if (!Boolean.TRUE.equals(
                     org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                            state, "requestIdAvailable", requestId))) {
+                            state, "requestIdAvailable", String.valueOf(requestId)))) {
                 throw new IllegalStateException("Decode request id is already owned: " + requestId);
             }
             DecodeResources.Acquisition<
@@ -297,7 +298,7 @@ public final class EndpointTestSupport {
                             org.springframework.test.util.ReflectionTestUtils.invokeMethod(
                                     state,
                                     "createReservation",
-                                    requestId,
+                                    String.valueOf(requestId),
                                     hardKv,
                                     expectedKv,
                                     priority,
@@ -311,13 +312,18 @@ public final class EndpointTestSupport {
     /** Read shadow ownership for assertions, without granting a production lookup capability. */
     public static DecodeResources.ReservationHandle decodeReservation(
             DecodeEndpoint endpoint, long requestId) {
+        return decodeReservation(endpoint, Long.toString(requestId));
+    }
+
+    public static DecodeResources.ReservationHandle decodeReservation(
+            DecodeEndpoint endpoint, String requestId) {
         return endpoint.isRetired()
                 ? null
                 : decodeReservation(endpoint.resourceSnapshot(), requestId);
     }
 
     private static DecodeResources.ReservationHandle decodeReservation(
-            DecodeResources.ResourceSnapshot snapshot, long requestId) {
+            DecodeResources.ResourceSnapshot snapshot, String requestId) {
         var request = snapshot.requests().get(requestId);
         if (request == null || request.reservationToken() <= 0L) {
             return null;
@@ -326,14 +332,14 @@ public final class EndpointTestSupport {
             case LOCAL_RESERVED, MASTER_QUEUED_NOT_DISPATCHED, ENGINE_MAY_HAVE_SEEN ->
                     new DecodeResources.ReservationHandle(
                             snapshot.routing().generationId(),
-                            requestId,
+                            String.valueOf(requestId),
                             request.reservationToken());
             default -> null;
         };
     }
 
     static int evictPrefill(
-            PrefillEndpoint state, long ttlMs, java.util.function.LongPredicate retained) {
+            PrefillEndpoint state, long ttlMs, java.util.function.Predicate<String> retained) {
         var candidates = new java.util.HashSet<RequestRoute>();
         for (RequestRoute route : state.cleanupCandidates()) {
             if (!retained.test(route.requestId())) {
@@ -344,7 +350,7 @@ public final class EndpointTestSupport {
     }
 
     static DecodeEndpoint.CleanupResult evictDecode(
-            DecodeEndpoint state, long ttlMs, java.util.function.LongPredicate retained) {
+            DecodeEndpoint state, long ttlMs, java.util.function.Predicate<String> retained) {
         var candidates = state.cleanupCandidates();
         candidates.keySet().removeIf(retained::test);
         return state.expireReservations(ttlMs, candidates);
@@ -451,7 +457,7 @@ public final class EndpointTestSupport {
                         org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork.class,
                         org.mockito.Mockito.withSettings()
                                 .useConstructor(
-                                        status.getIpPort(),
+                                        status.getLogicalIpPort(),
                                         endpoint,
                                         org.flexlb.balance.scheduler.QueueExecutionSettings.capture(
                                                 config,
@@ -533,11 +539,12 @@ public final class EndpointTestSupport {
                         repository,
                         new org.flexlb.balance.scheduler.PlacementAvailability());
         if (org.mockito.Mockito.mockingDetails(repository).isMock()) {
-            org.mockito.Mockito.when(repository.findActive(org.mockito.ArgumentMatchers.anyLong()))
+            org.mockito.Mockito.when(
+                            repository.findActive(org.mockito.ArgumentMatchers.anyString()))
                     .thenAnswer(
                             call -> {
-                                long id = call.getArgument(0);
-                                var owner = repository.ownerOf(id);
+                                String id = call.getArgument(0);
+                                var owner = repository.ownerOf(String.valueOf(id));
                                 if (owner == null) {
                                     return null;
                                 }
@@ -554,7 +561,8 @@ public final class EndpointTestSupport {
                                 var route = org.mockito.Mockito.mock(RequestRoute.class);
                                 org.mockito.Mockito.when(context.data()).thenReturn(data);
                                 org.mockito.Mockito.when(data.getLifecycle()).thenReturn(owner);
-                                org.mockito.Mockito.when(data.getRequestId()).thenReturn(id);
+                                org.mockito.Mockito.when(data.getRequestId())
+                                        .thenReturn(String.valueOf(id));
                                 org.mockito.Mockito.when(context.snapshot()).thenReturn(snapshot);
                                 org.mockito.Mockito.when(snapshot.route()).thenReturn(route);
                                 org.mockito.Mockito.when(route.ctx()).thenReturn(context);
@@ -795,7 +803,7 @@ public final class EndpointTestSupport {
 
     static void commitUnqueued(PrefillEndpoint endpoint, long requestId, long predictedMs) {
         RequestRoute item = org.mockito.Mockito.mock(RequestRoute.class);
-        org.mockito.Mockito.when(item.requestId()).thenReturn(requestId);
+        org.mockito.Mockito.when(item.requestId()).thenReturn(String.valueOf(requestId));
         org.flexlb.balance.scheduler.SchedulerTestSupport.bindEndpointOwner(endpoint, item);
         {
             var reservation = reserveUnqueued(endpoint, item, predictedMs);

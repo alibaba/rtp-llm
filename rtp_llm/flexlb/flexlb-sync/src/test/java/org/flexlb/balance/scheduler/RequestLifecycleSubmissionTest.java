@@ -8,7 +8,7 @@ import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.telemetry.FlexlbTrace;
@@ -54,7 +54,7 @@ class RequestLifecycleSubmissionTest {
             SchedulingTestConfig.useNonBatchDispatcher(config);
         }
         var router = mock(RequestWorkerSelector.class);
-        var owner = owner(config, mock(RecentCacheKeyTraceReporter.class), router);
+        var owner = owner(config, mock(TheoryCacheHitReporter.class), router);
         var context = RequestProtocolTestSupport.context(config, 700L);
         Span span = mock(Span.class);
         when(span.storeInContext(any(Context.class))).thenCallRealMethod();
@@ -86,7 +86,7 @@ class RequestLifecycleSubmissionTest {
     void completionObservationPreservesResponseEvenWhenReporterFails(boolean reporterFails)
             throws Exception {
         var config = SchedulingTestConfig.batchConfig();
-        var reporter = mock(RecentCacheKeyTraceReporter.class);
+        var reporter = mock(TheoryCacheHitReporter.class);
         var owner = owner(config, reporter);
         var context = RequestProtocolTestSupport.context(config, 702L);
         var original =
@@ -125,7 +125,7 @@ class RequestLifecycleSubmissionTest {
                             null,
                             System.currentTimeMillis());
             Delivery.Member claim;
-            try (var admission = owner.claimAdmissionHandle(702L, pending)) {
+            try (var admission = owner.claimAdmissionHandle("702", pending)) {
                 assertEquals(
                         PlacementResult.Status.SUCCESS,
                         RequestProtocolTestSupport.commitRoute(
@@ -180,7 +180,7 @@ class RequestLifecycleSubmissionTest {
     @org.junit.jupiter.api.Test
     void missingBatchInputRejectsBeforeRegistration() {
         var config = SchedulingTestConfig.batchConfig();
-        var owner = owner(config, mock(RecentCacheKeyTraceReporter.class));
+        var owner = owner(config, mock(TheoryCacheHitReporter.class));
         var context = RequestProtocolTestSupport.context(config, 701L);
         context.data().setGenerateInputPb(null);
         try {
@@ -193,7 +193,7 @@ class RequestLifecycleSubmissionTest {
                             .submit(context)
                             .join()
                             .getCode());
-            assertFalse(owner.requests.retainsIdentity(701L));
+            assertFalse(owner.requests.retainsIdentity("701"));
         } finally {
             SchedulerTestSupport.shutdown(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
@@ -201,7 +201,7 @@ class RequestLifecycleSubmissionTest {
     }
 
     private static RequestLifecycle owner(
-            FlexlbConfig config, RecentCacheKeyTraceReporter trace, RequestWorkerSelector router) {
+            FlexlbConfig config, TheoryCacheHitReporter trace, RequestWorkerSelector router) {
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         return SchedulerTestSupport.create(
@@ -214,7 +214,7 @@ class RequestLifecycleSubmissionTest {
                 new PlacementAvailability());
     }
 
-    private static RequestLifecycle owner(FlexlbConfig config, RecentCacheKeyTraceReporter trace) {
+    private static RequestLifecycle owner(FlexlbConfig config, TheoryCacheHitReporter trace) {
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         return SchedulerTestSupport.create(

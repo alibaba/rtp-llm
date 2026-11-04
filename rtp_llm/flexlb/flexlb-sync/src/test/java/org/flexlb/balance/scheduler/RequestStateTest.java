@@ -44,6 +44,15 @@ class RequestStateTest {
 
     private static RequestState state(
             RequestState.Phase phase, Delivery.SendMode claim, long batchId) {
-        return new RequestState(1L, phase, claim, batchId, 10L, 11L, "test");
+        return new RequestState(
+                "1",
+                1L,
+                org.flexlb.dao.route.RequestPhase.GENERATION,
+                phase,
+                claim,
+                batchId,
+                10L,
+                11L,
+                "test");
     }
 }

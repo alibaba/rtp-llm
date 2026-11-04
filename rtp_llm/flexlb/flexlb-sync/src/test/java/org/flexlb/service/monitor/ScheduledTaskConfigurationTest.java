@@ -1,7 +1,7 @@
 package org.flexlb.service.monitor;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.sync.synchronizer.WorkerStatusSynchronizer;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -54,6 +54,16 @@ class ScheduledTaskConfigurationTest {
         ScheduledThreadPoolExecutor scheduler;
         try (var context = new AnnotationConfigApplicationContext()) {
             context.register(Scheduling.class);
+            for (String name :
+                    java.util.List.of(
+                            "environmentConfigSource",
+                            "nacosConfigSource",
+                            "uniConfigConfigSource")) {
+                context.registerBean(
+                        name,
+                        org.flexlb.service.config.ConfigSource.class,
+                        () -> mock(org.flexlb.service.config.ConfigSource.class));
+            }
             context.registerBean("configService", ConfigService.class, () -> service);
             context.registerBean(EndpointRegistry.class, () -> registry);
             context.registerBean(CacheAwareService.class, () -> mock(CacheAwareService.class));

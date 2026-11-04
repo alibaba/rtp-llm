@@ -51,6 +51,7 @@ class ApplicationLifecycleTest {
                         grpc,
                         mock(EngineHealthReporter.class),
                         context.getEnvironment(),
+                        new org.flexlb.listener.ApplicationWarmupState(),
                         0L);
         context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
         context.registerBean(
@@ -82,6 +83,7 @@ class ApplicationLifecycleTest {
                             grpc,
                             mock(EngineHealthReporter.class),
                             context.getEnvironment(),
+                            new org.flexlb.listener.ApplicationWarmupState(),
                             0L);
             context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
             SchedulingShutdownTest.registerComponents(context);
@@ -100,6 +102,7 @@ class ApplicationLifecycleTest {
             context.registerBean(FlexlbGrpcServer.class, () -> mock(FlexlbGrpcServer.class));
             context.registerBean(
                     EngineHealthReporter.class, () -> mock(EngineHealthReporter.class));
+            context.registerBean(org.flexlb.listener.ApplicationWarmupState.class);
             context.register(ApplicationLifecycle.class);
             SchedulingShutdownTest.registerComponents(context);
             context.refresh();
@@ -119,7 +122,14 @@ class ApplicationLifecycleTest {
         var reporter = mock(EngineHealthReporter.class);
         var environment = mock(Environment.class);
         when(environment.getActiveProfiles()).thenReturn(new String[0]);
-        var lifecycle = new ApplicationLifecycle(consistency, grpc, reporter, environment, 0L);
+        var lifecycle =
+                new ApplicationLifecycle(
+                        consistency,
+                        grpc,
+                        reporter,
+                        environment,
+                        new org.flexlb.listener.ApplicationWarmupState(),
+                        0L);
         lifecycle.online();
         assertTrue(lifecycle.isHealthy());
         verifyNoInteractions(grpc);

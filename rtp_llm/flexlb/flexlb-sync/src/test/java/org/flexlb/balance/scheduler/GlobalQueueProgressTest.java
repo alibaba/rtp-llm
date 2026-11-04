@@ -41,7 +41,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.doAnswer;
@@ -213,8 +212,10 @@ class GlobalQueueProgressTest {
                                 RequestContext context = call.getArgument(0);
                                 CompletableFuture<Response> future =
                                         (CompletableFuture<Response>) call.callRealMethod();
-                                f.contexts.put(context.data().getRequestId(), context);
-                                f.requests.put(context.data().getRequestId(), future);
+                                f.contexts.put(
+                                        Long.parseLong(context.data().getRequestId()), context);
+                                f.requests.put(
+                                        Long.parseLong(context.data().getRequestId()), future);
                                 return future;
                             })
                     .when(f.lifecycle)
@@ -509,7 +510,7 @@ class GlobalQueueProgressTest {
                                                         org.flexlb.balance.endpoint.DecodeResources
                                                                 .MutationStatus.APPLIED,
                                                         false));
-                        when(route.requestId()).thenReturn(id);
+                        when(route.requestId()).thenReturn(String.valueOf(id));
                         if (attempts.computeIfAbsent(id, ignored -> new AtomicInteger())
                                         .incrementAndGet()
                                 == 1) {
@@ -526,7 +527,8 @@ class GlobalQueueProgressTest {
                                         new CompletableFuture<
                                                 org.flexlb.balance.eviction.DecodePreemption
                                                         .PreemptionResult>();
-                                pending.put(context.data().getRequestId(), operation);
+                                pending.put(
+                                        Long.parseLong(context.data().getRequestId()), operation);
                                 return operation;
                             });
             try {
@@ -566,7 +568,7 @@ class GlobalQueueProgressTest {
         try (Fixture f = new Fixture(RoleType.DECODE, true)) {
             long id = 1101L;
             DecodeEndpoint decode = f.blockDecodePreemption(id);
-            var reservation = new DecodeResources.ReservationHandle(1L, id, 7L);
+            var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(id), 7L);
             var result = new PreemptionResult(reservation, false, "committed");
             var reply = new CompletableFuture<PreemptionResult>();
             CountDownLatch invoked = new CountDownLatch(1);
@@ -670,7 +672,7 @@ class GlobalQueueProgressTest {
         try (Fixture f = new Fixture(RoleType.DECODE, true)) {
             long id = 1104L;
             DecodeEndpoint decode = f.blockDecodePreemption(id);
-            var reservation = new DecodeResources.ReservationHandle(3L, id, 17L);
+            var reservation = new DecodeResources.ReservationHandle(3L, String.valueOf(id), 17L);
             var reply = new CompletableFuture<PreemptionResult>();
             CountDownLatch invoked = new CountDownLatch(1);
             when(f.eviction.tryReclaim(any(), eq(decode)))
@@ -861,9 +863,10 @@ class GlobalQueueProgressTest {
                     .thenAnswer(
                             i ->
                                     groups.get(
-                                            ((RequestContext) i.getArgument(0))
-                                                    .data()
-                                                    .getRequestId()));
+                                            Long.parseLong(
+                                                    ((RequestContext) i.getArgument(0))
+                                                            .data()
+                                                            .getRequestId())));
 
             PrefillRoutingEntry a = endpoint("a");
             lifecycle = RequestProtocolTestSupport.schedulerMock();
@@ -875,25 +878,31 @@ class GlobalQueueProgressTest {
                             i -> {
                                 RequestContext context = i.getArgument(0);
                                 CompletableFuture<Response> future = new CompletableFuture<>();
-                                requests.put(context.data().getRequestId(), future);
-                                contexts.put(context.data().getRequestId(), context);
+                                requests.put(Long.parseLong(context.data().getRequestId()), future);
+                                contexts.put(
+                                        Long.parseLong(context.data().getRequestId()), context);
                                 context.data().setFuture(future);
                                 return future;
                             });
-            when(lifecycle.claimAdmissionHandle(anyLong(), any()))
+            when(lifecycle.claimAdmissionHandle(any(RequestContext.class)))
                     .thenAnswer(
                             i -> {
                                 AdmissionHandle mutation =
                                         RequestProtocolTestSupport.admissionHandle(
-                                                contexts.get(i.<Long>getArgument(0)));
-                                mutations.put(i.getArgument(0), mutation);
+                                                i.getArgument(0, RequestContext.class));
+                                mutations.put(
+                                        Long.parseLong(
+                                                i.getArgument(0, RequestContext.class)
+                                                        .data()
+                                                        .getRequestId()),
+                                        mutation);
                                 return mutation;
                             });
             org.mockito.Mockito.doAnswer(
                             commit -> {
                                 RequestRoute selectedRoute = commit.getArgument(0);
                                 RequestContext context = selectedRoute.ctx();
-                                long id = context.data().getRequestId();
+                                long id = Long.parseLong(context.data().getRequestId());
                                 onAdmission.accept(id);
                                 if (admissionBlocked.contains(id)) {
                                     return PlacementResult.blocked(
@@ -914,7 +923,7 @@ class GlobalQueueProgressTest {
                     .thenAnswer(
                             i -> {
                                 RequestContext context = i.getArgument(0);
-                                long id = context.data().getRequestId();
+                                long id = Long.parseLong(context.data().getRequestId());
                                 selected.add(id);
                                 onSelection.accept(id);
                                 if ("a".equals(groups.get(id)) && aSlots.get() == 0 && !preempt) {
@@ -959,7 +968,7 @@ class GlobalQueueProgressTest {
                                                         org.flexlb.balance.endpoint.DecodeResources
                                                                 .MutationStatus.APPLIED,
                                                         false));
-                        when(route.requestId()).thenReturn(id);
+                        when(route.requestId()).thenReturn(String.valueOf(id));
                         if (attempts.getAndIncrement() == 0) {
                             admissionBlocked.add(id);
                         } else {

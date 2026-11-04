@@ -24,16 +24,16 @@ public final class PriorityOrdering {
     public static int compareWithRequestId(
             int leftPriority,
             long leftEnqueueSeq,
-            long leftRequestId,
+            String leftRequestId,
             int rightPriority,
             long rightEnqueueSeq,
-            long rightRequestId) {
+            String rightRequestId) {
         int priorityOrder = Integer.compare(rightPriority, leftPriority);
         if (priorityOrder != 0) {
             return priorityOrder;
         }
         int sequenceOrder = Long.compare(leftEnqueueSeq, rightEnqueueSeq);
-        return sequenceOrder != 0 ? sequenceOrder : Long.compare(leftRequestId, rightRequestId);
+        return sequenceOrder != 0 ? sequenceOrder : leftRequestId.compareTo(rightRequestId);
     }
 
     private PriorityOrdering() {}

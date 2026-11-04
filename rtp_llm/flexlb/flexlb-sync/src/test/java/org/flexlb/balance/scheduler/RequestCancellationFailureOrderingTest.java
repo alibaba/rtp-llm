@@ -9,7 +9,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -48,7 +48,7 @@ class RequestCancellationFailureOrderingTest {
     @ValueSource(booleans = {false, true})
     void deliveryFailureOnlyBypassesPlacementWithoutAnEarlierCancellation(boolean cancelFirst) {
         var context = new RequestContext(mock(FlexlbConfig.class));
-        context.register(9501L, 1000L, 100_000L, 10_000L);
+        context.register("9501", 1000L, 100_000L, 10_000L);
         var scope = RequestCleanupPassTest.requireValue(context.beginPlacement(null));
         var route = RequestCleanupPassTest.route(context, 9501L);
         org.junit.jupiter.api.Assertions.assertTrue(
@@ -170,12 +170,12 @@ class RequestCancellationFailureOrderingTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         var context = RequestProtocolTestSupport.context(config, 9503L);
         var future = RequestProtocolTestSupport.register(owner, context);
         var prefill = mock(PrefillEndpoint.class);
         var decode = RequestProtocolTestSupport.decodeEndpoint();
-        var reservation = new DecodeResources.ReservationHandle(1L, 9503L, 1L);
+        var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(9503L), 1L);
         var route =
                 SchedulingTestConfig.createRoute(
                         context,
@@ -198,7 +198,7 @@ class RequestCancellationFailureOrderingTest {
                 .when(completions)
                 .register();
         try {
-            try (var admission = owner.claimAdmissionHandle(9503L, future)) {
+            try (var admission = owner.claimAdmissionHandle("9503", future)) {
                 assertNotNull(admission);
                 try {
                     assertEquals(

@@ -73,7 +73,8 @@ class PrefillRequestQueueContractTest {
         long version = queue.version();
         assertSame(first, queue.peek());
         assertEquals(
-                List.of(1L, 2L), snapshot.items().stream().map(RequestRoute::requestId).toList());
+                List.of(1L, 2L),
+                snapshot.items().stream().map(item -> Long.parseLong(item.requestId())).toList());
         assertNull(org.flexlb.balance.endpoint.EndpointTestSupport.removeQueued(state, stale));
         assertEquals(version, queue.version());
         when(first.requestExpired(100)).thenReturn(true);
@@ -157,7 +158,7 @@ class PrefillRequestQueueContractTest {
 
     private static RequestRoute route(long id, long sequence) {
         var route = mock(RequestRoute.class);
-        when(route.requestId()).thenReturn(id);
+        when(route.requestId()).thenReturn(String.valueOf(id));
         when(route.enqueueSeq()).thenReturn(sequence);
         when(route.expiresAtMs()).thenReturn(Long.MAX_VALUE);
         return route;

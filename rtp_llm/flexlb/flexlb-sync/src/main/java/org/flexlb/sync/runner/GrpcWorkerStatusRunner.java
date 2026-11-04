@@ -2,7 +2,7 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -55,7 +55,7 @@ public class GrpcWorkerStatusRunner extends AbstractStatusRunner {
         workerStatusRpcClient
                 .getWorkerStatusAsync(
                         workerStatus.getIp(),
-                        workerStatus.getGrpcPort(),
+                        workerStatus.getWorkerStatusPort(),
                         latestFinishedTaskVersion,
                         requestTimeoutMs,
                         roleType)
@@ -136,7 +136,7 @@ public class GrpcWorkerStatusRunner extends AbstractStatusRunner {
         try {
             if (observation == null) {
                 engineHealthReporter.reportStatusCheckerFail(
-                        modelName, BalanceStatusEnum.RESPONSE_NULL, roleType);
+                        BalanceStatusEnum.RESPONSE_NULL, workerStatus.getMetricIpPort(), roleType);
                 return;
             }
             StatusApplication applied = null;
@@ -177,7 +177,8 @@ public class GrpcWorkerStatusRunner extends AbstractStatusRunner {
                     }
                 }
             }
-            reportSuccessfulStatus(observation, startTime, applied.endpoint());
+            reportSuccessfulStatus(observation, startTime, applied);
+            observeCacheFeedback(observation);
             logWorkerStatusUpdate(startTime);
         } catch (Throwable failure) {
             pollLease.trace().record(Stage.STATUS_RESPONSE_FAILED, failure);
@@ -186,11 +187,16 @@ public class GrpcWorkerStatusRunner extends AbstractStatusRunner {
                     ipPort,
                     failure);
             engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.UNKNOWN_ERROR, roleType);
+                    BalanceStatusEnum.UNKNOWN_ERROR, workerStatus.getMetricIpPort(), roleType);
         }
     }
 
-    private record StatusApplication(WorkerEndpoint endpoint, WorkerEndpoint.StatusChange change) {}
+    private record StatusApplication(
+            WorkerEndpoint endpoint,
+            WorkerEndpoint.StatusChange change,
+            boolean newStatus,
+            boolean newFinished,
+            WorkerStatus.StepMetrics previousStep) {}
 
     /** Validate the frame once and commit one exact generation; external effects are returned as data. */
     private StatusApplication applyStatusLocked(WorkerStatus.StatusObservation observation) {
@@ -222,6 +228,7 @@ public class GrpcWorkerStatusRunner extends AbstractStatusRunner {
                             + "#"
                             + workerStatus.getGenerationId());
         }
+        var previousStep = workerStatus.committedEngineObservation().lastStepMetrics();
         WorkerEndpoint.StatusChange change = WorkerEndpoint.NO_STATUS_CHANGE;
         if (version > cursor.statusVersion()) {
             WorkerStatus.PreparedStatus prepared = workerStatus.prepareNewStatus(observation);
@@ -235,22 +242,82 @@ public class GrpcWorkerStatusRunner extends AbstractStatusRunner {
             // mutations.
             change = endpoint.applyStatusHeartbeat(workerStatus, observation);
         }
-        return new StatusApplication(endpoint, change);
+        return new StatusApplication(
+                endpoint,
+                change,
+                version > cursor.statusVersion(),
+                observation.latestFinishedVersion() != null
+                        && observation.latestFinishedVersion() > cursor.latestFinishedTaskVersion(),
+                previousStep);
+    }
+
+    private void observeCacheFeedback(WorkerStatus.StatusObservation observation) {
+        try {
+            for (var result :
+                    cacheAwareService.observeCacheHitFeedback(workerStatus, observation)) {
+                result.whenComplete(
+                        (comparison, error) -> {
+                            if (error != null || comparison == null) {
+                                logger.warn("Cache comparison failed at {}", ipPort, error);
+                                return;
+                            }
+                            try {
+                                org.slf4j.LoggerFactory.getLogger("pvLogger")
+                                        .info(
+                                                org.flexlb.util.JsonUtils.toStringOrEmpty(
+                                                        comparison));
+                                engineHealthReporter.reportCacheHitComparisonMetrics(
+                                        workerStatus, comparison);
+                            } catch (RuntimeException failure) {
+                                logger.warn(
+                                        "Cache comparison telemetry failed at {}", ipPort, failure);
+                            }
+                        });
+            }
+        } catch (RuntimeException failure) {
+            logger.warn("Cache feedback observation failed at {}", ipPort, failure);
+        }
     }
 
     private void reportSuccessfulStatus(
-            WorkerStatus.StatusObservation observation, long startTime, WorkerEndpoint endpoint) {
+            WorkerStatus.StatusObservation observation, long startTime, StatusApplication applied) {
+        var endpoint = applied.endpoint();
         try {
             engineHealthReporter.reportStatusCheckRemoteInfo(
                     modelName, observation.role().name(), startTime);
             engineHealthReporter.reportStatusCheckerSuccess(
-                    modelName,
-                    workerStatus.topologySnapshot(),
-                    workerStatus.committedEngineObservation(),
-                    workerStatus.pollHealth(),
+                    workerStatus,
                     endpoint == null ? java.util.OptionalLong.empty() : endpoint.tryGetLoadMetric(),
-                    observation.runningTasks().size(),
+                    observation.activeTasks().size(),
                     observation.finishedTasks().size());
+            if (endpoint instanceof org.flexlb.balance.endpoint.EncoderEndpoint encoder) {
+                long total = encoder.requestCount();
+                var engine = observation.engine();
+                long pending =
+                        Math.max(
+                                0,
+                                total
+                                        - Math.max(0, engine.runningQueryLen())
+                                        - Math.max(0, engine.waitingQueryLen()));
+                engineHealthReporter.reportEncoderStatus(
+                        workerStatus.getMetricIpPort(), pending, total, encoder.uncachedTokens());
+            }
+            var step = observation.engine().lastStepMetrics();
+            if (applied.newStatus()
+                    && step != null
+                    && (applied.previousStep() == null
+                            || step.stepId() != applied.previousStep().stepId()))
+                engineHealthReporter.reportWorkerStepMetrics(workerStatus, step);
+            if (applied.newFinished() && observation.role().supportsPrefill()) {
+                for (var task : observation.finishedTasks().values()) {
+                    if (task.telemetry() != null && task.telemetry().firstTokenTimeMs() > 0)
+                        engineHealthReporter.reportPrefillWorkerStatusTask(
+                                workerStatus.getMetricIpPort(),
+                                observation.role().name(),
+                                workerStatus.getGroup(),
+                                task.telemetry());
+                }
+            }
         } catch (Throwable telemetryFailure) {
             logger.warn(
                     "Worker status telemetry failed after commit for {}: {}",
@@ -293,10 +360,10 @@ public class GrpcWorkerStatusRunner extends AbstractStatusRunner {
     @Override
     protected void reportRpcFailure(boolean timeout) {
         engineHealthReporter.reportStatusCheckerFail(
-                modelName,
                 timeout
                         ? BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT
                         : BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE,
+                workerStatus.getMetricIpPort(),
                 roleType);
     }
 }

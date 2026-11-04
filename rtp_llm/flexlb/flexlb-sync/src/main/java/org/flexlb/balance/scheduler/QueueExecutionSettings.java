@@ -30,7 +30,7 @@ public record QueueExecutionSettings(
                             right.enqueueSeq(),
                             right.requestId());
     private static final Comparator<QueueItem> FIFO_QUEUE_ORDER =
-            Comparator.comparingLong(QueueItem::enqueueSeq).thenComparingLong(QueueItem::requestId);
+            Comparator.comparingLong(QueueItem::enqueueSeq).thenComparing(QueueItem::requestId);
 
     public static Comparator<QueueItem> queueOrder(boolean priorityOrdering) {
         return priorityOrdering ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;

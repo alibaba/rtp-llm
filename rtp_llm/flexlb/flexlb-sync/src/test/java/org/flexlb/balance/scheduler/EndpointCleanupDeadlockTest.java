@@ -6,7 +6,7 @@ import org.flexlb.balance.endpoint.PrefillCleanupDeadlockFixture;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -18,7 +18,7 @@ import java.nio.file.Path;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -216,21 +216,21 @@ class EndpointCleanupDeadlockTest {
                             service,
                             mock(DeliveryMetricsReporter.class),
                             mock(RequestSchedulerReporter.class),
-                            mock(RecentCacheKeyTraceReporter.class));
+                            mock(TheoryCacheHitReporter.class));
             long id = 991L;
             var context = RequestProtocolTestSupport.context(config, id);
             var future = RequestProtocolTestSupport.register(registry, context);
-            RequestContext requestContext = registry.requests.findActive(id);
+            RequestContext requestContext = registry.requests.findActive(String.valueOf(id));
             CountDownLatch contextHeld = new CountDownLatch(1);
             CountDownLatch endpointHeld = new CountDownLatch(1);
             AtomicReference<Throwable> failure = new AtomicReference<>();
-            LongPredicate ownership =
+            Predicate<String> ownership =
                     requestId -> {
                         // This callback is invoked by the real endpoint sweep under its real lock.
                         endpointHeld.countDown();
                         return org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                         registry)
-                                .retainsIdentity(requestId);
+                                .retainsIdentity(String.valueOf(requestId));
                     };
             Runnable sweep;
             Runnable endpointOperation;

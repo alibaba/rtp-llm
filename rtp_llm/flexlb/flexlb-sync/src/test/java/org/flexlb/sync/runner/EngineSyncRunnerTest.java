@@ -2,8 +2,8 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
@@ -124,7 +124,7 @@ class EngineSyncRunnerTest {
 
     @Test
     void should_initialize_poll_health_at_discovery_time() {
-        String ipPort = "127.0.0.1:8080";
+        String ipPort = "127.0.0.1:8080@0";
         Mockito.when(workerAddressService.getEngineWorkerList(modelName, RoleType.VIT))
                 .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080)));
         Runnable runner =
@@ -163,13 +163,13 @@ class EngineSyncRunnerTest {
 
         engineSyncRunner.run();
 
-        assertNotNull(endpointRegistry.statusSnapshot(roleType).get("127.0.0.1:8080"));
+        assertNotNull(endpointRegistry.statusSnapshot(roleType).get("127.0.0.1:8080@0"));
         verify(statusCheckExecutor, times(2)).submit(any(Runnable.class));
     }
 
     @Test
     void executorRejectionReturnsBothExactPollLeases() {
-        String ipPort = "127.0.0.1:8080";
+        String ipPort = "127.0.0.1:8080@0";
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080)));
         when(statusCheckExecutor.submit(any(Runnable.class)))
@@ -210,7 +210,7 @@ class EngineSyncRunnerTest {
                 .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
         EndpointRegistry directory = registry;
-        String ipPort = "127.0.0.1:8080";
+        String ipPort = "127.0.0.1:8080@0";
         WorkerStatus status =
                 Mockito.spy(
                         RunnerTestSupport.discovered(
@@ -281,13 +281,13 @@ class EngineSyncRunnerTest {
             runner.run();
 
             WorkerStatus discovered =
-                    directory.statusSnapshot(RoleType.PREFILL).get("127.0.0.1:61000");
+                    directory.statusSnapshot(RoleType.PREFILL).get("127.0.0.1:61000@0");
             assertEquals(RoleType.PREFILL, discovered.getRole());
             assertFalse(
                     discovered.pollHealth().reportedAlive(),
                     "service discovery alone must not make a worker routable");
             assertNull(
-                    registry.get(RoleType.PREFILL, "127.0.0.1:61000"),
+                    registry.get(RoleType.PREFILL, "127.0.0.1:61000@0"),
                     "an endpoint is published only by a committed status response");
             verify(statusCheckExecutor, times(2)).submit(any(Runnable.class));
         } finally {
@@ -336,10 +336,10 @@ class EngineSyncRunnerTest {
                                 WorkerHost.of(second.getIp(), second.getPort())));
         Mockito.doReturn(firstEndpoint)
                 .when(registry)
-                .get(RoleType.PREFILL, first.getIpPort(), first);
+                .get(RoleType.PREFILL, first.getLogicalIpPort(), first);
         Mockito.doReturn(secondEndpoint)
                 .when(registry)
-                .get(RoleType.PREFILL, second.getIpPort(), second);
+                .get(RoleType.PREFILL, second.getLogicalIpPort(), second);
         when(firstEndpoint.tryGetLoadMetric()).thenReturn(OptionalLong.of(10L));
         when(secondEndpoint.tryGetLoadMetric()).thenReturn(OptionalLong.empty());
 
@@ -371,10 +371,10 @@ class EngineSyncRunnerTest {
                                 WorkerHost.of(second.getIp(), second.getPort())));
         Mockito.doReturn(firstEndpoint)
                 .when(registry)
-                .get(RoleType.PREFILL, first.getIpPort(), first);
+                .get(RoleType.PREFILL, first.getLogicalIpPort(), first);
         Mockito.doReturn(secondEndpoint)
                 .when(registry)
-                .get(RoleType.PREFILL, second.getIpPort(), second);
+                .get(RoleType.PREFILL, second.getLogicalIpPort(), second);
         when(firstEndpoint.tryGetLoadMetric()).thenReturn(OptionalLong.of(10L));
         when(secondEndpoint.tryGetLoadMetric()).thenReturn(OptionalLong.of(30L));
 
@@ -411,7 +411,7 @@ class EngineSyncRunnerTest {
                 .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
         EndpointRegistry directory = registry;
-        String ipPort = "127.0.0.1:61000";
+        String ipPort = "127.0.0.1:61000@0";
         WorkerStatus oldStatus =
                 RunnerTestSupport.discovered(
                         RoleType.PREFILL, oldGroup, "127.0.0.1", 61000, 61001, "site-a");
@@ -484,6 +484,6 @@ class EngineSyncRunnerTest {
     }
 
     private static void discover(EndpointRegistry directory, WorkerStatus status) {
-        directory.currentOrDiscover(status.getRole(), status.getIpPort(), () -> status);
+        directory.currentOrDiscover(status.getRole(), status.getLogicalIpPort(), () -> status);
     }
 }

@@ -84,7 +84,7 @@ class RequestCleanupPassTest {
     @Test
     void completedRollbackAllowsAnotherRouteInTheSamePlacementScope() {
         var context = new RequestContext(mock(FlexlbConfig.class));
-        context.register(990L, 1000L, 100_000L, 10_000L);
+        context.register("990", 1000L, 100_000L, 10_000L);
         var operation = requireValue(context.beginPlacement(null));
         var first = route(context, 990L);
         org.junit.jupiter.api.Assertions.assertTrue(
@@ -116,7 +116,7 @@ class RequestCleanupPassTest {
     @Test
     void samePlacementRollbackKeepsCancellationWithoutTheDiscardedRouteIdentity() {
         var context = new RequestContext(mock(FlexlbConfig.class));
-        context.register(991L, 1000L, 100_000L, 10_000L);
+        context.register("991", 1000L, 100_000L, 10_000L);
         var operation = requireValue(context.beginPlacement(null));
         var route = route(context, 991L);
         org.junit.jupiter.api.Assertions.assertTrue(
@@ -180,7 +180,7 @@ class RequestCleanupPassTest {
     @Test
     void realAdmissionFailureSupersedesUnclaimedShutdownEvidence() {
         var context = new RequestContext(mock(FlexlbConfig.class));
-        context.register(993L, 1000L, 100_000L, 10_000L);
+        context.register("993", 1000L, 100_000L, 10_000L);
         var placement = requireValue(context.beginPlacement(null));
         var route = route(context, 993L);
         org.junit.jupiter.api.Assertions.assertTrue(
@@ -229,7 +229,7 @@ class RequestCleanupPassTest {
     void lateAcquisitionPreservesNotificationsAndRequiresItsOwnReleaseProof(
             boolean notificationsFinished) {
         var context = new RequestContext(mock(FlexlbConfig.class));
-        context.register(994L, 1000L, 100_000L, 10_000L);
+        context.register("994", 1000L, 100_000L, 10_000L);
         var placement = requireValue(context.beginPlacement(null));
         var originalRoute = route(context, 994L);
         org.junit.jupiter.api.Assertions.assertTrue(
@@ -294,7 +294,7 @@ class RequestCleanupPassTest {
     @ValueSource(booleans = {false, true})
     void preparationFailureWinsPendingWorkerEndBeforePlacementFinishes(boolean workerFirst) {
         var context = new RequestContext(mock(FlexlbConfig.class));
-        context.register(995L, 1000L, 100_000L, 10_000L);
+        context.register("995", 1000L, 100_000L, 10_000L);
         var placement = requireValue(context.beginPlacement(null));
         var route = route(context, 995L);
         assertTrue(context.bindPlacement(placement, route, PublicationResult.PREPARED));
@@ -327,24 +327,24 @@ class RequestCleanupPassTest {
     static RequestRoute route(RequestContext context, long id) {
         var route = mock(RequestRoute.class);
         when(route.ctx()).thenReturn(context);
-        when(route.requestId()).thenReturn(id);
+        when(route.requestId()).thenReturn(String.valueOf(id));
         var decode = SchedulerTestSupport.mockDecodeEndpoint();
         when(route.decodeEp()).thenReturn(decode);
         when(route.decodeReservation())
-                .thenReturn(new DecodeResources.ReservationHandle(1L, id, 1L));
+                .thenReturn(new DecodeResources.ReservationHandle(1L, String.valueOf(id), 1L));
         return route;
     }
 
     static RequestContext openContext(long id) {
         var context = new RequestContext(mock(FlexlbConfig.class));
-        context.register(id, 1000L, 100_000L, 10_000L);
+        context.register(String.valueOf(id), 1000L, 100_000L, 10_000L);
         var route = mock(RequestRoute.class);
         when(route.ctx()).thenReturn(context);
-        when(route.requestId()).thenReturn(id);
+        when(route.requestId()).thenReturn(String.valueOf(id));
         var decode = SchedulerTestSupport.mockDecodeEndpoint();
         when(route.decodeEp()).thenReturn(decode);
         when(route.decodeReservation())
-                .thenReturn(new DecodeResources.ReservationHandle(1L, id, 1L));
+                .thenReturn(new DecodeResources.ReservationHandle(1L, String.valueOf(id), 1L));
         var placement = requireValue(context.beginPlacement(null));
         org.junit.jupiter.api.Assertions.assertTrue(
                 context.bindPlacement(placement, route, PublicationResult.PREPARED));

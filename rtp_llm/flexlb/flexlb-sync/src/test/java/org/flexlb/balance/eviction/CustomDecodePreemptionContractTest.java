@@ -85,6 +85,18 @@ class CustomDecodePreemptionContractTest {
                                 null);
         new ApplicationContextRunner()
                 .withUserConfiguration(PlacementConfiguration.class)
+                .withBean(
+                        "environmentConfigSource",
+                        org.flexlb.service.config.ConfigSource.class,
+                        () -> mock(org.flexlb.service.config.ConfigSource.class))
+                .withBean(
+                        "nacosConfigSource",
+                        org.flexlb.service.config.ConfigSource.class,
+                        () -> mock(org.flexlb.service.config.ConfigSource.class))
+                .withBean(
+                        "uniConfigConfigSource",
+                        org.flexlb.service.config.ConfigSource.class,
+                        () -> mock(org.flexlb.service.config.ConfigSource.class))
                 .withBean(ConfigService.class, () -> SchedulingTestConfig.configService(config))
                 .withBean(RequestScheduler.class, () -> mock(RequestScheduler.class))
                 .withBean(DecodePreemption.class, () -> service)
@@ -125,7 +137,7 @@ class CustomDecodePreemptionContractTest {
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(2L);
         var first =
                 new DecodeRequestView(
-                        901L,
+                        String.valueOf(901L),
                         10,
                         128L,
                         128L,
@@ -135,7 +147,7 @@ class CustomDecodePreemptionContractTest {
                         false);
         var chosen =
                 new DecodeRequestView(
-                        902L,
+                        String.valueOf(902L),
                         mode.equals("priority") ? 90 : mode.equals("unknown") ? 0 : 30,
                         128L,
                         128L,
@@ -160,14 +172,15 @@ class CustomDecodePreemptionContractTest {
         var dispatcher = mock(DeliveryDispatcher.class);
         var context = new RequestContext(config);
         context.data()
-                .setRequest(Request.builder().requestId(903L).seqLen(128L).rawPriority(70).build());
+                .setRequest(
+                        Request.builder().requestId("903").seqLen(128L).rawPriority(70).build());
         context.data()
                 .setSchedulingMetadata(
                         SchedulingMetadata.explicit(70, System.currentTimeMillis() + 60_000L));
         var future = new RequestFuture((kind, response, failure) -> false);
         ReflectionTestUtils.invokeMethod(context.data(), "register", owner, future);
         SchedulerTestSupport.bindOwner(context, owner);
-        when(owner.isAdmissionOpen(903L, future)).thenReturn(true);
+        when(owner.isAdmissionOpen("903", future)).thenReturn(true);
         DecodePreemptionPolicy policy =
                 (request, priority, capacity, view, allowed, reasons) -> {
                     assertSame(snapshot, view);
@@ -213,7 +226,7 @@ class CustomDecodePreemptionContractTest {
                                 SchedulingTestConfig.configService(config),
                                 SchedulingTestConfig.capacity(config),
                                 policy));
-        var exact = new ReservationHandle(7L, 903L, 31L);
+        var exact = new ReservationHandle(7L, String.valueOf(903L), 31L);
         doAnswer(
                         invocation -> {
                             DefaultDecodePreemption.PreemptionCommand command =

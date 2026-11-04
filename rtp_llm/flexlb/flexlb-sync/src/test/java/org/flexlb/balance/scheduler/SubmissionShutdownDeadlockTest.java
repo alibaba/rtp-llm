@@ -227,7 +227,7 @@ class SubmissionShutdownDeadlockTest {
                                     config,
                                     SchedulingTestConfig.capacity(config),
                                     org.mockito.Mockito.mock(
-                                            org.flexlb.service.RecentCacheKeyTraceReporter.class)),
+                                            org.flexlb.service.TheoryCacheHitReporter.class)),
                             config,
                             router,
                             mock(DecodePreemption.class),

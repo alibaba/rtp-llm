@@ -150,7 +150,7 @@ class FlexlbServiceImplTest {
         verify(selector).routeVit(any());
         verifyNoInteractions(requestScheduler, observer);
         verify(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requestState), never())
-                .getRequestState(anyLong(), anyLong());
+                .getRequestState(org.mockito.ArgumentMatchers.anyString(), anyLong());
     }
 
     @Test
@@ -233,7 +233,7 @@ class FlexlbServiceImplTest {
                 .cancel(
                         org.mockito.ArgumentMatchers.argThat(
                                 (RequestContext context) ->
-                                        context.data().getRequestId() == 12_356L),
+                                        context.data().getRequestId().equals("12356")),
                         org.mockito.ArgumentMatchers.eq(0L),
                         org.mockito.ArgumentMatchers.eq(
                                 org.flexlb.balance.scheduler.CancelReason.CLIENT_CANCELLED));
@@ -366,7 +366,7 @@ class FlexlbServiceImplTest {
                 .cancel(
                         org.mockito.ArgumentMatchers.argThat(
                                 (RequestContext context) ->
-                                        context.data().getRequestId() == 12_357L),
+                                        context.data().getRequestId().equals("12357")),
                         org.mockito.ArgumentMatchers.eq(0L),
                         org.mockito.ArgumentMatchers.eq(
                                 org.flexlb.balance.scheduler.CancelReason.CLIENT_CANCELLED));
@@ -928,7 +928,7 @@ class FlexlbServiceImplTest {
                             nodeRejected(), "old:7001")); // Complete outside the original Context.
             ArgumentCaptor<RequestContext> ctx = ArgumentCaptor.forClass(RequestContext.class);
             verify(requestScheduler).submit(ctx.capture());
-            assertEquals(81, ctx.getValue().data().getRequestId());
+            assertEquals("81", ctx.getValue().data().getRequestId());
             verify(grpcForwarder, times(1)).forwardScheduleToMaster(any());
             verify(grpcForwarder, never()).forwardCancelToMaster(any());
         } finally {
@@ -1030,10 +1030,12 @@ class FlexlbServiceImplTest {
         when(masterStatusService.isNeedConsistency()).thenReturn(true);
         when(masterStatusService.isMaster()).thenReturn(false);
         when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requestState)
-                        .getRequestState(88L, 0L))
+                        .getRequestState("88", 0L, org.flexlb.dao.route.RequestPhase.GENERATION))
                 .thenReturn(
                         new RequestState(
+                                String.valueOf(88L),
                                 88L,
+                                org.flexlb.dao.route.RequestPhase.GENERATION,
                                 RequestState.Phase.ACKNOWLEDGED,
                                 Delivery.SendMode.BATCH_ENQUEUE,
                                 1001L,
@@ -1064,7 +1066,9 @@ class FlexlbServiceImplTest {
         when(masterStatusService.isMaster()).thenReturn(false);
         RequestState owned =
                 new RequestState(
+                        String.valueOf(86L),
                         86L,
+                        org.flexlb.dao.route.RequestPhase.GENERATION,
                         RequestState.Phase.ACKNOWLEDGED,
                         Delivery.SendMode.BATCH_ENQUEUE,
                         1001L,
@@ -1072,9 +1076,14 @@ class FlexlbServiceImplTest {
                         20L,
                         "owned here");
         when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requestState)
-                        .getRequestState(86L, 1001L))
+                        .getRequestState("86", 1001L, org.flexlb.dao.route.RequestPhase.GENERATION))
                 .thenReturn(owned);
-        when(requestScheduler.cancel(86L, 1001L, CancelReason.CLIENT_CANCELLED)).thenReturn(owned);
+        when(requestScheduler.cancel(
+                        "86",
+                        1001L,
+                        CancelReason.CLIENT_CANCELLED,
+                        org.flexlb.dao.route.RequestPhase.GENERATION))
+                .thenReturn(owned);
         service.getRequestState(
                 FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
                         .setRequestId(86)
@@ -1087,7 +1096,12 @@ class FlexlbServiceImplTest {
                         .setBatchId(1001)
                         .build(),
                 mock(StreamObserver.class));
-        verify(requestScheduler).cancel(86L, 1001L, CancelReason.CLIENT_CANCELLED);
+        verify(requestScheduler)
+                .cancel(
+                        "86",
+                        1001L,
+                        CancelReason.CLIENT_CANCELLED,
+                        org.flexlb.dao.route.RequestPhase.GENERATION);
         verifyNoInteractions(grpcForwarder);
     }
 
@@ -1685,11 +1699,11 @@ class FlexlbServiceImplTest {
                 .cancel(
                         org.mockito.ArgumentMatchers.argThat(
                                 (RequestContext context) ->
-                                        context.data().getRequestId() == 88_001L),
+                                        context.data().getRequestId().equals("88001")),
                         org.mockito.ArgumentMatchers.eq(0L),
                         org.mockito.ArgumentMatchers.eq(
                                 org.flexlb.balance.scheduler.CancelReason.CLIENT_CANCELLED));
-        assertPvContains("\"requestId\":88001");
+        assertPvContains("\"requestId\":\"88001\"");
         assertPvContains("\"scheduleOrigin\":\"LOCAL_STANDALONE\"");
     }
 
@@ -1717,6 +1731,9 @@ class FlexlbServiceImplTest {
                         context.data(), "generateInput");
         if (batch) {
             org.junit.jupiter.api.Assertions.assertNotNull(retained);
+            assertFalse(
+                    ((java.util.concurrent.FutureTask<?>) retained).isDone(),
+                    "payload decoding belongs to delivery");
         } else {
             org.junit.jupiter.api.Assertions.assertNull(retained);
         }
@@ -1840,10 +1857,12 @@ class FlexlbServiceImplTest {
         when(requestScheduler.submit(any()))
                 .thenReturn(CompletableFuture.completedFuture(response));
         when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requestState)
-                        .getRequestState(700L, 0))
+                        .getRequestState("700", 0, org.flexlb.dao.route.RequestPhase.GENERATION))
                 .thenReturn(
                         new RequestState(
+                                String.valueOf(700L),
                                 700L,
+                                org.flexlb.dao.route.RequestPhase.GENERATION,
                                 RequestState.Phase.ACKNOWLEDGED,
                                 Delivery.SendMode.BATCH_ENQUEUE,
                                 1001L,
@@ -1871,7 +1890,8 @@ class FlexlbServiceImplTest {
     @Test
     void testGetRequestState_rejectsStaleBatchIdAsNotFound() {
         when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requestState)
-                        .getRequestState(702L, 1002L))
+                        .getRequestState(
+                                "702", 1002L, org.flexlb.dao.route.RequestPhase.GENERATION))
                 .thenReturn(null);
         StreamObserver<FlexlbScheduleProtocol.GetRequestStateResponsePB> observer =
                 mock(StreamObserver.class);

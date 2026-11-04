@@ -11,7 +11,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -138,7 +138,7 @@ class RequestCompletionPublicationRaceTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         try {
             CompletableFuture<Response> future =
                     registry.register(
@@ -158,12 +158,12 @@ class RequestCompletionPublicationRaceTest {
             executor.shutdown();
             assertThrows(
                     java.util.concurrent.RejectedExecutionException.class,
-                    () -> registry.cancel(503L, 0L, CancelReason.CLIENT_CANCELLED));
+                    () -> registry.cancel("503", 0L, CancelReason.CLIENT_CANCELLED));
             assertThrows(ExecutionException.class, () -> future.get(2L, TimeUnit.SECONDS));
             assertEquals(
                     RequestState.Phase.CANCELLED,
                     org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
-                            .getRequestState(503L, 0L)
+                            .getRequestState("503", 0L)
                             .state());
         } finally {
             if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)) {
@@ -191,7 +191,7 @@ class RequestCompletionPublicationRaceTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         var responseExecutor =
                 (ResponseCompletionExecutor)
                         org.springframework.test.util.ReflectionTestUtils.getField(
@@ -227,7 +227,7 @@ class RequestCompletionPublicationRaceTest {
                                         completed.incrementAndGet();
                                         if (!last) {
                                             scheduler.cancel(
-                                                    requestId + 1,
+                                                    String.valueOf(requestId + 1),
                                                     0L,
                                                     CancelReason.CLIENT_CANCELLED);
                                         }
@@ -236,7 +236,7 @@ class RequestCompletionPublicationRaceTest {
                                     }
                                 }));
             }
-            scheduler.cancel(10_000L, 0L, CancelReason.CLIENT_CANCELLED);
+            scheduler.cancel("10000", 0L, CancelReason.CLIENT_CANCELLED);
             CompletableFuture.allOf(callbacks.toArray(CompletableFuture[]::new))
                     .get(10L, TimeUnit.SECONDS);
             responseExecutor.close();
@@ -360,7 +360,7 @@ class RequestCompletionPublicationRaceTest {
                         service,
                         reporter,
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         ExecutorService operations = Executors.newFixedThreadPool(2);
         CountDownLatch reportingEntered = new CountDownLatch(1);
         CountDownLatch resumeReporting = new CountDownLatch(1);
@@ -370,11 +370,11 @@ class RequestCompletionPublicationRaceTest {
             RequestContext context = RequestProtocolTestSupport.context(config, 501L);
             CompletableFuture<Response> future =
                     RequestProtocolTestSupport.register(registry, context);
-            RequestContext requestContext = registry.requests.findActive(501L);
+            RequestContext requestContext = registry.requests.findActive("501");
             PrefillEndpoint prefill = mock(PrefillEndpoint.class);
             when(prefill.getIp()).thenReturn("prefill");
             DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
-            var reservation = new DecodeResources.ReservationHandle(1L, 501L, 1L);
+            var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(501L), 1L);
             context.data().setFuture(future);
             RequestRoute item =
                     org.flexlb.balance.scheduler.SchedulingTestConfig.createRoute(
@@ -463,7 +463,7 @@ class RequestCompletionPublicationRaceTest {
             assertEquals(
                     SchedulerTestSupport.Stage.FINALIZING,
                     SchedulerTestSupport.stage(requestContext));
-            assertSame(requestContext, registry.requests.findActive(501L));
+            assertSame(requestContext, registry.requests.findActive("501"));
             assertEquals(
                     StrategyErrorType.INVALID_REQUEST.getErrorCode(),
                     registry.register(
@@ -482,12 +482,12 @@ class RequestCompletionPublicationRaceTest {
                             RequestProtocolTestSupport.context(config, 502L),
                             () -> {},
                             StrategyErrorType.BATCH_SLO_EXPIRED);
-            registry.cancel(502L, 0L, CancelReason.CLIENT_CANCELLED);
+            registry.cancel("502", 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(barrier.get(2L, TimeUnit.SECONDS).isSuccess());
             assertFalse(
                     future.get(2L, TimeUnit.SECONDS).isSuccess(),
                     "an obsolete success permit cannot win after TTL claims cleanup");
-            assertSame(requestContext, registry.requests.findActive(501L));
+            assertSame(requestContext, registry.requests.findActive("501"));
             assertEquals(
                     SchedulerTestSupport.Stage.FINALIZING,
                     SchedulerTestSupport.stage(requestContext));
@@ -508,11 +508,11 @@ class RequestCompletionPublicationRaceTest {
             assertEquals(
                     SchedulerTestSupport.Stage.FINISHED,
                     SchedulerTestSupport.stage(requestContext));
-            assertNull(registry.requests.findActive(501L));
+            assertNull(registry.requests.findActive("501"));
             assertEquals(
                     RequestState.Phase.TIMED_OUT,
                     org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
-                            .getRequestState(501L, 0L)
+                            .getRequestState("501", 0L)
                             .state());
             assertEquals(1, completions.get());
             verify(decode).release(reservation, DecodeResources.ReleaseReason.REMOTE_CLEANUP);

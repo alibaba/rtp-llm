@@ -74,11 +74,15 @@ public class DefaultDecodePreemption implements DecodePreemption {
             victims = List.copyOf(victims);
             Objects.requireNonNull(request, "request");
             Objects.requireNonNull(metadata, "metadata");
-            checkArgument(request.getRequestId() > 0L, "incoming request id must be positive");
-            Set<Long> victimIds = new LinkedHashSet<>();
+            checkArgument(
+                    request.getRequestId() != null && !request.getRequestId().isBlank(),
+                    "incoming request id is required");
+            Set<String> victimIds = new LinkedHashSet<>();
             for (DecodeRequestView victim : victims) {
                 checkArgument(
-                        victim.requestId() > 0L && victim.reservationToken() > 0L,
+                        victim.requestId() != null
+                                && !victim.requestId().isBlank()
+                                && victim.reservationToken() > 0L,
                         "victim requestId and reservation token must be positive");
                 checkArgument(
                         victim.phase() != null && victim.phase().requiresEngineCancel(),
@@ -170,7 +174,8 @@ public class DefaultDecodePreemption implements DecodePreemption {
                 ClaimedVictim owned = new ClaimedVictim(claim);
                 attempt.claims.add(owned);
                 victimReservations.add(reservation);
-                if (claim.owner().data().getRequestId() != victim.requestId()
+                if (!java.util.Objects.equals(
+                                claim.owner().data().getRequestId(), victim.requestId())
                         || claim.attemptToken() != token
                         || !reservation.equals(claim.reservation())) {
                     return CompletableFuture.completedFuture(
@@ -341,13 +346,14 @@ public class DefaultDecodePreemption implements DecodePreemption {
             this.claim = claim;
         }
 
-        private long requestId() {
+        private String requestId() {
             return claim.reservation().requestId();
         }
 
         private boolean requestResolved() {
             VictimResolution resolution = claim.result();
-            return resolution != null && resolution.requestId() == requestId();
+            return resolution != null
+                    && java.util.Objects.equals(resolution.requestId(), requestId());
         }
     }
 
@@ -659,7 +665,7 @@ public class DefaultDecodePreemption implements DecodePreemption {
     private void reportEviction(
             EvictionEvent event,
             int priority,
-            long requestId,
+            String requestId,
             String evictionCase,
             String outcome) {
         report(
@@ -718,19 +724,19 @@ public class DefaultDecodePreemption implements DecodePreemption {
     private void validateProposal(
             DecodeEvictionProposal proposal,
             DecodeResources.ResourceSnapshot snapshot,
-            long incomingId,
+            String incomingId,
             int incomingPriority) {
         checkArgument(
                 Objects.equals(proposal.endpointId(), snapshot.routing().address()),
                 "preemption proposal must target the selected endpoint");
         checkArgument(!proposal.victims().isEmpty(), "preemption proposal requires victims");
-        Set<Long> ids = new LinkedHashSet<>();
+        Set<String> ids = new LinkedHashSet<>();
         for (DecodeRequestView victim : proposal.victims()) {
             checkArgument(
                     victim.equals(snapshot.requests().get(victim.requestId())),
                     "preemption victim must match the supplied snapshot");
             checkArgument(
-                    victim.requestId() != incomingId
+                    !java.util.Objects.equals(victim.requestId(), incomingId)
                             && ids.add(victim.requestId())
                             && victim.reservationToken() > 0L
                             && victim.priorityKnown()
@@ -821,7 +827,7 @@ public class DefaultDecodePreemption implements DecodePreemption {
                                         }));
     }
 
-    private static void report(long requestId, String operation, Runnable metrics) {
+    private static void report(String requestId, String operation, Runnable metrics) {
         try {
             metrics.run();
         } catch (Throwable failure) {

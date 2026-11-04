@@ -58,6 +58,13 @@ public class HttpLoadBalanceServer {
     private final WorkerStatusSynchronizer workerStatusSynchronizer;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
 
+    private org.flexlb.balance.scheduler.RequestScheduler scheduler;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void configureScheduling(org.flexlb.balance.scheduler.RequestScheduler scheduler) {
+        this.scheduler = scheduler;
+    }
+
     public HttpLoadBalanceServer(
             MasterStatusService masterStatusService,
             ConfigService configService,
@@ -292,7 +299,11 @@ public class HttpLoadBalanceServer {
     public Mono<ServerResponse> inflightStatus(ServerRequest request) {
         try {
             Map<String, Object> result = new LinkedHashMap<>();
-            result.put("scheduler_inflight", requests.liveRequestCount());
+            int tracked = requests.liveRequestCount();
+            result.put("scheduler_inflight", tracked);
+            result.put("scheduler_tracked", tracked);
+            result.put(
+                    "scheduler_blocked", scheduler == null ? 0 : scheduler.blockedRequestCount());
             result.put(
                     "decode_max_engine_requests",
                     configService

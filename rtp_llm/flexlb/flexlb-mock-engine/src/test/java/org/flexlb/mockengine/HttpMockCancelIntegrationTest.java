@@ -60,7 +60,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *       KV_ALLOCATED — the accepted-layer contract Phase 5 eviction needs,</li>
  *   <li>the CANCELLED terminal surfaces in the next WorkerStatus finished
  *       list (iron rule 4 confirmation source),</li>
- *   <li>unknown engine port → UNSUPPORTED (HTTP 404),</li>
+ *   <li>unknown engine port → FAILED (HTTP 404),</li>
  *   <li>transport failure (dead URL) → failed future, never a synchronous
  *       throw.</li>
  * </ul>
@@ -121,7 +121,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefillService.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(2L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(2L)),
                                 5_000)
                         .get(5, TimeUnit.SECONDS);
         assertEquals(
@@ -195,7 +195,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefillService.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(21L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(21L)),
                                 5_000)
                         .get(5, TimeUnit.SECONDS);
         assertEquals(CancelReply.ACCEPTED, first);
@@ -204,7 +204,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefillService.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(21L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(21L)),
                                 5_000)
                         .get(5, TimeUnit.SECONDS);
         assertEquals(CancelReply.ACCEPTED, second);
@@ -231,7 +231,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefillService.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(424242L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(424242L)),
                                 5_000)
                         .get(5, TimeUnit.SECONDS);
         // Never-seen rid over the HTTP control plane: REQUEST_FENCED with the
@@ -308,7 +308,7 @@ class HttpMockCancelIntegrationTest {
                         .cancelAsync(
                                 "127.0.0.1",
                                 wrongPort,
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(23L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(23L)),
                                 5_000)
                         .get(5, TimeUnit.SECONDS);
 
@@ -331,7 +331,7 @@ class HttpMockCancelIntegrationTest {
                         .cancelAsync(
                                 "127.0.0.1",
                                 decodeService.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(24L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(24L)),
                                 5_000);
         assertThrows(
                 ExecutionException.class,
@@ -373,11 +373,10 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 59999,
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(1L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(1L)),
                                 5_000)
                         .get(5, TimeUnit.SECONDS);
-        assertEquals(
-                CancelReply.UNSUPPORTED, outcome, "unknown engine port (HTTP 404) → UNSUPPORTED");
+        assertEquals(CancelReply.FAILED, outcome, "unknown engine port (HTTP 404) → FAILED");
     }
 
     @Test
@@ -390,7 +389,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                         "127.0.0.1",
                         prefillService.getGrpcPort(),
-                        CancelReason.PRIORITY_PREEMPTED.toRequest(1L),
+                        CancelReason.PRIORITY_PREEMPTED.toRequest("1"),
                         5_000);
         assertNotNull(future, "cancel must never throw synchronously");
         assertThrows(
@@ -496,7 +495,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                         "127.0.0.1",
                         prefillService.getGrpcPort(),
-                        CancelReason.PRIORITY_PREEMPTED.toRequest(51L),
+                        CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(51L)),
                         5_000);
         ExecutionException failure =
                 assertThrows(
@@ -518,7 +517,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefillService.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(51L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(51L)),
                                 5_000)
                         .get(5, TimeUnit.SECONDS);
         assertEquals(
@@ -538,7 +537,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                         "127.0.0.1",
                         prefillService.getGrpcPort(),
-                        CancelReason.PRIORITY_PREEMPTED.toRequest(52L),
+                        CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(52L)),
                         5_000);
         ExecutionException failure =
                 assertThrows(
@@ -557,7 +556,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefillService.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(52L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(52L)),
                                 5_000)
                         .get(5, TimeUnit.SECONDS);
         assertEquals(
@@ -577,7 +576,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                         "127.0.0.1",
                         prefillService.getGrpcPort(),
-                        CancelReason.PRIORITY_PREEMPTED.toRequest(53L),
+                        CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(53L)),
                         5_000);
         ExecutionException failure =
                 assertThrows(
@@ -598,7 +597,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefillService.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(53L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(53L)),
                                 5_000)
                         .get(5, TimeUnit.SECONDS);
         assertEquals(

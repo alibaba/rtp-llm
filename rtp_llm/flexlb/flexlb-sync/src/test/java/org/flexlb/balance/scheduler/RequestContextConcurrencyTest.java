@@ -40,11 +40,13 @@ class RequestContextConcurrencyTest {
         try {
             for (int round = 0; round < 100; round++) {
                 var context = new RequestContext(SchedulingTestConfig.batchConfig());
-                context.data().setRequest(Request.builder().requestId(round + 1L).build());
-                context.register(round + 1L, 1000L, 100_000L, 10_000L);
+                context.data()
+                        .setRequest(
+                                Request.builder().requestId(String.valueOf(round + 1L)).build());
+                context.register(String.valueOf(round + 1L), 1000L, 100_000L, 10_000L);
                 var route = mock(RequestRoute.class);
                 when(route.ctx()).thenReturn(context);
-                when(route.requestId()).thenReturn(round + 1L);
+                when(route.requestId()).thenReturn(String.valueOf(round + 1L));
                 var placement = context.beginPlacement(null);
                 assertTrue(context.bindPlacement(placement, route, PublicationResult.PREPARED));
                 assertTrue(context.bindPlacement(placement, route, PublicationResult.PUBLISHED));

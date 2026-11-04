@@ -113,9 +113,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
     }
 
     private void dispatchRegistered(RequestContext context) {
-        AdmissionHandle operation =
-                lifecycle.claimAdmissionHandle(
-                        context.data().getRequestId(), context.data().getFuture());
+        AdmissionHandle operation = lifecycle.claimAdmissionHandle(context);
         if (operation == null) return;
         Response failure = Response.error(StrategyErrorType.DISPATCH_FAILED);
         try {
