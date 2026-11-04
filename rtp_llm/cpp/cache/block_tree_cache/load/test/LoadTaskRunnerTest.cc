@@ -156,6 +156,7 @@ TEST(LoadTaskRunnerTest, CreateTaskAllowsNoTransferDescriptors) {
         LoadContextCoordinator::CommitCallback{}, LoadContextCoordinator::AbortCallback{});
     const std::shared_ptr<LoadAsyncContext> context = coordinator->create({joined_desc}, {true}, 1);
     LoadTaskRunner::TaskPtr                 task    = runner.createTask(context);
+
     EXPECT_EQ(task, nullptr);
 }
 
@@ -186,6 +187,10 @@ TEST(LoadTaskRunnerTest, CreateTaskPartitionsHostAndDiskDescriptors) {
     LoadTaskRunner::TaskPtr task = runner.createTask(context);
 
     ASSERT_NE(task, nullptr);
+    EXPECT_EQ(task->host_to_device_task.workflowId(), context->workflowId());
+    EXPECT_EQ(task->disk_to_device_task.workflowId(), context->workflowId());
+    EXPECT_EQ(task->host_to_device_task.parentTraceId(), context->workflowId());
+    EXPECT_EQ(task->disk_to_device_task.parentTraceId(), context->workflowId());
     EXPECT_EQ(task->load_descs.size(), 2u);
     ASSERT_EQ(task->host_to_device_task.descriptors().size(), 1u);
     EXPECT_EQ(task->host_to_device_task.descriptors().front().source_tier, Tier::HOST);

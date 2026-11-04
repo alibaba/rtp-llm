@@ -27,6 +27,18 @@ tryDisableProfiler(DisableProfilerFn disable_profiler, const std::function<void(
 
 }  // namespace detail
 
+// Keep custom records outside Kineto's thread-local event tree. Both synchronous
+// and background exports use the same append-only writer.
+struct CollectedProfile {
+    std::unique_ptr<torch::autograd::profiler::ProfilerResult> kineto;
+    std::vector<AsyncProfileEvent>                             async_events;
+
+    const auto& events() const {
+        return kineto->events();
+    }
+    void save(const std::string& path);
+};
+
 // Low-level profiler wrapper around Kineto.
 // IMPORTANT: start() and stop() MUST be called on the same thread (Kineto thread-affinity).
 class TorchProfile {
@@ -37,7 +49,7 @@ public:
 
     // Stops profiling and returns the result + filename for async saving.
     // Returns {nullptr, ""} if already stopped.
-    std::pair<std::unique_ptr<torch::autograd::profiler::ProfilerResult>, std::string> stopAndCollect();
+    std::pair<std::unique_ptr<CollectedProfile>, std::string> stopAndCollect();
 
     // Legacy synchronous stop (calls stopAndCollect + save inline).
     void stop();
@@ -65,7 +77,7 @@ public:
     ~ProfilerSaveWorker();
 
     // Enqueue a save task. Non-blocking, returns immediately.
-    void enqueue(std::unique_ptr<torch::autograd::profiler::ProfilerResult> result, std::string file_name);
+    void enqueue(std::unique_ptr<CollectedProfile> result, std::string file_name);
 
     ProfilerSaveWorker(const ProfilerSaveWorker&)            = delete;
     ProfilerSaveWorker& operator=(const ProfilerSaveWorker&) = delete;
@@ -74,8 +86,8 @@ private:
     void run();
 
     struct SaveTask {
-        std::unique_ptr<torch::autograd::profiler::ProfilerResult> result;
-        std::string                                                file_name;
+        std::unique_ptr<CollectedProfile> result;
+        std::string                       file_name;
     };
 
     std::mutex              mu_;
