@@ -33,8 +33,7 @@ sublayer N+1's ``pre`` (including the intra-layer attn->ffn seam, fixed in
 wave 2).
 
 Remaining documented simplifications (fail-loud or caller-boundary):
-indexer Q is scored from BF16 rows (the FP4 Q quantization boundary stays
-with the caller / kernel), and the SWA pool is append-only (L2's cache has no
+the SWA pool is append-only (L2's cache has no
 ring compaction yet — the position->slot mapping is the identity the L1
 reader uses, so reads are correct).
 
@@ -75,6 +74,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.moe import (
 from rtp_llm.models_py.modules.dsv41.ppu.prefill import (
     _layer_attention,
     _produce_global,
+    _quantized_indexer_query,
     _rms_norm,
     _rope_tail,
 )
@@ -946,7 +946,7 @@ class DecodeStepOrchestrator:
             device=device,
         )
         logits = self.ops.index_score(
-            V41QuantizedTensor(index_q, None, "bf16"),
+            _quantized_indexer_query(index_q),
             V41QuantizedTensor(all_keys, None, "bf16"),
             head_weights,
             layer_id=layer_id,
@@ -996,9 +996,7 @@ class DecodeStepOrchestrator:
                 continue
             decoded = self._decode_indexer_k(layer_id, visible, request_id, device)
             logits = self.ops.index_score(
-                V41QuantizedTensor(
-                    index_q[index : index + 1].contiguous(), None, "bf16"
-                ),
+                _quantized_indexer_query(index_q[index : index + 1]),
                 V41QuantizedTensor(decoded, None, "bf16"),
                 head_weights[index : index + 1].contiguous(),
                 layer_id=layer_id,

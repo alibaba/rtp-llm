@@ -11,17 +11,24 @@ continuation through ``csa_state`` and determinism.
 import shutil
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41.ppu import _quant
+from rtp_llm.models_py.modules.dsv41.ppu.cache import PPUKVCache
 from rtp_llm.models_py.modules.dsv41.ppu.engram import (
     build_token_windows,
     compute_engram_hash_ids,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.model import PPUModelCore
 from rtp_llm.models_py.modules.dsv41.ppu.ops import PPUOps
-from rtp_llm.models_py.modules.dsv41.ppu.prefill import _torch_sparse_attention
+from rtp_llm.models_py.modules.dsv41.ppu.prefill import (
+    _indexer_topk,
+    _torch_sparse_attention,
+)
 from rtp_llm.models_py.modules.dsv41.ppu.weight import (
     V41Geometry,
     load_ppu_weights,
@@ -86,6 +93,49 @@ class PrefillEndToEndTest(unittest.TestCase):
         )
 
     # ------------------------------------------------------------- e2e
+
+    def test_indexer_selects_using_fp4_rounded_query(self):
+        geometry = replace(self.geometry, index_n_heads=1, index_topk=1)
+        query = torch.zeros(1, 1, 128, dtype=torch.bfloat16)
+        query[0, 0, :4] = torch.tensor([1.5, 0.4, 1.0, 0.5])
+        projection = torch.zeros(1, geometry.hidden_size, dtype=torch.bfloat16)
+        projection[0, 0] = 1
+        layer = replace(
+            self.bundle.layers[2],
+            index_wq=lambda _: query.flatten(1),
+            index_weights_proj=projection,
+        )
+        cache = PPUKVCache(self.config)
+        handle = cache.alloc(0, 4)
+        keys = torch.zeros(2, 128, dtype=torch.bfloat16)
+        keys[0, 2:4] = torch.tensor([0.375, 0.03125])
+        keys[1, 1] = 1
+        payload, scales = _quant.quantize_indexer_k_rows(keys)
+        cache.insert_rows(
+            2,
+            "indexer_kv",
+            handle.indexer_slots[2],
+            _quant.indexer_k_packed_rows(payload, scales),
+        )
+        x_pre = torch.zeros(1, geometry.hidden_size, dtype=torch.bfloat16)
+        x_pre[0, 0] = 1
+        positions = torch.tensor([3], dtype=torch.int64)
+        selected = _indexer_topk(
+            ops=self.ops,
+            layer=layer,
+            geometry=geometry,
+            bundle=self.bundle,
+            x_pre=x_pre,
+            qr=torch.zeros(1, geometry.q_lora_rank, dtype=torch.bfloat16),
+            positions=positions,
+            context=SimpleNamespace(positions=positions),
+            cache=cache,
+            slots={0: handle},
+            layer_id=2,
+        )
+        # Raw BF16 Q ranks key1 above key0 (0.400390625 > 0.390625).
+        # FP4 rounds Q[1] to0.375, so key0 must win.
+        self.assertEqual(selected.tolist(), [[0]])
 
     def test_end_to_end_finite(self):
         core = self._core()

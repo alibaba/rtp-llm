@@ -15,10 +15,12 @@ import sys
 import tempfile
 import types
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41.ppu import _quant
 from rtp_llm.models_py.modules.dsv41.ppu import decode as decode_module
 from rtp_llm.models_py.modules.dsv41.ppu.cache import PPUKVCache
 from rtp_llm.models_py.modules.dsv41.ppu.decode import (
@@ -324,6 +326,43 @@ class DecodeStepTest(DecodeHarness):
         self.assertEqual(batched.shape, reference.shape)
         self.assertTrue(torch.equal(batched, reference))
         self.assertTrue(bool((batched >= 0).any()))
+
+    def test_indexer_selects_using_fp4_rounded_query(self):
+        geometry = replace(self.geometry, index_n_heads=1, index_topk=1)
+        query = torch.zeros(1, 1, 128, dtype=torch.bfloat16)
+        query[0, 0, :4] = torch.tensor([1.5, 0.4, 1.0, 0.5])
+        projection = torch.zeros(1, geometry.hidden_size, dtype=torch.bfloat16)
+        projection[0, 0] = 1
+        layer = replace(
+            self.bundle.layers[2],
+            index_wq=lambda _: query.flatten(1),
+            index_weights_proj=projection,
+        )
+        cache = self._fresh_cache()
+        handle = cache.alloc(0, 4)
+        keys = torch.zeros(2, 128, dtype=torch.bfloat16)
+        keys[0, 2:4] = torch.tensor([0.375, 0.03125])
+        keys[1, 1] = 1
+        payload, scales = _quant.quantize_indexer_k_rows(keys)
+        cache.insert_rows(
+            2,
+            "indexer_kv",
+            handle.indexer_slots[2],
+            _quant.indexer_k_packed_rows(payload, scales),
+        )
+        orchestrator = self._orchestrator(cache)
+        orchestrator.geometry = geometry
+        x_pre = torch.zeros(1, geometry.hidden_size, dtype=torch.bfloat16)
+        x_pre[0, 0] = 1
+        qr = torch.zeros(1, geometry.q_lora_rank, dtype=torch.bfloat16)
+        for scorer in (
+            orchestrator._indexer_topk,
+            orchestrator._indexer_topk_per_request,
+        ):
+            with self.subTest(scorer=scorer.__name__):
+                selected = scorer(layer, x_pre, qr, [0], [3])
+                # FP4 Q changes the ranking from key1 to key0.
+                self.assertEqual(selected.tolist(), [[0]])
 
     def test_engram_windows_do_not_bleed_across_requests(self):
         ops = _RecordingOps(self.ops)

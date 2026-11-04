@@ -65,6 +65,7 @@ from rtp_llm.models_py.modules.dsv41.backend import (
     V41QuantizedTensor,
     V41StepContext,
 )
+from rtp_llm.models_py.modules.dsv41.ppu import _quant
 from rtp_llm.models_py.modules.dsv41.ppu.attention import COMBINED_WIDTH
 from rtp_llm.models_py.modules.dsv41.ppu.cache import PPUKVCache, PPURequestSlots
 from rtp_llm.models_py.modules.dsv41.ppu.cp import CPPrefillContext, cp_context_of
@@ -552,6 +553,12 @@ def _produce_global(
 # ---------------------------------------------------------------------------
 
 
+def _quantized_indexer_query(query: torch.Tensor) -> V41QuantizedTensor:
+    """Apply the post-RoPE group-32 FP4/UE8M0 query boundary before scoring."""
+    payload, scales = _quant.quantize_indexer_q(query.contiguous())
+    return V41QuantizedTensor(payload, scales, "fp4_ue8m0")
+
+
 def _indexer_topk(
     *,
     ops,
@@ -617,7 +624,7 @@ def _indexer_topk(
         torch.arange(total, device=x_pre.device, dtype=torch.int64) * source_ratio
     )
     logits = ops.index_score(
-        V41QuantizedTensor(index_q, None, "bf16"),
+        _quantized_indexer_query(index_q),
         V41QuantizedTensor(keys, None, "bf16"),
         head_weights,
         layer_id=layer_id,
