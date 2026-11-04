@@ -21,10 +21,18 @@ if [[ -n "${NAVI_SCHED_BAZEL_PROFILE:-}" ]]; then
 fi
 
 cd "${REPO_ROOT}"
+BAZEL_STARTUP_ARGS=()
+if [[ -n "${NAVI_SCHED_BAZELRC:-}" ]]; then
+    BAZEL_STARTUP_ARGS+=("--bazelrc=${NAVI_SCHED_BAZELRC}")
+fi
 BUILD_COMMAND=(
-    "${BAZEL_BIN}" --batch build
+    "${BAZEL_BIN}"
+    --batch build
     "${BUILD_ARGS[@]}"
 )
+if ((${#BAZEL_STARTUP_ARGS[@]})); then
+    BUILD_COMMAND=("${BAZEL_BIN}" "${BAZEL_STARTUP_ARGS[@]}" --batch build "${BUILD_ARGS[@]}")
+fi
 if (( ${#BUILD_PROFILE_ARGS[@]} )); then
     BUILD_COMMAND+=("${BUILD_PROFILE_ARGS[@]}")
 fi

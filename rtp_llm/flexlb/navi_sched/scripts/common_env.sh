@@ -112,5 +112,9 @@ if [[ "${NAVI_SCHED_CLEAR_DELETED_PACKAGES:-}" == "1" ]]; then
 fi
 
 navi_sched_bazel_output_bin() {
-    "${BAZEL_BIN}" info "$@" bazel-bin
+    if [[ -n "${NAVI_SCHED_BAZELRC:-}" ]]; then
+        "${BAZEL_BIN}" "--bazelrc=${NAVI_SCHED_BAZELRC}" info "$@" bazel-bin
+    else
+        "${BAZEL_BIN}" info "$@" bazel-bin
+    fi
 }
