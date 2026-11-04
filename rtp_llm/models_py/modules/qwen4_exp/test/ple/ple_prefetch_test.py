@@ -37,19 +37,16 @@ class PLEPrefetchTest(unittest.TestCase):
         self.assertEqual(rows.dtype, torch.bfloat16)
         torch.testing.assert_close(rows, expected, atol=0, rtol=0)
         module.finish_prefetch()
-        module._graph_gather_required = True
-        module.prepare_cpu_graph_rows(ids, 1)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             output = module._gather_local(ids).clone()
         ids.copy_(torch.tensor([19, 9, 7, 2], dtype=torch.int64, device="cuda"))
-        module.prepare_cpu_graph_rows(ids, 1)
         graph.replay()
         torch.testing.assert_close(
             output, module._gather_torch(ids.cpu()).cuda(), atol=0, rtol=0
         )
 
-    def _module(self, dtype=torch.bfloat16, expected_prefetch=True):
+    def _module(self, dtype=torch.bfloat16):
         shards = [
             (torch.arange(5 * 160).reshape(5, 160) + i * 1000).to(dtype)
             for i in range(2)
@@ -65,32 +62,38 @@ class PLEPrefetchTest(unittest.TestCase):
             total_shards=4,
             distributed_reduce=True,
         )
-        self.assertEqual(module.supports_prefetch, expected_prefetch)
+        self.assertTrue(module.supports_prefetch)
         self.assertTrue(
             all(t.device.type == "cpu" and t.is_pinned() for t in module.shards)
         )
         return module
 
-    def test_legacy_event_api_uses_current_stream_lookup_for_graph_rows(self):
+    def test_legacy_event_api_supports_eager_prefetch_and_inline_graph(self):
         original_event = torch.cuda.Event
 
         def legacy_event(enable_timing=False, blocking=False, interprocess=False):
             return original_event(enable_timing, blocking, interprocess)
 
+        ids = torch.tensor([5, 16, -1, 0], dtype=torch.int64, device="cuda")
         with patch.object(torch.cuda, "Event", legacy_event):
-            module = self._module(expected_prefetch=False)
-        ids = torch.tensor([5, 16, -1, 0], device="cuda", dtype=torch.int64)
-        module._graph_gather_required = True
-        module.prepare_cpu_graph_rows(ids, 1)
+            module = self._module()
+            handle = module.start_prefetch(ids)
+            eager = module.consume_prefetch(handle).clone()
+            module.finish_prefetch()
+        torch.testing.assert_close(
+            eager, module._gather_torch(ids.cpu()).cuda(), rtol=0, atol=0
+        )
+        module._gather_local(ids)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             actual = module._gather_local(ids).clone()
         ids.copy_(torch.tensor([19, 9, 7, 2], dtype=torch.int64, device="cuda"))
-        module.prepare_cpu_graph_rows(ids, 1)
         graph.replay()
         torch.testing.assert_close(
             actual, module._gather_torch(ids.cpu()).cuda(), rtol=0, atol=0
         )
+        graph.reset()
+        module.close()
 
     def test_lookup_and_reused_slots_preserve_local_remote_and_invalid_rows(self):
         for dtype in (torch.bfloat16, torch.float32):
@@ -250,32 +253,15 @@ class PLEPrefetchTest(unittest.TestCase):
                 handle.remove()
         self.assertTrue(module.supports_prefetch)
 
-    def test_external_wait_graph_replay_observes_every_new_lookup(self):
+    def test_prefetch_consumption_during_capture_is_rejected(self):
         module = self._module()
-        ids = torch.tensor([5, 0, 15, 19], device="cuda", dtype=torch.int64)
-        module.prepare_cpu_graph_rows(ids, 123)
-        module._prepared_cpu_graph_rows((4, 160), ids.device).clone()
-        torch.cuda.synchronize()
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            output = module._prepared_cpu_graph_rows((4, 160), ids.device).clone()
-        address = module._cpu_graph_rows.data_ptr()
-        for index in range(20):
-            with torch.cuda.stream(module._prefetcher.stream):
-                torch.cuda._sleep(200_000)
-            new_ids = torch.tensor(
-                [5 + index % 5, 16 + index % 4, 0, 20],
-                device="cuda",
-                dtype=torch.int64,
-            )
-            ids.copy_(new_ids)
-            module.prepare_cpu_graph_rows(ids, 123)
-            graph.replay()
-            expected = module._gather_torch(new_ids.cpu()).to("cuda")
-            torch.testing.assert_close(output, expected, atol=0, rtol=0)
-            self.assertEqual(module._cpu_graph_rows.data_ptr(), address)
-        module.prepare_cpu_graph_rows(ids, 456)
-        self.assertNotEqual(module._cpu_graph_rows.data_ptr(), address)
+        ids = torch.tensor([5, 19], device="cuda", dtype=torch.int64)
+        handle = module.start_prefetch(ids)
+        with patch.object(torch.cuda, "is_current_stream_capturing", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "eager execution"):
+                module.consume_prefetch(handle)
+        module.finish_prefetch()
+        module.close()
 
 
 if __name__ == "__main__":

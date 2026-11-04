@@ -395,7 +395,9 @@ class Qwen4ExpPLEGraphTest(PLERuntimeFixture, TestCase):
         self.assertTrue(
             all(shard.device.type == "cpu" for shard in self.ple.ple_embedding.shards)
         )
-        self.assertEqual(self.ple.ple_embedding._cpu_graph_buffers, {})
+        self.assertEqual(
+            self.ple.ple_embedding.resource_usage()["eager_retained_bytes"], 0
+        )
 
     def test_decode_ple_forward_captures_and_replays_captured_batch(self):
         if not torch.cuda.is_available():
@@ -553,7 +555,9 @@ class Qwen4ExpPLEGraphTest(PLERuntimeFixture, TestCase):
         self.assertTrue(
             all(shard.device.type == "cpu" for shard in self.ple.ple_embedding.shards)
         )
-        self.assertEqual(self.ple.ple_embedding._cpu_graph_buffers, {})
+        self.assertEqual(
+            self.ple.ple_embedding.resource_usage()["eager_retained_bytes"], 0
+        )
 
     def test_unsupported_prefix_cp_and_cuda_graph_fail_fast(self):
         for field, value, error in (

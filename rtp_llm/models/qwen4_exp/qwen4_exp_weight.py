@@ -112,10 +112,6 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
         start = tp_rank * shards_per_rank
         return range(start, start + shards_per_rank)
 
-    def local_shard_indices(self, load_config: LoadConfig) -> tuple[int, ...]:
-        """Global checkpoint shard indices owned by the current TP rank."""
-        return tuple(self._local_shard_range(load_config))
-
     def get_tensor_names(
         self, layer_id: Optional[int], load_config: LoadConfig
     ) -> set[str]:

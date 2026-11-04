@@ -845,6 +845,7 @@ test_suite(
         ":qsa_packed_count_test",
         ":qsa_projection_pair_test",
         ":qsa_target_prepare_test",
+        ":qsa_tma_prefill_test",
         ":qsa_topk_triton_test",
         ":rope_cache_policy_test",
         ":sparse_fmha_test",

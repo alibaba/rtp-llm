@@ -79,6 +79,7 @@ from rtp_llm.ops.compute_ops import (
     PyModelInputs,
     PyModelOutputs,
 )
+from rtp_llm.utils.fp8_constants import FP8_STORAGE_SCALE_SUFFIX
 from rtp_llm.utils.model_weight import W
 
 
@@ -149,7 +150,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             compress_ratio=ratio,
             norm_eps=layernorm_eps,
             projection_scale=weights.get(
-                W.qwen4_indexer_qk_proj_w + ".qwen4_fp8_storage_scale"
+                W.qwen4_indexer_qk_proj_w + FP8_STORAGE_SCALE_SUFFIX
             ),
             rope_config=self.qsa_rope_config,
         )
@@ -600,7 +601,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             norm_eps=config.layernorm_eps,
             role=getattr(self, "_execution_role", "PDFUSION"),
             weight_scales=tuple(
-                weights.get(name + ".qwen4_fp8_storage_scale")
+                weights.get(name + FP8_STORAGE_SCALE_SUFFIX)
                 for name in (
                     W.qwen4_hc_attn_mix_down,
                     W.qwen4_hc_attn_mix_up,
@@ -617,7 +618,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             norm_eps=config.layernorm_eps,
             role=getattr(self, "_execution_role", "PDFUSION"),
             weight_scales=tuple(
-                weights.get(name + ".qwen4_fp8_storage_scale")
+                weights.get(name + FP8_STORAGE_SCALE_SUFFIX)
                 for name in (
                     W.qwen4_hc_mlp_mix_down,
                     W.qwen4_hc_mlp_mix_up,
@@ -753,7 +754,6 @@ class Qwen4ExpModel(Qwen35Model):
         py_hw_kernel_config=None,
         device_resource_config=None,
     ):
-        from rtp_llm.model_loader.fp8_weight import FP8_STORAGE_SCALE_SUFFIX
         from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
 
         config = model_config
@@ -1070,9 +1070,6 @@ class Qwen4ExpModel(Qwen35Model):
                 distributed_reduce=tp_size > 1,
                 weight_scale=layer_weights.get(W.qwen4_ple_ngram_scale),
                 prefetch_budget_mb=getattr(self.config, "qwen4_ple_prefetch_mb", 256),
-                inline_cpu_uva_graph=(
-                    shard_pairs[0][1].device.type == "cpu" and torch.version.hip is None
-                ),
             )
             # Retain the same pinned owners in the weight/export inventory;
             # release pageable copies after this initialization scope finishes.
@@ -1093,7 +1090,7 @@ class Qwen4ExpModel(Qwen35Model):
                 hidden_size=self.config.hidden_size,
                 conv_kernel_size=int(conv_weight.shape[-1]),
                 projection_scales=tuple(
-                    layer_weights.get(name + ".qwen4_fp8_storage_scale")
+                    layer_weights.get(name + FP8_STORAGE_SCALE_SUFFIX)
                     for name in (W.qwen4_ple_key_proj_w, W.qwen4_ple_value_proj_w)
                 ),
                 norm_eps=self.config.layernorm_eps,
@@ -1285,10 +1282,10 @@ class Qwen4ExpModel(Qwen35Model):
             role=getattr(self.parallelism_config, "role_type", "PDFUSION"),
             weight_scales=(
                 weights.global_weights.get(
-                    W.qwen4_hc_mixer_mix_down + ".qwen4_fp8_storage_scale"
+                    W.qwen4_hc_mixer_mix_down + FP8_STORAGE_SCALE_SUFFIX
                 ),
                 weights.global_weights.get(
-                    W.qwen4_hc_mixer_mix_up + ".qwen4_fp8_storage_scale"
+                    W.qwen4_hc_mixer_mix_up + FP8_STORAGE_SCALE_SUFFIX
                 ),
                 None,
             ),

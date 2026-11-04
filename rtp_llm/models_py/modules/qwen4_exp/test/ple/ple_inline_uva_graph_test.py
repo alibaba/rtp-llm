@@ -11,7 +11,7 @@ from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpNGramEmbedding
     torch.cuda.is_available() and torch.version.hip is None, "requires NVIDIA CUDA"
 )
 class PLEInlineUVAGraphTest(unittest.TestCase):
-    def make_module(self, *, inline=True, partial=False, scale=0.25):
+    def make_module(self, *, partial=False, scale=0.25):
         indices = list(range(0, 128, 2)) if partial else list(range(128))
         shards = [
             ((torch.arange(67 * 160).reshape(67, 160) + i) % 33 - 16).to(
@@ -30,7 +30,6 @@ class PLEInlineUVAGraphTest(unittest.TestCase):
             total_shards=128,
             distributed_reduce=partial,
             weight_scale=torch.tensor([scale]),
-            inline_cpu_uva_graph=inline,
         )
 
     def test_dynamic_tokens_context_reorder_eos_and_graph_keys(self):
@@ -70,9 +69,7 @@ class PLEInlineUVAGraphTest(unittest.TestCase):
                     graph.replay()
                     self.assertTrue(torch.equal(output, expected))
                     self.assertTrue(torch.equal(pool, snapshot))
-            self.assertEqual(module._cpu_graph_buffers, {})
-            self.assertIsNone(module._cpu_graph_rows)
-            self.assertEqual(module.resource_usage()["graph_host_bytes"], 0)
+            self.assertEqual(module.resource_usage()["eager_retained_bytes"], 0)
             self.assertTrue(all(x() is not None and x().is_pinned() for x in owners))
             for graph, *_ in captures:
                 graph.reset()
@@ -95,34 +92,6 @@ class PLEInlineUVAGraphTest(unittest.TestCase):
             self.assertTrue(torch.equal(output, module._gather_torch(ids.cpu()).cuda()))
         graph.reset()
         module.close()
-
-    def test_default_staged_and_inline_consumers_match(self):
-        staged = self.make_module(inline=False)
-        inline = self.make_module()
-        history = torch.randint(0, 1000, (4, 8), device="cuda")
-        graphs = []
-        for module in (staged, inline):
-            if not module.inline_cpu_uva_graph:
-                module.prepare_cpu_graph_rows(module.hashed_ids(history, 4), 123)
-            with module.lookup_context(True):
-                for _ in range(3):
-                    module(history, 4)
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph):
-                    output = module(history, 4)
-            graphs.append((graph, output))
-        for _ in range(4):
-            history.copy_(torch.randint(0, 1000, history.shape, device="cuda"))
-            staged.prepare_cpu_graph_rows(staged.hashed_ids(history, 4), 123)
-            for graph, _ in graphs:
-                graph.replay()
-            self.assertTrue(torch.equal(graphs[0][1], graphs[1][1]))
-        self.assertEqual(staged.resource_usage()["graph_host_bytes"], 0)
-        self.assertGreater(staged.resource_usage()["graph_device_bytes"], 0)
-        for graph, _ in graphs:
-            graph.reset()
-        staged.close()
-        inline.close()
 
     def test_capture_geometry_and_closed_module_rejected(self):
         module = self.make_module()

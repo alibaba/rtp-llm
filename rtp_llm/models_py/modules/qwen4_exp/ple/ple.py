@@ -1,4 +1,3 @@
-import inspect
 import math
 from contextlib import contextmanager
 from typing import List, Optional
@@ -24,9 +23,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
     table, which for the released model would be 102GB.
 
     Shards can remain on the CPU while hash metadata and activations live on
-    CUDA. Host lookup transfers only ids and gathered rows to the execution
-    device before the TP reduction. CUDA Graph uses externally prepared lookup
-    rows; the large table remains on the CPU.
+    CUDA. Eager prefetch gathers selected rows on a side stream before the TP
+    reduction. CUDA Graph captures hash and UVA lookup on the model stream so
+    every replay reads its current token history without staging the table.
     """
 
     def __init__(
@@ -43,7 +42,6 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         distributed_reduce: bool = False,
         weight_scale: Optional[torch.Tensor] = None,
         prefetch_budget_mb: int = 256,
-        inline_cpu_uva_graph: bool = False,
     ):
         super().__init__()
         if not shards:
@@ -137,11 +135,6 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             and vocab_sizes.is_cuda
             and torch.version.hip is None
         )
-        if type(inline_cpu_uva_graph) is not bool:
-            raise ValueError("inline_cpu_uva_graph must be a boolean")
-        if inline_cpu_uva_graph and not self._cpu_uva_enabled:
-            raise ValueError("inline graph lookup requires pinned NVIDIA CPU UVA")
-        self.inline_cpu_uva_graph = inline_cpu_uva_graph
         if self._cpu_uva_enabled:
             from rtp_llm.models_py.modules.qwen4_exp.ple.ple_gather_triton import (
                 prepare_cpu_uva_shards,
@@ -167,14 +160,8 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         self._triton_shard_signature: Optional[tuple[int, ...]] = None
         self._closed = False
         self._graph_gather_required = False
-        self._cpu_graph_buffers = {}
-        self._cpu_graph_rows: Optional[torch.Tensor] = None
-        self._cpu_graph_prefetch = None
         self._prefetcher = None
-        if (
-            self._cpu_uva_enabled
-            and "external" in inspect.signature(torch.cuda.Event).parameters
-        ):
+        if self._cpu_uva_enabled:
             from rtp_llm.models_py.modules.qwen4_exp.ple.ple_prefetch import (
                 PLEPrefetcher,
             )
@@ -204,31 +191,18 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             for shard in self.shards
             if shard.device.type == "cpu"
         }
-        graph_host = sum(
-            host.nbytes
-            for host, _ in self._cpu_graph_buffers.values()
-            if host is not None
-        )
-        graph_device = sum(
-            device.nbytes for _, device in self._cpu_graph_buffers.values()
-        )
         retained = (
             self._prefetcher.retained_eager_bytes if self._prefetcher is not None else 0
         )
         return {
             "cpu_table_bytes": sum(storage.nbytes() for storage in storages.values()),
             "eager_retained_bytes": retained,
-            "graph_host_bytes": graph_host,
-            "graph_device_bytes": graph_device,
         }
 
     def close(self) -> None:
         """Called after graph runners are destroyed; release lookup buffers."""
         if self._prefetcher is not None:
             self._prefetcher.close()
-        self._cpu_graph_prefetch = None
-        self._cpu_graph_rows = None
-        self._cpu_graph_buffers.clear()
         self._prefetcher = None
         self._triton_shard_ptrs = None
         self._cpu_uva_pointers = None
@@ -249,10 +223,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             and not module_hooks._global_forward_hooks
         )
 
-    def start_prefetch(self, ids: torch.Tensor, *, slot=0, out=None):
+    def start_prefetch(self, ids: torch.Tensor, *, slot=0):
         if not self.supports_prefetch:
             return None
-        return self._prefetcher.start(ids, slot=slot, out=out)
+        return self._prefetcher.start(ids, slot=slot)
 
     def consume_prefetch(self, prefetch):
         if self._prefetcher is None or prefetch.owner is not self._prefetcher:
@@ -325,80 +299,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             blocks.append(hashed + head_offsets)
         return torch.cat(blocks, dim=-1)[:, -seq_len:]
 
-    def prepare_cpu_graph_rows(self, ngram_ids: torch.Tensor, graph_key: int) -> None:
-        """Refresh selected rows outside capture; keep the large table on CPU."""
-        if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError("PLE CPU graph preparation must run outside capture")
-        if self.shards[0].device.type != "cpu" or not ngram_ids.is_cuda:
-            raise RuntimeError(
-                "PLE CPU graph preparation needs CPU tables and CUDA ids"
-            )
-        shape = (*ngram_ids.shape, self.shards[0].shape[-1])
-        key = (graph_key, tuple(shape), ngram_ids.device)
-        if key not in self._cpu_graph_buffers:
-            host = (
-                None
-                if self._cpu_uva_enabled
-                else torch.empty(shape, dtype=self.output_dtype, pin_memory=True)
-            )
-            device = torch.empty(
-                shape, dtype=self.output_dtype, device=ngram_ids.device
-            )
-            self._cpu_graph_buffers[key] = (host, device)
-        host, device = self._cpu_graph_buffers[key]
-        if self.supports_prefetch:
-            self._cpu_graph_prefetch = self.start_prefetch(ngram_ids, out=device)
-            self._cpu_graph_rows = device
-            return
-        self._cpu_graph_prefetch = None
-        if self._cpu_uva_enabled:
-            from rtp_llm.models_py.modules.qwen4_exp.ple.ple_gather_triton import (
-                gather_local,
-            )
-
-            gather_local(
-                ngram_ids,
-                self.shards,
-                self.shard_indices,
-                self.total_shards,
-                self._cpu_uva_pointers,
-                out=device,
-                scale=self.weight_scale,
-            )
-            self._cpu_graph_rows = device
-            return
-        assert host is not None
-        # The D2H finishes before CPU indexing. Only selected rows are pinned;
-        # the checkpoint shards remain pageable CPU memory.
-        host.copy_(self._gather_torch(ngram_ids.cpu()))
-        device.copy_(host, non_blocking=True)
-        self._cpu_graph_rows = device
-
-    def _prepared_cpu_graph_rows(
-        self, shape: tuple, device: torch.device
-    ) -> torch.Tensor:
-        rows = self._cpu_graph_rows
-        if rows is None:
-            raise RuntimeError(
-                "qwen4_exp PLE CPU offload requires eager execution or "
-                "graph preparation of lookup rows"
-            )
-        if (
-            rows.shape != shape
-            or rows.device != device
-            or rows.dtype != self.output_dtype
-        ):
-            raise RuntimeError("PLE CPU graph lookup buffer geometry is stale")
-        if self._cpu_graph_prefetch is not None:
-            self.consume_prefetch(self._cpu_graph_prefetch)
-        return rows
-
     def _gather_local(self, ngram_ids: torch.Tensor) -> torch.Tensor:
         if self.shards[0].device.type == "cpu":
-            if self._graph_gather_required and not self.inline_cpu_uva_graph:
-                return self._prepared_cpu_graph_rows(
-                    (*ngram_ids.shape, self.shards[0].shape[-1]), ngram_ids.device
-                )
+            if self._graph_gather_required and not self._cpu_uva_enabled:
+                raise RuntimeError("PLE CPU graph lookup requires pinned NVIDIA UVA")
             if self._cpu_uva_enabled:
                 from rtp_llm.models_py.modules.qwen4_exp.ple.ple_gather_triton import (
                     gather_local,
@@ -499,19 +403,6 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 or token_history.shape[1] != self.context_len + seq_len
             ):
                 raise RuntimeError("PLE CPU graph history geometry is invalid")
-            if not self.inline_cpu_uva_graph:
-                # Preparation already hashed the current history. Captured
-                # forward consumes those rows directly.
-                rows = self._prepared_cpu_graph_rows(
-                    (
-                        token_history.shape[0],
-                        seq_len,
-                        self.ngram_heads,
-                        self.shards[0].shape[-1],
-                    ),
-                    token_history.device,
-                )
-                return self._reduce_rows(rows)
             # The constructor pinned and retained every table owner and mapped
             # its device address before capture. Capture hash + UVA gather on
             # the model stream so each replay reads its own current history.

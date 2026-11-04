@@ -193,7 +193,9 @@ class Qwen4ExpNGramEmbeddingTest(unittest.TestCase):
         module = self._build()
         module._graph_gather_required = True
 
-        with self.assertRaisesRegex(RuntimeError, "CPU offload requires eager"):
+        with self.assertRaisesRegex(
+            RuntimeError, "graph lookup requires pinned NVIDIA UVA"
+        ):
             module.gather(torch.zeros(1, 1, _HEADS, dtype=torch.int64))
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")

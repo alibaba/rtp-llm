@@ -331,7 +331,6 @@ class PLERuntimeFixture:
             embedding.multipliers.to(device),
             ngram_size=embedding.ngram_size,
             eos_token_id=embedding.eos_token_id,
-            inline_cpu_uva_graph=cpu_tables,
         )
         if cpu_tables:
             self.assertTrue(gpu_embedding._cpu_uva_enabled)
