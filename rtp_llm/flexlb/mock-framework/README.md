@@ -60,7 +60,7 @@ uv run --locked mock-case run "$CASE_FILE" \
 
 Case 保存业务配置、流量和门禁；启动配方保存命令、程序路径与 JVM 参数。需要调整 JVM 参数时编辑生成的 `launch.yaml`。默认 `-XX:ActiveProcessorCount=2` 只限制 JVM 看到的处理器数，不保证 CPU 配额。
 
-`shared` 将多个 P/D/V 实例放在一个 Engine JVM 中；`isolated` 为每实例启动独立 Engine JVM。Master、Client 按 Case 副本数独立启动，ZK 独立运行。进程放置改变后，Case 不变。
+P/D/V、Master 和 Client 各实例直接启动独立 JVM。ZooKeeper 由单独的角色进程提供。
 
 每次运行使用新的配方文件和结果目录。Runner 负责启动、执行和清理；异常或门禁失败会中止后续步骤并收尾。Ctrl+C 会取消执行并清理本次资源。环境问题可修复后重新准备；业务失败先保存证据，不为通过门禁改参数重跑。
 
