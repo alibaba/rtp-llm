@@ -20,6 +20,16 @@ http_archive(
     ],
 )
 
+http_archive(
+    name = "snappy",
+    urls = [
+        "https://alibaba-aios-dev.oss-cn-hangzhou.aliyuncs.com/build/odps_tensorflow/other/raw/master/mirror.bazel.build/github.com/google/snappy/archive/1.1.7.tar.gz",
+    ],
+    build_file = "//3rdparty/snappy:snappy.BUILD",
+    strip_prefix = "snappy-1.1.7",
+    sha256 = "3dfa02e873ff51a11ee02b9ca391807f0c8ea0529a4924afa645fbf97163f9d4",
+)
+
 load("//3rdparty/cuda_config:cuda_configure.bzl", "cuda_configure")
 load("//3rdparty/gpus:rocm_configure.bzl", "rocm_configure")
 load("//3rdparty/py:python_configure.bzl", "python_configure")
