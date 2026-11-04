@@ -139,6 +139,38 @@ bool GroupPolicy::buildLocationSpecGroups(int                 tp_size,
     for (const auto& group_name : compound_group_names) {
         new_location_spec_groups.erase(group_name);
     }
+    if (model_name == "DeepSeekV41" || model_name == "DeepSeekV41DSpark") {
+        // Rename only the published groups; keep spec order and writable masks unchanged.
+        static const std::map<std::string, std::string> compact_names{
+            {"Fhca_kv", "F0"},
+            {"Fglobal_kv_1", "F0"},
+            {"Fcsa_kv", "F1"},
+            {"Fglobal_kv_2", "F1"},
+            {"Findexer_kv", "F2"},
+            {"Lcsa_state", "L3"},
+            {"Lswa_kv", "L4"},
+            {"Fcsa_kvFhca_kvFindexer_kv", "F"},
+            {"Fglobal_kv_1Fglobal_kv_2Findexer_kv", "F"},
+            {"Fcsa_kvFhca_kvFindexer_kvLcsa_stateLswa_kv", "FL"},
+            {"Fglobal_kv_1Fglobal_kv_2Findexer_kvLcsa_stateLswa_kv", "FL"},
+        };
+        LocationSpecGroups compact_groups;
+        for (auto& [name, specs] : new_location_spec_groups) {
+            const auto  it           = compact_names.find(name);
+            const auto& compact_name = it == compact_names.end() ? name : it->second;
+            if (!compact_groups.emplace(compact_name, std::move(specs)).second) {
+                RTP_LLM_LOG_ERROR("duplicate KVCM compact location group [%s]", compact_name.c_str());
+                return false;
+            }
+        }
+        for (auto& [mask, name] : new_location_spec_group_map) {
+            (void)mask;
+            if (const auto it = compact_names.find(name); it != compact_names.end()) {
+                name = it->second;
+            }
+        }
+        new_location_spec_groups = std::move(compact_groups);
+    }
     location_spec_group_map_ = std::move(new_location_spec_group_map);
     spec_name_to_info_       = std::move(new_spec_name_to_info);
     all_spec_names_.clear();
