@@ -2,9 +2,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 import pytest
-from mock_framework.config import ConfigError, Registry, Step, compile_case
-from mock_framework.config.compiled_case import Reference
-from mock_framework.config.registry import case_interface, Bounds
+from mock_framework.config import ConfigError, compile_case
+from mock_framework.execution.step.registry import Registry
+from mock_framework.execution.step.step import Step
+from mock_framework.execution.step.step import Reference
+from mock_framework.execution.step.registry import register_step, Bounds
 from mock_framework.config.environment import expand_config
 
 
@@ -70,9 +72,11 @@ class ExtensionArgs:
     threshold: Annotated[int, Bounds(1, 8)]
 
 
-@case_interface('extension/queue', effect='read')
-async def queue(ctx, args: ExtensionArgs) -> int:
-    return args.threshold
+@register_step('extension/queue', effect='read')
+class queue(Step):
+    @staticmethod
+    async def execute(ctx, args: ExtensionArgs) -> int:
+        return args.threshold
 
 
 def test_function_registration_defines_contract_without_compiler_changes(case_data, compile_data):
@@ -158,16 +162,18 @@ def test_component_config_file_rejects_missing_empty_or_remote_paths(path, case_
 
 def test_nullable_reference_preserves_both_possible_types():
     from mock_framework.config.validation import compatible
-    from mock_framework.config.registry import schema
+    from mock_framework.execution.step.registry import schema
     assert compatible(schema(list[str] | None), schema(list[str] | None))
     assert not compatible(schema(list[str] | None), schema(list[str]))
 
 
 def test_typed_records_inside_result_collections_remain_referenceable_values():
     import asyncio
-    @case_interface('extension/records', effect='read')
-    async def records(ctx, args: ExtensionArgs) -> dict[str, list[ExtensionArgs]]:
-        return {'records': [args]}
+    @register_step('extension/records', effect='read')
+    class records(Step):
+        @staticmethod
+        async def execute(ctx, args: ExtensionArgs) -> dict[str, list[ExtensionArgs]]:
+            return {'records': [args]}
     registry = Registry((records,))
     assert asyncio.run(registry.get('extension/records').invoke(None, {'threshold': 4})) == {'records': [{'threshold': 4}]}
 
@@ -206,9 +212,11 @@ def test_nested_references_keep_static_sibling_constraints_and_error_paths(case_
         items: list[ExtensionArgs]
         targets: list[str] | None = None
 
-    @case_interface('extension/nested', effect='read')
-    async def nested(ctx, args: NestedArgs) -> int:
-        return len(args.items)
+    @register_step('extension/nested', effect='read')
+    class nested(Step):
+        @staticmethod
+        async def execute(ctx, args: NestedArgs) -> int:
+            return len(args.items)
 
     registry = Registry((queue, nested))
     steps = [
@@ -237,9 +245,11 @@ def test_union_preserves_nested_constructor_failure():
     class Choice:
         item: Positive | None
 
-    @case_interface('extension/choice', effect='read')
-    async def choice(ctx, args: Choice) -> int:
-        return 1
+    @register_step('extension/choice', effect='read')
+    class choice(Step):
+        @staticmethod
+        async def execute(ctx, args: Choice) -> int:
+            return 1
 
     interface = Registry((choice,)).get('extension/choice')
     with pytest.raises(ConfigError, match=r'extension/choice\.args\.item: value must be positive'):

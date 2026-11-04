@@ -12,7 +12,7 @@ from ...config.validation import duration
 
 from ..processes import launch_component
 from ..run_trace import write_json
-from ..transport import ExecutionError
+from .. import ExecutionError
 
 
 def _environment(config, topology, directory, *, require_engines):

@@ -6,7 +6,8 @@ import os
 import socket
 from ...config.validation import duration
 from ..run_trace import timestamp, write_json
-from ..transport import post, ExecutionError
+from .. import ExecutionError
+from ..transport import post
 
 ROLES = ('prefill', 'decode', 'vit')
 

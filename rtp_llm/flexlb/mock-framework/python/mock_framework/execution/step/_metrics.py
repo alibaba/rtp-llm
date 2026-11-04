@@ -9,12 +9,12 @@ import re
 from typing import Annotated
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from ...config.validation import duration
+from .. import ExecutionError
+from ._master import Targets
 
-from ..config.registry import case_interface
-from ..config.validation import duration
-from ..execution.runner import CaseContext
-from ..execution.transport import ExecutionError
-from .master import Targets
+
+
 
 
 @dataclass(frozen=True)
@@ -22,31 +22,11 @@ class MetricArgs(Targets):
     range: Annotated[str | list[str], 'range'] = 'latest'
 
 
-@dataclass(frozen=True, kw_only=True)
-class SuccessRateArgs(Targets):
-    range: Annotated[list[str], 'range']
-
-
-@dataclass(frozen=True)
-class Promql:
-    promql: str
-
-    def __post_init__(self):
-        if not self.promql.strip():
-            raise ValueError('promql must not be blank')
-
-
 @dataclass(frozen=True)
 class QuerySample:
     labels: dict[str, str]
     value: float
     sample_time: float
-
-
-@dataclass(frozen=True)
-class QueryResult:
-    samples: list[QuerySample]
-    query_time: str
 
 
 def epoch(value):
@@ -97,12 +77,6 @@ async def instant(ctx, expression, at):
     return result
 
 
-@case_interface('prometheus/query', effect='read')
-async def query(ctx: CaseContext, args: Promql) -> QueryResult:
-    """Execute raw PromQL at the fixed step time without rewriting it."""
-    return QueryResult(await instant(ctx, args.promql, epoch(ctx.query_time)), ctx.query_time)
-
-
 def window(ctx, args):
     end = epoch(ctx.query_time)
     if args.range == 'latest':
@@ -147,48 +121,4 @@ async def metric(ctx, args, role, numerator, denominator=None, *, kind=None):
     values = await instant(ctx, expression, at)
     if len(values) != 1:
         raise ExecutionError('Metric query must return one finite sample')
-    return values[0].value
-
-
-@case_interface('engine/cache/hit_rate', effect='read', unit='ratio')
-async def hit_rate(ctx: CaseContext, args: MetricArgs) -> float:
-    return await metric(ctx, args, 'prefill', 'rtp_llm_cache_hit_tokens_total', 'rtp_llm_cache_lookup_tokens_total')
-
-
-@case_interface('engine/prefill/tps', effect='read', unit='tokens/s')
-async def prefill_tps(ctx: CaseContext, args: MetricArgs) -> float:
-    return await metric(ctx, args, 'prefill', 'rtp_llm_forward_tokens_total', 'rtp_llm_context_forward_seconds_total', kind='compute')
-
-
-@case_interface('engine/prefill/tps_with_cache', effect='read', unit='tokens/s')
-async def cached_tps(ctx: CaseContext, args: MetricArgs) -> float:
-    return await metric(ctx, args, 'prefill', 'rtp_llm_forward_tokens_total', 'rtp_llm_context_forward_with_cache_seconds_total', kind='input')
-
-
-@case_interface('engine/decode/tps', effect='read', unit='tokens/s')
-async def decode_tps(ctx: CaseContext, args: MetricArgs) -> float:
-    return await metric(ctx, args, 'decode', 'rtp_llm_forward_tokens_total', kind='output')
-
-
-@case_interface('client/qps', effect='read', unit='requests/s')
-async def client_qps(ctx: CaseContext, args: MetricArgs) -> float:
-    """Rate of Client calls started, not successful completions or Master acceptance."""
-    return await metric(ctx, args, 'client', 'mock_client_requests_issued_total')
-
-
-@case_interface('client/success_rate', effect='read', unit='ratio')
-async def client_success_rate(ctx: CaseContext, args: SuccessRateArgs) -> float:
-    """Success share of terminal observations in an explicit [start, end] window; no request-count floor."""
-    at, millis, _ = window(ctx, args)
-    labels, targets = scope(ctx, args, 'client')
-    ctx.records.emit(event='metric_window', query_time=ctx.query_time, start=at - millis / 1000, end=at)
-    name = 'mock_client_requests_finished_total'
-    for outcome in ('success', 'error', 'timeout', 'cancelled'):
-        await counter_history(ctx, name, labels + ',outcome=' + json.dumps(outcome), targets, at, millis)
-    success = f'{name}{{{labels},outcome="success"}}'
-    total = f'{name}{{{labels}}}'
-    expression = f'sum(increase({success}[{millis}ms])) / sum(increase({total}[{millis}ms]))'
-    values = await instant(ctx, expression, at)
-    if len(values) != 1 or not 0 <= values[0].value <= 1:
-        raise ExecutionError('Client success rate requires terminal observations in the selected interval')
     return values[0].value

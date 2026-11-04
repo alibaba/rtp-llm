@@ -1,3 +1,8 @@
+from mock_framework.execution.step.client_success_rate import SuccessRateArgs
+from mock_framework.execution.step.client_success_rate import ClientSuccessRate
+from mock_framework.execution.step.engine_prefill_tps_with_cache import EnginePrefillTpsWithCache
+from mock_framework.execution.step.engine_prefill_tps import EnginePrefillTps
+from mock_framework.execution.step.engine_cache_hit_rate import EngineCacheHitRate
 import asyncio
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -5,8 +10,8 @@ from threading import Thread
 from types import SimpleNamespace
 from urllib.parse import parse_qs
 import pytest
-from mock_framework.interfaces import metrics
-from mock_framework.execution.transport import ExecutionError
+from mock_framework.execution.step import _metrics as metrics
+from mock_framework.execution import ExecutionError
 
 
 @pytest.fixture
@@ -66,7 +71,7 @@ def test_hit_rate_aggregates_counters_before_division_and_uses_one_query_time(mo
             return [metrics.QuerySample({'instance': f'127.0.0.1:{port}'}, 4, at) for port in (1001, 1002)]
         return [metrics.QuerySample({}, .76, at)]
     monkeypatch.setattr(metrics, 'instant', instant)
-    assert asyncio.run(metrics.hit_rate(context(), metrics.MetricArgs(range=['-90s', '-30s']))) == .76
+    assert asyncio.run(EngineCacheHitRate.execute(context(), metrics.MetricArgs(range=['-90s', '-30s']))) == .76
     assert len(calls) == 3 and len({at for _, at in calls}) == 1
     assert calls[0][1] == metrics.epoch(context().query_time) - 30
     assert 'sum(increase(rtp_llm_cache_hit_tokens_total' in calls[2][0]
@@ -83,7 +88,7 @@ def test_missing_insufficient_or_duplicate_instance_history_fails_before_aggrega
         return [metrics.QuerySample({'instance': f'127.0.0.1:{port}'}, count, at) for port, count in zip(ports, counts)]
     monkeypatch.setattr(metrics, 'instant', instant)
     with pytest.raises(ExecutionError, match='coverage'):
-        asyncio.run(metrics.hit_rate(context(), metrics.MetricArgs()))
+        asyncio.run(EngineCacheHitRate.execute(context(), metrics.MetricArgs()))
     assert len(calls) == 1
 
 
@@ -121,7 +126,7 @@ def test_success_rate_aggregates_all_terminals_without_a_request_count_floor(mon
         # Even one successful terminal in the interval is sufficient.
         return [metrics.QuerySample({}, 1.0, at)]
     monkeypatch.setattr(metrics, 'instant', instant)
-    assert asyncio.run(metrics.client_success_rate(ctx, metrics.SuccessRateArgs(range=['-20s', '0s']))) == 1
+    assert asyncio.run(ClientSuccessRate.execute(ctx, SuccessRateArgs(range=['-20s', '0s']))) == 1
     assert len(calls) == 5 and len({at for _, at in calls}) == 1
     assert all('outcome=' + json.dumps(outcome) in calls[i][0]
                for i, outcome in enumerate(('success', 'error', 'timeout', 'cancelled')))
@@ -144,7 +149,7 @@ def test_success_rate_rejects_zero_terminal_nan_and_invalid_ratios(monkeypatch, 
         return [metrics.QuerySample({}, value, at)]
     monkeypatch.setattr(metrics, 'instant', instant)
     with pytest.raises(ExecutionError, match='terminal observations'):
-        asyncio.run(metrics.client_success_rate(ctx, metrics.SuccessRateArgs(range=['-20s', '0s'])))
+        asyncio.run(ClientSuccessRate.execute(ctx, SuccessRateArgs(range=['-20s', '0s'])))
 
 
 def test_success_rate_rejects_a_missing_outcome_series(monkeypatch):
@@ -156,20 +161,20 @@ def test_success_rate_rejects_a_missing_outcome_series(monkeypatch):
         return [metrics.QuerySample({'instance': f'127.0.0.1:{port}'}, 2, at) for port in ports]
     monkeypatch.setattr(metrics, 'instant', instant)
     with pytest.raises(ExecutionError, match='coverage'):
-        asyncio.run(metrics.client_success_rate(ctx, metrics.SuccessRateArgs(range=['-20s', '0s'])))
+        asyncio.run(ClientSuccessRate.execute(ctx, SuccessRateArgs(range=['-20s', '0s'])))
 
 
 @pytest.mark.parametrize('args', [{}, {'range': 'latest'}, {'range': 'all'},
     {'range': ['0s', '0s']}, {'range': ['-20s', '1s']}, {'range': ['-20s']}])
 def test_success_rate_requires_an_explicit_valid_window(args):
-    from mock_framework.config import Registry
+    from mock_framework.execution.step.registry import Registry
     from mock_framework.config import ConfigError
     with pytest.raises(ConfigError):
         Registry.standard().get('client/success_rate').arguments(args)
 
 
 def test_success_rate_window_keeps_selected_clients_and_fixed_end(monkeypatch):
-    from mock_framework.config import Registry
+    from mock_framework.execution.step.registry import Registry
     ctx = context()
     for node in ctx.nodes:
         node['role'] = 'client'
@@ -189,8 +194,8 @@ def test_success_rate_window_keeps_selected_clients_and_fixed_end(monkeypatch):
 
 
 @pytest.mark.parametrize('method,denominator', [
-    (metrics.prefill_tps, 'rtp_llm_context_forward_seconds_total'),
-    (metrics.cached_tps, 'rtp_llm_context_forward_with_cache_seconds_total'),
+    (EnginePrefillTps.execute, 'rtp_llm_context_forward_seconds_total'),
+    (EnginePrefillTpsWithCache.execute, 'rtp_llm_context_forward_with_cache_seconds_total'),
 ])
 def test_prefill_throughput_uses_the_matching_nonempty_forward_duration(monkeypatch, method, denominator):
     calls = []

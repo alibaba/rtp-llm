@@ -1,10 +1,12 @@
-"""Register typed Python Case functions and validate their arguments and results."""
+"""Register typed Python Case steps and validate their arguments and results."""
+from .step import Step
+
 from dataclasses import MISSING, asdict, dataclass, fields as data_fields, is_dataclass
 from inspect import iscoroutinefunction, signature
 from types import UnionType
 from typing import Annotated, Literal, Union, get_args, get_origin, get_type_hints
 
-from .validation import ConfigError, validate
+from ...config.validation import ConfigError, validate
 
 _PRIMITIVES = {str: 'string', int: 'integer', float: 'number', bool: 'boolean', type(None): 'null'}
 
@@ -106,14 +108,14 @@ class Interface:
     name: str
     effect: str
     unit: str
-    function: object
+    step_type: type[Step]
     argument_type: object
     args: dict
     returns: dict
 
     def describe(self):
         return {'effect': self.effect, 'unit': self.unit, 'args': self.args, 'returns': self.returns,
-                'description': self.function.__doc__ or ''}
+                'description': self.step_type.execute.__doc__ or ''}
 
     def arguments(self, value):
         where = self.name + '.args'
@@ -122,7 +124,7 @@ class Interface:
 
     async def call(self, context, arguments):
         """Execute arguments already prepared by the Runner; validate the returned value."""
-        result = await self.function(context, arguments)
+        result = await self.step_type.execute(context, arguments)
         result = _result_value(result)
         validate(result, self.returns, self.name + '.result')
         return result
@@ -132,9 +134,10 @@ class Interface:
         return await self.call(context, self.arguments(value))
 
 
-def case_interface(name, *, effect, unit=''):
-    def decorate(function):
-        if effect not in ('read', 'write') or not name or not iscoroutinefunction(function):
+def register_step(name, *, effect, unit=''):
+    def decorate(step_type):
+        function = step_type.execute
+        if not issubclass(step_type, Step) or effect not in ('read', 'write') or not name or not iscoroutinefunction(function):
             raise ConfigError('Case interfaces need a name, read/write effect and async function')
         parameters = list(signature(function).parameters.values())
         hints = get_type_hints(function, include_extras=True)
@@ -143,10 +146,10 @@ def case_interface(name, *, effect, unit=''):
         argument_type = hints[parameters[1].name]
         if not is_dataclass(argument_type):
             raise ConfigError('Interface arguments must be a dataclass')
-        function.case_interface = Interface(
-            name=name, effect=effect, unit=unit, function=function, argument_type=argument_type,
+        step_type.definition = Interface(
+            name=name, effect=effect, unit=unit, step_type=step_type, argument_type=argument_type,
             args=schema(argument_type), returns=schema(hints['return']))
-        return function
+        return step_type
     return decorate
 
 
@@ -157,7 +160,7 @@ class Registry:
             self.register(function)
 
     def register(self, function):
-        definition = getattr(function, 'case_interface', None)
+        definition = getattr(function, 'definition', None)
         if definition is None:
             raise ConfigError('Missing interface decorator')
         if definition.name in self._interfaces:
@@ -166,8 +169,8 @@ class Registry:
 
     @classmethod
     def standard(cls):
-        from ..interfaces import FUNCTIONS
-        return cls(FUNCTIONS)
+        from . import standard_actions
+        return cls(standard_actions())
 
     @property
     def interfaces(self):

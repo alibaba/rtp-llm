@@ -7,11 +7,11 @@ from types import SimpleNamespace
 import pytest
 import zstandard
 
-from mock_framework.interfaces.client import client_evidence_pb2 as pb
-from mock_framework.config import Registry
-from mock_framework.interfaces.client import playback_directories
-from mock_framework.interfaces.client._records import read_requests
-from mock_framework.execution.transport import ExecutionError
+from mock_framework.execution.roles import client_evidence_pb2 as pb
+from mock_framework.execution.step.registry import Registry
+from mock_framework.execution.step.client_requests import playback_directories
+from mock_framework.execution.roles.client_evidence import read_requests
+from mock_framework.execution import ExecutionError
 from mock_framework.execution.roles import client as client_runtime
 
 

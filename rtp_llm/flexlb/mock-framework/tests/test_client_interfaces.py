@@ -1,11 +1,12 @@
+from mock_framework.execution.step.client_qps import ClientQps
 import asyncio
 from types import SimpleNamespace
 from pathlib import Path
 import pytest
-from mock_framework.config import Registry
+from mock_framework.execution.step.registry import Registry
 from mock_framework.config import ConfigError
-from mock_framework.interfaces import metrics
-from mock_framework.execution.transport import ExecutionError
+from mock_framework.execution.step import _metrics as metrics
+from mock_framework.execution import ExecutionError
 from mock_framework.execution.roles import client as client_runtime
 from mock_framework.execution.roles.client import ClientRole
 from helpers.input import read_inputs, write_inputs, pb
@@ -97,7 +98,7 @@ def test_qps_reuses_metric_aggregation_and_measures_issued_not_finished(monkeypa
         assert role == 'client' and numerator == 'mock_client_requests_issued_total'
         return 123.0
     monkeypatch.setattr(metrics, 'metric', metric)
-    assert asyncio.run(metrics.client_qps(context(), metrics.MetricArgs())) == 123.0
+    assert asyncio.run(ClientQps.execute(context(), metrics.MetricArgs())) == 123.0
 
 
 @pytest.mark.parametrize('replicas,large_input', [(2, False), (1, True), (2, True)], ids=['small-two', 'large-one', 'large-two'])
@@ -107,7 +108,8 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
     from pathlib import Path
     import yaml
     from mock_framework.config import compile_case
-    from mock_framework.execution import prepare_launch, run_case
+    from mock_framework.execution.launch import prepare_launch
+    from mock_framework.execution.runner import run_case
     from test_master import configuration
 
     root = Path(__file__).resolve().parents[1]
@@ -189,8 +191,8 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
                 assert index not in seen
                 seen.add(index)
     if large_input: assert seen == set(range(count))
-    from mock_framework.interfaces.client import playback_directories
-    from mock_framework.interfaces.client._records import read_requests
+    from mock_framework.execution.step.client_requests import playback_directories
+    from mock_framework.execution.roles.client_evidence import read_requests
     assert not (output / 'topology-history.json').exists()
     topology = [json.loads(path.read_text()) for path in sorted(output.glob('components/client-*/endpoints.json'))]
     records = [record for directory in playback_directories(output, topology) for record in read_requests(directory)]

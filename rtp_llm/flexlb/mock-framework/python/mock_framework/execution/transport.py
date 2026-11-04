@@ -4,8 +4,7 @@ import json
 from urllib.parse import urlsplit
 
 
-class ExecutionError(RuntimeError):
-    pass
+from . import ExecutionError
 
 
 async def post(url, payload, *, limit=16 * 1024 * 1024):

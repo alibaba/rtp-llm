@@ -2,7 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from mock_framework.config import Registry, load_yaml
+from mock_framework.config import load_yaml
+from mock_framework.execution.step.registry import Registry
 
 ROOT = Path(__file__).resolve().parents[1]
 

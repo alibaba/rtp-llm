@@ -9,7 +9,7 @@ from google.protobuf.message import DecodeError
 import zstandard
 
 from . import client_evidence_pb2 as pb
-from ...execution.transport import ExecutionError
+from .. import ExecutionError
 
 MAX_FRAME = 2 * 1024 * 1024
 OUTCOMES = {'success', 'error', 'timeout', 'cancelled'}

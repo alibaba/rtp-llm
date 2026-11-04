@@ -9,7 +9,7 @@ import pytest
 from mock_framework.execution.environment import RunEnvironment
 from mock_framework.execution.processes import ProcessSupervisor
 from mock_framework.execution.environment import EndpointRegistry
-from mock_framework.execution.transport import ExecutionError
+from mock_framework.execution import ExecutionError
 
 
 def test_topology_readers_and_publishers_cannot_mutate_current_instances(tmp_path):
@@ -35,7 +35,7 @@ def test_topology_readers_and_publishers_cannot_mutate_current_instances(tmp_pat
 
 
 def test_discovery_failure_after_launch_still_reaps_process(tmp_path, monkeypatch):
-    from mock_framework.execution import run_case
+    from mock_framework.execution.runner import run_case
     from mock_framework.execution.roles.master import MasterRole
     from test_master_lifecycle import generic, logs, assert_reaped, step
 

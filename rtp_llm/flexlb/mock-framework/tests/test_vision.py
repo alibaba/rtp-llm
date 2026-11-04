@@ -7,8 +7,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from mock_framework.config import Registry, compile_case
-from mock_framework.execution import prepare_launch, run_case
+from mock_framework.config import compile_case
+from mock_framework.execution.step.registry import Registry
+from mock_framework.execution.launch import prepare_launch
+from mock_framework.execution.runner import run_case
 from helpers.input import pb, write_inputs
 from test_master import configuration
 
