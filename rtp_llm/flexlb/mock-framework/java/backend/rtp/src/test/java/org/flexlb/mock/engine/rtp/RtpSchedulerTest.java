@@ -610,6 +610,15 @@ class RtpSchedulerTest {
                 }
                 assertNull(listener.terminal.get());
                 assertEquals(drafts == 0 ? 6 : 3, request.snapshot().generated());
+                var metrics = scheduler.scrapeMetrics();
+                assertEquals(0, RtpMetricsTest.sample(metrics, "rtp_llm_wait_stream_size", ""));
+                if (drafts > 0) {
+                    assertEquals(2, RtpMetricsTest.sample(metrics, "rtp_llm_sp_total_propose_token_num", ""));
+                    assertEquals(3, RtpMetricsTest.sample(metrics, "rtp_llm_sp_total_accepted_token_num", ""));
+                    assertEquals(2, RtpMetricsTest.sample(metrics, "rtp_llm_forward_tokens_total", "kind=\"output\""));
+                } else {
+                    assertFalse(metrics.contains("rtp_llm_sp_"));
+                }
                 assertEquals(16, cache.snapshot(0, false).freeBlocks());
             }
         }

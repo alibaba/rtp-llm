@@ -74,10 +74,13 @@ final class VitScheduler implements AutoCloseable {
                 var work=new ForwardBatch(Long.toString(++sequence),List.of(new ForwardBatch.Partition(0,requests)));
                 var sample=config.compute().plan(Role.vit,config.id(),work);
                 var result=compute.submit(sample).completion().toCompletableFuture().get();
-                metrics.events.observe("py_rtp_vit_embedding_forward_rt",result.elapsedNanos()/1e6);
-                metrics.events.observe("mock_vit_theoretical_forward_rt",sample.planned().toNanos()/1e6);
+                boolean completedForward=result.state()==SimulatedCompute.State.COMPLETED;
+                if(completedForward) {
+                    metrics.events.observe("py_rtp_vit_embedding_forward_rt",result.elapsedNanos()/1e6);
+                    metrics.events.observe("mock_vit_theoretical_forward_rt",sample.planned().toNanos()/1e6);
+                }
                 synchronized(this) { running=0; }
-                Throwable error=result.state()==SimulatedCompute.State.COMPLETED?null:Status.UNAVAILABLE.withDescription("V forward cancelled").asRuntimeException();
+                Throwable error=completedForward?null:Status.UNAVAILABLE.withDescription("V forward cancelled").asRuntimeException();
                 long completed=System.nanoTime();
                 for(var job:batch) {
                     Throwable failure=error!=null?error:completed>=job.deadline
