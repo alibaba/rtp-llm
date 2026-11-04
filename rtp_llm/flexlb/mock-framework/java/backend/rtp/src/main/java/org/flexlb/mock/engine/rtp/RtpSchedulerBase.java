@@ -297,14 +297,11 @@ abstract class RtpSchedulerBase implements Scheduler {
             }
             if (outcome.state() == SimulatedCompute.State.COMPLETED) {
                 long completed = System.nanoTime();
-                long stepNanos = completed - batch.stepStarted();
                 int size = batch.members().size();
-                long executeTokens = proposed > 0 ? accepted : computed;
-                metrics.batchSelected(prefill() ? size : 0, prefill() ? 0 : size, executeTokens, maxSequence);
-                metrics.stepCompleted(stepNanos, proposed, accepted, speculativeStreams);
-                metrics.forwardCompleted(outcome.elapsedNanos(), outcome.sample().planned().toNanos(), input, computed, output,
-                    prefill() ? completed - batch.scheduleStarted() : stepNanos,
-                    prefill() ? computed : proposed > 0 ? accepted : output);
+                metrics.stepCompleted(new RtpMetrics.StepStats(prefill() ? size : 0, prefill() ? 0 : size,
+                    maxSequence, completed - batch.scheduleStarted(), completed - batch.stepStarted(),
+                    outcome.elapsedNanos(), outcome.sample().planned().toNanos(), input, computed, output,
+                    proposed, accepted, speculativeStreams));
             }
         } finally { batch.members().forEach(member -> member.use().close()); }
     }
@@ -536,8 +533,7 @@ abstract class RtpSchedulerBase implements Scheduler {
                 active.values().stream().filter(e -> !e.state.terminating() && e.phase == CACHE_LOADING).count());
         }
     }
-    @Override public List<io.prometheus.client.Collector.MetricFamilySamples> collectMetrics() { return metrics.collect(); }
-    @Override public String scrapeMetrics() { return metrics.scrape(); }
+    RtpMetrics metrics() { return metrics; }
     @Override public void close() {
         if (closed) return;
         closed = true;

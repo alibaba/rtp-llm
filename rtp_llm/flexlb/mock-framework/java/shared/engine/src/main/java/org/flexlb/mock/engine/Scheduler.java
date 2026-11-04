@@ -77,11 +77,6 @@ public interface Scheduler extends AutoCloseable {
     long nextDeadline();
     List<Request> requests();
     QueueSnapshot queues();
-    String scrapeMetrics();
-    default List<io.prometheus.client.Collector.MetricFamilySamples> collectMetrics() {
-        throw new UnsupportedOperationException("Scheduler does not provide structured metric snapshots");
-    }
-
     /** Also runs while a Forward is pending: deadlines and I/O admission must not depend on compute completion. */
     void maintain();
     Work schedule();

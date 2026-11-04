@@ -36,7 +36,6 @@ class EngineLoopTest {
         public void close() { queue.clear(); }
         public List<Request> requests() { return List.of(); }
         public QueueSnapshot queues() { return new QueueSnapshot(queue.size(), 0, 0, 0); }
-        public String scrapeMetrics() { return ""; }
         public Request input(Input input, Listener listener) { throw new UnsupportedOperationException(); }
         public List<InputResult> input(List<InputItem> batch) { throw new UnsupportedOperationException(); }
         public void control(Request request, Control event) { throw new UnsupportedOperationException(); }
@@ -47,19 +46,16 @@ class EngineLoopTest {
         return new EngineLoop(lock, (domain, cache, finished) -> policy, new TaskHistory(), new org.flexlb.mock.cache.KvCache(1, 1, 0, org.flexlb.mock.cache.KvCache.EvictionPolicy.LRU), new ComputeModel(new ComputeSpec(new ComputeSpec.Forward(expression, null), null, null)), Role.prefill, "test");
     }
 
-    @Test void healthChecksDoNotCollectWindowMetricsAndExposeLoopFailures() throws Exception {
-        var scrapes = new java.util.concurrent.atomic.AtomicInteger();
+    @Test void healthChecksExposeLoopFailures() throws Exception {
         var fail = new java.util.concurrent.atomic.AtomicBoolean();
         var policy = new Policy(false) {
             @Override public Work schedule() {
                 if (fail.get()) throw new IllegalStateException("broken scheduling loop");
                 return super.schedule();
             }
-            @Override public String scrapeMetrics() { scrapes.incrementAndGet(); return ""; }
         };
         try (var loop = engine(policy, policy, "1")) {
             loop.checkHealthy(); loop.checkHealthy();
-            assertEquals(0, scrapes.get());
             fail.set(true); loop.wake();
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
             while (true) {
@@ -68,7 +64,6 @@ class EngineLoopTest {
                 assertTrue(System.nanoTime() < deadline);
                 Thread.sleep(5);
             }
-            assertEquals(0, scrapes.get());
         }
     }
 

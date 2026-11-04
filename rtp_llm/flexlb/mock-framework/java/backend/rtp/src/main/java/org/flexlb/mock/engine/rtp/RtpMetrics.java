@@ -21,6 +21,10 @@ final class RtpMetrics {
                         long canRunToRunningNanos, long cacheLoadNanos, long loadDoneToRunningNanos,
                         long firstTokenNanos, int inputTokens, int outputTokens, int iterations, int reusedTokens) {}
 
+    record StepStats(int context, int generate, long maxSequence, long scheduleToCompletionNanos, long stepNanos,
+                     long forwardNanos, long plannedNanos, long input, long computed, long output,
+                     long proposed, long accepted, long speculativeStreams) {}
+
     public record State(long waiting, long running, long loading, long ready, long totalTokens, long availableTokens,
                         long freeTokens, long heldTokens, long hostTotalTokens, long hostFreeTokens, int blockSize, long cacheLoading) {
         public State {
@@ -260,7 +264,7 @@ final class RtpMetrics {
             }
         }
     }
-    void batchSelected(int context, int generate, long tokens, long maxSequence) {
+    private void recordBatch(int context, int generate, long tokens, long maxSequence) {
         observePositive("rtp_llm_context_batch_size", context);
         observePositive("rtp_llm_generate_batch_size", generate);
         observePositive("rtp_llm_execute_token_size", tokens);
@@ -277,7 +281,20 @@ final class RtpMetrics {
         if (value > 0) events.observe(name, value);
     }
 
-    void stepCompleted(long elapsedNanos, long proposed, long accepted, long speculativeStreams) {
+    void stepCompleted(StepStats step) {
+        long executionNanos = prefill ? step.scheduleToCompletionNanos() : step.stepNanos();
+        if (step.forwardNanos() < 0 || step.plannedNanos() < 0 || step.input() < 0 || step.computed() < 0
+            || step.computed() > step.input() || step.output() < 0 || executionNanos < 0 || step.stepNanos() < 0
+            || step.proposed() < 0 || step.accepted() < 0 || step.speculativeStreams() < 0
+            || (step.proposed() > 0 && (step.speculativeStreams() == 0 || step.accepted() < step.speculativeStreams())))
+            throw new IllegalArgumentException("Invalid step observation");
+        recordBatch(step.context(), step.generate(), step.proposed() > 0 ? step.accepted() : step.computed(), step.maxSequence());
+        recordStepLatency(step.stepNanos(), step.proposed(), step.accepted(), step.speculativeStreams());
+        long tpsTokens = prefill ? step.computed() : step.proposed() > 0 ? step.accepted() : step.output();
+        recordForward(step, executionNanos, tpsTokens);
+    }
+
+    private void recordStepLatency(long elapsedNanos, long proposed, long accepted, long speculativeStreams) {
         positiveMicros("rtp_llm_step_latency_us", elapsedNanos);
         if (prefill || proposed == 0) return;
         double micros = elapsedNanos / 1000;
@@ -291,31 +308,28 @@ final class RtpMetrics {
         events.observe("rtp_llm_sp_estimate_tpot_us", micros / acceptedPerStream);
     }
 
-    void forwardCompleted(long elapsedNanos, long plannedNanos, long input, long computed, long output,
-                          long executionNanos, long tpsTokens) {
-        if (elapsedNanos < 0 || plannedNanos < 0 || input < 0 || computed < 0 || computed > input || output < 0 || executionNanos < 0 || tpsTokens < 0)
-            throw new IllegalArgumentException("Invalid forward observation");
+    private void recordForward(StepStats step, long executionNanos, long tpsTokens) {
         synchronized (observations) {
             if (tpsTokens > 0) {
                 windowTpsTokens += tpsTokens;
                 windowTpsNanos += executionNanos;
             }
-            windowInput += input; windowComputed += computed;
-            if (computed > 0) {
+            windowInput += step.input(); windowComputed += step.computed();
+            if (step.computed() > 0) {
                 windowComputeNanos += executionNanos;
-                if (prefill) contextSeconds.inc(elapsedNanos / 1_000_000_000.0);
+                if (prefill) contextSeconds.inc(step.forwardNanos() / 1_000_000_000.0);
             }
-            if (input > 0) {
+            if (step.input() > 0) {
                 windowInputNanos += executionNanos;
-                if (prefill) contextWithCacheSeconds.inc(elapsedNanos / 1_000_000_000.0);
+                if (prefill) contextWithCacheSeconds.inc(step.forwardNanos() / 1_000_000_000.0);
             }
-            tokens.get("input").inc(input); tokens.get("compute").inc(computed); tokens.get("output").inc(output);
+            tokens.get("input").inc(step.input()); tokens.get("compute").inc(step.computed()); tokens.get("output").inc(step.output());
         }
-        forward.observe(elapsedNanos / 1_000_000_000.0);
+        forward.observe(step.forwardNanos() / 1_000_000_000.0);
         // Compatibility baseline: production MTP Decode does not emit this collector field.
-        if (prefill && elapsedNanos > 0) events.observe("rtp_llm_model_forward_us", elapsedNanos / 1000.0);
-        actualForward.set(elapsedNanos / 1000.0);
-        plannedForward.set(plannedNanos / 1000.0);
+        if (prefill && step.forwardNanos() > 0) events.observe("rtp_llm_model_forward_us", step.forwardNanos() / 1000.0);
+        actualForward.set(step.forwardNanos() / 1000.0);
+        plannedForward.set(step.plannedNanos() / 1000.0);
     }
     public List<Collector.MetricFamilySamples> collect() { return MetricTags.collect(registry, tags); }
     public String scrape() { return MetricTags.scrape(registry, tags); }
