@@ -1,5 +1,8 @@
 package org.flexlb.mock.admission;
 
+import org.flexlb.mock.admission.RtpEvents.Control;
+import org.flexlb.mock.admission.RtpEvents.TransferResult;
+
 import io.grpc.*;
 import io.grpc.stub.*;
 import java.util.concurrent.*;
@@ -44,7 +47,7 @@ final class DecodeAdmission implements AutoCloseable {
         Call(ServerCallStreamObserver<GenerateOutputsPB> response, Context context) {
             this.response = response;
             rpcDeadline = context.getDeadline() == null ? Long.MAX_VALUE
-                : RpcTasks.after(started, context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
+                : RpcMessages.after(started, context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
             delivery = new BufferedOutput(transport, TimeUnit.MINUTES.toMillis(10));
             delivery.attach(response, () -> {
                 boolean expired = context.getDeadline() != null && context.getDeadline().isExpired();
@@ -62,7 +65,7 @@ final class DecodeAdmission implements AutoCloseable {
         @Override public boolean cancelled() { return response.isCancelled(); }
         @Override public void allocated(Scheduler.Request request) { acknowledge(this); }
         @Override public void output(Scheduler.Request request, Scheduler.Output progress) {
-            var output = LocalResponse.token(input, token, progress.generated(), progress.committed(), request.reused(),
+            var output = RpcMessages.token(input, token, progress.generated(), progress.committed(), request.reused(),
                 System.nanoTime() - started, progress.finished(), true).toBuilder();
             output.getFlattenOutputBuilder().getAuxInfoBuilder(0).setIterCount(progress.iterations() + 1);
             send(this, output.build());
@@ -81,8 +84,8 @@ final class DecodeAdmission implements AutoCloseable {
                     validate(frame);
                     call.input = frame.getInput();
                     call.client = frame.getClientId();
-                    call.request = engine.input(RpcTasks.input(call.input, call.client + "/" + call.input.getRequestId(),
-                        call.started, RpcTasks.deadline(call.input, call.started, call.rpcDeadline), false, config.blockSize(), config.cacheKeySeed()), call);
+                    call.request = engine.input(RpcMessages.input(call.input, call.client + "/" + call.input.getRequestId(),
+                        call.started, RpcMessages.deadline(call.input, call.started, call.rpcDeadline), false, config.blockSize(), config.cacheKeySeed()), call);
                     return;
                 }
                 if (frame.getRequestId() != call.input.getRequestId()
@@ -120,7 +123,7 @@ final class DecodeAdmission implements AutoCloseable {
                 || request.getInput().getRequestId() != request.getRequestId())
             throw RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid ALLOCATE frame or identity"), 605);
         var input = request.getInput(); var generation = input.getGenerateConfig();
-        RequestValidation.supported(input);
+        RpcMessages.supported(input);
         if (org.flexlb.mock.multimodal.MediaInput.present(input))
             throw Status.FAILED_PRECONDITION.withDescription("Decode ALLOCATE requires the prepared P input").asRuntimeException();
         if (input.getTokenIdsCount() < 1

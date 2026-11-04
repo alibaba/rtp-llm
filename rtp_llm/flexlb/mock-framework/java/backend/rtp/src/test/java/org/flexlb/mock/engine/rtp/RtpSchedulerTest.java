@@ -1,5 +1,8 @@
 package org.flexlb.mock.engine.rtp;
 
+import org.flexlb.mock.admission.RtpEvents.Control;
+import org.flexlb.mock.admission.RtpEvents.TransferResult;
+
 import org.flexlb.mock.admission.*;
 
 import static org.junit.jupiter.api.Assertions.*;

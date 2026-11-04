@@ -14,7 +14,6 @@ public final class TransportProbe {
                           @Argument(optional=true) Boolean empty,
                           @Argument(optional=true) Boolean invalid_result,
                           @Argument(optional=true) Boolean crash) {}
-    public record Echo(String query_time, String run, String observation) {}
     public interface Api {
         @Endpoint(value="probe/action", kind=Endpoint.Kind.action, background=true)
         Types.MasterReceipt action(Request args);
@@ -26,12 +25,6 @@ public final class TransportProbe {
         Types.QueryResult query(Request args);
         @Endpoint(value="probe/engines", kind=Endpoint.Kind.read)
         Types.PerMasterEngines engines(Types.None args);
-        @Endpoint(value="probe/echo", kind=Endpoint.Kind.read)
-        Echo echo(Types.EngineRange args);
-        @Endpoint(value="probe/range_metric", kind=Endpoint.Kind.read, unit="s")
-        Types.MetricValue rangeMetric(Types.EngineRange args);
-        @Endpoint(value="probe/prepare", kind=Endpoint.Kind.action)
-        Types.None prepare(Types.Prepare args);
     }
 
     public static final class Implementation implements Api {
@@ -57,17 +50,6 @@ public final class TransportProbe {
             var engines = List.of("127.0.0.1:9002", "127.0.0.1:9001");
             return new Types.PerMasterEngines(Map.of("master-0", engines, "master-1", engines));
         }
-        @Override public Echo echo(Types.EngineRange args) {
-            var context = InvocationContext.current();
-            return new Echo(context.queryTime().toString(), context.run(), String.valueOf(context.observation()));
-        }
-        @Override public Types.MetricValue rangeMetric(Types.EngineRange args) {
-            var observation = InvocationContext.current().observation();
-            double start = ((Number) observation.get("start")).doubleValue();
-            double end = ((Number) observation.get("end")).doubleValue();
-            return new Types.MetricValue(end - start, "s");
-        }
-        @Override public Types.None prepare(Types.Prepare args) { return new Types.None(); }
         private void delay(Request args) {
             if (Boolean.TRUE.equals(args.crash())) System.exit(17);
             if (args.delay_ms() != null) {

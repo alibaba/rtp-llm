@@ -5,38 +5,17 @@ import com.fasterxml.jackson.databind.*;
 import java.lang.reflect.*;
 import java.math.BigDecimal;
 import java.util.*;
-import java.util.regex.Pattern;
-import org.flexlb.mock.api.Variant;
-import org.flexlb.mock.api.model.Types;
 
 /** The generated schema validates both network input and component output. */
 final class JsonWire {
     static final ObjectMapper JSON = new ObjectMapper()
         .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
         .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
-    private static final Pattern DURATION = Pattern.compile("(-?(?:\\d+(?:\\.\\d+)?|\\.\\d+))(ns|us|ms|s|m|h)");
-
-    static BigDecimal seconds(String input) {
-        var match = DURATION.matcher(input);
-        if (!match.matches()) throw new IllegalArgumentException("Expected duration with unit");
-        var factor = switch (match.group(2)) {
-            case "ns" -> "0.000000001"; case "us" -> "0.000001"; case "ms" -> "0.001";
-            case "m" -> "60"; case "h" -> "3600"; default -> "1";
-        };
-        return new BigDecimal(match.group(1)).multiply(new BigDecimal(factor));
-    }
-
     @SuppressWarnings("unchecked")
     static void validate(JsonNode node, Map<String, Object> spec) {
         String type = (String) spec.get("type");
         if (node == null || node.isNull()) throw new IllegalArgumentException("Missing/null value");
         switch (type) {
-            case "union" -> {
-                for (var variant : (List<Map<String, Object>>) spec.get("variants")) {
-                    try { validate(node, variant); return; } catch (IllegalArgumentException ignored) { }
-                }
-                throw new IllegalArgumentException("No matching parameter variant");
-            }
             case "object" -> {
                 require(node.isObject(), "Expected object");
                 if (spec.containsKey("values")) {
@@ -51,16 +30,6 @@ final class JsonWire {
                     require(properties.containsKey(key), "Unknown field: " + key);
                     validate(node.get(key), properties.get(key));
                 });
-                for (var check : (List<Map<String, Object>>) spec.getOrDefault("checks", List.of())) {
-                    var fields = (List<String>) check.get("fields");
-                    if (fields.stream().anyMatch(key -> !node.has(key))) continue;
-                    var first = node.get(fields.getFirst());
-                    boolean valid = switch ((String) check.get("rule")) {
-                        case "ordered" -> first.decimalValue().compareTo(node.get(fields.get(1)).decimalValue()) <= 0;
-                        default -> throw new IllegalArgumentException("Unknown constraint");
-                    };
-                    require(valid, "Constraint failed: " + check);
-                }
             }
             case "array" -> {
                 require(node.isArray(), "Expected array");
@@ -82,20 +51,6 @@ final class JsonWire {
                     require(node.decimalValue().compareTo(new BigDecimal(spec.get("maximum").toString())) <= 0, "Above maximum");
             }
             case "boolean" -> require(node.isBoolean(), "Expected boolean");
-            case "duration" -> {
-                require(node.isTextual(), "Expected duration string");
-                require(seconds(node.textValue()).signum() >= 0, "Negative duration");
-            }
-            case "range" -> {
-                var allowed = (List<String>) spec.getOrDefault("ranges", List.of());
-                if (node.isTextual()) require(allowed.contains(node.textValue()), "Unsupported range");
-                else {
-                    require(allowed.contains("interval") && node.isArray() && node.size() == 2
-                        && node.get(0).isTextual() && node.get(1).isTextual(), "Invalid range");
-                    var start = seconds(node.get(0).textValue()); var end = seconds(node.get(1).textValue());
-                    require(start.compareTo(end) < 0 && end.signum() <= 0, "Invalid range bounds");
-                }
-            }
             default -> throw new IllegalArgumentException("Unknown schema type: " + type);
         }
     }
@@ -120,22 +75,6 @@ final class JsonWire {
             return Collections.unmodifiableMap(values);
         }
         var clazz = (Class<?>) type;
-        if (clazz == Types.Duration.class) return new Types.Duration(node.textValue());
-        if (clazz == Types.TimeRange.class) {
-            if (node.isTextual()) return node.textValue().equals("all") ? new Types.All() : new Types.Latest();
-            return new Types.Interval(new Types.Duration(node.get(0).textValue()), new Types.Duration(node.get(1).textValue()));
-        }
-        if (clazz.isSealed()) {
-            for (var variant : clazz.getPermittedSubclasses()) {
-                var tag = variant.getAnnotation(Variant.class);
-                if (tag.scalar() && node.isIntegralNumber()) {
-                    var field = variant.getRecordComponents()[0];
-                    return variant.getDeclaredConstructor(field.getType()).newInstance(decode(node, field.getGenericType()));
-                }
-                if (!tag.scalar() && node.path("distribution").asText().equals(tag.value())) return decode(node, variant);
-            }
-            throw new IllegalArgumentException("Unknown sealed variant");
-        }
         if (clazz.isEnum()) return Enum.valueOf((Class<Enum>) clazz, node.textValue());
         if (!clazz.isRecord()) return JSON.convertValue(node, clazz);
         var fields = clazz.getRecordComponents();

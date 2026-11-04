@@ -87,7 +87,7 @@ abstract class RtpSchedulerBase implements Scheduler {
         var entry = entry(handle);
         if (entry.state.terminating()) return;
         if (entry.state.expired()) { finish(entry, new RequestFailure(TIMEOUT, "Control arrived after deadline")); return; }
-        if (control instanceof org.flexlb.mock.admission.Control.Generate generate) {
+        if (control instanceof org.flexlb.mock.admission.RtpEvents.Control.Generate generate) {
             if (prefill() || !entry.loaded || entry.generating || entry.prefillFinished || generate.tokenId() < 0)
                 throw new RequestFailure(INVALID, "Generation requires loaded KV and a new generation permit");
             entry.outputToken = generate.tokenId();
@@ -99,7 +99,7 @@ abstract class RtpSchedulerBase implements Scheduler {
             entry.phase = QUEUED; entry.enqueuedAt = entry.timingStarted; waiting.addLast(entry);
             return;
         }
-        if (!(control instanceof org.flexlb.mock.admission.Control event)) throw new RequestFailure(INVALID, "Foreign RTP control");
+        if (!(control instanceof org.flexlb.mock.admission.RtpEvents.Control event)) throw new RequestFailure(INVALID, "Foreign RTP control");
         switch (event) {
             case PREFILL_COMPLETE -> {
                 if (prefill() || !entry.loaded || entry.generating)
@@ -332,7 +332,7 @@ abstract class RtpSchedulerBase implements Scheduler {
     @Override public void transferCompleted(Request request, TransferResult result) {
         var entry = entry(request);
         if (!live(entry)) return;
-        if (!(result instanceof org.flexlb.mock.admission.TransferResult transferred)) throw new RequestFailure(INVALID, "Foreign RTP transfer result");
+        if (!(result instanceof org.flexlb.mock.admission.RtpEvents.TransferResult transferred)) throw new RequestFailure(INVALID, "Foreign RTP transfer result");
         if (transferred.failure() != null) { finish(entry, transferred.failure()); return; }
         if (!entry.transferBegun || entry.phase != TRANSFERRING)
             throw new RequestFailure(INVALID, "Stale or duplicate transfer completion");

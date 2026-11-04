@@ -82,15 +82,6 @@ class ApiServerTest {
         assertEquals(400, call("probe/missing", Map.of(), "foreground", 1000).statusCode());
     }
 
-    @Test void validatesAndDecodesSpecialTypes() throws Exception {
-        for (Object output : List.of(128, Map.of("distribution", "normal", "mean", 128, "stddev", 32, "min", 0, "max", 512, "seed", 42),
-                Map.of("distribution", "uniform", "min", 1, "max", 2, "seed", 42)))
-            assertEquals(200, call("probe/prepare", Map.of("output_tokens", output), "foreground", 1000).statusCode());
-        assertEquals(400, call("probe/prepare", Map.of("output_tokens", Map.of("distribution", "uniform", "min", 5, "max", 1, "seed", 1)), "foreground", 1000).statusCode());
-        assertEquals(200, call("probe/echo", Map.of("range", List.of("-60s", "0s")), "foreground", 1000).statusCode());
-        assertEquals(400, call("probe/echo", Map.of("range", "all"), "foreground", 1000).statusCode());
-    }
-
     @Test void timesOutWithoutRetry() throws Exception {
         assertEquals(504, call("probe/action", Map.of("delay_ms", 1000), "foreground", 20).statusCode());
         assertEquals(200, call("probe/metric", Map.of(), "foreground", 1000).statusCode());
