@@ -172,6 +172,8 @@ message GenerateConfigPB {
     bool return_logprobs = 77;
     uint32 top_logprobs = 78;
     google.protobuf.Int32Value logits_index = 79;
+    // Missing on legacy clients: preserve the service-level writeback behavior.
+    google.protobuf.BoolValue enable_p2p_writeback = 80;
 }
 
 message MMPreprocessConfigPB {

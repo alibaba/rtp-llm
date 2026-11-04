@@ -66,7 +66,9 @@ class CacheStatusComparer(BaseComparer):
 
     def format_result(self, result_json: Dict[str, Any]) -> BaseModel:
         logging.debug(f"result_json: {result_json}")
-        if "cache_keys" in result_json:
+        if result_json.get("cache_key_list"):
+            result_json = {**result_json, "cached_keys": result_json["cache_key_list"]}
+        elif "cache_keys" in result_json:
             result_json = {
                 **result_json,
                 "cached_keys": [
@@ -74,6 +76,8 @@ class CacheStatusComparer(BaseComparer):
                     if present
                 ],
             }
+        elif "cache_key_list" in result_json:
+            result_json = {**result_json, "cached_keys": []}
         return CacheStatus(**result_json)
 
     def curl_response_to_json(

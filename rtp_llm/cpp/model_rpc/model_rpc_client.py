@@ -738,6 +738,10 @@ def trans_input(input_py: GenerateInput):
         input_py.generate_config.enable_remote_cache
     )
     generate_config_pb.enable_disk_cache = input_py.generate_config.enable_disk_cache
+    if input_py.generate_config.enable_p2p_writeback is not None:
+        generate_config_pb.enable_p2p_writeback.value = (
+            input_py.generate_config.enable_p2p_writeback
+        )
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "trace_id", functools.partial(str)
     )

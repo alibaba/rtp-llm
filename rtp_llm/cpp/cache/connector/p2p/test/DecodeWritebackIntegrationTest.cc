@@ -779,7 +779,15 @@ protected:
 TEST_P(DecodeWritebackHybridIntegrationTest, TransfersReusableGroupsAndPreservesSparseHoles) {
     tokens_ = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21};
     keys_   = calculateCacheKeys(tokens_.data(), 20, 4, config_.cache_key_hash_seed);
-    prepare(21, 20);
+    // Allocate the final forward pass before appending its sampled token.
+    // Allocating at seq=21 would prepare another decode step and retire
+    // SWA/LINEAR state needed by the completed 20-token prefix.
+    prepare(20, 20);
+    stream_->generate_status_->status = StreamState::RUNNING;
+    StreamUpdateInfo final_update{torch::tensor({{21}}, torch::kInt32), 1};
+    final_update.kv_ready_token_count = 20;
+    stream_->update(final_update);
+    ASSERT_FALSE(stream_->hasError());
     // Keep only the configured active tail among complete source blocks.
     for (const auto& group : source_->cacheGroups()) {
         if (group->policy().group_type == CacheGroupType::FULL) {

@@ -410,8 +410,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               StreamStateToString(stream_->getStatus()).c_str());
         }
 
-        if (finished_successfully && resource_context_.cache_manager->writebackEnabled() && !stream_->isFakeStream()
-            && !stream_->hasNumBeams()) {
+        if (finished_successfully && writebackEnabled() && !stream_->isFakeStream() && !stream_->hasNumBeams()) {
             MetaImpl meta(false, false, "");
             meta.fillRoutingContext(stream_);
             resource_context_.cache_manager->asyncWriteBack(batch_kv_cache_resource_,
@@ -1038,6 +1037,18 @@ bool StreamCacheResource::reuseCache() const {
     // Per-request field flows frontend → FlexLB → engine via protobuf.
     return !stream_->generateConfig()->isPrefillOnly() && resource_context_.reuse_cache
            && (resource_context_.ignore_request_cache_switches || stream_->reuseCache());
+}
+
+bool StreamCacheResource::resolveWritebackEnabled(bool                       deployment_enabled,
+                                                  const std::optional<bool>& request_enabled) noexcept {
+    return deployment_enabled && request_enabled.value_or(true);
+}
+
+bool StreamCacheResource::writebackEnabled() const {
+    const auto& generate_config = stream_->generateConfig();
+    return generate_config && resource_context_.cache_manager
+           && resolveWritebackEnabled(resource_context_.cache_manager->writebackEnabled(),
+                                      generate_config->enable_p2p_writeback);
 }
 
 bool StreamCacheResource::enableMemoryCache() const {

@@ -27,6 +27,19 @@ class RpcErrorCodeProtoTest(unittest.TestCase):
         self.assertEqual(fields["top_logprobs"].number, 78)
         self.assertEqual(fields["logits_index"].number, 79)
 
+    def test_request_level_p2p_writeback_uses_presence_aware_wire_field(self):
+        field = GenerateConfigPB.DESCRIPTOR.fields_by_name["enable_p2p_writeback"]
+        self.assertEqual(field.number, 80)
+        self.assertEqual(field.message_type.full_name, "google.protobuf.BoolValue")
+
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                config = GenerateConfigPB()
+                config.enable_p2p_writeback.value = enabled
+                parsed = GenerateConfigPB.FromString(config.SerializeToString())
+                self.assertTrue(parsed.HasField("enable_p2p_writeback"))
+                self.assertEqual(parsed.enable_p2p_writeback.value, enabled)
+
     def test_invalid_params_is_declared_and_round_trips(self):
         self.assertEqual(ErrorCodePB.Value("INVALID_PARAMS"), 26)
 

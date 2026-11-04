@@ -117,6 +117,9 @@ public:
     bool reuseCache() const;
     bool enableMemoryCache() const;
     bool enableDeviceCache() const;
+    bool writebackEnabled() const;
+    // A missing request value preserves legacy service-level behavior.
+    static bool resolveWritebackEnabled(bool deployment_enabled, const std::optional<bool>& request_enabled) noexcept;
     bool enableDiskCache() const;
     bool enableCacheLookup() const;
     Tier storeTarget() const;

@@ -703,6 +703,19 @@ TEST_F(StreamCacheResourceTest, testStreamCacheResourceReuseCacheMethod) {
     ASSERT_FALSE(resource.reuseCache());
 }
 
+TEST_F(StreamCacheResourceTest, RequestWritebackIsIntersectedWithDeploymentCapability) {
+    for (const bool deployment_enabled : {false, true}) {
+        for (const int request_mode : {-1, 0, 1}) {
+            SCOPED_TRACE("deployment=" + std::to_string(deployment_enabled)
+                         + " request_mode=" + std::to_string(request_mode));
+            const std::optional<bool> request_enabled =
+                request_mode < 0 ? std::nullopt : std::optional<bool>(request_mode == 1);
+            EXPECT_EQ(StreamCacheResource::resolveWritebackEnabled(deployment_enabled, request_enabled),
+                      deployment_enabled && request_mode != 0);
+        }
+    }
+}
+
 TEST_F(StreamCacheResourceTest, testPrefillOnlyDisablesPrefixAndDeviceCacheReuseForAllocation) {
     for (const bool ignore_request_switches : {false, true}) {
         SCOPED_TRACE(ignore_request_switches);

@@ -53,6 +53,9 @@ class V4CpWritebackAcceptanceTest(unittest.TestCase):
                 "input_len": 3,
                 "output_len": 2,
                 "pd_sep": True,
+                "reuse_len": 2048,
+                "actual_reuse_len": 2048,
+                "writeback_first_use_len": 0,
                 "prefill_total_reuse_len": 2048,
                 "prefill_local_reuse_len": 2048,
                 "decode_total_reuse_len": 2048,
@@ -117,6 +120,27 @@ class V4CpWritebackAcceptanceTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             validate_reuse(self.response, 2048, False)
 
+    def test_first_use_credit_is_separate_from_physical_reuse(self):
+        aux = self.response["aux_info"]
+        aux.update(local_reuse_len=2048, reuse_len=0, writeback_first_use_len=2048)
+        for pd_sep in (False, True):
+            validate_reuse(self.response, 2048, pd_sep, expected_first_use=2048)
+        aux["reuse_len"] = 2048
+        with self.assertRaisesRegex(AssertionError, "billed reuse"):
+            validate_reuse(self.response, 2048, False)
+
+    def test_repeated_reuse_cannot_receive_first_use_credit_again(self):
+        self.response["aux_info"].update(reuse_len=0, writeback_first_use_len=2048)
+        with self.assertRaisesRegex(AssertionError, "writeback_first_use_len"):
+            validate_reuse(self.response, 2048, True, expected_first_use=0)
+
+    def test_reuse_requires_physical_and_credit_fields(self):
+        for field in ("actual_reuse_len", "writeback_first_use_len"):
+            broken = copy.deepcopy(self.response)
+            del broken["aux_info"][field]
+            with self.subTest(field=field), self.assertRaisesRegex(AssertionError, field):
+                validate_reuse(broken, 2048, True)
+
     def test_text_and_tokens_must_both_match_control(self):
         compare_outputs(self.response, self.response)
         for key, value in (("output_ids", [[9, 5]]), ("response", "different")):
@@ -125,6 +149,25 @@ class V4CpWritebackAcceptanceTest(unittest.TestCase):
                 control[key] = value
                 with self.assertRaises(AssertionError):
                     compare_outputs(self.response, control)
+
+    def test_cache_key_list_precedes_legacy_membership_map(self):
+        self.assertEqual(
+            cached_keys({"cache_key_list": ["123", "-456"], "cache_keys": {}}),
+            {123, -456},
+        )
+        self.assertEqual(
+            cached_keys({"cache_key_list": ["123"], "cache_keys": {"456": True}}),
+            {123},
+        )
+
+    def test_empty_cache_key_list_supports_legacy_fallback(self):
+        self.assertEqual(cached_keys({"cache_key_list": []}), set())
+        self.assertEqual(
+            cached_keys({"cache_key_list": [], "cache_keys": {"123": True, "456": False}}),
+            {123},
+        )
+        with self.assertRaisesRegex(AssertionError, "Invalid cache_key_list"):
+            cached_keys({"cache_key_list": "123"})
 
     def test_publication_wait_never_generates_requests(self):
         now = [0.0]
@@ -245,6 +288,7 @@ class V4CpWritebackAcceptanceTest(unittest.TestCase):
             config = query["generate_config"]
             count = config["max_new_tokens"]
             reuse_len = 2048 if generation_count in (2, 3) else 0
+            first_use = 2048 if generation_count == 2 else 0
             output_token = 121 if corrupt_control and generation_count == 4 else 120
             input_ids = CharacterTokenizer().encode(query["prompt"])
             return {
@@ -256,7 +300,9 @@ class V4CpWritebackAcceptanceTest(unittest.TestCase):
                     "input_len": len(input_ids),
                     "output_len": count,
                     "pd_sep": role == "decode",
-                    "reuse_len": reuse_len,
+                    "reuse_len": reuse_len - first_use,
+                    "actual_reuse_len": reuse_len,
+                    "writeback_first_use_len": first_use,
                     "local_reuse_len": reuse_len,
                     "prefill_total_reuse_len": reuse_len,
                     "prefill_local_reuse_len": reuse_len,
