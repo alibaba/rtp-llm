@@ -415,6 +415,22 @@ class ModelRpcClientTest(TestCase):
             responses.extend(res.generate_outputs)
         return responses
 
+    def test_trans_input_preserves_qos_priority(self):
+        cases = [
+            ({"x-dashscope-inner-qos-level": "40"}, 50, 40),
+            ({"x-dashscope-inner-qos-level": "50"}, 40, 50),
+            ({}, 40, 40),
+            ({"x-dashscope-inner-qos-level": "invalid"}, 50, 50),
+            ({}, None, 50),
+        ]
+        for headers, configured, expected in cases:
+            with self.subTest(headers=headers, configured=configured):
+                input_py = self._make_generate_input(GenerateConfig(qos_priority=configured))
+                input_py.headers = headers
+                wire = trans_input(input_py)
+                restored = type(wire).FromString(wire.SerializeToString())
+                self.assertEqual(restored.priority, expected)
+
     def test_trans_input_serializes_typed_request_info(self):
         input_py = GenerateInput(
             request_id=123,
