@@ -41,7 +41,12 @@ private:
                               const torch::Tensor& token_ids_cpu,
                               const torch::Tensor& success_cpu,
                               const torch::Tensor& custom_output_cpu,
-                              int                  custom_output_batch_idx) const;
+                              int                  custom_output_batch_idx,
+                              bool                 return_content_logprobs,
+                              int                  logprobs_batch_idx,
+                              const torch::Tensor& token_logprobs_cpu,
+                              const torch::Tensor& top_logprob_token_ids_cpu,
+                              const torch::Tensor& top_logprobs_cpu) const;
 
 private:
     std::vector<int64_t>                       output_vocab_ids_;

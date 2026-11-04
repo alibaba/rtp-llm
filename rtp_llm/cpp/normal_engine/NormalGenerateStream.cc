@@ -114,6 +114,34 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             }
         }
 
+        if (generate_input_->generate_config->return_logprobs) {
+            RTP_LLM_CHECK(last_output_pos_ >= (size_t)inputLength());
+            const int64_t total_output_len   = seqLength() - inputLength();
+            const int64_t chunk_output_start = last_output_pos_ - inputLength();
+            RTP_LLM_CHECK(logprobs_history_size_ <= total_output_len);
+            const int64_t content_output_start = total_output_len - logprobs_history_size_;
+            const int64_t compact_output_start = std::max<int64_t>(chunk_output_start, content_output_start);
+            const int64_t logprobs_offset      = compact_output_start - chunk_output_start;
+            const int64_t logprobs_count       = total_output_len - compact_output_start;
+            RTP_LLM_CHECK(logprobs_offset >= 0 && logprobs_offset <= static_cast<int64_t>(output_len));
+            RTP_LLM_CHECK(logprobs_count >= 0 && logprobs_offset + logprobs_count == static_cast<int64_t>(output_len));
+            generate_output.logprobs_offset = static_cast<int32_t>(logprobs_offset);
+            generate_output.logprobs_count  = static_cast<int32_t>(logprobs_count);
+
+            if (logprobs_count > 0) {
+                RTP_LLM_CHECK(token_logprobs_.defined());
+                RTP_LLM_CHECK(top_logprob_token_ids_.defined());
+                RTP_LLM_CHECK(top_logprobs_.defined());
+                const int64_t history_start = compact_output_start - content_output_start;
+                RTP_LLM_CHECK(history_start + logprobs_count <= logprobs_history_size_);
+                RTP_LLM_CHECK(logprobs_history_size_ <= token_logprobs_.size(1));
+                generate_output.token_logprobs = token_logprobs_[i].narrow(0, history_start, logprobs_count).clone();
+                generate_output.top_logprob_token_ids =
+                    top_logprob_token_ids_[i].narrow(0, history_start, logprobs_count).clone();
+                generate_output.top_logprobs = top_logprobs_[i].narrow(0, history_start, logprobs_count).clone();
+            }
+        }
+
         if (generate_input_->generate_config->return_hidden_states && update_info.hidden_states.defined()) {
             if (update_info.hidden_states.size(0) == 1) {
                 generate_output.hidden_states = update_info.hidden_states.cpu();
@@ -252,7 +280,11 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             update_info.softmax_probs, seqLength() - update_info.num_new_tokens, update_info.src_batch_indices);
     }
 
-    finished_ = needFinish();
+    const auto untrimmed_seq_length = seqLength();
+    finished_                       = needFinish();
+    // EOS/stop matching can remove an accepted suffix after its logprobs were appended.
+    // Preserve the content boundary even when the removed suffix includes thinking tokens.
+    logprobs_history_size_ = std::max<int64_t>(0, logprobs_history_size_ - (untrimmed_seq_length - seqLength()));
     if (finished_) {
         reportEventWithoutLock(StreamEvents::GenerateDone);
         fillSubGenerateStatus(StreamState::FINISHED);

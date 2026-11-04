@@ -13,7 +13,7 @@ namespace rtp_llm {
 
 class AsyncRunner {
 public:
-    explicit AsyncRunner(torch::Stream stream);
+    explicit AsyncRunner(torch::Stream stream, bool propagate_thread_local_state = true);
     ~AsyncRunner();
 
     AsyncRunner(const AsyncRunner&)            = delete;
@@ -26,6 +26,7 @@ private:
     void workerLoop();
     void rethrowPendingExceptionIfAny(std::unique_lock<std::mutex>& lk);
 
+    const bool    propagate_thread_local_state_;
     torch::Stream stream_;
     torch::Event  event_;
 
@@ -35,8 +36,8 @@ private:
     std::condition_variable cv_done_;
 
     struct Task {
-        std::function<void()> fn;
-        at::ThreadLocalState  tls_state;
+        std::function<void()>               fn;
+        std::optional<at::ThreadLocalState> tls_state;
     };
     std::optional<Task> pending_task_;
     std::exception_ptr  pending_exception_;

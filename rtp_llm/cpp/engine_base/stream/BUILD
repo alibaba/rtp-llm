@@ -35,6 +35,7 @@ cc_library(
         ":generate_types",
         ":generate_config",
         "//rtp_llm/cpp/utils:error_code",
+        "//rtp_llm/cpp/utils:core_utils",
         "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],
