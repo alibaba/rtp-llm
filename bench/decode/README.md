@@ -20,7 +20,10 @@ Everything except `rdma_ep_probe.sh` runs on the serving host.
 The server must start decoding only after every request has been prefilled, otherwise
 the batch is never full. For an RTP-LLM `PDFUSION` server use
 `--pdfusion_scheduler_mode ratio --decode_prefill_ratio 0`; for a PD deployment hold
-decode on the D side until `cc` requests are ready.
+decode on the D side until `cc` requests are ready. When D runs data-parallel (DEP8),
+pass every D rank's http address with `--d-addrs ip:port,...` so the requests are
+spread evenly over the ranks; otherwise the P frontend sends them all to the rank in
+its `decode_endpoint`.
 
 ```bash
 python3 make_distinct_prompts.py --tokenizer /path/to/DeepSeek-V4-Flash --count 64 --out prompts_32k_x64_distinct.json

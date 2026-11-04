@@ -76,6 +76,16 @@ async def one_request(session, args, prompt, rid, t_ref):
             {"ignore_eos": True},
             **({"force_sp_accept": True} if args.force_accept else {}),
         )
+        if args.d_addrs:
+            ip, port = args.d_addrs[rid % len(args.d_addrs)].rsplit(":", 1)
+            payload["extra_configs"]["role_addrs"] = [
+                {
+                    "role": "DECODE",
+                    "ip": ip,
+                    "http_port": int(port),
+                    "grpc_port": int(port) + 1,
+                }
+            ]
     token_ts = []
     finish = None
     err = None
@@ -269,7 +279,14 @@ def main():
     )
     ap.add_argument("--vllm", action="store_true", help="vLLM request format")
     ap.add_argument("--model", default="", help="model field of the request")
+    ap.add_argument(
+        "--d-addrs",
+        default="",
+        help="comma list of decode-rank http ip:port (PD with a DP decode); "
+        "request i is pinned to entry i %% n via role_addrs",
+    )
     args = ap.parse_args()
+    args.d_addrs = [a for a in args.d_addrs.split(",") if a]
     if not args.model:
         args.model = "DeepSeek-V4-Flash" if args.vllm else "deepseek_v4"
     asyncio.run(run(args))
