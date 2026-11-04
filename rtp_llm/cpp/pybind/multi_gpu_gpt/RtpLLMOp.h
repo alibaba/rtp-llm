@@ -46,6 +46,12 @@ private:
                                                                 py::object                                    token_processor,
                                                                 py::object                                    mm_process_engine,
                                                                 telemetry::TelemetryConfig                    trace_config);
+    // Trampoline for the detached init thread: captures the failure text so init() can report it.
+    void                                          initRPCServerGuarded(const EngineInitParams                        maga_init_params,
+                                                                       std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                                                                       py::object                                    token_processor,
+                                                                       py::object                                    mm_process_engine,
+                                                                       telemetry::TelemetryConfig                    trace_config);
 
 private:
     std::unique_ptr<RpcServiceImpl> model_rpc_service_;
@@ -54,6 +60,10 @@ private:
     std::thread                     grpc_server_thread_;
     std::atomic<bool>               is_server_ready_{false};
     std::atomic<bool>               is_server_shutdown_{false};
+    // Set when the detached rpc init thread exits: silent death fails init() instead of hanging the ready-poll.
+    std::atomic<bool>               rpc_init_exited_{false};
+    // Failure text captured by the trampoline when the init thread throws; read after the exit flag.
+    std::string                     rpc_init_error_;
     size_t                          model_id_ = 0;
 };
 
