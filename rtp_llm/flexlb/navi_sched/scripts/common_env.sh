@@ -102,10 +102,11 @@ if [[ -n "${NAVI_SCHED_PIP_REPOSITORY:-}" ]]; then
         "--override_repository=pip=${NAVI_SCHED_PIP_REPOSITORY}"
     )
 fi
-NAVI_SCHED_BAZEL_OPT_ARGS=(
-    "${NAVI_SCHED_BAZEL_COMMON_ARGS[@]}"
-    -c opt
-)
+NAVI_SCHED_BAZEL_OPT_ARGS=()
+if ((${#NAVI_SCHED_BAZEL_COMMON_ARGS[@]})); then
+    NAVI_SCHED_BAZEL_OPT_ARGS+=("${NAVI_SCHED_BAZEL_COMMON_ARGS[@]}")
+fi
+NAVI_SCHED_BAZEL_OPT_ARGS+=(-c opt)
 
 navi_sched_bazel_output_bin() {
     "${BAZEL_BIN}" info "$@" bazel-bin
