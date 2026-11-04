@@ -189,8 +189,8 @@ class QueueRegistrationCancellationTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
-    void lowEngineQueueSuppressesSoftEvictionButNotHardDeadline(boolean batch) throws Exception {
+    @org.junit.jupiter.params.provider.CsvSource({"false,0", "false,90", "true,0", "true,90"})
+    void lowEngineQueueSuppressesSoftEvictionButNotHardDeadline(boolean batch, long hitTokens) throws Exception {
         var policy = new org.flexlb.config.PrefillQueueSheddingConfig();
         policy.setExpectedWaitThresholdMs(100L);
         policy.setMaxWaitMs(800L);
@@ -198,8 +198,8 @@ class QueueRegistrationCancellationTest {
             when(f.router.select(any(), nullable(String.class))).thenReturn(PlacementResult.blocked(
                     new PlacementKey(org.flexlb.dao.route.RoleType.PREFILL, null, null)));
             when(f.router.estimateQueuedWork(any(), nullable(String.class)))
-                    .thenReturn(new PrefillQueueShedding.Estimate(100, 0, Long.MAX_VALUE, 1));
-            when(f.router.hasEngineQueueAdmission(null)).thenReturn(true);
+                    .thenReturn(new PrefillQueueShedding.Estimate(100, hitTokens, Long.MAX_VALUE, 1));
+            when(f.router.isPrefillClusterOverloaded(null)).thenReturn(false);
             var context = f.context(923L);
             context.data().setSchedulingMetadata(org.flexlb.dao.SchedulingMetadata.explicit(50,
                     f.config.resolveExpiresAtMs(System.currentTimeMillis())));
@@ -207,7 +207,7 @@ class QueueRegistrationCancellationTest {
             assertThrows(java.util.concurrent.TimeoutException.class, () -> result.get(400, TimeUnit.MILLISECONDS));
             assertFalse(result.get(2, TimeUnit.SECONDS).isSuccess());
             assertEquals(CancelReason.DEADLINE_EXCEEDED, context.snapshot().cancellation().reason());
-            verify(f.router, atLeastOnce()).hasEngineQueueAdmission(null);
+            verify(f.router, atLeastOnce()).isPrefillClusterOverloaded(null);
         }
     }
 
@@ -487,6 +487,7 @@ class QueueRegistrationCancellationTest {
         }
 
         Fixture(org.flexlb.config.PrefillQueueSheddingConfig policy, boolean batch, java.util.function.LongSupplier clock) {
+            when(router.isPrefillClusterOverloaded(nullable(String.class))).thenReturn(true);
             when(router.coldPrefillAdmission(any(), nullable(String.class)))
                     .thenReturn(org.flexlb.balance.strategy.CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY);
             config.queueScheduler().setPrefillQueueShedding(policy);

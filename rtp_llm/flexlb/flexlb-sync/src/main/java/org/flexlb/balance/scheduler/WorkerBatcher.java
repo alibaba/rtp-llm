@@ -410,8 +410,11 @@ public final class WorkerBatcher {
     private GroupPlanner.Constraints schedulingConstraints() {
         WorkerStatus status = prefillEndpoint.getStatus();
         var engine = status == null ? null : status.committedEngineObservation();
-        return new GroupPlanner.Constraints(settings.maxRequests(), schedulingCapacity(engine, PlanningResource.TOKENS),
-                schedulingCapacity(engine, PlanningResource.KV), settings.executionBudgetMs(), settings.collectionWaitMs());
+        boolean queueAccepts = prefillEndpoint.engineQueueAllowsAdmission();
+        return new GroupPlanner.Constraints(settings.maxRequests(),
+                queueAccepts ? Long.MAX_VALUE : schedulingCapacity(engine, PlanningResource.TOKENS),
+                queueAccepts ? Long.MAX_VALUE : schedulingCapacity(engine, PlanningResource.KV),
+                settings.executionBudgetMs(), settings.collectionWaitMs());
     }
 
     public enum PlanningResource { TOKENS, KV }
@@ -626,6 +629,10 @@ public final class WorkerBatcher {
         if (head.requestExpired(nowMs)) {
             removeAndNotify(head, null, false);
             return BatcherCycleResult.NO_ACTION;
+        }
+        if (prefillEndpoint.engineQueueCongested()) {
+            return BatcherCycleResult.awaitingSchedulingChange(head, snapshot.queueVersion(),
+                    snapshot.schedulingInputVersion(), head.expiresAtMs(), "Prefill Engine waiting streams above threshold");
         }
         GroupPlanner.Constraints constraints = schedulingConstraints();
         if (Math.max(0L, head.seqLen()) > constraints.batchKvCapacity()) {

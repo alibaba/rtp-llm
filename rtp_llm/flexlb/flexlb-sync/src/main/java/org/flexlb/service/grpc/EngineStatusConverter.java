@@ -29,6 +29,15 @@ public class EngineStatusConverter {
                 workerStatusPB.getRunningTaskInfoList());
         Map<String, TaskObservation> finishedTasks = convertTasks(
                 workerStatusPB.getFinishedTaskListList());
+        long waiting = 0L;
+        long running = 0L;
+        for (TaskObservation task : runningTasks.values()) {
+            if (task.isPriorityCancelOverlayOnly()) { continue; }
+            if (task.phase() == TaskPhase.RUNNING) { running++; }
+            else { waiting++; }
+        }
+        // Engine writers may omit the proto3 queue summaries. Live task phases
+        // supply a lower bound without adding the same streams twice.
         EngineObservation engine = new EngineObservation(
                 RoleTypeProtoConverter.fromWorkerStatus(workerStatusPB),
                 (long) workerStatusPB.getAvailableConcurrency(),
@@ -42,8 +51,8 @@ public class EngineStatusConverter {
                 workerStatusPB.getDpRank(),
                 workerStatusPB.getMaxSeqLen(),
                 workerStatusPB.getMaxBatchTokensSize(),
-                workerStatusPB.getRunningQueryLen(),
-                workerStatusPB.getWaitingQueryLen());
+                Math.max(running, workerStatusPB.getRunningQueryLen()),
+                Math.max(waiting, workerStatusPB.getWaitingQueryLen()));
         return owner.bindStatusObservation(
                 engine,
                 workerStatusPB.getAlive(),

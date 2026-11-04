@@ -38,15 +38,17 @@ public final class RoutingConfig {
     public static final class TokenBalanceConfig {
         /** Above this percentage, the largest reusable prefix wins without a TTFT cap. */
         private double minPrefixHitPercent = 50.0;
-        /** Backpressure at this pending uncached work; one oversized request may enter an empty worker. */
+        /** Legacy token backpressure when Engine queue admission is disabled or telemetry is unknown. */
         private long maxPendingComputeTokens = 2_000_000L;
         /** Include recently completed uncached tokens in ranking only; disabled by default. */
         private boolean enableWindow = false;
         private long windowMs = 10_000L;
-        /** Optional low Engine waiting-queue watermark (inclusive). Allows token-waterline
-         * overflow only within cache-eligible workers; excludes Master queues and running requests.
+        /** Engine waiting-stream watermark; known queue pressure governs Prefill admission.
+         * Excludes Master queues and running requests. Null retains legacy admission limits.
          */
-        private Long engineQueueAdmissionThreshold;
+        private Long engineQueueAdmissionThreshold = 10L;
+        /** Consecutive observed time above the watermark before backpressure; zero disables debounce. */
+        private long engineQueueOverloadDurationMs = 5_000L;
         /** Optional rescue of small, aged requests to lightly loaded cache-eligible workers. */
         private HotspotRescueConfig hotspotRescue;
     }
@@ -54,6 +56,8 @@ public final class RoutingConfig {
     @Getter
     @Setter
     public static final class HotspotRescueConfig {
+        /** Migrate only when the source Engine reports more waiting streams than this count. */
+        private long engineQueueMigrationThreshold = 30L;
         private long minWaitMs = 5_000L;
         /** Total input, not just uncached tokens: a cache miss on the target must stay cheap. */
         private long maxInputTokens = 32_768L;

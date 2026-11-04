@@ -190,7 +190,9 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             if (blocker == null || !blocker.role().supportsPrefill() || !entry.knownColdRequest) { return; }
             pool = trafficPool(entry);
         }
-        hardTimeouts.add(new QueueHardTimeout(pool, protectionClock.getAsLong()));
+        if (router.isPrefillClusterOverloaded(pool)) {
+            hardTimeouts.add(new QueueHardTimeout(pool, protectionClock.getAsLong()));
+        }
     }
 
     /** Latest queue wait cause and counters; this snapshot is not specific to the current request. */
@@ -1078,7 +1080,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                     poolEntry.getKey() == null ? "<default>" : "group:" + poolEntry.getKey());
             var controller = sheddingControllers.computeIfAbsent(poolEntry.getKey(), ignored -> new PrefillQueueShedding.Controller());
             victims.addAll(PrefillQueueShedding.adaptiveVictims(pool, shedding, snapshot, controller,
-                    protectionClock.getAsLong(), !router.hasEngineQueueAdmission(poolEntry.getKey())));
+                    protectionClock.getAsLong(), router.isPrefillClusterOverloaded(poolEntry.getKey())));
         }
         // Keep attribution alive until the real cancellation/publication wins Context arbitration.
         for (var entry : expired) {
@@ -1090,6 +1092,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         for (var victim : victims) {
             String pool = trafficPool(victim);
             selected.merge(pool, 1, Integer::sum);
+            if (!router.isPrefillClusterOverloaded(pool)
+                    || router.hotPrefillQueueAllowsAdmission(victim.context, victim.routingGroup)) { continue; }
             if (victim.sheddingEstimate.hitTokens() == 0L) {
                 var domain = new PlacementKey(victim.lastBlocker.role(), pool, null);
                 long observed = availability.lastChangedSequence(domain);

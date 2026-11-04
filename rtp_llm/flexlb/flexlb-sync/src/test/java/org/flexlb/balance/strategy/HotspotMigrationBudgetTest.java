@@ -107,9 +107,10 @@ class HotspotMigrationBudgetTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.CsvSource({"0,0,0,true", "0,1,0,false", "50,20,30,true", "50,20,31,false"})
+    @org.junit.jupiter.params.provider.CsvSource({"0,0,0,true,false", "0,1,0,false,false", "50,20,30,true,false",
+            "50,20,31,false,false", "0,0,0,false,true"})
     void targetWatermarkIncludesPendingAndPlansButNotCompletedHistory(long threshold, long pending,
-            long planned, boolean allowed) {
+            long planned, boolean allowed, boolean congested) {
         var config = SchedulingTestConfig.newConfig();
         var balance = new RoutingConfig.TokenBalanceConfig();
         balance.setMaxPendingComputeTokens(100L);
@@ -120,6 +121,7 @@ class HotspotMigrationBudgetTest {
         var registry = mock(EndpointRegistry.class);
         var source = endpoint(0, false);
         var target = endpoint(1, true);
+        when(target.engineQueueCongested()).thenReturn(congested);
         when(target.ownership.tokenWorkload()).thenReturn(new PrefillTokenWorkload.Snapshot(10_000, pending, planned));
         var route = route(1000, 1);
         when(route.prefillEp()).thenReturn(source);
@@ -162,12 +164,60 @@ class HotspotMigrationBudgetTest {
         assertEquals(List.of(shortRoute), strategy.hotspotMigrationCandidates(1));
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+            "30,-1,0,2100000,false", "30,0,256,2100000,false",
+            "30,29,0,2100000,false", "30,30,0,2100000,false",
+            "30,31,0,1280000,true", "30,256,0,1280000,true",
+            "60,60,0,2100000,false", "60,61,0,1,true",
+            "0,0,256,2100000,false", "0,1,0,1,true"
+    })
+    void sourceUsesEngineWaitingCountInsteadOfPendingTokens(long threshold, long waiting, long running,
+            long pending, boolean allowed) {
+        var config = SchedulingTestConfig.newConfig();
+        var balance = new RoutingConfig.TokenBalanceConfig();
+        var rescue = new RoutingConfig.HotspotRescueConfig();
+        rescue.setEngineQueueMigrationThreshold(threshold);
+        balance.setHotspotRescue(rescue);
+        config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
+        var registry = mock(EndpointRegistry.class);
+        var source = endpoint(0, false);
+        var idle = endpoint(1, true);
+        publishEngineQueue(source, waiting, running);
+        when(source.ownership.tokenWorkload()).thenReturn(new PrefillTokenWorkload.Snapshot(pending));
+        var route = route(100, 1);
+        when(route.prefillEp()).thenReturn(source);
+        when(source.ownership.captureQueue(anyInt())).thenReturn(
+                new PrefillState.QueueSnapshot(1, 1, List.of(route), route));
+        when(registry.prefillRoutingSnapshot(RoleType.PREFILL)).thenReturn(List.of(
+                new EndpointRegistry.PrefillRoutingEntry("a", source), new EndpointRegistry.PrefillRoutingEntry("b", idle)));
+        var strategy = new CostBasedPrefillStrategy(registry, mock(CacheAwareService.class),
+                mock(EngineHealthReporter.class), mock(CacheMetricsReporter.class), SchedulingTestConfig.configService(config));
+        assertEquals(allowed ? List.of(route) : List.of(), strategy.hotspotMigrationCandidates(1));
+        if (!allowed) {
+            verify(source.ownership, org.mockito.Mockito.never()).captureQueue(anyInt());
+        }
+        // A subsequent Engine report clears the source trigger, independently of local queue/token backlog.
+        publishEngineQueue(source, 0L, 256L);
+        assertTrue(strategy.hotspotMigrationCandidates(1).isEmpty());
+    }
+
+    private void publishEngineQueue(PrefillEndpoint endpoint, long waiting, long running) {
+        var status = endpoint.getStatus();
+        var response = StrategyTestSupport.response(RoleType.PREFILL, true, 10_000, 10_000,
+                status.appliedStatusCursor().statusVersion() + 1L);
+        response.setWaitingQueryLen(waiting);
+        response.setRunningQueryLen(running);
+        StrategyTestSupport.publish(status, response);
+    }
+
     private PrefillEndpoint endpoint(int id, boolean idle) {
         var endpoint = mock(PrefillEndpoint.class);
         var ownership = mock(PrefillState.class);
         ReflectionTestUtils.setField(endpoint, "ownership", ownership);
         when(endpoint.getStatus()).thenReturn(StrategyTestSupport.workerStatus(RoleType.PREFILL, null,
                 "10.0.0." + id, 8080, 8081, true, 10_000, 10_000));
+        publishEngineQueue(endpoint, idle ? 0L : 31L, 0L);
         when(ownership.tokenWorkload()).thenReturn(new PrefillTokenWorkload.Snapshot(idle ? 0L : 1000L));
         when(ownership.progress()).thenReturn(mock(PrefillState.Progress.class));
         var routes = List.of(route(100, id + 1));

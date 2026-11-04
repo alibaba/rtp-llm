@@ -113,6 +113,19 @@ public class RequestWorkerSelector {
         }
     }
 
+    boolean hotPrefillQueueAllowsAdmission(RequestContext context, String policyGroup) {
+        var request = context.data().getRequest();
+        var vit = request.getSelectedVit();
+        String group = vit == null ? policyGroup : vit.getGroup();
+        return requiredRoles.stream().filter(RoleType::supportsPrefill)
+                .anyMatch(role -> prefillSelector.hotRequestHasEngineQueueAdmission(request, role, group));
+    }
+
+    boolean isPrefillClusterOverloaded(String group) {
+        return requiredRoles.stream().filter(RoleType::supportsPrefill)
+                .anyMatch(role -> prefillSelector.isClusterOverloaded(role, group));
+    }
+
     boolean hasEngineQueueAdmission(String group) {
         return requiredRoles.stream().filter(RoleType::supportsPrefill)
                 .anyMatch(role -> prefillSelector.hasEngineQueueAdmission(role, group));

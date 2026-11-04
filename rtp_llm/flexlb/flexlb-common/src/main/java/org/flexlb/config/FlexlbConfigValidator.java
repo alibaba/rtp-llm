@@ -250,12 +250,16 @@ final class FlexlbConfigValidator {
                     "router.roles.prefill.tokenBalance.minPrefixHitPercent");
             positive(balance.getMaxPendingComputeTokens(),
                     "router.roles.prefill.tokenBalance.maxPendingComputeTokens");
+            nonNegative(balance.getEngineQueueOverloadDurationMs(),
+                    "router.roles.prefill.tokenBalance.engineQueueOverloadDurationMs");
             if (balance.getEngineQueueAdmissionThreshold() != null) {
                 nonNegative(balance.getEngineQueueAdmissionThreshold(),
                         "router.roles.prefill.tokenBalance.engineQueueAdmissionThreshold");
             }
             var rescue = balance.getHotspotRescue();
             if (rescue != null) {
+                nonNegative(rescue.getEngineQueueMigrationThreshold(),
+                        "router.roles.prefill.tokenBalance.hotspotRescue.engineQueueMigrationThreshold");
                 positive(rescue.getMinWaitMs(), "router.roles.prefill.tokenBalance.hotspotRescue.minWaitMs");
                 positive(rescue.getMaxInputTokens(), "router.roles.prefill.tokenBalance.hotspotRescue.maxInputTokens");
                 positive(rescue.getMigrationIntervalMs(), "router.roles.prefill.tokenBalance.hotspotRescue.migrationIntervalMs");
