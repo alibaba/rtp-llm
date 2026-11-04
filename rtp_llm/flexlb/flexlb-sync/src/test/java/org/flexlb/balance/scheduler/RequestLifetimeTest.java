@@ -1,11 +1,11 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.prediction.PrefillPredictionBoundary;
-import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
+import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -29,19 +29,15 @@ import static org.flexlb.balance.scheduler.ContextResult.Cancellation;
 import static org.flexlb.balance.scheduler.ContextResult.CancellationFacts;
 import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
-import static org.flexlb.balance.scheduler.ContextResult.Granted;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
-import static org.flexlb.balance.scheduler.ContextResult.PlacementToken;
 import static org.flexlb.balance.scheduler.ContextResult.Prediction;
 import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
-import static org.flexlb.balance.scheduler.ContextResult.ResponseCandidate;
-import static org.flexlb.balance.scheduler.ContextResult.ResponseKind;
 import static org.flexlb.balance.scheduler.ContextResult.SendState;
 import static org.flexlb.balance.scheduler.ContextResult.TransportResult;
-import static org.flexlb.balance.scheduler.ContextResult.Update;
 import static org.flexlb.balance.scheduler.ExpirationTimer.Kind.INACTIVITY;
 import static org.flexlb.balance.scheduler.ExpirationTimer.Kind.REQUEST;
 import static org.flexlb.balance.scheduler.ExpirationTimer.Kind.VISIBILITY;
+import static org.flexlb.balance.scheduler.RequestChangeAssertions.Update;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -414,7 +410,7 @@ class RequestLifetimeTest {
                             System.currentTimeMillis());
             RequestProtocolTestSupport.bind(
                     registry, new RequestProtocolTestSupport.Registered(item, future));
-            DeliveryClaim claim =
+            Delivery.Member claim =
                     RequestProtocolTestSupport.claimBatchWithoutPrediction(
                             registry, item, 7L, () -> true);
             assertNotNull(claim);
@@ -423,9 +419,9 @@ class RequestLifetimeTest {
             assertTrue(RequestState.from(context.snapshot()).detail().startsWith("SUSPECTED_LOST"));
             assertNull(context.snapshot().cancellation());
             if (ackBeforeEvidence) {
-                registry.onDeliveryFact(
+                registry.onDeliveryResult(
                         new TransportResult(
-                                claim, DeliveryResult.delivered(), System.currentTimeMillis()));
+                                claim, Delivery.Result.delivered(), System.currentTimeMillis()));
                 assertTrue(
                         future.get(1L, TimeUnit.SECONDS).isSuccess(),
                         "uncertainty cannot hold a real EnqueueBatch ACK");
@@ -444,9 +440,9 @@ class RequestLifetimeTest {
                             System.currentTimeMillis()));
             if (!ackBeforeEvidence) {
                 assertFalse(future.isDone(), "Engine activity cannot create an EnqueueBatch ACK");
-                registry.onDeliveryFact(
+                registry.onDeliveryResult(
                         new TransportResult(
-                                claim, DeliveryResult.delivered(), System.currentTimeMillis()));
+                                claim, Delivery.Result.delivered(), System.currentTimeMillis()));
             }
             assertTrue(future.get(1L, TimeUnit.SECONDS).isSuccess());
             RequestProtocolTestSupport.awaitCondition(
@@ -485,13 +481,14 @@ class RequestLifetimeTest {
         RequestContext context = fixture.requestContext;
         RequestLifecycle scheduler = fixture.scheduler;
         var failure = new IllegalStateException("installation failed");
-        try (var timer = new ExpirationTimer(scheduler.requests)) {
-            var original =
-                    (java.util.concurrent.ScheduledThreadPoolExecutor)
-                            org.springframework.test.util.ReflectionTestUtils.getField(
-                                    timer, "executor");
-            var executor = org.mockito.Mockito.spy(original);
-            org.springframework.test.util.ReflectionTestUtils.setField(timer, "executor", executor);
+        try (var executor =
+                        org.mockito.Mockito.spy(
+                                new java.util.concurrent.ScheduledThreadPoolExecutor(1));
+                var timer =
+                        new ExpirationTimer(
+                                scheduler.requests,
+                                (task, delay) ->
+                                        executor.schedule(task, delay, TimeUnit.MILLISECONDS))) {
             var token = new ExpirationTimer.Token(context, REQUEST, 10L, 1L);
             var interceptFirst = new java.util.concurrent.atomic.AtomicBoolean(true);
             var exactHandle = new java.util.concurrent.atomic.AtomicReference<Object>();
@@ -506,11 +503,11 @@ class RequestLifetimeTest {
                                                 org.springframework.test.util.ReflectionTestUtils
                                                         .getField(timer, "slots");
                                 var handles =
-                                        (java.util.Map<?, ?>)
+                                        (Object[])
                                                 org.springframework.test.util.ReflectionTestUtils
                                                         .invokeMethod(
                                                                 slots.get(context), "handles");
-                                exactHandle.set(handles.get(REQUEST));
+                                exactHandle.set(handles[REQUEST.ordinal()]);
                                 // A zero-delay task has run but cannot publish until schedule
                                 // returns successfully.
                                 executor.submit(() -> {}).get(5, TimeUnit.SECONDS);
@@ -546,7 +543,7 @@ class RequestLifetimeTest {
             org.springframework.test.util.ReflectionTestUtils.invokeMethod(
                     exactHandle.get(), "fire");
             org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                    exactHandle.get(), "publish");
+                    exactHandle.get(), "fire");
             org.springframework.test.util.ReflectionTestUtils.invokeMethod(
                     exactHandle.get(), "cancel");
             if (!"install".equals(outcome)) {
@@ -569,14 +566,20 @@ class RequestLifetimeTest {
                         invocation -> {
                             var token = invocation.getArgument(0, ExpirationTimer.Token.class);
                             long nowMs = invocation.getArgument(1, Long.class);
-                            var update = fixture.requestContext.recordDeadline(token, nowMs, null);
+                            var update =
+                                    org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                                            fixture.requestContext,
+                                            observedRequest ->
+                                                    observedRequest.recordDeadline(
+                                                            token, nowMs, null));
                             assertNotNull(update.after().pendingEnd());
                             finishInactivity(fixture.requestContext, nowMs);
                             return null;
                         })
                 .when(registry)
                 .onDeadline(any(), anyLong());
-        try (var timer = new ExpirationTimer(registry.requests)) {
+        try (var tasks = new ScheduledTaskTimer();
+                var timer = new ExpirationTimer(registry.requests, tasks)) {
             startDelivery(fixture.requestContext);
             acknowledge(fixture.requestContext);
             ((RequestFuture) fixture.requestContext.data().getFuture())
@@ -614,7 +617,8 @@ class RequestLifetimeTest {
                         })
                 .when(registry)
                 .onDeadline(any(), anyLong());
-        ExpirationTimer timer = new ExpirationTimer(registry.requests);
+        var tasks = new ScheduledTaskTimer();
+        ExpirationTimer timer = new ExpirationTimer(registry.requests, tasks);
         Thread closer = null;
         try {
             shortenInactivity(fixture.requestContext, 20L);
@@ -626,6 +630,7 @@ class RequestLifetimeTest {
         } finally {
             release.countDown();
             timer.close();
+            tasks.close();
             if (closer != null) {
                 closer.join(5_000);
             }
@@ -641,7 +646,8 @@ class RequestLifetimeTest {
         AtomicLong now = new AtomicLong(start + 100L);
         AtomicInteger checks = new AtomicInteger();
         CountDownLatch expired = new CountDownLatch(1);
-        try (var timer = new ExpirationTimer(registry.requests, now::get)) {
+        try (var tasks = new ScheduledTaskTimer();
+                var timer = new ExpirationTimer(registry.requests, tasks, now::get)) {
             doAnswer(
                             invocation -> {
                                 var token = invocation.getArgument(0, ExpirationTimer.Token.class);
@@ -651,7 +657,11 @@ class RequestLifetimeTest {
                                     recordPrefill(fixture.requestContext, false, start + 50L);
                                 }
                                 var update =
-                                        fixture.requestContext.recordDeadline(token, nowMs, null);
+                                        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                                                fixture.requestContext,
+                                                observedRequest ->
+                                                        observedRequest.recordDeadline(
+                                                                token, nowMs, null));
                                 if (renewed) {
                                     assertNull(
                                             update.after().pendingEnd(),
@@ -727,7 +737,11 @@ class RequestLifetimeTest {
         // deadline.
         recordPrefill(context, false, exact.atMs() - 1L);
         var pendingEnd = context.snapshot().pendingEnd();
-        var update = context.recordDeadline(exact, exact.atMs(), null);
+        var update =
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        context,
+                        observedRequest ->
+                                observedRequest.recordDeadline(exact, exact.atMs(), null));
         assertSame(
                 pendingEnd,
                 update.after().pendingEnd(),
@@ -753,7 +767,9 @@ class RequestLifetimeTest {
 
     private static void expire(RequestContext context, ExpirationTimer.Token token) {
         if (token != null) {
-            context.recordDeadline(token, token.atMs(), null);
+            org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                    context,
+                    observedRequest -> observedRequest.recordDeadline(token, token.atMs(), null));
         }
     }
 
@@ -764,54 +780,60 @@ class RequestLifetimeTest {
         long now = context.snapshot().lastWorkerAtMs();
         var claim =
                 (ContextResult.DeliveryFacts)
-                        ((Granted<?>)
-                                        context.prepareDelivery(
-                                                context.snapshot().route(),
-                                                DeliveryClaimKind.BATCH_ENQUEUE,
-                                                1L,
-                                                now))
-                                .value();
+                        context.prepareDelivery(
+                                new org.flexlb.balance.scheduler.Delivery.Member(
+                                        context.snapshot().route(), null),
+                                Delivery.SendMode.BATCH_ENQUEUE,
+                                1L,
+                                now);
         context.publishDelivery(claim);
     }
 
     private static void acknowledge(RequestContext context) {
         var identity = context.snapshot().delivery().identity();
         long now = context.snapshot().lastWorkerAtMs();
-        context.recordDeliveryResult(
-                new TransportResult(identity, DeliveryResult.delivered(), now));
-        assertTrue(
-                context.selectResponse(
-                                new ResponseCandidate(
-                                        context, ResponseKind.CONFIRMATION, null, now))
-                        instanceof Granted<?>);
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.recordDeliveryResult(
+                                new TransportResult(identity, Delivery.Result.delivered(), now)));
+        assertTrue(context.confirmDelivery(now));
     }
 
     private static ExpirationTimer.Token decodeAccepted(RequestContext context) {
         var old = context.snapshot().deadlines().visibility();
         var route = context.snapshot().route();
-        context.recordEngineEvidence(
-                new EngineEvidence(
-                        route,
-                        route.decodeReservation(),
-                        RoleType.DECODE,
-                        EngineKind.ACTIVE,
-                        0L,
-                        null,
-                        context.snapshot().lastWorkerAtMs()));
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.recordEngineEvidence(
+                                new EngineEvidence(
+                                        route,
+                                        route.decodeReservation(),
+                                        RoleType.DECODE,
+                                        EngineKind.ACTIVE,
+                                        0L,
+                                        null,
+                                        context.snapshot().lastWorkerAtMs())));
         return old;
     }
 
     private static void recordPrefill(RequestContext context, boolean completed, long nowMs) {
         var route = context.snapshot().route();
-        context.recordEngineEvidence(
-                new EngineEvidence(
-                        route,
-                        null,
-                        route.decodeEp() == null ? RoleType.PDFUSION : RoleType.PREFILL,
-                        completed ? EngineKind.COMPLETED : EngineKind.ACTIVE,
-                        0L,
-                        null,
-                        nowMs));
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.recordEngineEvidence(
+                                new EngineEvidence(
+                                        route,
+                                        null,
+                                        route.decodeEp() == null
+                                                ? RoleType.PDFUSION
+                                                : RoleType.PREFILL,
+                                        completed ? EngineKind.COMPLETED : EngineKind.ACTIVE,
+                                        0L,
+                                        null,
+                                        nowMs)));
     }
 
     private static boolean needsConfirmation(RequestContext context) {
@@ -829,13 +851,17 @@ class RequestLifetimeTest {
     private static void cancel(RequestContext context, CancelReason reason, String detail) {
         if (reason == CancelReason.DEADLINE_EXCEEDED) {
             var deadline = context.snapshot().deadlines().inactivity();
-            context.recordDeadline(
-                    deadline,
-                    deadline.atMs(),
-                    new CancellationFacts(
-                            reason,
-                            org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED,
-                            detail));
+            org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                    context,
+                    observedRequest ->
+                            observedRequest.recordDeadline(
+                                    deadline,
+                                    deadline.atMs(),
+                                    new CancellationFacts(
+                                            reason,
+                                            org.flexlb.dao.loadbalance.StrategyErrorType
+                                                    .BATCH_SLO_EXPIRED,
+                                            detail)));
         } else {
             context.requestCancel(
                     new Cancellation(
@@ -849,12 +875,15 @@ class RequestLifetimeTest {
     }
 
     private static void uncertain(RequestContext context) {
-        context.recordDeliveryResult(
-                new TransportResult(
-                        context.snapshot().delivery().identity(),
-                        DeliveryResult.uncertain(
-                                new IllegalStateException("sender result unknown")),
-                        context.snapshot().lastWorkerAtMs()));
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.recordDeliveryResult(
+                                new TransportResult(
+                                        context.snapshot().delivery().identity(),
+                                        Delivery.Result.uncertain(
+                                                new IllegalStateException("sender result unknown")),
+                                        context.snapshot().lastWorkerAtMs())));
     }
 
     private static void shortenInactivity(RequestContext context, long durationMs) {
@@ -877,7 +906,7 @@ class RequestLifetimeTest {
     private static OptionalLong visibilityDeadline(
             WorkSnapshot preceding, long unstartedWorkMs, double lifetime, long deliveredAtMs) {
         long at =
-                PrefillPredictionBoundary.predictedVisibilityDeadlineMs(
+                PrefillTimePredictor.predictedVisibilityDeadlineMs(
                         preceding, unstartedWorkMs, lifetime, deliveredAtMs);
         return at == 0L ? OptionalLong.empty() : OptionalLong.of(at);
     }
@@ -917,11 +946,16 @@ class RequestLifetimeTest {
                         decode,
                         reservation,
                         System.currentTimeMillis());
-        var placement = (PlacementToken) ((Granted<?>) context.beginPlacement(null)).value();
+        var placement = (AdmissionHandle) context.beginPlacement(null);
         context.bindPlacement(placement, item, PublicationResult.PREPARED);
         context.bindPlacement(placement, item, PublicationResult.PUBLISHED);
-        context.completePlacement(
-                placement, PublicationResult.PUBLISHED, System.currentTimeMillis());
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.completePlacement(
+                                placement,
+                                PublicationResult.PUBLISHED,
+                                System.currentTimeMillis()));
         return new Fixture(owner, config, context, item);
     }
 
@@ -937,7 +971,7 @@ class RequestLifetimeTest {
             RequestContext context, WorkSnapshot work, long predictedMs, long nowMs) {
         startDelivery(context);
         long at =
-                PrefillPredictionBoundary.predictedVisibilityDeadlineMs(
+                PrefillTimePredictor.predictedVisibilityDeadlineMs(
                         work,
                         predictedMs,
                         context.data()
@@ -946,8 +980,12 @@ class RequestLifetimeTest {
                                 .getDecision()
                                 .getLifetime(),
                         nowMs);
-        context.recordDeliveryResult(
-                new Prediction(context.snapshot().delivery().identity(), at, nowMs));
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.recordDeliveryResult(
+                                new Prediction(
+                                        context.snapshot().delivery().identity(), at, nowMs)));
     }
 
     private static void startPrediction(

@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.scheduler.ResponseCompletionExecutor.Registration;
 import org.flexlb.config.ConfigService;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
@@ -22,9 +23,31 @@ import static org.mockito.Mockito.withSettings;
 
 /** Builds real request owners and shared facilities; contains no request state machine. */
 public final class SchedulerTestSupport {
-    static Thread decisionThread(RequestScheduler scheduler) {
-        var loop = ReflectionTestUtils.getField(scheduler, "schedulingLoop");
-        return (Thread) ReflectionTestUtils.getField(loop, "thread");
+    public static AbstractRequestScheduler createStartedScheduler(
+            RequestLifecycle lifecycle,
+            org.flexlb.config.FlexlbConfig config,
+            RequestWorkerSelector router,
+            org.flexlb.balance.eviction.DecodePreemption preemption,
+            PlacementAvailability availability,
+            org.flexlb.balance.planner.GroupPlanner grouping,
+            PlacementQueue queue) {
+        var scheduler =
+                PlacementConfiguration.create(
+                        lifecycle, config, router, preemption, availability, grouping, queue);
+        scheduler.start();
+        return scheduler;
+    }
+
+    static org.flexlb.balance.PlacementResult<RequestRoute, PlacementKey> enqueueRoute(
+            QueuedRequestScheduler scheduler, QueuedRequestScheduler.PlacementPlan plan) {
+        var route = RequestProtocolTestSupport.planRouting(plan);
+        var settings =
+                (QueueExecutionSettings) ReflectionTestUtils.getField(scheduler, "queueSettings");
+        return lifecycle(scheduler).dispatcher.enqueueRoute(route, settings);
+    }
+
+    static void startScheduling(RequestScheduler scheduler) {
+        scheduler.start();
     }
 
     public static RequestLifecycle lifecycle(RequestScheduler scheduler) {
@@ -38,29 +61,18 @@ public final class SchedulerTestSupport {
         return lifecycle;
     }
 
-    public static RequestExecution.Dependencies queueDependencies(SchedulerTestServices runtime) {
-        var current = runtime.queueDependencies;
-        if (current == null || current.deliveries != runtime.deliveries()) {
-            current =
-                    new RequestExecution.Dependencies(
-                            runtime.deliveries(),
-                            runtime.deliveryReporter,
-                            runtime::recordFailure,
-                            QueuedRequestScheduler::runPrefill);
-            org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
-                    runtime, "queueDependencies", current);
-        }
-        return current;
+    public static DeliveryExecution queueDependencies(SchedulerTestServices runtime) {
+        return runtime.deliveries();
     }
 
-    public static RequestExecution.Dependencies queueDependencies(
+    public static DeliveryExecution queueDependencies(
             RequestLifecycle owner, org.flexlb.config.FlexlbConfig config) {
         if (org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner) == null) {
             var runtime = mock(SchedulerTestServices.class);
             var deliveries =
                     new DeliveryExecution(DeliveryTestSupport.service(config), ignored -> {});
             when(runtime.deliveries()).thenReturn(deliveries);
-            when(runtime.signals()).thenReturn(new RequestSignals());
+
             org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                     runtime, "deliveryReporter", mock(DeliveryMetricsReporter.class));
             org.flexlb.balance.scheduler.SchedulerTestServices.bind(owner, runtime);
@@ -82,7 +94,14 @@ public final class SchedulerTestSupport {
                 new DeliveryDispatcher(
                         null,
                         DeliveryTestSupport.service(SchedulingTestConfig.newConfig()),
-                        new DeliveryMetricsReporter(null)));
+                        new DeliveryMetricsReporter(null),
+                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
+                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                                .decodeAdmissionCapacity(
+                                        DeliveryTestSupport.service(
+                                                SchedulingTestConfig.newConfig())),
+                        org.mockito.Mockito.mock(
+                                org.flexlb.balance.scheduler.DeliveryExecution.class)));
     }
 
     static DeliveryDispatcher dispatcher(SchedulerTestServices runtime) {
@@ -110,7 +129,7 @@ public final class SchedulerTestSupport {
                             var context = mock(RequestContext.class);
                             var data = mock(RequestData.class);
                             when(context.data()).thenReturn(data);
-                            when(data.getScheduler()).thenReturn(owner);
+                            when(data.getLifecycle()).thenReturn(owner);
                             return context;
                         });
         return repository;
@@ -123,14 +142,14 @@ public final class SchedulerTestSupport {
             when(service.loadBalanceConfig()).thenReturn(SchedulingTestConfig.newConfig());
             var deliveries = new DeliveryExecution(service, ignored -> {});
             when(runtime.deliveries()).thenReturn(deliveries);
-            when(runtime.signals()).thenReturn(new RequestSignals());
+
             org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                     runtime, "deliveryReporter", mock(DeliveryMetricsReporter.class));
             org.flexlb.balance.scheduler.SchedulerTestServices.bind(owner, runtime);
         }
-        if (context.data().getScheduler() == null) {
+        if (context.data().getLifecycle() == null) {
             // Minimal fixtures may bind an owner without registering a runnable request.
-            ReflectionTestUtils.setField(context.data(), "scheduler", owner);
+            ReflectionTestUtils.setField(context.data(), "lifecycle", owner);
         }
     }
 
@@ -151,15 +170,15 @@ public final class SchedulerTestSupport {
             var owner = repository == null ? null : repository.ownerOf(route.requestId());
             var data = mock(RequestData.class);
             when(context.data()).thenReturn(data);
-            when(data.getScheduler())
+            when(data.getLifecycle())
                     .thenReturn(owner == null ? mock(RequestLifecycle.class) : owner);
-        } else if (route.ctx().data().getScheduler() == null) {
+        } else if (route.ctx().data().getLifecycle() == null) {
             var repository = endpointRepositories.get(endpoint);
             var owner = repository == null ? null : repository.ownerOf(route.requestId());
             bindOwner(route.ctx(), owner == null ? mock(RequestLifecycle.class) : owner);
         }
         var context = route.ctx();
-        var owner = context.data().getScheduler();
+        var owner = context.data().getLifecycle();
         if (owner.requests == null) {
             var snapshot = context.snapshot();
             if (snapshot == null || org.mockito.Mockito.mockingDetails(snapshot).isMock()) {
@@ -179,13 +198,14 @@ public final class SchedulerTestSupport {
                                 .getRequestLifecycle()
                                 .getRequest()
                                 .getTimeoutMs());
-                var placement =
-                        (ContextResult.PlacementToken)
-                                ((ContextResult.Granted<?>) context.beginPlacement(null)).value();
+                var placement = (AdmissionHandle) context.beginPlacement(null);
                 context.bindPlacement(placement, route, ContextResult.PublicationResult.PREPARED);
                 context.bindPlacement(placement, route, ContextResult.PublicationResult.PUBLISHED);
-                context.completePlacement(
-                        placement, ContextResult.PublicationResult.PUBLISHED, now);
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        context,
+                        observedRequest ->
+                                observedRequest.completePlacement(
+                                        placement, ContextResult.PublicationResult.PUBLISHED, now));
             }
         }
     }
@@ -197,7 +217,27 @@ public final class SchedulerTestSupport {
     }
 
     public static void awaitRequestWork(SchedulerTestServices runtime) {
-        ReflectionTestUtils.invokeMethod(runtime.tasks(), "awaitIdle");
+        var tasks = (RequestTaskPool) runtime.tasks();
+        if (!tasks.isExecutingOnCurrentThread()) {
+            tasks.awaitIdle();
+            return;
+        }
+        // Race hooks run inside asynchronous DIRECT work. Drain the other tasks, not this hook.
+        var monitor = ReflectionTestUtils.getField(tasks, "workLifecycle");
+        try {
+            var pending = RequestTaskPool.class.getDeclaredField("pendingWork");
+            pending.setAccessible(true);
+            long until = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+            while (System.nanoTime() < until) {
+                synchronized (monitor) {
+                    if (pending.getLong(tasks) == 1L) return;
+                }
+                java.util.concurrent.locks.LockSupport.parkNanos(1_000_000L);
+            }
+            throw new AssertionError("other request work did not drain while running a race hook");
+        } catch (ReflectiveOperationException failure) {
+            throw new AssertionError(failure);
+        }
     }
 
     static void closeRequestWork(SchedulerTestServices runtime) {
@@ -221,7 +261,7 @@ public final class SchedulerTestSupport {
     public static java.util.concurrent.ScheduledThreadPoolExecutor cleanupExecutor(
             SchedulerTestServices runtime) {
         return (java.util.concurrent.ScheduledThreadPoolExecutor)
-                ReflectionTestUtils.getField(runtime.taskTimer(), "cleanupExecutor");
+                ReflectionTestUtils.getField(runtime.taskTimer(), "executor");
     }
 
     static void closeRequestExecutors(SchedulerTestServices runtime) {
@@ -235,26 +275,33 @@ public final class SchedulerTestSupport {
         if (delivery != null) {
             if (delivery.send() == ContextResult.SendState.NOT_STARTED
                     || delivery.send() == ContextResult.SendState.SENDING) {
-                context.recordDeliveryResult(
-                        new ContextResult.TransportResult(
-                                delivery.identity(),
-                                org.flexlb.balance.delivery.DeliveryResult.notSent(
-                                        new IllegalStateException(
-                                                "fixture sender exited before send")),
-                                System.currentTimeMillis()));
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        context,
+                        observedRequest ->
+                                observedRequest.recordDeliveryResult(
+                                        new ContextResult.TransportResult(
+                                                delivery.identity(),
+                                                org.flexlb.balance.scheduler.Delivery.Result
+                                                        .notSent(
+                                                                new IllegalStateException(
+                                                                        "fixture sender exited before send")),
+                                                System.currentTimeMillis())));
             }
-            context.recordDeliveryResult(
-                    new ContextResult.CleanupAcknowledgement(
-                            delivery.identity(),
-                            ContextResult.CancelEvidenceKind.CLEANED,
-                            System.currentTimeMillis()));
+            org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                    context,
+                    observedRequest ->
+                            observedRequest.recordDeliveryResult(
+                                    new ContextResult.CleanupAcknowledgement(
+                                            delivery.identity(),
+                                            ContextResult.CancelEvidenceKind.CLEANED,
+                                            System.currentTimeMillis())));
         }
         context.completeClose(
-                new ContextResult.CloseProgress(true, false, false, true, true),
+                new ContextResult.CloseProgress(true, false, false, true),
                 System.currentTimeMillis());
         org.junit.jupiter.api.Assertions.assertNotNull(context.releaseReason());
         context.completeClose(
-                new ContextResult.CloseProgress(false, true, true, false, false),
+                new ContextResult.CloseProgress(false, true, true, false),
                 System.currentTimeMillis());
         org.junit.jupiter.api.Assertions.assertNotNull(context.snapshot().terminalRecord());
         return context.snapshot().terminalRecord();
@@ -285,7 +332,7 @@ public final class SchedulerTestSupport {
         }
         if (state.placement() != null
                 && (!state.placement().published()
-                        || state.placement().operation().withdrawing() != null)) {
+                        || state.placement().operation().withdrawingRoute() != null)) {
             return Stage.ROUTING;
         }
         return state.route() == null ? Stage.QUEUED : Stage.READY_TO_DELIVER;
@@ -301,7 +348,7 @@ public final class SchedulerTestSupport {
         return facts == null ? null : facts.identity();
     }
 
-    static DeliveryClaim delivery(RequestContext context) {
+    static Delivery.Member delivery(RequestContext context) {
         var facts = context.snapshot().delivery();
         return facts == null ? null : facts.identity();
     }
@@ -417,15 +464,13 @@ public final class SchedulerTestSupport {
                                         .useConstructor(
                                                 snapshot,
                                                 router,
-                                                batches,
                                                 eviction,
                                                 runtime.newLifecycle(snapshot, capacity, trace),
                                                 availability,
                                                 new OrderedRequestQueue(
                                                         snapshot.isPriorityOrdering()),
                                                 org.flexlb.balance.planner.BuiltinGroupPlanner.from(
-                                                        snapshot),
-                                                queueDependencies(runtime))
+                                                        snapshot))
                                         .defaultAnswer(CALLS_REAL_METHODS))
                         : mock(
                                 DirectRequestScheduler.class,
@@ -435,16 +480,16 @@ public final class SchedulerTestSupport {
                                                 runtime.newLifecycle(snapshot, capacity, trace))
                                         .defaultAnswer(CALLS_REAL_METHODS));
         runtime.registerScheduler(owner);
-        if (owner instanceof QueuedRequestScheduler queue && startPlacement) {
-            queue.start();
+        if (startPlacement || owner instanceof DirectRequestScheduler) {
+            owner.start();
         }
         var lifecycle = spy(lifecycle(owner));
         ReflectionTestUtils.setField(owner, "lifecycle", lifecycle);
         return lifecycle;
     }
 
-    static ResponsePublication responsePublication(ResponseCompletionExecutor executor) {
-        return new ResponsePublication(executor, mock(RequestContext.class), false);
+    static Registration responsePublication(ResponseCompletionExecutor executor) {
+        return new Registration(executor, mock(RequestContext.class));
     }
 
     static DeliveryDispatcher createDispatcher(
@@ -462,6 +507,13 @@ public final class SchedulerTestSupport {
                         org.flexlb.config.ConfigService.class,
                         org.mockito.AdditionalAnswers.delegatesTo(service));
         org.mockito.Mockito.doReturn(config).when(dispatcherService).loadBalanceConfig();
-        return new DeliveryDispatcher(client, dispatcherService, new DeliveryMetricsReporter(null));
+        return new DeliveryDispatcher(
+                client,
+                dispatcherService,
+                new DeliveryMetricsReporter(null),
+                org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
+                new org.flexlb.balance.scheduler.PlacementConfiguration()
+                        .decodeAdmissionCapacity(dispatcherService),
+                org.mockito.Mockito.mock(org.flexlb.balance.scheduler.DeliveryExecution.class));
     }
 }

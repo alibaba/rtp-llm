@@ -8,7 +8,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.enums.BalanceStatusEnum;
-import org.flexlb.service.grpc.EngineStatusConverter;
+import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.grpc.WorkerStatusRpcClient;
 import org.flexlb.service.monitor.EngineHealthReporter;
 
@@ -111,7 +111,7 @@ public class GrpcWorkerStatusRunner extends AbstractStatusRunner {
                                 var observation =
                                         response == null
                                                 ? null
-                                                : EngineStatusConverter.convertToStatusObservation(
+                                                : WorkerStatusRpcClient.convertToStatusObservation(
                                                         workerStatus, response);
                                 pollLease.trace().record(Stage.CONVERSION_COMPLETED);
                                 handleStatusResponse(observation, startTime);
@@ -284,9 +284,7 @@ public class GrpcWorkerStatusRunner extends AbstractStatusRunner {
                 status.tpSize(),
                 status.availableKvCacheTokens(),
                 status.totalKvCacheTokens() - status.availableKvCacheTokens(),
-                runningTasks.values().stream()
-                        .filter(t -> t.phase() != org.flexlb.enums.TaskPhase.RUNNING)
-                        .count(),
+                runningTasks.values().stream().filter(t -> t.phase() != TaskPhase.RUNNING).count(),
                 runningTasks.size(),
                 workerStatus.appliedStatusCursor().statusVersion(),
                 TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - startTime);

@@ -6,9 +6,9 @@ import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DeliverySettlementTestSupport;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.scheduler.ExpirationTimer.Token;
+import org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
@@ -44,16 +44,13 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
-import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -87,7 +84,7 @@ class QueuedBatchDeliveryTest {
     private EngineGrpcClient grpc;
     private PrefillEndpoint prefill;
     private DecodeEndpoint decode;
-    private RequestExecution worker;
+    private EndpointWork worker;
     private final java.util.concurrent.CopyOnWriteArrayList<EngineRpcService.EnqueueBatchRequestPB>
             sent = new java.util.concurrent.CopyOnWriteArrayList<>();
 
@@ -118,7 +115,18 @@ class QueuedBatchDeliveryTest {
                             sent.add(call.getArgument(2));
                             return reply;
                         });
-        dispatcher = new DeliveryDispatcher(grpc, service, reporter);
+        dispatcher =
+                org.mockito.Mockito.spy(
+                        new DeliveryDispatcher(
+                                grpc,
+                                service,
+                                reporter,
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.TaskTimer.class),
+                                new org.flexlb.balance.scheduler.PlacementConfiguration()
+                                        .decodeAdmissionCapacity(service),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
         var execution =
                 org.mockito.Mockito.spy(
                         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
@@ -135,16 +143,11 @@ class QueuedBatchDeliveryTest {
         prefill = mock(PrefillEndpoint.class);
         when(prefill.getIp()).thenReturn("127.0.0.1");
         when(prefill.getGrpcPort()).thenReturn(8090);
-        when(prefill.reserveBatch(any(), anyLong(), anyInt()))
-                .thenAnswer(
-                        call ->
-                                ledger.reserveBatch(
-                                        call.getArgument(0),
-                                        call.getArgument(1),
-                                        call.getArgument(2)));
+        when(prefill.reserveBatch(anyLong(), anyInt()))
+                .thenAnswer(call -> ledger.reserveBatch(call.getArgument(0), call.getArgument(1)));
         org.mockito.Mockito.doAnswer(
                         call -> {
-                            RequestRoute item = call.getArgument(1);
+                            RequestRoute item = call.getArgument(0);
                             assertFalse(
                                     Thread.holdsLock(
                                             registry.requests.findActive(item.requestId())));
@@ -152,18 +155,15 @@ class QueuedBatchDeliveryTest {
                                     ledger.prefill, item);
                         })
                 .when(prefill)
-                .release(isNull(), any());
+                .releaseRequest(any());
         org.mockito.Mockito.doAnswer(
                         call -> {
-                            var released = ledger.prefill.release(call.getArgument(0), null);
-                            if (released.generationHandoff() != null) {
-                                ((AutoCloseable) released.generationHandoff()).close();
-                            }
-                            return released.released();
+                            var released = ledger.prefill.rollback(call.getArgument(0));
+                            return released;
                         })
                 .when(prefill)
-                .release(any(PrefillState.Reservation.class), isNull());
-        when(prefill.commitLocked(any(PrefillState.CommitPlan.class)))
+                .rollback(any(PrefillEndpoint.Reservation.class));
+        when(prefill.commitLocked(any(org.flexlb.balance.scheduler.Delivery.class)))
                 .thenAnswer(call -> ledger.commit(call.getArgument(0)));
         decode =
                 EndpointTestSupport.decode(
@@ -172,20 +172,21 @@ class QueuedBatchDeliveryTest {
                         SchedulerTestSupport.repository(registry));
         worker =
                 org.mockito.Mockito.spy(
-                        new RequestExecution(
-                                "queued-delivery",
-                                prefill,
-                                QueueExecutionSettings.capture(
-                                        config,
-                                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(
-                                                config)),
-                                dispatcher,
-                                ledger.prefill,
-                                SchedulerTestSupport.queueDependencies(
-                                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                                registry))));
-        ReflectionTestUtils.setField(prefill, "requestExecution", worker);
-        ReflectionTestUtils.setField(prefill, "ownership", ledger.prefill);
+                        org.flexlb.balance.endpoint.EndpointTestSupport.attach(
+                                org.flexlb.balance.endpoint.EndpointTestSupport.worker(
+                                        "queued-delivery",
+                                        prefill,
+                                        QueueExecutionSettings.capture(
+                                                config,
+                                                org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                                        config)),
+                                        dispatcher,
+                                        ledger.prefill,
+                                        SchedulerTestSupport.queueDependencies(
+                                                org.flexlb.balance.scheduler.SchedulerTestSupport
+                                                        .runtime(registry)))));
+        org.flexlb.balance.endpoint.EndpointTestSupport.attachWork(prefill, worker);
+        org.flexlb.balance.endpoint.EndpointTestSupport.stubResources(prefill, ledger.prefill);
         if (config.getDispatcher().getType() == org.flexlb.config.DispatcherConfig.Type.NON_BATCH) {
             return;
         }
@@ -238,12 +239,12 @@ class QueuedBatchDeliveryTest {
         RequestRoute second = item(2L);
         submit(List.of(first, second));
         assertEquals(
-                DeliveryClaimKind.NONE,
+                Delivery.SendMode.NONE,
                 SchedulerTestSupport.repository(registry)
                         .getRequestState(1L, 0L)
                         .deliveryClaimKind());
         assertEquals(
-                DeliveryClaimKind.NONE,
+                Delivery.SendMode.NONE,
                 SchedulerTestSupport.repository(registry)
                         .getRequestState(2L, 0L)
                         .deliveryClaimKind());
@@ -269,15 +270,15 @@ class QueuedBatchDeliveryTest {
         }
         releaseExecutor.countDown();
         awaitDispatchTasks();
-        assertFalse(first.future().get(5, TimeUnit.SECONDS).isSuccess());
+        assertFalse(first.ctx().data().getFuture().get(5, TimeUnit.SECONDS).isSuccess());
         assertEquals(
-                DeliveryClaimKind.NONE,
+                Delivery.SendMode.NONE,
                 SchedulerTestSupport.repository(registry)
                         .getRequestState(1L, 0L)
                         .deliveryClaimKind());
         int survivors = all ? 0 : 1;
         if (all) {
-            assertFalse(second.future().get(5, TimeUnit.SECONDS).isSuccess());
+            assertFalse(second.ctx().data().getFuture().get(5, TimeUnit.SECONDS).isSuccess());
         }
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
@@ -297,12 +298,12 @@ class QueuedBatchDeliveryTest {
                             .map(input -> input.getInput().getRequestId())
                             .toList());
             assertEquals(
-                    DeliveryClaimKind.BATCH_ENQUEUE,
+                    Delivery.SendMode.BATCH_ENQUEUE,
                     SchedulerTestSupport.repository(registry)
                             .getRequestState(2L, 0L)
                             .deliveryClaimKind());
             reply.complete(ack(2L));
-            assertTrue(second.future().get(5, TimeUnit.SECONDS).isSuccess());
+            assertTrue(second.ctx().data().getFuture().get(5, TimeUnit.SECONDS).isSuccess());
             ledger.finish(201L, second)
                     .forEach(
                             requestStatus ->
@@ -342,7 +343,7 @@ class QueuedBatchDeliveryTest {
         assertEquals(lastStatus, ReflectionTestUtils.getField(requestContext, "lastWorkerAtMs"));
         if (ack) {
             reply.complete(ack(1L));
-            assertTrue(item.future().get(5, TimeUnit.SECONDS).isSuccess());
+            assertTrue(item.ctx().data().getFuture().get(5, TimeUnit.SECONDS).isSuccess());
         }
         Token originalTimer = requestContext.snapshot().deadlines().inactivity();
         assertNotNull(originalTimer);
@@ -371,9 +372,11 @@ class QueuedBatchDeliveryTest {
         if (!ack) {
             reply.complete(ack(1L));
         }
-        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                .signals()
-                .delivery(requestContext.snapshot().delivery().identity())
+        requestContext
+                .snapshot()
+                .delivery()
+                .identity()
+                .completion()
                 .toCompletableFuture()
                 .get(2, TimeUnit.SECONDS);
         RequestProtocolTestSupport.awaitCondition(
@@ -382,7 +385,7 @@ class QueuedBatchDeliveryTest {
                                 != null);
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
-        assertEquals(ack, item.future().get(5, TimeUnit.SECONDS).isSuccess());
+        assertEquals(ack, item.ctx().data().getFuture().get(5, TimeUnit.SECONDS).isSuccess());
     }
 
     @Test
@@ -399,9 +402,8 @@ class QueuedBatchDeliveryTest {
                 .thenAnswer(
                         call -> {
                             assertFalse(Thread.holdsLock(context));
-                            org.junit.jupiter.api.Assertions.assertThrows(
-                                    IllegalStateException.class,
-                                    ledger.prefill.queueGuard()::requireHeld);
+                            org.junit.jupiter.api.Assertions.assertFalse(
+                                    ledger.prefill.resourceLock().isHeldByCurrentThread());
                             rpcEntered.countDown();
                             await(releaseRpc);
                             return reply;
@@ -416,14 +418,14 @@ class QueuedBatchDeliveryTest {
                                 () -> {
                                     synchronized (context) {
                                         assertEquals(
-                                                DeliveryClaimKind.BATCH_ENQUEUE,
+                                                Delivery.SendMode.BATCH_ENQUEUE,
                                                 context.snapshot().delivery().identity().kind());
                                     }
-                                    ledger.prefill.queueGuard().lock();
+                                    ledger.prefill.resourceLock().lock();
                                     try {
                                         assertEquals(0, ledger.prefill.progress().queueDepth());
                                     } finally {
-                                        ledger.prefill.queueGuard().unlock();
+                                        ledger.prefill.resourceLock().unlock();
                                     }
                                     registry.cancel(
                                             item.requestId(), 0L, CancelReason.CLIENT_CANCELLED);
@@ -445,37 +447,70 @@ class QueuedBatchDeliveryTest {
     }
 
     @Test
+    void submissionFailureBeforeExecutorAcceptanceSettlesCommittedRowsAndReturnsPermits()
+            throws Exception {
+        var route = item(9801L);
+        var attempt = new java.util.concurrent.atomic.AtomicReference<Delivery>();
+        org.mockito.Mockito.doAnswer(
+                        call -> {
+                            attempt.set(call.getArgument(0));
+                            throw new IllegalStateException("submission failed before acceptance");
+                        })
+                .when(dispatcher)
+                .deliverBatch(any());
+        try {
+            org.junit.jupiter.api.Assertions.assertDoesNotThrow(() -> submit(List.of(route)));
+            releaseExecutor.countDown();
+            awaitDispatchTasks();
+            SchedulerTestSupport.awaitRequestWork(SchedulerTestSupport.runtime(registry));
+            assertOccupancy(0, 0);
+            assertEquals(0, decode.resourceSnapshot().activeDispatchPermits());
+            org.mockito.Mockito.verify(grpc, org.mockito.Mockito.never())
+                    .batchEnqueueAsync(any(), anyInt(), any());
+        } finally {
+            // Keep a failed regression from blocking the fixture's infrastructure drain.
+            if (attempt.get() != null) {
+                attempt.get().releasePreparation();
+                attempt.get().executionPermit.close();
+            }
+        }
+    }
+
+    @Test
     void committedMaterializationFailureBeforeHandoffClosesRealAdmission() throws Exception {
         RequestRoute item = item(1L);
         var failure = new IllegalStateException("materialization failed before dispatcher entry");
         org.mockito.Mockito.doAnswer(
                         call -> {
-                            PrefillState.CommittedHandoff actual =
-                                    (PrefillState.CommittedHandoff) call.callRealMethod();
-                            var committed = org.mockito.Mockito.spy(actual);
-                            var capture = mock(PrefillState.WorkCapture.class);
-                            when(capture.materialize())
+                            call.callRealMethod();
+                            Delivery prepared = call.getArgument(0);
+                            var capture =
+                                    mock(
+                                            org.flexlb.balance.projection.RequestTimeEstimation
+                                                    .WorkSnapshot.class);
+                            when(capture.calculate())
                                     .thenAnswer(
                                             ignored -> {
-                                                assertThrows(
-                                                        IllegalStateException.class,
-                                                        ledger.prefill.queueGuard()::requireHeld);
+                                                org.junit.jupiter.api.Assertions.assertFalse(
+                                                        ledger.prefill
+                                                                .resourceLock()
+                                                                .isHeldByCurrentThread());
                                                 throw failure;
                                             });
-                            org.mockito.Mockito.doReturn(capture).when(committed).precedingWork();
-                            return committed;
+                            prepared.precedingWork = capture;
+                            return null;
                         })
-                .when(worker)
-                .commitSelection(any());
+                .when(dispatcher)
+                .commit(any(), any(), any(), anyInt(), any(), any());
         org.junit.jupiter.api.Assertions.assertDoesNotThrow(() -> submit(List.of(item)));
         verify(registry)
-                .onDeliveryFact(
+                .onDeliveryResult(
                         argThat(
                                 e ->
                                         e instanceof ContextResult.PreparationFailure failed
                                                 && failed.route() == item
                                                 && failed.detail().equals(failure.getMessage())));
-        assertFalse(item.future().get(5, TimeUnit.SECONDS).isSuccess());
+        assertFalse(item.ctx().data().getFuture().get(5, TimeUnit.SECONDS).isSuccess());
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         assertOccupancy(0, 0);
@@ -516,7 +551,7 @@ class QueuedBatchDeliveryTest {
                     "dispatchExecutor",
                     original);
         }
-        assertFalse(item.future().get(5, TimeUnit.SECONDS).isSuccess());
+        assertFalse(item.ctx().data().getFuture().get(5, TimeUnit.SECONDS).isSuccess());
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         verify(rejected, times(1)).execute(any());
@@ -540,7 +575,7 @@ class QueuedBatchDeliveryTest {
         submit(List.of(item));
         releaseExecutor.countDown();
         awaitDispatchTasks();
-        assertFalse(item.future().get(5, TimeUnit.SECONDS).isSuccess());
+        assertFalse(item.ctx().data().getFuture().get(5, TimeUnit.SECONDS).isSuccess());
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         assertOccupancy(0, 0);
@@ -584,7 +619,13 @@ class QueuedBatchDeliveryTest {
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         for (int index = 0; index < items.size(); index++) {
             if ((invalidMask & (1 << index)) != 0) {
-                assertFalse(items.get(index).future().get(5, TimeUnit.SECONDS).isSuccess());
+                assertFalse(
+                        items.get(index)
+                                .ctx()
+                                .data()
+                                .getFuture()
+                                .get(5, TimeUnit.SECONDS)
+                                .isSuccess());
             }
         }
         assertOccupancy(survivors.isEmpty() ? 0 : 1, survivors.size());
@@ -611,7 +652,7 @@ class QueuedBatchDeliveryTest {
                                             .setRequestId(item.requestId())));
             reply.complete(ack.build());
             for (RequestRoute item : survivors) {
-                assertTrue(item.future().get(5, TimeUnit.SECONDS).isSuccess());
+                assertTrue(item.ctx().data().getFuture().get(5, TimeUnit.SECONDS).isSuccess());
                 ledger.finish(201L, item)
                         .forEach(
                                 requestStatus ->
@@ -668,11 +709,11 @@ class QueuedBatchDeliveryTest {
                             throw observerFailure;
                         })
                 .when(registry)
-                .onDeliveryFact(
+                .onDeliveryResult(
                         argThat(
                                 e ->
                                         e instanceof ContextResult.TransportResult result
-                                                && result.delivery().item() == first));
+                                                && result.delivery().route() == first));
         submit(List.of(first, second));
         releaseExecutor.countDown();
         awaitDispatchTasks();
@@ -685,8 +726,8 @@ class QueuedBatchDeliveryTest {
                         .setRequestId(second.requestId()));
         reply.complete(ack.build());
         assertTrue(callbackExited.await(2, TimeUnit.SECONDS));
-        assertTrue(first.future().get(2, TimeUnit.SECONDS).isSuccess());
-        assertTrue(second.future().get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(first.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(second.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
                 .deliveries()
                 .awaitDeliveries();
@@ -724,48 +765,35 @@ class QueuedBatchDeliveryTest {
                 new IllegalStateException("handoff close observer failed after actual release");
         org.mockito.Mockito.doAnswer(
                         call -> {
-                            org.flexlb.balance.endpoint.DecodeResources.Acquisition<
-                                            org.flexlb.balance.endpoint.DecodeResources
-                                                    .EngineDispatchPermitAcquireStatus,
-                                            DecodeEndpoint.EngineDispatchPermit>
-                                    acquired =
-                                            (org.flexlb.balance.endpoint.DecodeResources
-                                                                    .Acquisition<
-                                                            org.flexlb.balance.endpoint
-                                                                    .DecodeResources
-                                                                    .EngineDispatchPermitAcquireStatus,
-                                                            DecodeEndpoint.EngineDispatchPermit>)
-                                                    call.callRealMethod();
-                            var permit = org.mockito.Mockito.spy(acquired.handle());
-                            org.mockito.Mockito.doAnswer(
-                                            release -> {
-                                                release.callRealMethod();
-                                                throw permitFailure;
-                                            })
-                                    .when(permit)
-                                    .release();
-                            return new org.flexlb.balance.endpoint.DecodeResources.Acquisition<>(
-                                    acquired.status(), permit);
+                            var result = call.callRealMethod();
+                            DecodeEndpoint.EngineDispatchPermit permit = call.getArgument(0);
+                            if (permit.belongsTo(decode, first.decodeReservation()))
+                                throw permitFailure;
+                            return result;
                         })
                 .when(decode)
-                .acquireDispatchPermit(
-                        org.mockito.ArgumentMatchers.eq(first.decodeReservation()), any());
+                .dispatch(
+                        any(),
+                        org.mockito.ArgumentMatchers.eq(
+                                org.flexlb.balance.endpoint.DecodeResources.DispatchOutcome
+                                        .ABANDONED));
         org.mockito.Mockito.doAnswer(
                         call -> {
-                            PrefillState.CommittedHandoff actual =
-                                    (PrefillState.CommittedHandoff) call.callRealMethod();
-                            var committed = org.mockito.Mockito.spy(actual);
+                            call.callRealMethod();
+                            Delivery prepared = call.getArgument(0);
+                            var pin = org.mockito.Mockito.spy(prepared.generationPin());
                             org.mockito.Mockito.doAnswer(
                                             close -> {
                                                 close.callRealMethod();
                                                 throw handoffFailure;
                                             })
-                                    .when(committed)
+                                    .when(pin)
                                     .close();
-                            return committed;
+                            ReflectionTestUtils.setField(prepared, "generationPin", pin);
+                            return null;
                         })
-                .when(worker)
-                .commitSelection(any());
+                .when(dispatcher)
+                .commit(any(), any(), any(), anyInt(), any(), any());
         submit(List.of(first, second));
         releaseExecutor.countDown();
         awaitDispatchTasks();
@@ -777,8 +805,8 @@ class QueuedBatchDeliveryTest {
                 EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
                         .setRequestId(second.requestId()));
         reply.complete(ack.build());
-        assertTrue(first.future().get(2, TimeUnit.SECONDS).isSuccess());
-        assertTrue(second.future().get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(first.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(second.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
                 .deliveries()
                 .awaitDeliveries();
@@ -830,11 +858,11 @@ class QueuedBatchDeliveryTest {
         var candidate = item(2L, null, other, candidatePriority);
         var blocker = blockDecode();
         try {
-            assertEquals(allowed, QueuedRequestScheduler.canBypass(worker, head, candidate));
+            assertEquals(allowed, canBypass(currentWork(), head, candidate));
             cycle();
             assertTrue(ledger.prefill.captureQueue(10).items().contains(head));
             assertEquals(!allowed, ledger.prefill.captureQueue(10).items().contains(candidate));
-            assertFalse(QueuedRequestScheduler.canBypass(worker, head, candidate));
+            assertFalse(canBypass(currentWork(), head, candidate));
         } finally {
             decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         }
@@ -854,7 +882,7 @@ class QueuedBatchDeliveryTest {
             cycle();
             cycle();
             assertEquals(List.of(head, next), ledger.prefill.captureQueue(10).items());
-            assertFalse(QueuedRequestScheduler.canBypass(worker, head, next));
+            assertFalse(canBypass(currentWork(), head, next));
             assertEquals(1, other.resourceSnapshot().activeDispatchPermits());
             assertEquals(0, decode.resourceSnapshot().activeDispatchPermits());
             assertFalse(ledger.prefill.captureQueue(10).items().contains(first));
@@ -870,14 +898,17 @@ class QueuedBatchDeliveryTest {
         var other = anotherDecode();
         var candidate = item(2L, null, other, 50);
         var blocker = blockDecode();
-        doReturn(null).doCallRealMethod().when(worker).commitSelection(any());
+        org.mockito.Mockito.doNothing()
+                .doCallRealMethod()
+                .when(dispatcher)
+                .commit(any(), any(), any(), anyInt(), any(), any());
         try {
             cycle();
-            assertTrue(QueuedRequestScheduler.canBypass(worker, head, candidate));
+            assertTrue(canBypass(currentWork(), head, candidate));
             assertEquals(0, other.resourceSnapshot().activeDispatchPermits());
             assertEquals(0, ledger.prefill.stats().batchCount());
             cycle();
-            assertFalse(QueuedRequestScheduler.canBypass(worker, head, candidate));
+            assertFalse(canBypass(currentWork(), head, candidate));
             assertEquals(List.of(head), ledger.prefill.captureQueue(10).items());
         } finally {
             decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
@@ -903,8 +934,8 @@ class QueuedBatchDeliveryTest {
                                             registry));
                             return call.callRealMethod();
                         })
-                .when(worker)
-                .commitSelection(any());
+                .when(dispatcher)
+                .commit(any(), any(), any(), anyInt(), any(), any());
         try {
             cycle();
             assertEquals(
@@ -919,7 +950,7 @@ class QueuedBatchDeliveryTest {
             assertTrue(permit.accepted());
             permit.value().close();
             if (!cancelHead) {
-                assertTrue(QueuedRequestScheduler.canBypass(worker, head, item(3L, null, other, 50)));
+                assertTrue(canBypass(currentWork(), head, item(3L, null, other, 50)));
             }
         } finally {
             decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
@@ -938,13 +969,13 @@ class QueuedBatchDeliveryTest {
                             decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
                             return call.callRealMethod();
                         })
-                .when(worker)
-                .commitSelection(any());
+                .when(dispatcher)
+                .commit(any(), any(), any(), anyInt(), any(), any());
         cycle();
         assertEquals(List.of(head, candidate), ledger.prefill.captureQueue(10).items());
         assertEquals(0, other.resourceSnapshot().activeDispatchPermits());
         assertEquals(0, ledger.prefill.stats().batchCount());
-        assertTrue(QueuedRequestScheduler.canBypass(worker, head, candidate));
+        assertTrue(canBypass(currentWork(), head, candidate));
         cycle();
         assertFalse(ledger.prefill.captureQueue(10).items().contains(head));
     }
@@ -959,7 +990,7 @@ class QueuedBatchDeliveryTest {
         try {
             cycle();
             assertEquals(3, ledger.prefill.captureQueue(10).items().size());
-            assertFalse(QueuedRequestScheduler.canBypass(worker, head, second));
+            assertFalse(canBypass(currentWork(), head, second));
             assertEquals(0, ledger.prefill.stats().batchCount());
         } finally {
             decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
@@ -970,13 +1001,13 @@ class QueuedBatchDeliveryTest {
     void bypassWaitNoticesArrivalsUntilItsAllowanceIsUsed() {
         enableBypass(true);
         var head = item(1L);
-        var guard = ledger.prefill.queueGuard();
+        var guard = ledger.prefill.resourceLock();
         long version = ledger.prefill.captureQueue(10).queueVersion();
         var candidate = item(2L, null, anotherDecode(), 50);
         guard.lock();
         try {
             assertFalse(
-                    ledger.prefill.queueWaitCurrentLocked(
+                    worker.queueWaitCurrentLocked(
                             head, version, 0L, true, System.currentTimeMillis()));
         } finally {
             guard.unlock();
@@ -987,13 +1018,14 @@ class QueuedBatchDeliveryTest {
             item(3L, null, anotherDecode(), 50);
             guard.lock();
             try {
+                // The queue has consumed the allowance; arrivals cannot invalidate this wait.
                 assertTrue(
-                        ledger.prefill.queueWaitCurrentLocked(
+                        worker.queueWaitCurrentLocked(
                                 head, version, 0L, true, System.currentTimeMillis()));
             } finally {
                 guard.unlock();
             }
-            assertFalse(QueuedRequestScheduler.canBypass(worker, head, candidate));
+            assertFalse(canBypass(currentWork(), head, candidate));
         } finally {
             decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         }
@@ -1004,19 +1036,40 @@ class QueuedBatchDeliveryTest {
         enableBypass(true);
         // The thread callback must observe the actual instance, rather than a Mockito spy copy.
         worker =
-                new RequestExecution(
-                        "bypass-wakeup",
-                        prefill,
-                        (QueueExecutionSettings) ReflectionTestUtils.getField(worker, "settings"),
-                        dispatcher,
-                        ledger.prefill,
-                        SchedulerTestSupport.queueDependencies(
-                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                        registry)));
-        ReflectionTestUtils.setField(prefill, "requestExecution", worker);
+                org.flexlb.balance.endpoint.EndpointTestSupport.attach(
+                        org.flexlb.balance.endpoint.EndpointTestSupport.worker(
+                                "bypass-wakeup",
+                                prefill,
+                                (QueueExecutionSettings)
+                                        ReflectionTestUtils.getField(worker, "settings"),
+                                dispatcher,
+                                ledger.prefill,
+                                SchedulerTestSupport.queueDependencies(
+                                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                registry))));
+        org.flexlb.balance.endpoint.EndpointTestSupport.attachWork(prefill, worker);
+        org.flexlb.balance.endpoint.EndpointTestSupport.attachWork(prefill, worker);
+        when(prefill.getStatus())
+                .thenReturn(
+                        WorkerStatus.createDiscovered(
+                                RoleType.PREFILL, null, "127.0.0.1", 8090, 8091, null));
+        when(prefill.ipPort()).thenReturn("127.0.0.1:8090");
+        var scheduler = SchedulerTestServices.scheduler(registry);
+        ((java.util.Map<PrefillEndpoint, EndpointWork>)
+                        ReflectionTestUtils.getField(scheduler, "endpointWork"))
+                .put(prefill, worker);
+        SchedulerTestSupport.startScheduling(scheduler);
+        doAnswer(
+                        call -> {
+                            scheduler.onEndpointChanged(prefill);
+                            return null;
+                        })
+                .when(prefill)
+                .signal(any());
         var head = item(1L);
         var blocker = blockDecode();
-        worker.start();
+        RequestExecutionTestSupport.start(worker);
+        prefill.signal(PrefillEndpoint.Signal.PLACEMENT);
         try {
             RequestProtocolTestSupport.awaitCondition(
                     () ->
@@ -1027,13 +1080,153 @@ class QueuedBatchDeliveryTest {
                                                     .getDescription()));
             var other = anotherDecode();
             var candidate = item(2L, null, other, 50);
-            worker.signal(false);
+            prefill.signal(PrefillEndpoint.Signal.INPUT);
             RequestProtocolTestSupport.awaitCondition(
                     () -> !ledger.prefill.captureQueue(10).items().contains(candidate));
-            assertFalse(QueuedRequestScheduler.canBypass(worker, head, candidate));
+            var work =
+                    ((java.util.Map<PrefillEndpoint, QueuedRequestScheduler.EndpointWork>)
+                                    ReflectionTestUtils.getField(scheduler, "endpointWork"))
+                            .get(prefill);
+            assertFalse(canBypass(work, head, candidate));
             assertEquals(List.of(head), ledger.prefill.captureQueue(10).items());
         } finally {
             assertNull(worker.stopAndAwait());
+            scheduler.close();
+            decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        }
+    }
+
+    @Test
+    void schedulerCanRequireTheWholeSelectedGroupInsteadOfAnImplicitPrefix() {
+        enableBypass(true);
+        var available = anotherDecode();
+        var first = item(81001L, null, available, 50);
+        var second = item(81002L);
+        var blocker = blockDecode();
+        try {
+            var result =
+                    worker.processSelection(
+                            List.of(first, second),
+                            "exact_group",
+                            prefill.predictor.evaluator(),
+                            OptionalLong.of(1L),
+                            null,
+                            Delivery.PrefixPolicy.ALL_SELECTED,
+                            () -> true);
+            assertNotNull(result);
+            assertEquals(CapacityBoundary.Resource.DECODE_ENGINE, result.resource());
+            assertEquals(List.of(first, second), ledger.prefill.captureQueue(10).items());
+            assertEquals(0, available.resourceSnapshot().activeDispatchPermits());
+            assertEquals(0, ledger.prefill.stats().batchCount());
+            assertTrue(sent.isEmpty());
+        } finally {
+            decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        }
+    }
+
+    @Test
+    void customSchedulerCanSkipAnAvailableHeadWithoutDefaultBypassRules() {
+        enableBypass(false);
+        var head = item(82001L);
+        var selected = item(82002L, null, anotherDecode(), 40);
+        var result =
+                worker.processSelection(
+                        List.of(selected),
+                        "custom_selection",
+                        prefill.predictor.evaluator(),
+                        OptionalLong.of(1L),
+                        head,
+                        Delivery.PrefixPolicy.ORDERED_PREFIX,
+                        () -> true);
+        assertNull(result);
+        assertEquals(List.of(head), ledger.prefill.captureQueue(10).items());
+        assertEquals(1, selected.decodeEp().resourceSnapshot().activeDispatchPermits());
+    }
+
+    private boolean canBypass(EndpointWork work, RequestRoute head, RequestRoute candidate) {
+        return work.prefillEndpoint()
+                .captureQueue(10, head, work.settings().priorityOrdering())
+                .items()
+                .contains(candidate);
+    }
+
+    @Test
+    void replacementQueueCanKeepStrictOrderEvenWhenDefaultQueueWouldBypass() {
+        enableBypass(true);
+        var head = item(1L);
+        var candidate = item(2L, null, anotherDecode(), 50);
+        var existing = ReflectionTestUtils.getField(ledger.prefill, "activeIndex");
+        var strictQueue =
+                mock(
+                        org.flexlb.balance.endpoint.PrefillRequestQueue.class,
+                        org.mockito.AdditionalAnswers.delegatesTo(existing));
+        org.mockito.Mockito.doCallRealMethod()
+                .when(strictQueue)
+                .candidatesAfterBlockedHead(
+                        any(), org.mockito.ArgumentMatchers.anyBoolean(), anyLong());
+        ReflectionTestUtils.setField(ledger.prefill, "activeIndex", strictQueue);
+        var blocker = blockDecode();
+        try {
+            cycle();
+            assertEquals(List.of(head, candidate), ledger.prefill.captureQueue(10).items());
+            assertEquals(0, candidate.decodeEp().resourceSnapshot().activeDispatchPermits());
+            verify(strictQueue)
+                    .candidatesAfterBlockedHead(
+                            any(), org.mockito.ArgumentMatchers.eq(true), anyLong());
+        } finally {
+            decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        }
+    }
+
+    @Test
+    void replacementPlannerCanDelayBypassWithoutLosingItsWakeup() {
+        enableBypass(true);
+        var head = item(1L);
+        var candidate = item(2L, null, anotherDecode(), 50);
+        var planner =
+                org.mockito.Mockito.spy(
+                        new org.flexlb.balance.planner.GroupPlanner() {
+                            public <T extends Input> Selection<T> select(
+                                    Iterable<T> ordered,
+                                    Constraints constraints,
+                                    PrefixPrediction<T> prediction) {
+                                return org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW
+                                        .select(ordered, constraints, prediction);
+                            }
+
+                            public String dispatchReason(
+                                    Selection<?> selection, Constraints constraints, long nowMs) {
+                                return selection.items().getFirst() == head ? "head_ready" : null;
+                            }
+
+                            public long nextCheckAtMs(
+                                    Selection<?> selection, Constraints constraints) {
+                                return candidate.enqueuedAtMs() + 10_000L;
+                            }
+
+                            public void validateConstraints(Constraints constraints) {}
+                        });
+        var original = worker.settings();
+        ReflectionTestUtils.setField(
+                worker,
+                "settings",
+                new QueueExecutionSettings(
+                        true, original.dispatcherType(), planner, original.maxRequests(), 0L, 0L));
+        var blocker = blockDecode();
+        try {
+            var waiting = QueuedRequestScheduler.decideExecution(worker);
+            assertSame(head, waiting.request());
+            assertEquals(CapacityBoundary.Resource.DECODE_ENGINE, waiting.unavailable().resource());
+            assertEquals(candidate.enqueuedAtMs() + 10_000L, waiting.wakeAtMs());
+            assertEquals(List.of(head, candidate), ledger.prefill.captureQueue(10).items());
+            assertEquals(0, candidate.decodeEp().resourceSnapshot().activeDispatchPermits());
+            org.mockito.Mockito.doReturn("custom_ready")
+                    .when(planner)
+                    .dispatchReason(any(), any(), anyLong());
+            cycle();
+            assertEquals(List.of(head), ledger.prefill.captureQueue(10).items());
+            assertEquals(1, candidate.decodeEp().resourceSnapshot().activeDispatchPermits());
+        } finally {
             decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         }
     }
@@ -1051,23 +1244,24 @@ class QueuedBatchDeliveryTest {
                 new DecodeResources.AdmissionCapacity(1, 100L));
         worker =
                 org.mockito.Mockito.spy(
-                        new RequestExecution(
-                                "bypass",
-                                prefill,
-                                new QueueExecutionSettings(
-                                        priorityOrdering,
-                                        config.getDispatcher().getType(),
-                                        org.flexlb.balance.planner.BuiltinGroupPlanner.valueOf(
-                                                grouping.name()),
-                                        maxRequests,
-                                        0L,
-                                        0L),
-                                dispatcher,
-                                ledger.prefill,
-                                SchedulerTestSupport.queueDependencies(
-                                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                                registry))));
-        ReflectionTestUtils.setField(prefill, "requestExecution", worker);
+                        org.flexlb.balance.endpoint.EndpointTestSupport.attach(
+                                org.flexlb.balance.endpoint.EndpointTestSupport.worker(
+                                        "bypass",
+                                        prefill,
+                                        new QueueExecutionSettings(
+                                                priorityOrdering,
+                                                config.getDispatcher().getType(),
+                                                org.flexlb.balance.planner.BuiltinGroupPlanner
+                                                        .valueOf(grouping.name()),
+                                                maxRequests,
+                                                0L,
+                                                0L),
+                                        dispatcher,
+                                        ledger.prefill,
+                                        SchedulerTestSupport.queueDependencies(
+                                                org.flexlb.balance.scheduler.SchedulerTestSupport
+                                                        .runtime(registry)))));
+        org.flexlb.balance.endpoint.EndpointTestSupport.attachWork(prefill, worker);
     }
 
     @ParameterizedTest
@@ -1118,10 +1312,11 @@ class QueuedBatchDeliveryTest {
             for (int i = 0; i < candidates.size(); i++) {
                 if (!batch) {
                     if (i < overtaken) {
-                        var response = candidates.get(i).future().get(2, TimeUnit.SECONDS);
+                        var response =
+                                candidates.get(i).ctx().data().getFuture().get(2, TimeUnit.SECONDS);
                         assertTrue(response.isSuccess(), response.toString());
                     } else {
-                        assertFalse(candidates.get(i).future().isDone());
+                        assertFalse(candidates.get(i).ctx().data().getFuture().isDone());
                     }
                 }
                 var resources = candidates.get(i).decodeEp().resourceSnapshot();
@@ -1151,17 +1346,16 @@ class QueuedBatchDeliveryTest {
                 cycle();
             }
             assertEquals(remaining, ledger.prefill.captureQueue(100).items());
-            assertFalse(QueuedRequestScheduler.canBypass(worker, head, later));
+            assertFalse(canBypass(currentWork(), head, later));
             assertEquals(0, later.decodeEp().resourceSnapshot().activeDispatchPermits());
-            assertFalse(head.future().isDone());
+            assertFalse(head.ctx().data().getFuture().isDone());
             if (!batch) {
                 verify(
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
                                         .deliveries(),
                                 org.mockito.Mockito.never())
                         .tryReserveDelivery();
-                verify(prefill, org.mockito.Mockito.never())
-                        .reserveBatch(any(), anyLong(), anyInt());
+                verify(prefill, org.mockito.Mockito.never()).reserveBatch(anyLong(), anyInt());
                 verifyNoInteractions(grpc);
             }
             if (!priority) {
@@ -1186,8 +1380,7 @@ class QueuedBatchDeliveryTest {
         var first = item(100L);
         var second = item(10L, null, anotherDecode(2), 50);
         var third = item(50L, null, anotherDecode(3), 50);
-        ledger.prefill.updateQueue(
-                PrefillState.QueueChange.REMOVE, first, System.currentTimeMillis());
+        org.flexlb.balance.endpoint.EndpointTestSupport.removeQueued(ledger.prefill, first);
         ledger.enqueue(first);
         assertEquals(List.of(first, second, third), ledger.prefill.captureQueue(10).items());
         var arrival = new CompletableFuture<RequestRoute>();
@@ -1199,8 +1392,8 @@ class QueuedBatchDeliveryTest {
                                             .get(5, TimeUnit.SECONDS));
                             return call.callRealMethod();
                         })
-                .when(worker)
-                .commitSelection(any());
+                .when(dispatcher)
+                .commit(any(), any(), any(), anyInt(), any(), any());
         cycle();
         assertEquals(
                 List.of(third, arrival.get(5, TimeUnit.SECONDS)),
@@ -1221,7 +1414,7 @@ class QueuedBatchDeliveryTest {
     private void configureOrderedQueue(
             boolean priority, DecisionPolicyConfig.Type grouping, int maxRequests) {
         ledger = new DeliverySettlementTestSupport(QueueExecutionSettings.queueOrder(priority));
-        ReflectionTestUtils.setField(prefill, "ownership", ledger.prefill);
+        org.flexlb.balance.endpoint.EndpointTestSupport.stubResources(prefill, ledger.prefill);
         var execution =
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry).deliveries();
         org.mockito.Mockito.doCallRealMethod().when(execution).nextBatchId();
@@ -1239,12 +1432,12 @@ class QueuedBatchDeliveryTest {
         try {
             cycle();
             assertEquals(List.of(head), ledger.prefill.captureQueue(10).items());
-            assertFalse(head.future().isDone());
-            assertFalse(candidate.future().get(2, TimeUnit.SECONDS).isSuccess());
+            assertFalse(head.ctx().data().getFuture().isDone());
+            assertFalse(candidate.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
             assertEquals(0, other.resourceSnapshot().activeDispatchPermits());
             assertEquals(0, ledger.prefill.stats().batchCount());
             var next = item(3L, null, other, 50);
-            assertTrue(QueuedRequestScheduler.canBypass(worker, head, next));
+            assertTrue(canBypass(currentWork(), head, next));
         } finally {
             decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         }
@@ -1255,22 +1448,23 @@ class QueuedBatchDeliveryTest {
     void singleNonBatchDecisionCanBypassOnlyOnce() {
         enableBypass(true);
         worker =
-                new RequestExecution(
-                        "single-bypass",
-                        prefill,
-                        new QueueExecutionSettings(
-                                true,
-                                config.getDispatcher().getType(),
-                                org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE,
-                                1,
-                                0L,
-                                0L),
-                        dispatcher,
-                        ledger.prefill,
-                        SchedulerTestSupport.queueDependencies(
-                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                        registry)));
-        ReflectionTestUtils.setField(prefill, "requestExecution", worker);
+                org.flexlb.balance.endpoint.EndpointTestSupport.attach(
+                        org.flexlb.balance.endpoint.EndpointTestSupport.worker(
+                                "single-bypass",
+                                prefill,
+                                new QueueExecutionSettings(
+                                        true,
+                                        config.getDispatcher().getType(),
+                                        org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE,
+                                        1,
+                                        0L,
+                                        0L),
+                                dispatcher,
+                                ledger.prefill,
+                                SchedulerTestSupport.queueDependencies(
+                                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                registry))));
+        org.flexlb.balance.endpoint.EndpointTestSupport.attachWork(prefill, worker);
         var head = item(1L);
         var other = anotherDecode();
         item(2L, null, other, 50);
@@ -1280,14 +1474,14 @@ class QueuedBatchDeliveryTest {
             var next = item(3L, null, other, 50);
             cycle();
             assertEquals(List.of(head, next), ledger.prefill.captureQueue(10).items());
-            assertFalse(QueuedRequestScheduler.canBypass(worker, head, next));
+            assertFalse(canBypass(currentWork(), head, next));
             assertEquals(0, ledger.prefill.stats().batchCount());
             verify(
                             org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
                                     .deliveries(),
                             org.mockito.Mockito.never())
                     .tryReserveDelivery();
-            verify(prefill, org.mockito.Mockito.never()).reserveBatch(any(), anyLong(), anyInt());
+            verify(prefill, org.mockito.Mockito.never()).reserveBatch(anyLong(), anyInt());
             verifyNoInteractions(grpc);
         } finally {
             decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
@@ -1303,30 +1497,35 @@ class QueuedBatchDeliveryTest {
         when(predictor.evaluator()).thenReturn(evaluator);
         ReflectionTestUtils.setField(prefill, "predictor", predictor);
         worker =
-                new RequestExecution(
-                        "predicted-bypass",
-                        prefill,
-                        new QueueExecutionSettings(
-                                true,
-                                config.getDispatcher().getType(),
-                                org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
-                                3,
-                                0L,
-                                1_000L),
-                        dispatcher,
-                        ledger.prefill,
-                        SchedulerTestSupport.queueDependencies(
-                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                        registry)));
+                org.flexlb.balance.endpoint.EndpointTestSupport.attach(
+                        org.flexlb.balance.endpoint.EndpointTestSupport.worker(
+                                "predicted-bypass",
+                                prefill,
+                                new QueueExecutionSettings(
+                                        true,
+                                        config.getDispatcher().getType(),
+                                        org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
+                                        3,
+                                        0L,
+                                        1_000L),
+                                dispatcher,
+                                ledger.prefill,
+                                SchedulerTestSupport.queueDependencies(
+                                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                                                registry))));
         var head = item(1L);
         var other = anotherDecode();
         var first = item(2L, null, other, 50);
         var second = item(3L, null, truncated ? other : anotherDecode(), 50);
-        var committed = new java.util.concurrent.atomic.AtomicReference<PrefillState.CommitPlan>();
+        var committed =
+                new java.util.concurrent.atomic.AtomicReference<
+                        org.flexlb.balance.scheduler.Delivery>();
         when(prefill.commitLocked(any()))
                 .thenAnswer(
                         call -> {
-                            var plan = call.getArgument(0, PrefillState.CommitPlan.class);
+                            var plan =
+                                    call.getArgument(
+                                            0, org.flexlb.balance.scheduler.Delivery.class);
                             committed.set(plan);
                             return ledger.commit(plan);
                         });
@@ -1337,7 +1536,7 @@ class QueuedBatchDeliveryTest {
                     truncated ? List.of(first) : List.of(first, second), committed.get().items());
             assertEquals(
                     first.seqLen() + (truncated ? 0L : second.seqLen()),
-                    committed.get().predictions()[0]);
+                    committed.get().predictedMs());
             verify(evaluator, times(truncated ? 6 : 5)).predictBatchMs(any());
             assertEquals(
                     truncated ? List.of(head, second) : List.of(head),
@@ -1377,7 +1576,7 @@ class QueuedBatchDeliveryTest {
         try {
             cycle();
             assertEquals(List.of(head, candidate), ledger.prefill.captureQueue(10).items());
-            assertTrue(QueuedRequestScheduler.canBypass(worker, head, candidate));
+            assertTrue(canBypass(currentWork(), head, candidate));
             assertEquals(0, other.resourceSnapshot().activeDispatchPermits());
             assertEquals(0, ledger.prefill.stats().batchCount());
         } finally {
@@ -1397,17 +1596,16 @@ class QueuedBatchDeliveryTest {
                             item(1L, null, other, 90);
                             return call.callRealMethod();
                         })
-                .when(worker)
-                .commitSelection(any());
+                .when(dispatcher)
+                .commit(any(), any(), any(), anyInt(), any(), any());
         try {
             cycle();
             assertEquals(3, ledger.prefill.captureQueue(10).items().size());
             assertEquals(0, other.resourceSnapshot().activeDispatchPermits());
             assertEquals(0, ledger.prefill.stats().batchCount());
             var first = ledger.prefill.captureQueue(10).head();
-            ledger.prefill.updateQueue(
-                    PrefillState.QueueChange.REMOVE, first, System.currentTimeMillis());
-            assertTrue(QueuedRequestScheduler.canBypass(worker, head, candidate));
+            org.flexlb.balance.endpoint.EndpointTestSupport.removeQueued(ledger.prefill, first);
+            assertTrue(canBypass(currentWork(), head, candidate));
         } finally {
             decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         }
@@ -1430,8 +1628,17 @@ class QueuedBatchDeliveryTest {
         }
     }
 
+    private QueuedRequestScheduler.EndpointWork manualScheduling;
+
+    private QueuedRequestScheduler.EndpointWork currentWork() {
+        var automatic = RequestExecutionTestSupport.schedulingState(worker);
+        if (automatic != null) return automatic;
+        if (manualScheduling == null || manualScheduling != worker) manualScheduling = worker;
+        return manualScheduling;
+    }
+
     private void cycle() {
-        assertNotNull(QueuedRequestScheduler.schedulePrefill(worker));
+        assertNotNull(RequestExecutionTestSupport.schedule(currentWork()));
     }
 
     private RequestRoute item(long id) {
@@ -1492,7 +1699,13 @@ class QueuedBatchDeliveryTest {
         var evaluator = new FormulaPredictor("100 * batchSize");
         org.junit.jupiter.api.Assertions.assertNull(
                 worker.processSelection(
-                        items, "queued-race", evaluator, OptionalLong.empty(), null));
+                        items,
+                        "queued-race",
+                        evaluator,
+                        OptionalLong.empty(),
+                        null,
+                        Delivery.PrefixPolicy.ORDERED_PREFIX,
+                        () -> true));
     }
 
     private void awaitDispatchTasks() throws Exception {

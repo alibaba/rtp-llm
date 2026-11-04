@@ -54,7 +54,7 @@ class FlexlbGrpcDrainTest {
                 {"requestLifecycle":{"request":{"timeoutMs":60000}},
                  "grpcServer":{"shutdownQuietPeriodMs":100}}
                 """));
-        var routes = mock(org.flexlb.balance.scheduler.RequestSchedulerEntry.class);
+        var routes = mock(org.flexlb.balance.scheduler.RequestLifecycle.class);
         var success = new Response();
         success.setSuccess(true);
         success.setCode(200);

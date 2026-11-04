@@ -55,6 +55,7 @@ class VitCacheDirectoryTest {
     private final Map<String, WorkerStatus> live = new HashMap<>();
     private WorkerStatus a;
     private WorkerStatus b;
+    private EndpointRegistry workers;
     private EngineGrpcClient grpc;
     private MasterStatusService consistency;
 
@@ -64,7 +65,7 @@ class VitCacheDirectoryTest {
         b = worker("10.0.0.2", "two");
         live.put(a.getIpPort(), a);
         live.put(b.getIpPort(), b);
-        var workers = mock(EndpointRegistry.class);
+        workers = mock(EndpointRegistry.class);
         when(workers.statusSnapshot(RoleType.VIT)).thenAnswer(call -> Map.copyOf(live));
         when(workers.endpointAddressSnapshot(RoleType.VIT))
                 .thenAnswer(call -> new java.util.ArrayList<>(live.keySet()));
@@ -79,7 +80,9 @@ class VitCacheDirectoryTest {
         grpc = mock(EngineGrpcClient.class);
         consistency = mock(MasterStatusService.class);
         directory = new VitCacheDirectory(workers, grpc, consistency);
-        selector = new VitCacheSelector(directory, workers);
+        selector =
+                new VitCacheSelector(
+                        directory, workers, new org.flexlb.balance.strategy.VitWorkerSelector());
     }
 
     @AfterEach
@@ -122,6 +125,29 @@ class VitCacheDirectoryTest {
                         .addAllGpuEmbeddingKeys(gpu)
                         .addAllCpuEmbeddingKeys(cpu)
                         .build());
+    }
+
+    @Test
+    void cacheAffinityDelegatesEqualCandidatesToReplacementStrategy() {
+        snapshot(a, "a1", "image");
+        snapshot(b, "b1", "image");
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        var custom =
+                new VitCacheSelector(
+                        directory,
+                        workers,
+                        addresses -> {
+                            calls.incrementAndGet();
+                            assertEquals(
+                                    java.util.Set.of(a.getIpPort(), b.getIpPort()),
+                                    java.util.Set.copyOf(addresses));
+                            assertThrows(
+                                    UnsupportedOperationException.class, () -> addresses.clear());
+                            return addresses.indexOf(b.getIpPort());
+                        });
+        var selected = custom.select(context("image"), null);
+        assertEquals(1, calls.get(), "cache routing must invoke the injected VIT strategy");
+        assertEquals(b.getIp(), selected.getServerIp());
     }
 
     @Test

@@ -9,7 +9,7 @@ public record RequestState(
         String requestId,
         long originalNumericRequestId,
         Phase state,
-        DeliveryClaimKind deliveryClaimKind,
+        Delivery.SendMode deliveryClaimKind,
         long batchId,
         long createdAtMs,
         long updatedAtMs,
@@ -20,10 +20,10 @@ public record RequestState(
         Objects.requireNonNull(deliveryClaimKind, "deliveryClaimKind");
         Objects.requireNonNull(detail, "detail");
         checkArgument(
-                deliveryClaimKind != DeliveryClaimKind.BATCH_ENQUEUE || batchId > 0L,
+                deliveryClaimKind != Delivery.SendMode.BATCH_ENQUEUE || batchId > 0L,
                 "batch enqueue delivery requires a positive batchId");
         checkArgument(
-                deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE || batchId == 0L,
+                deliveryClaimKind == Delivery.SendMode.BATCH_ENQUEUE || batchId == 0L,
                 "only batch enqueue delivery may carry a batchId");
     }
 
@@ -43,14 +43,14 @@ public record RequestState(
                         && cancellation != null
                         && snapshot.phase() == ContextResult.Phase.ENDING
                         && delivery != null
-                        && delivery.identity().kind() == DeliveryClaimKind.BATCH_ENQUEUE
+                        && delivery.identity().kind() == Delivery.SendMode.BATCH_ENQUEUE
                         && !snapshot.deliveryReleasable()
                         && !snapshot.close().expired();
         Phase phase =
                 cancellingRemote
                         ? Phase.CANCEL_REQUESTED
                         : snapshot.outcome() != null
-                                ? snapshot.outcome().outcome().phase()
+                                ? snapshot.outcome().phase()
                                 : cancellation != null
                                                 || snapshot.preemption() != null
                                                         && snapshot.preemption()
@@ -82,7 +82,7 @@ public record RequestState(
         return new RequestState(
                 snapshot.key().requestId(),
                 phase,
-                delivery == null ? DeliveryClaimKind.NONE : delivery.identity().kind(),
+                delivery == null ? Delivery.SendMode.NONE : delivery.identity().kind(),
                 delivery == null ? 0L : delivery.identity().batchId(),
                 snapshot.createdAtMs(),
                 snapshot.updatedAtMs(),

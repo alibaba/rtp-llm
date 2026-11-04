@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.scheduler.ResponseCompletionExecutor.Registration;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -25,7 +26,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -50,13 +50,18 @@ class SchedulerTestServicesTest {
                         service,
                         mock(EngineGrpcClient.class));
         var scheduler = mock(AbstractRequestScheduler.class);
-        org.springframework.test.util.ReflectionTestUtils.setField(scheduler, "lifecycle", mock(RequestLifecycle.class));
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                scheduler, "lifecycle", mock(RequestLifecycle.class));
         var pending = RequestProtocolTestSupport.context(config, 88001L);
-        var owner = runtime.newLifecycle(config, SchedulingTestConfig.capacity(config),
-                mock(RecentCacheKeyTraceReporter.class));
-        owner.bindScheduler(scheduler, mock(RequestLifecycle.Scheduling.class));
+        var owner =
+                runtime.newLifecycle(
+                        config,
+                        SchedulingTestConfig.capacity(config),
+                        mock(RecentCacheKeyTraceReporter.class));
+        owner.bindScheduler(scheduler);
         org.springframework.test.util.ReflectionTestUtils.setField(scheduler, "lifecycle", owner);
-        owner.register(pending, () -> {}, org.flexlb.dao.loadbalance.StrategyErrorType.RESOURCE_EXHAUSTED);
+        owner.register(
+                pending, () -> {}, org.flexlb.dao.loadbalance.StrategyErrorType.RESOURCE_EXHAUSTED);
         runtime.registerScheduler(scheduler);
 
         ShutdownResult result = runtime.shutdown(ShutdownMode.DRAIN, Duration.ZERO);
@@ -143,7 +148,9 @@ class SchedulerTestServicesTest {
     void externalFutureCancellationRemainsSynchronousAndItsSourceBlocksWorkClose()
             throws Exception {
         try (var f = new Fixture(false)) {
-            var scheduler = SchedulerTestSupport.lifecycle(SchedulerTestSupport.initializedScheduler(f.runtime));
+            var scheduler =
+                    SchedulerTestSupport.lifecycle(
+                            SchedulerTestSupport.initializedScheduler(f.runtime));
             var context = RequestProtocolTestSupport.context(f.config, 9103L);
             var result = RequestProtocolTestSupport.register(scheduler, context);
             var entered = new java.util.concurrent.CountDownLatch(1);
@@ -194,9 +201,15 @@ class SchedulerTestServicesTest {
     @Test
     void directStartupUsesOneSchedulerAndRejectsQueueRequests() {
         try (var f = new Fixture(false)) {
-            var scheduler = SchedulerTestSupport.lifecycle(SchedulerTestSupport.initializedScheduler(f.runtime));
-            assertInstanceOf(DirectRequestScheduler.class, org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(scheduler));
-            assertSame(org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(scheduler), SchedulerTestSupport.initializedScheduler(f.runtime));
+            var scheduler =
+                    SchedulerTestSupport.lifecycle(
+                            SchedulerTestSupport.initializedScheduler(f.runtime));
+            assertInstanceOf(
+                    DirectRequestScheduler.class,
+                    org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(scheduler));
+            assertSame(
+                    org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(scheduler),
+                    SchedulerTestSupport.initializedScheduler(f.runtime));
             var wrongMode = new RequestContext(SchedulingTestConfig.newConfig());
             wrongMode
                     .data()
@@ -212,7 +225,13 @@ class SchedulerTestServicesTest {
                                     .setRequestId(991L)
                                     .build()
                                     .toByteString());
-            var rejected = SchedulerTestServices.entry((AbstractRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(scheduler)).submit(wrongMode).join();
+            var rejected =
+                    SchedulerTestServices.entry(
+                                    (AbstractRequestScheduler)
+                                            org.flexlb.balance.scheduler.SchedulerTestServices
+                                                    .scheduler(scheduler))
+                            .submit(wrongMode)
+                            .join();
             assertFalse(rejected.isSuccess());
             assertEquals(
                     "request configuration does not match scheduler mode",
@@ -267,7 +286,8 @@ class SchedulerTestServicesTest {
                                 service,
                                 mock(EngineGrpcClient.class)));
         var scheduler = mock(AbstractRequestScheduler.class);
-        org.springframework.test.util.ReflectionTestUtils.setField(scheduler, "lifecycle", mock(RequestLifecycle.class));
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                scheduler, "lifecycle", mock(RequestLifecycle.class));
         var expected = new IllegalStateException("placement close failed");
         doThrow(expected).when(scheduler).close();
         var deliveries = spy(runtime.deliveries());
@@ -281,7 +301,13 @@ class SchedulerTestServicesTest {
                         IllegalStateException.class,
                         () -> runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO)));
 
-        var order = inOrder(scheduler, SchedulerTestServices.lifecycle(scheduler), runtime, deliveries, endpoints);
+        var order =
+                inOrder(
+                        scheduler,
+                        SchedulerTestServices.lifecycle(scheduler),
+                        runtime,
+                        deliveries,
+                        endpoints);
         order.verify(scheduler).close();
         order.verify(SchedulerTestServices.lifecycle(scheduler)).stopAdmissionsAndAwaitCompletion();
         order.verify(deliveries).awaitDeliveries();
@@ -292,7 +318,9 @@ class SchedulerTestServicesTest {
     @Test
     void stoppingRejectsRegistrationWhileAcceptedRequestWorkCanContinue() throws Exception {
         try (var f = new Fixture()) {
-            var scheduler = SchedulerTestSupport.lifecycle(SchedulerTestSupport.initializedScheduler(f.runtime));
+            var scheduler =
+                    SchedulerTestSupport.lifecycle(
+                            SchedulerTestSupport.initializedScheduler(f.runtime));
             var accepted = RequestProtocolTestSupport.context(f.config, 9101L);
             var result = RequestProtocolTestSupport.register(scheduler, accepted);
             assertFalse(result.isDone());
@@ -305,7 +333,7 @@ class SchedulerTestServicesTest {
             var rejected = RequestProtocolTestSupport.context(f.config, 9102L);
             var rejectedResult = RequestProtocolTestSupport.register(scheduler, rejected);
             assertFalse(rejectedResult.join().isSuccess());
-            assertNull(rejected.data().getScheduler());
+            assertNull(rejected.data().getLifecycle());
 
             var continued = new java.util.concurrent.CompletableFuture<Void>();
             f.runtime.tasks().execute(accepted, () -> continued.complete(null));
@@ -320,7 +348,7 @@ class SchedulerTestServicesTest {
             var cancelledWork = new java.util.concurrent.CompletableFuture<Void>();
             var cancellation =
                     f.runtime.taskTimer().schedule(() -> cancelledWork.complete(null), 60_000L);
-            cancellation.cancel();
+            cancellation.cancel(false);
 
             var otherWork = new java.util.concurrent.CompletableFuture<Void>();
             f.runtime.taskTimer().schedule(() -> otherWork.complete(null), 0L);
@@ -333,7 +361,9 @@ class SchedulerTestServicesTest {
     @Test
     void shutdownCancelsEveryExactOwnerInTheSharedRequestDirectory() {
         try (var f = new Fixture()) {
-            var installed = SchedulerTestSupport.lifecycle(SchedulerTestSupport.initializedScheduler(f.runtime));
+            var installed =
+                    SchedulerTestSupport.lifecycle(
+                            SchedulerTestSupport.initializedScheduler(f.runtime));
             var other =
                     new DirectRequestScheduler(
                             mock(RequestWorkerSelector.class),
@@ -359,7 +389,9 @@ class SchedulerTestServicesTest {
     @Test
     void failedCancellationDoesNotPreventOtherOwnersFromSettling() {
         try (var f = new Fixture()) {
-            var installed = SchedulerTestSupport.lifecycle(SchedulerTestSupport.initializedScheduler(f.runtime));
+            var installed =
+                    SchedulerTestSupport.lifecycle(
+                            SchedulerTestSupport.initializedScheduler(f.runtime));
             var other =
                     spy(
                             new DirectRequestScheduler(
@@ -507,7 +539,9 @@ class SchedulerTestServicesTest {
     void futureCallbackRejectsSelfShutdownBeforeMutationAndExternalShutdownStillDrains(
             boolean asynchronousAck) throws Exception {
         try (var f = new Fixture(false)) {
-            var owner = SchedulerTestSupport.lifecycle(SchedulerTestSupport.initializedScheduler(f.runtime));
+            var owner =
+                    SchedulerTestSupport.lifecycle(
+                            SchedulerTestSupport.initializedScheduler(f.runtime));
             var context = RequestProtocolTestSupport.context(f.config, 9201L);
             var future = RequestProtocolTestSupport.register(owner, context);
             var observed = new java.util.concurrent.CompletableFuture<Throwable>();
@@ -561,10 +595,10 @@ class SchedulerTestServicesTest {
                 var delivery =
                         RequestProtocolTestSupport.claimBatchWithoutPrediction(
                                 owner, route, 7L, () -> true);
-                owner.onDeliveryFact(
+                owner.onDeliveryResult(
                         new ContextResult.TransportResult(
                                 delivery,
-                                org.flexlb.balance.delivery.DeliveryResult.delivered(),
+                                org.flexlb.balance.scheduler.Delivery.Result.delivered(),
                                 System.currentTimeMillis()));
                 assertTrue(future.get(5, java.util.concurrent.TimeUnit.SECONDS).isSuccess());
                 assertNull(observed.get(5, java.util.concurrent.TimeUnit.SECONDS));
@@ -628,7 +662,7 @@ class SchedulerTestServicesTest {
                     if (responseCallback) {
                         var response = new java.util.concurrent.CompletableFuture<Void>();
                         response.thenRun(reenterShutdown);
-                        new ResponsePublication(f.runtime.responseCompletions(), context, false)
+                        new Registration(f.runtime.responseCompletions(), context)
                                 .submit(() -> response.complete(null));
                     } else {
                         f.runtime.tasks().execute(context, reenterShutdown);
@@ -668,7 +702,7 @@ class SchedulerTestServicesTest {
                             service,
                             mock(EngineGrpcClient.class));
             runtime.registerScheduler(
-                    PlacementConfiguration.create(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.createStartedScheduler(
                             runtime.newLifecycle(
                                     config,
                                     SchedulingTestConfig.capacity(config),
@@ -676,12 +710,10 @@ class SchedulerTestServicesTest {
                                             org.flexlb.service.RecentCacheKeyTraceReporter.class)),
                             config,
                             mock(RequestWorkerSelector.class),
-                            reporter,
                             mock(DecodePreemption.class),
                             new PlacementAvailability(),
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
-                            new OrderedRequestQueue(config.isPriorityOrdering()),
-                            runtime.queueDependencies));
+                            new OrderedRequestQueue(config.isPriorityOrdering())));
         }
 
         public void close() {

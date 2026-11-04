@@ -5,15 +5,16 @@ import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.eviction.DecodePreemptionPolicy.DecodeEvictionProposal;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimResolution;
 import org.flexlb.balance.scheduler.AdmissionHandle;
+import org.flexlb.balance.scheduler.ContextResult;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PreemptionRegistration;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestRepository;
-import org.flexlb.balance.scheduler.RequestSignals;
 import org.flexlb.balance.scheduler.RequestTaskExecutor;
 import org.flexlb.balance.scheduler.TaskTimer;
 import org.flexlb.config.ConfigService;
@@ -21,7 +22,6 @@ import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter.CancelEvent;
 import org.flexlb.service.monitor.RequestSchedulerReporter.EvictionEvent;
@@ -39,7 +39,6 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 
@@ -95,11 +94,14 @@ public class DefaultDecodePreemption implements DecodePreemption {
 
     private final RequestSchedulerReporter reporter;
     private volatile boolean shutdown;
+    private final java.util.concurrent.atomic.AtomicInteger activeWork =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private final ThreadLocal<Boolean> acquiring = new ThreadLocal<>();
     private final DeliveryDispatcher dispatcher;
     private final RequestRepository requests;
     private final RequestTaskExecutor executor;
     private final TaskTimer timer;
-    private final RequestSignals signals;
+
     private final AtomicLong tokenSequence = new AtomicLong(1);
 
     private final DecodePreemptionPolicy selectionPolicy;
@@ -111,7 +113,6 @@ public class DefaultDecodePreemption implements DecodePreemption {
             RequestRepository requests,
             RequestTaskExecutor executor,
             TaskTimer timer,
-            RequestSignals signals,
             RequestSchedulerReporter reporter,
             ConfigService configService,
             AdmissionCapacity capacity,
@@ -121,7 +122,7 @@ public class DefaultDecodePreemption implements DecodePreemption {
         this.requests = Objects.requireNonNull(requests, "requests");
         this.executor = Objects.requireNonNull(executor, "executor");
         this.timer = Objects.requireNonNull(timer, "timer");
-        this.signals = Objects.requireNonNull(signals, "signals");
+
         this.selectionPolicy = Objects.requireNonNull(selectionPolicy, "selectionPolicy");
         this.capacity = Objects.requireNonNull(capacity, "capacity");
         var config = configService.loadBalanceConfig();
@@ -147,13 +148,13 @@ public class DefaultDecodePreemption implements DecodePreemption {
         List<DecodeResources.ReservationHandle> victimReservations =
                 new ArrayList<>(command.victims().size());
         long endpointGenerationId = command.endpoint().getStatus().getGenerationId();
-        AttemptCapability capability = new AttemptCapability(command, token);
+        Attempt attempt = new Attempt(command, token);
         try {
             for (DecodeRequestView victim : command.victims()) {
                 var owner = requests.ownerOf(victim.requestId());
                 if (owner == null) {
                     return CompletableFuture.completedFuture(
-                            capability.abort(true, "cancel_owner_missing:" + victim.requestId()));
+                            attempt.abort(true, "cancel_owner_missing:" + victim.requestId()));
                 }
                 var reservation =
                         new DecodeResources.ReservationHandle(
@@ -163,16 +164,17 @@ public class DefaultDecodePreemption implements DecodePreemption {
                 Optional<PreemptionRegistration> claimAttempt = owner.tryClaim(reservation, token);
                 if (claimAttempt.isEmpty()) {
                     return CompletableFuture.completedFuture(
-                            capability.abort(false, "victim_inflight_gone"));
+                            attempt.abort(false, "victim_inflight_gone"));
                 }
                 PreemptionRegistration claim = claimAttempt.get();
-                ClaimedVictim owned = new ClaimedVictim(reservation, claim);
-                capability.claims.add(owned);
+                ClaimedVictim owned = new ClaimedVictim(claim);
+                attempt.claims.add(owned);
                 victimReservations.add(reservation);
                 if (claim.owner().data().getRequestId() != victim.requestId()
-                        || claim.attemptToken() != token) {
+                        || claim.attemptToken() != token
+                        || !reservation.equals(claim.reservation())) {
                     return CompletableFuture.completedFuture(
-                            capability.abort(
+                            attempt.abort(
                                     true,
                                     "lifecycle_returned_mismatched_claim:" + owned.requestId()));
                 }
@@ -190,43 +192,42 @@ public class DefaultDecodePreemption implements DecodePreemption {
                                     capacity);
             if (begin != DecodeResources.PreemptionBeginResult.SUCCESS) {
                 return CompletableFuture.completedFuture(
-                        capability.abort(
+                        attempt.abort(
                                 begin == DecodeResources.PreemptionBeginResult.ENDPOINT_RETIRED,
                                 "begin_" + begin.name().toLowerCase()));
             }
-            capability.endpointBegun = true;
-            capability.observe();
-            for (ClaimedVictim owned : capability.claims) {
-                var scheduler = owned.claim.owner().data().getScheduler();
+            attempt.endpointBegun = true;
+            attempt.observe();
+            for (ClaimedVictim owned : attempt.claims) {
+                var scheduler = owned.claim.owner().data().getLifecycle();
                 if (!scheduler.onPreemption(owned.claim, START_CANCEL)) {
                     return CompletableFuture.completedFuture(
-                            capability.abort(
+                            attempt.abort(
                                     true,
                                     "inflight_cancel_linearization_failed:" + owned.requestId()));
                 }
             }
-            for (ClaimedVictim owned : capability.claims) {
+            for (ClaimedVictim owned : attempt.claims) {
                 owned.acknowledgement =
-                        capability.outboundStarted(owned)
-                                ? cancel(owned, command, capability.expiresAt)
+                        attempt.outboundStarted(owned)
+                                ? cancel(owned, command, attempt.expiresAt)
                                 : CompletableFuture.completedFuture(
                                         PreemptionRegistration.Reply.UNKNOWN);
             }
 
             CompletableFuture<PreemptionResult> protocol =
                     CompletableFuture.allOf(
-                                    capability.claims.stream()
+                                    attempt.claims.stream()
                                             .map(owned -> owned.acknowledgement)
                                             .toArray(CompletableFuture[]::new))
                             .thenComposeAsync(
-                                    ignored -> handleAcknowledgements(context, capability),
+                                    ignored -> handleAcknowledgements(context, attempt),
                                     work -> executor.execute(context, work))
-                            .whenComplete(
-                                    (ignored, failure) -> capability.settlement.cancel(false));
+                            .whenComplete((ignored, failure) -> attempt.settlement.cancel(false));
             return protocol.handle(
                     (result, failure) -> {
                         if (failure != null) {
-                            return capability.abort(
+                            return attempt.abort(
                                     true,
                                     "coordinator_continuation_failed:" + failureDetail(failure));
                         }
@@ -234,12 +235,12 @@ public class DefaultDecodePreemption implements DecodePreemption {
                     });
         } catch (RuntimeException | Error failure) {
             return CompletableFuture.completedFuture(
-                    capability.abort(true, "coordinator_setup_failed:" + failureDetail(failure)));
+                    attempt.abort(true, "coordinator_setup_failed:" + failureDetail(failure)));
         }
     }
 
     private CompletableFuture<PreemptionResult> handleAcknowledgements(
-            RequestContext context, AttemptCapability capability) {
+            RequestContext context, Attempt attempt) {
         // A transport-unknown ACK is not a negative acknowledgement: the
         // Prefill may have installed the intent before the reply was lost.
         // Such a child therefore waits for the canonical victim resolution
@@ -247,15 +248,15 @@ public class DefaultDecodePreemption implements DecodePreemption {
         int waiting = 0;
         boolean hasNotFound = false;
 
-        for (ClaimedVictim owned : capability.claims) {
+        for (ClaimedVictim owned : attempt.claims) {
             if (owned.requestResolved()) {
                 continue;
             }
             var progress = owned.acknowledgement.join();
             if (progress == PreemptionRegistration.Reply.UNKNOWN) {
-                capability.transferUnknown(owned);
+                attempt.transferUnknown(owned);
             } else {
-                capability.transferred(owned);
+                attempt.transferred(owned);
             }
             if (progress == PreemptionRegistration.Reply.NOT_FOUND) {
                 hasNotFound |= !owned.requestResolved();
@@ -265,34 +266,31 @@ public class DefaultDecodePreemption implements DecodePreemption {
         }
 
         if (waiting == 0) {
-            capability.settlement.complete(capability.allVictimsResolved());
+            attempt.settlement.complete(attempt.allVictimsResolved());
             return CompletableFuture.completedFuture(
-                    capability.finish(hasNotFound, capability.settlement.getNow(false)));
+                    attempt.finish(hasNotFound, attempt.settlement.getNow(false)));
         }
         // Keep early rejection when the waited victims resolve but a NOT_FOUND victim has not.
         if (hasNotFound) {
             var pending =
                     CompletableFuture.allOf(
-                            capability.claims.stream()
+                            attempt.claims.stream()
                                     .filter(
                                             owned ->
                                                     owned.acknowledgement.join()
                                                             != PreemptionRegistration.Reply
                                                                     .NOT_FOUND)
-                                    .map(
-                                            owned ->
-                                                    signals.preemption(owned.claim)
-                                                            .toCompletableFuture())
+                                    .map(owned -> owned.claim.completion().toCompletableFuture())
                                     .toArray(CompletableFuture<?>[]::new));
             pending.whenComplete(
                     (ignored, failure) ->
-                            capability.settlement.complete(capability.allVictimsResolved()));
-            capability.settlement.whenComplete((ignored, failure) -> pending.cancel(false));
+                            attempt.settlement.complete(attempt.allVictimsResolved()));
+            attempt.settlement.whenComplete((ignored, failure) -> pending.cancel(false));
         }
         final boolean ackNotFound = hasNotFound;
         // Late facts still settle victims; they cannot change the frozen admission result.
-        return capability.settlement.thenApplyAsync(
-                resolved -> capability.finish(ackNotFound, resolved),
+        return attempt.settlement.thenApplyAsync(
+                resolved -> attempt.finish(ackNotFound, resolved),
                 work -> executor.execute(context, work));
     }
 
@@ -305,22 +303,13 @@ public class DefaultDecodePreemption implements DecodePreemption {
             if (remaining <= 0) {
                 return CompletableFuture.completedFuture(PreemptionRegistration.Reply.UNKNOWN);
             }
-            var stage =
-                    dispatcher.preempt(
-                            victim.claim,
-                            command.endpoint(),
-                            command.detail(),
-                            Math.min(command.cancelAckTimeoutMs(), remaining));
-            if (stage == null) {
-                return CompletableFuture.completedFuture(PreemptionRegistration.Reply.UNKNOWN);
-            }
-            return stage.handle(
-                    (outcome, failure) ->
-                            failure == null && outcome != null
-                                    ? outcome
-                                    : PreemptionRegistration.Reply.UNKNOWN);
+            return dispatcher.preempt(
+                    victim.claim,
+                    command.endpoint(),
+                    command.detail(),
+                    Math.min(command.cancelAckTimeoutMs(), remaining));
         } catch (RuntimeException | Error failure) {
-            // The capability marked this victim OUTBOUND before invocation,
+            // The attempt marked this victim OUTBOUND before invocation,
             // so close conservatively transfers its exact claims to UNKNOWN.
             return CompletableFuture.completedFuture(PreemptionRegistration.Reply.UNKNOWN);
         }
@@ -344,23 +333,20 @@ public class DefaultDecodePreemption implements DecodePreemption {
 
     /** Exact opaque request claim paired with its immutable endpoint victim. */
     private final class ClaimedVictim {
-        private final DecodeResources.ReservationHandle reservation;
         private final PreemptionRegistration claim;
         private CompletableFuture<PreemptionRegistration.Reply> acknowledgement;
         private volatile ClaimDisposition disposition = ClaimDisposition.RELEASABLE;
 
-        private ClaimedVictim(
-                DecodeResources.ReservationHandle reservation, PreemptionRegistration claim) {
-            this.reservation = reservation;
+        private ClaimedVictim(PreemptionRegistration claim) {
             this.claim = claim;
         }
 
         private long requestId() {
-            return reservation.requestId();
+            return claim.reservation().requestId();
         }
 
         private boolean requestResolved() {
-            VictimResolution resolution = signals.resolved(claim);
+            VictimResolution resolution = claim.result();
             return resolution != null && resolution.requestId() == requestId();
         }
     }
@@ -371,7 +357,7 @@ public class DefaultDecodePreemption implements DecodePreemption {
      * reconciliation, the incoming endpoint reservation aborts, and only
      * claims which never crossed an outbound boundary are released.
      */
-    private final class AttemptCapability implements AutoCloseable {
+    private final class Attempt implements AutoCloseable {
         private final PreemptionCommand command;
         private final long token;
         private final List<ClaimedVictim> claims = new ArrayList<>();
@@ -381,24 +367,20 @@ public class DefaultDecodePreemption implements DecodePreemption {
         private boolean closed;
         private String cleanupFailure;
 
-        private AttemptCapability(PreemptionCommand command, long token) {
+        private Attempt(PreemptionCommand command, long token) {
             this.command = command;
             this.token = token;
             this.expiresAt =
                     System.nanoTime()
                             + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(
                                     command.preemptionTimeoutMs());
+            activeWork.incrementAndGet();
         }
 
         private void observe() {
             var signals =
                     claims.stream()
-                            .map(
-                                    v ->
-                                            DefaultDecodePreemption.this
-                                                    .signals
-                                                    .preemption(v.claim)
-                                                    .toCompletableFuture())
+                            .map(v -> v.claim.completion().toCompletableFuture())
                             .toArray(CompletableFuture[]::new);
             var all = CompletableFuture.allOf(signals);
             all.whenComplete((ignored, failure) -> settlement.complete(allVictimsResolved()));
@@ -415,7 +397,7 @@ public class DefaultDecodePreemption implements DecodePreemption {
                                             1L,
                                             java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
                                                     remaining)));
-                    settlement.whenComplete((ignored, failure) -> deadline.cancel());
+                    settlement.whenComplete((ignored, failure) -> deadline.cancel(false));
                 }
             }
         }
@@ -432,7 +414,8 @@ public class DefaultDecodePreemption implements DecodePreemption {
             // fact.
             if (!command.endpoint()
                     .updatePreemption(
-                            token, DecodeResources.PreemptionUpdate.handedOff(owned.reservation))
+                            token,
+                            DecodeResources.PreemptionUpdate.handedOff(owned.claim.reservation()))
                     .status()
                     .applied()) {
                 return false;
@@ -459,7 +442,7 @@ public class DefaultDecodePreemption implements DecodePreemption {
             owned.claim
                     .owner()
                     .data()
-                    .getScheduler()
+                    .getLifecycle()
                     .onPreemption(
                             owned.claim,
                             new RequestLifecycle.PreemptionEvent(
@@ -476,7 +459,7 @@ public class DefaultDecodePreemption implements DecodePreemption {
                             ? command.endpoint().commitPreemption(token)
                             : null;
             if (incoming != null) {
-                beginClose();
+                if (beginClose()) activeWork.decrementAndGet();
                 return new PreemptionResult(incoming, false, "committed");
             }
             boolean cleanSingleNotFound =
@@ -498,33 +481,40 @@ public class DefaultDecodePreemption implements DecodePreemption {
             if (!beginClose()) {
                 return;
             }
-            settlement.complete(false);
+            try {
+                settlement.complete(false);
 
-            // OUTBOUND means the call may have reached Prefill even if its
-            // Java invocation or continuation failed. Transfer before endpoint
-            // abort so neither owner can be mistaken for locally releasable.
-            for (ClaimedVictim owned : claims) {
-                if (owned.disposition == ClaimDisposition.OUTBOUND) {
-                    cleanup("transfer_unknown:" + owned.requestId(), () -> transferUnknown(owned));
+                // OUTBOUND means the call may have reached Prefill even if its
+                // Java invocation or continuation failed. Transfer before endpoint
+                // abort so neither owner can be mistaken for locally releasable.
+                for (ClaimedVictim owned : claims) {
+                    if (owned.disposition == ClaimDisposition.OUTBOUND) {
+                        cleanup(
+                                "transfer_unknown:" + owned.requestId(),
+                                () -> transferUnknown(owned));
+                    }
                 }
-            }
-            if (endpointBegun) {
-                cleanup("endpoint_abort", () -> command.endpoint().abortPreemption(token));
-            }
-            for (ClaimedVictim owned : claims) {
-                if (owned.disposition == ClaimDisposition.RELEASABLE && !owned.requestResolved()) {
-                    cleanup(
-                            "release_claim:" + owned.requestId(),
-                            () ->
-                                    owned.claim
-                                            .owner()
-                                            .data()
-                                            .getScheduler()
-                                            .onPreemption(
-                                                    owned.claim,
-                                                    new RequestLifecycle.PreemptionEvent(
-                                                            null, true, null, null, null)));
+                if (endpointBegun) {
+                    cleanup("endpoint_abort", () -> command.endpoint().abortPreemption(token));
                 }
+                for (ClaimedVictim owned : claims) {
+                    if (owned.disposition == ClaimDisposition.RELEASABLE
+                            && !owned.requestResolved()) {
+                        cleanup(
+                                "release_claim:" + owned.requestId(),
+                                () ->
+                                        owned.claim
+                                                .owner()
+                                                .data()
+                                                .getLifecycle()
+                                                .onPreemption(
+                                                        owned.claim,
+                                                        new RequestLifecycle.PreemptionEvent(
+                                                                null, true, null, null, null)));
+                    }
+                }
+            } finally {
+                activeWork.decrementAndGet();
             }
         }
 
@@ -553,16 +543,55 @@ public class DefaultDecodePreemption implements DecodePreemption {
         return token;
     }
 
-    @PreDestroy
-    public void freezeAdmission() {
+    @Override
+    public void stopAdmission() {
         shutdown = true;
+    }
+
+    @Override
+    public boolean awaitIdle(long deadlineNanos) {
+        if (Boolean.TRUE.equals(acquiring.get()) && activeWork.get() != 0) return false;
+        boolean interrupted = false;
+        try {
+            while (activeWork.get() != 0) {
+                if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos)
+                    return false;
+                interrupted |= Thread.interrupted();
+                java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
+            }
+            return true;
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
+        }
+    }
+
+    @Override
+    @PreDestroy
+    public void close() {
+        stopAdmission();
+        checkState(awaitIdle(Long.MAX_VALUE), "preemption cannot wait for its own acquisition");
+    }
+
+    @Override
+    public CompletableFuture<PreemptionResult> tryReclaim(
+            RequestContext ctx, WorkerEndpoint endpoint) {
+        activeWork.incrementAndGet();
+        var previous = acquiring.get();
+        acquiring.set(Boolean.TRUE);
+        try {
+            return startReclaim(ctx, endpoint);
+        } finally {
+            if (previous == null) acquiring.remove();
+            else acquiring.set(previous);
+            activeWork.decrementAndGet();
+        }
     }
 
     /**
      * Starts one Decode preemption transaction. The caller owns the returned reservation and must
      * either attach it to its placement attempt or release it.
      */
-    public CompletableFuture<PreemptionResult> tryReclaim(
+    private CompletableFuture<PreemptionResult> startReclaim(
             RequestContext ctx, WorkerEndpoint blockedEndpoint) {
         Request request = ctx.data().getRequest();
         SchedulingMetadata metadata = ctx.data().getSchedulingMetadata();
@@ -581,7 +610,7 @@ public class DefaultDecodePreemption implements DecodePreemption {
         DecodeEvictionProposal proposal = planDecodeEviction(request, metadata, decodeEndpoint);
         if (proposal == null
                 || !ctx.data()
-                        .getScheduler()
+                        .getLifecycle()
                         .isAdmissionOpen(request.getRequestId(), ctx.data().getFuture())) {
             return null;
         }
@@ -613,15 +642,13 @@ public class DefaultDecodePreemption implements DecodePreemption {
                 ctx.data().getRequestId(),
                 "local preemption",
                 () -> {
-                    for (DecodeRequestView victim : proposal.victims()) {
-                        reportRequeuedVictim(ctx, victim, proposal);
-                    }
-                    reportEviction(
-                            EvictionEvent.COMMIT,
-                            ctx.data().getPriority(),
+                    reporter.reportPreemptionVictims(
                             ctx.data().getRequestId(),
+                            ctx.data().getPriority(),
+                            proposal.endpointId(),
                             proposal.evictionCase(),
-                            "success");
+                            proposal.victims(),
+                            false);
                     recordDecodePlanObservability(ctx, proposal);
                 });
         return CompletableFuture.completedFuture(
@@ -721,42 +748,11 @@ public class DefaultDecodePreemption implements DecodePreemption {
     }
 
     /**
-     * Observability only: the request's scheduler completes withdrawal and requeue.
-     */
-    private void reportRequeuedVictim(
-            RequestContext ctx, DecodeRequestView victim, DecodeEvictionProposal proposal) {
-        String stage = "decode_reserved";
-        report(
-                ctx.data().getRequestId(),
-                "requeued victim",
-                () -> {
-                    reporter.reportVictim(
-                            victim.priority(),
-                            ctx.data().getPriority(),
-                            stage,
-                            proposal.evictionCase());
-                    reporter.reportVictimKvTokens(victim.priority(), stage, victim.kvTokens());
-                });
-        Logger.debug(
-                "[decode-capacity] decode victim preempted: victim_id={} victim_priority={}"
-                        + " stage={} outcome={} kv_tokens={} incoming_id={} incoming_priority={}"
-                        + " worker={}",
-                victim.requestId(),
-                victim.priority(),
-                stage,
-                "requeued",
-                victim.kvTokens(),
-                ctx.data().getRequestId(),
-                ctx.data().getPriority(),
-                proposal.endpointId());
-    }
-
-    /**
      * Record the single committed Decode-eviction plan.
      */
     private static void recordDecodePlanObservability(
             RequestContext ctx, DecodeEvictionProposal proposal) {
-        long totalCost = proposal.priorityHarmProfile().totalCost();
+        long totalCost = proposal.diagnosticCost();
         ctx.data().setPlanType("decode_evict");
         ctx.data().setPlanCost(totalCost);
         ctx.data().setVictimCount(proposal.victims().size());
@@ -788,11 +784,16 @@ public class DefaultDecodePreemption implements DecodePreemption {
                         preemption.getTimeoutMs(),
                         () ->
                                 ctx.data()
-                                        .getScheduler()
+                                        .getLifecycle()
                                         .isAdmissionOpen(
                                                 request.getRequestId(), ctx.data().getFuture()),
                         "preempted by higher-priority request " + ctx.data().getRequestId());
-        reportCancelRequests(ctx, proposal);
+        report(
+                ctx.data().getRequestId(),
+                "cancel requests",
+                () ->
+                        reporter.reportPreemptionCancelRequests(
+                                proposal.endpointId(), proposal.victims()));
         return preempt(ctx, command)
                 .whenComplete(
                         (result, error) ->
@@ -803,66 +804,21 @@ public class DefaultDecodePreemption implements DecodePreemption {
                                             if (error != null
                                                     || result == null
                                                     || result.controlFailure()) {
-                                                reportCancelTimeout(ctx, proposal.endpointId());
+                                                reporter.reportEngineCancel(
+                                                        CancelEvent.TIMEOUT,
+                                                        proposal.endpointId(),
+                                                        ctx.data().getPriority());
                                             } else if (result.committed()) {
-                                                reportCommittedEnginePreemption(ctx, proposal);
+                                                reporter.reportPreemptionVictims(
+                                                        ctx.data().getRequestId(),
+                                                        ctx.data().getPriority(),
+                                                        proposal.endpointId(),
+                                                        proposal.evictionCase(),
+                                                        proposal.victims(),
+                                                        true);
                                                 recordDecodePlanObservability(ctx, proposal);
                                             }
                                         }));
-    }
-
-    /**
-     * Metrics never participate in the committed reservation handoff.
-     */
-    private void reportCommittedEnginePreemption(
-            RequestContext ctx, DecodeEvictionProposal proposal) {
-        report(
-                ctx.data().getRequestId(),
-                "committed preemption",
-                () -> {
-                    for (DecodeRequestView victim : proposal.victims()) {
-                        String stage =
-                                victim.phase() == DecodeTaskPhase.RUNNING
-                                        ? "decode_running"
-                                        : "decode_cancel";
-                        reporter.reportVictim(
-                                victim.priority(),
-                                ctx.data().getPriority(),
-                                stage,
-                                proposal.evictionCase());
-                        reporter.reportVictimKvTokens(victim.priority(), stage, victim.kvTokens());
-                        reporter.reportEngineCancel(
-                                CancelEvent.CONFIRM, proposal.endpointId(), victim.priority());
-                    }
-                    reporter.reportEviction(
-                            EvictionEvent.COMMIT,
-                            ctx.data().getPriority(),
-                            proposal.evictionCase(),
-                            "success");
-                });
-    }
-
-    private void reportCancelRequests(RequestContext ctx, DecodeEvictionProposal proposal) {
-        report(
-                ctx.data().getRequestId(),
-                "cancel requests",
-                () -> {
-                    for (DecodeRequestView victim : proposal.victims()) {
-                        reporter.reportEngineCancel(
-                                CancelEvent.REQUEST, proposal.endpointId(), victim.priority());
-                        reporter.reportCancel(victim.priority(), "PRIORITY_PREEMPTED");
-                    }
-                });
-    }
-
-    private void reportCancelTimeout(RequestContext ctx, String endpointId) {
-        report(
-                ctx.data().getRequestId(),
-                "cancel timeout",
-                () -> {
-                    reporter.reportEngineCancel(
-                            CancelEvent.TIMEOUT, endpointId, ctx.data().getPriority());
-                });
     }
 
     private static void report(long requestId, String operation, Runnable metrics) {
@@ -890,14 +846,14 @@ public class DefaultDecodePreemption implements DecodePreemption {
                 AdmissionHandle withdrawal =
                         owner == null
                                 ? null
-                                : org.flexlb.balance.scheduler.AdmissionHandle.tryBeginPreemption(
+                                : AdmissionHandle.tryBeginPreemption(
                                         owner, endpoint, victim, priority);
                 if (withdrawal == null) {
                     return null;
                 }
                 claimed.add(withdrawal);
             }
-            final var reserved =
+            incoming =
                     endpoint.replaceQueuedRequests(
                             victims,
                             request.getRequestId(),
@@ -905,30 +861,6 @@ public class DefaultDecodePreemption implements DecodePreemption {
                             request.getExpectedKvTokens(),
                             priority,
                             capacity);
-            incoming = reserved;
-            if (reserved != null) {
-                AtomicBoolean released = new AtomicBoolean();
-                Runnable releaseOnPlacementFailure =
-                        () -> {
-                            if (!released.compareAndSet(false, true)) {
-                                return;
-                            }
-                            var status =
-                                    endpoint.release(
-                                                    reserved,
-                                                    DecodeResources.ReleaseReason.LOCAL_ROLLBACK)
-                                            .status();
-                            checkState(
-                                    status == DecodeResources.ReservationReleaseResult.RELEASED
-                                            || status
-                                                    == DecodeResources.ReservationReleaseResult
-                                                            .STALE,
-                                    "failed placement retained Decode resources");
-                        };
-                for (AdmissionHandle withdrawal : claimed) {
-                    withdrawal.onPlacementFailure(releaseOnPlacementFailure);
-                }
-            }
             return incoming;
         } finally {
             Throwable failure = null;
@@ -940,14 +872,34 @@ public class DefaultDecodePreemption implements DecodePreemption {
                                 () ->
                                         withdrawal.complete(
                                                 committed
-                                                        ? org.flexlb.balance.scheduler.ContextResult
-                                                                .PublicationResult.WITHDRAWN
-                                                        : org.flexlb.balance.scheduler.ContextResult
-                                                                .PublicationResult.RESTORED));
+                                                        ? ContextResult.PublicationResult.WITHDRAWN
+                                                        : ContextResult.PublicationResult
+                                                                .RESTORED));
             }
-            if (failure != null) {
-                Failures.rethrow(failure, "request cleanup failed");
+            if (failure != null && incoming != null) {
+                var exact = incoming;
+                failure =
+                        Failures.run(
+                                failure,
+                                () -> {
+                                    var released =
+                                            endpoint.release(
+                                                            exact,
+                                                            DecodeResources.ReleaseReason
+                                                                    .LOCAL_ROLLBACK)
+                                                    .status();
+                                    checkState(
+                                            released
+                                                            == DecodeResources
+                                                                    .ReservationReleaseResult
+                                                                    .RELEASED
+                                                    || released
+                                                            == DecodeResources
+                                                                    .ReservationReleaseResult.STALE,
+                                            "failed withdrawal retained incoming Decode resources");
+                                });
             }
+            Failures.rethrow(failure, "queued request withdrawal failed");
         }
     }
 }

@@ -5,10 +5,13 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import io.opentelemetry.context.Context;
 import lombok.Getter;
 import lombok.Setter;
+import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.util.Failures;
 
 import java.util.Map;
@@ -32,10 +35,10 @@ public final class RequestData {
     private volatile Request request;
     private volatile SchedulingMetadata schedulingMetadata;
     private volatile CompletableFuture<Response> future;
-    private volatile RequestLifecycle scheduler;
+    private volatile RequestLifecycle lifecycle;
 
     @Getter(lombok.AccessLevel.NONE)
-    private volatile FutureTask<GenerateInputPayload> generateInput;
+    private volatile FutureTask<EngineRpcService.GenerateInputPB> generateInput;
 
     private volatile int generateInputSize;
 
@@ -83,17 +86,24 @@ public final class RequestData {
 
     /** Binding happens under the Repository -> Context lock; no callbacks execute here. */
     synchronized void register(RequestLifecycle owner, RequestFuture response) {
-        checkState(scheduler == null, "request data already registered");
+        checkState(lifecycle == null, "request data already registered");
         Objects.requireNonNull(request, "request");
-        Objects.requireNonNull(owner, "scheduler");
+        Objects.requireNonNull(owner, "lifecycle");
         Objects.requireNonNull(response, "response");
         if (schedulingMetadata == null) {
             schedulingMetadata =
                     SchedulingMetadata.explicit(
                             request.getRawPriority(), config.resolveExpiresAtMs(startTime));
         }
-        scheduler = owner;
+        lifecycle = owner;
         future = response;
+    }
+
+    /** Error classification for a scheduling deadline, independent of lifecycle settlement. */
+    public StrategyErrorType schedulingTimeoutError() {
+        return config.isQueue()
+                ? StrategyErrorType.RESOURCE_EXHAUSTED
+                : StrategyErrorType.BATCH_SLO_EXPIRED;
     }
 
     public long getRequestId() {
@@ -132,7 +142,7 @@ public final class RequestData {
         generateInput =
                 inputBytes == null || inputBytes.isEmpty()
                         ? null
-                        : new FutureTask<>(() -> GenerateInputPayload.parse(inputBytes));
+                        : new FutureTask<>(() -> Delivery.parseInput(inputBytes));
     }
 
     boolean hasGenerateInput() {
@@ -146,7 +156,7 @@ public final class RequestData {
         }
     }
 
-    GenerateInputPayload getGenerateInput()
+    EngineRpcService.GenerateInputPB getGenerateInput()
             throws InvalidProtocolBufferException, InterruptedException {
         var input = generateInput;
         if (input == null) {

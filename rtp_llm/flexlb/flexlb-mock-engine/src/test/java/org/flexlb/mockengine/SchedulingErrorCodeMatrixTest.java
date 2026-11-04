@@ -174,8 +174,7 @@ class SchedulingErrorCodeMatrixTest {
             assertFailure(failure, code, reason, message);
             assertEquals("PREFILL", context.data().getSchedulingDiagnostics().get("role"));
             assertEquals(1, context.data().getSchedulingDiagnostics().get("workers"));
-            assertEquals(
-                    1, fixture.harness.prefillEndpoint(0).ownership.stats().locallyOwnedRequests());
+            assertEquals(1, fixture.harness.prefillEndpoint(0).stats().locallyOwnedRequests());
             assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
         }
     }
@@ -342,7 +341,7 @@ class SchedulingErrorCodeMatrixTest {
 
     private static final class Fixture implements AutoCloseable {
         final AutoTpmE2EHarness harness;
-        final org.flexlb.balance.scheduler.RequestSchedulerEntry service;
+        final org.flexlb.balance.scheduler.RequestLifecycle service;
 
         Fixture(String mode) {
             this(mode, 100);

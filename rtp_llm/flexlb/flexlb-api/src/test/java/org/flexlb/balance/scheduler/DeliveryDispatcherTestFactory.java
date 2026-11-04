@@ -38,7 +38,14 @@ public final class DeliveryDispatcherTestFactory {
 
         private RuntimeSizedDispatcher(
                 EngineGrpcClient client, ConfigService config, DeliveryMetricsReporter reporter) {
-            super(client, config, reporter);
+            super(
+                    client,
+                    config,
+                    reporter,
+                    org.mockito.Mockito.mock(TaskTimer.class),
+                    new org.flexlb.balance.scheduler.PlacementConfiguration()
+                            .decodeAdmissionCapacity(config),
+                    org.mockito.Mockito.mock(DeliveryExecution.class));
             this.config = config;
         }
     }

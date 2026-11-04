@@ -45,7 +45,7 @@ import static org.mockito.Mockito.when;
  *   <li>Each routing response contains {@code ServerStatus} entries for the
  *       selected prefill worker and the shared decode worker</li>
  *   <li>The scheduler looks up the prefill endpoint by {@code ip:httpPort}
- *       and offers the request to that worker's {@code RequestExecution}</li>
+ *       and offers the request to that worker's {@code EndpointWork}</li>
  * </ul>
  */
 class MultipleWorkersTest extends FlexLBMockTestBase {

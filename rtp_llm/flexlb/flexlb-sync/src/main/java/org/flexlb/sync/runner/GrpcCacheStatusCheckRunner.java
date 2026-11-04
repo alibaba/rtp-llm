@@ -9,7 +9,6 @@ import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.BalanceStatusEnum;
-import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.grpc.WorkerStatusRpcClient;
 import org.flexlb.service.monitor.EngineHealthReporter;
 
@@ -57,24 +56,63 @@ public class GrpcCacheStatusCheckRunner extends AbstractStatusRunner {
         long currentCacheVersion = getCurrentCacheVersion();
 
         pollLease.trace().recordRpcStarted(requestTimeoutMs);
-        PollCompletion.registerResultCallback(
-                pollLease,
-                callbackExecutor,
-                "Cache status",
-                ipPort,
+        completePoll(
                 workerStatusRpcClient.getCacheStatusAsync(
                         workerStatus.getIp(),
                         workerStatus.getGrpcPort(),
                         currentCacheVersion,
                         requestTimeoutMs,
                         roleType),
-                (cacheStatus, failure) -> {
-                    if (failure != null) {
-                        handleException(failure);
-                    } else {
-                        handleCacheStatusResponse(cacheStatus, startTime);
-                    }
-                });
+                startTime);
+    }
+
+    /** The callback owns the exact poll lease, including response and executor failure. */
+    private void completePoll(
+            java.util.concurrent.CompletableFuture<EngineRpcService.CacheStatusPB> response,
+            long startTime) {
+        response.whenComplete(
+                        (value, failure) -> {
+                            pollLease.trace().record(Stage.RPC_COMPLETED, unwrap(failure));
+                            pollLease.trace().record(Stage.CALLBACK_READY);
+                        })
+                .handleAsync(
+                        (value, failure) -> {
+                            try {
+                                pollLease.trace().record(Stage.CALLBACK_STARTED);
+                                if (failure != null) handleException(unwrap(failure));
+                                else handleCacheStatusResponse(value, startTime);
+                            } catch (Throwable callbackFailure) {
+                                pollLease.trace().record(Stage.CALLBACK_FAILED, callbackFailure);
+                                logger.error(
+                                        "Cache status callback failed for {}",
+                                        ipPort,
+                                        callbackFailure);
+                            } finally {
+                                pollLease.trace().record(Stage.CALLBACK_ENDED);
+                            }
+                            return null;
+                        },
+                        callbackExecutor)
+                .whenComplete(
+                        (ignored, failure) -> {
+                            pollLease.close();
+                            if (failure != null) {
+                                pollLease
+                                        .trace()
+                                        .record(Stage.CALLBACK_SUBMISSION_FAILED, unwrap(failure));
+                                logger.error(
+                                        "Cache status callback was not scheduled for {}",
+                                        ipPort,
+                                        unwrap(failure));
+                            }
+                        });
+    }
+
+    private static Throwable unwrap(Throwable failure) {
+        return failure instanceof java.util.concurrent.CompletionException
+                        && failure.getCause() != null
+                ? failure.getCause()
+                : failure;
     }
 
     private void handleCacheStatusResponse(
@@ -106,7 +144,7 @@ public class GrpcCacheStatusCheckRunner extends AbstractStatusRunner {
                                 && snapshot.cacheStatus().getVersion() == response.getVersion();
                 pollLease.trace().record(Stage.CONVERSION_STARTED);
                 CacheStatus newCacheStatus =
-                        EngineStatusConverter.convertToCacheStatus(
+                        WorkerStatusRpcClient.convertToCacheStatus(
                                 response,
                                 reuseKeys ? snapshot.cacheStatus().getCachedKeys() : null);
                 pollLease.trace().record(Stage.CONVERSION_COMPLETED);

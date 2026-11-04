@@ -2,12 +2,12 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
+import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
 
-import static org.flexlb.balance.scheduler.ContextResult.Blocked;
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
 import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
@@ -15,7 +15,6 @@ import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.PreemptionReport;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -55,7 +54,7 @@ class PreemptionRegistrationTest {
         assertEquals(
                 PreemptionCancelPhase.NOT_FOUND_STALE, context.snapshot().preemption().phase());
         assertFalse(context.snapshot().preemption().phase().isLocallyReleasable());
-        assertInstanceOf(Blocked.class, context.prepareReconciliation(registration));
+        org.junit.jupiter.api.Assertions.assertFalse(context.canReconcilePreemption(registration));
         assertTrue(finish(registration));
         assertTrue(context.snapshot().preemption().finished());
         assertFalse(advance(registration, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
@@ -114,34 +113,38 @@ class PreemptionRegistrationTest {
                         false);
         assertNull(context.beginClose(failure, 1002L).outcome());
         assertSame(failure, context.snapshot().preemption().pendingTerminal());
-        assertInstanceOf(
-                Blocked.class,
-                context.prepareReconciliation(registration),
+        org.junit.jupiter.api.Assertions.assertFalse(
+                context.canReconcilePreemption(registration),
                 "UNKNOWN cannot turn local failure into Decode proof");
-        context.recordEngineEvidence(
-                new EngineEvidence(
-                        route,
-                        route.decodeReservation(),
-                        RoleType.DECODE,
-                        EngineKind.COMPLETED,
-                        0L,
-                        "worker complete",
-                        1003L));
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.recordEngineEvidence(
+                                new EngineEvidence(
+                                        route,
+                                        route.decodeReservation(),
+                                        RoleType.DECODE,
+                                        EngineKind.COMPLETED,
+                                        0L,
+                                        "worker complete",
+                                        1003L)));
         var worker = context.snapshot().preemption().pendingTerminal();
         assertEquals(EndKind.WORKER, worker.kind());
         var token = context.snapshot().deadlines().inactivity();
-        context.recordDeadline(token, token.atMs(), null);
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest -> observedRequest.recordDeadline(token, token.atMs(), null));
         assertSame(
                 worker,
                 context.snapshot().preemption().pendingTerminal(),
                 "authoritative Worker completion takes precedence over later local expiry");
         var beforeReconciliation = context.snapshot();
-        var reconcile = RequestCleanupPassTest.granted(context.prepareReconciliation(registration));
+        org.junit.jupiter.api.Assertions.assertTrue(context.canReconcilePreemption(registration));
         assertSame(
                 beforeReconciliation,
                 context.snapshot(),
                 "synchronous ledger preparation must not publish an in-progress request state");
-        assertSame(registration, reconcile);
+        assertSame(registration, context.snapshot().preemption().identity());
         assertSame(worker, context.snapshot().preemption().pendingTerminal());
     }
 
@@ -166,24 +169,25 @@ class PreemptionRegistrationTest {
                                 1002L)
                         .outcome());
         assertTrue(advance(registration, PreemptionCancelPhase.NOT_FOUND_STALE));
-        assertInstanceOf(
-                Blocked.class,
-                context.prepareReconciliation(registration),
+        org.junit.jupiter.api.Assertions.assertFalse(
+                context.canReconcilePreemption(registration),
                 "Prefill handoff plus NOT_FOUND is not Decode release proof");
         assertFalse(context.snapshot().preemption().finished());
-        context.recordEngineEvidence(
-                new EngineEvidence(
-                        route,
-                        route.decodeReservation(),
-                        RoleType.DECODE,
-                        EngineKind.ALLOCATED,
-                        0L,
-                        null,
-                        1003L));
-        var permission =
-                RequestCleanupPassTest.granted(context.prepareReconciliation(registration));
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.recordEngineEvidence(
+                                new EngineEvidence(
+                                        route,
+                                        route.decodeReservation(),
+                                        RoleType.DECODE,
+                                        EngineKind.ALLOCATED,
+                                        0L,
+                                        null,
+                                        1003L)));
+        org.junit.jupiter.api.Assertions.assertTrue(context.canReconcilePreemption(registration));
         context.completePreemption(
-                permission,
+                registration,
                 new PreemptionReport(
                         null, true, true, false, context.snapshot().preemption().pendingTerminal()),
                 1004L);
@@ -221,7 +225,7 @@ class PreemptionRegistrationTest {
 
     private static PreemptionRegistration registration() {
         var context = RequestCleanupPassTest.openContext(7L);
-        return RequestCleanupPassTest.granted(
+        return RequestCleanupPassTest.requireValue(
                 context.beginPreemption(
                         context.snapshot().route().decodeReservation(),
                         11L,

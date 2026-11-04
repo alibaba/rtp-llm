@@ -40,21 +40,24 @@ public final class EndpointCleanupTestSupport {
         private final boolean batch;
         private final AtomicLong clock = new AtomicLong(100);
         private final ReentrantLock lock = new ReentrantLock();
-        private final PrefillState state =
-                new PrefillState(
+        private final PrefillEndpoint state =
+                org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                         lock,
                         PrefillActiveIndex.ordered(
-                                4, Comparator.comparingLong(RequestRoute::requestId)),
+                                4,
+                                Comparator.comparingLong(
+                                        org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
+                                                ::requestId)),
                         clock::get);
-        private final EndpointGenerationLifecycle generation =
-                new EndpointGenerationLifecycle(() -> {});
+        private final EndpointRetirementTestSupport generation =
+                new EndpointRetirementTestSupport(() -> {});
 
         public PrefillLedger(boolean batch) {
             this.batch = batch;
         }
 
         public record Owner(
-                RequestRoute item, PrefillState.Reservation reservation, long batchId) {}
+                RequestRoute item, PrefillEndpoint.Reservation reservation, long batchId) {}
 
         public Owner commit(long requestId, long batchId, long predictedMs) {
             RequestRoute item = mock(RequestRoute.class);
@@ -65,17 +68,13 @@ public final class EndpointCleanupTestSupport {
                 try {
                     assertSame(
                             item,
-                            state.updateQueue(
-                                    PrefillState.QueueChange.ENQUEUE,
-                                    item,
-                                    System.currentTimeMillis()));
+                            org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(state, item));
                 } finally {
                     lock.unlock();
                 }
                 {
                     var reservation =
-                            state.reserveBatch(item, batchId, 1, generation.tryAcquireHandoff())
-                                    .reservation();
+                            state.reserveBatch(batchId, 1, generation.tryPinGeneration()).value();
                     try (var preparationReservation =
                             EndpointTestSupport.preparation(reservation)) {
                         assertNotNull(
@@ -91,17 +90,14 @@ public final class EndpointCleanupTestSupport {
                 }
             }
             {
-                var reservation = state.reserveUnqueuedRoute(item, predictedMs, 1).reservation();
+                var reservation = state.reserveUnqueuedRoute(item, predictedMs, 1).value();
                 try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
                     assertNotNull(
                             reservation,
                             "the expired individual must release its sole capacity slot");
                     try (var handoff =
-                            EndpointTestSupport.commitRoutes(
-                                    state,
-                                    List.of(item),
-                                    List.of(reservation),
-                                    generation.tryAcquireHandoff())) {
+                            org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
+                                    state, item, reservation)) {
                         assertNotNull(handoff);
                     }
                     return new Owner(item, reservation, batchId);

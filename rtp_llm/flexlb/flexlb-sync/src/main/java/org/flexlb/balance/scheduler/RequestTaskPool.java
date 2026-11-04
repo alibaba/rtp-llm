@@ -4,9 +4,12 @@ import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 import static com.google.common.base.Preconditions.checkState;
 
@@ -87,11 +90,12 @@ public final class RequestTaskPool implements RequestTaskExecutor {
     }
 
     /** Counts both the submitting source and its optional task, including the handoff between them. */
-    final class WorkRegistration implements AutoCloseable {
+    final class WorkRegistration implements AutoCloseable, Runnable {
         private final RequestContext context;
+        private Runnable work;
+        private boolean propagate;
         private boolean stop;
         private int owners = 1;
-        private boolean submitted;
         private boolean sourceClosed;
         private boolean started;
         private boolean executed;
@@ -116,24 +120,22 @@ public final class RequestTaskPool implements RequestTaskExecutor {
             Objects.requireNonNull(work, "work");
             checkState(!Thread.holdsLock(context), "request work submission under Context lock");
             synchronized (this) {
-                checkState(!sourceClosed && !submitted, "request work already handed off");
-                submitted = true;
+                checkState(!sourceClosed && this.work == null, "request work already handed off");
+                this.work = work;
+                propagate = inline;
                 owners++;
             }
             try {
                 if (owner == null) {
                     if (inline) {
-                        run(work, true);
+                        run();
                     } else {
-                        dispatch(() -> run(work, false));
+                        dispatch(this);
                     }
                     return true;
                 }
                 if (requestWorkQueue.execute(
-                        owner,
-                        () -> run(work, inline),
-                        this::reject,
-                        inline ? Runnable::run : this::dispatch)) {
+                        owner, this, inline ? Runnable::run : this::dispatch)) {
                     return true;
                 }
                 release();
@@ -159,7 +161,8 @@ public final class RequestTaskPool implements RequestTaskExecutor {
             release();
         }
 
-        private void run(Runnable work, boolean propagate) {
+        @Override
+        public void run() {
             synchronized (this) {
                 if (started) {
                     return;
@@ -261,6 +264,98 @@ public final class RequestTaskPool implements RequestTaskExecutor {
         }
         if (interrupted) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    /** Serializes and coalesces each owner's effects outside Context's monitor. */
+    static final class RequestWorkQueue {
+        private final ConcurrentMap<Object, Lane> lanes = new ConcurrentHashMap<>();
+
+        boolean execute(Object owner, WorkRegistration work, Consumer<Runnable> start) {
+            Objects.requireNonNull(work, "work");
+            for (; ; ) {
+                Lane lane = lanes.get(owner);
+                if (lane == null || lane.retired) {
+                    lane =
+                            lanes.compute(
+                                    owner,
+                                    (key, old) -> old == null || old.retired ? new Lane(key) : old);
+                }
+                synchronized (lane) {
+                    if (lane.retired) {
+                        continue;
+                    }
+                    if (lane.pending != null) {
+                        return false;
+                    } // One pending notification covers the latest facts.
+                    lane.pending = work;
+                    if (lane.started) {
+                        return true;
+                    }
+                }
+                try {
+                    start.accept(lane);
+                } catch (RuntimeException | Error failure) {
+                    lane.reject(failure);
+                    throw failure;
+                }
+                return true;
+            }
+        }
+
+        private final class Lane implements Runnable {
+            private final Object owner;
+            private WorkRegistration pending;
+            private boolean started;
+            private volatile boolean retired;
+
+            private Lane(Object owner) {
+                this.owner = owner;
+            }
+
+            @Override
+            public void run() {
+                synchronized (this) {
+                    if (started || retired) {
+                        return;
+                    }
+                    started = true;
+                }
+                Throwable failure = null;
+                for (; ; ) {
+                    WorkRegistration next;
+                    synchronized (this) {
+                        next = pending;
+                        pending = null;
+                        if (next == null) {
+                            retired = true;
+                        }
+                    }
+                    if (next == null) {
+                        lanes.remove(owner, this);
+                        Failures.rethrow(failure, "request closing failed");
+                        return;
+                    }
+                    failure = Failures.run(failure, next);
+                }
+            }
+
+            /** A failed start resolves every counted task, including a notification queued during handoff. */
+            private void reject(Throwable cause) {
+                WorkRegistration abandoned;
+                synchronized (this) {
+                    if (started || retired) {
+                        return;
+                    }
+                    retired = true;
+                    abandoned = pending;
+                    pending = null;
+                }
+                lanes.remove(owner, this);
+                if (abandoned != null) {
+                    Failures.run(cause, () -> abandoned.reject(cause));
+                }
+            }
         }
     }
 }

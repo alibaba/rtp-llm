@@ -1,35 +1,15 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.endpoint.DecodeResources;
-import org.flexlb.balance.endpoint.PrefillState;
-import org.flexlb.balance.prediction.PrefillPredictionBoundary;
-import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.scheduler.RequestLifecycle.Publication;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.route.RoleType;
-import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 
-import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.CompletableFuture;
-
-import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
-import static org.flexlb.balance.scheduler.ContextResult.RouteDelivered;
 
 /** Accepts DIRECT requests and completes one immediate endpoint selection and handoff. */
 public final class DirectRequestScheduler extends AbstractRequestScheduler {
-
-    /** Exact committed route and its frozen prediction, before response publication. */
-    record RouteDelivery(DeliveryClaim claim, WorkSnapshot precedingWork, long unstartedWorkMs) {
-        RouteDelivery {
-            Objects.requireNonNull(claim, "claim");
-            Objects.requireNonNull(precedingWork, "precedingWork");
-        }
-    }
 
     private final RequestWorkerSelector router;
     private final java.util.concurrent.ConcurrentLinkedQueue<RequestContext> pending =
@@ -40,20 +20,79 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
         this.router = Objects.requireNonNull(router, "router");
     }
 
+    private final java.util.concurrent.atomic.AtomicInteger acceptedWork =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private volatile boolean started;
+    private volatile boolean stopped;
+    private final java.util.concurrent.atomic.AtomicBoolean scheduling =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
     @Override
-    public long schedule(long nowNanos) {
-        RequestContext request;
-        while ((request = pending.poll()) != null) {
-            dispatchRegistered(request);
-        }
-        return Long.MAX_VALUE;
+    public void start() {
+        if (stopped) return;
+        started = true;
+        schedule();
     }
 
     @Override
-    public void onEndpointChanged(org.flexlb.balance.endpoint.WorkerEndpoint endpoint) {}
+    public void schedule() {
+        do {
+            if (stopped || !scheduling.compareAndSet(false, true)) return;
+            try {
+                RequestContext request;
+                while (!stopped && (request = pending.poll()) != null) {
+                    submitSelection(request);
+                }
+            } finally {
+                scheduling.set(false);
+            }
+        } while (started && !pending.isEmpty());
+    }
+
+    private void submitSelection(RequestContext request) {
+        try (var task = lifecycle.tasks.registerRequestWork(request)) {
+            acceptedWork.incrementAndGet();
+            try {
+                task.submit(
+                        () -> {
+                            try {
+                                dispatchRegistered(request);
+                            } finally {
+                                acceptedWork.decrementAndGet();
+                            }
+                        });
+            } catch (RuntimeException | Error failure) {
+                if (task.canRetrySubmission()) acceptedWork.decrementAndGet();
+                throw failure;
+            }
+        }
+    }
 
     @Override
-    public void close() {}
+    public void stop() {
+        stopped = true;
+        pending.clear();
+    }
+
+    @Override
+    public boolean awaitStopped(long deadlineNanos) {
+        if (acceptedWork.get() != 0 && lifecycle.tasks.isExecutingOnCurrentThread()) return false;
+        while (scheduling.get() || acceptedWork.get() != 0) {
+            if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos) return false;
+            java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
+        }
+        return true;
+    }
+
+    @Override
+    public void onEndpointChanged(WorkerEndpoint endpoint) {}
+
+    @Override
+    public void close() {
+        stop();
+        com.google.common.base.Preconditions.checkState(
+                awaitStopped(Long.MAX_VALUE), "scheduler cannot wait for its own work");
+    }
 
     @Override
     public void onRequestChanged(RequestContext request) {
@@ -61,267 +100,63 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
     }
 
     @Override
-    public boolean reschedule(RequestRoute previousRoute) {
-        return false;
-    }
-
-    @Override
     public void onRequest(RequestContext context) {
-        pending.add(Objects.requireNonNull(context, "context"));
+        if (!checkRequestMode(context, false)) return;
+        Objects.requireNonNull(context, "context");
+        if (stopped) {
+            lifecycle.cancel(context, 0L, CancelReason.SHUTDOWN);
+            return;
+        }
+        pending.add(context);
+        if (stopped) pending.remove(context);
+        else if (started) schedule();
     }
 
     private void dispatchRegistered(RequestContext context) {
-        CompletableFuture<Response> future = context.data().getFuture();
         AdmissionHandle operation =
-                lifecycle.claimAdmissionHandle(context.data().getRequestId(), future);
-        if (operation == null) {
-            return;
-        }
+                lifecycle.claimAdmissionHandle(
+                        context.data().getRequestId(), context.data().getFuture());
+        if (operation == null) return;
         Response failure = Response.error(StrategyErrorType.DISPATCH_FAILED);
-        boolean operationFinished = false;
         try {
-            var selection = router.select(context, router.resolvePolicyGroup(context));
-            context.data().setSchedulingDiagnostics(selection.diagnostics());
-            switch (selection.status()) {
-                case SUCCESS -> {
-                    PlacementResult<RouteDelivery, PlacementKey> committed = null;
-                    try (RequestRoute routing = selection.value()) {
-                        committed = commitDirectRoute(context, routing);
-                    } catch (RuntimeException | Error cleanupFailure) {
-                        if (committed == null
-                                || committed.status() != PlacementResult.Status.SUCCESS) {
-                            throw cleanupFailure;
-                        }
-                        Logger.warn(
-                                "DIRECT selection cleanup failed after handoff: request_id={}",
-                                context.data().getRequestId(),
-                                cleanupFailure);
-                    }
-                    failure =
-                            switch (committed.status()) {
-                                case SUCCESS -> {
-                                    RouteDelivery delivery = committed.value();
-                                    operation.finish();
-                                    operationFinished = true;
-                                    long now = System.currentTimeMillis();
-                                    long visibility =
-                                            PrefillPredictionBoundary.predictedVisibilityDeadlineMs(
-                                                    delivery.precedingWork(),
-                                                    delivery.unstartedWorkMs(),
-                                                    context.data()
-                                                            .getConfig()
-                                                            .getRequestLifecycle()
-                                                            .getDecision()
-                                                            .getLifetime(),
-                                                    now);
-                                    lifecycle.onDeliveryFact(
-                                            new RouteDelivered(delivery.claim(), visibility, now));
-                                    yield null;
-                                }
-                                case REJECTED -> committed.failure();
-                                case CLOSED -> Response.error(StrategyErrorType.REQUEST_CANCELLED);
-                                case BLOCKED ->
-                                        Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
-                            };
-                }
-                case BLOCKED ->
-                        failure =
-                                selection.failure() != null
-                                        ? selection.failure()
-                                        : Response.error(selection.blocker().role().getErrorType());
-                case REJECTED -> failure = selection.failure();
-                case CLOSED -> failure = Response.error(StrategyErrorType.REQUEST_CANCELLED);
-            }
-        } catch (RuntimeException selectionFailure) {
+            var committed = selectAndCommit(context, operation);
+            failure =
+                    switch (committed.status()) {
+                        case SUCCESS -> null;
+                        case REJECTED -> committed.failure();
+                        case CLOSED -> Response.error(StrategyErrorType.REQUEST_CANCELLED);
+                        case BLOCKED, ENDPOINT_CHANGED ->
+                                committed.failure() != null
+                                        ? committed.failure()
+                                        : Response.error(committed.blocker().role().getErrorType());
+                    };
+        } catch (RuntimeException problem) {
             Logger.warn(
                     "DIRECT admission failed: request_id={}",
                     context.data().getRequestId(),
-                    selectionFailure);
+                    problem);
         } finally {
-            if (!operationFinished) {
-                operation.finish();
-            }
-            if (failure != null) {
-                lifecycle.publish(context, failure, false);
-            }
+            if (failure != null) lifecycle.publish(context, failure, false);
         }
     }
 
-    PlacementResult<RouteDelivery, PlacementKey> commitDirectRoute(
-            RequestContext context, RequestRoute routing) {
-        var request = context.data().getRequest();
-        DecodeResources.ReservationHandle pendingDecodeRollback =
-                routing.decodeEp() == null
-                        ? null
-                        : routing.decodeEp()
-                                .tryReserveQueuedRequest(
-                                        routing.decodePin(),
-                                        routing.requestId(),
-                                        request.getHardKvTokens(),
-                                        request.getExpectedKvTokens(),
-                                        routing.priority(),
-                                        null)
-                                .handle();
-        if (routing.decodeEp() != null && pendingDecodeRollback == null) {
-            return PlacementResult.blocked(routing.placementKey(RoleType.DECODE));
-        }
-        Throwable failure = null;
-        RequestRoute acquired = null;
-        var placement = context.snapshot().placement();
-        var token = placement == null ? null : placement.operation();
-        boolean delivered = false;
+    /** Admission and generation pins finish before response callbacks can retire an endpoint. */
+    private PlacementResult<RequestRoute, PlacementKey> selectAndCommit(
+            RequestContext context, AdmissionHandle operation) {
         try {
-            RequestRoute route =
-                    acquired = RequestRoute.create(context, routing, pendingDecodeRollback);
-            CapacityBoundary.Attempt<DeliveryDispatcher.Member> attempt =
-                    DeliveryDispatcher.Member.prepare(route, decodeAdmissionCapacity);
-            if (!attempt.accepted()) {
-                return switch (attempt.boundary().status()) {
-                    case UNAVAILABLE ->
-                            PlacementResult.blocked(routing.placementKey(RoleType.DECODE));
-                    case OWNERSHIP_LOST ->
-                            PlacementResult.rejected(
-                                    Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
-                    case FAILED ->
-                            throw new IllegalStateException(
-                                    "route admission failed", attempt.boundary().cause());
-                };
+            var group = router.resolvePolicyGroup(context);
+            var selection = router.select(context, group);
+            if (selection.status() == PlacementResult.Status.ENDPOINT_CHANGED) {
+                selection = router.select(context, group);
             }
-            DeliveryDispatcher.Member member = attempt.value();
-            try (member) {
-                var reservationAttempt = new PrefillReservationAttempt(route);
-                try {
-                    PrefillState.CommittedHandoff handoff = null;
-                    try {
-                        PlacementResult.Status result =
-                                lifecycle.commitRoute(route, reservationAttempt);
-                        if (result != PlacementResult.Status.SUCCESS) {
-                            return result == PlacementResult.Status.CLOSED
-                                    ? PlacementResult.closed()
-                                    : PlacementResult.rejected(reservationAttempt.failure());
-                        }
-                        handoff =
-                                routing.prefillEp()
-                                        .commit(
-                                                new PrefillState.CommitPlan(
-                                                        PrefillState.CommitKind.DIRECT,
-                                                        List.of(route),
-                                                        List.of(reservationAttempt.reservation()),
-                                                        null,
-                                                        new long[0],
-                                                        null,
-                                                        System.currentTimeMillis()));
-                        if (handoff == null) {
-                            return PlacementResult.rejected(
-                                    Response.error(StrategyErrorType.DISPATCH_FAILED));
-                        }
-                        WorkSnapshot precedingWork = handoff.precedingWork().materialize();
-                        var claim = member.claimDelivery(DeliveryClaimKind.ROUTE_DECISION, 0L);
-                        if (claim == null) {
-                            return PlacementResult.closed();
-                        }
-                        delivered = true;
-                        pendingDecodeRollback = null;
-                        return PlacementResult.success(
-                                new RouteDelivery(claim, precedingWork, routing.prefillWorkMs()));
-                    } finally {
-                        Throwable cleanup = DeliveryDispatcher.closeCommitted(List.of(), handoff);
-                        if (cleanup != null) {
-                            lifecycle.tasks.recordFailure(cleanup);
-                        }
-                    }
-                } finally {
-                    if (reservationAttempt.reservation() != null) {
-                        routing.prefillEp().release(reservationAttempt.reservation(), null);
-                    }
-                }
-            }
-        } catch (RuntimeException | Error cause) {
-            failure = cause;
-            throw cause;
+            context.data().setSchedulingDiagnostics(selection.diagnostics());
+            if (selection.status() != PlacementResult.Status.SUCCESS) return selection.asFailure();
+            var committed = lifecycle.dispatcher.submitRoute(selection.value(), operation);
+            return committed.status() == PlacementResult.Status.BLOCKED
+                    ? PlacementResult.rejected(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED))
+                    : committed;
         } finally {
-            if (!delivered) {
-                Throwable rollbackFailure = null;
-                try {
-                    if (acquired != null) {
-                        acquired.prefillEp().release(null, acquired);
-                    }
-                } catch (RuntimeException | Error problem) {
-                    rollbackFailure = problem;
-                }
-                try {
-                    if (pendingDecodeRollback != null) {
-                        var released =
-                                routing.decodeEp()
-                                        .release(
-                                                pendingDecodeRollback,
-                                                DecodeResources.ReleaseReason.LOCAL_ROLLBACK)
-                                        .status();
-                        if (released != DecodeResources.ReservationReleaseResult.RELEASED
-                                && released != DecodeResources.ReservationReleaseResult.STALE) {
-                            throw new IllegalStateException(
-                                    "placement rollback retained Decode resources");
-                        }
-                    }
-                } catch (RuntimeException | Error problem) {
-                    rollbackFailure = Failures.append(rollbackFailure, problem);
-                }
-                if (rollbackFailure == null && acquired != null && token != null) {
-                    context.bindPlacement(token, acquired, PublicationResult.ROLLBACK_COMPLETED);
-                }
-                if (rollbackFailure != null) {
-                    if (failure == null) {
-                        Failures.rethrow(rollbackFailure, "DIRECT rollback failed");
-                    } else {
-                        Failures.append(failure, rollbackFailure);
-                    }
-                }
-            }
-        }
-    }
-
-    /** Holds acquisition output without mixing a failed publication with capacity pressure. */
-    private static final class PrefillReservationAttempt implements Publication {
-        private final RequestRoute route;
-        private PrefillState.ReservationResult<PrefillState.RouteReservation> result;
-
-        PrefillReservationAttempt(RequestRoute route) {
-            this.route = route;
-        }
-
-        @Override
-        public void publish() {
-            var data = route.ctx().data();
-            data.initializeExecutionOrder(data.getEnqueueTime());
-            result =
-                    route.prefillEp()
-                            .reserveUnqueuedRoute(route.prefillPin(), route, route.prefillWorkMs());
-        }
-
-        @Override
-        public boolean published() {
-            return result != null && result.status() == PrefillState.CapacityStatus.ACQUIRED;
-        }
-
-        PrefillState.RouteReservation reservation() {
-            return result == null ? null : result.reservation();
-        }
-
-        Response failure() {
-            if (result == null) {
-                return Response.error(StrategyErrorType.REQUEST_CANCELLED);
-            }
-            return switch (result.status()) {
-                case CAPACITY_FULL ->
-                        Response.buildErrorResponse(
-                                StrategyErrorType.RESOURCE_EXHAUSTED,
-                                CapacityBoundary.Resource.PREFILL_REQUEST.getDescription());
-                case ENDPOINT_RETIRED -> Response.error(StrategyErrorType.DISPATCH_FAILED);
-                case REQUEST_ALREADY_RESERVED, REQUEST_NOT_ACTIVE, BATCH_ID_ALREADY_RESERVED ->
-                        Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
-                case ACQUIRED ->
-                        throw new IllegalStateException("successful admission cannot be rejected");
-            };
+            operation.finish();
         }
     }
 }

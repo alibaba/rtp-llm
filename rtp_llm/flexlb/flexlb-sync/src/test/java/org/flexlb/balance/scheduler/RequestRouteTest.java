@@ -177,12 +177,10 @@ class RequestRouteTest {
         var context = context();
         try (var route = new RequestRoute(context)) {
             route.add(worker.tryPinGeneration(), metadata(worker), 1L, 0L);
-            assertThrows(
-                    IllegalStateException.class, () -> RequestRoute.create(context, route, null));
+            assertThrows(IllegalStateException.class, () -> route.attachReservation(null));
             route.close();
             assertThrows(IllegalStateException.class, route::prepare);
-            assertThrows(
-                    IllegalStateException.class, () -> RequestRoute.create(context, route, null));
+            assertThrows(IllegalStateException.class, () -> route.attachReservation(null));
         } finally {
             worker.close();
             org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
@@ -348,7 +346,7 @@ class RequestRouteTest {
 
     @Test
     @Timeout(5)
-    void concurrentCloseOfSelectedAndCapacityRoutesDrainsGenerationOnce() throws Exception {
+    void oneRouteOwnsSelectionAndCapacityAndConcurrentCloseDrainsGenerationOnce() throws Exception {
         var worker = prefill();
         var pin = worker.tryPinGeneration();
         var context = context();
@@ -360,7 +358,9 @@ class RequestRouteTest {
                                     return PlacementResult.success(scope);
                                 })
                         .value();
-        var acquired = RequestRoute.create(context, route, null);
+        var acquired = route.attachReservation(null);
+        assertSame(route, acquired);
+        assertSame(route, route.attachReservation(null));
         var barrier = new CyclicBarrier(2);
         try {
             worker.close();

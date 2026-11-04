@@ -1,10 +1,9 @@
 package org.flexlb.httpserver;
 
-import org.flexlb.balance.scheduler.SchedulerTestServices;
-
 import org.flexlb.balance.scheduler.RequestContext;
+import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestRepository;
-import org.flexlb.balance.scheduler.RequestSchedulerEntry;
+import org.flexlb.balance.scheduler.SchedulerTestServices;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.MasterStatusView;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
@@ -15,18 +14,35 @@ import org.flexlb.service.monitor.RequestSchedulerReporter;
 final class FlexlbServiceTestSupport {
     static FlexlbServiceImpl create(
             org.flexlb.balance.scheduler.AbstractRequestScheduler scheduler,
-            RequestRepository requests, MasterStatusView leadership, EngineHealthReporter health,
-            FlexlbGrpcForwarder forwarder, ConfigService config, DeliveryMetricsReporter batches,
-            ServerScheduleLatencyRecorder latency, RequestSchedulerReporter reporter) {
-        var router = (org.flexlb.balance.scheduler.RequestWorkerSelector)
-                org.springframework.test.util.ReflectionTestUtils.getField(scheduler, "router");
-        return create(new RequestSchedulerEntry(scheduler, SchedulerTestServices.lifecycle(scheduler), router,
-                config.loadBalanceConfig().isQueue()), requests, leadership, health,
-                forwarder, config, batches, latency, reporter);
+            RequestRepository requests,
+            MasterStatusView leadership,
+            EngineHealthReporter health,
+            FlexlbGrpcForwarder forwarder,
+            ConfigService config,
+            DeliveryMetricsReporter batches,
+            ServerScheduleLatencyRecorder latency,
+            RequestSchedulerReporter reporter) {
+        var router =
+                (org.flexlb.balance.scheduler.RequestWorkerSelector)
+                        org.springframework.test.util.ReflectionTestUtils.getField(
+                                scheduler, "router");
+        var service =
+                create(
+                        SchedulerTestServices.lifecycle(scheduler),
+                        requests,
+                        leadership,
+                        health,
+                        forwarder,
+                        config,
+                        batches,
+                        latency,
+                        reporter);
+        service.configureRouting(router);
+        return service;
     }
 
     static FlexlbServiceImpl create(
-            RequestSchedulerEntry scheduler,
+            RequestLifecycle scheduler,
             RequestRepository requests,
             MasterStatusView leadership,
             EngineHealthReporter health,

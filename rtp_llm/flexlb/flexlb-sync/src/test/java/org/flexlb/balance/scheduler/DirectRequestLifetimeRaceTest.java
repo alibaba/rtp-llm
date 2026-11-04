@@ -1,11 +1,11 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
@@ -85,22 +85,26 @@ class DirectRequestLifetimeRaceTest {
             when(pin.isOpen()).thenReturn(true);
             when(prefill.getIp()).thenReturn(metadata.getServerIp());
             when(prefill.getHttpPort()).thenReturn(metadata.getHttpPort());
-            var reservation = mock(PrefillState.RouteReservation.class);
+            var reservation = mock(PrefillEndpoint.RouteReservation.class);
             when(prefill.reserveUnqueuedRoute(eq(pin), any(), eq(30_000L)))
-                    .thenReturn(
-                            new PrefillState.ReservationResult<>(
-                                    PrefillState.CapacityStatus.ACQUIRED, reservation));
-            var handoff = mock(PrefillState.CommittedHandoff.class);
-            var capture = mock(PrefillState.WorkCapture.class);
-            when(capture.materialize())
+                    .thenReturn(CapacityBoundary.Attempt.accepted(reservation));
+            var capture =
+                    mock(org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot.class);
+            when(capture.calculate())
                     .thenReturn(
                             new WorkSnapshot(
                                     System.currentTimeMillis(),
                                     java.util.List.of(),
                                     java.util.List.of(),
                                     0L));
-            when(handoff.precedingWork()).thenReturn(capture);
-            when(prefill.commit(any(PrefillState.CommitPlan.class))).thenReturn(handoff);
+            when(prefill.commitDirect(any(), any(), any()))
+                    .thenAnswer(
+                            call -> {
+                                RequestRoute route = call.getArgument(1);
+                                when(reservation.belongsTo(route)).thenReturn(true);
+                                route.attachPrefillReservation(reservation);
+                                return capture;
+                            });
             when(prefillSelector.select(
                             org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
                             org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
@@ -130,12 +134,12 @@ class DirectRequestLifetimeRaceTest {
                             RoleType.PDFUSION, null, "127.0.0.1", 8080, 8081, null);
             when(prefill.getStatus()).thenReturn(status);
             when(pin.generationId()).thenReturn(1L);
-            var state = mock(PrefillState.class);
+            var state = prefill;
             when(state.requestCapacityAvailable(
                             org.mockito.ArgumentMatchers.anyLong(),
                             org.mockito.ArgumentMatchers.anyInt()))
                     .thenReturn(true);
-            org.springframework.test.util.ReflectionTestUtils.setField(prefill, "ownership", state);
+            org.flexlb.balance.endpoint.EndpointTestSupport.stubResources(prefill, state);
             when(endpoints.prefillRoutingSnapshot(RoleType.PDFUSION))
                     .thenReturn(
                             java.util.List.of(
@@ -165,12 +169,18 @@ class DirectRequestLifetimeRaceTest {
                                 return result;
                             })
                     .when(requests)
-                    .onDeliveryFact(
+                    .onDeliveryResult(
                             org.mockito.ArgumentMatchers.isA(ContextResult.RouteDelivered.class));
 
-            var returned = SchedulerTestServices.entry((AbstractRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(requests)).submit(context);
+            var returned =
+                    SchedulerTestServices.entry(
+                                    (AbstractRequestScheduler)
+                                            org.flexlb.balance.scheduler.SchedulerTestServices
+                                                    .scheduler(requests))
+                            .submit(context);
             assertSame(context.data().getFuture(), returned);
             var response = returned.get(2L, TimeUnit.SECONDS);
+            SchedulerTestSupport.awaitRequestWork(SchedulerTestSupport.runtime(requests));
             assertFalse(returned.isCompletedExceptionally());
             assertFalse(response.isSuccess());
             assertEquals(
@@ -183,13 +193,11 @@ class DirectRequestLifetimeRaceTest {
                     lateConfirmation.get(),
                     "confirmation after cancellation must return without reopening the request");
             verify(prefill)
-                    .commit(
-                            org.mockito.ArgumentMatchers.argThat(
-                                    plan ->
-                                            plan.routeReservations().equals(List.of(reservation))
-                                                    && plan.batchReservation() == null
-                                                    && plan.predictions().length == 0
-                                                    && plan.items().getFirst().ctx() == context));
+                    .commitDirect(
+                            org.mockito.ArgumentMatchers.eq(pin),
+                            org.mockito.ArgumentMatchers.argThat(route -> route.ctx() == context),
+                            org.mockito.ArgumentMatchers.same(reservation));
+            verify(prefill, org.mockito.Mockito.never()).commitLocked(any());
             verify(pin).close();
         } finally {
             RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(requests);

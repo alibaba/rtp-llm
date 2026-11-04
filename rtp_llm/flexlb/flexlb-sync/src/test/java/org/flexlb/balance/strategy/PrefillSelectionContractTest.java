@@ -3,12 +3,11 @@ package org.flexlb.balance.strategy;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
@@ -107,6 +106,7 @@ class PrefillSelectionContractTest {
                                         RequestTimeEstimation.AfterProbeAdmission.BLOCKED,
                                         "PREFILL_CAPACITY")));
         var input = mock(PrefillSelectionStrategy.CandidateInput.class);
+        when(input.requestCapacityAvailable()).thenReturn(true);
         when(input.address()).thenReturn(endpoint.ipPort());
         when(input.group()).thenReturn("g");
         when(input.projectionInputs())
@@ -168,6 +168,7 @@ class PrefillSelectionContractTest {
                         endpoint.predictor.evaluator(),
                         endpoint.deliveryMode);
         var candidate = mock(PrefillSelectionStrategy.CandidateInput.class);
+        when(candidate.requestCapacityAvailable()).thenReturn(true);
         when(candidate.address()).thenReturn(endpoint.ipPort());
         when(candidate.projectionInputs()).thenReturn(snapshot);
         var inputs = List.of(candidate);
@@ -199,6 +200,7 @@ class PrefillSelectionContractTest {
         var inputs = new java.util.ArrayList<PrefillSelectionStrategy.CandidateInput>();
         for (int index = 0; index < 4; index++) {
             var candidate = mock(PrefillSelectionStrategy.CandidateInput.class);
+            when(candidate.requestCapacityAvailable()).thenReturn(true);
             when(candidate.address()).thenReturn("worker-" + index);
             when(candidate.group()).thenReturn(index == 0 ? "other" : "g");
             when(candidate.generationId()).thenReturn(100L + index);
@@ -237,6 +239,7 @@ class PrefillSelectionContractTest {
         var endpoint = publish(registry, RoleType.PREFILL);
         var entry = new EndpointRegistry.PrefillRoutingEntry(endpoint.ipPort(), endpoint);
         var synthetic = mock(PrefillSelectionStrategy.CandidateInput.class);
+        when(synthetic.requestCapacityAvailable()).thenReturn(true);
         when(synthetic.address()).thenReturn("synthetic");
         when(synthetic.projectionInputs()).thenReturn(endpoint.captureRouteProjectionInputs());
         var policy = new CostBasedPrefillStrategy(cache, service);
@@ -279,6 +282,7 @@ class PrefillSelectionContractTest {
     void policyResultRetainsOnlyItsOwnScalarPredictionAcrossTheNextProjection() {
         var endpoint = publish(registry, RoleType.PREFILL);
         var candidate = mock(PrefillSelectionStrategy.CandidateInput.class);
+        when(candidate.requestCapacityAvailable()).thenReturn(true);
         when(candidate.address()).thenReturn(endpoint.ipPort());
         when(candidate.group()).thenReturn("g");
         when(candidate.generationId()).thenReturn(endpoint.getStatus().getGenerationId());
@@ -405,7 +409,7 @@ class PrefillSelectionContractTest {
         "1,1,0,0,0,RESOURCE_EXHAUSTED,RESOURCE_EXHAUSTED",
         "2,0,1,0,1,ADMISSION_UNAVAILABLE,UNSPECIFIED"
     })
-    void capacityBlockKeepsItsReasonAndClosesTheSelectedGeneration(
+    void capacityBlockKeepsItsReasonWithoutAcquiringTheSelectedGeneration(
             long release,
             long lower,
             long same,
@@ -413,12 +417,12 @@ class PrefillSelectionContractTest {
             long unknown,
             StrategyErrorType error,
             AdmissionRejectReason reason) {
-        var endpoint = publish(registry, RoleType.PREFILL);
-        var ownership = spy(endpoint.ownership);
-        ReflectionTestUtils.setField(endpoint, "ownership", ownership);
+        var endpoint = spy(publish(registry, RoleType.PREFILL));
+        var ownership = endpoint;
+        org.flexlb.balance.endpoint.EndpointTestSupport.stubResources(endpoint, ownership);
         doReturn(false).when(ownership).requestCapacityAvailable(endpoint.requestLimit, 1);
         doReturn(
-                        new PrefillState.AdmissionSummary(
+                        new PrefillSelectionStrategy.AdmissionSummary(
                                 lower + same + higher + unknown,
                                 release,
                                 lower,
@@ -429,7 +433,11 @@ class PrefillSelectionContractTest {
                 .admissionSummary(metadata.priority(), endpoint.requestLimit);
         var pin = endpoint.tryPinGeneration();
         var directory = spy(registry);
-        doReturn(pin).when(directory).capture(RoleType.PREFILL, endpoint.ipPort());
+        var address = endpoint.ipPort();
+        doReturn(List.of(new EndpointRegistry.PrefillRoutingEntry(address, endpoint)))
+                .when(directory)
+                .prefillRoutingSnapshot(RoleType.PREFILL);
+        doReturn(pin).when(directory).capture(RoleType.PREFILL, address);
         strategy = strategy(directory);
         try (pin;
                 var route = StrategyTestSupport.scope(request)) {
@@ -447,9 +455,12 @@ class PrefillSelectionContractTest {
                             "selectedEndpoint",
                             endpoint.ipPort(),
                             "cacheHitTokens",
-                            0L),
+                            0L,
+                            "affinityReason",
+                            ""),
                     result.diagnostics().get("details"));
-            assertFalse(pin.isOpen());
+            verify(directory, org.mockito.Mockito.never()).capture(any(), any());
+            assertTrue(pin.isOpen());
             assertNull(route.prefill());
         }
     }
@@ -469,7 +480,12 @@ class PrefillSelectionContractTest {
             try (pin;
                     var route = StrategyTestSupport.scope(request)) {
                 var result = strategy.select(request, metadata, RoleType.PREFILL, "g", route);
-                assertEquals(PlacementResult.Status.BLOCKED, result.status());
+                assertEquals(PlacementResult.Status.ENDPOINT_CHANGED, result.status());
+                assertEquals(PlacementResult.Status.SUCCESS, result.selection().status());
+                assertEquals(
+                        original.getStatus().getGenerationId(),
+                        ((PrefillSelectionStrategy.Selection<?>) result.selection().value())
+                                .generationId());
                 assertEquals(new PlacementKey(RoleType.PREFILL, "g", null), result.blocker());
                 assertNull(result.failure());
                 assertNull(route.prefill());

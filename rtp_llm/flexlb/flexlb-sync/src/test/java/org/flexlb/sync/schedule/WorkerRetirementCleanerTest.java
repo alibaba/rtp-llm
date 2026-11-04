@@ -46,7 +46,12 @@ class WorkerRetirementCleanerTest {
             context.registerBean(EndpointRegistry.class, () -> mock(EndpointRegistry.class));
             context.registerBean(TaskScheduler.class, () -> mock(TaskScheduler.class));
             context.registerBean(ScheduledAnnotationBeanPostProcessor.class);
-            context.registerBean(WorkerRetirementCleaner.class);
+            context.registerBean(
+                    org.flexlb.sync.synchronizer.WorkerStatusSynchronizer.class,
+                    () ->
+                            org.flexlb.sync.synchronizer.WorkerSyncTestSupport.retirements(
+                                    context.getBean(CacheAwareService.class),
+                                    context.getBean(EndpointRegistry.class)));
             context.refresh();
             var tasks =
                     context
@@ -59,7 +64,9 @@ class WorkerRetirementCleanerTest {
                                                                             .ScheduledMethodRunnable)
                                                                     task.getTask().getRunnable())
                                                             .getTarget()
-                                                    instanceof WorkerRetirementCleaner)
+                                                    instanceof
+                                                    org.flexlb.sync.synchronizer
+                                                            .WorkerStatusSynchronizer)
                             .toList();
             assertEquals(1, tasks.size());
             FixedRateTask task = assertInstanceOf(FixedRateTask.class, tasks.getFirst().getTask());
@@ -89,7 +96,8 @@ class WorkerRetirementCleanerTest {
                         })
                 .when(cache)
                 .removeEngineBlockCache(first.getIpPort());
-        WorkerRetirementCleaner cleaner = new WorkerRetirementCleaner(cache, directory);
+        org.flexlb.sync.synchronizer.WorkerStatusSynchronizer cleaner =
+                org.flexlb.sync.synchronizer.WorkerSyncTestSupport.retirements(cache, directory);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
             Future<?> cleaning = executor.submit(cleaner::retireUnavailableWorkers);
@@ -149,7 +157,8 @@ class WorkerRetirementCleanerTest {
                 org.junit.jupiter.api.Assertions.assertThrows(
                         IllegalStateException.class,
                         () ->
-                                new WorkerRetirementCleaner(cache, registry)
+                                org.flexlb.sync.synchronizer.WorkerSyncTestSupport.retirements(
+                                                cache, registry)
                                         .retireUnavailableWorkers()));
         org.flexlb.sync.runner.RunnerTestSupport.awaitCondition(
                 () -> !registry.statusSnapshot(RoleType.PREFILL).containsValue(began.get()));

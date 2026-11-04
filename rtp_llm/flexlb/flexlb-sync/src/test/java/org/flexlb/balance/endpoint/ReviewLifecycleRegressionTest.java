@@ -46,7 +46,7 @@ class ReviewLifecycleRegressionTest {
 
     @Test
     void failedCleanupCannotRunASuccessfulGenerationFinalizer() {
-        var lifecycle = new EndpointGenerationLifecycle(() -> {});
+        var lifecycle = new EndpointRetirementTestSupport(() -> {});
         AtomicBoolean finalized = new AtomicBoolean();
         lifecycle.onRetired(() -> finalized.set(true));
         lifecycle.beginRetirement();
@@ -55,7 +55,10 @@ class ReviewLifecycleRegressionTest {
         var failure = new IllegalStateException("cleanup failed");
         lifecycle.completeRetirement(failure);
         assertFalse(finalized.get());
-        assertSame(failure, assertThrows(IllegalStateException.class, () -> lifecycle.awaitRetirement(30_000L)));
+        assertSame(
+                failure,
+                assertThrows(
+                        IllegalStateException.class, () -> lifecycle.awaitRetirement(30_000L)));
     }
 
     @Test
@@ -119,11 +122,8 @@ class ReviewLifecycleRegressionTest {
                 EndpointTestSupport.publishEndpoint(registry, role, status.getIpPort(), status);
         ReentrantLock lock =
                 role == RoleType.PREFILL
-                        ? ((PrefillEndpoint) endpoint).ownership.lock
-                        : (ReentrantLock)
-                                ReflectionTestUtils.getField(
-                                        ReflectionTestUtils.getField(endpoint, "state"),
-                                        "admissionLock");
+                        ? ((PrefillEndpoint) endpoint).resourceLock()
+                        : (ReentrantLock) ReflectionTestUtils.getField(endpoint, "admissionLock");
         CountDownLatch held = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         try (var owner = Executors.newSingleThreadExecutor()) {

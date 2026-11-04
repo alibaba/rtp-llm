@@ -2,24 +2,28 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 
-/** Scheduling decisions; request admission and settlement belong to RequestLifecycle. */
+/** Scheduling owns its triggers and execution; Lifecycle owns requests and settlement. */
 public interface RequestScheduler extends AutoCloseable {
-    /** Run available decisions; return the next check time in System.nanoTime units.
-     * Long.MAX_VALUE means wait for a request or endpoint notification.
-     * The caller serializes invocations of this method.
-     */
-    long schedule(long nowNanos);
+    /** Start this implementation's scheduling triggers. */
+    void start();
+
+    /** Run available scheduling decisions. Implementations serialize concurrent invocations. */
+    void schedule();
+
+    void onRequest(RequestContext request);
+
+    /** Invalidate exact membership; resource settlement remains with RequestLifecycle. */
+    void onRequestChanged(RequestContext request);
 
     void onEndpointChanged(WorkerEndpoint endpoint);
 
-    /** A request whose lifecycle and cancellation callback are already registered. */
-    void onRequest(RequestContext request);
+    /** Stop producing scheduling work and cancel owned timers; do not close shared facilities. */
+    void stop();
 
-    /** Lifecycle notification; queue removal must not settle or release the request. */
-    void onRequestChanged(RequestContext request);
+    /** Wait for accepted scheduling work, using an absolute System.nanoTime deadline. */
+    boolean awaitStopped(long deadlineNanos);
 
-    /** Stop scheduling and release scheduler-owned workers. RequestLifecycle settles requests. */
+    /** Stop, drain scheduler-owned work and release scheduler-owned resources. */
     @Override
     void close();
-
 }

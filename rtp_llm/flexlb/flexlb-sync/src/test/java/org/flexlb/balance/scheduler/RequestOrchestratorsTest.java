@@ -56,7 +56,8 @@ class RequestOrchestratorsTest {
                                 configuration(),
                                 mock(EngineGrpcClient.class)));
         var owner = mock(AbstractRequestScheduler.class);
-        org.springframework.test.util.ReflectionTestUtils.setField(owner, "lifecycle", mock(RequestLifecycle.class));
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                owner, "lifecycle", mock(RequestLifecycle.class));
         runtime.registerScheduler(owner);
         var first = new IllegalStateException("placement close failed");
         var second = new IllegalStateException("dispatcher failed");
@@ -92,13 +93,21 @@ class RequestOrchestratorsTest {
                                 configuration(),
                                 mock(EngineGrpcClient.class)));
         var owner = mock(AbstractRequestScheduler.class);
-        org.springframework.test.util.ReflectionTestUtils.setField(owner, "lifecycle", mock(RequestLifecycle.class));
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                owner, "lifecycle", mock(RequestLifecycle.class));
         runtime.registerScheduler(owner);
         var executions = org.mockito.Mockito.spy(runtime.deliveries());
         org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                 runtime, "deliveries", executions);
         SchedulerTestSupport.shutdown(runtime);
-        InOrder order = inOrder(requests, owner, SchedulerTestServices.lifecycle(owner), runtime, executions, endpoints);
+        InOrder order =
+                inOrder(
+                        requests,
+                        owner,
+                        SchedulerTestServices.lifecycle(owner),
+                        runtime,
+                        executions,
+                        endpoints);
         order.verify(requests).closeRegistration();
         order.verify(owner).close();
         order.verify(SchedulerTestServices.lifecycle(owner)).stopAdmissionsAndAwaitCompletion();
@@ -211,8 +220,8 @@ class RequestOrchestratorsTest {
                         org.mockito.Mockito.mock(EngineGrpcClient.class))
                 .report();
         verify(requests, never()).liveRequestCount();
-        verify(registry, never()).endpointSnapshot(org.flexlb.dao.route.RoleType.PREFILL);
-        verify(registry, never()).endpointSnapshot(org.flexlb.dao.route.RoleType.DECODE);
+        verify(registry, never()).prefillStats();
+        verify(registry, never()).decodeStats();
     }
 
     @Test
@@ -224,13 +233,11 @@ class RequestOrchestratorsTest {
         PrefillEndpoint failingPrefill = mock(PrefillEndpoint.class);
         PrefillEndpoint healthyPrefill = mock(PrefillEndpoint.class);
         for (var endpoint : List.of(failingPrefill, healthyPrefill)) {
-            var state = mock(org.flexlb.balance.endpoint.PrefillState.class);
-            org.springframework.test.util.ReflectionTestUtils.setField(
-                    endpoint, "ownership", state);
+            var state = endpoint;
+            org.flexlb.balance.endpoint.EndpointTestSupport.stubResources(endpoint, state);
             when(state.progress())
                     .thenReturn(
-                            new org.flexlb.balance.endpoint.PrefillState.Progress(
-                                    0, 0, 0, 0, 0, 0));
+                            new org.flexlb.balance.endpoint.PrefillEndpoint.Progress(0, 0, 0, 0));
         }
         DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
         Map<String, PrefillEndpoint> prefill = new LinkedHashMap<>();
@@ -238,13 +245,11 @@ class RequestOrchestratorsTest {
         prefill.put("p2", healthyPrefill);
         when(requests.liveRequestCount()).thenReturn(7);
         when(requests.oldestLiveRequestAgeMs()).thenReturn(19L);
-        when(registry.endpointSnapshot(org.flexlb.dao.route.RoleType.PREFILL))
-                .thenReturn(Map.copyOf(prefill));
-        when(registry.endpointSnapshot(org.flexlb.dao.route.RoleType.DECODE))
-                .thenReturn(Map.of("d1", decode));
+        when(registry.prefillStats()).thenReturn(Map.copyOf(prefill));
+        when(registry.decodeStats()).thenReturn(Map.of("d1", decode));
         doThrow(new RuntimeException("metrics unavailable"))
-                .when(failingPrefill)
-                .reportBatchMetrics(reporter);
+                .when(reporter)
+                .reportPrefill(failingPrefill);
         new SchedulerTestServices(
                         requests,
                         registry,
@@ -255,12 +260,14 @@ class RequestOrchestratorsTest {
                         org.mockito.Mockito.mock(EngineGrpcClient.class))
                 .report();
         verify(reporter).reportSchedulerInflight(7, 19L);
-        verify(failingPrefill).reportBatchMetrics(reporter);
-        verify(healthyPrefill).reportBatchMetrics(reporter);
-        verify(decode).reportBatchMetrics(reporter);
+        verify(reporter).reportPrefill(failingPrefill);
+        verify(reporter).reportPrefill(healthyPrefill);
+        verify(reporter).reportDecode(decode);
         verify(admissionReporter).reportPrefillQueueDepth("p1", 0);
         verify(admissionReporter).reportPrefillQueueDepth("p2", 0);
-        verify(decode).reportAdmissionMetrics(admissionReporter);
+        verify(admissionReporter)
+                .reportDecodePreemption(
+                        org.mockito.ArgumentMatchers.eq("d1"), org.mockito.ArgumentMatchers.any());
     }
 
     private static SchedulerTestServices runtime(
@@ -282,13 +289,11 @@ class RequestOrchestratorsTest {
         DeliveryMetricsReporter batches = mock(DeliveryMetricsReporter.class);
         RequestSchedulerReporter admission = mock(RequestSchedulerReporter.class);
         DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
-        when(registry.endpointSnapshot(org.flexlb.dao.route.RoleType.PREFILL))
-                .thenThrow(new IllegalStateException("snapshot failed"));
-        when(registry.endpointSnapshot(org.flexlb.dao.route.RoleType.DECODE))
-                .thenReturn(Map.of("d1", decode));
+        when(registry.prefillStats()).thenThrow(new IllegalStateException("snapshot failed"));
+        when(registry.decodeStats()).thenReturn(Map.of("d1", decode));
         doThrow(new IllegalStateException("batch metrics failed"))
-                .when(decode)
-                .reportBatchMetrics(batches);
+                .when(batches)
+                .reportDecode(decode);
 
         new SchedulerTestServices(
                         requests,
@@ -301,8 +306,10 @@ class RequestOrchestratorsTest {
                 .report();
 
         verify(batches).reportSchedulerInflight(0, 0L);
-        verify(decode).reportBatchMetrics(batches);
-        verify(decode).reportAdmissionMetrics(admission);
+        verify(batches).reportDecode(decode);
+        verify(admission)
+                .reportDecodePreemption(
+                        org.mockito.ArgumentMatchers.eq("d1"), org.mockito.ArgumentMatchers.any());
     }
 
     private static ConfigService configuration() {

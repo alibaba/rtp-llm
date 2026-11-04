@@ -2,13 +2,12 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.FormulaPredictor;
-import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
@@ -99,8 +98,8 @@ class CostBasedPrefillStrategyBlockerTest {
             for (int index = 0; index < shape.length(); index++) {
                 char kind = shape.charAt(index);
                 var endpoint = mock(PrefillEndpoint.class);
-                org.springframework.test.util.ReflectionTestUtils.setField(
-                        endpoint, "ownership", mock(PrefillState.class));
+                org.flexlb.balance.endpoint.EndpointTestSupport.stubResources(
+                        endpoint, mock(PrefillEndpoint.class));
                 org.springframework.test.util.ReflectionTestUtils.setField(
                         endpoint, "requestLimit", 1L);
                 when(endpoint.getStatus())
@@ -112,9 +111,7 @@ class CostBasedPrefillStrategyBlockerTest {
                                         8080,
                                         8090,
                                         "test"));
-                when(endpoint.ownership.progress())
-                        .thenReturn(
-                                new PrefillState.Progress(0L, 0L, 0L, 0, 0, kind == 'A' ? 0L : 1L));
+                when(endpoint.progress()).thenReturn(new PrefillEndpoint.Progress(0L, 0L, 0L, 0));
                 when(endpoint.captureRouteProjectionInputs())
                         .thenAnswer(
                                 ignored -> {
@@ -135,7 +132,16 @@ class CostBasedPrefillStrategyBlockerTest {
 
             // Ranking models all scoped workers, including full workers; no generation pin is
             // published by this fixture.
-            assertEquals(org.flexlb.balance.PlacementResult.Status.BLOCKED, result.status());
+            assertEquals(
+                    registered == 0
+                            ? org.flexlb.balance.PlacementResult.Status.BLOCKED
+                            : org.flexlb.balance.PlacementResult.Status.ENDPOINT_CHANGED,
+                    result.status());
+            if (registered > 0) {
+                assertEquals(
+                        org.flexlb.balance.PlacementResult.Status.SUCCESS,
+                        result.selection().status());
+            }
             assertEquals(registered, projectedWorkers.get());
             assertEquals(entries, frozen);
             verify(directory).prefillRoutingSnapshot(role);
@@ -146,7 +152,9 @@ class CostBasedPrefillStrategyBlockerTest {
             }
             for (int index = 0; index < shape.length(); index++) {
                 if (shape.charAt(index) == 'O') {
-                    verifyNoInteractions(entries.get(index).endpoint().ownership);
+                    var ignored = entries.get(index).endpoint();
+                    verify(ignored).getStatus();
+                    org.mockito.Mockito.verifyNoMoreInteractions(ignored);
                 }
             }
         }

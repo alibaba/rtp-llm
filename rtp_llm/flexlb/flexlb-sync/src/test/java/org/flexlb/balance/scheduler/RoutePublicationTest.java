@@ -53,7 +53,7 @@ class RoutePublicationTest {
                         })) {
             var first = f.item(1L, 10L);
             var second = f.item(2L, 20L);
-            QueuedRequestScheduler.schedulePrefill(f.worker);
+            RequestExecutionTestSupport.schedule(f.worker);
             assertEquals(List.of(first), f.committedItems);
             assertEquals(List.of(1L), f.claimIds());
             assertArrayEquals(new long[] {10L}, f.committedRoutePredictions);
@@ -78,15 +78,15 @@ class RoutePublicationTest {
             var first = f.item(1L, 10L);
             var second = f.item(2L, 20L);
             org.mockito.Mockito.doReturn(-1L).when(f.evaluator).estimateMs(20L, 0L);
-            when(f.handoff.removedFailedMember()).thenReturn(budget == 0L);
-            QueuedRequestScheduler.schedulePrefill(f.worker);
+            f.removedFailedMember = budget == 0L;
+            RequestExecutionTestSupport.schedule(f.worker);
             if (budget > 0L) {
                 assertEquals(List.of(first), f.queueOwnership.captureQueue(10).items());
-                QueuedRequestScheduler.schedulePrefill(f.worker);
+                RequestExecutionTestSupport.schedule(f.worker);
             }
             assertEquals(List.of(1L), f.claimIds());
             assertEquals(java.util.Set.of(2L), f.preparationFailures.keySet());
-            verify(f.owner, times(1)).onDeliveryFact(isA(PreparationFailure.class));
+            verify(f.owner, times(1)).onDeliveryResult(isA(PreparationFailure.class));
             verify(f.decode, never()).acquireDispatchPermit(eq(second.decodeReservation()), any());
             verify(f.permits.get(1L)).release();
         }
@@ -103,10 +103,10 @@ class RoutePublicationTest {
                             config.decisionPolicy().setMaxPredictedExecutionMs(1_000L);
                         })) {
             var first = f.item(1L, 10L);
-            QueuedRequestScheduler.schedulePrefill(f.worker);
+            RequestExecutionTestSupport.schedule(f.worker);
             assertTrue(f.claims.isEmpty(), "NON_BATCH must still honor its decision window");
             var second = f.item(2L, 20L);
-            QueuedRequestScheduler.schedulePrefill(f.worker);
+            RequestExecutionTestSupport.schedule(f.worker);
             assertEquals(List.of(first, second), f.committedItems);
             assertEquals(List.of(1L, 2L), f.claimIds());
             assertArrayEquals(new long[] {10L, 20L}, f.committedRoutePredictions);
@@ -114,7 +114,7 @@ class RoutePublicationTest {
             assertEquals(30L, f.predictions.get(2L));
             verify(f.evaluator, never()).predictBatchMs(any());
             verify(f.prefill, never())
-                    .reserveBatch(any(), anyLong(), org.mockito.ArgumentMatchers.anyInt());
+                    .reserveBatch(anyLong(), org.mockito.ArgumentMatchers.anyInt());
             verify(f.runtime.deliveries(), never()).tryReserveDelivery();
             verify(f.runtime.deliveries(), never()).nextBatchId();
             verifyNoInteractions(f.grpc);
@@ -130,11 +130,11 @@ class RoutePublicationTest {
             doThrow(failure)
                     .when(f.decode)
                     .acquireDispatchPermit(eq(failed.decodeReservation()), any());
-            when(f.handoff.removedFailedMember()).thenReturn(true);
+            f.removedFailedMember = true;
             assertNull(f.process(List.of(first, failed), OptionalLong.empty()));
             assertEquals(List.of(first), f.committedItems);
             verify(f.owner)
-                    .onDeliveryFact(
+                    .onDeliveryResult(
                             argThat(
                                     e ->
                                             e instanceof PreparationFailure evidence
@@ -142,7 +142,7 @@ class RoutePublicationTest {
                                                     && evidence.detail()
                                                             .equals(failure.getMessage())));
             verify(f.owner)
-                    .onDeliveryFact(
+                    .onDeliveryResult(
                             argThat(
                                     e ->
                                             e instanceof RouteDelivered delivered
@@ -165,17 +165,17 @@ class RoutePublicationTest {
             doAnswer(
                             call -> {
                                 RouteDelivered delivered = call.getArgument(0);
-                                DeliveryClaim claim = delivered.delivery();
+                                Delivery.Member claim = delivered.delivery();
                                 assertEquals(
                                         List.of(1L, 2L),
                                         f.claimIds(),
                                         "publication must not race the next claim");
-                                assertFalse(Thread.holdsLock(claim.item().ctx()));
+                                assertFalse(Thread.holdsLock(claim.route().ctx()));
                                 assertFalse(f.queueLock.isHeldByCurrentThread());
                                 assertFalse(f.handoffClosed.get());
-                                published.add(claim.item().requestId());
+                                published.add(claim.route().requestId());
                                 f.predictions.put(
-                                        claim.item().requestId(),
+                                        claim.route().requestId(),
                                         f.duration(
                                                 ((RouteDelivered) call.getArgument(0))
                                                         .predictedAtMs(),
@@ -183,7 +183,7 @@ class RoutePublicationTest {
                                 return null;
                             })
                     .when(f.owner)
-                    .onDeliveryFact(isA(RouteDelivered.class));
+                    .onDeliveryResult(isA(RouteDelivered.class));
             assertNull(f.process(List.of(first, second), OptionalLong.empty()));
             assertEquals(List.of(1L, 2L), published);
             assertEquals(10, f.predictions.get(1L).longValue());
@@ -209,7 +209,7 @@ class RoutePublicationTest {
             assertArrayEquals(new long[] {10}, f.committedRoutePredictions);
             assertEquals(List.of(1L), f.claimIds());
             verify(f.owner)
-                    .onDeliveryFact(
+                    .onDeliveryResult(
                             argThat(
                                     e ->
                                             e instanceof RouteDelivered delivered
@@ -231,8 +231,8 @@ class RoutePublicationTest {
             assertEquals(CapacityBoundary.Status.UNAVAILABLE, boundary.status());
             assertEquals(CapacityBoundary.Resource.DECODE_ENGINE, boundary.resource());
             assertTrue(f.committedItems.isEmpty());
-            verify(f.owner, never()).claimDelivery(any(), any(), anyLong(), any());
-            verify(f.owner, never()).onDeliveryFact(isA(RouteDelivered.class));
+            verify(f.owner, never()).prepareDelivery(any(Delivery.Member.class), any(), anyLong());
+            verify(f.owner, never()).onDeliveryResult(isA(RouteDelivered.class));
         }
     }
 
@@ -253,7 +253,7 @@ class RoutePublicationTest {
                                 return null;
                             })
                     .when(f.owner)
-                    .onDeliveryFact(isA(RouteDelivered.class));
+                    .onDeliveryResult(isA(RouteDelivered.class));
             f.process(items, OptionalLong.empty());
             long total = 0;
             var expected = new java.util.ArrayList<Long>();
@@ -279,15 +279,15 @@ class RoutePublicationTest {
             doAnswer(
                             call -> {
                                 RouteDelivered delivered = call.getArgument(0);
-                                DeliveryClaim claim = delivered.delivery();
-                                published.add(claim.item().requestId());
-                                if (claim.item().requestId() == 1) {
+                                Delivery.Member claim = delivered.delivery();
+                                published.add(claim.route().requestId());
+                                if (claim.route().requestId() == 1) {
                                     throw f.expectedShutdownFailure;
                                 }
                                 return null;
                             })
                     .when(f.owner)
-                    .onDeliveryFact(isA(RouteDelivered.class));
+                    .onDeliveryResult(isA(RouteDelivered.class));
             assertDoesNotThrow(
                     () -> f.process(List.of(f.item(1, 10), f.item(2, 20)), OptionalLong.empty()));
             assertEquals(List.of(1L, 2L), published);
@@ -308,7 +308,7 @@ class RoutePublicationTest {
             verify(f.permits.get(1L)).release();
             verify(f.permits.get(2L)).release();
             verify(f.handoff).close();
-            verify(f.owner, times(2)).onDeliveryFact(isA(RouteDelivered.class));
+            verify(f.owner, times(2)).onDeliveryResult(isA(RouteDelivered.class));
         }
     }
 
@@ -318,7 +318,7 @@ class RoutePublicationTest {
             f.process(List.of(f.item(1, 0), f.item(2, 0)), OptionalLong.empty());
             assertEquals(2, f.claims.size());
             verify(f.owner, times(2))
-                    .onDeliveryFact(
+                    .onDeliveryResult(
                             argThat(
                                     e ->
                                             e instanceof RouteDelivered delivered
@@ -387,8 +387,7 @@ class RoutePublicationTest {
             var endpoint = f.realDecode();
             var first = f.realItem(endpoint, 1, 10);
             var second = f.realItem(endpoint, 2, 20);
-            when(f.prefill.commitLocked(
-                            any(org.flexlb.balance.endpoint.PrefillState.CommitPlan.class)))
+            when(f.prefill.commitLocked(any(org.flexlb.balance.scheduler.Delivery.class)))
                     .thenReturn(null);
             f.process(List.of(first, second), OptionalLong.empty());
             var snapshot = endpoint.resourceSnapshot();
@@ -396,8 +395,8 @@ class RoutePublicationTest {
             assertEquals(2, snapshot.queuedCount());
             assertEquals(0, endpoint.routingView().engineCapacityUsed());
             assertEquals(2, snapshot.requests().size());
-            verify(f.owner, never()).claimDelivery(any(), any(), anyLong(), any());
-            verify(f.owner, never()).onDeliveryFact(isA(RouteDelivered.class));
+            verify(f.owner, never()).prepareDelivery(any(Delivery.Member.class), any(), anyLong());
+            verify(f.owner, never()).onDeliveryResult(isA(RouteDelivered.class));
             verify(f.handoff, never()).close();
         }
     }

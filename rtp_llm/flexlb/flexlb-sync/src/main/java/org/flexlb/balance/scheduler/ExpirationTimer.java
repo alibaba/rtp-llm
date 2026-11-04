@@ -3,16 +3,13 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.util.Failures;
 
 import java.util.ArrayList;
-import java.util.EnumMap;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 
 /** Owns scheduled handles. Context owns only immutable desired deadline tokens. */
@@ -36,6 +33,38 @@ public final class ExpirationTimer implements AutoCloseable {
     }
 
     public record Plan(long revision, Token request, Token visibility, Token inactivity) {
+        /** Keep unchanged tokens exact, and keep the earlier activity recheck already scheduled. */
+        Plan schedule(RequestContext owner, long requestAt, long visibilityAt, long inactivityAt) {
+            if (inactivity != null && inactivityAt > 0L && inactivity.atMs() <= inactivityAt) {
+                inactivityAt = inactivity.atMs();
+            }
+            long next = revision + 1L;
+            var requestToken = token(owner, request, Kind.REQUEST, next, requestAt);
+            var visibilityToken = token(owner, visibility, Kind.VISIBILITY, next, visibilityAt);
+            var inactivityToken = token(owner, inactivity, Kind.INACTIVITY, next, inactivityAt);
+            return requestToken == request
+                            && visibilityToken == visibility
+                            && inactivityToken == inactivity
+                    ? this
+                    : new Plan(next, requestToken, visibilityToken, inactivityToken);
+        }
+
+        private static Token token(
+                RequestContext owner, Token previous, Kind kind, long revision, long atMs) {
+            if (atMs <= 0L) return null;
+            return previous != null && previous.atMs() == atMs
+                    ? previous
+                    : new Token(owner, kind, revision, atMs);
+        }
+
+        Plan without(Kind kind) {
+            return new Plan(
+                    revision + 1L,
+                    kind == Kind.REQUEST ? null : request,
+                    kind == Kind.VISIBILITY ? null : visibility,
+                    kind == Kind.INACTIVITY ? null : inactivity);
+        }
+
         Token token(Kind kind) {
             return switch (kind) {
                 case REQUEST -> request;
@@ -45,10 +74,9 @@ public final class ExpirationTimer implements AutoCloseable {
         }
     }
 
-    private record Slot(long revision, EnumMap<Kind, Handle> handles) {
+    private record Slot(long revision, Handle[] handles) {
         boolean hasFailedInstallation() {
-            for (Kind kind : KINDS) {
-                Handle handle = handles.get(kind);
+            for (Handle handle : handles) {
                 if (handle != null && handle.installationFailed) {
                     return true;
                 }
@@ -59,28 +87,20 @@ public final class ExpirationTimer implements AutoCloseable {
 
     private final RequestRepository requests;
     private final LongSupplier clock;
-    private final ScheduledThreadPoolExecutor executor;
+    private final TaskTimer timer;
     private final ConcurrentMap<RequestContext, Slot> slots = new ConcurrentHashMap<>();
     private final Object registrationMonitor = new Object();
     private volatile CompletableFuture<Throwable> closing;
     private int registrations;
 
-    ExpirationTimer(RequestRepository requests) {
-        this(requests, System::currentTimeMillis);
+    ExpirationTimer(RequestRepository requests, TaskTimer timer) {
+        this(requests, timer, System::currentTimeMillis);
     }
 
-    ExpirationTimer(RequestRepository requests, LongSupplier clock) {
+    ExpirationTimer(RequestRepository requests, TaskTimer timer, LongSupplier clock) {
         this.requests = Objects.requireNonNull(requests);
+        this.timer = Objects.requireNonNull(timer);
         this.clock = Objects.requireNonNull(clock);
-        executor =
-                new ScheduledThreadPoolExecutor(
-                        1,
-                        Thread.ofPlatform()
-                                .daemon()
-                                .name("request-scheduler-expiration")
-                                .factory());
-        executor.setRemoveOnCancelPolicy(true);
-        executor.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
     }
 
     boolean needsUpdate(RequestContext context, Plan plan) {
@@ -109,39 +129,7 @@ public final class ExpirationTimer implements AutoCloseable {
         }
         try {
             slots.compute(
-                    context,
-                    (key, previous) -> {
-                        if (!requests.isCurrent(key)
-                                || previous != null
-                                        && (plan.revision() < previous.revision()
-                                                || plan.revision() == previous.revision()
-                                                        && !previous.hasFailedInstallation())) {
-                            return previous;
-                        }
-                        var next = new EnumMap<Kind, Handle>(Kind.class);
-                        for (Kind kind : KINDS) {
-                            Token desired = plan.token(kind);
-                            Handle old = previous == null ? null : previous.handles().get(kind);
-                            if (desired != null
-                                    && (desired.owner() != key || desired.kind() != kind)) {
-                                throw new IllegalArgumentException(
-                                        "deadline belongs to another request or kind");
-                            }
-                            if (old != null && old.token == desired && !old.installationFailed) {
-                                next.put(kind, old);
-                                continue;
-                            }
-                            if (old != null) {
-                                stop.add(old);
-                            }
-                            if (desired != null) {
-                                var fresh = new Handle(desired);
-                                next.put(kind, fresh);
-                                start.add(fresh);
-                            }
-                        }
-                        return new Slot(plan.revision(), next);
-                    });
+                    context, (key, previous) -> replaceHandles(key, plan, previous, start, stop));
             Throwable failure = null;
             for (Handle handle : stop) {
                 failure = Failures.run(failure, handle::cancel);
@@ -161,16 +149,46 @@ public final class ExpirationTimer implements AutoCloseable {
         }
     }
 
+    /** Replace only the exact deadline handles; scheduling and cancellation stay outside compute. */
+    private Slot replaceHandles(
+            RequestContext key, Plan plan, Slot previous, List<Handle> start, List<Handle> stop) {
+        if (!requests.isCurrent(key)
+                || previous != null
+                        && (plan.revision() < previous.revision()
+                                || plan.revision() == previous.revision()
+                                        && !previous.hasFailedInstallation())) {
+            return previous;
+        }
+        var next = new Handle[KINDS.length];
+        for (Kind kind : KINDS) {
+            Token desired = plan.token(kind);
+            Handle old = previous == null ? null : previous.handles()[kind.ordinal()];
+            if (desired != null && (desired.owner() != key || desired.kind() != kind)) {
+                throw new IllegalArgumentException("deadline belongs to another request or kind");
+            }
+            if (old != null && old.token == desired && !old.installationFailed) {
+                next[kind.ordinal()] = old;
+                continue;
+            }
+            if (old != null) {
+                stop.add(old);
+            }
+            if (desired != null) {
+                var fresh = new Handle(desired);
+                next[kind.ordinal()] = fresh;
+                start.add(fresh);
+            }
+        }
+        return new Slot(plan.revision(), next);
+    }
+
     private void install(Handle handle) {
         if (!requests.isCurrent(handle.token.owner())) {
             handle.cancel();
             return;
         }
         try {
-            handle.install(
-                    executor.schedule(
-                            handle::fire, delayUntil(handle.token.atMs()), TimeUnit.MILLISECONDS));
-            handle.publish();
+            handle.install(timer.schedule(handle::fire, delayUntil(handle.token.atMs())));
         } catch (RuntimeException | Error failure) {
             Failures.run(failure, handle::cancel);
             synchronized (handle) {
@@ -186,7 +204,7 @@ public final class ExpirationTimer implements AutoCloseable {
         Throwable failure = null;
         if (removed != null) {
             for (Kind kind : List.of(Kind.INACTIVITY, Kind.REQUEST, Kind.VISIBILITY)) {
-                Handle handle = removed.handles().get(kind);
+                Handle handle = removed.handles()[kind.ordinal()];
                 if (handle != null) {
                     failure = Failures.run(failure, handle::cancel);
                 }
@@ -246,25 +264,9 @@ public final class ExpirationTimer implements AutoCloseable {
         boolean interrupted = false;
         Throwable failure = null;
         try {
-            synchronized (registrationMonitor) {
-                while (registrations != 0) {
-                    try {
-                        registrationMonitor.wait();
-                    } catch (InterruptedException ignored) {
-                        interrupted = true;
-                    }
-                }
-            }
+            interrupted = awaitRegistrations();
             for (RequestContext context : List.copyOf(slots.keySet())) {
                 failure = Failures.run(failure, () -> remove(context));
-            }
-            failure = Failures.run(failure, executor::shutdownNow);
-            while (!executor.isTerminated()) {
-                try {
-                    executor.awaitTermination(1, TimeUnit.DAYS);
-                } catch (InterruptedException ignored) {
-                    interrupted = true;
-                }
             }
         } catch (Throwable problem) {
             failure = Failures.append(failure, problem);
@@ -277,11 +279,24 @@ public final class ExpirationTimer implements AutoCloseable {
         Failures.rethrow(failure, "expiration timer failed");
     }
 
+    private boolean awaitRegistrations() {
+        boolean interrupted = false;
+        synchronized (registrationMonitor) {
+            while (registrations != 0) {
+                try {
+                    registrationMonitor.wait();
+                } catch (InterruptedException ignored) {
+                    interrupted = true;
+                }
+            }
+        }
+        return interrupted;
+    }
+
     private final class Handle {
         private final Token token;
         private volatile boolean installationFailed;
-        private ScheduledFuture<?> scheduled;
-        private boolean published;
+        private Future<?> scheduled;
         private boolean fired;
         private boolean claimed;
         private boolean canceled;
@@ -290,36 +305,23 @@ public final class ExpirationTimer implements AutoCloseable {
             this.token = token;
         }
 
-        private void install(ScheduledFuture<?> task) {
-            boolean discard;
+        private void install(Future<?> task) {
+            boolean discard, deliver;
             synchronized (this) {
-                scheduled = task;
+                scheduled = Objects.requireNonNull(task, "scheduled deadline task");
                 discard = canceled;
-            }
-            if (discard) {
-                task.cancel(false);
-            }
-        }
-
-        private void publish() {
-            boolean deliver;
-            synchronized (this) {
-                published = true;
                 deliver = fired && !canceled && !claimed;
-                if (deliver) {
-                    claimed = true;
-                }
+                if (deliver) claimed = true;
             }
-            if (deliver) {
-                deliver();
-            }
+            if (discard) task.cancel(false);
+            if (deliver) deliver();
         }
 
         private void fire() {
             boolean deliver;
             synchronized (this) {
                 fired = true;
-                deliver = published && !canceled && !claimed;
+                deliver = scheduled != null && !canceled && !claimed;
                 if (deliver) {
                     claimed = true;
                 }
@@ -330,13 +332,21 @@ public final class ExpirationTimer implements AutoCloseable {
         }
 
         private void deliver() {
-            if (requests.isCurrent(token.owner())) {
-                token.owner().data().getScheduler().onDeadline(token, clock.getAsLong());
+            synchronized (registrationMonitor) {
+                if (closing != null) return;
+                registrations++;
+            }
+            try {
+                if (requests.isCurrent(token.owner())) {
+                    token.owner().data().getLifecycle().onDeadline(token, clock.getAsLong());
+                }
+            } finally {
+                endRegistration();
             }
         }
 
         private void cancel() {
-            ScheduledFuture<?> task;
+            Future<?> task;
             synchronized (this) {
                 if (canceled || claimed) {
                     return;

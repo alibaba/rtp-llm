@@ -234,7 +234,14 @@ class StopExecutorSafetyTest {
                 new DeliveryDispatcher(
                         runtime.engineClient,
                         DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
-                        new org.flexlb.service.monitor.DeliveryMetricsReporter(null));
+                        new org.flexlb.service.monitor.DeliveryMetricsReporter(null),
+                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
+                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                                .decodeAdmissionCapacity(
+                                        DeliveryTestSupport.service(
+                                                SchedulingTestConfig.batchConfig())),
+                        org.mockito.Mockito.mock(
+                                org.flexlb.balance.scheduler.DeliveryExecution.class));
         var client = runtime.engineClient;
         var rpcReplies =
                 new java.util.concurrent.CopyOnWriteArrayList<
@@ -255,7 +262,7 @@ class StopExecutorSafetyTest {
             for (int i = 0; i < 30; i++) {
                 var context = context();
                 org.flexlb.balance.scheduler.SchedulerTestServices.bind(
-                        context.data().getScheduler(), runtime);
+                        context.data().getLifecycle(), runtime);
                 when(context.snapshot().delivery()).thenReturn(null);
                 when(context.snapshot().cancellation()).thenReturn(null);
                 var claim =
@@ -295,7 +302,14 @@ class StopExecutorSafetyTest {
                 mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
                 mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
                 new DeliveryDispatcher(
-                        null, config, new org.flexlb.service.monitor.DeliveryMetricsReporter(null)),
+                        null,
+                        config,
+                        new org.flexlb.service.monitor.DeliveryMetricsReporter(null),
+                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
+                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                                .decodeAdmissionCapacity(config),
+                        org.mockito.Mockito.mock(
+                                org.flexlb.balance.scheduler.DeliveryExecution.class)),
                 config,
                 mock(org.flexlb.engine.grpc.EngineGrpcClient.class));
     }

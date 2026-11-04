@@ -9,7 +9,6 @@ import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.balance.scheduler.RequestLifecycle;
-import org.flexlb.balance.scheduler.RequestSchedulerEntry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
@@ -512,7 +511,7 @@ class FollowerAsyncForwardingNettyTest {
     private static final class Follower implements AutoCloseable {
         private final AtomicInteger rejections = new AtomicInteger();
         private final AtomicInteger channelRejections = new AtomicInteger();
-        private final RequestSchedulerEntry requestScheduler = mock(RequestSchedulerEntry.class);
+        private final RequestLifecycle requestScheduler = mock(RequestLifecycle.class);
         private final RequestLifecycle requestState = mock(RequestLifecycle.class);
         private final int requestQueueCapacity;
         private final ThreadPoolExecutor requestExecutor;

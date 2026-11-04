@@ -1,10 +1,8 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -31,7 +29,7 @@ import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
 import static org.flexlb.balance.scheduler.ContextResult.SendState;
 import static org.flexlb.balance.scheduler.ContextResult.TransportResult;
-import static org.flexlb.balance.scheduler.ContextResult.UpdateKind;
+import static org.flexlb.balance.scheduler.RequestChangeAssertions.UpdateKind;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -58,7 +56,7 @@ class RequestInactivityTest {
     private RequestRoute item;
     private PrefillEndpoint prefill;
     private DecodeEndpoint decode;
-    private DeliveryClaim claim;
+    private Delivery.Member claim;
     private boolean deliveryCompleted;
     private final CompletableFuture<EngineGrpcClient.CancelReply> cleanup =
             new CompletableFuture<>();
@@ -115,7 +113,7 @@ class RequestInactivityTest {
         RequestProtocolTestSupport.bind(registry, registered);
         claim = RequestProtocolTestSupport.claimBatch(registry, item, 1L, () -> true);
         assertNotNull(claim);
-        assertTrue(claim.item().ctx().data().getScheduler().tryStartSend(claim));
+        assertTrue(claim.route().ctx().data().getLifecycle().tryStartSend(claim));
         handedOffAtMs = requestContext.snapshot().delivery().startedAtMs();
     }
 
@@ -160,7 +158,7 @@ class RequestInactivityTest {
         assertNull(requestContext.snapshot().deadlines().visibility());
         registry.onDeadline(deadline, deadline.atMs());
         assertLiveAndCharged();
-        assertTrue(item.future().join().isSuccess());
+        assertTrue(item.ctx().data().getFuture().join().isSuccess());
     }
 
     @ParameterizedTest
@@ -203,7 +201,7 @@ class RequestInactivityTest {
         assertTrue(
                 registry.requests.isCurrent(requestContext),
                 "the last matching heartbeat extends liveness");
-        verify(prefill, never()).release(null, item);
+        verify(prefill, never()).releaseRequest(item);
         verify(decode, never()).release(any(), any());
     }
 
@@ -212,26 +210,32 @@ class RequestInactivityTest {
         acknowledgeDelivery();
         long completedAt = registeredAtMs + TIMEOUT_MS;
         var completed =
-                requestContext.recordEngineEvidence(
-                        new EngineEvidence(
-                                item,
-                                null,
-                                RoleType.PREFILL,
-                                EngineKind.COMPLETED,
-                                0L,
-                                null,
-                                completedAt));
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        requestContext,
+                        observedRequest ->
+                                observedRequest.recordEngineEvidence(
+                                        new EngineEvidence(
+                                                item,
+                                                null,
+                                                RoleType.PREFILL,
+                                                EngineKind.COMPLETED,
+                                                0L,
+                                                null,
+                                                completedAt)));
         assertEquals(UpdateKind.APPLIED, completed.kind());
         var active =
-                requestContext.recordEngineEvidence(
-                        new EngineEvidence(
-                                item,
-                                null,
-                                RoleType.PREFILL,
-                                EngineKind.ACTIVE,
-                                0L,
-                                null,
-                                completedAt + 1));
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        requestContext,
+                        observedRequest ->
+                                observedRequest.recordEngineEvidence(
+                                        new EngineEvidence(
+                                                item,
+                                                null,
+                                                RoleType.PREFILL,
+                                                EngineKind.ACTIVE,
+                                                0L,
+                                                null,
+                                                completedAt + 1)));
         assertNotNull(
                 active.after().deadlines().visibility(),
                 "pending timer installation is real work even when status does not advance");
@@ -243,15 +247,18 @@ class RequestInactivityTest {
         assertNotNull(scheduledVisibility());
         var installed = scheduledVisibility();
         var repeated =
-                requestContext.recordEngineEvidence(
-                        new EngineEvidence(
-                                item,
-                                null,
-                                RoleType.PREFILL,
-                                EngineKind.ACTIVE,
-                                0L,
-                                null,
-                                completedAt + 2));
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        requestContext,
+                        observedRequest ->
+                                observedRequest.recordEngineEvidence(
+                                        new EngineEvidence(
+                                                item,
+                                                null,
+                                                RoleType.PREFILL,
+                                                EngineKind.ACTIVE,
+                                                0L,
+                                                null,
+                                                completedAt + 2)));
         timer.update(requestContext, repeated.after().deadlines());
         assertSame(
                 installed,
@@ -265,7 +272,7 @@ class RequestInactivityTest {
         RequestContext foreign = mock(RequestContext.class);
         RequestData foreignData = mock(RequestData.class);
         when(foreign.data()).thenReturn(foreignData);
-        when(foreignData.getScheduler()).thenReturn(mock(RequestLifecycle.class));
+        when(foreignData.getLifecycle()).thenReturn(mock(RequestLifecycle.class));
         registry.onEngineEvidence(
                 foreign,
                 new EngineEvidence(
@@ -276,7 +283,9 @@ class RequestInactivityTest {
                         0L,
                         null,
                         System.currentTimeMillis()));
-        verify(foreign, never()).recordEngineEvidence(any());
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                verify(foreign, never()),
+                observedRequest -> observedRequest.recordEngineEvidence(any()));
         registry.onEngineEvidence(requestContext, null);
         registry.onEngineEvidence(
                 requestContext,
@@ -321,7 +330,9 @@ class RequestInactivityTest {
                     registry, requestContext, observedAt + TIMEOUT_MS / 2L - 1L);
             assertLiveAndCharged();
         }
-        assertTrue(item.future().isDone(), "the delivery response does not end activity tracking");
+        assertTrue(
+                item.ctx().data().getFuture().isDone(),
+                "the delivery response does not end activity tracking");
     }
 
     @ParameterizedTest
@@ -345,8 +356,8 @@ class RequestInactivityTest {
                 registry,
                 prefill,
                 RoleType.PREFILL,
-                new PrefillState.PrefillRequestStatus(
-                        item, PrefillState.PrefillRequestStatus.Kind.ACTIVE, 0L));
+                new PrefillEndpoint.PrefillRequestStatus(
+                        item, PrefillEndpoint.PrefillRequestStatus.Kind.ACTIVE, 0L));
         RequestProtocolTestSupport.applyDecodeStatus(
                 registry,
                 decode,
@@ -364,19 +375,24 @@ class RequestInactivityTest {
     void missingDeliveryReplyRequiresSenderExitAndRemoteCleanup() throws Exception {
         RequestProtocolTestSupport.expireInactiveRequest(
                 registry, requestContext, handedOffAtMs + TIMEOUT_MS - 1L);
-        assertFalse(item.future().isDone(), "no transport callback has confirmed delivery");
+        assertFalse(
+                item.ctx().data().getFuture().isDone(),
+                "no transport callback has confirmed delivery");
         assertLiveAndCharged();
 
         RequestProtocolTestSupport.expireInactiveRequest(
                 registry, requestContext, handedOffAtMs + TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
-        assertFalse(item.future().get(1L, TimeUnit.SECONDS).isSuccess());
+        assertFalse(item.ctx().data().getFuture().get(1L, TimeUnit.SECONDS).isSuccess());
 
         // A late delivery acknowledgement must not resurrect the expired request.
         var before = requestContext.snapshot();
         var late =
-                new TransportResult(claim, DeliveryResult.delivered(), System.currentTimeMillis());
-        var rejected = requestContext.recordDeliveryResult(late);
+                new TransportResult(claim, Delivery.Result.delivered(), System.currentTimeMillis());
+        var rejected =
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        requestContext,
+                        observedRequest -> observedRequest.recordDeliveryResult(late));
         assertEquals(UpdateKind.STALE, rejected.kind());
         assertSame(before, rejected.before());
         assertSame(before, rejected.after());
@@ -384,13 +400,20 @@ class RequestInactivityTest {
                 SendState.UNKNOWN,
                 rejected.after().delivery().send(),
                 "late contradictory ACK cannot replace the settled sender fact");
-        registry.onDeliveryFact(late);
+        registry.onDeliveryResult(late);
         assertSame(before, requestContext.snapshot());
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
     }
 
     @Test
     void expiredSilenceRejectsAckWhileTheTimerWorkIsBacklogged() throws Exception {
+        var responses =
+                org.mockito.Mockito.spy(
+                        (ResponseCompletionExecutor)
+                                org.springframework.test.util.ReflectionTestUtils.getField(
+                                        registry, "responseCompletions"));
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                registry, "responseCompletions", responses);
         ExpirationTimer.Token exact = requestContext.snapshot().deadlines().inactivity();
         assertNotNull(exact);
         int workers = Math.clamp(Runtime.getRuntime().availableProcessors(), 2, 8);
@@ -428,32 +451,34 @@ class RequestInactivityTest {
                     requestContext, "commitSnapshot", System.currentTimeMillis());
             registry.onDeadline(
                     requestContext.snapshot().deadlines().inactivity(), System.currentTimeMillis());
-            completeDelivery(DeliveryResult.delivered());
+            completeDelivery(Delivery.Result.delivered());
+            verify(responses, never()).submit(any(), any());
             assertEquals(
                     RequestState.Phase.TIMED_OUT,
                     RequestState.from(requestContext.snapshot()).state());
             assertFalse(
-                    item.future().isDone(), "response publication follows the accepted cleanup");
+                    item.ctx().data().getFuture().isDone(),
+                    "response publication follows the accepted cleanup");
         } finally {
             release.countDown();
         }
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
-        assertFalse(item.future().get(1L, TimeUnit.SECONDS).isSuccess());
+        assertFalse(item.ctx().data().getFuture().get(1L, TimeUnit.SECONDS).isSuccess());
     }
 
     @ParameterizedTest
     @EnumSource(
-            value = DeliveryResult.Status.class,
+            value = Delivery.Result.Status.class,
             names = {"UNCERTAIN"})
-    void uncertainDeliveryKeepsOnlyABoundedConfirmationWait(DeliveryResult.Status outcome)
+    void uncertainDeliveryKeepsOnlyABoundedConfirmationWait(Delivery.Result.Status outcome)
             throws Exception {
-        completeDelivery(new DeliveryResult(outcome, new IllegalStateException("reply was lost")));
+        completeDelivery(new Delivery.Result(outcome, new IllegalStateException("reply was lost")));
         assertLiveAndCharged();
         RequestProtocolTestSupport.expireInactiveRequest(
                 registry, requestContext, handedOffAtMs + TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
-        assertFalse(item.future().get(1L, TimeUnit.SECONDS).isSuccess());
+        assertFalse(item.ctx().data().getFuture().get(1L, TimeUnit.SECONDS).isSuccess());
     }
 
     @Test
@@ -463,12 +488,7 @@ class RequestInactivityTest {
                 RequestState.Phase.CANCEL_REQUESTED,
                 registry.cancel(REQUEST_ID, 0L, CancelReason.CLIENT_CANCELLED).state());
         assertEquals(1, registry.requests.liveRequestCount());
-        assertFalse(
-                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                        .signals()
-                        .delivery(claim)
-                        .toCompletableFuture()
-                        .isDone());
+        assertFalse(claim.completion().toCompletableFuture().isDone());
 
         synchronized (requestContext) {
             assertEquals(
@@ -569,44 +589,32 @@ class RequestInactivityTest {
         }
         verify(decode, never()).release(any(), eq(DecodeResources.ReleaseReason.LOCAL_ROLLBACK));
         verify(decode, never()).release(any(), eq(DecodeResources.ReleaseReason.REMOTE_CLEANUP));
-        verify(prefill, never()).release(org.mockito.ArgumentMatchers.isNull(), any());
+        verify(prefill, never()).releaseRequest(any());
     }
 
-    private void completeDelivery(DeliveryResult result) {
-        registry.onDeliveryFact(new TransportResult(claim, result, System.currentTimeMillis()));
+    private void completeDelivery(Delivery.Result result) {
+        registry.onDeliveryResult(new TransportResult(claim, result, System.currentTimeMillis()));
         deliveryCompleted = true;
     }
 
     private void acknowledgeDelivery() throws Exception {
-        completeDelivery(DeliveryResult.delivered());
-        assertTrue(item.future().get(1L, TimeUnit.SECONDS).isSuccess());
+        completeDelivery(Delivery.Result.delivered());
+        assertTrue(item.ctx().data().getFuture().get(1L, TimeUnit.SECONDS).isSuccess());
     }
 
     private void assertExpiredAndReleased(RequestState.Phase expectedState) {
-        if (!org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                .signals()
-                .delivery(claim)
-                .toCompletableFuture()
-                .isDone()) {
+        if (!claim.completion().toCompletableFuture().isDone()) {
             assertEquals(
                     1, registry.requests.liveRequestCount(), "expiry retains cleanup ownership");
             cleanup.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             if (!deliveryCompleted) {
                 assertFalse(
-                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                                .signals()
-                                .delivery(claim)
-                                .toCompletableFuture()
-                                .isDone(),
+                        claim.completion().toCompletableFuture().isDone(),
                         "early cleanup cannot release the sender");
                 completeDelivery(
-                        DeliveryResult.uncertain(new IllegalStateException("sender exited")));
+                        Delivery.Result.uncertain(new IllegalStateException("sender exited")));
             }
-            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                    .signals()
-                    .delivery(claim)
-                    .toCompletableFuture()
-                    .join();
+            claim.completion().toCompletableFuture().join();
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         }
@@ -624,7 +632,7 @@ class RequestInactivityTest {
         }
         verify(decode, times(1))
                 .release(item.decodeReservation(), DecodeResources.ReleaseReason.REMOTE_CLEANUP);
-        verify(prefill, times(1)).release(null, item);
+        verify(prefill, times(1)).releaseRequest(item);
     }
 
     private boolean inactive(long nowMs) {
@@ -643,10 +651,10 @@ class RequestInactivityTest {
             return null;
         }
         var handles =
-                (java.util.Map<?, ?>)
+                (Object[])
                         org.springframework.test.util.ReflectionTestUtils.invokeMethod(
                                 slot, "handles");
-        var handle = handles.get(ExpirationTimer.Kind.VISIBILITY);
+        var handle = handles[ExpirationTimer.Kind.VISIBILITY.ordinal()];
         return handle == null
                 ? null
                 : (ScheduledFuture<?>)

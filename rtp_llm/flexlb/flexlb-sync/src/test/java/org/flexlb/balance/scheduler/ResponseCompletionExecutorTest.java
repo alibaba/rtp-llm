@@ -4,7 +4,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.springframework.test.util.ReflectionTestUtils;
 
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -59,7 +58,7 @@ class ResponseCompletionExecutorTest {
                 queued.get().run();
             }
             assertEquals(1, executions.get());
-            assertTrue(registrations(f.executor).isEmpty());
+            assertTrue(registrations(f.executor) == 0);
         }
     }
 
@@ -84,7 +83,7 @@ class ResponseCompletionExecutorTest {
                                     }));
             assertFalse(registration.hasCompletionOwner());
             assertEquals(0, executions.get());
-            assertTrue(registrations(f.executor).isEmpty());
+            assertTrue(registrations(f.executor) == 0);
         }
     }
 
@@ -116,7 +115,7 @@ class ResponseCompletionExecutorTest {
                                             })));
             assertTrue(registration.hasCompletionOwner());
             assertEquals(1, executions.get());
-            assertTrue(registrations(f.executor).isEmpty());
+            assertTrue(registrations(f.executor) == 0);
             assertFalse(
                     registration.completeNow(
                             () -> {
@@ -155,11 +154,11 @@ class ResponseCompletionExecutorTest {
                                                 return true;
                                             })));
             assertFalse(abandoned.hasCompletionOwner());
-            assertTrue(registrations(f.executor).isEmpty());
+            assertTrue(registrations(f.executor) == 0);
             assertNotNull(queued.get());
             queued.get().run();
             assertEquals(0, executions.get());
-            assertTrue(registrations(f.executor).isEmpty());
+            assertTrue(registrations(f.executor) == 0);
             f.restore();
             var completed = new CompletableFuture<Boolean>();
             var actual = SchedulerTestSupport.responsePublication(f.executor);
@@ -170,7 +169,7 @@ class ResponseCompletionExecutorTest {
                         return completed.complete(true);
                     });
             assertTrue(completed.get(5, TimeUnit.SECONDS));
-            RequestProtocolTestSupport.awaitCondition(() -> registrations(f.executor).isEmpty());
+            RequestProtocolTestSupport.awaitCondition(() -> registrations(f.executor) == 0);
             assertEquals(1, executions.get());
         }
     }
@@ -203,7 +202,7 @@ class ResponseCompletionExecutorTest {
                 assertTrue(started.await(5, TimeUnit.SECONDS));
                 actual.close();
                 assertTrue(
-                        registrations(f.executor).contains(actual),
+                        registrations(f.executor) == 1,
                         "a running callback still owes its registration");
                 var closing = closers.submit(f.executor::close);
                 RequestProtocolTestSupport.awaitCondition(
@@ -211,7 +210,7 @@ class ResponseCompletionExecutorTest {
                 assertFalse(closing.isDone());
                 finish.countDown();
                 closing.get(5, TimeUnit.SECONDS);
-                assertTrue(registrations(f.executor).isEmpty());
+                assertTrue(registrations(f.executor) == 0);
                 assertTrue(f.primary.isTerminated());
             } finally {
                 finish.countDown();
@@ -219,12 +218,11 @@ class ResponseCompletionExecutorTest {
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private static Set<ResponsePublication> registrations(ResponseCompletionExecutor executor) {
-        var registrations =
-                (Set<ResponsePublication>) ReflectionTestUtils.getField(executor, "registrations");
-        synchronized (registrations) {
-            return Set.copyOf(registrations);
+    private static int registrations(ResponseCompletionExecutor executor) {
+        var executorOwner = executor;
+        var lock = ReflectionTestUtils.getField(executorOwner, "completionLock");
+        synchronized (lock) {
+            return (int) ReflectionTestUtils.getField(executorOwner, "pendingCompletions");
         }
     }
 

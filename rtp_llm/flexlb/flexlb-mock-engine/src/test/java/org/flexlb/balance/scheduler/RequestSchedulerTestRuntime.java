@@ -38,7 +38,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     private final EndpointRegistry registry;
     private final DecodePreemption decodePreemption;
     private final AbstractRequestScheduler scheduler;
-    private final RequestSchedulerEntry entry;
+    private final RequestLifecycle entry;
     private final SchedulerTestServices runtime;
     private volatile boolean deliveryPaused;
     private final java.util.Set<Runnable> deliveryListeners =
@@ -87,10 +87,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         org.springframework.test.util.ReflectionTestUtils.setField(
                 runtime, "deliveries", facilities);
         org.springframework.test.util.ReflectionTestUtils.setField(
-                runtime,
-                "queueDependencies",
-                new RequestExecution.Dependencies(
-                        facilities, deliveryReporter, runtime::recordFailure, QueuedRequestScheduler::runPrefill));
+                delivery, "execution", facilities);
         // Keep transport and Dispatcher real; inject capacity pressure at its infrastructure owner.
         org.mockito.Mockito.doAnswer(
                         invocation ->
@@ -125,7 +122,6 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         requests,
                         runtime.tasks(),
                         runtime.taskTimer(),
-                        runtime.signals(),
                         requestReporter,
                         configService,
                         capacity,
@@ -138,24 +134,22 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                                 new org.flexlb.service.RecentCacheKeyTraceReporter()),
                         configService.loadBalanceConfig(),
                         router,
-                        deliveryReporter,
                         decodePreemption,
                         placementAvailability,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                 configService.loadBalanceConfig()),
                         new OrderedRequestQueue(
-                                configService.loadBalanceConfig().isPriorityOrdering()),
-                        runtime.queueDependencies);
-        this.entry = new RequestSchedulerEntry(scheduler, SchedulerTestServices.lifecycle(scheduler), router,
-                configService.loadBalanceConfig().isQueue());
+                                configService.loadBalanceConfig().isPriorityOrdering()));
+        this.entry = SchedulerTestServices.lifecycle(scheduler);
         runtime.registerScheduler(scheduler);
+        scheduler.start();
     }
 
     public RequestRepository requestRegistry() {
         return requests;
     }
 
-    public RequestSchedulerEntry entry() {
+    public RequestLifecycle entry() {
         return entry;
     }
 
@@ -201,7 +195,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 }
                 long version =
                         pin.endpoint() instanceof PrefillEndpoint prefill
-                                ? prefill.ownership.progress().ownershipVersion()
+                                ? prefill.progress().ownershipVersion()
                                 : pin.endpoint() instanceof DecodeEndpoint decode
                                         ? decode.placementVersion()
                                         : 0L;
@@ -263,7 +257,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     @Override
     public void close() {
-        decodePreemption.freezeAdmission();
+        decodePreemption.stopAdmission();
         runtime.shutdown(ShutdownMode.DRAIN, Duration.ofSeconds(30L));
     }
 

@@ -44,7 +44,7 @@ class GenerateInputPayloadTest {
                         .setUnknownFields(
                                 UnknownFieldSet.newBuilder().mergeVarintField(999, 71).build())
                         .build();
-        var wire = GenerateInputPayload.parse(original.toByteString()).toWireBuilder();
+        var wire = Delivery.parseInput(original.toByteString()).toBuilder();
         assertEquals(0, wire.getTokenIdsCount(), "Master must not materialize the token list");
         wire.setPriority(60)
                 .getGenerateConfigBuilder()
@@ -182,7 +182,7 @@ class GenerateInputPayloadTest {
                     InvalidProtocolBufferException.class, () -> GenerateInputPB.parseFrom(bytes));
             assertThrows(
                     InvalidProtocolBufferException.class,
-                    () -> GenerateInputPayload.parse(ByteString.copyFrom(bytes)));
+                    () -> Delivery.parseInput(ByteString.copyFrom(bytes)));
         }
     }
 
@@ -214,9 +214,7 @@ class GenerateInputPayloadTest {
         assertNotNull(
                 standard.getUnfinishedMessage(), "fixture must exercise partial-message retention");
         var failure =
-                assertThrows(
-                        InvalidProtocolBufferException.class,
-                        () -> GenerateInputPayload.parse(wire));
+                assertThrows(InvalidProtocolBufferException.class, () -> Delivery.parseInput(wire));
         assertNull(failure.getUnfinishedMessage());
         assertNull(
                 failure.getCause(),
@@ -247,18 +245,18 @@ class GenerateInputPayloadTest {
                 allocations.isThreadAllocatedMemorySupported());
         allocations.setThreadAllocatedMemoryEnabled(true);
         for (int i = 0; i < 3; i++) {
-            GenerateInputPayload.parse(bytes);
+            Delivery.parseInput(bytes);
         }
         long thread = Thread.currentThread().threadId();
         long before = allocations.getThreadAllocatedBytes(thread);
-        var prepared = GenerateInputPayload.parse(bytes);
+        var prepared = Delivery.parseInput(bytes);
         long allocated = allocations.getThreadAllocatedBytes(thread) - before;
         assertTrue(
                 allocated < 256 * 1024L,
                 "immutable multimodal bytes must be shared; allocated=" + allocated);
         assertEquals(
                 GenerateInputPB.parseFrom(bytes),
-                GenerateInputPB.parseFrom(prepared.toWireBuilder().build().toByteString()));
+                GenerateInputPB.parseFrom(prepared.toBuilder().build().toByteString()));
     }
 
     private static ByteString packed(int... tokens) throws IOException {
@@ -276,11 +274,10 @@ class GenerateInputPayloadTest {
         try {
             expected = GenerateInputPB.parseFrom(bytes);
         } catch (InvalidProtocolBufferException malformed) {
-            assertThrows(
-                    InvalidProtocolBufferException.class, () -> GenerateInputPayload.parse(bytes));
+            assertThrows(InvalidProtocolBufferException.class, () -> Delivery.parseInput(bytes));
             return;
         }
-        var wire = GenerateInputPayload.parse(bytes).toWireBuilder().build();
+        var wire = Delivery.parseInput(bytes).toBuilder().build();
         assertEquals(0, wire.getTokenIdsCount());
         assertEquals(expected, GenerateInputPB.parseFrom(wire.toByteString()));
     }

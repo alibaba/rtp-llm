@@ -94,6 +94,11 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         return List.copyOf(enqueuedRequests);
     }
 
+    /** Release a payload after a test has retained the evidence it needs. */
+    public void removeRecordedBatch(EngineRpcService.EnqueueBatchRequestPB batch) {
+        enqueuedRequests.remove(batch);
+    }
+
     public int getEnqueueCount() {
         return enqueuedRequests.size();
     }

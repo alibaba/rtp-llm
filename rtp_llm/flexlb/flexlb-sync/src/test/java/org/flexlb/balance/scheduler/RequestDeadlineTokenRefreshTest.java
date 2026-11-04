@@ -10,11 +10,9 @@ import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
 import static org.flexlb.balance.scheduler.ContextResult.Prediction;
-import static org.flexlb.balance.scheduler.ContextResult.Rejected;
-import static org.flexlb.balance.scheduler.ContextResult.UpdateKind;
+import static org.flexlb.balance.scheduler.RequestChangeAssertions.UpdateKind;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -27,9 +25,13 @@ class RequestDeadlineTokenRefreshTest {
     @EnumSource(ExpirationTimer.Kind.class)
     void earlyWakeRefreshesOnlyItsTokenWithoutConsumingDeadlineOrFirstCause(
             ExpirationTimer.Kind kind) {
-        var fixture = RequestDeliveryClaimStateTest.fixture(DeliveryClaimKind.BATCH_ENQUEUE, false);
+        var fixture = RequestDeliveryClaimStateTest.fixture(Delivery.SendMode.BATCH_ENQUEUE, false);
         var context = fixture.context();
-        context.recordDeliveryResult(new Prediction(fixture.delivery(), 3000L, 1002L));
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.recordDeliveryResult(
+                                new Prediction(fixture.delivery(), 3000L, 1002L)));
         var before = context.snapshot();
         var previous = before.deadlines().token(kind);
         assertNotNull(previous);
@@ -38,7 +40,12 @@ class RequestDeadlineTokenRefreshTest {
                         CancelReason.DEADLINE_EXCEEDED,
                         StrategyErrorType.RESOURCE_EXHAUSTED,
                         "diagnosis must not be used early");
-        var update = context.recordDeadline(previous, previous.atMs() - 1L, diagnosis);
+        var update =
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        context,
+                        observedRequest ->
+                                observedRequest.recordDeadline(
+                                        previous, previous.atMs() - 1L, diagnosis));
         assertEquals(UpdateKind.APPLIED, update.kind());
         assertSame(before, update.before());
         assertNotSame(before, update.after());
@@ -68,30 +75,46 @@ class RequestDeadlineTokenRefreshTest {
                 previous,
                 before.deadlines().token(kind),
                 "refresh cannot mutate a previously returned snapshot");
-        var old = context.recordDeadline(previous, previous.atMs(), diagnosis);
+        var old =
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        context,
+                        observedRequest ->
+                                observedRequest.recordDeadline(
+                                        previous, previous.atMs(), diagnosis));
         assertEquals(UpdateKind.STALE, old.kind());
         assertSame(update.after(), old.before());
         assertSame(old.before(), old.after());
         var forged = new ExpirationTimer.Token(context, kind, current.version(), current.atMs());
         assertEquals(
-                UpdateKind.STALE, context.recordDeadline(forged, current.atMs(), diagnosis).kind());
+                UpdateKind.STALE,
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                                context,
+                                observedRequest ->
+                                        observedRequest.recordDeadline(
+                                                forged, current.atMs(), diagnosis))
+                        .kind());
         assertSame(current, context.snapshot().deadlines().token(kind));
         if (kind == ExpirationTimer.Kind.REQUEST) {
-            context.recordEngineEvidence(
-                    new EngineEvidence(
-                            fixture.route(),
-                            fixture.reservation(),
-                            RoleType.PREFILL,
-                            EngineKind.ACTIVE,
-                            0L,
-                            null,
-                            current.atMs() - 1L));
+            org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                    context,
+                    observedRequest ->
+                            observedRequest.recordEngineEvidence(
+                                    new EngineEvidence(
+                                            fixture.route(),
+                                            fixture.reservation(),
+                                            RoleType.PREFILL,
+                                            EngineKind.ACTIVE,
+                                            0L,
+                                            null,
+                                            current.atMs() - 1L)));
         }
-        context.recordDeadline(current, current.atMs(), null);
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest -> observedRequest.recordDeadline(current, current.atMs(), null));
         if (kind == ExpirationTimer.Kind.REQUEST) {
             assertNull(context.snapshot().deadlines().request());
-            assertInstanceOf(
-                    Rejected.class,
+            org.junit.jupiter.api.Assertions.assertEquals(
+                    RequestContext.SendResult.CANCELLED,
                     context.beginSend(fixture.delivery(), current.atMs()),
                     "consuming the refreshed request timer cannot remove the original absolute send deadline");
         } else if (kind == ExpirationTimer.Kind.VISIBILITY) {

@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.strategy.VitSelectionStrategy;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
@@ -12,32 +13,17 @@ import org.flexlb.service.VitCacheDirectory.Candidate;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.ThreadLocalRandom;
 
 /** Selects cache-affine ViT endpoints and owns temporary cold-key placements. */
 @Component
 public class VitCacheSelector {
-    private static final long MIN_PENDING_TTL_MS = 120_000;
-    private static final long MAX_PENDING_TTL_MS = 600_000;
-    private static final int MAX_PENDING = 100_000;
+    private final VitSelectionStrategy strategy;
     private final VitCacheDirectory directory;
     private final EndpointRegistry workers;
-    private final LinkedHashMap<String, Placement> pending = new LinkedHashMap<>();
-    private long pendingPrunedAt;
-
-    private record Placement(WorkerStatus worker, String instance, long expiry) {
-        boolean matches(Candidate candidate, long now) {
-            return candidate != null
-                    && worker == candidate.worker()
-                    && expiry > now
-                    && (instance == null || Objects.equals(instance, candidate.instance()));
-        }
-    }
 
     private record MatchScore(int hashHits, int embeddingHits, int gpuHits, int pendingHits)
             implements Comparable<MatchScore> {
@@ -54,7 +40,9 @@ public class VitCacheSelector {
         }
     }
 
-    public VitCacheSelector(VitCacheDirectory directory, EndpointRegistry workers) {
+    public VitCacheSelector(
+            VitCacheDirectory directory, EndpointRegistry workers, VitSelectionStrategy strategy) {
+        this.strategy = Objects.requireNonNull(strategy);
         this.directory = directory;
         this.workers = workers;
     }
@@ -70,55 +58,36 @@ public class VitCacheSelector {
         keys = new ArrayList<>(new LinkedHashSet<>(keys));
         Map<String, Candidate> candidates = directory.candidates(group, keys);
         long now = System.currentTimeMillis();
-        if (now - pendingPrunedAt >= 5000) {
-            pending.values().removeIf(p -> !p.matches(candidates.get(p.worker().getIpPort()), now));
-            pendingPrunedAt = now;
-        }
-        List<Candidate> best = new ArrayList<>();
+        List<String> best = new ArrayList<>();
         MatchScore bestScore = null;
         for (Candidate candidate : candidates.values()) {
             if (group != null && !Objects.equals(group, candidate.worker().getGroup())) {
                 continue;
-            }
-            int pendingHits = 0;
-            for (String key : keys) {
-                Placement placement = pending.get(key);
-                if (placement != null && placement.matches(candidate, now)) {
-                    pendingHits++;
-                }
             }
             MatchScore score =
                     new MatchScore(
                             candidate.hashHits(),
                             candidate.embeddingHits(),
                             candidate.gpuHits(),
-                            pendingHits);
+                            directory.pendingHits(candidate, keys, now));
             int comparison = bestScore == null ? 1 : score.compareTo(bestScore);
             if (comparison > 0) {
                 best.clear();
                 bestScore = score;
             }
             if (comparison >= 0) {
-                best.add(candidate);
+                best.add(candidate.worker().getIpPort());
             }
         }
         if (best.isEmpty()) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
-        Candidate selected = best.get(ThreadLocalRandom.current().nextInt(best.size()));
-        long timeout = ctx.data().getRequest().getGenerateTimeout();
-        long ttl =
-                timeout <= 0
-                        ? MIN_PENDING_TTL_MS
-                        : Math.min(MAX_PENDING_TTL_MS, Math.max(MIN_PENDING_TTL_MS, timeout));
-        for (String key : keys) {
-            if (!selected.hashKeys().contains(key)) {
-                pending.put(key, new Placement(selected.worker(), selected.instance(), now + ttl));
-            }
-        }
-        while (pending.size() > MAX_PENDING) {
-            pending.remove(pending.keySet().iterator().next());
-        }
+        int selectedIndex = strategy.selectIndex(List.copyOf(best));
+        com.google.common.base.Preconditions.checkArgument(
+                selectedIndex >= 0 && selectedIndex < best.size(),
+                "VIT strategy returned an invalid index");
+        Candidate selected = candidates.get(best.get(selectedIndex));
+        directory.reserve(keys, selected, ctx.data().getRequest().getGenerateTimeout(), now);
         return status(selected.worker(), ctx.data().getRequestId());
     }
 

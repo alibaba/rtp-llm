@@ -3,9 +3,11 @@ package org.flexlb.balance.projection;
 import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.LearningPredictor;
-import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
 import org.flexlb.balance.projection.RequestTimeEstimation.Candidate;
+import org.flexlb.balance.projection.RequestTimeEstimation.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.Probe;
 import org.junit.jupiter.api.Test;
 
@@ -19,11 +21,44 @@ import static org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.proj
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Contract tests for the canonical route-projection value boundary. */
 class RequestTimeEstimationTest {
+
+    @Test
+    void frozenWorkCanBeReadConcurrentlyWithoutAnExtraCaptureObject() throws Exception {
+        var requests = new java.util.ArrayList<WorkSnapshot.RequestWork>();
+        requests.add(new WorkSnapshot.RequestWork(7L, WorkSnapshot.Phase.ENGINE_RUNNING, 30L));
+        var batches = new java.util.ArrayList<WorkSnapshot.BatchWork>();
+        batches.add(
+                new WorkSnapshot.BatchWork(
+                        List.of(9L, 8L),
+                        WorkSnapshot.Phase.COMMITTED,
+                        java.util.OptionalLong.of(40L)));
+        var snapshot = new WorkSnapshot(100L, requests, batches, 0L);
+        requests.clear();
+        batches.clear();
+        try (var readers = java.util.concurrent.Executors.newFixedThreadPool(8)) {
+            var futures = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+            for (int i = 0; i < 32; i++) {
+                futures.add(
+                        readers.submit(
+                                () -> {
+                                    assertEquals(60L, snapshot.knownRemainingWorkMsAt(110L));
+                                    assertTrue(snapshot.containsRequest(7L));
+                                    assertTrue(snapshot.containsRequest(8L));
+                                    assertTrue(snapshot.containsRequest(9L));
+                                    assertFalse(snapshot.containsRequest(10L));
+                                    assertFalse(snapshot.hasUnknownWork());
+                                    assertSame(snapshot, snapshot.calculate());
+                                }));
+            }
+            for (var future : futures) future.get(5, java.util.concurrent.TimeUnit.SECONDS);
+        }
+    }
 
     @Test
     void customPlannerIsUsedForEveryProjectedPrefix() {
@@ -266,6 +301,8 @@ class RequestTimeEstimationTest {
             assertTrue(snapshot.containsRequest(id));
         }
         assertFalse(snapshot.containsRequest(90L), "an uncaptured request identity is absent");
+        assertFalse(snapshot.containsRequest(Long.MIN_VALUE));
+        assertFalse(snapshot.containsRequest(Long.MAX_VALUE));
         assertFalse(snapshot.hasUnknownWork());
         assertEquals(100L, snapshot.capturedAtMs());
         assertEquals(100L, snapshot.totalRemainingWorkMs().orElseThrow());

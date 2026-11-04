@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -20,17 +21,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** Real endpoint accounting used by delivery callback ordering tests. */
 public final class DeliverySettlementTestSupport {
     private final ReentrantLock lock = new ReentrantLock();
-    public final PrefillState prefill;
-    private final EndpointGenerationLifecycle generation =
-            new EndpointGenerationLifecycle(() -> {});
+    public final PrefillEndpoint prefill;
+    private final EndpointRetirementTestSupport generation =
+            new EndpointRetirementTestSupport(() -> {});
 
     public DeliverySettlementTestSupport() {
-        this(Comparator.comparingLong(RequestRoute::requestId));
+        this(
+                Comparator.comparingLong(
+                        org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem::requestId));
     }
 
-    public DeliverySettlementTestSupport(Comparator<RequestRoute> ordering) {
+    public DeliverySettlementTestSupport(
+            Comparator<org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem> ordering) {
         prefill =
-                new PrefillState(
+                org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                         lock, PrefillActiveIndex.ordered(4, ordering), System::currentTimeMillis);
     }
 
@@ -38,30 +42,20 @@ public final class DeliverySettlementTestSupport {
         lock.lock();
         try {
             assertSame(
-                    item,
-                    prefill.updateQueue(
-                            PrefillState.QueueChange.ENQUEUE, item, System.currentTimeMillis()));
+                    item, org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(prefill, item));
         } finally {
             lock.unlock();
         }
     }
 
-    public PrefillState.ReservationResult<PrefillState.BatchReservation> reserveBatch(
-            RequestRoute head, long batchId, int maxBatches) {
-        return prefill.reserveBatch(head, batchId, maxBatches, generation.tryAcquireHandoff());
+    public CapacityBoundary.Attempt<PrefillEndpoint.BatchReservation> reserveBatch(
+            long batchId, int maxBatches) {
+        return prefill.reserveBatch(batchId, maxBatches, generation.tryPinGeneration());
     }
 
-    public PrefillState.CommittedHandoff commit(PrefillState.CommitPlan plan) {
-        var permit = plan.batchReservation() == null ? generation.tryAcquireHandoff() : null;
-        PrefillState.CommittedHandoff committed = null;
-        try {
-            committed = prefill.commitLocked(plan, permit);
-            return committed;
-        } finally {
-            if (committed == null && permit != null) {
-                permit.close();
-            }
-        }
+    public org.flexlb.balance.scheduler.Delivery commit(
+            org.flexlb.balance.scheduler.Delivery plan) {
+        return prefill.commitLocked(plan);
     }
 
     public void commit(long batchId, List<RequestRoute> items) {
@@ -70,19 +64,14 @@ public final class DeliverySettlementTestSupport {
             for (RequestRoute item : items) {
                 assertSame(
                         item,
-                        prefill.updateQueue(
-                                PrefillState.QueueChange.ENQUEUE,
-                                item,
-                                System.currentTimeMillis()));
+                        org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(prefill, item));
             }
         } finally {
             lock.unlock();
         }
         {
             var reservation =
-                    prefill.reserveBatch(
-                                    items.getFirst(), batchId, 2, generation.tryAcquireHandoff())
-                            .reservation();
+                    prefill.reserveBatch(batchId, 2, generation.tryPinGeneration()).value();
             try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
                 assertNotNull(reservation);
                 try (var handoff =
@@ -93,7 +82,7 @@ public final class DeliverySettlementTestSupport {
         }
     }
 
-    public List<PrefillState.PrefillRequestStatus> finish(long batchId, RequestRoute item) {
+    public List<PrefillEndpoint.PrefillRequestStatus> finish(long batchId, RequestRoute item) {
         TaskInfo finished = new TaskInfo();
         finished.setRequestId(item.requestId());
         finished.setBatchId(batchId);

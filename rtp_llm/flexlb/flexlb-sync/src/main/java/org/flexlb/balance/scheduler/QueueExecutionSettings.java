@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
@@ -19,7 +20,7 @@ public record QueueExecutionSettings(
         int maxRequests,
         long collectionWaitMs,
         long executionBudgetMs) {
-    private static final Comparator<RequestRoute> PRIORITY_QUEUE_ORDER =
+    private static final Comparator<QueueItem> PRIORITY_QUEUE_ORDER =
             (left, right) ->
                     PriorityOrdering.compareWithRequestId(
                             left.priority(),
@@ -28,27 +29,11 @@ public record QueueExecutionSettings(
                             right.priority(),
                             right.enqueueSeq(),
                             right.requestId());
-    private static final Comparator<RequestRoute> FIFO_QUEUE_ORDER =
-            Comparator.comparingLong(RequestRoute::enqueueSeq);
-    private static final Comparator<GroupPlanner.Item> PRIORITY_PROJECTION_ORDER =
-            (left, right) ->
-                    PriorityOrdering.compareWithRequestId(
-                            left.priority(),
-                            left.enqueueSeq(),
-                            left.requestId(),
-                            right.priority(),
-                            right.enqueueSeq(),
-                            right.requestId());
-    private static final Comparator<GroupPlanner.Item> FIFO_PROJECTION_ORDER =
-            Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
-                    .thenComparingLong(GroupPlanner.Item::requestId);
+    private static final Comparator<QueueItem> FIFO_QUEUE_ORDER =
+            Comparator.comparingLong(QueueItem::enqueueSeq).thenComparingLong(QueueItem::requestId);
 
-    public static Comparator<RequestRoute> queueOrder(boolean priorityOrdering) {
+    public static Comparator<QueueItem> queueOrder(boolean priorityOrdering) {
         return priorityOrdering ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
-    }
-
-    public static Comparator<GroupPlanner.Item> projectionOrder(boolean priorityOrdering) {
-        return priorityOrdering ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
     }
 
     public static QueueExecutionSettings capture(FlexlbConfig config, GroupPlanner grouping) {

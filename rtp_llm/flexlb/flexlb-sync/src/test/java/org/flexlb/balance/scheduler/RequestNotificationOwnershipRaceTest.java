@@ -8,7 +8,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.springframework.test.util.ReflectionTestUtils;
 
-import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -46,12 +45,15 @@ class RequestNotificationOwnershipRaceTest {
         when(service.loadBalanceConfig()).thenReturn(config);
         var owner =
                 (QueuedRequestScheduler)
-                        SchedulerTestServices.scheduler(SchedulerTestSupport.create(
+                        SchedulerTestServices.scheduler(
+                                SchedulerTestSupport.create(
                                         service,
                                         mock(DeliveryMetricsReporter.class),
                                         mock(RequestSchedulerReporter.class),
                                         mock(RecentCacheKeyTraceReporter.class)));
-        var runtime = org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(SchedulerTestServices.lifecycle(owner));
+        var runtime =
+                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
+                        SchedulerTestServices.lifecycle(owner));
         var context = RequestProtocolTestSupport.context(config, 9401L);
         var future = RequestProtocolTestSupport.register(owner, context);
         var originalTimer = runtime.deadlines();
@@ -91,7 +93,7 @@ class RequestNotificationOwnershipRaceTest {
                     },
                     false);
         }
-        owner.start();
+        SchedulerTestSupport.startScheduling(owner);
         try {
             assertTrue(workStarted.await(5, TimeUnit.SECONDS));
             assertNull(context.snapshot().route());
@@ -110,11 +112,10 @@ class RequestNotificationOwnershipRaceTest {
             assertSame(notificationOwner.get(), context.snapshot().outcome());
             assertFalse(context.snapshot().close().notificationsAttempted());
             assertFalse(context.snapshot().close().notificationsDone());
-            assertFalse(context.snapshot().close().timersDone());
             assertEquals(1, runtime.requests().liveRequestCount());
             assertSame(context, runtime.requests().findActive(9401L));
             assertTrue(
-                    publications(runtime).isEmpty(),
+                    publications(runtime) == 0,
                     "the frontend publisher releases its own registration only");
             verify(timer, times(1)).update(eq(context), any());
             finishNotification.countDown();
@@ -125,10 +126,9 @@ class RequestNotificationOwnershipRaceTest {
             SchedulerTestSupport.awaitRequestWork(runtime);
             assertSame(notificationOwner.get(), context.snapshot().outcome());
             assertTrue(context.snapshot().close().notificationsDone());
-            assertTrue(context.snapshot().close().timersDone());
             assertTrue(future.isCancelled());
             assertEquals(CancelReason.CLIENT_CANCELLED, context.snapshot().cancellation().reason());
-            assertTrue(publications(runtime).isEmpty());
+            assertTrue(publications(runtime) == 0);
             assertEquals(
                     0L,
                     ((Number) ReflectionTestUtils.getField(runtime.tasks(), "pendingWork"))
@@ -143,14 +143,11 @@ class RequestNotificationOwnershipRaceTest {
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private static Set<ResponsePublication> publications(SchedulerTestServices runtime) {
-        var values =
-                (Set<ResponsePublication>)
-                        ReflectionTestUtils.getField(
-                                SchedulerTestSupport.responseCompletions(runtime), "registrations");
-        synchronized (values) {
-            return Set.copyOf(values);
+    private static int publications(SchedulerTestServices runtime) {
+        var executorOwner = SchedulerTestSupport.responseCompletions(runtime);
+        var lock = ReflectionTestUtils.getField(executorOwner, "completionLock");
+        synchronized (lock) {
+            return (int) ReflectionTestUtils.getField(executorOwner, "pendingCompletions");
         }
     }
 }

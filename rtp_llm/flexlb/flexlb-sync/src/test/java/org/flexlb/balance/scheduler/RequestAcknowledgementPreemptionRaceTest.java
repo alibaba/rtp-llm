@@ -1,9 +1,7 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.loadbalance.Response;
@@ -72,14 +70,16 @@ class RequestAcknowledgementPreemptionRaceTest {
         var admission = RequestProtocolTestSupport.beginAdmission(owner, context);
         assertEquals(
                 org.flexlb.balance.PlacementResult.Status.SUCCESS,
-                owner.commitRoute(route, RequestProtocolTestSupport.publication(() -> true)));
+                RequestProtocolTestSupport.commitRoute(
+                        owner, route, RequestProtocolTestSupport.publication(() -> true)));
         admission.finish();
         var delivery =
-                owner.claimDelivery(
-                        route,
-                        DeliveryClaimKind.BATCH_ENQUEUE,
-                        7L,
-                        RequestProtocolTestSupport.handoff(() -> true));
+                DeliveryDispatcher.commitDelivery(
+                        owner,
+                        new org.flexlb.balance.scheduler.Delivery.Member(
+                                route, RequestProtocolTestSupport.handoff(() -> true)),
+                        Delivery.SendMode.BATCH_ENQUEUE,
+                        7L);
         assertTrue(owner.tryStartSend(delivery));
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);
@@ -97,7 +97,7 @@ class RequestAcknowledgementPreemptionRaceTest {
                         });
         try {
             assertTrue(entered.await(5L, TimeUnit.SECONDS));
-            RequestProtocolTestSupport.transport(owner, delivery, DeliveryResult.delivered());
+            RequestProtocolTestSupport.transport(owner, delivery, Delivery.Result.delivered());
             assertTrue(context.snapshot().delivery().acknowledged());
             assertNull(context.snapshot().selectedResponse());
             assertFalse(context.data().getFuture().isDone());
@@ -130,8 +130,8 @@ class RequestAcknowledgementPreemptionRaceTest {
                     context,
                     prefill,
                     RoleType.PREFILL,
-                    new PrefillState.PrefillRequestStatus(
-                            route, PrefillState.PrefillRequestStatus.Kind.ACTIVE, 0L));
+                    new PrefillEndpoint.PrefillRequestStatus(
+                            route, PrefillEndpoint.PrefillRequestStatus.Kind.ACTIVE, 0L));
             assertNull(context.snapshot().preemption());
             assertTrue(
                     context.data().getFuture().isDone(),
@@ -145,8 +145,8 @@ class RequestAcknowledgementPreemptionRaceTest {
                     context,
                     prefill,
                     RoleType.PREFILL,
-                    new PrefillState.PrefillRequestStatus(
-                            route, PrefillState.PrefillRequestStatus.Kind.COMPLETED, 0L));
+                    new PrefillEndpoint.PrefillRequestStatus(
+                            route, PrefillEndpoint.PrefillRequestStatus.Kind.COMPLETED, 0L));
             RequestProtocolTestSupport.applyDecodeStatus(
                     owner,
                     context,

@@ -2,9 +2,10 @@ package org.flexlb.balance.prediction;
 
 import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.projection.QueueSnapshot;
+import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport;
 import org.junit.jupiter.api.Test;
 
@@ -216,7 +217,7 @@ class IncrementalPredictionTest {
         assertEquals(500.5, selected.selectedPredictionMs().orElseThrow());
         assertEquals(
                 501L,
-                PrefillPredictionBoundary.committedDecisionGroupMs(
+                PrefillTimePredictor.committedDecisionGroupMs(
                         selected.selectedPredictionMs().orElseThrow()));
         assertTrue(selected.predictionBoundaryTriggered());
         // A second snapshot must receive fresh accumulation state.

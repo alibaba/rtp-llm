@@ -7,16 +7,12 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
-import static org.flexlb.balance.scheduler.ContextResult.Granted;
 import static org.flexlb.balance.scheduler.ContextResult.Prediction;
-import static org.flexlb.balance.scheduler.ContextResult.ResponseCandidate;
-import static org.flexlb.balance.scheduler.ContextResult.ResponseKind;
 import static org.flexlb.balance.scheduler.ContextResult.RouteDelivered;
 import static org.flexlb.balance.scheduler.ContextResult.SendState;
-import static org.flexlb.balance.scheduler.ContextResult.UpdateKind;
+import static org.flexlb.balance.scheduler.RequestChangeAssertions.UpdateKind;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -30,17 +26,22 @@ class RequestDeliveryEventTest {
     @Test
     void staleGenerationCannotConsumeTheCurrentRoutesPrediction() {
         var current =
-                RequestDeliveryClaimStateTest.fixture(DeliveryClaimKind.ROUTE_DECISION, false);
+                RequestDeliveryClaimStateTest.fixture(Delivery.SendMode.ROUTE_DECISION, false);
         var previous =
-                RequestDeliveryClaimStateTest.fixture(DeliveryClaimKind.ROUTE_DECISION, false);
+                RequestDeliveryClaimStateTest.fixture(Delivery.SendMode.ROUTE_DECISION, false);
         var before = current.context().snapshot();
         var stalePrediction =
-                current.context()
-                        .recordDeliveryResult(new Prediction(previous.delivery(), 3000L, 1002L));
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        current.context(),
+                        observedRequest ->
+                                observedRequest.recordDeliveryResult(
+                                        new Prediction(previous.delivery(), 3000L, 1002L)));
         var staleCompletion =
-                current.context()
-                        .recordDeliveryResult(
-                                new RouteDelivered(previous.delivery(), 3000L, 1002L));
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        current.context(),
+                        observedRequest ->
+                                observedRequest.recordDeliveryResult(
+                                        new RouteDelivered(previous.delivery(), 3000L, 1002L)));
         assertEquals(UpdateKind.STALE, stalePrediction.kind());
         assertEquals(UpdateKind.STALE, staleCompletion.kind());
         assertSame(before, current.context().snapshot());
@@ -48,8 +49,11 @@ class RequestDeliveryEventTest {
         verify(current.decode(), never()).ownership(any());
         verify(previous.decode(), never()).ownership(any());
         var update =
-                current.context()
-                        .recordDeliveryResult(new RouteDelivered(current.delivery(), 3000L, 1002L));
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        current.context(),
+                        observedRequest ->
+                                observedRequest.recordDeliveryResult(
+                                        new RouteDelivered(current.delivery(), 3000L, 1002L)));
         assertEquals(UpdateKind.APPLIED, update.kind());
         assertSame(current.delivery(), update.after().delivery().identity());
         assertNotNull(update.after().deadlines().visibility());
@@ -57,19 +61,25 @@ class RequestDeliveryEventTest {
 
     @Test
     void wrongDeliveryKindIsRejectedBeforeReadingDecodeOrConsumingPrediction() {
-        var fixture = RequestDeliveryClaimStateTest.fixture(DeliveryClaimKind.BATCH_ENQUEUE, false);
+        var fixture = RequestDeliveryClaimStateTest.fixture(Delivery.SendMode.BATCH_ENQUEUE, false);
         var before = fixture.context().snapshot();
         assertThrows(
                 IllegalArgumentException.class,
                 () ->
-                        fixture.context()
-                                .recordDeliveryResult(
-                                        new RouteDelivered(fixture.delivery(), 3000L, 1002L)));
+                        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                                fixture.context(),
+                                observedRequest ->
+                                        observedRequest.recordDeliveryResult(
+                                                new RouteDelivered(
+                                                        fixture.delivery(), 3000L, 1002L))));
         assertSame(before, fixture.context().snapshot());
         verify(fixture.decode(), never()).ownership(any());
         var prediction =
-                fixture.context()
-                        .recordDeliveryResult(new Prediction(fixture.delivery(), 3000L, 1002L));
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        fixture.context(),
+                        observedRequest ->
+                                observedRequest.recordDeliveryResult(
+                                        new Prediction(fixture.delivery(), 3000L, 1002L)));
         assertEquals(UpdateKind.APPLIED, prediction.kind());
         assertEquals(SendState.NOT_STARTED, prediction.after().delivery().send());
         assertFalse(prediction.after().deliveryReleasable());
@@ -83,22 +93,27 @@ class RequestDeliveryEventTest {
     void routeCompletionReturnsSettlementAndConfirmationWithoutAnotherStateQuery(
             boolean decodeObserved) {
         var fixture =
-                RequestDeliveryClaimStateTest.fixture(DeliveryClaimKind.ROUTE_DECISION, false);
+                RequestDeliveryClaimStateTest.fixture(Delivery.SendMode.ROUTE_DECISION, false);
         if (decodeObserved) {
-            fixture.context()
-                    .recordEngineEvidence(
-                            new EngineEvidence(
-                                    fixture.route(),
-                                    fixture.reservation(),
-                                    RoleType.DECODE,
-                                    EngineKind.ACTIVE,
-                                    0L,
-                                    null,
-                                    1002L));
+            org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                    fixture.context(),
+                    observedRequest ->
+                            observedRequest.recordEngineEvidence(
+                                    new EngineEvidence(
+                                            fixture.route(),
+                                            fixture.reservation(),
+                                            RoleType.DECODE,
+                                            EngineKind.ACTIVE,
+                                            0L,
+                                            null,
+                                            1002L)));
         }
         var update =
-                fixture.context()
-                        .recordDeliveryResult(new RouteDelivered(fixture.delivery(), 3000L, 1003L));
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        fixture.context(),
+                        observedRequest ->
+                                observedRequest.recordDeliveryResult(
+                                        new RouteDelivered(fixture.delivery(), 3000L, 1003L)));
         assertEquals(UpdateKind.APPLIED, update.kind());
         assertSame(fixture.delivery(), update.after().delivery().identity());
         assertTrue(update.after().deliveryReleasable());
@@ -110,14 +125,10 @@ class RequestDeliveryEventTest {
                 "recording transport does not select a frontend response");
         assertEquals(decodeObserved, update.after().engine().decodeAccepted());
         assertEquals(!decodeObserved, update.after().deadlines().visibility() != null);
-        var confirmed =
-                fixture.context()
-                        .selectResponse(
-                                new ResponseCandidate(
-                                        fixture.context(), ResponseKind.CONFIRMATION, null, 1004L));
-        assertInstanceOf(Granted.class, confirmed);
+        var confirmed = fixture.context().confirmDelivery(1004L);
+        org.junit.jupiter.api.Assertions.assertTrue(confirmed);
         assertNull(
-                confirmed.after().selectedResponse(),
+                fixture.context().snapshot().selectedResponse(),
                 "Scheduler publishes outside this transition");
         verify(fixture.decode(), never()).ownership(any());
     }

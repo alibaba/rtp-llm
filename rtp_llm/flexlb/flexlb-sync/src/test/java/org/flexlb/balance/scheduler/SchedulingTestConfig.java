@@ -62,15 +62,16 @@ public final class SchedulingTestConfig {
                 selected, "constructionState", (byte) 1);
         org.springframework.test.util.ReflectionTestUtils.setField(selected, "prefill", prefill);
         org.springframework.test.util.ReflectionTestUtils.setField(selected, "decode", decode);
-        var pins = new org.flexlb.balance.endpoint.WorkerEndpoint.GenerationPin[3];
-        org.springframework.test.util.ReflectionTestUtils.setField(selected, "pins", pins);
-        pins[0] = fixturePin(prefillEndpoint);
-        pins[1] = fixturePin(decodeEndpoint);
         org.springframework.test.util.ReflectionTestUtils.setField(
-                selected, "prefillIndex", (byte) 0);
+                selected, "prefillPin", fixturePin(prefillEndpoint));
         org.springframework.test.util.ReflectionTestUtils.setField(
-                selected, "decodeIndex", (byte) (decodeEndpoint == null ? -1 : 1));
-        RequestRoute route = RequestRoute.create(context, selected, reservation);
+                selected, "decodePin", fixturePin(decodeEndpoint));
+        var assignments = new java.util.ArrayList<org.flexlb.dao.loadbalance.ServerStatus>();
+        assignments.add(prefill);
+        if (decode != null) assignments.add(decode);
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                selected, "assignments", assignments);
+        RequestRoute route = selected.attachReservation(reservation);
         context.data()
                 .initializeExecutionOrder(enqueuedAtMs, fixtureQueueSequence.incrementAndGet());
         return route;
@@ -88,7 +89,7 @@ public final class SchedulingTestConfig {
         return pin;
     }
 
-    static org.flexlb.balance.PlacementResult<RequestRoute, PlacementKey> prepareRoute(
+    public static org.flexlb.balance.PlacementResult<RequestRoute, PlacementKey> prepareRoute(
             RequestContext context,
             java.util.function.Function<
                             RequestRoute,

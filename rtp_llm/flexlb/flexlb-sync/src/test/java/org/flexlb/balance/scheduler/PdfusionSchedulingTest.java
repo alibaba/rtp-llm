@@ -85,7 +85,16 @@ class PdfusionSchedulingTest {
                         call ->
                                 java.util.concurrent.CompletableFuture.completedFuture(
                                         LinearDeliveryFixture.ack(call.getArgument(2))));
-        DeliveryDispatcher delivery = new DeliveryDispatcher(grpc, service, reporter);
+        DeliveryDispatcher delivery =
+                new DeliveryDispatcher(
+                        grpc,
+                        service,
+                        reporter,
+                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
+                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                                .decodeAdmissionCapacity(service),
+                        org.mockito.Mockito.mock(
+                                org.flexlb.balance.scheduler.DeliveryExecution.class));
         EndpointRegistry endpoints =
                 new EndpointRegistry(
                         service,
@@ -162,7 +171,9 @@ class PdfusionSchedulingTest {
                         router,
                         mock(DecodePreemption.class),
                         availability);
-        AbstractRequestScheduler scheduler = ((AbstractRequestScheduler) org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle));
+        AbstractRequestScheduler scheduler =
+                ((AbstractRequestScheduler)
+                        org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle));
         try {
             long requestId = 920001L;
             var context = RequestProtocolTestSupport.context(config, requestId);
@@ -172,7 +183,8 @@ class PdfusionSchedulingTest {
                                     .setRequestId(requestId)
                                     .build()
                                     .toByteString());
-            Response response = SchedulerTestServices.entry(scheduler).submit(context).get(3, TimeUnit.SECONDS);
+            Response response =
+                    SchedulerTestServices.entry(scheduler).submit(context).get(3, TimeUnit.SECONDS);
             assertTrue(
                     response.isSuccess(), "PDFUSION route failed: " + response.getErrorMessage());
             assertEquals(
@@ -182,11 +194,7 @@ class PdfusionSchedulingTest {
             assertEquals(1, SchedulerTestSupport.repository(lifecycle).liveRequestCount());
             PrefillEndpoint endpoint =
                     (PrefillEndpoint) endpoints.get(RoleType.PDFUSION, worker.getIpPort());
-            assertEquals(
-                    1,
-                    endpoint.ownership
-                            .admissionSummary(0, endpoint.requestLimit)
-                            .occupiedRequests());
+            assertEquals(1, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
             var committedWork = endpoint.captureRouteProjectionInputs().work();
             assertTrue(committedWork.containsRequest(requestId));
             TaskInfo finished = new TaskInfo();
@@ -217,12 +225,8 @@ class PdfusionSchedulingTest {
             endpoint.publishStatus(projection);
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
-            assertEquals(
-                    0,
-                    endpoint.ownership
-                            .admissionSummary(0, endpoint.requestLimit)
-                            .occupiedRequests());
-            assertEquals(0, endpoint.ownership.stats().batchCount());
+            assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+            assertEquals(0, endpoint.stats().batchCount());
             assertTrue(
                     committedWork.containsRequest(requestId), "published snapshots stay immutable");
             assertTrue(!endpoint.captureRouteProjectionInputs().work().containsRequest(requestId));

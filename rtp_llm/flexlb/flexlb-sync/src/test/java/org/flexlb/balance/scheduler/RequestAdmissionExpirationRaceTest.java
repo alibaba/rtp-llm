@@ -52,7 +52,7 @@ class RequestAdmissionExpirationRaceTest {
         var prefill = mock(PrefillEndpoint.class);
         var cleanupFailure = new IllegalStateException("first Prefill cleanup failed");
         var releases = new AtomicInteger();
-        when(prefill.release(org.mockito.ArgumentMatchers.isNull(), any()))
+        when(prefill.releaseRequest(any()))
                 .thenAnswer(
                         call -> {
                             if (releases.incrementAndGet() == 1) {
@@ -81,8 +81,10 @@ class RequestAdmissionExpirationRaceTest {
                     assertNotNull(admission);
                     assertEquals(
                             org.flexlb.balance.PlacementResult.Status.SUCCESS,
-                            registry.commitRoute(
-                                    item, RequestProtocolTestSupport.publication(() -> true)));
+                            RequestProtocolTestSupport.commitRoute(
+                                    registry,
+                                    item,
+                                    RequestProtocolTestSupport.publication(() -> true)));
                 }
             }
             assertTrue(RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry));
@@ -162,11 +164,13 @@ class RequestAdmissionExpirationRaceTest {
                 assertNotNull(admission);
                 assertEquals(
                         org.flexlb.balance.PlacementResult.Status.SUCCESS,
-                        registry.commitRoute(
-                                item, RequestProtocolTestSupport.publication(() -> true)));
+                        RequestProtocolTestSupport.commitRoute(
+                                registry,
+                                item,
+                                RequestProtocolTestSupport.publication(() -> true)));
             }
             var cleanupFailure = new IllegalStateException("external completion cleanup failed");
-            when(prefill.release(null, item)).thenThrow(cleanupFailure).thenReturn(true);
+            when(prefill.releaseRequest(item)).thenThrow(cleanupFailure).thenReturn(true);
             if (asynchronous) {
                 assertTrue(
                         registry.publish(
@@ -192,7 +196,7 @@ class RequestAdmissionExpirationRaceTest {
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
             assertEquals(0, SchedulerTestSupport.repository(registry).liveRequestCount());
-            verify(prefill, times(2)).release(null, item);
+            verify(prefill, times(2)).releaseRequest(item);
         } finally {
             SchedulerTestSupport.timer(
                             org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry))
@@ -232,15 +236,17 @@ class RequestAdmissionExpirationRaceTest {
                             null,
                             requestContext.snapshot().createdAtMs());
             var cleanupFailure = new IllegalStateException("Prefill cleanup failed");
-            when(prefill.release(null, item)).thenThrow(cleanupFailure).thenReturn(true);
+            when(prefill.releaseRequest(item)).thenThrow(cleanupFailure).thenReturn(true);
             try (var admission = registry.claimAdmissionHandle(302L, future);
                     var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertTrue(
-                        (registry.commitRoute(
-                                        item, RequestProtocolTestSupport.publication(() -> true))
+                        (RequestProtocolTestSupport.commitRoute(
+                                        registry,
+                                        item,
+                                        RequestProtocolTestSupport.publication(() -> true))
                                 == org.flexlb.balance.PlacementResult.Status.SUCCESS));
-                registry.onDeliveryFact(
+                registry.onDeliveryResult(
                         new ContextResult.PreparationFailure(
                                 null, item, "preparation failed", System.currentTimeMillis()));
                 assertSame(
@@ -262,7 +268,7 @@ class RequestAdmissionExpirationRaceTest {
                             org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
                                             .liveRequestCount()
                                     == 0);
-            verify(prefill, times(2)).release(null, item);
+            verify(prefill, times(2)).releaseRequest(item);
             assertEquals(
                     RequestState.Phase.FAILED,
                     RequestState.from(requestContext.snapshot()).state());
@@ -327,13 +333,15 @@ class RequestAdmissionExpirationRaceTest {
                     var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertTrue(
-                        (registry.commitRoute(
-                                        item, RequestProtocolTestSupport.publication(() -> true))
+                        (RequestProtocolTestSupport.commitRoute(
+                                        registry,
+                                        item,
+                                        RequestProtocolTestSupport.publication(() -> true))
                                 == org.flexlb.balance.PlacementResult.Status.SUCCESS));
                 if (clientCancellation) {
                     registry.cancel(requestId, 0L, CancelReason.CLIENT_CANCELLED);
                 }
-                registry.onDeliveryFact(
+                registry.onDeliveryResult(
                         new ContextResult.PreparationFailure(
                                 null, item, "preparation failed", System.currentTimeMillis()));
                 if (clientCancellation) {
@@ -400,7 +408,7 @@ class RequestAdmissionExpirationRaceTest {
                     org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
                             .liveRequestCount());
             verify(decode, times(1)).release(reservation, DecodeResources.ReleaseReason.EXPIRED);
-            verify(prefill, times(1)).release(null, item);
+            verify(prefill, times(1)).releaseRequest(item);
         } finally {
             if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)) {
                 registry.closeOutstandingAndTerminalize();

@@ -1,11 +1,9 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.loadbalance.Request;
@@ -60,7 +58,7 @@ class RequestPreemptionRegressionTest {
     private DecodeEndpoint decode;
     private PrefillEndpoint prefill;
     private RequestRoute route;
-    private DeliveryClaim delivery;
+    private Delivery.Member delivery;
     private CompletableFuture<Response> response;
     private long statusVersion;
 
@@ -135,13 +133,17 @@ class RequestPreemptionRegressionTest {
             assertNotNull(admission);
             assertEquals(
                     org.flexlb.balance.PlacementResult.Status.SUCCESS,
-                    scheduler.commitRoute(
-                            route, RequestProtocolTestSupport.publication(() -> true)));
+                    RequestProtocolTestSupport.commitRoute(
+                            scheduler, route, RequestProtocolTestSupport.publication(() -> true)));
         }
         var permit = decode.acquireDispatchPermit(reservation, CAPACITY).handle();
         assertNotNull(permit);
         delivery =
-                scheduler.claimDelivery(route, DeliveryClaimKind.BATCH_ENQUEUE, BATCH_ID, permit);
+                DeliveryDispatcher.commitDelivery(
+                        scheduler,
+                        new org.flexlb.balance.scheduler.Delivery.Member(route, permit),
+                        Delivery.SendMode.BATCH_ENQUEUE,
+                        BATCH_ID);
         assertNotNull(delivery);
         assertTrue(scheduler.tryStartSend(delivery));
     }
@@ -155,7 +157,7 @@ class RequestPreemptionRegressionTest {
             // Supply actual sender/Worker terminal evidence only after the regression assertions.
             if (delivery != null) {
                 RequestProtocolTestSupport.transport(
-                        scheduler, delivery, DeliveryResult.delivered());
+                        scheduler, delivery, Delivery.Result.delivered());
             }
             if (route != null) {
                 reportDecode(null, true);
@@ -164,8 +166,8 @@ class RequestPreemptionRegressionTest {
                         context,
                         prefill,
                         RoleType.PREFILL,
-                        new PrefillState.PrefillRequestStatus(
-                                route, PrefillState.PrefillRequestStatus.Kind.COMPLETED, 0L));
+                        new PrefillEndpoint.PrefillRequestStatus(
+                                route, PrefillEndpoint.PrefillRequestStatus.Kind.COMPLETED, 0L));
             }
         } finally {
             SchedulerTestSupport.timer(
@@ -221,19 +223,13 @@ class RequestPreemptionRegressionTest {
                                 victimClaimed(),
                                 "ordinary cancellation cannot fabricate victim release proof"),
                 () -> assertNotEquals(Phase.CLOSED, context.snapshot().phase()),
-                () ->
-                        assertFalse(
-                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(scheduler)
-                                        .signals()
-                                        .delivery(delivery)
-                                        .toCompletableFuture()
-                                        .isDone()));
+                () -> assertFalse(delivery.completion().toCompletableFuture().isDone()));
     }
 
     @Test
     void historicalAllocationBeforeNotFoundDoesNotReleaseVictimOrItsKvHoldOnReceived()
             throws Exception {
-        RequestProtocolTestSupport.transport(scheduler, delivery, DeliveryResult.delivered());
+        RequestProtocolTestSupport.transport(scheduler, delivery, Delivery.Result.delivered());
         drainResponses();
         assertTrue(response.getNow(null).isSuccess(), "ACK precedes this preemption attempt");
         reportDecode(TaskPhase.KV_ALLOCATED, false);
@@ -268,13 +264,7 @@ class RequestPreemptionRegressionTest {
                         assertNotNull(
                                 context.snapshot().preemption(),
                                 "the Context must retain the unresolved attempt"),
-                () ->
-                        assertFalse(
-                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(scheduler)
-                                        .signals()
-                                        .preemption(preemption)
-                                        .toCompletableFuture()
-                                        .isDone()));
+                () -> assertFalse(preemption.completion().toCompletableFuture().isDone()));
     }
 
     @Test

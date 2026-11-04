@@ -2,6 +2,7 @@ package org.flexlb.balance.eviction;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.balance.eviction.DecodePreemptionPolicy.DecodeEvictionProposal;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestLifecycle;
@@ -68,6 +69,18 @@ class DecodePreemptionTest {
     @BeforeEach
     void setUp() {
         reporter = mock(RequestSchedulerReporter.class);
+        org.mockito.Mockito.doCallRealMethod()
+                .when(reporter)
+                .reportPreemptionVictims(
+                        org.mockito.ArgumentMatchers.anyLong(),
+                        anyInt(),
+                        any(),
+                        any(),
+                        any(),
+                        org.mockito.ArgumentMatchers.anyBoolean());
+        org.mockito.Mockito.doCallRealMethod()
+                .when(reporter)
+                .reportPreemptionCancelRequests(any(), any());
         dispatcher = mock(DeliveryDispatcher.class);
         requests = mock(RequestLifecycle.class);
         blockedEndpoint = mock(DecodeEndpoint.class);
@@ -86,7 +99,6 @@ class DecodePreemptionTest {
                                         requests),
                                 mock(org.flexlb.balance.scheduler.RequestTaskExecutor.class),
                                 mock(org.flexlb.balance.scheduler.TaskTimer.class),
-                                mock(org.flexlb.balance.scheduler.RequestSignals.class),
                                 reporter,
                                 SchedulingTestConfig.configService(config),
                                 SchedulingTestConfig.capacity(config),
@@ -158,7 +170,8 @@ class DecodePreemptionTest {
                 .setSchedulingMetadata(
                         SchedulingMetadata.explicit(70, System.currentTimeMillis() + 60_000L));
         var future =
-                new org.flexlb.balance.scheduler.RequestFuture((kind, response, failure) -> false);
+                new org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture(
+                        (kind, response, failure) -> false);
         org.springframework.test.util.ReflectionTestUtils.invokeMethod(
                 context.data(), "register", requests, future);
         org.flexlb.balance.scheduler.SchedulerTestSupport.bindOwner(context, requests);
@@ -287,9 +300,18 @@ class DecodePreemptionTest {
     @Test
     @DisplayName("A shut-down acquirer declines without side effects")
     void shutdownDeclines() {
-        acquirer.freezeAdmission();
+        acquirer.stopAdmission();
+        org.junit.jupiter.api.Assertions.assertTrue(acquirer.awaitIdle(System.nanoTime()));
         assertNull(tryReclaim(ctx(70), new CompletableFuture<>()));
         assertZeroSideEffect();
+    }
+
+    @Test
+    void failedSetupDoesNotStrandDrain() {
+        org.junit.jupiter.api.Assertions.assertThrows(
+                NullPointerException.class, () -> acquirer.tryReclaim(null, blockedEndpoint));
+        org.junit.jupiter.api.Assertions.assertTrue(acquirer.awaitIdle(System.nanoTime()));
+        acquirer.close();
     }
 
     // ─── Future states ──────────────────────────────────────────────────

@@ -11,11 +11,10 @@ import static org.flexlb.balance.scheduler.ContextResult.Cancellation;
 import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.Prediction;
-import static org.flexlb.balance.scheduler.ContextResult.Update;
-import static org.flexlb.balance.scheduler.ContextResult.UpdateKind;
+import static org.flexlb.balance.scheduler.RequestChangeAssertions.Update;
+import static org.flexlb.balance.scheduler.RequestChangeAssertions.UpdateKind;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -38,69 +37,88 @@ class RequestEngineObservationTest {
 
     @Test
     void laterActivityAndCancellationCannotMutateHistoricalSnapshotFacts() {
-        var fixture = RequestDeliveryClaimStateTest.fixture(DeliveryClaimKind.BATCH_ENQUEUE, false);
+        var fixture = RequestDeliveryClaimStateTest.fixture(Delivery.SendMode.BATCH_ENQUEUE, false);
         var context = fixture.context();
         var first =
-                context.recordEngineEvidence(
-                                new EngineEvidence(
-                                        fixture.route(),
-                                        fixture.reservation(),
-                                        RoleType.PREFILL,
-                                        EngineKind.ACTIVE,
-                                        0L,
-                                        null,
-                                        1100L))
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                                context,
+                                observedRequest ->
+                                        observedRequest.recordEngineEvidence(
+                                                new EngineEvidence(
+                                                        fixture.route(),
+                                                        fixture.reservation(),
+                                                        RoleType.PREFILL,
+                                                        EngineKind.ACTIVE,
+                                                        0L,
+                                                        null,
+                                                        1100L)))
                         .after();
         var firstDuplicate =
-                context.recordEngineEvidence(
-                        new EngineEvidence(
-                                fixture.route(),
-                                fixture.reservation(),
-                                RoleType.PREFILL,
-                                EngineKind.ACTIVE,
-                                0L,
-                                null,
-                                1100L));
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        context,
+                        observedRequest ->
+                                observedRequest.recordEngineEvidence(
+                                        new EngineEvidence(
+                                                fixture.route(),
+                                                fixture.reservation(),
+                                                RoleType.PREFILL,
+                                                EngineKind.ACTIVE,
+                                                0L,
+                                                null,
+                                                1100L)));
         assertEquals(UpdateKind.NO_CHANGE, firstDuplicate.kind());
         assertSame(first, firstDuplicate.before());
         assertSame(first, firstDuplicate.after());
         var later =
-                context.recordEngineEvidence(
-                                new EngineEvidence(
-                                        fixture.route(),
-                                        fixture.reservation(),
-                                        RoleType.PREFILL,
-                                        EngineKind.ACTIVE,
-                                        0L,
-                                        null,
-                                        1200L))
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                                context,
+                                observedRequest ->
+                                        observedRequest.recordEngineEvidence(
+                                                new EngineEvidence(
+                                                        fixture.route(),
+                                                        fixture.reservation(),
+                                                        RoleType.PREFILL,
+                                                        EngineKind.ACTIVE,
+                                                        0L,
+                                                        null,
+                                                        1200L)))
                         .after();
         assertNotSame(first, later);
-        assertSame(first.facts(), later.facts(), "activity alone must preserve control facts");
+        assertSame(first.route(), later.route());
+        assertSame(first.delivery(), later.delivery());
+        assertEquals(first.engine(), later.engine());
+        assertEquals(first.close(), later.close());
+        assertEquals(first.phase(), later.phase());
         assertSame(first.deadlines(), later.deadlines(), "existing timer wake-up remains valid");
         var laterDuplicate =
-                context.recordEngineEvidence(
-                        new EngineEvidence(
-                                fixture.route(),
-                                fixture.reservation(),
-                                RoleType.PREFILL,
-                                EngineKind.ACTIVE,
-                                0L,
-                                null,
-                                1200L));
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        context,
+                        observedRequest ->
+                                observedRequest.recordEngineEvidence(
+                                        new EngineEvidence(
+                                                fixture.route(),
+                                                fixture.reservation(),
+                                                RoleType.PREFILL,
+                                                EngineKind.ACTIVE,
+                                                0L,
+                                                null,
+                                                1200L)));
         assertEquals(UpdateKind.NO_CHANGE, laterDuplicate.kind());
         assertSame(later, laterDuplicate.before());
         assertSame(later, laterDuplicate.after());
         var foreign =
-                context.recordEngineEvidence(
-                        new EngineEvidence(
-                                null,
-                                fixture.reservation(),
-                                RoleType.PREFILL,
-                                EngineKind.ACTIVE,
-                                0L,
-                                null,
-                                1250L));
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        context,
+                        observedRequest ->
+                                observedRequest.recordEngineEvidence(
+                                        new EngineEvidence(
+                                                null,
+                                                fixture.reservation(),
+                                                RoleType.PREFILL,
+                                                EngineKind.ACTIVE,
+                                                0L,
+                                                null,
+                                                1250L)));
         assertEquals(UpdateKind.STALE, foreign.kind());
         assertSame(later, foreign.before());
         assertSame(later, foreign.after());
@@ -137,29 +155,26 @@ class RequestEngineObservationTest {
         var context = RequestCleanupPassTest.endingContext(7504L);
         var selected =
                 new ContextResult.ResponseCandidate(
-                        context,
-                        ContextResult.ResponseKind.TERMINAL,
-                        context.snapshot().outcome(),
-                        1002L);
+                        context, ContextResult.ResponseKind.TERMINAL, 1002L);
         var equalCandidate =
-                new ContextResult.ResponseCandidate(
-                        context, selected.kind(), selected.result(), selected.nowMs());
+                new ContextResult.ResponseCandidate(context, selected.kind(), selected.nowMs());
         assertEquals(selected, equalCandidate);
-        assertSame(selected, RequestCleanupPassTest.granted(context.selectResponse(selected)));
+        org.junit.jupiter.api.Assertions.assertTrue(context.selectResponse(selected));
         var committed = context.snapshot();
-        var rejected =
-                assertInstanceOf(
-                        ContextResult.Rejected.class, context.selectResponse(equalCandidate));
-        assertEquals(ContextResult.Rejection.ALREADY_SELECTED, rejected.reason());
+        org.junit.jupiter.api.Assertions.assertFalse(context.selectResponse(equalCandidate));
         assertSame(selected, committed.selectedResponse());
         assertSame(committed, context.snapshot());
-        assertSame(selected, RequestCleanupPassTest.granted(context.selectResponse(selected)));
+        org.junit.jupiter.api.Assertions.assertTrue(context.selectResponse(selected));
     }
 
     private static void verifyAtomicObservation(RoleType role) throws Exception {
-        var fixture = RequestDeliveryClaimStateTest.fixture(DeliveryClaimKind.BATCH_ENQUEUE, false);
+        var fixture = RequestDeliveryClaimStateTest.fixture(Delivery.SendMode.BATCH_ENQUEUE, false);
         var context = fixture.context();
-        context.recordDeliveryResult(new Prediction(fixture.delivery(), 3000L, 1002L));
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.recordDeliveryResult(
+                                new Prediction(fixture.delivery(), 3000L, 1002L)));
         var before = context.snapshot();
         var visibility = before.deadlines().visibility();
         var inactivity = before.deadlines().inactivity();
@@ -173,15 +188,19 @@ class RequestEngineObservationTest {
                         executor.submit(
                                 () -> {
                                     entered.countDown();
-                                    return context.recordEngineEvidence(
-                                            new EngineEvidence(
-                                                    fixture.route(),
-                                                    fixture.reservation(),
-                                                    role,
-                                                    EngineKind.ACTIVE,
-                                                    0L,
-                                                    null,
-                                                    2000L));
+                                    return org.flexlb.balance.scheduler.RequestChangeAssertions
+                                            .record(
+                                                    context,
+                                                    observedRequest ->
+                                                            observedRequest.recordEngineEvidence(
+                                                                    new EngineEvidence(
+                                                                            fixture.route(),
+                                                                            fixture.reservation(),
+                                                                            role,
+                                                                            EngineKind.ACTIVE,
+                                                                            0L,
+                                                                            null,
+                                                                            2000L)));
                                 });
                 assertTrue(entered.await(5, TimeUnit.SECONDS));
                 assertFalse(

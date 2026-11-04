@@ -72,7 +72,8 @@ class RequestAdmissionResourceLeakTest {
             assertNotNull(admission);
             assertEquals(
                     PlacementResult.Status.BLOCKED,
-                    lifecycle.commitRoute(
+                    RequestProtocolTestSupport.commitRoute(
+                            lifecycle,
                             registered.item(),
                             RequestProtocolTestSupport.publication(() -> false)));
             rollbackUnpublished(admission, registered);
@@ -92,7 +93,8 @@ class RequestAdmissionResourceLeakTest {
             assertThrows(
                     IllegalStateException.class,
                     () ->
-                            lifecycle.commitRoute(
+                            RequestProtocolTestSupport.commitRoute(
+                                    lifecycle,
                                     registered.item(),
                                     RequestProtocolTestSupport.publication(
                                             () -> {
@@ -111,8 +113,10 @@ class RequestAdmissionResourceLeakTest {
         RequestProtocolTestSupport.beginRoutePublication(lifecycle, registered);
         assertEquals(
                 PlacementResult.Status.CLOSED,
-                lifecycle.commitRoute(
-                        registered.item(), RequestProtocolTestSupport.publication(() -> true)));
+                RequestProtocolTestSupport.commitRoute(
+                        lifecycle,
+                        registered.item(),
+                        RequestProtocolTestSupport.publication(() -> true)));
         assertSame(registered.item(), activeRoute(3L));
         verify(registered.item().decodeEp(), never())
                 .release(any(), eq(DecodeResources.ReleaseReason.COUNTERPART_FINISHED));
@@ -136,8 +140,10 @@ class RequestAdmissionResourceLeakTest {
         try {
             assertEquals(
                     PlacementResult.Status.SUCCESS,
-                    lifecycle.commitRoute(
-                            registered.item(), RequestProtocolTestSupport.publication(() -> true)));
+                    RequestProtocolTestSupport.commitRoute(
+                            lifecycle,
+                            registered.item(),
+                            RequestProtocolTestSupport.publication(() -> true)));
             assertEquals(
                     RequestState.Phase.CANCEL_REQUESTED,
                     lifecycle.cancel(4L, 0L, CancelReason.CLIENT_CANCELLED).state());
@@ -217,13 +223,13 @@ class RequestAdmissionResourceLeakTest {
         Registered victim = registerItem(61L);
         Registered incoming = registerItem(62L);
         RequestProtocolTestSupport.beginRoutePublication(lifecycle, victim);
-        lifecycle.onQueueEvent(victim.item(), RequestLifecycle.QueueKind.REJECTED, null);
+        lifecycle.rejectRoute(victim.item(), null);
         Response response = victim.future().get(5, TimeUnit.SECONDS);
         assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), response.getCode());
         assertEquals(
                 "Worker scheduling queue rejected request: endpoint publication failed",
                 response.getErrorMessage());
-        lifecycle.onQueueEvent(victim.item(), RequestLifecycle.QueueKind.REJECTED, null);
+        lifecycle.rejectRoute(victim.item(), null);
         lifecycle.cancel(61L, 0L, CancelReason.CLIENT_CANCELLED);
         verify(victim.item().decodeEp(), times(1))
                 .release(
@@ -268,13 +274,16 @@ class RequestAdmissionResourceLeakTest {
             if (publicationOutcome.equals("THROW")) {
                 assertThrows(
                         IllegalStateException.class,
-                        () -> lifecycle.commitRoute(registered.item(), publication));
+                        () ->
+                                RequestProtocolTestSupport.commitRoute(
+                                        lifecycle, registered.item(), publication));
             } else {
                 assertEquals(
                         publicationOutcome.equals("SUCCESS")
                                 ? PlacementResult.Status.SUCCESS
                                 : PlacementResult.Status.BLOCKED,
-                        lifecycle.commitRoute(registered.item(), publication));
+                        RequestProtocolTestSupport.commitRoute(
+                                lifecycle, registered.item(), publication));
             }
         } finally {
             if (!publicationOutcome.equals("SUCCESS")) {
@@ -344,7 +353,7 @@ class RequestAdmissionResourceLeakTest {
                 .item()
                 .ctx()
                 .bindPlacement(
-                        admission.token,
+                        admission,
                         registered.item(),
                         ContextResult.PublicationResult.ROLLBACK_COMPLETED);
     }

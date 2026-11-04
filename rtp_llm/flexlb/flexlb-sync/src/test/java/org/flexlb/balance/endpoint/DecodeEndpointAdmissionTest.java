@@ -1267,11 +1267,9 @@ class DecodeEndpointAdmissionTest {
 
     private static ReentrantLock decodeAdmissionLock(DecodeEndpoint target)
             throws ReflectiveOperationException {
-        java.lang.reflect.Field owner = DecodeEndpoint.class.getDeclaredField("state");
-        owner.setAccessible(true);
-        java.lang.reflect.Field field = DecodeState.class.getDeclaredField("admissionLock");
+        java.lang.reflect.Field field = DecodeEndpoint.class.getDeclaredField("admissionLock");
         field.setAccessible(true);
-        return (ReentrantLock) field.get(owner.get(target));
+        return (ReentrantLock) field.get(target);
     }
 
     private DecodeResources.ReservationHandle reserve(

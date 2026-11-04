@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork;
+
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -29,10 +31,8 @@ import static com.google.common.base.Preconditions.checkState;
 /** Shared test setup and teardown for scheduler protocol tests. */
 public final class SchedulerTestServices {
 
-    public static RequestSchedulerEntry entry(AbstractRequestScheduler scheduler) {
-        return new RequestSchedulerEntry(scheduler, SchedulerTestServices.lifecycle(scheduler),
-                (RequestWorkerSelector) org.springframework.test.util.ReflectionTestUtils.getField(
-                        scheduler, "router"), scheduler instanceof QueuedRequestScheduler);
+    public static RequestLifecycle entry(AbstractRequestScheduler scheduler) {
+        return SchedulerTestServices.lifecycle(scheduler);
     }
 
     private static final long EXPIRATION_MAINTENANCE_INTERVAL_MS = 60_000L;
@@ -46,20 +46,16 @@ public final class SchedulerTestServices {
     private final LongSupplier clock;
 
     private final DeliveryExecution deliveries;
-    final RequestExecution.Dependencies queueDependencies;
     final EngineGrpcClient engineClient;
 
-    private final RequestSignals signals = new RequestSignals();
 
     DeliveryExecution deliveries() {
         return deliveries;
     }
 
-    public RequestSignals signals() {
-        return signals;
-    }
 
     private final ScheduledTaskTimer taskTimer = new ScheduledTaskTimer();
+    private final ScheduledTaskTimer deadlineTaskTimer = new ScheduledTaskTimer(1, "request-scheduler-expiration-");
 
     public TaskTimer taskTimer() {
         return taskTimer;
@@ -119,14 +115,24 @@ public final class SchedulerTestServices {
     /** Replaces a test dependency in both setup and the already assembled request owners. */
     public static void setDependency(SchedulerTestServices fixture, String name, Object value) {
         org.springframework.test.util.ReflectionTestUtils.setField(fixture, name, value);
+        if (name.equals("deliveries")) {
+            org.springframework.test.util.ReflectionTestUtils.setField(fixture.dispatcher, "execution", value);
+            return;
+        }
+        if (name.equals("taskTimer")) {
+            org.springframework.test.util.ReflectionTestUtils.setField(fixture.dispatcher, "timer", value);
+            return;
+        }
+        if (name.equals("dispatcher")) {
+            org.springframework.test.util.ReflectionTestUtils.setField(value, "execution", fixture.deliveries());
+            org.springframework.test.util.ReflectionTestUtils.setField(value, "timer", fixture.taskTimer());
+        }
         String field = name.equals("timer") ? "expirationTimer" : name;
         if (!java.util.Set.of(
                         "tasks",
-                        "signals",
                         "dispatcher",
                         "responseCompletions",
                         "deliveryReporter",
-                        "taskTimer",
                         "timer")
                 .contains(name)) return;
         synchronized (owners) {
@@ -151,11 +157,9 @@ public final class SchedulerTestServices {
         for (String name :
                 new String[] {
                     "tasks",
-                    "signals",
                     "dispatcher",
                     "responseCompletions",
-                    "deliveryReporter",
-                    "taskTimer"
+                    "deliveryReporter"
                 }) {
             try {
                 var source = SchedulerTestServices.class.getDeclaredField(name);
@@ -175,30 +179,26 @@ public final class SchedulerTestServices {
             org.flexlb.config.FlexlbConfig config,
             org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity capacity,
             org.flexlb.service.RecentCacheKeyTraceReporter trace) {
+        org.springframework.test.util.ReflectionTestUtils.setField(dispatcher, "decodeAdmissionCapacity", capacity);
         var owner =
-                new RequestLifecycle(
-                        requests(),
-                        tasks,
-                        deadlines(),
-                        signals(),
-                        dispatcher,
-                        responseCompletions(),
-                        deliveryReporter,
-                        taskTimer(),
-                        capacity,
-                        trace);
+                new RequestLifecycle(requests(),
+tasks,
+deadlines(),
+dispatcher,
+responseCompletions(),
+deliveryReporter,
+trace);
         owners.put(owner, this);
         return owner;
     }
 
     public RequestLifecycle boundLifecycle(
             RequestScheduler scheduler,
-            RequestLifecycle.Scheduling timing,
             org.flexlb.config.FlexlbConfig config,
             org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity capacity,
             org.flexlb.service.RecentCacheKeyTraceReporter trace) {
         var lifecycle = newLifecycle(config, capacity, trace);
-        lifecycle.bindScheduler(scheduler, timing);
+        lifecycle.bindScheduler(scheduler);
         return lifecycle;
     }
 
@@ -260,11 +260,10 @@ public final class SchedulerTestServices {
         this.endpoints = Objects.requireNonNull(endpoints, "endpoints");
         this.deliveryReporter = Objects.requireNonNull(deliveryReporter, "deliveryReporter");
         deliveryReporter.registerExecutor(deliveries);
-        this.queueDependencies =
-                new RequestExecution.Dependencies(
-                        deliveries, deliveryReporter, this::recordFailure, QueuedRequestScheduler::runPrefill);
         this.requestReporter = Objects.requireNonNull(requestReporter, "requestReporter");
         this.dispatcher = Objects.requireNonNull(dispatcher, "dispatcher");
+        org.springframework.test.util.ReflectionTestUtils.setField(dispatcher, "execution", deliveries);
+        org.springframework.test.util.ReflectionTestUtils.setField(dispatcher, "timer", taskTimer);
         if (org.springframework.test.util.ReflectionTestUtils.getField(dispatcher, "grpcClient")
                 == null) {
             org.springframework.test.util.ReflectionTestUtils.setField(
@@ -276,7 +275,7 @@ public final class SchedulerTestServices {
                         config.loadBalanceConfig()
                                 .getInternalRuntime()
                                 .getBatchDispatchCompletionThreads());
-        this.timer = new ExpirationTimer(requests);
+        this.timer = new ExpirationTimer(requests, deadlineTaskTimer);
     }
 
     private static final long TERMINAL_RETENTION_MS = 10_000L;
@@ -315,18 +314,18 @@ public final class SchedulerTestServices {
         }
         reportEndpoints(
                 "Prefill",
-                () -> endpoints.endpointSnapshot(RoleType.PREFILL),
-                endpoint -> ((PrefillEndpoint) endpoint).reportBatchMetrics(deliveryReporter),
+                endpoints::prefillStats,
+                deliveryReporter::reportPrefill,
                 (address, endpoint) ->
                         requestReporter.reportPrefillQueueDepth(
                                 address,
-                                ((PrefillEndpoint) endpoint).ownership.progress().queueDepth()));
+                                endpoint.queueDepth()));
         reportEndpoints(
                 "Decode",
-                () -> endpoints.endpointSnapshot(RoleType.DECODE),
-                endpoint -> ((DecodeEndpoint) endpoint).reportBatchMetrics(deliveryReporter),
+                endpoints::decodeStats,
+                deliveryReporter::reportDecode,
                 (address, endpoint) ->
-                        ((DecodeEndpoint) endpoint).reportAdmissionMetrics(requestReporter));
+                        requestReporter.reportDecodePreemption(address, endpoint.resourceSnapshot()));
     }
 
     private static <T> void reportEndpoints(
@@ -390,8 +389,8 @@ public final class SchedulerTestServices {
                                 delivery ->
                                         scope == SettlementScope.ALL
                                                 || delivery.kind()
-                                                        == DeliveryClaimKind.BATCH_ENQUEUE)
-                        .map(delivery -> signals.delivery(delivery).toCompletableFuture())
+                                                        == Delivery.SendMode.BATCH_ENQUEUE)
+                        .map(delivery -> delivery.completion().toCompletableFuture())
                         .toArray(CompletableFuture[]::new);
         try {
             CompletableFuture.allOf(pending)
@@ -472,6 +471,7 @@ public final class SchedulerTestServices {
                 return new ShutdownResult(requestedMode, completedMode, drained);
             }
             if (scheduler != null) {
+                firstFailure = Failures.run(firstFailure, scheduler::stop);
                 firstFailure = Failures.run(firstFailure, scheduler::close);
             }
             var owners = new java.util.LinkedHashSet<RequestLifecycle>();
@@ -479,7 +479,7 @@ public final class SchedulerTestServices {
                 owners.add(lifecycle(scheduler));
             }
             for (var context : requests.snapshotActive()) {
-                owners.add(context.data().getScheduler());
+                owners.add(context.data().getLifecycle());
             }
             for (var owner : owners) {
                 firstFailure = Failures.run(firstFailure, owner::stopAdmissionsAndAwaitCompletion);
@@ -490,7 +490,7 @@ public final class SchedulerTestServices {
                                 firstFailure,
                                 () ->
                                         context.data()
-                                                .getScheduler()
+                                                .getLifecycle()
                                                 .cancel(context, 0L, CancelReason.SHUTDOWN));
             }
             firstFailure = Failures.run(firstFailure, deliveries::awaitDeliveries);
@@ -502,6 +502,7 @@ public final class SchedulerTestServices {
             firstFailure =
                     Failures.run(firstFailure, () -> awaitDeliveryCleanup(SettlementScope.ALL));
             firstFailure = Failures.run(firstFailure, timer::close);
+            firstFailure = Failures.run(firstFailure, deadlineTaskTimer::close);
             firstFailure = Failures.run(firstFailure, tasks::awaitIdle);
             for (var owner : owners) {
                 firstFailure = Failures.run(firstFailure, owner::closeOutstandingAndTerminalize);

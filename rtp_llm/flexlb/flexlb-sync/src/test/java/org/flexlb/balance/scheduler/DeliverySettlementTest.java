@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DeliverySettlementTestSupport;
@@ -85,10 +84,10 @@ class DeliverySettlementTest {
                                         ignored -> new java.util.concurrent.CompletableFuture<>()));
         ledger = new DeliverySettlementTestSupport();
         prefill = mock(PrefillEndpoint.class);
-        when(prefill.release(org.mockito.ArgumentMatchers.isNull(), any()))
+        when(prefill.releaseRequest(any()))
                 .thenAnswer(
                         invocation -> {
-                            RequestRoute item = invocation.getArgument(1);
+                            RequestRoute item = invocation.getArgument(0);
                             RequestContext requestContext =
                                     registry.requests.findActive(item.requestId());
                             assertTrue(
@@ -122,7 +121,7 @@ class DeliverySettlementTest {
         Member member = member(1L, 11L);
         ledger.commit(11L, List.of(member.item()));
         reject(member);
-        assertFalse(member.item().future().get(2, TimeUnit.SECONDS).isSuccess());
+        assertFalse(member.item().ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
         assertOccupancy(1, 1);
         assertTrue(registry.requests.isCurrent(member.requestContext()));
         cleaned(member);
@@ -161,18 +160,9 @@ class DeliverySettlementTest {
                 .complete(EngineGrpcClient.CancelReply.REQUEST_FENCED);
         assertEquals(1, decode.routingView().engineCapacityUsed());
         assertOccupancy(1, 1);
-        assertFalse(
-                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                        .signals()
-                        .delivery(member.claim())
-                        .toCompletableFuture()
-                        .isDone());
+        assertFalse(member.claim().completion().toCompletableFuture().isDone());
         DeliverySettlementTestSupport.decodeStatus(decode, 2L, true);
-        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                .signals()
-                .delivery(member.claim())
-                .toCompletableFuture()
-                .get(2, TimeUnit.SECONDS);
+        member.claim().completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         assertEquals(0, decode.routingView().engineCapacityUsed());
@@ -194,14 +184,14 @@ class DeliverySettlementTest {
         for (int i = 1; i < members.size(); i++) {
             Member member = members.get(i);
             member.claim()
-                    .item()
+                    .route()
                     .ctx()
                     .data()
-                    .getScheduler()
-                    .onDeliveryFact(
+                    .getLifecycle()
+                    .onDeliveryResult(
                             new ContextResult.TransportResult(
                                     member.claim(),
-                                    DeliveryResult.delivered(),
+                                    Delivery.Result.delivered(),
                                     System.currentTimeMillis()));
             ledger.finish(20L, member.item())
                     .forEach(
@@ -242,14 +232,14 @@ class DeliverySettlementTest {
             reject(rejected);
             successful
                     .claim()
-                    .item()
+                    .route()
                     .ctx()
                     .data()
-                    .getScheduler()
-                    .onDeliveryFact(
+                    .getLifecycle()
+                    .onDeliveryResult(
                             new ContextResult.TransportResult(
                                     successful.claim(),
-                                    DeliveryResult.delivered(),
+                                    Delivery.Result.delivered(),
                                     System.currentTimeMillis()));
             ledger.finish(30L + i, successful.item());
             assertOccupancy(1, 1);
@@ -288,16 +278,12 @@ class DeliverySettlementTest {
             cleanup.get(2, TimeUnit.SECONDS);
             finished.get(2, TimeUnit.SECONDS);
         }
-        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                .signals()
-                .delivery(member.claim())
-                .toCompletableFuture()
-                .get(2, TimeUnit.SECONDS);
+        member.claim().completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         assertStaleDelivery(
                 member,
-                DeliveryResult.prefillRejected(new IllegalStateException("prepare rejected")));
+                Delivery.Result.prefillRejected(new IllegalStateException("prepare rejected")));
         ledger.finish(40L, member.item());
         assertOccupancy(0, 0);
     }
@@ -340,7 +326,7 @@ class DeliverySettlementTest {
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         assertOccupancy(1, 1);
         assertSame(replacement.requestContext(), registry.requests.findActive(50L));
-        assertFalse(replacement.item().future().isDone());
+        assertFalse(replacement.item().ctx().data().getFuture().isDone());
     }
 
     @Test
@@ -354,7 +340,7 @@ class DeliverySettlementTest {
                             throw new IllegalStateException("injected endpoint failure");
                         })
                 .when(prefill)
-                .release(null, member.item());
+                .releaseRequest(member.item());
         reject(member);
         // A CLEANED ACK proves release is allowed; it does not prove local resource release
         // succeeded.
@@ -366,17 +352,13 @@ class DeliverySettlementTest {
         await(failedAttempts);
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
-        assertFalse(member.item().future().get(2, TimeUnit.SECONDS).isSuccess());
+        assertFalse(member.item().ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
         assertOccupancy(1, 1);
         assertTrue(registry.requests.isCurrent(member.requestContext()));
         var failure = SchedulerTestSupport.failure(registry);
         assertNotNull(failure);
         assertTrue(failure.getMessage().contains("injected endpoint failure"));
-        var physicalSettlement =
-                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                        .signals()
-                        .delivery(member.claim())
-                        .toCompletableFuture();
+        var physicalSettlement = member.claim().completion().toCompletableFuture();
         assertFalse(
                 physicalSettlement.isDone(),
                 "physical settlement must retain the failed Prefill release obligation");
@@ -384,7 +366,7 @@ class DeliverySettlementTest {
         assertTrue(
                 member.requestContext().snapshot().close().decodeSettled(),
                 "the successfully released side remains settled");
-        verify(prefill, after(150).times(3)).release(null, member.item());
+        verify(prefill, after(150).times(3)).releaseRequest(member.item());
         verify(member.item().decodeEp(), times(1))
                 .release(
                         member.item().decodeReservation(),
@@ -392,9 +374,9 @@ class DeliverySettlementTest {
 
         // Restore the real release operation and resume the same request's remaining resource
         // obligation.
-        doAnswer(call -> EndpointTestSupport.releaseRequest(ledger.prefill, call.getArgument(1)))
+        doAnswer(call -> EndpointTestSupport.releaseRequest(ledger.prefill, call.getArgument(0)))
                 .when(prefill)
-                .release(null, member.item());
+                .releaseRequest(member.item());
         registry.scheduleClose(member.requestContext());
         physicalSettlement.get(2, TimeUnit.SECONDS);
         SchedulerTestSupport.awaitRequestWork(
@@ -408,7 +390,7 @@ class DeliverySettlementTest {
                 failure,
                 SchedulerTestSupport.failure(registry),
                 "actual recovery must retain the recorded facility failure");
-        verify(prefill, times(4)).release(null, member.item());
+        verify(prefill, times(4)).releaseRequest(member.item());
         verify(member.item().decodeEp(), times(1))
                 .release(
                         member.item().decodeReservation(),
@@ -430,26 +412,21 @@ class DeliverySettlementTest {
                 reservation =
                         EndpointTestSupport.reserveUnqueuedDecode(decode, pin, 131L, 1L, 2L, 50);
             }
-            var member = member(131L, 131L, decode, reservation, DeliveryClaimKind.ROUTE_DECISION);
+            var member = member(131L, 131L, decode, reservation, Delivery.SendMode.ROUTE_DECISION);
             ledger.commit(131L, List.of(member.item()));
             DeliverySettlementTestSupport.dispatchDecode(decode, reservation);
             DeliverySettlementTestSupport.decodeStatus(decode, 131L, false);
-            registry.onDeliveryFact(
+            registry.onDeliveryResult(
                     new ContextResult.RouteDelivered(
                             member.claim(), 0L, System.currentTimeMillis()));
-            assertTrue(member.item().future().get(2, TimeUnit.SECONDS).isSuccess());
+            assertTrue(member.item().ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
             assertTrue(decode.ownership(reservation).confirmed());
             assertEquals(1, decode.routingView().engineCapacityUsed());
             registry.cancel(131L, 0L, CancelReason.CLIENT_CANCELLED);
             assertNull(
                     member.requestContext().snapshot().delivery().abandonment(),
                     "route cancellation does not need batch abandonment");
-            assertFalse(
-                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                            .signals()
-                            .delivery(member.claim())
-                            .toCompletableFuture()
-                            .isDone());
+            assertFalse(member.claim().completion().toCompletableFuture().isDone());
             cleaned(member);
             verify(SchedulerTestSupport.engineClient(registry))
                     .cancelAsync(
@@ -467,7 +444,7 @@ class DeliverySettlementTest {
             assertFalse(registry.requests.isCurrent(member.requestContext()));
             assertNotNull(registry.requests.findTerminal(131L));
             assertTrue(
-                    member.item().future().join().isSuccess(),
+                    member.item().ctx().data().getFuture().join().isSuccess(),
                     "cancellation must preserve the first frontend ACK");
             assertNull(SchedulerTestSupport.failure(registry));
         } finally {
@@ -484,7 +461,7 @@ class DeliverySettlementTest {
         "PREFILL_REJECTED,true"
     })
     void failedDeliveryReleasesOnlyProvedUnacceptedDecodeOwnership(
-            DeliveryResult.Status source, boolean accepted) {
+            Delivery.Result.Status source, boolean accepted) {
         var decode =
                 spy(
                         EndpointTestSupport.decode(
@@ -512,21 +489,23 @@ class DeliverySettlementTest {
         }
         try {
             assertEquals(1, decode.routingView().engineCapacityUsed());
-            var settlement =
+            RequestProtocolTestSupport.closing(item);
+            context.completeClose(
+                    new ContextResult.CloseProgress(false, true, false, false),
+                    System.currentTimeMillis());
+            var failure =
                     RequestLifecycle.releaseResources(
-                            item,
-                            source == DeliveryResult.Status.NOT_SENT
+                            context,
+                            source == Delivery.Result.Status.NOT_SENT
                                     ? DecodeResources.ReleaseReason.NOT_SENT
-                                    : null,
-                            true,
-                            false);
-            boolean released = source == DeliveryResult.Status.NOT_SENT && !accepted;
-            assertEquals(released, settlement.decodeSettled());
-            assertTrue(settlement.prefillSettled());
-            org.junit.jupiter.api.Assertions.assertNull(settlement.failure());
+                                    : null);
+            boolean released = source == Delivery.Result.Status.NOT_SENT && !accepted;
+            assertEquals(released, context.snapshot().close().decodeSettled());
+            assertTrue(context.snapshot().close().prefillSettled());
+            org.junit.jupiter.api.Assertions.assertNull(failure);
             assertEquals(released ? 0 : 1, decode.routingView().engineCapacityUsed());
             assertEquals(!released, decode.ownership(reservation).owned());
-            verify(decode, source == DeliveryResult.Status.NOT_SENT ? times(1) : never())
+            verify(decode, source == Delivery.Result.Status.NOT_SENT ? times(1) : never())
                     .release(reservation, DecodeResources.ReleaseReason.NOT_SENT);
         } finally {
             decode.release(reservation, DecodeResources.ReleaseReason.REMOTE_CLEANUP).status();
@@ -545,24 +524,20 @@ class DeliverySettlementTest {
                             return DecodeResources.Ownership.NONE;
                         });
         member.claim()
-                .item()
+                .route()
                 .ctx()
                 .data()
-                .getScheduler()
-                .onDeliveryFact(
+                .getLifecycle()
+                .onDeliveryResult(
                         new ContextResult.TransportResult(
                                 member.claim(),
-                                DeliveryResult.notSent(
+                                Delivery.Result.notSent(
                                         new IllegalStateException("serialization failed")),
                                 System.currentTimeMillis()));
-        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                .signals()
-                .delivery(member.claim())
-                .toCompletableFuture()
-                .get(2, TimeUnit.SECONDS);
+        member.claim().completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
-        assertFalse(member.item().future().get(2, TimeUnit.SECONDS).isSuccess());
+        assertFalse(member.item().ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
         assertOccupancy(0, 0);
         assertTrue(cancellations.isEmpty());
         verify(member.item().decodeEp())
@@ -574,17 +549,17 @@ class DeliverySettlementTest {
         Member member = member(70L, 70L);
         ledger.commit(70L, List.of(member.item()));
         member.claim()
-                .item()
+                .route()
                 .ctx()
                 .data()
-                .getScheduler()
-                .onDeliveryFact(
+                .getLifecycle()
+                .onDeliveryResult(
                         new ContextResult.TransportResult(
                                 member.claim(),
-                                DeliveryResult.uncertain(new IllegalStateException("reply lost")),
+                                Delivery.Result.uncertain(new IllegalStateException("reply lost")),
                                 System.currentTimeMillis()));
         assertOccupancy(1, 1);
-        assertFalse(member.item().future().isDone());
+        assertFalse(member.item().ctx().data().getFuture().isDone());
         assertTrue(cancellations.isEmpty());
     }
 
@@ -610,21 +585,11 @@ class DeliverySettlementTest {
                             new RequestLifecycle.PreemptionEvent(phase, false, null, null, null)));
         }
         reject(member);
-        assertFalse(member.item().future().get(2, TimeUnit.SECONDS).isSuccess());
-        assertFalse(
-                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                        .signals()
-                        .preemption(preemption)
-                        .toCompletableFuture()
-                        .isDone());
+        assertFalse(member.item().ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
+        assertFalse(preemption.completion().toCompletableFuture().isDone());
         assertOccupancy(1, 1);
         cleaned(member);
-        assertTrue(
-                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                        .signals()
-                        .preemption(preemption)
-                        .toCompletableFuture()
-                        .isDone());
+        assertTrue(preemption.completion().toCompletableFuture().isDone());
         assertOccupancy(0, 0);
     }
 
@@ -639,23 +604,23 @@ class DeliverySettlementTest {
                             cleanupEntered.countDown();
                             await(releaseCleanup);
                             return org.flexlb.balance.endpoint.EndpointTestSupport.releaseRequest(
-                                    ledger.prefill, call.getArgument(1));
+                                    ledger.prefill, call.getArgument(0));
                         })
                 .when(prefill)
-                .release(null, member.item());
+                .releaseRequest(member.item());
         var callback = Executors.newSingleThreadExecutor();
         try {
             callback.submit(
                             () ->
                                     member.claim()
-                                            .item()
+                                            .route()
                                             .ctx()
                                             .data()
-                                            .getScheduler()
-                                            .onDeliveryFact(
+                                            .getLifecycle()
+                                            .onDeliveryResult(
                                                     new ContextResult.TransportResult(
                                                             member.claim(),
-                                                            DeliveryResult.prefillRejected(
+                                                            Delivery.Result.prefillRejected(
                                                                     new IllegalStateException(
                                                                             "prepare rejected")),
                                                             System.currentTimeMillis())))
@@ -699,14 +664,14 @@ class DeliverySettlementTest {
             switch (order.charAt(index)) {
                 case 'A' ->
                         member.claim()
-                                .item()
+                                .route()
                                 .ctx()
                                 .data()
-                                .getScheduler()
-                                .onDeliveryFact(
+                                .getLifecycle()
+                                .onDeliveryResult(
                                         new ContextResult.TransportResult(
                                                 member.claim(),
-                                                DeliveryResult.delivered(),
+                                                Delivery.Result.delivered(),
                                                 System.currentTimeMillis()));
                 case 'P' ->
                         ledger.finish(70L, member.item())
@@ -754,7 +719,7 @@ class DeliverySettlementTest {
                         "ACK alone cannot archive execution ownership");
             }
         }
-        var response = member.item().future().get(5, TimeUnit.SECONDS);
+        var response = member.item().ctx().data().getFuture().get(5, TimeUnit.SECONDS);
         assertTrue(response.isSuccess());
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
@@ -789,8 +754,8 @@ class DeliverySettlementTest {
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         assertOccupancy(0, 0);
-        assertSame(response, member.item().future().join());
-        assertStaleDelivery(member, DeliveryResult.delivered());
+        assertSame(response, member.item().ctx().data().getFuture().join());
+        assertStaleDelivery(member, Delivery.Result.delivered());
     }
 
     @ParameterizedTest(name = "decodeStatusFirst={0}")
@@ -798,24 +763,25 @@ class DeliverySettlementTest {
     void uncertainDeliveryIsAcknowledgedRegardlessOfDecodeStatusOrder(boolean decodeStatusFirst) {
         Member member = dispatchedMember(122L);
         assertTrue(member.requestContext().data().hasGenerateInput());
-        DeliveryResult unknown = DeliveryResult.uncertain(new IllegalStateException("reply lost"));
+        Delivery.Result unknown =
+                Delivery.Result.uncertain(new IllegalStateException("reply lost"));
         try {
             if (decodeStatusFirst) {
                 DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), 122L, false);
             } else {
-                registry.onDeliveryFact(
+                registry.onDeliveryResult(
                         new ContextResult.TransportResult(
                                 member.claim(), unknown, System.currentTimeMillis()));
             }
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
             assertFalse(
-                    member.item().future().isDone(),
+                    member.item().ctx().data().getFuture().isDone(),
                     "neither Decode acceptance alone nor UNKNOWN alone may acknowledge delivery");
             assertTrue(member.requestContext().data().hasGenerateInput());
 
             if (decodeStatusFirst) {
-                registry.onDeliveryFact(
+                registry.onDeliveryResult(
                         new ContextResult.TransportResult(
                                 member.claim(), unknown, System.currentTimeMillis()));
             } else {
@@ -831,18 +797,14 @@ class DeliverySettlementTest {
 
             Response response =
                     assertDoesNotThrow(
-                            () -> member.item().future().get(2, TimeUnit.SECONDS),
+                            () -> member.item().ctx().data().getFuture().get(2, TimeUnit.SECONDS),
                             "UNKNOWN plus exact Decode ACTIVE must acknowledge delivery in either event order");
             assertTrue(response.isSuccess());
             assertFalse(
                     member.requestContext().data().hasGenerateInput(),
                     "confirmed delivery must release payload before execution reconciliation finishes");
             assertFalse(
-                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                            .signals()
-                            .delivery(member.claim())
-                            .toCompletableFuture()
-                            .isDone(),
+                    member.claim().completion().toCompletableFuture().isDone(),
                     "acknowledgement must retain execution ownership until Worker terminal");
             assertOccupancy(1, 1);
             assertEquals(1, member.item().decodeEp().routingView().engineCapacityUsed());
@@ -887,12 +849,12 @@ class DeliverySettlementTest {
             EngineGrpcClient.CancelReply ack) throws Exception {
         Member member = dispatchedMember(120L);
         try {
-            registry.onDeliveryFact(
+            registry.onDeliveryResult(
                     new ContextResult.TransportResult(
                             member.claim(),
-                            DeliveryResult.delivered(),
+                            Delivery.Result.delivered(),
                             System.currentTimeMillis()));
-            assertTrue(member.item().future().get(2, TimeUnit.SECONDS).isSuccess());
+            assertTrue(member.item().ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
             registry.cancel(120L, 0L, CancelReason.CLIENT_CANCELLED);
             cancellations
                     .computeIfAbsent(
@@ -901,11 +863,7 @@ class DeliverySettlementTest {
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
             assertFalse(
-                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                            .signals()
-                            .delivery(member.claim())
-                            .toCompletableFuture()
-                            .isDone(),
+                    member.claim().completion().toCompletableFuture().isDone(),
                     "a cancel outcome alone cannot prove Worker cleanup");
 
             ledger.finish(120L, member.item())
@@ -939,7 +897,7 @@ class DeliverySettlementTest {
 
             assertTerminalsSettledAndArchived(member);
         } finally {
-            registry.onDeliveryFact(
+            registry.onDeliveryResult(
                     new ContextResult.CleanupAcknowledgement(
                             member.claim(),
                             ContextResult.CancelEvidenceKind.CLEANED,
@@ -1000,10 +958,10 @@ class DeliverySettlementTest {
                             DeliverySettlementTestSupport.decodeStatus(
                                     member.item().decodeEp(), 123L, true);
                     case 'S' ->
-                            registry.onDeliveryFact(
+                            registry.onDeliveryResult(
                                     new ContextResult.TransportResult(
                                             member.claim(),
-                                            DeliveryResult.uncertain(
+                                            Delivery.Result.uncertain(
                                                     new IllegalStateException("reply lost")),
                                             System.currentTimeMillis()));
                     default -> throw new AssertionError(order);
@@ -1012,20 +970,17 @@ class DeliverySettlementTest {
                         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
                 if (i < 2) {
                     assertFalse(
-                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                                    .signals()
-                                    .delivery(member.claim())
-                                    .toCompletableFuture()
-                                    .isDone(),
+                            member.claim().completion().toCompletableFuture().isDone(),
                             "partial evidence must retain delivery ownership: "
                                     + order.substring(0, i + 1));
                     assertTrue(registry.requests.isCurrent(member.requestContext()));
                 }
             }
             assertTerminalsSettledAndArchived(member);
-            assertFalse(member.item().future().get(2, TimeUnit.SECONDS).isSuccess());
+            assertFalse(
+                    member.item().ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
         } finally {
-            registry.onDeliveryFact(
+            registry.onDeliveryResult(
                     new ContextResult.CleanupAcknowledgement(
                             member.claim(),
                             ContextResult.CancelEvidenceKind.CLEANED,
@@ -1040,7 +995,9 @@ class DeliverySettlementTest {
         Member member = dispatchedMember(124L);
         var published = new java.util.concurrent.atomic.AtomicInteger();
         member.item()
-                .future()
+                .ctx()
+                .data()
+                .getFuture()
                 .thenRun(
                         () -> {
                             assertFalse(Thread.holdsLock(member.requestContext()));
@@ -1052,10 +1009,10 @@ class DeliverySettlementTest {
                     threads.submit(
                             () -> {
                                 await(start);
-                                registry.onDeliveryFact(
+                                registry.onDeliveryResult(
                                         new ContextResult.TransportResult(
                                                 member.claim(),
-                                                DeliveryResult.uncertain(
+                                                Delivery.Result.uncertain(
                                                         new IllegalStateException("reply lost")),
                                                 System.currentTimeMillis()));
                             });
@@ -1071,14 +1028,9 @@ class DeliverySettlementTest {
             start.countDown();
             sender.get(5, TimeUnit.SECONDS);
             worker.get(5, TimeUnit.SECONDS);
-            assertTrue(member.item().future().get(5, TimeUnit.SECONDS).isSuccess());
+            assertTrue(member.item().ctx().data().getFuture().get(5, TimeUnit.SECONDS).isSuccess());
             RequestProtocolTestSupport.awaitCondition(() -> published.get() == 1);
-            assertFalse(
-                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                            .signals()
-                            .delivery(member.claim())
-                            .toCompletableFuture()
-                            .isDone());
+            assertFalse(member.claim().completion().toCompletableFuture().isDone());
             assertOccupancy(1, 1);
             assertEquals(1, member.item().decodeEp().routingView().engineCapacityUsed());
             assertTrue(cancellations.isEmpty());
@@ -1158,30 +1110,26 @@ class DeliverySettlementTest {
                         "no client cancellation was recorded");
             }
             assertFalse(
-                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                            .signals()
-                            .delivery(member.claim())
-                            .toCompletableFuture()
-                            .isDone(),
+                    member.claim().completion().toCompletableFuture().isDone(),
                     "Worker terminals cannot substitute for sender exit");
 
             assertFalse(
                     cancellations.containsKey(121L),
                     "both Worker terminals already prove remote cleanup; no Cancel ACK is required");
-            registry.onDeliveryFact(
+            registry.onDeliveryResult(
                     new ContextResult.TransportResult(
                             member.claim(),
                             uncertainDelivery
-                                    ? DeliveryResult.uncertain(
+                                    ? Delivery.Result.uncertain(
                                             new IllegalStateException("reply lost"))
-                                    : DeliveryResult.delivered(),
+                                    : Delivery.Result.delivered(),
                             System.currentTimeMillis()));
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
 
             assertTerminalsSettledAndArchived(member);
         } finally {
-            registry.onDeliveryFact(
+            registry.onDeliveryResult(
                     new ContextResult.CleanupAcknowledgement(
                             member.claim(),
                             ContextResult.CancelEvidenceKind.CLEANED,
@@ -1197,12 +1145,12 @@ class DeliverySettlementTest {
             boolean senderFirst, boolean workerSuccessful) throws Exception {
         Member member = dispatchedMember(125L);
         if (senderFirst) {
-            registry.onDeliveryFact(
+            registry.onDeliveryResult(
                     new ContextResult.TransportResult(
                             member.claim(),
-                            DeliveryResult.delivered(),
+                            Delivery.Result.delivered(),
                             System.currentTimeMillis()));
-            assertTrue(member.item().future().get(5, TimeUnit.SECONDS).isSuccess());
+            assertTrue(member.item().ctx().data().getFuture().get(5, TimeUnit.SECONDS).isSuccess());
         }
         ledger.finish(125L, member.item())
                 .forEach(
@@ -1229,14 +1177,14 @@ class DeliverySettlementTest {
                                                 System.currentTimeMillis())));
         DeliverySettlementTestSupport.decodeStatus(
                 member.item().decodeEp(), 125L, true, workerSuccessful ? 0L : 42L);
-        member.item().future().get(5, TimeUnit.SECONDS);
+        member.item().ctx().data().getFuture().get(5, TimeUnit.SECONDS);
         long responseObservedAtNanos = System.nanoTime();
         if (!senderFirst) {
             assertEquals(0L, member.requestContext().data().getAckAtNanos());
-            registry.onDeliveryFact(
+            registry.onDeliveryResult(
                     new ContextResult.TransportResult(
                             member.claim(),
-                            DeliveryResult.delivered(),
+                            Delivery.Result.delivered(),
                             System.currentTimeMillis()));
         }
         SchedulerTestSupport.awaitRequestWork(
@@ -1279,11 +1227,7 @@ class DeliverySettlementTest {
                 "both Worker terminals and sender exit must finish request cleanup",
                 () ->
                         assertTrue(
-                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                                        .signals()
-                                        .delivery(member.claim())
-                                        .toCompletableFuture()
-                                        .isDone(),
+                                member.claim().completion().toCompletableFuture().isDone(),
                                 "delivery settlement still waits after both Worker terminals"),
                 () ->
                         assertFalse(
@@ -1304,7 +1248,7 @@ class DeliverySettlementTest {
             long batchId,
             DecodeEndpoint decode,
             DecodeResources.ReservationHandle reservation) {
-        return member(id, batchId, decode, reservation, DeliveryClaimKind.BATCH_ENQUEUE);
+        return member(id, batchId, decode, reservation, Delivery.SendMode.BATCH_ENQUEUE);
     }
 
     private Member member(
@@ -1312,7 +1256,7 @@ class DeliverySettlementTest {
             long batchId,
             DecodeEndpoint decode,
             DecodeResources.ReservationHandle reservation,
-            DeliveryClaimKind kind) {
+            Delivery.SendMode kind) {
         var context = RequestProtocolTestSupport.context(config, id);
         context.data()
                 .setGenerateInputPb(
@@ -1339,13 +1283,13 @@ class DeliverySettlementTest {
         RequestProtocolTestSupport.beginRoutePublication(
                 registry, new RequestProtocolTestSupport.Registered(item, future));
         var claim =
-                kind == DeliveryClaimKind.BATCH_ENQUEUE
+                kind == Delivery.SendMode.BATCH_ENQUEUE
                         ? RequestProtocolTestSupport.claimBatch(registry, item, batchId, () -> true)
                         : RequestProtocolTestSupport.claimRouteWithoutPrediction(
                                 registry, item, () -> true);
         assertNotNull(claim);
-        if (kind == DeliveryClaimKind.BATCH_ENQUEUE) {
-            assertTrue(claim.item().ctx().data().getScheduler().tryStartSend(claim));
+        if (kind == Delivery.SendMode.BATCH_ENQUEUE) {
+            assertTrue(claim.route().ctx().data().getLifecycle().tryStartSend(claim));
         }
         return new Member(item, registry.requests.findActive(id), claim);
     }
@@ -1356,38 +1300,38 @@ class DeliverySettlementTest {
                         member.item().requestId(),
                         ignored -> new java.util.concurrent.CompletableFuture<>())
                 .complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
-        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)
-                .signals()
-                .delivery(member.claim())
-                .toCompletableFuture()
-                .get(2, TimeUnit.SECONDS);
+        member.claim().completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
     }
 
     private void reject(Member member) {
         member.claim()
-                .item()
+                .route()
                 .ctx()
                 .data()
-                .getScheduler()
-                .onDeliveryFact(
+                .getLifecycle()
+                .onDeliveryResult(
                         new ContextResult.TransportResult(
                                 member.claim(),
-                                DeliveryResult.prefillRejected(
+                                Delivery.Result.prefillRejected(
                                         new IllegalStateException("prepare rejected")),
                                 System.currentTimeMillis()));
     }
 
-    private void assertStaleDelivery(Member member, DeliveryResult result) {
+    private void assertStaleDelivery(Member member, Delivery.Result result) {
         synchronized (member.requestContext()) {
             var before = member.requestContext().snapshot();
             var update =
-                    member.requestContext()
-                            .recordDeliveryResult(
-                                    new ContextResult.TransportResult(
-                                            member.claim(), result, System.currentTimeMillis()));
-            assertEquals(ContextResult.UpdateKind.STALE, update.kind());
+                    org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                            member.requestContext(),
+                            observedRequest ->
+                                    observedRequest.recordDeliveryResult(
+                                            new ContextResult.TransportResult(
+                                                    member.claim(),
+                                                    result,
+                                                    System.currentTimeMillis())));
+            assertEquals(RequestChangeAssertions.UpdateKind.STALE, update.kind());
             assertSame(before, update.before());
             assertSame(before, update.after());
             assertSame(before, member.requestContext().snapshot());
@@ -1417,5 +1361,6 @@ class DeliverySettlementTest {
         }
     }
 
-    private record Member(RequestRoute item, RequestContext requestContext, DeliveryClaim claim) {}
+    private record Member(
+            RequestRoute item, RequestContext requestContext, Delivery.Member claim) {}
 }

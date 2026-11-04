@@ -1,9 +1,8 @@
 package org.flexlb.service.monitor;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.EndpointStats;
 import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
@@ -57,7 +56,7 @@ import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
 @Component
 public class DeliveryMetricsReporter {
     @Autowired private ObjectProvider<RequestRepository> requestSources;
-    @Autowired private ObjectProvider<EndpointRegistry> endpointSources;
+    @Autowired private ObjectProvider<EndpointStats> endpointSources;
     @Autowired private ObjectProvider<RequestSchedulerReporter> requestReporters;
 
     @Scheduled(fixedRateString = "${report.interval.ms:2000}")
@@ -75,17 +74,45 @@ public class DeliveryMetricsReporter {
         }
         reportEndpoints(
                 "Prefill",
-                () -> endpoints.endpointSnapshot(RoleType.PREFILL),
-                endpoint -> ((PrefillEndpoint) endpoint).reportBatchMetrics(this),
+                endpoints::prefillStats,
+                this::reportPrefill,
                 (address, endpoint) ->
-                        requestReporter.reportPrefillQueueDepth(
-                                address, ((PrefillEndpoint) endpoint).queueDepth()));
+                        requestReporter.reportPrefillQueueDepth(address, endpoint.queueDepth()));
         reportEndpoints(
                 "Decode",
-                () -> endpoints.endpointSnapshot(RoleType.DECODE),
-                endpoint -> ((DecodeEndpoint) endpoint).reportBatchMetrics(this),
+                endpoints::decodeStats,
+                this::reportDecode,
                 (address, endpoint) ->
-                        ((DecodeEndpoint) endpoint).reportAdmissionMetrics(requestReporter));
+                        requestReporter.reportDecodePreemption(
+                                address, endpoint.resourceSnapshot()));
+    }
+
+    public void reportPrefill(EndpointStats.Prefill endpoint) {
+        String ip = endpoint.getIp();
+        reportBatcherQueueSize(RoleType.PREFILL.name(), ip, endpoint.queueDepth());
+        var counts = endpoint.queueCounters().byPriority();
+        boolean empty = true;
+        for (int priority = 0; priority < counts.length; priority++) {
+            if (counts[priority] == 0) continue;
+            empty = false;
+            reportBatcherQueueDepthByPriority(
+                    RoleType.PREFILL.name(), ip, priority, counts[priority]);
+        }
+        if (empty) reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), ip, 0, 0);
+        var stats = endpoint.stats();
+        reportPrefillInflight(
+                ip, stats.batchCount(), stats.locallyOwnedRequests(), stats.maxObservedAgeMs());
+    }
+
+    public void reportDecode(EndpointStats.Decode endpoint) {
+        var stats = endpoint.stats();
+        reportDecodeInflight(
+                endpoint.getIp(),
+                stats.inflight(),
+                stats.totalLoad(),
+                stats.expectedKv(),
+                stats.hardKv(),
+                stats.oldestAgeMs());
     }
 
     private static <T> void reportEndpoints(
@@ -327,7 +354,7 @@ public class DeliveryMetricsReporter {
 
     /**
      * Report inflight entries evicted from an endpoint ledger (prefill/decode
-     * orphan sweeps via {@link org.flexlb.balance.endpoint.EndpointRegistry}
+     * orphan sweeps via {@link EndpointRegistry}
      * and friends) via the same {@code app.flexlb.inflight.ttl.expired.qps}
      * series family.
      * <p>Endpoint-side evictions were previously log-only

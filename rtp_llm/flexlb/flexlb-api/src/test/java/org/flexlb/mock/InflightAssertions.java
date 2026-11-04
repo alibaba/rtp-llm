@@ -25,7 +25,7 @@ public final class InflightAssertions {
             PrefillEndpoint prefillEp, DecodeEndpoint decodeEp, long timeoutMs, long pollMs) {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
-            boolean prefillOk = prefillEp == null || prefillEp.ownership.stats().batchCount() == 0;
+            boolean prefillOk = prefillEp == null || prefillEp.stats().batchCount() == 0;
             boolean decodeOk = decodeEp == null || decodeEp.resourceSnapshot().reservedCount() == 0;
             if (prefillOk && decodeOk) {
                 return true;
@@ -51,7 +51,7 @@ public final class InflightAssertions {
                         + timeoutMs
                         + "ms"
                         + " (prefill batches="
-                        + (prefillEp != null ? prefillEp.ownership.stats().batchCount() : "null")
+                        + (prefillEp != null ? prefillEp.stats().batchCount() : "null")
                         + ", decode inflight="
                         + (decodeEp != null ? decodeEp.resourceSnapshot().reservedCount() : "null")
                         + ")");

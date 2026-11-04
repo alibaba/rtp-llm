@@ -18,6 +18,7 @@ import javax.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -28,6 +29,21 @@ import java.util.concurrent.TimeUnit;
 
 @Component
 public class VitCacheDirectory {
+    private static final long MIN_PENDING_TTL_MS = 120_000;
+    private static final long MAX_PENDING_TTL_MS = 600_000;
+    private static final int MAX_PENDING = 100_000;
+    private final LinkedHashMap<String, Placement> pending = new LinkedHashMap<>();
+    private long pendingPrunedAt;
+
+    private record Placement(WorkerStatus worker, String instance, long expiry) {
+        boolean matches(Candidate candidate, long now) {
+            return candidate != null
+                    && worker == candidate.worker()
+                    && expiry > now
+                    && (instance == null || Objects.equals(instance, candidate.instance()));
+        }
+    }
+
     // Cache residency changes after each image; ten-minute snapshots lose affinity.
     static final long SYNC_INTERVAL_MS = 30_000;
     private final EndpointRegistry workers;
@@ -230,6 +246,28 @@ public class VitCacheDirectory {
         }
     }
 
+    synchronized int pendingHits(Candidate candidate, List<String> keys, long now) {
+        int hits = 0;
+        for (String key : keys) {
+            Placement placement = pending.get(key);
+            if (placement != null && placement.matches(candidate, now)) hits++;
+        }
+        return hits;
+    }
+
+    synchronized void reserve(List<String> keys, Candidate selected, long timeout, long now) {
+        long ttl =
+                timeout <= 0
+                        ? MIN_PENDING_TTL_MS
+                        : Math.clamp(timeout, MIN_PENDING_TTL_MS, MAX_PENDING_TTL_MS);
+        for (String key : keys) {
+            if (!selected.hashKeys().contains(key)) {
+                pending.put(key, new Placement(selected.worker(), selected.instance(), now + ttl));
+            }
+        }
+        while (pending.size() > MAX_PENDING) pending.pollFirstEntry();
+    }
+
     /** Cache matches share immutable key sets from one directory view. */
     public synchronized Map<String, Candidate> candidates(String group, List<String> keys) {
         Map<String, WorkerStatus> live = liveWorkers();
@@ -266,6 +304,11 @@ public class VitCacheDirectory {
                             hashHits,
                             gpuHits + cpuHits,
                             gpuHits));
+        }
+        long now = System.currentTimeMillis();
+        if (now - pendingPrunedAt >= 5000) {
+            pending.values().removeIf(p -> !p.matches(matches.get(p.worker().getIpPort()), now));
+            pendingPrunedAt = now;
         }
         return Map.copyOf(matches);
     }

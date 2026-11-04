@@ -1,19 +1,106 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryResult;
-import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.endpoint.DecodeResources;
-import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
+import org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.mockito.Mockito;
 
 import java.util.List;
 import java.util.OptionalLong;
 
-/** Transport/config fixtures. Queue decisions are stubbed on RequestExecution, never on Dispatcher. */
+/** Transport/config fixtures. Queue decisions are stubbed on EndpointWork, never on Dispatcher. */
 public final class DeliveryTestSupport {
+    public static Delivery queued(
+            List<RequestRoute> items,
+            org.flexlb.balance.endpoint.PrefillEndpoint.BatchReservation reservation,
+            long[] predictions,
+            RequestRoute failed,
+            long now) {
+        return queued(items, reservation, predictions, failed, now, null);
+    }
+
+    public static Delivery queued(
+            List<RequestRoute> items,
+            org.flexlb.balance.endpoint.PrefillEndpoint.BatchReservation reservation,
+            long[] predictions,
+            RequestRoute failed,
+            long now,
+            RequestRoute bypassed) {
+        var delivery =
+                new Delivery(
+                        items.isEmpty() ? null : items.getFirst().prefillEp(),
+                        reservation != null,
+                        items.size(),
+                        null,
+                        "test");
+        for (var item : items) delivery.members.add(new Delivery.Member(item, null));
+        delivery.reservation = reservation;
+        if (reservation != null) {
+            delivery.predictedMs = predictions[0];
+            delivery.features =
+                    PrefillBatchFeatures.from(items, RequestRoute::seqLen, RequestRoute::hitCache);
+        } else System.arraycopy(predictions, 0, delivery.predictions, 0, predictions.length);
+        delivery.blocked = failed;
+        delivery.boundary =
+                failed == null
+                        ? null
+                        : CapacityBoundary.failed(
+                                new IllegalStateException("test preparation failure"));
+        delivery.selectionTimeMs = now;
+        delivery.bypassedHead = bypassed;
+        return delivery;
+    }
+
+    static Delivery.Member member(RequestRoute route, Delivery.SendMode kind, long batchId) {
+        var member = new Delivery.Member(route, null);
+        member.initialize(kind, batchId);
+        return member;
+    }
+
+    static ContextResult.DeliveryFacts prepared(
+            Delivery.Member member, Delivery.SendMode kind, long batchId) {
+        member.initialize(kind, batchId);
+        return new ContextResult.DeliveryFacts(
+                member,
+                ContextResult.SendState.NOT_STARTED,
+                false,
+                null,
+                false,
+                false,
+                member.decode() == null,
+                System.currentTimeMillis());
+    }
+
+    static Delivery committed(
+            long batchId,
+            List<Delivery.Member> members,
+            org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot precedingWork,
+            long predictedMs,
+            PrefillTimePredictor.Evaluator evaluator,
+            String reason,
+            int remainingQueueDepth,
+            org.flexlb.balance.scheduler.Delivery handoff,
+            DeliveryExecution.DeliveryPermit permit) {
+        var delivery =
+                new Delivery(
+                        members.isEmpty() ? null : members.getFirst().route().prefillEp(),
+                        true,
+                        members.size(),
+                        evaluator,
+                        reason);
+        delivery.batchId = batchId;
+        delivery.members = List.copyOf(members);
+        delivery.precedingWork = precedingWork;
+        delivery.predictedMs = predictedMs;
+        delivery.remainingQueueDepth = remainingQueueDepth;
+        if (handoff != null)
+            delivery.committed(handoff.generationPin(), precedingWork, remainingQueueDepth, false);
+        delivery.executionPermit = permit;
+        return delivery;
+    }
+
     public static org.flexlb.config.ConfigService service(org.flexlb.config.FlexlbConfig config) {
         var service = Mockito.mock(org.flexlb.config.ConfigService.class);
         Mockito.when(service.loadBalanceConfig()).thenReturn(config);
@@ -23,7 +110,14 @@ public final class DeliveryTestSupport {
     public static DeliveryDispatcher route(DeliveryMetricsReporter reporter) {
         var config = SchedulingTestConfig.newConfig();
         config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
-        return new DeliveryDispatcher(null, service(config), reporter);
+        return new DeliveryDispatcher(
+                null,
+                service(config),
+                reporter,
+                org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
+                new org.flexlb.balance.scheduler.PlacementConfiguration()
+                        .decodeAdmissionCapacity(service(config)),
+                org.mockito.Mockito.mock(org.flexlb.balance.scheduler.DeliveryExecution.class));
     }
 
     public static DeliveryDispatcher parked(CapacityBoundary boundary) {
@@ -48,7 +142,11 @@ public final class DeliveryTestSupport {
             super(
                     null,
                     service(SchedulingTestConfig.newConfig()),
-                    new DeliveryMetricsReporter(null));
+                    new DeliveryMetricsReporter(null),
+                    org.mockito.Mockito.mock(TaskTimer.class),
+                    new org.flexlb.balance.scheduler.PlacementConfiguration()
+                            .decodeAdmissionCapacity(service(SchedulingTestConfig.newConfig())),
+                    org.mockito.Mockito.mock(DeliveryExecution.class));
         }
 
         CapacityBoundary selectBoundary(
@@ -68,7 +166,7 @@ public final class DeliveryTestSupport {
         }
     }
 
-    public static void installQueueFixture(RequestExecution worker, DeliveryDispatcher dispatcher) {
+    public static void installQueueFixture(EndpointWork worker, DeliveryDispatcher dispatcher) {
         if (!(dispatcher instanceof StubDispatcher stub)) {
             return;
         }
@@ -80,7 +178,13 @@ public final class DeliveryTestSupport {
                                         call.getArgument(3)))
                 .when(worker)
                 .processSelection(
-                        Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any());
+                        Mockito.any(),
+                        Mockito.any(),
+                        Mockito.any(),
+                        Mockito.any(),
+                        Mockito.any(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any());
         Mockito.doAnswer(call -> stub.capacityAvailable(call.getArgument(0), call.getArgument(1)))
                 .when(worker)
                 .capacityAvailable(Mockito.any(), Mockito.any());
@@ -95,16 +199,23 @@ public final class DeliveryTestSupport {
     }
 
     public static CapacityBoundary process(
-            RequestExecution worker,
+            EndpointWork worker,
             List<RequestRoute> items,
             String reason,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong prediction) {
-        return worker.processSelection(items, reason, evaluator, prediction, null);
+        return worker.processSelection(
+                items,
+                reason,
+                evaluator,
+                prediction,
+                null,
+                Delivery.PrefixPolicy.ORDERED_PREFIX,
+                () -> true);
     }
 
     public static void afterSelection(
-            RequestExecution worker, java.util.function.Consumer<List<RequestRoute>> selected) {
+            EndpointWork worker, java.util.function.Consumer<List<RequestRoute>> selected) {
         Mockito.doAnswer(
                         call -> {
                             selected.accept(call.getArgument(0));
@@ -112,7 +223,13 @@ public final class DeliveryTestSupport {
                         })
                 .when(worker)
                 .processSelection(
-                        Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any());
+                        Mockito.any(),
+                        Mockito.any(),
+                        Mockito.any(),
+                        Mockito.any(),
+                        Mockito.any(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any());
     }
 
     @FunctionalInterface
@@ -125,7 +242,7 @@ public final class DeliveryTestSupport {
                 java.util.function.Supplier<CapacityBoundary> real);
     }
 
-    public static void selectWith(RequestExecution worker, Selection selection) {
+    public static void selectWith(EndpointWork worker, Selection selection) {
         Mockito.doAnswer(
                         call ->
                                 selection.select(
@@ -143,17 +260,13 @@ public final class DeliveryTestSupport {
                                         }))
                 .when(worker)
                 .processSelection(
-                        Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any());
-    }
-
-    public static void beforeCommit(RequestExecution worker, Runnable hook) {
-        Mockito.doAnswer(
-                        call -> {
-                            hook.run();
-                            return call.callRealMethod();
-                        })
-                .when(worker)
-                .commitSelection(Mockito.any());
+                        Mockito.any(),
+                        Mockito.any(),
+                        Mockito.any(),
+                        Mockito.any(),
+                        Mockito.any(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any());
     }
 
     static final PrefillTimePredictor.Evaluator EVALUATOR =
@@ -173,42 +286,27 @@ public final class DeliveryTestSupport {
 
     public static void stubRouteDelivery(
             RequestLifecycle requests,
-            java.util.function.BiConsumer<DeliveryClaim, DeliveryResult> completed) {
+            java.util.function.BiConsumer<Delivery.Member, Delivery.Result> completed) {
         Mockito.doAnswer(
                         invocation -> {
-                            var permit =
-                                    invocation.getArgument(
-                                            3, DecodeEndpoint.EngineDispatchPermit.class);
-                            if (permit != null
-                                    && permit.dispatch().status()
-                                            != DecodeResources.EngineDispatchPermitTransferStatus
-                                                    .TRANSFERRED) {
-                                return null;
-                            }
-                            var route = invocation.getArgument(0, RequestRoute.class);
-                            DeliveryClaim claim =
-                                    new DeliveryClaim(
-                                            route.ctx(),
-                                            1L,
-                                            route,
-                                            DeliveryClaimKind.ROUTE_DECISION,
-                                            0L);
+                            var claim = invocation.getArgument(0, Delivery.Member.class);
+                            var prepared = prepared(claim, Delivery.SendMode.ROUTE_DECISION, 0L);
                             Mockito.doAnswer(
                                             inv -> {
-                                                completed.accept(claim, DeliveryResult.delivered());
+                                                completed.accept(
+                                                        claim, Delivery.Result.delivered());
                                                 return null;
                                             })
                                     .when(requests)
-                                    .onDeliveryFact(
+                                    .onDeliveryResult(
                                             Mockito.isA(ContextResult.RouteDelivered.class));
-                            return claim;
+                            return prepared;
                         })
                 .when(requests)
-                .claimDelivery(
-                        Mockito.any(),
-                        Mockito.eq(DeliveryClaimKind.ROUTE_DECISION),
-                        Mockito.eq(0L),
-                        Mockito.any());
+                .prepareDelivery(
+                        Mockito.any(Delivery.Member.class),
+                        Mockito.eq(Delivery.SendMode.ROUTE_DECISION),
+                        Mockito.eq(0L));
     }
 
     private DeliveryTestSupport() {}

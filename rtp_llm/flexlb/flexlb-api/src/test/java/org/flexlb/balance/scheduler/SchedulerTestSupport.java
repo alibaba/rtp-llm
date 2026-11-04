@@ -58,16 +58,16 @@ public final class SchedulerTestSupport {
                             var context = mock(RequestContext.class);
                             var data = mock(RequestData.class);
                             when(context.data()).thenReturn(data);
-                            when(data.getScheduler()).thenReturn(owner);
+                            when(data.getLifecycle()).thenReturn(owner);
                             return context;
                         });
         return repository;
     }
 
     public static void bindOwner(RequestContext context, RequestLifecycle owner) {
-        if (context.data().getScheduler() == null) {
+        if (context.data().getLifecycle() == null) {
             // Minimal fixtures may bind an owner without registering a runnable request.
-            ReflectionTestUtils.setField(context.data(), "scheduler", owner);
+            ReflectionTestUtils.setField(context.data(), "lifecycle", owner);
         }
     }
 }

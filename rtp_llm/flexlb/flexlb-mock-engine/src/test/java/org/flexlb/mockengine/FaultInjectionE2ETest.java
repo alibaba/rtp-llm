@@ -335,15 +335,14 @@ class FaultInjectionE2ETest {
             AutoTpmE2EHarness.await(
                     () ->
                             h.requests.liveRequestCount() == 1
-                                    && prefillEndpoint.ownership.stats().batchCount() == 1
-                                    && prefillEndpoint.ownership.stats().locallyOwnedRequests()
-                                            == 1,
+                                    && prefillEndpoint.stats().batchCount() == 1
+                                    && prefillEndpoint.stats().locallyOwnedRequests() == 1,
                     2_000,
                     "missing ACK must retain scheduler and Prefill accounting");
 
             assertEquals(
                     0,
-                    prefillEndpoint.ownership.stats().individuallyOwnedRequests(),
+                    prefillEndpoint.stats().individuallyOwnedRequests(),
                     "batch delivery must not consume the route-request ledger");
             assertFalse(
                     crashedTerminal.await(250, TimeUnit.MILLISECONDS),
@@ -364,8 +363,8 @@ class FaultInjectionE2ETest {
                 assertFalse(
                         crashed.isDone(), "healthy delivery cannot settle the unrelated request");
             }
-            assertEquals(1, prefillEndpoint.ownership.stats().batchCount());
-            assertEquals(1, prefillEndpoint.ownership.stats().locallyOwnedRequests());
+            assertEquals(1, prefillEndpoint.stats().batchCount());
+            assertEquals(1, prefillEndpoint.stats().locallyOwnedRequests());
 
             Response expired = crashed.get(5, TimeUnit.SECONDS);
             assertFalse(expired.isSuccess());
@@ -382,8 +381,8 @@ class FaultInjectionE2ETest {
                                     clientCancellation
                                             ? CancelReason.CLIENT_CANCELLED.getMessage()
                                             : "REQUEST_INACTIVE"));
-            assertEquals(1, prefillEndpoint.ownership.stats().batchCount());
-            assertEquals(1, prefillEndpoint.ownership.stats().locallyOwnedRequests());
+            assertEquals(1, prefillEndpoint.stats().batchCount());
+            assertEquals(1, prefillEndpoint.stats().locallyOwnedRequests());
             assertTrue(h.requests.liveRequestCount() > 0, "failure response is not cleanup proof");
             assertTrue(prefill.isStopped());
             org.junit.jupiter.api.Assertions.assertThrows(

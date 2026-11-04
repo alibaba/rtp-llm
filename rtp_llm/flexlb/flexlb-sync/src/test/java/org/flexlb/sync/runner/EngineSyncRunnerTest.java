@@ -62,13 +62,13 @@ class EngineSyncRunnerTest {
 
     private final long syncEngineStatusInterval = 20L;
 
-    private EngineSyncRunner engineSyncRunner;
+    private Runnable engineSyncRunner;
 
     @BeforeEach
     void setUp() {
         endpointRegistry = RunnerTestSupport.endpointRegistry(Mockito.mock(ConfigService.class));
         engineSyncRunner =
-                new EngineSyncRunner(
+                org.flexlb.sync.synchronizer.WorkerSyncTestSupport.runner(
                         modelName,
                         endpointRegistry,
                         workerAddressService,
@@ -97,8 +97,8 @@ class EngineSyncRunnerTest {
 
     @Test
     void should_handle_null_worker_status_gracefully() {
-        EngineSyncRunner runnerWithEmptyDirectory =
-                new EngineSyncRunner(
+        Runnable runnerWithEmptyDirectory =
+                org.flexlb.sync.synchronizer.WorkerSyncTestSupport.runner(
                         modelName,
                         endpointRegistry,
                         workerAddressService,
@@ -127,8 +127,8 @@ class EngineSyncRunnerTest {
         String ipPort = "127.0.0.1:8080";
         Mockito.when(workerAddressService.getEngineWorkerList(modelName, RoleType.VIT))
                 .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080)));
-        EngineSyncRunner runner =
-                new EngineSyncRunner(
+        Runnable runner =
+                org.flexlb.sync.synchronizer.WorkerSyncTestSupport.runner(
                         modelName,
                         endpointRegistry,
                         workerAddressService,
@@ -174,8 +174,8 @@ class EngineSyncRunnerTest {
                 .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080)));
         when(statusCheckExecutor.submit(any(Runnable.class)))
                 .thenThrow(new RejectedExecutionException("full"));
-        EngineSyncRunner runner =
-                new EngineSyncRunner(
+        Runnable runner =
+                org.flexlb.sync.synchronizer.WorkerSyncTestSupport.runner(
                         modelName,
                         endpointRegistry,
                         workerAddressService,
@@ -220,8 +220,8 @@ class EngineSyncRunnerTest {
         Mockito.when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(List.of());
 
-        EngineSyncRunner runner =
-                new EngineSyncRunner(
+        Runnable runner =
+                org.flexlb.sync.synchronizer.WorkerSyncTestSupport.runner(
                         modelName,
                         directory,
                         workerAddressService,
@@ -257,8 +257,8 @@ class EngineSyncRunnerTest {
                 .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
         EndpointRegistry directory = registry;
-        EngineSyncRunner runner =
-                new EngineSyncRunner(
+        Runnable runner =
+                org.flexlb.sync.synchronizer.WorkerSyncTestSupport.runner(
                         modelName,
                         directory,
                         workerAddressService,
@@ -343,7 +343,7 @@ class EngineSyncRunnerTest {
         when(firstEndpoint.tryGetLoadMetric()).thenReturn(OptionalLong.of(10L));
         when(secondEndpoint.tryGetLoadMetric()).thenReturn(OptionalLong.empty());
 
-        EngineSyncRunner runner = varianceRunner(directory);
+        Runnable runner = varianceRunner(directory);
 
         runner.run();
 
@@ -378,7 +378,7 @@ class EngineSyncRunnerTest {
         when(firstEndpoint.tryGetLoadMetric()).thenReturn(OptionalLong.of(10L));
         when(secondEndpoint.tryGetLoadMetric()).thenReturn(OptionalLong.of(30L));
 
-        EngineSyncRunner runner = varianceRunner(directory);
+        Runnable runner = varianceRunner(directory);
 
         runner.run();
 
@@ -386,8 +386,8 @@ class EngineSyncRunnerTest {
                 .reportRunningLoadVariance(modelName, RoleType.PREFILL.toString(), 200.0);
     }
 
-    private EngineSyncRunner varianceRunner(EndpointRegistry directory) {
-        return new EngineSyncRunner(
+    private Runnable varianceRunner(EndpointRegistry directory) {
+        return org.flexlb.sync.synchronizer.WorkerSyncTestSupport.runner(
                 modelName,
                 directory,
                 workerAddressService,
@@ -423,8 +423,8 @@ class EngineSyncRunnerTest {
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(replacement));
 
-        EngineSyncRunner runner =
-                new EngineSyncRunner(
+        Runnable runner =
+                org.flexlb.sync.synchronizer.WorkerSyncTestSupport.runner(
                         modelName,
                         directory,
                         workerAddressService,

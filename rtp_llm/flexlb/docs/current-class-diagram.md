@@ -1,428 +1,175 @@
 # FlexLB 当前核心类图
 
-当前源码的结构审查与优先改造项见 [当前结构审查](scheduler-design/structure-current-review.md)。
-历轮实施记录见 [从所有权看调度类结构](scheduler-design/ownership-class-diagram.md)。
+2026-11-03 按工作区源码核对。本文描述当前职责和主要依赖，不是固定提交快照。历史改造记录位于 [scheduler-design](scheduler-design/README.md)，本轮目标与验收约束见[目标类图](scheduler-design/proposed-component-classes.html)，当前仍在改造中，本文不表示目标已经全部完成；历史稿中的类名不能作为当前实现依据。
 
-本轮重新核对了请求输入与 DecodeBinding 混合职责、QUEUE Route 的两次资源交接，以及抢占三方所有权。最新结论与改造验收见 [当前结构审查第 5 节](scheduler-design/structure-current-review.md#5-再从类图检查输入资源执行是否放对位置)；此前的 [调度类结构审查](scheduler-design/class-structure-review.md) 作为历史记录。
-
-本文更新至 2026-10-02 的源码结构。请求生命周期由 `BalanceContext` 的行为方法维护；`RequestScheduler` 管理目录及跨对象编排；发现与选路目录由 `EndpointRegistry` 统一管理。图使用 Mermaid `classDiagram`，分组对应 Maven module（将名称中的连字符换为下划线），不是 Java package。
-
-范围：请求入口、调度、请求状态、worker 状态、同步、缓存、抢占和主节点协调。为保持可读性，省略多数配置、指标、DTO、内部类和测试类；未标出的依赖不代表不存在。以下为源码静态关系，不表示运行时调用顺序。
-
-## UML 关系图例
-
-| Mermaid 表示 | UML 含义 | 本文用法                                 |
-| ------------ | -------- | ---------------------------------------- |
-| `A --> B`    | 有向关联 | A 持有 B 的引用                          |
-| `A ..> B`    | 依赖     | A 创建、使用 B，或通过注入函数间接调用 B |
-| `A *-- B`    | 组合     | A 创建并拥有 B 的实例                    |
-| `A <\|-- B`  | 泛化     | B 继承 A                                 |
-| `A <\|.. B`  | 实现     | B 实现接口 A                             |
-
-## 1. 请求入口、调度与投递
+## 调度、队列和策略
 
 ```mermaid
 classDiagram
-direction TB
-
-namespace flexlb_api {
-    class FlexlbServiceImpl
-    class FlexlbGrpcForwarder
-}
-
-namespace flexlb_sync {
-    class RequestScheduler
-    class DirectPlacementCoordinator
-    class PlacementStrategy {
-        <<interface>>
-    }
-    class GlobalQueueCoordinator
-    class QueuedPlacementControl["GlobalQueueCoordinator.Control"] {
-        <<interface>>
-    }
-    class DirectPlacementControl["DirectPlacementCoordinator.Control"] {
-        <<interface>>
-    }
-    class RequestDeliveryControl {
-        <<interface>>
-    }
-    class BalanceContext
-    class ProvisionalRoute
-    class DefaultRouter
-    class CostBasedPrefillStrategy
-    class DecodeSelector
-    class RandomStrategy
-    class EndpointRegistry
-    class WorkerBatcher
-    class GroupingPolicy {
-        <<enumeration>>
-        SINGLE
-        FIXED_WINDOW
-    }
-    class DeliveryStrategy {
-        <<interface>>
-    }
-    class BatchDeliveryStrategy
-    class RouteDeliveryStrategy
-    class DefaultBatchDispatcher
-    class BatchSchedulerReporter
-}
-
-namespace flexlb_grpc {
-    class EngineGrpcClient
-}
-
-FlexlbServiceImpl --> RequestScheduler
-FlexlbServiceImpl --> FlexlbGrpcForwarder : 转发到主节点
-RequestScheduler o-- BalanceContext : 注册、索引与请求协议
-RequestScheduler --> GlobalQueueCoordinator : 队列控制与关闭
-RequestScheduler --> PlacementStrategy : DIRECT / QUEUE
-PlacementStrategy <|.. DirectPlacementCoordinator
-PlacementStrategy <|.. GlobalQueueCoordinator
-DirectPlacementCoordinator --> DefaultRouter : 立即选择
-RequestScheduler --> EndpointRegistry
-GlobalQueueCoordinator --> DefaultRouter : 选择路由
-GlobalQueueCoordinator --> QueuedPlacementControl : 窄请求协议
-DirectPlacementCoordinator --> DirectPlacementControl : 窄请求协议
-RequestScheduler ..|> QueuedPlacementControl
-RequestScheduler ..|> DirectPlacementControl
-RequestScheduler ..> ProvisionalRoute : 候选资源准备与发布
-DefaultRouter --> CostBasedPrefillStrategy
-DefaultRouter --> DecodeSelector
-DefaultRouter --> RandomStrategy
-CostBasedPrefillStrategy --> EndpointRegistry
-DecodeSelector --> EndpointRegistry
-RandomStrategy --> EndpointRegistry
-WorkerBatcher --> GroupingPolicy : 纯成组决策
-WorkerBatcher --> DeliveryStrategy : 成组后投递
-DeliveryStrategy <|.. BatchDeliveryStrategy
-DeliveryStrategy <|.. RouteDeliveryStrategy
-BatchDeliveryStrategy --> RequestDeliveryControl
-RouteDeliveryStrategy --> RequestDeliveryControl
-RequestScheduler ..|> RequestDeliveryControl
-BatchDeliveryStrategy --> BatchSchedulerReporter : 投递统计
-RouteDeliveryStrategy --> BatchSchedulerReporter : 投递统计
-BatchDeliveryStrategy ..> DefaultBatchDispatcher : 经注入的提交函数
-DefaultBatchDispatcher --> EngineGrpcClient : EnqueueBatch
+    RequestScheduler <|.. AbstractRequestScheduler
+    AbstractRequestScheduler <|-- DirectRequestScheduler
+    AbstractRequestScheduler <|-- QueuedRequestScheduler
+    AbstractRequestScheduler --> RequestLifecycle : 共享装配
+    FlexlbServiceImpl --> RequestLifecycle : 提交与取消
+    FlexlbServiceImpl --> RequestWorkerSelector : VIT 预选与身份校验
+    RequestLifecycle --> RequestRepository : 精确请求目录
+    RequestLifecycle --> RequestContext : 状态裁决与结算
+    RequestLifecycle --> RequestScheduler : 通知请求变化
+    DirectRequestScheduler --> RequestWorkerSelector
+    QueuedRequestScheduler --> RequestWorkerSelector
+    QueuedRequestScheduler --> PlacementQueue
+    OrderedRequestQueue ..|> PlacementQueue
+    RequestWorkerSelector --> PrefillSelectionStrategy
+    RequestWorkerSelector --> DecodeSelectionStrategy
+    RequestWorkerSelector --> VitSelectionStrategy
+    RequestWorkerSelector --> EndpointRegistry
+    PrefillEndpoint --> PrefillRequestQueue
+    PrefillActiveIndex ..|> PrefillRequestQueue
+    QueuedRequestScheduler --> GroupPlanner
+    QueuedRequestScheduler --> DeliveryDispatcher : 准备和投递
+    DirectRequestScheduler --> DeliveryDispatcher : 提交选定路由
+    BuiltinGroupPlanner ..|> GroupPlanner
+    RequestTimeEstimation --> GroupPlanner
 ```
 
-职责说明：
+- `RequestScheduler` 定义调度时机、请求/Endpoint 变化通知与停止调度。DIRECT 和 QUEUE 实现决定何时选路及推进；策略、队列和组批规则可替换。
+- `AbstractRequestScheduler` 只绑定 `RequestLifecycle`、共享请求目录并校验默认调度模式，不执行请求生命周期流程。
+- `RequestLifecycle` 负责准入句柄、取消、超时、资源交接与请求结算；`RequestContext` 维护原子请求事实和结果优先级。取消和超时不是队列的资源释放职责。
+- `CostBasedPrefillStrategy` 经 CandidateInput 的只读容量入口完成默认 Prefill 容量归因。`RequestWorkerSelector` 不再读取容量并改判策略结果；资源竞争仍由提交时的 Endpoint 原子校验决定。
+- `RequestRepository` 管理注册、活动/终态身份与归档。队列维护成员和顺序，策略决定选择结果，Endpoint 持有精确资源账本。
+- `PlacementConfiguration` 完成调度组件装配。抢占策略由 `DecodePreemptionPolicy` 决定，`DecodePreemption` 定义执行入口，默认执行实现为 `DefaultDecodePreemption`。
 
-- `BalanceContext` 是唯一请求状态拥有者，私有维护阶段、绑定、admission、清理、期限及抢占参与；`RequestScheduler` 负责入口、目录和锁外副作用。
-- 路由 publication 在请求锁外，投递资格、期限检查与本地交接在同一请求锁内；响应选择与资源终态独立。
-- `DirectPlacementCoordinator` 对已注册请求执行一次立即选路和提交，通过 Scheduler 的请求协议取得准入、提交资源并发布结果。
-- `GlobalQueueCoordinator` 管理全局排队与 placement，取得规划资格后才选择路由。
-- `WorkerBatcher` 统一消费 `GroupingPolicy` 的 EMPTY/WAIT/READY，保留队列快照复验、容量预留、条件等待和投递事务。路由预测使用快照中同一个策略，组选择与窗口规则不再分叉。
-- 两个 Placement Control 是各协调器的嵌套接口；`RouteDelivery` 归 DIRECT 协议。`PlacementConfiguration` 完成装配和队列启动，Scheduler 不再依赖 Router。
-- `PlacementConfiguration` 直接读取 `dispatcher.type`，装配唯一的 Prefill 投递策略；批次模式通过 `BatchIdGenerator` 生成关联 ID，并把 `DefaultBatchDispatcher` 的提交函数传给 `BatchDeliveryStrategy`。
+`RequestSchedulerEntry` 已删除。API 直接调用 `RequestLifecycle.submit/cancel`；VIT-only 路由和预选身份校验在 API 路由入口调用 Selector，不注册生成请求。Lifecycle 不依赖选择器，不解释队列规则。`ApplicationLifecycle` 连接自定义 Scheduler 并启动调度；默认和自定义实现均使用同一个请求入口。
 
-请求内状态与执行设施的关系：
+`DeliveryDispatcher` 持有启动时绑定的 Decode 准入容量，队列发布与直接投递均由执行组件读取；Lifecycle 和默认 Scheduler 基类不再保存或传递这份配置。
+
+### 调度触发与请求状态
+
+Worker 队列通过 `PrefillRequestQueue.Snapshot` 同时提供有序成员和只读 `QueueItem` 比较规则。执行和预测使用队列实际规则；Endpoint 不再从配置重建另一套预测排序。默认优先级/FIFO 只提供一套比较器，自定义队列可以替换它。
+
+`RequestScheduler` 暴露 `start()`、`schedule()`、`stop()`、`awaitStopped(deadlineNanos)` 和请求/Endpoint 事件入口。调度函数归实现本身；自定义实现自行选择触发方式。默认 QUEUE 将原有后台调度线程直接归入自身：该线程调用 `schedule()`，按下一调度期限等待，并由请求/资源事件唤醒；planner 池继续执行选择和组批工作；DIRECT 在到达时将请求提交给请求执行池。没有独立 `SchedulerLoop`，`RequestLifecycle` 不再保存或控制调度循环。
+
+`stop()` 停止产生新调度工作，`awaitStopped` 等待已接受的调度执行；`close()` 进一步完成 Scheduler 所有的清理。服务停服顺序仍归 `ApplicationLifecycle`，共享任务/计时设施由各自组件关闭。
+
+`ContextResult.End` 直接持有终态、错误与说明，已删除重复的 `TerminalOutcome` 包装。选定终态与资源结算完成仍是两个不同事实。Context 的准入、投递准备、抢占返回实际句柄或空；绑定路由、选择响应和抢占检查返回布尔值。已删除通用 `Claim/Granted/Blocked/Rejected/Stale`、`GrantValue` 和 `RoutePermit`。发送开始用 `SendResult` 区分成功、取消和身份不可用，避免错误触发清理。
+
+Context 的 OPEN / ENDING / CLOSED 由已选终态和归档记录推导，不再维护另一份 phase 字段。发送资源可释放、投递可准备也从快照事实派生，不再保存重复布尔值。Deadline token 复用由已有 `ExpirationTimer.Plan` 完成，Context 仍决定到期条件。预测、清理和回调共用精确的 `Delivery.Member` 对象身份，已删除仅用于重复预测校验的投递序号。
+
+外部包中的自定义 Scheduler 可调用 `DeliveryDispatcher.submitRoute(route, admission)` 完成即时提交；Dispatcher 释放选机引用、结束准入后通知 Lifecycle，调用方不再接收中间 RouteDelivery 并补发成功结果；`ExternalRequestSchedulerTest` 使用真实 Endpoint 验证手动触发与提前取消。外部实现也可用公开的 `Delivery` 和 `DeliveryDispatcher.submit` 提交已有 Worker 队列中的成员，`ALL_SELECTED` / `ORDERED_PREFIX` 明确限定整组或有序前缀；集成测试覆盖真实 PDFUSION 和独立 Decode 组批。全局排队的资源准备已移入 `DeliveryDispatcher.enqueueRoute`；Direct、自定义和排队 Scheduler 都由 `finishPlacement(route, admission)` 完成未发布准备回滚、选机引用关闭和准入结束，调度器保留重试与抢占时机。这些契约测试不替代全量 UT 与性能验收。
+
+### Prefill 提交与队列等待
+
+`PrefillEndpoint.commitDirect(pin, route, reservation)` 在自身锁内校验并提交立即调度的精确预留，复用选机阶段持有的 generation 引用，返回此前工作量快照。已删除 `commitDirectLocked` 内层接口和额外的提交引用、Direct Delivery 包装；调用方无需另行加锁。该入口不接受队列计划、预测数组或批次参数。排队提交直接校验已有 `Delivery` 的成员、预测、批次预留和失败成员；`QueuedCommit` 与 `CommittedHandoff` 已删除。generation 使用权和提交快照记录在同一个 Delivery，清理只归还临时资源。批次特征在锁外构建一次，预测与账本共用。两种入口由 Endpoint 的同一份资源记录在原锁内校验身份与资源归属，整组验证完成前不改变成员占用。
+
+队列等待是否仍然成立由 `QueuedRequestScheduler.EndpointWork` 根据同一份 Decision 判断；Endpoint 提供锁内队首与版本事实。已删除仅转发 lock/unlock 的 `QueueGuard` 包装，队列成员更新与资源提交共用已有 `resourceLock()`。`EndpointWork` 只持有 Endpoint，不再单独传入其资源账本。调度启停归 Scheduler，成员增删直接归 Endpoint；测试专用驱动留在测试代码中。取消、超时和资源结算职责不变。
+
+## 投递、执行与停服
 
 ```mermaid
 classDiagram
-    SchedulerRuntime --> RequestScheduler : 维护与有序停机
-    SchedulerRuntime --> EndpointRegistry : 清理孤儿与退役
-    RequestScheduler o-- BalanceContext : 活动目录
-    BalanceContext --> RequestRoute : 当前精确绑定
-    RequestRoute --> BalanceContext : 请求实例
-    RequestRoute --> WorkerEndpoint : 代际与资源句柄
-    DefaultRouter ..> ProvisionalRoute : 候选与未交接资源
-    RequestScheduler ..> ProvisionalRoute : 协调提交
-    BalanceContext *-- AdmissionHandle : 当前准入操作
-    BalanceContext *-- CleanupProgress : 清理防重入
-    BalanceContext *-- PreemptionRegistration : 请求侧参与
-    BalanceContext *-- RequestFuture : 唯一响应目标
-    RequestScheduler --> ExpirationTimer : 注册与触发回调
-    RequestScheduler --> RequestContinuationExecutor : 请求内串行事实
-    RequestScheduler --> ResponseCompletionExecutor : 提交响应完成操作
-    SchedulerRuntime *-- ResponseCompletionExecutor : 创建与关闭
-    BalanceContext *-- PublicationPermit : 请求身份与响应认领
-    PublicationPermit --> CompletionRegistration : 执行登记
-    ResponseCompletionExecutor o-- CompletionRegistration : 在途任务与排空
+    ApplicationLifecycle --> RequestScheduler : 停止调度
+    ApplicationLifecycle --> RequestLifecycle : 等待准入与请求结算
+    ApplicationLifecycle --> EndpointRegistry : 关闭 Endpoint
+    ApplicationLifecycle --> DeliveryExecution : 等待投递
+    DeliveryDispatcher --> DeliveryExecution : 执行容量与投递设施
+    ApplicationLifecycle --> RequestTaskPool : 等待并关闭
+    ApplicationLifecycle --> ResponseCompletionExecutor : 关闭并排空
+    ApplicationLifecycle --> ExpirationTimer : 关闭期限注册
+    ApplicationLifecycle --> ScheduledTaskTimer : 关闭执行计时器
+    ApplicationLifecycle --> DeliveryDispatcher : 等待远端清理
+    RequestLifecycle --> ExpirationTimer : 请求期限
+    ExpirationTimer --> ScheduledTaskTimer : 经 TaskTimer 登记精确任务
+    RequestLifecycle --> DeliveryDispatcher : 投递与清理
+    DeliveryDispatcher --> EngineGrpcClient : 远端 RPC
+    DeliveryDispatcher --> Delivery : 准备至投递的一次操作
+    Delivery --> DeliveryMember : 精确成员
+    DeliveryMember --> RequestContext : 请求实例
 ```
 
-`AdmissionHandle`、`CleanupProgress`、`RequestFuture` 及投递句柄 `DeliveryClaim` 是 Context 的静态嵌套类型；批次和跨 victim 事务仍由原有组件负责。Timer 经 `RequestAccess` 获取关闭门槛、精确目录快照和触发回调，不持有具体 Scheduler。维护每轮读取一次动态 TTL，先清终态记录再清孤儿。整体关闭仍只有 SchedulerRuntime 一个 owner。
+`AdmissionHandle` 标识一次准入操作。`Delivery.Member` 从准备资源到投递使用同一份精确成员身份，原顶层 `DeliveryClaim` 和 `RequestSignals` 已删除；发送结果、取消和资源释放事实仍保存在 `RequestContext`。响应设施内保留 `ResponseCompletionExecutor.RequestFuture`。
 
-## 2. Worker 状态、同步与缓存
+`RequestRoute` 在发布前附加精确 Decode 预留，选择与资源准备共用同一个对象。`RequestLifecycle.beginRoute` 绑定精确请求身份，Dispatcher 在资源操作后直接记录 Context 的发布事实；Lifecycle 不再提供 publishRoute 转发协议；重复发布由 Context 的已发布状态拒绝。
 
-```mermaid
-classDiagram
-direction TB
+Prefill 的请求预留和批次预留分别与其资源记录合并，准备、提交、回滚使用同一对象身份。请求资源状态区分 WAITING、RESERVED、COMMITTED；队列删除仍不释放资源。Direct 只提交单个精确预留，不再经过多请求提交接口。`PrefillState`、`PrefillObservation` 已删除，其资源记录和状态归并直接归 `PrefillEndpoint`。释放不再经过 State 的 Release 报告：Endpoint 删除精确资源，解锁后归还 generation 使用权并发布一次容量变化。合并后的类仍超预算，继续收敛中。
 
-namespace flexlb_sync {
-    class MasterEngineSynchronizer
-    class EngineSyncRunner
-    class WorkerAddressService
-    class GrpcWorkerStatusRunner
-    class GrpcCacheStatusCheckRunner
-    class EngineGrpcService
-    class EndpointRegistry
-    class WorkerEndpoint
-    class PrefillEndpoint
-    class DecodeEndpoint
-    class PrefillState
-    class DecodeState
-    class WorkerBatcher
-}
+Decode 投递许可直接引用精确账本行，不再使用内部 DispatchLease 加外层 permit 的双对象。`Delivery` 负责校验并保留 protobuf 输入，已删除 GenerateInputPayload 包装对象和测试专用生产构造器。`ResponseCompletionExecutor` 只负责任务提交、执行和排空，响应裁决及 ACK 统计由 RequestLifecycle 驱动。
 
-namespace flexlb_common {
-    class WorkerStatus
-}
+`DecodeState` 已删除，原有资源记录、资源锁和原子操作直接归 `DecodeEndpoint`，不再经单独账本对象转发。合并后的类仍超代码和方法预算，尚未完成收敛。排队路由用 `RequestRoute` 的精确 Prefill/Decode 资源句柄记录交接，已删除 `PlacementPlan.pendingDecodeRollback` 与重复的 `published` 标志；Prefill 句柄在实际入队后、通知之前记录。
 
-namespace flexlb_cache {
-    class CacheAwareService {
-        <<interface>>
-    }
-    class DefaultCacheAwareService
-    class KvCacheManager
-    class GlobalCacheIndex
-    class EngineLocalView
-}
+`PrefillEndpoint` 不再持有 Dispatcher；Registry 在装配时传入已确定的投递模式值，预测仍使用实际投递模式。Dispatcher 的 Direct 与排队入口共用 Decode 预留和释放实现：预留已成功但路由拒绝接收时，立即释放该精确句柄，清理异常作为原异常的 suppressed cause。Direct 已删除重复的临时 Decode 句柄和 acquired route 引用。
 
-namespace flexlb_grpc {
-    class EngineGrpcClient
-}
+`ApplicationLifecycle.closeScheduling()` 负责服务停服顺序：停止准入与调度，取消并结算未完成请求，等待投递清理，关闭 Endpoint，再排空和关闭各执行组件。等待任务和关闭线程池由各执行组件实现，不再存在统一承接这些职责的 Runtime 类。
 
-MasterEngineSynchronizer --> WorkerAddressService
-MasterEngineSynchronizer --> EndpointRegistry
-MasterEngineSynchronizer ..> EngineSyncRunner : 创建并提交
-EngineSyncRunner --> WorkerAddressService : 发现地址
-EngineSyncRunner --> EndpointRegistry
-EngineSyncRunner ..> GrpcWorkerStatusRunner : 创建状态轮询
-EngineSyncRunner ..> GrpcCacheStatusCheckRunner : 创建缓存轮询
-GrpcWorkerStatusRunner --> EngineGrpcService
-GrpcWorkerStatusRunner --> EndpointRegistry : 校验与发布
-GrpcWorkerStatusRunner --> WorkerStatus : 更新观测
-GrpcCacheStatusCheckRunner --> EngineGrpcService
-GrpcCacheStatusCheckRunner --> EndpointRegistry : 代际校验
-GrpcCacheStatusCheckRunner --> CacheAwareService : 更新缓存
-EngineGrpcService --> EngineGrpcClient
-EndpointRegistry --> WorkerStatus : 维护发现的代际
-EndpointRegistry --> WorkerEndpoint : 管理 endpoint
-WorkerEndpoint --> WorkerStatus
-WorkerEndpoint <|-- PrefillEndpoint
-WorkerEndpoint <|-- DecodeEndpoint
-PrefillEndpoint *-- PrefillState
-PrefillEndpoint *-- WorkerBatcher : 仅 QUEUE 模式
-WorkerBatcher --> PrefillEndpoint
-WorkerBatcher --> PrefillState
-DecodeEndpoint *-- DecodeState
-CacheAwareService <|.. DefaultCacheAwareService
-CacheAwareService ..> WorkerStatus : 更新接口入参
-DefaultCacheAwareService --> KvCacheManager
-KvCacheManager --> GlobalCacheIndex
-KvCacheManager --> EngineLocalView
-```
+准备期间的精确路由只保存在 `RequestContext.route`；`PlacementFacts` 不再重复保存 acquired route 或 pending terminal。准备期间的结束原因写入 Context 的 `pendingEnd`，准备失败仍可先于准备结束结算；其他原因等待精确准备操作完成。等待期间仍安装请求的期限重检，不能因已有待结束原因而遗漏定时任务。
 
-当前边界特点：
+观测通过 Reporter 读取统计并上报，不参与策略决策、队列顺序或请求结算。Endpoint 的负载采样只保留 `tryGetLoadMetric`；锁忙时跳过采样，精确账本验证使用资源快照。Registry 的路由别名可以与 Endpoint 的通信地址不同，两者必须保留区分。
 
-- `WorkerStatus` 位于 `flexlb-common`，实际包含 generation、锁和生命周期状态，并非普通 DTO。
-- `EndpointRegistry` 统一管理发现的 WorkerStatus 代际、可路由 endpoint 的发布与退休，并直接向选路提供快照与 pin。
-- `PrefillEndpoint` 与 `WorkerBatcher` 双向关联，状态对象 `PrefillState` 由二者共享引用。
-- cache 更新接口接收整个 `WorkerStatus`。缓存索引按地址管理，调用方承担已有的 generation fencing 责任。
-- `MasterEngineSynchronizer` 通过 `EngineSyncRunner` 创建具体轮询任务，图中保留这一中间层。
+## Worker 同步与主节点状态
 
-## 3. 抢占取消与主节点协调
+`EndpointRegistry` 管理发现的 Worker 代际与路由快照；`WorkerStatusSynchronizer` 管理原有轮询执行设施和退休重试，`GrpcWorkerStatusRunner` 获取 Worker 状态。WorkerEndpoint 持有 generation 使用权与退休进度，不再经过独立 EndpointGenerationLifecycle。主节点状态由 `MasterStatusView` / `MasterStatusService` 提供，ZooKeeper 选主实现为 `ZookeeperMasterElectService`。
 
-```mermaid
-classDiagram
-direction TB
+本地排队抢占的撤回是同步流程；`DefaultDecodePreemption` 完成所有受影响请求的撤回后，在失败时精确回滚 incoming reservation。`AdmissionHandle` 不再保存失败回调，Lifecycle 不再回调抢占组件释放该资源；多个失败会合并异常，所有已领取准入都会完成。
 
-namespace flexlb_api {
-    class FlexlbServiceImpl
-}
+投递/抢占 RPC 的一次性超时由注入 Dispatcher 的 `TaskTimer` 处理，不再经请求借用 Lifecycle 的设施。`RequestLifecycle` 只保留管理请求期限的 `ExpirationTimer`，两者复用原有线程设施。
 
-namespace flexlb_sync {
-    class GlobalQueueCoordinator
-    class EvictionManager
-    class DecodePreemptionCoordinator
-    class RequestScheduler
-    class EngineCancelChannel {
-        <<interface>>
-    }
-    class GrpcEngineCancelChannel
-    class MasterElectService {
-        <<interface>>
-    }
-    class LBStatusConsistencyService
-    class ZookeeperMasterElectService
-}
+`ExpirationTimer` 借用 `TaskTimer`，只维护期限 token 与定时任务的对应关系。`ScheduledTaskTimer` 分别承接原有单线程期限池和双线程清理计时池，池数和隔离保持不变。关闭期限登记时等待已接受的回调并取消本组件任务；`ApplicationLifecycle` 随后关闭期限池，清理计时池仍在请求结算完成后关闭。任务取消直接使用 JDK `Future.cancel(false)`，不额外创建取消包装。
 
-namespace flexlb_grpc {
-    class EngineGrpcClient
-}
+默认 Scheduler 工厂仅装配，不启动后台调度。生产统一由 `ApplicationLifecycle` 完成绑定并调用 `start()`；测试夹具需要后台推进时显式启动，支持先登记、先取消、后启动的场景。
 
-namespace flexlb_common {
-    class GeneralHttpNettyService
-}
+`QueuedRequestScheduler` 和 `Delivery` 均不再持有 `DeliveryExecution`。Scheduler 构造只含已选成员及组批输入的投递对象，执行容量的读取、订阅和申请统一由 `DeliveryDispatcher` 承接；Scheduler 仍决定候选、有序前缀是否可接受，以及何时重试。路由提交延迟在 Dispatcher 的实际发布边界上报，删除 Scheduler 中只为指标包一层的 `enqueueRoute`。
 
-GlobalQueueCoordinator --> EvictionManager
-EvictionManager --> RequestScheduler
-EvictionManager --> DecodePreemptionCoordinator
-EvictionManager --> EngineCancelChannel
-DecodePreemptionCoordinator --> RequestScheduler : 注册与结算抢占
-DecodePreemptionCoordinator --> EngineCancelChannel : 请求取消
-EngineCancelChannel <|.. GrpcEngineCancelChannel
-GrpcEngineCancelChannel --> EngineGrpcClient : Cancel RPC
-FlexlbServiceImpl --> MasterElectService : 判断主节点
-MasterElectService <|.. LBStatusConsistencyService
-LBStatusConsistencyService --> ZookeeperMasterElectService
-ZookeeperMasterElectService --> GeneralHttpNettyService : 节点通知
-```
+请求观察只保留一个不可变 `ContextResult.Snapshot`，删除 `SnapshotFacts` 和委托层。重复观察保留原快照身份；时间或事实变化时创建新快照，历史快照保持不变。
 
-`EngineCancelChannel` 返回取消 RPC 的结果；取消确认不等价于资源已释放。请求状态与资源结算仍由调度侧结合终态证据处理。
+`awaitStopped` 等待的是已经接受的调度工作。Direct 对提交给现有请求执行池的选择任务计数，任务完成或提交失败后归还；Queue 识别自己的 planner 线程并拒绝自我等待。两者均不新增线程池、锁或每请求包装，也不把请求结算搬入 Scheduler。
 
-## 4. 当前 package 对照
+投递确认直接调用 `RequestContext.confirmDelivery`，不再伪装成 `ResponseKind.CONFIRMATION` 的响应候选；确认本身不选择前端响应，随后 ACK 仍与取消竞争。响应候选也不再重复保存请求终态，外部异常完成使用已有终态候选，原异常仍由 Future 的异常完成路径交付。
 
-以下 package 均以 `org.flexlb` 为前缀。
+Prefill 状态归并直接产生 `WorkerEndpoint.StatusChange.Prefill`，删除只承载相同字段的 `StatusReconciliation` 包装；状态事实仍在锁内提交，容量和请求通知在锁外发布。
 
-| Module        | 当前 package                           | 图中主要类                                                                                                                                                   |
-| ------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| flexlb-api    | `httpserver`                           | FlexlbServiceImpl、FlexlbGrpcForwarder                                                                                                                       |
-| flexlb-sync   | `balance.scheduler`                    | RequestScheduler、BalanceContext、GlobalQueueCoordinator、DefaultRouter、WorkerBatcher、BatchDeliveryStrategy、RouteDeliveryStrategy、DefaultBatchDispatcher |
-| flexlb-sync   | `balance.strategy`                     | CostBasedPrefillStrategy、DecodeSelector、RandomStrategy                                                                                                     |
-| flexlb-sync   | `balance.endpoint`                     | EndpointRegistry、WorkerEndpoint、PrefillEndpoint、DecodeEndpoint、PrefillState、DecodeState                                                                 |
-| flexlb-sync   | `balance.delivery`                     | DeliveryStrategy                                                                                                                                             |
-| flexlb-sync   | `balance.eviction`                     | EvictionManager、DecodePreemptionCoordinator、EngineCancelChannel、GrpcEngineCancelChannel                                                                   |
-| flexlb-sync   | `sync.synchronizer`                    | MasterEngineSynchronizer                                                                                                                                     |
-| flexlb-sync   | `sync.runner`                          | EngineSyncRunner、GrpcWorkerStatusRunner、GrpcCacheStatusCheckRunner                                                                                         |
-| flexlb-sync   | `service.address` / `service.grpc`     | WorkerAddressService / EngineGrpcService                                                                                                                     |
-| flexlb-sync   | `consistency`                          | MasterElectService、LBStatusConsistencyService、ZookeeperMasterElectService                                                                                  |
-| flexlb-common | `dao.master` / `transport`             | WorkerStatus / GeneralHttpNettyService                                                                                                                       |
-| flexlb-cache  | `cache.service` / `cache.service.impl` | CacheAwareService / DefaultCacheAwareService                                                                                                                 |
-| flexlb-cache  | `cache.core`                           | KvCacheManager、GlobalCacheIndex、EngineLocalView                                                                                                            |
-| flexlb-grpc   | `engine.grpc`                          | EngineGrpcClient                                                                                                                                             |
+队列拒绝直接调用 `RequestLifecycle.rejectRoute`；排队超时走已有 `cancel(..., DEADLINE_EXCEEDED)`，不再经过 `QueueKind` 事件分发。`RequestData.getLifecycle()` 明确返回请求生命周期负责人，调度器与生命周期不再共用 `getScheduler` 名称。
 
-## 5. 源码入口
+`RequestRoute` 用明确的 Prefill/Decode/VIT pin 字段保存代际使用权，不再维护 pin 数组和角色下标；响应与逆序释放仍遵守原选择顺序。只供测试转发 Future 的入口已删除，payload 大小估算归 `BatchEnqueueHelper`。Endpoint 退休统一通过原有完成 Future 等待和读取异常，删除重复异常字段及手工 wait/notify 协议；中断恢复与有界等待保持不变。
 
-- [RequestScheduler](../flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestScheduler.java)
-- [BalanceContext](../flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BalanceContext.java)
-- [EndpointRegistry](../flexlb-sync/src/main/java/org/flexlb/balance/endpoint/EndpointRegistry.java)
-- [PlacementConfiguration](../flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementConfiguration.java)
-- [BatchIdGenerator](../flexlb-sync/src/main/java/org/flexlb/balance/delivery/BatchIdGenerator.java)
-- [PrefillEndpoint](../flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillEndpoint.java)
-- [EngineSyncRunner](../flexlb-sync/src/main/java/org/flexlb/sync/runner/EngineSyncRunner.java)
-- [CacheAwareService](../flexlb-cache/src/main/java/org/flexlb/cache/service/CacheAwareService.java)
-- [EngineCancelChannel](../flexlb-sync/src/main/java/org/flexlb/balance/eviction/EngineCancelChannel.java)
-- [LBStatusConsistencyService](../flexlb-sync/src/main/java/org/flexlb/consistency/LBStatusConsistencyService.java)
+Prefill 预测输入直接在原锁内捕获队列、已提交工作和版本，去掉 `ProjectionSource` 外围重复的 `Snapshot` 包装；预测仍在锁外执行，缓存发布后释放请求引用。
 
-## 6. 调度决策流程（关键节点）
+Dispatcher 负责从请求校验到 Decode permit 提交、Context 发布的完整投递提交；Lifecycle 只提供身份与超时校验，并消费提交结果。保留提交前的临时 DeliveryFacts：Decode 提交失败时 Context 不发布投递，原请求仍能重试。删除 Lifecycle 的资源提交入口，Member 的便捷调用直接进入 Dispatcher。
 
-```mermaid
-flowchart TD
-    A[收到请求] --> B{调度模式}
-    B -->|DIRECT| C[选择路由并尝试准入]
-    C --> D{准入成功?}
-    D -->|是| E[返回路由，由前端投递]
-    D -->|否| F[返回失败]
+请求执行池直接将已有 WorkRegistration 放入执行队列，删除 Task 包装及重复 submitted/running 标志；请求锁外执行、同一结算串行、通知合并和拒绝后的计数归还不变。Prefill 的 WorkCapture 合入已有 WorkSnapshot，Endpoint 只冻结叶子事实，汇总和身份排序由快照在锁外计算并缓存，不再先构造捕获对象再构造快照。
 
-    B -->|QUEUE| G[全局排队]
-    G --> H[选择路由并尝试准入]
-    H --> I{准入成功?}
-    I -->|容量不足| J[等待容量；符合条件时尝试抢占]
-    J -->|容量恢复| H
-    J -->|抢占准入成功| K
-    I -->|是| K[进入选定 Worker 队列并成组]
-    K --> L{投递模式}
-    L -->|NON_BATCH| E
-    L -->|BATCH| M[Master 批量投递给 Engine]
-```
+### 抢占停服与替代队列契约
 
-- 路由选择：按模型所需角色选择 Prefill、Decode 等节点。
-- 等待和抢占仅概括 QUEUE 的容量处理；抢占需要满足优先级及资源条件，成功时继续原先选定的路由。
-- 图中省略取消、超时、异常和资源清理分支；成组后仍需等待实际投递容量。
+`DecodePreemption` 的默认和自定义实现均提供 `stopAdmission`、`awaitIdle`、`close`。
+`ApplicationLifecycle` 先停止抢占和调度，再等待已接受的抢占操作结束，随后结算请求并关闭执行设施。
+默认实现复用每次操作已有的 `Attempt` 统计资源交接；调用方取消结果 Future 不代表这些资源已经清理。
 
-## 7. 调度与抢占的所有权收敛（2026-09-25）
+Worker 队列的 `add` 返回 false 时，Endpoint 不发布 Prefill 预留，也不保留新建的资源记录。
+替代队列契约测试覆盖拒绝后的同 requestId 重试。默认组批实现仍由实际执行和预测共用，
+容量判断和预测值校验分别收敛为纯函数，保持有序前缀、饱和算术和预测预算的既有语义。
 
-以下关系已实施，包含普通路径和抢占恢复路径。
+### 队列操作与 deadline 登记
 
-```mermaid
-classDiagram
-    RequestScheduler --> BalanceContext : 写请求阶段与事实
-    RequestScheduler --> PlacementStrategy : 请求接管
-    RequestScheduler --> GlobalQueueCoordinator : 撤回与关闭
-    GlobalQueueCoordinator --> QueuedPlacementControl : 认领与结算调度权、enqueueRoute
-    RequestScheduler ..|> QueuedPlacementControl
-    GlobalQueueCoordinator --> DefaultRouter : 选择路由
-    GlobalQueueCoordinator --> EvictionManager : tryReserve获取抢占资源
-    GlobalQueueCoordinator ..> ProvisionalRoute : 持有候选至提交或关闭
-    EvictionManager --> RequestScheduler : 撤回本地victim及检查准入
-    EvictionManager --> DecodePreemptionCoordinator : Engine取消协议
-    DecodePreemptionCoordinator --> RequestScheduler : victim登记与终态
-    DecodePreemptionCoordinator --> DecodeEndpoint : 提交精确资源
-    RequestScheduler ..> ProvisionalRoute : 编排发布与资源转交
-    ProvisionalRoute --> PrefillEndpoint : 入队
-    ProvisionalRoute --> DecodeEndpoint : 采用精确reservation
-    BalanceContext --> RequestRequirements : 注册时冻结一次请求输入
-    RequestRoute --> BalanceContext : 读取请求输入和FIFO身份
-    WorkerBatcher --> PrefillState : 完整队列读取复验与收尾
-    PrefillState --> PrefillActiveIndex : 唯一索引访问者
-    BalanceContext --> RequestRoute : 当前路由身份
-    RequestRoute --> BalanceContext : 请求事实与唯一future
-```
+Worker 入队和精确删除不再通过 `QueueChange/updateQueue` 分发。
+`PrefillEndpoint` 在原资源锁内完成成员变更；`QueuedRequestScheduler` 判断超时，
+并在释放该锁后调用请求 Lifecycle。队列本身不会因成员到期而隐式删除或结算资源。
 
-### 已删除的重复流程
+`ExpirationTimer` 以已返回的定时任务 Future 表示安装成功，删除了第二次 publish 交接及其标记。
+三个固定 deadline 的句柄直接存储，不再为每次登记创建 EnumMap。
+旧 token、提前触发、安装失败重试、取消和停服的行为保持各自的契约测试。
 
-- EvictionManager 不再持有 ProvisionalRoute、AdmissionHandle 或投递指标 reporter，
-  不执行新请求路由安装、前端失败响应与路由关闭。
-- GlobalQueueCoordinator 从选路开始持有同一 AdmissionHandle；抢占异步执行时，
-  把它与 ProvisionalRoute 一起转移给 completion，结束时通过 try-with-resources 关闭。
-- 普通提交与抢占后提交共用 submitRoute，路由提交指标只在这里记录。
-- tryReserve 返回 null 表示未接管（包括本地 victim 冲突），继续原容量等待；
-  非 null Future 表示接管，结果提供精确 reservation 或抢占失败详情。
-  Engine UNKNOWN 等非成功结果不得被当作未接管重新排队。
-- 抢占方案选出后必须检查 isAdmissionOpen。ROUTING 期间已接受取消但 Future 尚未完成时，
-  该检查防止继续撤走 victim；也检查 Scheduler 关停。
-- completion 挂接前先从 Plan 转移资源，确保立即完成的 Future 不会触发 Plan 二次关闭。
-- Prefill 预留句柄直接引用原始请求 owner，不再重复保存请求 ID；批次 ID 唯一性在预留边界检查，
-  提交时删除重复全表扫描。最后成员结束之前仍阻止同批次 ID 重用。
-- RequestRoute 已删除独立 future 字段，统一读取其精确 Context；注册后 future 不可替换。
-- GlobalQueueEntry 也已删除重复 future 字段；全局 `trySubmitRegistered` 从已注册 Context 取得同一 Future。
-  Batch 发送优先级使用 RequestRoute 的冻结值，与队列排序和 Decode 准入保持一致。
-- 已进一步删除 CommittedAdmissionOwner；事务直接持有 generation handoff 与原成员列表，
-  Member 负责精确 Decode permit 的一次转交。finally 先关闭未转交成员，再关闭 handoff；
-  Batch 保留原下标和精确请求对象校验，Route/DIRECT 直接使用绑定的 Member。
-- Scheduler 已删除五个针对具体 Batch/Route 的准备和认领转发方法，复用现有原子边界。
+队列停止后的请求终结由 Scheduler 执行。`PrefillEndpoint.closeQueue()` 只关闭入队并返回精确成员，不再调用 `RequestLifecycle.rejectRoute`，也不再保存排空 Future 和等待线程。Endpoint 退休只发布一次精确退休事实；原先先拒绝队列成员、再发布退休事实的重复路径已删除。
 
-统一路由提交后为 27,589 行；进一步收敛账本、资源所有权、请求事实与维护入口后，当前 sync 生产 Java 共 25,890 行（最近一轮推迟 NON_BATCH 事务交接，确保准备失败仍可通过 abort 回收；删除 ClaimedRoute 重复请求引用；未通过性能验证的二分查找已撤回）。
-行数不代表功能或性能达标；回归与远端结果记录在 scheduler-design/evidence 中。
+WorkerEndpoint 的 generation 使用权已经覆盖未提交批次。真实 Endpoint 测试确认：批次预留未回滚时，退休清理不能开始；回滚后才进行一次清理，清理异常仍由退休等待方收到。因此删除资源层重复接管“孤儿批次使用权”的兜底协议，原子清理入口收窄到包内，并在清理前校验不存在未提交批次。
 
-### 状态归属
+Prefill/Decode 默认选择策略分开表达候选筛选、成本或缓存亲和排名与失败归因，仍保留原轮转、未知工作量、溢出和日志语义。未增加请求包装对象或状态缓存。Direct/Queued 的 close 都必须证明已排空；从自身已接收的任务中关闭会明确失败，不能把自等待失败当成关闭成功。
 
-| 对象                        | 应持有的事实 / 职责                                | 不应承担                 |
-| --------------------------- | -------------------------------------------------- | ------------------------ |
-| BalanceContext              | 输入、七阶段、响应事实、当前路由身份               | 执行抢占、发送、资源释放 |
-| RequestScheduler            | 事件仲裁、合法迁移、终态与清理                     | 具体投递事务内部操作     |
-| GlobalQueueCoordinator      | 优先级/FIFO、容量等待、选路与提交次序              | Engine Cancel 协议       |
-| ProvisionalRoute            | 提交前的所选路由与精确资源，关闭时释放未转出的资源 | 请求生命周期事实         |
-| RequestRoute                | 一次路由的身份、冻结值与资源能力                   | 初始化或推进请求阶段     |
-| WorkerBatcher               | Worker 成组窗口与投递时机                          | 全局排队和终态裁决       |
-| PrefillState / DecodeState  | 资源归属、Engine 观测与容量账本                    | 前端响应结果             |
-| DecodePreemptionCoordinator | 取消协议及终态证据等待                             | 新请求路由安装           |
+本轮提交边界：Prefill 的队列提交仅保留 `commitLocked(plan)`，代际引用由 Endpoint 获取及交接；调用方不能传入提交引用。Decode 的 permit 结果与账本变更由 `dispatch` 在同一把现有资源锁下处理，删除 `transferDispatch` 和 permit 自身的同步块。Direct 与全局队列的未发布路由共用 `rollbackRoute`，两份本地资源均尝试释放，全部成功后才记录 ROLLBACK_COMPLETED。预留占用、发送不确定性、远端释放证据仍保留；五个核心类尚未达到设计代码预算。
 
-### 下一处结构候选
+本轮将释放证据直接写回 RequestContext.CloseFacts，删除 RequestLifecycle.Settlement 回执；Direct 与排队路径都在 Route 上保存精确 Prefill 预留引用，以同一规则判断物理发布。投递失败经 Lifecycle 的统一状态推进入口处理。上述交接协议收敛不代表五类预算已达标。
 
-1. 已由 RequestScheduler 在原路由创建时点初始化首次 Worker FIFO；RequestRoute 构造器只读取。
-   后续检查输入冻结边界，不能提前 FIFO 到全局注册。
-2. Decode 账本已合并创建、Engine 观察和终态留存时间，终态由无请求/协议归属推导；
-   入队/出队阶段和计数统一更新。继续检查其他账本中的重复状态，核对其全部写入者。
-3. Scheduler 按事件收敛重复控制流；不按类长度机械拆出新协调器。
+执行器接收任务或拒绝回调后负责清理；Dispatcher 从已有 DeliveryPermit 状态判断是否完成移交，删除 Delivery.transferred。进入执行器前抛错仍由提交方释放临时资源；该边界有故障注入回归测试。
 
-已合并 PrefillState 两个 ACTIVE 终结入口：显式传入 Route lease 时校验并关闭，
-无 Route lease 时保留 Batch 准备事务的 lease。已删除仅测试使用的 WorkerBatcher.QueueSnapshot
-与 endpoint 转发入口，测试直接读取现有 PrefillActiveIndex.Capture。
+请求状态的确认条件由 `Snapshot.canConfirmDelivery()` 统一提供，Lifecycle 只负责响应执行资源与后续动作。抢占入口把状态有效性交给 `RequestContext.beginPlacement()`，只保留精确资源身份、优先级、有效期和资源可撤回检查。请求任务注册失败直接返回原失败，不对已关闭的任务设施重复注册；任务尚未被接受时的提交恢复、响应注册恢复、资源释放与定时器结算恢复仍保留。Prefill 状态更新每次加锁都重新读取当前账本，只在批次成员完全相同时复用锁外预测，提交失败仍在解锁前退休。
 
-DefaultRouter 已移除 ConfigService 依赖与失效的配置回退；请求 Context 的非空配置是
-选路输入，PinnedRouting 继续通过 try-with-resources 逆序释放未交出的节点 pin。
+Worker queue order includes blocked-head alternatives: `PrefillRequestQueue.candidatesAfterBlockedHead` defaults to no bypass, and `recordDispatch` receives only successful commits under the endpoint lock. `PrefillActiveIndex` owns the bounded bypass rule and allowance. `GroupPlanner` decides readiness for ordinary and bypass groups; the Scheduler preserves its deadline while watching head capacity.
 
-SchedulerRuntime 仅保留注入真实 dispatcher 的构造，删除测试专用 no-op 排空入口与
-Runnable 适配；Prefill/Decode 指标共用遍历方法，快照和各指标叶子的失败仍独立隔离。
-
-保留以下真实边界：Context 与某次路由的双向身份关联；WorkerBatcher 与资源账本；
-优先级队列与容量等待队列；取消 ACK 与资源终态。它们分别回答不同问题，不能用一个阶段替代。
-
-### 选择提交边界复核
-
-WorkerBatcher 保留锁内提交编排；PrefillState 提供精确成员校验和终态边界移除。
-删除 Worker 的重复提交标记，事务自身阶段决定是否 abort；异常先解锁再清理。
-没有引入 State 调用投递事务的反向依赖或新的 Service 层。
+`PlacementResult.ENDPOINT_CHANGED` retains the successful strategy result when its exact Prefill/Decode generation cannot be captured. It is distinct from strategy `BLOCKED`; retry timing remains with RequestScheduler. Class and module budgets remain unfinished.

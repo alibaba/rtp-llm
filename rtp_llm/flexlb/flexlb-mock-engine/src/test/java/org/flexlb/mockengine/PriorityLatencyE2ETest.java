@@ -68,7 +68,7 @@ class PriorityLatencyE2ETest {
             // Wait for the actual held endpoint queue, not an intermediate aggregate of 150.
             AutoTpmE2EHarness.await(
                     () ->
-                            h.prefillEndpoint(0).ownership.progress().queueDepth() == total
+                            h.prefillEndpoint(0).progress().queueDepth() == total
                                     && h.requests.pendingDeliveryRequestCount() == total,
                     10_000,
                     "all requests must reach the endpoint priority queue before release");

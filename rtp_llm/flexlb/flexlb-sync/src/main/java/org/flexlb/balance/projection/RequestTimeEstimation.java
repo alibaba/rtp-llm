@@ -1,17 +1,19 @@
 package org.flexlb.balance.projection;
 
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.prediction.InvalidPrefillPredictionException;
-import org.flexlb.balance.prediction.PrefillBatchFeatures;
-import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.prediction.PrefillTimePredictor.InvalidPrefillPredictionException;
+import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.config.DispatcherConfig;
 
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
 import java.util.NoSuchElementException;
+import java.util.Objects;
+import java.util.OptionalLong;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
@@ -282,7 +284,7 @@ public final class RequestTimeEstimation {
         private boolean reset(
                 List<GroupPlanner.Item> active,
                 GroupPlanner.Item probe,
-                Comparator<GroupPlanner.Item> order,
+                Comparator<? super GroupPlanner.Item> order,
                 long nowMs) {
             for (int index = 0; index < active.size(); index++) {
                 var item = active.get(index);
@@ -554,7 +556,7 @@ public final class RequestTimeEstimation {
         if (mode == DispatcherConfig.Type.BATCH) {
             var prediction = evaluator.newBatchPrediction();
             return (added, items) ->
-                    PrefillPredictionBoundary.requireValidDecisionGroupMs(
+                    PrefillTimePredictor.requireValidDecisionGroupMs(
                             prediction.append(added.seqLen(), added.hitCache()));
         }
         return new GroupPlanner.PrefixPrediction<>() {
@@ -564,12 +566,12 @@ public final class RequestTimeEstimation {
             public double append(RequestRoute added, List<RequestRoute> items) {
                 try {
                     totalMs +=
-                            PrefillPredictionBoundary.predictSingleRequestMs(
+                            PrefillTimePredictor.predictSingleRequestMs(
                                     evaluator, added.seqLen(), added.hitCache());
-                } catch (org.flexlb.balance.prediction.InvalidPrefillPredictionException failure) {
+                } catch (PrefillTimePredictor.InvalidPrefillPredictionException failure) {
                     throw failure.atMember(items.size() - 1);
                 }
-                return PrefillPredictionBoundary.requireValidDecisionGroupMs(totalMs);
+                return PrefillTimePredictor.requireValidDecisionGroupMs(totalMs);
             }
         };
     }
@@ -654,13 +656,13 @@ public final class RequestTimeEstimation {
             try {
                 long predicted =
                         batch
-                                ? PrefillPredictionBoundary.predictCommittedBatchMs(
+                                ? PrefillTimePredictor.predictCommittedBatchMs(
                                         evaluator,
                                         new PrefillBatchFeatures(
                                                 List.of(
                                                         new PrefillBatchFeatures.Item(
                                                                 seqLen, hitCache))))
-                                : PrefillPredictionBoundary.predictSingleRequestMs(
+                                : PrefillTimePredictor.predictSingleRequestMs(
                                         evaluator, seqLen, hitCache);
                 if (!sameInput) {
                     cachedSnapshot = snapshot;
@@ -685,7 +687,7 @@ public final class RequestTimeEstimation {
             int size = (int) Math.min(probePosition + 1L, items.size());
             if (selection.selectedPredictionMs().isPresent()) {
                 if (batch) {
-                    return PrefillPredictionBoundary.committedDecisionGroupMs(
+                    return PrefillTimePredictor.committedDecisionGroupMs(
                             selection.selectedPredictionMs().getAsDouble());
                 }
                 // Keep integer precision beyond 2^53, including the rejected-tail predecessor.
@@ -708,7 +710,7 @@ public final class RequestTimeEstimation {
             }
             try {
                 if (size == 2) {
-                    return PrefillPredictionBoundary.predictCommittedBatchMs(
+                    return PrefillTimePredictor.predictCommittedBatchMs(
                             evaluator,
                             new PrefillBatchFeatures(
                                     List.of(items.get(0).features(), items.get(1).features())));
@@ -717,7 +719,7 @@ public final class RequestTimeEstimation {
                 for (int i = 0; i < features.length; i++) {
                     features[i] = items.get(i).features();
                 }
-                return PrefillPredictionBoundary.predictCommittedBatchMs(
+                return PrefillTimePredictor.predictCommittedBatchMs(
                         evaluator, new PrefillBatchFeatures(List.of(features)));
             } catch (RuntimeException predictionFailure) {
                 throw new PredictionFailure(predictionFailure);
@@ -743,7 +745,7 @@ public final class RequestTimeEstimation {
                 if (batch) {
                     try {
                         batchMs =
-                                PrefillPredictionBoundary.requireValidDecisionGroupMs(
+                                PrefillTimePredictor.requireValidDecisionGroupMs(
                                         batchPrediction.append(added.seqLen(), added.hitCache()));
                     } catch (RuntimeException failure) {
                         throw new PredictionFailure(failure);
@@ -771,5 +773,210 @@ public final class RequestTimeEstimation {
                     ? INVALID_PREDICTION_DETAIL
                     : executionDetail;
         }
+    }
+
+    /**
+     * Frozen request identities and Prefill work accounting after endpoint admission.
+     * Each running request or batch consumes elapsed time independently; a batch is counted once.
+     * Unknown work preserves member identities and known durations, but makes the total unavailable.
+     */
+    public static final class WorkSnapshot {
+        private static final long[] EMPTY_LONGS = new long[0];
+        private final long capturedAtMs;
+        private List<RequestWork> requests;
+        private List<BatchWork> batches;
+        private long knownNonRunningWorkMs;
+        private long[] runningWorkMs = EMPTY_LONGS;
+        private long[] requestIds = EMPTY_LONGS;
+        private boolean unknownWork;
+        private volatile boolean calculated;
+
+        /** Freeze resource facts cheaply; aggregate and sort when read outside the endpoint lock. */
+        public WorkSnapshot(
+                long capturedAtMs,
+                List<RequestWork> requests,
+                List<BatchWork> batches,
+                long unknownRequestCount) {
+            this.capturedAtMs = capturedAtMs;
+            this.requests = List.copyOf(requests);
+            this.batches = List.copyOf(batches);
+            checkArgument(unknownRequestCount >= 0L, "unknownRequestCount must be non-negative");
+            unknownWork = unknownRequestCount > 0L;
+        }
+
+        public WorkSnapshot calculate() {
+            if (!calculated) {
+                synchronized (this) {
+                    if (!calculated) {
+                        calculateWork();
+                        requests = null;
+                        batches = null;
+                        calculated = true;
+                    }
+                }
+            }
+            return this;
+        }
+
+        private void calculateWork() {
+            int runningCount = 0;
+            int requestIdCount = requests.size();
+            long nonRunningMs = 0L;
+            boolean hasUnknown = unknownWork;
+            for (RequestWork request : requests) {
+                if (request.phase() == Phase.ENGINE_RUNNING) {
+                    runningCount++;
+                } else {
+                    nonRunningMs = saturatedAdd(nonRunningMs, request.remainingWorkMs());
+                }
+            }
+            for (BatchWork batch : batches) {
+                requestIdCount = Math.addExact(requestIdCount, batch.requestIds().size());
+                if (batch.remainingWorkMs().isEmpty()) {
+                    hasUnknown = true;
+                } else if (batch.phase() == Phase.ENGINE_RUNNING) {
+                    runningCount++;
+                } else {
+                    nonRunningMs = saturatedAdd(nonRunningMs, batch.remainingWorkMs().getAsLong());
+                }
+            }
+
+            this.knownNonRunningWorkMs = nonRunningMs;
+            this.runningWorkMs = runningCount == 0 ? EMPTY_LONGS : new long[runningCount];
+            this.requestIds = requestIdCount == 0 ? EMPTY_LONGS : new long[requestIdCount];
+            this.unknownWork = hasUnknown;
+            indexRequests();
+        }
+
+        private void indexRequests() {
+            int runningIndex = 0;
+            int requestIdIndex = 0;
+            for (RequestWork request : requests) {
+                requestIds[requestIdIndex++] = request.requestId();
+                if (request.phase() == Phase.ENGINE_RUNNING) {
+                    runningWorkMs[runningIndex++] = request.remainingWorkMs();
+                }
+            }
+            for (BatchWork batch : batches) {
+                for (long requestId : batch.requestIds()) {
+                    requestIds[requestIdIndex++] = requestId;
+                }
+                if (batch.phase() == Phase.ENGINE_RUNNING && batch.remainingWorkMs().isPresent()) {
+                    runningWorkMs[runningIndex++] = batch.remainingWorkMs().getAsLong();
+                }
+            }
+            Arrays.sort(requestIds);
+        }
+
+        public long capturedAtMs() {
+            return capturedAtMs;
+        }
+
+        /** Lifecycle phase visible to a projection. Only ENGINE_RUNNING consumes time. */
+        public enum Phase {
+            COMMITTED,
+            ENGINE_QUEUED,
+            ENGINE_RUNNING
+        }
+
+        /** One individually delivered request, identified by request id. */
+        public record RequestWork(long requestId, Phase phase, long remainingWorkMs) {
+
+            public RequestWork {
+                checkArgument(remainingWorkMs >= 0L, "remaining request work must be non-negative");
+            }
+        }
+
+        /** One shared EnqueueBatch work unit and its live request identities. */
+        public record BatchWork(List<Long> requestIds, Phase phase, OptionalLong remainingWorkMs) {
+
+            public BatchWork {
+                requestIds = List.copyOf(requestIds);
+                checkArgument(
+                        !remainingWorkMs.isPresent() || remainingWorkMs.getAsLong() >= 0L,
+                        "remaining batch work must be non-negative");
+            }
+        }
+
+        public boolean hasUnknownWork() {
+            calculate();
+            return unknownWork;
+        }
+
+        public boolean containsRequest(long requestId) {
+            calculate();
+            return Arrays.binarySearch(requestIds, requestId) >= 0;
+        }
+
+        /**
+         * Complete committed duration, absent when any work unit lacks a duration.
+         */
+        public OptionalLong totalRemainingWorkMs() {
+            return totalRemainingWorkMsAt(capturedAtMs);
+        }
+
+        /** Complete preceding work at a later clock; only observed running work consumes time. */
+        public OptionalLong totalRemainingWorkMsAt(long observedAtMs) {
+            return hasUnknownWork()
+                    ? OptionalLong.empty()
+                    : OptionalLong.of(knownRemainingWorkMsAt(observedAtMs));
+        }
+
+        /** Known work rebased to a later planning clock without copying the snapshot. */
+        public long knownRemainingWorkMsAt(long planningAtMs) {
+            calculate();
+            long elapsedMs = planningAtMs <= capturedAtMs ? 0L : planningAtMs - capturedAtMs;
+            long total = knownNonRunningWorkMs;
+            for (long runningMs : runningWorkMs) {
+                long remaining = elapsedMs >= runningMs ? 0L : runningMs - elapsedMs;
+                total = saturatedAdd(total, remaining);
+            }
+            return total;
+        }
+
+        private static long saturatedAdd(long left, long right) {
+            return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
+        }
+    }
+
+    /**
+     * Immutable scheduling inputs captured for a route-time what-if projection.
+     *
+     * <p>The active items are already in production queue order. This object is
+     * materialized from the endpoint's PrefillEndpoint at one linearization
+     * point together with committed work and pending count.
+     */
+    public record QueueSnapshot(
+            long capturedAtMs,
+            boolean queueScheduling,
+            GroupPlanner grouping,
+            Comparator<? super GroupPlanner.Item> ordering,
+            GroupPlanner.Constraints constraints,
+            List<GroupPlanner.Item> activeItems,
+            AdmissionBlock admissionBlock) {
+
+        public QueueSnapshot {
+            if (queueScheduling) {
+                Objects.requireNonNull(grouping, "grouping");
+            }
+            activeItems = List.copyOf(activeItems);
+            if (admissionBlock != null) {
+                checkArgument(!activeItems.isEmpty(), "admission block requires an ACTIVE head");
+                GroupPlanner.Item head = activeItems.getFirst();
+                checkArgument(
+                        head.requestId() == admissionBlock.requestId()
+                                && head.enqueueSeq() == admissionBlock.enqueueSeq(),
+                        "admission block must identify the exact ACTIVE head");
+            }
+        }
+
+        /**
+         * Exact ACTIVE head whose current capacity rejection parks the worker.
+         * Null semantics mean the wait only limits delivery, not queue publication.
+         */
+        public record AdmissionBlock(
+                long requestId,
+                long enqueueSeq,
+                RequestTimeEstimation.AdmissionBlockSemantics semantics) {}
     }
 }

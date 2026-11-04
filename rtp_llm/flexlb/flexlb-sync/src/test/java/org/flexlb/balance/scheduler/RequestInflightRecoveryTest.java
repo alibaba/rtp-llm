@@ -2,15 +2,13 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -52,7 +50,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * Real endpoint ledgers, status reducers, request ownership and capacity gates.
- * Transport replies are injected; this does not run an Engine or a RequestExecution thread.
+ * Transport replies are injected; this does not run an Engine or a EndpointWork thread.
  *
  * A rejected reply plus NOT_FOUND is deliberately insufficient to release Decode.
  * The red cases supply exact terminal evidence from BOTH endpoints before requiring settlement.
@@ -65,24 +63,18 @@ class RequestInflightRecoveryTest {
         try (Fixture f = new Fixture()) {
             f.send(
                     rejectedBeforeTerminal
-                            ? DeliveryResult.prefillRejected(
+                            ? Delivery.Result.prefillRejected(
                                     new IllegalStateException("Prefill prepare failed"))
-                            : DeliveryResult.delivered());
+                            : Delivery.Result.delivered());
             if (!rejectedBeforeTerminal) {
-                assertTrue(f.route.future().get(2, TimeUnit.SECONDS).isSuccess());
+                assertTrue(f.route.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
                 f.owner.cancel(Fixture.REQUEST_ID, 0L, CancelReason.CLIENT_CANCELLED);
             } else {
-                assertFalse(f.route.future().get(2, TimeUnit.SECONDS).isSuccess());
+                assertFalse(f.route.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
             }
             f.drain();
             assertTrue(f.owner.requests.isCurrent(f.context));
-            assertFalse(
-                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                    f.claim.owner().data().getScheduler())
-                            .signals()
-                            .delivery(f.claim)
-                            .toCompletableFuture()
-                            .isDone());
+            assertFalse(f.claim.completion().toCompletableFuture().isDone());
 
             f.prefillTerminal(rejectedBeforeTerminal ? 42L : 0L);
             f.decodeTerminal();
@@ -90,11 +82,8 @@ class RequestInflightRecoveryTest {
 
             // Establish the safety evidence before asserting the missing lifecycle transition.
             assertEquals(
-                    0L,
-                    f.prefill
-                            .ownership
-                            .admissionSummary(0, f.prefill.requestLimit)
-                            .occupiedRequests());
+                    0L, f.prefill.admissionSummary(0, f.prefill.requestLimit).occupiedRequests());
+
             assertEquals(0L, f.decode.routingView().totalLoad());
             assertFalse(f.decode.ownership(f.reservation).owned());
             assertTrue(f.prefillState.batchCapacityAvailable(1));
@@ -104,12 +93,7 @@ class RequestInflightRecoveryTest {
                     "Both exact endpoint terminals have released ownership; the sender has exited",
                     () ->
                             assertTrue(
-                                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                                    f.claim.owner().data().getScheduler())
-                                            .signals()
-                                            .delivery(f.claim)
-                                            .toCompletableFuture()
-                                            .isDone(),
+                                    f.claim.completion().toCompletableFuture().isDone(),
                                     "Delivery remains unsettled even though both Engine stages have ended"),
                     () ->
                             assertFalse(
@@ -124,9 +108,9 @@ class RequestInflightRecoveryTest {
             throws Exception {
         try (Fixture f = new Fixture()) {
             f.send(
-                    DeliveryResult.prefillRejected(
+                    Delivery.Result.prefillRejected(
                             new IllegalStateException("Prefill prepare failed")));
-            assertFalse(f.route.future().get(2, TimeUnit.SECONDS).isSuccess());
+            assertFalse(f.route.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
             f.drain();
             if (prefillErrorTerminal) {
                 f.prefillTerminal(42L);
@@ -139,19 +123,10 @@ class RequestInflightRecoveryTest {
             // Java cannot infer "Decode never started" from these wire replies.
             assertEquals(
                     prefillErrorTerminal ? 0L : 1L,
-                    f.prefill
-                            .ownership
-                            .admissionSummary(0, f.prefill.requestLimit)
-                            .occupiedRequests());
+                    f.prefill.admissionSummary(0, f.prefill.requestLimit).occupiedRequests());
             assertEquals(1L, f.decode.routingView().totalLoad());
             assertTrue(f.decode.ownership(f.reservation).owned());
-            assertFalse(
-                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                    f.claim.owner().data().getScheduler())
-                            .signals()
-                            .delivery(f.claim)
-                            .toCompletableFuture()
-                            .isDone());
+            assertFalse(f.claim.completion().toCompletableFuture().isDone());
             assertEquals(prefillErrorTerminal, f.prefillState.batchCapacityAvailable(1));
             f.assertNextDecodeReservationRejected();
 
@@ -170,9 +145,11 @@ class RequestInflightRecoveryTest {
     @Test
     void definiteNotSentMustReleaseBothLedgersAndReopenCapacity() throws Exception {
         try (Fixture f = new Fixture()) {
-            f.send(DeliveryResult.notSent(new IllegalStateException("Sender never called Engine")));
+            f.send(
+                    Delivery.Result.notSent(
+                            new IllegalStateException("Sender never called Engine")));
             f.drain();
-            assertFalse(f.route.future().get(2, TimeUnit.SECONDS).isSuccess());
+            assertFalse(f.route.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
             f.assertReleased();
         }
     }
@@ -181,11 +158,11 @@ class RequestInflightRecoveryTest {
     void exactRemoteCleanedProofMustReleaseRejectedDeliveryAndReopenCapacity() throws Exception {
         try (Fixture f = new Fixture()) {
             f.send(
-                    DeliveryResult.prefillRejected(
+                    Delivery.Result.prefillRejected(
                             new IllegalStateException("Prefill prepare failed")));
             f.drain();
             assertEquals(1L, f.decode.routingView().totalLoad());
-            f.owner.onDeliveryFact(
+            f.owner.onDeliveryResult(
                     new ContextResult.CleanupAcknowledgement(
                             f.claim,
                             ContextResult.CancelEvidenceKind.CLEANED,
@@ -198,8 +175,10 @@ class RequestInflightRecoveryTest {
     @Test
     void socketResetKeepsUnknownAttemptFencedUntilBothWorkerTerminals() throws Exception {
         try (Fixture f = new Fixture()) {
-            f.send(DeliveryResult.uncertain(new IllegalStateException("schedule socket reset")));
-            assertFalse(f.route.future().isDone(), "UNKNOWN transport cannot complete the request");
+            f.send(Delivery.Result.uncertain(new IllegalStateException("schedule socket reset")));
+            assertFalse(
+                    f.route.ctx().data().getFuture().isDone(),
+                    "UNKNOWN transport cannot complete the request");
             assertTrue(f.owner.requests.isCurrent(f.context));
             f.assertNextDecodeReservationRejected();
 
@@ -216,7 +195,7 @@ class RequestInflightRecoveryTest {
     void retry001SameLogicalRetryCannotReplaceUnknownAttempt() throws Exception {
         try (Fixture f = new Fixture()) {
             f.send(
-                    DeliveryResult.uncertain(
+                    Delivery.Result.uncertain(
                             new IllegalStateException("accepted then socket reset")));
             var duplicate = RequestProtocolTestSupport.register(f.owner, f.context);
 
@@ -259,37 +238,49 @@ class RequestInflightRecoveryTest {
                 }
                 assertNotNull(reservedD2);
                 var behindHead = f.enqueue(302L, d2, reservedD2);
-                var state =
-                        (org.flexlb.balance.endpoint.PrefillState)
-                                ReflectionTestUtils.getField(f.prefill, "ownership");
+                var state = (org.flexlb.balance.endpoint.PrefillEndpoint) f.prefill;
                 ReflectionTestUtils.setField(
                         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner)
                                 .deliveries(),
                         "decodeDeliveryCapacity",
                         f.capacity);
                 var worker =
-                        new RequestExecution(
-                                "ordered-prefix",
-                                f.prefill,
-                                QueueExecutionSettings.capture(
-                                        f.config,
-                                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(
-                                                f.config)),
-                                new DeliveryDispatcher(
-                                        null,
-                                        DeliveryTestSupport.service(f.config),
-                                        new DeliveryMetricsReporter(null)),
-                                state,
-                                SchedulerTestSupport.queueDependencies(
-                                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                                f.owner)));
+                        org.flexlb.balance.endpoint.EndpointTestSupport.attach(
+                                org.flexlb.balance.endpoint.EndpointTestSupport.worker(
+                                        "ordered-prefix",
+                                        f.prefill,
+                                        QueueExecutionSettings.capture(
+                                                f.config,
+                                                org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                                        f.config)),
+                                        new DeliveryDispatcher(
+                                                null,
+                                                DeliveryTestSupport.service(f.config),
+                                                new DeliveryMetricsReporter(null),
+                                                org.mockito.Mockito.mock(
+                                                        org.flexlb.balance.scheduler.TaskTimer
+                                                                .class),
+                                                new org.flexlb.balance.scheduler
+                                                                .PlacementConfiguration()
+                                                        .decodeAdmissionCapacity(
+                                                                DeliveryTestSupport.service(
+                                                                        f.config)),
+                                                org.mockito.Mockito.mock(
+                                                        org.flexlb.balance.scheduler
+                                                                .DeliveryExecution.class)),
+                                        state,
+                                        SchedulerTestSupport.queueDependencies(
+                                                org.flexlb.balance.scheduler.SchedulerTestSupport
+                                                        .runtime(f.owner))));
                 var boundary =
                         worker.processSelection(
                                 List.of(f.route, behindHead),
                                 "ordered-prefix",
                                 mock(PrefillTimePredictor.Evaluator.class),
                                 java.util.OptionalLong.empty(),
-                                null);
+                                null,
+                                Delivery.PrefixPolicy.ORDERED_PREFIX,
+                                () -> true);
                 assertNotNull(boundary, "The ordered prefix cannot skip its blocked head");
                 assertEquals(CapacityBoundary.Status.UNAVAILABLE, boundary.status());
                 assertEquals(0L, d2.routingView().engineCapacityUsed());
@@ -325,13 +316,13 @@ class RequestInflightRecoveryTest {
         final EndpointRegistry endpoints;
         final PrefillEndpoint prefill;
         final DecodeEndpoint decode;
-        final PrefillState prefillState;
+        final PrefillEndpoint prefillState;
         final DecodeResources.AdmissionCapacity capacity =
                 new DecodeResources.AdmissionCapacity(1L, 90L);
         final DecodeResources.ReservationHandle reservation;
         final RequestContext context;
         final RequestRoute route;
-        DeliveryClaim claim;
+        Delivery.Member claim;
         long prefillVersion = 1L;
         long decodeVersion = 1L;
 
@@ -389,35 +380,38 @@ class RequestInflightRecoveryTest {
                             decode,
                             reservation,
                             System.currentTimeMillis());
-            prefillState = (PrefillState) ReflectionTestUtils.getField(prefill, "ownership");
-            prefillState.queueGuard().lock();
+            prefillState = (PrefillEndpoint) prefill;
+            prefillState.resourceLock().lock();
             try {
                 ReflectionTestUtils.invokeMethod(
                         prefillState,
                         "enableQueueLocked",
                         org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(
-                                16, Comparator.comparingLong(RequestRoute::requestId)));
+                                16,
+                                Comparator.comparingLong(
+                                        org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
+                                                ::requestId)));
             } finally {
-                prefillState.queueGuard().unlock();
+                prefillState.resourceLock().unlock();
             }
             try (var admission = owner.claimAdmissionHandle(REQUEST_ID, future);
                     var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertEquals(
                         PlacementResult.Status.SUCCESS,
-                        owner.commitRoute(
+                        RequestProtocolTestSupport.commitRoute(
+                                owner,
                                 route,
                                 RequestProtocolTestSupport.publication(
                                         () -> {
-                                            prefillState.queueGuard().lock();
+                                            prefillState.resourceLock().lock();
                                             try {
-                                                return prefillState.updateQueue(
-                                                                PrefillState.QueueChange.ENQUEUE,
-                                                                route,
-                                                                System.currentTimeMillis())
+                                                return org.flexlb.balance.endpoint
+                                                                .EndpointTestSupport.enqueue(
+                                                                prefillState, route)
                                                         == route;
                                             } finally {
-                                                prefillState.queueGuard().unlock();
+                                                prefillState.resourceLock().unlock();
                                             }
                                         })));
             }
@@ -458,26 +452,26 @@ class RequestInflightRecoveryTest {
                 assertNotNull(admission);
                 assertEquals(
                         PlacementResult.Status.SUCCESS,
-                        owner.commitRoute(
+                        RequestProtocolTestSupport.commitRoute(
+                                owner,
                                 item,
                                 RequestProtocolTestSupport.publication(
                                         () -> {
-                                            prefillState.queueGuard().lock();
+                                            prefillState.resourceLock().lock();
                                             try {
-                                                return prefillState.updateQueue(
-                                                                PrefillState.QueueChange.ENQUEUE,
-                                                                item,
-                                                                System.currentTimeMillis())
+                                                return org.flexlb.balance.endpoint
+                                                                .EndpointTestSupport.enqueue(
+                                                                prefillState, item)
                                                         == item;
                                             } finally {
-                                                prefillState.queueGuard().unlock();
+                                                prefillState.resourceLock().unlock();
                                             }
                                         })));
             }
             return item;
         }
 
-        void send(DeliveryResult result) {
+        void send(Delivery.Result result) {
             var acquisition = decode.acquireDispatchPermit(reservation, capacity);
             assertEquals(
                     DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED,
@@ -485,24 +479,21 @@ class RequestInflightRecoveryTest {
             assertEquals(
                     DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                     acquisition.handle().dispatch().status());
-            var batch = prefill.reserveBatch(route, BATCH_ID, 1).reservation();
+            var batch = prefill.reserveBatch(BATCH_ID, 1).value();
             assertNotNull(batch);
-            PrefillState.CommittedHandoff handoff;
-            prefillState.queueGuard().lock();
+            org.flexlb.balance.scheduler.Delivery handoff;
+            prefillState.resourceLock().lock();
             try {
                 handoff =
                         prefillState.commitLocked(
-                                new PrefillState.CommitPlan(
-                                        PrefillState.CommitKind.BATCH,
+                                org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
                                         List.of(route),
-                                        List.of(),
                                         batch,
                                         new long[] {30_000L},
                                         null,
-                                        System.currentTimeMillis()),
-                                null);
+                                        System.currentTimeMillis()));
             } finally {
-                prefillState.queueGuard().unlock();
+                prefillState.resourceLock().unlock();
             }
             assertNotNull(handoff);
             try (handoff) {
@@ -511,10 +502,10 @@ class RequestInflightRecoveryTest {
                                 owner, route, BATCH_ID, () -> true);
                 assertNotNull(claim);
                 assertTrue(owner.tryStartSend(claim));
-                owner.onDeliveryFact(
+                owner.onDeliveryResult(
                         new ContextResult.Prediction(
                                 claim,
-                                org.flexlb.balance.prediction.PrefillPredictionBoundary
+                                org.flexlb.balance.prediction.PrefillTimePredictor
                                         .predictedVisibilityDeadlineMs(
                                                 new WorkSnapshot(
                                                         System.currentTimeMillis(),
@@ -530,7 +521,7 @@ class RequestInflightRecoveryTest {
                                                         .getLifetime(),
                                                 System.currentTimeMillis()),
                                 System.currentTimeMillis()));
-                owner.onDeliveryFact(
+                owner.onDeliveryResult(
                         new ContextResult.TransportResult(
                                 claim, result, System.currentTimeMillis()));
             }
@@ -589,19 +580,11 @@ class RequestInflightRecoveryTest {
         }
 
         void assertReleased() {
-            assertEquals(
-                    0L,
-                    prefill.ownership.admissionSummary(0, prefill.requestLimit).occupiedRequests());
+            assertEquals(0L, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
             assertEquals(0L, decode.routingView().totalLoad());
             assertFalse(decode.ownership(reservation).owned());
             assertTrue(prefillState.batchCapacityAvailable(1));
-            assertTrue(
-                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                    claim.owner().data().getScheduler())
-                            .signals()
-                            .delivery(claim)
-                            .toCompletableFuture()
-                            .isDone());
+            assertTrue(claim.completion().toCompletableFuture().isDone());
             assertFalse(owner.requests.isCurrent(context));
             assertNextDecodeReservationAccepted();
         }
@@ -610,14 +593,8 @@ class RequestInflightRecoveryTest {
         public void close() {
             // Inject strong proof only AFTER each test's assertions. This prevents an unrelated
             // shutdown timeout from hiding the missing terminal-settlement assertion.
-            if (claim != null
-                    && !org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                    claim.owner().data().getScheduler())
-                            .signals()
-                            .delivery(claim)
-                            .toCompletableFuture()
-                            .isDone()) {
-                owner.onDeliveryFact(
+            if (claim != null && !claim.completion().toCompletableFuture().isDone()) {
+                owner.onDeliveryResult(
                         new ContextResult.CleanupAcknowledgement(
                                 claim,
                                 ContextResult.CancelEvidenceKind.CLEANED,

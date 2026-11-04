@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.junit.jupiter.api.Test;
@@ -21,14 +22,21 @@ class RequestDrainTest {
         var owner = mock(RequestLifecycle.class);
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), 1L);
         var response = new RequestFuture((kind, result, failure) -> false);
-        assertEquals(RequestRepository.RegistrationResult.REGISTERED,
+        assertEquals(
+                RequestRepository.RegistrationResult.REGISTERED,
                 requests.register(context, owner, response));
         assertThrows(IllegalStateException.class, () -> requests.awaitResponses(Long.MAX_VALUE));
         requests.stopAccepting();
         assertFalse(requests.awaitResponses(System.nanoTime()));
         var drained = new CompletableFuture<Boolean>();
-        Thread waiter = Thread.ofPlatform().start(() -> drained.complete(
-                requests.awaitResponses(System.nanoTime() + TimeUnit.SECONDS.toNanos(5))));
+        Thread waiter =
+                Thread.ofPlatform()
+                        .start(
+                                () ->
+                                        drained.complete(
+                                                requests.awaitResponses(
+                                                        System.nanoTime()
+                                                                + TimeUnit.SECONDS.toNanos(5))));
         try {
             response.completeOwned(Response.error(StrategyErrorType.DISPATCH_FAILED));
             assertTrue(drained.get(2, TimeUnit.SECONDS));
@@ -49,8 +57,10 @@ class RequestDrainTest {
         var pending = new RequestFuture((kind, result, failure) -> false);
         var responses = java.util.List.of(failed, cancelled, pending);
         for (int i = 0; i < responses.size(); i++) {
-            var context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), i + 1L);
-            assertEquals(RequestRepository.RegistrationResult.REGISTERED,
+            var context =
+                    RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), i + 1L);
+            assertEquals(
+                    RequestRepository.RegistrationResult.REGISTERED,
                     requests.register(context, owner, responses.get(i)));
         }
         requests.stopAccepting();

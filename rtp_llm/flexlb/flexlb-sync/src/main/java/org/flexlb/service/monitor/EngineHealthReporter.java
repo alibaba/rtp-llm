@@ -18,6 +18,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
+import java.util.Locale;
 import java.util.OptionalLong;
 
 import static org.flexlb.constant.MetricConstant.CACHE_AVAILABLE_KV_CACHE_TOKENS;
@@ -49,6 +50,7 @@ import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_RUNNING_QUER
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_STEP_LATENCY_VAR;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.FORWARD_TO_MASTER_RESULT;
+import static org.flexlb.constant.MetricConstant.GRACEFUL_LIFECYCLE_EVENT;
 import static org.flexlb.constant.MetricConstant.GRPC_SERVER_PROCESS_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_ESTIMATED_TTFT_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_EXECUTION_TIME_MS;
@@ -72,6 +74,8 @@ public class EngineHealthReporter {
     public EngineHealthReporter(FlexMonitor monitor, EndpointStats endpointStats) {
         this.monitor = SafeFlexMonitor.wrap(monitor);
         this.endpointStats = endpointStats;
+        this.monitor.register(
+                GRACEFUL_LIFECYCLE_EVENT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
     }
 
     @PostConstruct
@@ -366,5 +370,29 @@ public class EngineHealthReporter {
     public void reportForwardToMasterResult(String type, String code) {
         monitor.report(
                 FORWARD_TO_MASTER_RESULT, FlexMetricTags.of("type", type, "code", code), 1.0);
+    }
+
+    public enum Event {
+        HEALTH_CHECK_OFFLINE,
+        ZK_NODE_OFFLINE,
+        SHUTDOWN_COMPLETE,
+        ZK_NODE_ONLINE,
+        WARMER_COMPLETE,
+        ONLINE_COMPLETE
+    }
+
+    public void reportDuration(Event event, long durationMs) {
+        monitor.report(
+                GRACEFUL_LIFECYCLE_EVENT,
+                FlexMetricTags.of(
+                        "type",
+                        event.name().toLowerCase(Locale.ROOT),
+                        "duration_ms",
+                        String.valueOf(durationMs)),
+                1);
+    }
+
+    public void reportProcessOk() {
+        monitor.report(GRACEFUL_LIFECYCLE_EVENT, FlexMetricTags.of("type", "process_ok"), 1);
     }
 }

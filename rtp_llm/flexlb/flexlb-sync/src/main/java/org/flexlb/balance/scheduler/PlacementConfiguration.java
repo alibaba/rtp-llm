@@ -21,14 +21,23 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Lazy;
+import org.springframework.context.annotation.Primary;
 
 /** Assembles the scheduler, Prefill delivery, and Decode preemption from startup config. */
+@org.springframework.scheduling.annotation.EnableScheduling
 @Configuration(proxyBeanMethods = false)
 public class PlacementConfiguration {
+
+    @Bean(name = "taskScheduler")
+    public java.util.concurrent.ScheduledThreadPoolExecutor taskScheduler() {
+        return new java.util.concurrent.ScheduledThreadPoolExecutor(
+                4, new io.micrometer.core.instrument.util.NamedThreadFactory("task-scheduler"));
+    }
 
     @Lazy
     @Bean(destroyMethod = "")
@@ -38,20 +47,22 @@ public class PlacementConfiguration {
 
     @Lazy
     @Bean(destroyMethod = "")
+    @Primary
     public ScheduledTaskTimer taskTimer() {
         return new ScheduledTaskTimer();
     }
 
     @Lazy
-    @Bean
-    public RequestSignals requestSignals() {
-        return new RequestSignals();
+    @Bean(destroyMethod = "")
+    public ScheduledTaskTimer deadlineTaskTimer() {
+        return new ScheduledTaskTimer(1, "request-scheduler-expiration-");
     }
 
     @Lazy
     @Bean(destroyMethod = "")
-    public ExpirationTimer expirationTimer(RequestRepository requests) {
-        return new ExpirationTimer(requests);
+    public ExpirationTimer expirationTimer(
+            RequestRepository requests, @Qualifier("deadlineTaskTimer") TaskTimer timer) {
+        return new ExpirationTimer(requests, timer);
     }
 
     @Lazy
@@ -78,24 +89,12 @@ public class PlacementConfiguration {
             RequestRepository requests,
             RequestTaskPool tasks,
             ExpirationTimer deadlines,
-            RequestSignals signals,
             DeliveryDispatcher dispatcher,
             ResponseCompletionExecutor completions,
             DeliveryMetricsReporter reporter,
-            TaskTimer timer,
-            AdmissionCapacity capacity,
             RecentCacheKeyTraceReporter trace) {
         return new RequestLifecycle(
-                requests,
-                tasks,
-                deadlines,
-                signals,
-                dispatcher,
-                completions,
-                reporter,
-                timer,
-                capacity,
-                trace);
+                requests, tasks, deadlines, dispatcher, completions, reporter, trace);
     }
 
     @Bean
@@ -153,21 +152,12 @@ public class PlacementConfiguration {
             RequestRepository requests,
             RequestTaskPool tasks,
             TaskTimer timer,
-            RequestSignals signals,
             RequestSchedulerReporter reporter,
             ConfigService configService,
             AdmissionCapacity capacity,
             DecodePreemptionPolicy policy) {
         return new DefaultDecodePreemption(
-                dispatcher,
-                requests,
-                tasks,
-                timer,
-                signals,
-                reporter,
-                configService,
-                capacity,
-                policy);
+                dispatcher, requests, tasks, timer, reporter, configService, capacity, policy);
     }
 
     @Bean
@@ -186,71 +176,37 @@ public class PlacementConfiguration {
                 availability.getMaxKvUsagePercent());
     }
 
-    @Bean
-    @Lazy
-    public RequestSchedulerEntry requestSchedulerEntry(RequestScheduler scheduler,
-            RequestLifecycle lifecycle, @Lazy RequestWorkerSelector router,
-            ConfigService configService) {
-        return new RequestSchedulerEntry(scheduler, lifecycle, router,
-                configService.loadBalanceConfig().isQueue());
-    }
-
     @Bean(destroyMethod = "")
     @ConditionalOnMissingBean(RequestScheduler.class)
     public RequestScheduler requestScheduler(
             @Lazy RequestWorkerSelector router,
-            DeliveryMetricsReporter reporter,
             @Lazy DecodePreemption decodePreemption,
             PlacementAvailability availability,
             RequestLifecycle lifecycle,
             ConfigService configService,
             GroupPlanner grouping,
-            @Lazy PlacementQueue queue,
-            DeliveryExecution deliveries,
-            RequestTaskPool tasks) {
+            @Lazy PlacementQueue queue) {
         FlexlbConfig config = configService.loadBalanceConfig();
-        RequestScheduler scheduler =
-                create(
-                        lifecycle,
-                        config,
-                        router,
-                        reporter,
-                        decodePreemption,
-                        availability,
-                        grouping,
-                        queue,
-                        new RequestExecution.Dependencies(
-                                deliveries,
-                                reporter,
-                                tasks::recordFailure,
-                                QueuedRequestScheduler::runPrefill));
-        return scheduler;
+        return create(lifecycle, config, router, decodePreemption, availability, grouping, queue);
     }
 
     static AbstractRequestScheduler create(
             RequestLifecycle lifecycle,
             FlexlbConfig config,
             RequestWorkerSelector router,
-            DeliveryMetricsReporter reporter,
             DecodePreemption decodePreemption,
             PlacementAvailability availability,
             GroupPlanner grouping,
-            PlacementQueue placementQueue,
-            RequestExecution.Dependencies queueDependencies) {
+            PlacementQueue placementQueue) {
         if (config.isQueue()) {
-            QueuedRequestScheduler queue =
-                    new QueuedRequestScheduler(
-                            config,
-                            router,
-                            reporter,
-                            decodePreemption,
-                            lifecycle,
-                            availability,
-                            placementQueue,
-                            grouping,
-                            queueDependencies);
-            queue.start();
-            return queue;
+            return new QueuedRequestScheduler(
+                    config,
+                    router,
+                    decodePreemption,
+                    lifecycle,
+                    availability,
+                    placementQueue,
+                    grouping);
         }
         return new DirectRequestScheduler(router, lifecycle);
     }

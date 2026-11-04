@@ -12,6 +12,7 @@ import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.enums.BackendServiceProtocolEnum;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.util.Failures;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -132,7 +133,7 @@ public class WorkerAddressService {
                     address,
                     failure.getMessage());
             Throwable reportFailure =
-                    org.flexlb.util.Failures.run(
+                    Failures.run(
                             null,
                             () ->
                                     engineHealthReporter.reportStatusCheckerFail(

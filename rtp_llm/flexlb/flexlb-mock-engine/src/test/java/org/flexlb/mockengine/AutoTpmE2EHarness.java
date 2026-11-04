@@ -9,8 +9,8 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.RequestContext;
+import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestRoute;
-import org.flexlb.balance.scheduler.RequestSchedulerEntry;
 import org.flexlb.balance.scheduler.RequestSchedulerTestRuntime;
 import org.flexlb.balance.scheduler.RequestWorkerSelector;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
@@ -103,7 +103,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     final ScheduledExecutorService engineScheduler = Executors.newScheduledThreadPool(8);
 
     final EndpointRegistry endpointRegistry;
-    final RequestSchedulerEntry scheduler;
+    final RequestLifecycle scheduler;
     final org.flexlb.balance.scheduler.RequestRepository requests;
     final DeliveryDispatcher dispatcher;
     private final RequestSchedulerTestRuntime schedulerRuntime;
@@ -172,7 +172,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     }
 
     /**
-     * @param autoTpm must be decided at construction time: {@code RequestExecution}
+     * @param autoTpm must be decided at construction time: {@code EndpointWork}
      *                freezes its queue comparator from the configured ordering
      *                when the endpoint is registered — flipping the switch after
      *                construction does NOT change the batch queue ordering.
@@ -277,7 +277,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         }
 
         // Conservative defaults; scenarios override before submitting traffic.
-        // Priority ordering must be set BEFORE registerEndpoint (RequestExecution freezes it).
+        // Priority ordering must be set BEFORE registerEndpoint (EndpointWork freezes it).
         if (initialConfig == null) {
             if (autoTpm) {
                 config.queueScheduler().setOrdering(ConfigTestSupport.priority());
@@ -363,7 +363,16 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                             return future;
                         });
 
-        dispatcher = new DeliveryDispatcher(grpcClient, configService, reporter);
+        dispatcher =
+                new DeliveryDispatcher(
+                        grpcClient,
+                        configService,
+                        reporter,
+                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
+                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                                .decodeAdmissionCapacity(configService),
+                        org.mockito.Mockito.mock(
+                                org.flexlb.balance.scheduler.DeliveryExecution.class));
         MockEngineClients.stubCancellation(grpcClient, services, preemptionSupported);
         schedulerRuntime =
                 new RequestSchedulerTestRuntime(

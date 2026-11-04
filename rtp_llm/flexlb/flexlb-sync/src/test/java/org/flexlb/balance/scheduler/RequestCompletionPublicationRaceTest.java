@@ -1,9 +1,10 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.scheduler.ResponseCompletionExecutor.Registration;
+import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
@@ -17,6 +18,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -386,7 +388,7 @@ class RequestCompletionPublicationRaceTest {
                             requestContext.snapshot().createdAtMs());
             RequestProtocolTestSupport.bind(
                     registry, new RequestProtocolTestSupport.Registered(item, future));
-            DeliveryClaim claim =
+            Delivery.Member claim =
                     RequestProtocolTestSupport.claimBatch(registry, item, 601L, () -> true);
             assertNotNull(claim);
 
@@ -419,7 +421,7 @@ class RequestCompletionPublicationRaceTest {
                     .thenReturn(
                             CompletableFuture.completedFuture(
                                     EngineGrpcClient.CancelReply.REQUEST_CLEANED));
-            assertTrue(claim.owner().data().getScheduler().tryStartSend(claim));
+            assertTrue(claim.owner().data().getLifecycle().tryStartSend(claim));
             var completions = new java.util.concurrent.atomic.AtomicInteger();
             CompletableFuture<Void> callback =
                     future.thenAccept(
@@ -435,11 +437,11 @@ class RequestCompletionPublicationRaceTest {
                             () ->
                                     claim.owner()
                                             .data()
-                                            .getScheduler()
-                                            .onDeliveryFact(
+                                            .getLifecycle()
+                                            .onDeliveryResult(
                                                     new ContextResult.TransportResult(
                                                             claim,
-                                                            DeliveryResult.delivered(),
+                                                            Delivery.Result.delivered(),
                                                             System.currentTimeMillis())));
             assertTrue(reportingEntered.await(2L, TimeUnit.SECONDS));
             assertEquals(
@@ -514,7 +516,7 @@ class RequestCompletionPublicationRaceTest {
                             .state());
             assertEquals(1, completions.get());
             verify(decode).release(reservation, DecodeResources.ReleaseReason.REMOTE_CLEANUP);
-            verify(prefill).release(null, item);
+            verify(prefill).releaseRequest(item);
         } finally {
             resumeReporting.countDown();
             resumeCleanup.countDown();
@@ -549,14 +551,14 @@ class RequestCompletionPublicationRaceTest {
                     .submit(() -> blockedFuture.completeOwned(new Response()));
             try {
                 assertTrue(entered.await(2, TimeUnit.SECONDS));
-                fixture.publication()
-                        .publish(
-                                fixture.candidate(),
-                                RequestFuture.Completion.RESPONSE,
-                                fixture.response(),
-                                null,
-                                false,
-                                fixture.scheduler().deliveryReporter);
+                ReflectionTestUtils.invokeMethod(
+                        fixture.scheduler(),
+                        "publishResponse",
+                        fixture.publication(),
+                        fixture.candidate(),
+                        fixture.response(),
+                        null,
+                        false);
                 assertNull(
                         fixture.requestContext().snapshot().selectedResponse(),
                         "queued ACK must remain unselected");
@@ -564,12 +566,11 @@ class RequestCompletionPublicationRaceTest {
                 Response failure = new Response();
                 failure.setSuccess(false);
                 var terminalPublication =
-                        new ResponsePublication(
+                        new Registration(
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
                                                 fixture.scheduler())
                                         .responseCompletions(),
-                                fixture.requestContext(),
-                                false);
+                                fixture.requestContext());
                 ContextResult.End terminal;
                 RequestState settled;
                 synchronized (fixture.requestContext()) {
@@ -591,12 +592,10 @@ class RequestCompletionPublicationRaceTest {
                         new ContextResult.ResponseCandidate(
                                 fixture.requestContext(),
                                 ContextResult.ResponseKind.TERMINAL,
-                                fixture.requestContext().snapshot().outcome(),
                                 System.currentTimeMillis());
                 terminalPublication.submit(
                         () ->
                                 fixture.requestContext().selectResponse(candidate)
-                                                instanceof ContextResult.Granted<?>
                                         && terminalPublication.complete(
                                                 RequestFuture.Completion.RESPONSE, failure, null));
                 resume.countDown();
@@ -609,10 +608,10 @@ class RequestCompletionPublicationRaceTest {
                 fixture.publication().close();
                 completions.close();
                 assertTrue(
-                        ((java.util.Set<?>)
+                        (int)
                                         org.springframework.test.util.ReflectionTestUtils.getField(
-                                                completions, "registrations"))
-                                .isEmpty());
+                                                completions, "pendingCompletions")
+                                == 0);
                 SchedulerTestSupport.timer(
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
                                         fixture.scheduler()))
@@ -630,9 +629,7 @@ class RequestCompletionPublicationRaceTest {
     void rejectedLockHeldCompletionReturnsExecutionRegistration(boolean asynchronous) {
         try (var responseExecutor = new ResponseCompletionExecutor(1)) {
             Fixture fixture = fixture(responseExecutor);
-            assertTrue(
-                    fixture.requestContext().selectResponse(fixture.candidate())
-                            instanceof ContextResult.Granted<?>);
+            assertTrue(fixture.requestContext().selectResponse(fixture.candidate()));
             try {
                 synchronized (fixture.requestContext()) {
                     assertThrows(
@@ -649,10 +646,10 @@ class RequestCompletionPublicationRaceTest {
                         fixture.requestContext().data().getFuture().isDone(),
                         "invalid lock-held calls must not run callbacks");
                 assertTrue(
-                        ((java.util.Set<?>)
+                        (int)
                                         org.springframework.test.util.ReflectionTestUtils.getField(
-                                                responseExecutor, "registrations"))
-                                .isEmpty());
+                                                responseExecutor, "pendingCompletions")
+                                == 0);
             } finally {
                 SchedulerTestSupport.timer(
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
@@ -670,9 +667,7 @@ class RequestCompletionPublicationRaceTest {
         Fixture fixture = fixture();
         Response success = new Response();
         success.setSuccess(true);
-        assertTrue(
-                fixture.requestContext().selectResponse(fixture.candidate())
-                        instanceof ContextResult.Granted<?>);
+        assertTrue(fixture.requestContext().selectResponse(fixture.candidate()));
         assertFalse(fixture.requestContext().data().getFuture().isDone());
         CompletableFuture<Void> callback =
                 fixture.requestContext()
@@ -684,7 +679,10 @@ class RequestCompletionPublicationRaceTest {
         RequestState settled;
         synchronized (fixture.requestContext()) {
             var deadline = fixture.requestContext().snapshot().deadlines().inactivity();
-            fixture.requestContext().recordDeadline(deadline, deadline.atMs(), null);
+            org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                    fixture.requestContext(),
+                    observedRequest ->
+                            observedRequest.recordDeadline(deadline, deadline.atMs(), null));
             var terminal =
                     RequestProtocolTestSupport.endFixture(
                             fixture.requestContext(),
@@ -717,9 +715,7 @@ class RequestCompletionPublicationRaceTest {
         Fixture fixture = fixture();
         Response success = new Response();
         success.setSuccess(true);
-        assertTrue(
-                fixture.requestContext().selectResponse(fixture.candidate())
-                        instanceof ContextResult.Granted<?>);
+        assertTrue(fixture.requestContext().selectResponse(fixture.candidate()));
         assertFalse(fixture.requestContext().data().getFuture().cancel(false));
         assertFalse(fixture.requestContext().data().getFuture().isDone());
         assertEquals(
@@ -739,12 +735,11 @@ class RequestCompletionPublicationRaceTest {
         Response failure = new Response();
         failure.setSuccess(false);
         var publication =
-                new ResponsePublication(
+                new Registration(
                         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
                                         fixture.scheduler())
                                 .responseCompletions(),
-                        fixture.requestContext(),
-                        false);
+                        fixture.requestContext());
         RequestState settled;
         synchronized (fixture.requestContext()) {
             var terminal =
@@ -762,9 +757,7 @@ class RequestCompletionPublicationRaceTest {
                 .remove(fixture.requestContext());
         Response success = new Response();
         success.setSuccess(true);
-        assertFalse(
-                fixture.requestContext().selectResponse(fixture.candidate())
-                        instanceof ContextResult.Granted<?>);
+        assertFalse(fixture.requestContext().selectResponse(fixture.candidate()));
         assertFalse(fixture.requestContext().data().getFuture().isDone());
         CompletableFuture<Void> callback =
                 fixture.requestContext()
@@ -779,11 +772,8 @@ class RequestCompletionPublicationRaceTest {
                 new ContextResult.ResponseCandidate(
                         fixture.requestContext(),
                         ContextResult.ResponseKind.TERMINAL,
-                        fixture.requestContext().snapshot().outcome(),
                         System.currentTimeMillis());
-        assertTrue(
-                fixture.requestContext().selectResponse(candidate)
-                        instanceof ContextResult.Granted<?>);
+        assertTrue(fixture.requestContext().selectResponse(candidate));
         boolean completed =
                 switch (form) {
                     case RESPONSE ->
@@ -855,16 +845,16 @@ class RequestCompletionPublicationRaceTest {
             RequestContext context = fixture.requestContext();
             RequestRoute exact = context.snapshot().route();
             var phase = context.snapshot().phase();
-            org.mockito.Mockito.doReturn(false).when(publisher).register(any());
+            org.mockito.Mockito.doReturn(false).when(publisher).register();
             try {
                 Runnable reject =
                         () -> {
                             if (deliveryFailure) {
                                 fixture.scheduler()
-                                        .onDeliveryFact(
+                                        .onDeliveryResult(
                                                 new ContextResult.TransportResult(
                                                         fixture.claim(),
-                                                        DeliveryResult.prefillRejected(
+                                                        Delivery.Result.prefillRejected(
                                                                 new IllegalStateException(
                                                                         "rejected")),
                                                         System.currentTimeMillis()));
@@ -933,7 +923,7 @@ class RequestCompletionPublicationRaceTest {
                 assertEquals(ContextResult.Phase.OPEN, fixture.requestContext().snapshot().phase());
                 assertNotNull(fixture.requestContext().snapshot().delivery());
                 assertNull(fixture.requestContext().snapshot().outcome());
-                verify(publisher, org.mockito.Mockito.never()).register(any());
+                verify(publisher, org.mockito.Mockito.never()).register();
             } finally {
                 fixture.publication().close();
                 SchedulerTestSupport.timer(
@@ -949,7 +939,7 @@ class RequestCompletionPublicationRaceTest {
 
     private static Fixture fixture() {
         var executor = mock(ResponseCompletionExecutor.class);
-        when(executor.register(any())).thenReturn(true);
+        when(executor.register()).thenReturn(true);
         return fixture(executor);
     }
 
@@ -977,35 +967,38 @@ class RequestCompletionPublicationRaceTest {
         assertNotNull(admission);
         assertEquals(
                 org.flexlb.balance.PlacementResult.Status.SUCCESS,
-                owner.commitRoute(item, RequestProtocolTestSupport.publication(() -> true)));
+                RequestProtocolTestSupport.commitRoute(
+                        owner, item, RequestProtocolTestSupport.publication(() -> true)));
         admission.finish();
-        var claim = owner.claimDelivery(item, DeliveryClaimKind.BATCH_ENQUEUE, 801L, null);
+        var claim =
+                DeliveryDispatcher.commitDelivery(
+                        owner,
+                        new org.flexlb.balance.scheduler.Delivery.Member(item, null),
+                        Delivery.SendMode.BATCH_ENQUEUE,
+                        801L);
         assertNotNull(claim);
         assertTrue(owner.tryStartSend(claim));
         if (delivered) {
-            context.recordDeliveryResult(
-                    new ContextResult.TransportResult(
-                            claim, DeliveryResult.delivered(), System.currentTimeMillis()));
+            org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                    context,
+                    observedRequest ->
+                            observedRequest.recordDeliveryResult(
+                                    new ContextResult.TransportResult(
+                                            claim,
+                                            Delivery.Result.delivered(),
+                                            System.currentTimeMillis())));
         }
         var publication =
-                new ResponsePublication(
+                new Registration(
                         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner)
                                 .responseCompletions(),
-                        context,
-                        true);
+                        context);
         if (delivered) {
-            assertTrue(
-                    context.selectResponse(
-                                    new ContextResult.ResponseCandidate(
-                                            context,
-                                            ContextResult.ResponseKind.CONFIRMATION,
-                                            null,
-                                            System.currentTimeMillis()))
-                            instanceof ContextResult.Granted<?>);
+            assertTrue(context.confirmDelivery(System.currentTimeMillis()));
         }
         var candidate =
                 new ContextResult.ResponseCandidate(
-                        context, ContextResult.ResponseKind.ACK, null, System.currentTimeMillis());
+                        context, ContextResult.ResponseKind.ACK, System.currentTimeMillis());
         return new Fixture(
                 owner, context, claim, publication, candidate, item.successResponse(true));
     }
@@ -1019,8 +1012,8 @@ class RequestCompletionPublicationRaceTest {
     private record Fixture(
             RequestLifecycle scheduler,
             RequestContext requestContext,
-            DeliveryClaim claim,
-            ResponsePublication publication,
+            Delivery.Member claim,
+            Registration publication,
             ContextResult.ResponseCandidate candidate,
             Response response) {}
 }

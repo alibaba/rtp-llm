@@ -6,10 +6,9 @@ import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.prediction.PrefillPredictionBoundary;
-import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.dao.loadbalance.Response;
@@ -26,7 +25,6 @@ import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -130,7 +128,7 @@ class PrefillCompletionProjectionTest {
                             decode,
                             reservation,
                             System.currentTimeMillis());
-            AtomicReference<PrefillState.RouteReservation> routeReservation =
+            AtomicReference<PrefillEndpoint.RouteReservation> routeReservation =
                     new AtomicReference<>();
             try (var mutation = requests.claimAdmissionHandle(101L, future);
                     var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(mutation);
@@ -138,17 +136,16 @@ class PrefillCompletionProjectionTest {
                 assertNotNull(mutation);
                 assertNotNull(pin);
                 assertTrue(
-                        (requests.commitRoute(
+                        (RequestProtocolTestSupport.commitRoute(
+                                        requests,
                                         item,
                                         RequestProtocolTestSupport.publication(
                                                 () -> {
                                                     var registered =
                                                             prefill.reserveUnqueuedRoute(
                                                                     pin, item, 30_000L);
-                                                    assertEquals(
-                                                            PrefillState.CapacityStatus.ACQUIRED,
-                                                            registered.status());
-                                                    routeReservation.set(registered.reservation());
+                                                    assertTrue(registered.accepted());
+                                                    routeReservation.set(registered.value());
                                                     return true;
                                                 }))
                                 == org.flexlb.balance.PlacementResult.Status.SUCCESS));
@@ -160,25 +157,21 @@ class PrefillCompletionProjectionTest {
                                 item,
                                 () -> {
                                     try (var handoff =
-                                            prefill.commit(
-                                                    new PrefillState.CommitPlan(
-                                                            PrefillState.CommitKind.DIRECT,
-                                                            List.of(item),
-                                                            List.of(routeReservation.get()),
-                                                            null,
-                                                            new long[0],
-                                                            null,
-                                                            System.currentTimeMillis()))) {
+                                            org.flexlb.balance.endpoint.EndpointTestSupport
+                                                    .commitDirect(
+                                                            prefill,
+                                                            item,
+                                                            routeReservation.get())) {
                                         return true;
                                     }
                                 });
                 assertNotNull(claim);
                 long now = System.currentTimeMillis();
                 var work = new WorkSnapshot(now, java.util.List.of(), java.util.List.of(), 0L);
-                requests.onDeliveryFact(
+                requests.onDeliveryResult(
                         new RouteDelivered(
                                 claim,
-                                PrefillPredictionBoundary.predictedVisibilityDeadlineMs(
+                                PrefillTimePredictor.predictedVisibilityDeadlineMs(
                                         work,
                                         30_000L,
                                         config.getRequestLifecycle().getDecision().getLifetime(),
@@ -186,9 +179,7 @@ class PrefillCompletionProjectionTest {
                                 now));
             }
             assertTrue(future.get(2L, TimeUnit.SECONDS).isSuccess());
-            assertEquals(
-                    1L,
-                    prefill.ownership.admissionSummary(0, prefill.requestLimit).occupiedRequests());
+            assertEquals(1L, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
 
             TaskInfo task = new TaskInfo();
             task.setRequestId(101L);
@@ -212,9 +203,7 @@ class PrefillCompletionProjectionTest {
             applyStatus(prefill, status(3L, Map.of(), Map.of("101", task)));
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests));
-            assertEquals(
-                    0L,
-                    prefill.ownership.admissionSummary(0, prefill.requestLimit).occupiedRequests());
+            assertEquals(0L, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
             synchronized (requestContext) {
                 assertTrue(
                         requestContext.snapshot().phase() != Phase.CLOSED,
@@ -250,9 +239,7 @@ class PrefillCompletionProjectionTest {
             applyStatus(prefill, status(4L, Map.of(), Map.of("101", task)));
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests));
-            assertEquals(
-                    0L,
-                    prefill.ownership.admissionSummary(0, prefill.requestLimit).occupiedRequests());
+            assertEquals(0L, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
 
             var decodeFinished = decodeStatus(3L, Map.of());
             decodeFinished.setFinishedTaskInfo(Map.of("101", task));
@@ -290,10 +277,10 @@ class PrefillCompletionProjectionTest {
             return false;
         }
         var handles =
-                (java.util.Map<?, ?>)
+                (Object[])
                         org.springframework.test.util.ReflectionTestUtils.invokeMethod(
                                 slot, "handles");
-        var handle = handles.get(ExpirationTimer.Kind.VISIBILITY);
+        var handle = handles[ExpirationTimer.Kind.VISIBILITY.ordinal()];
         return handle != null
                 && org.springframework.test.util.ReflectionTestUtils.getField(handle, "token")
                         == token

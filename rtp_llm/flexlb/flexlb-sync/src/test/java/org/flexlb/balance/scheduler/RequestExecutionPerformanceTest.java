@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.projection.RequestTimeEstimation;
+import org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
@@ -37,9 +38,9 @@ class RequestExecutionPerformanceTest {
     @Timeout(value = 30, unit = TimeUnit.SECONDS)
     void queueWaitSnapshotCaptureDoesNotScaleWithRequestCount() throws Throwable {
         var capture =
-                MethodHandles.privateLookupIn(RequestExecution.class, MethodHandles.lookup())
+                MethodHandles.privateLookupIn(EndpointWork.class, MethodHandles.lookup())
                         .findVirtual(
-                                RequestExecution.class,
+                                EndpointWork.class,
                                 "recordQueueWait",
                                 MethodType.methodType(
                                         void.class, RequestRoute.class, String.class));
@@ -57,7 +58,7 @@ class RequestExecutionPerformanceTest {
         // Both depths populate every priority bucket. Additional requests must not add capture
         // work.
         for (int depth : new int[] {128, 512, 4096}) {
-            RequestExecution runtime = runtimeWithDepth(depth);
+            EndpointWork runtime = runtimeWithDepth(depth);
             try {
                 RequestRoute head = RequestExecutionTestSupport.capture(runtime).items().getFirst();
                 for (int i = 0; i < operations; i++) {
@@ -112,14 +113,14 @@ class RequestExecutionPerformanceTest {
         long threadId = Thread.currentThread().threadId();
         int operations = 100_000;
         for (int depth : QUEUE_DEPTHS) {
-            RequestExecution runtime = runtimeWithDepth(depth);
+            EndpointWork runtime = runtimeWithDepth(depth);
             try {
                 if (depth > 0) {
                     var capture =
                             MethodHandles.privateLookupIn(
-                                            RequestExecution.class, MethodHandles.lookup())
+                                            EndpointWork.class, MethodHandles.lookup())
                                     .findVirtual(
-                                            RequestExecution.class,
+                                            EndpointWork.class,
                                             "recordQueueWait",
                                             MethodType.methodType(
                                                     void.class, RequestRoute.class, String.class));
@@ -188,7 +189,7 @@ class RequestExecutionPerformanceTest {
         long threadId = Thread.currentThread().threadId();
 
         for (int depth : QUEUE_DEPTHS) {
-            RequestExecution runtime = runtimeWithDepth(depth);
+            EndpointWork runtime = runtimeWithDepth(depth);
             PrefillEndpoint endpoint =
                     (PrefillEndpoint)
                             org.springframework.test.util.ReflectionTestUtils.getField(
@@ -259,7 +260,7 @@ class RequestExecutionPerformanceTest {
         }
     }
 
-    private static RequestExecution runtimeWithDepth(int depth) throws InterruptedException {
+    private static EndpointWork runtimeWithDepth(int depth) throws InterruptedException {
         FlexlbConfig config = SchedulingTestConfig.newConfig();
         SchedulingTestConfig.usePriorityQueue(config);
         SchedulingTestConfig.useSingleDecision(config);
@@ -271,7 +272,12 @@ class RequestExecutionPerformanceTest {
                 new DeliveryDispatcher(
                         null,
                         DeliveryTestSupport.service(config),
-                        new org.flexlb.service.monitor.DeliveryMetricsReporter(null));
+                        new org.flexlb.service.monitor.DeliveryMetricsReporter(null),
+                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
+                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                                .decodeAdmissionCapacity(DeliveryTestSupport.service(config)),
+                        org.mockito.Mockito.mock(
+                                org.flexlb.balance.scheduler.DeliveryExecution.class));
         RequestLifecycle scheduler = mock(RequestLifecycle.class);
         var facilities = mock(SchedulerTestServices.class);
         org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
@@ -291,14 +297,16 @@ class RequestExecutionPerformanceTest {
                         delivery,
                         SchedulerTestSupport.repository(scheduler),
                         mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class));
-        org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                endpoint,
-                "enableQueueRuntime",
+        var settings =
                 QueueExecutionSettings.capture(
-                        config, org.flexlb.balance.planner.BuiltinGroupPlanner.from(config)),
-                SchedulerTestSupport.queueDependencies(scheduler, config));
-        RequestExecution runtime =
-                org.flexlb.balance.endpoint.EndpointTestSupport.requestExecution(endpoint);
+                        config, org.flexlb.balance.planner.BuiltinGroupPlanner.from(config));
+        endpoint.enableQueue(settings);
+        EndpointWork runtime =
+                org.flexlb.balance.endpoint.EndpointTestSupport.worker(
+                        endpoint.ipPort(), endpoint, settings, delivery, endpoint, execution);
+        endpoint.observeQueueWait(
+                runtime::admissionBlockLocked, runtime::getLatestQueueWaitSnapshot);
+        RequestExecutionTestSupport.start(runtime);
         assertTrue(
                 !org.mockito.Mockito.mockingDetails(runtime).isMock(),
                 "allocation benchmark must measure the real queue runner");
@@ -318,13 +326,15 @@ class RequestExecutionPerformanceTest {
             SchedulerTestSupport.bindOwner(item.ctx(), scheduler);
             var context = item.ctx();
             context.register(item.requestId(), now, Long.MAX_VALUE, 60_000L);
-            var placement =
-                    (ContextResult.PlacementToken)
-                            ((ContextResult.Granted<?>) context.beginPlacement(null)).value();
+            var placement = (AdmissionHandle) context.beginPlacement(null);
             context.bindPlacement(placement, item, ContextResult.PublicationResult.PREPARED);
             context.bindPlacement(placement, item, ContextResult.PublicationResult.PUBLISHED);
-            context.completePlacement(placement, ContextResult.PublicationResult.PUBLISHED, now);
-            assertTrue(runtime.offer(item));
+            org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                    context,
+                    observedRequest ->
+                            observedRequest.completePlacement(
+                                    placement, ContextResult.PublicationResult.PUBLISHED, now));
+            assertTrue(RequestExecutionTestSupport.offer(runtime, item));
         }
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (RequestExecutionTestSupport.state(runtime).progress().queueDepth() != depth

@@ -5,6 +5,8 @@ import org.flexlb.balance.delivery.BatchIdGenerator;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DispatcherConfig;
+import org.flexlb.metric.ExecutorStats;
 import org.flexlb.util.Failures;
 
 import java.util.Objects;
@@ -24,7 +26,7 @@ import java.util.function.Consumer;
 import static com.google.common.base.Preconditions.checkState;
 
 /** Batch admission, transport execution and real RPC response drain. No request policy lives here. */
-public final class DeliveryExecution implements org.flexlb.metric.ExecutorStats {
+public final class DeliveryExecution implements ExecutorStats {
     private final Consumer<Throwable> failures;
     private final ThreadPoolExecutor dispatchExecutor;
     private final ThreadPoolExecutor completionExecutor;
@@ -106,6 +108,7 @@ public final class DeliveryExecution implements org.flexlb.metric.ExecutorStats 
         private static final int RUNNING = 2;
         private static final int RELEASED = 3;
         private static final int AWAITING_RESPONSE = 4;
+        private static final int CLOSED_BEFORE_SUBMISSION = 5;
         // RESERVED -> SUBMITTED -> RUNNING -> AWAITING_RESPONSE -> RELEASED.
         // close releases RESERVED; rejection releases SUBMITTED; sender exit without a response
         // releases RUNNING.
@@ -189,9 +192,15 @@ public final class DeliveryExecution implements org.flexlb.metric.ExecutorStats 
                     });
         }
 
+        /** A submitted task or its rejection callback owns sender cleanup, even after completion. */
+        boolean hasTaskOwner() {
+            int current = state.get();
+            return current != RESERVED && current != CLOSED_BEFORE_SUBMISSION;
+        }
+
         @Override
         public void close() {
-            if (state.compareAndSet(RESERVED, RELEASED)) {
+            if (state.compareAndSet(RESERVED, CLOSED_BEFORE_SUBMISSION)) {
                 release();
             }
         }
@@ -312,8 +321,7 @@ public final class DeliveryExecution implements org.flexlb.metric.ExecutorStats 
         this.failures = failures;
         var configuration = config.loadBalanceConfig();
         batchIds =
-                configuration.getDispatcher().getType()
-                                == org.flexlb.config.DispatcherConfig.Type.BATCH
+                configuration.getDispatcher().getType() == DispatcherConfig.Type.BATCH
                         ? BatchIdGenerator.forCurrentProcess()
                         : null;
         var sizing = configuration.getInternalRuntime();

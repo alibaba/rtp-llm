@@ -74,7 +74,7 @@ class WorkerEndpointTest {
         registerBatch(1L, 500, first);
         registerBatch(2L, 300, second);
 
-        assertTrue(endpoint.release(null, first));
+        assertTrue(endpoint.releaseRequest(first));
         assertCommittedWorkNear(300);
     }
 
@@ -83,7 +83,7 @@ class WorkerEndpointTest {
         RequestRoute committed = item(100L, 1000);
         registerBatch(1L, 500, committed);
         RequestRoute unknown = item(999L, 1000);
-        assertTrue(!endpoint.release(null, unknown));
+        assertTrue(!endpoint.releaseRequest(unknown));
         assertCommittedWorkNear(500);
     }
 
@@ -91,13 +91,13 @@ class WorkerEndpointTest {
     void releaseBatch_neverGoesNegative() {
         RequestRoute item = item(100L, 1000);
         registerBatch(1L, 100, item);
-        assertTrue(endpoint.release(null, item));
-        assertTrue(!endpoint.release(null, item));
-        assertEquals(0, endpoint.getLoadMetric().orElseThrow());
+        assertTrue(endpoint.releaseRequest(item));
+        assertTrue(!endpoint.releaseRequest(item));
+        assertEquals(0, endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow());
     }
 
     private void assertCommittedWorkNear(long expectedMs) {
-        long actualMs = endpoint.getLoadMetric().orElseThrow();
+        long actualMs = endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow();
         assertTrue(
                 actualMs <= expectedMs && actualMs >= expectedMs - 50,
                 "Expected committed work near " + expectedMs + "ms but got " + actualMs + "ms");
@@ -111,8 +111,8 @@ class WorkerEndpointTest {
         finished.setErrorCode(0);
         calibrate(Map.of("100", finished), null);
 
-        assertEquals(0, endpoint.getLoadMetric().orElseThrow());
-        assertEquals(0, endpoint.ownership.stats().batchCount());
+        assertEquals(0, endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow());
+        assertEquals(0, endpoint.stats().batchCount());
     }
 
     @Test
@@ -125,8 +125,8 @@ class WorkerEndpointTest {
         t2.setErrorCode(0);
         calibrate(Map.of("100", t1, "101", t2), null);
 
-        assertEquals(0, endpoint.getLoadMetric().orElseThrow());
-        assertEquals(0, endpoint.ownership.stats().batchCount());
+        assertEquals(0, endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow());
+        assertEquals(0, endpoint.stats().batchCount());
     }
 
     @Test
@@ -140,8 +140,8 @@ class WorkerEndpointTest {
         success.setErrorCode(0);
         calibrate(Map.of("100", failed, "101", success), null);
 
-        assertEquals(0, endpoint.ownership.stats().batchCount());
-        assertEquals(0, endpoint.getLoadMetric().orElseThrow());
+        assertEquals(0, endpoint.stats().batchCount());
+        assertEquals(0, endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow());
     }
 
     @Test
@@ -153,11 +153,13 @@ class WorkerEndpointTest {
         finished.setErrorCode(0);
         calibrate(Map.of("100", finished), null);
 
-        assertEquals(1, endpoint.ownership.stats().batchCount());
+        assertEquals(1, endpoint.stats().batchCount());
         // Remaining work is predicted duration minus elapsed running time.
         assertTrue(
-                Math.abs(endpoint.getLoadMetric().orElseThrow() - 2000) < 50,
-                "Expected ~2000ms but got " + endpoint.getLoadMetric().orElseThrow());
+                Math.abs(endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow() - 2000)
+                        < 50,
+                "Expected ~2000ms but got "
+                        + endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow());
     }
 
     @Test
@@ -166,21 +168,19 @@ class WorkerEndpointTest {
         RequestRoute failed = item(101L, 2000);
         RequestRoute third = item(102L, 3000);
         registerBatch(5L, 9999, first, failed, third);
-        assertTrue(endpoint.release(null, failed));
+        assertTrue(endpoint.releaseRequest(failed));
 
-        assertEquals(
-                2,
-                endpoint.ownership.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
+        assertEquals(2, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
     }
 
     @Test
     void repackBatch_allFailed_removesBatch() {
         RequestRoute item = item(100L, 1000);
         registerBatch(5L, 500, item);
-        assertTrue(endpoint.release(null, item));
+        assertTrue(endpoint.releaseRequest(item));
 
-        assertEquals(0, endpoint.ownership.stats().batchCount());
-        assertEquals(0, endpoint.getLoadMetric().orElseThrow());
+        assertEquals(0, endpoint.stats().batchCount());
+        assertEquals(0, endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow());
     }
 
     @Test
@@ -350,7 +350,7 @@ class WorkerEndpointTest {
                 throw new IllegalStateException("test item could not be offered to endpoint queue");
             }
         }
-        try (PrefillState.CommittedHandoff ignored =
+        try (org.flexlb.balance.scheduler.Delivery ignored =
                 EndpointTestSupport.commitBatch(endpoint, batchId, predictedMs, List.of(items))) {
             // Closing transfers only the generation handoff. The ledger keeps
             // the exact committed item identities until status/terminal facts.

@@ -99,9 +99,9 @@ class EndpointRegistryRoleTest {
                                 registry, role, "127.0.0.1:8001", status(role, 8001));
         EndpointTestSupport.commitUnqueued(endpoint, 91L, 20L);
         registry.evictExpiredOrphans(0, id -> id == 91L);
-        assertEquals(1, endpoint.ownership.stats().locallyOwnedRequests());
+        assertEquals(1, endpoint.stats().locallyOwnedRequests());
         registry.evictExpiredOrphans(0, ignored -> false);
-        assertEquals(0, endpoint.ownership.stats().locallyOwnedRequests());
+        assertEquals(0, endpoint.stats().locallyOwnedRequests());
     }
 
     @org.junit.jupiter.params.ParameterizedTest
@@ -349,7 +349,7 @@ class EndpointRegistryRoleTest {
                 EndpointTestSupport.publishEndpoint(
                         registry, RoleType.VIT, "127.0.0.1:8080", status, response);
 
-        assertEquals(2L, endpoint.getLoadMetric().orElseThrow());
+        assertEquals(2L, endpoint.tryGetLoadMetric().orElseThrow());
     }
 
     @Test

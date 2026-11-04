@@ -59,7 +59,7 @@ class LeakCanaryLongRunE2ETest {
                     2_000,
                     "ordinary Cancel cleanup proof must settle the rejected request");
             assertEquals(0L, h.decodeEndpoint(0).routingView().inflightHardKv());
-            assertEquals(0, h.prefillEndpoint(0).ownership.progress().queueDepth());
+            assertEquals(0, h.prefillEndpoint(0).progress().queueDepth());
             assertEquals(
                     0,
                     MockEngineTestSupport.getAcceptedCount(h.decodeEngines.get(0)),
@@ -185,8 +185,8 @@ class LeakCanaryLongRunE2ETest {
                     h.decodeEndpoint(0).routingView().inflightHardKv(),
                     "no orphaned hard-KV reservation");
             assertEquals(0, h.decodeEndpoint(0).resourceSnapshot().acceptedCount());
-            assertEquals(0, h.prefillEndpoint(0).ownership.progress().queueDepth());
-            assertEquals(0, h.prefillEndpoint(1).ownership.progress().queueDepth());
+            assertEquals(0, h.prefillEndpoint(0).progress().queueDepth());
+            assertEquals(0, h.prefillEndpoint(1).progress().queueDepth());
 
             long accepted =
                     h.services.values().stream()

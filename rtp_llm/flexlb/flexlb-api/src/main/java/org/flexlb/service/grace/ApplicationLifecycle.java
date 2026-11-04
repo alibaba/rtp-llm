@@ -2,6 +2,7 @@ package org.flexlb.service.grace;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.DeliveryExecution;
@@ -15,9 +16,11 @@ import org.flexlb.balance.scheduler.ScheduledTaskTimer;
 import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.httpserver.FlexlbGrpcServer;
 import org.flexlb.listener.ApplicationWarmupState;
+import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
 import org.springframework.context.event.ContextClosedEvent;
@@ -37,6 +40,7 @@ import java.util.concurrent.TimeUnit;
 public class ApplicationLifecycle implements ApplicationContextAware {
 
     private RequestScheduler scheduler;
+    private DecodePreemption preemption;
     private RequestLifecycle lifecycle;
     private RequestRepository requests;
     private EndpointRegistry endpoints;
@@ -45,29 +49,49 @@ public class ApplicationLifecycle implements ApplicationContextAware {
     private ExpirationTimer deadlines;
     private ResponseCompletionExecutor completions;
     private ScheduledTaskTimer taskTimer;
+    private ScheduledTaskTimer deadlineTaskTimer;
     private DeliveryDispatcher dispatcher;
 
     @Autowired
     public void configureScheduling(
             RequestScheduler scheduler,
+            RequestLifecycle lifecycle,
             RequestRepository requests,
             EndpointRegistry endpoints,
-            DeliveryExecution deliveries,
-            RequestTaskPool tasks,
-            ExpirationTimer deadlines,
-            ResponseCompletionExecutor completions,
-            ScheduledTaskTimer taskTimer,
-            DeliveryDispatcher dispatcher, RequestLifecycle lifecycle) {
+            DecodePreemption preemption) {
         this.scheduler = scheduler;
         this.lifecycle = lifecycle;
         this.requests = requests;
         this.endpoints = endpoints;
+        this.preemption = preemption;
+    }
+
+    @Autowired
+    public void configureExecution(
+            DeliveryExecution deliveries,
+            RequestTaskPool tasks,
+            ResponseCompletionExecutor completions,
+            DeliveryDispatcher dispatcher) {
         this.deliveries = deliveries;
         this.tasks = tasks;
-        this.deadlines = deadlines;
         this.completions = completions;
-        this.taskTimer = taskTimer;
         this.dispatcher = dispatcher;
+    }
+
+    @Autowired
+    public void configureTimers(
+            ExpirationTimer deadlines,
+            @Qualifier("deadlineTaskTimer") ScheduledTaskTimer deadlineTaskTimer,
+            ScheduledTaskTimer taskTimer) {
+        this.deadlines = deadlines;
+        this.deadlineTaskTimer = deadlineTaskTimer;
+        this.taskTimer = taskTimer;
+    }
+
+    @Autowired
+    public void startScheduling(RequestScheduler scheduler, RequestLifecycle lifecycle) {
+        lifecycle.bindScheduler(scheduler);
+        scheduler.start();
     }
 
     private void closeScheduling() {
@@ -80,10 +104,13 @@ public class ApplicationLifecycle implements ApplicationContextAware {
                                 requests.awaitResponses(
                                         System.nanoTime() + TimeUnit.SECONDS.toNanos(30L)));
         if (!requests.closeRegistration()) return;
+        failure = Failures.run(failure, preemption::stopAdmission);
+        failure = Failures.run(failure, scheduler::stop);
         failure = Failures.run(failure, scheduler::close);
+        failure = Failures.run(failure, preemption::close);
         var owners = new LinkedHashSet<RequestLifecycle>();
         owners.add(lifecycle);
-        for (var context : requests.snapshotActive()) owners.add(context.data().getScheduler());
+        for (var context : requests.snapshotActive()) owners.add(context.data().getLifecycle());
         for (var owner : owners)
             failure = Failures.run(failure, owner::stopAdmissionsAndAwaitCompletion);
         for (var context : requests.snapshotActive()) {
@@ -92,7 +119,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
                             failure,
                             () ->
                                     context.data()
-                                            .getScheduler()
+                                            .getLifecycle()
                                             .cancel(context, 0L, CancelReason.SHUTDOWN));
         }
         failure = Failures.run(failure, deliveries::awaitDeliveries);
@@ -102,6 +129,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         for (var owner : owners)
             failure = Failures.run(failure, () -> owner.awaitDeliveryCleanup(false));
         failure = Failures.run(failure, deadlines::close);
+        failure = Failures.run(failure, deadlineTaskTimer::close);
         failure = Failures.run(failure, tasks::awaitIdle);
         for (var owner : owners)
             failure = Failures.run(failure, owner::closeOutstandingAndTerminalize);
@@ -124,7 +152,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
 
     private final MasterStatusService consistency;
     private final FlexlbGrpcServer grpcServer;
-    private final GracefulLifecycleReporter reporter;
+    private final EngineHealthReporter reporter;
     private final Environment environment;
     private final ApplicationWarmupState warmupState;
     private final long warmUpWaitMs;
@@ -143,7 +171,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
     public ApplicationLifecycle(
             MasterStatusService consistency,
             FlexlbGrpcServer grpcServer,
-            GracefulLifecycleReporter reporter,
+            EngineHealthReporter reporter,
             Environment environment,
             ApplicationWarmupState warmupState) {
         this(consistency, grpcServer, reporter, environment, warmupState, DEFAULT_WARM_UP_WAIT_MS);
@@ -152,7 +180,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
     ApplicationLifecycle(
             MasterStatusService consistency,
             FlexlbGrpcServer grpcServer,
-            GracefulLifecycleReporter reporter,
+            EngineHealthReporter reporter,
             Environment environment,
             ApplicationWarmupState warmupState,
             long warmUpWaitMs) {
@@ -177,7 +205,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         try {
             consistency.start();
             reporter.reportDuration(
-                    GracefulLifecycleReporter.Event.ZK_NODE_ONLINE,
+                    EngineHealthReporter.Event.ZK_NODE_ONLINE,
                     System.currentTimeMillis() - consistencyStartedAt);
         } catch (Exception e) {
             Logger.error("application online registration failed", e);
@@ -188,7 +216,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         try {
             Thread.sleep(warmUpWaitMs);
             reporter.reportDuration(
-                    GracefulLifecycleReporter.Event.WARMER_COMPLETE,
+                    EngineHealthReporter.Event.WARMER_COMPLETE,
                     System.currentTimeMillis() - warmUpStartedAt);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -209,12 +237,12 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         }
         if (!shutdownReceived) {
             shutdownReceived = true;
-            reporter.reportDuration(GracefulLifecycleReporter.Event.HEALTH_CHECK_OFFLINE, 0L);
+            reporter.reportDuration(EngineHealthReporter.Event.HEALTH_CHECK_OFFLINE, 0L);
             long consistencyStartedAt = System.currentTimeMillis();
             try {
                 consistency.offline();
                 reporter.reportDuration(
-                        GracefulLifecycleReporter.Event.ZK_NODE_OFFLINE,
+                        EngineHealthReporter.Event.ZK_NODE_OFFLINE,
                         System.currentTimeMillis() - consistencyStartedAt);
             } catch (Throwable failure) {
                 Logger.error("application offline deregistration failed", failure);
@@ -228,7 +256,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         closeScheduling();
         shutdownCompletedSuccessfully = true;
         reporter.reportDuration(
-                GracefulLifecycleReporter.Event.SHUTDOWN_COMPLETE,
+                EngineHealthReporter.Event.SHUTDOWN_COMPLETE,
                 TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - drainStartedAt));
         return true;
     }

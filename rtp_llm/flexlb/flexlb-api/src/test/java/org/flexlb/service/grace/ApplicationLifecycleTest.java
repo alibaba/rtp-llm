@@ -2,6 +2,7 @@ package org.flexlb.service.grace;
 
 import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.httpserver.FlexlbGrpcServer;
+import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
@@ -48,7 +49,7 @@ class ApplicationLifecycleTest {
                 new ApplicationLifecycle(
                         consistency,
                         grpc,
-                        mock(GracefulLifecycleReporter.class),
+                        mock(EngineHealthReporter.class),
                         context.getEnvironment(),
                         0L);
         context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
@@ -79,7 +80,7 @@ class ApplicationLifecycleTest {
                     new ApplicationLifecycle(
                             consistency,
                             grpc,
-                            mock(GracefulLifecycleReporter.class),
+                            mock(EngineHealthReporter.class),
                             context.getEnvironment(),
                             0L);
             context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
@@ -98,11 +99,16 @@ class ApplicationLifecycleTest {
             context.registerBean(MasterStatusService.class, () -> mock(MasterStatusService.class));
             context.registerBean(FlexlbGrpcServer.class, () -> mock(FlexlbGrpcServer.class));
             context.registerBean(
-                    GracefulLifecycleReporter.class, () -> mock(GracefulLifecycleReporter.class));
+                    EngineHealthReporter.class, () -> mock(EngineHealthReporter.class));
             context.register(ApplicationLifecycle.class);
             SchedulingShutdownTest.registerComponents(context);
             context.refresh();
             assertNotNull(context.getBean(ApplicationLifecycle.class));
+            var scheduler = context.getBean(org.flexlb.balance.scheduler.RequestScheduler.class);
+            var lifecycle = context.getBean(org.flexlb.balance.scheduler.RequestLifecycle.class);
+            var order = org.mockito.Mockito.inOrder(lifecycle, scheduler);
+            order.verify(lifecycle).bindScheduler(scheduler);
+            order.verify(scheduler).start();
         }
     }
 
@@ -110,7 +116,7 @@ class ApplicationLifecycleTest {
     void normalServiceDoesNotDrainAndRepeatedOfflineIsIdempotent() {
         var consistency = mock(MasterStatusService.class);
         var grpc = mock(FlexlbGrpcServer.class);
-        var reporter = mock(GracefulLifecycleReporter.class);
+        var reporter = mock(EngineHealthReporter.class);
         var environment = mock(Environment.class);
         when(environment.getActiveProfiles()).thenReturn(new String[0]);
         var lifecycle = new ApplicationLifecycle(consistency, grpc, reporter, environment, 0L);
@@ -125,7 +131,7 @@ class ApplicationLifecycleTest {
         verify(reporter)
                 .reportDuration(
                         org.mockito.ArgumentMatchers.eq(
-                                GracefulLifecycleReporter.Event.SHUTDOWN_COMPLETE),
+                                EngineHealthReporter.Event.SHUTDOWN_COMPLETE),
                         anyLong());
     }
 }

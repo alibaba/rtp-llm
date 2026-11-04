@@ -39,7 +39,6 @@ import static org.flexlb.balance.scheduler.RequestProtocolTestSupport.await;
 import static org.flexlb.balance.scheduler.RequestProtocolTestSupport.awaitCondition;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -110,14 +109,11 @@ class GlobalQueueProgressTest {
                     .when(f.router)
                     .select(any(), nullable(String.class));
             f.submit(994L, "a");
-            QueuedRequestScheduler queue = (QueuedRequestScheduler) f.scheduler;
             awaitCondition(
-                    () ->
-                            diagnostics.equals(
-                                    ((Map<String, Object>)
-                                                    ReflectionTestUtils.getField(
-                                                            queue, "latestQueueWaitSnapshot"))
-                                            .get("decision")));
+                    () -> {
+                        var saved = f.contexts.get(994L).data().getSchedulingDiagnostics();
+                        return saved != null && diagnostics.equals(saved.get("decision"));
+                    });
             verify(f.mutations.get(994L)).finish();
         }
     }
@@ -200,10 +196,9 @@ class GlobalQueueProgressTest {
             assertEquals(
                     "Placement failed: diagnostics failed", response.getValue().getErrorMessage());
             assertEquals(List.of(cleanup), List.of(primary.getSuppressed()));
-            assertSame(
-                    SchedulerTestSupport.decisionThread(f.scheduler),
-                    finishingThread.get(),
-                    "planning failures must return to the decision owner before admission completion");
+            assertTrue(
+                    finishingThread.get().getName().equals("flexlb-scheduling"),
+                    "planning failures must return to scheduler execution before admission completion");
             verify(f.routes.get(992L)).close();
             verify(f.mutations.get(992L)).finish();
             assertFalse(f.admitted.contains(992L));
@@ -228,6 +223,11 @@ class GlobalQueueProgressTest {
             RequestProtocolTestSupport.awaitGlobalCapacityWaiters(f.scheduler, 1);
             QueuedRequestScheduler queue = (QueuedRequestScheduler) f.scheduler;
             RequestContext context = f.contexts.get(991L);
+            RequestProtocolTestSupport.recordCancellation(
+                    f.lifecycle,
+                    context,
+                    CancelReason.CLIENT_CANCELLED,
+                    "cancelled before scheduler notification");
             queue.onRequestChanged(context);
             awaitCondition(() -> RequestProtocolTestSupport.queuedCount(queue) == 0);
 
@@ -604,7 +604,7 @@ class GlobalQueueProgressTest {
                 }
                 awaitCondition(() -> f.admitted.contains(id));
                 assertTrue(selector.get().getName().startsWith("flexlb-global-planner-"));
-                assertEquals("flexlb-global-decision", commit.get().getName());
+                assertTrue(commit.get().getName().equals("flexlb-scheduling"));
                 assertFalse(selector.get().isVirtual());
                 assertTrue(selector.get().isDaemon());
                 assertEquals(List.of(id), f.admissionOrder);
@@ -891,9 +891,8 @@ class GlobalQueueProgressTest {
                             });
             org.mockito.Mockito.doAnswer(
                             commit -> {
-                                QueuedRequestScheduler.PlacementPlan plan = commit.getArgument(0);
-                                RequestContext context =
-                                        RequestProtocolTestSupport.planContext(plan);
+                                RequestRoute selectedRoute = commit.getArgument(0);
+                                RequestContext context = selectedRoute.ctx();
                                 long id = context.data().getRequestId();
                                 onAdmission.accept(id);
                                 if (admissionBlocked.contains(id)) {
@@ -902,15 +901,15 @@ class GlobalQueueProgressTest {
                                 }
                                 admissionOrder.add(id);
                                 admitted.add(id);
-                                RequestRoute item = mock(RequestRoute.class);
+                                RequestRoute item = RequestProtocolTestSupport.mockSelectedRoute();
                                 ServerStatus status = new ServerStatus();
                                 status.setRole(role);
                                 when(item.prefill()).thenReturn(status);
                                 when(item.prefillEp()).thenReturn(a.endpoint());
-                                return RequestProtocolTestSupport.published(plan, item);
+                                return RequestProtocolTestSupport.published(selectedRoute, item);
                             })
                     .when(RequestProtocolTestSupport.publication(lifecycle))
-                    .enqueueRoute(any());
+                    .enqueueRoute(any(), any());
             when(router.select(any(), nullable(String.class)))
                     .thenAnswer(
                             i -> {
@@ -927,7 +926,8 @@ class GlobalQueueProgressTest {
                                             new PlacementKey(
                                                     RoleType.DECODE, groups.get(id), null));
                                 }
-                                RequestRoute route = mock(RequestRoute.class);
+                                RequestRoute route = RequestProtocolTestSupport.mockSelectedRoute();
+                                when(route.ctx()).thenReturn(context);
                                 routes.put(id, route);
                                 return PlacementResult.success(route);
                             });

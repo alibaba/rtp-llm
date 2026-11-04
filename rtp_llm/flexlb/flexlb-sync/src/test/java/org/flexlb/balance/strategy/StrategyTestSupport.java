@@ -3,7 +3,6 @@ package org.flexlb.balance.strategy;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PlacementAvailability;
@@ -108,7 +107,11 @@ final class StrategyTestSupport {
                     result.value(),
                     result.failure(),
                     result.blocker() == null ? null : result.blocker().role(),
-                    result.diagnostics());
+                    result.diagnostics(),
+                    result.selection() == null
+                            ? null
+                            : org.flexlb.balance.PlacementResult.success(
+                                    result.selection().value()));
         }
     }
 
@@ -134,12 +137,7 @@ final class StrategyTestSupport {
                 return org.flexlb.balance.PlacementResult.success(route);
             }
             route.close();
-            return new org.flexlb.balance.PlacementResult<>(
-                    result.status(),
-                    null,
-                    result.failure(),
-                    result.blocker(),
-                    result.diagnostics());
+            return result.asFailure();
         } catch (RuntimeException | Error failure) {
             org.flexlb.util.Failures.append(failure, org.flexlb.util.Failures.close(route));
             throw failure;
@@ -201,10 +199,17 @@ final class StrategyTestSupport {
         }
     }
 
+    @SuppressWarnings("unchecked")
     static org.flexlb.dao.loadbalance.ServerStatus vit(RequestRoute route) {
-        return org.flexlb.dao.loadbalance.ServerStatus.copyOf(
-                (org.flexlb.dao.loadbalance.ServerStatus)
-                        org.springframework.test.util.ReflectionTestUtils.getField(route, "vit"));
+        var assignments =
+                (java.util.List<org.flexlb.dao.loadbalance.ServerStatus>)
+                        org.springframework.test.util.ReflectionTestUtils.getField(
+                                route, "assignments");
+        return assignments.stream()
+                .filter(status -> status.getRole() == RoleType.VIT)
+                .findFirst()
+                .map(org.flexlb.dao.loadbalance.ServerStatus::copyOf)
+                .orElse(null);
     }
 
     static WorkerEndpoint.GenerationPin decodePin(RequestRoute route) {
@@ -311,24 +316,11 @@ final class StrategyTestSupport {
                             org.flexlb.balance.scheduler.QueueExecutionSettings.capture(
                                     exactItem.ctx().data().getConfig(),
                                     org.flexlb.balance.planner.BuiltinGroupPlanner.from(
-                                            exactItem.ctx().data().getConfig())),
-                            org.flexlb.balance.endpoint.EndpointTestSupport.requestExecution(endpoint)
-                                            == null
-                                    ? org.flexlb.balance.scheduler.SchedulerTestSupport
-                                            .queueDependencies(
-                                                    exactItem.ctx().data().getScheduler(),
-                                                    exactItem.ctx().data().getConfig())
-                                    : (org.flexlb.balance.scheduler.RequestExecution.Dependencies)
-                                            org.springframework.test.util.ReflectionTestUtils
-                                                    .getField(
-                                                            org.flexlb.balance.endpoint
-                                                                    .EndpointTestSupport
-                                                                    .requestExecution(endpoint),
-                                                            "dependencies"));
+                                            exactItem.ctx().data().getConfig())));
         }
     }
 
-    static PrefillState.CommittedHandoff commitBatch(
+    static org.flexlb.balance.scheduler.Delivery commitBatch(
             PrefillEndpoint endpoint,
             long batchId,
             long predictedMs,
@@ -337,33 +329,27 @@ final class StrategyTestSupport {
             throw new IllegalArgumentException("committed batch requires at least one item");
         }
         List<RequestRoute> items = List.copyOf(exactItems);
-        PrefillState.ReservationResult<PrefillState.BatchReservation> result =
-                endpoint.reserveBatch(items.getFirst(), batchId, Integer.MAX_VALUE);
-        if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
-            throw new IllegalStateException("batch reservation rejected: " + result.status());
+        CapacityBoundary.Attempt<PrefillEndpoint.BatchReservation> result =
+                endpoint.reserveBatch(batchId, Integer.MAX_VALUE);
+        if (!result.accepted()) {
+            throw new IllegalStateException("batch reservation rejected: " + result.boundary());
         }
         {
-            PrefillState.BatchReservation reservation = result.reservation();
+            PrefillEndpoint.BatchReservation reservation = result.value();
             try (var preparationReservation =
                     org.flexlb.balance.endpoint.EndpointTestSupport.preparation(reservation)) {
-                PrefillState state =
-                        (PrefillState)
-                                org.springframework.test.util.ReflectionTestUtils.getField(
-                                        endpoint, "ownership");
-                state.queueGuard().lock();
+                PrefillEndpoint state = (PrefillEndpoint) endpoint;
+                state.resourceLock().lock();
                 try {
                     return state.commitLocked(
-                            new PrefillState.CommitPlan(
-                                    PrefillState.CommitKind.BATCH,
+                            org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
                                     items,
-                                    List.of(),
                                     reservation,
                                     new long[] {predictedMs},
                                     null,
-                                    System.currentTimeMillis()),
-                            null);
+                                    System.currentTimeMillis()));
                 } finally {
-                    state.queueGuard().unlock();
+                    state.resourceLock().unlock();
                 }
             }
         }
@@ -385,7 +371,7 @@ final class StrategyTestSupport {
     }
 
     /** Keep selection-owned queues parked without replacing admission internals. */
-    private static DeliveryDispatcher parkedDelivery() {
+    static DeliveryDispatcher parkedDelivery() {
         return org.flexlb.balance.scheduler.DeliveryTestSupport.parked(PARKED_BOUNDARY);
     }
 

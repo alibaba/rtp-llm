@@ -151,13 +151,13 @@ class CostBasedPrefillSelectionMetricTest {
         assertTrue(before.queue().queueScheduling(), "QUEUE policy exists before its first route");
         assertEquals(8, before.queue().constraints().maxRequests());
         assertEquals(windowMs, before.queue().constraints().collectionWindowMs());
-        assertNull(
-                org.springframework.test.util.ReflectionTestUtils.getField(first, "requestExecution"));
+        assertNull(org.flexlb.balance.endpoint.EndpointTestSupport.requestExecution(first));
         org.flexlb.balance.endpoint.EndpointTestSupport.enableQueueRuntime(
                 second,
                 settings,
                 org.flexlb.balance.scheduler.SchedulerTestSupport.queueDependencies(
-                        mock(org.flexlb.balance.scheduler.RequestLifecycle.class), config));
+                        mock(org.flexlb.balance.scheduler.RequestLifecycle.class), config),
+                StrategyTestSupport.parkedDelivery());
         strategy =
                 new StrategyTestSupport.PrefillRoutingFixture(
                         registry,
@@ -172,7 +172,8 @@ class CostBasedPrefillSelectionMetricTest {
                         first,
                         settings,
                         org.flexlb.balance.scheduler.SchedulerTestSupport.queueDependencies(
-                                mock(org.flexlb.balance.scheduler.RequestLifecycle.class), config));
+                                mock(org.flexlb.balance.scheduler.RequestLifecycle.class), config),
+                        StrategyTestSupport.parkedDelivery());
             }
             try (RequestRoute selected = select()) {
                 assertEquals("10.0.0.2", selected.prefill().getServerIp());
@@ -202,24 +203,31 @@ class CostBasedPrefillSelectionMetricTest {
                         RoleType.PREFILL,
                         null);
 
-        assertEquals(PlacementResult.Status.BLOCKED, result.status());
+        assertEquals(PlacementResult.Status.ENDPOINT_CHANGED, result.status());
+        assertEquals(PlacementResult.Status.SUCCESS, result.selection().status());
         assertReleased(workspace);
     }
 
     @Test
-    void capacityCheckFailureReleasesTheCapturedGeneration() {
+    void capacityCheckFailureDoesNotAcquireAGeneration() {
         config.setScheduler(ConfigTestSupport.direct());
         refreshContext();
-        var endpoint = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
-        var ownership = Mockito.spy(endpoint.ownership);
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                endpoint, "ownership", ownership);
+        var endpoint =
+                Mockito.spy((PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080"));
+        var ownership = endpoint;
+        org.flexlb.balance.endpoint.EndpointTestSupport.stubResources(endpoint, ownership);
         var failure = new IllegalStateException("capacity unavailable");
         Mockito.doThrow(failure)
                 .when(ownership)
                 .requestCapacityAvailable(Mockito.anyLong(), Mockito.anyInt());
         var pin = endpoint.tryPinGeneration();
         var directory = Mockito.spy(registry);
+        Mockito.doReturn(
+                        java.util.List.of(
+                                new EndpointRegistry.PrefillRoutingEntry(
+                                        "10.0.0.1:8080", endpoint)))
+                .when(directory)
+                .prefillRoutingSnapshot(RoleType.PREFILL);
         Mockito.doReturn(pin).when(directory).capture(RoleType.PREFILL, "10.0.0.1:8080");
         strategy =
                 new StrategyTestSupport.PrefillRoutingFixture(
@@ -230,8 +238,9 @@ class CostBasedPrefillSelectionMetricTest {
                         SchedulingTestConfig.configService(config));
         try {
             assertSame(failure, assertThrows(IllegalStateException.class, this::select));
-            assertFalse(
-                    pin.isOpen(), "failed selection must release its generation before returning");
+            Mockito.verify(directory, Mockito.never()).capture(Mockito.any(), Mockito.any());
+            assertTrue(
+                    pin.isOpen(), "selection only reads capacity; no generation has been acquired");
             assertReleased(candidateWorkspace().get());
         } finally {
             pin.close();
@@ -680,11 +689,12 @@ class CostBasedPrefillSelectionMetricTest {
                 org.flexlb.balance.scheduler.SchedulerTestSupport.queueDependencies(
                         mock(org.flexlb.balance.scheduler.RequestLifecycle.class), config);
         org.flexlb.balance.endpoint.EndpointTestSupport.enableQueueRuntime(
-                leader, settings, dependencies);
+                leader, settings, dependencies, StrategyTestSupport.parkedDelivery());
         org.flexlb.balance.endpoint.EndpointTestSupport.enableQueueRuntime(
                 (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080"),
                 settings,
-                dependencies);
+                dependencies,
+                StrategyTestSupport.parkedDelivery());
         assertEquals(
                 0L, leader.captureRouteProjectionInputs().queue().constraints().batchKvCapacity());
         try (RequestRoute selected = select()) {
@@ -721,7 +731,7 @@ class CostBasedPrefillSelectionMetricTest {
         } finally {
             status.lock.unlock();
         }
-        assertFalse(leader.ownership.requestCapacityAvailable(leader.requestLimit, 1));
+        assertFalse(leader.requestCapacityAvailable(leader.requestLimit, 1));
 
         var result =
                 StrategyTestSupport.select(

@@ -1,5 +1,6 @@
 package org.flexlb.balance.prediction;
 
+import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

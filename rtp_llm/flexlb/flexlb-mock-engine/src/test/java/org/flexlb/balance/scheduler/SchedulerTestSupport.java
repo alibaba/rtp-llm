@@ -16,7 +16,7 @@ public final class SchedulerTestSupport {
             long expectedKv,
             int priority) {
         endpoint.requirePinnedGeneration(pin);
-        Object state = ReflectionTestUtils.getField(endpoint, "state");
+        Object state = endpoint;
         var lock =
                 (java.util.concurrent.locks.ReentrantLock)
                         ReflectionTestUtils.getField(state, "admissionLock");

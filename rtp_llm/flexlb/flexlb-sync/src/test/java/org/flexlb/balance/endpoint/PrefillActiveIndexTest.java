@@ -3,7 +3,6 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -21,15 +20,19 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class PrefillActiveIndexTest {
-    private static final Comparator<RequestRoute> ORDER =
-            Comparator.comparingInt(RequestRoute::priority)
-                    .reversed()
-                    .thenComparingLong(RequestRoute::enqueueSeq);
+    private static final Comparator<org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem>
+            ORDER =
+                    Comparator.comparingInt(
+                                    org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
+                                            ::priority)
+                            .reversed()
+                            .thenComparingLong(
+                                    org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
+                                            ::enqueueSeq);
 
     @Test
     void directModeNeverAcquiresQueueMembership() {
@@ -193,14 +196,14 @@ class PrefillActiveIndexTest {
         verify(second, org.mockito.Mockito.never()).seqLen();
     }
 
-    private static List<Long> ids(PrefillActiveIndex.Capture capture) {
+    private static List<Long> ids(PrefillRequestQueue.Snapshot capture) {
         return capture.items().stream()
                 .map(org.flexlb.balance.scheduler.RequestRoute::requestId)
                 .toList();
     }
 
     @SuppressWarnings("unchecked")
-    private static int capturedSize(PrefillActiveIndex.Capture capture) {
+    private static int capturedSize(PrefillRequestQueue.Snapshot capture) {
         return capture.items().size();
     }
 

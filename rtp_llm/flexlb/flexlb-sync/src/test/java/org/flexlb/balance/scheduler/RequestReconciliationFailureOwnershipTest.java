@@ -1,9 +1,7 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.loadbalance.Response;
@@ -77,17 +75,21 @@ class RequestReconciliationFailureOwnershipTest {
         assertNotNull(admission);
         assertEquals(
                 org.flexlb.balance.PlacementResult.Status.SUCCESS,
-                owner.commitRoute(route, RequestProtocolTestSupport.publication(() -> true)));
+                RequestProtocolTestSupport.commitRoute(
+                        owner, route, RequestProtocolTestSupport.publication(() -> true)));
         admission.finish();
         var delivery =
-                owner.claimDelivery(
-                        route,
-                        DeliveryClaimKind.BATCH_ENQUEUE,
-                        7L,
-                        RequestProtocolTestSupport.handoff(() -> true));
+                DeliveryDispatcher.commitDelivery(
+                        owner,
+                        new org.flexlb.balance.scheduler.Delivery.Member(
+                                route, RequestProtocolTestSupport.handoff(() -> true)),
+                        Delivery.SendMode.BATCH_ENQUEUE,
+                        7L);
         assertTrue(owner.tryStartSend(delivery));
         RequestProtocolTestSupport.transport(
-                owner, delivery, DeliveryResult.uncertain(new IllegalStateException("reply lost")));
+                owner,
+                delivery,
+                Delivery.Result.uncertain(new IllegalStateException("reply lost")));
         var registration = owner.tryClaim(reservation, 4L).orElseThrow();
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
@@ -108,8 +110,8 @@ class RequestReconciliationFailureOwnershipTest {
                         java.util.concurrent.CompletableFuture.completedFuture(
                                 EngineGrpcClient.CancelReply.REQUEST_CLEANED));
         var failed =
-                new PrefillState.PrefillRequestStatus(
-                        route, PrefillState.PrefillRequestStatus.Kind.FAILED, 9L);
+                new PrefillEndpoint.PrefillRequestStatus(
+                        route, PrefillEndpoint.PrefillRequestStatus.Kind.FAILED, 9L);
         try {
             RequestProtocolTestSupport.applyPrefillStatus(
                     owner, context, prefill, RoleType.PREFILL, failed);

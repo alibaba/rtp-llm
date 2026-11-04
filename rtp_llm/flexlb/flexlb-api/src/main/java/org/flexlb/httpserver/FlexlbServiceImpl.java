@@ -7,9 +7,10 @@ import io.grpc.stub.StreamObserver;
 import io.opentelemetry.api.trace.Span;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestContext;
+import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestRepository;
-import org.flexlb.balance.scheduler.RequestSchedulerEntry;
 import org.flexlb.balance.scheduler.RequestState;
+import org.flexlb.balance.scheduler.RequestWorkerSelector;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.MasterStatusService;
@@ -53,7 +54,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     private static final org.slf4j.Logger pvLogger = LoggerFactory.getLogger("pvLogger");
 
-    private final RequestSchedulerEntry requestEntry;
+    private final RequestLifecycle requestEntry;
     private final FlexlbConfig config;
     private final RequestRepository requestState;
     private final MasterStatusView masterStatusView;
@@ -63,9 +64,16 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
     private final RequestSchedulerReporter requestSchedulerReporter;
 
+    private RequestWorkerSelector selector;
+
+    @Autowired
+    public void configureRouting(RequestWorkerSelector selector) {
+        this.selector = java.util.Objects.requireNonNull(selector);
+    }
+
     @Autowired
     public FlexlbServiceImpl(
-            @Lazy RequestSchedulerEntry requestEntry,
+            @Lazy RequestLifecycle requestEntry,
             ConfigService configService,
             RequestRepository requestState,
             MasterStatusService masterStatusService,
@@ -87,7 +95,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     FlexlbServiceImpl(
-            RequestSchedulerEntry requestEntry,
+            RequestLifecycle requestEntry,
             FlexlbConfig config,
             RequestRepository requestState,
             MasterStatusView masterStatusView,
@@ -756,22 +764,40 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     private CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeLocally(
             RequestContext ctx, Runnable onRegistered) {
-        return requestEntry
-                .submit(ctx, onRegistered)
-                .thenApply(
-                        response -> {
-                            FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
-                                    toProtoResponse(response).toBuilder();
-                            RequestState lifecycle =
-                                    isAdmissionRequest(ctx)
-                                            ? requestState.getRequestState(
-                                                    ctx.data().getRequestId(), 0)
-                                            : null;
-                            if (lifecycle != null) {
-                                builder.setLifecycle(toLifecycleProto(lifecycle));
-                            }
-                            return builder.build();
-                        });
+        var request = ctx.data().getRequest();
+        CompletableFuture<Response> result;
+        try {
+            if (request.isVitRouteOnly()) {
+                result = CompletableFuture.completedFuture(selector.routeVit(ctx));
+                ctx.data().setFuture(result);
+            } else if (request.getSelectedVit() != null
+                    && requestState.getRequestState(ctx.data().getRequestId(), 0L) == null
+                    && !selector.selectedVitIsValid(ctx)) {
+                result =
+                        CompletableFuture.completedFuture(
+                                Response.error(StrategyErrorType.VIT_ROUTE_STALE));
+            } else {
+                result = requestEntry.submit(ctx, onRegistered);
+            }
+        } catch (RuntimeException failure) {
+            result =
+                    CompletableFuture.completedFuture(
+                            Response.buildErrorResponse(
+                                    StrategyErrorType.DISPATCH_FAILED, failure.getMessage()));
+        }
+        return result.thenApply(
+                response -> {
+                    FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
+                            toProtoResponse(response).toBuilder();
+                    RequestState lifecycle =
+                            isAdmissionRequest(ctx)
+                                    ? requestState.getRequestState(ctx.data().getRequestId(), 0)
+                                    : null;
+                    if (lifecycle != null) {
+                        builder.setLifecycle(toLifecycleProto(lifecycle));
+                    }
+                    return builder.build();
+                });
     }
 
     private void completeSchedule(
@@ -849,12 +875,12 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private void cancelUndeliveredRoute(RequestContext exact) {
-        if (exact == null || exact.data().getScheduler() == null) {
+        if (exact == null || exact.data().getLifecycle() == null) {
             return;
         }
         try {
             exact.data()
-                    .getScheduler()
+                    .getLifecycle()
                     .cancel(exact, 0L, org.flexlb.balance.scheduler.CancelReason.CLIENT_CANCELLED);
         } catch (Exception error) {
             Logger.warn(
