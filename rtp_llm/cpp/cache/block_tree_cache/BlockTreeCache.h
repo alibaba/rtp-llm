@@ -77,7 +77,7 @@ struct BlockTreeCacheConfig {
 
     // ---- FULL prefix invariant scanner (diagnostic only) ----
     // The factory zeroes this on ranks that do not own a mutable BlockTree.
-    int64_t full_prefix_scan_interval_ms{0};  // 0 = disabled, no thread
+    int64_t full_prefix_scan_interval_ms{30000};  // 30 seconds; 0 = disabled, no thread
 
     // ---- Query helpers ----
     bool isTierEnabled(Tier tier) const {

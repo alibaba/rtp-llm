@@ -2361,12 +2361,23 @@ TEST_F(BlockTreeCacheFactoryTest, FullWatermarksPropagateAndRejectPartialOrInval
 
 TEST_F(BlockTreeCacheFactoryTest, FullPrefixScanConfigPropagatesAndValidates) {
     const auto config = makeSingleConfig();
+    EXPECT_EQ(BlockTreeCacheConfig{}.full_prefix_scan_interval_ms, 30000);
     {
         auto          allocator = initAllocator<CoordinatorCacheManager>(config);
         KVCacheConfig kv_cache_config;
         auto          cache = createBlockTreeCache(config, kv_cache_config, allocator);
         ASSERT_NE(cache, nullptr);
+        EXPECT_EQ(cache->config().full_prefix_scan_interval_ms, 30000);
+        EXPECT_NE(cache->full_prefix_scanner_.get(), nullptr);
+    }
+    {
+        auto          allocator = initAllocator<CoordinatorCacheManager>(config);
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.block_tree_full_prefix_scan_interval_ms = 0;
+        auto cache = createBlockTreeCache(config, kv_cache_config, allocator);
+        ASSERT_NE(cache, nullptr);
         EXPECT_EQ(cache->config().full_prefix_scan_interval_ms, 0);
+        EXPECT_EQ(cache->full_prefix_scanner_.get(), nullptr);
     }
 
     KVCacheConfig scan_enabled;
@@ -2400,6 +2411,7 @@ TEST_F(BlockTreeCacheFactoryTest, FullPrefixScanConfigPropagatesAndValidates) {
         auto cache     = createBlockTreeCache(config, scan_enabled, allocator, follower);
         ASSERT_NE(cache, nullptr);
         EXPECT_EQ(cache->config().full_prefix_scan_interval_ms, 0);
+        EXPECT_EQ(cache->full_prefix_scanner_.get(), nullptr);
     }
     for (const int64_t invalid_interval : {int64_t{-1}, int64_t{999}, std::numeric_limits<int64_t>::max()}) {
         auto          allocator = initAllocator<CoordinatorCacheManager>(config);
