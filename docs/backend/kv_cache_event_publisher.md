@@ -48,8 +48,11 @@ server and add it to the Instance Group's `event_report_storage_candidates`.
 
 Instance registrations must match the published schema and token stride. The `F0`/`F1`/`F2` to `F` change is a schema
 change: rollout requires a new HBM Instance ID or an explicit migration of the existing registration and metadata.
-Runtime pool names and Remote group names retain the attention-type naming: `hca_kv`/`csa_kv` and
-`Fhca_kv`/`Fcsa_kv`, including their aggregate group names. Automatic `DeepSeekV41` remote configuration
+Runtime pool names retain the attention-type naming: `hca_kv`/`csa_kv`. Remote group names use `F` for all
+FULL KV, `FL` for FULL KV plus CSA state and SWA KV, and `L3`/`L4` for the individual state groups.
+Unmerged FULL groups use `F0`/`F1`/`F2` for HCA/CSA/indexer KV. This mapping also accepts the legacy
+`global_kv_1`/`global_kv_2` pool tags and changes neither spec names nor writable group combinations.
+Automatic `DeepSeekV41` remote configuration
 with a single PACE DRAM backend merges the three compatible FULL groups into one `F_TP<n>` spec and
 remote allocation per rank, using the original GPU buffers directly. State specs remain
 `S3_TP<n>`/`S4_TP<n>`. Custom configurations, other backends, and `DeepSeekV41DSpark` retain
@@ -59,8 +62,9 @@ RTP does not override it. `OFF` selects normal batch I/O. `ON` supports compact 
 remote DRAM/OFFSET GAs when the Consumer supports foreign-GA bounds from Manager/SDK URIs and compact
 external GPU memory is negotiated. Both paths send the original GPU IOVs to offsets in the single GA,
 without payload packing. Other PACE configurations require separate validation before enabling `ON`.
-The automatic remote-cache Instance ID includes both specs and groups, so retaining the renamed groups can change
-that ID relative to an instance registered with `Fglobal_kv_1`/`Fglobal_kv_2` groups.
+The automatic remote-cache Instance ID includes both specs and groups, so shortening the group names changes
+that ID and starts a new cache namespace. Custom `KVCM_CLIENT_CONFIG` registrations must use the same short
+group names; an existing explicit Instance ID requires a matching registration migration or a new ID.
 This pool-name compatibility mapping applies to the `DeepSeekV41` and `DeepSeekV41DSpark` model names supplied by
 ModelFactory. Other models, including DeepSeek V4, retain their existing mappings.
 Consumers must check FULL history and SWA windows before reuse.
