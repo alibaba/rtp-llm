@@ -4,6 +4,11 @@ load("@arch_config//:arch_select.bzl", "select_py_bindings", "torch_deps")
 load("@bazel_skylib//lib:selects.bzl", "selects")
 
 config_setting(
+    name = "aios_open_source",
+    define_values = {"aios_open_source": "true"},
+)
+
+config_setting(
     name = "enable_triton",
     values = {"define": "enable_triton=true"},
 )
