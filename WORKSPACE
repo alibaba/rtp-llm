@@ -45,6 +45,13 @@ http_archive(
     build_file = "//3rdparty/lz4:BUILD",
 )
 
+http_archive(
+    name = "zstd_pkg",
+    urls = ["https://github.com/facebook/zstd/archive/refs/tags/v1.5.5.tar.gz"],
+    strip_prefix = "zstd-1.5.5",
+    build_file = "//3rdparty/zstd:BUILD",
+)
+
 load("//3rdparty/cuda_config:cuda_configure.bzl", "cuda_configure")
 load("//3rdparty/gpus:rocm_configure.bzl", "rocm_configure")
 load("//3rdparty/py:python_configure.bzl", "python_configure")
