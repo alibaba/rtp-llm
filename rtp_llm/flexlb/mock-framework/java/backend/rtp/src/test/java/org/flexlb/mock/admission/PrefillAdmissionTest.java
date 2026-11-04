@@ -4,6 +4,7 @@ import org.flexlb.mock.engine.rtp.RtpConfig;
 import org.flexlb.mock.engine.rtp.RtpNode;
 import org.flexlb.mock.engine.rtp.RtpScheduler;
 import org.flexlb.mock.engine.rtp.RtpNodeTest;
+import org.flexlb.mock.engine.rtp.RtpTestMetrics;
 
 import static org.junit.jupiter.api.Assertions.*;
 import com.fasterxml.jackson.databind.*;
@@ -139,7 +140,8 @@ class PrefillAdmissionTest {
 
     @Test void completionCancellationRaceHasOneTerminalAndConservesCapacity() throws Exception {
         var config = config("0");
-        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config))) {
+        var metrics = new RtpTestMetrics(config);
+        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new PrefillAdmission(config.endpoint(), cache, metrics)) {
             for (int i = 0; i < 100; i++) {
                 var session = engine.submit(input(i, 0, true)); session.cancel();
                 var result = session.completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
@@ -147,7 +149,7 @@ class PrefillAdmissionTest {
                 assertEquals(8, cache.snapshot(-1, false).availableBlocks());
             }
             assertEquals(100, engine.snapshot(0).finishedVersion());
-            var text = engine.scrapeMetrics();
+            var text = metrics.scrape();
             assertEquals(100, LocalRpcTest.sample(text, "rtp_llm_requests_started_total", ""));
             assertEquals(100, LocalRpcTest.sample(text, "rtp_llm_framework_requests_total", "outcome=\"success\"")
                 + LocalRpcTest.sample(text, "rtp_llm_framework_requests_total", "outcome=\"cancelled\""));
@@ -237,8 +239,9 @@ class PrefillAdmissionTest {
 
     @Test void cancelledPreparedMemberIsExcludedFromTheExplicitBatch() throws Exception {
         var config = config("0", true);
+        var metrics = new RtpTestMetrics(config);
         try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU);
-             var admission = new PrefillAdmission(config.endpoint(), cache, RtpScheduler.factory(config))) {
+             var admission = new PrefillAdmission(config.endpoint(), cache, metrics)) {
             var cancelled = admission.new Session(input(1, 0, true), true, System.nanoTime(), Long.MAX_VALUE);
             var ready = admission.new Session(input(2, 0, true), true, System.nanoTime(), Long.MAX_VALUE);
             cancelled.cancel();
@@ -248,7 +251,7 @@ class PrefillAdmissionTest {
             assertEquals(Status.Code.CANCELLED, Status.fromThrowable(batch.get(0).failure()).getCode());
             assertSame(ready, batch.get(1).session());
             assertTrue(ready.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().isOk());
-            assertEquals(1, LocalRpcTest.sample(admission.scrapeMetrics(), "rtp_llm_requests_started_total", ""));
+            assertEquals(1, LocalRpcTest.sample(metrics.scrape(), "rtp_llm_requests_started_total", ""));
             assertEquals(1, admission.snapshot(0).finished().size());
             ready.cancel(); ready.termination.get(2, TimeUnit.SECONDS);
             assertEquals(2, admission.snapshot(0).finished().size());

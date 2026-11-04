@@ -57,8 +57,12 @@ public final class MetricTags {
     }
 
     public static String scrape(CollectorRegistry registry, Map<String, String> tags) {
+        return scrape(collect(registry, tags));
+    }
+
+    public static String scrape(List<MetricFamilySamples> snapshot) {
         var text = new StringWriter();
-        try { TextFormat.write004(text, Collections.enumeration(collect(registry, tags))); }
+        try { TextFormat.write004(text, Collections.enumeration(snapshot)); }
         catch (IOException impossible) { throw new UncheckedIOException(impossible); }
         return text.toString();
     }
