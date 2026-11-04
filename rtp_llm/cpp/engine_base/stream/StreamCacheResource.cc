@@ -345,12 +345,15 @@ void StreamCacheResource::publishAllocatorReuse(const LoadAsyncContext& context,
                             "allocator reuse token count exceeds int range: blocks=%zu tokens=%d",
                             total,
                             tokens);
-    const size_t backend  = total - local;
-    auto&        resource = batch_kv_cache_resource_->cacheResource(0);
-    resource.setDeviceReuseBlockNum(local - host - disk);
-    resource.setMemoryReuseBlockNum(host);
-    resource.setDiskReuseBlockNum(disk);
-    resource.setStorageBackendReuseBlockNum(backend);
+    const size_t backend = total - local;
+    // Initial allocation shares the matched prefix across all batches.
+    for (int batch = 0; batch < batch_kv_cache_resource_->batchSize(); ++batch) {
+        auto& resource = batch_kv_cache_resource_->cacheResource(batch);
+        resource.setDeviceReuseBlockNum(local - host - disk);
+        resource.setMemoryReuseBlockNum(host);
+        resource.setDiskReuseBlockNum(disk);
+        resource.setStorageBackendReuseBlockNum(backend);
+    }
     publishReuseLengths(total * tokens, host * tokens, disk * tokens, backend * tokens);
 }
 
