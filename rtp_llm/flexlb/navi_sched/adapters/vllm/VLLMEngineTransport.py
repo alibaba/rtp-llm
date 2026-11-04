@@ -187,7 +187,7 @@ class VLLMEngineTransport:
         if local_request_ids:
             await self._engine_core.abort_requests_async(local_request_ids)
 
-    def shutdown(self) -> None:
+    def shutdown(self, timeout: float | None = None) -> None:
         if self._closed:
             return
         self._closed = True
@@ -202,7 +202,10 @@ class VLLMEngineTransport:
         continuation = getattr(self, "_render_continuation", None)
         if continuation is not None:
             continuation.close()
-        self._engine_core.shutdown()
+        if timeout is None:
+            self._engine_core.shutdown()
+        else:
+            self._engine_core.shutdown(timeout=timeout)
 
     def _abort_request(self, external_request_id: str) -> bool:
         request_id = self._request_ids.get(external_request_id)
