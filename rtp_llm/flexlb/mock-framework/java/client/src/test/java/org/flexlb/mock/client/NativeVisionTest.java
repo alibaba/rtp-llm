@@ -16,7 +16,7 @@ import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.*;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.mock.engine.rtp.*;
-import org.flexlb.mock.vit.*;
+import org.flexlb.mock.engine.vit.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;

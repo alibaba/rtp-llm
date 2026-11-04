@@ -7,10 +7,10 @@ import java.util.function.Supplier;
 import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.engine.rtp.RtpConfig;
 import org.flexlb.mock.engine.rtp.RtpNode;
-import org.flexlb.mock.runtime.EngineAddress;
-import org.flexlb.mock.runtime.EngineConfig;
-import org.flexlb.mock.vit.VitConfig;
-import org.flexlb.mock.vit.VitNode;
+import org.flexlb.mock.protocol.EngineAddress;
+import org.flexlb.mock.protocol.ConfigInput;
+import org.flexlb.mock.engine.vit.VitConfig;
+import org.flexlb.mock.engine.vit.VitNode;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -39,7 +39,7 @@ public final class EngineMain {
         }
         var started = configuration == null
             ? startEnvironment(System.getenv(), port + 1, port)
-            : start(EngineConfig.read(Path.of(configuration)), rpcPort, port);
+            : start(ConfigInput.read(Path.of(configuration)), rpcPort, port);
         var stopped = new CountDownLatch(1);
         try (var node = started) {
             var hook = new Thread(() -> {

@@ -8,7 +8,7 @@ import java.nio.file.*;
 import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
-import org.flexlb.mock.runtime.ApiServer;
+import org.flexlb.mock.protocol.ApiServer;
 import org.flexlb.mock.client.ClientProtocol.*;
 
 /** Each JVM executes locally; only client-0 coordinates the one current plan. */
@@ -29,7 +29,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
     private volatile boolean closed;
 
     public ClientNode(String id, Path topology, Path directory) throws IOException {
-        this(id, topology, directory, org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN, 0, 0L);
+        this(id, topology, directory, org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN, 0, 0L);
     }
     private ClientNode(String id, Path topology, Path directory, int imageToken, int blockSize, long seed) throws IOException {
         this.imageToken = imageToken; this.blockSize = blockSize; this.cacheKeySeed = seed;
@@ -213,11 +213,11 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         if (configuredImageToken != null && (!configuredImageToken.isIntegralNumber()
                 || !configuredImageToken.canConvertToInt() || configuredImageToken.intValue() < 0))
             throw new IllegalArgumentException("Client image_token_id must be nonnegative int32");
-        int imageToken = settings.path("image_token_id").asInt(org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN);
+        int imageToken = settings.path("image_token_id").asInt(org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN);
         int blockSize = settings.path("seq_size_per_block").asInt(0);
         if (settings.has("seq_size_per_block") && (!settings.path("seq_size_per_block").isIntegralNumber() || !settings.path("seq_size_per_block").canConvertToInt() || blockSize < 1))
             throw new IllegalArgumentException("Client seq_size_per_block must be positive int32");
-        long seed = org.flexlb.mock.runtime.EngineConfig.signedLong(settings, "cache_key_hash_seed", 0);
+        long seed = org.flexlb.mock.protocol.ConfigInput.signedLong(settings, "cache_key_hash_seed", 0);
         var directory = Path.of(required("MOCK_OUTPUT_DIR"));
         try (var node = new ClientNode(required("MOCK_NODE_ID"), Path.of(required("MOCK_TOPOLOGY_FILE")), directory, imageToken, blockSize, seed)) {
             var hook = new Thread(node::close, "client-shutdown"); Runtime.getRuntime().addShutdownHook(hook);

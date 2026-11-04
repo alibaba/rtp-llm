@@ -51,9 +51,9 @@ RTP 请求公共支持范围集中在 `RequestValidation`，本地单 token、P/
 
 ### 执行和 P/D 交接
 
-- P 的 `GenerateStreamCall(max_new_tokens=1)` 由 PrefillAdmission 接入，不启用 D。请求经过 FIFO→选中时分配 KV→共享 Compute→真实等待→编码输出→释放；排队不占 KV。
-- 多 token P/D 要求 `can_use_pd_separation=true` 且恰好一个有效 DECODE 地址。PrefillAdmission 先向 D ALLOCATE，确认后启动 P，随后 LOAD、发 P 首 token、等待 LOAD 确认、发 GENERATE 并转发 D 输出。
-- D 的 DecodeAdmission 处理原生协议，RtpScheduler 管理资源和队列，只有 GENERATE 后进入计算队列；每个 Engine 一轮一个 Forward，按配置合并多个请求。初始 KV 分配遇临时不足等待容量变化；生成期间每轮先增长 KV，失败则终止，成功后才执行与提交输出。
+- P 的 `GenerateStreamCall(max_new_tokens=1)` 由 PrefillRpcServer 接入，不启用 D。请求经过 FIFO→选中时分配 KV→共享 Compute→真实等待→编码输出→释放；排队不占 KV。
+- 多 token P/D 要求 `can_use_pd_separation=true` 且恰好一个有效 DECODE 地址。PrefillRpcServer 先向 D ALLOCATE，确认后启动 P，随后 LOAD、发 P 首 token、等待 LOAD 确认、发 GENERATE 并转发 D 输出。
+- D 的 DecodeRpcServer 处理原生协议，RtpScheduler 管理资源和队列，只有 GENERATE 后进入计算队列；每个 Engine 一轮一个 Forward，按配置合并多个请求。初始 KV 分配遇临时不足等待容量变化；生成期间每轮先增长 KV，失败则终止，成功后才执行与提交输出。
 
 PD 只执行调度器之间的交接，不模拟 KV 数据传输。P/D 只使用原生 RemoteGenerate TCP 连接，不注册自定义回调服务，也不跨节点比对 prompt、块布局或 cache keys。P 必须等自身 Scheduler 报告首轮 Forward 完成后才发送 LOAD；D 对已分配的请求执行零耗时异步传输事件，完成后回复 LOAD ACK。P 收到 ACK 才释放源 KV，然后发送 GENERATE 或 PREFILL_COMPLETE，D Scheduler 决定开始计算或结束。两端块大小各自独立，KV 的申请、持有、释放及 finished 记录仍归各自 Scheduler 管理。
 
@@ -75,7 +75,7 @@ WorkerStatus 报真实等待/执行任务、finished/version，available_concurr
 
 共享 `BlockPool` 只管理物理容量和引用。每个实例/存储层各自建池，每个所有者持有独立 Reference，close 幂等，不能释放其他所有者份额或混用池。REQUEST/CACHE/LOAD/STORE/EVICTION 分别计数；只有 CACHE 引用的块算可回收容量，free 和 available 分开，分配失败不部分扣账，释放唤醒等待者。
 
-`KvCache` 和 `BlockTree` 目前固定实现 RTP Full-KV 语义，文件保留在 `java/shared/cache`，不为未知的 vLLM 行为增加策略层或适配接口。每个 Engine 各自拥有 Device/Host 池、前缀索引和请求租约，同 JVM 不共享缓存内容。树内 `lru/lfu/fifo` 只改变合法候选的排序，Device 和 Host 可以分别配置。一次 match 用同一访问序号刷新整条命中路径，release/重叠 publish 不刷新；每次成功进入新存储层都会刷新该层的 FIFO 入层顺序。
+`KvCache` 和 `BlockTree` 目前固定实现 RTP Full-KV 语义，文件保留在 `java/engine 的 cache 包`，不为未知的 vLLM 行为增加策略层或适配接口。每个 Engine 各自拥有 Device/Host 池、前缀索引和请求租约，同 JVM 不共享缓存内容。树内 `lru/lfu/fifo` 只改变合法候选的排序，Device 和 Host 可以分别配置。一次 match 用同一访问序号刷新整条命中路径，release/重叠 publish 不刷新；每次成功进入新存储层都会刷新该层的 FIFO 入层顺序。
 
 Scheduler 统一调用 `prepare` 取得 `CacheLoad`；其本地阶段使用 `acquire`，在同一锁内完成前缀匹配、取得使用引用、申请缺少的 Device 容量和本地读取。状态/前缀快照只读，不保证后续请求仍然命中。本地 Host/Device 读取和转存瞬间完成，不建立本地 loading 队列、异步任务或带宽模型；PD 网络交接仍按原有生命周期执行。
 
@@ -95,7 +95,7 @@ Device/Host 水位按物理占用比例工作：达到 high 后，尽量回收�
 
 ## 通用 V 与输入准备
 
-Engine 是运行实例的概念，prefill/decode/vit 是 Engine 的角色；RTP/vLLM 是 Engine 后端，不能与 P/D/V 混为一层。当前配置中的 `component.engine` 字段选择 P/D 后端；V 统一实现于 `java/shared/vit`，不需要选择后端，也不与 `java/backend/rtp` 并列为后端。以后 P/D 使用哪个后端都复用这一份 V。V 的媒体协议与 TCP 客户端仍在 `java/shared/multimodal`，Client/P 只依赖该协议模块。
+Engine 是运行实例的概念，prefill/decode/vit 是 Engine 的角色；RTP/vLLM 是 Engine 后端，不能与 P/D/V 混为一层。当前配置中的 `component.engine` 字段选择 P/D 后端；V 统一实现于 `java/engine 的 vit 包`，不需要选择后端，也不与 `java/engine 的 RTP 实现` 并列为后端。以后 P/D 使用哪个后端都复用这一份 V。V 的媒体协议与 TCP 客户端仍在 `java/protocol`，Client/P 只依赖该协议模块。
 
 P/D/V 各实例拥有独立 JVM、端口、队列、缓存和产物目录。统一产物为 `java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar`。
 
@@ -140,7 +140,7 @@ Embedding Device/Host 按逻辑 rows*hidden_size*BF16(2 bytes) 计费，各自 L
 
 Client 按 Master 的 V-only route 选 V，读取元数据、计算路由长度和缓存 key，再带 selected_vit 与原始输入请求完整 P/D 路由；Master 切换使 pin 失效时重新取一次 V 路由。P 在输入准备完成后才把规范化 token 序列交给 KV/Scheduler，并用同一输入准备 D ALLOCATE 和 PD 交接。P 的输入准备发生在调度锁外，受原请求 deadline/取消约束；这段准备暂不计入 P Scheduler 的队列快照，但计入 Client 端到端耗时。D 接收已准备输入，不重复编码。
 
-P 的本地单 token、P/D 单请求和 Master batch 都由 PrefillAdmission 管理输入准备，RpcService 只负责路由。提交 Scheduler 的单个与批量入口只接受已准备输入，不在调度器里调用 V。接入层直接用 Session 登记 PENDING，并负责过滤已取消的 Batch 成员、整理逐项结果；提交成功后在同一执行锁内交给 Scheduler；准备失败同样发布 finished 增量，但不增加计算请求和队列指标。开始时间和 deadline 在接入时确定，显式组不会在准备结束后重置预算。
+P 的本地单 token、P/D 单请求和 Master batch 都由 PrefillRpcServer 管理输入准备，RtpRpcService 只负责路由。提交 Scheduler 的单个与批量入口只接受已准备输入，不在调度器里调用 V。接入层直接用 Session 登记 PENDING，并负责过滤已取消的 Batch 成员、整理逐项结果；提交成功后在同一执行锁内交给 Scheduler；准备失败同样发布 finished 增量，但不增加计算请求和队列指标。开始时间和 deadline 在接入时确定，显式组不会在准备结束后重置预算。
 
 VP 同 JVM 和跨进程都走 TCP gRPC，只传 shape/dtype、split_size 和逐行 INT32 hash，不生成 embedding payload，也不伪造 RDMA lease。Mock P 校验形状、长度和展开 span 后使用；此响应不能交给真实 tensor 解码器，VP 网络带宽和 GPU 内存复制不在模拟范围内。
 
@@ -390,7 +390,7 @@ prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collect
 
 `shared/cache/remote/RemoteCache` 仅定义逻辑 match/read/write，位置凭据由适配器自己持有，KvCache 持有本地容量和引用。接口执行在锁外虚拟线程中，整个查询/读取共用一次任务；不另设固定在途读写数量上限，资源占用由已有 KV 容量、引用和请求期限控制。接口返回/抛异常必须表示已停止访问本次资源；interrupt 只请求取消，不作为释放证明。尚未实现真实数据传输、存储 SDK、KVCM 写会话或 KVS。
 
-普通 RtpScheduler 将未就绪请求放入独立 CACHE_LOADING 阶段；完成通知只唤醒 EngineLoop，maintain 在调度锁内更新有效前缀、把请求放回 waiting 队尾。loading 不阻塞其他请求，也计入本轮准入预算与已初始化 KV 请求数。回调不查找可复用的 request_id；取消后原操作不能再发布。LOAD 引用一直持有到工作线程退出，即使请求已取消。
+普通 RtpScheduler 将未就绪请求放入独立 CACHE_LOADING 阶段；完成通知只唤醒 RtpEngineLoop，maintain 在调度锁内更新有效前缀、把请求放回 waiting 队尾。loading 不阻塞其他请求，也计入本轮准入预算与已初始化 KV 请求数。回调不查找可复用的 request_id；取消后原操作不能再发布。LOAD 引用一直持有到工作线程退出，即使请求已取消。
 
 成功请求通过 `Lease.publishAndStore` 发布有效完整块，并以独立 STORE 引用提交后台写；请求终态不等写入，失败不回滚有效本地缓存。返回的 CompletionStage 反映写入及资源释放结果。节点关闭请求取消在途任务，未安全结束的任务继续持有引用，禁止提前复用块。`enable_remote_cache=false` 为默认；当前命令行/Whale 入口未安装适配器，不能直接开启为真实远端模式。测试仅通过显式 Java 装配注入可控适配器，不提供运行时假存储。
 
