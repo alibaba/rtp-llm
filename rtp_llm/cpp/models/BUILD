@@ -58,6 +58,7 @@ cc_library(
         "logits_processor/RecommendationLogitsProcessor.h",
         "logits_processor/LogitsProcessorFactory.h",
         "logits_processor/GrammarLogitsProcessor.h",
+        "logits_processor/FixedContinuationLogitsProcessor.h",
         "logits_processor/BitmaskUtils.h",
     ],
     srcs = [
@@ -71,6 +72,7 @@ cc_library(
         "logits_processor/RecommendationLogitsProcessor.cc",
         "logits_processor/LogitsProcessorFactory.cc",
         "logits_processor/GrammarLogitsProcessor.cc",
+        "logits_processor/FixedContinuationLogitsProcessor.cc",
     ],
     deps = [
         ":sample_infos",

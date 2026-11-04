@@ -25,7 +25,11 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
     if (model_output.logits.is_cuda()) {
         need_token_history = std::any_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
             const auto& config = *stream->generateConfig();
-            return config.repetition_penalty != 1.0f || config.presence_penalty != 0.0f
+            const auto& processors = stream->getAllLogitsProcessorPtr();
+            const bool processor_needs_history = std::any_of(processors.begin(), processors.end(), [](const auto& p) {
+                return p && p->requiresHostTokenHistory();
+            });
+            return processor_needs_history || config.repetition_penalty != 1.0f || config.presence_penalty != 0.0f
                    || config.frequency_penalty != 0.0f || config.no_repeat_ngram_size.value_or(0) != 0
                    || stream->currentNumBeams() != 1 || stream->nextNumBeams() != 1;
         });

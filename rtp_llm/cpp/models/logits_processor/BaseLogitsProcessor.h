@@ -62,6 +62,11 @@ public:
     virtual bool isStateful() const {
         return false;
     }
+    // Processors that validate full committed IDs need the host history even
+    // when neutral sampling penalties would otherwise allow device-only IDs.
+    virtual bool requiresHostTokenHistory() const {
+        return false;
+    }
     virtual bool supportsNormalAsyncDeviceState() const {
         return false;
     }

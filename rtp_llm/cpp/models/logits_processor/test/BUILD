@@ -3,6 +3,18 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+cc_test(
+    name = "fixed_continuation_logits_processor_test",
+    srcs = ["FixedContinuationLogitsProcessorTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/models:logits_processor",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    tags = ["cpu", "manual"],
+)
+
 test_copts = [
     "-fno-access-control",
 ] + copts()

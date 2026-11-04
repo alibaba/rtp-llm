@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/FixedContinuationLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/PrefixToCandidateTokens.h"
 #include "rtp_llm/cpp/models/logits_processor/RecommendationLogitsProcessor.h"
@@ -159,6 +160,17 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
         result.push_back(std::move(multi_seq_processor));
     }
 
+    auto fixed = FixedContinuationLogitsProcessor::fromGenerateInput(generate_input);
+    if (!fixed.ok()) {
+        return fixed.status();
+    }
+    if (fixed.value()) {
+        if (!result.empty()) {
+            return ErrorInfo(ErrorCode::INVALID_PARAMS,
+                             "fixed continuation cannot be combined with other logits processors");
+        }
+        result.emplace_back(std::move(fixed.value()));
+    }
     return std::move(result);
 }
 
