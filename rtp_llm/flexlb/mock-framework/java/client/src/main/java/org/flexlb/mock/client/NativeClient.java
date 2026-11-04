@@ -9,7 +9,8 @@ import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.*;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
-import org.flexlb.mock.client.evidence.ClientEvidence.Event;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.flexlb.mock.protocol.*;
 
 /** One native Schedule -> Fetch/Generate exchange. Frontend-style primary/backup scheduling; no Engine fallback. */
@@ -18,7 +19,7 @@ public final class NativeClient implements AutoCloseable {
     public record Result(long requestId, Instant sentAt, Long ttftNanos, long elapsedNanos,
                          int outputTokens, Outcome outcome, String grpcCode, long errorCode, String message) {}
     private final java.util.function.Supplier<List<String>> masters;
-    private final java.util.function.Consumer<Event.Builder> events;
+    private final java.util.function.Consumer<ObjectNode> events;
     private final VitClient vision;
     private final long cacheKeySeed;
     private final Map<String, ManagedChannel> channels = new HashMap<>();
@@ -35,13 +36,13 @@ public final class NativeClient implements AutoCloseable {
     public NativeClient(java.util.function.Supplier<List<String>> masters) {
         this(masters, event -> {});
     }
-    NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<Event.Builder> events) {
+    NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<ObjectNode> events) {
         this(masters, events, MediaInput.IMAGE_TOKEN);
     }
-    NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<Event.Builder> events, int imageToken) {
+    NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<ObjectNode> events, int imageToken) {
         this(masters, events, imageToken, 0L);
     }
-    NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<Event.Builder> events, int imageToken, long seed) {
+    NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<ObjectNode> events, int imageToken, long seed) {
         cacheKeySeed = seed;
         vision = new VitClient(imageToken);
         this.masters = Objects.requireNonNull(masters); this.events = Objects.requireNonNull(events);
@@ -73,7 +74,7 @@ public final class NativeClient implements AutoCloseable {
             if (closed || closing) throw new IllegalStateException("Client closed");
             if (active.containsKey(request.getRequestId())) throw new IllegalArgumentException("Active request_id already exists");
             call = new Call(request, input, budget);
-            events.accept(call.event(Event.Kind.ISSUED).setEpochMs(call.sentAt.toEpochMilli()));
+            events.accept(call.event("ISSUED").put("epoch_ms", Long.toString(call.sentAt.toEpochMilli())));
             active.put(request.getRequestId(), call);
         }
         synchronized (call) {
@@ -113,17 +114,19 @@ public final class NativeClient implements AutoCloseable {
         public CompletionStage<Long> firstToken() { return firstToken.minimalCompletionStage(); }
         public void cancel() { finish(Status.CANCELLED.withDescription("Client cancelled request"), 0, Outcome.cancelled); }
 
-        private Event.Builder event(Event.Kind kind) {
-            return Event.newBuilder().setRequestId(request.getRequestId()).setEpochMs(System.currentTimeMillis())
-                .setElapsedNanos(System.nanoTime() - started).setKind(kind);
+        private ObjectNode event(String kind) {
+            return JsonNodeFactory.instance.objectNode().put("kind", kind)
+                .put("request_id", Long.toString(request.getRequestId()))
+                .put("epoch_ms", Long.toString(System.currentTimeMillis()))
+                .put("elapsed_nanos", Long.toString(System.nanoTime() - started));
         }
-        private void emit(Event.Kind kind) { events.accept(event(kind)); }
+        private void emit(String kind) { events.accept(event(kind)); }
         private void scheduleResult(Status status, long code, Boolean responseSuccess) {
             if (!pendingSchedule) return;
             pendingSchedule = false;
-            var result = event(Event.Kind.SCHEDULE_RESULT).setAttempt(scheduleAttempt).setMaster(scheduledMaster)
-                .setGrpcCode(status.getCode().name()).setErrorCode(code).setMessage(message(status));
-            if (responseSuccess != null) result.setResponseSuccess(responseSuccess);
+            var result = event("SCHEDULE_RESULT").put("attempt", scheduleAttempt).put("master", scheduledMaster)
+                .put("grpc_code", status.getCode().name()).put("error_code", Long.toString(code)).put("message", message(status));
+            if (responseSuccess != null) result.put("response_success", responseSuccess);
             events.accept(result);
         }
         private void schedule(int attempt) {
@@ -131,7 +134,7 @@ public final class NativeClient implements AutoCloseable {
             try {
                 scheduledMaster = routes.get(attempt);
                 scheduleAttempt++; pendingSchedule = true;
-                events.accept(event(Event.Kind.SCHEDULE_START).setAttempt(scheduleAttempt).setMaster(scheduledMaster));
+                events.accept(event("SCHEDULE_START").put("attempt", scheduleAttempt).put("master", scheduledMaster));
                 boolean visionRoute = MediaInput.present(input) && !visionPrepared;
                 if (!visionRoute) scheduleStarted = true;
                 var query = visionRoute ? request.toBuilder().setVitRouteOnly(true).clearSelectedVit()
@@ -238,7 +241,7 @@ public final class NativeClient implements AutoCloseable {
                             }
                             // Native Engine may finish at its context limit, even with ignore_eos or a larger minimum.
                             outputTokens = flat.getAuxInfo(0).getOutputLen(); finalFrame = flat.getFinished(0);
-                            if (ttft == null) { ttft = System.nanoTime() - started; emit(Event.Kind.FIRST_TOKEN); firstToken.complete(ttft); }
+                            if (ttft == null) { ttft = System.nanoTime() - started; emit("FIRST_TOKEN"); firstToken.complete(ttft); }
                             if (!terminal) stream.request(1);
                         }
                     }
@@ -298,11 +301,11 @@ public final class NativeClient implements AutoCloseable {
                     }
                 }); } catch (RejectedExecutionException closing) { /* Client shutdown owns the remaining channels. */ }
             }
-            var ended = event(Event.Kind.TERMINAL).setOutcome(outcome.name()).setGrpcCode(status.getCode().name())
-                .setErrorCode(code).setMessage(message(status)).setOutputTokens(outputTokens);
-            if (ttft != null) ended.setTtftNanos(ttft);
+            var ended = event("TERMINAL").put("outcome", outcome.name()).put("grpc_code", status.getCode().name())
+                .put("error_code", Long.toString(code)).put("message", message(status)).put("output_tokens", outputTokens);
+            if (ttft != null) ended.put("ttft_nanos", Long.toString(ttft));
             events.accept(ended);
-            result.complete(new Result(request.getRequestId(), sentAt, ttft, ended.getElapsedNanos(), outputTokens,
+            result.complete(new Result(request.getRequestId(), sentAt, ttft, ended.path("elapsed_nanos").asLong(), outputTokens,
                 outcome, status.getCode().name(), code, status.getDescription() == null ? "" : status.getDescription()));
         }
     }

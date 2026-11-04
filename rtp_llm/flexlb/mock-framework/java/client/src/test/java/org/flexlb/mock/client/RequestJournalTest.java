@@ -1,14 +1,14 @@
 package org.flexlb.mock.client;
 
 import static org.junit.jupiter.api.Assertions.*;
-import com.google.protobuf.util.JsonFormat;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.*;
 import java.nio.channels.FileChannel;
 import java.nio.file.*;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
-import org.flexlb.mock.client.evidence.ClientEvidence.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -17,16 +17,11 @@ class RequestJournalTest {
     static ClientProtocol.Shard plan() {
         return new ClientProtocol.Shard(1, null, "/unused", 1, 0, 1, 100, "0".repeat(64), 1.0, null, 1, 1, 3000, 1000);
     }
-    static List<EventBatch> read(Path path) throws Exception {
-        var rows = Files.readAllLines(path);
-        if (rows.isEmpty()) return List.of();
-        var batch = EventBatch.newBuilder();
-        JsonFormat.parser().merge(rows.getFirst(), batch);
-        for (var row : rows.subList(1, rows.size())) {
-            if (row.startsWith("{\"seal\"")) JsonFormat.parser().merge(row, batch);
-            else JsonFormat.parser().merge(row, batch.addEventsBuilder());
-        }
-        return List.of(batch.build());
+    static List<JsonNode> read(Path path) throws IOException {
+        var mapper = new ObjectMapper();
+        var rows = new ArrayList<JsonNode>();
+        for (var line : Files.readAllLines(path)) rows.add(mapper.readTree(line));
+        return rows;
     }
     @Test void backupAttemptsAndCancellationAreRecordedIncrementally() throws Exception {
         var path = directory.resolve("requests.jsonl");
@@ -40,31 +35,32 @@ class RequestJournalTest {
             PlaybackTest.eventually(() -> {
                 try { return Files.readString(path).contains("\"FIRST_TOKEN\""); } catch (IOException e) { return false; }
             });
-            assertFalse(read(path).getLast().hasSeal(), "Evidence must exist before the request ends");
+            assertFalse(read(path).getLast().has("seal"), "Evidence must exist before the request ends");
             call.cancel(); call.completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
             journal.finish(1, 1);
-            var frames = read(path);
-            var events = frames.stream().flatMap(b -> b.getEventsList().stream()).toList();
-            assertEquals(List.of(Event.Kind.ISSUED, Event.Kind.SCHEDULE_START, Event.Kind.SCHEDULE_RESULT,
-                Event.Kind.SCHEDULE_START, Event.Kind.SCHEDULE_RESULT, Event.Kind.FIRST_TOKEN, Event.Kind.TERMINAL),
-                events.stream().map(Event::getKind).toList());
+            var rows = read(path);
+            var events = rows.subList(1, rows.size() - 1);
+            assertEquals(List.of("ISSUED", "SCHEDULE_START", "SCHEDULE_RESULT",
+                "SCHEDULE_START", "SCHEDULE_RESULT", "FIRST_TOKEN", "TERMINAL"),
+                events.stream().map(row -> row.path("kind").asText()).toList());
             for (int i = 0; i < events.size(); i++) {
-                assertEquals(i + 1, events.get(i).getSequence()); assertEquals(100, events.get(i).getRequestId());
+                assertEquals(Integer.toString(i + 1), events.get(i).get("sequence").textValue());
+                assertEquals("100", events.get(i).get("request_id").textValue());
             }
-            assertEquals("UNAVAILABLE", events.get(2).getGrpcCode());
-            assertEquals(2, events.get(4).getAttempt()); assertEquals("OK", events.get(4).getGrpcCode());
-            assertEquals("cancelled", events.getLast().getOutcome()); assertTrue(events.getLast().hasTtftNanos());
-            assertEquals(1, frames.getLast().getSeal().getFinished());
+            assertEquals("UNAVAILABLE", events.get(2).path("grpc_code").asText());
+            assertEquals(2, events.get(4).path("attempt").asInt()); assertEquals("OK", events.get(4).path("grpc_code").asText());
+            assertEquals("cancelled", events.getLast().path("outcome").asText()); assertTrue(events.getLast().has("ttft_nanos"));
+            assertEquals("1", rows.getLast().path("seal").path("finished").textValue());
             assertThrows(FileAlreadyExistsException.class, () -> new RequestJournal(path, "client-0", plan()));
         }
     }
     @Test void queueOverflowCannotSealOrSilentlyDrop() throws Exception {
         var path = directory.resolve("requests.jsonl");
         var journal = new RequestJournal(path, "client-0", plan(), 1);
-        journal.record(Event.newBuilder().setKind(Event.Kind.ISSUED).setRequestId(100));
+        journal.record(new ObjectMapper().createObjectNode().put("kind", "ISSUED").put("request_id", "100"));
         assertNotNull(journal.failure());
         assertThrows(IOException.class, () -> journal.finish(1, 1));
-        assertTrue(read(path).stream().noneMatch(EventBatch::hasSeal));
+        assertTrue(read(path).stream().noneMatch(row -> row.has("seal")));
     }
     @Test void ioFailureCannotReportSuccessfulClose() throws Exception {
         var journal = new RequestJournal(directory.resolve("requests.jsonl"), "client-0", plan());
@@ -77,7 +73,7 @@ class RequestJournalTest {
         var path = directory.resolve("requests.jsonl");
         var journal = new RequestJournal(path, "client-0", plan());
         assertThrows(IOException.class, () -> journal.finish(1, 0));
-        assertTrue(read(path).stream().noneMatch(EventBatch::hasSeal));
+        assertTrue(read(path).stream().noneMatch(row -> row.has("seal")));
     }
     @Test void writerFailureStopsAllClientsAndKeepsPlaybackFailed() throws Exception {
         Path topology = directory.resolve("topology.json");
@@ -113,14 +109,14 @@ class RequestJournalTest {
                 var call = client.send(NativeClientTest.request(100), Duration.ofMillis(timeout ? 100 : 3000));
                 call.completion().toCompletableFuture().get(4, TimeUnit.SECONDS);
                 journal.finish(1, 1);
-                var events = read(path).stream().flatMap(b -> b.getEventsList().stream()).toList();
-                var attempt = events.stream().filter(e -> e.getKind() == Event.Kind.SCHEDULE_RESULT).findFirst().orElseThrow();
-                assertEquals(timeout ? "DEADLINE_EXCEEDED" : "OK", attempt.getGrpcCode());
-                assertEquals(!timeout, attempt.hasResponseSuccess()); assertFalse(attempt.getResponseSuccess());
-                assertEquals(timeout ? 0 : 429, attempt.getErrorCode());
-                assertEquals(timeout ? "timeout" : "error", events.getLast().getOutcome());
-                assertFalse(events.getLast().hasTtftNanos());
-                assertTrue(events.stream().noneMatch(e -> e.getKind() == Event.Kind.FIRST_TOKEN));
+                var events = read(path).stream().filter(row -> row.has("kind")).toList();
+                var attempt = events.stream().filter(e -> "SCHEDULE_RESULT".equals(e.path("kind").asText())).findFirst().orElseThrow();
+                assertEquals(timeout ? "DEADLINE_EXCEEDED" : "OK", attempt.path("grpc_code").asText());
+                assertEquals(!timeout, attempt.has("response_success")); assertFalse(attempt.path("response_success").asBoolean());
+                assertEquals(timeout ? 0 : 429, attempt.path("error_code").asLong());
+                assertEquals(timeout ? "timeout" : "error", events.getLast().path("outcome").asText());
+                assertFalse(events.getLast().has("ttft_nanos"));
+                assertTrue(events.stream().noneMatch(e -> "FIRST_TOKEN".equals(e.path("kind").asText())));
             }
         }
     }
