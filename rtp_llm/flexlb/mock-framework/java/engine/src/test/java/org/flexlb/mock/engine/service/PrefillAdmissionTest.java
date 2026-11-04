@@ -1,12 +1,5 @@
 package org.flexlb.mock.engine.service;
 
-import org.flexlb.mock.engine.rtp.RtpConfig;
-import org.flexlb.mock.engine.rtp.RtpNode;
-import org.flexlb.mock.engine.rtp.RtpScheduler;
-import org.flexlb.mock.engine.rtp.RtpNodeTest;
-import org.flexlb.mock.engine.rtp.RtpTestMetrics;
-
-import static org.junit.jupiter.api.Assertions.*;
 import com.fasterxml.jackson.databind.*;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.grpc.Status;
@@ -15,8 +8,14 @@ import java.util.*;
 import java.util.concurrent.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.engine.cache.KvCache;
+import org.flexlb.mock.engine.config.RtpConfig;
+import org.flexlb.mock.engine.execution.RtpNode;
+import org.flexlb.mock.engine.scheduler.RtpNodeTest;
+import org.flexlb.mock.engine.scheduler.RtpScheduler;
+import org.flexlb.mock.engine.scheduler.RtpTestMetrics;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import static org.junit.jupiter.api.Assertions.*;
 
 class PrefillAdmissionTest {
     @TempDir Path directory;
@@ -210,7 +209,7 @@ class PrefillAdmissionTest {
             for (int i = 0; i < 30; i++) {
                 var raw = input(i, 0, true);
                 var session = engine.new Session(raw, false, System.nanoTime(), Long.MAX_VALUE);
-                assertEquals(org.flexlb.mock.engine.Scheduler.ReportedPhase.PENDING,
+                assertEquals(org.flexlb.mock.engine.scheduler.Scheduler.ReportedPhase.PENDING,
                     engine.snapshot(0).tasks().getFirst().phase());
                 var gate = new CountDownLatch(1);
                 var submit = workers.submit(() -> {

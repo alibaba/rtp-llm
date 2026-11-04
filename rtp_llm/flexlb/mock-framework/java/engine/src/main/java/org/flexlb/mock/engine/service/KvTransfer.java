@@ -1,9 +1,8 @@
 package org.flexlb.mock.engine.service;
 
-import org.flexlb.mock.engine.RequestState;
-
 import java.util.*;
 import java.util.concurrent.*;
+import org.flexlb.mock.engine.scheduler.RequestState;
 
 /** Asynchronous zero-time KV transfer model. Resource use lasts until execution quiesces. */
 final class KvTransfer implements AutoCloseable {

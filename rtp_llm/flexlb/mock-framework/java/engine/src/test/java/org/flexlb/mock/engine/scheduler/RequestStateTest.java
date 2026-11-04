@@ -1,4 +1,4 @@
-package org.flexlb.mock.engine;
+package org.flexlb.mock.engine.scheduler;
 
 import static org.junit.jupiter.api.Assertions.*;
 import java.util.*;

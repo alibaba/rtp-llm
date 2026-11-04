@@ -1,11 +1,10 @@
 package org.flexlb.mock.engine.service;
 
-import org.flexlb.mock.engine.RequestState;
-
-import static org.junit.jupiter.api.Assertions.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.flexlb.mock.engine.scheduler.RequestState;
 import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
 
 class KvTransferTest {
     @Test void completionAndCancellationReleaseEachUseExactlyOnce() throws Exception {

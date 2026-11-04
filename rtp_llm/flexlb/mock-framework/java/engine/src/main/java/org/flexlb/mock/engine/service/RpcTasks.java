@@ -2,7 +2,7 @@ package org.flexlb.mock.engine.service;
 
 import java.util.concurrent.TimeUnit;
 import org.flexlb.engine.grpc.EngineRpcService.*;
-import org.flexlb.mock.engine.Scheduler;
+import org.flexlb.mock.engine.scheduler.Scheduler;
 
 /** Translation at the native RTP boundary; scheduling state contains no protobuf objects. */
 final class RpcTasks {

@@ -1,14 +1,14 @@
 package org.flexlb.mock.engine.service;
 
 import io.grpc.Status;
-import io.grpc.stub.StreamObserver;
 import io.grpc.stub.ServerCallStreamObserver;
+import io.grpc.stub.StreamObserver;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.engine.cache.KvCache;
-import org.flexlb.mock.engine.Scheduler;
+import org.flexlb.mock.engine.scheduler.Scheduler;
 
 /** Native RPC adapter; P and D owners manage request state and KV independently. */
 public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase implements AutoCloseable {

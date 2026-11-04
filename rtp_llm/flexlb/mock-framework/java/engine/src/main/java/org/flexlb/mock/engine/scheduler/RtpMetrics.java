@@ -1,4 +1,4 @@
-package org.flexlb.mock.engine.rtp;
+package org.flexlb.mock.engine.scheduler;
 
 import org.flexlb.mock.metrics.MetricTags;
 import org.flexlb.mock.metrics.WindowMetrics;

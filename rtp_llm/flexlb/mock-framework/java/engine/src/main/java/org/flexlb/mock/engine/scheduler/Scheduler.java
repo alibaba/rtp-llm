@@ -1,11 +1,12 @@
-package org.flexlb.mock.engine;
+package org.flexlb.mock.engine.scheduler;
 
 import java.util.List;
 import java.util.Objects;
 import org.flexlb.mock.engine.cache.KvCache;
-import org.flexlb.mock.protocol.CacheSequence;
+import org.flexlb.mock.engine.execution.RtpEngineLoop;
 import org.flexlb.mock.engine.forward.ForwardBatch;
 import org.flexlb.mock.engine.forward.SimulatedCompute;
+import org.flexlb.mock.protocol.CacheSequence;
 
 /** Called under the RtpEngineLoop lock. Queues, reservations and result commits belong to the implementation. */
 public interface Scheduler extends AutoCloseable {

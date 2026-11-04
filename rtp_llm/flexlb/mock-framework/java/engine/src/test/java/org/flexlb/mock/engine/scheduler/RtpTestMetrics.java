@@ -1,8 +1,7 @@
-package org.flexlb.mock.engine.rtp;
+package org.flexlb.mock.engine.scheduler;
 
 import org.flexlb.mock.engine.cache.KvCache;
-import org.flexlb.mock.engine.Scheduler;
-import org.flexlb.mock.engine.TaskHistory;
+import org.flexlb.mock.engine.config.RtpConfig;
 
 /** Captures the concrete RTP metrics for tests that assemble an admission component directly. */
 public final class RtpTestMetrics implements Scheduler.Factory {

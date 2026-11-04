@@ -1,9 +1,8 @@
-package org.flexlb.mock.engine;
+package org.flexlb.mock.engine.scheduler;
 
-import java.util.logging.Logger;
 import java.util.*;
-import org.flexlb.mock.engine.Scheduler;
-import org.flexlb.mock.engine.Scheduler.Task;
+import java.util.logging.Logger;
+import org.flexlb.mock.engine.scheduler.Scheduler.Task;
 
 /** Bounded native finished-version log shared by P and D; does not own requests or KV. */
 public final class TaskHistory {

@@ -1,4 +1,4 @@
-package org.flexlb.mock.engine;
+package org.flexlb.mock.engine.scheduler;
 
 /** Scheduler-defined request counts. Loading and transfer-ready requests are not compute waiters. */
 public record QueueSnapshot(int waiting, int running, int loading, int ready) {

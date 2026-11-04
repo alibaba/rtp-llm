@@ -1,4 +1,4 @@
-package org.flexlb.mock.engine.rtp;
+package org.flexlb.mock.engine.scheduler;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.*;

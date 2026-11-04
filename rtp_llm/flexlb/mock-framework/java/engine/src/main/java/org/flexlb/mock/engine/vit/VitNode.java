@@ -5,12 +5,13 @@ import io.grpc.netty.NettyServerBuilder;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import org.flexlb.mock.protocol.*;
+import org.flexlb.mock.engine.EngineMain.Address;
 
 /** Backend-independent V instance. The same listeners serve shared JVM and remote P. */
 public final class VitNode implements AutoCloseable {
     private final VitConfig config;
     private final VitService service;
-    private final EngineAddress address=EngineAddress.local();
+    private final Address address=Address.local();
     private Server rpc;
     private ControlServer api;
     private org.flexlb.mock.metrics.MetricsOutput metrics;

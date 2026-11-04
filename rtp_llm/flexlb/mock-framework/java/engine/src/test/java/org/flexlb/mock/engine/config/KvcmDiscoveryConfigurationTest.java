@@ -1,4 +1,4 @@
-package org.flexlb.mock.engine.rtp;
+package org.flexlb.mock.engine.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.Server;
@@ -8,6 +8,8 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.flexlb.kvcm.grpc.*;
 import org.flexlb.mock.api.model.Types.Role;
+import org.flexlb.mock.engine.execution.RtpNode;
+import org.flexlb.mock.engine.scheduler.RtpNodeTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;

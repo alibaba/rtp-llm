@@ -6,6 +6,10 @@ import java.util.concurrent.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.engine.cache.KvCache;
+import org.flexlb.mock.engine.execution.RtpEngineLoop;
+import org.flexlb.mock.engine.scheduler.RequestFailure;
+import org.flexlb.mock.engine.scheduler.Scheduler;
+import org.flexlb.mock.engine.scheduler.TaskHistory;
 
 /** Native ALLOCATE/LOAD/GENERATE protocol. Queue membership and progress stay behind Scheduler. */
 final class DecodeRpcServer implements AutoCloseable {

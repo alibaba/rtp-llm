@@ -1,10 +1,9 @@
-package org.flexlb.mock.engine;
+package org.flexlb.mock.engine.scheduler;
 
-import static org.junit.jupiter.api.Assertions.*;
 import java.util.*;
 import java.util.logging.*;
-import org.flexlb.mock.engine.Scheduler;
 import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
 
 class TaskHistoryTest {
     private static Scheduler.Task task(long id) {

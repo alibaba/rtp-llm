@@ -1,10 +1,10 @@
-package org.flexlb.mock.engine.rtp;
+package org.flexlb.mock.engine.scheduler;
 
-import static org.junit.jupiter.api.Assertions.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
+import org.flexlb.mock.engine.scheduler.RtpMetrics.StepStats;
 import org.junit.jupiter.api.Test;
-import org.flexlb.mock.engine.rtp.RtpMetrics.StepStats;
+import static org.junit.jupiter.api.Assertions.*;
 
 class RtpMetricsTest {
     private static final RtpMetrics.State IDLE = new RtpMetrics.State(0, 0, 0, 0, 100, 100, 100, 0, 1);

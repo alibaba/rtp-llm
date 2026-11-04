@@ -1,6 +1,5 @@
-package org.flexlb.mock.engine.rtp;
+package org.flexlb.mock.engine.scheduler;
 
-import static org.junit.jupiter.api.Assertions.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.*;
 import java.nio.file.*;
@@ -8,8 +7,11 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.mock.engine.config.RtpConfig;
+import org.flexlb.mock.engine.execution.RtpNode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import static org.junit.jupiter.api.Assertions.*;
 
 public class RtpNodeTest {
     private static final ObjectMapper JSON = new ObjectMapper();

@@ -1,6 +1,5 @@
 package org.flexlb.mock.engine.service;
 
-import static org.junit.jupiter.api.Assertions.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.*;
 import io.grpc.stub.StreamObserver;
@@ -10,11 +9,16 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.api.model.Types.Role;
+import org.flexlb.mock.engine.*;
 import org.flexlb.mock.engine.cache.KvCache;
 import org.flexlb.mock.engine.forward.ComputeModel;
 import org.flexlb.mock.engine.forward.SimulatedCompute;
-import org.flexlb.mock.engine.*;
+import org.flexlb.mock.engine.scheduler.QueueSnapshot;
+import org.flexlb.mock.engine.scheduler.RequestFailure;
+import org.flexlb.mock.engine.scheduler.RequestState;
+import org.flexlb.mock.engine.scheduler.Scheduler;
 import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
 
 /** Compiles and runs without any dependency on an Engine backend. */
 class AdmissionTest {
