@@ -985,7 +985,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10373。",
+          "description": "执行器 token 数除以有效执行时间。P 计实际执行 token，D 的 MTP 路径计含 bonus 的验收 token。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -2047,7 +2047,7 @@
         {
           "id": 100160,
           "type": "timeseries",
-          "title": "step latency · 待埋点",
+          "title": "step latency",
           "gridPos": {
             "x": 12,
             "y": 119,
@@ -2110,7 +2110,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 160。",
+          "description": "完成的执行步耗时，从调度返回到处理完本轮输出，单位微秒。面板显示窗口均值在所选实例中的最大值。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -8167,7 +8167,7 @@
         {
           "id": 110593,
           "type": "timeseries",
-          "title": "kv_cache_pool_load_ref_blocks · 待埋点",
+          "title": "kv_cache_pool_load_ref_blocks",
           "gridPos": {
             "x": 0,
             "y": 500,
@@ -8181,8 +8181,8 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_kv_cache_load_ref_blocks{instance=~\"${prefill_instance}\",role=\"prefill\"})",
-              "legendFormat": "Prefill · BTC · {{${prefill_group}}}",
+              "expr": "avg by(${prefill_group},tier,pool_name)(rtp_llm_kv_cache_load_ref_blocks{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "legendFormat": "{{${prefill_group}}} · {{tier}} / {{pool_name}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -8230,7 +8230,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。BTC LOAD 当前引用块数分池明细，每条曲线为一个 tier/pool_name；跟随顶部 tier/pool_name 筛选。avg 时间降采样。来源限定：release/btc_1.0@64120b43e、feat/dsv4_on_dev@c26a12796。dsv4-on-dev 未实现这三类引用埋点，不配置虚构的兼容 query；不使用 main 分支实现。 参考 RTP-LLM 大盘 v514 / panel 10593。",
+          "description": "当前模拟设备 KV 池被该操作引用的独立块数。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -8242,7 +8242,7 @@
         {
           "id": 110594,
           "type": "timeseries",
-          "title": "kv_cache_pool_store_ref_blocks · 待埋点",
+          "title": "kv_cache_pool_store_ref_blocks",
           "gridPos": {
             "x": 12,
             "y": 500,
@@ -8256,8 +8256,8 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_kv_cache_store_ref_blocks{instance=~\"${prefill_instance}\",role=\"prefill\"})",
-              "legendFormat": "Prefill · BTC · {{${prefill_group}}}",
+              "expr": "avg by(${prefill_group},tier,pool_name)(rtp_llm_kv_cache_store_ref_blocks{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "legendFormat": "{{${prefill_group}}} · {{tier}} / {{pool_name}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -8305,7 +8305,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。BTC STORE 当前引用块数分池明细，每条曲线为一个 tier/pool_name；跟随顶部 tier/pool_name 筛选。avg 时间降采样。来源限定：release/btc_1.0@64120b43e、feat/dsv4_on_dev@c26a12796。dsv4-on-dev 未实现这三类引用埋点，不配置虚构的兼容 query；不使用 main 分支实现。 参考 RTP-LLM 大盘 v514 / panel 10594。",
+          "description": "当前模拟设备 KV 池被该操作引用的独立块数。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -10786,7 +10786,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_model_forward_us{instance=~\"${prefill_instance}\",role=\"prefill\"}) / 1000",
+              "expr": "avg by(${prefill_group})(mock_model_forward_actual_us{instance=~\"${prefill_instance}\",role=\"prefill\"}) / 1000",
               "legendFormat": "{{${prefill_group}}} · 实际最近值均值",
               "datasource": {
                 "type": "prometheus",
@@ -10864,7 +10864,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_model_forward_us{instance=~\"${prefill_instance}\",role=\"prefill\"} - mock_model_forward_planned_us{instance=~\"${prefill_instance}\",role=\"prefill\"}) / 1000",
+              "expr": "avg by(${prefill_group})(mock_model_forward_actual_us{instance=~\"${prefill_instance}\",role=\"prefill\"} - mock_model_forward_planned_us{instance=~\"${prefill_instance}\",role=\"prefill\"}) / 1000",
               "legendFormat": "{{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -11065,7 +11065,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10369。",
+          "description": "有效执行时间内的 Decode TPS。MTP 使用停止条件截断前含 bonus 的验收 token。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -11077,7 +11077,7 @@
         {
           "id": 210383,
           "type": "timeseries",
-          "title": "output tps",
+          "title": "output wall tps",
           "gridPos": {
             "x": 12,
             "y": 674,
@@ -11091,7 +11091,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${decode_group})(rtp_llm_generate_tps{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "sum by(${decode_group})(rate(rtp_llm_forward_tokens_total{instance=~\"${decode_instance}\",role=\"decode\",kind=\"output\"}[$__rate_interval]))",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -11140,7 +11140,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10383。",
+          "description": "已提交给输出链路的 token 除以墙钟时间。按所选实例累加。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -11290,86 +11290,11 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10373。",
+          "description": "执行器 token 数除以有效执行时间。P 计实际执行 token，D 的 MTP 路径计含 bonus 的验收 token。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
               "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=10373",
-              "targetBlank": true
-            }
-          ]
-        },
-        {
-          "id": 200231,
-          "type": "timeseries",
-          "title": "model forward rt",
-          "gridPos": {
-            "x": 0,
-            "y": 692,
-            "w": 12,
-            "h": 9
-          },
-          "datasource": {
-            "type": "prometheus",
-            "uid": "mock-prometheus"
-          },
-          "targets": [
-            {
-              "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_model_forward_us{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "{{${decode_group}}}",
-              "datasource": {
-                "type": "prometheus",
-                "uid": "mock-prometheus"
-              }
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "µs",
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "fillOpacity": 0,
-                "showPoints": "auto",
-                "spanNulls": false
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            },
-            "legend": {
-              "displayMode": "table",
-              "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
-            }
-          },
-          "description": "All 按角色聚合；选择具体地址时每个 Engine 一条曲线。参考 RTP-LLM 大盘 v514 / panel 231。",
-          "links": [
-            {
-              "title": "RTP-LLM 原面板",
-              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=231",
               "targetBlank": true
             }
           ]
@@ -12127,7 +12052,7 @@
         {
           "id": 200160,
           "type": "timeseries",
-          "title": "step latency · 待埋点",
+          "title": "step latency",
           "gridPos": {
             "x": 12,
             "y": 737,
@@ -12190,7 +12115,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 160。",
+          "description": "完成的执行步耗时，从调度返回到处理完本轮输出，单位微秒。面板显示窗口均值在所选实例中的最大值。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -12652,7 +12577,7 @@
         {
           "id": 210112,
           "type": "timeseries",
-          "title": "TPOT(估计值) · 待埋点",
+          "title": "TPOT(估计值)",
           "gridPos": {
             "x": 0,
             "y": 773,
@@ -12715,7 +12640,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10112。",
+          "description": "Speculative step 耗时除以每个参与流平均验收 token，包含 bonus，单位微秒。 仅在模拟 draft 验收的 Decode 执行步采样。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -13109,81 +13034,6 @@
           ]
         },
         {
-          "id": 200221,
-          "type": "timeseries",
-          "title": "generate_batch_size_when_has_context",
-          "gridPos": {
-            "x": 0,
-            "y": 800,
-            "w": 12,
-            "h": 9
-          },
-          "datasource": {
-            "type": "prometheus",
-            "uid": "mock-prometheus"
-          },
-          "targets": [
-            {
-              "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_generate_batch_size_when_has_context{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · {{${decode_group}}}",
-              "datasource": {
-                "type": "prometheus",
-                "uid": "mock-prometheus"
-              }
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "short",
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "fillOpacity": 0,
-                "showPoints": "auto",
-                "spanNulls": false
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            },
-            "legend": {
-              "displayMode": "table",
-              "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
-            }
-          },
-          "description": "generate_batch_size_when_has_context 参考 RTP-LLM 大盘 v514 / panel 221。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
-          "links": [
-            {
-              "title": "RTP-LLM 原面板",
-              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=221",
-              "targetBlank": true
-            }
-          ]
-        },
-        {
           "id": 200149,
           "type": "timeseries",
           "title": "iterate count",
@@ -13559,81 +13409,6 @@
           ]
         },
         {
-          "id": 200226,
-          "type": "timeseries",
-          "title": "batch max seq len when has context",
-          "gridPos": {
-            "x": 0,
-            "y": 827,
-            "w": 12,
-            "h": 9
-          },
-          "datasource": {
-            "type": "prometheus",
-            "uid": "mock-prometheus"
-          },
-          "targets": [
-            {
-              "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_max_seq_len_when_has_context{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · {{${decode_group}}}",
-              "datasource": {
-                "type": "prometheus",
-                "uid": "mock-prometheus"
-              }
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "short",
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "fillOpacity": 0,
-                "showPoints": "auto",
-                "spanNulls": false
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            },
-            "legend": {
-              "displayMode": "table",
-              "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
-            }
-          },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 226。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
-          "links": [
-            {
-              "title": "RTP-LLM 原面板",
-              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=226",
-              "targetBlank": true
-            }
-          ]
-        },
-        {
           "id": 200125,
           "type": "timeseries",
           "title": "input token length",
@@ -14004,81 +13779,6 @@
             {
               "title": "RTP-LLM 原面板",
               "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=439",
-              "targetBlank": true
-            }
-          ]
-        },
-        {
-          "id": 200227,
-          "type": "timeseries",
-          "title": "execute token size when has context",
-          "gridPos": {
-            "x": 0,
-            "y": 854,
-            "w": 12,
-            "h": 9
-          },
-          "datasource": {
-            "type": "prometheus",
-            "uid": "mock-prometheus"
-          },
-          "targets": [
-            {
-              "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_execute_token_size_when_has_context{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · {{${decode_group}}}",
-              "datasource": {
-                "type": "prometheus",
-                "uid": "mock-prometheus"
-              }
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "short",
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "fillOpacity": 0,
-                "showPoints": "auto",
-                "spanNulls": false
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            },
-            "legend": {
-              "displayMode": "table",
-              "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
-            }
-          },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 227。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
-          "links": [
-            {
-              "title": "RTP-LLM 原面板",
-              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=227",
               "targetBlank": true
             }
           ]
@@ -17422,7 +17122,7 @@
         {
           "id": 210593,
           "type": "timeseries",
-          "title": "kv_cache_pool_load_ref_blocks · 待埋点",
+          "title": "kv_cache_pool_load_ref_blocks",
           "gridPos": {
             "x": 0,
             "y": 1073,
@@ -17436,8 +17136,8 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_kv_cache_load_ref_blocks{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · BTC · {{${decode_group}}}",
+              "expr": "avg by(${decode_group},tier,pool_name)(rtp_llm_kv_cache_load_ref_blocks{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "legendFormat": "{{${decode_group}}} · {{tier}} / {{pool_name}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -17485,7 +17185,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。BTC LOAD 当前引用块数分池明细，每条曲线为一个 tier/pool_name；跟随顶部 tier/pool_name 筛选。avg 时间降采样。来源限定：release/btc_1.0@64120b43e、feat/dsv4_on_dev@c26a12796。dsv4-on-dev 未实现这三类引用埋点，不配置虚构的兼容 query；不使用 main 分支实现。 参考 RTP-LLM 大盘 v514 / panel 10593。",
+          "description": "当前模拟设备 KV 池被该操作引用的独立块数。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -17497,7 +17197,7 @@
         {
           "id": 210594,
           "type": "timeseries",
-          "title": "kv_cache_pool_store_ref_blocks · 待埋点",
+          "title": "kv_cache_pool_store_ref_blocks",
           "gridPos": {
             "x": 12,
             "y": 1073,
@@ -17511,8 +17211,8 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_kv_cache_store_ref_blocks{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · BTC · {{${decode_group}}}",
+              "expr": "avg by(${decode_group},tier,pool_name)(rtp_llm_kv_cache_store_ref_blocks{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "legendFormat": "{{${decode_group}}} · {{tier}} / {{pool_name}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -17560,7 +17260,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。BTC STORE 当前引用块数分池明细，每条曲线为一个 tier/pool_name；跟随顶部 tier/pool_name 筛选。avg 时间降采样。来源限定：release/btc_1.0@64120b43e、feat/dsv4_on_dev@c26a12796。dsv4-on-dev 未实现这三类引用埋点，不配置虚构的兼容 query；不使用 main 分支实现。 参考 RTP-LLM 大盘 v514 / panel 10594。",
+          "description": "当前模拟设备 KV 池被该操作引用的独立块数。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -20027,7 +19727,7 @@
         {
           "id": 200546,
           "type": "timeseries",
-          "title": "TPOT(估计值) · 待埋点",
+          "title": "TPOT(估计值)",
           "gridPos": {
             "x": 0,
             "y": 1228,
@@ -20090,7 +19790,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 546。",
+          "description": "Speculative step 耗时除以每个参与流平均验收 token，包含 bonus，单位微秒。 仅在模拟 draft 验收的 Decode 执行步采样。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -20102,7 +19802,7 @@
         {
           "id": 200548,
           "type": "timeseries",
-          "title": "接受率 · 待埋点",
+          "title": "接受率",
           "gridPos": {
             "x": 12,
             "y": 1228,
@@ -20165,7 +19865,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 548。",
+          "description": "验收 token / (提议 token + 参与流数)，包含每流一个 bonus。 仅在模拟 draft 验收的 Decode 执行步采样。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -20177,7 +19877,7 @@
         {
           "id": 200549,
           "type": "timeseries",
-          "title": "接受率(不算入bonus) · 待埋点",
+          "title": "接受率(不算入bonus)",
           "gridPos": {
             "x": 0,
             "y": 1237,
@@ -20240,7 +19940,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 549。",
+          "description": "(验收 token − 参与流数) / 提议 token。 仅在模拟 draft 验收的 Decode 执行步采样。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -20252,7 +19952,7 @@
         {
           "id": 200402,
           "type": "timeseries",
-          "title": "每步平均token数目 · 待埋点",
+          "title": "每步平均token数目",
           "gridPos": {
             "x": 12,
             "y": 1237,
@@ -20315,7 +20015,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 402。",
+          "description": "验收 token / 参与流数，包含每流一个 bonus。 仅在模拟 draft 验收的 Decode 执行步采样。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -20477,7 +20177,7 @@
         {
           "id": 200178,
           "type": "timeseries",
-          "title": "sp_step_latency · 待埋点",
+          "title": "sp_step_latency",
           "gridPos": {
             "x": 0,
             "y": 1255,
@@ -20540,7 +20240,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 178。",
+          "description": "启用了 draft token 模型的 Decode 执行步耗时，单位微秒。 仅在模拟 draft 验收的 Decode 执行步采样。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -20552,7 +20252,7 @@
         {
           "id": 200176,
           "type": "timeseries",
-          "title": "sp_total_accepted_token_num · 待埋点",
+          "title": "sp_total_accepted_token_num",
           "gridPos": {
             "x": 12,
             "y": 1255,
@@ -20615,7 +20315,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 176。",
+          "description": "每个 speculative step 验收 token 数，包含 bonus，取停止条件截断前的值。 仅在模拟 draft 验收的 Decode 执行步采样。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -20627,7 +20327,7 @@
         {
           "id": 200182,
           "type": "timeseries",
-          "title": "sp_total_propose_token_num · 待埋点",
+          "title": "sp_total_propose_token_num",
           "gridPos": {
             "x": 0,
             "y": 1264,
@@ -20690,7 +20390,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 182。",
+          "description": "每个 speculative step 实际参与验收的 draft token 数。 仅在模拟 draft 验收的 Decode 执行步采样。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -20730,7 +20430,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_model_forward_us{instance=~\"${decode_instance}\",role=\"decode\"}) / 1000",
+              "expr": "avg by(${decode_group})(mock_model_forward_actual_us{instance=~\"${decode_instance}\",role=\"decode\"}) / 1000",
               "legendFormat": "{{${decode_group}}} · 实际最近值均值",
               "datasource": {
                 "type": "prometheus",
@@ -20808,7 +20508,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_model_forward_us{instance=~\"${decode_instance}\",role=\"decode\"} - mock_model_forward_planned_us{instance=~\"${decode_instance}\",role=\"decode\"}) / 1000",
+              "expr": "avg by(${decode_group})(mock_model_forward_actual_us{instance=~\"${decode_instance}\",role=\"decode\"} - mock_model_forward_planned_us{instance=~\"${decode_instance}\",role=\"decode\"}) / 1000",
               "legendFormat": "{{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -21171,7 +20871,7 @@
         {
           "id": 300452,
           "type": "timeseries",
-          "title": "vit preprocess rt · 部分支持",
+          "title": "vit preprocess rt",
           "gridPos": {
             "x": 12,
             "y": 1302,
@@ -21196,6 +20896,15 @@
               "refId": "B",
               "expr": "avg by(${vit_group})(py_rtp_vit_preprocess_other_rt{instance=~\"${vit_instance}\",role=\"vit\"})",
               "legendFormat": "ViT · preprocess_time · {{${vit_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            },
+            {
+              "refId": "C",
+              "expr": "avg by(${vit_group})(py_rtp_vit_preprocess_rt{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "legendFormat": "ViT · total · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -21243,7 +20952,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 452。\n下载部分已上报；像素解码、resize 和 tensor 预处理未模拟，other 曲线留空。",
+          "description": "成功准备图片的总耗时及其下载、其余准备耗时。其余准备包括读图片尺寸、摘要和几何计算。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -21330,7 +21039,7 @@
         {
           "id": 310351,
           "type": "timeseries",
-          "title": "vit preprocess rt(except download) · 待埋点",
+          "title": "vit preprocess rt(except download)",
           "gridPos": {
             "x": 12,
             "y": 1311,
@@ -21393,7 +21102,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10351。",
+          "description": "成功准备图片的非下载耗时，单位毫秒。包含读尺寸、摘要和几何计算。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -21405,7 +21114,7 @@
         {
           "id": 310365,
           "type": "timeseries",
-          "title": "vit preprocess waiting queue size",
+          "title": "vit preprocess outstanding",
           "gridPos": {
             "x": 0,
             "y": 1320,
@@ -21468,7 +21177,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10365。\n尚未完成准备的唯一媒体数，包含执行器排队与正在读取/准备的工作，不包含等待 Forward 或结果发布的任务。",
+          "description": "准备尚未完成的唯一媒体数，包含排队和执行中的工作。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -25203,15 +24912,6 @@
               "refId": "A_prefill",
               "expr": "avg by(${prefill_group})(rtp_llm_model_forward_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
               "legendFormat": "Prefill · 模型 forward 耗时 | 部署角色= · {{${prefill_group}}}",
-              "datasource": {
-                "type": "prometheus",
-                "uid": "mock-prometheus"
-              }
-            },
-            {
-              "refId": "A_decode",
-              "expr": "avg by(${decode_group})(rtp_llm_model_forward_us{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · 模型 forward 耗时 | 部署角色= · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"

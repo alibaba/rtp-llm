@@ -27,23 +27,26 @@ final class VitImageSource implements AutoCloseable {
     VitGeometry.Image prepare(MultimodalInputPB media, long deadline) throws IOException {
         int width, height;
         String identity=MediaInput.key(media);
+        long started=System.nanoTime(), downloadNanos=0;
         if(config.skipDownload()) {
             width=media.getMmPreprocessConfig().getWidth(); height=media.getMmPreprocessConfig().getHeight();
         } else {
-            long started=System.nanoTime();
-            byte[] bytes;
-            try { bytes=download(media.getMultimodalUrl(),Math.min(deadline,System.nanoTime()+TimeUnit.SECONDS.toNanos(60))); }
-            finally {
-                double millis=(System.nanoTime()-started)/1e6;
-                metrics.events.observe("py_rtp_vit_download_rt",millis);
-                metrics.events.observe("rtp_llm_vit_image_fetch_rt_us",millis*1000);
-            }
+            byte[] bytes=download(media.getMultimodalUrl(),Math.min(deadline,System.nanoTime()+TimeUnit.SECONDS.toNanos(60)));
+            downloadNanos=System.nanoTime()-started;
+            metrics.events.observe("rtp_llm_vit_image_fetch_rt_us",downloadNanos/1e3);
             int[] size=dimensions(bytes); width=size[0]; height=size[1];
             identity=contentIdentity(bytes);
         }
         VitGeometry.dimensions(width,height);
-        return new VitGeometry.Image(MediaInput.key(media),width,height,
+        var image=new VitGeometry.Image(MediaInput.key(media),width,height,
             VitGeometry.rows(width,height,config.patch(),config.merge(),config.minPixels(),config.maxTokens()),identity);
+        if (!config.skipDownload()) {
+            long elapsed=System.nanoTime()-started;
+            metrics.events.observe("py_rtp_vit_preprocess_rt",elapsed/1e6);
+            metrics.events.observe("py_rtp_vit_download_rt",downloadNanos/1e6);
+            metrics.events.observe("py_rtp_vit_preprocess_other_rt",(elapsed-downloadNanos)/1e6);
+        }
+        return image;
     }
 
     private String contentIdentity(byte[] bytes) {
