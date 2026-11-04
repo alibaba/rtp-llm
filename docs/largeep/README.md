@@ -90,15 +90,20 @@ consume bf16), fewer SMs for the GEMM, replicating hot experts (adds active expe
 
 ## 4. Build and run
 
+Tested environment: RTX PRO 5000 (SM120), driver 580, CUDA 13.2, Python 3.10, torch 2.11.0+cu130, triton 3.6.0,
+tilelang 0.1.9, nvidia-cutlass-dsl 4.8.0, FlashInfer `0.6.16.post3+rtp.sm120.fc1c4e44c25b`, DeepGEMM built from a
+SM120 branch (`2.6.1+local`; the 2.5.0 / 2.8.0 wheels pinned in `deps/` have no SM120 FP8 x FP4 grouped GEMM),
+flash-mla `1.0.0+d04a249`, rtp-kernel `0.1.0+34e3b72a`, rdma-core 58 (private build: the distro libibverbs had no
+provider for the NIC), `nvidia_peermem` loaded.
+
 1. Build the engine as usual for SM120 (`bazelisk build --config=cuda13_sm120 //:th_transformer //:rtp_compute_ops
    //:th_transformer_config`); the C++ changes are in `NormalEngine.cc` (equal-batch DP control), `MtpExecutor.cc`,
-   `cuda_graph_runner.cc`, `OpData.h`.
+   `cuda_graph_runner.cc`, `OpData.h`. Generate the Python gRPC stubs once: `bash bench/largeep/gen_protos.sh`.
 2. Build the all-to-all: `CUDA_HOME=... [RDMA_CORE=...] bash comm/largeep_a2a/build.sh` and verify it on the two decode
    hosts with `comm/largeep_a2a/run_2node.sh` (expect `bad_* = 0` and ~137 us/layer at n_pad 48).
-3. Optional, for the PCIe IPC collectives: vendor FlashInfer upstream (`github.com/flashinfer-ai/flashinfer`, tested at
-   `79f0637`) as a private package `fi_up` and pre-build its two JIT modules
-   (`fi_up.jit.comm.gen_pcie_ipc_comm_module`, `gen_pcie_ipc_ag_rs_module`); pass the directory as `FI_PCIE`.
-   Without it the attention collectives stay on NCCL (`DSV4_TP_RSAG` needs it).
+3. PCIe IPC collectives (FlashInfer upstream `79f0637` vendored as the private package `fi_up`):
+   `bash bench/largeep/setup_fi_up.sh /opt/fi-up` (clones, renames, pre-builds the two JIT modules); pass the directory
+   as `FI_PCIE`. Without it the attention collectives stay on NCCL (`DSV4_TP_RSAG` needs it).
 4. Start the decode group on both hosts and the prefill group on a third host:
 
 ```bash
@@ -114,7 +119,8 @@ python3 bench/largeep/gate_agent.py
 
 Other launcher knobs (both scripts): `PORT` (decode 31200, prefill 31100), `RUN_DIR` (logs and kernel caches),
 `TMP_DIR` (engine UNIX sockets; keep the path short, default `/tmp/largeep_<user>_<port>`), `PYTHON`, `CUDA_HOME`,
-`RDMA_CORE`, `IFNAME`, `GID_INDEX`; decode only: `NIC_MAP`, `TS_DUMP=<trigger file>`, `STATS_S`, `TP_RSAG=0` (keep the
+`RDMA_CORE`, `IFNAME`, `GID_INDEX`; decode only: `NIC_PREFIX` (RDMA device name prefix, default `erdma_`, e.g. `mlx5_`),
+`NIC_MAP`, `TS_DUMP=<trigger file>`, `STATS_S`, `TP_RSAG=0` (keep the
 attention all-reduce), `EXPECTED_M_CAP`, `CAPTURE`, `CONC`. `LD_LIBRARY_PATH` is extended, not replaced (put the
 Python runtime's `lib` there if the build needs it).
 
@@ -134,13 +140,25 @@ checkout of this branch with exactly the commands above gave `forced 31.6 | real
 cc63 31.81` (all-to-all per call: dispatch 67.6 + experts 136.5 + combine 99.6 us p50, `rr2_ts_breakdown.py`).
 Run-to-run noise is about +-0.5 ms; compare configurations with alternating runs.
 
+TP4 baseline (one host, 4 GPUs, 16 streams = the same 4 streams per GPU):
+
+```bash
+WS=$PWD MODEL=/models/DeepSeek-V4-Flash FI_PCIE=/opt/fi-up GPUS=0,1,2,3 bash bench/largeep/run_tp4_baseline.sh
+B="python3 bench/decode/decode_plateau_bench.py --url http://127.0.0.1:27000 --prompts-file prompts_1k_x64.json --cc 16"
+$B --max-tokens 600 --tokens-per-step 3 --force-accept        # warm-up
+$B --max-tokens 2400 --tokens-per-step 3 --force-accept       # forced step (step_mean_ms)
+$B --max-tokens 1024                                          # real MTP acceptance (measured_tpot_ms)
+```
+
+From a fresh checkout of this branch: forced 38.5 / 38.3 ms, real TPOT 18.25 ms.
+
 ## 5. Configuration reference
 
 | env | default | meaning |
 |---|---|---|
 | `DSV4_MOE_STRATEGY` | — | `sm120_rail_routed` selects the routed all-to-all |
 | `DSV4_SM120_RAIL_ROUTED_LIB` | next to the transport module | path of `librail_routed2.so` |
-| `DSV4_SM120_RAIL_NIC_MAP` | `0,0,0,0,1,1,1,1` | RDMA device index per local GPU (`erdma_<i>`) |
+| `DSV4_SM120_RAIL_NIC_MAP` / `_NIC_PREFIX` | `0,0,0,0,1,1,1,1` / `erdma_` | RDMA device per local GPU = prefix + index (GPUs 0-3 and 4-7 sit behind different PCIe switches / NICs) |
 | `DSV4_SM120_RAIL_NPAD_MAX` / `_FLAG_MODE` / `_SPIN_NS` | 192 / 2 / 5e9 | max rows per call, arrival protocol (2 = WRITE_WITH_IMM), spin timeout |
 | `DSV4_SM120_RAIL_GID` | 1 | RoCE GID index of the RDMA device |
 | `DSV4_SM120_RAIL_CPU` | unpinned | proxy thread cores: one base core or a list of 8 |

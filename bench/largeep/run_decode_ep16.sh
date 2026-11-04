@@ -10,6 +10,8 @@
 #   PHY2LOG     static EPLB placement json (bench/largeep/phy2log_active.json); unset = identity placement
 #   RDMA_CORE   private rdma-core prefix if the system libibverbs has no provider for the NIC
 #   PROXY_CPUS  comma list of 8 idle cores for the a2a proxy threads (one per local GPU)
+#   NIC_PREFIX  RDMA device name prefix (default erdma_; e.g. mlx5_), NIC_MAP = device index per local GPU
+#   GID_INDEX   RoCE GID index (default 1)
 # usage: NODE=0|1 WS=... MODEL=... HOST0=... HOST1=... [PORT=31200] bash run_decode_ep16.sh
 ulimit -c 0
 : "${WS:?}" "${MODEL:?}" "${HOST0:?}" "${HOST1:?}"
@@ -27,7 +29,7 @@ export CUDA_HOME=$CUDA PATH=$CUDA/bin:$PATH
 export TILELANG_CACHE_DIR=$W/cache/tilelang TRITON_CACHE_DIR=$W/cache/triton TMPDIR=$TMP
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export CACHE_STORE_RDMA_MODE=${CACHE_STORE_RDMA_MODE:-0}
-export NCCL_IB_HCA=${NCCL_IB_HCA:-erdma_0,erdma_1} NCCL_DMABUF_ENABLE=0 NCCL_IB_GID_INDEX=${GID_INDEX:-1} NCCL_GIN_TYPE=1
+export NCCL_IB_HCA=${NCCL_IB_HCA:-${NIC_PREFIX:-erdma_}0,${NIC_PREFIX:-erdma_}1} NCCL_DMABUF_ENABLE=0 NCCL_IB_GID_INDEX=${GID_INDEX:-1} NCCL_GIN_TYPE=1
 export NCCL_SOCKET_IFNAME=${IFNAME:-eth0} GLOO_SOCKET_IFNAME=${IFNAME:-eth0} NCCL_P2P_DISABLE=0 NCCL_P2P_LEVEL=SYS NCCL_DEBUG=WARN
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export ENABLE_FLASHINFER_TRTLLM_GEN=0
@@ -43,7 +45,8 @@ export DSV4_DECODE_HOLD_FILE=${HOLD_FILE:-/dev/shm/dsv4_decode_hold}
 # ---- MoE: routed rail all-to-all ----
 export DSV4_MOE_STRATEGY=sm120_rail_routed
 export DSV4_SM120_RAIL_ROUTED_LIB=${A2A_LIB:-$WS/comm/largeep_a2a/librail_routed2.so}
-export DSV4_SM120_RAIL_NIC_MAP=${NIC_MAP:-0,0,0,0,1,1,1,1}
+export DSV4_SM120_RAIL_NIC_MAP=${NIC_MAP:-0,0,0,0,1,1,1,1} DSV4_SM120_RAIL_NIC_PREFIX=${NIC_PREFIX:-erdma_}
+export DSV4_SM120_RAIL_GID=${GID_INDEX:-1}
 export DSV4_SM120_RAIL_NPAD_MAX=${NPAD_MAX:-192} DSV4_SM120_RAIL_FLAG_MODE=2 DSV4_SM120_RAIL_SPIN_NS=${SPIN_NS:-5000000000}
 export DSV4_SM120_RAIL_STATS_S=${STATS_S:-30}
 [ -n "${PROXY_CPUS:-}" ] && export DSV4_SM120_RAIL_CPU=$PROXY_CPUS

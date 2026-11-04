@@ -154,6 +154,8 @@ class RoutedRailTransport:
             proxy_cpu = int(cpu_env) + local if int(cpu_env) >= 0 else -1
         nic_map = os.environ.get("DSV4_SM120_RAIL_NIC_MAP", "0,0,0,0,1,1,1,1")
         nic_idx = int(nic_map.split(",")[local])
+        # DSV4_SM120_RAIL_NIC_PREFIX: RDMA device name prefix (erdma_ on the development hosts; mlx5_ etc. elsewhere)
+        nic_name = os.environ.get("DSV4_SM120_RAIL_NIC_PREFIX", "erdma_") + str(nic_idx)
         self.world, self.rank, self.tp = world, rank, tp
         self.n_pad_max = int(os.environ.get("DSV4_SM120_RAIL_NPAD_MAX", "192"))
         self.payload_bytes = int(payload_bytes)
@@ -182,7 +184,7 @@ class RoutedRailTransport:
             ts_calls=int(os.environ.get("DSV4_SM120_RAIL_TS_CALLS", "256")),
             ib_port=1,
             spin_ns=int(os.environ.get("DSV4_SM120_RAIL_SPIN_NS", "5000000000")),
-            nic_name=f"erdma_{nic_idx}".encode(),
+            nic_name=nic_name.encode(),
         )
         self._h = self._lib.rr2_init(ctypes.byref(rcfg))
         err = self._last_error()
@@ -193,10 +195,10 @@ class RoutedRailTransport:
         self._start_stats_thread()
         self._start_ts_dump_thread()
         _logger.warning(
-            "routed rail up: rank=%d tp=%d nic=erdma_%d n_pad_max=%d",
+            "routed rail up: rank=%d tp=%d nic=%s n_pad_max=%d",
             rank,
             tp,
-            nic_idx,
+            nic_name,
             self.n_pad_max,
         )
 
