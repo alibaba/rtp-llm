@@ -225,7 +225,7 @@ struct KVCacheConfig {
     bool        enable_crc                = true;
     std::string device_eviction_policy    = "lru";
     std::string memory_eviction_policy    = "lru";
-    std::string disk_eviction_policy      = "fifo";
+    std::string disk_eviction_policy      = "lru";
 
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
     // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal

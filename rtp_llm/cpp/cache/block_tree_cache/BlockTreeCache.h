@@ -54,7 +54,7 @@ struct BlockTreeCacheConfig {
     // ---- Per-tier eviction policy ----
     EvictionPolicy device_eviction_policy{EvictionPolicy::LRU};
     EvictionPolicy host_eviction_policy{EvictionPolicy::LRU};
-    EvictionPolicy disk_eviction_policy{EvictionPolicy::FIFO};
+    EvictionPolicy disk_eviction_policy{EvictionPolicy::LRU};
 
     // ---- Shared Store/Load/Evict task pool ----
     int    task_pool_size{4};
