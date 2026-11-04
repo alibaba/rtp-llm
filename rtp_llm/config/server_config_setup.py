@@ -341,6 +341,18 @@ def setup_default_args(py_env_configs):
             f"model_type is not set and could not be inferred from checkpoint path: {py_env_configs.model_args.ckpt_path}. Please provide --model_type or MODEL_TYPE environment variable."
         )
 
+    if (
+        py_env_configs.model_args.model_type in ("hy_v4", "hy_v4_mtp")
+        and py_env_configs.role_config.role_type == RoleType.DECODE
+        and py_env_configs.prefill_cp_config.kv_cache_sharded
+    ):
+        logging.warning(
+            "Disabling PREFILL_CP_KV_CACHE_SHARDED for HY4 decode: "
+            "decode requires a full sequence KV block table."
+        )
+        py_env_configs.prefill_cp_config.kv_cache_sharded = False
+        py_env_configs.parallelism_config.prefill_cp_config.kv_cache_sharded = False
+
     # add rocm env config, if using default value, change it to optimize version
     # 这些特殊处理仍然需要设置环境变量（因为可能被 C++ 代码读取）
     if os.path.exists("/dev/kfd") and os.getenv("FT_DISABLE_CUSTOM_AR") is None:

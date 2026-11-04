@@ -1,4 +1,7 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -6,7 +9,9 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_and_configure_server,
+    setup_default_args,
 )
+from rtp_llm.ops import RoleType
 from rtp_llm.server.server_args.server_args import setup_args
 
 
@@ -135,6 +140,64 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(pc.ep_size, 8)
         self.assertEqual(pc.ep_rank, 5)
         self.assertEqual(pc.ffn_tp_rank, 1)
+
+
+class Hy4DecodeCacheConfigTest(TestCase):
+    @patch("torch.cuda.is_available", return_value=False)
+    def test_cache_sharding_by_model_and_role(self, _cuda_available):
+        for model_type in ("hy_v4", "hy_v4_mtp", "deepseek_v4"):
+            for role in (RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION):
+                for sharded in (False, True):
+                    with self.subTest(model=model_type, role=role, sharded=sharded):
+                        config = PyEnvConfigs()
+                        config.model_args.model_type = model_type
+                        config.role_config.role_type = role
+                        config.parallelism_config.tp_size = 8
+                        config.parallelism_config.world_size = 8
+                        config.parallelism_config.local_world_size = 8
+                        config.prefill_cp_config.kv_cache_sharded = sharded
+
+                        setup_default_args(config)
+
+                        expected = sharded and not (
+                            model_type in ("hy_v4", "hy_v4_mtp")
+                            and role == RoleType.DECODE
+                        )
+                        self.assertEqual(
+                            config.prefill_cp_config.kv_cache_sharded, expected
+                        )
+                        self.assertEqual(
+                            config.parallelism_config.prefill_cp_config.kv_cache_sharded,
+                            expected,
+                        )
+                        set_parallelism_config(
+                            config.parallelism_config,
+                            world_rank=7,
+                            py_prefill_cp_config=config.prefill_cp_config,
+                        )
+                        self.assertEqual(
+                            config.parallelism_config.prefill_cp_config.kv_cache_sharded,
+                            expected,
+                        )
+
+    @patch("torch.cuda.is_available", return_value=False)
+    def test_decode_sharding_disabled_for_inferred_hy4(self, _cuda_available):
+        with tempfile.TemporaryDirectory() as checkpoint:
+            (Path(checkpoint) / "config.json").write_text(
+                json.dumps({"architectures": ["HYV4ForCausalLM"]}), encoding="utf-8"
+            )
+            config = PyEnvConfigs()
+            config.model_args.ckpt_path = checkpoint
+            config.role_config.role_type = RoleType.DECODE
+            config.prefill_cp_config.kv_cache_sharded = True
+
+            setup_default_args(config)
+
+            self.assertEqual(config.model_args.model_type, "hy_v4")
+            self.assertFalse(config.prefill_cp_config.kv_cache_sharded)
+            self.assertFalse(
+                config.parallelism_config.prefill_cp_config.kv_cache_sharded
+            )
 
 
 if __name__ == "__main__":
