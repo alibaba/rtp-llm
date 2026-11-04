@@ -280,6 +280,15 @@ void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& resul
     cache_reuse_metrics_.report_match_cost_time = result.match_end_time_us > 0;
     malloc_begin_time_us_                       = result.malloc_begin_time_us;
     cache_reuse_metrics_.load_attempted         = result.load_attempted;
+
+    // A retry must not inherit the previous attempt's metrics, even when it no longer needs a load.
+    cache_reuse_metrics_.load_success                  = false;
+    cache_reuse_metrics_.report_load_metrics           = false;
+    cache_reuse_metrics_.report_load_wait_latency      = false;
+    cache_reuse_metrics_.load_wait_latency_us          = 0;
+    cache_reuse_metrics_.report_match_to_ready_latency = false;
+    cache_reuse_metrics_.match_to_ready_latency_us     = 0;
+    cache_reuse_metrics_.load_prepare_latency_us       = result.load_prepare_latency_us;
     if (!result.load_attempted) {
         if (result.match_end_time_us > 0) {
             cache_reuse_metrics_.match_to_ready_latency_us =
@@ -289,16 +298,7 @@ void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& resul
         return;
     }
 
-    // Metrics describe the current load attempt. A retry must not inherit the
-    // previous attempt's terminal result or latency.
-    cache_reuse_metrics_.load_success                  = false;
-    cache_reuse_metrics_.report_load_metrics           = false;
-    cache_reuse_metrics_.report_load_wait_latency      = false;
-    cache_reuse_metrics_.load_wait_latency_us          = 0;
-    cache_reuse_metrics_.report_match_to_ready_latency = false;
-    cache_reuse_metrics_.match_to_ready_latency_us     = 0;
-    cache_reuse_metrics_.load_prepare_latency_us       = result.load_prepare_latency_us;
-    load_wait_begin_time_us_                           = currentTimeUs();
+    load_wait_begin_time_us_ = currentTimeUs();
     if (!result.success) {
         clearCacheReuseState();
         cache_reuse_metrics_.load_success              = false;
