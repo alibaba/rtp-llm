@@ -47,6 +47,7 @@ button.action:hover,a.action:hover{background:var(--soft);border-color:#cddcfa}
 <details><summary>查看组件生效配置</summary><pre id="effective"></pre></details>
 <details><summary>查看代码版本与工作区差异</summary><pre id="versions"></pre></details>
 </details>
+<details open><summary>角色运行结果</summary><div id="roles"></div></details>
 <details><summary>查看 Phase / Step 执行时间线</summary><div id="events" class="events"></div></details>
 </section>
 <div class="section-label">门禁结果 · 点击定位检查区间；单点检查显示查询点附近的指标；图表筛选不改变保存的门禁判定</div>
@@ -249,6 +250,13 @@ async function load() {
     if (experiment.warnings.length) {
       $('artifact-warnings').classList.remove('hidden');
       $('artifact-warnings').textContent = '产物不完整，未重新判定实验：\n' + experiment.warnings.join('；\n');
+    }
+    for (const [role, evidence] of Object.entries(experiment.roles ?? {})) {
+      const row = document.createElement('details'), title = document.createElement('summary'), data = document.createElement('pre');
+      const state = {observed:'有运行记录', no_observation:'未观测到启动', not_deployed:'未部署'}[evidence.state];
+      title.textContent = role + ' · ' + state + (evidence.instances.length ? ' · ' + evidence.instances.length + ' 实例' : '');
+      data.textContent = pretty(evidence);
+      row.append(title, data); $('roles').append(row);
     }
     experiment.events.forEach(event => {
       const button = document.createElement('button'), time = document.createElement('time');
