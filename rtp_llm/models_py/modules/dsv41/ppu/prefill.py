@@ -55,7 +55,7 @@ hidden is restored to logical token order on every rank.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -598,6 +598,9 @@ def _indexer_topk(
     head_weights = raw_weights * (geometry.index_head_dim * heads) ** -0.5
     # Key side: the KV SOURCE's indexer pool, dequantized through the op.
     keys = []
+    offsets = torch.zeros_like(positions, dtype=torch.int64)
+    limits = torch.zeros_like(offsets)
+    running = 0
     for rid in slots:
         handle = slots[rid]
         count = handle.global_slots[source].shape[0]
@@ -614,6 +617,11 @@ def _indexer_topk(
             out=decoded,
         )
         keys.append(decoded)
+        rows = context.request_ids == rid
+        offsets[rows] = running
+        visible = ((positions[rows] + 1) // source_ratio).clamp_max(count)
+        limits[rows] = running + visible
+        running += count
     keys = (
         torch.cat(keys, dim=0)
         if keys
@@ -630,16 +638,23 @@ def _indexer_topk(
         layer_id=layer_id,
         candidate_blocks=None,
         key_positions=key_positions,
-        context=context,
+        context=replace(context, positions=limits * source_ratio - 1),
         ratio=source_ratio,
     )
+    # The op's causal count spans the concatenated bank. Restrict each row to
+    # its own request and convert selected columns back to local entry IDs.
+    columns = torch.arange(total, device=x_pre.device)
+    keep = (columns[None, :] >= offsets[:, None]) & (columns[None, :] < limits[:, None])
+    logits = logits.masked_fill(~keep, float("-inf"))
     k = min(geometry.index_topk, total)
     if k == 0:
         return torch.full(
             (x_pre.shape[0], 1), -1, dtype=torch.int32, device=x_pre.device
         )
     top_scores, ids = logits.topk(k, dim=-1)
-    return torch.where(torch.isfinite(top_scores), ids, -1).to(torch.int32)
+    return torch.where(torch.isfinite(top_scores), ids - offsets[:, None], -1).to(
+        torch.int32
+    )
 
 
 # ---------------------------------------------------------------------------

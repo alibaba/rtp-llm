@@ -13,7 +13,6 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import torch
 
@@ -28,6 +27,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.ops import PPUOps
 from rtp_llm.models_py.modules.dsv41.ppu.prefill import (
     _indexer_topk,
     _torch_sparse_attention,
+    build_step_context,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.weight import (
     V41Geometry,
@@ -128,7 +128,9 @@ class PrefillEndToEndTest(unittest.TestCase):
             x_pre=x_pre,
             qr=torch.zeros(1, geometry.q_lora_rank, dtype=torch.bfloat16),
             positions=positions,
-            context=SimpleNamespace(positions=positions),
+            context=build_step_context(
+                positions, torch.tensor([0]), torch.tensor([0, 1])
+            ),
             cache=cache,
             slots={0: handle},
             layer_id=2,
@@ -136,6 +138,52 @@ class PrefillEndToEndTest(unittest.TestCase):
         # Raw BF16 Q ranks key1 above key0 (0.400390625 > 0.390625).
         # FP4 rounds Q[1] to0.375, so key0 must win.
         self.assertEqual(selected.tolist(), [[0]])
+
+    def test_indexer_keeps_request_keys_and_causality_separate(self):
+        geometry = replace(self.geometry, index_n_heads=1, index_topk=1)
+        query = torch.zeros(3, 1, 128, dtype=torch.bfloat16)
+        query[:, 0, 0] = 1
+        projection = torch.zeros(1, geometry.hidden_size, dtype=torch.bfloat16)
+        projection[0, 0] = 1
+        layer = replace(
+            self.bundle.layers[2],
+            index_wq=lambda _: query.flatten(1),
+            index_weights_proj=projection,
+        )
+        cache = PPUKVCache(self.config)
+        handles = {rid: cache.alloc(rid, 4) for rid in (42, 17)}
+        for rid, winning_entry in ((17, 0), (42, 1)):
+            keys = torch.zeros(2, 128, dtype=torch.bfloat16)
+            keys[winning_entry, 0] = 1
+            keys[1 - winning_entry, 1] = 1
+            payload, scales = _quant.quantize_indexer_k_rows(keys)
+            cache.insert_rows(
+                2,
+                "indexer_kv",
+                handles[rid].indexer_slots[2],
+                _quant.indexer_k_packed_rows(payload, scales),
+            )
+        x_pre = torch.zeros(3, geometry.hidden_size, dtype=torch.bfloat16)
+        x_pre[:, 0] = 1
+        positions = torch.tensor([3, 1, 3], dtype=torch.int64)
+        selected = _indexer_topk(
+            ops=self.ops,
+            layer=layer,
+            geometry=geometry,
+            bundle=self.bundle,
+            x_pre=x_pre,
+            qr=torch.zeros(3, geometry.q_lora_rank, dtype=torch.bfloat16),
+            positions=positions,
+            context=build_step_context(
+                positions, torch.tensor([17, 42, 42]), torch.tensor([0, 1, 3])
+            ),
+            cache=cache,
+            slots=handles,
+            layer_id=2,
+        )
+        # Request17 prefers its key0. Request42 must not read that key bank;
+        # its key1 becomes visible only at position3.
+        self.assertEqual(selected.tolist(), [[0], [0], [1]])
 
     def test_end_to_end_finite(self):
         core = self._core()
