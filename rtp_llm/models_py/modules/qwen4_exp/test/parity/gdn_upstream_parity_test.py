@@ -370,13 +370,6 @@ class GdnUpstreamParityTest(unittest.TestCase):
         recurrent state K-first [B, H, K, V]; ours is V-first [B, H, V, K].
         """
         namespace = _exec_upstream_gdn()
-        torch.manual_seed(0)
-        upstream = (
-            namespace["Qwen4ExpTextGatedDeltaNet"](_tiny_gdn_config(), 0)
-            .to(torch.bfloat16)
-            .cuda()
-        )
-        ours = self._our_gdn(upstream).to(torch.bfloat16).cuda().eval()
 
         from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
             fused_recurrent_gated_delta_rule,

@@ -192,7 +192,6 @@ class DraftPagedFmhaTest(unittest.TestCase):
         selected = torch.zeros(4, 2051, device="cuda", dtype=torch.int32)
         sources = torch.arange(4, device="cuda")
         valid = torch.ones(4, device="cuda", dtype=torch.bool)
-        visible = torch.ones(1, 4, device="cuda", dtype=torch.int32)
         cache = torch.zeros(3, 65536, device="cuda").to(torch.float8_e4m3fn)
         scale = torch.ones(3, 256, device="cuda")
         table = torch.ones(1, 2, device="cuda", dtype=torch.int32)

@@ -148,7 +148,7 @@ class Qwen4ExpPLEGraphTest(PLERuntimeFixture, TestCase):
         self.model.on_cuda_graph_warmup(SimpleNamespace(attention_inputs=inputs))
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            actual = self.model._apply_ple(1, hyper, ids.flatten(), inputs)
+            self.model._apply_ple(1, hyper, ids.flatten(), inputs)
         self.model.on_cuda_graph_capture(2, SimpleNamespace(attention_inputs=inputs))
         for live_batch in (1, 2, 1):
             self.state_base.copy_(before_state)

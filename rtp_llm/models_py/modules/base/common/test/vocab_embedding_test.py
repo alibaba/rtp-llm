@@ -6,7 +6,6 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.model_loader.loader import ModelLoader
-from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models_py.modules.base.common.fp8_embedding import Fp8VocabEmbedding
 

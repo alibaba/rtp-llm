@@ -222,7 +222,6 @@ class IndexerPrefillTritonTest(unittest.TestCase):
             ratio=4,
             kv_tokens_per_block=128,
             state_tokens_per_block=128,
-            capture_undo=True,
         )
 
     def fused(self, args):

@@ -3,7 +3,6 @@
 import functools
 
 import torch
-from flashinfer.utils import _get_cache_buf, get_device_sm_count
 
 
 @functools.cache

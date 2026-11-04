@@ -6,10 +6,7 @@ from typing import Any
 import torch
 
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import PLE_NGRAM_CTX_TAG, PLE_STATE_TAG
-from rtp_llm.models_py.model_desc.block_map import (
-    get_attention_inputs_value,
-    select_attention_inputs_for_tag,
-)
+from rtp_llm.models_py.model_desc.block_map import select_attention_inputs_for_tag
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.pd_publication import (
     validate_pd_cache_inputs,
 )

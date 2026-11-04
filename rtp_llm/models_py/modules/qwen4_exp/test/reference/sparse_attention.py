@@ -34,7 +34,6 @@ def gather_and_attend(
 ) -> torch.Tensor:
     B, H_q, S, D = q.shape
     H_kv = k.shape[1]
-    K = selected_indices.shape[-1]
     dev = q.device
     if scale is None:
         scale = 1.0 / float(D) ** 0.5

@@ -10,6 +10,7 @@ import cutlass.cute as cute
 import cutlass.pipeline as pipeline
 import torch
 from cutlass.cute.nvgpu import cpasync, warp, warpgroup
+from flashinfer.utils import _get_cache_buf, get_device_sm_count
 
 from .alpha import AlphaProcessor
 from .collective_inverse_hmma import CollectiveInverse
@@ -20,12 +21,7 @@ from .custom_compile_cache import (
     get_cached_compile,
     sm12x_compile_options,
 )
-from .device_utils import (
-    _get_cache_buf,
-    get_compute_capability,
-    get_device_name,
-    get_device_sm_count,
-)
+from .device_utils import get_compute_capability, get_device_name
 from .geometry import can_implement
 from .helpers import (
     SM80,

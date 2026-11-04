@@ -12,7 +12,7 @@ _DEV = "cuda"
 
 
 def _ref(q, w, pool, bt, ctx, bs):
-    M, H, D = q.shape[0], q.shape[1], q.shape[2]
+    M, H = q.shape[:2]
     max_ctx = int(ctx.max())
     out = torch.full((M, max_ctx), float("-inf"), device=_DEV)
     for row in range(M):
