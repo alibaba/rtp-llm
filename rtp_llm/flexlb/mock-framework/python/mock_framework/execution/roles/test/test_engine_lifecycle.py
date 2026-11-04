@@ -221,7 +221,7 @@ def test_partial_scale_failure_is_not_replayed_or_reported_as_success(tmp_path, 
     class exercise(Step):
         @staticmethod
         async def execute(ctx, args: Args) -> bool:
-            original = ctx.runtime.engines.call
+            original = ctx.runtime.engines._call
             calls = []
             async def fail_second(host, name, body):
                 if name == operation:
@@ -230,7 +230,7 @@ def test_partial_scale_failure_is_not_replayed_or_reported_as_success(tmp_path, 
                         ctx.records.emit(event='injected_failure', operation=name, calls=calls)
                         body = {**body, **({'controlPort': body['rpcPort']} if name == 'create' else {'id': 'prefill-999999'})}
                 return await original(host, name, body)
-            ctx.runtime.engines.call = fail_second
+            ctx.runtime.engines._call = fail_second
             if operation == 'create': await EngineScaleOut.execute(ctx, ScaleOut(count=2))
             else: await EngineScaleIn.execute(ctx, ScaleIn(count=2))
             raise AssertionError('Partial failure was swallowed')
