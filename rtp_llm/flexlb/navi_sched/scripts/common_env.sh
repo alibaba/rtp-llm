@@ -17,7 +17,7 @@ else
 fi
 export BAZELISK_HOME=${NAVI_SCHED_BAZELISK_HOME:-${HOME}/.cache/bazelisk}
 if [[ "${NAVI_SCHED_USE_CICD_DEPS:-}" == "1" ]]; then
-    export BAZEL_ARGS="${BAZEL_ARGS:-} --deleted_packages="
+    export BAZEL_ARGS="--config=cuda13 --config=cicd --deleted_packages="
 elif [[ "${NAVI_SCHED_CLEAR_BAZEL_ARGS:-}" == "1" ]]; then
     export BAZEL_ARGS=
 fi
