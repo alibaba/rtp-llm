@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #if USING_CUDA
 #include <ATen/cuda/CUDAGraph.h>
+#include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dspark_confidence.h"
@@ -767,11 +768,28 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
             .view({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)});
 
     torch::Tensor markov_embedding;
+#if USING_CUDA
+    // Each step consumes this FP32 bias before the next same-stream GEMM
+    // overwrites it. Keep the Markov weights in their loaded BF16 dtype.
+    torch::Tensor markov_bias_buffer;
+#endif
     for (int64_t step = 0; step < static_cast<int64_t>(propose_step_); ++step) {
         if (!markov_embedding.defined()) {
             markov_embedding = markov_w1.index_select(0, previous_tokens);
         }
-        auto markov_bias = torch::mm(markov_embedding, markov_w2.transpose(0, 1));
+        torch::Tensor markov_bias;
+#if USING_CUDA
+        if (markov_embedding.is_cuda() && markov_w2.is_cuda() && markov_embedding.scalar_type() == torch::kBFloat16
+            && markov_w2.scalar_type() == torch::kBFloat16) {
+            // Match the FP32 proposal-logit accumulator: a BF16 intermediate
+            // rounds away Markov terms before softmax, filtering, or argmax.
+            markov_bias = torch_ext::cublas_gemm_bf16_bf16_fp32_out(markov_embedding, markov_w2, markov_bias_buffer);
+            markov_bias_buffer = markov_bias;
+        } else
+#endif
+        {
+            markov_bias = torch::mm(markov_embedding, markov_w2.transpose(0, 1));
+        }
 
 #if USING_CUDA
         if (fused_greedy_output) {

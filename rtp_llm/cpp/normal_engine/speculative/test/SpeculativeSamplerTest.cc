@@ -556,7 +556,10 @@ TEST(DSparkSamplerTest, Int32IndicesPreserveGreedyAndStochasticResults) {
                         auto scratch = torch::empty({batch, vocab}, options.dtype(torch::kFloat32));
                         std::vector<torch::Tensor> columns;
                         for (int64_t step = 0; step < static_cast<int64_t>(steps); ++step) {
-                            auto          bias = torch::mm(w1.index_select(0, previous), w2.transpose(0, 1));
+                            auto          embedding = w1.index_select(0, previous);
+                            auto          bias      = dtype == torch::kBFloat16 ?
+                                                          torch_ext::cublas_gemm_bf16_bf16_fp32(embedding, w2) :
+                                                          torch::mm(embedding, w2.transpose(0, 1));
                             torch::Tensor tokens;
                             if (greedy) {
                                 tokens = execMarkovArgmaxStep({proposals.select(1, step), bias, temperature});
@@ -588,6 +591,63 @@ TEST(DSparkSamplerTest, Int32IndicesPreserveGreedyAndStochasticResults) {
             }
         }
     }
+}
+
+TEST(DSparkSamplerTest, Bf16MarkovKeepsFp32TermsForDenseGreedyAndTopK) {
+    const c10::cuda::CUDAGuard guard(0);
+    const auto                 fp32  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    constexpr int64_t          batch = 3, gamma = 5, vocab = 4, rank = 2;
+    // Every previous token has the same embedding, so all paths use an
+    // identical prefix. Products and sums below are exact dyadic FP32 values.
+    auto w1           = torch::ones({vocab, rank}, fp32.dtype(torch::kBFloat16));
+    auto w2           = torch::tensor({{1.0f, 1.0f / 256}, {1.0f, 1.0f / 128}, {0.0f, 0.0f}, {0.0f, 0.0f}},
+                            fp32.dtype(torch::kBFloat16));
+    auto row_logits   = torch::tensor({-1.0f, -1.0f - 3.0f / 512, -4.0f, -4.0f}, fp32);
+    auto logits       = row_logits.repeat({batch * gamma, 1});
+    auto anchors      = torch::tensor({0, 2, 3}, fp32.dtype(torch::kInt32));
+    auto temperatures = torch::tensor({0.75f, 1.0f, 2.0f}, fp32);
+    // Independent host double reference; no production GEMM or Markov op.
+    auto         expected_cpu    = torch::empty({batch, gamma, vocab}, torch::kFloat32);
+    const double combined[vocab] = {1.0 / 256, 1.0 / 512, -4.0, -4.0};
+    const double scales[batch]   = {0.75, 1.0, 2.0};
+    for (int64_t row = 0; row < batch; ++row) {
+        double normalizer = 0.0;
+        for (double score : combined) {
+            normalizer += std::exp(score / scales[row]);
+        }
+        for (int64_t step = 0; step < gamma; ++step) {
+            for (int64_t token = 0; token < vocab; ++token) {
+                expected_cpu[row][step][token] =
+                    static_cast<float>(std::exp(combined[token] / scales[row]) / normalizer);
+            }
+        }
+    }
+    auto expected = expected_cpu.to(torch::kCUDA);
+    // Negative control: the former BF16 GEMM rounds 1+1/256 to 1.0 and
+    // changes the winning token from 0 to 1 before any sampling randomness.
+    auto old_bias   = torch::mm(w1.index_select(0, anchors), w2.transpose(0, 1));
+    auto old_scores = row_logits + old_bias.to(torch::kFloat32);
+    ASSERT_TRUE(old_scores.argmax(-1).eq(1).all().item<bool>());
+    auto old_q = torch::softmax(old_scores / temperatures.unsqueeze(1), -1);
+    ASSERT_GT((old_q - expected.select(1, 0)).abs().max().item<float>(), 1.0e-4f);
+
+    SpeculativeSampler sampler({}, gamma);
+    auto               dense = sampler.sampleDSparkDraft(logits, anchors, temperatures, {}, {}, w1, w2, vocab, false);
+    ASSERT_FALSE(dense.token_ids_are_point_mass);
+    ASSERT_TRUE(torch::allclose(dense.all_probs, expected, 2.0e-6, 1.0e-7));
+    auto greedy = sampler.sampleDSparkDraft(logits, anchors, temperatures, {}, {}, w1, w2, vocab, true);
+    ASSERT_TRUE(greedy.token_ids_are_point_mass);
+    ASSERT_TRUE(greedy.token_ids.eq(0).all().item<bool>());
+    auto top_k    = torch::ones({batch}, anchors.options());
+    auto filtered = sampler.sampleDSparkDraft(logits, anchors, temperatures, top_k, {}, w1, w2, vocab, false);
+    auto one_hot  = torch::zeros_like(expected);
+    one_hot.select(2, 0).fill_(1.0f);
+    ASSERT_TRUE(torch::equal(filtered.all_probs, one_hot));
+    ASSERT_TRUE(filtered.token_ids.eq(0).all().item<bool>());
+    auto compact = sampler.sampleDSparkDraft(logits, anchors, temperatures, {}, {}, w1, w2, vocab, false, 1);
+    ASSERT_TRUE(compact.token_ids.eq(0).all().item<bool>());
+    ASSERT_TRUE(compact.all_probs_indices.eq(0).all().item<bool>());
+    ASSERT_TRUE(compact.all_probs.eq(1.0f).all().item<bool>());
 }
 
 TEST(DSparkSamplerTest, FusedOutputPreservesEmbeddingBitsAndStrides) {
@@ -1158,7 +1218,7 @@ TEST(DSparkDraftCommitTest, FiveStepCompactConfidenceMatchesFrozenTorchChainAndR
             auto                       previous = anchors.to(torch::kInt64);
             torch::manual_seed(71132);
             for (int64_t step = 0; step < gamma; ++step) {
-                auto bias     = w1.index_select(0, previous).mm(w2.transpose(0, 1));
+                auto bias     = torch_ext::cublas_gemm_bf16_bf16_fp32(w1.index_select(0, previous), w2);
                 auto selected = torch_ext::deepselect_fp32_topk(
                     torch_ext::markov_scaled_logits(
                         logits.view({batch, gamma, vocab}).select(1, step), bias, temperatures),
@@ -1304,8 +1364,8 @@ TEST(DSparkDraftCommitTest, ProductionShapeDraftTrace) {
     const auto                 fp32   = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
     const auto                 stream = at::cuda::getCurrentCUDAStream();
     constexpr int64_t          batch = 48, gamma = 5, width = 4096, vocab = 129280, rank = 256;
-    // Matches the supplied trace's sampled tensors: FP32 proposal logits,
-    // BF16 Markov GEMM output, K4096 top-p sampling, and a confidence finish.
+    // Production tensor shapes with FP32 proposal logits and Markov output,
+    // BF16 Markov weights, K4096 top-p sampling, and a confidence finish.
     // Only the final rank columns of the head weight cross this scalar API.
     auto               w1           = torch::randn({vocab, rank}, fp32.dtype(torch::kBFloat16));
     auto               w2           = torch::randn({vocab, rank}, w1.options());
@@ -1335,9 +1395,9 @@ TEST(DSparkDraftCommitTest, ProductionShapeDraftTrace) {
         columns.reserve(gamma);
         for (int64_t step = 0; step < gamma; ++step) {
             auto embedding = w1.index_select(0, previous);
-            auto bias      = torch::mm(embedding, w2.transpose(0, 1));
-            auto selected =
-                torch_ext::deepselect_fp32_markov_topk_prefilter(proposals.select(1, step), bias, temperatures);
+            auto bias      = torch_ext::cublas_gemm_bf16_bf16_fp32(embedding, w2);
+            auto selected  = torch_ext::deepselect_fp32_topk(
+                torch_ext::markov_scaled_logits(proposals.select(1, step), bias, temperatures), width);
             auto q   = torch::softmax(std::get<0>(selected), -1);
             auto ids = std::get<1>(selected);
             top_p_renorm_probs(q, filtered, top_p, 1.0, reinterpret_cast<uintptr_t>(stream.stream()));
@@ -1386,7 +1446,7 @@ TEST(DSparkDraftCommitTest, ProductionShapeDraftTrace) {
             for (int call = 0; call < 5; ++call) {
                 RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                     "dspark_draft_profile(kind=%s,call=%d,batch=48,gamma=5,vocab=129280,K=4096,rank=256,"
-                    "logits=fp32,markov=bf16,confidence=1)",
+                    "logits=fp32,markov=fp32,markov_weights=bf16,confidence=1)",
                     kind == 0 ? "old_chain" : "candidate",
                     call);
                 actual = kind == 0 ? reference() : candidate();
@@ -1402,7 +1462,7 @@ TEST(DSparkDraftCommitTest, ProductionShapeDraftTrace) {
     const auto path = std::string(output_dir) + "/dspark_draft_b48_g5_k4096_confidence.json";
     trace->save(path);
     std::cout << "DSPARK_DRAFT_TRACE path=" << path << " calls_per_kind=5 warmup_per_kind=5"
-              << " logits=fp32 markov=bf16 fixture_only=1" << std::endl;
+              << " logits=fp32 markov=fp32 markov_weights=bf16 fixture_only=1" << std::endl;
 }
 
 TEST(DSparkConfidenceSamplerTest, RejectsIncompleteOrMalformedConfidenceInputs) {
