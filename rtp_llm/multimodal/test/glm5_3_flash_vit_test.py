@@ -5,7 +5,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import av
 import numpy as np
 import torch
 from PIL import Image
@@ -383,6 +382,8 @@ class Glm53FlashVitTest(unittest.TestCase):
                 )
 
     def test_real_mp4_decord_preprocess(self):
+        import av
+
         video_path = Path(os.environ["TEST_TMPDIR"]) / "glm53_decord_test.mp4"
         with av.open(str(video_path), mode="w") as container:
             stream = container.add_stream("mpeg4", rate=4)
