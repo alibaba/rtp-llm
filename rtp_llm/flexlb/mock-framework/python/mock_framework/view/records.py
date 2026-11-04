@@ -126,10 +126,24 @@ def experiment(directory):
         return record['query_time']
 
     windows, events, annotations = {}, [], {}
+    processes, playback, master_queries = {}, [], []
+    role_names = ('client', 'master', 'prefill', 'decode', 'vit', 'zookeeper')
     for number, event in lines('events.jsonl'):
         try:
             kind = event['event']
-            if kind == 'metric_window':
+            if kind in ('process_started', 'process_ready', 'process_stopped'):
+                node = event['node']
+                role = event.get('role', node.split('-', 1)[0])
+                if role in role_names:
+                    instance_id = event.get('instance_id', node.split('-restart-', 1)[0])
+                    process = processes.setdefault(instance_id, {'role': role, 'id': instance_id, 'attempts': {}})
+                    attempt = process['attempts'].setdefault(node, {})
+                    if 'generation' in event:
+                        attempt['generation'] = event['generation']
+                    attempt[kind] = {k: event[k] for k in ('recorded_at', 'pid', 'code', 'url', 'connect') if k in event}
+            elif kind == 'client_result':
+                playback.append({'time': event['recorded_at'], 'result': event['result']})
+            elif kind == 'metric_window':
                 a, b = event['start'], event['end']
                 if any(type(value) not in (int, float) or not math.isfinite(value) for value in (a, b)) or b < a:
                     raise ValueError('invalid metric_window start/end')
@@ -142,6 +156,9 @@ def experiment(directory):
                     annotations[name] = {'step': name, 'time': milliseconds(event['recorded_at']),
                                          'text': steps.get(name, {}).get('describe', name)}
                 elif kind == 'step_finished' and name in annotations:
+                    interface = steps.get(name, {}).get('interface')
+                    if interface in ('master/get', 'master/engine/get') and 'result' in event:
+                        master_queries.append({'step': name, 'time': event['recorded_at'], 'result': event['result']})
                     annotations[name]['text'] += ' · ' + str(event.get('status', ''))
         except (ValueError, KeyError, TypeError, AttributeError, OverflowError) as error:
             warnings.append(f'events.jsonl:{number}: {error}')
@@ -176,6 +193,17 @@ def experiment(directory):
         source = None
     effective = {path.parent.name: optional(str(path.relative_to(directory)), dict)
                  for path in sorted(directory.glob('components/*/effective-config.json'))}
+    environment = case.get('environment')
+    roles = {}
+    for role in role_names:
+        instances = [value for value in processes.values() if value['role'] == role]
+        declared = isinstance(environment, dict) and role in environment
+        if role == 'zookeeper':
+            declared = 'zookeeper' in ((configuration or {}).get('launch') or {})
+        state = ('observed' if instances else 'no_observation' if declared or not isinstance(environment, dict) else 'not_deployed')
+        roles[role] = {'state': state, 'instances': instances}
+    roles['client']['playback'] = playback
+    roles['master']['observations'] = master_queries
     collection = optional('prometheus/collection.json', dict)
     if collection is not None and type(collection.get('complete')) is not bool:
         warnings.append('prometheus/collection.json: complete must be a boolean')
@@ -187,4 +215,4 @@ def experiment(directory):
             'gates': gates, 'events': sorted(events, key=lambda event: event['time']),
             'annotations': sorted(annotations.values(), key=lambda event: event['time']),
             'annotation_steps': list(dict.fromkeys([*steps, *annotations])),
-            'collection': collection, 'warnings': warnings}
+            'collection': collection, 'roles': roles, 'warnings': warnings}

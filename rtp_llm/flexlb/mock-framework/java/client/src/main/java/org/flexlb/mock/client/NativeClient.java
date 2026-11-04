@@ -10,7 +10,7 @@ import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.*;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.mock.client.evidence.ClientEvidence.Event;
-import org.flexlb.mock.multimodal.*;
+import org.flexlb.mock.protocol.*;
 
 /** One native Schedule -> Fetch/Generate exchange. Frontend-style primary/backup scheduling; no Engine fallback. */
 public final class NativeClient implements AutoCloseable {
@@ -19,7 +19,7 @@ public final class NativeClient implements AutoCloseable {
                          int outputTokens, Outcome outcome, String grpcCode, long errorCode, String message) {}
     private final java.util.function.Supplier<List<String>> masters;
     private final java.util.function.Consumer<Event.Builder> events;
-    private final MediaClient vision;
+    private final VitClient vision;
     private final long cacheKeySeed;
     private final Map<String, ManagedChannel> channels = new HashMap<>();
     private final Map<Long, Call> active = new HashMap<>();
@@ -43,7 +43,7 @@ public final class NativeClient implements AutoCloseable {
     }
     NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<Event.Builder> events, int imageToken, long seed) {
         cacheKeySeed = seed;
-        vision = new MediaClient(imageToken);
+        vision = new VitClient(imageToken);
         this.masters = Objects.requireNonNull(masters); this.events = Objects.requireNonNull(events);
         timers.setRemoveOnCancelPolicy(true);
     }

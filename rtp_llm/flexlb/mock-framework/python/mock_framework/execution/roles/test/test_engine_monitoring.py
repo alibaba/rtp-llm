@@ -14,7 +14,7 @@ import zipfile
 import pytest
 
 ROOT = FRAMEWORK
-JAR = ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
+JAR = ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
 JAVA = Path(os.environ['JAVA_HOME']) / 'bin/java' if os.environ.get('JAVA_HOME') else Path(shutil.which('java') or '/usr/bin/java')
 JAVAC = JAVA.with_name('javac')
 
@@ -68,22 +68,17 @@ def listener_pair():
 
 @pytest.mark.parametrize('role', ['PREFILL', 'DECODE', 'VIT'])
 def test_provider_disables_pull_and_receives_role_metrics(tmp_path, push_provider, role):
-    (tmp_path / 'config.json').write_text(json.dumps({
-        'image_token_id': 128000,
-        'vision_config': {'patch_size': 14, 'downsample_ratio': 3, 'min_pixels': 295936, 'max_image_tokens': 1024},
-        'text_config': {'hidden_size': 4096},
-    }))
     port = listener_pair()
     capture = tmp_path / 'reported.txt'
     env = {key: os.environ[key] for key in ('PATH', 'HOME', 'LANG', 'TMPDIR') if key in os.environ}
-    env.update(ROLE_TYPE=role, MODEL_TYPE='deepseek_v41', CHECKPOINT_PATH=str(tmp_path),
+    env.update(ROLE_TYPE=role, PATCH_SIZE='14', DOWNSAMPLE_RATIO='3', MIN_PIXELS='0', MAX_IMAGE_TOKENS='1024', HIDDEN_SIZE='4',
                START_PORT=str(port), MOCK_BIND_HOST='127.0.0.1', MOCK_ADVERTISE_HOST='127.0.0.1',
                TEST_BLOCK_NUM='17', SEQ_SIZE_PER_BLOCK='128', MAX_SEQ_LEN='2048',
                MOCK_COMPUTE_FORWARD_EXPRESSION='1', KV_CACHE_EVENT_PUBLISHER_TYPE='none',
-               ENABLE_REMOTE_CACHE='false', REPORT_CAPTURE=str(capture), kmonitorTags='test_scope^push-test')
+               REPORT_CAPTURE=str(capture), kmonitorTags='test_scope^push-test')
     with (tmp_path / 'engine.log').open('w+') as log:
         process = subprocess.Popen([str(JAVA), '-cp', os.pathsep.join((str(push_provider), str(JAR))),
-                                    'org.flexlb.mock.host.EngineMain'], env=env, stdout=log, stderr=subprocess.STDOUT)
+                                    'org.flexlb.mock.engine.EngineMain'], env=env, stdout=log, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline and process.poll() is None:

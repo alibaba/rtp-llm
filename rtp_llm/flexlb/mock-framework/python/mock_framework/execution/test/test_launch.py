@@ -23,12 +23,13 @@ def case(case_data, compile_data):
 def artifacts(tmp_path):
     framework = tmp_path / 'framework with spaces'
     for relative in ('java/master/target/classes/org/flexlb/MasterNode.class',
-                     'java/master/target/classes/org/flexlb/mock/master/ZookeeperNode.class',
-                     'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar',
+                     'java/zookeeper/target/classes/org/flexlb/mock/zookeeper/ZookeeperNode.class',
+                     'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar',
                      'java/client/target/mock-client-1.0-SNAPSHOT-all.jar', 'dependency.jar'):
         path = framework / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch()
+    (framework / 'java/zookeeper/target/dependencies.txt').write_text(str(framework / 'dependency.jar') + '\n')
     (framework / 'java/master/target/dependencies.txt').write_text(str(framework / 'dependency.jar') + '\n')
     java, prometheus = tmp_path / 'java', tmp_path / 'prometheus'
     for path in (java, prometheus):
@@ -37,17 +38,15 @@ def artifacts(tmp_path):
     return framework, java, prometheus
 
 
-@pytest.mark.parametrize('mode', ['shared', 'isolated'])
-def test_local_recipes_round_trip_without_shell_or_cwd_assumptions(case, artifacts, mode):
+def test_local_recipes_round_trip_without_shell_or_cwd_assumptions(case, artifacts):
     framework, java, prometheus = artifacts
-    launch = local_launch(case, java, prometheus, framework=framework, engine_mode=mode)
+    launch = local_launch(case, java, prometheus, framework=framework)
     assert launch == prepare_launch(launch, case, framework)
-    assert launch['engine_mode'] == mode
     assert set(launch['components']) == set(case.environment)
     assert launch['components']['prefill'] == launch['components']['decode']
-    assert launch['components']['prefill']['command'][-1] == 'org.flexlb.mock.host.EngineHost'
+    assert launch['components']['prefill']['command'][-1] == 'org.flexlb.mock.engine.EngineMain'
     assert launch['components']['master']['command'][-1] == 'org.flexlb.MasterNode'
-    assert launch['zookeeper']['command'][-1] == 'org.flexlb.mock.master.ZookeeperNode'
+    assert launch['zookeeper']['command'][-1] == 'org.flexlb.mock.zookeeper.ZookeeperNode'
     assert launch['components']['client']['command'][-1].endswith('mock-client-1.0-SNAPSHOT-all.jar')
     assert all(recipe['command'][0] == str(java) and recipe['cwd'] == str(framework)
                for recipe in launch['components'].values())
@@ -59,7 +58,7 @@ def test_local_recipes_reject_missing_or_unusable_inputs(case, artifacts, damage
     if damage in ('java', 'prometheus'):
         (java if damage == 'java' else prometheus).chmod(0o644)
     elif damage == 'engine':
-        (framework / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar').unlink()
+        (framework / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar').unlink()
     elif damage == 'master':
         (framework / 'java/master/target/classes/org/flexlb/MasterNode.class').unlink()
     else:
@@ -93,7 +92,7 @@ def test_cli_generates_a_readable_launch_file_and_refuses_overwrite(case, artifa
     assert error.value.code == 2 and output.read_text() == content
 
 
-def test_vision_uses_the_same_mixed_host_without_a_backend_tag(case, artifacts):
+def test_vision_uses_the_same_engine_entry_without_a_backend_tag(case, artifacts):
     framework, java, prometheus = artifacts
     environment = dict(case.environment)
     environment['vit'] = {'deployment': {'replicas': 1}, 'config': {'mock.compute': {'forward': {'expression': '1'}}}}

@@ -84,7 +84,7 @@ def test_cancelled_spawn_remains_owned_until_final_cleanup(tmp_path, monkeypatch
 
 def test_cleanup_continues_in_order_after_domain_failures(tmp_path):
     async def exercise():
-        runtime = RunEnvironment(SimpleNamespace(environment={}), {'components': {}, 'engine_mode': 'shared'},
+        runtime = RunEnvironment(SimpleNamespace(environment={}), {'components': {}},
             SimpleNamespace(directory=tmp_path, emit=lambda **event: None))
         order = []
         def operation(name, *, raises=False, errors=None):
@@ -94,7 +94,6 @@ def test_cleanup_continues_in_order_after_domain_failures(tmp_path):
                     raise ExecutionError(name + ' failed')
                 return errors
             return run
-        runtime.engines.stop_monitor = operation('health')
         runtime.clients.stop_playback = operation('drain', raises=True)
         runtime.clients.close = operation('clients', errors=['client cleanup failed'])
         runtime.masters.close = operation('masters')
@@ -108,7 +107,7 @@ def test_cleanup_continues_in_order_after_domain_failures(tmp_path):
         runtime.monitoring = SimpleNamespace(final_scrape=operation('scrape', raises=True),
             close=operation('prometheus'), finish=lambda errors: finished.extend(errors))
         errors = await runtime.close()
-        assert order == ['health', 'drain', 'scrape', 'clients', 'masters', 'engines', 'election', 'prometheus', 'fallback']
+        assert order == ['drain', 'scrape', 'clients', 'masters', 'engines', 'election', 'prometheus', 'fallback']
         assert len(errors) == 3 and finished == errors
         assert 'drain failed' in errors[0] and 'scrape failed' in errors[1]
         assert errors[2] == 'client cleanup failed'
@@ -128,7 +127,7 @@ def test_exit_before_cleanup_is_not_reclassified_as_normal_stop(tmp_path):
 
 def test_health_failure_at_teardown_still_fails_without_a_process_exit(tmp_path):
     async def exercise():
-        runtime = RunEnvironment(SimpleNamespace(environment={}), {'components': {}, 'engine_mode': 'shared'},
+        runtime = RunEnvironment(SimpleNamespace(environment={}), {'components': {}},
             SimpleNamespace(directory=tmp_path, emit=lambda **event: None))
         runtime.supervisor.fail('Engine membership differs')
         assert await runtime.close() == ['Engine membership differs']

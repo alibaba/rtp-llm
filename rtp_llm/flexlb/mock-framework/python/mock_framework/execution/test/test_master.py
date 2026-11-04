@@ -1,12 +1,13 @@
 from mock_framework.execution.test.helpers import FRAMEWORK
-from mock_framework.execution.step.master_get import MasterGet, MasterSelection
-from mock_framework.execution.step.master_engine_get import MasterEngineGet, EngineSelection
+from mock_framework.execution.test.helpers.zookeeper import command as zookeeper_command
 import json
 from pathlib import Path
 
 import pytest
 
 from mock_framework.execution.roles.master import master_environment
+from mock_framework.execution.step.master_get import MasterGet, MasterSelection
+from mock_framework.execution.step.master_engine_get import MasterEngineGet, EngineSelection
 from mock_framework.execution import ExecutionError
 
 
@@ -81,7 +82,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     master_classpath = os.pathsep.join([str(root / 'java/master/target/test-classes'), str(root / 'java/master/target/classes'),
         (root / 'java/master/target/dependencies.txt').read_text().strip()])
     client_classpath = os.pathsep.join([str(root / 'java/client/target/test-classes'), str(root / 'java/client/target/classes'),
-        str(root / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
+        str(root / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
     native = {'scheduler': {'type': 'QUEUE' if batched else 'DIRECT'},
               'dispatcher': {'type': 'BATCH' if batched else 'NON_BATCH'},
               'requestLifecycle': {'request': {'timeoutMs': 60000}},
@@ -99,18 +100,13 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     engine_config = {'mock.scheduler.mode': 'group' if batched else 'fifo', 'seq_size_per_block': 16, 'test_block_num': 9, 'reserve_block_ratio': 0,
                      'max_seq_len': 4096, 'mock.compute.forward.expression': '1 + batchSize'}
     if vision:
-        model = tmp_path / 'model'
-        model.mkdir()
-        (model / 'config.json').write_text(json.dumps({'image_token_id': 1000,
-            'text_config': {'hidden_size': 4}, 'vision_config': {'patch_size': 14,
-            'downsample_ratio': 3, 'min_pixels': 0, 'max_image_tokens': 1024}}))
-        engine_config['checkpoint_path'] = str(model)
-        engine_config.update(reuse_cache=True, enable_memory_cache=False)
+        engine_config['image_token_id'] = 1000
+        engine_config["reuse_cache"] = True
         route = json.loads(master_config['MODEL_SERVICE_CONFIG'])
         route['role_endpoints'][0]['vit_endpoint'] = {'address': 'v-domain', 'protocol': 'grpc'}
         master_config['MODEL_SERVICE_CONFIG'] = json.dumps(route)
     if kvcm:
-        engine_config.update(reuse_cache=True, enable_memory_cache=False,
+        engine_config.update(reuse_cache=True,
             kv_cache_event_publisher_type='kvcm', kvcm_server_address=f"127.0.0.1:{meta['rpc_port']}",
             kv_cache_event_instance_id='mock_16', kv_cache_event_instance_group='test')
     document = {'id': 'production_master_probe', 'describe': '真实Master与新P/D及Client接线验证',
@@ -123,7 +119,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
             {'id': 'leader', 'describe': 'ZK选举产生唯一Leader', 'interface': 'master/get', 'args': {'is_leader': True}, 'expect': {'count': 1},
              'wait_after': '20s' if replicas == 2 else '12s'}]}]}
     if vision:
-        document['environment']['vit'] = {'config': {'checkpoint_path': str(model),
+        document['environment']['vit'] = {'config': {'patch_size': 14, 'downsample_ratio': 3, 'min_pixels': 0, 'max_image_tokens': 1024, 'hidden_size': 4,
             'mock.vit.skip.download': True, 'mock.compute.forward.expression': '1 + batchSize'}}
     if history_overflow:
         document['phases'][0]['steps'].append({'id': 'still_healthy', 'describe': '多轮同步后Engine仍可发现',
@@ -141,10 +137,9 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     registry = Registry.standard(); case = compile_case(case_file, registry)
     components = {'master': {'command': [str(java), '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.mock.master.LateMasterNode' if history_overflow else 'org.flexlb.MasterNode'], 'startup_timeout': '60s'}}
     for role in (('prefill', 'decode', 'vit') if vision else ('prefill', 'decode')):
-        components[role] = {'command': [str(java), '-cp', str(root / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'), 'org.flexlb.mock.host.EngineHost']}
+        components[role] = {'command': [str(java), '-cp', str(root / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'), 'org.flexlb.mock.engine.EngineMain']}
     launch = prepare_launch({'components': components,
-        'zookeeper': {'command': [str(java), '-XX:ActiveProcessorCount=2', '-cp', master_classpath,
-                                  'org.flexlb.mock.master.ZookeeperNode']}}, case, tmp_path)
+        'zookeeper': {'command': zookeeper_command(root, java)}}, case, tmp_path)
     output = tmp_path / 'result'
 
     async def exercise():
@@ -201,7 +196,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     if history_overflow:
         before = json.loads((output / 'components/master-0/before-master.json').read_text())
         assert before == {'finished_requests': 1025, 'finished_version': 1025}
-        gap = (output / 'hosts/engine-shared/stderr.log').read_text()
+        gap = (output / 'components/prefill-0/stderr.log').read_text()
         assert 'finished_history_gap requested_version=-1 dropped_through=1 latest_version=1025 retained=1024' in gap
     effective = json.loads((output / 'components/master-0/effective-config.json').read_text())
     assert effective['FLEXLB_CONFIG'] == master_config['FLEXLB_CONFIG']
@@ -209,7 +204,13 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     assert native_env['HIPPO_ROLE'] == effective['HIPPO_ROLE']
     events = [json.loads(row) for row in (output / 'events.jsonl').read_text().splitlines()]
     started = [event for event in events if event['event'] == 'process_started']
-    assert [event['node'] for event in started] == ['zookeeper', 'engine-shared'] + [f'master-{i}' for i in range(replicas)]
+    expected_start_order = ['zookeeper', 'prefill-0', 'decode-0']
+    if vision:
+        expected_start_order.append('vit-0')
+    expected_start_order.extend(f'master-{i}' for i in range(replicas))
+    if dynamic:
+        expected_start_order.append('prefill-1')
+    assert [event['node'] for event in started] == expected_start_order
     election = effective['FLEXLB_SYNC_CONSISTENCY_CONFIG']
     assert election['needConsistency'] is True
     gates = [json.loads(row) for row in (output / 'gates.jsonl').read_text().splitlines()]

@@ -51,9 +51,9 @@ RTP 请求公共支持范围集中在 `RequestValidation`，本地单 token、P/
 
 ### 执行和 P/D 交接
 
-- P 的 `GenerateStreamCall(max_new_tokens=1)` 由 PrefillAdmission 接入，不启用 D。请求经过 FIFO→选中时分配 KV→共享 Compute→真实等待→编码输出→释放；排队不占 KV。
-- 多 token P/D 要求 `can_use_pd_separation=true` 且恰好一个有效 DECODE 地址。PrefillAdmission 先向 D ALLOCATE，确认后启动 P，随后 LOAD、发 P 首 token、等待 LOAD 确认、发 GENERATE 并转发 D 输出。
-- D 的 DecodeAdmission 处理原生协议，RtpScheduler 管理资源和队列，只有 GENERATE 后进入计算队列；每个 Engine 一轮一个 Forward，按配置合并多个请求。初始 KV 分配遇临时不足等待容量变化；生成期间每轮先增长 KV，失败则终止，成功后才执行与提交输出。
+- P 的 `GenerateStreamCall(max_new_tokens=1)` 由 PrefillRpcServer 接入，不启用 D。请求经过 FIFO→选中时分配 KV→共享 Compute→真实等待→编码输出→释放；排队不占 KV。
+- 多 token P/D 要求 `can_use_pd_separation=true` 且恰好一个有效 DECODE 地址。PrefillRpcServer 先向 D ALLOCATE，确认后启动 P，随后 LOAD、发 P 首 token、等待 LOAD 确认、发 GENERATE 并转发 D 输出。
+- D 的 DecodeRpcServer 处理原生协议，RtpScheduler 管理资源和队列，只有 GENERATE 后进入计算队列；每个 Engine 一轮一个 Forward，按配置合并多个请求。初始 KV 分配遇临时不足等待容量变化；生成期间每轮先增长 KV，失败则终止，成功后才执行与提交输出。
 
 PD 只执行调度器之间的交接，不模拟 KV 数据传输。P/D 只使用原生 RemoteGenerate TCP 连接，不注册自定义回调服务，也不跨节点比对 prompt、块布局或 cache keys。P 必须等自身 Scheduler 报告首轮 Forward 完成后才发送 LOAD；D 对已分配的请求执行零耗时异步传输事件，完成后回复 LOAD ACK。P 收到 ACK 才释放源 KV，然后发送 GENERATE 或 PREFILL_COMPLETE，D Scheduler 决定开始计算或结束。两端块大小各自独立，KV 的申请、持有、释放及 finished 记录仍归各自 Scheduler 管理。
 
@@ -73,31 +73,15 @@ WorkerStatus 报真实等待/执行任务、finished/version，available_concurr
 
 ## Block 容量与 RTP 缓存
 
-共享 `BlockPool` 只管理物理容量和引用。每个实例/存储层各自建池，每个所有者持有独立 Reference，close 幂等，不能释放其他所有者份额或混用池。REQUEST/CACHE/LOAD/STORE/EVICTION 分别计数；只有 CACHE 引用的块算可回收容量，free 和 available 分开，分配失败不部分扣账，释放唤醒等待者。
+每个 P/D Engine 有一个本地逻辑池。容量为 `test_block_num - 1`，首次分配仍受 `reserve_block_ratio` 约束。Scheduler 同步申请容量并取得完整 Block 前缀的复用量。等待中的请求可以在容量释放后重试，运行中的 Decode 增长失败按容量错误结束。
 
-`KvCache` 和 `BlockTree` 目前固定实现 RTP Full-KV 语义，文件保留在 `java/shared/cache`，不为未知的 vLLM 行为增加策略层或适配接口。每个 Engine 各自拥有 Device/Host 池、前缀索引和请求租约，同 JVM 不共享缓存内容。树内 `lru/lfu/fifo` 只改变合法候选的排序，Device 和 Host 可以分别配置。一次 match 用同一访问序号刷新整条命中路径，release/重叠 publish 不刷新；每次成功进入新存储层都会刷新该层的 FIFO 入层顺序。
-
-Scheduler 统一调用 `prepare` 取得 `CacheLoad`；其本地阶段使用 `acquire`，在同一锁内完成前缀匹配、取得使用引用、申请缺少的 Device 容量和本地读取。状态/前缀快照只读，不保证后续请求仍然命中。本地 Host/Device 读取和转存瞬间完成，不建立本地 loading 队列、异步任务或带宽模型；PD 网络交接仍按原有生命周期执行。
-
-对齐当前 real BlockTree：开启 Device cache 时，Host 读取成功后把已有有效前缀注册到 Device，再移除 Host 副本；关闭 Device cache 时，Host 源保留，Device 工作副本不注册。申请失败不能消费 Host。驱逐候选按所在层的直接子节点判断叶子，不要求整棵树的全局叶子；Full-KV 前缀被删除时，所有失效后缀跨层清理。Device 水位触发时向 Host 转存；Host 分配失败时保留 Device 源，不为了转存强制删除 Host 缓存，也不退化成丢弃 Device。未配置 Host 时水位回收可以直接删除 Device 索引。紧急 Device 分配允许直接回收 Device 缓存及失效后缀，不额外删除无关 Host 根。层间移动保持逻辑 key 和索引版本，真正插入/删除才改变 key 版本。Host 不计入 WorkerStatus/CacheStatus 的 Device 执行容量。
-
-容量使用原生 `test_block_num` 和 `reserve_block_ratio`。Device 可用块数=test_block_num−1；Host 使用 `mock.cache.memory.blocks` 个块。reserve 默认 5%，约束首次分配，运行中增长可以使用预留。需求超过单实例上限为永久不足，暂时被其他请求占用为可重试；增长一次补齐差额，失败不留下半次新增分配。容量不足后的等待/结束决定仍在 Scheduler，运行中的 RTP Decode 增长失败会结束该请求，不实现主动换出。显式投机的首次 D 分配也包含 reserveStep，在 PD 交接前准备目标容量。
-
-容量失败处理沿用上述边界：首次 `acquire` 返回 RETRYABLE 时，P 留在 waiting、D 留在容量等待阶段；同一分配版本不重复申请，资源释放或新前缀变为可复用后唤醒重试，并保留请求原 deadline。PERMANENT 立即结束单请求，返回容量错误 602；等待中超时返回 603，取消和超时后不再分配。运行中 Decode 的 `ensureCapacity` 无论暂时还是永久不足，都结束该请求，等待其 Compute/PD 使用归零后释放引用，其他请求继续；释放的容量可供等待请求重新准入。不增加抢占、请求换出或重新排队重算接口。
-
-Host 转存目标不足由 KV 内部保留源，不直接上升为请求失败。成功终态的 `publish` 抛异常时，RequestState 将请求改为内部错误，并在 finally 中关闭租约；失败/取消不发布。`acquire/ensureCapacity` 的预期容量失败必须以 Failure 返回，未预期的内部异常按 Engine 故障停止处理，不能伪装成容量不足继续运行。
-
-Scheduler 与 KV 管理器按 Token 交互：`prepare(requiredTokens, keys, deadline, remoteLookup)` 首次准备资源，`Lease.ensureCapacity(requiredTokens)` 保证本轮容量，`CacheLoad.Result.reusedTokens` 返回已就绪的总复用 Token 数，`Lease.reusedTokens()` 仍描述初次本地匹配。容量的 Block 换算和向上取整封装在 KV 管理器中；已有容量足够或需求变小时不缩容、不重复申请，超过容量上限返回永久不足。容量配置、物理池和状态快照仍使用原生 Block 口径。
-
-不再每轮调用 markValid，也不在 Lease 中重复保存计算进度。Scheduler 在成功终态且所有 Compute/PD 使用结束后调用 `publish(keys, validTokens)`，一次声明有效范围并注册完整有效块；P 仅提交 prompt，D 同时提交已计算的输出前缀，排除最后一个未计算 KV 的采样 token；KV 管理器校验有效范围未超过已分配容量、key 数未超过完整有效块数。`publish` 不关闭租约，`close` 只释放请求引用。投机拒绝区域、预留空间、失败/取消请求不发布，生成内容与输入使用同一 CacheSequence 算法建立前缀索引；当前输出模型重复原生 GENERATE 给出的首 token。多个请求可共享已注册的不可变 Device 块。缓存索引引用与请求物理引用独立：索引可以在请求运行中注销或迁往 Host，请求仍保留原 Device 块，最后一个引用释放才归还物理容量。acquire/publish 仅在同步事务内临时保护完整前缀。状态中的 referenced 只统计仍同时被索引和请求引用的 Device 物理块；注销或转存后仍被请求持有的块计入 held。Host-only 的私有 Device 副本与 Host 记作两层真实占用。
-
-Device/Host 水位按物理占用比例工作：达到 high 后，尽量回收到 low，未达到 low 时保留触发状态。加载、发布、增长和请求释放完成后同步检查，顺序为 Host、Device，不建后台扫描线程；运行中请求的引用可能使物理占用暂时无法下降。`enable_memory_cache` 要求显式正数 `mock.cache.memory.blocks`。Disk/Remote 及 Host 传输超时参数直接忽略，本地瞬间完成不使用这些参数。Host-only 写回暂保留可容纳的部分前缀，尚未对齐 real 的整批目标预分配与整批失败回滚；Device+Host 主路径不依赖此简化。远端准备流程与逻辑读写接口已实现，具体远端存储适配和真实 payload 未实现；Disk 仍不实现。明确不建模按网络层分池或 Hybrid/SWA/Linear 多资源 KV 布局，所有层统一折算为一套逻辑 KV 容量。
+容量不足时，按 LRU 淘汰可回收的前缀树叶子。请求持有的块不会被淘汰。成功终态只发布已计算的完整块，失败或取消只释放占用。Master CacheStatus 与 KVCM Reporter 使用同一份有效块状态。P/D 网络交接仍走原生协议。
 
 ## 通用 V 与输入准备
 
-Engine 是运行实例的概念，prefill/decode/vit 是 Engine 的角色；RTP/vLLM 是 Engine 后端，不能与 P/D/V 混为一层。当前配置中的 `component.engine` 字段选择 P/D 后端；V 统一实现于 `java/shared/vit`，不需要选择后端，也不与 `java/backend/rtp` 并列为后端。以后 P/D 使用哪个后端都复用这一份 V。V 的媒体协议与 TCP 客户端仍在 `java/shared/multimodal`，Client/P 只依赖该协议模块。
+Engine 是运行实例的概念，prefill/decode/vit 是 Engine 的角色；RTP/vLLM 是 Engine 后端，不能与 P/D/V 混为一层。当前配置中的 `component.engine` 字段选择 P/D 后端；V 统一实现于 `java/engine 的 vit 包`，不需要选择后端，也不与 `java/engine 的 RTP 实现` 并列为后端。以后 P/D 使用哪个后端都复用这一份 V。V 的媒体协议与 TCP 客户端仍在 `java/protocol`，Client/P 只依赖该协议模块。
 
-P/D/V 都实现 `EngineInstance` 生命周期句柄，各自拥有端口、队列、缓存和产物目录；V 拥有自己的调度器。本地同一个 `EngineHost` 平等管理三种 Engine；Whale 每 Pod 直接启动一个 Engine，无需 EngineHost。统一产物是 `java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar`，同时包含通用单实例入口和本地宿主入口，不为 V 单独打包。Master 始终独立 JVM。
+P/D/V 各实例拥有独立 JVM、端口、队列、缓存和产物目录。统一产物为 `java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar`。
 
 原生 `RemoteMultimodalEmbedding` 的一个请求可含多张图。缓存未命中的每份唯一媒体进入同一条异步准备链：准入 → 执行器排队 → 获取尺寸 → GPU 就绪队列 → Forward → 结果发布。RPC 等待线程、准备执行器和 Forward 执行线程分开；HTTP 慢读不会占用 Forward 线程。缓存命中直接返回，在途重复请求共用同一生产者和额度。`vit_concurrency` 限制准备执行器工作线程数，线程持续持有到该媒体计算完成；`vit_max_queue_size` 是额外等待额度，已接纳的唯一媒体总数不超过两者之和，GPU 就绪队列也按这个总预算派生。满时返回 RESOURCE_EXHAUSTED。任务额度由 VitPreparation 持有，直到共享结果发布完成后才释放；Scheduler 的完成通知只表示计算阶段结束。缓存条目的成功/失败发布采用身份校验，旧任务和重复完成不会覆盖新条目。
 
@@ -110,7 +94,11 @@ vit:
   deployment:
     replicas: 1
   config:
-    checkpoint_path: ./model
+    patch_size: 14
+    downsample_ratio: 3
+    hidden_size: 4096
+    min_pixels: 295936
+    max_image_tokens: 1024
     mock.vit.skip.download: true  # 本地假 URL 回放；Whale 使用默认 false
     gpu_max_batch_size: 8
     gpu_batch_wait_ms: 10
@@ -122,28 +110,13 @@ vit:
     mock.compute.forward.expression: "2 + 0.00001 * totalImagePixels"
 ```
 
-模型元数据沿用 real 的入口：Case 的 `checkpoint_path` 指向模型目录（相对路径以 case.yaml 所在目录为基准），Whale 使用 `CHECKPOINT_PATH`。仅读取该目录的 config.json，不加载权重；V 必须提供，纯文本 P/D 和 Client 可省略。多模态运行时 Client、P/D、V 指向同一份模型配置。文件保持 real 结构，例如：
-
-```json
-{
-  "image_token_id": 1000,
-  "vision_config": {
-    "patch_size": 14,
-    "downsample_ratio": 3,
-    "min_pixels": 295936,
-    "max_image_tokens": 1024
-  },
-  "text_config": {"hidden_size": 4096}
-}
-```
-
-image_token_id 必须使用所选模型的实际值，示例值不代表 DSV4.1 的固定标记。text_config.hidden_size 控制视觉结果的逻辑字节预算。无关模型字段忽略；所需几何字段缺失或非法直接报错。
+Mock 启动不读取或挂载模型目录。ViT 配置显式提供上例中的五个几何参数。P/D 的 `max_seq_len` 默认 8192，需对齐目标模型时显式传入有效长度。多模态的 P 和 Java Client 使用相同的 `image_token_id`。参与缓存匹配的请求发起方和 Engine 使用相同的 Block 大小和有符号 int64 `cache_key_hash_seed`，本地文本用例可使用默认 seed 0。
 
 `mock.vit.skip.download` 默认 false，Whale ENV 对应 `MOCK_VIT_SKIP_DOWNLOAD`。默认模式 GET 真实 HTTP(S) URL，仅读取图片头尺寸，不生成 RGB tensor；请求中的预处理 width/height 不冒充原图尺寸。支持 JDK ImageIO 图片格式（含 PNG/JPEG/GIF/BMP）及 WebP 头尺寸，其他格式明确拒绝。使用 real 的 `download_headers`（JSON 字符串）、`mm_image_max_file_size_kb` 和 `mm_timeout_ms`；文件大小取 mm_image_max_file_size_kb（正数时）和 DSV4.1 原生 `deepseek_v41_processor.py::load_image_source` 的 10 MiB 上限中较小值（`mm_image_max_file_size_kb <= 0` 仅关闭通用限制）；下载总期限最多 60 秒，并受任务剩余期限约束，瞬态网络错误及 HTTP 408/429/500/502/503/504 最多尝试三次，重试等待 200/400ms 且不超出剩余期限。队列等待同样计入任务期限。
 
-本地假 URL 设置 `mock.vit.skip.download=true`，从回放宽高获取尺寸；仍走同一执行器、准入、队列和完成流程，不模拟下载耗时，也不伪造下载指标。真实 URL 回放可省略宽高。几何继续使用 V4.1 `plan_image_grid`/`num_image_tokens`，参数来自模型 config.json 的 vision_config；视频、音频和 tensor 输入未实现。
+本地假 URL 设置 `mock.vit.skip.download=true`，从回放宽高获取尺寸；仍走同一执行器、准入、队列和完成流程，不模拟下载耗时，也不伪造下载指标。真实 URL 回放可省略宽高。几何继续使用 V4.1 `plan_image_grid`/`num_image_tokens`，参数来自 ViT 的显式配置；视频、音频和 tensor 输入未实现。
 
-回放数据保留原始 token、URL/尺寸与单个占位位置 Image.offset；已删除 Image.length，旧图片数据需要重新生成。Client 与 P/D 从同一模型目录读取 image_token_id，LoadClient 将回放中的图片位置编码为该值。直接构造请求的测试工具在不提供模型目录时仍使用 -200 约定；部署真实模型输入时必须提供对应目录。标记出现次数必须与媒体数一致。P 的内部 Prepared 保存规范化语义 token 和 cache-only spans，缓存 hash 不再替换语义 token。Native GenerateInput 不携带布局；仅 P→D 的 GenerateRequest.multimodal_cache_spans 携带缓存身份。P/D 按原生逐块滚动算法将语义 token 与重叠 span 身份共同混入 key；同一媒体身份必须在两端得到相同 key。当前 cache-key seed 固定为 0，不宣称不同 checkpoint 的命名空间已自动推导。
+回放数据保留原始 token、URL/尺寸与单个占位位置 Image.offset；已删除 Image.length，旧图片数据需要重新生成。Client 与 P/D 显式配置相同的 image_token_id，LoadClient 将回放中的图片位置编码为该值。直接构造请求的测试工具在不设置图片标记时仍使用 -200 约定；对接真实 Frontend 时使用其实际标记。标记出现次数必须与媒体数一致。P 的内部 Prepared 保存规范化语义 token 和 cache-only spans，缓存 hash 不再替换语义 token。Native GenerateInput 不携带布局；仅 P→D 的 GenerateRequest.multimodal_cache_spans 携带缓存身份。P/D 按原生逐块滚动算法将语义 token 与重叠 span 身份共同混入 key；同一媒体身份必须在两端得到相同 key。参与匹配的组件应显式对齐 cache-key seed。
 
 V 以 miss 的图片组成 ForwardBatch，复用公式和 SimulatedCompute。计算完成后登记缓存、通知等待者；Compute 不直接改变缓存。命中和在途合并不重复计入 forward。提供 real 名称的 py_rtp_vit_embedding_forward_rt、batch_size、cache 指标及 mock_vit_theoretical_forward_rt；元数据模拟不能代替真实模型计时校准。
 
@@ -151,17 +124,17 @@ Embedding Device/Host 按逻辑 rows*hidden_size*BF16(2 bytes) 计费，各自 L
 
 Client 按 Master 的 V-only route 选 V，读取元数据、计算路由长度和缓存 key，再带 selected_vit 与原始输入请求完整 P/D 路由；Master 切换使 pin 失效时重新取一次 V 路由。P 在输入准备完成后才把规范化 token 序列交给 KV/Scheduler，并用同一输入准备 D ALLOCATE 和 PD 交接。P 的输入准备发生在调度锁外，受原请求 deadline/取消约束；这段准备暂不计入 P Scheduler 的队列快照，但计入 Client 端到端耗时。D 接收已准备输入，不重复编码。
 
-P 的本地单 token、P/D 单请求和 Master batch 都由 PrefillAdmission 管理输入准备，RpcService 只负责路由。提交 Scheduler 的单个与批量入口只接受已准备输入，不在调度器里调用 V。接入层直接用 Session 登记 PENDING，并负责过滤已取消的 Batch 成员、整理逐项结果；提交成功后在同一执行锁内交给 Scheduler；准备失败同样发布 finished 增量，但不增加计算请求和队列指标。开始时间和 deadline 在接入时确定，显式组不会在准备结束后重置预算。
+P 的本地单 token、P/D 单请求和 Master batch 都由 PrefillRpcServer 管理输入准备，RtpRpcService 只负责路由。提交 Scheduler 的单个与批量入口只接受已准备输入，不在调度器里调用 V。接入层直接用 Session 登记 PENDING，并负责过滤已取消的 Batch 成员、整理逐项结果；提交成功后在同一执行锁内交给 Scheduler；准备失败同样发布 finished 增量，但不增加计算请求和队列指标。开始时间和 deadline 在接入时确定，显式组不会在准备结束后重置预算。
 
 VP 同 JVM 和跨进程都走 TCP gRPC，只传 shape/dtype、split_size 和逐行 INT32 hash，不生成 embedding payload，也不伪造 RDMA lease。Mock P 校验形状、长度和展开 span 后使用；此响应不能交给真实 tensor 解码器，VP 网络带宽和 GPU 内存复制不在模拟范围内。
 
-P/D/V 的单实例入口统一为 `java -jar java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar`。本地 Host 使用每实例配置文件，多个实例共享 JVM 时仍保留各自配置；不从进程 ENV 覆盖实例业务参数。
+P/D/V 的入口统一为 `java -jar java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar`。本地实例读取各自配置文件。
 
 独立 JVM 可选择两种输入方式：设置 `MOCK_CONFIG_FILE` 时，只读取文件中的 id/component_role/component.config；未设置时，只读取业务 ENV，身份由 `ROLE_TYPE=PREFILL|DECODE|VIT` 提供；可用 `MOCK_NODE_ID` 显式指定，否则使用 role 与发布地址生成诊断身份。文件和 ENV 不叠加，没有第二套默认值。P/D 文件还需提供 `component.engine: rtp`。
 
 独立入口使用 real 的 `START_PORT`（默认 8088），HTTP 为 START_PORT，gRPC 为 START_PORT+1。`MOCK_BIND_HOST`、`MOCK_ADVERTISE_HOST` 只控制进程监听和发布地址；监听通配地址且未显式指定发布地址时，通过主机名解析本机 IP。镜像默认监听 0.0.0.0，本地 Host 默认监听 127.0.0.1。
 
-EngineMain 不要求输出目录或 ready 文件，也不写 effective-config/endpoints。启动时输出一条包含生效配置、实际端点的 JSON 日志；每秒检查现有 Engine 健康状态，内部不可恢复故障使进程非零退出。HTTP `/health` 与原生 CheckHealth 使用同一条不采集指标的检查链，健康为 200/status=ok，故障为 503。TERM 触发关闭与资源释放。实验文件只由本地 EngineHost 发布，并继续保留目录防覆盖约束。
+EngineMain 在本地发布配置、端点和 ready，Whale 模式仅记录启动日志。HTTP 健康检查与原生 CheckHealth 使用相同检查链。内部执行故障使进程非零退出，TERM 触发资源释放。
 
 镜像和 CI 使用方法见 [Whale 镜像与启动](whale-engine.md)。无论是否共 JVM，VP/PD 都走 TCP、只传元数据。
 
@@ -229,15 +202,12 @@ Mock 专用参数使用小写点号名称，例如 `mock.compute.forward.express
 | concurrency_limit | 32，正整数 | P/D 每轮请求数上限；real 的 ConcurrencyConfig 输入经 engine_config.py 写入内部 max_generate_batch_size。 |
 | reserve_block_ratio | 5，0–100 | 首次分配预留百分比。 |
 | reuse_cache / enable_device_cache | false / true | 前缀复用和 Device 索引。 |
-| enable_memory_cache | false | Host 缓存开关；开启时须同时给出正数 mock.cache.memory.blocks。 |
 | tp_size / dp_size | 1 / 1，正整数 | real 并行配置；tp_size 用于原生状态/接入元数据，二者分别绑定公式 tpSize/dpSize，不模拟 rank 间执行。 |
 | cp_rotate_method | DISABLED | 沿用 real PrefillCPConfig；ALL_GATHER、ALL_GATHER_WITH_OVERLAP、ALLTOALL 开启通用 CP，cpSize=tp_size、cpEnabled=1，否则为 1/0。PREFILL_CP 是独立策略，当前未模拟，prefill_cp_size 等专用参数忽略。 |
 | max_batch_tokens_size | 0 | P 的 batch token/矩形准入；0 仍可执行 singleton。 |
 | max_batch_tokens_without_cache / max_inited_kv_cache_streams | 0 / 0 | 仅 P 生效；0 不启用对应限制。 |
-| device_eviction_policy / memory_eviction_policy | lru | real 内部配置属性，支持 lru/lfu/fifo；real server_args 没有对应公开 ENV，仅文件输入。 |
+| device_eviction_policy | lru | 仅支持 LRU。 |
 | disable_decode_first_malloc_device_reuse | false | real 内部 CacheConfig 属性，文件输入；不杜撰公开 ENV 名。 |
-| block_tree_device_evict_low/high_watermark_ratio | 0.82 / 0.90 | Device 水位。 |
-| block_tree_memory_evict_low/high_watermark_ratio | 0.90 / 0.94 | Host 水位。 |
 | gpu_max_batch_size / gpu_batch_wait_ms | 1 / 10 ms | 仅 V；batch=1 为逐请求执行且等待为 0；>1 同时限制 Forward 工作块数与媒体数，较大图片组分轮执行。 |
 | vit_concurrency / vit_max_queue_size | 64 / 64 | 异步工作线程上限 / 额外等待额度；总准入和 GPU 就绪队列容量为两者之和。 |
 | mm_cache_gpu_max_bytes / mm_cache_cpu_max_bytes | 各 2 GiB | V embedding 缓存逻辑预算，单位 byte。 |
@@ -250,7 +220,6 @@ real 默认值和映射以 `rtp_llm/server/server_args`、`rtp_llm/config/engine
 | 参数 | 含义 |
 | --- | --- |
 | mock.scheduler.mode | P 调度方式，默认 `fifo` 按单请求入队、自主组 Forward batch，拒绝 `EnqueueBatch`/`EnqueueGroup`；`group` 显式启用组语义。ENV 为 `MOCK_SCHEDULER_MODE`；D 始终使用普通调度。 |
-| mock.cache.memory.blocks | P/D Host 逻辑块预算，默认 0；不是 real 的 memory_cache_size_mb。本模型不加载层/head/dtype 来计算每块字节数，所以忽略 memory_cache_size_mb，不能把 MB 当块数。 |
 | mock.vit.skip.download | 默认 false；true 时只跳过实际图片读取，使用输入宽高，其余异步调度不变。 |
 | mock.compute.forward.expression | 必填，Forward 公式，结果单位 ms。 |
 | mock.compute.forward.noise.stddev.ms / stddev.ratio / max.deviation.ms / seed | 有界噪声，详见 Compute；数值后缀均相对 mock.compute.forward.noise。 |
@@ -270,7 +239,7 @@ SEQ_SIZE_PER_BLOCK=128 MAX_SEQ_LEN=32768 TEST_BLOCK_NUM=1025 \
 CONCURRENCY_LIMIT=32 MOCK_COMPUTE_FORWARD_EXPRESSION='19.5 + 0.175 * batchSize' \
 MOCK_COMPUTE_DECODE_TOKENS_PER_STEP=2.6 \
 START_PORT=8088 \
-java -jar java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar
+java -jar java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar
 ```
 
 ## DSV4.1 Engine / KVCM 契约
@@ -281,15 +250,15 @@ V 仍按 URL/预处理 key 缓存和合并在途请求，命中时不重新下�
 
 P 在 GENERATE 阶段发送 `prefill_kv_handoff.computed_kv_end`，为已计算 prompt 的排他边界，不包含首个采样 token。D 校验请求身份、已 LOAD 阶段和边界；缺省字段保留原生旧调用兼容，显式错误断言拒绝。未实现的 logprobs 请求明确返回 UNIMPLEMENTED，不伪造概率输出。
 
-共享缓存元信息由 `shared/cache/CacheMetadata` 描述，来源始终是 KvCache/BlockTree 已提交的有效块，不包含仅分配但尚未计算的工作块。快照记录逻辑 key、HBM/Host 驻留和版本；插入、介质迁移、淘汰与清空推进同一版本，并在缓存锁内投递短变更通知。Master 的原生 GetCacheStatus 仍返回逻辑可复用集合与容量，版本未改变时省略 key；Host 迁移不会误删除仍可复用的逻辑 key。
+缓存元信息由 `engine/cache/CacheMetadata` 描述，来自 KvCache/BlockTree 已提交的本地有效块。提交、淘汰和清空推进版本。Master 的原生 GetCacheStatus 返回可复用集合与容量，版本未改变时省略 key。
 
-`shared/cache/KvcmReporter` 消费同一来源，按 real Meta HTTP `/api/registerInstance`、`/api/reportEvent` 编码注册、NODE_REGISTER、HEARTBEAT、BLOCK_SNAPSHOT、BLOCK_ADD、BLOCK_DELETE 和 HOST_DOWN。当前 Full-KV 只发布实际 HBM 驻留；迁移到 Host 发送 HBM 删除，恢复到 HBM 发送新增，Host-only 缓存不会冒充 HBM。注册模型、布局和 spec 由 RTP 装配方明确传入；Reporter 和共享 KvcmDiscovery 不依赖 RtpConfig 或 Scheduler；Reporter 统一拥有发现和传输资源的关闭责任。旧 backend/rtp/KvcmPublisher 已删除，没有双实现或兼容入口。
+`engine/cache/KvcmReporter` 使用同一来源，按 real Meta HTTP `/api/registerInstance`、`/api/reportEvent` 编码注册、NODE_REGISTER、HEARTBEAT、BLOCK_SNAPSHOT、BLOCK_ADD、BLOCK_DELETE 和 HOST_DOWN。当前 Full-KV 仅发布本地 HBM 有效块。RTP 装配方提供注册模型、布局和 spec，Reporter 管理发现与传输资源。
 
 变更使用有界内存队列（100000 条），每次最多取 1000 条，按同 key 最后一次转换合并，避免 Meta 先处理 ADD 再处理 DELETE 导致结果逆序。注册和增量由同一个执行者每 20ms 处理，快照与心跳分别使用独立执行者，慢快照不阻塞 ADD/DELETE 或心跳。它们均不占用 Scheduler 线程。
 
-快照在缓存锁内一次捕获 HBM long[] 与版本，在锁外流式 JSON 编码，不构建逐 key JSON 对象树；仍保留完整请求体，并非零拷贝。对齐原生 Publisher：快照失败（包括限流）丢弃本轮，不重放、不暂停增量；下一次周期或服务端恢复请求捕获新快照。重新注册后旧快照回包不影响新注册，增量不按快照 ACK 过滤。注册和增量失败按原生默认 500ms→16s 指数退避；不使用 retry_after_ms 暂停整个数据通道。控制请求超时 1.5 秒，快照上传超时 30 秒。KVCM 响应先汇总 header 与全部 item 的恢复信号，再判断是否失败，前面的普通错误不会遮蔽后面的注册失效。心跳连续 snapshot_required=true 只触发一次，false 或重新注册重置。正常心跳或非空增量 ACK 启动/刷新 60 秒恢复窗口；超期后的心跳失败触发一次重新注册，注册和快照 ACK 不启动或续期该窗口，避免恢复风暴。队列溢出和增量失败请求新快照，不维护磁盘事件历史。关闭停止快照和心跳、收尾增量执行者，再尽力上报 HOST_DOWN；意外退出由服务端心跳失效处理。启用 enable_remote_cache 时，kv_cache_event_snapshot_interval_ms 非正数关闭数据上报，保留注册和心跳；未启用 remote 时非正数无效。
+快照在缓存锁内一次捕获 HBM long[] 与版本，在锁外流式 JSON 编码，不构建逐 key JSON 对象树；仍保留完整请求体，并非零拷贝。对齐原生 Publisher：快照失败（包括限流）丢弃本轮，不重放、不暂停增量；下一次周期或服务端恢复请求捕获新快照。重新注册后旧快照回包不影响新注册，增量不按快照 ACK 过滤。注册和增量失败按原生默认 500ms→16s 指数退避；不使用 retry_after_ms 暂停整个数据通道。控制请求超时 1.5 秒，快照上传超时 30 秒。KVCM 响应先汇总 header 与全部 item 的恢复信号，再判断是否失败，前面的普通错误不会遮蔽后面的注册失效。心跳连续 snapshot_required=true 只触发一次，false 或重新注册重置。正常心跳或非空增量 ACK 启动/刷新 60 秒恢复窗口；超期后的心跳失败触发一次重新注册，注册和快照 ACK 不启动或续期该窗口，避免恢复风暴。队列溢出和增量失败请求新快照，不维护磁盘事件历史。关闭停止快照和心跳、收尾增量执行者，再尽力上报 HOST_DOWN；意外退出由服务端心跳失效处理。快照间隔 `kv_cache_event_snapshot_interval_ms` 必须为正。
 
-Master 与 KVCM 是两个独立消费者，不要求跨服务原子提交。KVCM 不可用时不会阻塞调度或 Master RPC；最近错误、注册状态和待发送数量可从 Engine 端点的 kvcm 状态查看。远端 KV 已提供统一准备流程和逻辑读写接口，但未安装真实存储适配；事件位置仅声明本地持有缓存，不能当成成功的远端 payload 写入。
+Master 与 KVCM 是两个独立消费者，不要求跨服务原子提交。KVCM 不可用时不会阻塞调度或 Master RPC；最近错误、注册状态和待发送数量可从 Engine 端点的 kvcm 状态查看。事件位置表示 Engine 当前持有的本地缓存。
 ```yaml
 kv_cache_event_publisher_type: kvcm
 kv_cache_event_manager_endpoint: http://<meta-http-host>:<port>
@@ -298,7 +267,7 @@ kv_cache_event_instance_id: deployment_128
 kv_cache_event_snapshot_interval_ms: 600000
 ```
 
-manager_endpoint 是显式 Meta HTTP 覆盖地址，优先于发现；未配置时，shared/cache/KvcmDiscovery 使用 kvcm_enable_vipserver、kvcm_vipserver_domain 或 kvcm_server_address，通过原生 GetClusterInfo 发现 Meta HTTP leader。成功地址缓存到失败后失效，依次尝试 bootstrap 候选，不做周期轮询。instance_id 必须显式配置为共享查询空间；host_ip_port 缺省为发布 IP 加 gRPC 端口减一，与 DSV Master 身份一致。显式装配远端适配器并开启 enable_remote_cache=true 后，即使关闭事件发布仍可注册并保持控制心跳；未装配适配器却开启此项会在启动时报错。NODE_REGISTER 不宣称有 HBM 事件；心跳 extra_info 中的 rtp_remote_cache_enabled 单独记录，不能被解释成数据面已经接通。正式环境需使用匹配的 model_name 和实例组。
+manager_endpoint 是显式 Meta HTTP 覆盖地址，优先于发现；未配置时，`engine/cache/KvcmDiscovery` 使用 kvcm_enable_vipserver、kvcm_vipserver_domain 或 kvcm_server_address，通过原生 GetClusterInfo 发现 Meta HTTP leader。成功地址缓存到失败后失效，依次尝试 bootstrap 候选，不做周期轮询。instance_id 必须显式配置为共享查询空间；host_ip_port 缺省为发布 IP 加 gRPC 端口减一，与 DSV Master 身份一致。正式环境需使用匹配的 model_name 和实例组。
 
 `ExecuteFunction` 采用原生 FunctionRequest/Response：READ/WRITE 当前未提交任何外部 I/O，返回 FAILED_BUFFER_SAFE 且 payload_buffer_safe=true；其他未实现的 KVCM SDK 元数据操作返回 UNIMPLEMENTED。ShutdownRequest 的跨 rank 停机协调未模拟，返回 UNIMPLEMENTED，不生成排空证明；实例停止继续使用已有的进程生命周期和 TERM 清理路径。
 
@@ -366,7 +335,7 @@ ViT 使用相同的物理元数据与 Prometheus instance 发现；QPS、Embeddi
 
 `client/success_rate` 的 range 是必填的 `[start, end]`（start < end <= 0），按固定查询时刻定位窗口，使用 Counter 的 increase，按完成时间统计，分母包含 success/error/timeout/cancelled。它没有最小请求数门槛；窗口无终态时分母为零，或任一 Client 的终态序列采集不完整时均报错。至少两次抓取是计数器增量的计算条件，不是请求数要求。近期完成请求可能在更早时发出；此口径不表示同一发送阶段的成功率。
 
-`cases/master_ha_failover/case.yaml` 使用已转换的 DeepSeek trace，按 YAML 中的 `replay_speed` 回放贯穿杀 A、恢复 A、杀 B、恢复 B，检查结束后提前停止。操作通过已保存的地址列表引用，恢复前不杀另一侧；恢复后检查原主不被抢占。Case 在保守等待后直接检查最近完成请求的成功率，最后收集 Client 终态，不使用进度接口、最少样本数、精确事件窗口或 HA 专用执行器。启动配方仍由 `mock-case launch <case>/case.yaml` 生成；双 Master 要求本机可绑定两个回环 IP。该 Case 保留原 DeepSeek preset 的 Host 开关、容量与水位，不为演示命中而打开原配置关闭的 reuse_cache。参数来自 legacy_unverified preset，配置和数据迁移不代表端到端验收通过。
+`cases/master_ha_failover/case.yaml` 使用已转换的 DeepSeek trace，按 YAML 中的 `replay_speed` 回放贯穿杀 A、恢复 A、杀 B、恢复 B，检查结束后提前停止。操作通过已保存的地址列表引用，恢复前不杀另一侧；恢复后检查原主不被抢占。Case 在保守等待后直接检查最近完成请求的成功率，最后收集 Client 终态，不使用进度接口、最少样本数、精确事件窗口或 HA 专用执行器。启动配方仍由 `mock-case launch <case>/case.yaml` 生成；双 Master 要求本机可绑定两个回环 IP。该 Case 沿用原 DeepSeek preset 的本地块容量和 reuse_cache，已移除 Host、远端和水位配置。参数来自 legacy_unverified preset，配置和数据迁移不代表端到端验收通过。
 
 原始 PromQL 不自动加过滤。matrix/string/native histogram、非有限值、查询 warning 或后端失败都不作为有效门禁；普通指标恰好一个有限值。原始查询返回结构化结果，不隐式聚合或对各样本套用数值门禁。查询不重试，HTTP 和求值均受步骤剩余预算限制。
 
@@ -391,19 +360,13 @@ prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collect
 
 ### RTP 调度实现边界
 
-`RtpSchedulerBase` 共享请求状态、KV 引用、PD 生命周期、Forward 提交和取消，并提供运行状态和指标采样源；`RtpScheduler` 仅做普通 FIFO 准入，`RtpGroupScheduler` 单独拥有显式组队列、残余成员和普通/组之间的选择。组标识不改变普通请求的调度方式。选择在 Engine 启动时完成，不从 Master 配置推断，也不在运行中按请求切换。`fifo` 模式应配合 Master 的 `NON_BATCH` 交付；它仍会动态组成多请求 Forward batch。本地准备立即完成；普通调度器支持远端异步准备，显式 group 暂不支持远端适配器。
+`RtpSchedulerBase` 共享请求状态、KV 引用、PD 生命周期、Forward 提交和取消，并提供运行状态和指标采样源；`RtpScheduler` 仅做普通 FIFO 准入，`RtpGroupScheduler` 单独拥有显式组队列、残余成员和普通/组之间的选择。组标识不改变普通请求的调度方式。选择在 Engine 启动时完成，不从 Master 配置推断，也不在运行中按请求切换。`fifo` 模式应配合 Master 的 `NON_BATCH` 交付；它仍会动态组成多请求 Forward batch。两种调度器都同步准备本地缓存。
 
 `RtpNode` 装配指标导出，并在调度锁内调用采集。`RtpMetrics` 读取调度状态快照并按各指标的口径采样。
 
-### 缓存准备与远端接口
+### KVCM 元信息
 
-`KvCache.prepare` 返回准备操作或明确的永久/可重试容量错误。关闭远端时只执行本地匹配和分配，不创建传输线程。开启时，P 对本地缺失的连续前缀异步查询、读取；查到位置不增加复用量，读取成功才发布有效块并完成准备。读取失败保留有效本地前缀，由普通调度器重算缺失部分；请求总 deadline 不重置。D 的 PD 加载仍使用原有流程，不重复查询远端。
-
-`shared/cache/remote/RemoteCache` 仅定义逻辑 match/read/write，位置凭据由适配器自己持有，KvCache 持有本地容量和引用。接口执行在锁外虚拟线程中，整个查询/读取共用一次任务；不另设固定在途读写数量上限，资源占用由已有 KV 容量、引用和请求期限控制。接口返回/抛异常必须表示已停止访问本次资源；interrupt 只请求取消，不作为释放证明。尚未实现真实数据传输、存储 SDK、KVCM 写会话或 KVS。
-
-普通 RtpScheduler 将未就绪请求放入独立 CACHE_LOADING 阶段；完成通知只唤醒 EngineLoop，maintain 在调度锁内更新有效前缀、把请求放回 waiting 队尾。loading 不阻塞其他请求，也计入本轮准入预算与已初始化 KV 请求数。回调不查找可复用的 request_id；取消后原操作不能再发布。LOAD 引用一直持有到工作线程退出，即使请求已取消。
-
-成功请求通过 `Lease.publishAndStore` 发布有效完整块，并以独立 STORE 引用提交后台写；请求终态不等写入，失败不回滚有效本地缓存。返回的 CompletionStage 反映写入及资源释放结果。节点关闭请求取消在途任务，未安全结束的任务继续持有引用，禁止提前复用块。`enable_remote_cache=false` 为默认；当前命令行/Whale 入口未安装适配器，不能直接开启为真实远端模式。测试仅通过显式 Java 装配注入可控适配器，不提供运行时假存储。
+KVCM Reporter 发布有效块事件、快照和心跳。它不承担 KV payload 读写。旧的 Host 容量、远端缓存开关和水位配置应从 Mock 配方移除。
 
 ### 状态与耗时口径（对照本分支 real）
 

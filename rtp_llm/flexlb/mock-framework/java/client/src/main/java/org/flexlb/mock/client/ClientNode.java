@@ -8,7 +8,7 @@ import java.nio.file.*;
 import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
-import org.flexlb.mock.runtime.ApiServer;
+import org.flexlb.mock.protocol.ControlServer;
 import org.flexlb.mock.client.ClientProtocol.*;
 
 /** Each JVM executes locally; only client-0 coordinates the one current plan. */
@@ -21,7 +21,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
     private final Path topology, directory;
     private final ClientMetrics metrics = new ClientMetrics();
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
-    private final ApiServer api;
+    private final ControlServer api;
     private LoadClient worker;
     private long workerSequence, sequence, nextRequestId = 1;
     private Group group;
@@ -29,12 +29,18 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
     private volatile boolean closed;
 
     public ClientNode(String id, Path topology, Path directory) throws IOException {
-        this(id, topology, directory, org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN, 0, 0L);
+        this(id, topology, directory, org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN, 0, 0L);
     }
     private ClientNode(String id, Path topology, Path directory, int imageToken, int blockSize, long seed) throws IOException {
         this.imageToken = imageToken; this.blockSize = blockSize; this.cacheKeySeed = seed;
         this.id = id; this.topology = topology; this.directory = directory;
-        api = new ApiServer(new InetSocketAddress("127.0.0.1", 0)).bind(ClientProtocol.class, this).metrics(metrics::scrape).start();
+        api = new ControlServer(new InetSocketAddress("127.0.0.1", 0)).route("client/start", Start.class, Ack.class, this::start)
+            .route("client/stop", Empty.class, Summary.class, this::stop)
+            .route("worker/prepare", Shard.class, Ack.class, this::prepare)
+            .route("worker/begin", Begin.class, Ack.class, this::begin)
+            .route("worker/halt", Sequence.class, Ack.class, this::halt)
+            .route("worker/state", Sequence.class, State.class, this::state)
+            .metrics(metrics::scrape).start();
     }
     public String url() { return api.url(); }
     private static void save(Path path, Object value) throws IOException {
@@ -207,20 +213,22 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         var config = JSON.readTree(Path.of(required("MOCK_CONFIG_FILE")).toFile());
         var settings = config.path("component").path("config");
         settings.fieldNames().forEachRemaining(name -> {
-            if (!java.util.Set.of("checkpoint_path", "seq_size_per_block").contains(name)) throw new IllegalArgumentException("Unknown Client setting: " + name);
+            if (!java.util.Set.of("image_token_id", "cache_key_hash_seed", "seq_size_per_block").contains(name)) throw new IllegalArgumentException("Unknown Client setting: " + name);
         });
-        var model = org.flexlb.mock.runtime.EngineConfig.model(settings);
-        int imageToken = org.flexlb.mock.runtime.EngineConfig.imageToken(
-            model, org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN);
+        var configuredImageToken = settings.get("image_token_id");
+        if (configuredImageToken != null && (!configuredImageToken.isIntegralNumber()
+                || !configuredImageToken.canConvertToInt() || configuredImageToken.intValue() < 0))
+            throw new IllegalArgumentException("Client image_token_id must be nonnegative int32");
+        int imageToken = settings.path("image_token_id").asInt(org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN);
         int blockSize = settings.path("seq_size_per_block").asInt(0);
         if (settings.has("seq_size_per_block") && (!settings.path("seq_size_per_block").isIntegralNumber() || !settings.path("seq_size_per_block").canConvertToInt() || blockSize < 1))
             throw new IllegalArgumentException("Client seq_size_per_block must be positive int32");
-        long seed = org.flexlb.mock.cache.CacheSequence.cacheKeySeed(model, System.getenv());
+        long seed = org.flexlb.mock.protocol.ConfigInput.signedLong(settings, "cache_key_hash_seed", 0);
         var directory = Path.of(required("MOCK_OUTPUT_DIR"));
         try (var node = new ClientNode(required("MOCK_NODE_ID"), Path.of(required("MOCK_TOPOLOGY_FILE")), directory, imageToken, blockSize, seed)) {
             var hook = new Thread(node::close, "client-shutdown"); Runtime.getRuntime().addShutdownHook(hook);
             var effective = JSON.createObjectNode().put("id", node.id).put("seq_size_per_block", blockSize).put("cache_key_hash_seed", seed);
-            if (settings.has("checkpoint_path")) effective.set("checkpoint_path", settings.get("checkpoint_path"));
+            if (configuredImageToken != null) effective.put("image_token_id", imageToken);
             save(directory.resolve("effective-config.json"), effective);
             save(directory.resolve("endpoints.json"), Map.of("id", node.id, "role", "client", "control", node.url(),
                 "rpc", URI.create(node.url()).getAuthority(), "metrics", node.url() + "/metrics"));

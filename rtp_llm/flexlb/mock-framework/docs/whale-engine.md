@@ -12,7 +12,7 @@ Whale 拆分部署的角色类型使用 `PY_PREFILL`、`PY_DECODE`、`PY_VIT`、
 JAVA_HOME=/path/to/jdk21 python3 scripts/package-engine.py
 ```
 
-脚本调用现有 Maven 构建入口，编译 `java/host` 及其依赖，生成 `target/image`。该目录只包含 Dockerfile、固定启动脚本、Engine JAR 和 build-manifest.json。manifest 记录源码 SHA、CI 配方 SHA（本地未提供时为空）、JAR SHA256；打包默认跳过单测执行，并如实记录 tests_executed=false。修改工作区后做的本地打包不能仅凭 HEAD SHA 作为干净源码构建的证明。
+脚本调用现有 Maven 构建入口，编译 `java/engine` 及其依赖，生成 `target/image`。该目录只包含 Dockerfile、固定启动脚本、Engine JAR 和 build-manifest.json。manifest 记录源码 SHA、CI 配方 SHA（本地未提供时为空）、JAR SHA256；打包默认跳过单测执行，并如实记录 tests_executed=false。修改工作区后做的本地打包不能仅凭 HEAD SHA 作为干净源码构建的证明。
 
 ```sh
 docker build -t mock-engine:local target/image
@@ -39,7 +39,7 @@ docker run --rm \
 
 V 使用 `ROLE_TYPE=VIT`；native 和 Mock 参数遵循[配置参考](component-reference.md#engine-配置规则)。未提供 MOCK_NODE_ID 时，身份使用 role 与本机发布地址；需要指定发布地址时设置 MOCK_ADVERTISE_HOST。共享主机上的实例物理资源仍由平台/JVM 统计，不伪造每 Engine 的 CPU/内存。
 
-多模态 V 设置 `CHECKPOINT_PATH` 指向可读的模型目录，仅读取 config.json。默认异步 GET 图片 URL 并读取尺寸，不依赖 Frontend 提供宽高；准备执行器和 Forward 队列分离。`VIT_CONCURRENCY` 限制异步媒体工作线程，`VIT_MAX_QUEUE_SIZE` 提供额外等待额度，`VIT_GPU_MAX_BATCH_SIZE`/`VIT_GPU_BATCH_WAIT_MS` 控制就绪工作的合批。`MM_TIMEOUT_MS`、`MM_IMAGE_MAX_FILE_SIZE_KB`、`DOWNLOAD_HEADERS` 使用 real 名称与单位。支持的 URL/图片格式和模拟边界见组件参考。
+多模态 V 显式设置 `PATCH_SIZE`、`DOWNSAMPLE_RATIO`、`HIDDEN_SIZE`、`MIN_PIXELS` 和 `MAX_IMAGE_TOKENS`。默认异步 GET 图片 URL 并读取尺寸，不依赖 Frontend 提供宽高；准备执行器和 Forward 队列分离。`VIT_CONCURRENCY` 限制异步媒体工作线程，`VIT_MAX_QUEUE_SIZE` 提供额外等待额度，`VIT_GPU_MAX_BATCH_SIZE`/`VIT_GPU_BATCH_WAIT_MS` 控制就绪工作的合批。`MM_TIMEOUT_MS`、`MM_IMAGE_MAX_FILE_SIZE_KB`、`DOWNLOAD_HEADERS` 使用 real 名称与单位。支持的 URL/图片格式和模拟边界见组件参考。
 
 本地假 URL 回放设置 `mock.vit.skip.download: true`（ENV 为 `MOCK_VIT_SKIP_DOWNLOAD=true`），并提供图片宽高；它只跳过读取，仍经过相同的准入、执行器、就绪队列和结果发布流程。Whale 使用默认 false；跳过读取不能用于评估真实下载吞吐。
 
@@ -50,7 +50,7 @@ HTTP 为 START_PORT，gRPC 为 START_PORT+1；平台探针访问 HTTP `/health`�
 
 ## 部署接线边界
 
-`CHECKPOINT_PATH` 可以使用平台注入的 OSS 模型目录；Java 启动时通过 C2 Fuse 的原生只读挂载协议解析为本地目录，只读取 config.json。与 real RTP 一致，host Fuse 使用 HIPPO_FUSE_PORT、HIPPO_SLAVE_IP 和 HIPPO_APP_WORKDIR，sidecar Fuse 使用 28006 端口及 /mnt/fuse。模板须提供 /mnt/fuse 的共享卷和 HostToContainer 传播。有效配置记录本地挂载路径，避免输出带凭据的 OSS URI；不在部署 ENV 中注入下载程序。
+Mock Engine 启动不读取 checkpoint 或请求 C2 Fuse 挂载。P/D 使用显式的 `MAX_SEQ_LEN`、`IMAGE_TOKEN_ID`（多模态）和 `CACHE_KEY_HASH_SEED`（与真实 Frontend 匹配时）。Seed 使用有符号十进制 int64。部署迁移时将有效参数加入角色配置后再切换镜像。
 
 这些文件提供可构建的镜像和服务入口，不自动修改 Whale 模板、发布角色或注册 VIP。接入目标部署时，使用其现有角色发现、探针、资源和停止宽限设置。Master 仍是独立 JVM，不起本地 ZK 或 Mock 集群管理器。
 
@@ -65,10 +65,10 @@ HTTP 为 START_PORT，gRPC 为 START_PORT+1；平台探针访问 HTTP `/health`�
 | Role | 开启 | 关闭 |
 | --- | --- | --- |
 | Master（全部主备） | `FLEXLB_CONFIG.cacheMatching.type=KVCM`，配置 `MODEL_SERVICE_CONFIG.kvcm` 的服务地址、端口和 namespace | `cacheMatching.type=LOCAL_SYNC` |
-| P/D | `KV_CACHE_EVENT_PUBLISHER_TYPE=kvcm`，配置原生 `RECO_*` 发现参数及共享 `KV_CACHE_EVENT_INSTANCE_ID` | `KV_CACHE_EVENT_PUBLISHER_TYPE=none`、`ENABLE_REMOTE_CACHE=false` |
+| P/D | `KV_CACHE_EVENT_PUBLISHER_TYPE=kvcm`，配置原生 `RECO_*` 发现参数及共享 `KV_CACHE_EVENT_INSTANCE_ID` | `KV_CACHE_EVENT_PUBLISHER_TYPE=none` |
 | Frontend、ViT | 保持原有链路和配置 | 相同 |
 
-这里只启用缓存元信息查询和上报，未实现远端 KV 数据加载，开启组的 `ENABLE_REMOTE_CACHE` 也保持 false。Engine 的共享 instance_id 必须等于 Master 查询的 `<namespace>_<cacheKeyBlockSize>`，host 身份必须与 Master 发现结果一致。更改 Master 查询模式需要重启。
+这里只启用缓存元信息查询和上报，未实现远端 KV 数据加载。Engine 的共享 instance_id 必须等于 Master 查询的 `<namespace>_<cacheKeyBlockSize>`，host 身份必须与 Master 发现结果一致。更改 Master 查询模式需要重启。
 
 
 ## 监控自动选择
@@ -79,7 +79,7 @@ Engine 只启用一个指标后端，不需要额外部署开关。公共构建�
 
 两种后端消费同一份结构化快照，各自只有一个采集入口，不解析 Prometheus 文本，不重复清空窗口。快照里的 QPS 已是速率、counter 是累计值，KMonitor 按 Gauge 上报，避免再次转换成 QPS；Histogram bucket/sum/count 保留为同名数值序列，不冒充原始延迟样本。SDK 的 JVM 内置资源采集关闭，避免当成每个模拟 Engine 的资源。指标实例在关闭前停止其采集线程；SDK 为 JVM 共享，在进程退出时关闭。
 
-缺少 provider 时使用 Prometheus；provider 存在但 SDK 加载或初始化失败则启动失败，不静默回退。运行期间上报异常记录错误并在后续周期继续尝试。打包会检查 reporter、SDK、SPI 及服务启动后 `/metrics` 的互斥行为；本地公共测试不能替代内部 CI 的 SDK 编译、配置测试，以及 Whale 上实际指标验收。内部配置测试命令为 `scripts/build.sh -pl java/host -am -Pinternal-monitoring -Dtest=KMonitorReporterTest -Dsurefire.failIfNoSpecifiedTests=false`。
+缺少 provider 时使用 Prometheus；provider 存在但 SDK 加载或初始化失败则启动失败，不静默回退。运行期间上报异常记录错误并在后续周期继续尝试。打包会检查 reporter、SDK、SPI 及服务启动后 `/metrics` 的互斥行为；本地公共测试不能替代内部 CI 的 SDK 编译、配置测试，以及 Whale 上实际指标验收。内部配置测试命令为 `scripts/build.sh -pl java/engine -am -Pinternal-monitoring -Dtest=KMonitorReporterTest -Dsurefire.failIfNoSpecifiedTests=false`。
 
 ### 配置初始化边界
 

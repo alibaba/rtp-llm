@@ -1,5 +1,6 @@
 from mock_framework.execution.test.helpers import FRAMEWORK
-"""Real Master plus shared/cross-process V/P/D, using the standard binary playback path."""
+from mock_framework.execution.test.helpers.zookeeper import command as zookeeper_command
+"""Real Master plus independent V/P/D processes, using the standard binary playback path."""
 import asyncio
 import json
 import os
@@ -13,11 +14,10 @@ from mock_framework.execution.step.registry import Registry
 from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
 from mock_framework.execution.test.helpers.input import pb, write_inputs
-from mock_framework.execution.test.test_master import configuration
+from test_master import configuration
 
 
-@pytest.mark.parametrize('mode', ['shared', 'isolated'])
-def test_vision_playback_through_real_master(tmp_path, mode):
+def test_vision_playback_through_real_master(tmp_path):
     root = FRAMEWORK
     java = str(Path(os.environ['JAVA_HOME']) / 'bin/java')
     master_classpath = os.pathsep.join([str(root / 'java/master/target/classes'),
@@ -30,17 +30,12 @@ def test_vision_playback_through_real_master(tmp_path, mode):
         'dispatcher': {'type': 'NON_BATCH', 'maxInflightPerPrefillWorker': 16},
         'requestLifecycle': {'request': {'timeoutMs': 5000}},
         'grpcServer': {'executorCoreSize': 4, 'executorMaxSize': 8, 'executorQueueSize': 64, 'shutdownQuietPeriodMs': 10}})
-    model = tmp_path / 'model'
-    model.mkdir()
-    (model / 'config.json').write_text(json.dumps({'image_token_id': 1000,
-        'text_config': {'hidden_size': 4}, 'vision_config': {'patch_size': 14, 'downsample_ratio': 3,
-        'min_pixels': 0, 'max_image_tokens': 1024}}))
-    engine = {'engine': 'rtp', 'config': {'checkpoint_path': 'model', 'seq_size_per_block': 2, 'test_block_num': 128,
+    engine = {'engine': 'rtp', 'config': {'image_token_id': 1000, 'seq_size_per_block': 2, 'test_block_num': 128,
         'reserve_block_ratio': 0, 'max_seq_len': 128, 'mock.compute.forward.expression': '1'}}
-    vision = {'config': {'checkpoint_path': 'model', 'mock.vit.skip.download': True, 'mm_cache_gpu_max_bytes': 1024,
+    vision = {'config': {'patch_size': 14, 'downsample_ratio': 3, 'min_pixels': 0, 'max_image_tokens': 1024, 'hidden_size': 4, 'mock.vit.skip.download': True, 'mm_cache_gpu_max_bytes': 1024,
         'mm_cache_cpu_max_bytes': 1024, 'mock.compute.forward.expression': '2 + batchSize'}}
     data = {'id': 'vision_playback', 'describe': 'Native V selection, metadata preparation, P/D generation',
-        'environment': {'master': {'config': native}, 'prefill': engine, 'decode': engine, 'vit': vision, 'client': {'config': {'checkpoint_path': 'model'}}},
+        'environment': {'master': {'config': native}, 'prefill': engine, 'decode': engine, 'vit': vision, 'client': {'config': {'image_token_id': 1000}}},
         'phases': [{'id': 'traffic', 'describe': 'Play media requests', 'timeout': '30s', 'steps': [
             {'id': 'start', 'describe': 'Play image input', 'interface': 'client/start', 'args': {
                 'requests_file': 'requests.binpb.zst', 'qps': 4, 'concurrency': 4, 'queue_capacity': 8,
@@ -58,14 +53,14 @@ def test_vision_playback_through_real_master(tmp_path, mode):
     path.write_text(yaml.safe_dump(data))
     registry = Registry.standard()
     case = compile_case(path, registry)
-    host = root / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
+    host = root / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
     components = {'master': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.MasterNode'], 'startup_timeout': '60s'},
         'client': {'command': [java, '-jar', str(root / 'java/client/target/mock-client-1.0-SNAPSHOT-all.jar')]}}
     for role in ('prefill', 'decode', 'vit'):
-        components[role] = {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', str(host), 'org.flexlb.mock.host.EngineHost'],
+        components[role] = {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', str(host), 'org.flexlb.mock.engine.EngineMain'],
             'env': {'MOCK_BIND_HOST': '0.0.0.0', 'MOCK_ADVERTISE_HOST': '127.0.0.1'}}
-    launch = prepare_launch({'engine_mode': mode, 'components': components,
-        'zookeeper': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.mock.master.ZookeeperNode']}}, case, tmp_path)
+    launch = prepare_launch({'components': components,
+        'zookeeper': {'command': zookeeper_command(root, java)}}, case, tmp_path)
     output = tmp_path / 'result'
     result = asyncio.run(run_case(case, registry, launch, output))
     assert result['status'] == 'PASS', result
@@ -74,12 +69,13 @@ def test_vision_playback_through_real_master(tmp_path, mode):
     client, = summary['clients'].values()
     assert client['issued'] == client['finished'] == client['outcomes']['success'] == 8, client
     events = [json.loads(line) for line in (output / 'events.jsonl').read_text().splitlines()]
-    hosts = [event for event in events if event.get('event') == 'process_started' and event.get('node', '').startswith('engine-')]
-    assert len(hosts) == (1 if mode == 'shared' else 3)
+    engines = [event for event in events if event.get('event') == 'process_started'
+               and event.get('node') in {'prefill-0', 'decode-0', 'vit-0'}]
+    assert len({event['pid'] for event in engines}) == 3
 
 
 def test_vit_is_a_shared_engine_without_backend_configuration():
-    from mock_framework.config.compiler import compile_environment
+    from mock_framework.config.environment import compile_environment
     from mock_framework.config import ConfigError
 
     vision = {'config': {'mock.compute.forward.expression': '1'}}

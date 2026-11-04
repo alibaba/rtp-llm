@@ -12,7 +12,7 @@ uv run --locked mock-case compile <case目录>/case.yaml \
   --output <输出目录>/compiled.json
 ```
 
-每个 Case 保存自己的声明和角色配置。回放数据放在共享的 `data/traffic/`。例如 `requests_file: data/traffic/basic.binpb.zst` 默认从框架目录解析，也可以用 `--shared-root` 指定共享根。普通相对输入路径仍从 Case 目录解析。输入使用 Protobuf + Zstd，编译阶段检查 Case 声明，播放时检查文件内容。
+每个 Case 保存自己的声明和角色配置。回放数据放在共享的 `data/traffic/`。例如 `requests_file: data/traffic/basic.jsonl` 默认从框架目录解析，也可以用 `--shared-root` 指定共享根。普通相对输入路径仍从 Case 目录解析。输入支持 JSONL 和 Protobuf + Zstd，编译阶段检查 Case 声明，播放时检查文件内容。
 
 顶层为 `id`、可选 `name`、`describe`、`environment`、`phases` 和可选 `view`。Phase 顺序执行。每个 Step 直接写 `interface` 与 `args`，可选 `expect`、`within`、`wait_after` 和 `background`。phase 必须有正的 `timeout`。ID 全局唯一，引用必须来自前置步骤或允许的全局发现字段。
 
@@ -75,31 +75,28 @@ uv run --locked mock-case run <case目录>/case.yaml \
   --output <新的运行目录>
 ```
 
-启动配方与 Case 业务配置分开。Master/Client 按 replicas 启动独立进程；Engine 的 replicas 表示逻辑实例数，编号 `<组件>-<序号>`，由 engine_mode 决定放置；Compute 是组内配置，不单独启动。`command` 是 argv，不经过 shell；cwd 相对配方解析。配方不再包含 bindings；目标选择和查询聚合由 Python 接口函数完成。
+启动配方与 Case 业务配置分开。Master/Client 按 replicas 启动独立进程；Engine 按 replicas 启动独立 JVM，编号 `<组件>-<序号>`；Compute 是组内配置，不单独启动。`command` 是 argv，不经过 shell；cwd 相对配方解析。配方不再包含 bindings；目标选择和查询聚合由 Python 接口函数完成。
 
-真实 Master 配方需要顶层 `zookeeper`；P/D/V 使用 `java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar`。Master classpath 是 `java/master/target/classes` 加 `target/dependencies.txt` 的内容。示意：
+真实 Master 配方需要顶层 `zookeeper`；P/D/V 使用 `java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar`。Master classpath 是 `java/master/target/classes` 加 `target/dependencies.txt` 的内容。示意：
 
 ```yaml
-engine_mode: shared  # shared（默认）：一个 Engine JVM；isolated：每实例一个 JVM
 zookeeper:
-  command: [<Java21>, -cp, <Master的classpath>, org.flexlb.mock.master.ZookeeperNode]
+  command: [<Java21>, -cp, <ZooKeeper 的 classpath>, org.flexlb.mock.zookeeper.ZookeeperNode]
 components:
   master:
     command: [<Java21>, -cp, <Master的classpath>, org.flexlb.MasterNode]
     startup_timeout: 60s
   prefill:
-    command: [<Java21>, -cp, <Engine JAR绝对路径>, org.flexlb.mock.host.EngineHost]
+    command: [<Java21>, -cp, <Engine JAR绝对路径>, org.flexlb.mock.engine.EngineMain]
   decode:
-    command: [<Java21>, -cp, <Engine JAR绝对路径>, org.flexlb.mock.host.EngineHost]
+    command: [<Java21>, -cp, <Engine JAR绝对路径>, org.flexlb.mock.engine.EngineMain]
   vit:
-    command: [<Java21>, -cp, <Engine JAR绝对路径>, org.flexlb.mock.host.EngineHost]
+    command: [<Java21>, -cp, <Engine JAR绝对路径>, org.flexlb.mock.engine.EngineMain]
 ```
 
 配方必须覆盖 Case 实际声明的组件。组件通过 `MOCK_CONFIG_FILE` 读取本实例配置和完整 environment；`MOCK_NODE_ID`、`MOCK_COMPONENT`、`MOCK_OUTPUT_DIR` 提供身份和目录。初始化并绑定端口后原子发布 `MOCK_READY_FILE`，启动超时或提前退出都失败并回收已有进程。
 
-统一 Engine JAR 的默认入口为 `EngineMain`，只启动配置指定的一个 P/D/V Engine，不启动管理接口。Whale 每个 Pod 用镜像内固定的 `whale_start.sh` 运行一个实例，生命周期由 Whale 管理。EngineMain 不发布本地实验文件；本地 Case 通过 EngineHost 管理实例和产物。
-
-本地 Runner 显式用 `java -cp <Engine JAR> org.flexlb.mock.host.EngineHost` 启动宿主；同一个宿主管理 P/D/V，不为 V 单设管理者。共享模式下 P/D/V 的 command、cwd、env 和 startup_timeout 必须一致；角色差异写入各自 config，不能用进程 env 区分同 JVM 的实例。宿主读取 `MOCK_COMPONENTS_DIR`，按实例目录读取配置并创建对象。Runner 的 isolated 模式仍使用每 JVM 一个对象的本地宿主，便于验证统一扩缩容协议；这不是 Whale 的启动方式。两种入口共用实例装配，RtpNode/VitNode 不再各自提供进程入口或可执行 JAR。
+统一 Engine JAR 的默认入口为 `EngineMain`。本地 Runner 为每个实例分配监听端口、配置和产物目录，启动 JVM 后等待 ready 和端点回读。Whale 每个 Pod 使用同一入口，由平台管理发现与进程。
 
 宿主的 `host/create`、`host/stop`、`host/status` 是内部原子接口，不接收集群副本数。`create` 接收 Python 分配的实例 id、rpcPort 和 controlPort；metrics 与该实例的 control 共用 HTTP 监听端口。宿主控制端口通过 `MOCK_HOST_PORT` 指定。Python 在启动监听前选择本次实验未使用的端口，Java 绑定指定端口，Runner 再核对返回地址与分配一致。端口探测不构成预留，若被其他进程抢占，启动失败并结束实验，不偷偷换端口；不能先启动服务再检查是否复用了旧地址。Python `execution/engines.py` 管理放置和实例归属，`interfaces/engines.py` 提供两项 Case 操作：
 
@@ -125,13 +122,13 @@ components:
 
 主动下线会终止该实例的在途请求；生产 Master 淘汰旧地址前仍可能有路由失败，不能将当前操作称为无损缩容。Case 应按场景判断过渡期错误和收敛后的成功率。生命周期验收持续记录请求结果，验证两种 JVM 放置下剩余实例继续服务、真实 Master 最终移除旧地址、新实例能接请求，以及历史指标仍可查询。另用故意保留旧 Prometheus target 的场景检查采集不会串到新实例，并注入第二个创建/停止失败，检查已完成操作不重放、整次实验报错并清理。
 
-共享宿主关闭最后一个 Engine 后仍保留，允许再次扩容；独立宿主在关闭实例后回收进程。每次新增使用新编号、目录和未用过的监听地址。编号表示一次创建，例如删除 prefill-0 后再次扩容会创建 prefill-2，不填补旧编号；创建失败也不回收编号。它只用于内部对象映射和产物路径，Case 仍使用服务地址，不增加 node/generation 标签或选择器。实验目录和实例目录拒绝覆盖；Java 以 CREATE_NEW 写入 effective-config.json，另一宿主也不能重新使用旧实例目录。重新创建必须使用新编号与新目录，Runner 断点恢复、Engine 同身份原地重启不在当前能力范围。`hosts/engine-shared/` 或 `hosts/engine-<实例>/` 保存 JVM 日志，`components/<实例>/` 保存 config、effective-config、endpoints 和 ready，不复制宿主日志到各实例。下线删除 ready；endpoints、日志和配置作为该组件的原始产物保留，不另行维护实例历史。
+每次新增使用新编号、目录和未用过的监听地址。编号仅用于进程管理与产物路径。Case 仍使用服务地址。每个实例在 `components/<实例>/` 保存配置、日志和端点，进程停止后保留证据。
 
 `topology.json` 只保存当前活动实例，不生成 topology-history.json，不保存实例起止时间或退役台账。活动 Master 的 discovery.json 随当前 Engine 更新，角色缩到零时写空地址列表。Master 查询直接返回生产 WorkerDirectory 当前观察到的地址，不经实例 ID 或历史地址表转换；因此生产发现尚未淘汰的旧地址仍会如实返回。消费者的刷新和淘汰由自身实现负责，Case 检查其收敛结果。最终清理清空当前拓扑。
 
 Prometheus 对每个实例独立抓取，以 RPC 地址作为 instance；宿主不重复输出业务指标。新增实例先完成采集基线，下线前完成末次抓取再移出目标；不保留退役目标、实例生命期或退役实例的末次采样台账。语义查询按当前活动实例选择范围并检查采样覆盖；时间窗只限定指标数据，不改变成员选择。原始 PromQL 直接查询 Prometheus 已采集的数据。
 
-Runner 每秒开始一轮宿主健康检查，单次 HTTP 调用限时 10 秒，检查实际成员与 Engine 状态；进程退出另行实时监视。操作期间用同一管理锁隔离成员变更与健康快照。共享宿主意外退出记录受影响实例并使整个实验 ERROR；预期停止仅登记将回收的独立宿主，不屏蔽共享 JVM 意外退出。Master 始终单独 spawn，不进入 EngineHost。
+Runner 监视每个 Engine JVM 的退出状态。意外退出使实验失败。主动缩容停止指定进程，确认退出后撤销端点。
 
 Python 运行环境持续存活；`ProcessSupervisor` 持有进程并监视退出，各角色服务负责自己的生命周期，`RunEnvironment` 统一安排最终清理。进程监督器不识别 Master 业务接口，也不合并返回值。真实 Master 的状态查询由 `interfaces/master.py` 按 targets 逐实例调用，并保留每个 Master 的独立结果。
 
@@ -198,4 +195,8 @@ environment:
 
 编译时读取文件并沿用内联配置的重复键、点路径冲突和 Master JSON 校验，结果展开到原有组件配置和运行产物，Runner/Java 不需要重新读取源文件。不增加文件继承或覆盖合并；小配置与测试夹具仍可直接使用内联 mapping。
 
-Engine 配置名、Mock 参数命名、ENV 映射和忽略规则见[组件配置参考](component-reference.md#engine-配置规则)。Case 使用每实例文件作为唯一配置源；共享 JVM 不从进程 ENV 覆盖业务配置。
+Engine 配置名、Mock 参数命名、ENV 映射和忽略规则见[组件配置参考](component-reference.md#engine-配置规则)。Case 使用每实例文件作为唯一配置源；本地 Engine 不从进程 ENV 覆盖业务配置。
+
+### 可读回放数据
+
+Case 的 `client/start.args.requests_file` 可以引用独立数据集。示例见 `data/traffic/basic.jsonl`。共享路径以 `data/` 开头，其他相对路径按 Case 所在目录解析，也接受本机绝对路径。JSONL 每行一条请求，字段为 `token_ids`、`max_new_tokens`，以及可选的 `priority`、`arrival_offset_ms`、`images`。Client 完整校验输入后才发布分片。现有 `.binpb.zst` 大流量数据可继续回放。

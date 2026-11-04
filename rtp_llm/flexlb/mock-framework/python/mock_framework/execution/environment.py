@@ -3,13 +3,9 @@ from .roles.client import ClientRole
 from .roles.engine import EngineRole
 from .roles.master import MasterRole
 from .roles.prometheus import Prometheus
+from .roles.zookeeper import ZooKeeperRole
 from .processes import ProcessSupervisor
-import asyncio
 import copy
-import json
-import os
-
-from ..config.validation import duration
 
 from .run_trace import write_json
 from . import ExecutionError
@@ -59,8 +55,8 @@ class EndpointRegistry:
 class RunEnvironment:
     def __init__(self, case, launch, records):
         self.case, self.records = case, records
-        self._election = launch.get('zookeeper')
         self.supervisor = ProcessSupervisor(records)
+        self.zookeeper = ZooKeeperRole(launch.get('zookeeper'), self.supervisor, records)
         self.topology = EndpointRegistry(records.directory)
         self.monitoring = Prometheus(self.supervisor, records, launch['prometheus']) if 'prometheus' in launch else None
         self.masters = MasterRole(component=case.environment.get('master'), recipe=launch['components'].get('master'),
@@ -68,36 +64,17 @@ class RunEnvironment:
             topology=self.topology, records=records, monitoring=self.monitoring)
         self.topology.add_publisher(self.masters.publish_discovery)
         self.engines = EngineRole(supervisor=self.supervisor, topology=self.topology, records=records,
-            environment=case.environment, recipes=launch['components'], mode=launch['engine_mode'], monitoring=self.monitoring)
+            environment=case.environment, recipes=launch['components'], monitoring=self.monitoring)
         self.clients = ClientRole(environment=case.environment, component=case.environment.get('client'), recipe=launch['components'].get('client'),
             supervisor=self.supervisor, topology=self.topology, records=records, monitoring=self.monitoring)
-
-    async def _start_election(self):
-        if self._election is None:
-            return
-        recipe = self._election
-        directory = self.records.directory / 'zookeeper'
-        directory.mkdir()
-        ready = directory / 'ready.json'
-        await self.supervisor.spawn('zookeeper', recipe['command'], recipe['cwd'],
-            {**os.environ, **recipe['env'], 'MOCK_OUTPUT_DIR': str(directory), 'MOCK_READY_FILE': str(ready)}, directory)
-        async def await_ready():
-            while not ready.exists():
-                await asyncio.sleep(.02)
-            value = json.loads(ready.read_text())
-            host, port = value['connect'].split(':')
-            if host != '127.0.0.1' or not 0 < int(port) < 65536:
-                raise ExecutionError('Invalid ZooKeeper readiness address')
-            return value['connect']
-        connect = await self.supervisor.guard(await_ready(), float(duration(recipe['startup_timeout'])))
-        self.records.emit(event='process_ready', node='zookeeper', connect=connect)
-        self.masters.configure_election(connect)
 
     async def start(self):
         self.topology.publish()
         if self.monitoring:
             await self.supervisor.guard(self.monitoring.start(), self.monitoring.startup_timeout)
-        await self._start_election()
+        connect = await self.zookeeper.start()
+        if connect is not None:
+            self.masters.configure_election(connect)
         await self.engines.start()
         await self.masters.start()
         await self.clients.start_nodes()
@@ -114,7 +91,6 @@ class RunEnvironment:
                     errors.extend(result)
             except Exception as error:
                 errors.append(f'{label}: {type(error).__name__}: {error}')
-        await cleanup('engine health monitor', self.engines.stop_monitor)
         if self.supervisor.failure.done():
             errors.append(self.supervisor.failure.result())
         # Keep producers and observers alive through Client drain and the final scrape.
@@ -124,7 +100,7 @@ class RunEnvironment:
         await cleanup('client processes', self.clients.close)
         await cleanup('master processes', self.masters.close)
         await cleanup('engine processes', self.engines.close)
-        await cleanup('zookeeper', lambda: self.supervisor.stop(['zookeeper'], 5))
+        await cleanup('zookeeper', self.zookeeper.close)
         if self.monitoring:
             await cleanup('prometheus', self.monitoring.close)
         await cleanup('remaining processes', self.supervisor.close)

@@ -3,13 +3,12 @@ from pathlib import Path
 from ..config.validation import duration, fields, text
 from . import ExecutionError
 from .roles.prometheus import prepare_prometheus
-from .roles.engine import ROLES
 from .roles.master import validate_master_launch
 
 
 def prepare_launch(raw, case, base):
     """Launch recipes are developer bindings, separate from case business configuration."""
-    fields(raw, {'components', 'prometheus', 'zookeeper', 'engine_mode'}, {'components'}, where='launch')
+    fields(raw, {'components', 'prometheus', 'zookeeper'}, {'components'}, where='launch')
     if not isinstance(raw['components'], dict):
         raise ExecutionError('launch components must be a mapping')
     if 'zookeeper' in raw['components']:
@@ -51,13 +50,7 @@ def prepare_launch(raw, case, base):
     if 'master' in components:
         validate_master_launch(case.environment['master']['config'], components['master']['env'],
                                local_election=zookeeper is not None)
-    mode = raw.get('engine_mode', 'shared')
-    if mode not in ('shared', 'isolated'):
-        raise ExecutionError('engine_mode must be shared or isolated')
-    engine_recipes = [recipe for role, recipe in components.items() if role in ROLES]
-    if mode == 'shared' and engine_recipes and any(recipe != engine_recipes[0] for recipe in engine_recipes[1:]):
-        raise ExecutionError('Shared Engine JVM requires identical command, cwd, env and startup_timeout for all Engine roles; put instance settings in config')
-    result = {'components': components, 'engine_mode': mode}
+    result = {'components': components}
     if zookeeper is not None:
         result['zookeeper'] = zookeeper
     if 'prometheus' in raw:
@@ -67,7 +60,7 @@ def prepare_launch(raw, case, base):
     return result
 
 
-def local_launch(case, java, prometheus, *, framework, engine_mode='shared'):
+def local_launch(case, java, prometheus, *, framework):
     """Bind a Case to locally built RTP, Client, Master and ZooKeeper artifacts."""
     import os
     framework, java = Path(framework).resolve(), Path(java).resolve()
@@ -83,27 +76,31 @@ def local_launch(case, java, prometheus, *, framework, engine_mode='shared'):
             raise ExecutionError(f'Missing build artifact: {path}; run scripts/build.sh first')
         return path
 
+    def component_classpath(role):
+        root = f'java/{role}/target'
+        dependencies = artifact(f'{root}/dependencies.txt').read_text(encoding='utf-8').strip()
+        if not dependencies or any(not Path(entry).is_absolute() or not Path(entry).exists()
+                                   for entry in dependencies.split(os.pathsep)):
+            raise ExecutionError(f'{role} classpath has missing or nonabsolute entries; run scripts/build.sh first')
+        return os.pathsep.join([str(framework / root / 'classes'), dependencies])
+
     prefix = [str(java), '-XX:ActiveProcessorCount=2']
     commands = {}
-    raw = {'engine_mode': engine_mode, 'prometheus': {'binary': str(Path(prometheus).resolve())}}
+    raw = {'prometheus': {'binary': str(Path(prometheus).resolve())}}
     if 'master' in case.environment:
         config = case.environment['master']['config']
         if not {'FLEXLB_CONFIG', 'MODEL_SERVICE_CONFIG'} <= config.keys():
             raise ExecutionError('Local Master requires FLEXLB_CONFIG and MODEL_SERVICE_CONFIG')
         artifact('java/master/target/classes/org/flexlb/MasterNode.class')
-        artifact('java/master/target/classes/org/flexlb/mock/master/ZookeeperNode.class')
-        dependencies = artifact('java/master/target/dependencies.txt').read_text(encoding='utf-8').strip()
-        if not dependencies or any(not Path(entry).is_absolute() or not Path(entry).exists()
-                                   for entry in dependencies.split(os.pathsep)):
-            raise ExecutionError('Master classpath has missing or nonabsolute entries; run scripts/build.sh first')
-        classpath = os.pathsep.join([str(framework / 'java/master/target/classes'), dependencies])
-        master_prefix = prefix + ['-cp', classpath]
-        # shortcut: expose all native metrics locally until collection cost is measured at scale.
+        artifact('java/zookeeper/target/classes/org/flexlb/mock/zookeeper/ZookeeperNode.class')
+        classpath = component_classpath('master')
+        # Expose native metrics locally.
         commands['master'] = prefix + ['-Dflexlb.monitor.metric-whitelist=flexlb_', '-cp', classpath, 'org.flexlb.MasterNode']
-        raw['zookeeper'] = {'command': master_prefix + ['org.flexlb.mock.master.ZookeeperNode'], 'startup_timeout': '60s'}
+        raw['zookeeper'] = {'command': prefix + ['-cp', component_classpath('zookeeper'),
+            'org.flexlb.mock.zookeeper.ZookeeperNode'], 'startup_timeout': '60s'}
     if {'prefill', 'decode', 'vit'} & case.environment.keys():
-        engine = prefix + ['-cp', str(artifact('java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')),
-                           'org.flexlb.mock.host.EngineHost']
+        engine = prefix + ['-cp', str(artifact('java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar')),
+                           'org.flexlb.mock.engine.EngineMain']
         commands.update(prefill=engine, decode=engine, vit=engine)
     if 'client' in case.environment:
         commands['client'] = prefix + ['-jar', str(artifact('java/client/target/mock-client-1.0-SNAPSHOT-all.jar'))]
