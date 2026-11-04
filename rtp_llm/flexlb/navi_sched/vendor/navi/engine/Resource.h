@@ -1,6 +1,6 @@
 #pragma once
 
-#include "builder/ResourceDefBuilder.h"
+#include "navi/builder/ResourceDefBuilder.h"
 #include "navi/engine/ResourceConfigContext.h"
 #include "navi/engine/ResourceCreator.h"
 #include "navi/engine/ResourceInitContext.h"
