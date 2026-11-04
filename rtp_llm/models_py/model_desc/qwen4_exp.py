@@ -1302,10 +1302,6 @@ class Qwen4ExpModel(Qwen35Model):
         return ple_input_ids(inputs, getattr(tokens, "eos_token_id", None))
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        if torch.version.hip is not None and callable(
-            getattr(fmha_impl, "bind_graph_inputs", None)
-        ):
-            fmha_impl.bind_graph_inputs(inputs)
         if self.__dict__.get("_closed", False):
             raise RuntimeError("Qwen4 model is closed")
         from rtp_llm.models_py.distributed.flashinfer_all_reduce import (

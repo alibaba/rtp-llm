@@ -124,18 +124,12 @@ class SparseFmhaTest(unittest.TestCase):
                 selected[:, 1, :2] = 31
                 selected[:, 2] = -1
                 selected[:, 2, -1] = 256
-                baseline = sparse_prefill_attn_torch_reference(
-                    q.double(), k.double(), v.double(), selected
-                ).to(q.dtype)
                 expected = sparse_prefill_attn_torch_reference(
                     q.double(), k.double(), v.double(), selected
                 ).to(q.dtype)
                 candidate = sparse_prefill_attn(q, k, v, selected)
                 torch.testing.assert_close(
                     candidate, expected, atol=0.0078125, rtol=0.008
-                )
-                torch.testing.assert_close(
-                    candidate, baseline, atol=0.0078125, rtol=0.008
                 )
                 self.assertTrue((candidate[:, :, 0] == 0).all())
 

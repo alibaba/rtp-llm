@@ -454,14 +454,11 @@ def make_decode_marlin_executor(native, role, max_generate_batch_size):
 
     if not (
         isinstance(native, CutlassNvfp4Executor)
-        and str(role).upper().rsplit(".", 1)[-1] == "DECODE"
-        and 0 < max_generate_batch_size <= 8
         and native.ep_size == 2
         and native.tp_size == 1
         and native.w1.shape == (256, 1280, 160)
         and native.w2.shape == (256, 2560, 40)
         and native.w1.is_cuda
-        and torch.version.hip is None
         and torch.cuda.get_device_capability(native.w1.device) == (12, 0)
         and not native.config.model_config.eplb_config.enable_eplb()
         and all(

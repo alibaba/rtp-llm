@@ -10,6 +10,7 @@ import torch
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.model_factory_register import _model_factory, get_lazy_model_module_path
 from rtp_llm.model_loader.weight_module import CompositeWeight
+from rtp_llm.models.qwen3_next.qwen3_next import Qwen35Moe
 from rtp_llm.models.qwen4_exp.qwen4_exp import Qwen4Exp
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
@@ -99,23 +100,25 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
             kv_cache_config=KVCacheConfig(),
         )
 
-    def test_component_is_registered_and_qsa_load_reaches_parent(self):
+    def test_component_is_registered(self):
         self.assertIs(_model_factory["qwen4_exp_mtp"], Qwen4ExpMTP)
         self.assertEqual(
             get_lazy_model_module_path("qwen4_exp_mtp"),
             "rtp_llm.models.qwen4_exp.qwen4_exp_mtp",
         )
+
+    def test_shared_load_rejects_disabled_qsa_before_weight_loading(self):
         model = Qwen4ExpMTP.__new__(Qwen4ExpMTP)
         model.model_config = self.config
-        with mock.patch.object(Qwen4Exp, "load") as parent_load:
-            model.load(skip_python_model=True)
-        parent_load.assert_called_once_with(skip_python_model=True)
-
-    def test_load_rejects_disabled_qsa_before_parent(self):
-        model = Qwen4ExpMTP.__new__(Qwen4ExpMTP)
-        model.model_config = SimpleNamespace(enable_qwen4_qsa=False)
-        with mock.patch.object(Qwen4Exp, "load") as parent_load:
-            with self.assertRaisesRegex(RuntimeError, "dense draft fallback"):
+        model.model_config._qwen4_indexer_head_dim = 0
+        model.parallelism_config = ParallelismConfig()
+        with (
+            mock.patch.object(Qwen35Moe, "load") as parent_load,
+            mock.patch("torch.version.hip", None),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "complete checkpoint PLE/QSA geometry"
+            ):
                 model.load()
         parent_load.assert_not_called()
 

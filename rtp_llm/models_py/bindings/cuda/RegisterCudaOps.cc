@@ -31,7 +31,6 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
     rtp_ops_m.def("head_ipc_meta_size", &headIpcMetaSize);
     rtp_ops_m.def(
         "head_ipc_gather", &headIpcGather, py::arg("input"), py::arg("buffers"), py::arg("signals"), py::arg("rank"));
-    rtp_ops_m.def("head_ipc_close", &headIpcClose, py::arg("pointers"), py::arg("rank"));
 
     rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32",
                   &torch_ext::cublas_gemm_bf16_bf16_fp32,

@@ -113,15 +113,6 @@ class Qwen4ExpMTP(Qwen4Exp):
     def get_weight_cls():
         return Qwen4ExpMTPWeight
 
-    def load(self, skip_python_model: bool = False):
-        config = getattr(self, "model_config", None)
-        if not bool(getattr(config, "enable_qwen4_qsa", False)):
-            raise RuntimeError(
-                "qwen4_exp MTP requires checkpoint QSA geometry; "
-                "dense draft fallback is forbidden"
-            )
-        return super().load(skip_python_model=skip_python_model)
-
     def _py_model_class(self):
         from rtp_llm.models_py.model_desc.qwen4_exp_mtp import Qwen4ExpMTPModel
 
@@ -226,8 +217,8 @@ class Qwen4ExpMTP(Qwen4Exp):
         config.attn_config.rope_config.base = int(mtp_config["rope_theta"])
         config._qwen4_ple_layer_ids = []
         # QSA is the released draft attention contract. Config construction may
-        # keep it disabled for checkpoint-inspection tools, but load() refuses a
-        # silent dense fallback.
+        # keep it disabled for checkpoint-inspection tools, but shared load
+        # validation refuses a silent dense fallback.
         config.attn_config.is_sparse = config.enable_qwen4_qsa
         config.attn_config.use_sparse_gqa_fmha = config.enable_qwen4_qsa
         # The draft consumes text ids and aliases only the target vocabulary

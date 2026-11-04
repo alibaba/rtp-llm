@@ -4,7 +4,6 @@
 // Preserve its per-CTA alternating counter protocol and both barriers. Inputs
 // are copied to dedicated IPC staging; peer reads never alias the output.
 #include "rtp_llm/models_py/bindings/cuda/kernels/head_ipc_gather.h"
-#include <cuda.h>
 #include <cuda_runtime.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
@@ -13,8 +12,7 @@
 
 namespace rtp_llm {
 namespace qwen_head_ipc {
-constexpr int                 kMaxBlocks         = 36;
-constexpr CUpointer_attribute rangeStartAddrAttr = CU_POINTER_ATTRIBUTE_RANGE_START_ADDR;
+constexpr int kMaxBlocks = 36;
 
 // Counter may overflow, but it's fine since unsigned int overflow is
 // well-defined behavior.
@@ -160,9 +158,4 @@ torch::Tensor headIpcGather(const torch::Tensor&        input,
     return output;
 }
 
-void headIpcClose(const std::vector<int64_t>& pointers, int64_t rank) {
-    TORCH_CHECK(pointers.size() == 2 && rank >= 0 && rank < 2, "Head IPC close requires two rank pointers");
-    C10_CUDA_CHECK(cudaIpcCloseMemHandle(reinterpret_cast<void*>(pointers[1 - rank])));
-    C10_CUDA_CHECK(cudaFree(reinterpret_cast<void*>(pointers[rank])));
-}
 }  // namespace rtp_llm

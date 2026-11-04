@@ -63,7 +63,6 @@ class HeadIpcGatherTest(unittest.TestCase):
             self.assertEqual(len(_PROCESS_LIFETIME_IPC), count + 1)
             self.assertIs(_PROCESS_LIFETIME_IPC[-1][0], owners[0])
             self.assertIs(_PROCESS_LIFETIME_IPC[-1][1], owners[1])
-            workspace.ops.head_ipc_close.assert_not_called()
         finally:
             del _PROCESS_LIFETIME_IPC[count:]
 
