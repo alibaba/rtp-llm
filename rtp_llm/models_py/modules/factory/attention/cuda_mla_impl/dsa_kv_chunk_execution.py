@@ -25,6 +25,7 @@ class DsaPreparedKVBlock:
     native_context: object = None
     native_table: object = None
     native_schedule: object = None
+    indexer_decode_positions: object = None
 
 
 def _prefill_block_layout(block, request_count, device):
@@ -214,6 +215,10 @@ class DsaKVExecution:
                     for n in ("wire", "received"):
                         add(n, (padded, width), torch.float32)
                     add("complete", (q, select_width), torch.float32)
+                    if self.fp8_indexer and owner.native_exact_topk:
+                        add("decode.ends", (q,), torch.int32)
+                        if self.graph:
+                            add("decode.positions." + str(block.starts[0]), (select_width,), torch.int32)
                     add("gathered_indices", (padded, k), torch.int32)
                 for prefix, columns in (("block", select_width), ("merge", 2 * k)):
                     s.update(indexer_candidate_workspace_shapes(
@@ -430,11 +435,27 @@ class DsaKVExecution:
                         self.workspace.graph_geometry[geometry_key] = (positions, gathered_positions)
                 else:
                     positions, gathered_positions = cached
-                self.blocks.append(
-                    DsaPreparedKVBlock(
-                        None, start, width, positions, dcp_positions=gathered_positions
-                    )
+                prepared = DsaPreparedKVBlock(
+                    None, start, width, positions, dcp_positions=gathered_positions
                 )
+                if self.fp8_indexer and owner.native_exact_topk:
+                    if start % params.page_size or width % params.page_size:
+                        raise ValueError("Bounded Indexer Decode chunks must contain whole owner pages")
+                    key = ("decode.positions", start, width, geometry)
+                    compact_positions = self.workspace.graph_geometry.get(key) if self.graph else None
+                    if compact_positions is None:
+                        compact_positions = torch.arange(
+                            start * self.shards, (start + width) * self.shards,
+                            dtype=torch.int32, device=device,
+                        )
+                        if self.graph:
+                            destination = self.workspace("decode.positions." + str(start),
+                                                         (self.shards * width,), torch.int32)
+                            destination.copy_(compact_positions)
+                            compact_positions = destination
+                            self.workspace.graph_geometry[key] = compact_positions
+                    prepared.indexer_decode_positions = compact_positions
+                self.blocks.append(prepared)
         self._planning_key = self.planning_key(params, name)
         self.metadata_ready = None
         if self.prefill or self.fp8_indexer:
@@ -497,6 +518,7 @@ class DsaKVExecution:
                         block.slices,
                         block.indexer_starts,
                         block.indexer_ends,
+                        block.indexer_decode_positions,
                         block.native_context,
                         block.native_table,
                         block.native_schedule,

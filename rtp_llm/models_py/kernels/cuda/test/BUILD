@@ -119,3 +119,9 @@ cuda13_sm100_py_test(
     srcs = ["fused_activation_index_test.py"],
     deps = py_test_deps,
 )
+
+cuda13_sm100_py_test(
+    name = "dsa_decode_compact_test",
+    srcs = ["dsa_decode_compact_test.py"],
+    deps = py_test_deps + ["//rtp_llm:numpy", "//rtp_llm:triton"],
+)

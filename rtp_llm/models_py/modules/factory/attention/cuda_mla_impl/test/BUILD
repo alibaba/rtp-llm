@@ -67,3 +67,9 @@ py_test(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
 )
+
+cuda13_sm100_py_test(
+    name = "dsa_decode_positions_lifetime_test",
+    srcs = ["dsa_decode_positions_lifetime_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+)

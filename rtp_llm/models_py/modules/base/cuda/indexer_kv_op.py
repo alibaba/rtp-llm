@@ -72,6 +72,7 @@ class IndexerKVOp(nn.Module):
             ),
         )
         for number, block in enumerate(execution.blocks):
+            bounds = {}
             width = block.width
             score = (None if execution.fp8_indexer and params.is_prefill else
                      workspace("score", (execution.rows, width), torch.float32))
@@ -94,19 +95,28 @@ class IndexerKVOp(nn.Module):
                     (execution.selection_rows, width * params.shard_size),
                     torch.float32,
                 )
-                complete.view(execution.selection_rows, params.shard_size, width).copy_(
-                    received.view(
-                        params.shard_size, execution.selection_rows, width
-                    ).transpose(0, 1)
-                )
-                positions = block.dcp_positions
+                if execution.fp8_indexer and isinstance(self.selector, NativeExactIndexerTopKBackend):
+                    from rtp_llm.models_py.kernels.cuda.dsa_decode_compact import restore_visible_decode_scores
+
+                    ends = workspace("decode.ends", (execution.selection_rows,), torch.int32)
+                    with profile_scope("RTP::attention.dsa.indexer.decode_visible_restore"):
+                        restore_visible_decode_scores(
+                            received, params.positions_d, complete, ends,
+                            shard_rank=params.shard_rank, shards=params.shard_size,
+                            page=params.page_size, start=block.start,
+                        )
+                    positions = block.indexer_decode_positions
+                    bounds = {"ends": ends}
+                else:
+                    complete.view(execution.selection_rows, params.shard_size, width).copy_(
+                        received.view(
+                            params.shard_size, execution.selection_rows, width
+                        ).transpose(0, 1)
+                    )
+                    positions = block.dcp_positions
             with profile_scope("RTP::attention.dsa.indexer.chunk_topk"):
-                bounds = (
-                    {"starts": block.indexer_starts, "ends": block.indexer_ends}
-                    if params.is_prefill and execution.fp8_indexer
-                    and isinstance(self.selector, NativeExactIndexerTopKBackend)
-                    else {}
-                )
+                if params.is_prefill and execution.fp8_indexer and isinstance(self.selector, NativeExactIndexerTopKBackend):
+                    bounds = {"starts": block.indexer_starts, "ends": block.indexer_ends}
                 current = self.selector.select_candidates(
                     complete, positions, self.topk, workspace=workspace,
                     scores_are_sanitized=self.scores_are_sanitized and params.is_prefill,
