@@ -94,6 +94,18 @@ class DequantFP8Block32Test(unittest.TestCase):
 
 
 class PPUResidentBF16LinearTest(unittest.TestCase):
+    def test_fp32_output_preserves_projection_before_bf16_rounding(self):
+        x = torch.tensor([[[1.0, 1.0]]], dtype=torch.bfloat16)
+        weight = torch.tensor([[1.0, 1.0 / 512]], dtype=torch.bfloat16)
+        linear = PPUResidentBF16Linear(weight, output_dtype=torch.float32)
+        output = linear(x)
+        self.assertEqual(output.dtype, torch.float32)
+        self.assertEqual(output.item(), 1.0 + 1.0 / 512)
+        self.assertEqual(PPUResidentBF16Linear(weight)(x).item(), 1.0)
+        empty = linear(x[:, :0])
+        self.assertEqual(empty.shape, (1, 0, 1))
+        self.assertEqual(empty.dtype, torch.float32)
+
     def test_forward_matches_manual(self):
         torch.manual_seed(201)
         n, k = 96, 64

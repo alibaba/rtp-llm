@@ -141,6 +141,13 @@ def make_routing(t, num_experts, top_k, seed, slots=COMM_SLOTS):
 
 
 class SqrtSoftplusGateTest(unittest.TestCase):
+    def test_fp32_projection_distinguishes_scores_with_same_bf16_rounding(self):
+        hidden = torch.tensor([[1.0, 1.0]], dtype=torch.bfloat16)
+        weight = torch.tensor([[1.0, 0.0], [1.0, 1.0 / 512]], dtype=torch.bfloat16)
+        ids, weights = sqrtsoftplus_gate(hidden, weight, None, top_k=1)
+        self.assertEqual(ids.tolist(), [[1]])
+        torch.testing.assert_close(weights, torch.tensor([[1.5]]))
+
     E = 4
     K = 8
 
@@ -186,7 +193,7 @@ class SqrtSoftplusGateTest(unittest.TestCase):
         t, e, k = 8, 16, 32
         hidden = torch.randn(t, k, dtype=torch.bfloat16)
         weight = torch.randn(e, k, dtype=torch.bfloat16)
-        logits = F.linear(hidden, weight).float()
+        logits = F.linear(hidden.float(), weight.float())
         original = F.softplus(logits).sqrt()
         # Strong bias that completely reorders ranking vs. no bias.
         bias = torch.linspace(5.0, -5.0, e, dtype=torch.float32)
@@ -598,7 +605,7 @@ class FusedGateTritonTest(unittest.TestCase):
         hidden = torch.randn(t, k, dtype=torch.bfloat16, device="cuda")
         weight = torch.randn(e, k, dtype=torch.bfloat16, device="cuda")
         bias = torch.randn(e, dtype=torch.float32, device="cuda")
-        logits = F.linear(hidden, weight).float().contiguous()
+        logits = torch.mm(hidden, weight.t(), out_dtype=torch.float32).contiguous()
         fused_w, fused_i = _fused_sqrtsoftplus_gate_triton(
             logits, bias.contiguous(), topk=6, routed_scaling_factor=1.5
         )

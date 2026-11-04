@@ -182,8 +182,9 @@ def _torch_sparse_attention(
     """Softmax attention over the workspace rows selected by ``indices``.
 
     Mirrors the flash_mla sparse call: per row the valid indices are
-    ``indices[row, 0, :lengths[row]]`` into ``kv [R, 1, 512]``; ``attn_sink``
-    is added to the scores per head before the softmax.
+    ``indices[row, 0, :lengths[row]]`` into ``kv [R, 1, 512]``. Each head's
+    ``attn_sink`` is a separate logit with a zero value: it contributes to
+    the softmax denominator without contributing to the weighted values.
     """
     rows = q.shape[0]
     out = torch.zeros_like(q)
@@ -195,9 +196,13 @@ def _torch_sparse_attention(
         valid = indices[row, 0, :count].to(torch.int64)
         keys = kv[valid, 0].float()  # [n, 512]
         scores = torch.einsum("hd,kd->hk", q[row].float(), keys) * sm_scale
-        if sink is not None:
-            scores = scores + sink[:, None]
-        probs = torch.softmax(scores, dim=-1)
+        if sink is None:
+            probs = torch.softmax(scores, dim=-1)
+        else:
+            normalizer = torch.logsumexp(
+                torch.cat((scores, sink[:, None]), dim=-1), dim=-1, keepdim=True
+            )
+            probs = torch.exp(scores - normalizer)
         out[row] = (probs @ keys).to(q.dtype)
     return out
 
@@ -411,7 +416,9 @@ def _compress_pairs(
 ) -> torch.Tensor:
     """Pair pooling: softmax over the pair per channel, then RMSNorm."""
     weights = torch.softmax(scores.float(), dim=-2)
-    latent = (values.float() * weights).sum(-2)
+    # The compressor emits BF16 pooled values before RMSNorm. Its C2
+    # projections and unfinished-pair state retain FP32 separately.
+    latent = (values.float() * weights).sum(-2).to(torch.bfloat16)
     return _rms_norm(latent, norm, eps).to(torch.bfloat16)
 
 
@@ -484,7 +491,7 @@ def _produce_global(
                 right_scores.append(scores[right_index])
                 left_positions.append(left_pos)
             if not boundaries:
-                latent = values.new_zeros((0, geometry.head_dim))
+                latent = values.new_zeros((0, geometry.head_dim), dtype=torch.bfloat16)
                 entry_positions = positions.new_zeros(0)
             else:
                 pair_values = torch.stack(

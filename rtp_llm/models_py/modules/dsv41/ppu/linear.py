@@ -102,19 +102,29 @@ def dequant_fp8_block32_ue8m0(
 class PPUResidentBF16Linear:
     """BF16-resident linear used for dense projections and shared experts.
 
-    Holds the dequantized BF16 weight (and optional BF16 bias); ``forward`` is
-    ``F.linear(x, w, b)``. Construct either directly with a BF16 weight or via
+    Holds the dequantized BF16 weight (and optional BF16 bias). Output is
+    BF16 by default; C2 compressor projections retain FP32 output for pooling
+    and unfinished-pair state. Construct directly with a BF16 weight or via
     :meth:`from_quantized` from a V41 weight descriptor (values/scales/format
     per ``V41QuantizedTensor`` in the backend contract).
     """
 
-    def __init__(self, weight: torch.Tensor, bias: Optional[torch.Tensor] = None):
+    def __init__(
+        self,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+        *,
+        output_dtype: torch.dtype = torch.bfloat16,
+    ):
         if weight.dtype != torch.bfloat16:
             raise TypeError(
                 f"PPUResidentBF16Linear expects a BF16 weight, got {weight.dtype}"
             )
         self.weight = weight
         self.bias = bias
+        if output_dtype not in (torch.bfloat16, torch.float32):
+            raise ValueError("PPU dense output must be BF16 or FP32")
+        self.output_dtype = output_dtype
         if bias is not None and bias.dtype != torch.bfloat16:
             raise TypeError(f"bias must be BF16, got {bias.dtype}")
 
@@ -125,6 +135,7 @@ class PPUResidentBF16Linear:
         scales: Optional[torch.Tensor] = None,
         format: str = "bf16",
         bias: Optional[torch.Tensor] = None,
+        output_dtype: torch.dtype = torch.bfloat16,
     ) -> "PPUResidentBF16Linear":
         """Build from a V41 weight descriptor (values, scales, format).
 
@@ -137,16 +148,29 @@ class PPUResidentBF16Linear:
         if format == "bf16":
             if values.dtype != torch.bfloat16:
                 values = values.to(torch.bfloat16)
-            return cls(values, bias)
+            return cls(values, bias, output_dtype=output_dtype)
         if format == "fp8_32x32_ue8m0":
             weight = dequant_fp8_block32_ue8m0(values, scales)
-            return cls(weight, bias)
+            return cls(weight, bias, output_dtype=output_dtype)
         raise ValueError(
             f"unsupported dense linear weight format {format!r}; expected "
             "'bf16' or 'fp8_32x32_ue8m0'"
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.output_dtype == torch.float32:
+            if x.is_cuda:
+                output_shape = (*x.shape[:-1], self.weight.shape[0])
+                if x.numel() == 0:
+                    return x.new_empty(output_shape, dtype=torch.float32)
+                output = torch.mm(
+                    x.reshape(-1, x.shape[-1]),
+                    self.weight.t(),
+                    out_dtype=torch.float32,
+                ).reshape(output_shape)
+                return output if self.bias is None else output + self.bias.float()
+            bias = None if self.bias is None else self.bias.float()
+            return F.linear(x.float(), self.weight.float(), bias)
         return F.linear(x, self.weight, self.bias)
 
     __call__ = forward

@@ -230,8 +230,8 @@ def sqrtsoftplus_gate(
     Exactly matches ``rtp_llm/models_py/modules/dsv41/moe/gate.py`` for the
     non-hash path:
 
-      1. BF16 GEMM with an FP32 epilogue: ``scores = F.linear(x_bf16,
-         w_bf16).float()``.
+      1. BF16 inputs with FP32 projection output; no intermediate BF16
+         rounding before the ranking.
       2. ``original = sqrt(softplus(scores))``.
       3. ``router_bias`` is added for RANKING ONLY; weights are gathered from
          the un-biased ``original`` scores.
@@ -267,8 +267,12 @@ def sqrtsoftplus_gate(
         if router_weight.dtype == torch.bfloat16
         else router_weight.to(torch.bfloat16)
     )
-    # bf16 GEMM -> fp32 epilogue (rtp gate.py plan_0427 P1 numerics).
-    logits = F.linear(x_bf16, w_bf16).float()
+    # Casting a BF16 GEMM result afterward loses score differences that can
+    # change top-k experts. PPU torch.mm supports an FP32 output directly.
+    if x_bf16.is_cuda:
+        logits = torch.mm(x_bf16, w_bf16.t(), out_dtype=torch.float32)
+    else:
+        logits = F.linear(x_bf16.float(), w_bf16.float())
     if (
         router_bias is not None
         and image_rows is None

@@ -46,8 +46,8 @@ wq_a.weight`` + ``.scale``, ``ffn.experts.{id}.w1.weight`` + ``.scale``,
 
 from __future__ import annotations
 
-import json
 import importlib.util
+import json
 import math
 import os
 import struct
@@ -117,6 +117,7 @@ class V41Geometry:
     index_source_layer_ids: Tuple[int, ...]
     engram_layer_ids: Tuple[int, ...]
     engram_num_embeddings: Tuple[int, ...]
+    engram_vocab_size: int  # bucket base, independent of tokenizer vocab_size
     engram_max_ngram_size: int
     engram_n_heads: int
     engram_head_dim: int
@@ -269,6 +270,7 @@ class V41Geometry:
             ),
             engram_layer_ids=engram_layers,
             engram_num_embeddings=engram_counts,
+            engram_vocab_size=_cfg_int(config, "engram_vocab_size", default=vocab),
             engram_max_ngram_size=_cfg_int(config, "engram_max_ngram_size", default=4),
             engram_n_heads=_cfg_int(config, "engram_n_heads", default=8),
             engram_head_dim=_cfg_int(config, "engram_head_dim", default=256),
@@ -537,7 +539,12 @@ def _as_scale(scale: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     return scale.float()
 
 
-def _load_dense(source: _CheckpointSource, prefix: str) -> PPUResidentBF16Linear:
+def _load_dense(
+    source: _CheckpointSource,
+    prefix: str,
+    *,
+    output_dtype: torch.dtype = torch.bfloat16,
+) -> PPUResidentBF16Linear:
     """One dense projection: ``{prefix}.weight`` (+ ``.scale``) -> BF16 resident."""
     values = source.get(f"{prefix}.weight")
     if values is None:
@@ -548,8 +555,12 @@ def _load_dense(source: _CheckpointSource, prefix: str) -> PPUResidentBF16Linear
     if scale is None and values.dtype == torch.float8_e4m3fn:
         raise KeyError(f"{prefix}.weight is FP8 but {prefix}.scale is missing")
     if scale is not None:
-        return PPUResidentBF16Linear.from_quantized(values, scale, "fp8_32x32_ue8m0")
-    return PPUResidentBF16Linear.from_quantized(values, None, "bf16")
+        return PPUResidentBF16Linear.from_quantized(
+            values, scale, "fp8_32x32_ue8m0", output_dtype=output_dtype
+        )
+    return PPUResidentBF16Linear.from_quantized(
+        values, None, "bf16", output_dtype=output_dtype
+    )
 
 
 def _load_vector(
@@ -699,7 +710,11 @@ class PPUWeightBundle:
         def move_linear(linear):
             if linear is None:
                 return None
-            return PPUResidentBF16Linear(move(linear.weight), move(linear.bias))
+            return PPUResidentBF16Linear(
+                move(linear.weight),
+                move(linear.bias),
+                output_dtype=linear.output_dtype,
+            )
 
         layers = {}
         for layer_id, layer in self.layers.items():
@@ -918,13 +933,19 @@ def load_ppu_weights(
             wo_b=_load_dense(source, f"{prefix}.attn.wo_b"),
         )
         if is_kv_source:
-            layer.compressor_wkv = _load_dense(source, f"{prefix}.attn.compressor.wkv")
+            layer.compressor_wkv = _load_dense(
+                source,
+                f"{prefix}.attn.compressor.wkv",
+                output_dtype=torch.float32 if ratio == 2 else torch.bfloat16,
+            )
             layer.compressor_norm = _load_vector(
                 source, f"{prefix}.attn.compressor.norm.weight"
             )
             if ratio == 2:
                 layer.compressor_wgate = _load_dense(
-                    source, f"{prefix}.attn.compressor.wgate"
+                    source,
+                    f"{prefix}.attn.compressor.wgate",
+                    output_dtype=torch.float32,
                 )
             layer.index_wk = _load_dense(source, f"{prefix}.attn.indexer.wk")
             layer.index_k_norm = _load_vector(
@@ -1005,7 +1026,7 @@ def load_ppu_weights(
             layer_ids=geometry.engram_layer_ids,
             max_ngram_size=geometry.engram_max_ngram_size,
             n_heads=geometry.engram_n_heads,
-            vocab_size=geometry.vocab_size,
+            vocab_size=geometry.engram_vocab_size,
             compressed_vocab_size=geometry.engram_compressed_vocab_size,
             num_embeddings=geometry.engram_num_embeddings,
             token_map=list(geometry.engram_token_map),
@@ -1122,6 +1143,7 @@ def synthetic_config(
         "index_source_layer_ids": list(index_sources),
         "engram_layer_ids": list(engram_layers),
         "engram_num_embeddings": list(engram_num_embeddings),
+        "engram_vocab_size": vocab_size,
         "engram_max_ngram_size": engram_max_ngram_size,
         "engram_n_heads": engram_n_heads,
         "engram_head_dim": engram_head_dim,

@@ -21,6 +21,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.engram import (
 )
 from rtp_llm.models_py.modules.dsv41.ppu.model import PPUModelCore
 from rtp_llm.models_py.modules.dsv41.ppu.ops import PPUOps
+from rtp_llm.models_py.modules.dsv41.ppu.prefill import _torch_sparse_attention
 from rtp_llm.models_py.modules.dsv41.ppu.weight import (
     V41Geometry,
     load_ppu_weights,
@@ -304,8 +305,9 @@ class PrefillEndToEndTest(unittest.TestCase):
         tensors are created on the INPUT tensor's device (cuda inputs used to
         get CPU bookkeeping and crashed after the long weight load)."""
 
-        import rtp_llm.models_py.modules.dsv41.ppu.prefill as prefill_module
         from unittest import mock
+
+        import rtp_llm.models_py.modules.dsv41.ppu.prefill as prefill_module
 
         core = self._core()
         captured = {}
@@ -367,6 +369,43 @@ class PrefillEndToEndTest(unittest.TestCase):
         second = self._core().prefill(ids, apply_lm_head=True)
         torch.testing.assert_close(first.logits, second.logits, rtol=0, atol=0)
         torch.testing.assert_close(first.hidden, second.hidden, rtol=0, atol=0)
+
+
+class SparseAttentionSinkTest(unittest.TestCase):
+    def test_sink_changes_each_heads_denominator(self):
+        # Zero queries give unit mass to each real key. The two heads' sink
+        # masses are 1 and 3, with zero values. Padding contributes no mass.
+        q = torch.zeros(2, 2, 2)
+        kv = torch.tensor([[[2.0, 4.0]], [[6.0, 8.0]]])
+        indices = torch.tensor([[[0, -1]], [[1, 0]]], dtype=torch.int32)
+        lengths = torch.tensor([1, 2], dtype=torch.int32)
+        sink = torch.tensor([1.0, 3.0]).log()
+        result = _torch_sparse_attention(q, kv, indices, lengths, 1.0, sink)
+        expected = torch.tensor(
+            [[[1.0, 2.0], [0.5, 1.0]], [[8.0 / 3, 4.0], [1.6, 2.4]]]
+        )
+        torch.testing.assert_close(result, expected)
+
+    def test_sink_limits_and_empty_rows(self):
+        q = torch.zeros(2, 2, 2, dtype=torch.bfloat16)
+        kv = torch.tensor([[[2.0, 4.0]]], dtype=torch.bfloat16)
+        indices = torch.tensor([[[0]], [[-1]]], dtype=torch.int32)
+        lengths = torch.tensor([1, 0], dtype=torch.int32)
+        sink = torch.tensor([float("-inf"), float("inf")])
+        result = _torch_sparse_attention(q, kv, indices, lengths, 1.0, sink)
+        expected = torch.tensor(
+            [[[2.0, 4.0], [0.0, 0.0]], [[0.0, 0.0], [0.0, 0.0]]],
+            dtype=torch.bfloat16,
+        )
+        torch.testing.assert_close(result, expected)
+
+    def test_no_sink_keeps_regular_attention(self):
+        q = torch.zeros(1, 1, 2)
+        kv = torch.tensor([[[2.0, 4.0]], [[6.0, 8.0]]])
+        indices = torch.tensor([[[0, 1]]], dtype=torch.int32)
+        lengths = torch.tensor([2], dtype=torch.int32)
+        result = _torch_sparse_attention(q, kv, indices, lengths, 1.0, None)
+        torch.testing.assert_close(result, torch.tensor([[[4.0, 6.0]]]))
 
 
 if __name__ == "__main__":

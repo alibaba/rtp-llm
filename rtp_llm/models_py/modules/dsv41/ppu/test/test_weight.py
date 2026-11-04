@@ -441,6 +441,15 @@ class EngramShardTest(unittest.TestCase):
                 )
                 self.assertTrue(torch.equal(shard.scale, scale[start : start + 1024]))
 
+    def test_engram_bucket_base_is_independent_of_token_vocabulary(self):
+        config = dict(self.config, engram_vocab_size=257)
+        bundle = load_ppu_weights(config, self.tensors)
+        params = bundle.engram_hash_params
+        self.assertEqual(params.primes.tolist(), [[[257, 263], [269, 271], [277, 281]]])
+        self.assertEqual(params.offsets.tolist(), [[0, 257, 520, 789, 1060, 1337]])
+        self.assertEqual(params.token_map.numel(), config["vocab_size"])
+        self.assertEqual(params.compressed_vocab_size, config["vocab_size"])
+
     def test_hash_params_are_built(self):
         bundle = self.single
         self.assertIsNotNone(bundle.engram_hash_params)
@@ -458,6 +467,13 @@ class EngramShardTest(unittest.TestCase):
 
 
 class BindWiringTest(unittest.TestCase):
+    def test_compressor_projection_outputs_match_pair_state_precision(self):
+        pair = self.bundle.layers[2]
+        single = self.bundle.layers[6]
+        self.assertEqual(pair.compressor_wkv.output_dtype, torch.float32)
+        self.assertEqual(pair.compressor_wgate.output_dtype, torch.float32)
+        self.assertEqual(single.compressor_wkv.output_dtype, torch.bfloat16)
+
     @classmethod
     def setUpClass(cls):
         cls.config = synthetic_config()
