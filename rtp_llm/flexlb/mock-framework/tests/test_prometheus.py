@@ -104,7 +104,7 @@ def test_real_prometheus_ingestion_semantic_queries_and_recorded_gates(tmp_path,
                 return
             for n, (length, count) in enumerate(((5, 2), (9, 10))):
                 completed = await asyncio.to_thread(subprocess.run,
-                    [str(java), '-cp', classpath, 'org.flexlb.mock.engine.rtp.MetricsProbe', endpoints[n]['rpc'],
+                    [str(java), '-cp', classpath, 'org.flexlb.mock.engine.scheduler.MetricsProbe', endpoints[n]['rpc'],
                      str(length), str(count), str(tmp_path / f'probe-{n}.json')], capture_output=True, text=True, timeout=10)
                 assert completed.returncode == 0, completed.stderr
             await asyncio.to_thread(wait_until, lambda: (samples := query('sum(rtp_llm_forward_tokens_total{job="mock",kind="output"})'))
