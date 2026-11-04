@@ -74,6 +74,15 @@ cc_library(
 )
 
 cc_library(
+    name = "async_profile_trace",
+    srcs = ["AsyncProfileTrace.cc", "AsyncProfileTimeline.cc"],
+    hdrs = ["AsyncProfileTrace.h"],
+    deps = [":async_profiling_scope"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "async_profiling_scope",
     hdrs = ["AsyncProfilingScope.h"],
     copts = copts(),
