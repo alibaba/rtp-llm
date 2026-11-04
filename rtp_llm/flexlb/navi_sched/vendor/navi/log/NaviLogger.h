@@ -344,7 +344,6 @@ NAVI_EVENT_LOG(NaviLogger *logger, LogLevel level, const char *file, int line, c
 #define NAVI_LOG_INTERNAL(logger, level, format, args...)                      \
     {                                                                          \
         if (__builtin_expect(logEnable(logger, navi::LOG_LEVEL_##level), 0)) { \
-
             NAVI_EVENT_LOG(logger,                                             \
                            navi::LOG_LEVEL_##level,                            \
                            __FILE__,                                           \
@@ -358,7 +357,6 @@ NAVI_EVENT_LOG(NaviLogger *logger, LogLevel level, const char *file, int line, c
 #define NAVI_OBJECT_LOG_INTERNAL(logger, level, object, objectType, format, args...)                                   \
     {                                                                                                                  \
         if (__builtin_expect(logEnable(logger, navi::LOG_LEVEL_##level), 0)) {                                         \
-
             NAVI_OBJECT_EVENT_LOG(logger,                                                                              \
                                   navi::LOG_LEVEL_##level,                                                             \
                                   (void *)object,                                                                      \
