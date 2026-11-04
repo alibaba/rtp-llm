@@ -130,9 +130,16 @@ RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSam
         if (params.draft_probs_indices_d.defined()) {
             checkRejectionSamplingTensor(params.draft_probs_indices_d, "draft_probs_indices_d", torch::kInt32, 3);
             checkSameDevice(params.draft_probs_indices_d, "draft_probs_indices_d", device);
-            RTP_LLM_CHECK_WITH_INFO(params.draft_probs_indices_d.sizes() == params.draft_probs_d.sizes()
-                                        && params.draft_probs_d.size(2) == target_vocab_size,
+            // The draft may run a NARROWER candidate cap than the target: truncating
+            // the proposal q keeps rejection sampling exact (a target candidate
+            // outside q gets q = 0 and is recovered by the residual / bonus draw),
+            // while truncating the target p would change the emitted distribution.
+            // So the two widths are validated independently: only self-consistency
+            // and the remap hash-table bound (draft width <= 4096) are required.
+            RTP_LLM_CHECK_WITH_INFO(params.draft_probs_indices_d.sizes() == params.draft_probs_d.sizes(),
                                     "draft candidate IDs must match compact draft probabilities");
+            RTP_LLM_CHECK_WITH_INFO(params.draft_probs_d.size(2) >= 1 && params.draft_probs_d.size(2) <= 4096,
+                                    "compact draft candidate width must be in [1, 4096]");
         }
         RTP_LLM_CHECK_WITH_INFO(target_vocab_size <= 4096, "compact rejection supports K <= 4096");
     } else {
@@ -964,6 +971,14 @@ void rejectionSampling(const RejectionSamplingParams& params) {
         auto accept_shape   = std::vector<int64_t>{config.batch_size, config.num_speculative_tokens};
         accept_target_probs = torch::empty(accept_shape, params.target_probs_d.options());
         accept_draft_probs  = torch::empty(accept_shape, params.target_probs_d.options());
+        // Target width covers target_candidate_ids/target_probs and the aligned
+        // draft output; the draft keeps its own (possibly narrower) candidate cap.
+        // Both tensors are [batch, speculative_steps, K], so the candidate width is
+        // the LAST dimension (using dim 1 would silently pass the step count and
+        // truncate the draft table to `num_speculative_tokens` entries).
+        const int draft_compact_width = params.draft_probs_indices_d.defined() ?
+                                            static_cast<int>(params.draft_probs_indices_d.size(2)) :
+                                            0;
         check_cuda_value(invokeRemapDraftTopk(
             params.draft_probs_indices_d.defined() ? params.draft_probs_indices_d.data_ptr<int32_t>() : nullptr,
             draft_probs,
@@ -976,7 +991,8 @@ void rejectionSampling(const RejectionSamplingParams& params) {
             config.batch_size,
             config.num_speculative_tokens,
             config.target_vocab_size,
-            params.draft_probs_d.size(2),
+            draft_compact_width,
+            static_cast<int>(params.draft_probs_d.size(2)),
             stream));
         draft_probs = aligned_draft_probs.data_ptr<float>();
     }

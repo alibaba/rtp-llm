@@ -2189,6 +2189,191 @@ TEST(DSparkDeterministicSelectionTest, DeterministicSparseRowsSelection) {
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// Mixed candidate widths: the draft runs a narrower cap than the target
+// (MtpExecutor caps the draft at 1024 while the target keeps 4096).
+//
+// Rejection sampling is exact for ANY proposal distribution q as long as the
+// residual is computed from the target p, so shrinking q cannot change the
+// emitted distribution: a target candidate outside q simply gets q = 0, is never
+// accepted, and is recovered from the residual at exactly p. These two cases pin
+// that down.
+// ---------------------------------------------------------------------------
+TEST(DSparkSamplerTest, NarrowDraftWithZeroTailMatchesFullWidth) {
+    const c10::cuda::CUDAGuard guard(0);
+    const auto                 ints   = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    const auto                 floats = ints.dtype(torch::kFloat32);
+
+    // Target support: four candidates with p = (0.4, 0.3, 0.2, 0.1).
+    // Draft support: the FIRST TWO of them with q = (0.6, 0.4) == the same q a
+    // full-width draft would carry with zero mass on the tail.
+    const auto target_candidates = torch::tensor({1000, 1001, 1002, 1003}, ints);
+    // Two identical target rows (one per verified position) of the same
+    // four-candidate support.
+    const auto target_probs =
+        torch::tensor({0.4f, 0.3f, 0.2f, 0.1f, 0.4f, 0.3f, 0.2f, 0.1f}, floats).reshape({1, 2, 4});
+    const auto target_ids_all  = target_candidates.repeat({2}).reshape({1, 2, 4});
+    const auto target_ids      = torch::tensor({1000, 1002}, ints).reshape({2, 1});
+    const auto draft_token_ids = torch::tensor({1000}, ints).reshape({1, 1});
+
+    // Narrow draft (K=2) and the equivalent full-width draft (K=4, zero tail).
+    const auto narrow_probs = torch::tensor({0.6f, 0.4f}, floats).reshape({1, 1, 2});
+    const auto narrow_ids   = torch::tensor({1000, 1001}, ints).reshape({1, 1, 2});
+    const auto wide_probs   = torch::tensor({0.6f, 0.4f, 0.0f, 0.0f}, floats).reshape({1, 1, 4});
+    const auto wide_ids     = target_candidates.reshape({1, 1, 4});
+
+    auto run = [&](const torch::Tensor& draft_probs,
+                   const torch::Tensor& draft_indices,
+                   float                accept_uniform,
+                   float                residual_uniform) {
+        auto uniforms  = torch::tensor({accept_uniform, residual_uniform}, floats).reshape({1, 2});
+        auto tokens    = torch::empty({1, 2}, ints);
+        auto lengths   = torch::empty({1}, ints);
+        auto do_sample = torch::ones({1}, ints.dtype(torch::kBool));
+        execRejectionSampling({draft_probs,
+                               draft_token_ids,
+                               uniforms,
+                               target_probs,
+                               target_ids,
+                               tokens,
+                               lengths,
+                               do_sample,
+                               /*draft_probs_point_mass=*/false,
+                               /*target_probs_point_mass=*/false,
+                               /*force_mask_d=*/{},
+                               /*finalize_outputs=*/true,
+                               /*valid_draft_lengths_d=*/{},
+                               draft_indices,
+                               target_ids_all});
+        return std::make_pair(tokens, lengths);
+    };
+
+    // ---- Acceptance regime: accept iff u * q(a) < p(a), i.e. u * 0.6 < 0.4. ----
+    for (const float accept_uniform : {0.0f, 0.3f, 0.6f}) {
+        SCOPED_TRACE(accept_uniform);
+        auto narrow = run(narrow_probs, narrow_ids, accept_uniform, 0.5f);
+        auto wide   = run(wide_probs, wide_ids, accept_uniform, 0.5f);
+        // Identical decision and identical emitted tokens.
+        EXPECT_TRUE(torch::equal(narrow.first, wide.first)) << "narrow draft diverged from the full-width draft";
+        EXPECT_TRUE(torch::equal(narrow.second, wide.second));
+        // Accepted: the draft token, then the target bonus token.
+        EXPECT_EQ(narrow.first[0][0].item<int32_t>(), 1000);
+        EXPECT_EQ(narrow.second[0].item<int32_t>(), 2);
+        EXPECT_EQ(narrow.first[0][1].item<int32_t>(), 1002);
+    }
+
+    // ---- Rejection regime: resample from max(p - q, 0) over the TARGET support.
+    //
+    // The expectation is derived from the fixture instead of hardcoding ids: q is
+    // zero on the candidates the draft never proposes, so the residual there is
+    // exactly p and the kernel inverts its CDF (first slot whose running sum
+    // exceeds u * sum). Candidate i is therefore emitted for
+    // cum(i-1) <= u * sum < cum(i). That single assertion covers both properties
+    // this change must guarantee: (a) the residual can only reach candidates
+    // outside the draft's proposal set, and (b) it reaches them with exactly
+    // their target probability.
+    const std::vector<float>   p_values{0.4f, 0.3f, 0.2f, 0.1f};
+    const std::vector<float>   q_on_target_slots{0.6f, 0.4f, 0.0f, 0.0f};
+    const std::vector<int32_t> target_slot_ids{1000, 1001, 1002, 1003};
+    std::vector<float>         residual(p_values.size(), 0.0f);
+    std::vector<int32_t>       residual_only_ids;  // target candidates with q == 0
+    float                      residual_total = 0.0f;
+    for (size_t i = 0; i < p_values.size(); ++i) {
+        residual[i] = std::max(p_values[i] - q_on_target_slots[i], 0.0f);
+        residual_total += residual[i];
+        if (q_on_target_slots[i] == 0.0f) {
+            residual_only_ids.push_back(target_slot_ids[i]);
+        }
+    }
+    ASSERT_GT(residual_total, 0.0f);
+    ASSERT_FALSE(residual_only_ids.empty());
+    auto expected_residual_token = [&](float uniform) {
+        const float target     = uniform * residual_total;
+        float       cumulative = 0.0f;
+        for (size_t i = 0; i < residual.size(); ++i) {
+            cumulative += residual[i];
+            if (residual[i] > 0.0f && cumulative > target) {
+                return target_slot_ids[i];
+            }
+        }
+        return target_slot_ids.back();
+    };
+
+    int residual_cases = 0;
+    for (const float residual_uniform : {0.05f, 0.10f, 0.34f, 0.50f, 0.80f, 0.95f}) {
+        SCOPED_TRACE(residual_uniform);
+        auto narrow = run(narrow_probs, narrow_ids, /*accept_uniform=*/0.9f, residual_uniform);
+        auto wide   = run(wide_probs, wide_ids, /*accept_uniform=*/0.9f, residual_uniform);
+        // The truncated q behaves exactly like the same q with zero tail.
+        EXPECT_TRUE(torch::equal(narrow.first, wide.first)) << "narrow draft residual diverged from full width";
+        EXPECT_TRUE(torch::equal(narrow.second, wide.second));
+        // Residual token follows the target p on the q == 0 candidates.
+        const auto emitted = narrow.first[0][0].item<int32_t>();
+        EXPECT_EQ(emitted, expected_residual_token(residual_uniform))
+            << "residual token does not follow p on the candidates the draft cannot propose";
+        EXPECT_NE(std::find(residual_only_ids.begin(), residual_only_ids.end(), emitted), residual_only_ids.end())
+            << "residual emitted a candidate that carries draft mass: " << emitted;
+        // Only the residual position is real (one accepted slot, no bonus).
+        EXPECT_EQ(narrow.second[0].item<int32_t>(), 1);
+        ++residual_cases;
+    }
+    // u below 2/3 of the residual mass must land on the first q == 0 candidate and
+    // above it on the second: pins the proportionality, not just membership.
+    EXPECT_EQ(expected_residual_token(0.10f), residual_only_ids.front());
+    EXPECT_EQ(expected_residual_token(0.90f), residual_only_ids.back());
+    EXPECT_EQ(residual_cases, 6);
+}
+
+TEST(DSparkSamplerTest, NarrowDraftKeepsOnlyTargetSupportTokens) {
+    const c10::cuda::CUDAGuard guard(0);
+    const auto                 ints   = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    const auto                 floats = ints.dtype(torch::kFloat32);
+
+    // The draft proposes a token that is NOT in the target candidate list at all
+    // (it lives outside the target cap). p is zero there, so the token must never
+    // be accepted and the emitted token must stay inside the target support.
+    const auto target_candidates = torch::tensor({500, 501, 502, 503}, ints);
+    const auto target_probs =
+        torch::tensor({0.4f, 0.3f, 0.2f, 0.1f, 0.4f, 0.3f, 0.2f, 0.1f}, floats).reshape({1, 2, 4});
+    const auto target_ids_all = target_candidates.repeat({2}).reshape({1, 2, 4});
+    const auto target_ids     = torch::tensor({500, 502}, ints).reshape({2, 1});
+    // Draft support is a single candidate (900) that the target cap excludes.
+    const auto draft_probs     = torch::ones({1, 1, 1}, floats);
+    const auto draft_ids       = torch::tensor({900}, ints).reshape({1, 1, 1});
+    const auto draft_token_ids = torch::tensor({900}, ints).reshape({1, 1});
+
+    auto in_target = [&](int32_t token) { return torch::nonzero(target_candidates.eq(token)).numel() > 0; };
+
+    for (const float residual_uniform : {0.05f, 0.5f, 0.95f}) {
+        SCOPED_TRACE(residual_uniform);
+        auto uniforms  = torch::tensor({0.0f, residual_uniform}, floats).reshape({1, 2});
+        auto tokens    = torch::empty({1, 2}, ints);
+        auto lengths   = torch::empty({1}, ints);
+        auto do_sample = torch::ones({1}, ints.dtype(torch::kBool));
+        execRejectionSampling({draft_probs,
+                               draft_token_ids,
+                               uniforms,
+                               target_probs,
+                               target_ids,
+                               tokens,
+                               lengths,
+                               do_sample,
+                               false,
+                               false,
+                               {},
+                               true,
+                               {},
+                               draft_ids,
+                               target_ids_all});
+        // p(900) == 0 => always rejected, and the residual is p restricted to the
+        // target support (normalized), so the token is a target candidate.
+        EXPECT_EQ(lengths[0].item<int32_t>(), 1);
+        const auto emitted = tokens[0][0].item<int32_t>();
+        EXPECT_TRUE(in_target(emitted)) << "emitted token " << emitted << " is outside the target candidate cap";
+        EXPECT_NE(emitted, 900);
+    }
+}
+
 }  // namespace
 }  // namespace speculative
 }  // namespace rtp_llm

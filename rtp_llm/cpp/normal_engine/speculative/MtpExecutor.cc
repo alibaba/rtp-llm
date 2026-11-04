@@ -3136,8 +3136,18 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
     buffer_holder_.hold_host(temperature_cpu);
     buffer_holder_.hold_host(top_k_cpu);
     buffer_holder_.hold_host(top_p_cpu);
-    int        force_topk     = speculative::dsparkForceTopK();
-    const bool mixed_sampling = speculative::dsparkHasMixedSamplingParams(stream_groups.allStreams());
+    // Draft candidate cap. The target keeps the shared DSpARK cap
+    // (dsparkForceTopK(), 4096): truncating the *target* support changes the
+    // emitted distribution, and the real dsv4.1 service measures tau (the mass
+    // in ranks 1025..4096) up to 8.7e-2 for T=1.0/high top_p requests.
+    // Truncating the *draft* support does not: speculative rejection sampling is
+    // exact for any proposal distribution q as long as the residual is computed
+    // from the target p, so a narrower q only lowers the acceptance rate (draft
+    // tokens outside q are recovered by the residual / bonus draw). min() keeps
+    // RTP_LLM_DSPARK_FORCE_TOPK working as a downward override.
+    constexpr int kDraftCandidateCap = 1024;
+    int           force_topk         = std::min(kDraftCandidateCap, speculative::dsparkForceTopK());
+    const bool    mixed_sampling     = speculative::dsparkHasMixedSamplingParams(stream_groups.allStreams());
     // Mixed requests use the fixed candidate cap, including explicit top-k
     // above that cap. Pure explicit top-k keeps the full-vocabulary path.
     const bool compact_pure_path  = !has_top_k && has_top_p;

@@ -557,6 +557,7 @@ __global__ void remap_draft_topk_kernel(const int32_t* __restrict__ draft_candid
                                         float* __restrict__ accept_draft_probs,
                                         int num_speculative_tokens,
                                         int compact_width,
+                                        int draft_compact_width,
                                         int draft_prob_width,
                                         int table_size) {
     constexpr unsigned kFingerprintShift = 16;
@@ -570,9 +571,13 @@ __global__ void remap_draft_topk_kernel(const int32_t* __restrict__ draft_candid
     const int32_t*        target_ids = target_candidate_ids + target_row * compact_width;
     const float*          target_q   = target_probs + target_row * compact_width;
     float*                aligned_p  = aligned_draft_probs + row * compact_width;
+    // The draft may run a narrower candidate cap than the target: every draft
+    // lookup/stride below uses the draft width, while the aligned output keeps the
+    // target width (a target candidate outside the draft cap simply gets 0, i.e.
+    // q = 0 there, which is exactly what the residual expects).
     const bool            compact    = draft_candidate_ids != nullptr;
-    const int32_t*        draft_ids  = compact ? draft_candidate_ids + row * compact_width : nullptr;
-    const float*          draft_p    = compact ? draft_probs + row * compact_width : nullptr;
+    const int32_t*        draft_ids  = compact ? draft_candidate_ids + row * draft_compact_width : nullptr;
+    const float*          draft_p    = compact ? draft_probs + row * draft_compact_width : nullptr;
     extern __shared__ int table[];
     if (threadIdx.x == 0) {
         accept_target_probs[row] = 0.0f;
@@ -589,7 +594,7 @@ __global__ void remap_draft_topk_kernel(const int32_t* __restrict__ draft_candid
     // the sampled-token write in the lookup loop cannot be overwritten by it.
     __syncthreads();
     if (compact) {
-        for (int i = threadIdx.x; i < compact_width; i += blockDim.x) {
+        for (int i = threadIdx.x; i < draft_compact_width; i += blockDim.x) {
             const int      id    = draft_ids[i];
             const unsigned hash  = static_cast<unsigned>(id) * 2654435761u;
             const unsigned fp    = hash >> kFingerprintShift;
@@ -697,19 +702,25 @@ cudaError_t invokeRemapDraftTopk(const int32_t* draft_candidate_ids,
                                  int            batch_size,
                                  int            num_speculative_tokens,
                                  int            compact_width,
+                                 int            draft_compact_width,
                                  int            draft_prob_width,
                                  cudaStream_t   stream) {
     if (batch_size == 0 || num_speculative_tokens == 0) {
         return cudaSuccess;
     }
-    int half_table = 1;
-    while (half_table < 2 * compact_width) {
+    // The hash table holds the *draft* candidates (the target ids are only looked
+    // up in it), so it is sized from the draft width. With a mixed-width batch the
+    // draft width is the smaller one, which keeps the table at 2x the insertion
+    // count (load factor 0.5) and shrinks the shared-memory footprint.
+    const int table_width = draft_candidate_ids ? draft_compact_width : compact_width;
+    int       half_table  = 1;
+    while (half_table < 2 * table_width) {
         half_table *= 2;
     }
     if (half_table > 8192) {
         return cudaErrorInvalidValue;
     }
-    // half_table <= 8192 <=> compact_width <= 4096 < 2^16: the kernel packs the
+    // half_table <= 8192 <=> table_width <= 4096 < 2^16: the kernel packs the
     // candidate index into the low 16 bits of every hash-table slot.
     int table_size = half_table;
     if (draft_candidate_ids) {
@@ -734,6 +745,7 @@ cudaError_t invokeRemapDraftTopk(const int32_t* draft_candidate_ids,
                                         accept_draft_probs,
                                         num_speculative_tokens,
                                         compact_width,
+                                        draft_compact_width,
                                         draft_prob_width,
                                         table_size);
     return cudaGetLastError();

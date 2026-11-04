@@ -28,22 +28,20 @@
 namespace rtp_llm {
 namespace speculative {
 
+// Shared DSpARK candidate width. This is the **target** cap: truncating the
+// target distribution changes what the model emits, and the served dsv4.1 model
+// measures the ranks-1025..4096 mass at up to 8.7e-2 for T=1.0 / high top_p
+// requests, so the target keeps the wide support.
+//
+// The DRAFT is capped separately and more aggressively (1024, see
+// MtpExecutor::sampleDSparkDraft): speculative rejection sampling is exact for
+// any proposal distribution q as long as the residual is computed from the
+// target p, so a narrower q only costs acceptance rate, never distribution
+// fidelity. DeepSelect instantiates exactly {512, 1024, 4096}; any other width
+// falls back to ATen topk.
 int dsparkForceTopK() {
     const char* value = std::getenv("RTP_LLM_DSPARK_FORCE_TOPK");
     if (value == nullptr) {
-        // DSpARK candidate cap. K4096 is the historical default; K1024 is the
-        // DeepInfer-aligned width and is fully wired (DeepSelect instantiates
-        // exactly {512, 1024, 4096}; any other width falls back to ATen topk).
-        //
-        // Flipping this literal to 1024 is the whole production switch. It is
-        // deliberately left at 4096 because the K1024 cap drops the mass that
-        // ranks 1025..4096 carry: on unit-variance synthetic logits at T=0.3 the
-        // dropped fraction is ~1.3e-1 and the full-vocabulary TV against K4096 is
-        // the same order, four orders of magnitude above the 1e-5 alignment bar.
-        // The delta collapses only for peaked distributions (logit std >= ~3 at
-        // T=0.3 measured 2e-6 tail / 2e-8 TV), so the flip needs a measurement of
-        // the real dsv4.1 tail mass first. RTP_LLM_DSPARK_FORCE_TOPK=1024
-        // enables it without a rebuild in the meantime.
         return 4096;
     }
     char* end = nullptr;

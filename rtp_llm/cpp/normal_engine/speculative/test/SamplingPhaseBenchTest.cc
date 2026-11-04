@@ -85,6 +85,7 @@ constexpr float   kTopP                  = 0.95f;
 constexpr int     kDefaultWarmup         = 20;
 constexpr int     kDefaultReps           = 100;
 constexpr int64_t kFingerprintSeed       = 20261104;
+constexpr int     kDraftCandidateCap      = 1024;  // MtpExecutor's draft-side cap
 constexpr int64_t kFingerprintCount      = 16;  // leading token ids reported
 constexpr int64_t kHashCount             = 64;  // 8x8 leading candidate ids hashed
 
@@ -106,6 +107,32 @@ int candidateWidth() {
                         && (parsed == kSmallCandidateWidth || parsed == kDefaultCandidateWidth
                             || parsed == kLegacyCandidateWidth),
                     "SAMPLING_BENCH_CANDIDATE_WIDTH must be one of 512, 1024, 4096; got '",
+                    value,
+                    "'");
+        return static_cast<int>(parsed);
+    }();
+    return width;
+}
+
+// Draft-side candidate cap. Production runs the target at the DSpARK cap above
+// but the draft at min(1024, cap) (MtpExecutor::sampleDSparkDraft), which is
+// distribution-exact: rejection sampling emits p for any proposal q, so a
+// narrower draft only costs acceptance rate. Mirror that split here, otherwise
+// this bench would keep measuring a draft width the served path no longer uses.
+// SAMPLING_BENCH_DRAFT_CANDIDATE_WIDTH overrides it for A/B runs.
+int draftCandidateWidth() {
+    static const int width = []() {
+        const char* value = std::getenv("SAMPLING_BENCH_DRAFT_CANDIDATE_WIDTH");
+        if (value == nullptr || *value == '\0') {
+            return std::min(kDraftCandidateCap, candidateWidth());
+        }
+        char* end         = nullptr;
+        errno             = 0;
+        const long parsed = std::strtol(value, &end, 10);
+        TORCH_CHECK(errno == 0 && end != value && *end == '\0'
+                        && (parsed == kSmallCandidateWidth || parsed == kDefaultCandidateWidth
+                            || parsed == kLegacyCandidateWidth),
+                    "SAMPLING_BENCH_DRAFT_CANDIDATE_WIDTH must be one of 512, 1024, 4096; got '",
                     value,
                     "'");
         return static_cast<int>(parsed);
@@ -636,24 +663,29 @@ RejectionFixture makeRejectionFixture() {
     const auto i64  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt64);
     const auto b    = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kBool);
 
-    const int     width = candidateWidth();
-    const int64_t steps = kGamma;
-    const int64_t slots = kGamma + 1;
-    const int64_t half  = width / 2;
+    const int     width      = candidateWidth();
+    const int     draft_w    = draftCandidateWidth();
+    const int64_t steps      = kGamma;
+    const int64_t slots      = kGamma + 1;
+    const int64_t half       = width / 2;
+    // The draft cap may be narrower than the target cap (production split); the
+    // overlap must then fit the draft width.
+    const int64_t draft_half = std::min<int64_t>(draft_w / 2, half);
 
     RejectionFixture fixture;
     fixture.width       = width;
-    fixture.overlap_ids = half;
+    fixture.overlap_ids = draft_half;
 
     // Full-vocabulary scrambled candidates (see the header comment above): the
     // remap hash only collides when ids are spread over the vocabulary.
     const auto vocabulary_perm = torch::randperm(kVocab, i64);
-    const auto draft_ids_i32   = vocabulary_perm.narrow(0, 0, width).to(torch::kInt32);
-    const auto overlap_ids_i32 = vocabulary_perm.narrow(0, half, half).to(torch::kInt32);
-    const auto target_ids_i32 = torch::cat({overlap_ids_i32, vocabulary_perm.narrow(0, width, half).to(torch::kInt32)});
-    fixture.draft_probs_indices  = draft_ids_i32.reshape({1, 1, width}).expand({kBatch, steps, width}).contiguous();
+    const auto draft_ids_i32   = vocabulary_perm.narrow(0, 0, draft_w).to(torch::kInt32);
+    const auto overlap_ids_i32 = vocabulary_perm.narrow(0, draft_half, draft_half).to(torch::kInt32);
+    const auto target_ids_i32  = torch::cat({overlap_ids_i32,
+                                            vocabulary_perm.narrow(0, width, width - draft_half).to(torch::kInt32)});
+    fixture.draft_probs_indices  = draft_ids_i32.reshape({1, 1, draft_w}).expand({kBatch, steps, draft_w}).contiguous();
     fixture.target_probs_indices = target_ids_i32.reshape({1, 1, width}).expand({kBatch, slots, width}).contiguous();
-    fixture.draft_probs          = torch::softmax(torch::randn({kBatch, steps, width}, fp32), -1);
+    fixture.draft_probs          = torch::softmax(torch::randn({kBatch, steps, draft_w}, fp32), -1);
     fixture.target_probs         = torch::softmax(torch::randn({kBatch, slots, width}, fp32), -1);
 
     // Draft candidate position >= W/2 is in the shared half, so keep the draft's
@@ -760,7 +792,7 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
                                       markov_w2,
                                       static_cast<size_t>(kVocab),
                                       /*batch_all_greedy=*/false,
-                                      /*force_topk=*/candidateWidth(),
+                                      /*force_topk=*/draftCandidateWidth(),
                                       /*joint_max_top_k=*/0,
                                       /*copy_token_ids=*/false);
         };
@@ -778,7 +810,7 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
                                                 markov_w2,
                                                 static_cast<size_t>(kVocab),
                                                 /*batch_all_greedy=*/false,
-                                                /*force_topk=*/candidateWidth(),
+                                                /*force_topk=*/draftCandidateWidth(),
                                                 /*joint_max_top_k=*/0,
                                                 /*copy_token_ids=*/false);
         TORCH_CHECK(output.token_ids.defined() && output.all_probs.defined() && output.all_probs_indices.defined(),
