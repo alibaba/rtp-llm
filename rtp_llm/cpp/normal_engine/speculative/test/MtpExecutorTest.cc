@@ -684,6 +684,76 @@ TEST_F(MtpExecutorTest, testCompactPointMassProposalAndRejection) {
     EXPECT_TRUE(torch::equal(multiple.token_ids, std::get<1>(torch::topk(multiple.all_probs, 3, -1))));
 }
 
+TEST_F(MtpExecutorTest, testCompactTargetPointMassRejection) {
+    const auto    i32   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto    f32   = i32.dtype(torch::kFloat32);
+    constexpr int batch = 5;
+    constexpr int steps = 3;
+    for (int width : {7, 4096}) {
+        const int vocab = width * 2;
+        auto      candidate_ids =
+            (torch::arange(width, i32) * 2).reshape({1, 1, width}).expand({batch, steps + 1, width}).contiguous();
+        candidate_ids.select(2, width - 1).fill_(-1);
+        auto compact_q = torch::zeros({batch, steps + 1, width}, f32);
+        compact_q.select(2, 0).fill_(0.25f);
+        compact_q.select(2, 1).fill_(0.5f);
+        compact_q.select(2, 2).fill_(0.25f);
+        auto dense_q = torch::zeros({batch, steps + 1, vocab}, f32);
+        dense_q.scatter_add_(2, candidate_ids.clamp_min(0).to(torch::kLong), compact_q);
+        for (bool sample : {false, true}) {
+            for (int reject : {0, 1, steps}) {
+                for (bool missing : {false, true}) {
+                    auto draft   = torch::full({batch, steps}, 2, i32);
+                    auto target  = torch::full({batch, steps + 1}, 2, i32);
+                    auto uniform = torch::full({batch, steps + 1}, 0.125f, f32);
+                    if (reject < steps) {
+                        uniform.select(1, reject).fill_(0.875f);
+                        target.select(1, reject).fill_(4);
+                        if (missing)
+                            draft.select(1, reject).fill_(3);
+                    }
+                    auto do_sample       = torch::full({batch}, sample, i32.dtype(torch::kBool));
+                    auto dense_ids       = torch::full({batch, steps + 1}, -777, i32);
+                    auto compact_ids     = torch::empty_like(dense_ids);
+                    auto dense_lengths   = torch::empty({batch}, i32);
+                    auto compact_lengths = torch::empty_like(dense_lengths);
+                    ASSERT_EQ(invokePointMassRejectionSampling(draft.data_ptr<int32_t>(),
+                                                               uniform.data_ptr<float>(),
+                                                               dense_q.data_ptr<float>(),
+                                                               target.data_ptr<int32_t>(),
+                                                               1,
+                                                               dense_ids.data_ptr<int32_t>(),
+                                                               dense_lengths.data_ptr<int32_t>(),
+                                                               do_sample.data_ptr<bool>(),
+                                                               batch,
+                                                               steps,
+                                                               vocab,
+                                                               at::cuda::getCurrentCUDAStream().stream()),
+                              cudaSuccess);
+                    ASSERT_EQ(invokePointMassRejectionSampling(draft.data_ptr<int32_t>(),
+                                                               uniform.data_ptr<float>(),
+                                                               compact_q.data_ptr<float>(),
+                                                               target.data_ptr<int32_t>(),
+                                                               1,
+                                                               compact_ids.data_ptr<int32_t>(),
+                                                               compact_lengths.data_ptr<int32_t>(),
+                                                               do_sample.data_ptr<bool>(),
+                                                               batch,
+                                                               steps,
+                                                               width,
+                                                               at::cuda::getCurrentCUDAStream().stream(),
+                                                               candidate_ids.data_ptr<int32_t>()),
+                              cudaSuccess);
+                    EXPECT_TRUE(torch::equal(dense_ids, compact_ids));
+                    EXPECT_TRUE(torch::equal(dense_lengths, compact_lengths));
+                    EXPECT_TRUE(compact_lengths.eq(reject + 1).all().item<bool>());
+                    EXPECT_FALSE(compact_ids.eq(-777).any().item<bool>());
+                }
+            }
+        }
+    }
+}
+
 TEST_F(MtpExecutorTest, testHy4SamplerConfig) {
     {
         autil::EnvGuard env("RTP_LLM_HY4_FORCE_TOPK", "0");
@@ -700,6 +770,77 @@ TEST_F(MtpExecutorTest, testHy4SamplerConfig) {
     for (const std::string value : {"", "-1", "2147483648", "4096x"}) {
         autil::EnvGuard env("RTP_LLM_HY4_FORCE_TOPK", value);
         EXPECT_THROW(Sampler(SamplerInitParams{"hy_v4"}), c10::Error);
+    }
+}
+
+TEST_F(MtpExecutorTest, testHy4CompactTargetSamplerForward) {
+    constexpr int batch      = 4;
+    constexpr int vocab      = 8192;
+    constexpr int cap        = 4096;
+    const auto    host_i32   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).pinned_memory(true);
+    const auto    device_f32 = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    for (int mode = 0; mode < 5; ++mode) {
+        SCOPED_TRACE(mode);
+        autil::EnvGuard env("RTP_LLM_HY4_FORCE_TOPK", mode == 2 ? "0" : "4096");
+        Sampler         sampler(SamplerInitParams{"hy_v4"});
+        SamplerInputs   inputs{};
+        inputs.logits                     = torch::randn({batch, vocab}, device_f32);
+        const auto expected_greedy        = torch::argmax(inputs.logits, -1);
+        inputs.token_ids                  = torch::zeros({batch, 1}, host_i32);
+        inputs.input_lengths              = torch::zeros({batch}, host_i32);
+        inputs.sequence_lengths           = torch::zeros({batch}, host_i32);
+        inputs.vocab_size                 = vocab;
+        inputs.step                       = 0;
+        inputs.batch_size                 = batch;
+        inputs.batch_size_out             = batch;
+        inputs.num_beams_in               = torch::ones({batch}, host_i32.dtype(torch::kInt64));
+        inputs.num_beams_out              = torch::ones_like(inputs.num_beams_in);
+        inputs.top_k                      = torch::zeros({batch}, host_i32);
+        inputs.top_p                      = torch::full({batch}, 0.9f, host_i32.dtype(torch::kFloat32));
+        inputs.temperature                = torch::ones({batch}, host_i32.dtype(torch::kFloat32));
+        inputs.allow_compact_target_probs = true;
+        inputs.skip_logits_probs_restore  = true;
+        inputs.phase                      = LogitsProcessorPhase::MTP_VERIFY;
+        if (mode == 1) {
+            inputs.top_k.data_ptr<int32_t>()[0] = 1;
+            inputs.top_k.data_ptr<int32_t>()[2] = 32;
+            inputs.top_p.data_ptr<float>()[3]   = 0;
+        }
+        if (mode == 3)
+            inputs.cum_log_probs = torch::zeros({batch}, host_i32.dtype(torch::kFloat32));
+        if (mode == 4)
+            inputs.top_k.fill_(1);
+        for (int row = 0; row < batch; ++row) {
+            inputs.generator.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+            inputs.generator.back().set_current_seed(1234 + row);
+        }
+        auto       output  = sampler.forward(inputs);
+        const bool compact = mode < 2;
+        ASSERT_EQ(output.all_probs.dim(), 2);
+        ASSERT_EQ(output.all_probs.size(0), batch);
+        ASSERT_EQ(output.all_probs.size(1), compact ? cap : vocab);
+        ASSERT_EQ(output.all_probs_indices.defined(), compact);
+        EXPECT_TRUE(output.success.all().item<bool>());
+        EXPECT_TRUE(torch::allclose(output.all_probs.sum(-1), torch::ones({batch}, device_f32), 1e-5, 1e-5));
+        const auto tokens = output.token_ids.select(1, 0);
+        if (compact) {
+            ASSERT_EQ(output.all_probs_indices.scalar_type(), torch::kInt32);
+            ASSERT_EQ(output.all_probs_indices.sizes(), output.all_probs.sizes());
+            const auto matches = output.all_probs_indices.eq(tokens.unsqueeze(1));
+            EXPECT_TRUE(matches.sum(-1).eq(1).all().item<bool>());
+            EXPECT_TRUE((output.all_probs * matches).sum(-1).gt(0).all().item<bool>());
+        } else {
+            EXPECT_TRUE(output.all_probs.gather(1, tokens.to(torch::kLong).unsqueeze(1)).gt(0).all().item<bool>());
+        }
+        if (mode == 1) {
+            EXPECT_EQ(tokens[0].item<int32_t>(), expected_greedy[0].item<int64_t>());
+        }
+        if (mode == 4) {
+            EXPECT_TRUE(torch::equal(tokens.to(torch::kLong), expected_greedy));
+        }
+        if (mode == 3) {
+            EXPECT_TRUE(torch::isfinite(output.cum_log_probs).all().item<bool>());
+        }
     }
 }
 

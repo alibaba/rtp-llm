@@ -2503,15 +2503,23 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             }
 
             // target model sample
-            CHECK_AND_RETURN_REF(sampler_input,
-                                 batch_stream_processor_->gatherSpecSamplerInput(
-                                     stream_groups, model_input, model_output, *spec_logits_result));
+            CHECK_AND_RETURN_REF(
+                sampler_input,
+                batch_stream_processor_->gatherSpecSamplerInput(stream_groups,
+                                                                model_input,
+                                                                model_output,
+                                                                *spec_logits_result,
+                                                                draft_sampler_output.draft_point_mass));
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
             sampler_output           = std::move(sampler_->forward(sampler_input));
             sampler_output.all_probs = reshapeMtpTargetAllProbs(sampler_output.all_probs,
                                                                 static_cast<int64_t>(batch_size),
                                                                 static_cast<int64_t>(propose_step_ + 1),
-                                                                sampler_input.logits.size(1));
+                                                                sampler_output.all_probs.size(-1));
+            if (sampler_output.all_probs_indices.defined()) {
+                sampler_output.all_probs_indices =
+                    sampler_output.all_probs_indices.reshape_as(sampler_output.all_probs);
+            }
 
             // rejection sampling
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);

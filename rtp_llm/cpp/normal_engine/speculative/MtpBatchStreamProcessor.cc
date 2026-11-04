@@ -756,7 +756,8 @@ absl::StatusOr<SamplerInputs>
 MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
                                                 const GptModelInputs&                       model_inputs,
                                                 const GptModelOutputs&                      model_output,
-                                                const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result) const {
+                                                const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
+                                                bool compact_target_capable) const {
     RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.gather_spec_sampler_input");
     (void)model_inputs;
     RTP_LLM_CHECK(!stream_groups.empty());
@@ -799,7 +800,9 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 
     auto vocab_size           = (size_t)model_output.logits.size(1);
     sampler_inputs.vocab_size = vocab_size;
-    if (return_all_probs) {
+    sampler_inputs.allow_compact_target_probs = return_all_probs && compact_target_capable;
+    sampler_inputs.skip_logits_probs_restore  = true;
+    if (return_all_probs && !compact_target_capable) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     }

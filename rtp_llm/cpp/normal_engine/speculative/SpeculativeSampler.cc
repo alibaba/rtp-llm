@@ -145,6 +145,13 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     auto draft_token_probs  = draft_sampler_output.all_probs;
     auto target_token_probs = target_sampler_output.all_probs;
+    const auto& target_candidate_ids = target_sampler_output.all_probs_indices;
+    if (target_candidate_ids.defined()) {
+        RTP_LLM_CHECK(draft_sampler_output.draft_point_mass);
+        RTP_LLM_CHECK(target_candidate_ids.is_cuda() && target_candidate_ids.is_contiguous()
+                      && target_candidate_ids.scalar_type() == torch::kInt32
+                      && target_candidate_ids.sizes() == target_token_probs.sizes());
+    }
 
     buffer_holder_.hold_host(draft_token_ids);
     auto draft_token_ids_d_t = draft_token_ids.to(target_device, true);
@@ -245,18 +252,20 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                           && target_token_probs_d_t.is_contiguous());
             RTP_LLM_CHECK(draft_token_ids_d_t.scalar_type() == torch::kInt32 && draft_token_ids_d_t.is_contiguous());
             RTP_LLM_CHECK(target_token_ids_d_t.scalar_type() == torch::kInt32 && target_token_ids_d_t.is_contiguous());
-            RTP_LLM_CHECK(invokePointMassRejectionSampling(draft_token_ids_d_t.data_ptr<int32_t>(),
-                                                           uniform_samples_d.data_ptr<float>(),
-                                                           target_token_probs_d_t.data_ptr<float>(),
-                                                           target_token_ids_d_t.data_ptr<int32_t>(),
-                                                           target_token_ids_d_t.size(1),
-                                                           output_token_ids_d.data_ptr<int32_t>(),
-                                                           output_accepted_token_num_d.data_ptr<int32_t>(),
-                                                           do_sample_d.data_ptr<bool>(),
-                                                           batch_size,
-                                                           propose_step_,
-                                                           target_token_probs_d_t.size(2),
-                                                           cuda_graph::graphGetCurrentStream().stream())
+            RTP_LLM_CHECK(invokePointMassRejectionSampling(
+                              draft_token_ids_d_t.data_ptr<int32_t>(),
+                              uniform_samples_d.data_ptr<float>(),
+                              target_token_probs_d_t.data_ptr<float>(),
+                              target_token_ids_d_t.data_ptr<int32_t>(),
+                              target_token_ids_d_t.size(1),
+                              output_token_ids_d.data_ptr<int32_t>(),
+                              output_accepted_token_num_d.data_ptr<int32_t>(),
+                              do_sample_d.data_ptr<bool>(),
+                              batch_size,
+                              propose_step_,
+                              target_token_probs_d_t.size(2),
+                              cuda_graph::graphGetCurrentStream().stream(),
+                              target_candidate_ids.defined() ? target_candidate_ids.data_ptr<int32_t>() : nullptr)
                           == cudaSuccess);
         } else
 #endif

@@ -340,6 +340,8 @@ struct GreedyParams {
     TensorHolder*              buffer_holder = nullptr;
     int                        force_topk             = 0;
     bool                       use_optimized_sampling = true;
+    std::optional<torch::Tensor> output_all_probs_indices;
+    bool                         skip_logits_probs_restore = false;
 };
 
 struct GreedyOutput {

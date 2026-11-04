@@ -1,5 +1,8 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
+#include <ATen/cuda/CUDAGraph.h>
+#include <c10/cuda/CUDAGuard.h>
 #include "rtp_llm/models_py/bindings/cuda/ops/tests/CudaTestUtils.h"
 #include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -729,6 +732,7 @@ TEST_F(CudaSamplerTest, testHy4ForceTopKDistribution) {
     const int  batch = 4096, vocab = 8;
     auto       logits = torch::tensor({0.4f, 0.3f, 0.2f, 0.1f, 0.f, 0.f, 0.f, 0.f}, f32).log().repeat({batch, 1});
     for (int mode : {0, 1, 2}) {
+        SCOPED_TRACE(mode);
         const int    cap = mode == 2 ? 4 : 0;
         GreedyParams params{};
         params.logits           = logits.clone();
@@ -883,9 +887,15 @@ TEST_F(CudaSamplerTest, testHy4ForceTopKBenchmark) {
         params.output_all_probs = torch::empty_like(logits);
         params.generator.resize(batch);
         for (int trial = 0; trial < 3; ++trial) {
-            for (int side = 0; side < 2; ++side) {
-                const int cap     = (trial + side) % 2 == 0 ? 0 : 4096;
+            for (int side = 0; side < 4; ++side) {
+                const int mode                   = (trial + side) % 4;
+                const int cap                    = mode == 0 ? 0 : 4096;
                 params.force_topk = cap;
+                params.skip_logits_probs_restore = mode >= 2;
+                params.output_all_probs          = torch::empty({batch, mode == 3 ? 4096 : 154880}, f32);
+                params.output_all_probs_indices =
+                    mode == 3 ? std::optional<torch::Tensor>(torch::empty({batch, 4096}, f32.dtype(torch::kInt32))) :
+                                std::nullopt;
                 const auto us     = benchmarkCudaEventUs(
                     [&] {
                         params.logits = logits.clone();
@@ -895,6 +905,116 @@ TEST_F(CudaSamplerTest, testHy4ForceTopKBenchmark) {
                     20,
                     100);
                 std::cout << "HY4_FORCE_TOPK batch=" << batch << " vocab=154880 cap=" << cap << " trial=" << trial
+                          << " mode=" << mode << " us=" << us << std::endl;
+            }
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, testHy4CompactTargetProbabilities) {
+    const auto f32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const auto i32 = f32.dtype(torch::kInt32);
+    for (int mode : {0, 1, 2}) {
+        auto logits = torch::randn({4, 154880}, f32);
+        auto run    = [&](bool compact) {
+            GreedyParams params{};
+            params.logits           = logits.clone();
+            params.input_lengths    = torch::zeros({4}, i32);
+            params.sequence_lengths = torch::zeros({4}, i32);
+            params.token_ids        = torch::zeros({4, 1}, i32);
+            params.step             = 0;
+            params.top_k            = mode == 1 ? pinnedIntTensor({1, 7, 0, 6000}) : pinnedIntTensor({0, 0, 0, 0});
+            params.top_p =
+                mode == 2 ? pinnedFloatTensor({0.9f, 1.f, 0.f, 0.8f}) : pinnedFloatTensor({0.9f, 0.9f, 0.9f, 0.9f});
+            params.temperature               = pinnedFloatTensor({1, 1, 1, 1});
+            params.force_topk                = 4096;
+            params.skip_logits_probs_restore = compact;
+            params.output_all_probs          = torch::empty({4, compact ? 4096 : 154880}, f32);
+            if (compact)
+                params.output_all_probs_indices = torch::empty({4, 4096}, i32);
+            params.generator.resize(4);
+            torch::manual_seed(2438);
+            auto output = execSampleGreedy(params);
+            EXPECT_TRUE(output.success.all().item<bool>());
+            return params;
+        };
+        auto dense   = run(false);
+        auto compact = run(true);
+        EXPECT_TRUE(torch::equal(compact.logits, logits));
+        EXPECT_TRUE(torch::equal(dense.token_ids, compact.token_ids)) << dense.token_ids << compact.token_ids;
+        auto ids = compact.output_all_probs_indices->to(torch::kLong);
+        ASSERT_TRUE(ids.ge(-1).logical_and(ids.lt(154880)).all().item<bool>());
+        EXPECT_FALSE(compact.output_all_probs->masked_select(ids.lt(0)).ne(0).any().item<bool>());
+        auto restored = torch::zeros_like(logits).scatter_add_(1, ids.clamp_min(0), *compact.output_all_probs);
+        EXPECT_TRUE(torch::allclose(restored, *dense.output_all_probs, 1e-5, 1e-7))
+            << "max_diff=" << (restored - *dense.output_all_probs).abs().max().item<float>()
+            << "l1=" << (restored - *dense.output_all_probs).abs().sum(-1);
+        EXPECT_TRUE(torch::allclose(compact.output_all_probs->sum(-1), torch::ones({4}, f32)));
+    }
+}
+
+TEST_F(CudaSamplerTest, testHy4DeepSelectAccuracyAndBenchmark) {
+    const auto f32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    for (int width : {8192, 154880}) {
+        for (int pattern : {0, 1, 2, 3, 4, 5}) {
+            auto logits = torch::randn({16, width}, f32);
+            if (pattern == 1)
+                logits.zero_();
+            if (pattern == 2 || pattern == 3) {
+                logits.fill_(-std::numeric_limits<float>::infinity());
+                if (pattern == 2)
+                    logits.narrow(1, width - 8, 8).normal_();
+            }
+            if (pattern == 4)
+                logits.select(1, width - 1).fill_(std::numeric_limits<float>::infinity());
+            if (pattern == 5)
+                logits.select(1, width - 1).fill_(std::numeric_limits<float>::quiet_NaN());
+            bool used          = false;
+            auto [values, ids] = torch_ext::deepselect_fp32_topk(logits, 4096, &used);
+            ASSERT_TRUE(used);
+            ASSERT_TRUE(ids.ge(0).logical_and(ids.lt(width)).all().item<bool>());
+            auto ordered_ids = std::get<0>(ids.sort(-1));
+            EXPECT_TRUE(ordered_ids.slice(1, 1).gt(ordered_ids.slice(1, 0, 4095)).all().item<bool>());
+            EXPECT_TRUE(torch::allclose(values, logits.gather(1, ids), 0, 0, true));
+            auto reference = std::get<0>(torch::topk(logits, 4096, -1));
+            EXPECT_TRUE(torch::allclose(std::get<0>(values.sort(-1, true)), reference, 0, 0, true));
+        }
+    }
+    auto                       stream = at::cuda::getStreamFromPool();
+    c10::cuda::CUDAStreamGuard guard(stream);
+    auto                       input = torch::randn({16, 154880}, f32);
+    torch_ext::deepselect_fp32_topk(input, 4096);
+    ASSERT_EQ(cudaStreamSynchronize(stream.stream()), cudaSuccess);
+    at::cuda::CUDAGraph graph;
+    graph.capture_begin();
+    auto [graph_values, graph_ids] = torch_ext::deepselect_fp32_topk(input, 4096);
+    graph.capture_end();
+    for (int replay = 0; replay < 3; ++replay) {
+        input.normal_();
+        graph.replay();
+        EXPECT_TRUE(torch::equal(graph_values, input.gather(1, graph_ids)));
+        EXPECT_TRUE(torch::equal(std::get<0>(graph_values.sort(-1, true)), std::get<0>(torch::topk(input, 4096, -1))));
+    }
+    auto flush = torch::zeros({kL2FlushBytes / sizeof(float)}, f32);
+    for (int batch : {1, 16, 128}) {
+        auto logits = torch::randn({batch, 154880}, f32);
+        for (int trial = 0; trial < 3; ++trial) {
+            for (int side = 0; side < 2; ++side) {
+                const bool deepselect = (trial + side) % 2;
+                const auto us         = benchmarkCudaEventUs(
+                    [&] {
+                        if (deepselect) {
+                            bool used = false;
+                            torch_ext::deepselect_fp32_topk(logits, 4096, &used);
+                            EXPECT_TRUE(used);
+                        } else {
+                            torch::topk(logits, 4096, -1, true, false);
+                        }
+                    },
+                    flush,
+                    20,
+                    100);
+                std::cout << "HY4_SELECTOR batch=" << batch << " deepselect=" << deepselect << " trial=" << trial
                           << " us=" << us << std::endl;
             }
         }
