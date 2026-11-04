@@ -25,7 +25,7 @@ RtpEngineLoop 负责唤醒、执行和结果交接，不判断后端队列和协
 
 ## 设计边界
 
-本节记录已确定的职责边界，包含尚待实现的部分。当前已迁移 Python Case 接口、Step/ref 和 Prometheus 查询，并拆出协议无关的 RtpEngineLoop、请求进度/终态和 RTP 调度域；本批接通 Engine 宿主、实例扩缩容和发现更新；Client 已接通标准压缩输入播放与 client0 协调，其他后端仍待实现。其后的“当前代码职责”及运行说明描述可执行范围。
+本节记录已确定的职责边界，包含尚待实现的部分。当前已迁移 Python Case 接口、Step/ref 和 Prometheus 查询，并拆出协议无关的 RtpEngineLoop、请求进度/终态和 RTP 调度域；本地 Engine 独立 JVM 支持实例扩缩容和发现更新；Client 已接通标准压缩输入播放与 client0 协调，其他后端仍待实现。其后的“当前代码职责”及运行说明描述可执行范围。
 
 ### Python Case 操作与 Java 实例能力
 
@@ -35,7 +35,7 @@ Python 提供面向 Case 的业务接口，Java Engine 提供实例原子能力�
 | --- | --- |
 | Python Runner | 顺序执行 step、解析引用、固定时间范围、预算和失败处理、记录结果。 |
 | Python Case 接口实现 | 选择 Engine、扩缩容、向 client0 提交流量任务、跨实例查询与聚合；使用进程管理和发现文件能力。 |
-| Java 实例协议 | 停止实例、查询自身状态、接收已分配的流量计划等。Engine 宿主另负责创建和关闭本 JVM 内的 Engine 对象。 |
+| Java 实例协议 | 停止实例、查询自身状态、接收已分配的流量计划等。Engine 进程在启动时装配实例，由 Runner 启停。 |
 | Java client0 协调者 | 固定参与者、分配总流量与输入、协调准备/启动/停止、汇总活动状态；与本地请求执行分开。 |
 | Java 公共 Mock Engine | 请求接入、调度循环、资源机制、Forward 执行、输出和指标；组合 RTP 或 vLLM Scheduler。 |
 
