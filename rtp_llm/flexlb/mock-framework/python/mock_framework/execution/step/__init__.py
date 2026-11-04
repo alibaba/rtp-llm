@@ -20,8 +20,6 @@ def standard_actions():
     from .client_stop import ClientStop
     from .client_requests import ClientRequests
 
-    from .stop import Stop
-
     return (
         MasterGet,
         MasterEngineGet,
@@ -40,5 +38,4 @@ def standard_actions():
         ClientStart,
         ClientStop,
         ClientRequests,
-        Stop,
     )

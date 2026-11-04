@@ -416,18 +416,6 @@ def test_compiler_rejects_reference_to_background_result(setup):
         setup([step(background=True), step('write', args={'value': {'ref': 'steps.read'}})])
 
 
-def test_background_step_can_be_stopped_without_replaying_write(setup, tmp_path):
-    result, out = run(setup, tmp_path, [
-        step('write', background=True, args={'delay': 10}),
-        step(interface='step/stop', args={'target': 'write'}, expect={'eq': True}),
-    ])
-    assert result['status'] == 'PASS'
-    finished = [event for event in events(out) if event['event'] == 'step_finished']
-    assert [(event['step_id'], event['status']) for event in finished] == [('write', 'CANCELLED'), ('read', 'PASS')]
-    assert finished[0]['outcome_unknown']
-    assert sum(event['event'] == 'mutation' for event in events(out)) == 1
-
-
 def test_background_failure_interrupts_foreground_and_reaps_process(setup, tmp_path):
     result, out = run(setup, tmp_path, [
         step(background=True, args={'delay': .05}, expect={'eq': 3}),

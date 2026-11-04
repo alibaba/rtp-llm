@@ -2,7 +2,6 @@
 from abc import ABC, abstractmethod
 import asyncio
 from dataclasses import dataclass, field
-from collections.abc import Awaitable, Callable
 import time
 from typing import Any, ClassVar
 
@@ -41,7 +40,6 @@ class Expect:
 @dataclass(frozen=True)
 class Step(ABC):
     definition: ClassVar
-    allow_background: ClassVar[bool] = True
     id: str
     describe: str
     interface: str
@@ -120,7 +118,6 @@ class StepContext:
     deadline: float
     phase_id: str = ''
     results: dict[str, Any] = field(default_factory=dict)
-    stop_step: Callable[[str], Awaitable[bool]] | None = None
 
     @property
     def timeout(self):
