@@ -45,6 +45,9 @@ BUILD_COMMAND+=(
 if [[ "${NAVI_SCHED_CLEAR_DELETED_PACKAGES:-}" == "1" ]]; then
     BUILD_COMMAND+=("--deleted_packages=__navi_sched_no_deleted_packages__")
 fi
+if [[ "${NAVI_SCHED_ANNOUNCE_RC:-}" == "1" ]]; then
+    BUILD_COMMAND+=(--announce_rc)
+fi
 "${BUILD_COMMAND[@]}"
 OUTPUT_BIN=$(navi_sched_bazel_output_bin "${BUILD_ARGS[@]}")
 
