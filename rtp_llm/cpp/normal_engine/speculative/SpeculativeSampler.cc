@@ -818,14 +818,9 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
 #if USING_CUDA
             if (compact_width > 0) {
                 auto step_logits = proposal_logits.select(1, step);
-                auto selected =
-                    compact_width == 4096 && batch_size >= 16 && draft_vocab_size == 129280
-                            && step_logits.stride(0) % 256 == 0 && markov_bias.scalar_type() == torch::kBFloat16 ?
-                        torch_ext::deepselect_fp32_markov_topk_prefilter(step_logits, markov_bias, temperature) :
-                        torch_ext::deepselect_fp32_topk(
-                            torch_ext::markov_scaled_logits(step_logits, markov_bias, temperature), compact_width);
-                compact_indices = std::get<1>(selected);
-                draft_q         = torch::softmax(std::get<0>(selected), -1);
+                auto selected    = torch_ext::draft_markov_topk(step_logits, markov_bias, temperature, compact_width);
+                compact_indices  = std::get<1>(selected);
+                draft_q          = torch::softmax(std::get<0>(selected), -1);
             } else
 #endif
             {
