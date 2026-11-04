@@ -21,6 +21,8 @@ exclude = ["*.test", "*.test.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["python/mock_framework"]
+addopts = "-p mock_framework.execution.test.support"
+
 pythonpath = ["python"]
 
 [tool.setuptools.package-data]
