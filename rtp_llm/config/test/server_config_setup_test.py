@@ -319,7 +319,7 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.disk_cache_staging_block_count, 128)
         self.assertEqual(config.device_eviction_policy, "lru")
         self.assertEqual(config.memory_eviction_policy, "lru")
-        self.assertEqual(config.disk_eviction_policy, "fifo")
+        self.assertEqual(config.disk_eviction_policy, "lru")
         self.assertEqual(config.reserve_block_ratio, 5)
         self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 30000)
         self.assertFalse(hasattr(config, "write_cache_sync"))
