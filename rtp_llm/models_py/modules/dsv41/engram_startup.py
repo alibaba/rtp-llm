@@ -25,6 +25,8 @@ from .engram_exchange import (Cohort, ExchangeError, ExchangeServer, decode, dig
                               remote_exchange, tls_context, validate_group)
 from .engram_bootstrap import _json, _private_read, stage_package
 from .engram_descriptors import build_manifest
+from .engram_ganginfo import (ANNOTATION_ENV, DEFAULT_ANNOTATION, GangInfoError,
+                              family, read_parts)
 from .engram_manifest import parse_manifest
 from .engram_shard_config import shared_storage_requested, validate_count
 
@@ -239,6 +241,39 @@ def _ganginfo_cohort(env):
     return _parse_members(raw, env.get(PORT_ENV))
 
 
+def _annotation_cohort(env, parts):
+    """Storage hosts from the platform's gang annotation, when unambiguous.
+
+    Only a one-host instance can be read from addresses alone: every listed pod
+    is then one storage host.  A multi-host instance keeps the existing
+    derivation (the gang itself is the cohort), because the annotation does not
+    say how several multi-host instances group, and guessing would silently
+    change an existing per-instance layout.
+    """
+    path = env.get(ANNOTATION_ENV)
+    try:
+        entries = read_parts(path or DEFAULT_ANNOTATION)
+    except GangInfoError:
+        # Deployments without platform annotations (manual containers) fall
+        # through to the explicit inputs; a path the operator set is a
+        # misconfiguration and must not be ignored.
+        if path is None:
+            return None
+        raise ExchangeError('INVALID_GANGINFO') from None
+    if parts is None or len(parts) != 1:
+        return None
+    local = [entry for entry in entries if entry[1] == parts[0]]
+    if len(local) != 1:
+        raise ExchangeError('LOCAL_HOST_NOT_IN_GANGINFO')
+    name = family(local[0][0])
+    listed = entries if name is None else [e for e in entries if family(e[0]) == name]
+    default_port = env.get(PORT_ENV)
+    if default_port is not None and (not default_port.isdigit() or not 1 <= int(default_port) <= 65535):
+        raise ExchangeError('INVALID_COHORT')
+    port = int(default_port) if default_port else DEFAULT_COHORT_PORT
+    return [(host, explicit or port) for _, host, explicit in listed]
+
+
 def _gang_parts(gang_hosts, world_size):
     """Use the completed DistributedServer topology, never rediscover NICs."""
     if gang_hosts is None:
@@ -336,7 +371,8 @@ def build_group(env, world_size, *, rank=0, gang_hosts=None):
     """Derive membership from explicit sharing inputs and the completed gang.
 
     The address list may come from the environment, from the topology directory
-    the platform writes, or from the gang itself when one gang spans the hosts.
+    the platform writes, from the gang annotation, or from the gang itself when
+    one gang spans the hosts.
     """
     # Ordinary deployments must not opt in merely because /etc/ganginfo exists.
     if not shared_storage_requested(env):
@@ -344,10 +380,16 @@ def build_group(env, world_size, *, rank=0, gang_hosts=None):
     if type(world_size) is not int or world_size <= 0 or not 0 <= rank < world_size:
         raise ExchangeError('INVALID_WORLD_SIZE')
     parts, discovered = _gang_parts(gang_hosts, world_size)
+    source = 'cohort'
     cohort = _cohort(env)
     if cohort is None:
+        source = 'ganginfo'
         cohort = _ganginfo_cohort(env)
     if cohort is None:
+        source = 'annotation'
+        cohort = _annotation_cohort(env, parts)
+    if cohort is None:
+        source = 'gang'
         if parts is None:
             raise ExchangeError('GANG_TOPOLOGY_REQUIRED')
         if len(parts) < 2:
@@ -397,6 +439,13 @@ def build_group(env, world_size, *, rank=0, gang_hosts=None):
     timeout = DEFAULT_TIMEOUT if raw_timeout is None else float(raw_timeout)
     if not 0 < timeout <= 86400:
         raise ExchangeError('INVALID_TIMEOUT')
+    single_gang = parts is not None and len(parts) == instances
+    # One line that answers "which topology did this pod pick, and why".
+    logging.getLogger(__name__).info(
+        'engram topology source=%s instances=%d p=%d index=%d coordinator=%s:%d '
+        'local=%s single_gang=%s',
+        source, instances, p, index, cohort[0][0], cohort[0][1],
+        parts[0] if parts else '-', single_gang)
     return dict(
         group=group,
         instance_id=local['instance_id'],
@@ -406,7 +455,7 @@ def build_group(env, world_size, *, rank=0, gang_hosts=None):
         timeout_seconds=timeout,
         rank_base=(rank // local_world_size) * local_world_size if parts is not None
                   else (index % (world_size // local_world_size)) * local_world_size,
-        single_gang=parts is not None and len(parts) == instances,
+        single_gang=single_gang,
     )
 
 

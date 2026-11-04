@@ -2,6 +2,7 @@
 import base64
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+import json
 from pathlib import Path
 import tempfile
 import threading
@@ -515,6 +516,96 @@ class TopologySourceTest(unittest.TestCase):
             s.build_group(env, 4)
         with self.assertRaisesRegex(e.ExchangeError, 'COHORT_REQUIRED'):
             s.build_group(env, 4, gang_hosts=['a'] * 4)
+
+    def _annotation(self, directory, parts):
+        payload = {name: {'name': name, 'ip': ip} for name, ip in parts}
+        body = json.dumps(payload).replace('"', '\\"')
+        path = Path(directory) / 'annotations'
+        path.write_text('app.c2.io/biz-detail-ganginfo="%s"\n' % body)
+        return str(path)
+
+    def test_gang_annotation_discovers_single_host_instances(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._annotation(directory, [
+                ('prefill_part0', '10.0.0.1'), ('prefill_part1', '10.0.0.2'),
+                ('prefill_part2', '10.0.0.3'), ('prefill_part3', '10.0.0.4')])
+            env = {s.COUNT_ENV: '4', s.REVISION_ENV: 'rev', s.CHECKPOINT_ENV: '/model',
+                   s.ANNOTATION_ENV: path}
+            cfg = s.build_group(env, 4, rank=0, gang_hosts=['10.0.0.1'] * 4)
+            self.assertFalse(cfg['single_gang'])
+            self.assertEqual(cfg['index'], 0)
+            self.assertEqual(cfg['coordinator'],
+                             {'host': '10.0.0.1', 'port': s.DEFAULT_COHORT_PORT})
+            self.assertEqual([m['shards'][0]['host_id'] for m in cfg['group']['members']],
+                             ['10.0.0.1', '10.0.0.2', '10.0.0.3', '10.0.0.4'])
+            with self.assertLogs(s.__name__, level='INFO') as logs:
+                s.build_group(env, 4, rank=0, gang_hosts=['10.0.0.1'] * 4)
+            self.assertIn('source=annotation instances=4 p=4 index=0 '
+                          'coordinator=10.0.0.1:%d local=10.0.0.1'
+                          % s.DEFAULT_COHORT_PORT, logs.output[0])
+            # Every instance keeps its own rank space; only the address differs.
+            cfg = s.build_group(env, 4, rank=0, gang_hosts=['10.0.0.4'] * 4)
+            self.assertEqual(cfg['index'], 3)
+            self.assertEqual(cfg['rank_base'], 0)
+            env[s.PORT_ENV] = '29999'
+            cfg = s.build_group(env, 4, rank=0, gang_hosts=['10.0.0.1'] * 4)
+            self.assertEqual(cfg['coordinator']['port'], 29999)
+
+    def test_gang_annotation_keeps_single_instance_multihost(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._annotation(directory, [
+                ('decode_part0', '10.0.0.1'), ('decode_part1', '10.0.0.2')])
+            env = {s.COUNT_ENV: '2', s.REVISION_ENV: 'rev', s.CHECKPOINT_ENV: '/model',
+                   s.ANNOTATION_ENV: path}
+            cfg = s.build_group(env, 8, rank=5,
+                                gang_hosts=['10.0.0.1'] * 4 + ['10.0.0.2'] * 4)
+            self.assertTrue(cfg['single_gang'])
+            self.assertEqual(cfg['index'], 1)
+            self.assertEqual(cfg['rank_base'], 4)
+            self.assertEqual([m['shards'][0]['host_id'] for m in cfg['group']['members']],
+                             ['10.0.0.1', '10.0.0.2'])
+
+    def test_gang_annotation_leaves_multihost_instances_alone(self):
+        # A 4-pod gang of two 2-host instances keeps the per-instance layout:
+        # the annotation cannot say how pods group, so it must not be guessed.
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._annotation(directory, [
+                ('prefill_part%d' % i, '10.0.0.%d' % (i + 1)) for i in range(4)])
+            env = {s.COUNT_ENV: '2', s.REVISION_ENV: 'rev', s.CHECKPOINT_ENV: '/model',
+                   s.ANNOTATION_ENV: path}
+            cfg = s.build_group(env, 8, rank=0,
+                                gang_hosts=['10.0.0.1'] * 4 + ['10.0.0.2'] * 4)
+            self.assertTrue(cfg['single_gang'])
+            self.assertEqual([m['shards'][0]['host_id'] for m in cfg['group']['members']],
+                             ['10.0.0.1', '10.0.0.2'])
+
+    def test_gang_annotation_must_list_the_local_host(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._annotation(directory, [
+                ('prefill_part0', '10.0.0.1'), ('prefill_part1', '10.0.0.2')])
+            env = {s.COUNT_ENV: '2', s.REVISION_ENV: 'rev', s.CHECKPOINT_ENV: '/model',
+                   s.ANNOTATION_ENV: path}
+            with self.assertRaisesRegex(e.ExchangeError, 'LOCAL_HOST_NOT_IN_GANGINFO'):
+                s.build_group(env, 4, gang_hosts=['10.0.0.9'] * 4)
+
+    def test_gang_annotation_is_optional_but_not_ignored_when_configured(self):
+        env = {s.COUNT_ENV: '2', s.REVISION_ENV: 'rev', s.CHECKPOINT_ENV: '/model'}
+        with mock.patch.object(s, 'DEFAULT_ANNOTATION', '/nonexistent/annotations'):
+            with self.assertRaisesRegex(e.ExchangeError, 'COHORT_REQUIRED'):
+                s.build_group(env, 4, gang_hosts=['10.0.0.1'] * 4)
+        env[s.ANNOTATION_ENV] = '/nonexistent/annotations'
+        with self.assertRaisesRegex(e.ExchangeError, 'INVALID_GANGINFO'):
+            s.build_group(env, 4, gang_hosts=['10.0.0.1'] * 4)
+
+    def test_explicit_cohort_still_overrides_the_annotation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._annotation(directory, [
+                ('prefill_part%d' % i, '10.0.0.%d' % (i + 1)) for i in range(4)])
+            env = {s.COUNT_ENV: '2', s.REVISION_ENV: 'rev', s.CHECKPOINT_ENV: '/model',
+                   s.ANNOTATION_ENV: path, s.COHORT_ENV: '127.0.0.1,127.0.0.2'}
+            cfg = s.build_group(env, 4, gang_hosts=['127.0.0.1'] * 4)
+            self.assertEqual(cfg['coordinator']['host'], '127.0.0.1')
+            self.assertEqual(len(cfg['group']['members']), 2)
 
 
 class RevisionTest(unittest.TestCase):

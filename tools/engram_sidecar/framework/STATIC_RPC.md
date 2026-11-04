@@ -17,6 +17,11 @@ RTP_ENGRAM_COHORT=10.0.0.1,10.0.0.2,10.0.0.3,10.0.0.4
 两项都没配，跳过共享启动，使用原有本地加载路径。二者同时配置时 P 必须等于列表长度。
 目录、证书、NUMA 等辅助配置不会启用共享。配置了共享但交换失败时启动失败，不静默加载另一份本地表。
 
+**列表可以省略。** 共享已启用但没有 `RTP_ENGRAM_COHORT` 时，从平台注解
+`GANG_ANNOCATION_PATH`（默认 `/etc/podinfo/annotations`）里的
+`app.c2.io/biz-detail-ganginfo` 取成员地址，端口统一用 `RTP_ENGRAM_COHORT_PORT`。
+注解里没有 port 字段，也不要指望它带 port。手动容器没有这个文件，仍然用上面的显式列表。
+
 | 配置 | 用途 |
 |---|---|
 | `CHECKPOINT_PATH` | 沿用业务模型目录；`RTP_ENGRAM_CHECKPOINT` 可单独覆盖 |
@@ -39,7 +44,12 @@ RTP_ENGRAM_COHORT=10.0.0.1,10.0.0.2,10.0.0.3,10.0.0.4
 不再用 hostname 重新猜网卡，不再通过另一个 `engram/topology` Store 协议汇集地址。
 
 - 单 gang：直接从已有成员信息得到 host 和每 host rank 数。
-- 跨 gang：完整共享组由 `RTP_ENGRAM_COHORT` 提供；每个 gang 的局部 rank 编号和 host 归属仍使用自身 `WorldInfo`。
+- 跨 gang：完整共享组按 `RTP_ENGRAM_COHORT` → `RTP_ENGRAM_GANGINFO_DIR` → 平台注解的优先级取；
+  每个 gang 的局部 rank 编号和 host 归属仍使用自身 `WorldInfo`。
+- 注解按 `_partN` 后缀排序，并按本机地址匹配到的名字前缀过滤掉别的角色。
+  本实例只有一个 host 时，每个成员各算一个存储 host（多实例共享）；
+  本实例跨多个 host 时保持原有推导（gang 自身就是共享组），因为注解无法说明多个多 host 实例
+  如何分组，猜错会静默改变现有布局——这种拓扑仍需显式 `RTP_ENGRAM_COHORT`。
 - 显式 `RTP_ENGRAM_GANGINFO_DIR` 仍可提供列表，但必须先用上述 env 启用共享；不会自动读取 `/etc/ganginfo`。
 - 地址列表必须使用 RTP 注册的可达地址。不要仅凭平台“虚/实 IP”的列名猜选哪一个。
 
