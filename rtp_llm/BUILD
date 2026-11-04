@@ -1,5 +1,13 @@
 package(default_visibility = ["//visibility:public"])
 
+exports_files(
+    ["models/deepseek_v4.py"],
+    visibility = [
+        "//rtp_llm/models_py:__pkg__",
+        "//rtp_llm/models_py/modules/dsv4/ppu/test:__pkg__",
+    ],
+)
+
 exports_files([
     "ops/libth_transformer_config.pyi",
     "ops/librtp_compute_ops/__init__.pyi",
@@ -8,7 +16,7 @@ exports_files([
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
 load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
-load("@arch_config//:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps", "platform_deps", "triton_deps")
+load("@arch_config//:arch_select.bzl", "requirement", "whl_deps", "ml_pin_reqs", "internal_deps", "jit_deps", "platform_deps", "triton_deps")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 
 load("@release_version//:defs.bzl", "RELEASE_VERSION")
@@ -71,12 +79,14 @@ xft_dep = select({
 arch_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
+    "@//:using_ppu": [],
     "//conditions:default": [":decord", ":av"],
 })
 
 arch_with_version_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
+    "@//:using_ppu": [],
     "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
 })
 
@@ -167,6 +177,7 @@ py_library(
         "utils/test/*.py",
         "utils/test/**/*.py",
     ]),
+    data = glob(["utils/moe_luts/*"]),
     deps = [
         ":jit_cache_env",
         ":numa",
@@ -323,6 +334,9 @@ py_library(
         "//rtp_llm/models_py:models",
         ":multimodal",
     ] + select({
+        "@//:using_ppu": ["//rtp_llm/models_py:ppu_entrypoint"],
+        "//conditions:default": [],
+    }) + select({
         # cuda13 locks ship deep-gemm and deep-ep.
         "@//:using_cuda13_x86": deep,
         "@//:using_cuda13_arm": deep,
@@ -667,18 +681,26 @@ py_package(
     }),
 )
 
+grpcio_tools_req = select({
+    # grpcio-tools 1.57 ships no cp312 wheel; the PPU runtime is Python 3.12.
+    "@//:using_ppu": ["grpcio-tools==1.62.0"],
+    "//conditions:default": ["grpcio-tools==1.57.0"],
+})
+
+setuptools_req = select({
+    "@//:using_ppu": ["setuptools==70.3.0"],
+    "//conditions:default": ["setuptools==60.5.0"],
+})
+
 whl_reqs = [
     "filelock>=3.20.0",
     "jinja2",
     "sympy",
     "typing-extensions",
     "importlib_metadata",
-    "transformers==5.2.0",
     "sentencepiece==0.2.0",
     "fastapi==0.115.6",
-    "grpcio-tools==1.57.0",
     "uvicorn==0.30.0",
-    "setuptools==60.5.0",
     "dacite",
     "pynvml",
     "thrift",
@@ -687,7 +709,6 @@ whl_reqs = [
     "tiktoken==0.7.0",
     "lru-dict",
     "py-spy",
-    "pyarrow==14.0.0",
     "safetensors",
     "cpm_kernels",
     "Pillow",
@@ -699,7 +720,6 @@ whl_reqs = [
     "pydantic",
     "timm==0.9.12",
     "onnx",
-    "sentence-transformers==5.2.0",
     # "xfastertransformer_devel==1.8.1.1",
     # "xfastertransformer_devel_icx==1.8.1.1",
     "grpcio==1.62.0",
@@ -724,11 +744,10 @@ whl_reqs = [
     "portalocker",
     "concurrent_log_handler",
     "apache-tvm-ffi",
-    "xgrammar==0.2.8",
     # OTel trace runtime; keep the pinned protobuf compatibility constraint.
     "opentelemetry-sdk==1.44.0",
     "opentelemetry-exporter-otlp-proto-http==1.15.0",
-] + whl_deps() + platform_deps() + xft_dep
+] + grpcio_tools_req + setuptools_req + whl_deps() + platform_deps() + xft_dep + ml_pin_reqs()
 
 # Frontend-only requirement set: the frontend lane is CPU serving (HTTP + gRPC
 # client + tokenizer), so the engine's platform CUDA tree (whl_deps: torch-cuda,
@@ -745,7 +764,6 @@ whl_reqs_frontend = [
     "sympy",
     "typing-extensions",
     "importlib_metadata",
-    "transformers==5.2.0",
     "sentencepiece==0.2.0",
     "fastapi==0.115.6",
     "uvicorn==0.30.0",
@@ -779,11 +797,15 @@ whl_reqs_frontend = [
     "portalocker",
     "concurrent_log_handler",
     "apache-tvm-ffi",
-    "xgrammar==0.2.8",
     # OTel trace runtime; keep the pinned protobuf compatibility constraint.
     "opentelemetry-sdk==1.44.0",
     "opentelemetry-exporter-otlp-proto-http==1.15.0",
-]
+] + select({
+    # The PPU vendor lock pins the transformers 4.57.1 family and carries no
+    # xgrammar; mirror it so the frontend wheel metadata matches its lock.
+    "@//:using_ppu": ["transformers==4.57.1"],
+    "//conditions:default": ["transformers==5.2.0", "xgrammar==0.2.8"],
+})
 
 py_wheel(
     name = "rtp_llm_frontend_whl",

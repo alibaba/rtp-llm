@@ -905,6 +905,13 @@ def make_copy_dir_rule(repository_ctx, name, src_dir, out_dir, exceptions = None
     # '@D' already contains the relative path for a single file, see
     # http://docs.bazel.build/versions/master/be/make-variables.html#predefined_genrule_variables
     out_dir = "$(@D)/%s" % out_dir if len(outs) > 1 else "$(@D)"
+    pre_cmd = ""
+    if len(outs) > 1:
+        # External repository outputs survive toolkit changes in a persistent
+        # Bazel output base, and `cp -rLf` leaves files the new source tree no
+        # longer has.  Those stale headers then shadow the declared ones (e.g.
+        # an old top-level cub/ next to the new cccl/ layout), so start clean.
+        pre_cmd = 'rm -rf "%s" ; ' % out_dir
     if exceptions != None:
         for x in exceptions:
             post_cmd += " ; rm -fR " + out_dir + "/" + x
@@ -913,9 +920,9 @@ def make_copy_dir_rule(repository_ctx, name, src_dir, out_dir, exceptions = None
     outs = [
 %s
     ],
-    cmd = \"""cp -rLf "%s/." "%s/" %s\""",
+    cmd = \"""%scp -rLf "%s/." "%s/" %s\""",
     tags = ["no-remote"],
-)""" % (name, "\n".join(outs), src_dir, out_dir, post_cmd)
+)""" % (name, "\n".join(outs), pre_cmd, src_dir, out_dir, post_cmd)
 
 def _flag_enabled(repository_ctx, flag_name):
     return get_host_environ(repository_ctx, flag_name) == "1"

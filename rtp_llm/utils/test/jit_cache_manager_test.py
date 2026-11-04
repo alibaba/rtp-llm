@@ -298,6 +298,27 @@ class WrapperCacheSetupTest(JitCacheTestBase):
 
 
 class StoreTest(JitCacheTestBase):
+    def test_ppu_triton_binary_survives_snapshot_restore(self):
+        component = replace(
+            next(item for item in jit.COMPONENTS if item.name == "triton"),
+            local_dir=self.root / "local" / "triton",
+        )
+        manager = jit.JitCacheManager(
+            jit.Scope("test", component.local_dir.parent, (component,)), ""
+        )
+        expected = {
+            "triton/hash/kernel.json": b"{}",
+            "triton/hash/kernel.hgbin": b"ppu-binary",
+        }
+        for rel, payload in expected.items():
+            path = component.local_dir.parent / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+        snap_store = self.make_store()
+        snap_store.publish_snapshot(manager._snapshot_files())
+        restored = snap_store.prepare_restore(self.root / "restored")
+        self.assertEqual(contents(restored.staging), expected)
+
     def test_deep_gemm_completed_entry_survives_snapshot_restore(self):
         component = replace(
             next(item for item in jit.COMPONENTS if item.name == "deep_gemm"),
@@ -668,6 +689,24 @@ class ScopeTest(JitCacheTestBase):
         self.assertNotIn("torch_extensions", names)  # no identity -> not managed
         self.assertIn("triton", names)
 
+    def test_ppu_triton_scope_skips_old_incomplete_snapshots(self):
+        with mock.patch("torch.__version__", "2.11.0"), mock.patch.dict(
+            os.environ, {"PPU_HOME": ""}
+        ), mock.patch("torch.cuda.is_available", side_effect=AssertionError) as probe:
+            old_scope = self.scope_id()
+            old_rocm = self.scope_id(hip="6.2.41133", arch="gfx942")
+            with mock.patch.dict(os.environ, {"PPU_HOME": "/usr/local/ppu"}):
+                self.assertNotEqual(old_scope, self.scope_id())
+                self.assertEqual(
+                    old_rocm, self.scope_id(hip="6.2.41133", arch="gfx942")
+                )
+            self.assertEqual(old_scope, self.scope_id())
+            os.environ["TRITON_CACHE_DIR"] = str(self.root / "explicit")
+            explicit_scope = self.scope_id()
+            with mock.patch.dict(os.environ, {"PPU_HOME": "/usr/local/ppu"}):
+                self.assertEqual(explicit_scope, self.scope_id())
+            probe.assert_not_called()
+
     def test_rocm_scope_and_component_selection(self):
         with _fake_probes(hip="6.2.41133", arch="gfx942"):
             scope = jit.resolve_scope(self.root)
@@ -928,6 +967,8 @@ class ScopeTest(JitCacheTestBase):
         triton = next(x for x in jit.COMPONENTS if x.name == "triton")
         self.assertTrue(triton.should_sync("hash/kernel.cubin"))
         self.assertTrue(triton.should_sync("hash/kernel.cubin", "closed"))
+        self.assertTrue(triton.should_sync("hash/kernel.hgbin"))
+        self.assertTrue(triton.should_sync("hash/kernel.hgbin", "closed"))
         self.assertFalse(triton.should_sync("hash/t.autotune.json"))
         self.assertFalse(triton.should_sync("hash/t.autotune.json", "closed"))
         self.assertFalse(triton.should_sync("../escape.cubin"))

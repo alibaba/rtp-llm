@@ -87,6 +87,9 @@ def _genrule(src_dir, genrule_name, command, outs):
 
   Genrule executes the given command and produces the given outputs.
   """
+  # These genrules copy files from the build image's absolute Python prefix,
+  # which only exists on the client. Remote execution hangs on the large,
+  # multi-output header tree; local copies are fast and cache-stable.
   return (
       'genrule(\n' +
       '    name = "' +
@@ -94,6 +97,7 @@ def _genrule(src_dir, genrule_name, command, outs):
       '    outs = [\n' +
       outs +
       '\n    ],\n' +
+      '    tags = ["local"],\n' +
       '    cmd = """\n' +
       command +
       '\n   """,\n' +
@@ -237,6 +241,21 @@ def _get_python_include(repository_ctx, python_bin):
   return result.stdout.splitlines()[0]
 
 
+def _get_python_lib_link(repository_ctx, python_bin):
+  """Gets the Python shared-library directory and file name."""
+  result = _execute(
+      repository_ctx,
+      [python_bin, "-c",
+       'import sys, sysconfig;' +
+       'print(sysconfig.get_config_var("LIBDIR"));' +
+       'print("libpython%d.%d.so" % sys.version_info[:2])'],
+      error_msg="Problem getting python shared library.",
+      error_details=("Is the Python binary path set up right? " +
+                     "(See ./configure or " + _PYTHON_BIN_PATH + ".) "))
+  lines = result.stdout.splitlines()
+  return lines[0], lines[1]
+
+
 def _get_python_import_lib_name(repository_ctx, python_bin):
   """Get Python import library name (pythonXY.lib) on Windows."""
   result = _execute(
@@ -258,6 +277,7 @@ def _create_local_python_repository(repository_ctx):
   python_lib = _get_python_lib(repository_ctx, python_bin)
   _check_python_lib(repository_ctx, python_lib)
   python_include = _get_python_include(repository_ctx, python_bin)
+  python_lib_dir, python_lib_name = _get_python_lib_link(repository_ctx, python_bin)
   python_include_rule = _symlink_genrule_for_dir(
       repository_ctx, python_include, 'python_include', 'python_include')
   python_import_lib_genrule = ""
@@ -273,6 +293,8 @@ def _create_local_python_repository(repository_ctx):
   _tpl(repository_ctx, "BUILD", {
       "%{PYTHON_INCLUDE_GENRULE}": python_include_rule,
       "%{PYTHON_IMPORT_LIB_GENRULE}": python_import_lib_genrule,
+      "%{PYTHON_LIB_PATH}": python_lib_dir + "/" + python_lib_name,
+      "%{PYTHON_LIB_NAME}": python_lib_name,
   })
 
 

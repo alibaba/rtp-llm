@@ -122,7 +122,7 @@ COMPONENTS = (
     Component("tvm_ffi", "TVM_FFI_CACHE_DIR", (rule(CREATED, ".so"),), ("torch", "@apache-tvm-ffi"), CUDA),
     Component("cute_dsl", "CUTE_DSL_CACHE_DIR", (rule(MOVED, ".mlir"),), ("accelerator", "@nvidia-cutlass-dsl"), CUDA),
     # First match wins: autotune results remain local.
-    Component("triton", "TRITON_CACHE_DIR", (rule(frozenset(), ".autotune.json"), rule(CREATED, ".json", ".cubin", ".hsaco", ".so")), ("cxx",)),
+    Component("triton", "TRITON_CACHE_DIR", (rule(frozenset(), ".autotune.json"), rule(CREATED, ".json", ".cubin", ".hsaco", ".hgbin", ".so")), ("cxx",)),
 )
 Scope = namedtuple("Scope", "scope_id root components")
 # fmt: on
@@ -176,6 +176,13 @@ def resolve_scope(
                 _distribution_version(p[1:]) if p.startswith("@") else scopes[p]
                 for p in item.scopes
             )
+            if (
+                item.name == "triton"
+                and backend == CUDA
+                and (os.environ.get("PPU_HOME") or "ppu" in torch.__version__.lower())
+            ):
+                # Old PPU snapshots contain metadata without the required .hgbin.
+                parts += ("ppu-hgbin-v1",)
             if item.name == "deep_gemm":
                 try:
                     identity = deep_gemm_build_scope(torch_scope)

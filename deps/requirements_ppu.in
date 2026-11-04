@@ -1,0 +1,2 @@
+-r requirements_base_ppu.txt
+-r requirements_torch_ppu.txt

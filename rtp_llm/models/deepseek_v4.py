@@ -6,9 +6,7 @@ raises so the engine fails fast if you try to actually run inference. Subsequent
 milestones (M1 mHC, M2 HCA, M3 CSA, M4 heterogeneous KV cache) flesh out the
 real model body in `rtp_llm/models_py/model_desc/deepseek_v4_model.py`.
 
-Key V4 architecture differences vs V3 — see
-`/home/wangyin.yx/workspace/work_memory/plans/develop_ds_v4.md` for the full
-breakdown:
+Key V4 architecture differences vs V3:
 
   - MQA single-KV-head with head_dim=512 (no kv_lora_rank, no v_head_dim split)
   - Per-layer attention type from `compress_ratios`: 0=SWA-only, 4=CSA, 128=HCA
@@ -103,6 +101,23 @@ def _dsv4_pool_blocks(config_value: int | None, env_name: str) -> int:
     return value if value > 0 else 0
 
 
+def detect_fp4_expert_storage(weight_keys) -> "str | None":
+    """Detect I8-packed-FP4 routed-expert storage from checkpoint tensor keys.
+
+    V4 routed experts ship as I8-packed FP4 (e2m1) values plus a UE8M0
+    group-32 scale tensor per projection; ``_build_routed_experts_fp4``
+    consumes both.  The per-expert ``.w1/.w2/.w3.scale`` sibling keys are the
+    unambiguous signature of that layout: FP8/int8-stored experts carry no
+    per-expert scale tensors under this naming, so a miss leaves the estimate
+    untouched.  Used by ``DeepSeekV4Weight._process_meta`` when config.json
+    does not declare ``expert_dtype``.
+    """
+    for key in weight_keys:
+        if key.endswith((".w1.scale", ".w2.scale", ".w3.scale")) and ".ffn.experts." in key:
+            return "fp4"
+    return None
+
+
 def _require_n_shared_experts(config_json: dict) -> int:
     """Return the explicitly declared shared-expert count.
 
@@ -130,6 +145,33 @@ def _require_n_shared_experts(config_json: dict) -> int:
     return raw_value
 
 
+def _is_ppu_flash(config):
+    if config.model_type not in ("deepseek_v4", "deepseek_v4_mtp"):
+        return False
+    from rtp_llm.device.device_type import is_ppu
+
+    return (
+        is_ppu()
+        and config.hidden_size == 4096
+        and config.num_layers == (1 if config.model_type == "deepseek_v4_mtp" else 43)
+    )
+
+
+def configure_ppu_scheduler(config, scheduler):
+    """Preserve FIFO admission bounds before target or draft buffers are built."""
+    if not _is_ppu_flash(config):
+        return
+    chunk_size = int(scheduler.prefill_chunk_size)
+    config._ppu_prefill_chunk_size = chunk_size
+    config.moe_prefill_max_tokens_per_rank = min(
+        int(scheduler.max_context_batch_size) * int(config.max_seq_len),
+        max(
+            int(scheduler.max_batch_tokens_size),
+            chunk_size if chunk_size > 0 else int(config.max_seq_len),
+        ),
+    )
+
+
 class DeepSeekV4Weight(DeepSeekV2Weight):
     """DeepSeek-V4 weight info.
 
@@ -150,11 +192,33 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         noaux_tc (``layer_id >= num_hash_layers``).
     """
 
+    def get_weight_info(self):
+        info = super().get_weight_info()
+        if _is_ppu_flash(self.model_config) and self._moe_pure_tp_mode:
+            from rtp_llm.models_py.modules.dsv4.ppu.resources import (
+                configure_weight_splits,
+            )
+
+            configure_weight_splits(info)
+        return info
+
     def _process_meta(self, meta_dict, weight_keys):  # type: ignore[override]
         # V4 has no LoRA q-projection split (we use ``wq_a`` / ``wq_b`` directly)
         # and no e_score_correction_bias (uses noaux_tc gate.bias on layers ≥ num_hash_layers).
         self.q_use_lora = False
         self.has_e_score_correction_bias = False
+        # Native FP4 routed-expert detection: some V4 checkpoints do not
+        # declare ``expert_dtype`` in config.json even though they store
+        # routed experts as I8-packed FP4 + UE8M0 group scales (see
+        # _build_routed_experts_fp4).  Detect the storage from the checkpoint
+        # keys so eval_model_weight_size() prices the experts at their real
+        # width; without this the model-wide FP8 width inflates the estimate
+        # ~1.8x and misroutes the loader to the scratch/CPU path (v4_pro:
+        # 42-minute weight load instead of a fastsafetensors GPU direct load).
+        if not (getattr(self.model_config, "expert_weight_dtype", None) or "").strip():
+            detected = detect_fp4_expert_storage(weight_keys)
+            if detected is not None:
+                self.model_config.expert_weight_dtype = detected
         # Per-layer attention type schedule + hash-router count, both attached to
         # ``self`` so ``_get_hf_layer_weight_info`` can branch per layer.
         self._compress_ratios = list(
@@ -284,6 +348,11 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                 norm_name,
                 [CkptWeightInfo(self._key(f"{ckpt_prefix}.norm.weight"), identity)],
                 identity,
+                data_type=(
+                    torch.float32
+                    if inner and _is_ppu_flash(self.model_config)
+                    else None
+                ),
             ),
             AtomicWeight(
                 ape_name,
@@ -664,8 +733,33 @@ class DeepSeekV4(DeepSeekV2):
 
         model_config.kv_cache_spec_descs = descs
 
+    def create_model_loader(self):
+        if _is_ppu_flash(self.model_config):
+            from rtp_llm.models_py.modules.dsv4.ppu.metadata.cache import (
+                configure_indexer_cache,
+            )
+            from rtp_llm.models_py.modules.dsv4.ppu.manifest import validate_cache_config
+
+            validate_cache_config(self.kv_cache_config)
+            configure_indexer_cache(self.model_config)
+            if self.model_config.model_type == "deepseek_v4":
+                from rtp_llm.models_py.modules.dsv4.ppu.communication import (
+                    maybe_warmup_ppu_tp_communication,
+                )
+
+                maybe_warmup_ppu_tp_communication(
+                    self.parallelism_config,
+                    options={"DSV4_PPU_TP_COMM_WARMUP": "1", **os.environ},
+                )
+        return super().create_model_loader()
+
     def _create_python_model(self):
-        from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
+        if _is_ppu_flash(self.model_config):
+            from rtp_llm.models_py.model_desc.deepseek_v4_ppu.model import (
+                PpuDeepSeekV4Model as DeepSeekV4Model,
+            )
+        else:
+            from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 
         self.py_model = DeepSeekV4Model(
             self.model_config,
@@ -793,6 +887,19 @@ class DeepSeekV4(DeepSeekV2):
         config.moe_inter_size = int(moe_intermediate_size)
         # Every layer is MoE in V4 (compress_ratios doesn't include dense replacement)
         config.moe_layer_index = list(range(config.num_layers))
+
+        # V4 routed experts ship at a narrower width than the model-wide
+        # quant_algo: the checkpoint stores them as I8-packed FP4 + UE8M0
+        # group scales while ``quantization_config`` only describes the
+        # dense FP8 block-wise scheme (there is no ModelOptFp4-style config
+        # to trigger the framework FP4 paths; see
+        # _build_routed_experts_fp4).  Record the declared expert storage
+        # dtype so eval_model_weight_size prices experts at their real
+        # width -- the model-wide width overestimates V4-Pro by 1.81x
+        # (1562GB vs 893GB on disk) and misroutes the loader.
+        expert_dtype = config_json.get("expert_dtype")
+        if expert_dtype is not None:
+            config.expert_weight_dtype = str(expert_dtype).strip().lower()
 
         # ---- V4-only model-level fields ----
         config.hc_mult = int(config_json.get("hc_mult", 1))
@@ -959,6 +1066,12 @@ class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
                 identity,
             ),
         ]
+        if _is_ppu_flash(self.model_config):
+            # Quantized projections already own these scale bytes.
+            weights = [
+                w for w in weights
+                if w.name not in (W.v4_mtp_e_proj_s, W.v4_mtp_h_proj_s)
+            ]
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
 
 
@@ -974,9 +1087,12 @@ class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
         return config
 
     def _create_python_model(self):
-        from rtp_llm.models_py.model_desc.deepseek_v4_mtp_model import (
-            DeepSeekV4MtpModel,
-        )
+        if _is_ppu_flash(self.model_config):
+            from rtp_llm.models_py.model_desc.deepseek_v4_ppu.mtp_model import (
+                PpuDeepSeekV4MtpModel as DeepSeekV4MtpModel,
+            )
+        else:
+            from rtp_llm.models_py.model_desc.deepseek_v4_mtp_model import DeepSeekV4MtpModel
 
         self.py_model = DeepSeekV4MtpModel(
             self.model_config,

@@ -1,0 +1,53 @@
+{
+    "model_type": "qwen35_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s1"
+                    }
+                ],
+                "max_tokens": 30,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Here's a thinking process that leads to the explanation of the CAP Theorem:\n\n1.  **Deconstruct the Request:**\n    *  ",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 16,
+                    "total_tokens": 46,
+                    "completion_tokens": 30
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:l1",
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": "\n\n<think>\n\n</think>\n\nThis is a powerful and honest reflection. You have successfully built a reputation for",
+                "finished": true
+            }
+        }
+    ]
+}

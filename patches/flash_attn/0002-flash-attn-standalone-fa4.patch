@@ -1,0 +1,21 @@
+diff --git a/flash_attn/__init__.py b/flash_attn/__init__.py
+--- a/flash_attn/__init__.py
++++ b/flash_attn/__init__.py
+@@ -1,4 +1,17 @@
+ __version__ = "2.8.3.post1"
++
++# The CUDA13 FA2 wheel vendors an older cute implementation. When FA4 is
++# installed in a separate Bazel root, use that declared dependency for cute
++# while retaining the FA2 root interfaces below.
++from importlib.metadata import PackageNotFoundError, distribution
++
++try:
++    _fa4_root = str(distribution("flash-attn-4").locate_file("flash_attn"))
++except PackageNotFoundError:
++    pass
++else:
++    if _fa4_root not in __path__:
++        __path__.insert(0, _fa4_root)
+
+ from flash_attn.flash_attn_interface import (
+     flash_attn_func,

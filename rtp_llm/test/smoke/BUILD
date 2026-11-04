@@ -146,6 +146,7 @@ load("//rtp_llm/test/smoke:suites_sm100.bzl", "sm100_suites")
 load("//rtp_llm/test/smoke:suites_sm120.bzl", "sm120_suites")
 load("//rtp_llm/test/smoke:suites_rocm_oss.bzl", "rocm_oss_suites")
 load("//rtp_llm/test/smoke:suites_remote_cache.bzl", "remote_cache_suites")
+load("//rtp_llm/test/smoke:suites_ppu.bzl", "ppu_suites")
 
 h20_oss_suites()
 cuda13_suites()
@@ -154,10 +155,10 @@ sm100_suites()
 sm120_suites()
 rocm_oss_suites()
 remote_cache_suites()
+ppu_suites()
 
 # ============================================================================
-# Top-level CI suites (OSS tests only)
-# Internal-only tests live in //internal_source/rtp_llm/test/smoke:maga_model_smoke_internal{_light}
+# Top-level CI suites (OSS plus public PPU tests)
 # ============================================================================
 
 test_suite(
@@ -167,6 +168,7 @@ test_suite(
         ":smoke_h20_eagle",
         ":smoke_sm8x_basic",
         ":smoke_sm120_basic",
+        ":smoke_ppu_basic",
     ],
 )
 
@@ -192,6 +194,9 @@ test_suite(
         ":smoke_sm100_moe",
         ":smoke_sm120_dense",
         ":smoke_sm120_moe",
+        ":smoke_ppu_pd",
+        ":smoke_ppu_qwen35_basic",
+        ":smoke_ppu_qwen35_func",
     ],
 )
 

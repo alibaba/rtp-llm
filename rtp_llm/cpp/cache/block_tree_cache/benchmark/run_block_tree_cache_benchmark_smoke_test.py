@@ -24,8 +24,9 @@ def _libpython_dir():
     root = os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")
     if not root:
         return None
+    libpython = "libpython%d.%d.so" % sys.version_info[:2]
     for base, _, files in os.walk(root):
-        if "libpython3.10.so" in files:
+        if libpython in files:
             return base
     return None
 

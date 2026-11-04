@@ -4751,6 +4751,16 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
                 .to(torch::kCUDA);
     }
 
+    // PPU must retain the accepted pre-HC rows [0, 5..9]. Other builds retain
+    // their existing raw-prefix override; this fix must not change that path.
+    components.fake_target_model->setMtpTargetHiddenStates(target_output.all_hidden_states);
+#if !USE_PPU
+    if (!components.executor->useStreamAsync()) {
+        next_draft_input.last_hidden_states = target_output.all_hidden_states.narrow(0, 0, 6);
+    }
+#endif
+    target_output.all_hidden_states = torch::zeros_like(target_output.all_hidden_states);
+
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
 

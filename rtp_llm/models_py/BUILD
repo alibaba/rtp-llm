@@ -106,18 +106,34 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+_DSV4_PPU_MODULES = [
+    "modules/dsv4/ppu/**/*.py",
+    "modules/factory/linear/ppu_impl/fp8_linear.py",
+]
+_DSV4_PPU_KERNELS = [
+    "kernels/ppu/attention/**/*.py", "kernels/ppu/moe/**/*.py",
+    "kernels/ppu/hc/**/*.py", "kernels/ppu/mtp/**/*.py",
+    "kernels/ppu/jit/**/*.py", "kernels/ppu/runtime.py",
+]
+
 py_library(
     name = "modules",
     srcs = glob([
         "modules/*.py",
         "modules/**/*.py",
-    ]),
+    ], exclude = _DSV4_PPU_MODULES) + select({
+        "@//:using_ppu": glob(_DSV4_PPU_MODULES),
+        "//conditions:default": [],
+    }),
     data = [
         ":cutlass_moe_config",
         ":dsv41_jit_sources",
         "//rtp_llm/models_py/bindings/cuda/kernels:topk_v3_jit_headers",
         ":rocm_fp8_ptpc_hipb_solutions",
-    ],
+    ] + select({
+        "@//:using_ppu": [":ppu_sources"],
+        "//conditions:default": [],
+    }),
     deps = [
         ":utils",
         ":kernels",
@@ -175,6 +191,17 @@ py_library(
 # Export sitecustomize.py for test targets to fix nvidia-cutlass-dsl import
 exports_files(["modules/factory/sitecustomize.py"])
 
+exports_files(
+    [
+        "modules/dsv4/ppu/resources.py",
+        "modules/dsv4/ppu/moe/ppu_ep_moe.py",
+        "modules/dsv4/ppu/metadata/cache.py",
+        "modules/dsv4/ppu/manifest.py",
+    ],
+    visibility = ["//rtp_llm/models_py/modules/dsv4/ppu/test:__pkg__"],
+)
+
+
 py_library(
     name = "modules_cuda",
     srcs = glob([
@@ -194,11 +221,72 @@ py_library(
 )
 
 py_library(
+    name = "ppu_entrypoint",
+    srcs = [
+        "__init__.py",
+        "modules/factory/attention/register.py",
+        "modules/factory/fused_moe/register.py",
+        "modules/factory/linear/register.py",
+    ],
+    deps = [
+        "//rtp_llm:device",
+        "//rtp_llm:utils",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "ppu_modules",
+    # Keep the public PPU test closure aligned with the internal ppu_modules
+    # target: the factory imports the shared model runtime during collection.
+    srcs = [],
+    deps = [
+        ":ppu_entrypoint",
+        ":modules",
+        "//rtp_llm:models",
+        "//rtp_llm:config",
+        "//rtp_llm:device",
+        "//rtp_llm:ops",
+        "//rtp_llm:lora",
+        "//rtp_llm:transformers",
+        "//rtp_llm/model_loader:loader",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:utils",
+    ],
+    data = [
+        "//:rtp_compute_ops",
+        "//:th_transformer",
+        "//rtp_llm/libs:libth_transformer_config_so",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "kernels",
     srcs = glob([
         "kernels/*.py",
         "kernels/**/*.py",
-    ]),
+    ], exclude = _DSV4_PPU_KERNELS) + select({
+        "@//:using_ppu": glob(_DSV4_PPU_KERNELS),
+        "//conditions:default": [],
+    }),
+)
+
+py_library(
+    name = "internal_kernels",
+    srcs = glob(["kernels/ppu/**/*.py"], exclude = _DSV4_PPU_KERNELS) + select({
+        "@//:using_ppu": glob(_DSV4_PPU_KERNELS),
+        "//conditions:default": [],
+    }),
+    data = select({
+        "@//:using_ppu": [":ppu_jit_sources"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+    ],
+    visibility = ["//visibility:public"],
 )
 
 py_library(
@@ -215,7 +303,10 @@ py_library(
         "model_desc/*.py",
         "model_desc/cuda_graph/*.py",
         "speculative/*.py",
-    ]),
+    ]) + select({
+        "@//:using_ppu": glob(["model_desc/deepseek_v4_ppu/**/*.py"]),
+        "//conditions:default": [],
+    }),
     deps = [
         ":utils",
         ":modules",
@@ -242,5 +333,24 @@ py_library(
         "@//:using_cuda12_9_x86": ["//rtp_llm:tilelang"],
         "//conditions:default": [],
     }),
+    visibility = ["//visibility:public"],
+)
+
+# PPU-native JIT sources retain their frozen relative include layout.
+filegroup(
+    name = "ppu_jit_sources",
+    srcs = glob(["kernels/ppu/**/*.cuh", "kernels/ppu/**/*.h", "kernels/ppu/**/*.json", "kernels/ppu/**/*.patch", "kernels/ppu/**/NOTICE*"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "ppu_sources",
+    srcs = glob([
+        "model_desc/deepseek_v4_ppu/**/*.py",
+        "modules/dsv4/ppu/**/*.py",
+        "modules/factory/linear/ppu_impl/*.py",
+        "modules/factory/fused_moe/ppu_impl/*.py",
+        "kernels/ppu/**/*.py",
+    ], exclude = ["**/test/**", "**/tests/**"]) + [":ppu_jit_sources", "//rtp_llm:models/deepseek_v4.py"],
     visibility = ["//visibility:public"],
 )
