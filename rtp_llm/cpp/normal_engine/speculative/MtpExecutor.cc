@@ -373,6 +373,10 @@ makeFakeSPOutputBuffer(DataType data_type, size_t hidden_size, size_t vocab_size
     sp_buffer->all_probs     = fake_probs;
     sp_buffer->tokens        = torch::zeros({1, 2}, torch::kInt32);
     sp_buffer->hidden_states = fake_hidden_states;
+    // Padding rows share a batch with real streams; without a GPU propose mirror the whole batch
+    // drops off the GPU propose-token path (collectLegacyProposeSlices) onto host token copies.
+    sp_buffer->propose_tokens_gpu =
+        torch::zeros({1, 1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
 
     return sp_buffer;
 }
@@ -1475,10 +1479,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(rejection_sampling)");
 
         if (model_input.is_fake_stream) {
-            speculative_sampler_output.accept_len = torch::full(
-                {1}, (int64_t)(propose_step_ + 1), torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-            speculative_sampler_output.accept_tokens = torch::zeros(
-                {1, (int64_t)(propose_step_ + 1)}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+            // An all-fake round can carry several padded rows (DP equal-batch padding).
+            speculative_sampler_output.accept_len =
+                torch::full({static_cast<int64_t>(batch_size)},
+                            (int64_t)(propose_step_ + 1),
+                            torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+            speculative_sampler_output.accept_tokens =
+                torch::zeros({static_cast<int64_t>(batch_size), (int64_t)(propose_step_ + 1)},
+                             torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
         } else {
             // gatherSpecSamplerInput reads host stream state updated by the previous
             // bookkeeping worker. DROP_BROAD_SYNC therefore needs this narrow sync
@@ -1712,6 +1720,17 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
 
 void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_input) {
     if (!useAsyncPrepare()) {
+        return;
+    }
+    // Early prepare snapshots the pre-rejection verify token/length geometry.
+    // Only layouts that keep that geometry verbatim after the rejection update
+    // (DSpARK commit, FIXED_WIDTH) may prepare this early: COMPACT rewrites
+    // combo_tokens/input_lengths/last_hidden_states from the accepted lengths in
+    // updateDecodePostDraftModelInput (mtp::prepareDraftPrefillAfterVerify), so an
+    // early prepare would run the draft prefill with stale uniform geometry and
+    // replay a CUDA graph instance whose attention buffers were never prepared
+    // for the compact token count. Fall back to the in-forward prepare then.
+    if (!is_dspark_ && batch_stream_processor_->draftInputLayout() != mtp::DraftInputLayout::FIXED_WIDTH) {
         return;
     }
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);

@@ -24,6 +24,9 @@ from .nccl_ep_mxfp8 import (  # noqa: F401  CP4EP4PP2 stage-local NCCL MXFP8
     NcclEpMxfp8Strategy,
 )
 from .sm120_decode import Sm120DecodeStrategy  # noqa: F401 explicit DP/EP decode
+from .sm120_rail_routed import (
+    Sm120RailRoutedStrategy,
+)  # noqa: F401  DP/EP decode over routed rail
 from .local_loop import LocalLoopStrategy  # noqa: F401  universal fallback
 
 __all__ = [

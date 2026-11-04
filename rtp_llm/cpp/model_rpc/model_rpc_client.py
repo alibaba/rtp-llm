@@ -1,6 +1,7 @@
 import functools
 import json
 import logging
+import os
 import time
 from typing import Any, AsyncGenerator, Dict, Optional, Union
 
@@ -512,6 +513,40 @@ def trans_output(
     return outputs_py
 
 
+class _DpRoundRobin:
+    """Round-robin DP leader index shared by every frontend process on this host.
+
+    Each frontend process owns its own request counter, so request_id % n_dp lets
+    every process start at leader 0 and skews small batches. A file-locked counter
+    in /dev/shm keyed by the address count keeps the assignment strictly balanced
+    across processes. Falls back to a process-local counter if the file is unusable.
+    """
+
+    def __init__(self, n: int) -> None:
+        self._n = n
+        self._local = 0
+        self._path = os.environ.get(
+            "RTP_LLM_DP_ROUTE_RR_FILE", f"/dev/shm/rtp_llm_dp_rr_{os.getuid()}_{n}"
+        )
+
+    def next(self) -> int:
+        try:
+            import fcntl
+
+            fd = os.open(self._path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                raw = os.pread(fd, 32, 0)
+                v = int(raw) if raw.strip() else 0
+                os.pwrite(fd, str(v + 1).ljust(32).encode(), 0)
+            finally:
+                os.close(fd)
+            return v % self._n
+        except Exception:
+            self._local += 1
+            return (self._local - 1) % self._n
+
+
 class ModelRpcClient(object):
 
     def __init__(
@@ -530,7 +565,12 @@ class ModelRpcClient(object):
                 (args: --max_rpc_timeout_ms / env: MAX_RPC_TIMEOUT_MS).
             decode_entrance: Whether this is a decode entrance
         """
+        route_addrs = [a for a in os.environ.get("RTP_LLM_DP_ROUTE_ADDRS", "").split(",") if a]
+        if route_addrs:
+            logging.info(f"DP route override: {addresses} -> {route_addrs}")
+            addresses = route_addrs
         self._addresses = addresses
+        self._rr = _DpRoundRobin(len(addresses)) if len(addresses) > 1 else None
         self._max_rpc_timeout_ms = max_rpc_timeout_ms
         self._decode_entrance = decode_entrance
         self._options = []
@@ -649,7 +689,10 @@ class ModelRpcClient(object):
         # Select target address before entering the try block so it is always
         # available to the error handlers below (surfaced in logs only)
         # details to identify which backend peer dropped the connection).
-        target_address = address_list[input_py.request_id % len(address_list)]
+        if address_list is self._addresses and self._rr is not None:
+            target_address = address_list[self._rr.next()]
+        else:
+            target_address = address_list[input_py.request_id % len(address_list)]
         logging.debug(
             f"request: [{input_py.request_id}] send to address: {target_address}"
         )
@@ -704,7 +747,10 @@ class ModelRpcClient(object):
             input_pb = trans_input(inp)
             batch_input_pb.inputs.append(input_pb)
 
-        target_address = self._addresses[inputs[0].request_id % len(self._addresses)]
+        if self._rr is not None:
+            target_address = self._addresses[self._rr.next()]
+        else:
+            target_address = self._addresses[inputs[0].request_id % len(self._addresses)]
         logging.debug(
             f"batch request: [{len(inputs)} items] send to address: {target_address}"
         )

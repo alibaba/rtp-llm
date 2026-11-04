@@ -331,12 +331,20 @@ def forward_layers(
     if _rt_on:
         _rt.record("decode_embed_hc_expanded", h)
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
-    for layer_idx, layer in enumerate(v4.layers):
-        h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
-        if layer_idx in capture_ids:
-            v4.capture_aux_hidden(layer_idx, h)
-        if _rt_on:
-            _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
+    from rtp_llm.models_py.distributed import tp_rsag as _tp_rsag
+
+    shard = _tp_rsag.sharded_decode_ctx(v4, B * q_len, capture_ids, _rt_on)
+    if shard is not None:
+        h = _tp_rsag.run_sharded_layers(
+            v4, h, attn_metadata, input_ids.view(B, q_len), kv_cache, shard
+        )
+    else:
+        for layer_idx, layer in enumerate(v4.layers):
+            h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
+            if layer_idx in capture_ids:
+                v4.capture_aux_hidden(layer_idx, h)
+            if _rt_on:
+                _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
     if v4._mtp_hidden_buffer is not None:
         if capture_ids:
             # DSpARK mode: the buffer already holds this forward's aux rows

@@ -30,6 +30,8 @@ enum class ParallelMode {
     EPLB   = 5,
     // All TP/DP ranks in the current PP stage; WORLD when pp_size == 1.
     STAGE = 6,
+    // Host-side (gloo) twin of DP for per-round control collectives on CPU tensors.
+    DP_CPU = 7,
 };
 
 // A batch includes two parts: context batch and decoder batch.

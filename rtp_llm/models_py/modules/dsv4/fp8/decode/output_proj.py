@@ -80,6 +80,12 @@ def decode_output_proj(
         o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
     out = attn._lin(attn.wo_b, o.flatten(2))
     if attn.tp_size > 1:
+        from rtp_llm.models_py.distributed import tp_rsag as _tp_rsag
+
+        ctx = _tp_rsag.CTX
+        if ctx is not None:
+            # token-sharded decode: return this rank's owned rows [cap, D] of the TP-summed output
+            return _tp_rsag.reduce_scatter_rows(out.reshape(-1, out.size(-1)), ctx)
         from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 
         all_reduce(out, Group.TP)

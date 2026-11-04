@@ -23,7 +23,9 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <c10/core/InferenceMode.h>
 #include <algorithm>
+#include <unistd.h>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <list>
@@ -1013,16 +1015,88 @@ static int decodeFixedBs() {
     return value;
 }
 
+static bool decodeEqualBs() {
+    static const bool value = [] {
+        const char* e = getenv("DSV4_DECODE_EQ_BS");
+        return e && *e && std::string(e) != "0";
+    }();
+    return value;
+}
+
+static const std::string& decodeHoldFile() {
+    static const std::string path = [] {
+        const char* e = getenv("DSV4_DECODE_HOLD_FILE");
+        return std::string((e && *e) ? e : "/dev/shm/dsv4_decode_hold");
+    }();
+    return path;
+}
+
+static bool decodeHoldRequested() {
+    return access(decodeHoldFile().c_str(), F_OK) == 0;
+}
+
+// Publishes the number of streams this DP group is holding (<hold file>.q<dp_rank>) so the
+// benchmark gate can release only once every group has its full batch queued.
+static void reportHeldStreams(int dp_rank, int64_t n_held) {
+    static int64_t last = -1;
+    if (n_held == last) {
+        return;
+    }
+    last                   = n_held;
+    const std::string path = decodeHoldFile() + ".q" + std::to_string(dp_rank);
+    if (FILE* f = fopen(path.c_str(), "w")) {
+        fprintf(f, "%ld\n", static_cast<long>(n_held));
+        fclose(f);
+    }
+}
+
+static bool dpUniformDecodeBs() {
+    static const bool value = [] {
+        const char* e = getenv("DSV4_DP_UNIFORM_DECODE_BS");
+        return e && *e && std::string(e) != "0";
+    }();
+    return value;
+}
+
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
+    // One DP all-reduce(MAX) of {has_prefill, n_decode}; every DP leader calls it once per round.
+    auto reduce_prefill_and_decode = [](bool local_prefill, int64_t local_decode) {
+        auto flag = torch::tensor({static_cast<int64_t>(local_prefill ? 1 : 0), local_decode},
+                                  torch::TensorOptions().dtype(torch::kInt64))
+                        .to(torch::kCUDA);
+        auto out = execAllReduce({flag, ReduceOp::Max, false, ParallelMode::DP}).buffer.cpu();
+        return std::make_pair(out[0].item<int64_t>() != 0, out[1].item<int64_t>());
+    };
+    auto pad_decode_to = [this](std::list<GenerateStreamPtr>& ss, int64_t target) {
+        int64_t n_decode = 0;
+        for (const auto& stream : ss) {
+            if (!stream->isContextStream()) {
+                ++n_decode;
+            }
+        }
+        const int mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
+        for (; n_decode < target; ++n_decode) {
+            ss.emplace_back(MtpExecutor::createMinFakeDecodeStream(sp_config.gen_num_per_cycle,
+                                                                   model_config_,
+                                                                   runtime_config,
+                                                                   resource_context_,
+                                                                   mtp_vocab_size,
+                                                                   isDSpark()));
+        }
+    };
+    auto reduce_any_prefill = [](bool local_prefill, ParallelMode mode) {
+        auto flag =
+            torch::full({1}, local_prefill ? 1 : 0, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        // The admitted TP1/PP1/DP=EP profile spans WORLD. The C++ comm
+        // bridge registers WORLD, but does not register ParallelMode::EP.
+        return execAllReduce({flag, ReduceOp::Max, false, mode}).buffer.item<int32_t>() != 0;
+    };
+    auto reduce_any_prefill_world = [&reduce_any_prefill](bool local_prefill) {
+        return reduce_any_prefill(local_prefill, ParallelMode::WORLD);
+    };
     if (dp_prefill_phase_sync_) {
-        auto reduce_any_prefill = [](bool local_prefill) {
-            auto flag = torch::full(
-                {1}, local_prefill ? 1 : 0, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-            // The admitted TP1/PP1/DP=EP profile spans WORLD. The C++ comm
-            // bridge registers WORLD, but does not register ParallelMode::EP.
-            return execAllReduce({flag, ReduceOp::Max, false, ParallelMode::WORLD}).buffer.item<int32_t>() != 0;
-        };
-        if (alignDsv4DpPrefillPhase(streams, reduce_any_prefill, [this] { return createMinFakeStream(1, true); })) {
+        if (alignDsv4DpPrefillPhase(
+                streams, reduce_any_prefill_world, [this] { return createMinFakeStream(1, true); })) {
             RTP_LLM_LOG_DEBUG("DSV4 DP/EP: synchronized prefill phase, streams=%zu", streams.size());
             return;
         }
@@ -1064,6 +1138,29 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                                                                                     mtp_vocab_size,
                                                                                     isDSpark()));
                     }
+                } else if (decodeEqualBs()) {
+                    // One host-side DP all-reduce per round (gloo, no CUDA stream sync).
+                    auto  ctl                = torch::zeros({2}, torch::kInt64);
+                    auto* c                  = ctl.data_ptr<int64_t>();
+                    c[0]                     = static_cast<int64_t>(streams.size());
+                    c[1]                     = decodeHoldRequested() ? 1 : 0;
+                    ctl                      = execAllReduce({ctl, ReduceOp::Max, false, ParallelMode::DP_CPU}).buffer;
+                    const int64_t max_decode = ctl.data_ptr<int64_t>()[0];
+                    const bool    hold       = ctl.data_ptr<int64_t>()[1] != 0;
+                    reportHeldStreams(parallelism_config.dp_rank, hold ? static_cast<int64_t>(streams.size()) : -1);
+                    if (hold) {
+                        // Slow-down gate: the scheduler keeps every real stream in its running queue
+                        // (ScheduleOutput is a copy), so dropping them here only skips this round.
+                        streams.clear();
+                        pad_decode_to(streams, 1);
+                    } else {
+                        pad_decode_to(streams, std::max<int64_t>(max_decode, 1));
+                    }
+                } else if (dpUniformDecodeBs()) {
+                    const auto [unused_prefill, max_decode] =
+                        reduce_prefill_and_decode(false, static_cast<int64_t>(streams.size()));
+                    (void)unused_prefill;
+                    pad_decode_to(streams, std::max<int64_t>(max_decode, 1));
                 } else {
                     need_decode = streams.empty();
                 }
@@ -1079,7 +1176,41 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                         has_decode = true;
                     }
                 }
-                need_prefill = !has_prefill && !runtime_config.use_batch_decode_scheduler;
+                // A fake prefill forces every DP group through an eager
+                // prefill forward each round (~200ms, host-bound) even when
+                // no group has prefill work, capping decode throughput at
+                // roughly one round per prefill forward. Gate it on a WORLD
+                // all-reduce so the fake prefill is only added when some DP
+                // group actually has prefill work this step; when no group
+                // does, all groups skip the prefill phase identically
+                // (prefillStep early-returns on an empty stream list) and the
+                // EP collective sequence stays aligned. The reduce must run
+                // on every rank with the same call count, so evaluate it
+                // before any short-circuit. Enabled via
+                // DSV4_PDFUSION_FAKE_PREFILL_GATE=1; unset keeps old behavior.
+                static const bool fake_prefill_gate = getenv("DSV4_PDFUSION_FAKE_PREFILL_GATE") != nullptr;
+                // Only DP leader ranks run mayAddFakeStream in this profile;
+                // the DP parallel group is exactly those leaders (one per DP
+                // group, same tp_rank), so the reduce participant set matches
+                // even though non-leader ranks never enter this function.
+                if (fake_prefill_gate && dpUniformDecodeBs()) {
+                    int64_t n_decode = 0;
+                    for (const auto& stream : streams) {
+                        if (!stream->isContextStream()) {
+                            ++n_decode;
+                        }
+                    }
+                    const auto [any_prefill, max_decode] = reduce_prefill_and_decode(has_prefill, n_decode);
+                    if (!has_prefill && any_prefill && !runtime_config.use_batch_decode_scheduler) {
+                        streams.emplace_back(MtpExecutor::createMinFakePrefillStream(
+                            1, model_config_, runtime_config, resource_context_));
+                    }
+                    pad_decode_to(streams, std::max<int64_t>(max_decode, 1));
+                    return;
+                }
+                const bool any_prefill_world =
+                    fake_prefill_gate ? reduce_any_prefill(has_prefill, ParallelMode::DP) : true;
+                need_prefill = !has_prefill && any_prefill_world && !runtime_config.use_batch_decode_scheduler;
                 need_decode  = !has_decode;
                 break;
             }

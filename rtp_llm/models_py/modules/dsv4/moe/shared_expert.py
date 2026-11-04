@@ -559,9 +559,14 @@ class OverlapSharedExpertExecutor(SharedExpertExecutor):
     def _can_overlap(self, x: torch.Tensor) -> bool:
         if not (x.is_cuda and torch.cuda.is_available()):
             return False
-        if torch.cuda.is_current_stream_capturing():
+        # DSV4_SHARED_EXPERT_OVERLAP_IN_GRAPH=1: fork the aux stream inside CUDA-graph capture too. The fork
+        # (wait_stream on the capturing stream) and join (finish) are recorded as graph edges, so replay runs
+        # the shared expert concurrently with the routed path. The stream must exist before capture
+        # (prepare() creates it); warmup forwards keep it so the capture sees the same allocations.
+        in_graph = os.environ.get("DSV4_SHARED_EXPERT_OVERLAP_IN_GRAPH", "0") == "1"
+        if torch.cuda.is_current_stream_capturing() and not in_graph:
             return False
-        if cuda_graph_warmup_forward_enabled():
+        if cuda_graph_warmup_forward_enabled() and not in_graph:
             return False
         if os.environ.get("MOEDBG", "0") != "0":
             return False

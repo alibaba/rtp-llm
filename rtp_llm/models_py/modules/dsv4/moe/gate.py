@@ -175,8 +175,25 @@ class Gate(nn.Module):
         return cached
 
     def forward(
-        self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None
+        self,
+        x: torch.Tensor,
+        input_ids: Optional[torch.Tensor] = None,
+        log2phy: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """``log2phy`` ([E] int64, optional) maps the selected logical expert ids to physical slots (static
+        EPLB placement); the fused path applies it inside the gate kernel."""
+        weights, indices = self._forward(x, input_ids, log2phy)
+        if log2phy is not None and getattr(self, "_remap_pending", False):
+            indices = log2phy[indices.long()].to(indices.dtype)
+        return weights, indices
+
+    def _forward(
+        self,
+        x: torch.Tensor,
+        input_ids: Optional[torch.Tensor],
+        log2phy: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        self._remap_pending = log2phy is not None
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
         _dbg = self._dbg_prefix if _rt.ENABLED else None
@@ -219,12 +236,14 @@ class Gate(nn.Module):
             and self.bias is not None
             and _use_fused_gate(self.score_func, rows)
         ):
+            self._remap_pending = False
             return fused_sqrtsoftplus_gate(
                 scores.contiguous(),
                 self.bias.contiguous(),
                 topk=self.topk,
                 route_scale=float(self.route_scale),
                 norm_eps=1e-12,
+                log2phy=log2phy,
             )
 
         if self.score_func == "softmax":

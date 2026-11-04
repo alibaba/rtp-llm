@@ -345,6 +345,7 @@ def select_strategy(
                         "sm120_fused_moe",
                         "fork_nccl_mxfp8",
                         "sm120_decode",
+                        "sm120_rail_routed",
                     ):
                         raise RuntimeError(
                             "DSV4 EP MoE requires a distributed strategy. "

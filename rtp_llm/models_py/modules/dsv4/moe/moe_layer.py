@@ -152,6 +152,87 @@ def _get_or_create_final_out(
     return bigger
 
 
+# --- static EPLB placement (logical -> physical expert ids) ---------------------------------------------------
+_PHY2LOG_PATH = os.environ.get("DSV4_PHY2LOG_PATH", "")
+_LOG2PHY_CACHE: dict = {}
+
+
+def _log2phy_table(layer_id: int, n_experts: int, device: torch.device):
+    """[n_experts] int64 map logical id -> physical slot for main-model layer ``layer_id`` (None if identity)."""
+    key = (layer_id, device.index)
+    if key in _LOG2PHY_CACHE:
+        return _LOG2PHY_CACHE[key]
+    import json
+
+    tab = None
+    plan = json.load(open(_PHY2LOG_PATH))
+    if (
+        layer_id < len(plan)
+        and len(plan[layer_id]) == n_experts
+        and plan[layer_id] != list(range(n_experts))
+    ):
+        phy2log = plan[layer_id]
+        if sorted(phy2log) != list(range(n_experts)):
+            raise ValueError(
+                f"phy2log layer {layer_id} is not a permutation (redundant experts not supported here)"
+            )
+        log2phy = [0] * n_experts
+        for phy, log in enumerate(phy2log):
+            log2phy[log] = phy
+        tab = torch.tensor(log2phy, dtype=torch.int64, device=device)
+    _LOG2PHY_CACHE[key] = tab
+    return tab
+
+
+# --- opt-in expert-load histogram (EPLB planning) -------------------------------------------------------------
+# DSV4_MOE_EXPERT_HIST=<file>: every MoE layer adds its routed top-k ids into a persistent per-layer int64
+# bincount on the GPU (graph-capturable: index_add_ into a fixed buffer, no host sync). Whenever <file>.trigger
+# changes mtime, a daemon thread writes {"layers": {layer_id: counts}} to <file>.r<rank>.json.
+_EXPERT_HIST = os.environ.get("DSV4_MOE_EXPERT_HIST", "")
+_EXPERT_HIST_BUFS: dict = {}
+
+
+def _expert_hist_add(layer_id: int, indices: torch.Tensor, n_experts: int) -> None:
+    buf = _EXPERT_HIST_BUFS.get(layer_id)
+    if buf is None:
+        buf = torch.zeros(n_experts, dtype=torch.int64, device=indices.device)
+        _EXPERT_HIST_BUFS[layer_id] = buf
+        if len(_EXPERT_HIST_BUFS) == 1:
+            _start_expert_hist_dumper()
+    flat = indices.reshape(-1).to(torch.int64)
+    buf.index_add_(0, flat.clamp_(0, n_experts - 1), torch.ones_like(flat))
+
+
+def _start_expert_hist_dumper() -> None:
+    import json
+    import threading
+    import time
+
+    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    trig = _EXPERT_HIST + ".trigger"
+
+    def loop():
+        seen = None
+        while True:
+            try:
+                m = os.stat(trig).st_mtime
+            except OSError:
+                m = None
+            if m is not None and m != seen:
+                seen = m
+                stream = torch.cuda.Stream()
+                with torch.cuda.stream(stream):
+                    snap = {
+                        str(k): v.to("cpu", non_blocking=False).tolist()
+                        for k, v in _EXPERT_HIST_BUFS.items()
+                    }
+                with open(f"{_EXPERT_HIST}.r{rank}.json", "w") as f:
+                    json.dump({"rank": rank, "layers": snap}, f)
+            time.sleep(1.0)
+
+    threading.Thread(target=loop, daemon=True, name="moe-expert-hist").start()
+
+
 class MoE(nn.Module):
     """V4 MoE block: routed top-k experts + 1 shared expert.
 
@@ -199,6 +280,10 @@ class MoE(nn.Module):
             "weights/prefix dict path was removed."
         )
         self.layer_id = layer_id
+        # The MTP draft model's MoE is layer 0 of its own model and its weights load without phy2log (the
+        # propose model builds its own ModelArgs). DeepSeekV4MtpModel zeroes n_hash_layers; the main DSV4
+        # checkpoints have num_hash_layers=3, so n_hash_layers == 0 identifies the draft MoE.
+        self._is_draft_moe = int(n_hash_layers) == 0
         self.dim = dim
         self.n_routed_experts = n_routed_experts
         self.n_activated_experts = n_activated_experts
@@ -381,8 +466,25 @@ class MoE(nn.Module):
                     out.copy_(combined)
             return
 
+        tab = None
+        if (
+            _PHY2LOG_PATH
+            and not self._is_draft_moe
+            and x.size(0) > 0
+            and not _EXPERT_HIST
+        ):
+            tab = _log2phy_table(self.layer_id, self.n_routed_experts, x.device)
         with record_function_range("dsv4.moe.gate"):
-            weights, indices = self.gate(x, input_ids)
+            weights, indices = self.gate(x, input_ids, log2phy=tab)
+        if _EXPERT_HIST and indices.numel() > 0:
+            # the histogram counts logical ids (EPLB planning input); remap afterwards
+            _expert_hist_add(self.layer_id, indices, self.n_routed_experts)
+            if _PHY2LOG_PATH and not self._is_draft_moe:
+                tab = _log2phy_table(
+                    self.layer_id, self.n_routed_experts, indices.device
+                )
+                if tab is not None:
+                    indices = tab[indices.long()].to(indices.dtype)
 
         if self._routed_includes_shared:
             # Fused strategy returns ``routed + shared`` directly.
@@ -465,6 +567,37 @@ class MoE(nn.Module):
                     )
         return out.view(shape)
 
+    def _forward_owned_rows(
+        self, x: torch.Tensor, input_ids_flat: torch.Tensor
+    ) -> torch.Tensor:
+        """Token-sharded decode (DSV4_TP_RSAG=1): x is this rank's owned rows [cap, dim]; gate, shared expert and
+        the rail dispatch/combine all run on them. Pad rows (beyond the real tokens) get routed id -1.
+        """
+        tab = None
+        if _PHY2LOG_PATH and not self._is_draft_moe:
+            tab = _log2phy_table(self.layer_id, self.n_routed_experts, x.device)
+        with record_function_range("dsv4.moe.gate"):
+            weights, indices = self.gate(x, input_ids_flat, log2phy=tab)
+        # pad rows (past the real tokens) are not dispatched: the payload packer writes routed id -1 beyond n_valid
+        out = _get_or_create_final_out(
+            max(int(x.size(0)), 1), self.dim, x.dtype, x.device
+        )[: x.size(0)]
+        with record_function_range("dsv4.moe.shared_expert_start"):
+            self._shared_executor.start(self.shared_experts, x)
+        try:
+            with record_function_range("dsv4.moe.routed_experts"):
+                routed = self._strategy.forward_owned_rows(x, weights, indices)
+        except Exception:
+            self._shared_executor.finish()
+            raise
+        with record_function_range("dsv4.moe.shared_expert_finish"):
+            shared = self._shared_executor.finish()
+        with record_function_range("dsv4.moe.add_shared"):
+            combined = combine_routed_and_shared(routed, shared, x.dtype, out=out)
+            if combined.data_ptr() != out.data_ptr():
+                out.copy_(combined)
+        return out
+
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
@@ -497,6 +630,10 @@ class MoE(nn.Module):
                     f"L{self.layer_id:02d}_moe_x_in_{dbg_pos_name}",
                     x[dbg_pos_mask].contiguous(),
                 )
+        from rtp_llm.models_py.distributed import tp_rsag as _tp_rsag
+
+        if _tp_rsag.CTX is not None and hasattr(self._strategy, "forward_owned_rows"):
+            return self._forward_owned_rows(x, input_ids_flat).view(shape)
         if getattr(self._strategy, "single_round_dispatch", False):
             out = _get_or_create_final_out(
                 max(int(x.size(0)), 1), self.dim, x.dtype, x.device

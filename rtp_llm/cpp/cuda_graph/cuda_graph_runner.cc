@@ -739,13 +739,25 @@ bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, 
     return true;
 }
 
+namespace {
+// Strategies whose MoE collective differs between graph replay and eager (the routed rail
+// transport): a rank-local eager fallback would desync every EP rank, so it must stay opt-in.
+bool rankUniformMoeStrategy(const char* strategy) {
+    if (!strategy) {
+        return false;
+    }
+    const std::string s(strategy);
+    return s == "sm120_decode" || s.rfind("sm120_rail", 0) == 0;
+}
+}  // namespace
+
 bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state) {
     // Eager fallback is opt-in: a rank-local graph/eager decision can select
     // different MoE collectives across ranks. Enable only with rank-uniform admission.
     static const bool soft_degrade = [] {
         const char* e        = getenv("RTP_LLM_CUDA_GRAPH_SOFT_DEGRADE");
         const char* strategy = getenv("DSV4_MOE_STRATEGY");
-        return !strategy || std::string(strategy) != "sm120_decode" || (e && std::string(e) == "1");
+        return !rankUniformMoeStrategy(strategy) || (e && std::string(e) == "1");
     }();
     int cuda_graph_bs        = inputs.attention_inputs.input_lengths.size(0);
     state.current_batch_size = cuda_graph_bs;
@@ -871,7 +883,7 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
             static const bool soft_degrade_tv = [] {
                 const char* e        = getenv("RTP_LLM_CUDA_GRAPH_SOFT_DEGRADE");
                 const char* strategy = getenv("DSV4_MOE_STRATEGY");
-                return !strategy || std::string(strategy) != "sm120_decode" || (e && std::string(e) == "1");
+                return !rankUniformMoeStrategy(strategy) || (e && std::string(e) == "1");
             }();
             if (soft_degrade_tv) {
                 // Eager execution accepts mixed fresh/steady stream geometry.
@@ -895,7 +907,7 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
             static const bool soft_degrade_ih = [] {
                 const char* e        = getenv("RTP_LLM_CUDA_GRAPH_SOFT_DEGRADE");
                 const char* strategy = getenv("DSV4_MOE_STRATEGY");
-                return !strategy || std::string(strategy) != "sm120_decode" || (e && std::string(e) == "1");
+                return !rankUniformMoeStrategy(strategy) || (e && std::string(e) == "1");
             }();
             if (soft_degrade_ih) {
                 RTP_LLM_LOG_WARNING(

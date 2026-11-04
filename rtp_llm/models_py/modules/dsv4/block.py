@@ -326,8 +326,13 @@ class Block(nn.Module):
         the single authority; the DSpARK draft substitutes its non-causal
         fixed-block attention this way instead of copying the block body.
         """
+        from rtp_llm.models_py.distributed import tp_rsag as _tp_rsag
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
+        if _tp_rsag.CTX is not None and attn_fn is None:
+            return self._forward_decode_tp_sharded(
+                x, attn_metadata, input_ids, kv_cache, _tp_rsag
+            )
         _dbg_layer = _rt.should_record_layer(self.layer_id)
         # Attention path
         residual = x
@@ -366,6 +371,32 @@ class Block(nn.Module):
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
         x = self.ffn_hc.post(ffn_out, residual, post, comb)
         return x
+
+    def _forward_decode_tp_sharded(
+        self, x, attn_metadata, input_ids, kv_cache, tp_rsag
+    ):
+        """Token-sharded decode block (DSV4_TP_RSAG=1). ``x`` is this rank's owned residual rows [cap, hc, dim]
+        (see distributed/tp_rsag.py); ``input_ids`` is [B, q_len]. Returns the updated owned rows.
+        """
+        ctx = tp_rsag.CTX
+        bsz, q_len = int(input_ids.shape[0]), int(input_ids.shape[1])
+        residual = x
+        x_pre, post, comb = self.attn_hc.pre(x)
+        x_pre = self.attn_norm(x_pre)
+        full = tp_rsag.all_gather_rows(x_pre, ctx)[: ctx.T]
+        attn_out = self.attn.forward_decode(
+            full.view(bsz, q_len, -1), attn_metadata, kv_cache=kv_cache
+        )
+        if attn_out.size(0) != ctx.cap:
+            raise RuntimeError(
+                f"sharded attention returned {tuple(attn_out.shape)}, expected [{ctx.cap}, dim]"
+            )
+        x = self.attn_hc.post(attn_out, residual, post, comb)
+        residual = x
+        x_pre, post, comb = self.ffn_hc.pre(x)
+        x_pre = self.ffn_norm(x_pre)
+        ffn_out = self.ffn(x_pre, tp_rsag.CTX_IDS)
+        return self.ffn_hc.post(ffn_out, residual, post, comb)
 
     def forward_prefill_fast(
         self,

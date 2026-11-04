@@ -699,6 +699,8 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
     if model_args.ptuning_path:
         model_args.ptuning_path = fetch_remote_file_to_local(model_args.ptuning_path)
 
+    if not model_args.phy2log_path and os.environ.get("DSV4_PHY2LOG_PATH"):
+        model_args.phy2log_path = os.environ["DSV4_PHY2LOG_PATH"]
     if model_args.phy2log_path:
         model_args.phy2log_path = fetch_remote_file_to_local(model_args.phy2log_path)
 

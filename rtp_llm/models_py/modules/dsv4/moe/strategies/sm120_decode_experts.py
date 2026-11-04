@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Dict, Optional
 
 import torch
@@ -31,6 +32,7 @@ from .._silu_mul_fp8_quant_triton import (
 from .base import RoutedExpertsStrategy
 
 _GROUPED_ALIGNMENT = 128
+_EXPECTED_M_CAP = int(os.environ.get("DSV4_MOE_MASKED_EXPECTED_M_CAP", "64"))
 
 
 class Sm120DecodeExperts(RoutedExpertsStrategy):
@@ -170,7 +172,12 @@ class Sm120DecodeExperts(RoutedExpertsStrategy):
             n_int, int(indices.size(1)), e, int(d), int(inter), alignment, device
         )
         alignment = int(ws["alignment"])
-        expected_m = min(alignment, ceil_div(n_int * int(indices.size(1)), e))
+        # expected_m only selects the DeepGEMM launch config (masked_m bounds the work). Above 64 the SM120
+        # heuristic switches to BLOCK_M=128 with 2 stages, 1.4x slower for decode-sized groups (9 active experts x
+        # 8 rows: 171 vs 121 us), so the hint is capped at the 64-row tile.
+        expected_m = min(
+            alignment, ceil_div(n_int * int(indices.size(1)), e), _EXPECTED_M_CAP
+        )
         (adjusted_ids, masked_m) = recompute_topk_ids_sum_expert_count(
             indices,
             current_expert_start_id=int(expert_start_id),

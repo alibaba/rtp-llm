@@ -18,6 +18,9 @@ _CPP_PARALLEL_MODE_TP = 0
 _CPP_PARALLEL_MODE_DP = 1
 _CPP_PARALLEL_MODE_WORLD = 2
 _CPP_PARALLEL_MODE_STAGE = 6
+_CPP_PARALLEL_MODE_DP_CPU = (
+    7  # gloo twin of the DP group (host-side control collectives)
+)
 # P2PBackend enum values matching C++ rtp_llm::P2PBackend in ExecOps.h
 _CPP_P2P_BACKEND_NCCL = 0
 _CPP_P2P_BACKEND_GLOO = 1
@@ -67,11 +70,33 @@ _pcie_oneshot_max_bytes = 0
 # eager TP all-reduce (all ranks reach it in lockstep during warm-up, before any
 # CUDA-graph capture) so it does not interleave with the C++ comm setup.
 _pcie_oneshot_pending_group: list = [None]
+# hidden width of the first eligible call (the FI backend sizes its workspace from it)
+_pcie_oneshot_first_hidden: list = [None]
 
 
 def _init_pcie_oneshot(group: torch.distributed.ProcessGroup) -> None:
     global _pcie_oneshot, _pcie_oneshot_max_bytes
     if os.environ.get("DSV4_PCIE_ONESHOT_AR", "0") != "1":
+        return
+    if os.environ.get("DSV4_PCIE_AR_BACKEND", "b12x") == "fi":
+        # FlashInfer upstream PCIe IPC all-reduce (rtp_llm/models_py/distributed/fi_pcie_ar.py). Built on the
+        # TP group with the hidden width of the first call; every shape it admits is resolved before capture.
+        try:
+            from rtp_llm.models_py.distributed.fi_pcie_ar import FiPcieAllReduce
+
+            hidden = int(_pcie_oneshot_first_hidden[0] or 4096)
+            _pcie_oneshot = FiPcieAllReduce(group, hidden, torch.bfloat16)
+            _pcie_oneshot_max_bytes = _pcie_oneshot.max_rows * hidden * 2
+            logging.info(
+                "FI PCIe IPC all-reduce enabled (hidden=%d, <= %d rows)",
+                hidden,
+                _pcie_oneshot.max_rows,
+            )
+        except Exception as e:
+            # A failure here is not rank-uniform-safe to swallow (some ranks could have finished the
+            # collective setup); raise so the launch fails loudly instead of hanging in a mixed state.
+            logging.exception("FI PCIe IPC all-reduce init failed: %s", e)
+            raise
         return
     try:
         from b12x_pcie import PCIeOneshotAllReducePool
@@ -106,10 +131,14 @@ def pcie_oneshot_all_reduce(tensor: torch.Tensor) -> Optional[torch.Tensor]:
         if group is None or torch.cuda.is_current_stream_capturing():
             return None
         _pcie_oneshot_pending_group[0] = None
+        if tensor.dim() >= 1:
+            _pcie_oneshot_first_hidden[0] = int(tensor.shape[-1])
         _init_pcie_oneshot(group)
         pool = _pcie_oneshot
         if pool is None:
             return None
+    if hasattr(pool, "try_all_reduce"):
+        return pool.try_all_reduce(tensor)
     nbytes = tensor.numel() * tensor.element_size()
     if (
         nbytes > _pcie_oneshot_max_bytes
@@ -323,10 +352,16 @@ def _create_process_groups(
                 backend=backend,
                 timeout=timedelta(days=36500),
             )
+            dp_gloo_group = torch.distributed.new_group(
+                ranks=dp_ranks,
+                backend="gloo",
+                timeout=timedelta(days=36500),
+            )
             # Only store the group if this rank is part of it
             if world_rank in dp_ranks:
                 group_key = Group.DP.name + str(first.pp * tp_size + first.tp)
                 _group_map[group_key] = dp_group
+                _group_map[group_key + "_gloo"] = dp_gloo_group
                 logging.info(
                     f"[rank: {world_rank}] Stored DP group with key: {group_key} {dp_group} with ranks: {dp_ranks}"
                 )
@@ -356,6 +391,7 @@ def _create_process_groups(
                 )
                 # symm_mem init is per-member; only for groups this rank joins.
                 _get_symm_mem().init_symm_mem_communicator(tp_group)
+                _pcie_oneshot_pending_group[0] = tp_group
 
             # All ranks must wait for group creation to complete
             torch.distributed.barrier()
@@ -471,6 +507,8 @@ def _register_process_groups_to_cpp():
                     ):
                         mode_to_group[_CPP_PARALLEL_MODE_DP] = pg
                         registered_modes.add(_CPP_PARALLEL_MODE_DP)
+                    elif group_key == expected_key + "_gloo":
+                        mode_to_group[_CPP_PARALLEL_MODE_DP_CPU] = pg
 
     # If world_size == tp_size, WORLD is also TP group.
     if (
@@ -555,6 +593,12 @@ def _register_process_groups_to_cpp():
         target = dest if dest is not None else tensor
         if dest is not None:
             target.copy_(tensor)
+        if mode == _CPP_PARALLEL_MODE_DP_CPU:
+            # gloo: host tensor in, host tensor out; never touches a CUDA stream.
+            torch.distributed.all_reduce(
+                target, op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM), group=pg
+            )
+            return target
         device_id = torch.cuda.current_device()
         gpu_t, was_cpu = _ensure_cuda(target, device_id)
         torch.distributed.all_reduce(

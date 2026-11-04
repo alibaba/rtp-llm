@@ -28,6 +28,7 @@ def _v4_gate_sqrtsoftplus_topk_kernel(
     bias_ptr,  # [E] fp32
     out_idx_ptr,  # [N, K] int64
     out_w_ptr,  # [N, K] fp32
+    log2phy_ptr,  # [E] int64 logical -> physical expert slot (read only when HAS_REMAP)
     N,
     E: tl.constexpr,
     K: tl.constexpr,
@@ -35,6 +36,7 @@ def _v4_gate_sqrtsoftplus_topk_kernel(
     ROUTE_SCALE: tl.constexpr,
     BLOCK_E: tl.constexpr,  # >= E, power of 2
     BLOCK_K: tl.constexpr,  # >= K, power of 2
+    HAS_REMAP: tl.constexpr,
 ):
     """One program per token row.
 
@@ -80,8 +82,10 @@ def _v4_gate_sqrtsoftplus_topk_kernel(
         idx = tl.argmax(cur_biased, axis=0)  # int32 scalar
         # Gather the un-biased score at this index for the weight.
         sel = tl.sum(tl.where(offs == idx, s_active, 0.0), axis=0)
-        safe_idx = tl.where(row_is_finite, idx, k)
-        tl.store(out_idx_ptr + pid * K + k, safe_idx.to(tl.int64))
+        safe_idx = tl.where(row_is_finite, idx, k).to(tl.int64)
+        if HAS_REMAP:
+            safe_idx = tl.load(log2phy_ptr + safe_idx)
+        tl.store(out_idx_ptr + pid * K + k, safe_idx)
         tl.store(out_w_ptr + pid * K + k, sel)
         # Blank out the chosen position so the next argmax ignores it.
         cur_biased = tl.where(offs == idx, -float("inf"), cur_biased)
@@ -104,6 +108,9 @@ def fused_sqrtsoftplus_gate(
     topk: int,
     route_scale: float = 1.0,
     norm_eps: float = 1e-12,
+    log2phy: (
+        torch.Tensor | None
+    ) = None,  # [E] int64: store log2phy[index] (static EPLB placement)
 ):
     """Fused replacement for the Gate epilogue when score_func='sqrtsoftplus'.
 
@@ -138,6 +145,7 @@ def fused_sqrtsoftplus_gate(
         bias,
         out_idx,
         out_w,
+        log2phy if log2phy is not None else out_idx,
         N=N,
         E=E,
         K=K,
@@ -145,6 +153,7 @@ def fused_sqrtsoftplus_gate(
         ROUTE_SCALE=route_scale,
         BLOCK_E=BLOCK_E,
         BLOCK_K=BLOCK_K,
+        HAS_REMAP=log2phy is not None,
         num_warps=4,
         num_stages=2,
     )
