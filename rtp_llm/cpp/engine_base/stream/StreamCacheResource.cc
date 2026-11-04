@@ -379,7 +379,9 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_CHECK(nums == total_blocks);
 
     if (total_blocks > 0) {
-        if (reuseCache() && !stream_->hasErrorWithoutLock() && stream_->getStatus() == StreamState::FINISHED) {
+        const bool finished_successfully =
+            !stream_->hasErrorWithoutLock() && stream_->getStatus() == StreamState::FINISHED;
+        if (reuseCache() && finished_successfully) {
             const Tier target_tier = storeTarget();
             RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, storing cache, curBlocksNum=%d, target_tier=%s",
                               stream_->streamId(),
@@ -397,18 +399,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                 InsertInfo insert_info{
                     batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier, stream_->streamId()};
                 insert_info.account_for_prefill = resource_context_.role_type == RoleType::PREFILL;
-                size_t resident_prefix_length = 0;
+                size_t resident_prefix_length   = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
-                if (target_tier == Tier::DEVICE && resource_context_.cache_manager->writebackEnabled()
-                    && !stream_->isFakeStream() && !stream_->hasNumBeams()) {
-                    MetaImpl meta(false, false, "");
-                    meta.fillRoutingContext(stream_);
-                    resource_context_.cache_manager->asyncWriteBack(batch_kv_cache_resource_,
-                                                                     stream_->completeTokenIdsPtr(),
-                                                                     stream_->inputLength(),
-                                                                     stream_->writebackKVReadyTokenCount(),
-                                                                     meta);
-                }
             }
         } else {
             RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, NOT storing cache, reuseCache=%d, hasError=%d, status=%s",
@@ -416,6 +408,17 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               reuseCache(),
                               stream_->hasErrorWithoutLock(),
                               StreamStateToString(stream_->getStatus()).c_str());
+        }
+
+        if (finished_successfully && resource_context_.cache_manager->writebackEnabled() && !stream_->isFakeStream()
+            && !stream_->hasNumBeams()) {
+            MetaImpl meta(false, false, "");
+            meta.fillRoutingContext(stream_);
+            resource_context_.cache_manager->asyncWriteBack(batch_kv_cache_resource_,
+                                                            stream_->completeTokenIdsPtr(),
+                                                            stream_->inputLength(),
+                                                            stream_->writebackKVReadyTokenCount(),
+                                                            meta);
         }
 
         FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
@@ -748,18 +751,23 @@ bool StreamCacheResource::deferAllocatorLoadRelease() {
 }
 
 void StreamCacheResource::reportCacheReuseMetrics() {
-    if (stream_->metrics_reporter_ == nullptr || !reuseCache()) {
+    if (stream_->metrics_reporter_ == nullptr) {
         return;
     }
+    cache_reuse_metrics_.writeback_reuse_len =
+        resource_context_.role_type == RoleType::PREFILL ?
+            std::clamp<int64_t>(stream_->writebackFirstUseLength(), 0, std::max(0, stream_->initialReuseLength())) :
+            -1;
     cache_reuse_metrics_.kv_cache_reuse_length            = stream_->initialReuseLength();
     cache_reuse_metrics_.stream_cache_device_reuse_length = stream_->deviceReuseLength();
     cache_reuse_metrics_.stream_cache_memory_reuse_length = stream_->hostReuseLength();
     cache_reuse_metrics_.stream_cache_disk_reuse_length   = stream_->diskReuseLength();
     cache_reuse_metrics_.stream_cache_remote_reuse_length = stream_->remoteReuseLength();
-    cache_reuse_metrics_.report_reuse_metrics             = true;
+    cache_reuse_metrics_.report_reuse_metrics             = reuseCache();
     kmonitor::MetricsTags tags;
-    stream_->metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(
-        &tags, &cache_reuse_metrics_);
+    auto                  metrics = cache_reuse_metrics_;
+    metrics.report_reuse_lengths = true;
+    stream_->metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &metrics);
 }
 
 void StreamCacheResource::reportRemoteContextReady(std::optional<RemoteRestoreTiming::Clock::time_point> gpu_ready_at) {

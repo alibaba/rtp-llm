@@ -972,6 +972,10 @@ bool P2PConnectorAsyncWriteContext::beginKickoff() {
         return false;
     }
     kickoff_started_ = true;
+    WritebackStageMetricsCollector stage;
+    stage.stage        = "kickoff_queue";
+    stage.cost_time_us = currentTimeUs() - start_time_us_;
+    reportWritebackMetrics(metrics_reporter_, stage);
     return true;
 }
 
@@ -1207,8 +1211,9 @@ bool P2PConnectorAsyncWriteContext::beginPeerCall(PeerCancel cancel) {
     if (cancelled_ || released_ || release_ready_)
         return false;
     peer_pending_      = true;
-    metrics_.submitted = true;
-    peer_cancel_       = std::move(cancel);
+    metrics_.submitted  = true;
+    peer_start_time_us_ = currentTimeUs();
+    peer_cancel_        = std::move(cancel);
     return true;
 }
 
@@ -1227,7 +1232,8 @@ void P2PConnectorAsyncWriteContext::failLocked(const ErrorInfo& error) {
     if (error_.ok())
         error_ = error;
     if (!cancelled_) {
-        cancelled_ = true;
+        drain_start_time_us_ = currentTimeUs();
+        cancelled_           = true;
         done_      = true;
         cv_.notify_all();
         notify();
@@ -1257,6 +1263,11 @@ void P2PConnectorAsyncWriteContext::checkPeerResultLocked() {
         failLocked(peer_error.hasError() ? peer_error :
                    ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "StartWriteBack RPC failed"));
     }
+    WritebackStageMetricsCollector stage;
+    stage.stage        = "peer_call";
+    stage.cost_time_us = peer_start_time_us_ > 0 ? currentTimeUs() - peer_start_time_us_ : 0;
+    stage.error        = error_;
+    reportWritebackMetrics(metrics_reporter_, stage);
     peer_result_.reset();
 }
 
@@ -1272,6 +1283,9 @@ void P2PConnectorAsyncWriteContext::tryFinishLocked(const ErrorInfo& error) {
     if (!transfer_stopped_ || (peer_pending_ && !peer_stopped_))
         return;
     release_ready_ = true;
+    if (drain_start_time_us_ == 0) {
+        drain_start_time_us_ = currentTimeUs();
+    }
 }
 
 void P2PConnectorAsyncWriteContext::finishRelease() {
@@ -1322,7 +1336,8 @@ void P2PConnectorAsyncWriteContext::finishRelease() {
         released_ = true;
         release_in_progress_ = false;
         metrics = metrics_;
-        metrics.error = error_;
+        metrics.error         = error_;
+        metrics.drain_time_us = currentTimeUs() - drain_start_time_us_;
     }
     cv_.notify_all();
     notify();
@@ -1330,7 +1345,6 @@ void P2PConnectorAsyncWriteContext::finishRelease() {
         RTP_LLM_LOG_WARNING("writeback failed: unique_key=%s error=%s", unique_key_.c_str(), metrics.error.ToString().c_str());
     if (metrics_reporter_) {
         metrics.total_cost_time_us = currentTimeUs() - start_time_us_;
-        metrics.hold_time_us = metrics.total_cost_time_us;
         try {
             metrics_reporter_->report<P2PConnectorMetrics, WriteSchedulerMetricsCollector>(nullptr, &metrics);
         } catch (const std::exception& exception) {
@@ -1345,8 +1359,13 @@ P2PConnectorAsyncWriteContextChecker::~P2PConnectorAsyncWriteContextChecker() {
     stop();
 }
 
-bool P2PConnectorAsyncWriteContextChecker::init(const P2PConnectorSchedulerConfig& config) {
-    if (thread_.joinable() || !retained_kv_.init(config.topology, config.p2p_kv_leak_exit_threshold_percent, false))
+bool P2PConnectorAsyncWriteContextChecker::init(const P2PConnectorSchedulerConfig& config,
+                                                kmonitor::MetricsReporterPtr       metrics_reporter) {
+    if (thread_.joinable()) {
+        return false;
+    }
+    metrics_reporter_ = std::move(metrics_reporter);
+    if (!retained_kv_.init(config.topology, config.p2p_kv_leak_exit_threshold_percent, false, metrics_reporter_))
         return false;
     control_pool_ = std::make_shared<autil::ThreadPool>(4, 1024, nullptr, "P2PWriteControl");
     if (!control_pool_->start())
@@ -1418,7 +1437,7 @@ size_t P2PConnectorAsyncWriteContextChecker::inflightContextCount() const {
 }
 
 int64_t P2PConnectorAsyncWriteContextChecker::nextWakeupMs() const {
-    auto                        next = std::numeric_limits<int64_t>::max();
+    auto next = metrics_reporter_ ? P2PNotification::nowMs() + 1000 : std::numeric_limits<int64_t>::max();
     std::lock_guard<std::mutex> lock(mutex_);
     for (const auto& [key, context] : contexts_)
         next = std::min(next, context->nextWakeupMs());
@@ -1433,6 +1452,8 @@ void P2PConnectorAsyncWriteContextChecker::checkOnce() {
             contexts.push_back(context);
     }
     std::vector<KVCacheResourcePtr> retained;
+    WritebackStatusMetricsCollector status;
+    const auto                      now_us = currentTimeUs();
     for (const auto& context : contexts) {
         context->checkDone();
         context->expireTransferDeadlineIfNeeded();
@@ -1440,9 +1461,16 @@ void P2PConnectorAsyncWriteContextChecker::checkOnce() {
         context->runControl(control_pool_);
         {
             std::lock_guard<std::mutex> lock(context->mutex_);
+            if (!context->released_) {
+                ++status.inflight_context_count;
+                const auto age_ms         = std::max<int64_t>(0, now_us - context->start_time_us_) / 1000;
+                status.oldest_inflight_ms = std::max(status.oldest_inflight_ms, age_ms);
+            }
             if ((context->cancelled_ || context->release_ready_) && !context->released_) {
                 if (auto resource = context->source_resource_.lock()) {
                     retained.push_back(std::move(resource));
+                    status.oldest_kv_hold_ms = std::max(status.oldest_kv_hold_ms,
+                                                        std::max<int64_t>(0, now_us - context->start_time_us_) / 1000);
                 }
             }
         }
@@ -1453,7 +1481,7 @@ void P2PConnectorAsyncWriteContextChecker::checkOnce() {
                 contexts_.erase(it);
         }
     }
-    retained_kv_.check(retained);
+    retained_kv_.check(retained, status);
 }
 
 }  // namespace rtp_llm

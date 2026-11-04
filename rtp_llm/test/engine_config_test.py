@@ -230,7 +230,7 @@ class EngineConfigTest(TestCase):
         self.assertEqual(config.p2p_kv_leak_exit_threshold_percent, 30)
         config.p2p_kv_leak_exit_threshold_percent = 45
         state = config.__getstate__()
-        self.assertEqual(len(state), 27)
+        self.assertEqual(len(state), 29)
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.__getstate__(), state)
         self.assertEqual(restored.p2p_prefill_sender_thread_count, 8)
@@ -256,17 +256,25 @@ class EngineConfigTest(TestCase):
     def test_cache_store_config_preserves_writeback_fields(self):
         config = CacheStoreConfig()
         self.assertFalse(config.p2p_writeback_enable)
+        self.assertTrue(config.p2p_writeback_require_device_prefix)
         self.assertEqual(config.p2p_writeback_timeout_ms, 5000)
-        self.assertAlmostEqual(config.p2p_writeback_kv_reserve_ratio, 0.1)
+        self.assertAlmostEqual(config.p2p_writeback_max_kv_ratio, 0.3)
         config.p2p_writeback_enable = True
+        config.p2p_writeback_require_device_prefix = False
         config.p2p_writeback_timeout_ms = 1234
-        config.p2p_writeback_kv_reserve_ratio = 0.25
+        config.p2p_writeback_max_kv_ratio = 0.25
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(len(config.__getstate__()), 29)
         self.assertTrue(restored.p2p_writeback_enable)
+        self.assertFalse(restored.p2p_writeback_require_device_prefix)
         self.assertEqual(restored.p2p_writeback_timeout_ms, 1234)
-        self.assertAlmostEqual(restored.p2p_writeback_kv_reserve_ratio, 0.25)
+        self.assertAlmostEqual(restored.p2p_writeback_max_kv_ratio, 0.25)
+
+        legacy = CacheStoreConfig.__new__(CacheStoreConfig)
+        legacy.__setstate__(config.__getstate__()[:-1])
+        self.assertTrue(legacy.p2p_writeback_require_device_prefix)
+        self.assertAlmostEqual(legacy.p2p_writeback_max_kv_ratio, 0.3)
 
 
 class SetupPdSepConfigTest(TestCase):
@@ -357,6 +365,24 @@ class SetupPdSepConfigTest(TestCase):
 
 
 class CacheStoreGroupArgsBindingTest(TestCase):
+    def test_writeback_capacity_ratio_binds_to_cache_store_config(self):
+        configs = PyEnvConfigs()
+        parser = EnvArgumentParser(add_help=False)
+        parser.set_root_config(configs)
+        init_cache_store_group_args(parser, configs.cache_store_config)
+        parser.parse_args(["--p2p_writeback_max_kv_ratio", "0.2"])
+        self.assertAlmostEqual(configs.cache_store_config.p2p_writeback_max_kv_ratio, 0.2)
+
+    def test_writeback_prefix_policy_binds_to_cache_store_config(self):
+        for value in ("true", "false"):
+            with self.subTest(value=value):
+                configs = PyEnvConfigs()
+                parser = EnvArgumentParser(add_help=False)
+                parser.set_root_config(configs)
+                init_cache_store_group_args(parser, configs.cache_store_config)
+                parser.parse_args(["--p2p_writeback_require_device_prefix", value])
+                self.assertEqual(configs.cache_store_config.p2p_writeback_require_device_prefix, value == "true")
+
     def test_p2p_safety_ttl_arg_binds_to_cache_store_config(self):
         py_env_configs = PyEnvConfigs()
         parser = EnvArgumentParser(add_help=False)

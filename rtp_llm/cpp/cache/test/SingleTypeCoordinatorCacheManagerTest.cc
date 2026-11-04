@@ -518,8 +518,12 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ExternalInsertDoesNotOverwriteBusy
 }
 
 TEST_F(SingleTypeCoordinatorCacheManagerTest, ExternalAllocationLoadsLowerTierSuffixAndHoldsGpuPrefix) {
-    for (const Tier tier : {Tier::HOST, Tier::DISK}) {
+    for (const auto& [tier, require_device_prefix] : {std::make_pair(Tier::HOST, true),
+                                                    std::make_pair(Tier::DISK, true),
+                                                    std::make_pair(Tier::HOST, false),
+                                                    std::make_pair(Tier::DISK, false)}) {
         SCOPED_TRACE(tierName(tier));
+        SCOPED_TRACE(require_device_prefix);
         ScopedSingleTypeDiskDirectory disk_directory;
         allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(createSingleTypeTestConfig(2, 10, 4));
         allocator_->setBlockTreeCacheConfigForTest(makeSingleTypeTieredConfig(tier, disk_directory.path()));
@@ -569,7 +573,11 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ExternalAllocationLoadsLowerTierSu
         KVCacheResourcePtr                resource;
         size_t                            start = 0;
         std::shared_ptr<LoadAsyncContext> load_context;
-        const auto error = allocator_->admitWriteBackDecodeCache({11, 22, 33, 44}, 1, resource, start, load_context);
+        EXPECT_TRUE(allocator_->admitWriteBackDecodeCache({11, 22, 33, 44}, 3, resource, start, load_context).hasError());
+        EXPECT_EQ(resource, nullptr);
+        EXPECT_EQ(load_context, nullptr);
+        const auto error = allocator_->admitWriteBackDecodeCache(
+            {11, 22, 33, 44}, require_device_prefix ? 1 : 3, resource, start, load_context, require_device_prefix);
         ASSERT_TRUE(error.ok()) << error.ToString();
         ASSERT_NE(load_context, nullptr);
         EXPECT_EQ(start, 3u);
@@ -602,6 +610,8 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ExternalAllocationLoadsLowerTierSu
             }
             ASSERT_EQ(offset, expected[index].size());
         }
+        EXPECT_TRUE(allocator_->commitWriteBackDecodeCache(*resource, start, currentTimeMs() + 5000).hasError());
+        EXPECT_EQ(cache->tree()->findNode({11, 22, 33, 44}).size(), 3u);
         ASSERT_TRUE(load_context->commit());
         load_context->waitDone();
         ASSERT_TRUE(load_context->success()) << load_context->errorInfo().ToString();
@@ -662,7 +672,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ExternalAllocationFailureAbortsPen
     KVCacheResourcePtr resource;
     size_t             start = 0;
     std::shared_ptr<LoadAsyncContext> load_context;
-    const auto error = allocator_->admitWriteBackDecodeCache({11, 22, 33}, 1, resource, start, load_context);
+    const auto error = allocator_->admitWriteBackDecodeCache({11, 22, 33}, 2, resource, start, load_context, false);
     EXPECT_EQ(error.code(), ErrorCode::MALLOC_FAILED);
     EXPECT_EQ(resource, nullptr);
     EXPECT_EQ(load_context, nullptr);
@@ -671,6 +681,14 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ExternalAllocationFailureAbortsPen
     EXPECT_EQ(group->hostPool()->treeRefCount(source), 1u);
     EXPECT_EQ(cache->tree()->findNode({11, 22}).back()->group_set_resources[0].transfer_state,
               GroupSetTransferState::IDLE);
+    cache->shutdownLoads();
+    EXPECT_EQ(allocator_->admitWriteBackDecodeCache({11, 22, 33}, 2, resource, start, load_context, false).code(),
+              ErrorCode::CACHE_STORE_STORE_FAILED);
+    EXPECT_EQ(resource, nullptr);
+    EXPECT_EQ(load_context, nullptr);
+    EXPECT_EQ(allocator_->freeBlocksNum(), free);
+    EXPECT_EQ(group->devicePools().front()->refCount(prefix), 1u);
+    EXPECT_EQ(group->hostPool()->treeRefCount(source), 1u);
 }
 
 // Test init

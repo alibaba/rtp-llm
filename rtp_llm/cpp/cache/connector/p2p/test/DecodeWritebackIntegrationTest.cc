@@ -6,6 +6,7 @@
 #include <future>
 #include <numeric>
 #include <thread>
+#include <tuple>
 #include <cuda_runtime.h>
 
 #include "autil/EnvUtil.h"
@@ -154,25 +155,27 @@ protected:
     std::shared_ptr<KVCacheManager>
     makeManager(RoleType                          role,
                 const std::shared_ptr<Allocator>& allocator,
-                bool                              enabled = true,
-                double kv_reserve_ratio                   = CacheStoreConfig{}.p2p_writeback_kv_reserve_ratio) {
+                bool                              enabled          = true,
+                double                            max_kv_ratio = CacheStoreConfig{}.p2p_writeback_max_kv_ratio,
+                const KVCacheConfig&              kv_cache_config  = {}) {
         PDSepConfig pd;
-        pd.role_type       = role;
+        pd.role_type = role;
         CacheStoreConfig store;
         store.p2p_writeback_enable           = enabled;
-        store.p2p_writeback_kv_reserve_ratio = kv_reserve_ratio;
-        auto manager               = std::make_shared<KVCacheManager>(role == RoleType::PREFILL ? prefill_config_ : config_,
-                                                        false,
-                                                        nullptr,
-                                                        KVCacheConfig{},
-                                                        role == RoleType::DECODE ? parallelismFor(role) : ParallelismConfig{},
-                                                        RuntimeConfig{},
-                                                        SpeculativeExecutionConfig{},
-                                                        pd,
-                                                        store);
-        manager->coordinator_manager_        = allocator;
-        manager->block_tree_cache_ = allocator->blockTreeCache();
-        manager->cp_slot_mapper_   = allocator->cpSlotMapper();
+        store.p2p_writeback_max_kv_ratio = max_kv_ratio;
+        auto manager =
+            std::make_shared<KVCacheManager>(role == RoleType::PREFILL ? prefill_config_ : config_,
+                                             false,
+                                             nullptr,
+                                             kv_cache_config,
+                                             role == RoleType::DECODE ? parallelismFor(role) : ParallelismConfig{},
+                                             RuntimeConfig{},
+                                             SpeculativeExecutionConfig{},
+                                             pd,
+                                             store);
+        manager->coordinator_manager_ = allocator;
+        manager->block_tree_cache_    = allocator->blockTreeCache();
+        manager->cp_slot_mapper_      = allocator->cpSlotMapper();
         return manager;
     }
 
@@ -215,7 +218,8 @@ protected:
             target_->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, prefillCpSize(), config_.seq_size_per_block));
         }
         decode_                          = makeManager(RoleType::DECODE, source_);
-        prefill_                         = makeManager(RoleType::PREFILL, target_);
+        // Keep tiny receiver pools focused on transfer/lifecycle; scheduler tests exercise the capacity threshold.
+        prefill_                         = makeManager(RoleType::PREFILL, target_, true, 1.0);
         decode_service_.local.engine_    = std::make_shared<WritebackEngine>(decode_);
         decode_service_.decode.engine_   = decode_service_.local.engine_;
         prefill_service_.local.engine_   = std::make_shared<WritebackEngine>(prefill_);
@@ -237,7 +241,7 @@ protected:
             ASSERT_TRUE(allocator->init());
             allocator->setCPSlotMapper(
                 std::make_shared<CPSlotMapper>(rank, prefillCpSize(), config_.seq_size_per_block));
-            auto manager           = makeManager(RoleType::PREFILL, allocator);
+            auto manager           = makeManager(RoleType::PREFILL, allocator, true, 1.0);
             auto service           = std::make_unique<WritebackService>();
             service->local.engine_ = std::make_shared<WritebackEngine>(manager);
             int rpc_port           = 0;
@@ -329,6 +333,7 @@ protected:
             scheduler.cache_key_tokens_per_block                           = config_.seq_size_per_block;
             scheduler.cache_key_hash_seed = config_.cache_key_hash_seed;
             scheduler.role_type                                    = role;
+            scheduler.p2p_writeback_max_kv_ratio = role == RoleType::PREFILL ? 1.0 : 0.3;
             scheduler.parallelism_config                           = parallelismFor(role);
             scheduler.worker_grpc_addrs =
                 role == RoleType::PREFILL ? prefill_grpc_addrs : decode_grpc_addrs;
@@ -381,21 +386,27 @@ protected:
         DeviceTestBase::TearDown();
     }
 
-    void prepare(int token_count = 13, int ready_count = 12, int input_length = 4) {
-        auto input              = std::make_shared<GenerateInput>();
+    void prepare(int  token_count         = 13,
+                 int  ready_count         = 12,
+                 int  input_length        = 4,
+                 bool reuse_cache         = true,
+                 bool request_reuse_cache = true,
+                 bool enable_device_cache = true) {
+        auto input = std::make_shared<GenerateInput>();
         input->input_ids =
             torch::tensor(std::vector<int>(tokens_.begin(), tokens_.begin() + input_length), torch::kInt32);
         auto gc                 = std::make_shared<GenerateConfig>();
         gc->max_new_tokens      = 32;
         gc->unique_key          = "finished-writeback";
-        gc->reuse_cache         = true;
+        gc->reuse_cache         = request_reuse_cache;
         gc->enable_device_cache = true;
         gc->role_addrs.emplace_back(RoleType::PREFILL, "127.0.0.1", 0, prefill_port_);
         input->generate_config = gc;
         ResourceContext resources;
-        resources.cache_manager = decode_;
-        resources.reuse_cache   = true;
-        resources.role_type     = RoleType::DECODE;
+        resources.cache_manager       = decode_;
+        resources.reuse_cache         = reuse_cache;
+        resources.enable_device_cache = enable_device_cache;
+        resources.role_type           = RoleType::DECODE;
         ModelConfig model;
         model.max_seq_len                  = 64;
         model.vocab_size                   = 128;
@@ -507,11 +518,16 @@ protected:
                && prefill_->p2p_connector_->prefill_->write_scheduler_->inflightContextCount() == 0;
     }
     size_t sourceRefs(size_t index) {
-        return source_->blockTreeCache()->groupSets().front()->devicePools().front()->refCount(source_blocks_[index]);
+        const auto pool = source_->blockTreeCache()->groupSets().front()->devicePools().front();
+        return pool->isAllocated(source_blocks_[index]) ? pool->refCount(source_blocks_[index]) : 0;
     }
 };
 
 class DecodeWritebackIntegrationTest: public DecodeWritebackIntegrationTestBase<CoordinatorCacheManager> {};
+
+class DecodeWritebackCachePolicyIntegrationTest:
+    public DecodeWritebackIntegrationTest,
+    public ::testing::WithParamInterface<std::tuple<bool, bool, bool>> {};
 
 class DecodeWritebackIndependentPoolsIntegrationTest:
     public DecodeWritebackIntegrationTestBase<CoordinatorCacheManager> {
@@ -911,6 +927,72 @@ TEST_F(DecodeWritebackIntegrationTest, FinishedStreamReleasesBeforeTcpCopyAndNex
     prefill_->free(FreeInfo{reused, ids});
 }
 
+TEST_P(DecodeWritebackCachePolicyIntegrationTest, LocalCachePolicyDoesNotGateWritebackOrPrefillReuse) {
+    const auto [reuse_cache, request_reuse_cache, enable_device_cache] = GetParam();
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.reuse_cache         = reuse_cache;
+    kv_cache_config.enable_device_cache = enable_device_cache;
+    auto manager                        = makeManager(
+        RoleType::DECODE, source_, true, CacheStoreConfig{}.p2p_writeback_max_kv_ratio, kv_cache_config);
+    manager->p2p_connector_ = decode_->p2p_connector_;
+    decode_                 = std::move(manager);
+    ASSERT_TRUE(decode_->writebackEnabled());
+    prepare(13, 12, 4, reuse_cache, request_reuse_cache, enable_device_cache);
+    const bool stored_locally = reuse_cache && request_reuse_cache && enable_device_cache;
+    EXPECT_EQ(stream_->streamCacheResource().reuseCache(), reuse_cache && request_reuse_cache);
+    stream_->generate_status_->status = StreamState::RUNNING;
+    stream_->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+    ASSERT_TRUE(await([&] { return sender_->started > 0; }));
+    auto write = context();
+    ASSERT_NE(write, nullptr);
+    EXPECT_TRUE(write->resourceHoldPending());
+    EXPECT_EQ(stream_->streamCacheResource().curBlocksNum(), 0);
+    EXPECT_EQ(sourceRefs(0), stored_locally ? 1u : 0u);
+    EXPECT_EQ(sourceRefs(1), stored_locally ? 2u : 1u);
+    EXPECT_EQ(source_->devicePrefixBlocksForTest(keys_), stored_locally ? keys_.size() : 0u);
+    stream_.reset();
+    sender_->release();
+    ASSERT_TRUE(await([&] { return drained(); }));
+    ASSERT_TRUE(write->success()) << write->errorInfo().ToString();
+    EXPECT_EQ(sourceRefs(1), stored_locally ? 1u : 0u);
+    EXPECT_EQ(target_->devicePrefixBlocksForTest(keys_), keys_.size());
+
+    auto input             = std::make_shared<GenerateInput>();
+    input->input_ids       = torch::tensor(tokens_, torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    ModelConfig model;
+    model.max_seq_len                  = 64;
+    model.vocab_size                   = 128;
+    model.attn_config.tokens_per_block = 4;
+    ResourceContext resources;
+    resources.cache_manager = prefill_;
+    resources.role_type     = RoleType::PREFILL;
+    resources.reuse_cache   = true;
+    auto reused_stream      = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, resources, nullptr);
+    ASSERT_TRUE(reused_stream->initKVBlock().ok());
+    EXPECT_EQ(reused_stream->initialReuseLength(), 12);
+    EXPECT_EQ(reused_stream->writebackFirstUseLength(), 8);
+    const auto& reused = reused_stream->streamCacheResource().kvCache();
+    for (int layer = 0; layer < 2; ++layer) {
+        for (size_t position = 1; position < keys_.size(); ++position) {
+            for (const auto& block :
+                 target_->convertIndexToBuffer(layer, "default", reused.blocks(0, "default")[position], 1, 0)) {
+                std::vector<uint8_t> bytes(block.size_bytes);
+                ASSERT_EQ(cudaMemcpy(bytes.data(), block.addr, bytes.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+                EXPECT_TRUE(std::all_of(
+                    bytes.begin(), bytes.end(), [&](uint8_t value) { return value == 10 * layer + position + 1; }));
+            }
+        }
+    }
+    reused_stream->generate_status_->status = StreamState::FINISHED;
+    reused_stream->releaseResource();
+}
+
+INSTANTIATE_TEST_SUITE_P(CachePolicy,
+                         DecodeWritebackCachePolicyIntegrationTest,
+                         ::testing::Combine(::testing::Bool(), ::testing::Bool(), ::testing::Bool()));
+
 TEST_F(DecodeWritebackIntegrationTest, WritebackDiscountStartsAfterPrefillCommitThroughRealStreamOutputs) {
     prepare();
     stream_->generate_status_->status = StreamState::RUNNING;
@@ -1070,19 +1152,27 @@ TEST_F(DecodeWritebackIntegrationTest, NonDecodeRolePreservesLocalReleaseWithout
     EXPECT_EQ(sourceRefs(1), 1u);
 }
 
-TEST_F(DecodeWritebackIntegrationTest, KvReserveSkipsWritebackAndPreservesLocalRelease) {
-    auto reserved            = makeManager(RoleType::DECODE, source_, true, /*kv_reserve_ratio=*/1.0);
+TEST_F(DecodeWritebackIntegrationTest, DecodeZeroKvRatioStillSubmitsWriteback) {
+    auto reserved            = makeManager(RoleType::DECODE, source_, true, /*max_kv_ratio=*/0.0);
     reserved->p2p_connector_ = decode_->p2p_connector_;
     decode_                  = std::move(reserved);
     prepare();
     stream_->releaseResource();
-    EXPECT_TRUE(drained());
-    EXPECT_EQ(prefill_service_.handshakes, 0);
+    ASSERT_TRUE(await([&]() { return sender_->started > 0; }));
+    const auto write = context();
+    ASSERT_NE(write, nullptr);
+    EXPECT_EQ(prefill_service_.handshakes, 1);
+    EXPECT_EQ(stream_->streamCacheResource().curBlocksNum(), 0);
+    EXPECT_EQ(sourceRefs(1), 2u);
+    sender_->release();
+    ASSERT_TRUE(await([&]() { return drained(); }));
+    EXPECT_TRUE(write->success()) << write->errorInfo().ToString();
     EXPECT_EQ(sourceRefs(1), 1u);
+    EXPECT_EQ(target_->devicePrefixBlocksForTest(keys_), keys_.size());
 }
 
-TEST_F(DecodeWritebackIntegrationTest, KvReserveDoesNotCreditPromptHeldByAnotherRequest) {
-    auto reserved            = makeManager(RoleType::DECODE, source_, true, /*kv_reserve_ratio=*/0.7);
+TEST_F(DecodeWritebackIntegrationTest, DecodeSharedPromptDoesNotGateWriteback) {
+    auto reserved            = makeManager(RoleType::DECODE, source_, true, /*max_kv_ratio=*/0.18);
     reserved->p2p_connector_ = decode_->p2p_connector_;
     decode_                  = std::move(reserved);
     tokens_.resize(29);
@@ -1102,16 +1192,23 @@ TEST_F(DecodeWritebackIntegrationTest, KvReserveDoesNotCreditPromptHeldByAnother
 
     stream_->releaseResource();
 
-    EXPECT_TRUE(drained());
-    EXPECT_EQ(prefill_service_.handshakes, 0);
+    ASSERT_TRUE(await([&]() { return sender_->started > 0; }));
+    const auto write = context();
+    ASSERT_NE(write, nullptr);
+    EXPECT_EQ(prefill_service_.handshakes, 1);
     EXPECT_EQ(stream_->streamCacheResource().curBlocksNum(), 0);
-    EXPECT_EQ(pool->availableBlocksNum(), 10u);
+    EXPECT_EQ(pool->availableBlocksNum(), 8u);
     EXPECT_EQ(sourceRefs(0), 2u);
+    EXPECT_EQ(sourceRefs(5), 2u);
+    sender_->release();
+    ASSERT_TRUE(await([&]() { return drained(); }));
+    EXPECT_TRUE(write->success()) << write->errorInfo().ToString();
+    EXPECT_EQ(pool->availableBlocksNum(), 10u);
     EXPECT_EQ(sourceRefs(5), 1u);
 }
 
-TEST_F(DecodeWritebackIntegrationTest, KvReserveCreditsReleasedLongPromptBeforeWriteback) {
-    auto reserved            = makeManager(RoleType::DECODE, source_, true, /*kv_reserve_ratio=*/0.7);
+TEST_F(DecodeWritebackIntegrationTest, DecodeReleasesLongPromptWhileHoldingWritebackSuffix) {
+    auto reserved            = makeManager(RoleType::DECODE, source_, true, /*max_kv_ratio=*/0.18);
     reserved->p2p_connector_ = decode_->p2p_connector_;
     decode_                  = std::move(reserved);
     tokens_.resize(29);
@@ -1139,8 +1236,8 @@ TEST_F(DecodeWritebackIntegrationTest, KvReserveCreditsReleasedLongPromptBeforeW
     EXPECT_EQ(target_->devicePrefixBlocksForTest(keys_), 7u);
 }
 
-TEST_F(DecodeWritebackIndependentPoolsIntegrationTest, KvReserveChecksEachPoolBeforeHoldingSuffix) {
-    auto reserved            = makeManager(RoleType::DECODE, source_, true, /*kv_reserve_ratio=*/0.875);
+TEST_F(DecodeWritebackIndependentPoolsIntegrationTest, DecodePoolCapacityDoesNotGateWriteback) {
+    auto reserved            = makeManager(RoleType::DECODE, source_, true, /*max_kv_ratio=*/0.25);
     reserved->p2p_connector_ = decode_->p2p_connector_;
     decode_                  = std::move(reserved);
     prepare();
@@ -1153,9 +1250,15 @@ TEST_F(DecodeWritebackIndependentPoolsIntegrationTest, KvReserveChecksEachPoolBe
 
     stream_->releaseResource();
 
-    EXPECT_TRUE(drained());
-    EXPECT_EQ(prefill_service_.handshakes, 0);
+    ASSERT_TRUE(await([&]() { return sender_->started > 0; }));
+    const auto write = context();
+    ASSERT_NE(write, nullptr);
+    EXPECT_EQ(prefill_service_.handshakes, 1);
     EXPECT_EQ(stream_->streamCacheResource().curBlocksNum(), 0);
+    EXPECT_EQ(sourceRefs(1), 2u);
+    sender_->release();
+    ASSERT_TRUE(await([&]() { return drained(); }));
+    EXPECT_TRUE(write->success()) << write->errorInfo().ToString();
     EXPECT_EQ(pools[0]->availableBlocksNum(), pools[0]->totalBlocksNum());
     EXPECT_EQ(sourceRefs(1), 1u);
 }
@@ -1202,6 +1305,44 @@ TEST_F(DecodeWritebackIntegrationTest, CancelledStreamDoesNotTriggerWriteback) {
     stream_->releaseResource();
     EXPECT_TRUE(drained());
     EXPECT_EQ(prefill_service_.handshakes, 0);
+}
+
+TEST_F(DecodeWritebackIntegrationTest, UnfinishedStreamWithReuseDisabledDoesNotTriggerWriteback) {
+    prepare(13, 12, 4, false);
+    stream_->generate_status_->status = StreamState::RUNNING;
+    stream_->releaseResource();
+    EXPECT_TRUE(drained());
+    EXPECT_EQ(prefill_service_.handshakes, 0);
+    EXPECT_EQ(sourceRefs(1), 0u);
+}
+
+TEST_F(DecodeWritebackIntegrationTest, FailedFinishedStreamWithReuseDisabledDoesNotTriggerWriteback) {
+    prepare(13, 12, 4, false);
+    stream_->reportError(ErrorCode::EXECUTION_EXCEPTION, "test writeback exclusion");
+    stream_->generate_status_->status = StreamState::FINISHED;
+    stream_->releaseResource();
+    EXPECT_TRUE(drained());
+    EXPECT_EQ(prefill_service_.handshakes, 0);
+    EXPECT_EQ(sourceRefs(1), 0u);
+}
+
+TEST_F(DecodeWritebackIntegrationTest, FakeStreamWithReuseDisabledDoesNotTriggerWriteback) {
+    prepare(13, 12, 4, false);
+    stream_->setIsFakeStream(true);
+    stream_->releaseResource();
+    EXPECT_TRUE(drained());
+    EXPECT_EQ(prefill_service_.handshakes, 0);
+    EXPECT_EQ(sourceRefs(1), 0u);
+}
+
+TEST_F(DecodeWritebackIntegrationTest, BeamStreamWithReuseDisabledDoesNotTriggerWriteback) {
+    prepare(13, 12, 4, false);
+    stream_->generateConfig()->num_beams = 2;
+    ASSERT_TRUE(stream_->hasNumBeams());
+    stream_->releaseResource();
+    EXPECT_TRUE(drained());
+    EXPECT_EQ(prefill_service_.handshakes, 0);
+    EXPECT_EQ(sourceRefs(1), 0u);
 }
 
 TEST_F(DecodeWritebackIntegrationTest, DeadlineKeepsSourcePinnedUntilSenderStops) {
