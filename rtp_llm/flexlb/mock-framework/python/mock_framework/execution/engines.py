@@ -17,6 +17,7 @@ class EngineHosts:
         self.environment, self.recipes, self.mode, self.monitoring = environment, recipes, mode, monitoring
         self.hosts, self.instances, self.counters = {}, {}, {}
         self.used_ports = set()
+        self.readiness = {}
         self.lock = asyncio.Lock()
         self._monitor = None
 
@@ -57,6 +58,7 @@ class EngineHosts:
                     host_dir = self.records.directory / 'hosts' / host_name
                     host_dir.mkdir(parents=True)
                     ready = host_dir / 'ready.json'
+                    self.readiness[ready] = host_name
                     host_port = self.port()
                     members = set()
                     child = await self.supervisor.spawn(host_name, recipe['command'], recipe['cwd'],
@@ -74,6 +76,7 @@ class EngineHosts:
                         return value['url']
                     host['url'] = await self.supervisor.guard(await_ready(), float(duration(recipe['startup_timeout'])))
                     self.records.emit(event='process_ready', node=host_name, url=host['url'])
+                self.readiness[directory / 'ready.json'] = host_name
                 rpc_port, control_port = self.port(), self.port()
                 endpoint = await self.call(host, 'create', {'id': node, 'rpcPort': rpc_port, 'controlPort': control_port})
                 saved = json.loads((directory / 'endpoints.json').read_text())
@@ -114,6 +117,7 @@ class EngineHosts:
                 stopped = await self.call(host, 'stop', {'id': node})
                 if stopped.get('id') != node or stopped.get('rpc') != item['rpc']:
                     raise ExecutionError('Host stopped an unexpected Engine')
+                self.readiness.pop(self.records.directory / 'components' / node / 'ready.json', None)
                 host['members'].remove(node)
                 del self.instances[node]
                 self.topology.retire(node)
@@ -122,7 +126,10 @@ class EngineHosts:
                 self.records.emit(event='instance_stopped', node=node, host=host_name, rpc=item['rpc'])
                 if self.mode == 'isolated':
                     errors = await self.supervisor.stop_expected(host_name)
+                    if errors:
+                        raise ExecutionError('; '.join(errors))
                     del self.hosts[host_name]
+                    errors = self.retire_readiness()
                     if errors:
                         raise ExecutionError('; '.join(errors))
             return [item['rpc'] for item in selected]
@@ -155,4 +162,16 @@ class EngineHosts:
             await asyncio.gather(self._monitor, return_exceptions=True)
 
     async def close(self):
-        return await self.supervisor.stop(list(self.hosts), 3)
+        return await self.supervisor.stop(list(dict.fromkeys(self.readiness.values())), 3)
+
+    def retire_readiness(self):
+        live = {name for name, child in self.supervisor.children if child.returncode is None}
+        errors = []
+        for path, host_name in list(self.readiness.items()):
+            if host_name not in live:
+                try:
+                    path.unlink(missing_ok=True)
+                    del self.readiness[path]
+                except OSError as error:
+                    errors.append(f'{path}: cannot remove readiness: {error}')
+        return errors

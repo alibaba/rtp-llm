@@ -6,6 +6,7 @@ from .master import MasterGroup
 from .monitoring import Prometheus
 from .processes import ProcessSupervisor
 from .topology import Topology
+from .zookeeper import ZooKeeperRole
 
 
 class RunEnvironment:
@@ -18,6 +19,7 @@ class RunEnvironment:
         self.masters = MasterGroup(component=case.environment.get('master'), recipe=launch['components'].get('master'),
             election=launch.get('zookeeper'), launcher=launcher, supervisor=self.supervisor,
             topology=self.topology, records=records, monitoring=self.monitoring)
+        self.zookeeper = ZooKeeperRole(launch.get('zookeeper'), self.supervisor, records)
         self.topology.add_publisher(self.masters.publish_discovery)
         self.engines = EngineHosts(supervisor=self.supervisor, topology=self.topology, records=records,
             environment=case.environment, recipes=launch['components'], mode=launch['engine_mode'], monitoring=self.monitoring)
@@ -28,7 +30,7 @@ class RunEnvironment:
         self.topology.publish()
         if self.monitoring:
             await self.supervisor.guard(self.monitoring.start(), self.monitoring.startup_timeout)
-        await self.masters.prepare()
+        self.masters.configure_election(await self.zookeeper.start())
         await self.engines.start()
         if self.masters.component is not None:
             await self.masters.start(self.masters.component['deployment']['replicas'])
@@ -56,10 +58,11 @@ class RunEnvironment:
         await cleanup('client processes', self.clients.close)
         await cleanup('master processes', self.masters.close)
         await cleanup('engine processes', self.engines.close)
-        await cleanup('zookeeper', self.masters.close_election)
+        await cleanup('zookeeper', self.zookeeper.close)
         if self.monitoring:
             await cleanup('prometheus', self.monitoring.close)
         await cleanup('remaining processes', self.supervisor.close)
+        errors.extend(self.engines.retire_readiness())
         if not self.supervisor.children:
             try:
                 self.topology.clear()

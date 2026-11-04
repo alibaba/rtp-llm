@@ -172,6 +172,7 @@ def test_host_failure_or_partial_startup_fails_the_run_and_cleans_every_process(
     assert result['status'] == 'ERROR'
     events = no_children(output)
     assert len([event for event in events if event['event'] == 'process_started']) == 1
+    assert not list(output.rglob('ready.json'))
     if not invalid:
         assert all(node in result['error'] for node in ('prefill-0', 'prefill-1', 'decode-0'))
 

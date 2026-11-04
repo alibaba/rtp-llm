@@ -3,12 +3,10 @@ import asyncio
 import copy
 import errno
 import json
-import os
 import secrets
 import socket
 import uuid
 from urllib.parse import urlsplit
-from ..config.validation import duration
 
 from .records import write_json
 from .transport import ExecutionError
@@ -90,32 +88,16 @@ class MasterGroup:
         self._instances = {}
         self._lock = asyncio.Lock()
 
-    async def prepare(self):
-        if self.election is None:
+    def configure_election(self, connect):
+        if connect is None:
             return
-        recipe = self.election
-        directory = self.records.directory / 'zookeeper'
-        directory.mkdir()
-        ready = directory / 'ready.json'
-        await self.supervisor.spawn('zookeeper', recipe['command'], recipe['cwd'],
-            {**os.environ, **recipe['env'], 'MOCK_OUTPUT_DIR': str(directory), 'MOCK_READY_FILE': str(ready)}, directory)
-        async def await_ready():
-            while not ready.exists():
-                await asyncio.sleep(.02)
-            value = json.loads(ready.read_text())
-            host, port = value['connect'].split(':')
-            if host != '127.0.0.1' or not 0 < int(port) < 65536:
-                raise ExecutionError('Invalid ZooKeeper readiness address')
-            return value['connect']
-        connect = await self.supervisor.guard(await_ready(), float(duration(recipe['startup_timeout'])))
         identity = 'mock-' + uuid.uuid4().hex
         self.consistency = {'type': 'ZOOKEEPER', 'connectString': connect,
                             'sessionTimeoutMs': 6000, 'connectionTimeoutMs': 6000}
         self.environment = {'HIPPO_ROLE': identity, 'BIZ_NAME': 'mock',
             'DEPLOYMENT_NAME': identity, 'ZONE_NAME': 'local',
             'MOCK_MASTER_PORT': str(master_port(self.component['deployment']['replicas']))}
-        self.records.emit(event='process_ready', node='zookeeper', connect=connect)
-        write_json(directory / 'master-environment.json', self.environment)
+        write_json(self.records.directory / 'zookeeper' / 'master-environment.json', self.environment)
 
     def _environment(self, index, directory):
         env = master_environment(self.component['config'], self.topology.active(), directory,
@@ -241,9 +223,6 @@ class MasterGroup:
         for process in reversed(self._owned):
             errors.extend(await self.supervisor.stop([process], self._stop_grace()))
         return errors
-
-    async def close_election(self):
-        return await self.supervisor.stop(['zookeeper'], 5)
 
 
 def master_port(count):

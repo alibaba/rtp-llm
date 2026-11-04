@@ -99,7 +99,7 @@ def test_cleanup_continues_in_order_after_domain_failures(tmp_path):
         runtime.clients.close = operation('clients', errors=['client cleanup failed'])
         runtime.masters.close = operation('masters')
         runtime.engines.close = operation('engines')
-        runtime.masters.close_election = operation('election')
+        runtime.zookeeper.close = operation('election')
         runtime.supervisor.close = operation('fallback')
         finished = []
         runtime.monitoring = SimpleNamespace(final_scrape=operation('scrape', raises=True),
