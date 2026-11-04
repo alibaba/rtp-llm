@@ -14,6 +14,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -34,6 +36,7 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
                                    IsTierEnabledFn                is_tier_enabled,
                                    SettledFn                      settled):
     tree_(tree),
+    transfer_dispatcher_(transfer_dispatcher),
     task_pool_(task_pool),
     metrics_reporter_(&metrics_reporter),
     mutex_(&mutex),
@@ -52,9 +55,36 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
         tier_heaps.host   = std::make_unique<EvictionHeap>(host_policy);
         tier_heaps.disk   = std::make_unique<EvictionHeap>(disk_policy);
     }
+    frozen_block_observer_             = std::make_shared<FrozenBlockObserver>();
+    frozen_block_observer_->mutex      = mutex_;
+    frozen_block_observer_->on_changed = [this](IBlockPool* pool, BlockIdxType block) {
+        onFrozenBlockChanged(pool, block);
+    };
+    const auto observe = [this](std::shared_ptr<IBlockPool> pool) {
+        if (pool == nullptr
+            || std::find(observed_pools_.begin(), observed_pools_.end(), pool) != observed_pools_.end()) {
+            return;
+        }
+        observed_pools_.push_back(pool);
+    };
+    for (const GroupSetPtr& group_set : tree_->groupSets()) {
+        for (const auto& pool : group_set->devicePools()) {
+            observe(pool);
+        }
+        observe(group_set->hostPool());
+        observe(group_set->diskPool());
+    }
+    // Finish allocating registration state before publishing callbacks to pools.
+    for (const auto& pool : observed_pools_) {
+        pool->setFrozenBlockObserver(frozen_block_observer_);
+    }
 }
 
 BlockTreeEvictor::~BlockTreeEvictor() {
+    // The cache owner stops polling and drains transfer/backend callbacks first.
+    for (const auto& pool : observed_pools_) {
+        pool->clearFrozenBlockObserver(frozen_block_observer_);
+    }
     std::lock_guard<std::mutex> lock(pending_release_mutex_);
     for (const auto& [pool, count] : pending_release_counts_) {
         RTP_LLM_CHECK_WITH_INFO(count == 0,
@@ -87,9 +117,66 @@ bool BlockTreeEvictor::isEvictable(TreeNode* node, size_t group_set_id, Tier sou
                || tree_->isLeafAtTier(node, group_set_id, source_tier));
 }
 
+std::vector<BlockTreeEvictor::PhysicalBlock>
+BlockTreeEvictor::candidateBlocks(TreeNode* node, size_t group_set_id, Tier tier) const {
+    const GroupSetPtr&         group_set = tree_->groupSets()[group_set_id];
+    const GroupSetResource&    resource  = node->group_set_resources[group_set_id];
+    std::vector<PhysicalBlock> blocks;
+    if (tier == Tier::DEVICE) {
+        blocks.reserve(resource.device_blocks.size());
+        for (size_t i = 0; i < resource.device_blocks.size(); ++i) {
+            if (!isNullBlockIdx(resource.device_blocks[i])) {
+                blocks.push_back({group_set->devicePools()[i].get(), resource.device_blocks[i]});
+            }
+        }
+    } else if (tier == Tier::HOST && !isNullBlockIdx(resource.host_block)) {
+        blocks.push_back({group_set->hostPool().get(), resource.host_block});
+    } else if (tier == Tier::DISK && !isNullBlockIdx(resource.disk_block)) {
+        blocks.push_back({group_set->diskPool().get(), resource.disk_block});
+    }
+    return blocks;
+}
+
+bool BlockTreeEvictor::candidateIsFrozen(const std::vector<PhysicalBlock>& blocks) const {
+    return std::any_of(
+        blocks.begin(), blocks.end(), [](const PhysicalBlock& block) { return block.pool->isFrozen(block.block); });
+}
+
+void BlockTreeEvictor::unregisterCandidate(const CandidateKey& key) {
+    const auto candidate_it = candidate_blocks_.find(key);
+    if (candidate_it == candidate_blocks_.end()) {
+        return;
+    }
+    for (const PhysicalBlock& block : candidate_it->second) {
+        const auto block_it = block_candidates_.find(block);
+        if (block_it == block_candidates_.end()) {
+            continue;
+        }
+        auto& candidates = block_it->second;
+        candidates.erase(std::remove(candidates.begin(), candidates.end(), key), candidates.end());
+        if (candidates.empty()) {
+            block_candidates_.erase(block_it);
+        }
+    }
+    candidate_blocks_.erase(candidate_it);
+}
+
+void BlockTreeEvictor::onFrozenBlockChanged(IBlockPool* pool, BlockIdxType block) {
+    const auto block_it = block_candidates_.find({pool, block});
+    if (block_it == block_candidates_.end()) {
+        return;
+    }
+    for (const CandidateKey& key : block_it->second) {
+        const auto candidate_it = candidate_blocks_.find(key);
+        RTP_LLM_CHECK(candidate_it != candidate_blocks_.end());
+        heapFor(key.group_set_id, key.tier)->setFrozenIfPresent(key.node, candidateIsFrozen(candidate_it->second));
+    }
+}
+
 void BlockTreeEvictor::suspendCandidate(TreeNode* node, size_t group_set_id, Tier source_tier) {
     if (source_tier != Tier::NONE) {
         heapFor(group_set_id, source_tier)->erase(node);
+        unregisterCandidate({node, group_set_id, source_tier});
     }
 }
 
@@ -100,10 +187,21 @@ void BlockTreeEvictor::admitCandidate(TreeNode* node, size_t group_set_id, Tier 
     const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
     EvictionHeap*      heap      = heapFor(group_set_id, target_tier);
     if (group_set->groupType() == CacheGroupType::FULL && !tree_->isLeafAtTier(node, group_set_id, target_tier)) {
-        heap->erase(node);
+        suspendCandidate(node, group_set_id, target_tier);
         return;
     }
-    heap->upsert(node, node->group_set_resources[group_set_id].candidate_meta);
+    const CandidateKey key{node, group_set_id, target_tier};
+    auto               blocks       = candidateBlocks(node, group_set_id, target_tier);
+    const bool         is_frozen    = candidateIsFrozen(blocks);
+    const auto         candidate_it = candidate_blocks_.find(key);
+    if (candidate_it == candidate_blocks_.end() || candidate_it->second != blocks) {
+        unregisterCandidate(key);
+        candidate_blocks_.emplace(key, blocks);
+        for (const PhysicalBlock& block : blocks) {
+            block_candidates_[block].push_back(key);
+        }
+    }
+    heap->upsert(node, node->group_set_resources[group_set_id].candidate_meta, is_frozen);
 }
 
 void BlockTreeEvictor::updateFullCandidate(TreeNode* parent) {
@@ -419,8 +517,8 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
 
 void BlockTreeEvictor::runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept {
     try {
-        task_runner_->runTransfer(task, *metrics_reporter_, [this, task](ErrorInfo error) noexcept {
-            completeEvictionTask(task, std::move(error));
+        task_runner_->runTransfer(task, *metrics_reporter_, [this, task](TransferResult result) noexcept {
+            completeEvictionTask(task, std::move(result));
         });
         return;
     } catch (const std::exception& error) {
@@ -432,10 +530,15 @@ void BlockTreeEvictor::runEvictionTask(std::shared_ptr<const EvictionTransferTas
 }
 
 void BlockTreeEvictor::completeEvictionTask(std::shared_ptr<const EvictionTransferTask> task,
-                                            ErrorInfo                                   error) noexcept {
-    if (error.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
+                                            TransferResult                              result) noexcept {
+    if (result.status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
         auto observation = CompletionStageContext::forTransfer(*metrics_reporter_, task->transfer_task, "evict", false);
         CompletionStageScope freeze(observation, "freeze_blocks", "workflow_callback");
+        FrozenTask frozen(result,
+                          FrozenTask::QueryKind::TRANSFER,
+                          "evict",
+                          task->transfer_task.traceId(),
+                          task->transfer_task.requestId().value_or(-1));
         // Ordinary source/target references are still held here. Freeze every
         // saved endpoint before rollback can return any of them to a pool.
         for (const TransferDescriptor& desc : task->descriptors()) {
@@ -443,22 +546,24 @@ void BlockTreeEvictor::completeEvictionTask(std::shared_ptr<const EvictionTransf
                 continue;
             }
             const GroupSetPtr& group_set = tree_->groupSets()[desc.group_set_id];
-            const auto freeze = [&group_set](Tier tier, const std::vector<BlockIdxType>& blocks) noexcept {
+            const auto freeze = [&group_set, &frozen, &desc](Tier tier, const std::vector<BlockIdxType>& blocks) noexcept {
                 if (tier == Tier::DEVICE) {
                     for (size_t i = 0; i < blocks.size(); ++i) {
-                        group_set->devicePools()[i]->freezeBlock(blocks[i]);
+                        frozen.freeze(group_set->devicePools()[i], blocks[i], desc.source_tier, desc.target_tier);
                     }
                 } else {
-                    IBlockPool* pool = tier == Tier::HOST ? static_cast<IBlockPool*>(group_set->hostPool().get()) :
-                                                            static_cast<IBlockPool*>(group_set->diskPool().get());
-                    pool->freezeBlock(blocks.front());
+                    std::shared_ptr<IBlockPool> pool = tier == Tier::HOST ?
+                                                           std::static_pointer_cast<IBlockPool>(group_set->hostPool()) :
+                                                           std::static_pointer_cast<IBlockPool>(group_set->diskPool());
+                    frozen.freeze(std::move(pool), blocks.front(), desc.source_tier, desc.target_tier);
                 }
             };
             freeze(desc.source_tier, desc.source_blocks);
             freeze(desc.target_tier, desc.target_blocks);
         }
+        transfer_dispatcher_->retainFrozenTask(std::move(frozen));
     }
-    scheduleEvictionSettlement(std::move(task), error.ok());
+    scheduleEvictionSettlement(std::move(task), result.ok());
 }
 
 void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task,
@@ -595,25 +700,15 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t         
                 return context.skip(VictimSkipReason::NOT_RECLAIMABLE);
             }
         }
-        if (!force_drop) {
+        // The heap excludes frozen candidates before calling this predicate.
+        if (!force_drop && tier == Tier::DEVICE) {
             const GroupSetPtr&      group_set = tree_->groupSets()[group_set_id];
             const GroupSetResource& resource  = node->group_set_resources[group_set_id];
-            if (tier == Tier::DEVICE) {
-                for (size_t i = 0; i < resource.device_blocks.size(); ++i) {
-                    if (!isNullBlockIdx(resource.device_blocks[i])) {
-                        if (group_set->devicePools()[i]->hasRequestRef(resource.device_blocks[i])) {
-                            return context.skip(VictimSkipReason::REQUEST_REF);
-                        }
-                        if (group_set->devicePools()[i]->isFrozen(resource.device_blocks[i])) {
-                            return context.skip(VictimSkipReason::FROZEN);
-                        }
-                    }
+            for (size_t i = 0; i < resource.device_blocks.size(); ++i) {
+                if (!isNullBlockIdx(resource.device_blocks[i])
+                    && group_set->devicePools()[i]->hasRequestRef(resource.device_blocks[i])) {
+                    return context.skip(VictimSkipReason::REQUEST_REF);
                 }
-            } else if ((tier == Tier::HOST && !isNullBlockIdx(resource.host_block)
-                        && group_set->hostPool()->isFrozen(resource.host_block))
-                       || (tier == Tier::DISK && !isNullBlockIdx(resource.disk_block)
-                           && group_set->diskPool()->isFrozen(resource.disk_block))) {
-                return context.skip(VictimSkipReason::FROZEN);
             }
         }
         if (force_drop || tier != Tier::DEVICE
@@ -659,7 +754,7 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t         
                           tierName(tier),
                           tierName(resource.getTopTier()),
                           static_cast<int>(resource.transfer_state));
-        heap->erase(entry->node);
+        suspendCandidate(entry->node, group_set_id, tier);
     }
     if (!entry.has_value()) {
         return std::nullopt;
@@ -1108,7 +1203,7 @@ void BlockTreeEvictor::settleSingleEviction(TreeNode* node) {
 void BlockTreeEvictor::eraseNodeFromAllHeaps(TreeNode* node) {
     for (const GroupSetPtr& group_set : tree_->groupSets()) {
         for (Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
-            heapFor(group_set->groupSetId(), tier)->erase(node);
+            suspendCandidate(node, group_set->groupSetId(), tier);
         }
     }
 }

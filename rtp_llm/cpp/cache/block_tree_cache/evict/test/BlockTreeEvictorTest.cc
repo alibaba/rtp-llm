@@ -31,6 +31,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
@@ -130,6 +131,8 @@ std::shared_ptr<HostBlockPool> makePinnedHostPool(size_t usable_blocks) {
     config->pool_type            = BlockPoolType::HOST;
     config->pool_name            = "block_tree_evictor_test_host";
     config->physical_block_count = usable_blocks + 1;
+    // Tiny lifecycle fixtures intentionally freeze more than the production threshold.
+    config->frozen_block_abort_ratio = 0.0;
     config->payload_bytes        = 64;
     config->stride_bytes         = 4096;
     config->alignment            = 4096;
@@ -175,6 +178,7 @@ std::shared_ptr<BlockTreeDiskBlockPool> makeTestDiskPool(size_t usable_blocks, c
     config->pool_type            = BlockPoolType::DISK;
     config->pool_name            = name;
     config->work_dir             = "/tmp";
+    config->frozen_block_abort_ratio = 0.0;
     config->payload_bytes        = 64;
     config->stride_bytes         = 64;
     config->disk_size_bytes      = (usable_blocks + 1) * config->stride_bytes;
@@ -1151,7 +1155,7 @@ public:
         std::optional<bool> result;
         evictor_->task_runner_->runTransfer(std::make_shared<EvictionTransferTask>(task),
                                             *evictor_->metrics_reporter_,
-                                            [&](ErrorInfo error) { result = error.ok(); });
+                                            [&](TransferResult error) { result = error.ok(); });
         if (!result.has_value()) {
             ADD_FAILURE() << "scripted eviction transfer did not complete inline";
             return false;
@@ -2657,7 +2661,7 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimMetricsSeparateWatermarkDropFromOnDeman
     }
 }
 
-TEST_F(BlockTreeEvictorTest, ChooseVictimMetricsFrozenSourcesAndFirstRejectionReason) {
+TEST_F(BlockTreeEvictorTest, ChooseVictimMetricsDoNotCountFrozenCandidatesAsScanned) {
     for (const auto tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
         SCOPED_TRACE(tierName(tier));
         resetGroup(makePinnedHostPool(1), makeTestDiskPool(1, "selection_metrics_frozen"));
@@ -2674,7 +2678,6 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimMetricsFrozenSourcesAndFirstRejectionRe
         IBlockPool* pool = tier == Tier::DEVICE ? static_cast<IBlockPool*>(device_pool_.get()) :
                            tier == Tier::HOST   ? static_cast<IBlockPool*>(group_->hostPool().get()) :
                                                   static_cast<IBlockPool*>(group_->diskPool().get());
-        pool->freezeBlock(source);
         if (tier == Tier::DEVICE) {
             device_pool_->incRef(source);
             EXPECT_FALSE(evictor_->chooseVictim(0, tier).has_value());
@@ -2686,13 +2689,11 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimMetricsFrozenSourcesAndFirstRejectionRe
                                           {{VictimSkipReason::REQUEST_REF, 1}});
             device_pool_->decRef(source);
         }
+        pool->freezeBlock(source);
         EXPECT_FALSE(evictor_->chooseVictim(0, tier).has_value());
         const auto frozen = evictor_->takeVictimSelectionMetrics();
-        expectVictimSelectionCounters(frozen.at(VictimSelectionTrigger::WATERMARK, tier, CacheGroupType::FULL, false),
-                                      1,
-                                      0,
-                                      1,
-                                      {{VictimSkipReason::FROZEN, 1}});
+        expectVictimSelectionCounters(
+            frozen.at(VictimSelectionTrigger::WATERMARK, tier, CacheGroupType::FULL, false), 1, 0, 0);
         pool->decTreeRef(source, BlockTreeRefType::FROZEN);
         EXPECT_TRUE(evictor_->dropLocked(0, tier, false));
     }
@@ -3902,6 +3903,322 @@ TEST_F(BlockTreeEvictorTest, FrozenCandidateBecomesEligibleAfterLastFrozenRefere
     insertedNode(result)->group_set_resources[0].evictFromTier(Tier::HOST);
     group_->releaseSingleBlock(Tier::HOST, block, BlockTreeRefType::CACHE);
     EXPECT_EQ(host_pool->freeBlocksNum(), host_pool->totalBlocksNum());
+}
+
+TEST_F(BlockTreeEvictorTest, FrozenCandidatesFormAnUnvisitedSuffixForNormalAndForcedVictimSelection) {
+    auto host_pool = makePinnedHostPool(3);
+    ASSERT_NE(host_pool, nullptr);
+    resetGroup(host_pool);
+    std::vector<TreeNode*> nodes;
+    BlockIdList            blocks;
+    for (CacheKeyType key : {100, 200, 300}) {
+        const auto block = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+        ASSERT_FALSE(isNullBlockIdx(block));
+        blocks.push_back(block);
+        nodes.push_back(insertedNode(insert({key}, {{makeResource(Tier::HOST, block)}})));
+    }
+
+    host_pool->freezeBlock(blocks.front());
+    host_pool->freezeBlock(blocks.back());
+    for (bool force_drop : {false, true}) {
+        const auto victim = evictor_->chooseVictim(0, Tier::HOST, force_drop);
+        ASSERT_TRUE(victim.has_value());
+        EXPECT_EQ(victim->node, nodes[1]);
+    }
+    std::vector<TreeNode*> visited;
+    EXPECT_FALSE(evictor_->heapFor(0, Tier::HOST)
+                     ->best([&](TreeNode* node) {
+                         visited.push_back(node);
+                         return false;
+                     })
+                     .has_value());
+    EXPECT_EQ(visited, (std::vector<TreeNode*>{nodes[1]}));
+
+    host_pool->freezeBlock(blocks[1]);
+    visited.clear();
+    EXPECT_FALSE(evictor_->heapFor(0, Tier::HOST)
+                     ->best([&](TreeNode* node) {
+                         visited.push_back(node);
+                         return true;
+                     })
+                     .has_value());
+    EXPECT_TRUE(visited.empty());
+    EXPECT_FALSE(evictor_->chooseVictim(0, Tier::HOST, /*force_drop=*/true).has_value());
+
+    host_pool->unfreezeBlock(blocks.front());
+    const auto restored_victim = evictor_->chooseVictim(0, Tier::HOST);
+    ASSERT_TRUE(restored_victim.has_value());
+    EXPECT_EQ(restored_victim->node, nodes.front());
+    host_pool->unfreezeBlock(blocks[1]);
+    host_pool->unfreezeBlock(blocks.back());
+    while (evictor_->dropLocked(0, Tier::HOST, /*notify_settled=*/false)) {}
+    EXPECT_EQ(host_pool->usedBlocksNum(), 0u);
+}
+
+TEST_F(BlockTreeEvictorTest, MatchingFrozenCandidateKeepsItFrozenAndUnfreezeUsesUpdatedMetadata) {
+    auto host_pool = makePinnedHostPool(2);
+    ASSERT_NE(host_pool, nullptr);
+    resetGroup(host_pool);
+    const auto first_block  = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    const auto second_block = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(first_block));
+    ASSERT_FALSE(isNullBlockIdx(second_block));
+    TreeNode* first  = insertedNode(insert({100}, {{makeResource(Tier::HOST, first_block)}}));
+    TreeNode* second = insertedNode(insert({200}, {{makeResource(Tier::HOST, second_block)}}));
+    auto*     heap   = evictor_->heapFor(0, Tier::HOST);
+
+    host_pool->freezeBlock(first_block);
+    host_pool->incTreeRef(first_block, BlockTreeRefType::FROZEN);
+    auto& meta           = first->group_set_resources[0].candidate_meta;
+    meta.last_access_seq = evictor_->nextAccessSeq();
+    ++meta.hit_count;
+    evictor_->onMatched(first, 0);
+    EXPECT_TRUE(heap->index_.at(first)->is_frozen);
+
+    host_pool->unfreezeBlock(first_block);
+    EXPECT_TRUE(heap->index_.at(first)->is_frozen);
+    auto victim = evictor_->chooseVictim(0, Tier::HOST);
+    ASSERT_TRUE(victim.has_value());
+    EXPECT_EQ(victim->node, second);
+
+    host_pool->decTreeRef(first_block, BlockTreeRefType::FROZEN);
+    EXPECT_FALSE(heap->index_.at(first)->is_frozen);
+    victim = evictor_->chooseVictim(0, Tier::HOST);
+    ASSERT_TRUE(victim.has_value());
+    EXPECT_EQ(victim->node, second);
+    EXPECT_EQ(meta.last_access_seq, heap->index_.at(first)->primary_key);
+    while (evictor_->dropLocked(0, Tier::HOST, /*notify_settled=*/false)) {}
+}
+
+TEST_F(BlockTreeEvictorTest, FrozenDiskCandidateRestoresItsFifoPositionAfterUnfreeze) {
+    auto disk_pool = makeTestDiskPool(2, "frozen_disk_candidate");
+    ASSERT_NE(disk_pool, nullptr);
+    resetGroup(nullptr, disk_pool);
+    const auto first_block  = group_->allocateSingleBlock(Tier::DISK, BlockTreeRefType::CACHE);
+    const auto second_block = group_->allocateSingleBlock(Tier::DISK, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(first_block));
+    ASSERT_FALSE(isNullBlockIdx(second_block));
+    TreeNode* first  = insertedNode(insert({100}, {{makeResource(Tier::DISK, first_block)}}));
+    TreeNode* second = insertedNode(insert({200}, {{makeResource(Tier::DISK, second_block)}}));
+
+    disk_pool->freezeBlock(first_block);
+    EXPECT_TRUE(evictor_->heapFor(0, Tier::DISK)->index_.at(first)->is_frozen);
+    const auto victim = evictor_->chooseVictim(0, Tier::DISK, /*force_drop=*/true);
+    ASSERT_TRUE(victim.has_value());
+    EXPECT_EQ(victim->node, second);
+
+    disk_pool->unfreezeBlock(first_block);
+    const auto restored_victim = evictor_->chooseVictim(0, Tier::DISK);
+    ASSERT_TRUE(restored_victim.has_value());
+    EXPECT_EQ(restored_victim->node, first);
+    while (evictor_->dropLocked(0, Tier::DISK, /*notify_settled=*/false)) {}
+}
+
+TEST_F(BlockTreeEvictorTest, ReadmittingSuspendedFrozenSourcePreservesFrozenState) {
+    auto host_pool = makePinnedHostPool(1);
+    ASSERT_NE(host_pool, nullptr);
+    resetGroup(host_pool);
+    const auto block = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(block));
+    TreeNode* node = insertedNode(insert({100}, {{makeResource(Tier::HOST, block)}}));
+
+    evictor_->suspendCandidate(node, 0, Tier::HOST);
+    host_pool->freezeBlock(block);
+    EXPECT_EQ(evictor_->candidateCount(0, Tier::HOST), 0u);
+    evictor_->admitCandidate(node, 0, Tier::HOST);
+    EXPECT_EQ(evictor_->candidateCount(0, Tier::HOST), 1u);
+    EXPECT_TRUE(evictor_->heapFor(0, Tier::HOST)->index_.at(node)->is_frozen);
+    EXPECT_FALSE(evictor_->chooseVictim(0, Tier::HOST).has_value());
+
+    host_pool->unfreezeBlock(block);
+    const auto victim = evictor_->chooseVictim(0, Tier::HOST);
+    ASSERT_TRUE(victim.has_value());
+    EXPECT_EQ(victim->node, node);
+    EXPECT_TRUE(evictor_->dropLocked(0, Tier::HOST, /*notify_settled=*/false));
+}
+
+TEST_F(BlockTreeEvictorTest, UnfreezingRemovedCandidateDoesNotAccessDeletedNodeOrReadmitIt) {
+    auto host_pool = makePinnedHostPool(1);
+    ASSERT_NE(host_pool, nullptr);
+    resetGroup(host_pool);
+    const auto block = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(block));
+    TreeNode* node = insertedNode(insert({100}, {{makeResource(Tier::HOST, block)}}));
+    host_pool->freezeBlock(block);
+    EXPECT_FALSE(evictor_->chooseVictim(0, Tier::HOST, /*force_drop=*/true).has_value());
+
+    // Prefix invalidation can discard a cache entry while a physical frozen hold remains.
+    evictor_->runDropTask(TransferDescriptor(node, 0, 0, Tier::HOST, Tier::NONE, {block}), /*notify_settled=*/false);
+    EXPECT_EQ(tree_->size(), 0u);
+    EXPECT_EQ(evictor_->candidateCount(0, Tier::HOST), 0u);
+    EXPECT_TRUE(host_pool->isAllocated(block));
+
+    host_pool->unfreezeBlock(block);
+    EXPECT_FALSE(host_pool->isAllocated(block));
+    EXPECT_EQ(evictor_->candidateCount(0, Tier::HOST), 0u);
+    EXPECT_FALSE(evictor_->chooseVictim(0, Tier::HOST).has_value());
+}
+
+TEST_F(BlockTreeEvictorTest, SharedPhysicalBlockUpdatesEveryCandidateAndUnregistersRemovedOwner) {
+    auto host_pool = makePinnedHostPool(1);
+    ASSERT_NE(host_pool, nullptr);
+    resetGroup(host_pool);
+    const auto block = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(block));
+    TreeNode* first = insertedNode(insert({100}, {{makeResource(Tier::HOST, block)}}));
+    // Each fixture insertion consumes one seed reference in addition to acquiring tree ownership.
+    host_pool->incTreeRef(block, BlockTreeRefType::CACHE);
+    TreeNode* second = insertedNode(insert({200}, {{makeResource(Tier::HOST, block)}}));
+    EXPECT_EQ(host_pool->treeRefCount(block), 2u);
+    auto* heap = evictor_->heapFor(0, Tier::HOST);
+
+    host_pool->freezeBlock(block);
+    EXPECT_TRUE(heap->index_.at(first)->is_frozen);
+    EXPECT_TRUE(heap->index_.at(second)->is_frozen);
+    EXPECT_FALSE(evictor_->chooseVictim(0, Tier::HOST).has_value());
+    EXPECT_EQ(host_pool->treeRefCount(block), 3u);
+
+    evictor_->runDropTask(TransferDescriptor(first, 0, 0, Tier::HOST, Tier::NONE, {block}), /*notify_settled=*/false);
+    EXPECT_EQ(tree_->size(), 1u);
+    EXPECT_EQ(heap->size(), 1u);
+    EXPECT_TRUE(heap->index_.at(second)->is_frozen);
+    EXPECT_TRUE(host_pool->isAllocated(block));
+    EXPECT_EQ(host_pool->treeRefCount(block), 2u);
+
+    host_pool->unfreezeBlock(block);
+    EXPECT_EQ(heap->size(), 1u);
+    EXPECT_FALSE(heap->index_.at(second)->is_frozen);
+    EXPECT_EQ(host_pool->treeRefCount(block), 1u);
+    const auto victim = evictor_->chooseVictim(0, Tier::HOST);
+    ASSERT_TRUE(victim.has_value());
+    EXPECT_EQ(victim->node, second);
+    EXPECT_TRUE(evictor_->dropLocked(0, Tier::HOST, /*notify_settled=*/false));
+    EXPECT_FALSE(host_pool->isAllocated(block));
+}
+
+TEST_F(BlockTreeEvictorTest, UnfreezingReplacedBlockDoesNotChangeReplacementCandidateState) {
+    auto host_pool = makePinnedHostPool(1);
+    ASSERT_NE(host_pool, nullptr);
+    resetGroup(host_pool);
+    const auto host_block = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(host_block));
+    TreeNode* node = insertedNode(insert({100}, {{makeResource(Tier::HOST, host_block)}}));
+    host_pool->freezeBlock(host_block);
+    const auto device_blocks = allocateDeviceBlocksForTest(*group_, 1, BlockTreeRefType::CACHE);
+    ASSERT_EQ(device_blocks.size(), 1u);
+    ASSERT_EQ(device_blocks.front().size(), 1u);
+    const auto device_block = device_blocks.front().front();
+    const auto replacement  = insert({100}, {{makeResource(Tier::DEVICE, device_block)}});
+    unreferenceDeviceBlocksForTest(*group_, device_blocks, BlockTreeRefType::CACHE);
+    ASSERT_EQ(replacement.adopted_nodes.size(), 1u);
+    EXPECT_EQ(replacement.adopted_nodes.front().first, node);
+    EXPECT_EQ(evictor_->candidateCount(0, Tier::HOST), 0u);
+    device_pool_->freezeBlock(device_block);
+
+    host_pool->unfreezeBlock(host_block);
+    EXPECT_FALSE(host_pool->isAllocated(host_block));
+    EXPECT_EQ(evictor_->candidateCount(0, Tier::HOST), 0u);
+    EXPECT_TRUE(evictor_->heapFor(0, Tier::DEVICE)->index_.at(node)->is_frozen);
+    EXPECT_FALSE(evictor_->chooseVictim(0, Tier::DEVICE, /*force_drop=*/true).has_value());
+
+    device_pool_->unfreezeBlock(device_block);
+    const auto victim = evictor_->chooseVictim(0, Tier::DEVICE, /*force_drop=*/true);
+    ASSERT_TRUE(victim.has_value());
+    EXPECT_EQ(victim->node, node);
+    EXPECT_TRUE(evictor_->dropLocked(0, Tier::DEVICE, /*notify_settled=*/false));
+    EXPECT_FALSE(device_pool_->isAllocated(device_block));
+}
+
+TEST_F(BlockTreeEvictorTest, EveryDeviceMemberMustBeUnfrozenBeforeCandidateReturnsToNormalOrder) {
+    auto second_pool = makeTestDevicePool(8, "frozen_candidate_second_member");
+    ASSERT_NE(second_pool, nullptr);
+    auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    auto topology =
+        block_transfer_engine_test::makeTestTopology({block_transfer_engine_test::makeTestGroupBase(policy, {0}, 16),
+                                                      block_transfer_engine_test::makeTestGroupBase(policy, {1}, 16)});
+    group_ =
+        std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool_, second_pool}, nullptr, nullptr);
+    group_->initialize(0, topology, topology->groupTags());
+    groups_           = {group_};
+    tree_             = std::make_unique<BlockTree>(groups_);
+    evictor_          = evictor_runtime_.make(tree_.get());
+    const auto blocks = allocateDeviceBlocksForTest(*group_, 2, BlockTreeRefType::CACHE);
+    ASSERT_EQ(blocks.size(), 2u);
+    std::vector<TreeNode*> nodes;
+    for (size_t index = 0; index < blocks.size(); ++index) {
+        GroupSetResource resource;
+        resource.device_blocks = blocks[index];
+        nodes.push_back(insertedNode(insert({static_cast<CacheKeyType>(100 + index)}, {{resource}})));
+    }
+    unreferenceDeviceBlocksForTest(*group_, blocks, BlockTreeRefType::CACHE);
+
+    second_pool->freezeBlock(blocks[0][1]);
+    device_pool_->freezeBlock(blocks[0][0]);
+    EXPECT_TRUE(evictor_->heapFor(0, Tier::DEVICE)->index_.at(nodes.front())->is_frozen);
+    second_pool->unfreezeBlock(blocks[0][1]);
+    EXPECT_TRUE(evictor_->heapFor(0, Tier::DEVICE)->index_.at(nodes.front())->is_frozen);
+    auto victim = evictor_->chooseVictim(0, Tier::DEVICE, /*force_drop=*/true);
+    ASSERT_TRUE(victim.has_value());
+    EXPECT_EQ(victim->node, nodes.back());
+
+    device_pool_->unfreezeBlock(blocks[0][0]);
+    EXPECT_FALSE(evictor_->heapFor(0, Tier::DEVICE)->index_.at(nodes.front())->is_frozen);
+    victim = evictor_->chooseVictim(0, Tier::DEVICE, /*force_drop=*/true);
+    ASSERT_TRUE(victim.has_value());
+    EXPECT_EQ(victim->node, nodes.front());
+    while (evictor_->dropLocked(0, Tier::DEVICE, /*notify_settled=*/false)) {}
+}
+
+TEST(BlockTreeEvictorFrozenTest, FreezeAndUnfreezeUpdateHeapSynchronouslyUnderCacheMutex) {
+    struct Environment {
+        DeviceBlockPoolPtr                device_pool;
+        std::shared_ptr<HostBlockPool>    host_pool;
+        std::shared_ptr<FullGroupSet>     group;
+        std::unique_ptr<BlockTree>        tree;
+        TestEvictorRuntime                runtime;
+        std::unique_ptr<BlockTreeEvictor> evictor;
+    };
+    auto environment         = std::make_shared<Environment>();
+    environment->device_pool = makeTestDevicePool(8, "frozen_heap_mutex_device");
+    environment->host_pool   = makePinnedHostPool(1);
+    ASSERT_NE(environment->device_pool, nullptr);
+    ASSERT_NE(environment->host_pool, nullptr);
+    environment->group = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{environment->device_pool}, environment->host_pool, nullptr);
+    initializeFullGroup(environment->group, environment->device_pool);
+    const std::vector<GroupSetPtr> groups{environment->group};
+    environment->tree    = std::make_unique<BlockTree>(groups);
+    environment->evictor = environment->runtime.make(environment->tree.get());
+    const auto block     = environment->group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(block));
+    const std::vector<std::vector<GroupSetResource>> resources{{makeResource(Tier::HOST, block)}};
+    const auto inserted = environment->tree->insertNode({100}, resources, false, false);
+    releaseLowerTierSeedRefs(groups, resources);
+    environment->evictor->onInserted(inserted);
+    TreeNode* node = insertedNode(inserted);
+
+    for (bool freeze : {true, false}) {
+        SCOPED_TRACE(freeze ? "freeze" : "unfreeze");
+        std::unique_lock<std::mutex>               cache_lock(environment->runtime.mutex_);
+        auto                                       started        = std::make_shared<std::promise<void>>();
+        auto                                       started_future = started->get_future();
+        block_tree_cache_test::BoundedThread<void> operation([environment, block, freeze, started] {
+            started->set_value();
+            if (freeze) {
+                environment->host_pool->freezeBlock(block);
+            } else {
+                environment->host_pool->unfreezeBlock(block);
+            }
+        });
+        EXPECT_EQ(started_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        EXPECT_EQ(operation.waitFor(std::chrono::milliseconds(50)), std::future_status::timeout);
+        cache_lock.unlock();
+        ASSERT_EQ(operation.waitFor(std::chrono::seconds(2)), std::future_status::ready);
+        operation.get();
+        cache_lock.lock();
+        EXPECT_EQ(environment->evictor->heapFor(0, Tier::HOST)->index_.at(node)->is_frozen, freeze);
+        EXPECT_EQ(environment->evictor->chooseVictim(0, Tier::HOST).has_value(), !freeze);
+    }
 }
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimKeepsCandidateUntilTaskActivation) {

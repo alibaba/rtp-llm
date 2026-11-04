@@ -49,6 +49,7 @@ DeviceBlockPool::DeviceBlockPool(std::shared_ptr<const DeviceBlockPoolConfig> co
     for (auto& typed_refcounts : refcounts_by_type_) {
         typed_refcounts.assign(this->config().physical_block_count, 0);
     }
+    remote_write_source_refs_.assign(this->config().physical_block_count, 0);
 }
 
 std::function<void()> DeviceBlockPool::pinForRemotePublication(BlockIdxType block) {
@@ -104,6 +105,38 @@ void DeviceBlockPool::releaseRemotePublicationPin(BlockIdxType block, const std:
     }
 }
 
+bool DeviceBlockPool::tryPinForRemoteWriteSource(BlockIdxType block) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    checkAllocatedNoLock(block);
+    const auto type           = static_cast<size_t>(DeviceBlockRefType::REMOTE_CONNECTOR);
+    auto&      source_refs    = remote_write_source_refs_[block];
+    auto&      connector_refs = refcounts_by_type_[type][block];
+    if (treeRefCountNoLock(block, BlockTreeRefType::FROZEN) != 0 || connector_refs != source_refs) {
+        return false;
+    }
+    const bool was_active    = isActiveNoLock(block);
+    const bool was_available = isAvailableNoLock(block);
+    ++refcounts_[block];
+    ++source_refs;
+    if (connector_refs++ == 0) {
+        ++referenced_block_counts_[type];
+    }
+    updateActiveBlocksNumNoLock(block, was_active);
+    updateAvailableBlocksNumNoLock(block, was_available);
+    return true;
+}
+
+void DeviceBlockPool::unpinRemoteWriteSource(BlockIdxType block) {
+    mutateAllocatedBlocks(
+        BlockIdList{block},
+        [this](BlockIdxType block) { RTP_LLM_CHECK(remote_write_source_refs_[block] > 0); },
+        [this](BlockIdxType block) {
+            --remote_write_source_refs_[block];
+            decRefNoLock(block, static_cast<size_t>(DeviceBlockRefType::REMOTE_CONNECTOR));
+        });
+}
+
 void DeviceBlockPool::incRef(BlockIdxType block, DeviceBlockRefType ref_type) {
     incRef(BlockIdList{block}, ref_type);
 }
@@ -140,19 +173,21 @@ void DeviceBlockPool::decRef(const BlockIdList& blocks, DeviceBlockRefType ref_t
                                     poolName().c_str(),
                                     type_index);
         },
-        [this, type_index](BlockIdxType block) {
-            const bool was_active    = isActiveNoLock(block);
-            const bool was_available = isAvailableNoLock(block);
-            --refcounts_[block];
-            if (--refcounts_by_type_[type_index][block] == 0) {
-                --referenced_block_counts_[type_index];
-            }
-            if (refcounts_[block] == 0) {
-                freeAllocatedBlockNoLock(block);
-            }
-            updateActiveBlocksNumNoLock(block, was_active);
-            updateAvailableBlocksNumNoLock(block, was_available);
-        });
+        [this, type_index](BlockIdxType block) { decRefNoLock(block, type_index); });
+}
+
+void DeviceBlockPool::decRefNoLock(BlockIdxType block, size_t type_index) {
+    const bool was_active    = isActiveNoLock(block);
+    const bool was_available = isAvailableNoLock(block);
+    --refcounts_[block];
+    if (--refcounts_by_type_[type_index][block] == 0) {
+        --referenced_block_counts_[type_index];
+    }
+    if (refcounts_[block] == 0) {
+        freeAllocatedBlockNoLock(block);
+    }
+    updateActiveBlocksNumNoLock(block, was_active);
+    updateAvailableBlocksNumNoLock(block, was_available);
 }
 
 bool DeviceBlockPool::tryReplaceRequestReferences(const std::vector<RequestReferenceUpdate>& reference_updates,

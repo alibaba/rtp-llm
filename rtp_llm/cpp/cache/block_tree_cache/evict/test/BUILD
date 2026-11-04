@@ -44,6 +44,7 @@ cc_test(
 
 cc_test(
     name = "block_tree_evictor_test",
+    testonly = True,
     exec_properties = {"gpu": "L20_CU13"},
     srcs = ["BlockTreeEvictorTest.cc"],
     copts = test_copts,
@@ -51,7 +52,10 @@ cc_test(
         "L20_CU13",
         "exclusive-if-local",
     ],
-    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils"],
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
+    ],
     env = {},
 )
 

@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <vector>
+
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionHeap.h"
 
 namespace rtp_llm {
@@ -333,6 +335,116 @@ TEST(EvictionHeapTest, ContainsAfterErase) {
 TEST(EvictionHeapTest, UpsertNullNodeIgnored) {
     EvictionHeap heap(EvictionPolicy::LRU);
     heap.upsert(nullptr, makeMeta(1, 1, 0));
+    EXPECT_EQ(heap.size(), 0u);
+}
+
+class FrozenEvictionHeapTest: public ::testing::TestWithParam<EvictionPolicy> {};
+
+TEST_P(FrozenEvictionHeapTest, FrozenEntriesFollowOrdinaryEntriesAndStopSelection) {
+    EvictionHeap heap(GetParam());
+    TreeNode     oldest;
+    TreeNode     middle;
+    TreeNode     newest;
+    oldest.cache_key = 1;
+    middle.cache_key = 2;
+    newest.cache_key = 3;
+    heap.upsert(&oldest, makeMeta(10, 10, 10));
+    heap.upsert(&middle, makeMeta(20, 20, 20));
+    heap.upsert(&newest, makeMeta(30, 30, 30));
+
+    ASSERT_TRUE(heap.setFrozenIfPresent(&oldest, true));
+    const auto victim = heap.best([](TreeNode*) { return true; });
+    ASSERT_TRUE(victim.has_value());
+    EXPECT_EQ(victim->node, &middle);
+    EXPECT_FALSE(victim->is_frozen);
+
+    std::vector<TreeNode*> visited;
+    const auto             rejected = heap.best([&](TreeNode* node) {
+        visited.push_back(node);
+        return false;
+    });
+    EXPECT_FALSE(rejected.has_value());
+    EXPECT_EQ(visited, (std::vector<TreeNode*>{&middle, &newest}));
+    EXPECT_EQ(heap.size(), 3u);
+
+    ASSERT_TRUE(heap.setFrozenIfPresent(&middle, true));
+    ASSERT_TRUE(heap.setFrozenIfPresent(&newest, true));
+    size_t     predicate_calls = 0;
+    const auto all_frozen      = heap.best([&](TreeNode*) {
+        ++predicate_calls;
+        return true;
+    });
+    EXPECT_FALSE(all_frozen.has_value());
+    EXPECT_EQ(predicate_calls, 0u);
+
+    ASSERT_TRUE(heap.setFrozenIfPresent(&oldest, false));
+    const auto thawed = heap.best([](TreeNode*) { return true; });
+    ASSERT_TRUE(thawed.has_value());
+    EXPECT_EQ(thawed->node, &oldest);
+    EXPECT_EQ(thawed->primary_key, 10u);
+    EXPECT_EQ(heap.size(), 3u);
+}
+
+TEST_P(FrozenEvictionHeapTest, MetadataUpdatePreservesFrozenStateAndRestoresLatestKeysOnThaw) {
+    EvictionHeap heap(GetParam());
+    TreeNode     frozen;
+    TreeNode     ordinary;
+    frozen.cache_key   = 1;
+    ordinary.cache_key = 2;
+    heap.upsert(&frozen, makeMeta(10, 10, 10), /*is_frozen=*/true);
+    heap.upsert(&ordinary, makeMeta(100, 100, 100));
+
+    ASSERT_TRUE(heap.updateIfPresent(&frozen, makeMeta(30, 40, 50)));
+    const auto victim = heap.best([](TreeNode*) { return true; });
+    ASSERT_TRUE(victim.has_value());
+    EXPECT_EQ(victim->node, &ordinary);
+
+    ASSERT_TRUE(heap.setFrozenIfPresent(&frozen, false));
+    const auto thawed = heap.best([](TreeNode*) { return true; });
+    ASSERT_TRUE(thawed.has_value());
+    EXPECT_EQ(thawed->node, &frozen);
+    switch (GetParam()) {
+        case EvictionPolicy::LRU:
+            EXPECT_EQ(thawed->primary_key, 30u);
+            EXPECT_EQ(thawed->secondary_key, 40u);
+            break;
+        case EvictionPolicy::LFU:
+            EXPECT_EQ(thawed->primary_key, 50u);
+            EXPECT_EQ(thawed->secondary_key, 30u);
+            break;
+        case EvictionPolicy::FIFO:
+            EXPECT_EQ(thawed->primary_key, 40u);
+            EXPECT_EQ(thawed->secondary_key, 0u);
+            break;
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(AllPolicies,
+                         FrozenEvictionHeapTest,
+                         ::testing::Values(EvictionPolicy::LRU, EvictionPolicy::LFU, EvictionPolicy::FIFO));
+
+TEST(EvictionHeapTest, FrozenUpdatesAreIdempotentAndNeverAdmitMissingNodes) {
+    EvictionHeap heap(EvictionPolicy::LRU);
+    TreeNode     node;
+    EXPECT_FALSE(heap.setFrozenIfPresent(&node, true));
+    EXPECT_FALSE(heap.setFrozenIfPresent(&node, false));
+    EXPECT_EQ(heap.size(), 0u);
+
+    heap.upsert(&node, makeMeta(10, 20, 30));
+    EXPECT_TRUE(heap.setFrozenIfPresent(&node, true));
+    EXPECT_TRUE(heap.setFrozenIfPresent(&node, true));
+    EXPECT_FALSE(heap.best([](TreeNode*) { return true; }).has_value());
+    EXPECT_EQ(heap.size(), 1u);
+
+    EXPECT_TRUE(heap.setFrozenIfPresent(&node, false));
+    EXPECT_TRUE(heap.setFrozenIfPresent(&node, false));
+    const auto victim = heap.best([](TreeNode*) { return true; });
+    ASSERT_TRUE(victim.has_value());
+    EXPECT_EQ(victim->node, &node);
+    EXPECT_EQ(victim->primary_key, 10u);
+    EXPECT_EQ(victim->secondary_key, 20u);
+    heap.erase(&node);
+    EXPECT_FALSE(heap.setFrozenIfPresent(&node, true));
     EXPECT_EQ(heap.size(), 0u);
 }
 

@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventReporter.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -545,6 +546,7 @@ TEST(KVCMLocalTest, LegacyEmptyRemoteResponsePreservesOneofPresence) {
 }
 
 TEST(KVCMLocalTest, ExecuteFunctionPropagatesMetadataErrorsAndPreservesTransferStatus) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     rtp_llm::initLogger();
     createDevice();
     auto environment    = makeBackendEnvironment("kvcm_rpc_result");
@@ -568,6 +570,7 @@ TEST(KVCMLocalTest, ExecuteFunctionPropagatesMetadataErrorsAndPreservesTransferS
         EXPECT_FALSE(manager.executeFunction(request, response));
     }
 
+    int operation_sequence = 0;
     for (const auto ec :
          {kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS, kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT}) {
         client_wrapper->load_status = ec;
@@ -576,17 +579,62 @@ TEST(KVCMLocalTest, ExecuteFunctionPropagatesMetadataErrorsAndPreservesTransferS
             FunctionRequestPB request;
             auto*             remote = request.mutable_remote_request();
             remote->set_op(operation);
+            const auto operation_id = "transfer_" + std::to_string(operation_sequence++);
+            remote->set_operation_id(operation_id);
             remote->add_group_tags("default");
             remote->add_block_ids(environment.block_id);
             remote->add_uris("transfer_uri");
             FunctionResponsePB response;
             EXPECT_TRUE(manager.executeFunction(request, response));
             ASSERT_TRUE(response.has_remote_response());
+            const bool timed_out = ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT;
             EXPECT_EQ(response.remote_response().transfer_status(),
-                      ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT :
-                                                                                REMOTE_TRANSFER_STATUS_FAILED);
+                      timed_out ? REMOTE_TRANSFER_STATUS_TIMEOUT : REMOTE_TRANSFER_STATUS_FAILED);
+            EXPECT_FALSE(response.remote_response().payload_buffer_safe());
+
+            QueryKVCMOperationsRequestPB  query_request;
+            QueryKVCMOperationsResponsePB query_response;
+            query_request.add_operation_ids(operation_id);
+            ASSERT_TRUE(manager.queryKVCMOperations(query_request, query_response));
+            ASSERT_EQ(query_response.operations_size(), 1);
+            EXPECT_EQ(query_response.operations(0).state(),
+                      QueryKVCMOperationsResponsePB::OperationState::RUNNING);
+            EXPECT_FALSE(manager.forgetKVCMOperation(operation_id));
         }
     }
+
+    // The SDK completes safely after the worker deadline. Keep the timeout
+    // result while recording that the blocks can be released.
+    constexpr auto timeout = std::chrono::milliseconds(100);
+    client_wrapper->save_status.reset();
+    EXPECT_CALL(*client_wrapper, saveKvCachesForTag(_, _, _, _))
+        .WillOnce(Invoke([timeout](const auto&, const auto&, const auto&, const auto&) {
+            std::this_thread::sleep_for(timeout + std::chrono::milliseconds(50));
+            return std::make_pair(true, kv_cache_manager::UriStrVec{});
+        }));
+
+    const std::string operation_id = "late_safe_write";
+    FunctionRequestPB request;
+    auto* remote = request.mutable_remote_request();
+    remote->set_op(REMOTE_OPERATION_WRITE);
+    remote->set_operation_id(operation_id);
+    remote->set_timeout_ms(timeout.count());
+    remote->add_group_tags("default");
+    remote->add_block_ids(environment.block_id);
+    remote->add_uris("transfer_uri");
+    FunctionResponsePB response;
+    ASSERT_TRUE(manager.executeFunction(request, response));
+    ASSERT_TRUE(response.has_remote_response());
+    EXPECT_EQ(response.remote_response().transfer_status(), REMOTE_TRANSFER_STATUS_TIMEOUT);
+    EXPECT_TRUE(response.remote_response().payload_buffer_safe());
+
+    QueryKVCMOperationsRequestPB query_request;
+    QueryKVCMOperationsResponsePB query_response;
+    query_request.add_operation_ids(operation_id);
+    ASSERT_TRUE(manager.queryKVCMOperations(query_request, query_response));
+    ASSERT_EQ(query_response.operations_size(), 1);
+    EXPECT_EQ(query_response.operations(0).state(), QueryKVCMOperationsResponsePB::OperationState::FINISHED);
+    EXPECT_TRUE(manager.forgetKVCMOperation(operation_id));
 }
 
 BackendHandle makeCompletionProofBackend(const BackendEnvironment&                 environment,
@@ -1379,7 +1427,10 @@ TEST(KVCMLocalTest, TP2PayloadWaitReleasesCoordinatorAndShutdownDrainsSettlement
         if (write) {
             auto next_request = makeStorageRequest(*environment, {102});
             next_request.request_id = 43;
-            ASSERT_TRUE(backend->backend->write(backend->backend->prepareWrite(std::move(next_request))));
+            auto next_task = backend->backend->prepareWrite(std::move(next_request));
+            ASSERT_TRUE(next_task);
+            ASSERT_EQ(environment->device_pool->refCount(environment->block_id), refs + 2);
+            ASSERT_TRUE(backend->backend->write(std::move(next_task)));
         } else {
             backend->backend->match(request, [progressed](size_t, auto, bool ok) { progressed->set_value(ok); });
         }
@@ -1499,6 +1550,304 @@ TEST(KVCMLocalTest, PayloadReadFailurePropagatesToCompletion) {
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
     EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
     EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
+}
+
+class GatedLocalCompletionClient final: public kvcm::ClientWrapper {
+public:
+    using Code = kv_cache_manager::ClientErrorCode;
+
+    explicit GatedLocalCompletionClient(Code code):
+        ClientWrapper(std::make_unique<kvcm::MockClientFactory>()),
+        code_(code),
+        entered(entered_promise_.get_future().share()),
+        released_(release_promise_.get_future().share()) {}
+
+    bool initForPools(const ConfigMap&, kv_cache_manager::RoleType,
+                      const std::vector<PoolRegistration>&, const std::vector<std::string>&) override {
+        return true;
+    }
+
+    void shutdown() noexcept override {
+        shutdown_before_sdk_returned.store(attempted.load() && !returned.load());
+        ++shutdown_calls;
+    }
+
+    std::pair<bool, kv_cache_manager::Locations>
+    match(const std::string&, const std::string&, kv_cache_manager::QueryType,
+          const std::vector<int64_t>&, const kv_cache_manager::BlockMask&,
+          const kv_cache_manager::ForwardContext&) override {
+        return {true, {{{"tp0_Fdefault", "local_uri"}}}};
+    }
+
+    std::pair<bool, kv_cache_manager::WriteLocation>
+    getWriteLocation(const std::string&, const std::string&, const std::vector<int64_t>&,
+                     const std::vector<int64_t>&, const std::vector<std::string>&, int64_t, int32_t) override {
+        kv_cache_manager::WriteLocation location;
+        location.write_session_id = "local_session";
+        location.block_mask = kv_cache_manager::BlockMaskOffset{0};
+        location.locations = {{{"tp0_Fdefault", "local_uri"}}};
+        return {true, std::move(location)};
+    }
+
+    bool finishWrite(const std::string&, const std::string&, const std::string&,
+                     const kv_cache_manager::BlockMask&, const kv_cache_manager::Locations&) override {
+        return true;
+    }
+
+    bool abortWrite(const std::string&, const std::string&, const std::string&) override {
+        return true;
+    }
+
+    Code loadKvCachesForTagWithStatus(
+        const std::string&, const kv_cache_manager::UriStrVec&, kv_cache_manager::BlockBuffers&,
+        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>&, TransferCompletion* completion,
+        std::optional<std::chrono::steady_clock::time_point>) override {
+        return transfer(completion);
+    }
+
+    std::pair<Code, kv_cache_manager::UriStrVec> saveKvCachesForTagWithStatus(
+        const std::string&, const kv_cache_manager::UriStrVec&, const kv_cache_manager::BlockBuffers&,
+        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>&, TransferCompletion* completion,
+        std::optional<std::chrono::steady_clock::time_point>) override {
+        return {transfer(completion), {}};
+    }
+
+    void release() {
+        std::call_once(release_once_, [this] { release_promise_.set_value(); });
+    }
+
+    std::atomic<bool> attempted{false};
+    std::atomic<bool> returned{false};
+    std::atomic<bool> shutdown_before_sdk_returned{false};
+    std::atomic<size_t> shutdown_calls{0};
+
+private:
+    Code transfer(TransferCompletion* completion) {
+        attempted.store(true);
+        if (completion) *completion = TransferCompletion::UNKNOWN;
+        entered_promise_.set_value();
+        released_.wait();
+        if (completion) *completion = sdkResultCompletion(code_);
+        returned.store(true);
+        return code_;
+    }
+
+    Code code_;
+    std::promise<void> entered_promise_;
+    std::promise<void> release_promise_;
+
+public:
+    std::shared_future<void> entered;
+
+private:
+    std::shared_future<void> released_;
+    std::once_flag release_once_;
+};
+
+// The SDK gate is always opened before backend teardown, including fatal assertions.
+// The dispatcher has no BroadcastManager or multi-rank engine in these tests.
+struct LocalCompletionSession {
+    explicit LocalCompletionSession(kv_cache_manager::ClientErrorCode code,
+                                    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter = nullptr):
+        environment(makeBackendEnvironment("kvcm_local_completion")),
+        client(std::make_shared<GatedLocalCompletionClient>(code)),
+        backend(std::make_shared<KVCMStorageBackend>(environment.cache_config, KVCacheConfig{}, RuntimeConfig{},
+                                                    singleRankConfig(), SpeculativeExecutionConfig{}, nullptr,
+                                                    false, std::move(metrics_reporter), client)),
+        dispatcher(std::make_shared<BlockTransferDispatcher>(nullptr, nullptr, 8, backend)),
+        frozen_result(frozen_promise.get_future()),
+        finished_result(finished_promise.get_future()),
+        read_result(read_promise.get_future()) {
+        dispatcher->stopFrozenPolling();
+        backend->setFrozenTaskRetainer([this](FrozenTask task) {
+            const auto id = task.recovery_task_ids.empty() ? std::string{} : task.recovery_task_ids.front();
+            EXPECT_EQ(task.query_kind, FrozenTask::QueryKind::KVCM);
+            EXPECT_FALSE(task.finalFrozen);
+            EXPECT_EQ(task.recovery_task_ids.size(), 1u);
+            dispatcher->retainFrozenTask(std::move(task));
+            frozen_promise.set_value(id);
+        });
+        backend->setFinishedOperationHandler([this](const std::string& id) {
+            dispatcher->enqueueFinishedKVCMOperation(id);
+            finished_promise.set_value(id);
+        });
+    }
+
+    ~LocalCompletionSession() {
+        client->release();
+        if (shutdown_result.valid()) shutdown_result.wait();
+        backend->shutdown();
+    }
+
+    bool initialize() {
+        if (!initialized) initialized = initSingleRank(*backend, environment);
+        return initialized;
+    }
+
+    bool submit(bool write, std::chrono::milliseconds timeout = std::chrono::milliseconds(250)) {
+        if (!initialize()) return false;
+        auto request = makeStorageRequest(environment);
+        std::shared_ptr<StorageBackendMatchMeta> meta;
+        if (!write) {
+            auto observation = match(*backend, request);
+            if (!observation.success || !observation.match_meta) return false;
+            meta = std::move(observation.match_meta);
+        }
+        request.transfer_task.emplace(std::vector<TransferDescriptor>{}, timeout);
+        if (write) {
+            auto task = backend->prepareWrite(std::move(request));
+            if (!task || !backend->write(std::move(task))) return false;
+        } else {
+            backend->read(std::move(request), std::move(meta), [this](ErrorInfo error) {
+                read_promise.set_value(std::move(error));
+            });
+        }
+        return client->entered.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    }
+
+    bool waitForState(const std::string& id, TaskCompletion state) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        do {
+            if (backend->queryLocalKVCMOperations({id}) == std::vector<TaskCompletion>{state}) return true;
+            std::this_thread::yield();
+        } while (std::chrono::steady_clock::now() < deadline);
+        return false;
+    }
+
+    BackendEnvironment environment;
+    std::shared_ptr<GatedLocalCompletionClient> client;
+    std::shared_ptr<KVCMStorageBackend> backend;
+    std::shared_ptr<BlockTransferDispatcher> dispatcher;
+    std::promise<std::string> frozen_promise;
+    std::promise<std::string> finished_promise;
+    std::promise<ErrorInfo> read_promise;
+    std::future<std::string> frozen_result;
+    std::future<std::string> finished_result;
+    std::future<ErrorInfo> read_result;
+    std::future<void> shutdown_result;
+    bool initialized{false};
+};
+
+class LocalKVCMCompletionTest: public ::testing::TestWithParam<bool> {};
+
+INSTANTIATE_TEST_SUITE_P(ReadAndWrite, LocalKVCMCompletionTest, ::testing::Bool());
+
+TEST_P(LocalKVCMCompletionTest, BusinessDeadlineFreezesUntilSdkCompletionThenThawsAndForgets) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    LocalCompletionSession session(kv_cache_manager::ClientErrorCode::ER_OK, metrics_reporter);
+    ASSERT_TRUE(session.initialize());
+    auto* quarantine_metrics = metrics_reporter->getMetricsGroup<RtpLLMRemoteCacheQuarantineMetrics>();
+    ASSERT_NE(quarantine_metrics, nullptr);
+    // Consume each transition separately: gauge snapshots aggregate pending samples.
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
+    const auto ref_count = session.environment.device_pool->refCount(session.environment.block_id);
+    ASSERT_TRUE(session.submit(GetParam()));
+    ASSERT_EQ(session.frozen_result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    const auto id = session.frozen_result.get();
+    ASSERT_FALSE(id.empty());
+    if (!GetParam()) {
+        ASSERT_EQ(session.read_result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        EXPECT_EQ(session.read_result.get().code(), ErrorCode::DEADLINE_EXCEEDED);
+    }
+    EXPECT_FALSE(session.client->returned.load());
+    EXPECT_EQ(session.backend->queryLocalKVCMOperations({id}), std::vector<TaskCompletion>{TaskCompletion::PENDING});
+    EXPECT_FALSE(session.backend->forgetLocalKVCMOperations({id}));
+    session.dispatcher->pollFrozenTasks();
+    EXPECT_TRUE(session.environment.device_pool->isFrozen(session.environment.block_id));
+    EXPECT_EQ(session.environment.device_pool->refCount(session.environment.block_id), ref_count + 1);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 1);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0.125);
+
+    session.client->release();
+    ASSERT_TRUE(session.waitForState(id, TaskCompletion::FINISHED));
+    session.dispatcher->pollFrozenTasks();
+    EXPECT_FALSE(session.environment.device_pool->isFrozen(session.environment.block_id));
+    EXPECT_EQ(session.environment.device_pool->refCount(session.environment.block_id), ref_count);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
+    session.dispatcher->pollFrozenTasks();
+    EXPECT_EQ(session.backend->queryLocalKVCMOperations({id}), std::vector<TaskCompletion>{TaskCompletion::UNKNOWN});
+}
+
+TEST_P(LocalKVCMCompletionTest, OrdinarySdkTimeoutDoesNotProveBufferCompletion) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    LocalCompletionSession session(kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT);
+    ASSERT_TRUE(session.submit(GetParam()));
+    ASSERT_EQ(session.frozen_result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    const auto id = session.frozen_result.get();
+    ASSERT_FALSE(id.empty());
+    session.client->release();
+    session.backend->shutdown();
+    EXPECT_TRUE(session.client->returned.load());
+    EXPECT_EQ(session.backend->queryLocalKVCMOperations({id}), std::vector<TaskCompletion>{TaskCompletion::PENDING});
+    session.dispatcher->pollFrozenTasks();
+    EXPECT_TRUE(session.environment.device_pool->isFrozen(session.environment.block_id));
+    EXPECT_FALSE(session.backend->forgetLocalKVCMOperations({id}));
+}
+
+TEST_P(LocalKVCMCompletionTest, ExplicitSafeSdkFailureAfterDeadlinePermitsRecovery) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    for (const auto& [code, safe] : failedCompletionCases<kv_cache_manager::ClientErrorCode>(GetParam())) {
+        if (!safe) continue;
+        SCOPED_TRACE(static_cast<int>(code));
+        LocalCompletionSession session(code);
+        const auto ref_count = session.environment.device_pool->refCount(session.environment.block_id);
+        ASSERT_TRUE(session.submit(GetParam()));
+        ASSERT_EQ(session.frozen_result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        const auto id = session.frozen_result.get();
+        ASSERT_FALSE(id.empty());
+        session.client->release();
+        ASSERT_TRUE(session.waitForState(id, TaskCompletion::FINISHED));
+        session.dispatcher->pollFrozenTasks();
+        EXPECT_FALSE(session.environment.device_pool->isFrozen(session.environment.block_id));
+        EXPECT_EQ(session.environment.device_pool->refCount(session.environment.block_id), ref_count);
+        session.dispatcher->pollFrozenTasks();
+        EXPECT_EQ(session.backend->queryLocalKVCMOperations({id}), std::vector<TaskCompletion>{TaskCompletion::UNKNOWN});
+    }
+}
+
+TEST_P(LocalKVCMCompletionTest, SuccessfulOperationsUseFinishedHandlerForRegistryCleanup) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    LocalCompletionSession session(kv_cache_manager::ClientErrorCode::ER_OK);
+    ASSERT_TRUE(session.submit(GetParam(), std::chrono::seconds(5)));
+    session.client->release();
+    ASSERT_EQ(session.finished_result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    const auto id = session.finished_result.get();
+    ASSERT_FALSE(id.empty());
+    EXPECT_EQ(session.backend->queryLocalKVCMOperations({id}), std::vector<TaskCompletion>{TaskCompletion::FINISHED});
+    EXPECT_FALSE(session.environment.device_pool->isFrozen(session.environment.block_id));
+    session.dispatcher->pollFrozenTasks();
+    EXPECT_EQ(session.backend->queryLocalKVCMOperations({id}), std::vector<TaskCompletion>{TaskCompletion::UNKNOWN});
+}
+
+TEST(KVCMLocalTest, ShutdownDrainsSdkCallsThatOutliveTheBusinessDeadline) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    LocalCompletionSession session(kv_cache_manager::ClientErrorCode::ER_OK);
+    ASSERT_TRUE(session.submit(/*write=*/false));
+    ASSERT_EQ(session.frozen_result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    const auto id = session.frozen_result.get();
+    auto shutdown_started = std::make_shared<std::promise<void>>();
+    auto started = shutdown_started->get_future();
+    session.shutdown_result = std::async(std::launch::async, [backend = session.backend, shutdown_started] {
+        shutdown_started->set_value();
+        backend->shutdown();
+    });
+    ASSERT_EQ(started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(session.shutdown_result.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    EXPECT_EQ(session.client->shutdown_calls.load(), 0u);
+    session.client->release();
+    ASSERT_EQ(session.shutdown_result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    session.shutdown_result.get();
+    EXPECT_EQ(session.client->shutdown_calls.load(), 1u);
+    EXPECT_FALSE(session.client->shutdown_before_sdk_returned.load());
+    EXPECT_EQ(session.backend->queryLocalKVCMOperations({id}), std::vector<TaskCompletion>{TaskCompletion::FINISHED});
+    session.dispatcher->pollFrozenTasks();
+    EXPECT_FALSE(session.environment.device_pool->isFrozen(session.environment.block_id));
 }
 
 TEST(KVCMLocalTest, PayloadReadTimeoutFreezesOnlyDestinationBlock) {

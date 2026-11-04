@@ -133,6 +133,41 @@ private:
         std::unordered_map<TreeNode*, EvictionTimingSnapshot> pending_timings;
     };
 
+    struct CandidateKey {
+        TreeNode* node;
+        size_t    group_set_id;
+        Tier      tier;
+
+        bool operator==(const CandidateKey& other) const {
+            return node == other.node && group_set_id == other.group_set_id && tier == other.tier;
+        }
+    };
+    struct CandidateKeyHash {
+        size_t operator()(const CandidateKey& key) const {
+            return std::hash<TreeNode*>{}(key.node) ^ (std::hash<size_t>{}(key.group_set_id) << 1)
+                   ^ (static_cast<size_t>(key.tier) << 2);
+        }
+    };
+    struct PhysicalBlock {
+        IBlockPool*  pool;
+        BlockIdxType block;
+
+        bool operator==(const PhysicalBlock& other) const {
+            return pool == other.pool && block == other.block;
+        }
+    };
+    struct PhysicalBlockHash {
+        size_t operator()(const PhysicalBlock& key) const {
+            return std::hash<IBlockPool*>{}(key.pool) ^ (std::hash<BlockIdxType>{}(key.block) << 1);
+        }
+    };
+
+    std::vector<PhysicalBlock> candidateBlocks(TreeNode* node, size_t group_set_id, Tier tier) const;
+    bool                       candidateIsFrozen(const std::vector<PhysicalBlock>& blocks) const;
+    void                       unregisterCandidate(const CandidateKey& key);
+    // Called after the pool mutation, outside its mutex and under the cache mutex.
+    void onFrozenBlockChanged(IBlockPool* pool, BlockIdxType block);
+
     EvictionHeap*                     heapFor(size_t group_set_id, Tier tier) const;
     bool                              isEvictable(TreeNode* node, size_t group_set_id, Tier source_tier) const;
     std::optional<TransferDescriptor> chooseVictim(size_t                 group_set_id,
@@ -159,7 +194,7 @@ private:
     Tier   watermarkTargetTier(Tier source_tier) const;
     size_t watermarkLogicalBatchLimit(Tier source_tier, Tier target_tier) const;
     void   runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept;
-    void   completeEvictionTask(std::shared_ptr<const EvictionTransferTask> task, ErrorInfo error) noexcept;
+    void   completeEvictionTask(std::shared_ptr<const EvictionTransferTask> task, TransferResult result) noexcept;
     BatchEvictResult batchEvictLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count);
     void scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task, bool success) noexcept;
     void
@@ -187,6 +222,7 @@ private:
                                                                  bool&                high_reached) const;
 
     BlockTree*                          tree_;
+    const BlockTransferDispatcher*      transfer_dispatcher_{nullptr};
     BlockTreeTaskPool*                  task_pool_{nullptr};
     BlockTreeCacheMetricsReporter*      metrics_reporter_{nullptr};
     std::mutex*                         mutex_{nullptr};
@@ -200,6 +236,13 @@ private:
     // Heap ownership: vector index is the declared group_set_id.
     std::vector<GroupSetTierHeaps>          heaps_;
     mutable VictimSelectionMetrics          victim_selection_metrics_;
+    // Both directions describe current heap membership. Saved block IDs also
+    // allow removal after a resource has been replaced in the tree.
+    std::unordered_map<CandidateKey, std::vector<PhysicalBlock>, CandidateKeyHash>  candidate_blocks_;
+    std::unordered_map<PhysicalBlock, std::vector<CandidateKey>, PhysicalBlockHash> block_candidates_;
+    std::shared_ptr<FrozenBlockObserver>                                            frozen_block_observer_;
+    // Keep registration owners alive independently of the tree (also during teardown).
+    std::vector<std::shared_ptr<IBlockPool>> observed_pools_;
     mutable std::mutex                      pending_release_mutex_;
     std::unordered_map<IBlockPool*, size_t> pending_release_counts_;
     // Process-local logical clocks (read/written only under the cache mutex).

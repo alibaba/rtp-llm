@@ -118,6 +118,12 @@ void LoadTaskRunner::runTransfer(TaskPtr                        task,
             transfers->completeBatch(std::move(result));
         };
         try {
+            // A frozen source may still be in use by an earlier transfer. Fail only
+            // this tier so settlement can keep the other tier's completed prefix.
+            if (source_tier == Tier::HOST ? task->host_source_frozen : task->disk_source_frozen) {
+                complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load source is frozen"), 0, false);
+                continue;
+            }
             auto                 observation = CompletionStageContext::forTransfer(metrics_reporter, transfer, "load");
             CompletionStageScope submit(observation, "next_stage_submit", "workflow_callback");
             transfer_begin =
