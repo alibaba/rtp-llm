@@ -32,18 +32,25 @@ class _LookupStream:
         self.embedding = embedding
         self.uva = embedding._uva
         self.pinned = embedding._pinned
+        self.storage = getattr(embedding, "_external_storage", None)
+        self.device_scale_lease = embedding._device_scale_resources()
         self.stream = torch.cuda.Stream(device=device, priority=0)
         # An external record node also updates the event on graph replay.
         # Host-table unregister must wait for actual reads, not capture time.
         self.done = torch.cuda.Event(external=True)
         self.done.record(torch.cuda.current_stream(device))
-        self.pinned._lookup_events.append(self.done)
+        if self.pinned is not None:
+            self.pinned._lookup_events.append(self.done)
+        else:
+            self.storage.register_lookup_event(self.done)
 
     def matches(self, embedding):
         return (
             embedding is self.embedding
             and embedding._uva is self.uva
             and embedding._pinned is self.pinned
+            and getattr(embedding, "_external_storage", None) is self.storage
+            and embedding._device_scale_lease is self.device_scale_lease
         )
 
 

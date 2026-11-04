@@ -6,6 +6,9 @@ batch/query rows over eight attention pre/post windows in L10..L13. Empty
 pieces launch no kernels. Unsupported producers keep the serial lookup route.
 """
 
+import logging
+from contextlib import nullcontext
+
 import torch
 
 from . import _engram_decode_prefetch as prefetch
@@ -35,7 +38,10 @@ def _eligible(module):
         and module.q_weight.is_cuda
         and getattr(embedding, "_quantized_lookup_supported", False)
         and embedding._uva is not None
-        and embedding._pinned is not None
+        and (
+            embedding._pinned is not None
+            or getattr(embedding, "_external_storage", None) is not None
+        )
         and embedding._device_scale_lease is not None
         and module.layout.n_hash_cols == 24
         and module.layout.head_dim == 256
@@ -88,6 +94,13 @@ def prepare_module(module, target):
         state.stream.synchronize()
     state.ready = True
     module._decode_scheduled_stream = state
+    logging.info(
+        "Engram decode prefetch prepared: layer=%d grid=%d scale_shards=%d external=%s",
+        target,
+        state.grid,
+        getattr(module.embed_tokens, "_scale_shard_count", 1),
+        getattr(module.embed_tokens, "_external_storage", None) is not None,
+    )
     return state
 
 
@@ -125,7 +138,9 @@ class _ScheduledWork:
             tensor.record_stream(self.state.stream)
         # Even a failed enqueue must be drained by the enclosing plan's close.
         self.epoch += 1
-        with torch.cuda.stream(self.state.stream):
+        storage = getattr(embedding, "_external_storage", None)
+        fence = storage.use() if storage is not None else nullcontext()
+        with fence, torch.cuda.stream(self.state.stream):
             try:
                 weight, scales = embedding._uva
                 if self.state.target == 1:

@@ -111,6 +111,36 @@ def cpu_model(tokens):
 
 
 class DecodeScheduleCPU(unittest.TestCase):
+    def test_external_tables_use_the_same_schedule_and_storage_fence(self):
+        with ExitStack() as stack:
+            _, whole, slices = self.mock_cuda(stack)
+            model = cpu_model(6)
+            for target in (1, 14):
+                embedding = model.layers[target].engram.embed_tokens
+                embedding._pinned = None
+                embedding._external_storage = SimpleNamespace(
+                    use=lambda: nullcontext(), register_lookup_event=Mock()
+                )
+                self.assertTrue(schedule._eligible(model.layers[target].engram))
+                with patch.object(torch.cuda, "Stream"), patch.object(torch.cuda, "Event"):
+                    state = prefetch._LookupStream(embedding, torch.device("cuda:0"))
+                embedding._external_storage.register_lookup_event.assert_called_once_with(
+                    state.done
+                )
+                self.assertTrue(state.matches(embedding))
+            plan = prefetch.DecodeEngramPrefetch(
+                model, SimpleNamespace(batch_size=1, q_len_per_req=6)
+            )
+            try:
+                for index, layer in enumerate(model.layers):
+                    plan.before_layer(index)
+                    layer.attn.forward_decode()
+                self.assertEqual(set(plan._schedule.targets), {1, 14})
+                self.assertEqual(whole.call_count, 1)
+                self.assertEqual(slices.call_count, 6)
+            finally:
+                plan.close()
+
     def mock_cuda(self, stack):
         main = Mock(name="main")
         stack.enter_context(patch.dict(os.environ, ENV))
@@ -502,6 +532,66 @@ class DecodeScheduleCUDA(unittest.TestCase):
         ids[::3, ::4] = -1
         ids[1::7, 1::5] = 257
         return ids
+
+    @torch.inference_mode()
+    def test_external_views_capture_replay_and_changed_ids(self):
+        # Exercise the external constructor and real scheduled GPU kernels.
+        # Small CUDA-backed views replace Fabric imports here; the service
+        # integration test supplies the actual cross-host mappings.
+        from rtp_llm.models_py.modules.dsv41.engram import HostEngramEmbedding
+        from rtp_llm.models_py.modules.dsv41.engram_storage import FabricEngramStorage
+
+        storage = FabricEngramStorage()
+        storage.device = self.device.index
+        storage._state = "READY"
+        for target in (1, 14):
+            for role, table in zip(("weight", "scale"), self.tables[target]):
+                storage._views[f"layers.{target}.engram.embed.{role}"] = table.to(
+                    self.device
+                )
+            module = self.model.layers[target].engram
+            group = (
+                torch.distributed.group.WORLD
+                if torch.distributed.is_initialized()
+                else None
+            )
+            module.embed_tokens = HostEngramEmbedding.from_storage(
+                storage, target, scale_group=group,
+                scale_identity=f"external-schedule-L{target}",
+            )
+            if group is not None:
+                self.assertEqual(
+                    module.embed_tokens._scale_shard_count,
+                    torch.distributed.get_world_size(group),
+                )
+            self.assertIsNone(module.embed_tokens._pinned)
+            self.assertTrue(schedule._eligible(module))
+        storage._pin_graph()
+        tokens = 18
+        inputs = {t: self.ids(tokens, 0, t).to(self.device) for t in (1, 14)}
+        metadata = SimpleNamespace(batch_size=3, q_len_per_req=6)
+        _, active = self.run_model(inputs, metadata)
+        self.assertEqual(active, {1, 14})
+        graph = torch.cuda.CUDAGraph()
+        try:
+            with torch.cuda.graph(graph):
+                outputs, active = self.run_model(inputs, metadata)
+            self.assertEqual(active, {1, 14})
+            self.assertEqual(len(storage._lookup_events), 2)
+            for generation in (1, 2, 3):
+                for target in (1, 14):
+                    inputs[target].copy_(self.ids(tokens, generation, target))
+                metadata._engram_decode_tables.validate()
+                graph.replay()
+                torch.cuda.synchronize(self.device)
+                for target in (1, 14):
+                    self.assert_pair(
+                        outputs[target], self.ids(tokens, generation, target), target
+                    )
+        finally:
+            torch.cuda.synchronize(self.device)
+            graph.reset()
+            storage._unpin_graph()
 
     def run_model(
         self, inputs, metadata, *, enabled=True, fallback_layer=None, abandon=False
