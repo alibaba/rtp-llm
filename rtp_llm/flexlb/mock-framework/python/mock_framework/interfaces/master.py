@@ -20,7 +20,7 @@ class EngineSelection(Targets):
     role: Literal['prefill', 'decode', 'vit'] = 'prefill'
 
 
-def selected(ctx, targets):
+def _select_masters(ctx, targets):
     available = {item['rpc']: item for item in ctx.runtime.topology.active('master')}
     addresses = sorted(available) if targets is None else targets
     if not addresses or set(addresses) - available.keys():
@@ -28,7 +28,7 @@ def selected(ctx, targets):
     return [available[address] for address in addresses]
 
 
-async def read(ctx, master, operation, args):
+async def _read_master_state(ctx, master, operation, args):
     return await post(master['control'], {'interface': operation, 'args': args,
         'context': {'run': 'foreground', 'query_time': ctx.query_time, 'observation': None,
                     'timeout_ms': max(1, int(ctx.timeout * 1000))}})
@@ -42,12 +42,12 @@ class MasterSelection(Targets):
 @case_interface('master/get', effect='read')
 async def get(ctx: CaseContext, args: MasterSelection) -> list[str]:
     """List active Masters, optionally filtering their actual leadership claims."""
-    masters = selected(ctx, args.targets)
+    masters = _select_masters(ctx, args.targets)
     if args.is_leader is None:
         return [master['rpc'] for master in masters]
     result = []
     for master in masters:
-        value = await read(ctx, master, 'master/leadership/get', {})
+        value = await _read_master_state(ctx, master, 'master/leadership/get', {})
         own = value['instances']
         if own not in ([], [{'id': master['id']}]):
             raise ExecutionError('Master returned an invalid local leadership observation')
@@ -60,8 +60,8 @@ async def get(ctx: CaseContext, args: MasterSelection) -> list[str]:
 async def engines(ctx: CaseContext, args: EngineSelection) -> dict[str, list[str]]:
     """Keep each Master's discovered Engine addresses separate."""
     result = {}
-    for master in selected(ctx, args.targets):
-        value = await read(ctx, master, 'master/engine/get', {'role': args.role})
+    for master in _select_masters(ctx, args.targets):
+        value = await _read_master_state(ctx, master, 'master/engine/get', {'role': args.role})
         if set(value['instances']) != {master['id']}:
             raise ExecutionError('Master returned another instance observation')
         addresses = value['instances'][master['id']]

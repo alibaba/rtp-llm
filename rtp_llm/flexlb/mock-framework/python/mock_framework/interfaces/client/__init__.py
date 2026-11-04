@@ -10,6 +10,7 @@ from ._records import RequestRecord, read_requests
 from ...execution.client_group import ClientResult
 from ...config.registry import Bounds, case_interface
 from ...config.validation import duration
+from ...execution.runner import CaseContext
 from ...execution.transport import ExecutionError
 
 
@@ -44,7 +45,7 @@ class Empty:
 
 
 @case_interface('client/start', effect='write')
-async def start(ctx, args: Start) -> bool:
+async def start(ctx: CaseContext, args: Start) -> bool:
     """Start the same finite plan on all Clients; rate and concurrency are global budgets."""
     body = {key: value for key, value in asdict(args).items() if value is not None}
     path = (ctx.runtime.case.directory / Path(args.requests_file)).resolve()
@@ -57,7 +58,7 @@ async def start(ctx, args: Start) -> bool:
 
 
 @case_interface('client/stop', effect='write')
-async def stop(ctx, args: Empty) -> dict[str, ClientResult]:
+async def stop(ctx: CaseContext, args: Empty) -> dict[str, ClientResult]:
     """Stop all Clients and collect bounded cleanup; natural completion returns its saved result."""
     return await ctx.runtime.clients.collect(ctx.query_time, ctx.timeout)
 
@@ -105,7 +106,7 @@ def playback_directories(root, topology, targets=None, playback=None):
 
 
 @case_interface('client/requests', effect='read')
-async def requests(ctx, args: Requests) -> RequestsResult:
+async def requests(ctx: CaseContext, args: Requests) -> RequestsResult:
     """Read a sealed playback; filters limit returned details, never completeness validation."""
     directories = playback_directories(ctx.records.directory, ctx.runtime.topology.active(), args.targets, args.playback)
     ids = None if args.request_ids is None else set(args.request_ids)

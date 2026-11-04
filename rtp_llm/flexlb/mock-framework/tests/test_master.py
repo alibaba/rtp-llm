@@ -337,5 +337,5 @@ def test_master_get_without_leadership_filter_lists_selected_active_masters(monk
     from mock_framework.interfaces import master
     async def unexpected_read(*args):
         raise AssertionError('An unfiltered listing does not query leadership')
-    monkeypatch.setattr(master, 'read', unexpected_read)
+    monkeypatch.setattr(master, '_read_master_state', unexpected_read)
     assert asyncio.run(master.get(adapter_context(), master.MasterSelection(targets))) == expected
