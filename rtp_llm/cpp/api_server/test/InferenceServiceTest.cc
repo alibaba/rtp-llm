@@ -395,6 +395,19 @@ TEST_F(InferenceServiceTest, fillGenerateInput) {
     EXPECT_TRUE(std::memcmp(input->input_ids.data_ptr(), token_ids.data(), input->input_ids.nbytes()) == 0);
 }
 
+TEST_F(InferenceServiceTest, RejectCompactLogprobsBeforeGeneration) {
+    for (const std::string& config :
+         {std::string(R"({"return_logprobs":true})"), std::string(R"({"top_logprobs":1})")}) {
+        const std::string body = R"({"prompt":"hello","generate_config":)" + config + "}";
+        try {
+            InferenceParsedRequest::extractRequest(body, model_config_, nullptr);
+            FAIL() << "compact logprobs request was accepted";
+        } catch (const HttpApiServerException& error) {
+            EXPECT_EQ(error.getType(), HttpApiServerException::UNSUPPORTED_OPERATION);
+        }
+    }
+}
+
 TEST_F(InferenceServiceTest, iterateStreams) {
 
     EXPECT_CALL(*mock_metric_reporter_, reportResponseFirstTokenLatencyMs(_)).Times(1);

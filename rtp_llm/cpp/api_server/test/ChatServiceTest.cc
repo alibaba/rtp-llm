@@ -122,6 +122,25 @@ protected:
     std::vector<int>                                     data_;
 };
 
+TEST_F(ChatServiceTest, RejectCompactLogprobsBeforeGeneration) {
+    EXPECT_CALL(*mock_render_, render_chat_request).Times(0);
+    EXPECT_CALL(*mock_engine_, enqueue(Matcher<const std::shared_ptr<GenerateInput>&>(_))).Times(0);
+    for (const std::string& config :
+         {std::string(R"({"return_logprobs":true})"), std::string(R"({"top_logprobs":1})")}) {
+        for (const std::string& stream : {std::string("false"), std::string("true")}) {
+            http_server::HttpRequest request;
+            const std::string body = R"({"messages":[],"extra_configs":)" + config + R"(,"stream":)" + stream + "}";
+            request._request       = CreateHttpPacket(body);
+            try {
+                chat_service_->chatCompletions(writer_, request, 10086);
+                FAIL() << "compact logprobs request was accepted";
+            } catch (const HttpApiServerException& error) {
+                EXPECT_EQ(error.getType(), HttpApiServerException::UNSUPPORTED_OPERATION);
+            }
+        }
+    }
+}
+
 TEST_F(ChatServiceTest, ChatCompletions_ThrowException) {
     http_server::HttpRequest request;
     const std::string        body = R"del({
