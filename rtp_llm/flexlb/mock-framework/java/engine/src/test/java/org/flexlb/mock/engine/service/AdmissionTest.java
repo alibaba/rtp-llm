@@ -1,5 +1,7 @@
 package org.flexlb.mock.engine.service;
 
+import org.flexlb.mock.engine.scheduler.TaskHistory;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.*;
 import io.grpc.stub.StreamObserver;
@@ -55,13 +57,17 @@ class AdmissionTest {
         var compute = ComputeModel.fromJson(new ObjectMapper().readTree("{\"forward\":{\"expression\":\"1\"}}"));
         for (var role : List.of(Role.prefill, Role.decode)) {
             var created = new AtomicReference<RejectingScheduler>();
+            var lock = new Object();
+            var history = new TaskHistory();
             try (var cache = new KvCache(2, 8, 0, KvCache.EvictionPolicy.LRU);
-                 var service = new RtpRpcService(new RtpServiceConfig("test", role, 2, 1, 1, 4096, 0, compute, -200, 0L), cache,
-                     (lock, supplied, finished) -> {
-                         assertSame(cache, supplied);
-                         assertNull(created.get(), "One scheduler per instance");
-                         var scheduler = new RejectingScheduler(lock); created.set(scheduler); return scheduler;
-                     })) {
+                 var engine = new org.flexlb.mock.engine.execution.RtpEngineLoop(lock, (domain, supplied, finished) -> {
+                     assertSame(lock, domain);
+                     assertSame(cache, supplied);
+                     assertNull(created.get(), "One scheduler per instance");
+                     var scheduler = new RejectingScheduler(domain); created.set(scheduler); return scheduler;
+                 }, history, cache, compute, role, "test");
+                 var service = new RtpRpcService(new RtpServiceConfig("test", role, 2, 1, 1, 4096, 0, compute, -200, 0L),
+                     cache, lock, history, engine, true)) {
                 var server = io.grpc.netty.NettyServerBuilder.forPort(0).addService(service).build().start();
                 var channel = ManagedChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();
                 try {

@@ -12,6 +12,7 @@ import org.flexlb.mock.engine.cache.KvcmReporter;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.scheduler.RtpScheduler;
 import org.flexlb.mock.engine.scheduler.Scheduler;
+import org.flexlb.mock.engine.scheduler.TaskHistory;
 import org.flexlb.mock.engine.service.RtpRpcService;
 import org.flexlb.mock.metrics.MetricTags;
 import org.flexlb.mock.protocol.ControlServer;
@@ -21,6 +22,7 @@ public final class RtpNode implements AutoCloseable {
     private final RtpConfig config;
     private final KvCache cache;
     private final RtpRpcService service;
+    private final RtpEngineLoop engine;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final org.flexlb.mock.engine.EngineMain.Address address = org.flexlb.mock.engine.EngineMain.Address.local();
     private Server rpc;
@@ -35,15 +37,23 @@ public final class RtpNode implements AutoCloseable {
         this.config = Objects.requireNonNull(config);
         Objects.requireNonNull(schedulers);
         cache = new KvCache(config.blockSize(), config.deviceBlocks(), config.reserveBlocks(), config.deviceCache());
+        var lock = new Object();
+        var finished = new TaskHistory();
         try {
-            service = new RtpRpcService(config.endpoint(), cache, (lock, storage, finished) -> {
-                var scheduler = schedulers.create(lock, storage, finished);
-                var samples = RtpScheduler.metricsFor(scheduler);
-                if (samples != null) metricSource = new MetricSource(lock, samples);
-                return scheduler;
-            }, config.groupScheduling());
+            var scheduler = schedulers.create(lock, cache, finished);
+            var samples = RtpScheduler.metricsFor(scheduler);
+            if (samples != null) metricSource = new MetricSource(lock, samples);
+            engine = new RtpEngineLoop(lock, scheduler, finished, cache, config.compute(), config.role(), config.id());
+            try {
+                service = new RtpRpcService(config.endpoint(), cache, lock, finished, engine, config.groupScheduling());
+            } catch (RuntimeException | Error failure) {
+                engine.close();
+                throw failure;
+            }
+        } catch (RuntimeException | Error failure) {
+            cache.close();
+            throw failure;
         }
-        catch (RuntimeException error) { cache.close(); throw error; }
     }
 
     public static RtpNode start(RtpConfig config) throws IOException {
@@ -159,8 +169,10 @@ public final class RtpNode implements AutoCloseable {
         } catch (RuntimeException error) {
             if (failure == null) failure = error; else failure.addSuppressed(error);
         } finally {
-            try { if (publisher != null) publisher.close(); } finally {
-                try { if (api != null) api.close(); } finally { cache.close(); }
+            try { engine.close(); } finally {
+                try { if (publisher != null) publisher.close(); } finally {
+                    try { if (api != null) api.close(); } finally { cache.close(); }
+                }
             }
         }
         if (failure != null) throw failure;

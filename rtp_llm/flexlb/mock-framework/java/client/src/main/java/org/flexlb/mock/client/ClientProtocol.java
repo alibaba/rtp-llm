@@ -52,9 +52,9 @@ public interface ClientProtocol {
                  int queued, int inflight, Map<String, Long> outcomes, List<String> errors) {}
     record Summary(Map<String, State> clients, List<String> errors) {}
 
-    throws Exception;
-    throws Exception;
-    throws Exception;
+    Ack start(Start args) throws Exception;
+    Summary stop(Empty args) throws Exception;
+    Ack prepare(Shard args) throws Exception;
     Ack begin(Begin args);
     Ack halt(Sequence args);
     State state(Sequence args);

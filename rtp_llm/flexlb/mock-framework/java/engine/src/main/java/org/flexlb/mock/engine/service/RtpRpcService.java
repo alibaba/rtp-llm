@@ -8,7 +8,8 @@ import java.util.function.Supplier;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.engine.cache.KvCache;
-import org.flexlb.mock.engine.scheduler.Scheduler;
+import org.flexlb.mock.engine.execution.RtpEngineLoop;
+import org.flexlb.mock.engine.scheduler.TaskHistory;
 
 /** Native RPC adapter; P and D owners manage request state and KV independently. */
 public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase implements AutoCloseable {
@@ -20,16 +21,14 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
     private final AtomicLong statusVersion = new AtomicLong();
     private volatile boolean closed;
 
-    public RtpRpcService(RtpServiceConfig config, KvCache cache, Scheduler.Factory schedulers) {
-        this(config, cache, schedulers, true);
-    }
-
-    public RtpRpcService(RtpServiceConfig config, KvCache cache, Scheduler.Factory schedulers, boolean groups) {
+    public RtpRpcService(RtpServiceConfig config, KvCache cache, Object executionLock, TaskHistory finished,
+                         RtpEngineLoop engine, boolean groups) {
         this.config = config;
         this.groups = groups;
         this.cache = cache;
-        prefill = config.role() == org.flexlb.mock.api.model.Types.Role.prefill ? new PrefillRpcServer(config, cache, schedulers) : null;
-        decode = prefill == null ? new DecodeRpcServer(config, cache, schedulers) : null;
+        prefill = config.role() == org.flexlb.mock.api.model.Types.Role.prefill
+            ? new PrefillRpcServer(config, executionLock, finished, engine) : null;
+        decode = prefill == null ? new DecodeRpcServer(config, executionLock, engine) : null;
     }
     public void close() {
         closed = true;
