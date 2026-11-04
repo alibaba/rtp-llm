@@ -18,7 +18,7 @@ import org.flexlb.mock.multimodal.*;
 public final class NativeClient implements AutoCloseable {
     public enum Outcome { success, error, cancelled, timeout }
     public record Result(long requestId, Instant sentAt, Long ttftNanos, long elapsedNanos,
-                         int outputTokens, Outcome outcome, String grpcCode, long errorCode, String message) {}
+                         int outputTokens, Outcome outcome, String grpcCode, long errorCode, String message, Long tpotNanos) {}
     private final java.util.function.Supplier<List<String>> masters;
     private final java.util.function.Consumer<Event.Builder> events;
     private final long cacheKeySeed;
@@ -96,6 +96,7 @@ public final class NativeClient implements AutoCloseable {
         private final Instant sentAt = Instant.now();
         private final long started = System.nanoTime();
         private Long ttft;
+        private long lastTokenNanos;
         private long batchId;
         private int outputTokens, scheduleAttempt;
         private boolean pendingSchedule;
@@ -234,7 +235,14 @@ public final class NativeClient implements AutoCloseable {
                                 finish(Status.DATA_LOSS.withDescription("Invalid generation output stream"), 0, Outcome.error); return;
                             }
                             outputTokens = flat.getAuxInfo(0).getOutputLen(); finalFrame = flat.getFinished(0);
-                            if (ttft == null) { ttft = System.nanoTime() - started; emit(Event.Kind.FIRST_TOKEN); firstToken.complete(ttft); }
+                            if (width > 0) {
+                                lastTokenNanos = System.nanoTime() - started;
+                                if (ttft == null) {
+                                    ttft = lastTokenNanos;
+                                    emit(Event.Kind.FIRST_TOKEN);
+                                    firstToken.complete(ttft);
+                                }
+                            }
                             if (!terminal) stream.request(1);
                         }
                     }
@@ -298,8 +306,9 @@ public final class NativeClient implements AutoCloseable {
                 .setErrorCode(code).setMessage(message(status)).setOutputTokens(outputTokens);
             if (ttft != null) ended.setTtftNanos(ttft);
             events.accept(ended);
+            Long tpot = ttft != null && outputTokens > 1 ? (lastTokenNanos - ttft) / (outputTokens - 1) : null;
             result.complete(new Result(request.getRequestId(), sentAt, ttft, ended.getElapsedNanos(), outputTokens,
-                outcome, status.getCode().name(), code, status.getDescription() == null ? "" : status.getDescription()));
+                outcome, status.getCode().name(), code, status.getDescription() == null ? "" : status.getDescription(), tpot));
         }
     }
     private static String message(Status status) {

@@ -250,7 +250,7 @@ abstract class RtpSchedulerBase implements Scheduler {
 
     @Override public void computeCompleted(Work work, SimulatedCompute.Outcome outcome) {
         var batch = completedBatch(work);
-        long input = 0, computed = 0, output = 0, maxSequence = 0;
+        long input = 0, computed = 0, output = 0, outputStreams = 0, maxSequence = 0;
         long proposed = 0, accepted = 0, speculativeStreams = 0;
         try {
             for (var member : batch.members()) {
@@ -274,6 +274,7 @@ abstract class RtpSchedulerBase implements Scheduler {
                 if (committed > 0 && entry.firstToken == 0) entry.firstToken = System.nanoTime();
                 entry.nextStep = null;
                 output += committed;
+                if (committed > 0) outputStreams++;
                 if (prefill()) { running.remove(entry); entry.phase = READY; entry.prefillFinished = result.finished(); }
                 emit(entry, committed, result.finished());
             }
@@ -283,7 +284,7 @@ abstract class RtpSchedulerBase implements Scheduler {
                 metrics.stepCompleted(new RtpMetrics.StepStats(prefill() ? size : 0, prefill() ? 0 : size,
                     maxSequence, completed - batch.scheduleStarted(), completed - batch.stepStarted(),
                     outcome.elapsedNanos(), outcome.sample().planned().toNanos(), input, computed, output,
-                    proposed, accepted, speculativeStreams));
+                    proposed, accepted, speculativeStreams, outputStreams));
             }
         } finally { batch.members().forEach(member -> member.use().close()); }
     }

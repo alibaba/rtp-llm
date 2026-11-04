@@ -14,6 +14,9 @@ final class ClientMetrics {
         .labelNames("role").register(registry).labels("client");
     private final Histogram.Child ttft = Histogram.build().name("mock_client_ttft_seconds").help("Call start to first received token.")
         .labelNames("role").register(registry).labels("client");
+    private final Histogram.Child tpot = Histogram.build().name("mock_client_tpot_seconds")
+        .help("Time from first to last received token per token after the first, for successful calls.")
+        .labelNames("role").register(registry).labels("client");
     ClientMetrics() {
         var counter = Counter.build().name("mock_client_requests_finished_total").help("Client terminal observations.")
             .labelNames("role", "outcome").register(registry);
@@ -23,6 +26,8 @@ final class ClientMetrics {
     void finished(NativeClient.Result result) {
         finished.get(result.outcome()).inc(); latency.observe(result.elapsedNanos() / 1e9);
         if (result.ttftNanos() != null) ttft.observe(result.ttftNanos() / 1e9);
+        if (result.outcome() == NativeClient.Outcome.success && result.tpotNanos() != null)
+            tpot.observe(result.tpotNanos() / 1e9);
     }
     String scrape() { return MetricTags.scrape(registry, tags); }
 }

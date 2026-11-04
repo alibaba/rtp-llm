@@ -296,7 +296,7 @@
         {
           "id": 5,
           "type": "timeseries",
-          "title": "Client TTFT",
+          "title": "Client TTFT / TPOT",
           "gridPos": {
             "x": 0,
             "y": 19,
@@ -330,6 +330,15 @@
               "refId": "C",
               "expr": "histogram_quantile(0.99,sum by(${client_group},le)(rate(mock_client_ttft_seconds_bucket{instance=~\"${client_instance}\"}[$__rate_interval])))",
               "legendFormat": "P99 · {{${client_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            },
+            {
+              "refId": "D",
+              "expr": "sum by(${client_group})(rate(mock_client_tpot_seconds_sum{instance=~\"${client_instance}\"}[$__rate_interval])) / sum by(${client_group})(rate(mock_client_tpot_seconds_count{instance=~\"${client_instance}\"}[$__rate_interval]))",
+              "legendFormat": "TPOT 平均 · {{${client_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -378,7 +387,7 @@
               ]
             }
           },
-          "description": "从开始原生调用到首 Token；仅包含已观察到首 Token 的请求。均值按请求加权，分位数合并 Histogram 后计算。"
+          "description": "TTFT 是发起调用到收到首 token 的时间。TPOT 按成功请求首尾 token 到达时间差除以首 token 之后的 token 数。"
         },
         {
           "id": 6,
@@ -14778,6 +14787,81 @@
             }
           },
           "description": ""
+        },
+        {
+          "id": 810123,
+          "type": "timeseries",
+          "title": "Decode TPOT（步耗时估计）",
+          "gridPos": {
+            "x": 0,
+            "y": 926,
+            "w": 12,
+            "h": 9
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "avg by(${decode_group})(mock_decode_estimate_tpot_us{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "legendFormat": "Decode · {{${decode_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "µs",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ]
+            }
+          },
+          "description": "Mock Decode 步耗时 ÷ 每条产出请求本轮提交的平均 token 数。",
+          "links": [
+            {
+              "title": "RTP-LLM 原面板",
+              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=10112",
+              "targetBlank": true
+            }
+          ]
         }
       ],
       "gridPos": {

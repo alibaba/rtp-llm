@@ -21,7 +21,7 @@ final class RtpMetrics {
 
     record StepStats(int context, int generate, long maxSequence, long scheduleToCompletionNanos, long stepNanos,
                      long forwardNanos, long plannedNanos, long input, long computed, long output,
-                     long proposed, long accepted, long speculativeStreams) {}
+                     long proposed, long accepted, long speculativeStreams, long outputStreams) {}
 
     public record State(long waiting, long running, long loading, long ready, long totalTokens, long availableTokens,
                         long freeTokens, long heldTokens, long hostTotalTokens, long hostFreeTokens, int blockSize) {
@@ -229,6 +229,8 @@ final class RtpMetrics {
             throw new IllegalArgumentException("Invalid step observation");
         recordBatch(step.context(), step.generate(), step.proposed() > 0 ? step.accepted() : step.computed(), step.maxSequence());
         recordStepLatency(step.stepNanos(), step.proposed(), step.accepted(), step.speculativeStreams());
+        if (!prefill && step.output() > 0 && step.outputStreams() > 0)
+            events.observe("mock_decode_estimate_tpot_us", step.stepNanos() / 1000.0 * step.outputStreams() / step.output());
         long tpsTokens = prefill ? step.computed() : step.proposed() > 0 ? step.accepted() : step.output();
         recordForward(step, executionNanos, tpsTokens);
     }
