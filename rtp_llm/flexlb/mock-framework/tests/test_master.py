@@ -1,3 +1,4 @@
+from helpers.zookeeper import command as zookeeper_command
 import json
 from pathlib import Path
 
@@ -133,8 +134,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     for role in (('prefill', 'decode', 'vit') if vision else ('prefill', 'decode')):
         components[role] = {'command': [str(java), '-cp', str(root / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'), 'org.flexlb.mock.engine.EngineMain']}
     launch = prepare_launch({'components': components,
-        'zookeeper': {'command': [str(java), '-XX:ActiveProcessorCount=2', '-cp', master_classpath,
-                                  'org.flexlb.mock.master.ZookeeperNode']}}, case, tmp_path)
+        'zookeeper': {'command': zookeeper_command(root, java)}}, case, tmp_path)
     output = tmp_path / 'result'
 
     async def exercise():

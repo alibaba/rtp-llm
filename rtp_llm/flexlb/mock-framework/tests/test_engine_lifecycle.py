@@ -1,3 +1,4 @@
+from helpers.zookeeper import command as zookeeper_command
 import asyncio
 from dataclasses import dataclass, replace
 import json
@@ -54,7 +55,7 @@ def setup_case(tmp_path, operation, monitor=False, invalid=False, master=False):
             (ROOT / 'java/master/target/dependencies.txt').read_text().strip()])
         prefix = [str(java), '-XX:ActiveProcessorCount=2', '-cp', classpath]
         raw['components']['master'] = {'command': prefix + ['org.flexlb.MasterNode'], 'startup_timeout': '60s'}
-        raw['zookeeper'] = {'command': prefix + ['org.flexlb.mock.master.ZookeeperNode']}
+        raw['zookeeper'] = {'command': zookeeper_command(ROOT, java)}
     if monitor:
         raw['prometheus'] = {'binary': os.environ['PROMETHEUS_BIN'], 'scrape_interval': '100ms'}
     return case, registry, prepare_launch(raw, case, tmp_path)

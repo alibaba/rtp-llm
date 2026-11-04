@@ -1,4 +1,4 @@
-package org.flexlb.mock.master;
+package org.flexlb.mock.zookeeper;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.InetSocketAddress;

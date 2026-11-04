@@ -1,4 +1,5 @@
-"""Real Master plus shared/cross-process V/P/D, using the standard binary playback path."""
+from helpers.zookeeper import command as zookeeper_command
+"""Real Master plus independent V/P/D processes, using the standard binary playback path."""
 import asyncio
 import json
 import os
@@ -56,7 +57,7 @@ def test_vision_playback_through_real_master(tmp_path):
         components[role] = {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', str(host), 'org.flexlb.mock.engine.EngineMain'],
             'env': {'MOCK_BIND_HOST': '0.0.0.0', 'MOCK_ADVERTISE_HOST': '127.0.0.1'}}
     launch = prepare_launch({'components': components,
-        'zookeeper': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.mock.master.ZookeeperNode']}}, case, tmp_path)
+        'zookeeper': {'command': zookeeper_command(root, java)}}, case, tmp_path)
     output = tmp_path / 'result'
     result = asyncio.run(run_case(case, registry, launch, output))
     assert result['status'] == 'PASS', result

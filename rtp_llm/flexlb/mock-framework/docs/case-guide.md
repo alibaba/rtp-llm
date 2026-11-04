@@ -77,7 +77,7 @@ uv run --locked mock-case run <case目录>/case.yaml \
 
 ```yaml
 zookeeper:
-  command: [<Java21>, -cp, <Master的classpath>, org.flexlb.mock.master.ZookeeperNode]
+  command: [<Java21>, -cp, <ZooKeeper 的 classpath>, org.flexlb.mock.zookeeper.ZookeeperNode]
 components:
   master:
     command: [<Java21>, -cp, <Master的classpath>, org.flexlb.MasterNode]
