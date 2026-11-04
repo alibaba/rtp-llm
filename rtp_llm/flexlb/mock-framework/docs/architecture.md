@@ -47,13 +47,13 @@ Case 操作放在独立的 Python 实现中，不在 Runner 主循环按接口�
 
 ### Python 接口定义和 Step 模型
 
-Case 接口由 Python 函数实现，装饰器登记稳定接口名、读写属性和必要单位，参数与返回类型来自函数签名。参数范围和跨字段校验放在参数类型中，不在装饰器另抄一份字段表。Registry 只负责登记、查找和定义检查；不要求每个函数继承一个接口基类，也不做动态插件发现。运行状态由本次 Case 的上下文持有，不能存入全局注册函数。
+Case 动作继承 Step 并实现 execute。装饰器登记稳定动作名、读写属性和单位，参数与返回类型来自 execute 的签名。Registry 负责登记、查找和定义检查，运行状态由当次 Case 的上下文持有。
 
-配置编译按 Case → Phase → Step 推进，环境编译分别处理部署参数、组件配置文件和 Master 原生 JSON。普通值与 ref 共用 validation 的 schema 遍历；编译器只为 ref 叶子提供类型检查和转换，不再复制对象/列表/union 的校验规则。值解析、schema 校验和类型兼容检查统一在 config/validation.py；不再保留 values.py。编译器通过 Interface.arguments 检查无引用参数，dataclass 构造与结果转换作为 registry 内部实现，不直接从编译器调用。Runner 在 ref 展开后只校验并构造一次参数，再调用 Interface.call；Interface.invoke 供独立调用时从原始参数完成同样的准备。参数失败发生在调用前，结果校验失败发生在调用后，保留各自的错误阶段和写操作 outcome_unknown 语义。
+配置编译按 Case → Phase → Step 推进，环境编译分别处理部署参数、组件配置文件和 Master 原生 JSON。普通值与 ref 共用 validation 的 schema 遍历；编译器只为 ref 叶子提供类型检查和转换，不再复制对象/列表/union 的校验规则。值解析、schema 校验和类型兼容检查统一在 config/validation.py；不再保留 values.py。编译器通过 Interface.arguments 检查无引用参数，dataclass 构造与结果转换作为 registry 内部实现，不直接从编译器调用。Runner 在 ref 展开后只校验并构造一次参数，由 Step.run 调用 Interface.call；Interface.invoke 供独立调用时从原始参数完成同样的准备。参数失败发生在调用前，结果校验失败发生在调用后，保留各自的错误阶段和写操作 outcome_unknown 语义。
 
 Step 统一为一次接口调用，包含 id、describe、interface、args、within 和可选 expect。删除 YAML 的 call/check 外壳及两套重复 Step 类：无 expect 时执行并保存结果，有 expect 时在同一次返回后判断。读取也可以只取值供后续引用；写操作的回执可以断言，但不因断言失败重放。接口读写属性与是否断言相互独立，不把普通检查隐式变成轮询。
 
-执行链统一为解析引用、校验实参、固定查询时刻和预算、调用 Python 函数、校验返回值、保存结果、执行可选断言。编译阶段检查引用必须来自前置 step 或允许的全局信息，检查字段路径与类型；运行时解析后再次校验。Python 类型注解本身不等于运行时校验。
+执行链统一为解析引用、校验实参、固定查询时刻和预算、调用 Step.execute、校验返回值、保存结果、执行可选断言。编译阶段检查引用必须来自前置 step 或允许的全局信息，检查字段路径与类型；运行时解析后再次校验。Python 类型注解本身不等于运行时校验。
 
 普通数值查询直接返回数值，单位声明在接口上；地址集合返回列表，动作返回明确回执，逐 Master 状态保留映射。断言按结构和运算符判断，不按 MetricValue、PerMasterEngines 等业务类型名称偷偷聚合。接口文档和清单可以由 Python 定义导出，用于保存实验现场，不再依赖 Java 构建才能编译 Case。
 
@@ -153,29 +153,15 @@ D 只有 KV 加载成功和生成许可均满足后才进入 Decode；Prefill-on
 
 ### JVM 放置、配置和生命周期
 
-业务操作只感知实例及其服务地址，不感知 JVM。物理放置先只支持两种 Engine 形态：
+P、D、ViT、Master、Client 和 ZooKeeper 各实例分别运行在自己的 JVM。Case 通过服务地址引用实例，Python 保存进程与端点的归属。两个本地 Master 使用不同的回环地址，HTTP 和 gRPC 分别绑定到各自地址，端口可以相同。
 
-| 对象 | Engine 共享模式 | Engine 独立模式 |
-| --- | --- | --- |
-| Master | 每个 Master 独立 JVM | 每个 Master 独立 JVM |
-| P/D/V Mock Engine | 全部放在同一个 Engine JVM | 每个 Engine 一个 JVM |
-| Client | 每个 Client 独立 JVM | 每个 Client 独立 JVM |
-
-本地 P/D/V 各实例直接启动一个 JVM。Case 通过服务地址引用实例。
-
-实例使用服务地址区分，同 IP 下用端口区分。控制、业务 RPC 和 metrics 地址之间的对应关系留在发现信息中，不向 Case 暴露额外的 JVM 身份。实例之间统一通过 TCP 通信，共 JVM 不另走 in-process 传输。Python 内部仍须保存进程与实例归属，以处理宿主退出和清理。
-
-进程 env、heap 和资源限制属于 JVM；每个 Engine 的业务参数来自自己的配置对象。共 JVM 时不能用修改进程 env 或全局 System properties 的方式切换实例配置。原生 env 风格字段可以保留其名字和值，由实例加载器从显式配置读取。
-
-停止 Engine 会终止所属 JVM，释放实例监听器和缓存。其他实例继续运行。
-
-Runner 登记预期停止，确认进程退出后撤销端点。意外退出使实验失败并回收其余进程。
+Engine 业务参数来自实例配置。缩容时 Runner 登记预期停止，确认 JVM 退出后清理就绪文件并撤销端点。意外退出会使实验失败并回收其余进程。
 
 ### 发现文件和产物
 
-进程启动材料和实例产物分目录保存。每个输出文件只有一个写入者，不让多个 Engine 共享同一个输出目录并各自覆盖 `endpoints.json`；宿主若汇总多个实例端点，由宿主统一写。ready/endpoints 采用临时文件加原子替换发布，部分启动失败要回收已经启动的对象。沿用 `components/<角色>-<序号>/` 保存每个实例的 config、effective-config 和 endpoints；共享宿主自己的启动材料、stdout/stderr 单独保存，不能把宿主日志冒充某个 Engine 的专属日志。聚合 topology/discovery 由 Python 单写，实例不得各自覆盖这份文件。
+每个实例在 `components/<角色>-<序号>/` 保存启动配置、生效配置、端点和进程日志。Engine 的就绪文件在端点写入后原子发布。部分启动失败时，Runner 仍回收已登记的进程。Python 发布活跃端点和 Master 发现文件。
 
-Python 维护一份权威的当前发现信息，增加、移除和重启换地址均更新该信息。Master 等消费者能否动态加载发现变更由其自身实现负责，Case 可检查传播结果，框架不替消费者伪造路由更新。显式引用旧地址不能偷偷改指向新实例；一次运行内，Engine 的业务 RPC、控制/metrics 和宿主控制端口统一不复用，跨用途也不能复用，例如不能把旧 metrics 端口分给新 RPC。该约束只覆盖本次 Runner 管理的 Engine 和宿主，不是操作系统级端口预留。
+Python 维护一份权威的当前发现信息，增加、移除和重启换地址均更新该信息。Master 等消费者能否动态加载发现变更由其自身实现负责，Case 可检查传播结果，框架不替消费者伪造路由更新。显式引用旧地址不能偷偷改指向新实例；一次运行内，Engine 的业务 RPC、控制/metrics 端口均不复用，跨用途也不能复用，例如不能把旧 metrics 端口分给新 RPC。该约束只覆盖本次 Runner 管理的 Engine，不是操作系统级端口预留。
 
 ### Client：播放器控速，Client 发送与管理生命周期
 
@@ -300,7 +286,7 @@ Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API�
 
 指标按实例上报、按查询语义聚合：总 QPS 求和；成功率和命中率分别汇总分子/分母后求比率；平均值按样本数加权；p99 不能平均各实例 p99，须合并兼容直方图或使用完整请求记录。时间窗口、目标覆盖和采样完整性要校验，缺数据不补零。语义查询只使用当前活动实例；显式 targets 也必须仍然活动，不根据时间窗重建过去的成员集合。需要查询已下线地址时，直接使用原始 PromQL。不同 Master 的状态保留逐实例结果，不取并集掩盖差异。
 
-去掉业务指标上的 RTP/vLLM `engine`、逻辑 `node`、JVM 和主动添加的实验 ID 标签，保留必要的角色与实例地址区分。独立采集端点可使用 Prometheus `instance`；共享 `/metrics` 时必须在样本上区分实例服务地址，不能让同名同标签序列碰撞或重复采集。`host_ip`/`container_ip` 保持物理含义，共 JVM 时不能仅靠相同 IP 区分 Engine。实验默认独占 Prometheus，跨实验合并分析时再补来源标签，不能在合并后无法区分数据来源。
+去掉业务指标上的 RTP/vLLM `engine`、逻辑 `node`、JVM 和主动添加的实验 ID 标签，保留必要的角色与实例地址区分。各实例通过自己的 `/metrics` 暴露指标，Prometheus 使用 `instance` 区分目标。`host_ip`/`container_ip` 保持物理含义。实验默认独占 Prometheus，跨实验合并分析时再补来源标签，不能在合并后无法区分数据来源。
 
 一个真实完成的 Forward batch 记录一次耗时，不能按 batch 中请求数重复记录。请求终态按请求计数，token 按本轮实际计算和提交分别统计。新增两项 Forward 指标，不增加对应服务接口：
 
