@@ -580,8 +580,8 @@ def prepare_static_engram(store, *, rank, world_size, environ=None, gang_hosts=N
                 ' shard allocates on device %d / NUMA %d by default',
                 config['local_device'], config['local_numa'])
         logging.getLogger(__name__).info(
-            'engram startup: publishing shard %d/%d on %s (device %d, NUMA %d)',
-            shard['index'], p - 1, shard['host_id'],
+            'engram startup: publishing shard %d of %d on %s (device %d, NUMA %d)',
+            shard['index'] + 1, p, shard['host_id'],
             config['local_device'], config['local_numa'])
         shard_started = time.monotonic()
         document = publish_shard(
