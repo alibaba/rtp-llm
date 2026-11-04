@@ -291,7 +291,10 @@ cc_library(
 cc_library(
     name = "rtp_llm_adapter_public_api_compile",
     srcs = ["test/package/RtpLLMAdapterPublicApiCompileTest.cpp"],
-    deps = [":navi_sched_role_lib"],
+    deps = [
+        ":navi_sched_role_lib",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi_runtime_config",
+    ],
 )
 
 cc_test(
