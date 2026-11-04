@@ -1,7 +1,7 @@
 """Bound Case steps and the common execution lifecycle."""
 from abc import ABC, abstractmethod
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections.abc import Awaitable, Callable
 import time
 from typing import Any, ClassVar
@@ -56,11 +56,12 @@ class Step(ABC):
     async def execute(context, arguments):
         """Implement the action for one set of validated arguments."""
 
-    async def run(self, context, results, phase_id):
-        with context.records.step(phase_id, self.id, self.interface):
-            await self._run(context, results, phase_id)
+    async def run(self, context):
+        with context.records.step(context.phase_id, self.id, self.interface):
+            await self._run(context)
 
-    async def _run(self, context, results, phase_id):
+    async def _run(self, context):
+        results, phase_id = context.results, context.phase_id
         started = time.monotonic()
         interface = self.definition
         runtime, records = context.runtime, context.records
@@ -117,6 +118,8 @@ class StepContext:
     records: Any
     query_time: str
     deadline: float
+    phase_id: str = ''
+    results: dict[str, Any] = field(default_factory=dict)
     stop_step: Callable[[str], Awaitable[bool]] | None = None
 
     @property

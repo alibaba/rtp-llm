@@ -90,11 +90,12 @@ async def run_case(case, registry, launch, directory):
                 for step in phase.steps:
                     tasks.check()
                     deadline = min(phase_deadline, time.monotonic() + float(duration(step.within))) if step.within else phase_deadline
-                    context = StepContext(runtime, records, timestamp(), deadline, tasks.stop)
+                    context = StepContext(runtime, records, timestamp(), deadline,
+                                          phase_id=phase.id, results=results, stop_step=tasks.stop)
                     if step.background:
-                        tasks.start(step.id, step.run(context, results, phase.id))
+                        tasks.start(step.id, step.run(context))
                     else:
-                        await tasks.run(step.run(context, results, phase.id))
+                        await tasks.run(step.run(context))
                 await tasks.finish()
                 phase_status = 'PASS'
             except GateFailure:
