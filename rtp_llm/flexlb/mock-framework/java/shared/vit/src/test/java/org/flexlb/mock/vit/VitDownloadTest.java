@@ -156,7 +156,11 @@ class VitDownloadTest {
                     String snapshot=metrics(node);
                     assertEquals(6,VitTest.sample(snapshot,"py_rtp_vit_request_rt_count"));
                     assertEquals(1,VitTest.sample(snapshot,"py_rtp_vit_embedding_rt_count"));
-                    assertEquals(5,VitTest.sample(snapshot,"py_rtp_vit_download_rt_count"));
+                    assertEquals(1,VitTest.sample(snapshot,"py_rtp_vit_download_rt_count"));
+                    assertEquals(1,VitTest.sample(snapshot,"py_rtp_vit_preprocess_rt_count"));
+                    double download=VitTest.sample(snapshot,"py_rtp_vit_download_rt_sum");
+                    double other=VitTest.sample(snapshot,"py_rtp_vit_preprocess_other_rt_sum");
+                    assertEquals(download+other,VitTest.sample(snapshot,"py_rtp_vit_preprocess_rt_sum"),1e-9);
                     assertEquals(0,VitTest.sample(snapshot,"py_rtp_vit_preprocess_queue_size"));
                 } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
             } finally { stalled.countDown();server.stop(0); }

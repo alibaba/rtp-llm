@@ -92,7 +92,8 @@ def test_vit_and_shared_process_resources_are_not_faked():
     assert '待埋点' not in items[300449]['title']
     assert '待埋点' not in items[310354]['title']
     assert '待埋点' in items[310356]['title']  # No simulated CUDA Graph.
-    assert '待埋点' in items[310350]['title']  # No image download.
+    assert '待埋点' not in items[310350]['title']
+    assert 'py_rtp_vit_download_rt' in items[310350]['targets'][0]['expr']
     assert all('role="vit"' in t['expr'] for p in vit['panels'] for t in p['targets'])
     host = next(r for r in rows if r['title'].startswith('Engine 宿主'))
     assert all(not p['targets'] for p in host['panels'])
@@ -122,8 +123,8 @@ def test_local_legends_use_prometheus_labels_and_respect_aggregation():
     forward = items[100231]['targets'][0]
     assert forward['legendFormat'] == '{{${prefill_group}}}'
     assert forward['expr'].startswith('avg by(${prefill_group})(')
-    decode_forward = items[200231]['targets'][0]
-    assert decode_forward['legendFormat'] == '{{${decode_group}}}'
+    decode_forward = items[600019]['targets'][0]
+    assert decode_forward['legendFormat'].startswith('{{${decode_group}}}')
     assert decode_forward['expr'].startswith('avg by(${decode_group})(')
     cache = items[110587]['targets'][0]
     assert 'cache_dependency={{cache_dependency}}' in cache['legendFormat']
@@ -159,7 +160,7 @@ def test_engine_selection_controls_query_grouping_and_legend_together():
 def test_real_engine_observations_return_to_rtp_panels_and_mock_rows_only_compare_simulation():
     items = {p['id']: p for p in panels()}
     for offset in (100000, 200000):
-        for source_id in (127, 128, 142, 154, 173, 174, 231):
+        for source_id in (127, 128, 142, 154, 173, 174):
             panel = items[offset + source_id]
             assert '待埋点' not in panel['title']
             assert '尚未导出' not in panel['description']
@@ -169,10 +170,20 @@ def test_real_engine_observations_return_to_rtp_panels_and_mock_rows_only_compar
         quality = next(r for r in rows if r['title'] == role + ' · Mock 模拟质量')
         assert len(quality['panels']) == 3
         assert all('mock_model_forward_planned_us' in t['expr'] or 'rtp_llm_model_forward_seconds_sum' in t['expr']
-                   for p in quality['panels'] for t in p['targets'] if 'rtp_llm_model_forward_us' not in t['expr'])
+                   for p in quality['panels'] for t in p['targets'] if 'mock_model_forward_actual_us' not in t['expr'])
+    assert not {200231, 200221, 200226, 200227}.intersection(items)
+    assert all('role="prefill"' in t['expr'] for p in panels() for t in p['targets']
+               if 'rtp_llm_model_forward_us' in t['expr'])
     assert not any('mock_engine_' in t['expr'] for p in panels() for t in p['targets'])
     assert 'rtp_llm_context_tps{' in items[110379]['targets'][0]['expr']
     assert 'rtp_llm_generate_tps{' in items[210369]['targets'][0]['expr']
+    assert 'kind="output"' in items[210383]['targets'][0]['expr']
+    for panel_id in (100160, 200160, 200178, 200548, 300452, 310351):
+        assert '待埋点' not in items[panel_id]['title']
+    assert items[200548]['fieldConfig']['defaults']['unit'] == 'percentunit'
+    assert 'py_rtp_vit_preprocess_rt{' in items[300452]['targets'][2]['expr']
+    assert all('role="decode"' in t['expr'] for p in panels() for t in p['targets']
+               if 'rtp_llm_sp_' in t['expr'])
 
 
 def test_custom_panels_follow_their_own_address_selection_without_losing_business_dimensions():

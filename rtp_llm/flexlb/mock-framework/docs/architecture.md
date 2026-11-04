@@ -304,7 +304,7 @@ Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API�
 
 一个真实完成的 Forward batch 记录一次耗时，不能按 batch 中请求数重复记录。请求终态按请求计数，token 按本轮实际计算和提交分别统计。新增两项 Forward 指标，不增加对应服务接口：
 
-- `rtp_llm_model_forward_us`：模拟 Forward 的实际耗时，单位微秒；对齐 real 模型 Forward 调用区间的含义，不包含请求排队或网络 TTFT。
+- `rtp_llm_model_forward_us`：Prefill 完成 Forward 的窗口均值，单位微秒。目标生产 MTP Decode 版本缺少该时序。P/D 的最近一轮模拟实际耗时使用 `mock_model_forward_actual_us`。
 - `mock_model_forward_planned_us`：公式和可选噪声确定的本轮计划耗时，单位微秒。
 
 实际计时从提交本轮计算到公共执行层收到完成通知，包含计时器延迟和回调调度等待，在处理结果及提交 token/KV 前结束。计划和实际对同一完成 batch 各记一次，取消批次不补完成样本。差值可以揭示宿主调度/GC 等干扰，不能单独归因为 CPU 不足；Client TTFT 仍取真实接收时间。本仓 real `NormalExecutor.cc` 围绕 model_->forward 计时，`RtpLLMMetrics.cc` 将该字段注册并报告为 Gauge；本轮因此采用同名微秒 Gauge，计划耗时也用 Gauge。Gauge 保留最近一批，不能拿采样点平均值冒充逐批平均；吞吐仍使用累计 token 与耗时 Histogram 的 sum/count。KMonitor 与 Prometheus 的采样、聚合管线不据此宣称完全相同。

@@ -59,7 +59,7 @@ abstract class RtpSchedulerBase implements Scheduler {
 
     }
     private record Member(Entry request, RequestState.Use use, ComputeModel.Plan step) {}
-    private record Batch(List<Member> members) {}
+    private record Batch(List<Member> members, long scheduleStarted, long stepStarted) {}
     private record Notice(Runnable action, boolean terminal) {}
 
     RtpSchedulerBase(Object lock, RtpConfig config, KvCache cache, TaskHistory history) {
@@ -137,6 +137,7 @@ abstract class RtpSchedulerBase implements Scheduler {
     }
 
     @Override public Work schedule() {
+        long scheduleStarted = System.nanoTime();
         if (closed) return null;
         if (executing != null) throw new IllegalStateException("Forward already in flight");
         int limit = config.maxGenerateBatchSize();
@@ -175,20 +176,8 @@ abstract class RtpSchedulerBase implements Scheduler {
             }
             entry.phase = FORWARD;
         }
-        metrics.observe("rtp_llm_context_batch_size", prefill() ? items.size() : 0);
-        metrics.observe("rtp_llm_generate_batch_size", prefill() ? 0 : items.size());
-        long executeTokens = items.stream().mapToLong(i -> prefill() ? i.computeTokens() : i.stepTokens()).sum();
-        long maxSequence = items.stream().mapToLong(i -> (long) i.inputTokens() + i.generatedTokens()).max().orElse(0);
-        metrics.observe("rtp_llm_execute_token_size", executeTokens);
-        metrics.observe("rtp_llm_max_seq_len", maxSequence);
-        if (prefill()) {
-            metrics.observe("rtp_llm_context_batch_size_when_has_context", items.size());
-            metrics.observe("rtp_llm_generate_batch_size_when_has_context", 0);
-            metrics.observe("rtp_llm_execute_token_size_when_has_context", executeTokens);
-            metrics.observe("rtp_llm_max_seq_len_when_has_context", maxSequence);
-        }
         var batch = new ForwardBatch(config.id() + "/" + ++batchSequence, List.of(new ForwardBatch.Partition(0, items)));
-        executing = new Work(new Batch(List.copyOf(members)), batch);
+        executing = new Work(new Batch(List.copyOf(members), scheduleStarted, System.nanoTime()), batch);
         return executing;
     }
 
@@ -279,10 +268,12 @@ abstract class RtpSchedulerBase implements Scheduler {
 
     @Override public void computeCompleted(Work work, SimulatedCompute.Outcome outcome) {
         var batch = completedBatch(work);
-        long input = 0, computed = 0, output = 0;
+        long input = 0, computed = 0, output = 0, maxSequence = 0;
+        long proposed = 0, accepted = 0, speculativeStreams = 0;
         try {
             for (var member : batch.members()) {
                 var entry = member.request();
+                maxSequence = Math.max(maxSequence, (long) entry.input.tokens() + member.step().request().generated());
                 input += prefill() ? entry.input.tokens() : member.step().verifyTokens();
                 computed += prefill() ? entry.input.tokens() - entry.reused : member.step().verifyTokens();
                 if (!live(entry)) continue;
@@ -292,6 +283,11 @@ abstract class RtpSchedulerBase implements Scheduler {
                 }
                 var result = config.compute().completed(member.step());
                 int committed = result.committedTokens();
+                if (member.step().progress().proposedTokens() > 0) {
+                    proposed += member.step().progress().proposedTokens();
+                    accepted += result.candidates();
+                    speculativeStreams++;
+                }
                 entry.state.commit(committed, outcome.elapsedNanos());
                 if (committed > 0 && entry.firstToken == 0) entry.firstToken = System.nanoTime();
                 entry.nextStep = null;
@@ -299,8 +295,17 @@ abstract class RtpSchedulerBase implements Scheduler {
                 if (prefill()) { running.remove(entry); entry.phase = READY; entry.prefillFinished = result.finished(); }
                 emit(entry, committed, result.finished());
             }
-            if (outcome.state() == SimulatedCompute.State.COMPLETED)
-                metrics.forwardCompleted(outcome.elapsedNanos(), outcome.sample().planned().toNanos(), input, computed, output);
+            if (outcome.state() == SimulatedCompute.State.COMPLETED) {
+                long completed = System.nanoTime();
+                long stepNanos = completed - batch.stepStarted();
+                int size = batch.members().size();
+                long executeTokens = proposed > 0 ? accepted : computed;
+                metrics.batchSelected(prefill() ? size : 0, prefill() ? 0 : size, executeTokens, maxSequence);
+                metrics.stepCompleted(stepNanos, proposed, accepted, speculativeStreams);
+                metrics.forwardCompleted(outcome.elapsedNanos(), outcome.sample().planned().toNanos(), input, computed, output,
+                    prefill() ? completed - batch.scheduleStarted() : stepNanos,
+                    prefill() ? computed : proposed > 0 ? accepted : output);
+            }
         } finally { batch.members().forEach(member -> member.use().close()); }
     }
 
@@ -377,28 +382,21 @@ abstract class RtpSchedulerBase implements Scheduler {
     private void terminal(Entry entry, RequestFailure failure) {
         long now = System.nanoTime();
         history.add(task(entry, now, System.currentTimeMillis(), failure));
-        // Real emits stream timings for success, cancellation and timeout, not arbitrary internal errors.
-        if (failure == null || failure.reason() == CANCELLED || failure.reason() == TIMEOUT) {
-            var progress = entry.state.snapshot();
-            metrics.observe("rtp_llm_latency_us", Math.max(0, now - entry.timingStarted) / 1000.0);
-            metrics.observe("rtp_llm_wait_latency_us", entry.waitNanos / 1000.0);
-            metrics.positiveMicros("rtp_llm_stream_enqueue_to_canrun_us", entry.canRun == 0 ? 0 : Math.max(0, entry.canRun - entry.enqueuedAt));
-            metrics.positiveMicros("rtp_llm_stream_canrun_to_running_us", entry.canRun == 0 || entry.firstRunning == 0 ? 0 : Math.max(0, entry.firstRunning - entry.canRun));
-            metrics.positiveMicros("rtp_llm_stream_loading_cache_latency_us", entry.loadDone == 0 ? 0 : entry.loadDone - entry.loadStarted);
-            metrics.positiveMicros("rtp_llm_stream_load_done_to_running_us", entry.loadDone == 0 || entry.firstRunning == 0 ? 0 : Math.max(0, entry.firstRunning - entry.loadDone));
-            if (entry.firstToken != 0) metrics.observe("rtp_llm_first_token_latency_us", (entry.firstToken - entry.begun) / 1000.0);
-            metrics.observe("rtp_llm_input_token_length", entry.input.tokens());
-            metrics.observe("rtp_llm_output_token_length", progress.generated());
-            metrics.observe("rtp_llm_iterate_count", progress.iterations());
-            metrics.observe("rtp_llm_reuse_length", entry.reused);
-            metrics.observe("rtp_llm_query_batch_size", 1); // Native query batch is beams, not the scheduler batch.
-        }
-        active.remove(entry.input.identity(), entry);
-        metrics.finished(failure == null ? RtpMetrics.Outcome.success : switch (failure.reason()) {
+        var outcome = failure == null ? RtpMetrics.Outcome.success : switch (failure.reason()) {
             case CANCELLED -> RtpMetrics.Outcome.cancelled;
             case TIMEOUT -> RtpMetrics.Outcome.timeout;
             default -> RtpMetrics.Outcome.error;
-        });
+        };
+        var progress = entry.state.snapshot();
+        metrics.requestFinished(outcome, new RtpMetrics.RequestStats(
+            Math.max(0, now - entry.timingStarted), entry.waitNanos,
+            entry.canRun == 0 ? 0 : Math.max(0, entry.canRun - entry.enqueuedAt),
+            entry.canRun == 0 || entry.firstRunning == 0 ? 0 : Math.max(0, entry.firstRunning - entry.canRun),
+            entry.loadDone == 0 ? 0 : entry.loadDone - entry.loadStarted,
+            entry.loadDone == 0 || entry.firstRunning == 0 ? 0 : Math.max(0, entry.firstRunning - entry.loadDone),
+            entry.firstToken == 0 ? -1 : entry.firstToken - entry.begun,
+            entry.input.tokens(), progress.generated(), progress.iterations(), entry.reused));
+        active.remove(entry.input.identity(), entry);
         enqueue(entry, () -> {
             try { entry.listener.terminal(entry, failure); }
             finally { synchronized (lock) { owned.remove(entry); } }

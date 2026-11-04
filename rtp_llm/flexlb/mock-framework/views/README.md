@@ -10,7 +10,7 @@ Prefill 和 Decode 分开提供吞吐/延迟/负载、PD RPC、KV、KV 分池、
 
 线上 Engine 查询主要使用全局 `hippo_role`，并非每个面板都硬编码了 Prefill/Decode。源码语义、线上 PD 分离分区和局部业务过滤共同决定本地归属；Master 的 `role=PREFILL/DECODE/PDFUSION` 是被观察 Worker 的角色，不是 Master 自己的角色，保留原查询的具体限制，不能替换为 Engine 自报的小写 role。
 
-ViT 已接入共享 vision engine：QPS、成功/错误、图片数、Embedding 长度/请求等待耗时、队列深度/等待时间、Forward/合批大小和缓存命中/未命中/合并等待/淘汰/驻留 Tokens/Bytes。使用 real 的 `py_rtp_vit_*` 名称，耗时单位为毫秒。Forward、就绪排队加 Forward（py_rtp_vit_embedding_rt）和请求总耗时（py_rtp_vit_request_rt）分别记录；缓存命中不制造 Embedding/Forward 样本。真实 URL 读取提供 py_rtp_vit_download_rt（ms）和 rtp_llm_vit_image_fetch_rt_us（μs）；跳过读取时不制造零值。预处理子进程、CUDA Graph、GreenNet 尚未模拟。py_rtp_vit_request_rt 覆盖阻塞媒体处理调用的成功或失败，包括下载和共享结果等待，不含异步提交 ACK、RPC 传输及输出编码。py_rtp_vit_preprocess_queue_size 统计准备尚未完成的媒体（排队＋执行中），不包含等待计算或发布的任务；没有独立 CPU 子进程，因此 dispatch/return 指标保持缺失。
+ViT 已接入共享 vision engine：QPS、成功/错误、图片数、Embedding 长度/请求等待耗时、队列深度/等待时间、Forward/合批大小和缓存命中/未命中/合并等待/淘汰/驻留 Tokens/Bytes。使用 real 的 `py_rtp_vit_*` 名称，耗时单位为毫秒。Forward、就绪排队加 Forward（py_rtp_vit_embedding_rt）和请求总耗时（py_rtp_vit_request_rt）分别记录；缓存命中不制造 Embedding/Forward 样本。真实 URL 图片准备提供总耗时、下载及非下载耗时（ms），成功读取另提供 fetch 耗时（μs）。非下载部分测量读尺寸、内容摘要和几何计算。跳过读取时这些面板无样本。预处理子进程、CUDA Graph、GreenNet 尚未模拟。py_rtp_vit_request_rt 覆盖阻塞媒体处理调用的成功或失败，包括下载和共享结果等待，不含异步提交 ACK、RPC 传输及输出编码。py_rtp_vit_preprocess_queue_size 统计准备尚未完成的媒体（排队＋执行中），不包含等待计算或发布的任务；没有独立 CPU 子进程，因此 dispatch/return 指标保持缺失。
 
 ## 已实现与缺口
 
@@ -18,7 +18,7 @@ Engine 的 waiting/running、Device 可用 Tokens、Device/Host 容量 Blocks、
 
 真实事件的辅助 Counter/Histogram 使用 rtp_llm_*，包括接纳/终态、缓存查找/命中、Forward Tokens 和实际耗时分布；这些是本地 Prometheus 增补，不声称 real 已有完全相同的 Counter/Histogram 名称。Python 接口同步消费新名字。计划 Forward、ViT 模拟运行图片数及 hash 预算保留 mock_ 前缀。实际观测归回 P/D 的 RTP row，Mock 模拟质量各保留实际/理论、偏差、模拟执行时间占比三个面板，不将最后一项当作 GPU 利用率。
 
-TPS/QPS Gauge 使用两次采集间的真实单调时钟间隔，空闲归零；Prefill 计算 TPS 的分母只累计有计算 Token 的 Forward，含缓存 TPS 的分母只累计有输入 Token 的 Forward。窗口与 real 后台周期并非逐点一致。原始累计量不清零，门禁仍按明确时间范围查询 Counter 增量。
+执行 TPS 按窗口累计 token 除以有效执行时间。P 的 context TPS 区分实际计算和含缓存输入，D 的 MTP 采用停止条件截断前的验收 token（含 bonus）。只有 wall TPS 和 QPS 使用两次采集间的墙钟间隔；D 输出 wall TPS 来自已提交输出 token Counter。执行 TPS 空闲窗口归零；有活动的窗口仅上报有对应工作量的执行 TPS。门禁继续读取原有 Counter 和时间范围。
 
 旧实验没有新导出，需使用其保存的原始大盘；本次不改写旧 TSDB，也不生成旧名字别名来伪造新实验结果。
 
@@ -61,6 +61,8 @@ View 的 `annotation_steps` 只配置默认选择，省略则全部显示，空�
 | 边界 | 对齐指标与含义 | 明确限制 |
 |---|---|---|
 | Forward 组装 | `rtp_llm_context_batch_size` / `generate_batch_size`，`execute_token_size`，`max_seq_len`；含 Context 的条件系列只在 P 上产生 | Decode 执行 Token 取 verify/step，不拿整段历史输入相加；不把 running 请求数当作本批大小 |
+| 执行步 | P/D `rtp_llm_step_latency_us` | 完成的非空执行步，从调度返回到处理完输出，微秒；包含 Mock 执行和输出处理 |
+| 投机验收 | D `rtp_llm_sp_*` 的步耗时、提议/验收、接受率和估计 TPOT | 仅 draft 模型。real 生产 MTP（`5f026a038`）的验收数据跨步流水，Mock 同步记录本步验收，保留统计分子和分母；没有独立 propose/score/sampler 耗时 |
 | 请求终态 | `rtp_llm_latency_us`、`wait_latency_us`、`first_token_latency_us`、`input_token_length`、`output_token_length`、`iterate_count`、`query_batch_size` | 如 real，仅 success/cancel/timeout 产生流统计；无首 Token 则不报首 Token 耗时；query batch 是 beam 数，当前为 1 |
 | D Loading | `rtp_llm_stream_loading_cache_latency_us` | 从实际 beginTransfer 到 transferCompleted，不含等待 P 计算；其他 loading 阶段不混用 |
 | ViT 调度 | `py_rtp_vit_embedding_queue_size` / `queue_wait_rt` / `batch_size` / `forward_rt` | 队列项是提交的工作 chunk；运行图片数另为 Mock 辅助项 |

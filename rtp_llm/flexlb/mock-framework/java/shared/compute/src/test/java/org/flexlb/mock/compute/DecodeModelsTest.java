@@ -25,13 +25,13 @@ class DecodeModelsTest {
         assertEquals(.2, counts[1] / 20000.0, .02); assertEquals(.512, counts[4] / 20000.0, .02);
     }
     @Test void eosAndLengthClampOnlyAcceptedOutput() {
-        assertEquals(new ComputeModel.Result(4, true), stopping(0, 1).complete("r", 0, 5, 0, 4, false));
-        assertEquals(new ComputeModel.Result(3, true), stopping(1, 1).complete("r", 0, 5, 3, 10, false));
-        assertEquals(new ComputeModel.Result(5, false), stopping(1, 1).complete("r", 0, 5, 0, 10, true));
-        assertEquals(new ComputeModel.Result(1, true), stopping(0, 1).complete("r", 3, 5, 0, 4, true));
-        assertEquals(new ComputeModel.Result(2, true), stopping(1, 1).complete("r", 0, 5, 9, 2, false));
+        assertEquals(new ComputeModel.Result(4, true, 5), stopping(0, 1).complete("r", 0, 5, 0, 4, false));
+        assertEquals(new ComputeModel.Result(3, true, 5), stopping(1, 1).complete("r", 0, 5, 3, 10, false));
+        assertEquals(new ComputeModel.Result(5, false, 5), stopping(1, 1).complete("r", 0, 5, 0, 10, true));
+        assertEquals(new ComputeModel.Result(1, true, 5), stopping(0, 1).complete("r", 3, 5, 0, 4, true));
+        assertEquals(new ComputeModel.Result(2, true, 5), stopping(1, 1).complete("r", 0, 5, 9, 2, false));
         var rejected = step(4, 0, 1); var plan = rejected.plan(0, 10);
-        assertEquals(new ComputeModel.Result(1, false), stopping(1, 1).complete("r", 0,
+        assertEquals(new ComputeModel.Result(1, false, 1), stopping(1, 1).complete("r", 0,
             rejected.candidates(plan, "r", 0), 2, 10, false));
     }
     @Test void perTokenEosHasGeometricMeanAndIsStableAcrossRoundWidths() {
@@ -61,7 +61,7 @@ class DecodeModelsTest {
         assertEquals(260, total);
         var mean = new DecodeStepModel(new DecodeSpec(null, null, null, 5.0)); var plan = mean.plan(0, 4);
         assertEquals(5, mean.candidates(plan, "r", 0)); assertEquals(3, plan.additionalKvTokens());
-        assertEquals(new ComputeModel.Result(4, true), stopping(0, 1).complete("r", 0, 5, 0, 4, false));
+        assertEquals(new ComputeModel.Result(4, true, 5), stopping(0, 1).complete("r", 0, 5, 0, 4, false));
     }
     @Test void randomAcceptanceIsKeyedAndInvalidParametersAreRejected() {
         var model = step(4, .6, 42); var plan = model.plan(7, 80); int expected = model.candidates(plan, "r", 7);
