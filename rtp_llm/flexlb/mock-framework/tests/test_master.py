@@ -199,7 +199,13 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     assert native_env['HIPPO_ROLE'] == effective['HIPPO_ROLE']
     events = [json.loads(row) for row in (output / 'events.jsonl').read_text().splitlines()]
     started = [event for event in events if event['event'] == 'process_started']
-    assert [event['node'] for event in started] == ['zookeeper', 'prefill-0', 'decode-0'] + (['vit-0'] if vision else []) + [f'master-{i}' for i in range(replicas)]
+    expected_start_order = ['zookeeper', 'prefill-0', 'decode-0']
+    if vision:
+        expected_start_order.append('vit-0')
+    expected_start_order.extend(f'master-{i}' for i in range(replicas))
+    if dynamic:
+        expected_start_order.append('prefill-1')
+    assert [event['node'] for event in started] == expected_start_order
     election = effective['FLEXLB_SYNC_CONSISTENCY_CONFIG']
     assert election['needConsistency'] is True
     gates = [json.loads(row) for row in (output / 'gates.jsonl').read_text().splitlines()]
