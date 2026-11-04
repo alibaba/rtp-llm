@@ -89,6 +89,7 @@ cc_library(
     deps = [
         ":navi_proto_cc_proto_headers",
         ":navi_builder_headers",
+        ":navi_builder_headers",
         "//rtp_llm/flexlb/navi_sched/vendor/autil:object_tracer",
         "//rtp_llm/flexlb/navi_sched/vendor/network/anet:anet",
         "//rtp_llm/flexlb/navi_sched/vendor/autil:json",
