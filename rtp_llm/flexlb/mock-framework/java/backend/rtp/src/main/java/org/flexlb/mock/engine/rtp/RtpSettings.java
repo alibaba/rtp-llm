@@ -9,6 +9,10 @@ import org.flexlb.mock.runtime.EngineConfig;
 
 /** Only implemented native settings enter the effective configuration. */
 final class RtpSettings {
+    private static final Map<String, String> KVCM_ENV_BINDINGS = Map.of(
+        "RECO_ENABLE_VIPSERVER", "kvcm_enable_vipserver",
+        "RECO_VIPSERVER_DOMAIN", "kvcm_vipserver_domain",
+        "RECO_SERVER_ADDRESS", "kvcm_server_address");
     private static final Set<String> COMMON = Set.of(
         "checkpoint_path", "test_block_num", "reserve_block_ratio", "device_eviction_policy", "seq_size_per_block", "reuse_cache",
         "enable_device_cache", "disable_decode_first_malloc_device_reuse", "max_seq_len", "max_batch_tokens_size", "max_context_batch_size", "cp_force_single_prefill",
@@ -28,16 +32,16 @@ final class RtpSettings {
         var names = new HashSet<>(nativeNames(role));
         // These are real internal attributes, without public server ENV bindings.
         names.removeAll(Set.of("device_eviction_policy", "memory_eviction_policy", "disable_decode_first_malloc_device_reuse"));
-        names.removeAll(Set.of("kvcm_enable_vipserver", "kvcm_vipserver_domain", "kvcm_server_address"));
+        names.removeAll(KVCM_ENV_BINDINGS.values());
         return Set.copyOf(names);
     }
     static ObjectNode environment(Map<String, String> env, Role role) {
         var result = EngineConfig.environment(env, environmentNames(role), mockNames());
         // Real ENV bindings differ from their native config attribute names.
-        for (String suffix : List.of("enable_vipserver", "vipserver_domain", "server_address")) {
-            String value = env.get("RECO_" + suffix.toUpperCase(Locale.ROOT));
-            if (value != null) result.put("kvcm_" + suffix, value);
-        }
+        KVCM_ENV_BINDINGS.forEach((variable, setting) -> {
+            String value = env.get(variable);
+            if (value != null) result.put(setting, value);
+        });
         return result;
     }
     static Set<String> mockNames() {
