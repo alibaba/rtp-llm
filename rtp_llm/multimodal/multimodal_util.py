@@ -78,6 +78,7 @@ CONNECT_TIMEOUT_RETRIES = 2
 
 def _default_request_get(url, headers, timeout=10):
     import requests
+    from urllib3.exceptions import ReadTimeoutError
 
     return requests.get(url, stream=True, headers=headers, timeout=timeout)
 
@@ -347,7 +348,10 @@ def _download_http_content(
         raise
     except (requests.exceptions.Timeout, TimeoutError):
         raise_mm(MMErr.DL_TIMEOUT, ExceptionType.MM_DOWNLOAD_FAILED)
-    except requests.exceptions.ConnectionError:
+    except requests.exceptions.ConnectionError as error:
+        # Response.iter_content wraps urllib3 read timeout in ConnectionError.
+        if error.args and isinstance(error.args[0], ReadTimeoutError):
+            raise_mm(MMErr.DL_TIMEOUT, ExceptionType.MM_DOWNLOAD_FAILED)
         raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
     except (
         requests.exceptions.InvalidURL,
