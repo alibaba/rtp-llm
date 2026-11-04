@@ -298,6 +298,27 @@ TEST_F(ShutdownCoordinatorTest, RepeatedWaitRetainsAcknowledgedCertificate) {
     EXPECT_LT(std::chrono::steady_clock::now() - start, 1500ms);
 }
 
+TEST_F(ShutdownCoordinatorTest, CertifiedExitedPeerDoesNotConsumeRequestDrainBudget) {
+    // Every receiver holds the same all-drained certificate. The last rank
+    // only has sender proof for rank 0; ranks 1/2 close before acknowledging
+    // its own relay. Waiting the 30-second drain budget would strand ranks
+    // that already advanced to collective communication teardown.
+    auto release = releaseRequest(0);
+    for (auto& peer : peers_) {
+        ShutdownResponsePB response;
+        ASSERT_TRUE(peer.coordinator->handle(release, &response).ok());
+    }
+    for (size_t rank : {0, 1, 2}) {
+        peers_[rank].server->Shutdown();
+    }
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_TRUE(peers_[3].coordinator->wait(std::chrono::system_clock::now() + 30s));
+    EXPECT_LT(std::chrono::steady_clock::now() - start, 8s);
+    ShutdownResponsePB response;
+    ASSERT_TRUE(peers_[3].coordinator->handle(statusRequest(), &response).ok());
+    EXPECT_EQ(response.drained_instances_size(), 4);
+}
+
 TEST_F(ShutdownCoordinatorTest, AnyRankCanInitiateShutdownAndWaitForBusyPeer) {
     peers_[2].draining  = false;
     peers_[2].onflight  = 1;

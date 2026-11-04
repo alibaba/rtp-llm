@@ -193,18 +193,27 @@ bool ShutdownCoordinator::wait(Deadline deadline) {
             request.set_sender_rank(rank_);
             request.set_sender_instance_id(instance_id_);
             auto delivered = deliveredRanks(instances);
+            // Once this immutable certificate proves every member drained,
+            // relay is best-effort. A peer can close its RPC server after
+            // acknowledging another issuer and before replying to us. Do not
+            // spend the full request-drain budget retrying that closed server:
+            // the other members may already be waiting in device teardown.
+            const auto relay_deadline =
+                std::min(deadline, std::chrono::system_clock::now() + std::chrono::seconds(5));
             do {
                 deadline = effectiveDeadline(deadline);
                 request.set_deadline_unix_ms(
                     std::chrono::duration_cast<std::chrono::milliseconds>(deadline.time_since_epoch()).count());
-                for (size_t i = 0; i < addresses_.size() && std::chrono::system_clock::now() < deadline; ++i) {
+                for (size_t i = 0; i < addresses_.size()
+                                   && std::chrono::system_clock::now() < std::min(deadline, relay_deadline); ++i) {
                     // Incoming release RPCs can prove that an issuer holds
                     // this certificate even if it exits before our next call.
                     delivered = deliveredRanks(instances);
                     if (!delivered[i]) {
                         ShutdownResponsePB response;
                         const bool         acknowledged =
-                            call(i, request, &response, deadline).ok() && recordPeerCertificate(i, instances, response);
+                            call(i, request, &response, std::min(deadline, relay_deadline)).ok()
+                            && recordPeerCertificate(i, instances, response);
                         if (acknowledged && response.deadline_unix_ms() > 0) {
                             deadline =
                                 effectiveDeadline(Deadline(std::chrono::milliseconds(response.deadline_unix_ms())));
@@ -216,8 +225,9 @@ bool ShutdownCoordinator::wait(Deadline deadline) {
                     break;
                 }
                 std::this_thread::sleep_until(
-                    std::min(deadline, std::chrono::system_clock::now() + std::chrono::milliseconds(20)));
-            } while (std::chrono::system_clock::now() < deadline);
+                    std::min({deadline, relay_deadline,
+                              std::chrono::system_clock::now() + std::chrono::milliseconds(20)}));
+            } while (std::chrono::system_clock::now() < std::min(deadline, relay_deadline));
             // Even if a peer exits before acknowledging delivery, the
             // certificate proves there are no user requests left to interrupt.
             return true;
