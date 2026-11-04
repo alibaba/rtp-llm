@@ -75,7 +75,7 @@ def test_vision_playback_through_real_master(tmp_path):
 
 
 def test_vit_is_a_shared_engine_without_backend_configuration():
-    from mock_framework.config.environment import compile_environment
+    from mock_framework.config.compiler import compile_environment
     from mock_framework.config import ConfigError
 
     vision = {'config': {'mock.compute.forward.expression': '1'}}
