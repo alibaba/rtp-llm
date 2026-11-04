@@ -12,6 +12,9 @@ from typing import Optional
 import torch
 
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import PLE_NGRAM_CTX_TAG, PLE_STATE_TAG
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+    host_input_mirror,
+)
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpPLELayer
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 
@@ -103,13 +106,14 @@ class PLETransactionCoordinator:
         prefixes_device = prefix_source.to(
             device=hyper_states.device, dtype=torch.long, non_blocking=True
         ).contiguous()
-        invalid_history = prefixes <= 0
-        if live_rows is not None:
-            invalid_history = invalid_history & live_rows.to(prefixes.device)
-        if not graph_capture and bool(torch.any(invalid_history).item()):
-            raise RuntimeError(
-                "qwen4_exp PLE target verify requires a non-empty committed history"
-            )
+        if not graph_capture:
+            invalid_history = host_input_mirror(state_inputs, "prefix_lengths") <= 0
+            if live_rows is not None:
+                invalid_history = invalid_history & live_rows.to(invalid_history.device)
+            if bool(torch.any(invalid_history).item()):
+                raise RuntimeError(
+                    "qwen4_exp PLE target verify requires a non-empty committed history"
+                )
         if int(ids.numel()) != batch_size * query_len:
             raise RuntimeError(
                 "qwen4_exp PLE target verify input lengths do not partition "

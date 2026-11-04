@@ -82,7 +82,13 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
 
     def _stats_delta(self):
         stats = qsa_step_plan.step_plan_cache_stats()
-        return {key: stats[key] - self.stats0[key] for key in stats}
+        return {
+            key: stats[key] - self.stats0[key]
+            for key in ("hits", "misses", "invalidations")
+        }
+
+    def _mirror_readbacks(self):
+        return qsa_step_plan.step_plan_cache_stats()["mirror_readbacks"]
 
     def _context(
         self, prefixes, lengths, *, shared=None, layer=0, is_mtp_draft=False
@@ -352,6 +358,103 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
             self._stats_delta(),
             {"hits": 1, "invalidations": 0, "misses": 1},
         )
+
+    def test_host_mirror_passes_host_sources_through(self):
+        inputs = SimpleNamespace(
+            prefix_lengths=torch.tensor([4, 8], dtype=torch.int32)
+        )
+        readbacks0 = self._mirror_readbacks()
+        mirror = qsa_step_plan.host_input_mirror(inputs, "prefix_lengths")
+        self.assertIs(mirror, inputs.prefix_lengths)
+        self.assertEqual(self._mirror_readbacks(), readbacks0)
+
+    @unittest.skipIf(not torch.cuda.is_available(), "device mirror needs CUDA")
+    def test_host_mirror_reads_device_source_once_per_step(self):
+        inputs = SimpleNamespace(
+            prefix_lengths=torch.tensor([4, 8], dtype=torch.int32, device="cuda")
+        )
+        readbacks0 = self._mirror_readbacks()
+        mirror_one = qsa_step_plan.host_input_mirror(inputs, "prefix_lengths")
+        self.assertEqual(mirror_one.device.type, "cpu")
+        self.assertEqual(mirror_one.tolist(), [4, 8])
+        self.assertEqual(self._mirror_readbacks(), readbacks0 + 1)
+        # The layers of one step share the single readback.
+        mirror_two = qsa_step_plan.host_input_mirror(inputs, "prefix_lengths")
+        self.assertIs(mirror_two, mirror_one)
+        self.assertEqual(self._mirror_readbacks(), readbacks0 + 1)
+        # A rebound tensor (a fresh step materialising new inputs) refreshes
+        # the mirror even when the values are identical.
+        inputs.prefix_lengths = torch.tensor(
+            [4, 8], dtype=torch.int32, device="cuda"
+        )
+        mirror_three = qsa_step_plan.host_input_mirror(inputs, "prefix_lengths")
+        self.assertIsNot(mirror_three, mirror_one)
+        self.assertEqual(mirror_three.tolist(), [4, 8])
+        self.assertEqual(self._mirror_readbacks(), readbacks0 + 2)
+        # Missing attributes stay None (the caller keeps its error semantics).
+        self.assertIsNone(
+            qsa_step_plan.host_input_mirror(SimpleNamespace(), "prefix_lengths")
+        )
+
+    @unittest.skipIf(not torch.cuda.is_available(), "device mirror needs CUDA")
+    def test_host_mirror_evicts_beyond_its_bound(self):
+        readbacks0 = self._mirror_readbacks()
+        holders = [
+            SimpleNamespace(
+                prefix_lengths=torch.tensor([index], dtype=torch.int32, device="cuda")
+            )
+            for index in range(qsa_step_plan._MIRROR_CACHE_LIMIT + 1)
+        ]
+        for holder in holders:
+            qsa_step_plan.host_input_mirror(holder, "prefix_lengths")
+        self.assertEqual(
+            len(qsa_step_plan._MIRROR_CACHE), qsa_step_plan._MIRROR_CACHE_LIMIT
+        )
+        # The oldest entry was evicted: touching it again costs a readback.
+        mirror = qsa_step_plan.host_input_mirror(holders[0], "prefix_lengths")
+        self.assertEqual(mirror.tolist(), [0])
+        self.assertEqual(
+            self._mirror_readbacks(),
+            readbacks0 + qsa_step_plan._MIRROR_CACHE_LIMIT + 2,
+        )
+
+    @unittest.skipIf(not torch.cuda.is_available(), "device mirror needs CUDA")
+    def test_step_plan_builds_and_hits_with_device_length_sources(self):
+        # The RTP_LLM_DEVICE_INPUT seam: input_lengths/prefix_lengths live on
+        # the device while the rest of the step keeps the CPU fixtures.  The
+        # build reads both sources back once; the second layer's hit reuses
+        # those mirrors without another readback.
+        context = self._context([8], [5])
+        lengths_cuda = context.main_inputs.input_lengths.to("cuda")
+        prefixes_cuda = context.main_inputs.prefix_lengths.to("cuda")
+        for inputs in (
+            context.main_inputs,
+            context.indexer_kv_inputs,
+            context.indexer_state_inputs,
+        ):
+            inputs.input_lengths = lengths_cuda
+            inputs.prefix_lengths = prefixes_cuda
+        readbacks0 = self._mirror_readbacks()
+        plan_one = self._geometry(context, 5)
+        self.assertEqual(plan_one.step.lengths, [5])
+        self.assertEqual(plan_one.step.prefix_values, [8])
+        self.assertEqual(self._mirror_readbacks(), readbacks0 + 2)
+        second = self._context(
+            [8],
+            [5],
+            shared=(
+                context.main_inputs,
+                context.indexer_kv_inputs,
+                context.indexer_state_inputs,
+            ),
+        )
+        plan_two = self._geometry(second, 5)
+        self.assertIs(plan_two.step, plan_one.step)
+        self.assertEqual(
+            self._stats_delta(),
+            {"hits": 1, "invalidations": 0, "misses": 1},
+        )
+        self.assertEqual(self._mirror_readbacks(), readbacks0 + 2)
 
 
 if __name__ == "__main__":

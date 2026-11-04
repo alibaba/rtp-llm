@@ -10,6 +10,9 @@ from rtp_llm.models_py.model_desc.block_map import select_attention_inputs_for_t
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.pd_publication import (
     validate_pd_cache_inputs,
 )
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+    host_input_mirror,
+)
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 
 from .ple_cache_views import PLECacheViews
@@ -82,8 +85,8 @@ class PLEExecution:
         ids = ple_ids.reshape(-1).long()
         self._validate_ple_mode(ctx_inputs, allow_target_verify=True)
         if ctx_inputs.is_prefill:
-            lengths = [int(x) for x in ctx_inputs.input_lengths.tolist()]
-            raw_prefixes = ctx_inputs.prefix_lengths
+            lengths = [int(x) for x in host_input_mirror(ctx_inputs, "input_lengths").tolist()]
+            raw_prefixes = host_input_mirror(ctx_inputs, "prefix_lengths")
             prefixes = (
                 [int(x) for x in raw_prefixes.tolist()]
                 if raw_prefixes is not None and raw_prefixes.numel()
@@ -313,7 +316,10 @@ class PLEExecution:
                 )
 
             if state_inputs.is_prefill:
-                lengths = [int(x) for x in state_inputs.input_lengths.tolist()]
+                lengths = [
+                    int(x)
+                    for x in host_input_mirror(state_inputs, "input_lengths").tolist()
+                ]
                 if any(length <= 0 for length in lengths):
                     raise RuntimeError(
                         "qwen4_exp PLE requires positive prefill lengths"
@@ -322,7 +328,7 @@ class PLEExecution:
                     raise RuntimeError(
                         "qwen4_exp PLE packed prefill lengths are inconsistent"
                     )
-                raw_prefixes = getattr(state_inputs, "prefix_lengths", None)
+                raw_prefixes = host_input_mirror(state_inputs, "prefix_lengths")
                 prefixes = (
                     [int(x) for x in raw_prefixes.tolist()]
                     if raw_prefixes is not None and int(raw_prefixes.numel()) > 0

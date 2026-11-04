@@ -4,6 +4,7 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import host_input_mirror
 from rtp_llm.ops.compute_ops import LayerKVCache
 
 from .fmha_plans import (
@@ -252,7 +253,12 @@ def _prepare_incremental_prefill_inputs(
     if batch <= 0 or int(prefixes.numel()) != batch:
         raise ValueError("qwen4_exp incremental prefill lengths and prefixes disagree")
     plan = _try_prepare_host_incremental_prefill(
-        self, qkv, kv_cache, selected_indices, input_lengths, prefixes
+        self,
+        qkv,
+        kv_cache,
+        selected_indices,
+        host_input_mirror(self.attn_inputs, "input_lengths"),
+        host_input_mirror(self.attn_inputs, "prefix_lengths"),
     )
     if plan is not None:
         return plan
