@@ -20,7 +20,8 @@ PYTHON_BIN=${NAVI_SCHED_PYTHON_BIN:-/opt/conda310/bin/python3}
 NAVI_SCHED_COMPILER_CONFIG=${NAVI_SCHED_COMPILER_CONFIG:-gcc}
 
 if [[ "${NAVI_SCHED_COMPILER_CONFIG}" != "clang" &&
-    "${NAVI_SCHED_COMPILER_CONFIG}" != "gcc" ]]; then
+      "${NAVI_SCHED_COMPILER_CONFIG}" != "gcc" &&
+      "${NAVI_SCHED_COMPILER_CONFIG}" != "none" ]]; then
     echo "unsupported NaviSched compiler config: ${NAVI_SCHED_COMPILER_CONFIG}" >&2
     exit 1
 fi
@@ -28,7 +29,10 @@ fi
 case "$(uname -m)" in
     x86_64)
         NAVI_SCHED_PLATFORM_TAG=linux_x86_64
-        NAVI_SCHED_BAZEL_COMPILER_ARGS=("--config=${NAVI_SCHED_COMPILER_CONFIG}")
+    NAVI_SCHED_BAZEL_COMPILER_ARGS=()
+    if [[ "${NAVI_SCHED_COMPILER_CONFIG}" != "none" ]]; then
+        NAVI_SCHED_BAZEL_COMPILER_ARGS+=("--config=${NAVI_SCHED_COMPILER_CONFIG}")
+    fi
         NAVI_SCHED_BAZEL_PLATFORM_CONFIG=''
         ;;
     aarch64 | arm64)
