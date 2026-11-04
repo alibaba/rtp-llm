@@ -28,6 +28,7 @@ cc_library(
     name = "navi_headers",
     hdrs = glob([
         "common.h",
+        "builder/*.h",
         "config/*.h",
         "engine/AsyncPipe.h",
         "engine/Data.h",
