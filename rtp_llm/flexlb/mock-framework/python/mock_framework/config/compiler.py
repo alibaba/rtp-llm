@@ -6,7 +6,6 @@ from typing import Any
 from pathlib import Path
 import re
 
-from ..execution.roles.master import validate_master_config
 from ..execution.step.step import Expect, Reference, Step
 from .yaml_loader import load_yaml
 from ..execution.step.registry import Registry
@@ -267,6 +266,8 @@ def compile_environment(raw, *, directory=None):
         deployment = _compile_deployment(component.get('deployment', {}), role)
         native = _load_component_config(component.get('config', {}), role, directory)
         if role == 'master':
+            from ..execution.roles.master import validate_master_config
+
             validate_master_config(native)
         if 'checkpoint_path' in native:
             checkpoint = Path(text(native['checkpoint_path'], f'{role}.checkpoint_path'))

@@ -130,7 +130,7 @@ class EngineRole:
                         raise ExecutionError('; '.join(errors))
             return [item['rpc'] for item in selected]
 
-    async def _monitor(self):
+    async def _watch_hosts(self):
         try:
             while not self.supervisor.closing:
                 await asyncio.sleep(1)
@@ -150,7 +150,7 @@ class EngineRole:
                 await self.supervisor.guard(self.scale_out(role, count), float(duration(recipe['startup_timeout'])) * count)
 
         if self.hosts:
-            self._monitor = asyncio.create_task(self._monitor())
+            self._monitor = asyncio.create_task(self._watch_hosts())
 
     async def stop_monitor(self):
         if self._monitor:
