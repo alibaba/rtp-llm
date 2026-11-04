@@ -28,7 +28,8 @@ namespace anet {
 static void debugPortListenConflict(uint32_t port) {
     static bool inDailyRunMode = []() -> bool { return autil::EnvUtil::getEnv("DAILY_RUN_MODE", false); }();
     if (inDailyRunMode) {
-        (void)system("echo '======= '`date '+%Y-%m-%d %H:%M:%S'`' =======' >> netstat.txt");
+        const int systemResult = system("echo '======= '`date '+%Y-%m-%d %H:%M:%S'`' =======' >> netstat.txt");
+        (void)systemResult;
         char buf[512];
         // or: lsof -iTCP -P -n | grep ':%u'
         snprintf(buf, 512, "netstat -anp | grep ':%u' >> netstat.txt", port);
@@ -370,11 +371,11 @@ int Socket::setPriority(CONNPRIORITY priority) {
         rc = getsockopt(_socketHandle, SOL_SOCKET, SO_PRIORITY, &actualPrio, (socklen_t*)&prioLen);
         ANET_LOG(WARN, "Socket priority is set to %d, rc %d", actualPrio, rc);
 
-        rc = setsockopt(_socketHandle, SOL_IP, IP_TOS, 
+        rc = setsockopt(_socketHandle, SOL_IP, IP_TOS,
                           (const void *)(&priority), sizeof(priority));
-        if (rc < 0) { 
+        if (rc < 0) {
             rc = errno;
-            ANET_LOG(ERROR, "Can not set ip tos for the socket: %d, errno %d", 
+            ANET_LOG(ERROR, "Can not set ip tos for the socket: %d, errno %d",
                              _socketHandle, rc );
         }
 #endif
