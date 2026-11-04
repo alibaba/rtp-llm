@@ -9,7 +9,7 @@ Whale 拆分部署的角色类型使用 `PY_PREFILL`、`PY_DECODE`、`PY_VIT`、
 在框架目录执行：
 
 ```sh
-JAVA_HOME=/path/to/jdk21 python3 scripts/package-engine.py
+JAVA_HOME=/path/to/jdk21 python3 scripts/package-whale-engine.py
 ```
 
 脚本调用现有 Maven 构建入口，编译 `java/engine` 及其依赖，生成 `target/image`。该目录只包含 Dockerfile、固定启动脚本、Engine JAR 和 build-manifest.json。manifest 记录源码 SHA、CI 配方 SHA（本地未提供时为空）、JAR SHA256；打包默认跳过单测执行，并如实记录 tests_executed=false。修改工作区后做的本地打包不能仅凭 HEAD SHA 作为干净源码构建的证明。
@@ -18,11 +18,11 @@ JAVA_HOME=/path/to/jdk21 python3 scripts/package-engine.py
 docker build -t mock-engine:local target/image
 ```
 
-Dockerfile 采用与当前 real FlexLB 生产镜像相同的固定 CPU/JDK 基础镜像；不安装 GPU 栈，不在容器启动时编译、下载或覆盖代码。继承镜像的 Master 入口被显式替换，JVM 前台运行。
+源码配方 `docker/whale-engine.Dockerfile` 在打包时复制为 `target/image/Dockerfile`。配方采用与当前 real FlexLB 生产镜像相同的固定 CPU/JDK 基础镜像；不安装 GPU 栈，不在容器启动时编译、下载或覆盖代码。继承镜像的 Master 入口被显式替换，JVM 前台运行。
 
 内部仓 `.aoneci/image.yaml` 增加显式选择的 `mock-engine` 构建项。选择 `pre-jobs: [mock-engine]`，`github_commit` 必须是包含新框架的完整源码 SHA；`github_source_repo` 按标准生产流程指定源码仓。CI 沿用 Java 21、build-image、DADI 转换及区域镜像同步流程，不改已有角色的默认构建项。
 
-CI 执行 package-engine.py 时传入 EXPECTED_SOURCE_SHA 与 CI_RECIPE_SHA。源码不匹配则在编译前失败。普通镜像仓库为 `hub.docker.alibaba-inc.com/isearch/flexlb_mock_engine`，标签遵循生产配方的 release/weights/version 组合；Whale 需要的 accelerated 镜像以对应转换任务的实际结果为准。
+CI 执行 package-whale-engine.py 时传入 EXPECTED_SOURCE_SHA 与 CI_RECIPE_SHA。源码不匹配则在编译前失败。普通镜像仓库为 `hub.docker.alibaba-inc.com/isearch/flexlb_mock_engine`，标签遵循生产配方的 release/weights/version 组合；Whale 需要的 accelerated 镜像以对应转换任务的实际结果为准。
 
 ## 启动
 
@@ -79,7 +79,7 @@ Engine 只启用一个指标后端，不需要额外部署开关。公共构建�
 
 两种后端消费同一份结构化快照，各自只有一个采集入口，不解析 Prometheus 文本，不重复清空窗口。快照里的 QPS 已是速率、counter 是累计值，KMonitor 按 Gauge 上报，避免再次转换成 QPS；Histogram bucket/sum/count 保留为同名数值序列，不冒充原始延迟样本。SDK 的 JVM 内置资源采集关闭，避免当成每个模拟 Engine 的资源。指标实例在关闭前停止其采集线程；SDK 为 JVM 共享，在进程退出时关闭。
 
-缺少 provider 时使用 Prometheus；provider 存在但 SDK 加载或初始化失败则启动失败，不静默回退。运行期间上报异常记录错误并在后续周期继续尝试。打包会检查 reporter、SDK、SPI 及服务启动后 `/metrics` 的互斥行为；本地公共测试不能替代内部 CI 的 SDK 编译、配置测试，以及 Whale 上实际指标验收。内部配置测试命令为 `scripts/build.sh -pl java/engine -am -Pinternal-monitoring -Dtest=KMonitorReporterTest -Dsurefire.failIfNoSpecifiedTests=false`。
+缺少 provider 时使用 Prometheus；provider 存在但 SDK 加载或初始化失败则启动失败，不静默回退。运行期间上报异常记录错误并在后续周期继续尝试。打包会检查 reporter、SDK、SPI 及服务启动后 `/metrics` 的互斥行为；本地公共测试不能替代内部 CI 的 SDK 编译、配置测试，以及 Whale 上实际指标验收。内部配置测试命令为 `scripts/build-java.sh -pl java/engine -am -Pinternal-monitoring -Dtest=KMonitorReporterTest -Dsurefire.failIfNoSpecifiedTests=false`。
 
 ### 配置初始化边界
 

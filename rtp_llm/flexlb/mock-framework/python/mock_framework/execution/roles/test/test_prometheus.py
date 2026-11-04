@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import time
+from types import SimpleNamespace
 import urllib.parse
 import urllib.request
 
@@ -19,6 +20,20 @@ from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
 
 ROOT = FRAMEWORK
+
+
+def test_managed_prometheus_rejects_push_backend_before_discovery(tmp_path):
+    from mock_framework.execution.roles.prometheus import Prometheus
+    from mock_framework.execution import ExecutionError
+
+    (tmp_path / 'endpoints.json').write_text(json.dumps({
+        'id': 'prefill-0', 'rpc': '127.0.0.1:1234', 'metrics': '', 'metrics_backend': 'kmonitor',
+    }))
+    collector = Prometheus(None, SimpleNamespace(directory=tmp_path),
+                           {'startup_timeout': '1s', 'scrape_interval': '1s'})
+    with pytest.raises(ExecutionError, match='metrics_backend=prometheus, got .kmonitor.'):
+        collector.discover('prefill-0', tmp_path)
+    assert collector.targets == {}
 
 
 @pytest.mark.skipif(not os.environ.get('PROMETHEUS_BIN'), reason='Set PROMETHEUS_BIN for real Prometheus integration')
