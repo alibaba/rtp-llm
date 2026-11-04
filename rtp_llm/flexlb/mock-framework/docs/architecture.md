@@ -434,11 +434,11 @@ EngineMain 本地启动时原子发布 effective-config、endpoints 和 ready。
 
 Engine 的 HTTP 与原生健康检查读取现有 Loop/Scheduler 失败状态，不采集指标。独立进程每秒调用同一检查，不可恢复失败退出。不开新的健康管理模块，不把普通请求失败当作 Engine 故障。
 
-本分支使用 DSV4.1 的原始多模态 RPC 与内部 PD cache spans；Prepared 输入准备仍在 Scheduler 之前完成，Scheduler 消费长度和只读缓存身份，不处理媒体 RPC。缓存元信息归 shared/cache，Master RPC 与共享 KvcmReporter 消费同一份有效块状态。RTP 实例仅装配 Reporter 的配置、实例身份和实际缓存能力；缓存锁只投递变更，网络线程负责 KVCM 注册、事件与恢复，远端读写另由 shared/cache 的 CacheLoad 与 remote/RemoteCache 管理，当前只实现非 group 的加载流程，未接真实存储。具体范围见组件参考中的 DSV4.1 Engine / KVCM 契约。
+RTP 在同步本地缓存上执行。KVCM Reporter 消费有效块发布和淘汰，保留注册、事件、快照和恢复。
 
 ### 非 group 的异步缓存准备
 
-KvCache 统一拥有本地分配、有效前缀提交和异步读写引用。CacheLoad 代表一次准备操作，立即就绪和远端等待使用同一入口；RemoteCache 只负责外部协议，不操作调度队列。普通 RtpScheduler 独立推进 loading，请求准备就绪后重新参与 FIFO 组批。RtpEngineLoop 通过 KvCache.onChange 接收容量/准备完成信号，网络调用不持有调度或缓存锁。RtpGroupScheduler 不支持远端适配器，保持已有本地组边界。后台写持有缓存引用，不使用 RequestState.pin 延迟请求终态。真实远端存储、payload 和 KVCM/KVS 适配尚未实现。
+KvCache 同步取得本地容量和复用前缀。资源释放或新前缀发布可唤醒 RtpEngineLoop。KVCM Reporter 只在网络线程处理元信息。
 
 ### 状态与观测边界
 

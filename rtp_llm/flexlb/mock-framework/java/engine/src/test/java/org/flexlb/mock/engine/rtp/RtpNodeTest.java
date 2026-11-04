@@ -88,12 +88,12 @@ public class RtpNodeTest {
         }
     }
 
-    @Test void enabledRemoteCacheRequiresAnExplicitAdapter() throws Exception {
+    @Test void removedRemoteCacheIsRejected() throws Exception {
         var root = JSON.<com.fasterxml.jackson.databind.node.ObjectNode>valueToTree(configuration("prefill"));
         ((com.fasterxml.jackson.databind.node.ObjectNode) root.path("component").path("config"))
             .put("enable_remote_cache", true);
         var error = assertThrows(IllegalArgumentException.class, () -> RtpNode.start(RtpConfig.load(root)));
-        assertTrue(error.getMessage().contains("no storage adapter is installed"));
+        assertTrue(error.getMessage().contains("supports only local KV"));
     }
 
     @Test void exportsClasspathForNativeCrossProcessProbe() throws Exception {

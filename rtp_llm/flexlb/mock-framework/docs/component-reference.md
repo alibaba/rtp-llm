@@ -73,25 +73,9 @@ WorkerStatus 报真实等待/执行任务、finished/version，available_concurr
 
 ## Block 容量与 RTP 缓存
 
-共享 `BlockPool` 只管理物理容量和引用。每个实例/存储层各自建池，每个所有者持有独立 Reference，close 幂等，不能释放其他所有者份额或混用池。REQUEST/CACHE/LOAD/STORE/EVICTION 分别计数；只有 CACHE 引用的块算可回收容量，free 和 available 分开，分配失败不部分扣账，释放唤醒等待者。
+每个 P/D Engine 有一个本地逻辑池。容量为 `test_block_num - 1`，首次分配仍受 `reserve_block_ratio` 约束。Scheduler 同步申请容量并取得完整 Block 前缀的复用量。等待中的请求可以在容量释放后重试，运行中的 Decode 增长失败按容量错误结束。
 
-`KvCache` 和 `BlockTree` 目前固定实现 RTP Full-KV 语义，文件保留在 `java/engine 的 cache 包`，不为未知的 vLLM 行为增加策略层或适配接口。每个 Engine 各自拥有 Device/Host 池、前缀索引和请求租约，同 JVM 不共享缓存内容。树内 `lru/lfu/fifo` 只改变合法候选的排序，Device 和 Host 可以分别配置。一次 match 用同一访问序号刷新整条命中路径，release/重叠 publish 不刷新；每次成功进入新存储层都会刷新该层的 FIFO 入层顺序。
-
-Scheduler 统一调用 `prepare` 取得 `CacheLoad`；其本地阶段使用 `acquire`，在同一锁内完成前缀匹配、取得使用引用、申请缺少的 Device 容量和本地读取。状态/前缀快照只读，不保证后续请求仍然命中。本地 Host/Device 读取和转存瞬间完成，不建立本地 loading 队列、异步任务或带宽模型；PD 网络交接仍按原有生命周期执行。
-
-对齐当前 real BlockTree：开启 Device cache 时，Host 读取成功后把已有有效前缀注册到 Device，再移除 Host 副本；关闭 Device cache 时，Host 源保留，Device 工作副本不注册。申请失败不能消费 Host。驱逐候选按所在层的直接子节点判断叶子，不要求整棵树的全局叶子；Full-KV 前缀被删除时，所有失效后缀跨层清理。Device 水位触发时向 Host 转存；Host 分配失败时保留 Device 源，不为了转存强制删除 Host 缓存，也不退化成丢弃 Device。未配置 Host 时水位回收可以直接删除 Device 索引。紧急 Device 分配允许直接回收 Device 缓存及失效后缀，不额外删除无关 Host 根。层间移动保持逻辑 key 和索引版本，真正插入/删除才改变 key 版本。Host 不计入 WorkerStatus/CacheStatus 的 Device 执行容量。
-
-容量使用原生 `test_block_num` 和 `reserve_block_ratio`。Device 可用块数=test_block_num−1；Host 使用 `mock.cache.memory.blocks` 个块。reserve 默认 5%，约束首次分配，运行中增长可以使用预留。需求超过单实例上限为永久不足，暂时被其他请求占用为可重试；增长一次补齐差额，失败不留下半次新增分配。容量不足后的等待/结束决定仍在 Scheduler，运行中的 RTP Decode 增长失败会结束该请求，不实现主动换出。显式投机的首次 D 分配也包含 reserveStep，在 PD 交接前准备目标容量。
-
-容量失败处理沿用上述边界：首次 `acquire` 返回 RETRYABLE 时，P 留在 waiting、D 留在容量等待阶段；同一分配版本不重复申请，资源释放或新前缀变为可复用后唤醒重试，并保留请求原 deadline。PERMANENT 立即结束单请求，返回容量错误 602；等待中超时返回 603，取消和超时后不再分配。运行中 Decode 的 `ensureCapacity` 无论暂时还是永久不足，都结束该请求，等待其 Compute/PD 使用归零后释放引用，其他请求继续；释放的容量可供等待请求重新准入。不增加抢占、请求换出或重新排队重算接口。
-
-Host 转存目标不足由 KV 内部保留源，不直接上升为请求失败。成功终态的 `publish` 抛异常时，RequestState 将请求改为内部错误，并在 finally 中关闭租约；失败/取消不发布。`acquire/ensureCapacity` 的预期容量失败必须以 Failure 返回，未预期的内部异常按 Engine 故障停止处理，不能伪装成容量不足继续运行。
-
-Scheduler 与 KV 管理器按 Token 交互：`prepare(requiredTokens, keys, deadline, remoteLookup)` 首次准备资源，`Lease.ensureCapacity(requiredTokens)` 保证本轮容量，`CacheLoad.Result.reusedTokens` 返回已就绪的总复用 Token 数，`Lease.reusedTokens()` 仍描述初次本地匹配。容量的 Block 换算和向上取整封装在 KV 管理器中；已有容量足够或需求变小时不缩容、不重复申请，超过容量上限返回永久不足。容量配置、物理池和状态快照仍使用原生 Block 口径。
-
-不再每轮调用 markValid，也不在 Lease 中重复保存计算进度。Scheduler 在成功终态且所有 Compute/PD 使用结束后调用 `publish(keys, validTokens)`，一次声明有效范围并注册完整有效块；P 仅提交 prompt，D 同时提交已计算的输出前缀，排除最后一个未计算 KV 的采样 token；KV 管理器校验有效范围未超过已分配容量、key 数未超过完整有效块数。`publish` 不关闭租约，`close` 只释放请求引用。投机拒绝区域、预留空间、失败/取消请求不发布，生成内容与输入使用同一 CacheSequence 算法建立前缀索引；当前输出模型重复原生 GENERATE 给出的首 token。多个请求可共享已注册的不可变 Device 块。缓存索引引用与请求物理引用独立：索引可以在请求运行中注销或迁往 Host，请求仍保留原 Device 块，最后一个引用释放才归还物理容量。acquire/publish 仅在同步事务内临时保护完整前缀。状态中的 referenced 只统计仍同时被索引和请求引用的 Device 物理块；注销或转存后仍被请求持有的块计入 held。Host-only 的私有 Device 副本与 Host 记作两层真实占用。
-
-Device/Host 水位按物理占用比例工作：达到 high 后，尽量回收到 low，未达到 low 时保留触发状态。加载、发布、增长和请求释放完成后同步检查，顺序为 Host、Device，不建后台扫描线程；运行中请求的引用可能使物理占用暂时无法下降。`enable_memory_cache` 要求显式正数 `mock.cache.memory.blocks`。Disk/Remote 及 Host 传输超时参数直接忽略，本地瞬间完成不使用这些参数。Host-only 写回暂保留可容纳的部分前缀，尚未对齐 real 的整批目标预分配与整批失败回滚；Device+Host 主路径不依赖此简化。远端准备流程与逻辑读写接口已实现，具体远端存储适配和真实 payload 未实现；Disk 仍不实现。明确不建模按网络层分池或 Hybrid/SWA/Linear 多资源 KV 布局，所有层统一折算为一套逻辑 KV 容量。
+容量不足时，按 LRU 淘汰可回收的前缀树叶子。请求持有的块不会被淘汰。成功终态只发布已计算的完整块，失败或取消只释放占用。Master CacheStatus 与 KVCM Reporter 使用同一份有效块状态。P/D 网络交接仍走原生协议。
 
 ## 通用 V 与输入准备
 
@@ -218,15 +202,12 @@ Mock 专用参数使用小写点号名称，例如 `mock.compute.forward.express
 | concurrency_limit | 32，正整数 | P/D 每轮请求数上限；real 的 ConcurrencyConfig 输入经 engine_config.py 写入内部 max_generate_batch_size。 |
 | reserve_block_ratio | 5，0–100 | 首次分配预留百分比。 |
 | reuse_cache / enable_device_cache | false / true | 前缀复用和 Device 索引。 |
-| enable_memory_cache | false | Host 缓存开关；开启时须同时给出正数 mock.cache.memory.blocks。 |
 | tp_size / dp_size | 1 / 1，正整数 | real 并行配置；tp_size 用于原生状态/接入元数据，二者分别绑定公式 tpSize/dpSize，不模拟 rank 间执行。 |
 | cp_rotate_method | DISABLED | 沿用 real PrefillCPConfig；ALL_GATHER、ALL_GATHER_WITH_OVERLAP、ALLTOALL 开启通用 CP，cpSize=tp_size、cpEnabled=1，否则为 1/0。PREFILL_CP 是独立策略，当前未模拟，prefill_cp_size 等专用参数忽略。 |
 | max_batch_tokens_size | 0 | P 的 batch token/矩形准入；0 仍可执行 singleton。 |
 | max_batch_tokens_without_cache / max_inited_kv_cache_streams | 0 / 0 | 仅 P 生效；0 不启用对应限制。 |
-| device_eviction_policy / memory_eviction_policy | lru | real 内部配置属性，支持 lru/lfu/fifo；real server_args 没有对应公开 ENV，仅文件输入。 |
+| device_eviction_policy | lru | 仅支持 LRU。 |
 | disable_decode_first_malloc_device_reuse | false | real 内部 CacheConfig 属性，文件输入；不杜撰公开 ENV 名。 |
-| block_tree_device_evict_low/high_watermark_ratio | 0.82 / 0.90 | Device 水位。 |
-| block_tree_memory_evict_low/high_watermark_ratio | 0.90 / 0.94 | Host 水位。 |
 | gpu_max_batch_size / gpu_batch_wait_ms | 1 / 10 ms | 仅 V；batch=1 为逐请求执行且等待为 0；>1 同时限制 Forward 工作块数与媒体数，较大图片组分轮执行。 |
 | vit_concurrency / vit_max_queue_size | 64 / 64 | 异步工作线程上限 / 额外等待额度；总准入和 GPU 就绪队列容量为两者之和。 |
 | mm_cache_gpu_max_bytes / mm_cache_cpu_max_bytes | 各 2 GiB | V embedding 缓存逻辑预算，单位 byte。 |
@@ -239,7 +220,6 @@ real 默认值和映射以 `rtp_llm/server/server_args`、`rtp_llm/config/engine
 | 参数 | 含义 |
 | --- | --- |
 | mock.scheduler.mode | P 调度方式，默认 `fifo` 按单请求入队、自主组 Forward batch，拒绝 `EnqueueBatch`/`EnqueueGroup`；`group` 显式启用组语义。ENV 为 `MOCK_SCHEDULER_MODE`；D 始终使用普通调度。 |
-| mock.cache.memory.blocks | P/D Host 逻辑块预算，默认 0；不是 real 的 memory_cache_size_mb。本模型不加载层/head/dtype 来计算每块字节数，所以忽略 memory_cache_size_mb，不能把 MB 当块数。 |
 | mock.vit.skip.download | 默认 false；true 时只跳过实际图片读取，使用输入宽高，其余异步调度不变。 |
 | mock.compute.forward.expression | 必填，Forward 公式，结果单位 ms。 |
 | mock.compute.forward.noise.stddev.ms / stddev.ratio / max.deviation.ms / seed | 有界噪声，详见 Compute；数值后缀均相对 mock.compute.forward.noise。 |
@@ -380,19 +360,13 @@ prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collect
 
 ### RTP 调度实现边界
 
-`RtpSchedulerBase` 共享请求状态、KV 引用、PD 生命周期、Forward 提交和取消，并提供运行状态和指标采样源；`RtpScheduler` 仅做普通 FIFO 准入，`RtpGroupScheduler` 单独拥有显式组队列、残余成员和普通/组之间的选择。组标识不改变普通请求的调度方式。选择在 Engine 启动时完成，不从 Master 配置推断，也不在运行中按请求切换。`fifo` 模式应配合 Master 的 `NON_BATCH` 交付；它仍会动态组成多请求 Forward batch。本地准备立即完成；普通调度器支持远端异步准备，显式 group 暂不支持远端适配器。
+`RtpSchedulerBase` 共享请求状态、KV 引用、PD 生命周期、Forward 提交和取消，并提供运行状态和指标采样源；`RtpScheduler` 仅做普通 FIFO 准入，`RtpGroupScheduler` 单独拥有显式组队列、残余成员和普通/组之间的选择。组标识不改变普通请求的调度方式。选择在 Engine 启动时完成，不从 Master 配置推断，也不在运行中按请求切换。`fifo` 模式应配合 Master 的 `NON_BATCH` 交付；它仍会动态组成多请求 Forward batch。两种调度器都同步准备本地缓存。
 
 `RtpNode` 装配指标导出，并在调度锁内调用采集。`RtpMetrics` 读取调度状态快照并按各指标的口径采样。
 
-### 缓存准备与远端接口
+### KVCM 元信息
 
-`KvCache.prepare` 返回准备操作或明确的永久/可重试容量错误。关闭远端时只执行本地匹配和分配，不创建传输线程。开启时，P 对本地缺失的连续前缀异步查询、读取；查到位置不增加复用量，读取成功才发布有效块并完成准备。读取失败保留有效本地前缀，由普通调度器重算缺失部分；请求总 deadline 不重置。D 的 PD 加载仍使用原有流程，不重复查询远端。
-
-`shared/cache/remote/RemoteCache` 仅定义逻辑 match/read/write，位置凭据由适配器自己持有，KvCache 持有本地容量和引用。接口执行在锁外虚拟线程中，整个查询/读取共用一次任务；不另设固定在途读写数量上限，资源占用由已有 KV 容量、引用和请求期限控制。接口返回/抛异常必须表示已停止访问本次资源；interrupt 只请求取消，不作为释放证明。尚未实现真实数据传输、存储 SDK、KVCM 写会话或 KVS。
-
-普通 RtpScheduler 将未就绪请求放入独立 CACHE_LOADING 阶段；完成通知只唤醒 RtpEngineLoop，maintain 在调度锁内更新有效前缀、把请求放回 waiting 队尾。loading 不阻塞其他请求，也计入本轮准入预算与已初始化 KV 请求数。回调不查找可复用的 request_id；取消后原操作不能再发布。LOAD 引用一直持有到工作线程退出，即使请求已取消。
-
-成功请求通过 `Lease.publishAndStore` 发布有效完整块，并以独立 STORE 引用提交后台写；请求终态不等写入，失败不回滚有效本地缓存。返回的 CompletionStage 反映写入及资源释放结果。节点关闭请求取消在途任务，未安全结束的任务继续持有引用，禁止提前复用块。`enable_remote_cache=false` 为默认；当前命令行/Whale 入口未安装适配器，不能直接开启为真实远端模式。测试仅通过显式 Java 装配注入可控适配器，不提供运行时假存储。
+KVCM Reporter 发布有效块事件、快照和心跳。它不承担 KV payload 读写。旧的 Host 容量、远端缓存开关和水位配置应从 Mock 配方移除。
 
 ### 状态与耗时口径（对照本分支 real）
 

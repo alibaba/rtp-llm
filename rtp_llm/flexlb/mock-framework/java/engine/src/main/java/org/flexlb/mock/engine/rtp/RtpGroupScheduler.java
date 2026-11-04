@@ -17,7 +17,6 @@ final class RtpGroupScheduler extends RtpSchedulerBase {
 
     RtpGroupScheduler(Object lock, RtpConfig config, KvCache cache, org.flexlb.mock.engine.TaskHistory finished) {
         super(lock, config, cache, finished);
-        if (cache.remoteEnabled()) throw new IllegalArgumentException("Remote KV requires mock.scheduler.mode=fifo");
     }
 
     @Override public List<InputResult> input(List<InputItem> batch) {

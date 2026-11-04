@@ -55,16 +55,6 @@ class BlockTreeTest {
             }
         }
     }
-    @Test void lfuAndFifoOnlyChangeOrderingOfEligibleTreeLeaves() {
-        for (var policy : List.of(LFU, FIFO)) try (var cache = new KvCache(1, 2, 0, policy)) {
-            seed(cache, 1L); seed(cache, 2L);
-            cache.acquire(1, List.of(1L)).lease().close();
-            try (var pressure = cache.acquire(1, List.of()).lease()) {
-                assertNotNull(pressure);
-                assertEquals(Set.of(policy == FIFO ? 2L : 1L), cache.snapshot(-1, true).keys());
-            }
-        }
-    }
     @Test void failedReuseBelowReserveLeavesNoNewPin() {
         try (var cache = new KvCache(1, 10, 1, LRU)) {
             seed(cache, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L);

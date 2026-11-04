@@ -86,6 +86,9 @@ public final class BlockPool {
         private Reference(BlockPool owner, Block block, Kind kind) {
             this.owner = owner; this.block = block; this.kind = kind;
         }
+        boolean inUse() {
+            synchronized (owner) { return block.activeRefs > 0; }
+        }
         @Override public void close() { owner.release(this); }
     }
 }
