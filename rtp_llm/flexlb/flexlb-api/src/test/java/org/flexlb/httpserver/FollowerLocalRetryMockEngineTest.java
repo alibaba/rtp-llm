@@ -9,8 +9,8 @@ import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.RouteService;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Timeout;
@@ -34,8 +34,7 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
     @Timeout(value = 20, unit = TimeUnit.SECONDS)
     void followerRecoveryDispatchesExactlyOnceToMockEngine(String failure) throws Exception {
         RouteService remoteRoutes = mock(RouteService.class);
-        RouteService localRoutes =
-                new RouteService(scheduler, mock(RecentCacheKeyTraceReporter.class));
+        RouteService localRoutes = new RouteService(scheduler, mock(TheoryCacheHitReporter.class));
         try (Node oldMaster = new Node("10.0.0.1", remoteRoutes);
                 Node follower = new Node("10.0.0.2", localRoutes)) {
             when(follower.leadership.getMasterHostIpPort()).thenReturn(oldMaster.httpAddress());
@@ -72,6 +71,7 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
                 assertTrue(response.getEnqueuedByMaster());
                 assertTrue(response.getLifecycle().getBatchId() > 0);
                 assertEquals(requestId, response.getLifecycle().getRequestId());
+                assertEquals(Long.toString(requestId), response.getLifecycle().getRequestIdStr());
                 assertEquals(
                         1,
                         mockPrefillWorker.getEnqueueCount(),

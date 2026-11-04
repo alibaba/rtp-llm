@@ -1,5 +1,13 @@
 package(default_visibility = ["//visibility:public"])
 
+exports_files(
+    ["models/deepseek_v4.py"],
+    visibility = [
+        "//rtp_llm/models_py:__pkg__",
+        "//rtp_llm/models_py/modules/dsv4/ppu/test:__pkg__",
+    ],
+)
+
 exports_files([
     "ops/libth_transformer_config.pyi",
     "ops/librtp_compute_ops/__init__.pyi",

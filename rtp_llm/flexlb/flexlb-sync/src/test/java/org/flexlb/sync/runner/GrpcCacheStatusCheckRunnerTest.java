@@ -2,8 +2,8 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -64,7 +64,7 @@ class GrpcCacheStatusCheckRunnerTest {
 
         new GrpcCacheStatusCheckRunner(
                         "test-model",
-                        status.getIpPort(),
+                        status.getLogicalIpPort(),
                         "test-site",
                         RoleType.DECODE,
                         status,
@@ -90,10 +90,10 @@ class GrpcCacheStatusCheckRunnerTest {
     void testGrpcCacheStatusCheckRunner() {
         // Arrange
         String modelName = "test-model";
-        String ipPort = "127.0.0.1:8080";
         String site = "test-site";
 
         WorkerStatus workerStatus = workerStatus();
+        String ipPort = workerStatus.getLogicalIpPort();
         WorkerDirectory directory = directory(workerStatus);
 
         EngineRpcService.CacheStatusPB cacheStatusPB =
@@ -111,7 +111,7 @@ class GrpcCacheStatusCheckRunnerTest {
                         anyLong(),
                         eq(RoleType.PREFILL)))
                 .thenReturn(CompletableFuture.completedFuture(cacheStatusPB));
-        when(localKvCacheAwareManager.updateEngineBlockCache(workerStatus))
+        when(localKvCacheAwareManager.updateFromWorkerStatus(workerStatus))
                 .thenReturn(
                         WorkerCacheUpdateResult.builder().success(true).cacheVersion(1).build());
 
@@ -157,8 +157,8 @@ class GrpcCacheStatusCheckRunnerTest {
 
     @Test
     void failedCacheIndexUpdateRetriesTheSameWorkerVersion() {
-        String ipPort = "127.0.0.1:8080";
         WorkerStatus workerStatus = workerStatus();
+        String ipPort = workerStatus.getLogicalIpPort();
         WorkerDirectory directory = directory(workerStatus);
         EngineRpcService.CacheStatusPB firstResponse =
                 EngineRpcService.CacheStatusPB.newBuilder().setVersion(1).setBlockSize(128).build();
@@ -175,7 +175,7 @@ class GrpcCacheStatusCheckRunnerTest {
                         CompletableFuture.completedFuture(firstResponse),
                         CompletableFuture.completedFuture(secondResponse),
                         CompletableFuture.completedFuture(secondResponse));
-        when(localKvCacheAwareManager.updateEngineBlockCache(workerStatus))
+        when(localKvCacheAwareManager.updateFromWorkerStatus(workerStatus))
                 .thenReturn(
                         WorkerCacheUpdateResult.builder().success(true).cacheVersion(1).build(),
                         WorkerCacheUpdateResult.builder()
@@ -213,8 +213,8 @@ class GrpcCacheStatusCheckRunnerTest {
 
     @Test
     void staleGenerationCallbackCannotPublishAddressCache() {
-        String ipPort = "127.0.0.1:8080";
         WorkerStatus oldStatus = workerStatus();
+        String ipPort = oldStatus.getLogicalIpPort();
         WorkerDirectory directory = Mockito.mock(WorkerDirectory.class);
         when(directory.isCurrentStatus(RoleType.PREFILL, ipPort, oldStatus)).thenReturn(false);
         CompletableFuture<EngineRpcService.CacheStatusPB> response = new CompletableFuture<>();
@@ -255,7 +255,7 @@ class GrpcCacheStatusCheckRunnerTest {
                         .setBlockSize(128)
                         .build());
 
-        verify(localKvCacheAwareManager, never()).updateEngineBlockCache(oldStatus);
+        verify(localKvCacheAwareManager, never()).updateFromWorkerStatus(oldStatus);
     }
 
     private void runCachePoll(
@@ -287,7 +287,7 @@ class GrpcCacheStatusCheckRunnerTest {
 
     private static WorkerDirectory directory(WorkerStatus status) {
         WorkerDirectory directory = new WorkerDirectory(Mockito.mock(EndpointRegistry.class));
-        directory.currentOrDiscover(status.getRole(), status.getIpPort(), () -> status);
+        directory.currentOrDiscover(status.getRole(), status.getLogicalIpPort(), () -> status);
         return directory;
     }
 }

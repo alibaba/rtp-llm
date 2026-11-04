@@ -32,7 +32,7 @@ for variant in ("before", "after"):
         body = (
             body[:a]
             + """        var selected = GroupPlanner.select(items, GroupPlanner.itemAccess(), constraints(size),
-                prefix -> model.predictBatchMs(PrefillBatchFeatures.from(prefix,
+                prefix -> model.predictBatchMs(org.flexlb.balance.prediction.PrefillBatchFeatures.from(prefix,
                         GroupPlanner.Item::seqLen, GroupPlanner.Item::hitCache)));"""
             + body[b:]
         )

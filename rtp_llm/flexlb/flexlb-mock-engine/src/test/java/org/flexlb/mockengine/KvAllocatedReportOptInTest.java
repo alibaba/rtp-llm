@@ -198,7 +198,7 @@ class KvAllocatedReportOptInTest {
                 status.getFinishedTaskListList().stream()
                         .anyMatch(
                                 task ->
-                                        task.getRequestId() == 2L
+                                        task.getRequestId() == 2
                                                 && task.getErrorInfo().getErrorCode()
                                                         == EngineRpcService.ErrorCodePB.CANCELLED
                                                                 .getNumber());

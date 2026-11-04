@@ -15,8 +15,9 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -57,7 +58,8 @@ class BatchDeliveryStrategyTest {
         ConfigService configs = mock(ConfigService.class);
         when(configs.loadBalanceConfig()).thenReturn(config);
         EngineGrpcClient client = mock(EngineGrpcClient.class);
-        DefaultBatchDispatcher dispatcher = new DefaultBatchDispatcher(client, configs, null, 1, 1);
+        DefaultBatchDispatcher dispatcher =
+                new DefaultBatchDispatcher(client, configs, NoOpFlexMonitor.getInstance(), 1, 1);
         when(fixture.capabilities.prefill().getIp()).thenReturn("127.0.0.1");
         when(fixture.capabilities.prefill().getGrpcPort()).thenReturn(8090);
         ServerStatus prefill = new ServerStatus();
@@ -81,7 +83,7 @@ class BatchDeliveryStrategyTest {
             ScheduledRequest item = fixture.item(id);
             BalanceContext context = new BalanceContext(config);
             Request request = new Request();
-            request.setRequestId(id);
+            request.setRequestId(Long.toString(id));
             context.setRequest(request);
             // Rope concatenation shares the large immutable payload across all 64 inputs.
             context.setGenerateInputPb(
@@ -424,7 +426,7 @@ class BatchDeliveryStrategyTest {
                         1_000L,
                         List.of(
                                 new WorkSnapshot.RequestWork(
-                                        99L, WorkSnapshot.Phase.COMMITTED, 25L)),
+                                        "99", WorkSnapshot.Phase.COMMITTED, 25L)),
                         List.of(),
                         0L));
 

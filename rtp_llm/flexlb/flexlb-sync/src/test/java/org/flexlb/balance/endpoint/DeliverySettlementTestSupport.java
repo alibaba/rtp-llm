@@ -23,7 +23,7 @@ public final class DeliverySettlementTestSupport {
             new PrefillState(
                     lock,
                     PrefillActiveIndex.ordered(
-                            4, Comparator.comparingLong(ScheduledRequest::requestId)),
+                            4, Comparator.comparing(ScheduledRequest::requestId)),
                     System::currentTimeMillis,
                     () -> {});
     private final EndpointGenerationLifecycle generation =
@@ -69,7 +69,7 @@ public final class DeliverySettlementTestSupport {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
         response.setRunningTaskInfo(Map.of());
-        response.setFinishedTaskInfo(Map.of(Long.toString(item.requestId()), finished));
+        response.setFinishedTaskInfo(Map.of(item.requestId(), finished));
         var observation =
                 EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090)
                         .freezeStatusResponse(response);
@@ -106,7 +106,7 @@ public final class DeliverySettlementTestSupport {
 
     public static void decodeStatus(DecodeEndpoint endpoint, long requestId, boolean finished) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(Long.toString(requestId));
         task.setPhase(finished ? null : TaskPhase.KV_ALLOCATED);
         WorkerStatusResponse response = new WorkerStatusResponse();
         var tasks = Map.of(Long.toString(requestId), task);

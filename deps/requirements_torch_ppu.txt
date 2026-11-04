@@ -8,6 +8,7 @@ flashinfer-python @ https://pkg.flytiger-eco.com/artifactory/pypi_generic/flashi
 deep-gemm @ https://pkg.flytiger-eco.com/artifactory/pypi_generic/deep_gemm/1.0.0+v0.4.0.ppu2.2.0/deep_gemm-1.0.0+cu130torch2.11.0alios7u2oe-cp312-cp312-linux_x86_64.whl#sha256=7e42900e3e86927f874daac8466f2d8611efe9b0c2ffeea30a306fe5e445a0cd
 deep-ep @ https://pkg.flytiger-eco.com/artifactory/pypi_generic/deep_ep/2.2.1+v0.1.0.ppu2.2.0/deep_ep-2.2.1+cu130torch2.11.0alios7u2oe-cp312-cp312-linux_x86_64.whl#sha256=e02ca174935722009cb89180bed021caf092f37b32fe5bdd75d388aaa7ff1fda
 fast-hadamard-transform @ https://pkg.flytiger-eco.com/artifactory/pypi_generic/fast_hadamard_transform/1.1.0.post2+v0.1.0.ppu2.2.0/fast_hadamard_transform-1.1.0.post2+cu130torch2.11.0alios7u2ce-cp312-cp312-linux_x86_64.whl#sha256=a310e83135c8cc717a6568ead29fd004839aa192d8ddc0f0cf99d077b6dc2294
+deep-gemm-mega @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/ppu/deep_gemm_mega-2.1.0%2Bppu2.2.0.torch2.11.cu130.r1-cp312-cp312-linux_x86_64.whl#sha256=48039c6fbac4832b8990fdc1ace9ce1b5bfc3a7c4d7fa02a9b5172e01f78c392
 mkl==2021.1.1
 # Flash checkpoints contain F8_E8M0 scale tensors.
 safetensors==0.8.0

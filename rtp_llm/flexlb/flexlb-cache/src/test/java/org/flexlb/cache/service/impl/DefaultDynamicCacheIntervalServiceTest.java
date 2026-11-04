@@ -1,5 +1,6 @@
 package org.flexlb.cache.service.impl;
 
+import org.flexlb.cache.match.localsync.DefaultDynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.WorkerRegistryConfig;

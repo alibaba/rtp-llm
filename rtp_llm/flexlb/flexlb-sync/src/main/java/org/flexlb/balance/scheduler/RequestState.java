@@ -4,7 +4,8 @@ import java.util.Objects;
 
 /** Immutable public view of one canonical request generation. */
 public record RequestState(
-        long requestId,
+        String requestId,
+        long originalNumericRequestId,
         Phase state,
         DeliveryClaimKind deliveryClaimKind,
         long batchId,

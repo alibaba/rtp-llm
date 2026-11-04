@@ -7,6 +7,8 @@ import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimTerminal;
 import org.flexlb.balance.scheduler.PreemptionRegistration;
 import org.flexlb.balance.scheduler.RequestRegistry;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -44,9 +46,9 @@ public final class DecodePreemptionCoordinator {
 
     record PreemptionCommand(
             DecodeEndpoint endpoint,
-            long incomingRequestId,
+            String incomingRequestId,
             long incomingKvTokens,
-            long incomingExpectedKvTokens,
+            long incomingKvBudgetTokens,
             int incomingPriority,
             DecodeEndpoint.AdmissionCapacity capacity,
             List<DecodeRequestView> victims,
@@ -59,17 +61,19 @@ public final class DecodePreemptionCoordinator {
                 throw new IllegalArgumentException("endpoint and victims are required");
             }
             victims = List.copyOf(victims);
-            if (incomingRequestId <= 0L) {
-                throw new IllegalArgumentException("incoming request id must be positive");
+            if (incomingRequestId == null || incomingRequestId.isBlank()) {
+                throw new IllegalArgumentException("incoming request id must not be blank");
             }
             if (capacity == null) {
                 throw new IllegalArgumentException("capacity policy is required");
             }
-            Set<Long> victimIds = new LinkedHashSet<>();
+            Set<String> victimIds = new LinkedHashSet<>();
             for (DecodeRequestView victim : victims) {
-                if (victim.requestId() <= 0L || victim.reservationToken() <= 0L) {
+                if (victim.requestId() == null
+                        || victim.requestId().isBlank()
+                        || victim.reservationToken() <= 0L) {
                     throw new IllegalArgumentException(
-                            "victim requestId and reservation token must be positive");
+                            "victim requestId must not be blank and reservation token must be positive");
                 }
                 if (victim.phase() == null || !victim.phase().requiresEngineCancel()) {
                     throw new IllegalArgumentException(
@@ -87,12 +91,46 @@ public final class DecodePreemptionCoordinator {
 
     private final EngineCancelChannel cancelChannel;
     private final RequestRegistry requests;
+    private final RequestSchedulerReporter reporter;
     private final AtomicLong tokenSequence = new AtomicLong(1);
 
     public DecodePreemptionCoordinator(
-            EngineCancelChannel cancelChannel, RequestRegistry requests) {
+            EngineCancelChannel cancelChannel,
+            RequestRegistry requests,
+            RequestSchedulerReporter reporter) {
         this.cancelChannel = Objects.requireNonNull(cancelChannel, "cancelChannel");
         this.requests = Objects.requireNonNull(requests, "requests");
+        this.reporter = Objects.requireNonNull(reporter, "reporter");
+    }
+
+    CompletableFuture<PreemptionResult> prepareReturnedPreemption(PreemptionCommand command) {
+        long token = nextToken();
+        long generation = command.endpoint().getStatus().getGenerationId();
+        List<DecodeEndpoint.ReservationHandle> victims =
+                command.victims().stream()
+                        .map(
+                                victim ->
+                                        new DecodeEndpoint.ReservationHandle(
+                                                generation,
+                                                victim.requestId(),
+                                                victim.reservationToken()))
+                        .toList();
+        DecodeEndpoint.PreemptionBeginResult begin =
+                command.endpoint()
+                        .beginReturnedPreemption(
+                                token,
+                                victims,
+                                command.incomingRequestId(),
+                                command.incomingKvTokens(),
+                                command.incomingKvBudgetTokens(),
+                                command.incomingPriority(),
+                                command.capacity());
+        reportTargetValidationResult("return", begin);
+        return CompletableFuture.completedFuture(
+                new PreemptionResult(
+                        begin == DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                        begin == DecodeEndpoint.PreemptionBeginResult.ENDPOINT_RETIRED,
+                        "return_" + begin.name().toLowerCase()));
     }
 
     CompletableFuture<PreemptionResult> preempt(PreemptionCommand command) {
@@ -105,6 +143,7 @@ public final class DecodePreemptionCoordinator {
             Optional<CancelTarget> target =
                     requests.findCancelTarget(victim.requestId(), victim.reservationToken());
             if (target.isEmpty()) {
+                reportTargetValidationFailure("rpc", "cancel_target_unavailable");
                 return CompletableFuture.completedFuture(
                         new PreemptionResult(
                                 false, true, "cancel_owner_missing:" + victim.requestId()));
@@ -126,12 +165,14 @@ public final class DecodePreemptionCoordinator {
                                 token,
                                 command.detail());
                 if (claimAttempt.isEmpty()) {
+                    reportTargetValidationFailure("rpc", "request_claim_rejected");
                     return CompletableFuture.completedFuture(
                             capability.abort(false, "victim_inflight_gone"));
                 }
                 PreemptionRegistration claim = claimAttempt.get();
                 ClaimedVictim owned = capability.add(victim, targets.get(index), claim);
-                if (claim.requestId() != victim.requestId() || claim.attemptToken() != token) {
+                if (!Objects.equals(claim.requestId(), victim.requestId())
+                        || claim.attemptToken() != token) {
                     return CompletableFuture.completedFuture(
                             capability.abort(
                                     true,
@@ -146,10 +187,11 @@ public final class DecodePreemptionCoordinator {
                                     victimReservations,
                                     command.incomingRequestId(),
                                     command.incomingKvTokens(),
-                                    command.incomingExpectedKvTokens(),
+                                    command.incomingKvBudgetTokens(),
                                     command.incomingPriority(),
                                     command.capacity());
             if (begin != DecodeEndpoint.PreemptionBeginResult.SUCCESS) {
+                reportTargetValidationResult("rpc", begin);
                 return CompletableFuture.completedFuture(
                         capability.abort(
                                 begin == DecodeEndpoint.PreemptionBeginResult.ENDPOINT_RETIRED,
@@ -219,6 +261,32 @@ public final class DecodePreemptionCoordinator {
         } catch (RuntimeException | Error failure) {
             return CompletableFuture.completedFuture(
                     capability.abort(true, "coordinator_setup_failed:" + failureDetail(failure)));
+        }
+    }
+
+    private void reportTargetValidationResult(
+            String mode, DecodeEndpoint.PreemptionBeginResult result) {
+        String reason =
+                switch (result) {
+                    case VICTIM_GONE -> "victim_state_changed";
+                    case VICTIM_ALREADY_CLAIMED -> "victim_already_claimed";
+                    case INVALID_PRIORITY -> "priority_not_preemptible";
+                    default -> null;
+                };
+        if (reason != null) {
+            reportTargetValidationFailure(mode, reason);
+        }
+    }
+
+    private void reportTargetValidationFailure(String mode, String reason) {
+        try {
+            reporter.reportPreemptionTargetInvalid(mode, reason);
+        } catch (RuntimeException metricFailure) {
+            Logger.warn(
+                    "Failed to report preemption target validation: mode={} reason={}",
+                    mode,
+                    reason,
+                    metricFailure);
         }
     }
 
@@ -427,7 +495,7 @@ public final class DecodePreemptionCoordinator {
             return claim;
         }
 
-        private long requestId() {
+        private String requestId() {
             return victim.requestId();
         }
     }
@@ -494,7 +562,7 @@ public final class DecodePreemptionCoordinator {
         }
 
         private synchronized boolean recordTerminal(ClaimedVictim owned, VictimTerminal terminal) {
-            if (terminal == null || terminal.requestId() != owned.requestId()) {
+            if (terminal == null || !Objects.equals(terminal.requestId(), owned.requestId())) {
                 return false;
             }
             return recordTerminal(owned);
