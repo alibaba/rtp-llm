@@ -1170,6 +1170,47 @@ TEST_F(StreamCacheResourceTest, testCacheLoadPrepareFailureHasNoWaitLatency) {
     EXPECT_GE(metrics.match_to_ready_latency_us, metrics.match_cost_time_us + metrics.load_prepare_latency_us);
 }
 
+TEST_F(StreamCacheResourceTest, CacheLoadRetryWithoutLoadClearsPrepareFailureMetrics) {
+    prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    for (bool matched : {false, true}) {
+        SCOPED_TRACE(matched);
+        MallocResult failed{false, 0, 100, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
+        failed.malloc_begin_time_us    = currentTimeUs() - 400;
+        failed.match_end_time_us       = failed.malloc_begin_time_us + 100;
+        failed.load_prepare_latency_us = 300;
+        failed.load_attempted          = true;
+        resource.recordCacheReuseMallocResult(failed);
+        ASSERT_TRUE(resource.cache_reuse_metrics_.report_load_metrics);
+        ASSERT_FALSE(resource.cache_reuse_metrics_.load_success);
+        ASSERT_TRUE(resource.cache_reuse_metrics_.report_match_to_ready_latency);
+
+        MallocResult retry{true, 0};
+        retry.device_input_length  = 6;
+        retry.malloc_begin_time_us = currentTimeUs() - 20;
+        retry.match_end_time_us    = matched ? retry.malloc_begin_time_us + 10 : 0;
+        retry.match_cost_time_us   = matched ? 10 : 0;
+        resource.recordCacheReuseMallocResult(retry);
+
+        const auto& metrics = resource.cache_reuse_metrics_;
+        EXPECT_FALSE(metrics.load_attempted);
+        EXPECT_FALSE(metrics.load_success);
+        EXPECT_FALSE(metrics.report_load_metrics);
+        EXPECT_FALSE(metrics.report_load_wait_latency);
+        EXPECT_EQ(metrics.load_prepare_latency_us, 0);
+        EXPECT_EQ(metrics.load_wait_latency_us, 0);
+        EXPECT_EQ(metrics.device_input_length, retry.device_input_length);
+        EXPECT_EQ(metrics.match_cost_time_us, retry.match_cost_time_us);
+        EXPECT_EQ(metrics.report_match_cost_time, matched);
+        EXPECT_EQ(metrics.report_match_to_ready_latency, matched);
+        if (matched) {
+            EXPECT_GE(metrics.match_to_ready_latency_us, retry.match_cost_time_us);
+        } else {
+            EXPECT_EQ(metrics.match_to_ready_latency_us, 0);
+        }
+    }
+}
+
 TEST_F(StreamCacheResourceTest, testCacheLoadFailureKeepsDeviceReuseMetrics) {
     prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
     StreamCacheResource&         resource = stream_->streamCacheResource();
@@ -1425,6 +1466,9 @@ TEST_F(StreamCacheResourceTest, RemoteTimeoutAllocationRetryKeepsLocalLookupAndS
         ASSERT_TRUE(context->localLoadSucceeded());
 
         EXPECT_TRUE(absl::IsUnavailable(resource.waitForAllocatorLoad()));
+        ASSERT_TRUE(resource.cache_reuse_metrics_.report_load_metrics);
+        ASSERT_FALSE(resource.cache_reuse_metrics_.load_success);
+        ASSERT_TRUE(resource.cache_reuse_metrics_.report_load_wait_latency);
         EXPECT_EQ(resource.curBlocksNum(), 0);
         EXPECT_EQ(stream_->reuseLength(), 0);
         pool->decRef(*held);
@@ -1432,11 +1476,16 @@ TEST_F(StreamCacheResourceTest, RemoteTimeoutAllocationRetryKeepsLocalLookupAndS
         ASSERT_TRUE(resource.initKVBlock().ok());
         ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
         EXPECT_EQ(backend->matchCalls(), 1u);
-        // Detaching under pressure may evict an ordinary prefix. A resident
-        // prefix survives and must remain eligible for local lookup on retry.
-        EXPECT_EQ(stream_->reuseLength(), resident ? 2 : 0);
-        EXPECT_EQ(stream_->deviceReuseLength(), resident ? 2 : 0);
+        // Atomic suffix replacement preserves the local prefix on allocation retry.
+        EXPECT_EQ(stream_->reuseLength(), 2);
+        EXPECT_EQ(stream_->deviceReuseLength(), 2);
         EXPECT_EQ(stream_->remoteReuseLength(), 0);
+        EXPECT_FALSE(resource.cache_reuse_metrics_.load_attempted);
+        EXPECT_FALSE(resource.cache_reuse_metrics_.report_load_metrics);
+        EXPECT_FALSE(resource.cache_reuse_metrics_.report_load_wait_latency);
+        EXPECT_EQ(resource.cache_reuse_metrics_.load_prepare_latency_us, 0);
+        EXPECT_EQ(resource.cache_reuse_metrics_.load_wait_latency_us, 0);
+        EXPECT_TRUE(resource.cache_reuse_metrics_.report_match_to_ready_latency);
     }
 }
 
