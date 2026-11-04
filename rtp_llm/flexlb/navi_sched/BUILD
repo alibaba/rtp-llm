@@ -36,6 +36,7 @@ cc_library(
     ]),
     deps = [
         "//rtp_llm/flexlb/navi_sched/vendor/navi:navi",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi_headers",
         "//rtp_llm/flexlb/navi_sched/vendor/navi:navi_runtime_config",
         "//rtp_llm/flexlb/navi_sched/vendor/autil:hash_util",
         "//rtp_llm/flexlb/navi_sched/vendor/autil:json",

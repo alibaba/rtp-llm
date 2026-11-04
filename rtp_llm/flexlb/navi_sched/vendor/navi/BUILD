@@ -59,6 +59,7 @@ cc_library(
         "engine/ResourceCreator.h",
         "engine/ResourceInitContext.h",
         "engine/ResourceMap.h",
+        "engine/SummaryBuilder.h",
         "engine/CollectFlags.h",
         "engine/RunGraphParams.h",
         "engine/TimeoutChecker.h",
