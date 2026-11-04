@@ -76,6 +76,7 @@ if [[ ! -f "${PYTHON_LIBRARY}" ]]; then
 fi
 
 export PATH="$(dirname "${PYTHON_BIN}"):${PATH}"
+export PYTHON_BIN_PATH="${PYTHON_BIN}"
 export NAVI_PYTHON_HOME="${REPO_ROOT}/aios/navi/config_loader/python:\
 ${PYTHON_LIB_DIR}/python${PYTHON_VERSION}"
 

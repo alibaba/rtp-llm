@@ -298,10 +298,6 @@ cc_library(
         "-Wno-aligned-new",
     ],
     include_prefix = "navi",
-    linkopts = [
-        "-L/opt/conda310/lib",
-        "-lpython3.10",
-    ],
     deps = [
         ":navi_builder_headers",
         ":navi_builder_inner",
@@ -318,7 +314,8 @@ cc_library(
         "//rtp_llm/flexlb/navi_sched/vendor/third_party/elfutils-libelf",
         "//rtp_llm/flexlb/navi_sched/vendor/third_party/libev",
         "//rtp_llm/flexlb/navi_sched/vendor/third_party/tbb",
-        "@python3.10_header//:python3.10_headers",
+        "@local_config_python//:python_headers",
+        "@local_config_python//:python_lib",
     ],
     alwayslink = True,
 )
