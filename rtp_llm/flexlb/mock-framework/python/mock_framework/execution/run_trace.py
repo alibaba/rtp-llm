@@ -24,7 +24,7 @@ def write_json(path, value):
             temporary.unlink(missing_ok=True)
 
 
-class Records:
+class RunTrace:
     def __init__(self, directory, case, launch):
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=False)

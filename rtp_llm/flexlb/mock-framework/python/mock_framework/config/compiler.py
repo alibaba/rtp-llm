@@ -4,11 +4,10 @@ from pathlib import Path
 import re
 
 from .environment import compile_environment
-from .errors import ConfigError
-from .model import Step, CompiledCase, Expect, Phase, Reference
+from .compiled_case import Step, CompiledCase, Expect, Phase, Reference
 from .parser import load_yaml
 from .registry import Registry
-from .validation import compatible, duration, fields, text, validate
+from .validation import ConfigError, compatible, duration, fields, text, validate
 
 _ID = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 _GLOBALS = {'type': 'object', 'properties': {

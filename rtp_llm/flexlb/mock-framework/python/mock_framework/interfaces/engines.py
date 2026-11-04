@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from typing import Annotated, Literal
 from ..config.registry import Bounds, case_interface
+from ..execution.runner import CaseContext
 from .master import Targets
 
 
@@ -18,12 +19,12 @@ class ScaleIn(Targets):
 
 
 @case_interface('engine/scale_out', effect='write')
-async def scale_out(ctx, args: ScaleOut) -> list[str]:
+async def scale_out(ctx: CaseContext, args: ScaleOut) -> list[str]:
     """Create count instances from the role's configuration; return their service addresses."""
     return await ctx.runtime.engines.create(args.role, args.count)
 
 
 @case_interface('engine/scale_in', effect='write')
-async def scale_in(ctx, args: ScaleIn) -> list[str]:
+async def scale_in(ctx: CaseContext, args: ScaleIn) -> list[str]:
     """Stop all selected instances by default; count limits the fixed selection."""
     return await ctx.runtime.engines.remove(args.role, args.targets, args.count)

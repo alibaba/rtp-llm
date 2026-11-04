@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from typing import Annotated, Literal
 from ..config.registry import Bounds, case_interface
+from ..execution.runner import CaseContext
 from ..execution.transport import post, ExecutionError
 
 
@@ -39,7 +40,7 @@ class MasterSelection(Targets):
 
 
 @case_interface('master/get', effect='read')
-async def get(ctx, args: MasterSelection) -> list[str]:
+async def get(ctx: CaseContext, args: MasterSelection) -> list[str]:
     """List active Masters, optionally filtering their actual leadership claims."""
     masters = selected(ctx, args.targets)
     if args.is_leader is None:
@@ -56,7 +57,7 @@ async def get(ctx, args: MasterSelection) -> list[str]:
 
 
 @case_interface('master/engine/get', effect='read')
-async def engines(ctx, args: EngineSelection) -> dict[str, list[str]]:
+async def engines(ctx: CaseContext, args: EngineSelection) -> dict[str, list[str]]:
     """Keep each Master's discovered Engine addresses separate."""
     result = {}
     for master in selected(ctx, args.targets):
@@ -78,7 +79,7 @@ class Start:
 
 
 @case_interface('master/start', effect='write')
-async def start(ctx, args: Start) -> list[str]:
+async def start(ctx: CaseContext, args: Start) -> list[str]:
     """Create new Master JVMs in this run's election group; never reuse stopped identities."""
     return await ctx.runtime.masters.start(args.count)
 
@@ -89,12 +90,12 @@ class Stop(Targets):
 
 
 @case_interface('master/stop', effect='write')
-async def stop(ctx, args: Stop) -> list[str]:
+async def stop(ctx: CaseContext, args: Stop) -> list[str]:
     """Stop selected Master JVMs, or all active Masters when targets is omitted."""
     return await ctx.runtime.masters.stop(args.targets, args.mode)
 
 
 @case_interface('master/restart', effect='write')
-async def restart(ctx, args: Targets) -> list[str]:
+async def restart(ctx: CaseContext, args: Targets) -> list[str]:
     """Restore stopped Masters at their original service addresses with fresh process artifacts."""
     return await ctx.runtime.masters.restart(args.targets)

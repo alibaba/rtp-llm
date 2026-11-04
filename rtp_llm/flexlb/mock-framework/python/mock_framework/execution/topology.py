@@ -1,6 +1,6 @@
 """Single owner of current instance addresses. Readers receive detached snapshots."""
 import copy
-from .records import write_json
+from .run_trace import write_json
 from .transport import ExecutionError
 
 

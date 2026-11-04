@@ -163,7 +163,7 @@ def test_success_rate_rejects_a_missing_outcome_series(monkeypatch):
     {'range': ['0s', '0s']}, {'range': ['-20s', '1s']}, {'range': ['-20s']}])
 def test_success_rate_requires_an_explicit_valid_window(args):
     from mock_framework.config import Registry
-    from mock_framework.config.errors import ConfigError
+    from mock_framework.config import ConfigError
     with pytest.raises(ConfigError):
         Registry.standard().get('client/success_rate').arguments(args)
 

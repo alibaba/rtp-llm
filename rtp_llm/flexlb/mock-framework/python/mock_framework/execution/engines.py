@@ -5,7 +5,7 @@ import json
 import os
 import socket
 from ..config.validation import duration
-from .records import timestamp, write_json
+from .run_trace import timestamp, write_json
 from .transport import post, ExecutionError
 
 ROLES = ('prefill', 'decode', 'vit')

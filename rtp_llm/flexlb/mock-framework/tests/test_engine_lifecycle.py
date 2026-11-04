@@ -13,7 +13,7 @@ import yaml
 from mock_framework.config import Registry, compile_case
 from mock_framework.config.registry import case_interface
 from mock_framework.execution import prepare_launch, run_case, ExecutionError
-from mock_framework.execution.records import timestamp
+from mock_framework.execution.run_trace import timestamp
 from mock_framework.interfaces.engines import ScaleIn, ScaleOut, scale_in, scale_out
 from mock_framework.interfaces.metrics import Promql, query
 
@@ -101,7 +101,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
             assert (ctx.records.directory / 'components' / first['id'] / name).read_bytes() == content
         if owner.monitoring:
             # Keep an obsolete discovery target present while new instances are already serving.
-            from mock_framework.execution.records import write_json
+            from mock_framework.execution.run_trace import write_json
             from mock_framework.execution.monitoring import _get
             prom = owner.monitoring
             retired = {'targets': [urllib.parse.urlsplit(first['metrics']).netloc], 'labels': {'instance': first['rpc'], '__metrics_path__': '/metrics'}}
@@ -240,7 +240,7 @@ def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_addr
     async def exercise(ctx, args: Args) -> bool:
         from datetime import datetime
         from mock_framework.interfaces.master import engines, EngineSelection
-        from mock_framework.execution.records import write_json
+        from mock_framework.execution.run_trace import write_json
         from mock_framework.execution.monitoring import _get
         directory = ctx.records.directory / 'traffic'
         directory.mkdir()

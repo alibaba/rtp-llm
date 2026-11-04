@@ -4,7 +4,7 @@ import re
 import yaml
 from yaml.nodes import MappingNode
 
-from .errors import ConfigError
+from .validation import ConfigError
 
 
 class StrictLoader(yaml.SafeLoader):

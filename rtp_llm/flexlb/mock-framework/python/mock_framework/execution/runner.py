@@ -3,11 +3,11 @@ from dataclasses import dataclass
 import time
 from pathlib import Path
 
-from ..config.model import Reference
+from ..config.compiled_case import Reference
 from ..config.validation import duration, validate
 from .assertions import compare
 from .environment import RunEnvironment
-from .records import Records, timestamp, write_json
+from .run_trace import RunTrace, timestamp, write_json
 from .transport import ExecutionError
 
 
@@ -30,7 +30,7 @@ def resolve(value, results, globals):
 @dataclass(frozen=True)
 class CaseContext:
     runtime: RunEnvironment
-    records: Records
+    records: RunTrace
     query_time: str
     deadline: float
 
@@ -47,7 +47,7 @@ class CaseContext:
 
 
 async def run_case(case, registry, launch, directory):
-    records = Records(directory, case, launch)
+    records = RunTrace(directory, case, launch)
     runtime = RunEnvironment(case, launch, records)
     results = {}
     result = {'status': 'ERROR', 'started_at': timestamp()}
