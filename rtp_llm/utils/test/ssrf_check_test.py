@@ -37,7 +37,7 @@ PUBLIC_HOSTS = {
 
 
 @pytest.fixture(scope="session")
-def certificates(tmp_path_factory):
+def certificates(tmp_path_factory, request):
     directory = tmp_path_factory.mktemp("download-tls")
     ca_key, ca = directory / "ca.key", directory / "ca.pem"
     key, csr, cert = (
@@ -46,10 +46,12 @@ def certificates(tmp_path_factory):
         directory / "server.pem",
     )
     ext = directory / "server.ext"
+    certificate_hosts = ["origin.download.test", "other.download.test"]
+    certificate_hosts.extend(getattr(request, "param", ()))
     ext.write_text(
         "basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\n"
         "extendedKeyUsage=serverAuth\n"
-        "subjectAltName=DNS:origin.download.test,DNS:other.download.test\n"
+        "subjectAltName=" + ",".join("DNS:" + host for host in certificate_hosts) + "\n"
     )
     commands = [
         [

@@ -4,9 +4,23 @@ load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test")
 
 requirement([
     "grpcio",
+    "pytest",
+    "requests",
     "protobuf",
     "triton",
 ])
+
+py_library(
+    name = "ssrf_transport_test_support",
+    testonly = True,
+    srcs = ["ssrf_check_test.py"],
+    deps = [
+        ":pytest",
+        ":requests",
+        "//rtp_llm:safe_download",
+    ],
+    visibility = ["//visibility:public"],
+)
 
 filegroup(
     name = "testdata",

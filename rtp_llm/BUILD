@@ -157,16 +157,24 @@ _JIT_CACHE_SRCS = [
 _JIT_CACHE_ENV_SRCS = ["utils/jit_cache_env.py"]
 
 py_library(
+    name = "safe_download",
+    srcs = ["utils/ssrf_check.py"],
+    deps = [":requests"],
+)
+
+py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",
     ], exclude = _JIT_CACHE_SRCS + _JIT_CACHE_ENV_SRCS + [
+        "utils/ssrf_check.py",
         "utils/warmup.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
     ]),
     data = glob(["utils/moe_luts/*"]),
     deps = [
+        ":safe_download",
         ":jit_cache_env",
         ":torch",
         ":safetensors",

@@ -94,7 +94,12 @@ def _check_download(deadline, cancellation_event):
 def request_get(url, headers, timeout=None, *, deadline=None, cancellation_event=None):
     global REQUEST_GET
     if REQUEST_GET is None:
-        from rtp_llm.utils.ssrf_check import safe_request_get
+        from rtp_llm.utils.import_util import has_internal_source
+
+        if has_internal_source():
+            from internal_source.rtp_llm.utils.ssrf_check import safe_request_get
+        else:
+            from rtp_llm.utils.ssrf_check import safe_request_get
 
         REQUEST_GET = safe_request_get
 

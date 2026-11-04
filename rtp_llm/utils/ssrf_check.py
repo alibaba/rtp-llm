@@ -1,3 +1,4 @@
+import contextvars
 import ipaddress
 import logging
 import socket
@@ -10,6 +11,7 @@ from requests.adapters import HTTPAdapter
 logger = logging.getLogger(__name__)
 
 _MAX_REDIRECTS = 5
+_active_request_pin = contextvars.ContextVar("safe_download_request_pin", default=None)
 
 
 def _url_origin(url: str):
@@ -120,6 +122,9 @@ class _SSRFAdapter(HTTPAdapter):
     while TLS uses the original hostname for SNI and ``assert_hostname``.
     """
 
+    def _resolve_host(self, hostname: str) -> str:
+        return _resolve_and_validate_host(hostname)
+
     @staticmethod
     def _pin_connection(conn: Any, validated_ip: str, original_host: str, scheme: str):
         """Override the pool's TCP target to *validated_ip* while keeping TLS
@@ -150,11 +155,12 @@ class _SSRFAdapter(HTTPAdapter):
         parsed = urlparse(url)
         original_host = parsed.hostname
         if original_host:
-            try:
-                validated_ip = _resolve_and_validate_host(original_host)
-                self._pin_connection(conn, validated_ip, original_host, parsed.scheme)
-            except ValueError:
-                raise
+            pin = _active_request_pin.get()
+            if pin is not None and pin[0] is self and pin[1] == url:
+                validated_ip = pin[2]
+            else:
+                validated_ip = self._resolve_host(original_host)
+            self._pin_connection(conn, validated_ip, original_host, parsed.scheme)
         return conn
 
     def send(
@@ -168,7 +174,7 @@ class _SSRFAdapter(HTTPAdapter):
     ):
         parsed = urlparse(request.url)
         original_host = str(parsed.hostname or "")
-        validated_ip = _resolve_and_validate_host(original_host)
+        validated_ip = self._resolve_host(original_host)
         # Store for get_connection_with_tls_context / get_connection.
         # Do NOT rewrite request.url — keep the original hostname so that
         # TLS SNI and certificate verification work correctly.
@@ -177,7 +183,15 @@ class _SSRFAdapter(HTTPAdapter):
         # urllib3 would otherwise derive Host from the pinned IP. Preserve an
         # explicit caller Host; redirects to another origin discard it below.
         request.headers.setdefault("Host", parsed.netloc.rsplit("@", 1)[-1])
-        return super().send(request, stream, timeout, verify, cert, proxies)
+        # Older requests passes only a URL to get_connection. Reuse this exact
+        # request's validated address instead of opening a second DNS window.
+        # Context-local state keeps concurrent/nested sends isolated and is
+        # always cleared, including transport/TLS failures.
+        token = _active_request_pin.set((self, request.url, validated_ip))
+        try:
+            return super().send(request, stream, timeout, verify, cert, proxies)
+        finally:
+            _active_request_pin.reset(token)
 
 
 def safe_request_get(url: str, headers: Dict[str, str], timeout: int = 10):
@@ -192,12 +206,24 @@ def safe_request_get(url: str, headers: Dict[str, str], timeout: int = 10):
     Connections are pinned to the validated IP to close the DNS-rebinding window
     between URL validation and the actual TCP connect.
     """
-    current_url = _validate_url(url)
+    return _safe_request_get(
+        url, headers, timeout, validate_url=_validate_url, adapter_factory=_SSRFAdapter
+    )
+
+
+def _safe_request_get(url, headers, timeout, *, validate_url, adapter_factory):
+    """Shared transport; internal routing supplies a narrowly scoped host policy.
+
+    Every hop still passes validation and the pinning adapter. Routing never
+    delegates redirects, TLS verification, or credential handling to another
+    downloader.
+    """
+    current_url = validate_url(url)
     current_headers = requests.structures.CaseInsensitiveDict(headers)
     response = None
     session = requests.Session()
-    session.mount("http://", _SSRFAdapter())
-    session.mount("https://", _SSRFAdapter())
+    session.mount("http://", adapter_factory())
+    session.mount("https://", adapter_factory())
     with session:
         for _ in range(_MAX_REDIRECTS):
             response = session.get(
@@ -212,7 +238,7 @@ def safe_request_get(url: str, headers: Dict[str, str], timeout: int = 10):
                 response.close()
                 if not location:
                     break
-                next_url = _validate_url(urljoin(current_url, location))
+                next_url = validate_url(urljoin(current_url, location))
                 if _url_origin(current_url) != _url_origin(next_url):
                     # These caller headers belong to the original origin.
                     # Never restore them if a later hop returns to that origin.
