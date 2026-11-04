@@ -2,18 +2,15 @@ package org.flexlb.mock.protocol;
 
 import java.net.InetSocketAddress;
 import java.nio.file.*;
-import java.time.Instant;
 import java.util.*;
-import org.flexlb.mock.api.*;
 
 /** Test-only transport peer. Does not simulate Master, Engine, traffic or Prometheus. */
 public final class TransportProbe {
-    public record Request(@Argument(optional=true, minimum=0) Long delay_ms,
+    public record Request(@Argument(optional=true) Long delay_ms,
                           @Argument(optional=true) Double value,
                           @Argument(optional=true) Boolean empty,
                           @Argument(optional=true) Boolean invalid_result,
                           @Argument(optional=true) Boolean crash) {}
-    public record Echo(String query_time, String run, String observation) {}
     public record None() {}
     public record MasterRef(String id) {}
     public record MasterSet(List<MasterRef> instances) {}
@@ -22,11 +19,6 @@ public final class TransportProbe {
     public record MetricValue(double value, String unit) {}
     public record QuerySample(Map<String, String> labels, double value, String sample_time) {}
     public record QueryResult(List<QuerySample> samples, String query_time) {}
-    public record EngineRange(@Argument(ranges={"latest", "interval"}) TimeRange range) {}
-    public record Prepare(
-        @Argument(optional=true) OutputTokens output_tokens,
-        @Argument(optional=true) Integer priority) {}
-
     public static final class Implementation {
         public MasterReceipt action(Request args) {
             delay(args);
@@ -49,16 +41,6 @@ public final class TransportProbe {
             var engines = List.of("127.0.0.1:9002", "127.0.0.1:9001");
             return new PerMasterEngines(Map.of("master-0", engines, "master-1", engines));
         }
-        public Echo echo(EngineRange args, ControlServer.Context context) {
-            return new Echo(context.queryTime().toString(), context.run(), String.valueOf(context.observation()));
-        }
-        public MetricValue rangeMetric(EngineRange args, ControlServer.Context context) {
-            var observation = context.observation();
-            double start = ((Number) observation.get("start")).doubleValue();
-            double end = ((Number) observation.get("end")).doubleValue();
-            return new MetricValue(end - start, "s");
-        }
-        public None prepare(Prepare args) { return new None(); }
         private void delay(Request args) {
             if (Boolean.TRUE.equals(args.crash())) System.exit(17);
             if (args.delay_ms() != null) {
@@ -76,9 +58,6 @@ public final class TransportProbe {
             .route("probe/metric", Request.class, MetricValue.class, probe::metric)
             .route("probe/query", Request.class, QueryResult.class, false, probe::query)
             .route("probe/engines", None.class, PerMasterEngines.class, probe::engines)
-            .route("probe/echo", EngineRange.class, Echo.class, false, probe::echo)
-            .route("probe/range_metric", EngineRange.class, MetricValue.class, false, probe::rangeMetric)
-            .route("probe/prepare", Prepare.class, None.class, probe::prepare)
             .start();
     }
 

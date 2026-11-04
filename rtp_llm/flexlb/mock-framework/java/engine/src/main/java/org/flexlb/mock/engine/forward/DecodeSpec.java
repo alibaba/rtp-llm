@@ -1,12 +1,10 @@
 package org.flexlb.mock.engine.forward;
 
-import org.flexlb.mock.api.Argument;
-
 /** Mock progress parameters, shared across engine adapters. Not a native MTP algorithm selector. */
-public record DecodeSpec(@Argument(optional=true, minimum=0, maximum=2147483646) Integer draft_tokens,
-                         @Argument(optional=true, minimum=0, maximum=1) Double acceptance_rate,
-                         @Argument(optional=true) Long seed,
-                         @Argument(optional=true, minimum=1, maximum=2147483647) Double tokens_per_step) {
+public record DecodeSpec(Integer draft_tokens,
+                         Double acceptance_rate,
+                         Long seed,
+                         Double tokens_per_step) {
     public DecodeSpec {
         boolean speculative = draft_tokens != null && draft_tokens != 0
             || acceptance_rate != null && acceptance_rate != 0 || seed != null && seed != 0;

@@ -1,9 +1,7 @@
 package org.flexlb.mock.engine.forward;
 
-import org.flexlb.mock.api.Argument;
-
-public record StoppingSpec(@Argument(optional=true, minimum=0, maximum=1) Double probability,
-                           @Argument(optional=true) Long seed) {
+public record StoppingSpec(Double probability,
+                           Long seed) {
     public StoppingSpec {
         probability = probability == null ? 0 : probability;
         if (!Double.isFinite(probability) || probability < 0 || probability > 1)
