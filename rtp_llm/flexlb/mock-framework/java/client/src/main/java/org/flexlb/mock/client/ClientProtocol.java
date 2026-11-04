@@ -1,10 +1,8 @@
 package org.flexlb.mock.client;
 
 import java.util.*;
-import org.flexlb.mock.api.Endpoint;
 import org.flexlb.mock.api.Argument;
 import com.fasterxml.jackson.annotation.JsonInclude;
-import static org.flexlb.mock.api.Endpoint.Kind.*;
 
 /** Private Client control transport. Python owns the Case API. */
 public interface ClientProtocol {
@@ -54,10 +52,10 @@ public interface ClientProtocol {
                  int queued, int inflight, Map<String, Long> outcomes, List<String> errors) {}
     record Summary(Map<String, State> clients, List<String> errors) {}
 
-    @Endpoint(value="client/start", kind=action) Ack start(Start args) throws Exception;
-    @Endpoint(value="client/stop", kind=action) Summary stop(Empty args) throws Exception;
-    @Endpoint(value="worker/prepare", kind=action) Ack prepare(Shard args) throws Exception;
-    @Endpoint(value="worker/begin", kind=action) Ack begin(Begin args);
-    @Endpoint(value="worker/halt", kind=action) Ack halt(Sequence args);
-    @Endpoint(value="worker/state", kind=read) State state(Sequence args);
+    throws Exception;
+    throws Exception;
+    throws Exception;
+    Ack begin(Begin args);
+    Ack halt(Sequence args);
+    State state(Sequence args);
 }

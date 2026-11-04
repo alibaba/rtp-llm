@@ -13,8 +13,7 @@ import org.flexlb.Application;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.service.grace.ApplicationLifecycle;
 import org.flexlb.sync.status.WorkerDirectory;
-import org.flexlb.mock.api.master.MasterStateApi;
-import org.flexlb.mock.protocol.ApiServer;
+import org.flexlb.mock.protocol.ControlServer;
 import org.springframework.boot.SpringApplication;
 import org.springframework.core.SpringProperties;
 import org.springframework.core.env.AbstractEnvironment;
@@ -58,7 +57,8 @@ public final class MasterNode {
             var reads = new MasterReads(id, consistency::isMaster, role -> workers.statusSnapshot(
                 org.flexlb.dao.route.RoleType.valueOf(role.name().toUpperCase(Locale.ROOT))).values().stream()
                 .map(s -> s.getIp() + ":" + s.getGrpcPort()).collect(Collectors.toSet()));
-            try (var api = new ApiServer(new InetSocketAddress(host, 0)).bind(MasterStateApi.class, reads).start()) {
+            try (var api = new ControlServer(new InetSocketAddress(host, 0)).route("master/leadership/get", None.class, MasterSet.class, reads::leadership)
+                    .route("master/engine/get", EngineSelection.class, PerMasterEngines.class, reads::engines).start()) {
                 String nativeUrl = "http://" + host + ":" + port;
                 json.writerWithDefaultPrettyPrinter().writeValue(directory.resolve("endpoints.json").toFile(), Map.of(
                     "id", id, "role", "master", "control", api.url(), "http", nativeUrl, "rpc", host + ":" + (port + 2),
@@ -74,7 +74,7 @@ public final class MasterNode {
     }
     private static String required(String key) { return Objects.requireNonNull(System.getenv(key), "Missing " + key); }
 
-    public static final class MasterReads implements MasterStateApi {
+    public static final class MasterReads {
         private final String id;
         private final BooleanSupplier leader;
         private final Function<Role, Set<String>> observed;
@@ -82,10 +82,10 @@ public final class MasterNode {
             this.id = Objects.requireNonNull(id); this.leader = Objects.requireNonNull(leader);
             this.observed = Objects.requireNonNull(observed);
         }
-        @Override public MasterSet leadership(None args) {
+        public MasterSet leadership(None args) {
             return new MasterSet(leader.getAsBoolean() ? List.of(new MasterRef(id)) : List.of());
         }
-        @Override public PerMasterEngines engines(EngineSelection args) {
+        public PerMasterEngines engines(EngineSelection args) {
             return new PerMasterEngines(Map.of(id, observed.apply(args.role()).stream().sorted().toList()));
         }
     }

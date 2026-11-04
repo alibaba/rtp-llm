@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.flexlb.mock.engine.cache.KvCache;
 import org.flexlb.mock.engine.cache.KvcmReporter;
 import org.flexlb.mock.engine.Scheduler;
-import org.flexlb.mock.protocol.ApiServer;
+import org.flexlb.mock.protocol.ControlServer;
 
 /** One owned RTP P/D object with independent listeners and resources. Does not contain the case runner or a cluster controller. */
 public final class RtpNode implements AutoCloseable {
@@ -23,7 +23,7 @@ public final class RtpNode implements AutoCloseable {
     private final AtomicBoolean closed = new AtomicBoolean();
     private final org.flexlb.mock.protocol.EngineAddress address = org.flexlb.mock.protocol.EngineAddress.local();
     private Server rpc;
-    private ApiServer api;
+    private ControlServer api;
     private org.flexlb.mock.metrics.MetricsOutput metrics;
     private KvcmReporter publisher;
     private MetricSource metricSource;
@@ -63,7 +63,7 @@ public final class RtpNode implements AutoCloseable {
             var builder = NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service);
             node.rpc = builder.build().start();
             node.metrics = org.flexlb.mock.metrics.MetricsOutput.start(node::collectMetrics);
-            node.api = new ApiServer(node.address.listener(controlPort)).health(node::checkHealthy);
+            node.api = new ControlServer(node.address.listener(controlPort)).health(node::checkHealthy);
             if (node.metrics.prometheus()) node.api.metrics(() -> MetricTags.scrape(node.collectMetrics()));
             node.api.start();
             node.publisher = node.startMetadataReporter();
