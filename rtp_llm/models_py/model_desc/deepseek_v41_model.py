@@ -12,6 +12,10 @@ from rtp_llm.models_py.model_desc.deepseek_v41_base_model import (
     DeepSeekV4Model,
     _is_decode_fmha,
 )
+from rtp_llm.models_py.modules.dsv41.engram_model_attach import (
+    initialize_model_engram,
+    require_engram_runtime,
+)
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import as_tagged_attention_inputs
 
 
@@ -59,53 +63,50 @@ class DeepSeekV41Model(DeepSeekV4Model):
         return 4
 
     def _load_extra_weights(self, weights) -> None:
-        from rtp_llm.models_py.modules.dsv41.engram import (
-            Engram,
-            EngramLayout,
-            NgramHashState,
-        )
+        from rtp_llm.models_py.modules.dsv41.engram import EngramLayout
 
         if not isinstance(self.v4.embed, _V41ImageEmbedding):
             self.v4.embed = _V41ImageEmbedding(self.v4.embed, self)
         config = self._v4_args.v41_config
         layout = EngramLayout(config)
-        if not layout.layer_ids:
+        scale_group = None
+        if layout.layer_ids:
+            device = self.v4.embed.weight.device
+            from rtp_llm.models_py.modules.dsv41._engram_scale_shards import (
+                select_scale_group,
+            )
+
+            scale_group = select_scale_group(
+                device,
+                signature={
+                    "checkpoint": config["checkpoint_path"],
+                    "layers": [i for i in layout.layer_ids if i < len(self.v4.layers)],
+                },
+                enabled=(
+                    os.getenv("DSV41_ENGRAM_SHARD_SCALES", "1") == "1"
+                    and os.getenv("DSV41_ENGRAM_DEVICE_SCALES", "1") == "1"
+                    and os.getenv("DSV41_ENGRAM_DIRECT_FP8", "1") == "1"
+                    and layout.head_dim == 256
+                    and layout.n_hash_cols == 24
+                ),
+            )
+        attachment = initialize_model_engram(self, scale_group=scale_group)
+        if attachment.phase == "EMPTY":
             return
-        checkpoint_path = config["checkpoint_path"]
-        modules = []
-        device = self.v4.embed.weight.device
-        self._engram_hash_state = NgramHashState(layout, checkpoint_path, device=device)
-        from rtp_llm.models_py.modules.dsv41._engram_scale_shards import (
-            select_scale_group,
+        logging.info(
+            "DeepSeek V4.1 Engram initialized on layers %s (external=%s)",
+            [layer_id for layer_id, _ in self._engram_layers],
+            attachment.external,
         )
 
-        scale_group = select_scale_group(
-            device,
-            signature={
-                "checkpoint": checkpoint_path,
-                "layers": [i for i in layout.layer_ids if i < len(self.v4.layers)],
-            },
-            enabled=(
-                os.getenv("DSV41_ENGRAM_SHARD_SCALES", "1") == "1"
-                and os.getenv("DSV41_ENGRAM_DEVICE_SCALES", "1") == "1"
-                and os.getenv("DSV41_ENGRAM_DIRECT_FP8", "1") == "1"
-                and layout.head_dim == 256
-                and layout.n_hash_cols == 24
-            ),
+    def prepare_fmha_impl(self, inputs, is_cuda_graph: bool = False):
+        attn = as_tagged_attention_inputs(getattr(inputs, "attention_inputs", None))
+        require_engram_runtime(
+            self, is_cuda_graph=is_cuda_graph,
+            is_prefill=bool(getattr(attn, "is_prefill", False)),
+            is_target_verify=bool(getattr(attn, "is_target_verify", False)),
         )
-        for layer_id in layout.layer_ids:
-            if layer_id >= len(self.v4.layers):
-                continue
-            layer = self.v4.layers[layer_id]
-            layer.engram = Engram.from_checkpoint(
-                config, layer_id, checkpoint_path, device, scale_group=scale_group
-            )
-            modules.append((layer_id, layout.layer_ids.index(layer_id)))
-        self._engram_layers = tuple(modules)
-        logging.info(
-            "DeepSeek V4.1 Engram initialized on layers %s",
-            [layer_id for layer_id, _ in modules],
-        )
+        return super().prepare_fmha_impl(inputs, is_cuda_graph=is_cuda_graph)
 
     def _prepare_engram(self, inputs) -> None:
         if not self._engram_layers:
@@ -236,6 +237,12 @@ class DeepSeekV41Model(DeepSeekV4Model):
 
     @torch.inference_mode()
     def forward(self, inputs, fmha_impl: Any = None):
+        attn = as_tagged_attention_inputs(getattr(inputs, "attention_inputs", None))
+        require_engram_runtime(
+            self, capture_check=torch.cuda.is_current_stream_capturing,
+            is_prefill=bool(getattr(attn, "is_prefill", False)),
+            is_target_verify=bool(getattr(attn, "is_target_verify", False)),
+        )
         from rtp_llm.models_py.modules.dsv41.engram import (
             EngramCPULookupPrefetch,
             EngramLookupPrefetch,

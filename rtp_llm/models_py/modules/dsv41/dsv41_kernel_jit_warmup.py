@@ -371,11 +371,22 @@ def warmup_v41_engram_jit(model, *, max_m, device):
     if min(lookup_sms) <= 0:
         raise ValueError("Engram lookup requires a positive physical SM count")
     sms = max(lookup_sms)
+    lookup_capabilities = tuple(
+        (
+            bool(getattr(layer.embed_tokens, "supports_cpu_lookup", True)),
+            bool(getattr(layer.embed_tokens, "supports_async_prefetch", True)),
+        )
+        for layer in layers
+    )
+    prefetch_layers = [
+        layer for layer, capabilities in zip(layers, lookup_capabilities)
+        if capabilities[1]
+    ]
     prefetch_config = None
     prefetch_carveout = None
     from rtp_llm.models_py.modules.dsv41 import _engram_decode_prefetch
 
-    if engram_lookup_prefetch_enabled():
+    if prefetch_layers and engram_lookup_prefetch_enabled():
         from rtp_llm.models_py.modules.dsv41._engram_triton import (
             PREFETCH_LOOKUP_CARVEOUT,
             PREFETCH_LOOKUP_CONFIG,
@@ -392,20 +403,22 @@ def warmup_v41_engram_jit(model, *, max_m, device):
             (
                 tuple(layer.q_weight.shape),
                 layer.eps,
-                tuple(layer.embed_tokens.weight.shape),
                 getattr(layer, "_direct_fp8_lookup", False) is True,
                 getattr(layer.embed_tokens, "_scale_shard_count", 1),
+                tuple(layer.embed_tokens.table_shape),
             )
             for layer in layers
         ),
         max_m,
         lookup_sms,
+        lookup_capabilities,
         prefetch_config,
         prefetch_carveout,
     )
     if key in _ENGRAM_WARMED:
-        for layer in layers:
+        for layer in prefetch_layers:
             layer.prepare_lookup_prefetch()
+        for layer in layers:
             _engram_decode_prefetch.prepare(layer)
         common._sync_cuda(device)
         prepare_engram_cpu_lookup(model, max_m=max_m)
@@ -438,7 +451,7 @@ def warmup_v41_engram_jit(model, *, max_m, device):
         common._run_triton_warmup_launch_with_retry(
             "DSV41 Engram", f"hash rows={rows}", hash_launch, device=device
         )
-        for layer in layers:
+        for layer, capabilities in zip(layers, lookup_capabilities):
             ids = hashes[:, layer.layer_hash_index].contiguous()
             if rows <= limit:
                 lookup = (
@@ -452,16 +465,11 @@ def warmup_v41_engram_jit(model, *, max_m, device):
                     partial(lookup, ids, device),
                     device=device,
                 )
-            if rows <= prefetch_limit:
-                lookup = (
-                    layer.warmup_lookup
-                    if getattr(layer, "_direct_fp8_lookup", False) is True
-                    else layer.embed_tokens.warmup_prefetch
-                )
+            if rows <= prefetch_limit and capabilities[1]:
                 common._run_triton_warmup_launch_with_retry(
                     "DSV41 Engram",
                     f"prefetch lookup rows={rows} config={prefetch_config}",
-                    partial(lookup, ids, device),
+                    partial(layer.embed_tokens.warmup_prefetch, ids, device),
                     device=device,
                 )
         if rows in (1, 16):
@@ -489,12 +497,22 @@ def warmup_v41_engram_jit(model, *, max_m, device):
                         ),
                         device=device,
                     )
-    for layer in layers:
+    for layer in prefetch_layers:
         layer.prepare_lookup_prefetch()
+    for layer in layers:
         _engram_decode_prefetch.prepare(layer)
     common._sync_cuda(device)
     prepare_engram_cpu_lookup(model, max_m=max_m)
     _ENGRAM_WARMED.add(key)
+    logging.info(
+        "[DSV41 Engram] decode scheduled lookup ready layers=%s scale_shards=%s",
+        [
+            layout.layer_ids[layer.layer_hash_index]
+            for layer in layers
+            if getattr(getattr(layer, "_decode_scheduled_stream", None), "ready", False)
+        ],
+        [getattr(layer.embed_tokens, "_scale_shard_count", 1) for layer in layers],
+    )
     logging.info(
         "[DSV41 Engram] JIT warmup done; lookup grid covered through %d tokens; "
         "async lookup ready=%s block_rows=%s warps=%s carveout=%s covered_tokens=%d",
