@@ -70,6 +70,8 @@ class PageRRSparseMlaOp(SparseMlaOp):
         return self.communicator.scatter_queries(query)
 
     def _decode(self, query):
+        if query.shape[1] == self.communicator.heads:
+            return query.contiguous()
         return self.communicator.query_gather(
             query.transpose(0, 1).contiguous()
         ).transpose(0, 1)
@@ -286,13 +288,17 @@ class SparseMlaPageRRImpl(SparseMlaImpl):
 
     def _apply_input_bmm(self, q, layer_id):
         params = self.page_rr_params
-        if not (params.is_prefill and params.query_cp):
+        query_cp = params.is_prefill and params.query_cp
+        if not query_cp and q.shape[1] == self.num_heads:
             return super()._apply_input_bmm(q, layer_id)
         from rtp_llm.models_py.kernels.cuda.dsa_buffer_ops import absorbed_query
         from rtp_llm.utils.model_weight import W
 
+        if q.shape[1] != self.workspace_owner.heads:
+            raise ValueError("Sparse replicated Q must contain every attention head")
         return absorbed_query(q, self.weights[layer_id][W.mla_kc],
-                              self.kv_lora_rank, self.fmha_impl.kernel_heads)
+                              self.kv_lora_rank,
+                              self.fmha_impl.kernel_heads if query_cp else q.shape[1])
 
     def prepare(self, inputs, forbid_realloc=False):
         self.page_rr_params.prepare(inputs, forbid_realloc=forbid_realloc)

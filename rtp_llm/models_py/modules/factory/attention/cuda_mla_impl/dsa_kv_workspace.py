@@ -193,6 +193,7 @@ class DsaWorkspaceOwner:
         self.heads, self.latent_dim = heads, latent_dim
         self.suffix_dim, self.value_dim = suffix_dim, value_dim
         self.hidden_dim, self.q_rank, self.tp_size = hidden_dim, q_rank, tp_size
+        self.query_heads = heads // tp_size
         self.nope_dim = nope_dim
         if not isinstance(attn_res_blocks, int) or attn_res_blocks < 0:
             raise ValueError("DSA AttnRes block capacity must be a nonnegative integer")
@@ -252,6 +253,8 @@ class DsaWorkspaceOwner:
             and cp.is_enabled()
             and getattr(cp, "preserve_tp_layout", False)
         )
+        if owner.prefill_query_cp or parallelism.role_type == RoleType.DECODE:
+            owner.query_heads = owner.heads
         return owner
 
     def phase(self, name, *, graph_key=None):
@@ -288,7 +291,8 @@ class DsaWorkspaceOwner:
             + 2 * self.q_rank
             + self.latent_dim
             + self.suffix_dim
-            + local_heads * (self.value_dim + self.nope_dim + self.suffix_dim)
+            + local_heads * self.value_dim
+            + self.query_heads * (self.nope_dim + self.suffix_dim)
         )
         if indexer:
             features += (

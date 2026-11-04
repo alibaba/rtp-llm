@@ -16,7 +16,7 @@ from rtp_llm.ops import RoleType
 
 
 class KimiK31DSA(KimiK3MLA):
-    """Full-head local-Q Prefill; TP-head Decode over owner-local cache."""
+    """Local-Q Prefill and replicated-Q Decode over owner-local cache."""
 
     def __init__(self, config, parallelism, weights, layer_idx, hardware=None):
         super().__init__(config, parallelism, weights, layer_idx, hardware)
@@ -27,7 +27,11 @@ class KimiK31DSA(KimiK3MLA):
             and cp.is_enabled() and cp.preserve_tp_layout
         )
         self.heads = config.attn_config.head_num // (1 if self.prefill_query_cp else self.tp_size)
-        self.query_heads = self.heads
+        self.query_heads = (
+            config.attn_config.head_num
+            if self.prefill_query_cp or parallelism.role_type == RoleType.DECODE
+            else self.heads
+        )
         self._gate_stream = None
         if policy.indexer_use_fp8:
             from rtp_llm.models_py.modules.base.cuda.fp8_indexer_op import Fp8IndexerOp
@@ -72,7 +76,7 @@ class KimiK31DSA(KimiK3MLA):
             else:
                 q, latent = self.q_norm(q.contiguous()), self.kv_norm(latent.contiguous())
         with profile_scope("RTP::attention.mla.q_proj"):
-            query = self.q_b(q).reshape(-1, self.heads, self.q_dim)
+            query = self.q_b(q).reshape(-1, self.query_heads, self.q_dim)
         with profile_scope("RTP::attention.dsa.indexer"):
             indices = run_sparse_indexer(self.indexer, hidden, q, indexer_cache, indexer)
         with profile_scope("RTP::attention.mla.core"):

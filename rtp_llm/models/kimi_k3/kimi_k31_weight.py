@@ -39,8 +39,7 @@ class KimiK31Weight(KimiK3Weight):
         return (1, 0) if self.prefill_query_cp else super()._mla_projection_parallelism()
 
     def _replicate_mla_query_heads(self):
-        # Prefill owns queries; Decode gathers TP head shards in its DCP group.
-        return self.prefill_query_cp
+        return self.prefill_query_cp or self.role_type == RoleType.DECODE
 
     # Verified against the weight index at 546f79b5ee100f74d7ef432f0c078d92dc92bab6.
     _INDEXER_SUFFIXES = (
