@@ -16,6 +16,9 @@ else
     BAZEL_BIN=bazel
 fi
 export BAZELISK_HOME=${NAVI_SCHED_BAZELISK_HOME:-${HOME}/.cache/bazelisk}
+if [[ "${NAVI_SCHED_CLEAR_BAZEL_ARGS:-}" == "1" ]]; then
+    export BAZEL_ARGS=
+fi
 PYTHON_BIN=${NAVI_SCHED_PYTHON_BIN:-/opt/conda310/bin/python3}
 NAVI_SCHED_COMPILER_CONFIG=${NAVI_SCHED_COMPILER_CONFIG:-gcc}
 
