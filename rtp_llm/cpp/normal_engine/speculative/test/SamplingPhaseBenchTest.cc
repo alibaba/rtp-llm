@@ -599,18 +599,20 @@ std::string targetKernelProbeJson(const TargetFixture& fixture,
 
 // ---------------------------------------------------------------------------
 // Rejection-phase fixture: compact DSpARK verify shapes with *partially
-// overlapping* draft/target candidate sets.
+// overlapping* draft/target candidate sets drawn from the FULL vocabulary.
 //
-// Production draft and target candidates are different vocabulary slices and
-// only partially overlap, so remap_draft_topk (models_py/bindings/cuda/kernels/
-// speculative_sampling) exercises real hash-table hits and misses. Giving both
-// sides identical candidate ids made every lookup hit and turned the served
-// 87us remap into the 28us this bench used to report.
+// remap_draft_topk hashes candidates with `(id * 2654435761) & mask`, so a
+// bucket depends only on `id mod 2W`. Small contiguous id windows (the previous
+// [100, 100+W) / [100+W/2, 100+W/2+W) fixture) never collide, which pins the
+// probe count at 1 and under-reports the kernel: the served path has ids
+// scattered over the whole vocabulary (hash load ~0.5, several probes per
+// lookup). This fixture therefore draws ids from a full-vocabulary permutation.
 //
-// Layout: draft ids are a permutation of [100, 100+W); target ids are a
-// permutation of [100+W/2, 100+W/2+W). The windows intersect on W/2 ids, and
-// every sampled draft token is forced into that intersection, so q(draft) and
-// q(target) stay resolvable for the acceptance test.
+// Layout: perm is a random permutation of [0, vocab). Draft candidates are
+// perm[0, W); its first half is draft-only and its second half perm[W/2, W) is
+// shared with the target set, which completes with fresh ids perm[W, 3W/2).
+// Overlap is exactly W/2, and every sampled draft token is forced into it, so
+// q(draft) and q(target) stay resolvable for the acceptance test.
 // ---------------------------------------------------------------------------
 struct RejectionFixture {
     torch::Tensor draft_probs;
@@ -631,6 +633,7 @@ struct RejectionFixture {
 RejectionFixture makeRejectionFixture() {
     const auto fp32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
     const auto i32  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    const auto i64  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt64);
     const auto b    = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kBool);
 
     const int     width = candidateWidth();
@@ -639,35 +642,42 @@ RejectionFixture makeRejectionFixture() {
     const int64_t half  = width / 2;
 
     RejectionFixture fixture;
-    fixture.width                = width;
-    fixture.overlap_ids          = half;
-    const auto draft_window      = torch::randperm(width, i32) + 100;
-    const auto target_window     = torch::randperm(width, i32) + (100 + half);
-    fixture.draft_probs_indices  = draft_window.reshape({1, 1, width}).expand({kBatch, steps, width}).contiguous();
-    fixture.target_probs_indices = target_window.reshape({1, 1, width}).expand({kBatch, slots, width}).contiguous();
+    fixture.width       = width;
+    fixture.overlap_ids = half;
+
+    // Full-vocabulary scrambled candidates (see the header comment above): the
+    // remap hash only collides when ids are spread over the vocabulary.
+    const auto vocabulary_perm = torch::randperm(kVocab, i64);
+    const auto draft_ids_i32   = vocabulary_perm.narrow(0, 0, width).to(torch::kInt32);
+    const auto overlap_ids_i32 = vocabulary_perm.narrow(0, half, half).to(torch::kInt32);
+    const auto target_ids_i32 = torch::cat({overlap_ids_i32, vocabulary_perm.narrow(0, width, half).to(torch::kInt32)});
+    fixture.draft_probs_indices  = draft_ids_i32.reshape({1, 1, width}).expand({kBatch, steps, width}).contiguous();
+    fixture.target_probs_indices = target_ids_i32.reshape({1, 1, width}).expand({kBatch, slots, width}).contiguous();
     fixture.draft_probs          = torch::softmax(torch::randn({kBatch, steps, width}, fp32), -1);
     fixture.target_probs         = torch::softmax(torch::randn({kBatch, slots, width}, fp32), -1);
 
-    // Keep the draft's own argmax when it already lands in the overlap window
-    // (draft ids >= 100 + W/2 are also target candidates); otherwise substitute
-    // a deterministic overlap id so the remap hash resolves the sampled token.
-    // The substitution is a fixture device only; it does not change which kernel
-    // work the rejection launch performs.
+    // Draft candidate position >= W/2 is in the shared half, so keep the draft's
+    // own argmax when it lands there and substitute a deterministic overlap id
+    // otherwise. Either way the sampled token is a real target candidate, which
+    // is what production remap_draft_topk needs to resolve q(draft).
     const auto  draft_choice_cpu    = fixture.draft_probs.argmax(-1).to(torch::kCPU).contiguous();
-    const auto  draft_window_cpu    = draft_window.to(torch::kCPU).contiguous();
+    const auto  draft_ids_cpu       = draft_ids_i32.to(torch::kCPU).contiguous();
     auto        draft_token_ids_cpu = torch::zeros({kBatch, steps}, torch::TensorOptions().dtype(torch::kInt32));
     const auto* choices             = draft_choice_cpu.data_ptr<int64_t>();
-    const auto* window              = draft_window_cpu.data_ptr<int32_t>();
+    const auto* candidate_ids       = draft_ids_cpu.data_ptr<int32_t>();
     auto*       sampled_ids         = draft_token_ids_cpu.data_ptr<int32_t>();
     for (int64_t row = 0; row < kBatch; ++row) {
         for (int64_t step = 0; step < steps; ++step) {
             const int64_t slot_index = row * steps + step;
-            int32_t       id         = window[choices[slot_index]];
-            if (id < static_cast<int32_t>(100 + half)) {
-                id = static_cast<int32_t>(100 + half + (slot_index % half));
+            const int64_t position   = choices[slot_index];
+            if (position < half) {
+                // Draft argmax sits in the draft-only half: substitute an entry
+                // from the shared half (positions >= W/2 are target candidates).
+                sampled_ids[slot_index] = candidate_ids[half + (slot_index % half)];
                 ++fixture.substituted_draft_tokens;
+            } else {
+                sampled_ids[slot_index] = candidate_ids[position];
             }
-            sampled_ids[slot_index] = id;
         }
     }
     fixture.draft_token_ids = draft_token_ids_cpu.to(i32);
@@ -1085,10 +1095,19 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
                    << ",\"tokens_hash_first8x8\":" << tokens_hash
                    << ",\"accepted_in_range\":" << (accepted_ok ? "true" : "false")
                    << ",\"candidate_overlap\":{\"strategy\":\"partial\""
+                   << ",\"id_range\":\"full_vocab\""
                    << ",\"width\":" << rejection_fixture.width << ",\"overlap_ids\":" << rejection_fixture.overlap_ids
                    << ",\"draft_only_ids\":" << (rejection_fixture.width - rejection_fixture.overlap_ids)
                    << ",\"target_only_ids\":" << (rejection_fixture.width - rejection_fixture.overlap_ids)
-                   << ",\"substituted_draft_tokens\":" << rejection_fixture.substituted_draft_tokens
+                   << ",\"substituted_draft_tokens\":"
+                   << rejection_fixture.substituted_draft_tokens
+                   // remap_draft_topk uses linear-probing over 2W slots with W
+                   // entries, so the load factor is 0.5 and full-vocabulary ids
+                   // make hits and misses both cost several probes. The previous
+                   // contiguous-id fixture never collided (probe == 1).
+                   << ",\"hash_table_load\":0.5"
+                   << ",\"probe_expected\":\"full-vocab random ids (table load 0.5, hits+misses ~1.5-2.5 "
+                      "probes, not 1)\""
                    << ",\"sampled_draft_tokens_in_target\":true}"
                    << "}";
 

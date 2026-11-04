@@ -29,6 +29,8 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
 #include "torch/csrc/autograd/profiler_kineto.h"
+// Markov-fusion UT: device properties are needed to skip on non-Blackwell hosts.
+#include <ATen/cuda/CUDAContext.h>
 #endif
 
 namespace rtp_llm {
@@ -2101,6 +2103,90 @@ TEST(DSparkConfidenceStatsTest, ZeroValidLengthAndEmptyBatchHaveNoObservations) 
     auto empty = SpeculativeSampler::buildConfidenceStats(torch::empty({0, 3}, torch::kFloat32),
                                                           torch::empty({0}, torch::kInt32));
     EXPECT_TRUE(torch::equal(empty, torch::zeros({3, 6}, torch::kFloat32)));
+}
+
+// ---------------------------------------------------------------------------
+// Sparse-row determinism. `select_sparse_row` used to hand out its output slots
+// with `atomicAdd_block`, so the warp arrival order (undefined) decided which
+// column landed in which slot. A row with far fewer finite values than K appends
+// thousands of tokens whose value is exactly -inf, hence a row whose candidate
+// list was a different permutation of the same set on every launch.
+// The fix assigns slots with a warp-ordered prefix; this test pins it by running
+// the same input twice and demanding bit-identical output.
+// ---------------------------------------------------------------------------
+namespace {
+
+#if USING_CUDA
+bool deepSelectKernelAvailable() {
+    if (!torch_ext::deepselect_fp32_available()) {
+        return false;
+    }
+    const auto* properties = at::cuda::getDeviceProperties(0);
+    return properties->major == 10 && (properties->minor == 0 || properties->minor == 3);
+}
+#endif
+
+}  // namespace
+
+TEST(DSparkDeterministicSelectionTest, DeterministicSparseRowsSelection) {
+#if USING_CUDA
+    if (!deepSelectKernelAvailable()) {
+        GTEST_SKIP() << "DeepSelect FP32 requires SM100 or SM103";
+    }
+    const c10::cuda::CUDAGuard guard(0);
+    const auto                 floats = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    torch::manual_seed(20261105);
+
+    constexpr int64_t vocab = 16384;
+    constexpr int64_t rows  = 4;
+    constexpr int64_t k     = 4096;  // select_sparse_row only exists for K4096
+
+    // Rows 0..2 have eight finite logits each (the -inf census fills the rest);
+    // row 3 is dense so the mixed batch also covers the normal epilogue.
+    auto logits = torch::full({rows, vocab}, -std::numeric_limits<float>::infinity(), floats);
+    for (int64_t row = 0; row < 3; ++row) {
+        logits.select(0, row).narrow(0, row * 97, 8).fill_(static_cast<float>(row));
+    }
+    logits.select(0, 3).copy_(torch::randn({vocab}, floats));
+
+    // The draft path scores logits with the Markov bias before selecting; using it
+    // here keeps the fixture on the production code path (and keeps the -inf
+    // columns at -inf through the affine map).
+    auto bias        = torch::randn({rows, vocab}, floats).to(torch::kBFloat16);
+    auto temperature = torch::full({rows}, 0.5f, floats);
+    auto scores      = torch_ext::markov_scaled_logits(logits, bias, temperature);
+
+    auto run    = [&]() { return torch_ext::deepselect_fp32_topk(scores, k); };
+    auto first  = run();
+    auto second = run();
+
+    const auto& first_indices  = std::get<1>(first);
+    const auto& second_indices = std::get<1>(second);
+    ASSERT_EQ(first_indices.sizes(), second_indices.sizes());
+    // Elementwise: the whole point of the fix is that the emission order is a pure
+    // function of the input, not of warp scheduling.
+    EXPECT_TRUE(torch::equal(first_indices, second_indices))
+        << "sparse-row selection is not reproducible: candidate order changed between launches";
+    // Values must be bit-identical too (compare bits so an inf/NaN payload cannot
+    // hide behind == semantics).
+    EXPECT_TRUE(torch::equal(std::get<0>(first).view(torch::kInt32), std::get<0>(second).view(torch::kInt32)))
+        << "sparse-row selection values changed between launches";
+
+    // The sparse rows must actually have taken the sparse epilogue, otherwise this
+    // test would only cover the dense path: every sparse row keeps its -inf fill
+    // (values are exactly -inf) and pads nothing to -1.
+    auto indices_cpu = first_indices.cpu();
+    auto values_cpu  = std::get<0>(first).cpu();
+    for (int64_t row = 0; row < 3; ++row) {
+        SCOPED_TRACE(row);
+        EXPECT_TRUE(indices_cpu.select(0, row).ge(0).all().item<bool>())
+            << "sparse row emitted a -1 padding slot; the sparse epilogue was not taken";
+        EXPECT_EQ(values_cpu.select(0, row).eq(-std::numeric_limits<float>::infinity()).sum().item<int64_t>(), k - 8)
+            << "sparse row should carry exactly eight finite candidates";
+    }
+#else
+    GTEST_SKIP() << "CUDA only";
+#endif
 }
 
 }  // namespace

@@ -79,29 +79,49 @@ public:
     // Only a row whose final cutoff is -inf needs this path. Its survivors
     // already contain every value above -inf; fill the rest from distinct real
     // -inf tokens, without letting padded tail slots enter the output.
+    //
+    // The slot of every appended token is assigned by a warp-ordered prefix
+    // (`warp_cnt`, the same scheme the dense main loop uses for its dst_slot),
+    // not by `atomicAdd_block`. A large sparse row appends thousands of tokens
+    // that all carry exactly -inf, so an arrival-order dependent slot assignment
+    // emitted the same set in a different order on every launch: the candidate
+    // list was not a pure function of the input. Ordering by (warp id, lane id)
+    // makes the emitted list deterministic and keeps it in ascending
+    // survivor/column order, matching the dense path's convention.
+    // DSparkDeterministicSelectionTest.DeterministicSparseRowsSelection pins it.
     static __device__ __noinline__ void select_sparse_row(const TopkSelectArgs& args,
                                                           uint32_t              batch_idx,
                                                           uint32_t              end_vocab_idx,
                                                           const uint64_t*       survivors,
-                                                          uint32_t*             selected_count,
+                                                          uint32_t*             warp_scratch,
                                                           OutIdxT*              output,
                                                           float*                output_values) {
         const float* input = static_cast<const float*>(args.input) + uint64_t(batch_idx) * args.stride_input_batch;
-        if (threadIdx.x == 0) {
-            *selected_count = 0;
-        }
         __syncthreads();
-        const uint32_t lane   = threadIdx.x & 31u;
-        auto           append = [&](bool pick, uint32_t index, float value) {
+        const uint32_t lane = threadIdx.x & 31u;
+        const uint32_t warp = threadIdx.x >> 5u;
+        // Block-uniform running total: rebuilt from the shared per-warp counts,
+        // so every thread computes the same offset without an atomic.
+        uint32_t offset = 0;
+        auto     append = [&](bool pick, uint32_t index, float value) {
             const uint32_t mask  = __ballot_sync(0xffffffffu, pick);
             const uint32_t count = __popc(mask);
-            uint32_t       first = 0;
-            if (lane == 0 && count != 0) {
-                first = atomicAdd_block(selected_count, count);
+            if (lane == 0) {
+                warp_scratch[warp] = count;
             }
-            first = __shfl_sync(0xffffffffu, first, 0);
+            __syncthreads();
+            uint32_t warp_prefix = 0;
+            uint32_t total       = 0;
+            CUTE_UNROLL
+            for (uint32_t w = 0; w < NUM_WARPS; ++w) {
+                const uint32_t c = warp_scratch[w];
+                total += c;
+                if (w < warp) {
+                    warp_prefix += c;
+                }
+            }
             if (pick) {
-                const uint32_t slot = first + __popc(mask & ((1u << lane) - 1u));
+                const uint32_t slot = offset + warp_prefix + __popc(mask & ((1u << lane) - 1u));
                 if (slot < args.topk) {
                     output[slot] = static_cast<OutIdxT>(
                         args.index_map ? args.index_map[uint64_t(batch_idx) * args.stride_index_map_batch + index] :
@@ -111,6 +131,8 @@ public:
                     }
                 }
             }
+            __syncthreads();  // warp_scratch is reused by the next append
+            offset += total;
         };
         for (uint32_t base = 0; base < args.topk; base += NUM_THREADS) {
             const uint64_t pair  = survivors[base + threadIdx.x];
@@ -119,16 +141,15 @@ public:
             const bool     pick  = index < end_vocab_idx && canonicalize_nan(bits) != NEG_INF_BITS;
             append(pick, index, pick ? __ldg(input + index) : 0.0f);
         }
-        __syncthreads();
         for (uint32_t base = 0; base < end_vocab_idx; base += NUM_THREADS) {
-            if (*selected_count >= args.topk) {
+            // `offset` is block-uniform (every thread accumulates the same total).
+            if (offset >= args.topk) {
                 break;
             }
             const uint32_t index = base + threadIdx.x;
             const bool     valid = index < end_vocab_idx;
             const float    value = valid ? __ldg(input + index) : 0.0f;
             append(valid && __float_as_uint(value) == NEG_INF_BITS, index, value);
-            __syncthreads();
         }
     }
 
