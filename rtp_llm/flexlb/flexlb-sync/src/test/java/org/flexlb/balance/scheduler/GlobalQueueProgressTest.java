@@ -202,14 +202,8 @@ class GlobalQueueProgressTest {
 
     @Test
     void nonTerminalControlFactRestoresTheExactGlobalQueueEntry() throws Exception {
-        try (Fixture f = new Fixture(RoleType.PREFILL)) {
-            doAnswer(call -> {
-                RequestContext context = call.getArgument(0);
-                CompletableFuture<Response> future = (CompletableFuture<Response>) call.callRealMethod();
-                f.contexts.put(context.data().getRequestId(), context);
-                f.requests.put(context.data().getRequestId(), future);
-                return future;
-            }).when(f.lifecycle).register(any(), any(Runnable.class), any());
+        // Configure the spy before the decision thread can enter another mocked method.
+        try (Fixture f = new Fixture(RoleType.PREFILL, false, null, true)) {
             f.submit(991L, "a");
             awaitCondition(() -> f.selected.contains(991L));
             QueuedRequestScheduler queue = (QueuedRequestScheduler)
@@ -756,6 +750,11 @@ class GlobalQueueProgressTest {
         }
 
         private Fixture(RoleType role, boolean preempt, org.flexlb.config.PrefillQueueSheddingConfig shedding) {
+            this(role, preempt, shedding, false);
+        }
+
+        private Fixture(RoleType role, boolean preempt, org.flexlb.config.PrefillQueueSheddingConfig shedding,
+                boolean realRegistration) {
             config.queueScheduler().setPrefillQueueShedding(shedding);
             this.role = role;
             SchedulingTestConfig.useFifoQueue(config);
@@ -772,7 +771,8 @@ class GlobalQueueProgressTest {
             lifecycle = RequestProtocolTestSupport.schedulerMock();
             when(lifecycle.register(any(), org.mockito.ArgumentMatchers.any(Runnable.class), org.mockito.ArgumentMatchers.any())).thenAnswer(i -> {
                 RequestContext context = i.getArgument(0);
-                CompletableFuture<Response> future = new CompletableFuture<>();
+                CompletableFuture<Response> future = realRegistration
+                        ? (CompletableFuture<Response>) i.callRealMethod() : new CompletableFuture<>();
                 requests.put(context.data().getRequestId(), future);
                 contexts.put(context.data().getRequestId(), context);
                 context.data().setFuture(future);
