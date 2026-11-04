@@ -1,4 +1,3 @@
 internal_source/rdma
 open_source
-rtp_llm/flexlb/navi_sched
 internal_source/rtp_llm/navi_sched/tools
