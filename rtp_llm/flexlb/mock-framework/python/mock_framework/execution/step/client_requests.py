@@ -2,7 +2,7 @@ import asyncio
 from dataclasses import dataclass
 import threading
 from typing import Annotated
-from ..roles.client_evidence import RequestRecord, read_requests
+from ..evidence.client import RequestRecord, read_requests
 from .registry import Bounds, register_step
 from .step import Step, StepContext
 from .. import ExecutionError

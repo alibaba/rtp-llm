@@ -258,7 +258,7 @@ write_inputs("traffic.binpb.zst", (
 
 新运行的每个 Client 每轮写入 `components/<client>/playback/<轮次>/requests.jsonl`。首行记录版本、Client、播放轮次和分片身份，随后每行记录一个有连续序号的事件，最后一行的 `seal` 记录 issued 和 finished 计数。文件可直接查看。64 位整数使用十进制字符串，避免 JavaScript 读取时丢失精度。
 
-JSONL 与旧的 Protobuf + Zstd 证据共用 `java/client/src/main/proto/client_evidence.proto` 的字段定义。若目录中没有 `requests.jsonl`，`client/requests` 读取旧的 `requests.binpb.zst` 并检查帧、序号和封口。两种格式共用请求状态和汇总校验。回放输入和分片格式由各自的读写器处理。
+`client/requests` 读取 `requests.jsonl`，校验请求序号、封口和汇总结果。回放输入和分片格式由各自的读写器处理。
 
 网络回调向有字节上限的队列追加事件。写线程定期批量写入 JSONL，刷新缓冲区并同步到磁盘。Client 等待最终封口同步成功后才完成。队列满、超大事件、写入失败或收尾超时会使 worker 报错，由 client0 停止整轮。进程意外退出时，已写出的行可供查看，完整性检查仍要求有效封口。
 
@@ -276,7 +276,7 @@ JSONL 与旧的 Protobuf + Zstd 证据共用 `java/client/src/main/proto/client_
   args: {outcome: error, limit: 20}
 ```
 
-Case 的 start、stop、requests 各有一个 Step 文件。ClientRole 管理回放，client_evidence.py 直接解析 JSONL 并校验请求和封口。读取旧压缩证据时才加载 legacy_client_evidence.py 及其生成的 client_evidence_pb2.py。镜像终验直接复用读取函数。不提供独立请求查询 CLI，也不增加 Java 查询服务、parser 类或存储抽象。
+Case 的 start、stop、requests 各有一个 Step 文件。ClientRole 管理回放，`execution/evidence/client.py` 直接解析 JSONL 并校验请求和封口。镜像终验直接复用读取函数。不提供独立请求查询 CLI，也不增加 Java 查询服务、parser 类或存储抽象。
 
 ### Python 指标查询与公共指标
 
