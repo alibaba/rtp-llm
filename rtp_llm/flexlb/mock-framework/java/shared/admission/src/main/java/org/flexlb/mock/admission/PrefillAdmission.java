@@ -8,7 +8,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.engine.*;
-import org.flexlb.mock.cache.KvCache;
 import org.flexlb.mock.multimodal.MediaInput;
 import org.flexlb.mock.api.model.Types.Role;
 
@@ -17,9 +16,9 @@ import org.flexlb.mock.api.model.Types.Role;
  */
 final class PrefillAdmission implements AutoCloseable {
     private final AdmissionConfig config;
-    private final Object executionLock = new Object();
+    private final Object executionLock;
     private final EngineLoop engine;
-    private final TaskHistory finished = new TaskHistory();
+    private final TaskHistory finished;
     // Local request lifetime; output/Fetch sessions may outlive these entries. Guarded by executionLock.
     private final Map<Long, Session> sessions = new LinkedHashMap<>();
     private final org.flexlb.mock.multimodal.MediaClient vision;
@@ -35,9 +34,11 @@ final class PrefillAdmission implements AutoCloseable {
     private long nextOutputSweep;
     private volatile boolean closed;
 
-    PrefillAdmission(AdmissionConfig config, KvCache cache, Scheduler.Factory schedulers) {
+    PrefillAdmission(AdmissionConfig config, Object executionLock, TaskHistory finished, EngineLoop engine) {
         this.config = config;
-        engine = new EngineLoop(executionLock, schedulers, finished, cache, config.compute(), config.role(), config.id());
+        this.executionLock = executionLock;
+        this.finished = finished;
+        this.engine = engine;
         vision = new org.flexlb.mock.multimodal.MediaClient();
         deadlines.setRemoveOnCancelPolicy(true);
     }

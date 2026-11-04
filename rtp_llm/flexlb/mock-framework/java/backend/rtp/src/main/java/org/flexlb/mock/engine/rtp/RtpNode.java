@@ -2,6 +2,8 @@ package org.flexlb.mock.engine.rtp;
 
 import io.prometheus.client.Collector.MetricFamilySamples;
 import org.flexlb.mock.admission.RpcService;
+import org.flexlb.mock.engine.EngineLoop;
+import org.flexlb.mock.engine.TaskHistory;
 import org.flexlb.mock.metrics.MetricTags;
 
 import io.grpc.Server;
@@ -26,7 +28,7 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
     private ApiServer api;
     private org.flexlb.mock.metrics.MetricsOutput metrics;
     private KvcmReporter publisher;
-    private MetricSource metricSource;
+    private final MetricSource metricSource;
 
     private record MetricSource(Object lock, RtpMetrics metrics) {}
 
@@ -35,15 +37,22 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
         Objects.requireNonNull(schedulers);
         cache = new KvCache(config.blockSize(), config.deviceBlocks(), config.reserveBlocks(), config.evictionPolicy(),
             config.deviceCache(), config.hostBlocks(), config.hostPolicy(), config.deviceWatermark(), config.hostWatermark());
+        var lock = new Object();
+        var finished = new TaskHistory();
         try {
-            service = new RpcService(config.endpoint(), cache, (lock, storage, finished) -> {
-                var scheduler = schedulers.create(lock, storage, finished);
-                if (scheduler instanceof RtpSchedulerBase rtp)
-                    metricSource = new MetricSource(lock, rtp.metrics());
-                return scheduler;
-            }, config.groupScheduling());
+            var scheduler = schedulers.create(lock, cache, finished);
+            metricSource = scheduler instanceof RtpSchedulerBase rtp ? new MetricSource(lock, rtp.metrics()) : null;
+            var engine = new EngineLoop(lock, scheduler, finished, cache, config.compute(), config.role(), config.id());
+            try {
+                service = new RpcService(config.endpoint(), cache, lock, finished, engine, config.groupScheduling());
+            } catch (RuntimeException | Error error) {
+                try { engine.close(); } catch (RuntimeException cleanup) { error.addSuppressed(cleanup); }
+                throw error;
+            }
+        } catch (RuntimeException | Error error) {
+            try { cache.close(); } catch (RuntimeException cleanup) { error.addSuppressed(cleanup); }
+            throw error;
         }
-        catch (RuntimeException error) { cache.close(); throw error; }
     }
 
     public static RtpNode start(RtpConfig config) throws IOException {

@@ -36,9 +36,13 @@ public final class EngineLoop implements AutoCloseable {
     }
 
     public EngineLoop(Object lock, Scheduler.Factory schedulers, TaskHistory finished, KvCache cache, ComputeModel model, Role role, String identity) {
+        this(lock, schedulers.create(lock, cache, finished), finished, cache, model, role, identity);
+    }
+
+    public EngineLoop(Object lock, Scheduler scheduler, TaskHistory finished, KvCache cache, ComputeModel model, Role role, String identity) {
         this.lock = Objects.requireNonNull(lock);
         this.finished = Objects.requireNonNull(finished);
-        this.scheduler = Objects.requireNonNull(schedulers.create(lock, cache, finished));
+        this.scheduler = Objects.requireNonNull(scheduler);
         this.cache = Objects.requireNonNull(cache);
         this.model = Objects.requireNonNull(model);
         this.role = Objects.requireNonNull(role);

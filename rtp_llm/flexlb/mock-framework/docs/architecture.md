@@ -65,7 +65,7 @@ Python async 只表达非阻塞等待，不代表任意 step 可以脱离 Runner
 
 RTP 和 vLLM 的设计目标是复用请求事实、资源机制、EngineLoop、Forward、输出和生命周期工具；各自的 Scheduler 拥有队列模型、准入、组批、抢占恢复和结果后的状态转换。替换调度策略不应修改 Compute 或 EngineLoop。原生协议和计算模型参数仍在各自接入/配置边界适配，不宣称两个真实后端只有调度差异。
 
-当前已打通 Java 装配入口 `RtpNode.start(config, Scheduler.Factory)`，指定监听端口时使用 `start(config, rpcPort, controlPort, factory)`。工厂的 `create(lock, cache, finished)` 为每个实例创建一个新 Scheduler，收到协议接入层与 EngineLoop 共用的调度锁，本实例独占的 RTP Full-KV 管理器 KvCache，以及共享的 TaskHistory 完成记录。工厂不关闭缓存；节点在关闭或调度器创建失败时回收它。默认入口只在 RtpNode 选择 RTP 工厂，PrefillAdmission/DecodeAdmission 不再创建或引用 RtpScheduler，公共执行层不识别 RTP 配置。
+当前已打通 Java 装配入口 `RtpNode.start(config, Scheduler.Factory)`，指定监听端口时使用 `start(config, rpcPort, controlPort, factory)`。工厂的 `create(lock, cache, finished)` 为每个实例创建一个新 Scheduler，收到协议接入层与 EngineLoop 共用的调度锁，本实例独占的 RTP Full-KV 管理器 KvCache，以及共享的 TaskHistory 完成记录。工厂不关闭缓存；节点在关闭或调度器创建失败时回收它。RtpNode 创建 Scheduler、TaskHistory 和 EngineLoop 后再装配 RPC。PrefillAdmission 和 DecodeAdmission 接收已创建的执行循环，并沿用同一把调度锁。
 
 P 接入层负责原生报文、生成参数、媒体准备和会话取消；上下文空间、单批 token 预算及 KV 准入由 Scheduler 判定。合法单请求超过单批预算时仍可单独执行，超出上下文或单实例 KV 总容量则在准入时拒绝。请求数量由配置的并发与 KV 容量约束，不额外写死活动请求数上限。
 
@@ -339,7 +339,8 @@ Python 运行时按以下边界组织。`RunEnvironment` 装配实例并安排�
 | `execution/processes.py` | `ProcessSupervisor` 的子进程所有权、退出监视、操作中断和回收；不识别 Master、Engine 或 Client 业务。 |
 | `execution/topology.py` | `Topology` 的当前实例端点及文件发布；读者拿到独立快照。 |
 | `execution/components.py` | Master/Client 通用的配置文件、进程启动、ready 检查与端点登记；原生配置与端点额外校验由调用方提供。 |
-| `execution/master.py` | `MasterGroup` 的 ZK 选举环境、独立 JVM 增减、原生配置和 Master discovery 发布。 |
+| `execution/master.py` | `MasterGroup` 的选举配置、独立 JVM 增减、原生配置和 Master discovery 发布。 |
+| `execution/zookeeper.py` | 本地 ZooKeeper 进程启动、就绪地址校验和关闭。 |
 | `execution/engines.py` | `EngineHosts` 的实例分配、JVM 放置、扩缩容、成员检查和宿主退出影响范围。 |
 | `execution/client_group.py` | `ClientGroup` 的 Client JVM、当前播放待收尾状态、client0 控制与最终汇总校验；流量分片和控速仍由 Java 负责。 |
 | `execution/monitoring.py` | `Prometheus` 的采集器、目标、基线、末次采样和采集完整性记录；不执行 Case 语义查询。 |
@@ -348,9 +349,9 @@ Python 运行时按以下边界组织。`RunEnvironment` 装配实例并安排�
 
 拓扑是 Python 根据已校验的实例端点生产的运行记录，不代表生产 Master 的成员状态或主备判断。`Topology` 统一登记与退役，发布当前 topology.json，并把快照交给 `MasterGroup` 更新活动 Master 的 discovery。Master、Client 等消费者自行加载配置；Python 不替它们推导主节点。发布失败使实验报错，保留已登记状态与进程所有权，随后清理；不宣称多个文件的发布是一个事务。
 
-启动顺序固定为 Prometheus、ZK、Engine、Master、Client、采集基线。收尾先停止 Engine 健康检查，再收集 Client、完成最后采样，依次清理 Client、Master、Engine、ZK、Prometheus，最后由进程监督器回收剩余进程。某一步失败仍继续后续清理，错误进入最终结果；进程未回收时保留其所有权，不能仅删除内部记录。最终没有存活的受管进程后清空活动拓扑。
+启动顺序固定为 Prometheus、ZK、Engine、Master、Client、采集基线。收尾先停止 Engine 健康检查，再收集 Client、完成最后采样，依次清理 Client、Master、Engine、ZK、Prometheus，最后由进程监督器回收剩余进程。某一步失败仍继续后续清理，错误进入最终结果；进程未回收时保留其所有权，不能仅删除内部记录。Engine 宿主退出后清理该宿主及所属实例的就绪文件，包括创建过程中未完成登记的实例。最终没有存活的受管进程后清空活动拓扑。
 
-新增 Case 操作在 `interfaces/` 用现有装饰器注册；新增角色生命周期行为进入对应服务；只有新的跨服务启动/收尾顺序才修改 `RunEnvironment`。不为接口名、角色名或 Case 名向 Runner 主循环增加分支，也不引入通用插件框架或事件总线。配置入口和业务 Case 的下一批接线以这些边界为基础，本批保持现有 YAML 参数、返回值与产物格式。
+新增 Case 操作在 `interfaces/` 用现有装饰器注册；新增角色生命周期行为进入对应服务；只有新的跨服务启动/收尾顺序才修改 `RunEnvironment`。不为接口名、角色名或 Case 名向 Runner 主循环增加分支，也不引入通用插件框架或事件总线。StepContext 持有本步预算、查询时刻和已完成 Step 的结果。事件与门禁用 run_id、phase_id 和 step_id 关联，View 对旧产物继续按 query_time 查找指标窗口。
 
 这里的 EngineLoop 是 P/D 文本生成执行内核，不是 JVM 宿主循环，也不是 ViT 调度循环。runtime 仅提供访问和实例管理设施；EngineLoop 驱动 Scheduler 选批及 Forward 执行，Scheduler 提交生成进度、队列和资源变化。ViT 保留自己的图片合批循环。RequestState 负责进度、终态及资源使用计数；QueueSnapshot 只是队列计数值，不统一各调度器的队列容器。
 

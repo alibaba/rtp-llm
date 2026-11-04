@@ -6,7 +6,6 @@ import io.grpc.*;
 import io.grpc.stub.StreamObserver;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicReference;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.api.model.Types.Role;
@@ -54,14 +53,13 @@ class AdmissionTest {
     @Test void bothRolesUseTheSuppliedSchedulerWithoutABackend() throws Exception {
         var compute = ComputeModel.fromJson(new ObjectMapper().readTree("{\"forward\":{\"expression\":\"1\"}}"));
         for (var role : List.of(Role.prefill, Role.decode)) {
-            var created = new AtomicReference<RejectingScheduler>();
+            var lock = new Object();
+            var finished = new TaskHistory();
+            var scheduler = new RejectingScheduler(lock);
             try (var cache = new KvCache(2, 8, 0, KvCache.EvictionPolicy.LRU);
-                 var service = new RpcService(new AdmissionConfig("test", role, 2, 1, 1, 4096, 0, compute, 0), cache,
-                     (lock, supplied, finished) -> {
-                         assertSame(cache, supplied);
-                         assertNull(created.get(), "One scheduler per instance");
-                         var scheduler = new RejectingScheduler(lock); created.set(scheduler); return scheduler;
-                     })) {
+                 var engine = new EngineLoop(lock, scheduler, finished, cache, compute, role, "test");
+                 var service = new RpcService(new AdmissionConfig("test", role, 2, 1, 1, 4096, 0, compute, 0),
+                     cache, lock, finished, engine, true)) {
                 var server = io.grpc.netty.NettyServerBuilder.forPort(0).addService(service).build().start();
                 var channel = ManagedChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();
                 try {
@@ -85,9 +83,9 @@ class AdmissionTest {
                     }
                     assertEquals(Status.Code.RESOURCE_EXHAUSTED, Status.fromThrowable(error).getCode());
                     assertTrue(error.getMessage().contains("injected scheduler admission"));
-                    assertTrue(created.get().submitted);
+                    assertTrue(scheduler.submitted);
                     service.close();
-                    assertTrue(created.get().closed);
+                    assertTrue(scheduler.closed);
                 } finally {
                     channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
                     server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);

@@ -5,7 +5,6 @@ import io.grpc.stub.*;
 import java.util.concurrent.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.engine.*;
-import org.flexlb.mock.cache.KvCache;
 
 /**
  * Native ALLOCATE/LOAD/GENERATE protocol. Queue membership and progress stay behind Scheduler.
@@ -13,14 +12,16 @@ import org.flexlb.mock.cache.KvCache;
 final class DecodeAdmission implements AutoCloseable {
     private final AdmissionConfig config;
     private final EngineLoop engine;
+    private final Object executionLock;
     private final ExecutorService transport = Executors.newVirtualThreadPerTaskExecutor();
     private final KvTransfer transfer = new KvTransfer();
     private enum Stage { ALLOCATING, ALLOCATED, LOADING, LOADED, GENERATING, FINISHING }
     private boolean closed;
 
-    DecodeAdmission(AdmissionConfig config, KvCache cache, Scheduler.Factory schedulers) {
+    DecodeAdmission(AdmissionConfig config, Object executionLock, EngineLoop engine) {
         this.config = config;
-        engine = new EngineLoop(this, schedulers, new TaskHistory(), cache, config.compute(), config.role(), config.id());
+        this.executionLock = executionLock;
+        this.engine = engine;
     }
 
     StreamObserver<GenerateRequestPB> open(StreamObserver<GenerateOutputsPB> observer) {
@@ -54,7 +55,7 @@ final class DecodeAdmission implements AutoCloseable {
         @Override public void onNext(GenerateRequestPB frame) { accept(this, frame); }
         @Override public void onError(Throwable error) { stop(this, Status.CANCELLED.withDescription("Decode stream closed"), 8100); }
         @Override public void onCompleted() {
-            synchronized (DecodeAdmission.this) {
+            synchronized (executionLock) {
                 if (stage != Stage.GENERATING && stage != Stage.FINISHING) stop(this, Status.CANCELLED.withDescription("P closed before generation"), 8100);
             }
         }
@@ -71,46 +72,48 @@ final class DecodeAdmission implements AutoCloseable {
         }
     }
 
-    private synchronized void accept(Call call, GenerateRequestPB frame) {
-        if (call.terminal) return;
-        try {
-            if (closed) throw Status.UNAVAILABLE.withDescription("Decode node is closing").asRuntimeException();
-            if (call.input == null) {
-                validate(frame);
-                call.input = frame.getInput();
-                call.client = frame.getClientId();
-                call.request = engine.input(RpcTasks.input(call.input, call.client + "/" + call.input.getRequestId(),
-                    call.started, RpcTasks.deadline(call.input, call.started, call.rpcDeadline), false, config.blockSize(), config.cacheKeySeed()), call);
-                return;
+    private void accept(Call call, GenerateRequestPB frame) {
+        synchronized (executionLock) {
+            if (call.terminal) return;
+            try {
+                if (closed) throw Status.UNAVAILABLE.withDescription("Decode node is closing").asRuntimeException();
+                if (call.input == null) {
+                    validate(frame);
+                    call.input = frame.getInput();
+                    call.client = frame.getClientId();
+                    call.request = engine.input(RpcTasks.input(call.input, call.client + "/" + call.input.getRequestId(),
+                        call.started, RpcTasks.deadline(call.input, call.started, call.rpcDeadline), false, config.blockSize(), config.cacheKeySeed()), call);
+                    return;
+                }
+                if (frame.getRequestId() != call.input.getRequestId()
+                        || !frame.getClientId().isEmpty() && !frame.getClientId().equals(call.client))
+                    throw Status.INVALID_ARGUMENT.withDescription("RemoteGenerate identity changed").asRuntimeException();
+                if (frame.getStage() == RemoteStage.LOAD && call.stage == Stage.ALLOCATED) {
+                    startLoad(call);
+                } else if (frame.getStage() == RemoteStage.PREFILL_COMPLETE && call.stage == Stage.LOADED) {
+                    if (!frame.getClientId().equals(call.client) || call.input.getGenerateConfig().getMinNewTokens() > 1
+                            || call.input.getGenerateConfig().getIgnoreEos() && call.input.getGenerateConfig().getMaxNewTokens() != 1)
+                        throw Status.FAILED_PRECONDITION.withDescription("Invalid Prefill-only completion").asRuntimeException();
+                    call.stage = Stage.FINISHING;
+                    engine.control(call.request, Control.PREFILL_COMPLETE);
+                } else if (frame.getStage() == RemoteStage.GENERATE && call.stage == Stage.LOADED) {
+                    if (frame.getProposeTokenIdsCount() > 0 || frame.getPositionIdsCount() > 0 || frame.hasProposeProbs() || frame.hasProposeHidden())
+                        throw Status.UNIMPLEMENTED.withDescription("Speculative/position handoff is not supported").asRuntimeException();
+                    if (call.input.getGenerateConfig().getMaxNewTokens() == 1)
+                        throw Status.FAILED_PRECONDITION.withDescription("Single-token request is already complete at Prefill").asRuntimeException();
+                    call.stage = Stage.GENERATING;
+                    call.token = frame.getFirstGenerateTokenId();
+                    engine.control(call.request, new Control.Generate(call.token));
+                } else {
+                    throw Status.FAILED_PRECONDITION.withDescription("Expected ALLOCATE, LOAD, then GENERATE or PREFILL_COMPLETE").asRuntimeException();
+                }
+            } catch (RequestFailure failure) {
+                stop(call, failure.reason() == RequestFailure.Reason.INVALID ? Status.INVALID_ARGUMENT.withDescription(failure.getMessage()) : RpcErrors.status(failure),
+                    failure.reason() == RequestFailure.Reason.INVALID ? 605 : RpcErrors.code(failure));
             }
-            if (frame.getRequestId() != call.input.getRequestId()
-                    || !frame.getClientId().isEmpty() && !frame.getClientId().equals(call.client))
-                throw Status.INVALID_ARGUMENT.withDescription("RemoteGenerate identity changed").asRuntimeException();
-            if (frame.getStage() == RemoteStage.LOAD && call.stage == Stage.ALLOCATED) {
-                startLoad(call);
-            } else if (frame.getStage() == RemoteStage.PREFILL_COMPLETE && call.stage == Stage.LOADED) {
-                if (!frame.getClientId().equals(call.client) || call.input.getGenerateConfig().getMinNewTokens() > 1
-                        || call.input.getGenerateConfig().getIgnoreEos() && call.input.getGenerateConfig().getMaxNewTokens() != 1)
-                    throw Status.FAILED_PRECONDITION.withDescription("Invalid Prefill-only completion").asRuntimeException();
-                call.stage = Stage.FINISHING;
-                engine.control(call.request, Control.PREFILL_COMPLETE);
-            } else if (frame.getStage() == RemoteStage.GENERATE && call.stage == Stage.LOADED) {
-                if (frame.getProposeTokenIdsCount() > 0 || frame.getPositionIdsCount() > 0 || frame.hasProposeProbs() || frame.hasProposeHidden())
-                    throw Status.UNIMPLEMENTED.withDescription("Speculative/position handoff is not supported").asRuntimeException();
-                if (call.input.getGenerateConfig().getMaxNewTokens() == 1)
-                    throw Status.FAILED_PRECONDITION.withDescription("Single-token request is already complete at Prefill").asRuntimeException();
-                call.stage = Stage.GENERATING;
-                call.token = frame.getFirstGenerateTokenId();
-                engine.control(call.request, new Control.Generate(call.token));
-            } else {
-                throw Status.FAILED_PRECONDITION.withDescription("Expected ALLOCATE, LOAD, then GENERATE or PREFILL_COMPLETE").asRuntimeException();
-            }
-        } catch (RequestFailure failure) {
-            stop(call, failure.reason() == RequestFailure.Reason.INVALID ? Status.INVALID_ARGUMENT.withDescription(failure.getMessage()) : RpcErrors.status(failure),
-                failure.reason() == RequestFailure.Reason.INVALID ? 605 : RpcErrors.code(failure));
+            catch (StatusRuntimeException error) { stop(call, error.getStatus(), error.getStatus().getCode() == Status.Code.INVALID_ARGUMENT ? 605 : 0); }
+            catch (RuntimeException error) { stop(call, Status.INTERNAL.withDescription("Decode frame failed: " + error.getMessage()), 0); }
         }
-        catch (StatusRuntimeException error) { stop(call, error.getStatus(), error.getStatus().getCode() == Status.Code.INVALID_ARGUMENT ? 605 : 0); }
-        catch (RuntimeException error) { stop(call, Status.INTERNAL.withDescription("Decode frame failed: " + error.getMessage()), 0); }
     }
     private void validate(GenerateRequestPB request) {
         if (request.getStage() != RemoteStage.ALLOCATE || !request.hasInput() || request.getClientId().isBlank()
@@ -127,7 +130,7 @@ final class DecodeAdmission implements AutoCloseable {
     }
 
     private void acknowledge(Call call) {
-        synchronized (this) {
+        synchronized (executionLock) {
             if (!live(call)) return;
             call.stage = Stage.ALLOCATED;
         }
@@ -144,19 +147,21 @@ final class DecodeAdmission implements AutoCloseable {
         } catch (RuntimeException error) { use.close(); throw error; }
     }
 
-    private synchronized void loaded(Call call, KvTransfer.Outcome outcome) {
-        if (!live(call)) return;
-        var failure = outcome.state() == KvTransfer.State.COMPLETED ? null : new RequestFailure(
-            outcome.state() == KvTransfer.State.CANCELLED ? RequestFailure.Reason.CANCELLED : RequestFailure.Reason.INTERNAL,
-            "KV transfer " + outcome.state(), outcome.error());
-        try {
-            engine.transferCompleted(call.request, new TransferResult(false, failure));
-            if (failure != null) return;
-            call.stage = Stage.LOADED;
-            send(call, GenerateOutputsPB.newBuilder().setRequestId(call.input.getRequestId())
-                .setErrorInfo(RpcErrorPB.newBuilder().setErrorCodeValue(0)).build());
-        } catch (RequestFailure error) { stop(call, RpcErrors.status(error), RpcErrors.code(error)); }
-        catch (RuntimeException error) { stop(call, Status.CANCELLED.withDescription("LOAD acknowledgement failed"), 8100); }
+    private void loaded(Call call, KvTransfer.Outcome outcome) {
+        synchronized (executionLock) {
+            if (!live(call)) return;
+            var failure = outcome.state() == KvTransfer.State.COMPLETED ? null : new RequestFailure(
+                outcome.state() == KvTransfer.State.CANCELLED ? RequestFailure.Reason.CANCELLED : RequestFailure.Reason.INTERNAL,
+                "KV transfer " + outcome.state(), outcome.error());
+            try {
+                engine.transferCompleted(call.request, new TransferResult(false, failure));
+                if (failure != null) return;
+                call.stage = Stage.LOADED;
+                send(call, GenerateOutputsPB.newBuilder().setRequestId(call.input.getRequestId())
+                    .setErrorInfo(RpcErrorPB.newBuilder().setErrorCodeValue(0)).build());
+            } catch (RequestFailure error) { stop(call, RpcErrors.status(error), RpcErrors.code(error)); }
+            catch (RuntimeException error) { stop(call, Status.CANCELLED.withDescription("LOAD acknowledgement failed"), 8100); }
+        }
     }
 
     private boolean live(Call call) {
@@ -172,27 +177,33 @@ final class DecodeAdmission implements AutoCloseable {
         return true;
     }
 
-    private synchronized void send(Call call, GenerateOutputsPB output) {
-        if (call.terminal || call.response.isCancelled()) throw Status.CANCELLED.asRuntimeException();
-        call.delivery.add(output);
+    private void send(Call call, GenerateOutputsPB output) {
+        synchronized (executionLock) {
+            if (call.terminal || call.response.isCancelled()) throw Status.CANCELLED.asRuntimeException();
+            call.delivery.add(output);
+        }
     }
 
-    private synchronized void stop(Call call, Status status, long code) {
-        if (call.terminal) return;
-        if (call.request == null) ended(call, status, code);
-        else engine.finish(call.request, RpcErrors.scheduling(status, code));
+    private void stop(Call call, Status status, long code) {
+        synchronized (executionLock) {
+            if (call.terminal) return;
+            if (call.request == null) ended(call, status, code);
+            else engine.finish(call.request, RpcErrors.scheduling(status, code));
+        }
     }
-    private synchronized void ended(Call call, Status status, long code) {
-        if (call.terminal) return;
-        call.terminal = true;
-        if (call.transfer != null) call.transfer.cancel();
-        call.delivery.finish(status.isOk() ? null : RpcErrors.failure(status, code));
+    private void ended(Call call, Status status, long code) {
+        synchronized (executionLock) {
+            if (call.terminal) return;
+            call.terminal = true;
+            if (call.transfer != null) call.transfer.cancel();
+            call.delivery.finish(status.isOk() ? null : RpcErrors.failure(status, code));
+        }
     }
 
     Scheduler.Status snapshot(long latestFinished) { return engine.status(latestFinished); }
     void checkHealthy() { engine.checkHealthy(); }
     @Override public void close() {
-        synchronized (this) {
+        synchronized (executionLock) {
             if (closed) return;
             closed = true;
             engine.close();

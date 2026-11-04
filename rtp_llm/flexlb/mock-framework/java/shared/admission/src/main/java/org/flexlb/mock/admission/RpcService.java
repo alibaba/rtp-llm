@@ -7,7 +7,8 @@ import java.util.function.Supplier;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.cache.KvCache;
-import org.flexlb.mock.engine.Scheduler;
+import org.flexlb.mock.engine.EngineLoop;
+import org.flexlb.mock.engine.TaskHistory;
 
 /**
  * Native RPC adapter; P and D owners manage request state and KV independently.
@@ -21,17 +22,16 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
     private final AtomicLong statusVersion = new AtomicLong();
     private volatile boolean closed;
 
-    public RpcService(AdmissionConfig config, KvCache cache, Scheduler.Factory schedulers) {
-        this(config, cache, schedulers, true);
-    }
-
-    public RpcService(AdmissionConfig config, KvCache cache, Scheduler.Factory schedulers, boolean groups) {
+    public RpcService(AdmissionConfig config, KvCache cache, Object executionLock, TaskHistory finished,
+                      EngineLoop engine, boolean groups) {
         this.config = config;
         this.groups = groups;
         this.cache = cache;
-        prefill = config.role() == org.flexlb.mock.api.model.Types.Role.prefill ? new PrefillAdmission(config, cache, schedulers) : null;
-        decode = prefill == null ? new DecodeAdmission(config, cache, schedulers) : null;
+        prefill = config.role() == org.flexlb.mock.api.model.Types.Role.prefill
+            ? new PrefillAdmission(config, executionLock, finished, engine) : null;
+        decode = prefill == null ? new DecodeAdmission(config, executionLock, engine) : null;
     }
+
     public void close() {
         closed = true;
         RuntimeException failure = null;
