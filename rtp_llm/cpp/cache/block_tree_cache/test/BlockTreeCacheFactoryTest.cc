@@ -23,6 +23,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -1939,15 +1940,72 @@ TEST_F(BlockTreeCacheFactoryTest, CreatesDiskCacheWithoutHostCache) {
     }
 }
 
-TEST_F(BlockTreeCacheFactoryTest, RejectsDiskCacheForReusableLinearGroupSet) {
-    const auto    config    = makeHybridConfig();
-    auto          allocator = initAllocator<CoordinatorCacheManager>(config);
-    KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_disk_cache  = true;
-    kv_cache_config.disk_cache_size_mb = 1;
-    kv_cache_config.disk_cache_paths   = "/unused/rejected-before-disk-init";
+TEST_F(BlockTreeCacheFactoryTest, ReusableLinearDiskRoundTripWithOptionalHostAndCrc) {
+    for (bool host_enabled : {false, true}) {
+        for (bool crc_enabled : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "host=" << host_enabled << " crc=" << crc_enabled);
+            const auto                               config    = makeHybridConfig();
+            auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
+            block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_linear_disk");
+            KVCacheConfig                            kv_cache_config;
+            kv_cache_config.enable_memory_cache    = host_enabled;
+            kv_cache_config.memory_cache_size_mb   = host_enabled ? 1 : 0;
+            kv_cache_config.enable_disk_cache      = true;
+            kv_cache_config.disk_cache_size_mb     = 1;
+            kv_cache_config.disk_cache_paths       = disk_dir.path;
+            kv_cache_config.disk_cache_buffered_io = true;
+            kv_cache_config.enable_crc             = crc_enabled;
 
-    expectFactoryRejects(config, allocator, kv_cache_config);
+            auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{});
+            ASSERT_NE(cache, nullptr);
+            ASSERT_EQ(cache->groupSets().size(), 2u);
+            EXPECT_EQ(cache->groupSets().front()->groupType(), CacheGroupType::LINEAR);
+            for (const auto& group : cache->groupSets()) {
+                const auto id            = group->groupSetId();
+                const auto device_blocks = block_tree_cache_test::allocateDeviceBlocksForTest(*group, 1);
+                ASSERT_EQ(device_blocks.size(), 1u);
+                const auto& blocks     = device_blocks.front();
+                const auto  disk_block = group->allocateSingleBlock(Tier::DISK, BlockTreeRefType::STORE);
+                ASSERT_NE(disk_block, NULL_BLOCK_IDX);
+                const auto tiles = getDeviceHostCopyTiles(*group, blocks);
+                ASSERT_FALSE(tiles.empty());
+                const uint8_t pattern = 0x35 + id;
+                for (const auto& tile : tiles) {
+                    writeDevicePattern(tile.buffer.addr, tile.buffer.size_bytes, pattern);
+                }
+                if (host_enabled) {
+                    const auto host_block = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::STORE);
+                    ASSERT_NE(host_block, NULL_BLOCK_IDX);
+                    ASSERT_TRUE(cache
+                                    ->executeTransfer(block_transfer_engine_test::makeTransferTask(
+                                        {TransferDescriptor::deviceToHost(id, blocks, host_block)}))
+                                    .ok());
+                    ASSERT_TRUE(cache
+                                    ->executeTransfer(block_transfer_engine_test::makeTransferTask(
+                                        {TransferDescriptor::hostToDisk(id, host_block, disk_block)}))
+                                    .ok());
+                    group->releaseSingleBlock(Tier::HOST, host_block, BlockTreeRefType::STORE);
+                } else {
+                    ASSERT_TRUE(cache
+                                    ->executeTransfer(block_transfer_engine_test::makeTransferTask(
+                                        {TransferDescriptor::deviceToDisk(id, blocks, disk_block)}))
+                                    .ok());
+                }
+                for (const auto& tile : tiles) {
+                    writeDevicePattern(tile.buffer.addr, tile.buffer.size_bytes, 0);
+                }
+                // Disk hits restore directly to DEVICE even when the Host tier is enabled.
+                const auto result = cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
+                    {TransferDescriptor::diskToDevice(id, disk_block, blocks)}));
+                ASSERT_TRUE(result.ok()) << result.status.ToString();
+                for (const auto& tile : tiles) {
+                    expectDevicePattern(tile.buffer.addr, tile.buffer.size_bytes, pattern);
+                }
+                group->releaseSingleBlock(Tier::DISK, disk_block, BlockTreeRefType::STORE);
+                block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, device_blocks);
+            }
+        }
+    }
 }
 
 TEST_F(BlockTreeCacheFactoryTest, DiskCacheAllowsDisabledLinearReuse) {

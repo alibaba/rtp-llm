@@ -78,7 +78,8 @@ DeviceDiskTransferExecutor::DeviceDiskTransferExecutor(DeviceHostTransferExecuto
         max_stride          = std::max(max_stride, stride);
         if (group_set->groupType() == CacheGroupType::FULL) {
             full_stride = std::max(full_stride, stride);
-        } else if (group_set->groupType() == CacheGroupType::SWA) {
+        } else if (group_set->groupType() == CacheGroupType::SWA || group_set->groupType() == CacheGroupType::LINEAR) {
+            // SWA and LINEAR share staging blocks sized for the larger encoded state.
             swa_stride = std::max(swa_stride, stride);
         }
     }
@@ -327,7 +328,7 @@ HostStagingBlockPool* DeviceDiskTransferExecutor::stagingPool(CacheGroupType gro
     if (group_type == CacheGroupType::FULL) {
         return full_staging_pool_.get();
     }
-    if (group_type == CacheGroupType::SWA) {
+    if (group_type == CacheGroupType::SWA || group_type == CacheGroupType::LINEAR) {
         return swa_staging_pool_.get();
     }
     return nullptr;
@@ -337,7 +338,7 @@ size_t DeviceDiskTransferExecutor::batchCapacity(CacheGroupType group_type) cons
     if (group_type == CacheGroupType::FULL) {
         return full_batch_capacity_;
     }
-    if (group_type == CacheGroupType::SWA) {
+    if (group_type == CacheGroupType::SWA || group_type == CacheGroupType::LINEAR) {
         return swa_batch_capacity_;
     }
     return 0;

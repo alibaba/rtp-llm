@@ -459,17 +459,6 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     if (!buildGroupMembers(cache_config, group_members)) {
         return nullptr;
     }
-    if (disk_enabled) {
-        for (const std::vector<std::string>& members : group_members) {
-            RTP_LLM_CHECK_WITH_INFO(!members.empty(), "BlockTreeCache aggregation plan contains an empty group set");
-            if (cache_config.topology().group(members.front()).policy.group_type == CacheGroupType::LINEAR) {
-                RTP_LLM_LOG_ERROR("disk cache does not support reusable LINEAR group sets, tag=%s",
-                                  members.front().c_str());
-                return nullptr;
-            }
-        }
-    }
-
     std::vector<BackingLayout> backing_layouts;
     backing_layouts.reserve(group_members.size());
     size_t combined_stride = 0;
