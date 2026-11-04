@@ -471,6 +471,7 @@ def pytest_collection_modifyitems(config, items):
 # ============================================================================
 
 
+@pytest.hookimpl(optionalhook=True)
 def pytest_configure_node(node):
     """Controller-side: record the fixed logical pool, not replacement count."""
     config = node.config
@@ -489,6 +490,7 @@ def pytest_configure_node(node):
     config._rtp_expected_gpu_workers = worker_count
 
 
+@pytest.hookimpl(optionalhook=True)
 def pytest_testnodedown(node, error):
     """Controller-side: record the CVD reported by a worker as it goes down."""
     workeroutput = getattr(node, "workeroutput", None) or {}
