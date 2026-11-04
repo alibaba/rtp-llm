@@ -15,7 +15,7 @@ Every format here is byte-exact against rtp-llm's own codec oracles
   by 6; the four scale bytes pack little-endian into one int32).
 
 Triton fast paths are copied from sglang-for-sail (commit 512b03d,
-Apache-2.0) and are only used when ``is_ppu()`` is true at call time; the
+Apache-2.0) and are only used for accelerator tensors on a PPU host; the
 pure-torch paths are the portable ground truth.
 """
 
@@ -69,9 +69,9 @@ def is_ppu() -> bool:
         return False
 
 
-def _ppu_fast_path() -> bool:
-    """True when the copied Triton kernels are usable (PPU + triton import)."""
-    if not is_ppu():
+def _ppu_fast_path(tensor: torch.Tensor) -> bool:
+    """True for accelerator tensors when the PPU Triton kernels are usable."""
+    if not tensor.is_cuda or not is_ppu():
         return False
     try:
         _triton_kernels()
@@ -293,7 +293,9 @@ def dequantize_global_kv_slots(
     """
     if (
         out is not None
-        and _ppu_fast_path()
+        and _ppu_fast_path(pool)
+        and out.device == pool.device
+        and slots.device == pool.device
         and slots.numel()
         and bool((slots >= 0).all())
     ):
@@ -332,7 +334,7 @@ def dequantize_swa_kv_rows(packed: torch.Tensor, out: torch.Tensor = None):
     values = values * ue8m0_scale_from_byte(scales).unsqueeze(-1)
     values = values.reshape(rows, KV_DIM)
     if out is None:
-        if _ppu_fast_path():
+        if _ppu_fast_path(packed):
             # The paged kernel with one entry per "page" handles plain rows.
             out = torch.empty(
                 (rows, KV_DIM), dtype=torch.bfloat16, device=packed.device
@@ -378,7 +380,7 @@ def quantize_indexer_q(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     in the low byte.
     """
     shape = q.shape
-    if _ppu_fast_path():
+    if _ppu_fast_path(q):
         return quantize_indexer_q_ppu(q)
     rows = q.numel() // INDEXER_HEAD_DIM
     payload, sf = _quantize_mx_rows(q.reshape(rows, INDEXER_HEAD_DIM))

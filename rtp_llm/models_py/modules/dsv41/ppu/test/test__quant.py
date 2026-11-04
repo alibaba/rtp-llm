@@ -6,6 +6,7 @@ oracles), never by calling the module under test.
 """
 
 import unittest
+from unittest import mock
 
 import torch
 
@@ -301,6 +302,40 @@ class SwaKv528Test(unittest.TestCase):
 
 
 class IndexerMxTest(unittest.TestCase):
+    def test_cpu_query_stays_on_cpu_when_ppu_kernels_are_available(self):
+        q = torch.zeros(1, 1, 128, dtype=torch.bfloat16)
+        q[0, 0, 0] = 6
+        with mock.patch.object(_quant, "is_ppu", return_value=True), mock.patch.object(
+            _quant, "_triton_kernels", side_effect=AssertionError("CPU kernel dispatch")
+        ):
+            payload, sf = _quant.quantize_indexer_q(q)
+        self.assertEqual(payload.device.type, "cpu")
+        self.assertEqual(payload[0, 0, 0].item(), 7)
+        self.assertEqual(sf[0, 0].item(), 0x0101017F)
+
+    def test_cpu_swa_decode_stays_on_cpu_on_ppu_host(self):
+        packed = torch.zeros(1, 528, dtype=torch.uint8)
+        packed[:, 512:] = 127  # UE8M0 scale1.
+        with mock.patch.object(_quant, "is_ppu", return_value=True), mock.patch.object(
+            _quant, "_triton_kernels", side_effect=AssertionError("CPU kernel dispatch")
+        ):
+            decoded = _quant.dequantize_swa_kv_rows(packed)
+        self.assertEqual(decoded.device.type, "cpu")
+        self.assertFalse(bool(decoded.any()))
+
+    def test_cpu_global_decode_stays_on_cpu_on_ppu_host(self):
+        pool = torch.zeros(1, 288, dtype=torch.uint8)
+        pool[:, 256:] = 0x38  # E4M3 scale1.
+        pool[0, 0] = 7  # E2M1 value6 in the first low nibble.
+        out = torch.empty(1, 512, dtype=torch.bfloat16)
+        with mock.patch.object(_quant, "is_ppu", return_value=True), mock.patch.object(
+            _quant, "_triton_kernels", side_effect=AssertionError("CPU kernel dispatch")
+        ):
+            decoded = _quant.dequantize_global_kv_slots(pool, torch.tensor([0]), out)
+        self.assertIs(decoded, out)
+        self.assertEqual(decoded[0, 0].item(), 6)
+        self.assertFalse(bool(decoded[0, 1:].any()))
+
     def test_quantize_indexer_q_matches_reference(self):
         torch.manual_seed(19)
         q = torch.randn(5, 32, 128, dtype=torch.bfloat16)
