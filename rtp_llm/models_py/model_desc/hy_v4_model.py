@@ -79,6 +79,10 @@ class Hy4DecoderLayer(nn.Module):
         self._drain_prefill_before_moe = layer_idx in config.moe_layer_index and str(
             moe_config.moe_strategy
         ).startswith("mega_moe")
+        self._drain_pinned_mla_before_moe = self._drain_prefill_before_moe and (
+            os.environ.get("RTP_LLM_DSA_MLA_DRAIN_BEFORE_MOE", "1") == "1"
+            or os.environ.get("RTP_LLM_CP_KV_CROSS_LAYER", "1") == "1"
+        )
         self.self_attn = MlaAttention.from_model_config(
             config,
             parallelism_config,
@@ -145,6 +149,7 @@ class Hy4DecoderLayer(nn.Module):
         nn.Module.__init__(clone)
         clone.layer_idx = self.layer_idx
         clone._drain_prefill_before_moe = self._drain_prefill_before_moe
+        clone._drain_pinned_mla_before_moe = self._drain_pinned_mla_before_moe
         clone.self_attn = self.self_attn
         clone.mlp = (
             self.mlp.clone_for_cuda_graph()
@@ -159,6 +164,17 @@ class Hy4DecoderLayer(nn.Module):
         clone._fuse_mlp_ihc_mxfp8 = self._fuse_mlp_ihc_mxfp8
         clone.cmp = self.cmp.clone_for_cuda_graph() if self.cmp is not None else None
         return clone
+
+    def _wait_pinned_mla_before_moe(self, fmha_impl: FMHAImplBase) -> None:
+        if not self._drain_pinned_mla_before_moe:
+            return
+        groups = getattr(fmha_impl, "pinned_mla_groups", None)
+        if groups is None:
+            groups = getattr(getattr(fmha_impl, "fmha_impl", None), "pinned_mla_groups", {})
+        entry = groups.get(self.layer_idx)
+        if entry is not None:
+            working, _ = entry
+            working.wait_prefetch_complete()
 
     def forward(
         self,
@@ -199,6 +215,7 @@ class Hy4DecoderLayer(nn.Module):
         layered = getattr(fmha_impl, "layered_prefill_cache", None)
         if self._drain_prefill_before_moe and layered is not None:
             layered.wait_prefetch_complete()
+        self._wait_pinned_mla_before_moe(fmha_impl)
         mlp_input_fp8 = None
         mlp_input_scale = None
         if getattr(self, "_fuse_mlp_ihc_mxfp8", False):

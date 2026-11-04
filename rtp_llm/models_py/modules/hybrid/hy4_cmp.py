@@ -91,9 +91,12 @@ class Hy4Cmp:
         if cache is None:
             return "requires real LayerKVCache"
         storage = cache.kv_cache_base
-        if (not storage.is_cuda or storage.device != hidden.device or storage.ndim != 3
-                or storage.shape[0] < 1 or storage.shape[1] != 64 or not storage.is_contiguous()):
-            return "requires contiguous CUDA MLA cache [blocks,64,slot]"
+        if not storage.is_cuda or storage.device != hidden.device:
+            return f"MLA cache device={storage.device}, CMP requires {hidden.device}"
+        if storage.ndim != 3 or storage.shape[0] < 1 or storage.shape[1] != 64:
+            return f"MLA cache shape={tuple(storage.shape)}, CMP requires [blocks>0,64,slot]"
+        if not storage.is_contiguous():
+            return f"MLA cache stride={storage.stride()}, CMP requires contiguous storage"
         if fmha._kv_cache_type == "fp8_ds_mla":
             if (not isinstance(fmha.fmha_impl, SparseMlaFp8Op)
                     or storage.dtype not in (torch.uint8, torch.float8_e4m3fn)

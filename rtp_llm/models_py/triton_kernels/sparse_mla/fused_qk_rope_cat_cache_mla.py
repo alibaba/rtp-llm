@@ -37,6 +37,20 @@ _NUM_FP8_K_BLOCKS = 5
 _FP8_SCALE_MIN: dict[torch.device, torch.Tensor] = {}
 
 
+def validate_mla_cache_device(kv_cache: torch.Tensor, device: torch.device) -> None:
+    if device.type != "cuda":
+        raise ValueError(f"MLA compute requires CUDA, got {device}")
+    if kv_cache.device == device:
+        return
+    if kv_cache.device.type == "cpu" and kv_cache.is_pinned():
+        return
+    raise ValueError(
+        f"MLA cache must be on {device} or CUDA-accessible pinned CPU memory; "
+        f"got device={kv_cache.device}, shape={tuple(kv_cache.shape)}, "
+        f"stride={kv_cache.stride()}. Check the cache working set/staging setup."
+    )
+
+
 def _get_fp8_scale_min(device: torch.device) -> torch.Tensor:
     t = _FP8_SCALE_MIN.get(device)
     if t is None:
@@ -348,6 +362,16 @@ def fused_qk_rope_cat_cache_mla(
         is_neox_style: True for NEOX rotation
         kv_cache_type: "auto" or "fp8_ds_mla"
     """
+    validate_mla_cache_device(kv_cache, q.device)
+    for name, tensor in (
+        ("compressed_kv", compressed_kv),
+        ("k_pe", k_pe),
+        ("slot_mapping", slot_mapping),
+        ("positions", positions),
+        ("cos_sin_cache", cos_sin_cache),
+    ):
+        if tensor.device != q.device:
+            raise ValueError(f"{name} must be on {q.device}, got {tensor.device}")
     assert q.dim() == 3 and q.dtype == torch.bfloat16
     assert compressed_kv.dim() == 2 and compressed_kv.dtype == torch.bfloat16
     assert k_pe.dim() == 2 and k_pe.dtype == torch.bfloat16
@@ -420,7 +444,7 @@ def fused_qk_rope_cat_cache_mla(
             slot_mapping,
             positions,
             cos_sin_cache,
-            _get_fp8_scale_min(kv_cache.device),
+            _get_fp8_scale_min(q.device),
             q.stride(0),
             q.stride(1),
             k_pe.stride(0),

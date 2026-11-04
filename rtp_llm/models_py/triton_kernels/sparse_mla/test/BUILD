@@ -1,4 +1,13 @@
 py_test(
+    name = "test_mla_cache_device",
+    srcs = ["test_mla_cache_device.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_cp_indexed_copy",
     srcs = ["test_cp_indexed_copy.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],

@@ -58,6 +58,7 @@ class Hy4PrefillMigrationTest(unittest.TestCase):
         model.hidden_size = 4
         model.layer_num = 2
         model.kv_cache = None
+        model.pinned_mla_groups = {}
         model.layered_prefill_cache = _PrefillCache()
         model.embed_tokens = nn.Embedding.from_pretrained(
             torch.arange(12.0).reshape(3, 4)

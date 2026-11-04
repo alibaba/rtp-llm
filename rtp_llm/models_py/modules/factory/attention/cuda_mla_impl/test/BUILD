@@ -4,6 +4,14 @@ load("//bazel:arch_select.bzl", "requirement")
 requirement(["torch", "triton", "flash-mla"])
 
 py_test(
+    name = "test_capture_cache_slots",
+    srcs = ["test_capture_cache_slots.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "cp_kv_padded_pack_test",
     srcs = ["cp_kv_padded_pack_test.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],

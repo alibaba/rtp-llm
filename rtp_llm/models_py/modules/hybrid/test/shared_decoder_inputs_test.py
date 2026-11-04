@@ -7,12 +7,28 @@ from torch import nn
 from torch.nn import functional as F
 
 from rtp_llm.models_py.model_desc.generic_moe_mtp import GenericMoeMTPModel
-from rtp_llm.models_py.model_desc.hy_v4_model import Hy4Model
+from rtp_llm.models_py.model_desc.hy_v4_model import Hy4DecoderLayer, Hy4Model
 from rtp_llm.models_py.model_desc.hy_v4_mtp_model import Hy4MtpModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 
 
 class SharedDecoderInputsTest(unittest.TestCase):
+    def test_hy4_waits_for_shared_group_before_moe(self):
+        working = Mock()
+        model = SimpleNamespace(layer_idx=3, _drain_pinned_mla_before_moe=True)
+        direct = SimpleNamespace(pinned_mla_groups={3: (working, 1)})
+        for fmha in (direct, SimpleNamespace(fmha_impl=direct)):
+            working.reset_mock()
+            Hy4DecoderLayer._wait_pinned_mla_before_moe(model, fmha)
+            working.wait_prefetch_complete.assert_called_once_with()
+        for enabled, groups in ((False, direct.pinned_mla_groups), (True, {})):
+            working.reset_mock()
+            model._drain_pinned_mla_before_moe = enabled
+            Hy4DecoderLayer._wait_pinned_mla_before_moe(
+                model, SimpleNamespace(pinned_mla_groups=groups)
+            )
+            working.wait_prefetch_complete.assert_not_called()
+
     def test_hy4_binds_current_pinned_cache_before_forward(self):
         class ForwardReached(Exception):
             pass

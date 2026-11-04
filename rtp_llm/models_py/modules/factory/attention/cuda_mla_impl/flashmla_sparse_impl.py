@@ -44,6 +44,7 @@ from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
 )
 from rtp_llm.models_py.triton_kernels.sparse_mla.fused_qk_rope_cat_cache_mla import (
     fused_qk_rope_cat_cache_mla,
+    validate_mla_cache_device,
 )
 from rtp_llm.models_py.triton_kernels.sparse_mla.pad_query_heads import (
     maybe_pad_query_heads,
@@ -647,6 +648,12 @@ class SparseMlaImpl(MlaImplBase):
         self.fmha_params = rtp_llm_ops.SparseMlaParams()
         self.rope_params = self.fmha_params
         self.prepare(attn_inputs)
+        if self.is_cuda_graph:
+            # Capture inputs share a dummy block table across requests. Suppress
+            # their cache writes, including warmup before stream capture starts.
+            # prepare_cuda_graph restores real slots in this same buffer before
+            # replay; never capture this initialization in the forward graph.
+            self.fmha_params.slot_mapping.fill_(-1)
 
     def _refresh_paged_mqa_schedule_metadata(
         self, attn_inputs: PyAttentionInputs, forbid_realloc: bool
@@ -917,6 +924,8 @@ class SparseMlaImpl(MlaImplBase):
                 device=q.device,
             )
             write_slots = torch.arange(q.shape[0], dtype=torch.int64, device=q.device)
+
+        validate_mla_cache_device(cache_target.kv_cache_base, q.device)
 
         if prepared_query is not None:
             if (working_entry is not None or not self._fuse_qk_rope_cat_cache_mla
