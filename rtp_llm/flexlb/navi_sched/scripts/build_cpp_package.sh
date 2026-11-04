@@ -101,8 +101,10 @@ for runtime_lib in liblz4.so libzstd.so libelf.so libev.so; do
     chmod u+w "${PACKAGE_DIR}/lib/${runtime_lib}"
 done
 cp -L "${PYTHON_LIBRARY}" \
-    "${PACKAGE_DIR}/lib/libpython3.10.so.1.0"
-chmod u+w "${PACKAGE_DIR}/lib/libpython3.10.so.1.0"
+    "${PACKAGE_DIR}/lib/${PYTHON_LIBRARY_NAME}"
+chmod u+w "${PACKAGE_DIR}/lib/${PYTHON_LIBRARY_NAME}"
+sed -i "s/libpython3\\.10\\.so\\.1\\.0/${PYTHON_LIBRARY_NAME}/g" \
+    "${PACKAGE_DIR}/BUILD"
 patchelf --set-rpath '$ORIGIN' "${PACKAGE_DIR}/lib/libnavi_sched.so"
 
 PUBLIC_API_DEPFILE=$(find \

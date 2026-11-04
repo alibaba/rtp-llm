@@ -58,14 +58,11 @@ fi
 
 PYTHON_VERSION=$("${PYTHON_BIN}" -c \
     'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-if [[ "${PYTHON_VERSION}" != "3.10" ]]; then
-    echo "NaviSched requires Python 3.10, found ${PYTHON_VERSION}" >&2
-    exit 1
-fi
+PYTHON_LIBRARY_NAME="libpython${PYTHON_VERSION}.so.1.0"
 
 PYTHON_HOME=$(cd "$(dirname "${PYTHON_BIN}")/.." && pwd)
 PYTHON_LIB_DIR=${PYTHON_HOME}/lib
-PYTHON_LIBRARY=${PYTHON_LIB_DIR}/libpython3.10.so.1.0
+PYTHON_LIBRARY=${PYTHON_LIB_DIR}/${PYTHON_LIBRARY_NAME}
 if [[ ! -f "${PYTHON_LIBRARY}" ]]; then
     echo "missing Python runtime library: ${PYTHON_LIBRARY}" >&2
     exit 1
@@ -73,11 +70,11 @@ fi
 
 export PATH="$(dirname "${PYTHON_BIN}"):${PATH}"
 export NAVI_PYTHON_HOME="${REPO_ROOT}/aios/navi/config_loader/python:\
-${PYTHON_LIB_DIR}/python3.10"
+${PYTHON_LIB_DIR}/python${PYTHON_VERSION}"
 
 NAVI_SCHED_BAZEL_COMMON_ARGS=(
     "${NAVI_SCHED_BAZEL_COMPILER_ARGS[@]}"
-    --config=py310
+    --config=${NAVI_SCHED_PYTHON_BAZEL_CONFIG:-py310}
 )
 if [[ -n "${NAVI_SCHED_BAZEL_PLATFORM_CONFIG}" ]]; then
     NAVI_SCHED_BAZEL_COMMON_ARGS+=("${NAVI_SCHED_BAZEL_PLATFORM_CONFIG}")
