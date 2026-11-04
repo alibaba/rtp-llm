@@ -2,9 +2,11 @@ import asyncio
 from dataclasses import dataclass
 import json
 import os
+import signal
 from pathlib import Path
 import sys
 import subprocess
+import time
 from typing import Annotated
 import pytest
 import yaml
@@ -74,6 +76,35 @@ def cleaned(out):
     for e in starts:
         with pytest.raises(ProcessLookupError):
             os.kill(e['pid'], 0)
+
+
+def test_cli_sigterm_cancels_and_cleans_owned_process(setup, tmp_path):
+    case, _, launch = setup([{'id': 'leader', 'describe': 'leader', 'interface': 'master/get'}], child='hung')
+    launch['components']['master']['startup_timeout'] = '30s'
+    recipe = tmp_path / 'launch.yaml'
+    recipe.write_text(yaml.safe_dump(launch))
+    out = tmp_path / 'terminated'
+    child = subprocess.Popen([sys.executable, '-m', 'mock_framework.cli', 'run', str(case.source),
+                              '--launch', str(recipe), '--output', str(out)],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if (out / 'events.jsonl').exists() and any(e['event'] == 'process_started' for e in events(out)):
+                break
+            assert child.poll() is None
+            time.sleep(.02)
+        else:
+            pytest.fail('CLI did not start its owned process')
+        child.send_signal(signal.SIGTERM)
+        _, stderr = child.communicate(timeout=10)
+        assert child.returncode == 130, stderr
+        assert json.loads((out / 'result.json').read_text())['status'] == 'CANCELLED'
+        cleaned(out)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.communicate(timeout=5)
 
 
 def run(setup, tmp_path, steps, **kw):

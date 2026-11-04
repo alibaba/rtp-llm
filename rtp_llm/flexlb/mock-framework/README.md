@@ -28,10 +28,10 @@ export PROMETHEUS_BIN="<Prometheus 可执行文件>"
 export PATH="$JAVA_HOME/bin:$PATH"
 
 uv sync --locked
-./scripts/build.sh
+./scripts/build-java.sh
 ```
 
-`build.sh` 编译 Java 并运行 Java 测试，复用生产模块的公式、协议和 Master；构建 Mock 时跳过 Boot 重打包及 Whale 分发归档，不改变生产模块独立构建的默认行为。
+`build-java.sh` 编译 Java 并运行 Java 测试，复用生产模块的公式、协议和 Master；构建 Mock 时跳过 Boot 重打包及 Whale 分发归档，不改变生产模块独立构建的默认行为。
 
 ## 跑第一个 Case
 
@@ -114,10 +114,34 @@ Case 字段、相对路径、共享资源、引用、断言、扩缩容与 Maste
 执行 Java 和 Python 检查：
 
 ```sh
-PROMETHEUS_BIN="$PROMETHEUS_BIN" ./scripts/check.sh
+PROMETHEUS_BIN="$PROMETHEUS_BIN" ./scripts/test-framework.sh
 ```
 
-`check.sh` 会先调用 `build.sh`，再运行 Python 测试。缺少 Prometheus 时会跳过真实采集集成测试；macOS 缺少回环别名时跳过双 Master 测试。报告检查结果时说明跳过项，测试通过不代替完整 Case 验收。
+`test-framework.sh` 会先调用 `build-java.sh`，再运行 Python 测试。缺少 Prometheus 时会跳过真实采集集成测试；macOS 缺少回环别名时跳过双 Master 测试。报告检查结果时说明跳过项，测试通过不代替完整 Case 验收。
+
+## CI 基础 Case
+
+CI 使用预制的 CPU 测试环境，每次检出待测源码，干净构建一次后运行同一个 `cases/basic/case.yaml`：
+
+```sh
+./scripts/run-ci-case.sh /absolute/path/to/new-output
+```
+
+预先设置 `JAVA_HOME`、`PROMETHEUS_BIN`，并准备 uv 依赖缓存。脚本离线安装锁定的 Python 依赖，清理 Maven 构建输出，禁用内部构建 profile，再构建并执行 Case。此脚本跳过 Java 单测执行，但编译测试代码；需要执行 Java 单测时使用 `scripts/build-java.sh`。Case 失败或执行错误以非零状态退出；产物目录包含构建日志、启动配方和完整实验结果。SIGTERM 会进入取消和进程清理流程。
+
+预制环境在源码仓库根目录构建：
+
+```sh
+docker build -f rtp_llm/flexlb/mock-framework/docker/ci-case-env.Dockerfile -t mock-case-ci:<version> .
+```
+
+镜像包含 JDK 21、Python 3.12.12、uv、Prometheus 3.5.0，以及 Python/Maven 依赖缓存。预热阶段的 Mock 源码、JAR 和 class 不进入最终镜像。项目依赖变化时重建预制镜像；Python 缓存缺失会明确失败，不在每次 Job 中下载。Maven 新增依赖仍可按 Maven 仓库配置下载。
+
+外层内部仓库的 `.aoneci/image-base.yaml` 提供 `mock-ci-image` 任务，通过 `mock-ci-image=true` 构建并发布预制镜像；同时将其他不需要的镜像开关设为 false，并指定待测源码的 `github_commit` 和 `github_source_repo`。在 `.aoneci/main.yaml` 使用 `pre-jobs=["mock-ci-case"]` 和 `mock-case-image=<已发布的固定版本或 digest>` 单独运行 `mock-ci-case`。两者复用现有源码检出和产物上传能力，不启动 Whale 镜像构建。
+
+基础 Job 会先上传成功或失败的结果，再传播 Case 退出码。首次验证采用显式选择，尚未加入默认 MR 门禁列表；发布并验证预制镜像后，固定镜像版本并将 `mock-ci-case` 加入默认 `pre-jobs` 才会自动阻断 MR。
+
+Case 使用本次独占的 Prometheus。若误用 KMonitor Engine 产物，采集启动阶段会明确报错，不回退或同时启用两个后端。Whale 镜像打包和自动上报规则保持不变。
 
 - [Case 指南](docs/case-guide.md)：配置、路径、Step/ref、断言、启动配方与生命周期操作。
 - [组件配置与指标参考](docs/component-reference.md)：Master、RTP、ViT、KV、Compute/EOS、Client 协议及指标口径。

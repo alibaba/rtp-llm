@@ -79,7 +79,7 @@ def package():
     if internal_monitoring:
         profiles.append('internal-monitoring')
     build_args = ['-P' + ','.join(profiles)] if profiles else []
-    subprocess.run([str(FRAMEWORK / 'scripts/build.sh'), '-pl', 'java/host', '-am', '-DskipTests', *build_args],
+    subprocess.run([str(FRAMEWORK / 'scripts/build-java.sh'), '-pl', 'java/host', '-am', '-DskipTests', *build_args],
                    cwd=FRAMEWORK, check=True)
     jar = FRAMEWORK / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
     with zipfile.ZipFile(jar) as archive:
@@ -111,8 +111,8 @@ def package():
         shutil.rmtree(context)
     context.mkdir(parents=True)
     shutil.copyfile(jar, context / 'mock-engine.jar')
-    for name in ('Dockerfile', 'whale_start.sh'):
-        shutil.copyfile(FRAMEWORK / 'docker' / name, context / name)
+    shutil.copyfile(FRAMEWORK / 'docker/whale-engine.Dockerfile', context / 'Dockerfile')
+    shutil.copyfile(FRAMEWORK / 'docker/whale_start.sh', context / 'whale_start.sh')
     manifest = dict(schema_version=1, source_sha=source, recipe_sha=recipe,
                     jar_sha256=hashlib.sha256(jar.read_bytes()).hexdigest(), tests_executed=False,
                     internal_discovery=internal_discovery, metrics_backend=backend, service_startup_verified=True)

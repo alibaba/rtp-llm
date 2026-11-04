@@ -3,6 +3,7 @@ import asyncio
 from dataclasses import asdict
 import json
 from pathlib import Path
+import signal
 import sys
 import yaml
 
@@ -45,7 +46,15 @@ def main():
             if args.output is None or args.launch is None:
                 parser.error('run requires --output <new directory> and --launch <recipes.yaml>')
             launch = prepare_launch(load_yaml(args.launch), case, args.launch.resolve().parent)
-            result = asyncio.run(run_case(case, registry, launch, args.output))
+
+            def interrupted(signum, frame):
+                raise KeyboardInterrupt
+
+            previous = signal.signal(signal.SIGTERM, interrupted)
+            try:
+                result = asyncio.run(run_case(case, registry, launch, args.output))
+            finally:
+                signal.signal(signal.SIGTERM, previous)
             sys.stdout.write(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
             if result['status'] != 'PASS':
                 parser.exit(1)

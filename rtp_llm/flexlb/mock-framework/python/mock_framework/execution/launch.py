@@ -76,7 +76,7 @@ def local_launch(case, java, prometheus, *, framework, engine_mode='shared'):
     def artifact(relative):
         path = framework / relative
         if not path.is_file():
-            raise ExecutionError(f'Missing build artifact: {path}; run scripts/build.sh first')
+            raise ExecutionError(f'Missing build artifact: {path}; run scripts/build-java.sh first')
         return path
 
     prefix = [str(java), '-XX:ActiveProcessorCount=2']
@@ -91,7 +91,7 @@ def local_launch(case, java, prometheus, *, framework, engine_mode='shared'):
         dependencies = artifact('java/master/target/dependencies.txt').read_text(encoding='utf-8').strip()
         if not dependencies or any(not Path(entry).is_absolute() or not Path(entry).exists()
                                    for entry in dependencies.split(os.pathsep)):
-            raise ExecutionError('Master classpath has missing or nonabsolute entries; run scripts/build.sh first')
+            raise ExecutionError('Master classpath has missing or nonabsolute entries; run scripts/build-java.sh first')
         classpath = os.pathsep.join([str(framework / 'java/master/target/classes'), dependencies])
         master_prefix = prefix + ['-cp', classpath]
         # shortcut: expose all native metrics locally until collection cost is measured at scale.
