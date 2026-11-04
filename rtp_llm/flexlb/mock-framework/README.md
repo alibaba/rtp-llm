@@ -6,7 +6,7 @@
 
 本分支 `codex/mock-framework-dsv41` 基于公共 Mock 提交 `84b174c6d9`，真实 Java Master 和 Engine RPC 契约固定为 `feature/dsv41-dev-main-202161013@ba26ddf1dd86c02bcee3cc6eee966ca59e4ae7a6`。不随远端分支自动更新，也不包含真实 GPU 引擎实现。公共修改先进入 `codex/mock-framework-on-main`，再按独立提交同步；本分支的协议迁移不反向覆盖 main 的契约。
 
-多模态回放使用原始 token 和图片占位位置 `Image.offset`，不再接受预展开的 `Image.length`。Client 从 real 模型目录的 config.json 读取 image_token_id，将占位位置编码为该标记，V 给出长度/hash 元数据，P 准备计算输入并通过原生 PD 请求传递缓存身份。V4.1 几何、ViT 负载及 KVCM 接入范围见[组件参考](docs/component-reference.md)。
+多模态回放使用原始 token 和图片占位位置 `Image.offset`，不再接受预展开的 `Image.length`。Client 使用显式配置的 image_token_id，将占位位置编码为该标记，V 给出长度/hash 元数据，P 准备计算输入并通过原生 PD 请求传递缓存身份。V4.1 几何、ViT 负载及 KVCM 接入范围见[组件参考](docs/component-reference.md)。
 
 ## 准备环境
 
@@ -49,7 +49,6 @@ uv run --locked mock-case compile "$CASE_FILE" \
 uv run --locked mock-case launch "$CASE_FILE" \
   --java "$JAVA_HOME/bin/java" \
   --prometheus "$PROMETHEUS_BIN" \
-  --engine-mode shared \
   --output "$RUN_ROOT/launch.yaml"
 
 uv run --locked mock-case run "$CASE_FILE" \
@@ -61,7 +60,7 @@ uv run --locked mock-case run "$CASE_FILE" \
 
 Case 保存业务配置、流量和门禁；启动配方保存命令、程序路径与 JVM 参数。需要调整 JVM 参数时编辑生成的 `launch.yaml`。默认 `-XX:ActiveProcessorCount=2` 只限制 JVM 看到的处理器数，不保证 CPU 配额。
 
-`shared` 将多个 P/D/V 实例放在一个 Engine JVM 中；`isolated` 为每实例启动独立 Engine JVM。Master、Client 按 Case 副本数独立启动，ZK 独立运行。进程放置改变后，Case 不变。
+P/D/V、Master 和 Client 各实例直接启动独立 JVM。ZooKeeper 由单独的角色进程提供。
 
 每次运行使用新的配方文件和结果目录。Runner 负责启动、执行和清理；异常或门禁失败会中止后续步骤并收尾。Ctrl+C 会取消执行并清理本次资源。环境问题可修复后重新准备；业务失败先保存证据，不为通过门禁改参数重跑。
 
@@ -121,7 +120,7 @@ PROMETHEUS_BIN="$PROMETHEUS_BIN" ./scripts/check.sh
 
 - [Case 指南](docs/case-guide.md)：配置、路径、Step/ref、断言、启动配方与生命周期操作。
 - [组件配置与指标参考](docs/component-reference.md)：Master、RTP、ViT、KV、Compute/EOS、Client 协议及指标口径。
-- [架构与设计边界](docs/architecture.md)：组件职责、Scheduler/EngineLoop、协议和资源生命周期、接口扩展。
+- [架构与设计边界](docs/architecture.md)：组件职责、Scheduler/RtpEngineLoop、协议和资源生命周期、接口扩展。
 - [View 指南](docs/view-guide.md)：报告内容、事件标注、异常展示与服务生命周期。
 - [大盘说明](views/README.md)与[指标覆盖](views/coverage.md)：查询分区、标签与缺口。
 

@@ -43,19 +43,15 @@ def wait_healthy(child, port, log):
 
 def command():
     return [str(Path(os.environ['JAVA_HOME']) / 'bin/java'), '-XX:ActiveProcessorCount=2',
-            '-jar', str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')]
+            '-jar', str(ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar')]
 
 
-def environment(role, port, model):
+def environment(role, port):
     env = {key: value for key, value in os.environ.items() if not key.startswith('MOCK_')}
     env.update(ROLE_TYPE=role.upper(), START_PORT=str(port), MOCK_COMPUTE_FORWARD_EXPRESSION='1',
                MOCK_BIND_HOST='0.0.0.0', MOCK_ADVERTISE_HOST='127.0.0.1')
     if role == 'vit':
-        model.mkdir()
-        (model / 'config.json').write_text(json.dumps({'image_token_id': 1000,
-            'text_config': {'hidden_size': 4}, 'vision_config': {'patch_size': 14, 'downsample_ratio': 3,
-            'min_pixels': 0, 'max_image_tokens': 1024}}))
-        env['CHECKPOINT_PATH'] = str(model)
+        env.update(PATCH_SIZE='14', DOWNSAMPLE_RATIO='3', MIN_PIXELS='0', MAX_IMAGE_TOKENS='1024', HIDDEN_SIZE='4')
         env['MOCK_VIT_SKIP_DOWNLOAD'] = 'true'
     else:
         env.update(SEQ_SIZE_PER_BLOCK='16', MAX_SEQ_LEN='4096', TEST_BLOCK_NUM='9', RESERVE_BLOCK_RATIO='0')
@@ -66,12 +62,11 @@ def environment(role, port, model):
 @pytest.mark.parametrize('role', ['prefill', 'decode', 'vit'])
 def test_service_restarts_without_case_artifacts(tmp_path, role, source):
     port = ports()
-    model = tmp_path / 'model'
-    env = environment(role, port, model)
+    env = environment(role, port)
     if source == 'file':
         config = {'mock.compute.forward.expression': '1'}
         if role == 'vit':
-            config['checkpoint_path'] = str(model)
+            config.update({'patch_size': 14, 'downsample_ratio': 3, 'min_pixels': 0, 'max_image_tokens': 1024, 'hidden_size': 4})
             config['mock.vit.skip.download'] = True
         component = {'config': config}
         if role != 'vit':
@@ -116,16 +111,16 @@ def test_service_restarts_without_case_artifacts(tmp_path, role, source):
 
 def test_fatal_vit_compute_failure_exits_the_service(tmp_path):
     port = ports()
-    env = environment('vit', port, tmp_path / 'model')
+    env = environment('vit', port)
     env['MOCK_COMPUTE_FORWARD_EXPRESSION'] = '-1'
     log = tmp_path / 'process.log'
     with log.open('w') as stream:
         child = subprocess.Popen(command(), env=env, cwd=tmp_path, stdout=stream, stderr=stream)
         try:
             wait_healthy(child, port, log)
-            classpath = os.pathsep.join([str(ROOT / 'java/host/target/test-classes'),
-                                        str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
-            subprocess.run([command()[0], '-cp', classpath, 'org.flexlb.mock.host.EngineFailureProbe',
+            classpath = os.pathsep.join([str(ROOT / 'java/engine/target/test-classes'),
+                                        str(ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
+            subprocess.run([command()[0], '-cp', classpath, 'org.flexlb.mock.engine.EngineFailureProbe',
                             f'127.0.0.1:{port + 1}'], check=True, capture_output=True, timeout=10)
             child.wait(timeout=8)
             assert child.returncode not in (0, 143)

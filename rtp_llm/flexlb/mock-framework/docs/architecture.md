@@ -57,7 +57,7 @@ Step 统一为一次接口调用，包含 id、describe、interface、args、wit
 
 普通数值查询直接返回数值，单位声明在接口上；地址集合返回列表，动作返回明确回执，逐 Master 状态保留映射。断言按结构和运算符判断，不按 MetricValue、PerMasterEngines 等业务类型名称偷偷聚合。接口文档和清单可以由 Python 定义导出，用于保存实验现场，不再依赖 Java 构建才能编译 Case。
 
-Runner 管理声明了 background 的 Step 任务。任务属于当前 Phase，Phase 结束前会等待或回收这些任务。client/start 返回表示 Java 已确认开始回放，回放仍由 ClientRole 和 Java client0 管理，使用 client/stop 停止并收齐结果。
+Runner 管理声明了 background 的 Step 任务。任务属于当前 Phase，Phase 结束前会等待或回收这些任务。后台 Step 的结果不能作为 Case 引用。client/start 返回表示 Java 已确认开始回放，回放仍由 ClientRole 和 Java client0 管理，使用 client/stop 停止并收齐结果。
 
 本轮重构按职责变化整体重写 Registry、Step 模型、编译和执行主链，联动 CLI、启动配方、夹具和构建入口；复用严格 YAML 解析、进程回收、采集与记录等仍成立的机制。Java 内部端点保留明确的请求/响应协议，但不再声明整套 Case API；配置类型留在所属组件，不能随旧接口目录误删。保留引用重校验、固定时间窗口、错误结果和取消清理的验收，不保留另一套旧 Case 执行入口作为兼容分支。
 
@@ -161,15 +161,15 @@ D 只有 KV 加载成功和生成许可均满足后才进入 Decode；Prefill-on
 | P/D/V Mock Engine | 全部放在同一个 Engine JVM | 每个 Engine 一个 JVM |
 | Client | 每个 Client 独立 JVM | 每个 Client 独立 JVM |
 
-本地运行默认采用共享模式，P/D/V 实例放在一个 JVM；独立模式用于需要进程隔离的实验。模式在运行开始前确定。共享模式新增 Engine 就在已有宿主创建对象；独立模式新增 Engine 就启动专属 JVM。不实现任意多 JVM/多实例装箱、动态迁移或共享宿主不足时自动另开 JVM。共享指代码复用，实例仍独立拥有缓存容量、请求状态和 Scheduler。
+本地 P/D/V 各实例直接启动一个 JVM。Case 通过服务地址引用实例。
 
 实例使用服务地址区分，同 IP 下用端口区分。控制、业务 RPC 和 metrics 地址之间的对应关系留在发现信息中，不向 Case 暴露额外的 JVM 身份。实例之间统一通过 TCP 通信，共 JVM 不另走 in-process 传输。Python 内部仍须保存进程与实例归属，以处理宿主退出和清理。
 
 进程 env、heap 和资源限制属于 JVM；每个 Engine 的业务参数来自自己的配置对象。共 JVM 时不能用修改进程 env 或全局 System properties 的方式切换实例配置。原生 env 风格字段可以保留其名字和值，由实例加载器从显式配置读取。
 
-停止 Engine 是关闭对象：拒绝新请求、终止活动、关闭自己拥有的 RPC/连接、释放资源并移除发现地址。共享宿主中的其他实例继续运行；最后一个 Engine 停止后宿主可保留至实验收尾，供后续扩容。独立模式完成停止后回收专属 JVM。对象清理不依赖 System.gc，也不承诺能强杀某个 Java 线程；关闭超时使实验失败并进入宿主清理。
+停止 Engine 会终止所属 JVM，释放实例监听器和缓存。其他实例继续运行。
 
-Runner 在动作前登记预期停止，结合子进程退出和有界健康检查判断结果；预期停止仍需确认完成，不能吞掉所有异常。停止单个 Engine 不允许对应共享 JVM 意外退出。宿主意外退出映射到其全部实例，记录首个根因，停止剩余发压并清理实验；不自动重启或重放未知结果的写操作。业务请求错误按 Case 门禁判断，不与基础设施退出混为一谈。
+Runner 登记预期停止，确认进程退出后撤销端点。意外退出使实验失败并回收其余进程。
 
 ### 发现文件和产物
 
@@ -219,7 +219,7 @@ Python 在 stop 或最终清理时收集异常，不增加实时发压监控。�
 
 `client/start` 只接受 `requests_file`，路径指向标准 Protobuf＋Zstd 文件；不接受 inline requests、JSONL、xz 或格式兼容开关。相对路径基于 Case YAML 所在目录，也接受绝对路径。当前所有 Client 位于同一机器并共享文件系统，不支持 URL 或跨机器分发。
 
-唯一输入定义为 `java/client/src/main/proto/client_input.proto`，Java 由 Maven 生成，Python 测试辅助目录 python/mock_framework/execution/test/helpers 提交同一 protoc 3.25.1 生成的 client_input_pb2.py；输入读写器 input.py 也仅供框架测试与镜像终验生成、检查测试数据，不发布到 mock_framework 运行包。Request 保存未展开的回放输入：非空、非负 int32 token_ids，正 int32 max_new_tokens（本格式中的固定目标输出长度，LoadClient 发送 ignore_eos=true），可选非负 int32 priority（缺省为 50，显式 0 保留），可选非负 int64 arrival_offset_ms（相对于源起点的毫秒偏移，尚未除以倍速）。可选 images 保存 url、width、height、offset；每张图只占 token_ids 中的一个位置，offset 按升序排列且不得重复。LoadClient 按 checkpoint_path/config.json 中的 image_token_id 将这些位置写为图片标记；Mock V 默认异步下载真实图片，使用 Java 读取尺寸并按文件内容摘要生成模拟特征身份；本地 mock.vit.skip.download=true 时使用回放宽高，其他准入、排队和计算路径相同。Client 查询 V 元数据后计算路由长度和缓存 key，发送给后端的仍是原始媒体输入。P 在进入 Scheduler 前展开图片位置，保留语义图片标记，将逐行特征 hash 单独保存在缓存区间中；hash 不替换语义 token。完整生成参数及真实观测仍不是此播放格式的内容。未知字段、非法请求及不支持的版本均拒绝。
+压缩输入定义为 `java/client/src/main/proto/client_input.proto`，Java 由 Maven 生成，Python 测试辅助目录 python/mock_framework/execution/test/helpers 提交同一 protoc 3.25.1 生成的 client_input_pb2.py；输入读写器 input.py 也仅供框架测试与镜像终验生成、检查测试数据，不发布到 mock_framework 运行包。Request 保存未展开的回放输入：非空、非负 int32 token_ids，正 int32 max_new_tokens（本格式中的固定目标输出长度，LoadClient 发送 ignore_eos=true），可选非负 int32 priority（缺省为 50，显式 0 保留），可选非负 int64 arrival_offset_ms（相对于源起点的毫秒偏移，尚未除以倍速）。可选 images 保存 url、width、height、offset；每张图只占 token_ids 中的一个位置，offset 按升序排列且不得重复。LoadClient 按显式配置的 image_token_id 将这些位置写为图片标记；Mock V 默认异步下载真实图片，使用 Java 读取尺寸并按文件内容摘要生成模拟特征身份；本地 mock.vit.skip.download=true 时使用回放宽高，其他准入、排队和计算路径相同。Client 查询 V 元数据后计算路由长度和缓存 key，发送给后端的仍是原始媒体输入。P 在进入 Scheduler 前展开图片位置，保留语义图片标记，将逐行特征 hash 单独保存在缓存区间中；hash 不替换语义 token。完整生成参数及真实观测仍不是此播放格式的内容。未知字段、非法请求及不支持的版本均拒绝。
 
 文件以 `MCKINP01` 标识输入格式 v1，之后每批为 4 字节大端压缩长度加一个 Zstd 压缩的 Protobuf InputChunk。帧必须为 single-segment、声明解压长度并带校验和，压缩及解压单批上限均为 4 MiB；每请求 Protobuf 上限 1 MiB，每批至多 1024 个请求。写入器按约 1 MiB 或 1024 请求封批，不累积整个文件。InputChunk.sequence 从 1 连续递增，末批只含 total_requests；缺末批、计数不符、截断或尾随数据均报错。InputChunk 仅用于文件分块，不决定请求发送或 Engine 计算的 batch。输入和分片使用同一份格式与读写器，输入消息与执行证据消息分开定义。
 
@@ -317,26 +317,19 @@ Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API�
 
 ## 当前代码职责
 
-Python 接口与 Java 内部协议已分开；Engine 已接通共享/独立宿主和实例扩缩容；Master 与 Client 保持逐实例进程。
+Python 接口与 Java 内部协议已分开；Engine 以单实例 JVM 扩缩容；Master 与 Client 保持逐实例进程。
 
 | 目录 | 负责内容 |
 | --- | --- |
 | `python/mock_framework/config/` | YAML 解析、检查、点分配置展开、引用和可执行步骤编译。 |
 | `python/mock_framework/execution/` | 运行环境装配、统一 Step 执行、角色生命周期、拓扑、采集、HTTP 传输、断言与记录；各模块边界见下表。 |
-| `python/mock_framework/interfaces/` | 已接通的 Case 函数：逐 Master 状态、Client start/stop、公共指标与原始 PromQL。 |
-| `java/interfaces/` | Java 内部端点的类型/校验及共享模型定义；不再定义或导出 Case API。 |
-| `java/runtime/` | HTTP 接口绑定、参数和回执校验、调用上下文、实例生命周期句柄和进程监听地址。 |
-| `java/host/` | P/D/V 统一实例装配和可执行 JAR；单实例入口 EngineMain、本地多实例宿主 EngineHost。宿主不包含调度或集群策略。 |
-| `java/master/` | 真实 Master 的启动入口、生产状态到公共读取接口的适配、独立 ZK 启动入口。 |
-| `java/client/` | client0 协调、Player 控速、LoadClient 队列/并发/生命周期、NativeClient 原生收发与实际计时。 |
-| `java/shared/vit/` | 跨后端共用的 V Engine：图像编码、组批、embedding/hash 字节缓存和节点装配。 |
-| `java/shared/admission/` | 共享接入层：RPC、Batch/Fetch、PD 通信及零耗时传输执行器、输出编码与状态适配；不依赖后端实现。 |
-| `java/backend/rtp/` | RTP 配置解析、P/D 调度策略、资源申请时机、RtpMetrics 指标口径和节点装配。 |
-| `java/shared/multimodal/` | 原生媒体输入、Mock 元数据校验与 TCP 客户端，无 V 服务、计算或缓存依赖。 |
-| `java/shared/engine/` | EngineLoop/Scheduler 执行边界及工厂契约、RequestState 进度与终态/资源使用权、QueueSnapshot 请求计数。 |
-| `java/shared/compute/` | Forward batch、公式、噪声、Decode 推进、停止模型和可取消计时。 |
-| `java/shared/cache/` | BlockPool 物理容量与引用、KvCache 块租约及前缀发布、BlockTree 叶子候选与驱逐、CacheSequence 语义序列与缓存身份。 |
-| `java/shared/metrics/` | 物理标签、Prometheus 文本导出与窗口均值/QPS 统计；不包含 RTP 调度语义，不提供查询代理。 |
+| `python/mock_framework/execution/step/` | 已接通的 Case Step：逐 Master 状态、Client start/stop、公共指标与原始 PromQL。 |
+| `java/protocol/` | 控制 HTTP、媒体 RPC 和跨组件 Cache Key 编码。 |
+| `java/engine/` | P/D/V 单实例入口、RTP 接入、调度、Forward、KV 和 ViT。 |
+| `java/metrics/` | 指标标签、窗口统计和 Prometheus / KMonitor 导出。 |
+| `java/client/` | 分片、回放、原生请求和逐请求证据。 |
+| `java/master/` | 本地真实 Master 启动和状态查询。 |
+| `java/zookeeper/` | 独立 ZooKeeper JVM。 |
 | Python 各模块的 `test/`、Java 各模块的 `src/test/` | 源码旁的单元测试与集成探针。 |
 | `scripts/` | 构建和检查入口。 |
 
@@ -346,10 +339,11 @@ Python 运行时按以下边界组织。`RunEnvironment` 装配实例并安排�
 | --- | --- |
 | `execution/runner.py` | Phase 顺序、时间预算、后台任务及整场回收。 |
 | `execution/step/` | Step 基类、注册表、比较器及每个动作的参数、执行和返回契约。 |
-| `execution/environment.py` | RunEnvironment 组装角色、管理 ZooKeeper、安排启停顺序。EndpointRegistry 持有活跃端点并发布 topology.json。 |
+| `execution/environment.py` | RunEnvironment 组装角色并安排启停顺序。EndpointRegistry 持有活跃端点并发布 topology.json。 |
 | `execution/processes.py` | ProcessSupervisor 管子进程、监看和回收。角色决定何时启停及哪些退出是预期的。 |
 | `execution/roles/master.py` | MasterRole 管独立 JVM、选举配置、发现发布和原地址重启。 |
-| `execution/roles/engine.py` | EngineRole 分开管理 Host JVM 与 P/D/V 实例。 |
+| `execution/roles/engine.py` | EngineRole 管理每个 P/D/V 实例的 JVM。 |
+| `execution/roles/zookeeper.py` | ZooKeeperRole 管选举服务的启停和就绪。 |
 | `execution/roles/client.py` | ClientRole 管 Client JVM 和回放收尾。Java client0 负责分片、控速与汇总。 |
 | `execution/roles/prometheus.py` | Prometheus 进程、目标、采集基线和末次抓取。 |
 | `execution/launch.py` | 启动配方的结构校验与规范化。 |
@@ -360,13 +354,13 @@ EndpointRegistry 发布当前端点快照。MasterRole 消费快照，更新活�
 
 Trace 的两个 JSONL 流共用 `run_id` 和 `seq`。Step 事件、关联动作事件和门禁带有 `phase_id`、`step_id`、`action`。实例就绪或退出时可通过 `instance_id` 和 `generation` 关联。View 优先按 Step 身份匹配指标窗口，旧产物按原有查询时间关联。
 
-启动顺序固定为 Prometheus、ZK、Engine、Master、Client、采集基线。收尾先停止 Engine 健康检查，再收集 Client、完成最后采样，依次清理 Client、Master、Engine、ZK、Prometheus，最后由进程监督器回收剩余进程。某一步失败仍继续后续清理，错误进入最终结果；进程未回收时保留其所有权，不能仅删除内部记录。最终没有存活的受管进程后清空活动拓扑。
+启动顺序固定为 Prometheus、ZK、Engine、Master、Client、采集基线。收尾先收集 Client、完成最后采样，依次清理 Client、Master、Engine、ZK、Prometheus，最后由进程监督器回收剩余进程。某一步失败仍继续后续清理，错误进入最终结果；进程未回收时保留其所有权，不能仅删除内部记录。最终没有存活的受管进程后清空活动拓扑。
 
-新增 Case 操作在 `interfaces/` 用现有装饰器注册；新增角色生命周期行为进入对应服务；只有新的跨服务启动/收尾顺序才修改 `RunEnvironment`。不为接口名、角色名或 Case 名向 Runner 主循环增加分支，也不引入通用插件框架或事件总线。配置入口和业务 Case 的下一批接线以这些边界为基础，本批保持现有 YAML 参数、返回值与产物格式。
+新增 Case 操作在 `execution/step/` 定义 Step 子类并注册；新增角色生命周期行为进入对应服务；只有新的跨服务启动/收尾顺序才修改 `RunEnvironment`。不为接口名、角色名或 Case 名向 Runner 主循环增加分支，也不引入通用插件框架或事件总线。配置入口和业务 Case 的下一批接线以这些边界为基础，本批保持现有 YAML 参数、返回值与产物格式。
 
 这里的 EngineLoop 是 P/D 文本生成执行内核，不是 JVM 宿主循环，也不是 ViT 调度循环。runtime 仅提供访问和实例管理设施；EngineLoop 驱动 Scheduler 选批及 Forward 执行，Scheduler 提交生成进度、队列和资源变化。ViT 保留自己的图片合批循环。RequestState 负责进度、终态及资源使用计数；QueueSnapshot 只是队列计数值，不统一各调度器的队列容器。
 
-multimodal 供 Client、P 接入层和 ViT 共用媒体标识、输入转换及 TCP 调用；图片几何、模拟输出 hash 生成和缓存大小计算归 ViT 的 VitGeometry。它们不反向依赖 ViT 服务实现。shared/metrics 只保留 MetricTags 和 WindowMetrics；RTP 指标名称、单位及 TPS/容量统计放在后端 RtpMetrics，ViT 仍使用 VitMetrics。指标记录不参与模拟计算；窗口统计在 scrape 时推进，因此同一目标应由一个采集者抓取，额外 scrape 会改变窗口划分。
+protocol 供 Client、P 接入层和 ViT 共用媒体输入与 RPC；图片几何、模拟输出 hash 生成和缓存大小计算归 ViT 的 VitGeometry。它们不反向依赖 ViT 服务实现。java/metrics 提供公共指标标签、窗口统计与导出；RTP 指标名称、单位及 TPS/容量统计放在后端 RtpMetrics，ViT 仍使用 VitMetrics。指标记录不参与模拟计算；窗口统计在 scrape 时推进，因此同一目标应由一个采集者抓取，额外 scrape 会改变窗口划分。
 
 ViT 的终态分三步：VitScheduler 只完成已准备图片的计算阶段 Future，不依赖 VitCache；VitPreparation.Task 等待阶段结果，统一调用 VitCache.publish 发布成功/失败，随后移除任务、释放准入额度。VitCache 保留同 key 的共享结果条目、等待者和驻留淘汰，不再从 pending 数量推导执行额度。mm_inflight_inputs 来源于 Preparation 的在途任务数，包含发布尚未返回的任务。排队取消通过阶段 Future 返回给任务所有者；已经选入 Forward 的工作保留到实际完成。关闭同样由 Preparation 收口任务终态，Cache.close 仅关闭缓存驻留。
 
@@ -420,9 +414,7 @@ Master HA Case 在 environment 中声明两个独立 Master JVM，启动后通�
 
 接入层只处理原生 RPC 的解析、响应关联和异步输出；Scheduler 是队列、计算进度、容量和终态的唯一来源。D 的网络不可写只阻塞输出缓冲发送，不再阻塞 Decode Forward 或 KV 释放；缓冲仍受请求生成长度和整体输出保留策略约束。PD 交接只保留 ALLOCATE→Prefill 完成→LOAD/ACK→GENERATE 或 PREFILL_COMPLETE，不实现额外来源注册表、Reader 所有权及自定义 proto。Wire 阶段仅用于拒绝乱序帧，不代替 Scheduler 的调度状态。
 
-接入组件独立为 `mock-admission`（`java/shared/admission`，包名 `org.flexlb.mock.admission`）。对外入口为 `RpcService`，接收 `AdmissionConfig`、实例自己的 `KvCache` 和现有 `Scheduler.Factory`；RtpNode 额外传入启动时确定的显式组接口开关，关闭时 EnqueueBatch/EnqueueGroup 返回 UNIMPLEMENTED。`AdmissionConfig` 只含身份、角色、块大小、TP、序列/批 Token 上限和 ComputeModel，不包含排队、抢占或组批策略。RTP 后端通过 `RtpConfig.endpoint()` 提供这些值，由 `RtpNode` 装配 `RtpScheduler.factory(config)`：P 的 `mock.scheduler.mode=fifo`（默认）选择 RtpScheduler，`group` 显式选择 RtpGroupScheduler；D 始终使用普通调度。换 Scheduler 不需要复制接入代码。模块只有当前这一套 RPC，不增加协议选择、接入基类或插件注册机制。
-
-接入层的独立测试只依赖共享组件，用独立测试 Scheduler 验证 P/D 入队、错误返回和锁归属；真实 RTP 策略的 RPC/PD 集成测试仍在后端模块中运行。模块依赖方向为后端→接入层→共享运行组件，不存在接入层→后端依赖。
+RTP 接入位于 `java/engine` 的 `service` 包。RtpRpcService 路由原生 RPC，PrefillRpcServer 和 DecodeRpcServer 管理各自的协议会话。RtpEngineLoop 连接 RPC 与 Scheduler。P 默认使用 FIFO，显式组模式使用 RtpGroupScheduler，D 使用普通调度。
 
 ## 构建与检查
 
@@ -442,15 +434,15 @@ PROMETHEUS_BIN=/path/to/prometheus ./scripts/check.sh
 
 ### 独立 Engine 服务与本地实验的边界
 
-EngineInstances 只完成配置解析和实例装配，返回实例及生效配置。EngineHost 负责本地实验的 effective-config/endpoints/ready 文件，并保留新实例不可覆盖旧产物的约束。EngineMain 不依赖这些文件，使用 START_PORT 启动单个服务，在日志中输出配置和地址；平台发现与重拉不经过 Python Runner。
+EngineMain 本地启动时原子发布 effective-config、endpoints 和 ready。Whale 启动时在日志记录有效配置和端点，平台管理发现和重拉。
 
 Engine 的 HTTP 与原生健康检查读取现有 Loop/Scheduler 失败状态，不采集指标。独立进程每秒调用同一检查，不可恢复失败退出。不开新的健康管理模块，不把普通请求失败当作 Engine 故障。
 
-本分支使用 DSV4.1 的原始多模态 RPC 与内部 PD cache spans；Prepared 输入准备仍在 Scheduler 之前完成，Scheduler 消费长度和只读缓存身份，不处理媒体 RPC。缓存元信息归 shared/cache，Master RPC 与共享 KvcmReporter 消费同一份有效块状态。RTP 实例仅装配 Reporter 的配置、实例身份和实际缓存能力；缓存锁只投递变更，网络线程负责 KVCM 注册、事件与恢复，远端读写另由 shared/cache 的 CacheLoad 与 remote/RemoteCache 管理，当前只实现非 group 的加载流程，未接真实存储。具体范围见组件参考中的 DSV4.1 Engine / KVCM 契约。
+RTP 在同步本地缓存上执行。KVCM Reporter 消费有效块发布和淘汰，保留注册、事件、快照和恢复。
 
-### 非 group 的异步缓存准备
+### 本地 KV 容量与元信息
 
-KvCache 统一拥有本地分配、有效前缀提交和异步读写引用。CacheLoad 代表一次准备操作，立即就绪和远端等待使用同一入口；RemoteCache 只负责外部协议，不操作调度队列。普通 RtpScheduler 独立推进 loading，请求准备就绪后重新参与 FIFO 组批。EngineLoop 通过 KvCache.onChange 接收容量/准备完成信号，网络调用不持有调度或缓存锁。RtpGroupScheduler 不支持远端适配器，保持已有本地组边界。后台写持有缓存引用，不使用 RequestState.pin 延迟请求终态。真实远端存储、payload 和 KVCM/KVS 适配尚未实现。
+KvCache 同步取得本地容量和复用前缀。资源释放或新前缀发布可唤醒 RtpEngineLoop。KVCM Reporter 只在网络线程处理元信息。
 
 ### 状态与观测边界
 

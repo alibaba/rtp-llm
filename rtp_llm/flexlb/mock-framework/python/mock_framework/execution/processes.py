@@ -46,6 +46,13 @@ class ProcessSupervisor:
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
+    def _process_event(self, event, name, **fields):
+        instance_id, _, generation = name.partition('-restart-')
+        role = instance_id.split('-', 1)[0]
+        if role in ('master', 'prefill', 'decode', 'vit', 'client', 'zookeeper', 'prometheus'):
+            fields.update(role=role, instance_id=instance_id, generation=int(generation or '0'))
+        self.records.emit(event=event, node=name, **fields)
+
     async def spawn(self, name, command, cwd, env, directory, *, describe=None, zero_exit=False):
         if name in self._children or name in self._expected:
             raise ExecutionError(f'Process identity has already been used: {name}')
@@ -54,7 +61,7 @@ class ProcessSupervisor:
             if zero_exit:
                 self._zero_exit.add(name)
             self._monitors.append(asyncio.create_task(self._monitor(name, child, describe)))
-            self.records.emit(event='process_started', node=name, pid=child.pid)
+            self._process_event('process_started', name, pid=child.pid)
         with (directory / 'stdout.log').open('wb') as out, (directory / 'stderr.log').open('wb') as err:
             spawning = asyncio.create_task(asyncio.create_subprocess_exec(
                 *command, cwd=cwd, env=env, stdout=out, stderr=err, start_new_session=True))
@@ -87,7 +94,7 @@ class ProcessSupervisor:
         if child.returncode is not None:
             if child.returncode not in (-signal.SIGKILL, 128 + signal.SIGKILL):
                 errors.append(f'{name}: unexpected exit status during kill: {child.returncode}')
-            self.records.emit(event='process_stopped', node=name, code=child.returncode)
+            self._process_event('process_stopped', name, code=child.returncode)
             del self._children[name]
         return errors
 
@@ -126,7 +133,7 @@ class ProcessSupervisor:
                 errors.append(f'{name}: unexpected exit status during stop: {child.returncode}')
             if name in self._zero_exit and (killed or child.returncode != 0):
                 errors.append(f'{name}: did not stop gracefully; retained data may be incomplete')
-            self.records.emit(event='process_stopped', node=name, code=child.returncode)
+            self._process_event('process_stopped', name, code=child.returncode)
             if child.returncode is not None:
                 del self._children[name]
         return errors

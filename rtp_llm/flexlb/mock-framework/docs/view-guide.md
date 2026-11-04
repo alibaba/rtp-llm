@@ -21,7 +21,9 @@ uv run --locked mock-view /tmp/basic-result \
 
 查看服务复制已完成实验的 TSDB，原始结果与数据不被重新打开写入；它不启动任何 Engine/Master/Client、不重新执行检查。多个查看会话使用不同输出目录和端口，可以独立查看同一份实验。
 
-一个页面展示原始 Case、完整配置/启动配方、组件生效配置、代码版本/工作区差异、Phase/Step 时间线、保存的门禁，以及 Grafana 在线曲线。默认大盘所有 row 折叠，Prefill/Decode 分区并显式过滤各自 role；唯一线上参考是 RTP-LLM 大盘（包括其中的 FlexLB 分区）。当前已上报的 Mock 观测与 real 待埋点面板分开说明，ViT 和共享 JVM 的宿主资源缺口不伪造数据。Client 的 TTFT/请求耗时不能冒充 Engine 延迟。完整来源与覆盖见 [指标覆盖](../views/coverage.md)。每实例曲线保留 instance/role 等原有标签，支持 Grafana 自己的缩放与曲线选择。
+角色运行结果区展示实例进程的启动、就绪和退出记录、Client 回放结果，以及 Case 实际采到的 Master 状态。
+
+一个页面展示原始 Case、完整配置/启动配方、组件生效配置、代码版本/工作区差异、Phase/Step 时间线、保存的门禁，以及 Grafana 在线曲线。默认大盘所有 row 折叠，Prefill/Decode 分区并显式过滤各自 role；唯一线上参考是 RTP-LLM 大盘（包括其中的 FlexLB 分区）。当前已上报的 Mock 观测与 real 待埋点面板分开说明，未采集的 ViT 与进程资源指标保持缺失。Client 的 TTFT/请求耗时不能冒充 Engine 延迟。完整来源与覆盖见 [指标覆盖](../views/coverage.md)。每实例曲线保留 instance/role 等原有标签，支持 Grafana 自己的缩放与曲线选择。
 
 点击门禁卡片定位其保存的指标窗口；执行侧 metric_window 事件记录真正使用的起止时间，展示层不根据当前实现重新计算。原始 PromQL 与非指标检查只标记查询点，图表显示附近上下文，不解析表达式推导窗口。每个 Step 只导入一个图表标注：普通操作标在开始时刻；有门禁时使用查询点或已记录的查询窗口，并在注释中展示接口、判定、预期条件、实际值（含单位）和错误。Phase 和 Step 的完整开始/结束记录仍保留在执行时间线。
 

@@ -378,6 +378,13 @@ def test_trace_correlates_steps_and_gates_across_streams(setup, tmp_path):
         assert starts[gate['phase_id'], gate['step_id'], gate['action']] < gate['seq']
 
 
+def test_compiler_rejects_reference_to_background_result(setup):
+    from mock_framework.config import ConfigError
+
+    with pytest.raises(ConfigError, match="Background Step 'read'"):
+        setup([step(background=True), step('write', args={'value': {'ref': 'steps.read'}})])
+
+
 def test_background_step_can_be_stopped_without_replaying_write(setup, tmp_path):
     result, out = run(setup, tmp_path, [
         step('write', background=True, args={'delay': 10}),

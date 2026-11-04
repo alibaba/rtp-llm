@@ -43,7 +43,7 @@ def native_kvcm(tmp_path):
         ready = tmp_path / 'kvcm-ready.json'
         log = (tmp_path / 'kvcm.log').open('w')
         classpath = os.pathsep.join([str(ROOT / 'java/client/target/test-classes'),
-            str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
+            str(ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
         process = subprocess.Popen([str(Path(os.environ['JAVA_HOME']) / 'bin/java'), '-cp', classpath,
             'org.flexlb.mock.client.KvcmMetaProbe', str(ready)], stdout=log, stderr=log)
         processes.append((process, log))

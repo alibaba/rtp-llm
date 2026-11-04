@@ -31,7 +31,7 @@ phases:
         describe: Client 自行发现主 Master，开始单轮播放。
         interface: client/start
         args:
-          requests_file: data/traffic/basic.binpb.zst
+          requests_file: data/traffic/basic.jsonl
           qps: 2
           concurrency: 2
           queue_capacity: 4

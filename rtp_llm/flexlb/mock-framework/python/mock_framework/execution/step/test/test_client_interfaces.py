@@ -1,3 +1,4 @@
+from mock_framework.execution.test.helpers.zookeeper import command as zookeeper_command
 from mock_framework.execution.test.helpers import FRAMEWORK
 from mock_framework.execution.step.client_qps import ClientQps
 import asyncio
@@ -28,7 +29,7 @@ def context():
 
 
 def args():
-    return {'masters': ['master:1'], 'requests_file': str(FRAMEWORK / 'data/traffic/basic.binpb.zst'),
+    return {'masters': ['master:1'], 'requests_file': str(FRAMEWORK / 'data/traffic/basic.jsonl'),
             'qps': 10, 'concurrency': 2}
 
 
@@ -150,8 +151,8 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
     components = {'master': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.MasterNode'], 'startup_timeout': '60s'},
                   'client': {'command': [java, '-jar', str(root / 'java/client/target/mock-client-1.0-SNAPSHOT-all.jar')]}}
     for role in ('prefill', 'decode'):
-        components[role] = {'command': [java, '-cp', str(root / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'), 'org.flexlb.mock.host.EngineHost']}
-    recipe = {'components': components, 'zookeeper': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.mock.master.ZookeeperNode']}}
+        components[role] = {'command': [java, '-cp', str(root / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'), 'org.flexlb.mock.engine.EngineMain']}
+    recipe = {'components': components, 'zookeeper': {'command': zookeeper_command(root, java)}}
     if os.environ.get('PROMETHEUS_BIN'):
         recipe['prometheus'] = {'binary': os.environ['PROMETHEUS_BIN'], 'scrape_interval': '250ms'}
         data['phases'][0]['steps'].insert(1, {'id': 'qps', 'describe': 'Check aggregate issued rate',
@@ -218,7 +219,7 @@ def test_teardown_collects_unstopped_playback_before_final_scrape(failed, tmp_pa
     async def scrape(): order.append('scrape')
     async def close_monitor(): order.append('monitor stopped')
     async def exercise():
-        runtime = RunEnvironment(SimpleNamespace(environment={}), {'components': {}, 'engine_mode': 'shared'},
+        runtime = RunEnvironment(SimpleNamespace(environment={}), {'components': {}},
             SimpleNamespace(directory=tmp_path, emit=lambda **event: None))
         runtime.clients.pending = True
         runtime.clients.stop_playback = collect

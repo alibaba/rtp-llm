@@ -45,6 +45,8 @@ def _reference(value, expected, where, *, previous):
         raise ConfigError(f'{where}: invalid reference path')
     if parts[0] == 'steps' and len(parts) >= 2 and parts[1] in previous:
         source, path, definition = parts[1], parts[2:], previous[parts[1]]
+        if definition is None:
+            raise ConfigError(f'{where}: Background Step {source!r} does not provide a referenceable result')
     elif parts[0] == 'globals' and len(parts) >= 2:
         source, path, definition = 'globals', parts[1:], _GLOBALS
     else:
@@ -136,7 +138,7 @@ def _compile_step(raw, registry, ids, previous):
         raise ConfigError(f'{step_id}.background: expected a boolean')
     if background and not interface.step_type.allow_background:
         raise ConfigError(f'{step_id}: {interface.name} must run in the foreground')
-    previous[step_id] = interface.returns
+    previous[step_id] = None if background else interface.returns
     return interface.step_type(step_id, description, interface.name, args, expect, within, wait_after, background)
 
 
@@ -269,13 +271,6 @@ def compile_environment(raw, *, directory=None):
             from ..execution.roles.master import validate_master_config
 
             validate_master_config(native)
-        if 'checkpoint_path' in native:
-            checkpoint = Path(text(native['checkpoint_path'], f'{role}.checkpoint_path'))
-            if not checkpoint.is_absolute():
-                if directory is None:
-                    raise ConfigError(f'{role}.checkpoint_path: relative model directory requires a Case directory')
-                checkpoint = Path(directory) / checkpoint
-            native = {**native, 'checkpoint_path': str(checkpoint.resolve())}
         result[role] = {'deployment': deployment, 'config': expand_config(native)}
         if 'engine' in component:
             result[role]['engine'] = component['engine']
