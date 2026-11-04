@@ -48,7 +48,6 @@ class EngramTransitionCudaTest(unittest.TestCase):
         )
         from rtp_llm.models_py.modules.dsv41.engram import gated_engram_residual
         from rtp_llm.models_py.modules.dsv41.hc.engram_cuda import State
-        from rtp_llm.models_py.modules.dsv41.hc.v41_prenorm import prepare_tf32_weight
         from rtp_llm.models_py.modules.dsv41.test.test_v41_mega_mhc import make_case
 
         case = make_case((m,))
@@ -65,7 +64,7 @@ class EngramTransitionCudaTest(unittest.TestCase):
         state = State(
             self.projection.weight,
             self.projection.weight_scales,
-            prepare_tf32_weight(next_hc.fn),
+            next_hc.fn,
             next_hc.scale,
             next_hc.base,
             case["norm"].weight,

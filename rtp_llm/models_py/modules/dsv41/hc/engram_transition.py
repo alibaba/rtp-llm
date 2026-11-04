@@ -111,12 +111,10 @@ def try_fused_engram_post_pre(layer, pending):
     if state is None:
         if torch.cuda.is_current_stream_capturing():
             return None
-        from rtp_llm.models_py.modules.dsv41.hc.v41_prenorm import prepare_tf32_weight
-
         state = _backend().State(
             module.wkv.weight,
             module.wkv.weight_scales,
-            prepare_tf32_weight(next_hc.fn),
+            next_hc.fn,
             next_hc.scale,
             next_hc.base,
             layer.attn_norm.weight,

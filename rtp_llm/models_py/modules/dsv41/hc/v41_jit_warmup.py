@@ -218,7 +218,7 @@ def _launch_fused_pre(unit, tokens, device):
     use_deepgemm = tokens <= v41_prenorm.max_supported_tokens()
     _tile_ops().mhc_pre_big_fuse(
         residual,
-        v41_prenorm.prepare_tf32_weight(unit.fn) if use_deepgemm else unit.fn,
+        unit.fn,
         unit.scale,
         unit.base,
         unit.norm_eps,
