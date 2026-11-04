@@ -23,7 +23,8 @@ fi
 cd "${REPO_ROOT}"
 BAZEL_STARTUP_ARGS=()
 if [[ -n "${NAVI_SCHED_BAZELRC:-}" ]]; then
-    BAZEL_STARTUP_ARGS+=("--bazelrc=${NAVI_SCHED_BAZELRC}")
+    BAZEL_STARTUP_ARGS+=(--nosystem_rc --nohome_rc --noworkspace_rc
+        "--bazelrc=${NAVI_SCHED_BAZELRC}")
 fi
 BUILD_COMMAND=(
     "${BAZEL_BIN}"

@@ -113,7 +113,8 @@ fi
 
 navi_sched_bazel_output_bin() {
     if [[ -n "${NAVI_SCHED_BAZELRC:-}" ]]; then
-        "${BAZEL_BIN}" "--bazelrc=${NAVI_SCHED_BAZELRC}" info "$@" bazel-bin
+        "${BAZEL_BIN}" --nosystem_rc --nohome_rc --noworkspace_rc \
+            "--bazelrc=${NAVI_SCHED_BAZELRC}" info "$@" bazel-bin
     else
         "${BAZEL_BIN}" info "$@" bazel-bin
     fi
