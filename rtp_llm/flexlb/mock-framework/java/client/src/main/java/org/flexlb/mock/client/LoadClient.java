@@ -1,15 +1,18 @@
 package org.flexlb.mock.client;
 
+import java.io.IOException;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.Consumer;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleRequestPB;
 import org.flexlb.mock.client.ClientProtocol.*;
 
-/** Owns admission, concurrency and request lifetimes. Only Player controls arrival rate. */
+/** Owns playback pacing, admission, concurrency and request lifetimes. */
 final class LoadClient implements AutoCloseable {
     private final Shard plan;
     private final NativeClient client;
@@ -54,7 +57,7 @@ final class LoadClient implements AutoCloseable {
         begun = true;
         long start = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(delay);
         player = Thread.ofVirtual().name("client-player").start(() -> {
-            try { Player.play(plan, start, this::offer); }
+            try { play(plan, start, this::offer); }
             catch (InterruptedException interrupted) { if (!isStopped()) fail("Player interrupted unexpectedly"); }
             catch (java.io.InterruptedIOException interrupted) { if (!isStopped()) fail(interrupted.toString()); }
             catch (java.io.IOException | RuntimeException error) { fail(error.toString()); }
@@ -62,6 +65,24 @@ final class LoadClient implements AutoCloseable {
         });
         LockSupport.unpark(dispatcher);
     }
+    /** Use the shared source time origin for every shard. */
+    static void play(Shard plan, long startNanos, Consumer<Item> submit) throws IOException, InterruptedException {
+        try (var reader = new ReplayInput.Reader(Path.of(plan.requests_file()))) {
+            for (long position = 0; position < plan.count(); position++) {
+                var input = reader.next();
+                if (input == null) throw new IOException("Truncated request shard: " + plan.requests_file());
+                long index = Math.addExact(plan.first_index(), Math.multiplyExact(position, plan.stride()));
+                long due = startNanos + ReplayInput.delayNanos(index, input, plan.qps(), plan.replay_speed());
+                long left;
+                while ((left = due - System.nanoTime()) > 0) TimeUnit.NANOSECONDS.sleep(left);
+                if (Thread.interrupted()) throw new InterruptedException();
+                submit.accept(new Item(Math.addExact(plan.first_request_id(), index), index, input));
+            }
+            if (reader.next() != null) throw new IOException("Extra records in request shard: " + plan.requests_file());
+            reader.verify(plan.sha256());
+        }
+    }
+
     private synchronized boolean isStopped() { return stopped; }
     private void offer(Item item) {
         if (stopped) return;

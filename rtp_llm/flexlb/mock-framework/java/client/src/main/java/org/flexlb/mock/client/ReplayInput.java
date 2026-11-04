@@ -9,14 +9,81 @@ import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.security.*;
 import java.util.*;
+import java.util.function.BooleanSupplier;
+import org.flexlb.mock.client.ClientProtocol.Start;
 import org.flexlb.mock.client.input.ClientInput.*;
 
-/** Versioned, bounded Protobuf chunks; source files and prepared shards use this same codec. */
-final class InputFile {
+/** Reads playback sources and prepares bounded, checksummed Protobuf/Zstd shards. */
+final class ReplayInput {
     static final byte[] MAGIC = "MCKINP01".getBytes(StandardCharsets.US_ASCII);
     static final int MAX_FRAME = 4 * 1024 * 1024, MAX_REQUEST = 1024 * 1024, MAX_CHUNK_REQUESTS = 1024;
+
+    record Part(String path, long count, String sha256) {}
+    static List<Part> split(Start plan, Path directory, int clients, BooleanSupplier cancelled) throws IOException {
+        Files.createDirectory(directory);
+        var outputs = new ArrayList<Writer>();
+        var digests = new ArrayList<MessageDigest>();
+        long count = 0, previousArrival = -1;
+        Throwable primary = null;
+        try {
+            for (int i = 0; i < clients; i++) {
+                var digest = digest(); digests.add(digest);
+                outputs.add(new Writer(new BufferedOutputStream(new DigestOutputStream(Files.newOutputStream(
+                    directory.resolve(i + ".part"), StandardOpenOption.CREATE_NEW), digest))));
+            }
+            Path source = Path.of(plan.requests_file());
+            var before = Files.readAttributes(source, BasicFileAttributes.class);
+            try (var reader = source(source)) {
+                Request input;
+                while ((input = reader.next()) != null) {
+                    checkInterrupted();
+                    if (cancelled.getAsBoolean()) throw new InterruptedIOException("Request preparation stopped");
+                    long next = Math.addExact(count, 1);
+                    if (plan.qps() != null && next / plan.qps() > 86400) throw new IOException("Playback exceeds 24 hours");
+                    delayNanos(count, input, plan.qps(), plan.replay_speed());
+                    if (plan.replay_speed() != null) {
+                        if (input.getArrivalOffsetMs() < previousArrival) throw new IOException("Replay arrival offsets must be nondecreasing");
+                        previousArrival = input.getArrivalOffsetMs();
+                    }
+                    outputs.get((int) (count % clients)).write(input);
+                    count = next;
+                }
+            }
+            var after = Files.readAttributes(source, BasicFileAttributes.class);
+            if (before.size() != after.size() || !before.lastModifiedTime().equals(after.lastModifiedTime())
+                    || !Objects.equals(before.fileKey(), after.fileKey())) throw new IOException("Input file changed during preparation: " + source);
+            if (count < clients) throw new IOException("Need at least one request per Client");
+            for (var output : outputs) output.finish();
+        } catch (IOException | RuntimeException | Error failure) {
+            primary = failure; throw failure;
+        } finally {
+            IOException failure = null;
+            for (var output : outputs) try { output.close(); }
+            catch (IOException error) { if (failure == null) failure = error; else failure.addSuppressed(error); }
+            if (failure != null) {
+                if (primary != null) primary.addSuppressed(failure);
+                else throw failure;
+            }
+        }
+        var parts = new ArrayList<Part>();
+        for (int i = 0; i < clients; i++) {
+            checkInterrupted();
+            Path path = directory.resolve(i + ".binpb.zst").toAbsolutePath();
+            Files.move(directory.resolve(i + ".part"), path, StandardCopyOption.ATOMIC_MOVE);
+            parts.add(new Part(path.toString(), count / clients + (i < count % clients ? 1 : 0), HexFormat.of().formatHex(digests.get(i).digest())));
+        }
+        return List.copyOf(parts);
+    }
+
+    static long delayNanos(long index, Request input, Double qps, Double speed) throws IOException {
+        if (speed != null && !input.hasArrivalOffsetMs()) throw new IOException("Replay requires arrival_offset_ms on every request");
+        double seconds = speed == null ? index / qps : input.getArrivalOffsetMs() / (1000.0 * speed);
+        if (!Double.isFinite(seconds) || seconds < 0 || seconds > 86400) throw new IOException("Playback exceeds 24 hours");
+        return (long) (seconds * 1_000_000_000.0);
+    }
 
     static void validate(Request request) throws IOException {
         if (request.getTokenIdsCount() == 0 || request.getTokenIdsList().stream().anyMatch(v -> v < 0)

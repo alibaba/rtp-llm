@@ -8,7 +8,7 @@ import org.flexlb.mock.client.ClientProtocol.Start;
 final class InputFixture {
     static Request request() { return Request.newBuilder().addAllTokenIds(List.of(1, 2, 3)).setMaxNewTokens(3).setPriority(20).build(); }
     static Path write(Path path, Iterable<Request> requests) throws Exception {
-        try (var writer = new InputFile.Writer(Files.newOutputStream(path, StandardOpenOption.CREATE_NEW))) {
+        try (var writer = new ReplayInput.Writer(Files.newOutputStream(path, StandardOpenOption.CREATE_NEW))) {
             for (var request : requests) writer.write(request);
             writer.finish();
         }
