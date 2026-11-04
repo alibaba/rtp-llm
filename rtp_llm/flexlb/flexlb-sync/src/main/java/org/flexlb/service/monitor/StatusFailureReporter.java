@@ -26,16 +26,29 @@ public class StatusFailureReporter {
         monitor.register(STATUS_FAILURE_DETAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
     }
 
-    public void report(RoleType role, String operation, Stage stage, String reason,
-                       GrpcFailure.Analysis failure) {
+    public void report(
+            RoleType role,
+            String operation,
+            Stage stage,
+            String reason,
+            GrpcFailure.Analysis failure) {
         try {
-            FlexMetricTags tags = FlexMetricTags.of(
-                    "role", role == null ? "" : role.getCode(),
-                    "operation", operation,
-                    "stage", stage.name(),
-                    "reason", reason,
-                    "origin", failure != null && failure.confirmedLocalFailure() ? "MASTER" : "UNCONFIRMED",
-                    "grpc_code", failure == null ? "NONE" : failure.grpcCode().name());
+            FlexMetricTags tags =
+                    FlexMetricTags.of(
+                            "role",
+                            role == null ? "" : role.getCode(),
+                            "operation",
+                            operation,
+                            "stage",
+                            stage.name(),
+                            "reason",
+                            reason,
+                            "origin",
+                            failure != null && failure.confirmedLocalFailure()
+                                    ? "MASTER"
+                                    : "UNCONFIRMED",
+                            "grpc_code",
+                            failure == null ? "NONE" : failure.grpcCode().name());
             monitor.report(STATUS_FAILURE_DETAIL, tags, 1.0);
         } catch (RuntimeException | Error ignoredDiagnosticFailure) {
             // Failure diagnostics must not interrupt status processing or cleanup.

@@ -1,23 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.await;
-import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.awaitCondition;
-import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.bind;
-import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.bindRoute;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.anyString;
-import static org.mockito.Mockito.eq;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -48,6 +30,24 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+
+import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.await;
+import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.awaitCondition;
+import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.bind;
+import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.bindRoute;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /** Executable documentation for the RequestSlot delivery lock boundary. */
 class RequestLifecycleDeliveryLockContractTest {

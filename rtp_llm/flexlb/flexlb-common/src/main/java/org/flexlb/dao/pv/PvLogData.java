@@ -3,9 +3,7 @@ package org.flexlb.dao.pv;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
-
 import lombok.Data;
-
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -56,6 +54,7 @@ public class PvLogData {
 
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     private Map<String, Object> schedulingDiagnostics;
+
     private String traceId;
     private String spanId;
     private Boolean traceSampled;

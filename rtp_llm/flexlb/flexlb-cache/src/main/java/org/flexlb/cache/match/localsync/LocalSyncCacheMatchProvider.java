@@ -8,9 +8,9 @@ import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.EndpointTrace;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.EndpointTrace;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -74,9 +74,17 @@ public class LocalSyncCacheMatchProvider
                 kvCacheManager.findMatchingEngines(blockCacheKeys, roleType, group));
     }
 
-    public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus) { return updateFromWorkerStatus(workerStatus, null); }
+    public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus) {
+        workerStatus.cacheMutationLock.lock();
+        try {
+            return updateFromWorkerStatus(workerStatus, null);
+        } finally {
+            workerStatus.cacheMutationLock.unlock();
+        }
+    }
 
-    public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus, EndpointTrace.Poll pollTrace) {
+    public WorkerCacheUpdateResult updateFromWorkerStatus(
+            WorkerStatus workerStatus, EndpointTrace.Poll pollTrace) {
         requireCacheMutationLock(workerStatus);
         long startTime = System.nanoTime() / 1000;
         String logicalIpPort = workerStatus.getLogicalIpPort();
@@ -109,17 +117,19 @@ public class LocalSyncCacheMatchProvider
         } catch (Throwable e) {
             log.error("Error updating worker cache for: {}", logicalIpPort, e);
             WorkerCacheUpdateResult result = buildFailureResult(logicalIpPort, e.getMessage());
-            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(metricIpPort, role, startTime, "0    public void removeEngineBlockCache(WorkerStatus workerStatus, EndpointTrace trace) {
-        requireCacheMutationLock(workerStatus);
-        kvCacheManager.removeEngineCache(workerStatus.getLogicalIpPort(), trace);
-    }
-
-");
+            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(metricIpPort, role, startTime, "0");
             return result;
         }
     }
 
-    public void removeEngineBlockCache(String engineIpPort) { removeEngineBlockCache(engineIpPort, null); }
+    public void removeEngineBlockCache(WorkerStatus workerStatus, EndpointTrace trace) {
+        requireCacheMutationLock(workerStatus);
+        kvCacheManager.removeEngineCache(workerStatus, trace);
+    }
+
+    public void removeEngineBlockCache(String engineIpPort) {
+        removeEngineBlockCache(engineIpPort, null);
+    }
 
     public void removeEngineBlockCache(String engineIpPort, EndpointTrace trace) {
         kvCacheManager.removeEngineCache(engineIpPort, trace);
@@ -144,9 +154,11 @@ public class LocalSyncCacheMatchProvider
                 .errorMessage(errorMessage)
                 .build();
     }
+
     private static void requireCacheMutationLock(WorkerStatus workerStatus) {
         if (!workerStatus.cacheMutationLock.isHeldByCurrentThread()) {
-            throw new IllegalStateException("Cache mutation requires the owning generation cache lock");
+            throw new IllegalStateException(
+                    "Cache mutation requires the owning generation cache lock");
         }
     }
 }

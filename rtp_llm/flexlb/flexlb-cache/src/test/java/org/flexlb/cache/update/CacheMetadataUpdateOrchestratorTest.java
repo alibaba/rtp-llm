@@ -35,12 +35,12 @@ class CacheMetadataUpdateOrchestratorTest {
         when(configuration.isLocalSyncEnabled()).thenReturn(true);
         WorkerStatus workerStatus = workerStatus("127.0.0.1", 8080, RoleType.PREFILL);
         WorkerCacheUpdateResult expected = WorkerCacheUpdateResult.builder().success(true).build();
-        when(localSyncProvider.updateFromWorkerStatus(workerStatus)).thenReturn(expected);
+        when(localSyncProvider.updateFromWorkerStatus(workerStatus, null)).thenReturn(expected);
 
         WorkerCacheUpdateResult actual = orchestrator().updateFromWorkerStatus(workerStatus);
 
         assertSame(expected, actual);
-        verify(localSyncProvider).updateFromWorkerStatus(workerStatus);
+        verify(localSyncProvider).updateFromWorkerStatus(workerStatus, null);
     }
 
     @Test

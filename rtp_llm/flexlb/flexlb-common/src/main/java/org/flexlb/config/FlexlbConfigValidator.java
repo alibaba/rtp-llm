@@ -1,7 +1,6 @@
 package org.flexlb.config;
 
 import com.fasterxml.jackson.databind.JsonNode;
-
 import org.flexlb.balance.prediction.DecodeCostFormula;
 import org.flexlb.balance.prediction.PrefillTimeFormula;
 import org.flexlb.config.RoutingConfig.CacheAffinityConfig;

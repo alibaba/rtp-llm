@@ -66,9 +66,16 @@ class NettyMemoryReporterTest {
         ByteBuf buffer = allocator.directBuffer(16384);
         try {
             reporter.sample();
-            verify(monitor).report(NETTY_DIRECT_PINNED_BYTES, tags, (double) allocator.pinnedDirectMemory());
-            verify(monitor).report(NETTY_DIRECT_RESERVED_BYTES, tags,
-                    (double) allocator.metric().usedDirectMemory());
+            verify(monitor)
+                    .report(
+                            NETTY_DIRECT_PINNED_BYTES,
+                            tags,
+                            (double) allocator.pinnedDirectMemory());
+            verify(monitor)
+                    .report(
+                            NETTY_DIRECT_RESERVED_BYTES,
+                            tags,
+                            (double) allocator.metric().usedDirectMemory());
             assertTrue(allocator.pinnedDirectMemory() >= 16384L);
             verify(monitor, times(1)).report(eq(NETTY_DIRECT_PINNED_BYTES), any(), anyDouble());
             clearInvocations(monitor);
@@ -81,8 +88,9 @@ class NettyMemoryReporterTest {
 
     @Test
     void discoveryIncludesTheActualGrpcSingletonAndNettyDefault() throws Exception {
-        var getter = Class.forName("io.grpc.netty.Utils")
-                .getDeclaredMethod("getByteBufAllocator", boolean.class);
+        var getter =
+                Class.forName("io.grpc.netty.Utils")
+                        .getDeclaredMethod("getByteBufAllocator", boolean.class);
         assertTrue(getter.trySetAccessible());
         var grpc = (PooledByteBufAllocator) getter.invoke(null, false);
         var monitor = mock(FlexMonitor.class);
@@ -92,8 +100,11 @@ class NettyMemoryReporterTest {
         try {
             reporter.sample();
             var name = grpc == PooledByteBufAllocator.DEFAULT ? "netty_default" : "grpc_default";
-            verify(monitor).report(NETTY_DIRECT_PINNED_BYTES,
-                    FlexMetricTags.of("allocator", name), (double) grpc.pinnedDirectMemory());
+            verify(monitor)
+                    .report(
+                            NETTY_DIRECT_PINNED_BYTES,
+                            FlexMetricTags.of("allocator", name),
+                            (double) grpc.pinnedDirectMemory());
         } finally {
             buffer.release();
         }
@@ -105,18 +116,37 @@ class NettyMemoryReporterTest {
         var monitor = mock(FlexMonitor.class);
         var sampled = new CountDownLatch(1);
         var samplerThread = new java.util.concurrent.atomic.AtomicReference<Thread>();
-        doAnswer(invocation -> {
-            samplerThread.set(Thread.currentThread());
-            sampled.countDown();
-            return null;
-        }).when(monitor).report(eq(NETTY_MEMORY_SAMPLE_TIMESTAMP_MS), any(), anyDouble());
+        doAnswer(
+                        invocation -> {
+                            samplerThread.set(Thread.currentThread());
+                            sampled.countDown();
+                            return null;
+                        })
+                .when(monitor)
+                .report(eq(NETTY_MEMORY_SAMPLE_TIMESTAMP_MS), any(), anyDouble());
         var reporter = new NettyMemoryReporter(settings, monitor);
         try {
             reporter.start();
-            verify(monitor).register(NETTY_DIRECT_RESERVED_BYTES, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-            verify(monitor).register(NETTY_DIRECT_PINNED_BYTES, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-            verify(monitor).register(NETTY_MEMORY_SAMPLE_DURATION_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-            verify(monitor).register(NETTY_MEMORY_SAMPLE_TIMESTAMP_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+            verify(monitor)
+                    .register(
+                            NETTY_DIRECT_RESERVED_BYTES,
+                            FlexMetricType.GAUGE,
+                            FlexPriorityType.PRECISE);
+            verify(monitor)
+                    .register(
+                            NETTY_DIRECT_PINNED_BYTES,
+                            FlexMetricType.GAUGE,
+                            FlexPriorityType.PRECISE);
+            verify(monitor)
+                    .register(
+                            NETTY_MEMORY_SAMPLE_DURATION_MS,
+                            FlexMetricType.GAUGE,
+                            FlexPriorityType.PRECISE);
+            verify(monitor)
+                    .register(
+                            NETTY_MEMORY_SAMPLE_TIMESTAMP_MS,
+                            FlexMetricType.GAUGE,
+                            FlexPriorityType.PRECISE);
             assertTrue(sampled.await(5, TimeUnit.SECONDS));
             assertTrue(samplerThread.get().isDaemon());
             assertEquals("flexlb-netty-memory-reporter", samplerThread.get().getName());
@@ -135,13 +165,16 @@ class NettyMemoryReporterTest {
         var monitor = mock(FlexMonitor.class);
         var attempts = new AtomicInteger();
         var recovered = new CountDownLatch(1);
-        doAnswer(invocation -> {
-            if (attempts.incrementAndGet() == 1) {
-                throw new OutOfMemoryError("simulated reporting failure");
-            }
-            recovered.countDown();
-            return null;
-        }).when(monitor).report(eq(NETTY_DIRECT_RESERVED_BYTES), any(), anyDouble());
+        doAnswer(
+                        invocation -> {
+                            if (attempts.incrementAndGet() == 1) {
+                                throw new OutOfMemoryError("simulated reporting failure");
+                            }
+                            recovered.countDown();
+                            return null;
+                        })
+                .when(monitor)
+                .report(eq(NETTY_DIRECT_RESERVED_BYTES), any(), anyDouble());
         Logger logger = (Logger) LoggerFactory.getLogger(NettyMemoryReporter.class);
         var logs = new ListAppender<ILoggingEvent>();
         logs.start();
@@ -149,9 +182,16 @@ class NettyMemoryReporterTest {
         var reporter = new NettyMemoryReporter(settings, monitor);
         try {
             reporter.start();
-            assertTrue(recovered.await(5, TimeUnit.SECONDS), "one failed sample must not cancel future sampling");
-            assertFalse(logs.list.stream().anyMatch(event ->
-                    event.getMessage().startsWith("event=netty_memory_sample_failed")));
+            assertTrue(
+                    recovered.await(5, TimeUnit.SECONDS),
+                    "one failed sample must not cancel future sampling");
+            assertFalse(
+                    logs.list.stream()
+                            .anyMatch(
+                                    event ->
+                                            event.getMessage()
+                                                    .startsWith(
+                                                            "event=netty_memory_sample_failed")));
         } finally {
             reporter.close();
             logger.detachAppender(logs);
@@ -202,23 +242,29 @@ class NettyMemoryReporterTest {
         settings.getAutoCapture().setCooldownMs(2000L);
         var nowNanos = new AtomicLong();
         var monitor = mock(FlexMonitor.class);
-        doAnswer(invocation -> {
-            nowNanos.addAndGet(TimeUnit.MILLISECONDS.toNanos(1500));
-            return null;
-        }).doNothing().when(monitor).report(eq(NETTY_DIRECT_RESERVED_BYTES), any(), anyDouble());
+        doAnswer(
+                        invocation -> {
+                            nowNanos.addAndGet(TimeUnit.MILLISECONDS.toNanos(1500));
+                            return null;
+                        })
+                .doNothing()
+                .when(monitor)
+                .report(eq(NETTY_DIRECT_RESERVED_BYTES), any(), anyDouble());
         var reporter = new NettyMemoryReporter(settings, monitor, nowNanos::get);
         var allocator = new PooledByteBufAllocator(true, 0, 1, 8192, 4, 0, 0, false);
         reporter.registerAllocator("test", allocator);
         Logger logger = (Logger) LoggerFactory.getLogger(NettyMemoryReporter.class);
-        var logs = new ListAppender<ILoggingEvent>() {
-            @Override
-            protected void append(ILoggingEvent event) {
-                super.append(event);
-                if (event.getMessage().startsWith("event=netty_memory_capture ") && captures(this) == 1L) {
-                    nowNanos.addAndGet(TimeUnit.MILLISECONDS.toNanos(500));
-                }
-            }
-        };
+        var logs =
+                new ListAppender<ILoggingEvent>() {
+                    @Override
+                    protected void append(ILoggingEvent event) {
+                        super.append(event);
+                        if (event.getMessage().startsWith("event=netty_memory_capture ")
+                                && captures(this) == 1L) {
+                            nowNanos.addAndGet(TimeUnit.MILLISECONDS.toNanos(500));
+                        }
+                    }
+                };
         logs.start();
         logger.addAppender(logs);
         ByteBuf buffer = allocator.directBuffer(16384);
@@ -240,8 +286,10 @@ class NettyMemoryReporterTest {
             assertEquals(2L, captures(logs), "capture resumes exactly at the cooldown boundary");
             verify(monitor, times(4)).report(eq(NETTY_DIRECT_RESERVED_BYTES), any(), anyDouble());
             verify(monitor, times(4)).report(eq(NETTY_DIRECT_PINNED_BYTES), any(), anyDouble());
-            verify(monitor, times(4)).report(eq(NETTY_MEMORY_SAMPLE_DURATION_MS), any(), anyDouble());
-            verify(monitor, times(4)).report(eq(NETTY_MEMORY_SAMPLE_TIMESTAMP_MS), any(), anyDouble());
+            verify(monitor, times(4))
+                    .report(eq(NETTY_MEMORY_SAMPLE_DURATION_MS), any(), anyDouble());
+            verify(monitor, times(4))
+                    .report(eq(NETTY_MEMORY_SAMPLE_TIMESTAMP_MS), any(), anyDouble());
         } finally {
             buffer.release();
             logger.detachAppender(logs);
@@ -250,7 +298,9 @@ class NettyMemoryReporterTest {
     }
 
     private static long captures(ListAppender<ILoggingEvent> logs) {
-        return logs.list.stream().filter(event -> event.getMessage().startsWith("event=netty_memory_capture ")).count();
+        return logs.list.stream()
+                .filter(event -> event.getMessage().startsWith("event=netty_memory_capture "))
+                .count();
     }
 
     private static NettyMemoryReporterConfig enabled() {

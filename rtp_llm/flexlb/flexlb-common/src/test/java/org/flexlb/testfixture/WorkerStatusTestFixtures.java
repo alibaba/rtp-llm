@@ -11,7 +11,7 @@ import java.util.Objects;
 
 /** Test data setup through the production poll and publication APIs. */
 public final class WorkerStatusTestFixtures {
-    private WorkerStatusTestFixtures() { }
+    private WorkerStatusTestFixtures() {}
 
     public static WorkerStatus readyForScheduling(WorkerStatus worker) {
         receive(worker, true, null);
@@ -40,7 +40,8 @@ public final class WorkerStatusTestFixtures {
         }
     }
 
-    public static WorkerStatus.PollHealth receive(WorkerStatus worker, boolean alive, Throwable failure) {
+    public static WorkerStatus.PollHealth receive(
+            WorkerStatus worker, boolean alive, Throwable failure) {
         try (WorkerStatus.PollLease lease = Objects.requireNonNull(worker.tryBeginStatusPoll(1L))) {
             worker.recordStatusRpcResult(lease, failure == null, alive, failure);
         }
@@ -54,25 +55,29 @@ public final class WorkerStatusTestFixtures {
     public static StatusObservation observation(
             WorkerStatus worker, WorkerStatusResponse response) {
         Objects.requireNonNull(response, "response");
-        Map<String, TaskObservation> runningTasks = freezeTaskMap(
-                response.getRunningTaskInfo());
-        Map<String, TaskObservation> finishedTasks = freezeTaskMap(
-                response.getFinishedTaskInfo());
-        EngineObservation engine = new EngineObservation(
-                response.getRole(),
-                response.getAvailableConcurrency(),
-                response.getAvailableKvCacheTokens(),
-                response.getTotalKvCacheTokens(),
-                runningTasks,
-                response.getStepLatencyMs(),
-                response.getIterateCount(),
-                response.getDpSize(),
-                response.getTpSize(),
-                response.getDpRank(),
-                response.getMaxSeqLen(),
-                response.getMaxBatchTokensSize(),
-                response.getRunningQueryLen(),
-                response.getWaitingQueryLen());
+        Map<String, TaskObservation> runningTasks = freezeTaskMap(response.getRunningTaskInfo());
+        Map<String, TaskObservation> finishedTasks = freezeTaskMap(response.getFinishedTaskInfo());
+        EngineObservation engine =
+                new EngineObservation(
+                        response.getRole(),
+                        response.getAvailableConcurrency(),
+                        response.getAvailableKvCacheTokens(),
+                        response.getTotalKvCacheTokens(),
+                        runningTasks,
+                        response.getStepLatencyMs(),
+                        response.getIterateCount(),
+                        response.getDpSize(),
+                        response.getTpSize(),
+                        response.getDpRank(),
+                        response.getBlockSize(),
+                        response.getBlockHashLookaheadTokens(),
+                        response.getCacheMatchRollbackBlocks(),
+                        response.getKvCacheGroupMode(),
+                        response.getMaxSeqLen(),
+                        response.getMaxBatchTokensSize(),
+                        response.getRunningQueryLen(),
+                        response.getWaitingQueryLen(),
+                        response.getLastStepMetrics());
         return worker.bindStatusObservation(
                 engine,
                 response.isAlive(),
@@ -81,16 +86,14 @@ public final class WorkerStatusTestFixtures {
                 finishedTasks);
     }
 
-    private static Map<String, TaskObservation> freezeTaskMap(
-            Map<String, TaskInfo> tasks) {
+    private static Map<String, TaskObservation> freezeTaskMap(Map<String, TaskInfo> tasks) {
         if (tasks == null || tasks.isEmpty()) {
             return Map.of();
         }
         Map<String, TaskObservation> frozen = new HashMap<>(tasks.size());
         for (Map.Entry<String, TaskInfo> entry : tasks.entrySet()) {
             if (entry.getKey() != null && entry.getValue() != null) {
-                frozen.put(entry.getKey(), copyTask(
-                        entry.getValue()));
+                frozen.put(entry.getKey(), copyTask(entry.getValue()));
             }
         }
         return Map.copyOf(frozen);
@@ -111,7 +114,27 @@ public final class WorkerStatusTestFixtures {
                 task.getBatchId(),
                 task.getPhase(),
                 task.getExecutionTimeMs(),
-                task.getPriorityPreemptionProgress());
+                task.getPriorityPreemptionProgress(),
+                new WorkerStatus.TaskTelemetry(
+                        task.isPrefixLengthValid(),
+                        task.getRequestReceivedTimeMs(),
+                        task.getInputQueueEnqueueTimeMs(),
+                        task.getInputQueueDrainTimeMs(),
+                        task.getWaitingEnteredTimeMs(),
+                        task.getRunningEnteredTimeMs(),
+                        task.getRemoteKvWaitMs(),
+                        task.getFirstTokenTimeMs(),
+                        task.getHbmLocalMatchTokens(),
+                        task.getRemoteKvAddedMatchTokens(),
+                        task.getFirstPrefillStepId(),
+                        task.getLastPrefillStepId(),
+                        task.getPrefillStepCount(),
+                        task.getPrefillNonfinalChunkTokensMin(),
+                        task.getPrefillNonfinalChunkTokensMax(),
+                        task.getCompletedPrefillTokens(),
+                        task.getRemainingPrefillTokens() < 0
+                                ? null
+                                : task.getRemainingPrefillTokens(),
+                        task.getLastCompletedPrefillStepId()));
     }
-
 }

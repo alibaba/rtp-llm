@@ -10,7 +10,6 @@ import io.netty.util.concurrent.DefaultEventExecutorChooserFactory;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import io.netty.util.concurrent.RejectedExecutionHandlers;
 import io.netty.util.internal.PlatformDependent;
-
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.springframework.context.annotation.Bean;

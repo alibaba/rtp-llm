@@ -1,7 +1,6 @@
 package org.flexlb.cache.match.localsync;
 
 import lombok.extern.slf4j.Slf4j;
-
 import org.flexlb.cache.primitive.LongObjectMap;
 import org.flexlb.cache.primitive.SmallOwnerSet;
 import org.flexlb.dao.master.EndpointTrace;
@@ -34,7 +33,9 @@ public class GlobalCacheIndex {
      */
     private final LongAdder totalMappings = new LongAdder();
 
-    /** Per-caller compaction storage; cache queries never retain this array. */
+    /**
+     * Per-caller compaction storage; cache queries never retain this array.
+     */
     private final ThreadLocal<String[]> prefixCandidates =
             ThreadLocal.withInitial(() -> new String[0]);
 

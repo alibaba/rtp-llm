@@ -7,11 +7,11 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.match.CacheAwareService;
-import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
@@ -106,7 +106,7 @@ public class CostBasedPrefillStrategy {
                     balanceContext,
                     roleType,
                     group,
-                    discovery.registeredCount(),
+                    discovery.directory().size(),
                     survivors,
                     -1,
                     "NO_SELECTED_CANDIDATE",
@@ -128,7 +128,7 @@ public class CostBasedPrefillStrategy {
                     balanceContext,
                     roleType,
                     group,
-                    discovery.registeredCount(),
+                    discovery.directory().size(),
                     survivors,
                     -1,
                     "ENDPOINT_GENERATION_CHANGED",
@@ -183,49 +183,50 @@ public class CostBasedPrefillStrategy {
                         survivors.ownershipVersion(selectedIndex),
                         selectedPin);
         try {
-        if (balanceContext.selectionReason(roleType) == null) {
-            balanceContext.recordSelectionReason(roleType, "COST_BASED");
-        }
-        cacheAwareService.trackRoutingPrediction(
-                requestId,
-                roleType,
-                group,
-                best.getStatus(),
-                seqLen,
-                bestCacheHit,
-                cacheMatchResult);
-        HostCacheMatch selectedMatch = cacheMatchResult.hostMatch(best.getStatus());
-        if (cacheMatchResult.source() == CacheMatchSource.KVCM
-                && cacheMatchResult.querySucceeded()) {
-            engineHealthReporter.reportKvcmSelectedMatch(
+            if (balanceContext.selectionReason(roleType) == null) {
+                balanceContext.recordSelectionReason(roleType, "COST_BASED");
+            }
+            cacheAwareService.trackRoutingPrediction(
+                    requestId,
                     roleType,
-                    best.getStatus().getMetricIpPort(),
-                    selectedMatch == null
-                            ? 0
-                            : CacheMatchResult.matchedTokens(
-                                    selectedMatch.localMatchBlocks(),
-                                    cacheMatchResult.blockSize(),
-                                    seqLen),
-                    selectedMatch == null
-                            ? 0
-                            : CacheMatchResult.matchedTokens(
-                                    selectedMatch.globalMatchBlocks(),
-                                    cacheMatchResult.blockSize(),
-                                    seqLen),
-                    seqLen);
-        }
-        balanceContext.recordCacheSelection(roleType, best.getIp(), bestCacheHit);
-        recordDecision(
-                balanceContext,
-                roleType,
-                group,
-                discovery.registeredCount(),
-                survivors,
-                selectedIndex,
-                balanceContext.selectionReason(roleType),
-                rejections);
+                    group,
+                    best.getStatus(),
+                    seqLen,
+                    bestCacheHit,
+                    cacheMatchResult);
+            HostCacheMatch selectedMatch = cacheMatchResult.hostMatch(best.getStatus());
+            if (cacheMatchResult.source() == CacheMatchSource.KVCM
+                    && cacheMatchResult.querySucceeded()) {
+                engineHealthReporter.reportKvcmSelectedMatch(
+                        roleType,
+                        best.getStatus().getMetricIpPort(),
+                        selectedMatch == null
+                                ? 0
+                                : CacheMatchResult.matchedTokens(
+                                        selectedMatch.localMatchBlocks(),
+                                        cacheMatchResult.blockSize(),
+                                        seqLen),
+                        selectedMatch == null
+                                ? 0
+                                : CacheMatchResult.matchedTokens(
+                                        selectedMatch.globalMatchBlocks(),
+                                        cacheMatchResult.blockSize(),
+                                        seqLen),
+                        seqLen);
+            }
+            balanceContext.recordCacheSelection(roleType, best.getIp(), bestCacheHit);
+            recordDecision(
+                    balanceContext,
+                    roleType,
+                    group,
+                    discovery.directory().size(),
+                    survivors,
+                    selectedIndex,
+                    balanceContext.selectionReason(roleType),
+                    rejections);
             reportSelectedEstimates(roleType, best, config, selectedTtft, selectedPrefillMs);
-            reportCacheHitMetrics(roleType, best.getStatus().getMetricIpPort(), bestCacheHit, seqLen);
+            reportCacheHitMetrics(
+                    roleType, best.getStatus().getMetricIpPort(), bestCacheHit, seqLen);
             reportRoutingCacheMatchMetrics(
                     roleType,
                     survivors.routingCacheMatchTokens(selectedIndex),
@@ -514,7 +515,8 @@ public class CostBasedPrefillStrategy {
     private PrefillCandidateSet evaluateCandidates(
             EndpointDiscovery discovery,
             BalanceContext balanceContext,
-            CacheMatchResult cacheMatchResult, Map<String, Integer> rejections) {
+            CacheMatchResult cacheMatchResult,
+            Map<String, Integer> rejections) {
         Request request = balanceContext.getRequest();
         int eligibleSize = discovery.candidates().size();
         PrefillCandidateSet candidates = CANDIDATES.get();

@@ -82,13 +82,15 @@ public class EngineSyncRunner implements Runnable {
                 workerDirectory,
                 workerAddressService,
                 statusCheckExecutor,
+                cacheStatusExecutor,
+                statusApplicationExecutor,
                 engineHealthReporter,
                 engineGrpcService,
                 roleType,
                 cacheAwareService,
                 cacheIntervalService,
                 syncRequestTimeoutMs,
-                syncCount,
+                syncCycleId,
                 syncEngineStatusInterval,
                 false,
                 cacheFullSnapshotDebugMode);
@@ -99,13 +101,15 @@ public class EngineSyncRunner implements Runnable {
             WorkerDirectory workerDirectory,
             WorkerAddressService workerAddressService,
             ExecutorService statusCheckExecutor,
+            ExecutorService cacheStatusExecutor,
+            ExecutorService statusApplicationExecutor,
             EngineHealthReporter engineHealthReporter,
             EngineGrpcService engineGrpcService,
             RoleType roleType,
             CacheAwareService cacheAwareService,
             DynamicCacheIntervalService cacheIntervalService,
             long syncRequestTimeoutMs,
-            LongAdder syncCount,
+            long syncCycleId,
             Long syncEngineStatusInterval,
             boolean kvcmEnabled,
             boolean cacheFullSnapshotDebugMode) {
@@ -156,9 +160,13 @@ public class EngineSyncRunner implements Runnable {
                                                     topology.ip(),
                                                     topology.port(),
                                                     topology.grpcPort(),
-                                                    topology.port() + 5,
+                                                    topology.httpServerPort(),
+                                                    topology.workerStatusPort(),
                                                     topology.site(),
-                                                    topology.group());
+                                                    topology.group(),
+                                                    topology.deploymentName(),
+                                                    topology.engineIndex(),
+                                                    topology.multiEngineNum());
                                         })
                                 .toList();
                 logger.warn(
@@ -175,8 +183,8 @@ public class EngineSyncRunner implements Runnable {
                     roleType,
                     latestEngineWorkerList.size());
             if (discoverySucceeded) {
-                engineHealthReporter.reportServiceDiscoveryResult(
-                        modelName, latestEngineWorkerList.size(), roleType.toString());
+                engineHealthReporter.reportRawServiceDiscoveryHostCount(
+                        modelName, roleType, latestEngineWorkerList.size());
             }
             if (CollectionUtils.isEmpty(latestEngineWorkerList)) {
                 logger.debug(
@@ -238,16 +246,7 @@ public class EngineSyncRunner implements Runnable {
 
                 WorkerStatus workerStatus =
                         discoverySucceeded
-                                ? getOrCreateWorkerStatus(
-                                        workerIpPort,
-                                        site,
-                                        host.getGroup(),
-                                        host.getDeploymentName(),
-                                        host.getIp(),
-                                        host.getHttpPort(),
-                                        host.getGrpcPort(),
-                                        host.getEngineIndex(),
-                                        host.getMultiEngineNum())
+                                ? getOrCreateWorkerStatus(host)
                                 : cachedWorkerStatuses.get(workerIpPort);
 
                 if (workerStatus == null) {
@@ -275,6 +274,7 @@ public class EngineSyncRunner implements Runnable {
                                 new GrpcWorkerStatusRunner(
                                         modelName,
                                         workerIpPort,
+                                        host.getWorkerStatusPort(),
                                         roleType,
                                         workerStatus,
                                         statusPollLease,
@@ -435,37 +435,28 @@ public class EngineSyncRunner implements Runnable {
         }
     }
 
-    private WorkerStatus getOrCreateWorkerStatus(
-            String workerIpPort,
-            String site,
-            String group,
-            String deploymentName,
-            String ip,
-            int port,
-            int grpcPort,
-            int engineIndex,
-            int multiEngineNum) {
+    private WorkerStatus getOrCreateWorkerStatus(WorkerHost host) {
+        String workerIpPort = host.getLogicalIpPort();
+        String site = host.getSite();
+        String group = host.getGroup();
+        String deploymentName = host.getDeploymentName();
         while (true) {
             WorkerStatus workerStatus =
                     workerDirectory.currentOrDiscover(
-                            roleType,
-                            workerIpPort,
-                            () ->
-                                    createWorkerStatus(
-                                            workerIpPort,
-                                            site,
-                                            group,
-                                            deploymentName,
-                                            ip,
-                                            port,
-                                            grpcPort,
-                                            engineIndex,
-                                            multiEngineNum));
+                            roleType, workerIpPort, () -> createWorkerStatus(host));
 
+            WorkerStatus.TopologySnapshot topology = workerStatus.topologySnapshot();
+            boolean engineTopologyChanged =
+                    topology.grpcPort() != host.getGrpcPort()
+                            || topology.workerStatusPort() != host.getWorkerStatusPort()
+                            || topology.httpServerPort() != host.getHttpServerPort()
+                            || topology.multiEngineNum() != host.getMultiEngineNum();
             // Unchanged discovery must not wait for local status reduction.
             if (workerStatus.getRole() == roleType
                     && Objects.equals(workerStatus.getGroup(), group)
-                    && Objects.equals(workerStatus.getSite(), site)) {
+                    && Objects.equals(workerStatus.getSite(), site)
+                    && Objects.equals(workerStatus.getDeploymentName(), deploymentName)
+                    && !engineTopologyChanged) {
                 return workerStatus;
             }
             EndpointRegistry.DetachedGeneration endpointToRetire = null;
@@ -486,7 +477,7 @@ public class EngineSyncRunner implements Runnable {
                 String currentGroup = workerStatus.getGroup();
                 boolean roleChanged = currentRole != roleType;
                 boolean groupChanged = !Objects.equals(currentGroup, group);
-                if (!roleChanged && !groupChanged) {
+                if (!roleChanged && !groupChanged && !engineTopologyChanged) {
                     // Site changes do not change scheduling ownership. Publish
                     // the discovery labels atomically on the same generation.
                     workerStatus.updateDiscoveryLabels(site, group, deploymentName);
@@ -533,31 +524,12 @@ public class EngineSyncRunner implements Runnable {
         }
     }
 
-    private WorkerStatus createWorkerStatus(
-            String workerIpPort,
-            String site,
-            String group,
-            String deploymentName,
-            String ip,
-            int port,
-            int grpcPort,
-            int engineIndex,
-            int multiEngineNum) {
-        WorkerStatus discovered =
-                WorkerStatus.createDiscovered(
-                        roleType,
-                        group,
-                        ip,
-                        port,
-                        grpcPort,
-                        site,
-                        deploymentName,
-                        engineIndex,
-                        multiEngineNum);
+    private WorkerStatus createWorkerStatus(WorkerHost host) {
+        WorkerStatus discovered = WorkerStatus.createDiscovered(roleType, host);
         logger.info(
                 "Created WorkerStatus generation {} for worker: {}",
                 discovered.getGenerationId(),
-                workerIpPort);
+                host.getLogicalIpPort());
         return discovered;
     }
 

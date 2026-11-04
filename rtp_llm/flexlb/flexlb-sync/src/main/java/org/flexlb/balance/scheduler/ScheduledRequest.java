@@ -155,6 +155,7 @@ public final class ScheduledRequest implements Prioritized {
     public boolean decodeReadyForDispatch() {
         return execution.decodeReadyForDispatch();
     }
+
     public DecodeEndpoint.ReservationHandle decodeReservation() {
         return execution.decodeReservation();
     }

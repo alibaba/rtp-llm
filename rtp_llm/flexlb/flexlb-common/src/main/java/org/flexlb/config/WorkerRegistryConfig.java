@@ -16,6 +16,7 @@ public final class WorkerRegistryConfig {
     @Setter
     public static final class ExecutorsConfig {
         private int cacheStatusThreads = 32;
+
         /** CPU-bound diff work is also capped by available processors. */
         private int cacheDiffParallelism = 8;
     }

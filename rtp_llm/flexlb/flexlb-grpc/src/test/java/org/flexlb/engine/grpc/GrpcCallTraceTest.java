@@ -28,7 +28,8 @@ import static org.mockito.Mockito.when;
 class GrpcCallTraceTest {
     private final AtomicLong clock = new AtomicLong();
     private final GrpcTransportObserver observer = mock(GrpcTransportObserver.class);
-    private final GrpcTransportObserver.SocketState socket = mock(GrpcTransportObserver.SocketState.class);
+    private final GrpcTransportObserver.SocketState socket =
+            mock(GrpcTransportObserver.SocketState.class);
     private final GrpcCallTrace trace = new GrpcCallTrace(observer, clock::get);
 
     @Test
@@ -37,8 +38,12 @@ class GrpcCallTraceTest {
         Channel channel = mock(Channel.class);
         MethodDescriptor<Object, Object> method = mock(MethodDescriptor.class);
         ClientStreamTracer.Factory existing = mock(ClientStreamTracer.Factory.class);
-        CallOptions options = CallOptions.DEFAULT.withDeadlineAfter(5, TimeUnit.SECONDS)
-                .withWaitForReady().withStreamTracerFactory(existing).withOption(GrpcCallTrace.CALL_TRACE, trace);
+        CallOptions options =
+                CallOptions.DEFAULT
+                        .withDeadlineAfter(5, TimeUnit.SECONDS)
+                        .withWaitForReady()
+                        .withStreamTracerFactory(existing)
+                        .withOption(GrpcCallTrace.CALL_TRACE, trace);
         var captured = org.mockito.ArgumentCaptor.forClass(CallOptions.class);
         GrpcCallTrace.INTERCEPTOR.interceptCall(method, options, channel);
         verify(channel).newCall(same(method), captured.capture());
@@ -140,8 +145,11 @@ class GrpcCallTraceTest {
         ClientStreamTracer stream = stream(trace);
         clock.set(1_000_000);
         stream.streamCreated(Attributes.EMPTY, null);
-        var event = new GrpcTransportObserver.Observation(GrpcTransportObserver.Event.READ_FAILURE,
-                3_000_000, GrpcFailure.Kind.LOCAL_MEMORY_EXHAUSTED);
+        var event =
+                new GrpcTransportObserver.Observation(
+                        GrpcTransportObserver.Event.READ_FAILURE,
+                        3_000_000,
+                        GrpcFailure.Kind.LOCAL_MEMORY_EXHAUSTED);
         when(socket.observation()).thenReturn(event);
         clock.set(4_000_000);
         stream.streamClosed(Status.UNAVAILABLE);
@@ -151,7 +159,9 @@ class GrpcCallTraceTest {
         assertEquals("READ_FAILURE", snapshot.transportEvent());
         assertEquals(GrpcFailure.Kind.LOCAL_MEMORY_EXHAUSTED, snapshot.transportCauseKind());
         assertEquals(3, snapshot.transportEventMs());
-        assertEquals("MASTER", snapshot.failureOrigin(GrpcFailure.analyze(new ClosedChannelException())));
+        assertEquals(
+                "MASTER",
+                snapshot.failureOrigin(GrpcFailure.analyze(new ClosedChannelException())));
     }
 
     @Test
@@ -159,13 +169,21 @@ class GrpcCallTraceTest {
         when(observer.find(Attributes.EMPTY)).thenReturn(socket);
         ClientStreamTracer stream = stream(trace);
         stream.streamCreated(Attributes.EMPTY, null);
-        when(socket.observation()).thenReturn(new GrpcTransportObserver.Observation(
-                GrpcTransportObserver.Event.PEER_EOF, 0, GrpcFailure.Kind.UNEXPECTED_EOF));
+        when(socket.observation())
+                .thenReturn(
+                        new GrpcTransportObserver.Observation(
+                                GrpcTransportObserver.Event.PEER_EOF,
+                                0,
+                                GrpcFailure.Kind.UNEXPECTED_EOF));
         stream.streamClosed(Status.UNAVAILABLE);
         trace.markCallbackStarted();
         assertEquals("PEER_EOF", trace.snapshot().transportEvent());
-        assertEquals("UNCONFIRMED", trace.snapshot().failureOrigin(GrpcFailure.analyze(new ClosedChannelException())));
-        assertEquals("MASTER", trace.snapshot().failureOrigin(GrpcFailure.analyze(new OutOfMemoryError())));
+        assertEquals(
+                "UNCONFIRMED",
+                trace.snapshot().failureOrigin(GrpcFailure.analyze(new ClosedChannelException())));
+        assertEquals(
+                "MASTER",
+                trace.snapshot().failureOrigin(GrpcFailure.analyze(new OutOfMemoryError())));
         assertEquals("UNCONFIRMED", GrpcCallTrace.Snapshot.EMPTY.failureOrigin(null));
     }
 
@@ -180,8 +198,12 @@ class GrpcCallTraceTest {
         stream.streamClosed(Status.OK);
         clock.set(4_000_000);
         trace.markCallbackStarted();
-        when(socket.observation()).thenReturn(new GrpcTransportObserver.Observation(
-                GrpcTransportObserver.Event.PEER_EOF, eventNanos, GrpcFailure.Kind.UNEXPECTED_EOF));
+        when(socket.observation())
+                .thenReturn(
+                        new GrpcTransportObserver.Observation(
+                                GrpcTransportObserver.Event.PEER_EOF,
+                                eventNanos,
+                                GrpcFailure.Kind.UNEXPECTED_EOF));
         assertEquals("NONE", trace.snapshot().transportEvent());
         assertNull(trace.snapshot().transportCauseKind());
         assertEquals(-1, trace.snapshot().transportEventMs());
@@ -194,8 +216,12 @@ class GrpcCallTraceTest {
         stream.streamCreated(Attributes.EMPTY, null);
         clock.set(2_000_000);
         trace.markCallbackStarted();
-        when(socket.observation()).thenReturn(new GrpcTransportObserver.Observation(
-                GrpcTransportObserver.Event.WRITE_BROKEN_PIPE, 3_000_000, GrpcFailure.Kind.BROKEN_PIPE));
+        when(socket.observation())
+                .thenReturn(
+                        new GrpcTransportObserver.Observation(
+                                GrpcTransportObserver.Event.WRITE_BROKEN_PIPE,
+                                3_000_000,
+                                GrpcFailure.Kind.BROKEN_PIPE));
         assertEquals("NONE", trace.snapshot().transportEvent());
         assertEquals(-1, trace.snapshot().callbackDelayMs());
     }
@@ -207,8 +233,12 @@ class GrpcCallTraceTest {
         stream.streamCreated(Attributes.EMPTY, null);
         clock.set(1_000_000);
         stream.inboundTrailers(null);
-        when(socket.observation()).thenReturn(new GrpcTransportObserver.Observation(
-                GrpcTransportObserver.Event.READ_FAILURE, 2_000_000, GrpcFailure.Kind.LOCAL_MEMORY_EXHAUSTED));
+        when(socket.observation())
+                .thenReturn(
+                        new GrpcTransportObserver.Observation(
+                                GrpcTransportObserver.Event.READ_FAILURE,
+                                2_000_000,
+                                GrpcFailure.Kind.LOCAL_MEMORY_EXHAUSTED));
         clock.set(3_000_000);
         stream.streamClosed(Status.UNKNOWN);
         clock.set(4_000_000);
@@ -216,7 +246,9 @@ class GrpcCallTraceTest {
         var snapshot = trace.snapshot();
         assertEquals("NONE", snapshot.transportEvent());
         assertNull(snapshot.transportCauseKind());
-        assertEquals("UNCONFIRMED", snapshot.failureOrigin(GrpcFailure.analyze(new ClosedChannelException())));
+        assertEquals(
+                "UNCONFIRMED",
+                snapshot.failureOrigin(GrpcFailure.analyze(new ClosedChannelException())));
         assertEquals(1, snapshot.callbackDelayMs());
         assertEquals(3, snapshot.responseDeliveryMs());
     }
@@ -297,9 +329,14 @@ class GrpcCallTraceTest {
 
     @Test
     void clockFailuresNeverEscapeDiagnosticCallbacks() {
-        GrpcCallTrace broken = assertDoesNotThrow(() -> new GrpcCallTrace(null, () -> {
-            throw new OutOfMemoryError("diagnostic");
-        }));
+        GrpcCallTrace broken =
+                assertDoesNotThrow(
+                        () ->
+                                new GrpcCallTrace(
+                                        null,
+                                        () -> {
+                                            throw new OutOfMemoryError("diagnostic");
+                                        }));
         ClientStreamTracer stream = stream(broken);
         assertDoesNotThrow(() -> stream.streamCreated(Attributes.EMPTY, null));
         assertDoesNotThrow(stream::outboundHeaders);
@@ -312,6 +349,7 @@ class GrpcCallTraceTest {
     }
 
     private static ClientStreamTracer stream(GrpcCallTrace trace) {
-        return trace.newClientStreamTracer(ClientStreamTracer.StreamInfo.newBuilder().build(), new Metadata());
+        return trace.newClientStreamTracer(
+                ClientStreamTracer.StreamInfo.newBuilder().build(), new Metadata());
     }
 }

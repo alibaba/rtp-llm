@@ -1,7 +1,6 @@
 package org.flexlb.balance.endpoint;
 
 import lombok.Getter;
-
 import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 

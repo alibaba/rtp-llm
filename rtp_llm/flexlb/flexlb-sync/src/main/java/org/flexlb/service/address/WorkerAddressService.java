@@ -1,9 +1,6 @@
 package org.flexlb.service.address;
 
-import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
-
 import io.micrometer.core.instrument.util.NamedThreadFactory;
-
 import org.apache.commons.lang3.tuple.Pair;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -19,6 +16,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import javax.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -32,7 +30,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 
-import javax.annotation.PreDestroy;
+import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
 
 @Service("workerAddressService")
 public class WorkerAddressService {
@@ -201,7 +199,7 @@ public class WorkerAddressService {
             if (state.shouldWarnForEmptyWorkers()) {
                 logger.warn(
                         "No workers discovered, model={}, address={}, group={}; retaining last"
-                            + " non-empty worker list (warning limited to once per minute)",
+                                + " non-empty worker list (warning limited to once per minute)",
                         modelName,
                         endpoint.getAddress(),
                         endpoint.getGroup());

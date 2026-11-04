@@ -1,7 +1,6 @@
 package org.flexlb.cache.match.localsync;
 
 import lombok.extern.slf4j.Slf4j;
-
 import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.dao.master.EndpointTrace;
@@ -13,6 +12,8 @@ import org.flexlb.engine.grpc.cache.EngineCacheInvalidator;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
@@ -20,9 +21,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-
-import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
 
 /**
  * KV cache manager
@@ -47,10 +45,10 @@ public class KvCacheManager implements EngineCacheInvalidator {
      */
     @Autowired private CacheMetricsReporter cacheMetricsReporter;
 
-    private final Map<String, String> physicalIpPortByLogicalIpPort = new ConcurrentHashMap<>();
-    // Only failed updates retain a diff. Callers serialize each address through
-    // its generation's cache lock; retries replay idempotently before new diffs.
-    private final Map<String, DiffResult> pendingUpdates = new ConcurrentHashMap<>();
+    // The owning worker supplies the same lock used by cache application and retirement.
+    private final Map<String, WorkerStatus> cacheOwners = new ConcurrentHashMap<>();
+    // Only an interrupted addition needs replay: its local ownership may already be recorded.
+    private final Map<String, Long> pendingAdditions = new ConcurrentHashMap<>();
 
     @PostConstruct
     public void init() {
@@ -114,15 +112,28 @@ public class KvCacheManager implements EngineCacheInvalidator {
             String role,
             Set<Long> newCacheBlocks,
             EndpointTrace.Poll pollTrace) {
-        if (workerStatus == null) {
+        if (workerStatus == null
+                || workerStatus.getLogicalIpPort() == null
+                || newCacheBlocks == null) {
             return;
         }
-        updateEngineCache(
-                workerStatus.getWorkerIdentity(),
-                workerStatus.getMetricIpPort(),
-                role,
-                newCacheBlocks,
-                pollTrace);
+        workerStatus.cacheMutationLock.lock();
+        try {
+            String address = workerStatus.getLogicalIpPort();
+            WorkerStatus previous = cacheOwners.putIfAbsent(address, workerStatus);
+            if (previous != null && previous != workerStatus) {
+                throw new IllegalStateException(
+                        "Previous cache generation has not been retired: " + address);
+            }
+            updateEngineCache(
+                    workerStatus.getWorkerIdentity(),
+                    workerStatus.getMetricIpPort(),
+                    role,
+                    newCacheBlocks,
+                    pollTrace);
+        } finally {
+            workerStatus.cacheMutationLock.unlock();
+        }
     }
 
     private void updateEngineCache(
@@ -135,12 +146,11 @@ public class KvCacheManager implements EngineCacheInvalidator {
         if (engineIPort == null || newCacheBlocks == null) {
             return;
         }
-        physicalIpPortByLogicalIpPort.put(engineIPort, identity.getPhysicalIpPort());
 
-        DiffResult pending = pendingUpdates.get(engineIPort);
+        Long pending = pendingAdditions.get(engineIPort);
         if (pending != null) {
-            applyDiff(engineIPort, pending, pollTrace);
-            pendingUpdates.remove(engineIPort, pending);
+            addCacheBlock(engineIPort, pending, pollTrace);
+            pendingAdditions.remove(engineIPort);
         }
 
         // Calculate diff
@@ -154,11 +164,12 @@ public class KvCacheManager implements EngineCacheInvalidator {
             return;
         }
 
-        try {
-            applyDiff(engineIPort, diffResult, pollTrace);
-        } catch (RuntimeException | Error failure) {
-            pendingUpdates.put(engineIPort, diffResult);
-            throw failure;
+        for (Long key : diffResult.getAddedBlocks()) {
+            addCacheBlock(engineIPort, key, pollTrace);
+        }
+        for (Long key : diffResult.getRemovedBlocks()) {
+            globalCacheIndex.removeCacheBlock(engineIPort, key, pollTrace);
+            engineLocalView.removeCacheBlock(engineIPort, key);
         }
 
         // Report metrics
@@ -169,16 +180,13 @@ public class KvCacheManager implements EngineCacheInvalidator {
         cacheMetricsReporter.reportEngineViewsMapSize(engineLocalView.getEngineViewsMapSize());
     }
 
-    private void applyDiff(String address, DiffResult diff, EndpointTrace.Poll pollTrace) {
-        for (Long key : diff.getAddedBlocks()) {
-            // Track ownership first, including a global write that fails midway.
+    private void addCacheBlock(String address, Long key, EndpointTrace.Poll pollTrace) {
+        try {
             engineLocalView.addOrUpdateCacheBlock(address, key);
             globalCacheIndex.addCacheBlock(key, address, pollTrace);
-        }
-        for (Long key : diff.getRemovedBlocks()) {
-            // Retain ownership until global removal succeeds for cleanup/replay.
-            globalCacheIndex.removeCacheBlock(address, key, pollTrace);
-            engineLocalView.removeCacheBlock(address, key);
+        } catch (RuntimeException | Error failure) {
+            pendingAdditions.put(address, key);
+            throw failure;
         }
     }
 
@@ -191,41 +199,55 @@ public class KvCacheManager implements EngineCacheInvalidator {
         if (engineIpPort == null) {
             return;
         }
-        // The cache lock excludes writers. Retain ownership on failure so a
-        // retry can safely repeat removal of any already-removed mappings.
-        Set<Long> removedBlocks = engineLocalView.getEngineCacheBlocks(engineIpPort);
-        globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort, removedBlocks, trace);
-        physicalIpPortByLogicalIpPort.remove(engineIpPort);
-        engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
-        pendingUpdates.remove(engineIpPort);
-        cacheMetricsReporter.reportGlobalCacheMetrics(
-                globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
+        WorkerStatus owner = cacheOwners.get(engineIpPort);
+        if (owner != null) {
+            removeEngineCache(engineIpPort, owner, trace);
+        }
     }
 
     /**
-     * Remove cache metadata for engines that are no longer present in service discovery.
+     * Removes only the snapshot owned by the captured worker generation.
+     */
+    public void removeEngineCache(WorkerStatus owner, EndpointTrace trace) {
+        if (owner != null) {
+            removeEngineCache(owner.getLogicalIpPort(), owner, trace);
+        }
+    }
+
+    private void removeEngineCache(String address, WorkerStatus owner, EndpointTrace trace) {
+        owner.cacheMutationLock.lock();
+        try {
+            // A delayed discovery callback must not remove a replacement generation.
+            if (cacheOwners.get(address) != owner) {
+                return;
+            }
+            Set<Long> removedBlocks = engineLocalView.getEngineCacheBlocks(address);
+            globalCacheIndex.removeAllCacheBlockOfEngine(address, removedBlocks, trace);
+            engineLocalView.removeAllCacheBlockOfEngine(address);
+            pendingAdditions.remove(address);
+            owner.invalidateCacheIndex();
+            cacheOwners.remove(address, owner);
+            cacheMetricsReporter.reportGlobalCacheMetrics(
+                    globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
+        } finally {
+            owner.cacheMutationLock.unlock();
+        }
+    }
+
+    /**
+     * Removes snapshots absent from discovery while excluding updates to each owning generation.
      */
     @Override
     public void removeStaleEngineCaches(Collection<String> activeEngineIpPorts) {
         if (activeEngineIpPorts == null) {
             return;
         }
-        Set<String> activePhysicalIpPorts = new HashSet<>(activeEngineIpPorts);
-        Set<String> staleEngineIpPorts = new HashSet<>(engineLocalView.getAllEngineIpPorts());
-        staleEngineIpPorts.removeIf(
-                engineIpPort ->
-                        activePhysicalIpPorts.contains(
-                                physicalIpPortByLogicalIpPort.getOrDefault(
-                                        engineIpPort, engineIpPort)));
-        for (String staleEngineIpPort : staleEngineIpPorts) {
-            long startTime = System.nanoTime() / 1000;
-            engineLocalView.removeAllCacheBlockOfEngine(staleEngineIpPort);
-            globalCacheIndex.removeAllCacheBlockOfEngine(staleEngineIpPort);
-            physicalIpPortByLogicalIpPort.remove(staleEngineIpPort);
-            log.info(
-                    "Removed stale engine cache: {}, cost={}us",
-                    staleEngineIpPort,
-                    System.nanoTime() / 1000 - startTime);
+        Set<String> active = new HashSet<>(activeEngineIpPorts);
+        for (Map.Entry<String, WorkerStatus> entry : cacheOwners.entrySet()) {
+            WorkerStatus owner = entry.getValue();
+            if (!active.contains(owner.getWorkerIdentity().getPhysicalIpPort())) {
+                removeEngineCache(entry.getKey(), owner, owner.trace());
+            }
         }
     }
 
@@ -236,8 +258,8 @@ public class KvCacheManager implements EngineCacheInvalidator {
 
         globalCacheIndex.clear();
         engineLocalView.clear();
-        physicalIpPortByLogicalIpPort.clear();
-        pendingUpdates.clear();
+        cacheOwners.clear();
+        pendingAdditions.clear();
 
         // Report
         cacheMetricsReporter.reportGlobalCacheMetrics(

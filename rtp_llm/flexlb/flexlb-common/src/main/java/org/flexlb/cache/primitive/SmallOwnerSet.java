@@ -47,18 +47,30 @@ public final class SmallOwnerSet extends AbstractSet<String> {
     }
 
     @Override
-    public int size() { return owners.length; }
+    public int size() {
+        return owners.length;
+    }
 
     @Override
-    public synchronized void clear() { owners = new String[0]; }
+    public synchronized void clear() {
+        owners = new String[0];
+    }
 
     @Override
     public Iterator<String> iterator() {
         Iterator<String> snapshot = List.of(owners).iterator();
         return new Iterator<>() {
             private String current;
-            public boolean hasNext() { return snapshot.hasNext(); }
-            public String next() { current = snapshot.next(); return current; }
+
+            public boolean hasNext() {
+                return snapshot.hasNext();
+            }
+
+            public String next() {
+                current = snapshot.next();
+                return current;
+            }
+
             public void remove() {
                 if (current == null) {
                     throw new IllegalStateException();

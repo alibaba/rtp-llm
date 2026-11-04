@@ -1,7 +1,8 @@
 package org.flexlb.testfixture;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
-
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.KvCacheGroupMode;
 
@@ -9,6 +10,8 @@ import java.util.Map;
 
 /** Mutable input used to assemble worker observations in tests. */
 @Data
+@com.fasterxml.jackson.databind.annotation.JsonNaming(
+        com.fasterxml.jackson.databind.PropertyNamingStrategies.SnakeCaseStrategy.class)
 public class WorkerStatusResponse {
 
     private RoleType role;
@@ -41,6 +44,8 @@ public class WorkerStatusResponse {
     private long tpSize;
 
     private long dpRank;
+
+    private long blockSize;
 
     @JsonProperty("block_hash_lookahead_tokens")
     private int blockHashLookaheadTokens;

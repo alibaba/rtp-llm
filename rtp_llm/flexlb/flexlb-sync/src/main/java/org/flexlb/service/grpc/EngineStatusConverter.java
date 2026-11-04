@@ -1,5 +1,6 @@
 package org.flexlb.service.grpc;
 
+import org.flexlb.cache.primitive.LongKeySet;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatus.EngineObservation;
@@ -13,7 +14,6 @@ import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 
 import java.util.HashMap;
-import org.flexlb.cache.primitive.LongKeySet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -92,10 +92,12 @@ public class EngineStatusConverter {
      */
     public static CacheStatus convertToCacheStatus(EngineRpcService.CacheStatusPB cacheStatusPB) {
         // Own the key set independently from the protobuf message graph.
-        return convertToCacheStatus(cacheStatusPB, new LongKeySet(
-                cacheStatusPB.getCacheKeyListCount() > 0
-                        ? cacheStatusPB.getCacheKeyListList()
-                        : cacheStatusPB.getCacheKeysMap().keySet()));
+        return convertToCacheStatus(
+                cacheStatusPB,
+                new LongKeySet(
+                        cacheStatusPB.getCacheKeyListCount() > 0
+                                ? cacheStatusPB.getCacheKeyListList()
+                                : cacheStatusPB.getCacheKeysMap().keySet()));
     }
 
     /** Reuse an already owned key set for an acknowledged, unchanged version. */

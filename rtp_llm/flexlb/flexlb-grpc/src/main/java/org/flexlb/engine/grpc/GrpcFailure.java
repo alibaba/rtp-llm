@@ -26,28 +26,28 @@ import java.util.concurrent.RejectedExecutionException;
 public final class GrpcFailure {
     // Stronger local evidence wins over transport wrappers.
     // This order is independent of both the cause-chain order and Kind's declaration order.
-    private static final List<Kind> CAUSE_PRECEDENCE = List.of(
-            Kind.LOCAL_MEMORY_EXHAUSTED,
-            Kind.LOCAL_EXECUTOR_REJECTED,
-            Kind.LOCAL_BIND_FAILED,
-            Kind.PROTOBUF_FAILURE,
-            Kind.CONNECT_TIMEOUT,
-            Kind.CONNECT_REFUSED,
-            Kind.NO_ROUTE,
-            Kind.CONNECTION_RESET,
-            Kind.BROKEN_PIPE,
-            Kind.IO_INTERRUPTED,
-            Kind.ASYNC_CHANNEL_CLOSED,
-            Kind.CONNECT_FAILED,
-            Kind.UNEXPECTED_EOF,
-            Kind.IO_TIMEOUT,
-            Kind.SOCKET_FAILURE,
-            Kind.CHANNEL_CLOSED,
-            Kind.HTTP2_FAILURE,
-            Kind.IO_FAILURE);
+    private static final List<Kind> CAUSE_PRECEDENCE =
+            List.of(
+                    Kind.LOCAL_MEMORY_EXHAUSTED,
+                    Kind.LOCAL_EXECUTOR_REJECTED,
+                    Kind.LOCAL_BIND_FAILED,
+                    Kind.PROTOBUF_FAILURE,
+                    Kind.CONNECT_TIMEOUT,
+                    Kind.CONNECT_REFUSED,
+                    Kind.NO_ROUTE,
+                    Kind.CONNECTION_RESET,
+                    Kind.BROKEN_PIPE,
+                    Kind.IO_INTERRUPTED,
+                    Kind.ASYNC_CHANNEL_CLOSED,
+                    Kind.CONNECT_FAILED,
+                    Kind.UNEXPECTED_EOF,
+                    Kind.IO_TIMEOUT,
+                    Kind.SOCKET_FAILURE,
+                    Kind.CHANNEL_CLOSED,
+                    Kind.HTTP2_FAILURE,
+                    Kind.IO_FAILURE);
 
-    private GrpcFailure() {
-    }
+    private GrpcFailure() {}
 
     public enum Kind {
         LOCAL_MEMORY_EXHAUSTED,
@@ -75,20 +75,33 @@ public final class GrpcFailure {
 
     public record Analysis(Kind kind, Status.Code grpcCode, Throwable rootCause) {
         public boolean confirmedLocalFailure() {
-            return kind == Kind.LOCAL_MEMORY_EXHAUSTED || kind == Kind.LOCAL_EXECUTOR_REJECTED
+            return kind == Kind.LOCAL_MEMORY_EXHAUSTED
+                    || kind == Kind.LOCAL_EXECUTOR_REJECTED
                     || kind == Kind.LOCAL_BIND_FAILED;
         }
 
         /** Caller also enforces operation idempotency and the single retry limit. */
         public boolean retryableTransportFailure() {
-            // Cancellation/deadline remains terminal even when cancellation exposes a closed transport.
+            // Cancellation/deadline remains terminal even when cancellation exposes a closed
+            // transport.
             if (grpcCode == Status.Code.CANCELLED || grpcCode == Status.Code.DEADLINE_EXCEEDED) {
                 return false;
             }
             return switch (kind) {
-                case CONNECT_TIMEOUT, CONNECT_REFUSED, CONNECT_FAILED, NO_ROUTE, CONNECTION_RESET,
-                        BROKEN_PIPE, IO_INTERRUPTED, ASYNC_CHANNEL_CLOSED, CHANNEL_CLOSED,
-                        UNEXPECTED_EOF, IO_TIMEOUT, SOCKET_FAILURE, HTTP2_FAILURE -> true;
+                case CONNECT_TIMEOUT,
+                        CONNECT_REFUSED,
+                        CONNECT_FAILED,
+                        NO_ROUTE,
+                        CONNECTION_RESET,
+                        BROKEN_PIPE,
+                        IO_INTERRUPTED,
+                        ASYNC_CHANNEL_CLOSED,
+                        CHANNEL_CLOSED,
+                        UNEXPECTED_EOF,
+                        IO_TIMEOUT,
+                        SOCKET_FAILURE,
+                        HTTP2_FAILURE ->
+                        true;
                 default -> false;
             };
         }
@@ -116,8 +129,8 @@ public final class GrpcFailure {
         IdentityHashMap<Throwable, Boolean> visited = new IdentityHashMap<>();
         // Suppressed errors are earlier attempts/diagnostic failures, not this attempt's cause.
         for (Throwable cause = failure;
-             cause != null && visited.put(cause, Boolean.TRUE) == null;
-             cause = cause.getCause()) {
+                cause != null && visited.put(cause, Boolean.TRUE) == null;
+                cause = cause.getCause()) {
             root = cause;
             // The first gRPC exception owns this attempt's code, including UNKNOWN.
             if (!statusFound) {
@@ -143,8 +156,10 @@ public final class GrpcFailure {
             case BindException ignored -> Kind.LOCAL_BIND_FAILED;
             case InvalidProtocolBufferException ignored -> Kind.PROTOBUF_FAILURE;
             case ConnectTimeoutException ignored -> Kind.CONNECT_TIMEOUT;
-            case ConnectException connection -> "Connection refused".equals(connection.getMessage())
-                    ? Kind.CONNECT_REFUSED : Kind.CONNECT_FAILED;
+            case ConnectException connection ->
+                    "Connection refused".equals(connection.getMessage())
+                            ? Kind.CONNECT_REFUSED
+                            : Kind.CONNECT_FAILED;
             case NoRouteToHostException ignored -> Kind.NO_ROUTE;
             case ClosedByInterruptException ignored -> Kind.IO_INTERRUPTED;
             case AsynchronousCloseException ignored -> Kind.ASYNC_CHANNEL_CLOSED;
@@ -159,7 +174,8 @@ public final class GrpcFailure {
     }
 
     private static Kind classifySocketMessage(String message) {
-        // NIO exposes these observations as exception text, not structured errno or worker-fault evidence.
+        // NIO exposes these observations as exception text, not structured errno or worker-fault
+        // evidence.
         if ("Connection reset".equals(message) || "Connection reset by peer".equals(message)) {
             return Kind.CONNECTION_RESET;
         }

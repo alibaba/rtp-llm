@@ -1,7 +1,6 @@
 package org.flexlb.dao.master;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
-
 import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.KvCacheGroupMode;
@@ -62,7 +61,31 @@ public class WorkerStatus {
             String site,
             String deploymentName,
             int engineIndex,
-            int multiEngineNum) {
+            int multiEngineNum,
+            int workerStatusPort,
+            int httpServerPort) {
+
+        public TopologySnapshot(
+                String group,
+                String ip,
+                int port,
+                int grpcPort,
+                String site,
+                String deploymentName,
+                int engineIndex,
+                int multiEngineNum) {
+            this(
+                    group,
+                    ip,
+                    port,
+                    grpcPort,
+                    site,
+                    deploymentName,
+                    engineIndex,
+                    multiEngineNum,
+                    grpcPort,
+                    port + 5);
+        }
 
         public TopologySnapshot(String group, String ip, int port, int grpcPort, String site) {
             this(group, ip, port, grpcPort, site, null, 0, 1);
@@ -583,6 +606,36 @@ public class WorkerStatus {
                         role, null, 0L, 0L, Map.of(), 0.0, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L));
     }
 
+    /**
+     * Creates a generation with the exact control ports supplied by discovery.
+     */
+    public static WorkerStatus createDiscovered(RoleType role, WorkerHost host) {
+        WorkerStatus worker =
+                createDiscovered(
+                        role,
+                        host.getGroup(),
+                        host.getIp(),
+                        host.getHttpPort(),
+                        host.getGrpcPort(),
+                        host.getSite(),
+                        host.getDeploymentName(),
+                        host.getEngineIndex(),
+                        host.getMultiEngineNum());
+        worker.topology.set(
+                new TopologySnapshot(
+                        host.getGroup(),
+                        host.getIp(),
+                        host.getHttpPort(),
+                        host.getGrpcPort(),
+                        host.getSite(),
+                        host.getDeploymentName(),
+                        host.getEngineIndex(),
+                        host.getMultiEngineNum(),
+                        host.getWorkerStatusPort(),
+                        host.getHttpServerPort()));
+        return worker;
+    }
+
     @JsonIgnore
     public long getGenerationId() {
         return generationId;
@@ -742,7 +795,9 @@ public class WorkerStatus {
                                 site,
                                 deploymentName,
                                 current.engineIndex(),
-                                current.multiEngineNum()));
+                                current.multiEngineNum(),
+                                current.workerStatusPort(),
+                                current.httpServerPort()));
     }
 
     public RoleType getRole() {
@@ -805,6 +860,15 @@ public class WorkerStatus {
                 current ->
                         new CacheIndexSnapshot(
                                 next, current.indexInitialized(), current.indexedVersion()));
+    }
+
+    /**
+     * Forces the next cache poll to rebuild an index removed by service discovery.
+     */
+    public void invalidateCacheIndex() {
+        requireCacheMutationLock();
+        CacheIndexSnapshot current = cacheIndexSnapshot.get();
+        cacheIndexSnapshot.set(new CacheIndexSnapshot(current.cacheStatus(), false, -1L));
     }
 
     public void publishCacheIndexedVersion(long version) {

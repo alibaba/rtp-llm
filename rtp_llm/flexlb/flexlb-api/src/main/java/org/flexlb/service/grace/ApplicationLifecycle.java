@@ -1,7 +1,6 @@
 package org.flexlb.service.grace;
 
 import lombok.extern.slf4j.Slf4j;
-
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.httpserver.FlexlbGrpcServer;
 import org.flexlb.listener.ApplicationWarmupState;
@@ -42,7 +41,6 @@ public class ApplicationLifecycle implements ApplicationContextAware {
     }
 
     private volatile boolean processReady;
-    private volatile boolean warmUpFinished;
     private volatile boolean shutdownReceived;
     private volatile boolean shutdownCompletedSuccessfully;
 

@@ -75,8 +75,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 cacheAwareService,
                 cacheIntervalService,
                 requestTimeoutMs,
-                syncCount,
-                syncEngineStatusInterval,
                 fullSnapshotDebugMode,
                 callbackExecutor);
     }
@@ -95,8 +93,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             CacheAwareService cacheAwareService,
             DynamicCacheIntervalService cacheIntervalService,
             long requestTimeoutMs,
-            LongAdder syncCount,
-            Long syncEngineStatusInterval,
             boolean fullSnapshotDebugMode,
             Executor callbackExecutor) {
 
@@ -342,7 +338,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
 
         logger.debug(
                 "gRPC Cache Status - {}, role:{}, block_size:{}, version:{}, cacheKeySize:{},"
-                    + " available_kv_cache:{}, total_kv_cache:{}, cost_us:{}, syncIntervalMs:{}",
+                        + " available_kv_cache:{}, total_kv_cache:{}, cost_us:{}, syncIntervalMs:{}",
                 ipPort,
                 roleType.name(),
                 cacheStatus.getBlockSize(),
@@ -358,7 +354,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         WorkerCacheUpdateResult result;
         try {
             pollLease.pollTrace().record(Stage.CACHE_INDEX_UPDATE_BEGIN);
-            result = cacheAwareService.updateEngineBlockCache(workerStatus, pollLease.pollTrace());
+            result = cacheAwareService.updateFromWorkerStatus(workerStatus, pollLease.pollTrace());
         } catch (Exception e) {
             pollLease.pollTrace().record(Stage.CACHE_INDEX_UPDATE_FAILED, e);
             reportFailure(
@@ -379,7 +375,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         pollLease.pollTrace().record(Stage.CACHE_INDEX_UPDATE_FAILED, message);
         logger.debug("Cache update failed for {}#{}, error:{}", ipPort, generationId, message);
         engineHealthReporter.reportCacheStatusCheckerFail(
-                modelName,
+                workerStatus.getMetricIpPort(),
                 BalanceStatusEnum.CACHE_UPDATE_FAILED,
                 roleType,
                 Stage.CACHE_INDEX_UPDATE_FAILED,
@@ -437,7 +433,12 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                     default -> BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE;
                 };
         engineHealthReporter.reportCacheStatusCheckerFail(
-                modelName, status, roleType, Stage.RPC_COMPLETED, failure.kind().name(), failure);
+                workerStatus.getMetricIpPort(),
+                status,
+                roleType,
+                Stage.RPC_COMPLETED,
+                failure.kind().name(),
+                failure);
     }
 
     private void reportFailure(Stage stage, Throwable cause, BalanceStatusEnum status) {
@@ -449,7 +450,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                         ? stage.name()
                         : failure.kind().name();
         engineHealthReporter.reportCacheStatusCheckerFail(
-                modelName, status, roleType, stage, reason, failure);
+                workerStatus.getMetricIpPort(), status, roleType, stage, reason, failure);
     }
 
     private long getCurrentCacheVersion() {

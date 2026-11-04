@@ -1,7 +1,6 @@
 package org.flexlb.cache.match.localsync;
 
 import lombok.extern.slf4j.Slf4j;
-
 import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.primitive.LongKeySet;
 import org.flexlb.config.ConfigService;
@@ -9,14 +8,13 @@ import org.flexlb.config.WorkerRegistryConfig;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.PreDestroy;
 import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ForkJoinTask;
 import java.util.concurrent.RejectedExecutionException;
-
-import javax.annotation.PreDestroy;
 
 /**
  * Engine local view (small hash table)
@@ -38,6 +36,7 @@ public class EngineLocalView {
      * Custom ForkJoin thread pool for parallel computation
      */
     private volatile ForkJoinPool customPool;
+
     private final int diffParallelism;
 
     public EngineLocalView() {
@@ -50,7 +49,10 @@ public class EngineLocalView {
     }
 
     private EngineLocalView(WorkerRegistryConfig.ExecutorsConfig executors) {
-        diffParallelism = Math.min(Runtime.getRuntime().availableProcessors(), executors.getCacheDiffParallelism());
+        diffParallelism =
+                Math.min(
+                        Runtime.getRuntime().availableProcessors(),
+                        executors.getCacheDiffParallelism());
     }
 
     private volatile boolean closed;
@@ -73,8 +75,7 @@ public class EngineLocalView {
                 throw new IllegalStateException("Engine local view is closed");
             }
             if (customPool == null) {
-                customPool =
-                        new ForkJoinPool(diffParallelism);
+                customPool = new ForkJoinPool(diffParallelism);
             }
             return customPool;
         }
@@ -104,16 +105,29 @@ public class EngineLocalView {
 
         ForkJoinPool pool = diffPool();
         ForkJoinTask<LongKeySet> addedTask = null;
+        ForkJoinTask<LongKeySet> removedTask = null;
         Set<Long> addedBlocks;
         Set<Long> removedBlocks;
         try {
             addedTask = pool.submit(() -> LongKeySet.difference(newCacheBlocks, oldCacheBlocks));
-            ForkJoinTask<LongKeySet> removedTask = pool.submit(() -> LongKeySet.difference(oldCacheBlocks, newCacheBlocks));
+            removedTask = pool.submit(() -> LongKeySet.difference(oldCacheBlocks, newCacheBlocks));
             addedBlocks = addedTask.join();
             removedBlocks = removedTask.join();
         } catch (RejectedExecutionException error) {
-            addedBlocks = addedTask == null ? LongKeySet.difference(newCacheBlocks, oldCacheBlocks) : addedTask.join();
+            addedBlocks =
+                    addedTask == null
+                            ? LongKeySet.difference(newCacheBlocks, oldCacheBlocks)
+                            : addedTask.join();
             removedBlocks = LongKeySet.difference(oldCacheBlocks, newCacheBlocks);
+        } finally {
+            // Both tasks borrow the mutable local view under the caller's cache lock.
+            // Even if one task fails, the other must finish before that lock is released.
+            if (addedTask != null) {
+                addedTask.quietlyJoin();
+            }
+            if (removedTask != null) {
+                removedTask.quietlyJoin();
+            }
         }
 
         // Update statistics in dynamic sync interval manager

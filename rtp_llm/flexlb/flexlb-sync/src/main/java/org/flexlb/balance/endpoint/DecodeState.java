@@ -722,7 +722,7 @@ final class DecodeState {
     }
 
     boolean shouldRetryDispatch(
-            long requestId, AdmissionCapacity capacity, boolean schedulingReady) {
+            String requestId, AdmissionCapacity capacity, boolean schedulingReady) {
         DecodeRequestState candidate = shadowReservation(requestId);
         if (candidate == null || !candidate.queued() || candidate.dispatchPermit() != null) {
             return true;

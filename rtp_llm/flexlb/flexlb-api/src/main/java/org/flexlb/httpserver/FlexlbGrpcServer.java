@@ -7,7 +7,6 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.util.concurrent.DefaultThreadFactory;
-
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.constant.MetricConstant;
@@ -23,15 +22,15 @@ import org.springframework.core.env.Environment;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
 import java.io.IOException;
 import java.util.Objects;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-
-import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 public class FlexlbGrpcServer {
@@ -59,7 +58,8 @@ public class FlexlbGrpcServer {
     private volatile ThreadPoolExecutor grpcExecutor;
     private ThreadPoolExecutor grpcControlExecutor;
     private GrpcReceivingGuard receivingGuard;
-    private CountingCallerRunsHandler countingCallerRunsHandler;
+    private final CountingCallerRunsHandler countingCallerRunsHandler =
+            new CountingCallerRunsHandler();
 
     public FlexlbGrpcServer(
             FlexlbServiceImpl flexlbServiceImpl,
@@ -112,7 +112,7 @@ public class FlexlbGrpcServer {
                         executorConfig, io.netty.util.internal.PlatformDependent.maxDirectMemory());
         Logger.info(
                 "FlexLB receiving limits: schedule={}, control={}, timeoutMs={},"
-                    + " bodyBudgetBytes={}, scheduleBodyBudgetBytes={}, controlBodyBudgetBytes={}",
+                        + " bodyBudgetBytes={}, scheduleBodyBudgetBytes={}, controlBodyBudgetBytes={}",
                 receiving.scheduleCalls(),
                 receiving.controlCalls(),
                 receiving.timeoutMs(),
@@ -122,7 +122,6 @@ public class FlexlbGrpcServer {
 
         this.bossGroup =
                 new NioEventLoopGroup(1, new DefaultThreadFactory("flexlb-grpc-server-boss"));
-        this.countingCallerRunsHandler = new CountingCallerRunsHandler();
         this.grpcExecutor =
                 new ThreadPoolExecutor(
                         executorConfig.getExecutorCoreSize(),
@@ -227,7 +226,11 @@ public class FlexlbGrpcServer {
         monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE, executor.getPoolSize());
         monitor.report(
                 MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE, executor.getMaximumPoolSize());
-        monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_CALLER_RUNS, 0.0);
+        monitor.report(
+                MetricConstant.GRPC_SERVER_EXECUTOR_CALLER_RUNS,
+                ((CountingCallerRunsHandler) executor.getRejectedExecutionHandler())
+                        .getCallerRunsCount()
+                        .getAndSet(0L));
     }
 
     private static final String[] RECEIVING_METRICS = {

@@ -2,8 +2,9 @@ package org.flexlb.engine.grpc;
 
 import com.google.protobuf.MapEntry;
 import com.google.protobuf.MapField;
-import java.lang.reflect.Field;
 import org.flexlb.cache.primitive.PackedBooleanCacheMap;
+
+import java.lang.reflect.Field;
 
 /** Storage adapter for the pinned protobuf 3.25.1 runtime. */
 public final class PackedCacheMapField {
@@ -24,8 +25,8 @@ public final class PackedCacheMapField {
 
     private PackedCacheMapField() {}
 
-    public static MapField<Long, Boolean> copy(MapField<Long, Boolean> source,
-                                                MapEntry<Long, Boolean> defaultEntry) {
+    public static MapField<Long, Boolean> copy(
+            MapField<Long, Boolean> source, MapEntry<Long, Boolean> defaultEntry) {
         MapField<Long, Boolean> copy = create(defaultEntry);
         copy.getMutableMap().putAll(source.getMap());
         return copy;

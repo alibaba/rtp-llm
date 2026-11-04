@@ -61,6 +61,22 @@ class GrpcTransportObserverTest {
     }
 
     @Test
+    void nativeTransportObservationAcceptsVoidPromiseWrites() {
+        var embedded =
+                new io.netty.channel.embedded.EmbeddedChannel(observer.nativeTransportHandler());
+        try {
+            var payload = Unpooled.buffer().writeByte(7);
+            assertDoesNotThrow(() -> embedded.writeAndFlush(payload, embedded.voidPromise()));
+            ByteBuf delivered = embedded.readOutbound();
+            assertSame(payload, delivered);
+            delivered.release();
+            embedded.checkException();
+        } finally {
+            embedded.finishAndReleaseAll();
+        }
+    }
+
+    @Test
     void peer_eof_survives_socket_removal_for_streams_holding_the_state() throws Exception {
         Attributes attributes = connect();
         GrpcTransportObserver.SocketState state = observer.find(attributes);
@@ -86,14 +102,19 @@ class GrpcTransportObserverTest {
         channel.config().setAutoRead(false);
         channel.shutdownInput().syncUninterruptibly();
 
-        int read = channel.eventLoop().submit(() -> {
-            ByteBuf buffer = Unpooled.buffer(8);
-            try {
-                return ((GrpcTransportObserver.ObservedChannel) channel).doReadBytes(buffer);
-            } finally {
-                buffer.release();
-            }
-        }).get(5, TimeUnit.SECONDS);
+        int read =
+                channel.eventLoop()
+                        .submit(
+                                () -> {
+                                    ByteBuf buffer = Unpooled.buffer(8);
+                                    try {
+                                        return ((GrpcTransportObserver.ObservedChannel) channel)
+                                                .doReadBytes(buffer);
+                                    } finally {
+                                        buffer.release();
+                                    }
+                                })
+                        .get(5, TimeUnit.SECONDS);
 
         assertEquals(-1, read);
         assertNull(state.observation());
@@ -109,12 +130,25 @@ class GrpcTransportObserverTest {
         assertNotNull(observer.find(attributes));
         assertNull(observer.find(null));
         assertNull(observer.find(Attributes.EMPTY));
-        assertNull(observer.find(Attributes.newBuilder()
-                .set(Grpc.TRANSPORT_ATTR_LOCAL_ADDR, channel.localAddress()).build()));
-        assertNull(observer.find(attributes.toBuilder()
-                .set(Grpc.TRANSPORT_ATTR_REMOTE_ADDR, new InetSocketAddress("127.0.0.1", 1)).build()));
-        assertNull(observer.find(attributes.toBuilder()
-                .set(Grpc.TRANSPORT_ATTR_LOCAL_ADDR, new InetSocketAddress("127.0.0.1", 1)).build()));
+        assertNull(
+                observer.find(
+                        Attributes.newBuilder()
+                                .set(Grpc.TRANSPORT_ATTR_LOCAL_ADDR, channel.localAddress())
+                                .build()));
+        assertNull(
+                observer.find(
+                        attributes.toBuilder()
+                                .set(
+                                        Grpc.TRANSPORT_ATTR_REMOTE_ADDR,
+                                        new InetSocketAddress("127.0.0.1", 1))
+                                .build()));
+        assertNull(
+                observer.find(
+                        attributes.toBuilder()
+                                .set(
+                                        Grpc.TRANSPORT_ATTR_LOCAL_ADDR,
+                                        new InetSocketAddress("127.0.0.1", 1))
+                                .build()));
     }
 
     @Test
@@ -124,7 +158,8 @@ class GrpcTransportObserverTest {
         assertNotNull(state);
         OutOfMemoryError failure = new OutOfMemoryError("Cannot reserve direct buffer memory");
 
-        channel.eventLoop().submit(() -> channel.pipeline().fireExceptionCaught(failure))
+        channel.eventLoop()
+                .submit(() -> channel.pipeline().fireExceptionCaught(failure))
                 .get(5, TimeUnit.SECONDS);
 
         assertSame(failure, propagatedFailure.get());
@@ -134,18 +169,21 @@ class GrpcTransportObserverTest {
     }
 
     @Test
-    void pipeline_diagnostic_failure_cannot_replace_or_stop_the_original_exception() throws Exception {
+    void pipeline_diagnostic_failure_cannot_replace_or_stop_the_original_exception()
+            throws Exception {
         Attributes attributes = connect();
         GrpcTransportObserver.SocketState state = observer.find(attributes);
         assertNotNull(state);
-        Throwable failure = new RuntimeException() {
-            @Override
-            public synchronized Throwable getCause() {
-                throw new OutOfMemoryError("diagnostic failure");
-            }
-        };
+        Throwable failure =
+                new RuntimeException() {
+                    @Override
+                    public synchronized Throwable getCause() {
+                        throw new OutOfMemoryError("diagnostic failure");
+                    }
+                };
 
-        channel.eventLoop().submit(() -> channel.pipeline().fireExceptionCaught(failure))
+        channel.eventLoop()
+                .submit(() -> channel.pipeline().fireExceptionCaught(failure))
                 .get(5, TimeUnit.SECONDS);
 
         assertSame(failure, propagatedFailure.get());
@@ -155,8 +193,11 @@ class GrpcTransportObserverTest {
 
     @ParameterizedTest
     @MethodSource("failures")
-    void socket_failure_preserves_direction_and_specific_cause(boolean read, Throwable failure,
-            GrpcTransportObserver.Event event, GrpcFailure.Kind kind) {
+    void socket_failure_preserves_direction_and_specific_cause(
+            boolean read,
+            Throwable failure,
+            GrpcTransportObserver.Event event,
+            GrpcFailure.Kind kind) {
         var state = new GrpcTransportObserver.SocketState();
         state.recordFailure(read, failure);
         assertNotNull(state.observation());
@@ -166,20 +207,41 @@ class GrpcTransportObserverTest {
 
     static Stream<Arguments> failures() {
         return Stream.of(
-                Arguments.of(true, new SocketException("Connection reset"),
-                        GrpcTransportObserver.Event.READ_RESET, GrpcFailure.Kind.CONNECTION_RESET),
-                Arguments.of(false, new SocketException("Connection reset by peer"),
-                        GrpcTransportObserver.Event.WRITE_RESET, GrpcFailure.Kind.CONNECTION_RESET),
-                Arguments.of(false, new SocketException("Broken pipe"),
-                        GrpcTransportObserver.Event.WRITE_BROKEN_PIPE, GrpcFailure.Kind.BROKEN_PIPE),
-                Arguments.of(true, new SocketException("Broken pipe"),
-                        GrpcTransportObserver.Event.READ_FAILURE, GrpcFailure.Kind.BROKEN_PIPE),
-                Arguments.of(true, new IOException("read failed"),
-                        GrpcTransportObserver.Event.READ_FAILURE, GrpcFailure.Kind.IO_FAILURE),
-                Arguments.of(false, new OutOfMemoryError("direct memory"),
-                        GrpcTransportObserver.Event.WRITE_FAILURE, GrpcFailure.Kind.LOCAL_MEMORY_EXHAUSTED),
-                Arguments.of(true, new EOFException(),
-                        GrpcTransportObserver.Event.READ_FAILURE, GrpcFailure.Kind.UNEXPECTED_EOF));
+                Arguments.of(
+                        true,
+                        new SocketException("Connection reset"),
+                        GrpcTransportObserver.Event.READ_RESET,
+                        GrpcFailure.Kind.CONNECTION_RESET),
+                Arguments.of(
+                        false,
+                        new SocketException("Connection reset by peer"),
+                        GrpcTransportObserver.Event.WRITE_RESET,
+                        GrpcFailure.Kind.CONNECTION_RESET),
+                Arguments.of(
+                        false,
+                        new SocketException("Broken pipe"),
+                        GrpcTransportObserver.Event.WRITE_BROKEN_PIPE,
+                        GrpcFailure.Kind.BROKEN_PIPE),
+                Arguments.of(
+                        true,
+                        new SocketException("Broken pipe"),
+                        GrpcTransportObserver.Event.READ_FAILURE,
+                        GrpcFailure.Kind.BROKEN_PIPE),
+                Arguments.of(
+                        true,
+                        new IOException("read failed"),
+                        GrpcTransportObserver.Event.READ_FAILURE,
+                        GrpcFailure.Kind.IO_FAILURE),
+                Arguments.of(
+                        false,
+                        new OutOfMemoryError("direct memory"),
+                        GrpcTransportObserver.Event.WRITE_FAILURE,
+                        GrpcFailure.Kind.LOCAL_MEMORY_EXHAUSTED),
+                Arguments.of(
+                        true,
+                        new EOFException(),
+                        GrpcTransportObserver.Event.READ_FAILURE,
+                        GrpcFailure.Kind.UNEXPECTED_EOF));
     }
 
     @Test
@@ -196,12 +258,13 @@ class GrpcTransportObserverTest {
     @Test
     void failed_cause_inspection_is_ignored_without_preventing_later_observation() {
         var state = new GrpcTransportObserver.SocketState();
-        Throwable brokenDiagnostic = new RuntimeException() {
-            @Override
-            public synchronized Throwable getCause() {
-                throw new OutOfMemoryError("diagnostic failure");
-            }
-        };
+        Throwable brokenDiagnostic =
+                new RuntimeException() {
+                    @Override
+                    public synchronized Throwable getCause() {
+                        throw new OutOfMemoryError("diagnostic failure");
+                    }
+                };
 
         assertDoesNotThrow(() -> state.recordFailure(true, brokenDiagnostic));
         assertNull(state.observation());
@@ -213,19 +276,28 @@ class GrpcTransportObserverTest {
         server = new ServerSocket(0, 1, InetAddress.getLoopbackAddress());
         server.setSoTimeout(5000);
         group = new NioEventLoopGroup(1);
-        channel = (NioSocketChannel) new Bootstrap().group(group)
-                .channelFactory(observer::newChannel)
-                .handler(new ChannelInboundHandlerAdapter() {
-                    @Override
-                    public void exceptionCaught(ChannelHandlerContext context, Throwable cause) {
-                        propagatedFailure.compareAndSet(null, cause);
-                        context.close();
-                    }
-                })
-                .connect(server.getLocalSocketAddress()).syncUninterruptibly().channel();
+        channel =
+                (NioSocketChannel)
+                        new Bootstrap()
+                                .group(group)
+                                .channelFactory(observer::newChannel)
+                                .handler(
+                                        new ChannelInboundHandlerAdapter() {
+                                            @Override
+                                            public void exceptionCaught(
+                                                    ChannelHandlerContext context,
+                                                    Throwable cause) {
+                                                propagatedFailure.compareAndSet(null, cause);
+                                                context.close();
+                                            }
+                                        })
+                                .connect(server.getLocalSocketAddress())
+                                .syncUninterruptibly()
+                                .channel();
         peer = server.accept();
         return Attributes.newBuilder()
                 .set(Grpc.TRANSPORT_ATTR_LOCAL_ADDR, channel.localAddress())
-                .set(Grpc.TRANSPORT_ATTR_REMOTE_ADDR, channel.remoteAddress()).build();
+                .set(Grpc.TRANSPORT_ATTR_REMOTE_ADDR, channel.remoteAddress())
+                .build();
     }
 }

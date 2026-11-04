@@ -1,11 +1,5 @@
 package org.flexlb.httpserver;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.RequestScheduler;
@@ -34,6 +28,12 @@ import org.springframework.test.web.reactive.server.WebTestClient;
 import java.time.Duration;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
 class HttpLoadBalanceServerTest {
 
     @Test
@@ -48,7 +48,7 @@ class HttpLoadBalanceServerTest {
                         scheduler,
                         mock(EndpointRegistry.class),
                         mock(WorkerDirectory.class),
-                        mock(MasterEngineSynchronizer.class),
+                        mock(ApplicationLifecycle.class),
                         new ServerScheduleLatencyRecorder());
         WebTestClient client =
                 WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();
@@ -151,7 +151,8 @@ class HttpLoadBalanceServerTest {
                             consistency,
                             grpc,
                             mock(GracefulLifecycleReporter.class),
-                            new MockEnvironment());
+                            new MockEnvironment(),
+                            new org.flexlb.listener.ApplicationWarmupState());
             context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
             context.refresh();
             if (processReady) {

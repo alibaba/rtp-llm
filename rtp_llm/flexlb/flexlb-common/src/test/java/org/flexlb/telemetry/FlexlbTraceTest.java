@@ -82,7 +82,8 @@ class FlexlbTraceTest {
             FlexlbTrace.setScheduleAttribute(context, AttributeKey.stringKey("mode"), "BATCH");
             FlexlbTrace.setScheduleAttribute(context, AttributeKey.booleanKey("batch"), true);
             FlexlbTrace.markBusinessError(context, 500, "FLEXLB_INTERNAL_ERROR");
-            FlexlbTrace.recordPlacement(context, System.nanoTime(), "BLOCKED", Map.of("workers", 42), null);
+            FlexlbTrace.recordPlacement(
+                    context, System.nanoTime(), "BLOCKED", Map.of("workers", 42), null);
             FlexlbTrace.recordScheduleFailure(context, 8431, "ERROR", Map.of("queueDepth", 2463));
             FlexlbTrace.finish(owner, new IllegalStateException("ignored"));
             FlexlbTrace.finishWithGrpcStatus(owner, "INTERNAL", 13, false);
@@ -177,11 +178,18 @@ class FlexlbTraceTest {
     void placementFollowsExplicitContextAcrossThreadsWithoutAnotherSpan() throws Exception {
         Span root = FlexlbTrace.startServer("Schedule", Context.root());
         Context context = root.storeInContext(Context.root());
-        Thread worker = new Thread(() -> {
-            FlexlbTrace.recordPlacement(context, System.nanoTime(), "BLOCKED",
-                    Map.of("workers", 42, "role", "PREFILL", "cause", "capacity"), null);
-            FlexlbTrace.recordPlacement(context, System.nanoTime(), "SUCCESS", null, null);
-        });
+        Thread worker =
+                new Thread(
+                        () -> {
+                            FlexlbTrace.recordPlacement(
+                                    context,
+                                    System.nanoTime(),
+                                    "BLOCKED",
+                                    Map.of("workers", 42, "role", "PREFILL", "cause", "capacity"),
+                                    null);
+                            FlexlbTrace.recordPlacement(
+                                    context, System.nanoTime(), "SUCCESS", null, null);
+                        });
         worker.start();
         worker.join(3000);
         assertFalse(worker.isAlive());
@@ -191,11 +199,22 @@ class FlexlbTraceTest {
         SpanData data = exporter.spans.getFirst();
         assertEquals(StatusCode.OK, data.getStatus().getStatusCode());
         assertEquals(2, data.getEvents().size());
-        assertEquals(42L, data.getEvents().getFirst().getAttributes()
-                .get(AttributeKey.longKey("flexlb.placement.registered_workers")));
-        assertEquals("SUCCESS", data.getAttributes().get(AttributeKey.stringKey("flexlb.placement.outcome")));
-        assertEquals(-1L, data.getAttributes().get(AttributeKey.longKey("flexlb.placement.registered_workers")));
-        assertEquals("UNKNOWN", data.getAttributes().get(AttributeKey.stringKey("flexlb.placement.cause")));
+        assertEquals(
+                42L,
+                data.getEvents()
+                        .getFirst()
+                        .getAttributes()
+                        .get(AttributeKey.longKey("flexlb.placement.registered_workers")));
+        assertEquals(
+                "SUCCESS",
+                data.getAttributes().get(AttributeKey.stringKey("flexlb.placement.outcome")));
+        assertEquals(
+                -1L,
+                data.getAttributes()
+                        .get(AttributeKey.longKey("flexlb.placement.registered_workers")));
+        assertEquals(
+                "UNKNOWN",
+                data.getAttributes().get(AttributeKey.stringKey("flexlb.placement.cause")));
     }
 
     @Test
@@ -203,10 +222,13 @@ class FlexlbTraceTest {
         Span root = FlexlbTrace.startServer("Schedule", Context.root());
         Context context = root.storeInContext(Context.root());
         for (int attempt = 0; attempt < 1000; attempt++) {
-            FlexlbTrace.recordPlacement(context, System.nanoTime(), "BLOCKED",
-                    Map.of("workers", 42), null);
+            FlexlbTrace.recordPlacement(
+                    context, System.nanoTime(), "BLOCKED", Map.of("workers", 42), null);
         }
-        FlexlbTrace.recordScheduleFailure(context, 8431, "FLEXLB_BUSINESS_REJECTED",
+        FlexlbTrace.recordScheduleFailure(
+                context,
+                8431,
+                "FLEXLB_BUSINESS_REJECTED",
                 Map.of("queueDepth", 2463, "cause", "PREFILL placement unavailable"));
         FlexlbTrace.markBusinessError(context, 8431, "FLEXLB_BUSINESS_REJECTED");
         FlexlbTrace.finish(root);
@@ -223,11 +245,22 @@ class FlexlbTraceTest {
     void placementErrorIsBoundedAndObservationFailureDoesNotEscape() {
         Span root = FlexlbTrace.startServer("Schedule", Context.root());
         Context context = root.storeInContext(Context.root());
-        FlexlbTrace.recordPlacement(context, System.nanoTime(), "ERROR", null,
+        FlexlbTrace.recordPlacement(
+                context,
+                System.nanoTime(),
+                "ERROR",
+                null,
                 new IllegalStateException("x".repeat(1000)));
         FlexlbTrace.finish(root);
-        assertEquals(256, exporter.spans.getFirst().getEvents().getFirst().getAttributes()
-                .get(AttributeKey.stringKey("flexlb.placement.exception.message")).length());
+        assertEquals(
+                256,
+                exporter.spans
+                        .getFirst()
+                        .getEvents()
+                        .getFirst()
+                        .getAttributes()
+                        .get(AttributeKey.stringKey("flexlb.placement.exception.message"))
+                        .length());
         Context broken = new ThrowingSpan().storeInContext(Context.root());
         FlexlbTrace.recordPlacement(broken, System.nanoTime(), "ERROR", null, null);
         FlexlbTrace.recordScheduleFailure(broken, 500, "ERROR", null);

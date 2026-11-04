@@ -1,19 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.awaitCondition;
-import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.commitRoute;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
@@ -46,6 +32,20 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+
+import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.awaitCondition;
+import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.commitRoute;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /** Canonical request-generation ownership tests, independent of the facade. */
 class RequestRegistryTest {
@@ -203,7 +203,12 @@ class RequestRegistryTest {
         CompletableFuture<Response> future = lifecycle.register(context);
         WorkerStatus worker = mock(WorkerStatus.class);
         EncoderEndpoint endpoint =
-                new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+                new EncoderEndpoint(
+                        worker,
+                        new EndpointEventProjector(
+                                lifecycle,
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.service.monitor.StatusFailureReporter.class)));
         Response route = new Response();
         route.setSuccess(true);
 
@@ -260,7 +265,12 @@ class RequestRegistryTest {
         when(worker.committedEngineObservation()).thenReturn(engine);
         when(engine.runningTaskList()).thenReturn(Map.of());
         EncoderEndpoint endpoint =
-                new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+                new EncoderEndpoint(
+                        worker,
+                        new EndpointEventProjector(
+                                lifecycle,
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.service.monitor.StatusFailureReporter.class)));
 
         try (var pin = endpoint.tryPinGeneration()) {
             assertTrue(lifecycle.claimEncoderRoute("109", future, pin));
@@ -302,7 +312,12 @@ class RequestRegistryTest {
         when(worker.committedEngineObservation()).thenReturn(engine);
         when(engine.runningTaskList()).thenReturn(Map.of());
         EncoderEndpoint endpoint =
-                new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+                new EncoderEndpoint(
+                        worker,
+                        new EndpointEventProjector(
+                                lifecycle,
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.service.monitor.StatusFailureReporter.class)));
 
         try (var pin = endpoint.tryPinGeneration()) {
             assertTrue(lifecycle.claimEncoderRoute("110", future, pin));
@@ -330,7 +345,11 @@ class RequestRegistryTest {
     void concurrentEncoderSelectionsKeepEveryPendingRequest() throws Exception {
         EncoderEndpoint endpoint =
                 new EncoderEndpoint(
-                        mock(WorkerStatus.class), new EndpointEventProjector(lifecycle));
+                        mock(WorkerStatus.class),
+                        new EndpointEventProjector(
+                                lifecycle,
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.service.monitor.StatusFailureReporter.class)));
         int requestCount = 32;
         CountDownLatch start = new CountDownLatch(1);
         try (var executor = Executors.newFixedThreadPool(8)) {
@@ -361,7 +380,12 @@ class RequestRegistryTest {
     void encoderStatusAndCleanupRaceCannotDoubleReleasePendingRequest() throws Exception {
         WorkerStatus worker = mock(WorkerStatus.class);
         EncoderEndpoint endpoint =
-                new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+                new EncoderEndpoint(
+                        worker,
+                        new EndpointEventProjector(
+                                lifecycle,
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.service.monitor.StatusFailureReporter.class)));
         try (var executor = Executors.newFixedThreadPool(2)) {
             for (int index = 0; index < 32; index++) {
                 String requestId = "encoder-race-" + index;
@@ -401,8 +425,14 @@ class RequestRegistryTest {
         CompletableFuture<Response> encoderFuture = lifecycle.register(context);
         CompletableFuture<Response> generationFuture = lifecycle.register(context(108L));
         WorkerStatus worker = mock(WorkerStatus.class);
+        when(worker.trace()).thenReturn(new org.flexlb.dao.master.EndpointTrace());
         EncoderEndpoint endpoint =
-                new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+                new EncoderEndpoint(
+                        worker,
+                        new EndpointEventProjector(
+                                lifecycle,
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.service.monitor.StatusFailureReporter.class)));
         Response route = new Response();
         route.setSuccess(true);
         try (var pin = endpoint.tryPinGeneration()) {
@@ -428,7 +458,12 @@ class RequestRegistryTest {
         CompletableFuture<Response> failedFuture = lifecycle.register(failedContext);
         WorkerStatus failedWorker = mock(WorkerStatus.class);
         EncoderEndpoint failedEndpoint =
-                new EncoderEndpoint(failedWorker, new EndpointEventProjector(lifecycle));
+                new EncoderEndpoint(
+                        failedWorker,
+                        new EndpointEventProjector(
+                                lifecycle,
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.service.monitor.StatusFailureReporter.class)));
         Response route = new Response();
         route.setSuccess(true);
         try (var pin = failedEndpoint.tryPinGeneration()) {
@@ -456,7 +491,12 @@ class RequestRegistryTest {
         CompletableFuture<Response> inactiveFuture = lifecycle.register(inactiveContext);
         WorkerStatus inactiveWorker = mock(WorkerStatus.class);
         EncoderEndpoint inactiveEndpoint =
-                new EncoderEndpoint(inactiveWorker, new EndpointEventProjector(lifecycle));
+                new EncoderEndpoint(
+                        inactiveWorker,
+                        new EndpointEventProjector(
+                                lifecycle,
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.service.monitor.StatusFailureReporter.class)));
         try (var pin = inactiveEndpoint.tryPinGeneration()) {
             assertTrue(lifecycle.claimEncoderRoute("110", inactiveFuture, pin));
         }
@@ -477,7 +517,12 @@ class RequestRegistryTest {
         CompletableFuture<Response> future = lifecycle.register(context);
         WorkerStatus worker = mock(WorkerStatus.class);
         EncoderEndpoint endpoint =
-                new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
+                new EncoderEndpoint(
+                        worker,
+                        new EndpointEventProjector(
+                                lifecycle,
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.service.monitor.StatusFailureReporter.class)));
         Response route = new Response();
         route.setSuccess(true);
         try (var pin = endpoint.tryPinGeneration()) {
@@ -502,7 +547,11 @@ class RequestRegistryTest {
         CompletableFuture<Response> future = lifecycle.register(context);
         EncoderEndpoint endpoint =
                 new EncoderEndpoint(
-                        mock(WorkerStatus.class), new EndpointEventProjector(lifecycle));
+                        mock(WorkerStatus.class),
+                        new EndpointEventProjector(
+                                lifecycle,
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.service.monitor.StatusFailureReporter.class)));
         try (var pin = endpoint.tryPinGeneration()) {
             assertTrue(lifecycle.claimEncoderRoute("113", future, pin));
         }
@@ -564,10 +613,10 @@ class RequestRegistryTest {
             assertNull(context.getGenerateInputPb());
         }
 
-        lifecycle.cancelRequest(104L, 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.cancelRequest("104", 0L, CancelReason.CLIENT_CANCELLED);
         future.get(5, TimeUnit.SECONDS);
         assertNull(context.getGenerateInputPb(), "retained context must not pin terminal input");
-        assertEquals(RequestState.Phase.CANCELLED, lifecycle.requestSlot(104L).snapshot().state());
+        assertEquals(RequestState.Phase.CANCELLED, lifecycle.requestSlot("104").snapshot().state());
     }
 
     @Test

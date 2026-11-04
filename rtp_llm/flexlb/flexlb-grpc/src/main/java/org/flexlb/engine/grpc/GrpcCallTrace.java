@@ -16,25 +16,26 @@ import java.util.function.LongSupplier;
 public final class GrpcCallTrace extends ClientStreamTracer.Factory {
     public static final CallOptions.Key<GrpcCallTrace> CALL_TRACE =
             CallOptions.Key.create("flexlb.grpc.call-trace");
-    public static final ClientInterceptor INTERCEPTOR = new ClientInterceptor() {
-        @Override
-        public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
-                MethodDescriptor<ReqT, RespT> method, CallOptions options, Channel next) {
-            CallOptions tracedOptions = options;
-            try {
-                GrpcCallTrace trace = options.getOption(CALL_TRACE);
-                if (trace != null) {
-                    tracedOptions = options.withStreamTracerFactory(trace);
+    public static final ClientInterceptor INTERCEPTOR =
+            new ClientInterceptor() {
+                @Override
+                public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
+                        MethodDescriptor<ReqT, RespT> method, CallOptions options, Channel next) {
+                    CallOptions tracedOptions = options;
+                    try {
+                        GrpcCallTrace trace = options.getOption(CALL_TRACE);
+                        if (trace != null) {
+                            tracedOptions = options.withStreamTracerFactory(trace);
+                        }
+                    } catch (RuntimeException | Error ignored) {
+                        // Tracing setup must not prevent the call from starting.
+                    }
+                    return next.newCall(method, tracedOptions);
                 }
-            } catch (RuntimeException | Error ignored) {
-                // Tracing setup must not prevent the call from starting.
-            }
-            return next.newCall(method, tracedOptions);
-        }
-    };
+            };
 
     private static final long UNSET = Long.MIN_VALUE;
-    private static final ClientStreamTracer NOOP = new ClientStreamTracer() { };
+    private static final ClientStreamTracer NOOP = new ClientStreamTracer() {};
 
     private final GrpcTransportObserver observer;
     private final LongSupplier clock;
@@ -53,28 +54,43 @@ public final class GrpcCallTrace extends ClientStreamTracer.Factory {
     }
 
     public enum Stage {
-        WAITING_TRANSPORT, WAITING_HEADERS_WRITE, WAITING_RESPONSE,
-        RECEIVING_RESPONSE, RESPONSE_TRAILERS_RECEIVED
+        WAITING_TRANSPORT,
+        WAITING_HEADERS_WRITE,
+        WAITING_RESPONSE,
+        RECEIVING_RESPONSE,
+        RESPONSE_TRAILERS_RECEIVED
     }
 
-    public record Snapshot(Stage stage, String transportEvent, GrpcFailure.Kind transportCauseKind,
-                           double callbackDelayMs, double responseDeliveryMs,
-                           double streamCreatedMs, double outboundHeadersMs, double inboundHeadersMs,
-                           double inboundTrailersMs, double streamClosedMs, double callbackStartedMs,
-                           double transportEventMs) {
-        public static final Snapshot EMPTY = new Snapshot(Stage.WAITING_TRANSPORT, "NONE", null,
-                -1, -1, -1, -1, -1, -1, -1, -1, -1);
+    public record Snapshot(
+            Stage stage,
+            String transportEvent,
+            GrpcFailure.Kind transportCauseKind,
+            double callbackDelayMs,
+            double responseDeliveryMs,
+            double streamCreatedMs,
+            double outboundHeadersMs,
+            double inboundHeadersMs,
+            double inboundTrailersMs,
+            double streamClosedMs,
+            double callbackStartedMs,
+            double transportEventMs) {
+        public static final Snapshot EMPTY =
+                new Snapshot(
+                        Stage.WAITING_TRANSPORT, "NONE", null, -1, -1, -1, -1, -1, -1, -1, -1, -1);
 
         public String failureOrigin(GrpcFailure.Analysis failure) {
             return (failure != null && failure.confirmedLocalFailure())
-                    || transportCauseKind == GrpcFailure.Kind.LOCAL_MEMORY_EXHAUSTED
-                    || transportCauseKind == GrpcFailure.Kind.LOCAL_EXECUTOR_REJECTED
-                    || transportCauseKind == GrpcFailure.Kind.LOCAL_BIND_FAILED ? "MASTER" : "UNCONFIRMED";
+                            || transportCauseKind == GrpcFailure.Kind.LOCAL_MEMORY_EXHAUSTED
+                            || transportCauseKind == GrpcFailure.Kind.LOCAL_EXECUTOR_REJECTED
+                            || transportCauseKind == GrpcFailure.Kind.LOCAL_BIND_FAILED
+                    ? "MASTER"
+                    : "UNCONFIRMED";
         }
     }
 
     @Override
-    public ClientStreamTracer newClientStreamTracer(ClientStreamTracer.StreamInfo info, Metadata headers) {
+    public ClientStreamTracer newClientStreamTracer(
+            ClientStreamTracer.StreamInfo info, Metadata headers) {
         try {
             if (callbackStartedNanos != UNSET) {
                 return NOOP;
@@ -99,8 +115,19 @@ public final class GrpcCallTrace extends ClientStreamTracer.Factory {
             TraceStream stream = latestStream;
             long callback = callbackStartedNanos;
             if (stream == null) {
-                return new Snapshot(Stage.WAITING_TRANSPORT, "NONE", null,
-                        -1, -1, -1, -1, -1, -1, -1, elapsedMs(startedNanos, callback), -1);
+                return new Snapshot(
+                        Stage.WAITING_TRANSPORT,
+                        "NONE",
+                        null,
+                        -1,
+                        -1,
+                        -1,
+                        -1,
+                        -1,
+                        -1,
+                        -1,
+                        elapsedMs(startedNanos, callback),
+                        -1);
             }
             long closed = beforeEnd(stream.closedNanos, callback);
             long end = closed == UNSET ? callback : closed;
@@ -108,24 +135,39 @@ public final class GrpcCallTrace extends ClientStreamTracer.Factory {
             long outbound = beforeEnd(stream.outboundHeadersNanos, end);
             long headers = beforeEnd(stream.inboundHeadersNanos, end);
             long trailers = beforeEnd(stream.inboundTrailersNanos, end);
-            Stage stage = trailers != UNSET ? Stage.RESPONSE_TRAILERS_RECEIVED
-                    : headers != UNSET ? Stage.RECEIVING_RESPONSE
-                    : outbound != UNSET ? Stage.WAITING_RESPONSE
-                    : created != UNSET ? Stage.WAITING_HEADERS_WRITE : Stage.WAITING_TRANSPORT;
+            Stage stage =
+                    trailers != UNSET
+                            ? Stage.RESPONSE_TRAILERS_RECEIVED
+                            : headers != UNSET
+                                    ? Stage.RECEIVING_RESPONSE
+                                    : outbound != UNSET
+                                            ? Stage.WAITING_RESPONSE
+                                            : created != UNSET
+                                                    ? Stage.WAITING_HEADERS_WRITE
+                                                    : Stage.WAITING_TRANSPORT;
 
             GrpcTransportObserver.SocketState socket = stream.socket;
             GrpcTransportObserver.Observation event = socket == null ? null : socket.observation();
             long socketEnd = trailers == UNSET ? end : trailers;
-            if (event != null && (created == UNSET || event.nanoTime() - created < 0
-                    || beforeEnd(event.nanoTime(), socketEnd) == UNSET)) {
+            if (event != null
+                    && (created == UNSET
+                            || event.nanoTime() - created < 0
+                            || beforeEnd(event.nanoTime(), socketEnd) == UNSET)) {
                 event = null;
             }
-            return new Snapshot(stage, event == null ? "NONE" : event.event().name(),
-                    event == null ? null : event.causeKind(), elapsedMs(closed, callback),
-                    elapsedMs(trailers, callback), elapsedMs(startedNanos, created),
-                    elapsedMs(startedNanos, outbound), elapsedMs(startedNanos, headers),
-                    elapsedMs(startedNanos, trailers), elapsedMs(startedNanos, closed),
-                    elapsedMs(startedNanos, callback), event == null ? -1 : elapsedMs(startedNanos, event.nanoTime()));
+            return new Snapshot(
+                    stage,
+                    event == null ? "NONE" : event.event().name(),
+                    event == null ? null : event.causeKind(),
+                    elapsedMs(closed, callback),
+                    elapsedMs(trailers, callback),
+                    elapsedMs(startedNanos, created),
+                    elapsedMs(startedNanos, outbound),
+                    elapsedMs(startedNanos, headers),
+                    elapsedMs(startedNanos, trailers),
+                    elapsedMs(startedNanos, closed),
+                    elapsedMs(startedNanos, callback),
+                    event == null ? -1 : elapsedMs(startedNanos, event.nanoTime()));
         } catch (RuntimeException | Error ignored) {
             return Snapshot.EMPTY;
         }

@@ -17,17 +17,83 @@ public final class GrpcTransportObserver {
     private final ConcurrentMap<SocketKey, SocketState> sockets = new ConcurrentHashMap<>();
 
     public enum Event {
-        PEER_EOF, READ_RESET, WRITE_RESET, WRITE_BROKEN_PIPE, READ_FAILURE, WRITE_FAILURE
+        PEER_EOF,
+        READ_RESET,
+        WRITE_RESET,
+        WRITE_BROKEN_PIPE,
+        READ_FAILURE,
+        WRITE_FAILURE
     }
 
-    public record Observation(Event event, long nanoTime, GrpcFailure.Kind causeKind) {
-    }
+    public record Observation(Event event, long nanoTime, GrpcFailure.Kind causeKind) {}
 
-    private record SocketKey(SocketAddress local, SocketAddress remote) {
-    }
+    private record SocketKey(SocketAddress local, SocketAddress remote) {}
 
     public NioSocketChannel newChannel() {
         return new ObservedChannel();
+    }
+
+    public io.netty.channel.Channel newChannel(io.netty.channel.EventLoopGroup eventLoopGroup) {
+        if (!(eventLoopGroup instanceof io.netty.channel.epoll.EpollEventLoopGroup)) {
+            return newChannel();
+        }
+        var channel = new io.netty.channel.epoll.EpollSocketChannel();
+        channel.pipeline().addLast(nativeTransportHandler());
+        return channel;
+    }
+
+    io.netty.channel.ChannelDuplexHandler nativeTransportHandler() {
+        return new io.netty.channel.ChannelDuplexHandler() {
+            private SocketKey key;
+            private SocketState state;
+
+            @Override
+            public void channelActive(ChannelHandlerContext context) {
+                try {
+                    key =
+                            new SocketKey(
+                                    context.channel().localAddress(),
+                                    context.channel().remoteAddress());
+                    state = new SocketState();
+                    sockets.put(key, state);
+                } catch (RuntimeException | Error ignored) {
+                    // Observation must not interrupt a connected socket.
+                }
+                context.fireChannelActive();
+            }
+
+            @Override
+            public void exceptionCaught(ChannelHandlerContext context, Throwable failure) {
+                if (state != null) {
+                    state.recordFailure(true, failure);
+                }
+                context.fireExceptionCaught(failure);
+            }
+
+            @Override
+            public void write(
+                    ChannelHandlerContext context,
+                    Object message,
+                    io.netty.channel.ChannelPromise promise) {
+                // A void promise cannot accept listeners; preserve fire-and-forget writes.
+                io.netty.channel.ChannelPromise observed = promise.unvoid();
+                observed.addListener(
+                        future -> {
+                            if (!future.isSuccess() && state != null) {
+                                state.recordFailure(false, future.cause());
+                            }
+                        });
+                context.write(message, observed);
+            }
+
+            @Override
+            public void channelInactive(ChannelHandlerContext context) {
+                if (key != null && state != null) {
+                    sockets.remove(key, state);
+                }
+                context.fireChannelInactive();
+            }
+        };
     }
 
     public SocketState find(Attributes attributes) {
@@ -37,7 +103,9 @@ public final class GrpcTransportObserver {
             }
             SocketAddress local = attributes.get(Grpc.TRANSPORT_ATTR_LOCAL_ADDR);
             SocketAddress remote = attributes.get(Grpc.TRANSPORT_ATTR_REMOTE_ADDR);
-            return local == null || remote == null ? null : sockets.get(new SocketKey(local, remote));
+            return local == null || remote == null
+                    ? null
+                    : sockets.get(new SocketKey(local, remote));
         } catch (RuntimeException | Error ignored) {
             return null;
         }
@@ -86,16 +154,20 @@ public final class GrpcTransportObserver {
 
         ObservedChannel() {
             try {
-                pipeline().addLast(new ChannelInboundHandlerAdapter() {
-                    @Override
-                    public void exceptionCaught(ChannelHandlerContext context, Throwable cause) {
-                        // Read-buffer allocation can fail before doReadBytes is called.
-                        if (state != null) {
-                            state.recordFailure(true, cause);
-                        }
-                        context.fireExceptionCaught(cause);
-                    }
-                });
+                pipeline()
+                        .addLast(
+                                new ChannelInboundHandlerAdapter() {
+                                    @Override
+                                    public void exceptionCaught(
+                                            ChannelHandlerContext context, Throwable cause) {
+                                        // Read-buffer allocation can fail before doReadBytes is
+                                        // called.
+                                        if (state != null) {
+                                            state.recordFailure(true, cause);
+                                        }
+                                        context.fireExceptionCaught(cause);
+                                    }
+                                });
             } catch (RuntimeException | Error ignored) {
                 // Installing diagnostics must not prevent channel construction.
             }

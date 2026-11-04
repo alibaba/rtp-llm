@@ -53,8 +53,8 @@ class StatusFailureReporterTest {
     void registersFailureDetailAtPrecisePriority() {
         reporter.init();
 
-        verify(monitor).register(STATUS_FAILURE_DETAIL,
-                FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        verify(monitor)
+                .register(STATUS_FAILURE_DETAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
     }
 
     @ParameterizedTest
@@ -62,16 +62,24 @@ class StatusFailureReporterTest {
     void reportsOnlyBoundedTagsAndConfirmedOrigin(Throwable cause, String origin) {
         var failure = GrpcFailure.analyze(Status.INTERNAL.withCause(cause).asRuntimeException());
 
-        reporter.report(RoleType.DECODE, "worker_status",
-                Stage.STATUS_RESPONSE_FAILED, "CONVERSION_FAILED", failure);
+        reporter.report(
+                RoleType.DECODE,
+                "worker_status",
+                Stage.STATUS_RESPONSE_FAILED,
+                "CONVERSION_FAILED",
+                failure);
 
-        verify(monitor).report(STATUS_FAILURE_DETAIL, FlexMetricTags.of(
-                "role", RoleType.DECODE.getCode(),
-                "operation", "worker_status",
-                "stage", "STATUS_RESPONSE_FAILED",
-                "reason", "CONVERSION_FAILED",
-                "origin", origin,
-                "grpc_code", "INTERNAL"), 1.0);
+        verify(monitor)
+                .report(
+                        STATUS_FAILURE_DETAIL,
+                        FlexMetricTags.of(
+                                "role", RoleType.DECODE.getCode(),
+                                "operation", "worker_status",
+                                "stage", "STATUS_RESPONSE_FAILED",
+                                "reason", "CONVERSION_FAILED",
+                                "origin", origin,
+                                "grpc_code", "INTERNAL"),
+                        1.0);
     }
 
     static Stream<Arguments> failureOrigins() {
@@ -88,22 +96,31 @@ class StatusFailureReporterTest {
                 Arguments.of(new AsynchronousCloseException(), "UNCONFIRMED"),
                 Arguments.of(new ClosedChannelException(), "UNCONFIRMED"),
                 Arguments.of(new EOFException(), "UNCONFIRMED"),
-                Arguments.of(new InvalidProtocolBufferException("malformed response"), "UNCONFIRMED"),
+                Arguments.of(
+                        new InvalidProtocolBufferException("malformed response"), "UNCONFIRMED"),
                 Arguments.of(new IllegalStateException("role mismatch"), "UNCONFIRMED"));
     }
 
     @Test
     void unsuccessfulApplicationResultDoesNotRequireAnException() {
-        reporter.report(RoleType.PREFILL, "cache_status", Stage.CACHE_INDEX_UPDATE_FAILED,
-                "NULL_RESULT", null);
+        reporter.report(
+                RoleType.PREFILL,
+                "cache_status",
+                Stage.CACHE_INDEX_UPDATE_FAILED,
+                "NULL_RESULT",
+                null);
 
-        verify(monitor).report(STATUS_FAILURE_DETAIL, FlexMetricTags.of(
-                "role", RoleType.PREFILL.getCode(),
-                "operation", "cache_status",
-                "stage", "CACHE_INDEX_UPDATE_FAILED",
-                "reason", "NULL_RESULT",
-                "origin", "UNCONFIRMED",
-                "grpc_code", "NONE"), 1.0);
+        verify(monitor)
+                .report(
+                        STATUS_FAILURE_DETAIL,
+                        FlexMetricTags.of(
+                                "role", RoleType.PREFILL.getCode(),
+                                "operation", "cache_status",
+                                "stage", "CACHE_INDEX_UPDATE_FAILED",
+                                "reason", "NULL_RESULT",
+                                "origin", "UNCONFIRMED",
+                                "grpc_code", "NONE"),
+                        1.0);
     }
 
     @Test
@@ -115,8 +132,12 @@ class StatusFailureReporterTest {
             registry.config().meterFilter(whitelist.whitelistMetricsFilter());
             var exported = new StatusFailureReporter(new MicrometerFlexMonitor(registry));
             exported.init();
-            exported.report(RoleType.DECODE, "worker_status", Stage.RPC_COMPLETED,
-                    "DEADLINE_EXCEEDED", GrpcFailure.analyze(Status.DEADLINE_EXCEEDED.asRuntimeException()));
+            exported.report(
+                    RoleType.DECODE,
+                    "worker_status",
+                    Stage.RPC_COMPLETED,
+                    "DEADLINE_EXCEEDED",
+                    GrpcFailure.analyze(Status.DEADLINE_EXCEEDED.asRuntimeException()));
 
             String scrape = registry.scrape();
             assertTrue(scrape.contains("flexlb_app_status_failure_detail_total{"));
@@ -131,16 +152,24 @@ class StatusFailureReporterTest {
     @ParameterizedTest
     @MethodSource("diagnosticFailures")
     void monitorFailureDoesNotEscape(Throwable diagnosticFailure) {
-        doThrow(diagnosticFailure).when(monitor).report(
-                eq(STATUS_FAILURE_DETAIL), any(FlexMetricTags.class), eq(1.0));
+        doThrow(diagnosticFailure)
+                .when(monitor)
+                .report(eq(STATUS_FAILURE_DETAIL), any(FlexMetricTags.class), eq(1.0));
 
-        assertDoesNotThrow(() -> reporter.report(
-                RoleType.PREFILL, "cache_status", Stage.STATUS_RESPONSE_FAILED,
-                "DEADLINE_EXCEEDED", GrpcFailure.analyze(Status.DEADLINE_EXCEEDED.asRuntimeException())));
+        assertDoesNotThrow(
+                () ->
+                        reporter.report(
+                                RoleType.PREFILL,
+                                "cache_status",
+                                Stage.STATUS_RESPONSE_FAILED,
+                                "DEADLINE_EXCEEDED",
+                                GrpcFailure.analyze(
+                                        Status.DEADLINE_EXCEEDED.asRuntimeException())));
     }
 
     static Stream<Arguments> diagnosticFailures() {
-        return Stream.of(Arguments.of(new IllegalStateException("monitor failed")),
+        return Stream.of(
+                Arguments.of(new IllegalStateException("monitor failed")),
                 Arguments.of(new OutOfMemoryError("metrics allocation")));
     }
 }

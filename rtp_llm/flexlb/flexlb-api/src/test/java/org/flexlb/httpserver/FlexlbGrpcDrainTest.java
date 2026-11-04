@@ -1,14 +1,5 @@
 package org.flexlb.httpserver;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import io.grpc.ForwardingServerCallListener;
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
@@ -19,7 +10,6 @@ import io.grpc.ServerInterceptors;
 import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
-
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
@@ -43,6 +33,16 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
 class FlexlbGrpcDrainTest {
     @Test
     void interruptedShutdownStillDrainsQueuedGrpcBufferCleanup() throws Exception {
@@ -54,7 +54,7 @@ class FlexlbGrpcDrainTest {
                         config,
                         new MockEnvironment(),
                         null,
-                        null,
+                        NoOpFlexMonitor.getInstance(),
                         new GrpcServerTimingInterceptor(),
                         null);
         var executor =

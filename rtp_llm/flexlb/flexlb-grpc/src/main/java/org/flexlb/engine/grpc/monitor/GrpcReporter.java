@@ -1,12 +1,5 @@
 package org.flexlb.engine.grpc.monitor;
 
-import static org.flexlb.constant.MetricConstant.GRPC_CALL_COUNT;
-import static org.flexlb.constant.MetricConstant.GRPC_CALL_DURATION;
-import static org.flexlb.constant.MetricConstant.GRPC_CALL_FAILURE;
-import static org.flexlb.constant.MetricConstant.GRPC_CHANNEL_POOL_SIZE;
-import static org.flexlb.constant.MetricConstant.GRPC_CONNECTION_DURATION;
-import static org.flexlb.constant.MetricConstant.GRPC_DELIVERY_DELAY;
-
 import org.flexlb.engine.grpc.GrpcCallTrace;
 import org.flexlb.engine.grpc.GrpcFailure;
 import org.flexlb.enums.FlexMetricType;
@@ -16,6 +9,13 @@ import org.flexlb.metric.FlexMonitor;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
+
+import static org.flexlb.constant.MetricConstant.GRPC_CALL_COUNT;
+import static org.flexlb.constant.MetricConstant.GRPC_CALL_DURATION;
+import static org.flexlb.constant.MetricConstant.GRPC_CALL_FAILURE;
+import static org.flexlb.constant.MetricConstant.GRPC_CHANNEL_POOL_SIZE;
+import static org.flexlb.constant.MetricConstant.GRPC_CONNECTION_DURATION;
+import static org.flexlb.constant.MetricConstant.GRPC_DELIVERY_DELAY;
 
 /** Reports outbound Engine gRPC calls and managed channel pool metrics. */
 @Component

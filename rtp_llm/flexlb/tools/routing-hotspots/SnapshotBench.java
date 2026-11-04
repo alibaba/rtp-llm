@@ -1,5 +1,4 @@
 import com.sun.management.ThreadMXBean;
-
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.endpoint.PrefillActiveIndex;
@@ -44,7 +43,8 @@ public class SnapshotBench {
     static BatchDeliveryStrategy strategy;
     static RequestRegistry registry;
     static final RouteProjection.Probe PROBE =
-            new RouteProjection.Probe(Long.MAX_VALUE, 0, 1, Long.MAX_VALUE, 2048, 0, 0);
+            new RouteProjection.Probe(
+                    Long.toString(Long.MAX_VALUE), 0, 1, Long.MAX_VALUE, 2048, 0, 0);
 
     record Endpoint(WorkerBatcher runtime, ReentrantLock lock, ScheduledRequest member) {
         void changeMembership() {
@@ -64,7 +64,7 @@ public class SnapshotBench {
 
     static ScheduledRequest request(FlexlbConfig config, long id, int priority, long tokens) {
         var request = new Request();
-        request.setRequestId(id);
+        request.setRequestId(Long.toString(id));
         request.setSeqLen(tokens);
         request.setPriority(priority);
         var context = new BalanceContext(config);
@@ -229,7 +229,7 @@ public class SnapshotBench {
                 System.out.printf(
                         Locale.ROOT,
                         "index_remove_add_depth%d round=%d ns/op=%.2f cpu_ns/op=%.2f"
-                            + " bytes/op=%.2f%n",
+                                + " bytes/op=%.2f%n",
                         depth,
                         round,
                         (double) elapsed / operations,

@@ -735,8 +735,6 @@ public final class DeliveryStrategyTestSupport {
                     public void removeListener(Runnable listener) {}
                 },
                 new RouteProjection.AdmissionBlockSemantics(
-                        "TEST_BLOCK",
-                        RouteProjection.AfterProbeAdmission.BLOCKED,
-                        "TEST_BLOCK"));
+                        "TEST_BLOCK", RouteProjection.AfterProbeAdmission.BLOCKED, "TEST_BLOCK"));
     }
 }

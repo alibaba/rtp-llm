@@ -26,15 +26,16 @@ public final class RequestExecution implements Prioritized {
     private final long hitCache;
     private final int maxInflightBatchesPerPrefillWorker;
 
-    RequestExecution(Response routeResponse,
-                     ServerStatus prefill,
-                     PrefillEndpoint prefillEp,
-                     ScheduledRequest.DecodeBinding decodeBinding,
-                     long enqueuedAtMs,
-                     long enqueueSequence,
-                     long expiresAtMs,
-                     long hitCache,
-                     int maxInflightBatchesPerPrefillWorker) {
+    RequestExecution(
+            Response routeResponse,
+            ServerStatus prefill,
+            PrefillEndpoint prefillEp,
+            ScheduledRequest.DecodeBinding decodeBinding,
+            long enqueuedAtMs,
+            long enqueueSequence,
+            long expiresAtMs,
+            long hitCache,
+            int maxInflightBatchesPerPrefillWorker) {
         this.routeResponse = routeResponse;
         this.prefill = prefill;
         this.prefillEp = prefillEp;
@@ -46,39 +47,78 @@ public final class RequestExecution implements Prioritized {
         this.maxInflightBatchesPerPrefillWorker = maxInflightBatchesPerPrefillWorker;
     }
 
-    public String requestId() { return decodeBinding.requestId(); }
+    public String requestId() {
+        return decodeBinding.requestId();
+    }
 
     @Override
-    public int priority() { return decodeBinding.priority(); }
+    public int priority() {
+        return decodeBinding.priority();
+    }
 
-    public long seqLen() { return decodeBinding.hardKvTokens(); }
-    public long hitCache() { return hitCache; }
-    public long enqueuedAtMs() { return enqueuedAtMs; }
+    public long seqLen() {
+        return decodeBinding.inputKvTokens();
+    }
+
+    public long hitCache() {
+        return hitCache;
+    }
+
+    public long enqueuedAtMs() {
+        return enqueuedAtMs;
+    }
 
     @Override
-    public long enqueueSeq() { return enqueueSequence; }
+    public long enqueueSeq() {
+        return enqueueSequence;
+    }
 
-    public long expiresAtMs() { return expiresAtMs; }
+    public long expiresAtMs() {
+        return expiresAtMs;
+    }
+
     public boolean requestExpired(long nowMs) {
         return expiresAtMs <= 0L || nowMs >= expiresAtMs;
     }
 
-    public Response routeResponse() { return routeResponse; }
-    public ServerStatus prefill() { return prefill; }
-    public PrefillEndpoint prefillEp() { return prefillEp; }
-    public ServerStatus decode() { return decodeBinding.status(); }
-    public DecodeEndpoint decodeEp() { return decodeBinding.endpoint(); }
+    public Response routeResponse() {
+        return routeResponse;
+    }
+
+    public ServerStatus prefill() {
+        return prefill;
+    }
+
+    public PrefillEndpoint prefillEp() {
+        return prefillEp;
+    }
+
+    public ServerStatus decode() {
+        return decodeBinding.status();
+    }
+
+    public DecodeEndpoint decodeEp() {
+        return decodeBinding.endpoint();
+    }
+
     public DecodeEndpoint.ReservationHandle decodeReservation() {
         return decodeBinding.reservation();
     }
-    public ScheduledRequest.DecodeBinding decodeBinding() { return decodeBinding; }
+
+    public ScheduledRequest.DecodeBinding decodeBinding() {
+        return decodeBinding;
+    }
+
     public int maxInflightBatchesPerPrefillWorker() {
         return maxInflightBatchesPerPrefillWorker;
     }
 
     /** Advisory only: delivery still acquires the exact Decode permit. */
     public boolean decodeReadyForDispatch() {
-        return decodeBinding.isAbsent() || decodeBinding.endpoint() == null
-                || decodeBinding.endpoint().shouldRetryDispatch(requestId(), decodeBinding.capacity());
+        return decodeBinding.isAbsent()
+                || decodeBinding.endpoint() == null
+                || decodeBinding
+                        .endpoint()
+                        .shouldRetryDispatch(requestId(), decodeBinding.capacity());
     }
 }

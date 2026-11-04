@@ -47,8 +47,10 @@ class GlobalCacheIndexTest {
         assertEquals(0, local.size("retired"));
         assertEquals(514L, globalCacheIndex.totalBlocks());
         assertEquals(514L, globalCacheIndex.totalMappings());
-        assertEquals(Map.of("survivor", 1), globalCacheIndex.batchCalculatePrefixMatchLength(
-                List.of("retired", "survivor"), List.of(0L, 1L)));
+        assertEquals(
+                Map.of("survivor", 1),
+                globalCacheIndex.batchCalculatePrefixMatchLength(
+                        List.of("retired", "survivor"), List.of(0L, 1L)));
         globalCacheIndex.removeAllCacheBlockOfEngine("retired", detached, null);
         assertEquals(514L, globalCacheIndex.totalMappings());
     }
@@ -62,32 +64,41 @@ class GlobalCacheIndexTest {
             var jobs = new java.util.ArrayList<java.util.concurrent.Future<?>>();
             for (int writer = 0; writer < 8; writer++) {
                 String owner = "writer-" + writer;
-                jobs.add(executor.submit(() -> {
-                    for (int iteration = 0; iteration < 10_000; iteration++) {
-                        index.addCacheBlock(17L, owner, null);
-                        index.addCacheBlock(18L, owner, null);
-                        assertEquals(Map.of(owner, 1), index.batchCalculatePrefixMatchLength(
-                                List.of(owner), List.of(18L)));
-                        index.removeCacheBlock(owner, 18L, null);
-                        index.removeCacheBlock(owner, 17L, null);
-                    }
-                    index.addCacheBlock(18L, owner, null);
-                }));
+                jobs.add(
+                        executor.submit(
+                                () -> {
+                                    for (int iteration = 0; iteration < 10_000; iteration++) {
+                                        index.addCacheBlock(17L, owner, null);
+                                        index.addCacheBlock(18L, owner, null);
+                                        assertEquals(
+                                                Map.of(owner, 1),
+                                                index.batchCalculatePrefixMatchLength(
+                                                        List.of(owner), List.of(18L)));
+                                        index.removeCacheBlock(owner, 18L, null);
+                                        index.removeCacheBlock(owner, 17L, null);
+                                    }
+                                    index.addCacheBlock(18L, owner, null);
+                                }));
             }
-            jobs.add(executor.submit(() -> {
-                for (int iteration = 0; iteration < 30_000; iteration++) {
-                    assertEquals(Map.of("stable", 1), index.batchCalculatePrefixMatchLength(
-                            List.of("stable"), List.of(17L)));
-                }
-            }));
+            jobs.add(
+                    executor.submit(
+                            () -> {
+                                for (int iteration = 0; iteration < 30_000; iteration++) {
+                                    assertEquals(
+                                            Map.of("stable", 1),
+                                            index.batchCalculatePrefixMatchLength(
+                                                    List.of("stable"), List.of(17L)));
+                                }
+                            }));
             for (var job : jobs) job.get(25, TimeUnit.SECONDS);
         }
         assertEquals(9L, index.totalMappings());
         assertEquals(2L, index.totalBlocks());
         for (int writer = 0; writer < 8; writer++) {
             String owner = "writer-" + writer;
-            assertEquals(Map.of(owner, 1), index.batchCalculatePrefixMatchLength(
-                    List.of(owner), List.of(18L)));
+            assertEquals(
+                    Map.of(owner, 1),
+                    index.batchCalculatePrefixMatchLength(List.of(owner), List.of(18L)));
         }
     }
 
@@ -132,22 +143,25 @@ class GlobalCacheIndexTest {
         var release = new CountDownLatch(1);
         var mapField = GlobalCacheIndex.class.getDeclaredField("blockToEnginesMap");
         mapField.setAccessible(true);
-        var map = (org.flexlb.cache.primitive.LongObjectMap<Set<String>>) mapField.get(globalCacheIndex);
-        var blockingOwners = new java.util.HashSet<String>() {
-            @Override
-            public boolean remove(Object value) {
-                entered.countDown();
-                try {
-                    if (!release.await(5, TimeUnit.SECONDS)) {
-                        throw new AssertionError("cleanup was not released");
+        var map =
+                (org.flexlb.cache.primitive.LongObjectMap<Set<String>>)
+                        mapField.get(globalCacheIndex);
+        var blockingOwners =
+                new java.util.HashSet<String>() {
+                    @Override
+                    public boolean remove(Object value) {
+                        entered.countDown();
+                        try {
+                            if (!release.await(5, TimeUnit.SECONDS)) {
+                                throw new AssertionError("cleanup was not released");
+                            }
+                        } catch (InterruptedException interruption) {
+                            Thread.currentThread().interrupt();
+                            throw new AssertionError(interruption);
+                        }
+                        return super.remove(value);
                     }
-                } catch (InterruptedException interruption) {
-                    Thread.currentThread().interrupt();
-                    throw new AssertionError(interruption);
-                }
-                return super.remove(value);
-            }
-        };
+                };
         blockingOwners.add(retiring);
         map.remove(1L);
         map.computeIfAbsent(1L, ignored -> blockingOwners);
@@ -155,30 +169,36 @@ class GlobalCacheIndexTest {
         var waiterHistory = new EndpointTrace();
         var poll = waiterHistory.beginPoll("CACHE", 2L);
         var failure = new AtomicReference<Throwable>();
-        Thread cleaning = new Thread(() -> {
-            try {
-                globalCacheIndex.removeAllCacheBlockOfEngine(retiring, Set.of(1L), cleanupHistory);
-            } catch (Throwable thrown) {
-                failure.set(thrown);
-            }
-        });
-        Thread waiting = new Thread(() -> {
-            try {
-                if (remove) {
-                    globalCacheIndex.removeCacheBlock("worker-B", 2L, poll);
-                } else {
-                    globalCacheIndex.addCacheBlock(2L, "worker-B", poll);
-                }
-            } catch (Throwable thrown) {
-                failure.set(thrown);
-            }
-        });
+        Thread cleaning =
+                new Thread(
+                        () -> {
+                            try {
+                                globalCacheIndex.removeAllCacheBlockOfEngine(
+                                        retiring, Set.of(1L), cleanupHistory);
+                            } catch (Throwable thrown) {
+                                failure.set(thrown);
+                            }
+                        });
+        Thread waiting =
+                new Thread(
+                        () -> {
+                            try {
+                                if (remove) {
+                                    globalCacheIndex.removeCacheBlock("worker-B", 2L, poll);
+                                } else {
+                                    globalCacheIndex.addCacheBlock(2L, "worker-B", poll);
+                                }
+                            } catch (Throwable thrown) {
+                                failure.set(thrown);
+                            }
+                        });
         try {
             cleaning.start();
             assertTrue(entered.await(3, TimeUnit.SECONDS));
             waiting.start();
             waiting.join(1000L);
-            assertFalse(waiting.isAlive(), "unrelated shard must progress before cleanup is released");
+            assertFalse(
+                    waiting.isAlive(), "unrelated shard must progress before cleanup is released");
         } finally {
             release.countDown();
             cleaning.join(3000L);
@@ -191,8 +211,9 @@ class GlobalCacheIndexTest {
         var waited = waiterHistory.snapshot().cachePoll().indexWait();
         assertEquals(0L, waited.ageUs());
         assertEquals(0L, waited.totalWaitUs());
-        assertEquals(remove ? Map.of() : Map.of("worker-B", 1), globalCacheIndex.batchCalculatePrefixMatchLength(
-                List.of("worker-B"), List.of(2L)));
+        assertEquals(
+                remove ? Map.of() : Map.of("worker-B", 1),
+                globalCacheIndex.batchCalculatePrefixMatchLength(List.of("worker-B"), List.of(2L)));
     }
 
     @Test

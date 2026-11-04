@@ -1,5 +1,15 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.projection.QueueSnapshot;
+import org.flexlb.balance.projection.RouteProjection;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.util.List;
+import java.util.OptionalLong;
+
 import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.ROUTE;
 import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.TOKEN_EVALUATOR;
 import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.constraints;
@@ -12,16 +22,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-
-import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.projection.QueueSnapshot;
-import org.flexlb.balance.projection.RouteProjection;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
-
-import java.util.List;
-import java.util.OptionalLong;
 
 /** Work prediction and observed-head admission must remain independent. */
 class RouteAdmissionPolicyTest {

@@ -1098,12 +1098,21 @@ class DefaultBatchDispatcherTest {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
         item.ctx().getRequest().setPriority(60);
-        var original = EngineRpcService.GenerateInputPB.parseFrom(item.ctx().getGenerateInputPb()).toBuilder()
-                .addAllTokenIds(List.of(0, 127, 128, 129264, -1, Integer.MIN_VALUE))
-                .addMultimodalInputs(EngineRpcService.MultimodalInputPB.newBuilder()
-                        .setMultimodalTensor(EngineRpcService.TensorPB.newBuilder()
-                                .setFp16Data(com.google.protobuf.ByteString.copyFrom(new byte[1024 * 1024]))))
-                .build();
+        var original =
+                EngineRpcService.GenerateInputPB.parseFrom(item.ctx().getGenerateInputPb())
+                        .toBuilder()
+                        .addAllTokenIds(List.of(0, 127, 128, 129264, -1, Integer.MIN_VALUE))
+                        .addMultimodalInputs(
+                                EngineRpcService.MultimodalInputPB.newBuilder()
+                                        .setMultimodalTensor(
+                                                EngineRpcService.TensorPB.newBuilder()
+                                                        .setFp16Data(
+                                                                com.google.protobuf.ByteString
+                                                                        .copyFrom(
+                                                                                new byte
+                                                                                        [1024
+                                                                                                * 1024]))))
+                        .build();
         item.ctx().setGenerateInputPb(original.toByteString());
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
@@ -1121,7 +1130,10 @@ class DefaultBatchDispatcherTest {
         var encoded = sentInput(sent.getFirst());
         assertEquals(60, encoded.getPriority());
         assertEquals(0, encoded.getTokenIdsCount(), "dispatcher must keep tokens encoded");
-        var received = sentInput(EngineRpcService.EnqueueBatchRequestPB.parseFrom(sent.getFirst().toByteString()));
+        var received =
+                sentInput(
+                        EngineRpcService.EnqueueBatchRequestPB.parseFrom(
+                                sent.getFirst().toByteString()));
         assertEquals(original.getTokenIdsList(), received.getTokenIdsList());
         assertEquals(original.getMultimodalInputsList(), received.getMultimodalInputsList());
         assertEquals(60, received.getPriority());

@@ -393,8 +393,12 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             PlacementResult<RouteAdmission, PlacementKey> result =
                     router.select(entry.context, entry.routingGroup);
             handle.recordDiagnostics(result.diagnostics());
-            FlexlbTrace.recordPlacement(entry.context.getTraceContext(), decisionStartedNanos,
-                    result.status().name(), result.diagnostics(), null);
+            FlexlbTrace.recordPlacement(
+                    entry.context.getTraceContext(),
+                    decisionStartedNanos,
+                    result.status().name(),
+                    result.diagnostics(),
+                    null);
             if (result.status() == PlacementResult.Status.SUCCESS) {
                 return Plan.success(entry, handle, result, availabilitySequence);
             }
@@ -402,8 +406,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             return Plan.result(entry, result, availabilitySequence);
         } catch (Throwable failure) {
             handle.close();
-            FlexlbTrace.recordPlacement(entry.context.getTraceContext(), decisionStartedNanos,
-                    "ERROR", null, failure);
+            FlexlbTrace.recordPlacement(
+                    entry.context.getTraceContext(), decisionStartedNanos, "ERROR", null, failure);
             return Plan.failure(entry, failure, availabilitySequence);
         }
     }

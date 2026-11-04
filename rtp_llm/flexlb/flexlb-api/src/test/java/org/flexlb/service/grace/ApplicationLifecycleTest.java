@@ -70,13 +70,16 @@ class ApplicationLifecycleTest {
                 "servingResource", DisposableBean.class, () -> () -> destroyed.set(true));
         context.refresh();
         when(grpc.isServing()).thenReturn(true);
-        context.publishEvent(new ApplicationReadyEvent(
-                new SpringApplication(), new String[0], context, Duration.ZERO));
+        context.publishEvent(
+                new ApplicationReadyEvent(
+                        new SpringApplication(), new String[0], context, Duration.ZERO));
         assertTrue(lifecycle.isReady());
         var closing = CompletableFuture.runAsync(context::close);
         try {
             assertTrue(draining.await(2, TimeUnit.SECONDS));
-            assertFalse(lifecycle.isReady(), "readiness must be withdrawn while gRPC is still draining");
+            assertFalse(
+                    lifecycle.isReady(),
+                    "readiness must be withdrawn while gRPC is still draining");
             assertThrows(TimeoutException.class, () -> closing.get(100, TimeUnit.MILLISECONDS));
             assertFalse(destroyed.get());
         } finally {
@@ -116,27 +119,40 @@ class ApplicationLifecycleTest {
         var grpc = mock(FlexlbGrpcServer.class);
         when(grpc.isServing()).thenReturn(true);
         try (var context = new AnnotationConfigApplicationContext();
-             var child = new AnnotationConfigApplicationContext()) {
-            var lifecycle = new ApplicationLifecycle(consistency, grpc,
-                    mock(GracefulLifecycleReporter.class), context.getEnvironment(), 0L);
+                var child = new AnnotationConfigApplicationContext()) {
+            var lifecycle =
+                    new ApplicationLifecycle(
+                            consistency,
+                            grpc,
+                            mock(GracefulLifecycleReporter.class),
+                            context.getEnvironment(),
+                            new org.flexlb.listener.ApplicationWarmupState(),
+                            0L);
             context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
             context.refresh();
             assertFalse(lifecycle.isProcessReady());
             assertFalse(lifecycle.isReady());
-            context.publishEvent(new ApplicationReadyEvent(
-                    new SpringApplication(), new String[0], child, Duration.ZERO));
-            assertFalse(lifecycle.isProcessReady(), "a child management context cannot make the master ready");
-            context.publishEvent(new ApplicationReadyEvent(
-                    new SpringApplication(), new String[0], context, Duration.ZERO));
+            context.publishEvent(
+                    new ApplicationReadyEvent(
+                            new SpringApplication(), new String[0], child, Duration.ZERO));
+            assertFalse(
+                    lifecycle.isProcessReady(),
+                    "a child management context cannot make the master ready");
+            context.publishEvent(
+                    new ApplicationReadyEvent(
+                            new SpringApplication(), new String[0], context, Duration.ZERO));
             assertTrue(lifecycle.isProcessReady());
             assertTrue(lifecycle.isReady(), "standalone master requires no online hook");
-            assertFalse(lifecycle.isHealthy(), "platform hook health keeps its existing warm-up contract");
+            assertFalse(
+                    lifecycle.isHealthy(),
+                    "platform hook health keeps its existing warm-up contract");
             verifyNoInteractions(consistency);
             when(grpc.isServing()).thenReturn(false);
             assertFalse(lifecycle.isReady(), "a stopped transport cannot accept scheduling RPCs");
             lifecycle.online();
             assertTrue(lifecycle.isHealthy());
-            assertFalse(lifecycle.isReady(), "the online hook must not make a stopped transport ready");
+            assertFalse(
+                    lifecycle.isReady(), "the online hook must not make a stopped transport ready");
         }
     }
 

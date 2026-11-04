@@ -32,9 +32,12 @@ class WorkerPollDiagnosticsPerformanceTest {
         for (int i = 0; i < ITERATIONS; i++) {
             poll.record(point);
         }
-        double bytesPerEvent = (double) (bean.getThreadAllocatedBytes(threadId) - before) / ITERATIONS;
+        double bytesPerEvent =
+                (double) (bean.getThreadAllocatedBytes(threadId) - before) / ITERATIONS;
         System.out.printf("Trace recorder: bytes_per_event=%.2f%n", bytesPerEvent);
-        assertTrue(bytesPerEvent <= 8.0, "recording must update fixed fields without per-event allocation");
+        assertTrue(
+                bytesPerEvent <= 8.0,
+                "recording must update fixed fields without per-event allocation");
         assertEquals(1, trace.snapshot().statusPoll().syncCycleId());
     }
 
@@ -59,7 +62,8 @@ class WorkerPollDiagnosticsPerformanceTest {
         }
         double bytesPerPoll = (double) allocated / ITERATIONS;
         System.out.printf("Worker poll diagnostic phases: bytes_per_poll=%.2f%n", bytesPerPoll);
-        assertTrue(bytesPerPoll <= 16.0,
+        assertTrue(
+                bytesPerPoll <= 16.0,
                 "fixed primitive phase writes must not allocate maps, boxed values or event objects per poll");
     }
 
@@ -79,9 +83,13 @@ class WorkerPollDiagnosticsPerformanceTest {
                 recordNormalPhases(lease.pollTrace());
             }
         }
-        double bytesPerPoll = (double) (bean.getThreadAllocatedBytes(threadId) - before) / ITERATIONS;
-        System.out.printf("Complete poll diagnostics including state: bytes_per_poll=%.2f%n", bytesPerPoll);
-        assertTrue(bytesPerPoll <= 2048, "each poll must retain only bounded primitive diagnostic state");
+        double bytesPerPoll =
+                (double) (bean.getThreadAllocatedBytes(threadId) - before) / ITERATIONS;
+        System.out.printf(
+                "Complete poll diagnostics including state: bytes_per_poll=%.2f%n", bytesPerPoll);
+        assertTrue(
+                bytesPerPoll <= 2048,
+                "each poll must retain only bounded primitive diagnostic state");
     }
 
     @Test
@@ -103,10 +111,11 @@ class WorkerPollDiagnosticsPerformanceTest {
                     throw new AssertionError("an active poll must retain its lease");
                 }
             }
-            double bytesPerSkip = (double)
-                    (bean.getThreadAllocatedBytes(threadId) - before) / ITERATIONS;
+            double bytesPerSkip =
+                    (double) (bean.getThreadAllocatedBytes(threadId) - before) / ITERATIONS;
             System.out.printf("Worker poll busy lease: bytes_per_skip=%.2f%n", bytesPerSkip);
-            assertTrue(bytesPerSkip <= 8.0,
+            assertTrue(
+                    bytesPerSkip <= 8.0,
                     "busy skips must aggregate without per-tick strings, maps or snapshots");
 
             var snapshot = worker.trace().snapshot();
@@ -126,8 +135,14 @@ class WorkerPollDiagnosticsPerformanceTest {
         WorkerStatus[] workers = new WorkerStatus[2 * workersPerRole];
         WorkerStatus.PollLease[] applications = new WorkerStatus.PollLease[workers.length];
         for (int i = 0; i < workers.length; i++) {
-            workers[i] = WorkerStatus.createDiscovered(i < workersPerRole ? RoleType.PREFILL : RoleType.DECODE,
-                    "test", "127.0.0.1", 10000 + i, 20000 + i, "test");
+            workers[i] =
+                    WorkerStatus.createDiscovered(
+                            i < workersPerRole ? RoleType.PREFILL : RoleType.DECODE,
+                            "test",
+                            "127.0.0.1",
+                            10000 + i,
+                            20000 + i,
+                            "test");
             applications[i] = workers[i].tryBeginStatusPoll(0L);
             assertTrue(workers[i].tryBeginStatusApplication(applications[i]));
             applications[i].close();
@@ -144,7 +159,9 @@ class WorkerPollDiagnosticsPerformanceTest {
                 }
                 for (WorkerStatus worker : workers) {
                     try (var lease = worker.tryBeginStatusPoll(round + 1L)) {
-                        if (lease == null) { throw new AssertionError("application must not block RPC"); }
+                        if (lease == null) {
+                            throw new AssertionError("application must not block RPC");
+                        }
                         worker.recordStatusRpcResult(lease, true, true, null);
                         if (worker.tryBeginStatusApplication(lease)) {
                             throw new AssertionError("a second application must not be retained");
@@ -153,11 +170,15 @@ class WorkerPollDiagnosticsPerformanceTest {
                 }
             }
             long polls = (long) measuredRounds * workers.length;
-            double bytesPerPoll = (double) (bean.getThreadAllocatedBytes(threadId) - allocated) / polls;
+            double bytesPerPoll =
+                    (double) (bean.getThreadAllocatedBytes(threadId) - allocated) / polls;
             double nsPerPoll = (double) (System.nanoTime() - started) / polls;
-            System.out.printf("750P/750D blocked application bookkeeping: polls=%d bytes_per_poll=%.2f ns_per_poll=%.2f%n",
+            System.out.printf(
+                    "750P/750D blocked application bookkeeping: polls=%d bytes_per_poll=%.2f ns_per_poll=%.2f%n",
                     polls, bytesPerPoll, nsPerPoll);
-            assertTrue(bytesPerPoll <= 2048, "continuing heartbeats must retain only bounded poll state");
+            assertTrue(
+                    bytesPerPoll <= 2048,
+                    "continuing heartbeats must retain only bounded poll state");
         } finally {
             for (int i = 0; i < workers.length; i++) {
                 workers[i].finishStatusApplication(applications[i]);
@@ -165,7 +186,9 @@ class WorkerPollDiagnosticsPerformanceTest {
         }
         for (WorkerStatus worker : workers) {
             try (var lease = worker.tryBeginStatusPoll(warmupRounds + measuredRounds + 1L)) {
-                assertTrue(worker.tryBeginStatusApplication(lease), "application ownership must be reusable");
+                assertTrue(
+                        worker.tryBeginStatusApplication(lease),
+                        "application ownership must be reusable");
                 worker.finishStatusApplication(lease);
             }
         }
@@ -176,7 +199,8 @@ class WorkerPollDiagnosticsPerformanceTest {
         WorkerStatus worker = worker();
         WorkerStatus.PollLease held = worker.tryBeginStatusPoll(1L);
         try {
-            held.pollTrace().record(Stage.RPC_COMPLETED, new IllegalStateException("worker unavailable"));
+            held.pollTrace()
+                    .record(Stage.RPC_COMPLETED, new IllegalStateException("worker unavailable"));
             for (int i = 0; i < 20_000; i++) {
                 held.pollTrace().record(Stage.STATUS_LOCK_ACQUIRED);
             }
@@ -213,8 +237,8 @@ class WorkerPollDiagnosticsPerformanceTest {
     }
 
     private static WorkerStatus worker() {
-        return WorkerStatus.createDiscovered(RoleType.DECODE, "test", "127.0.0.1",
-                8080, 8081, "test");
+        return WorkerStatus.createDiscovered(
+                RoleType.DECODE, "test", "127.0.0.1", 8080, 8081, "test");
     }
 
     private static com.sun.management.ThreadMXBean allocationBean() {

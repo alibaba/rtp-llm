@@ -12,22 +12,35 @@ class EngineGrpcConfigTest {
 
     @Test
     void defaultsTo128MiB() {
-        assertEquals(128 * 1024 * 1024,
-                ConfigService.parse(document("")).getEngineGrpc().getKvCacheMaxInboundMessageBytes());
+        assertEquals(
+                128 * 1024 * 1024,
+                ConfigService.parse(document(""))
+                        .getEngineGrpc()
+                        .getKvCacheMaxInboundMessageBytes());
     }
 
     @Test
     void readsUnifiedConfigOverride() {
-        assertEquals(67108864, ConfigService.parse(document(
-                ",\"engineGrpc\":{\"kvCacheMaxInboundMessageBytes\":67108864}"))
-                .getEngineGrpc().getKvCacheMaxInboundMessageBytes());
+        assertEquals(
+                67108864,
+                ConfigService.parse(
+                                document(
+                                        ",\"engineGrpc\":{\"kvCacheMaxInboundMessageBytes\":67108864}"))
+                        .getEngineGrpc()
+                        .getKvCacheMaxInboundMessageBytes());
     }
 
     @Test
     void rejectsNonPositiveLimit() {
-        for (int limit : new int[]{0, -1}) {
-            assertThrows(ConfigValidationException.class, () -> ConfigService.parse(document(
-                    ",\"engineGrpc\":{\"kvCacheMaxInboundMessageBytes\":" + limit + "}")));
+        for (int limit : new int[] {0, -1}) {
+            assertThrows(
+                    ConfigValidationException.class,
+                    () ->
+                            ConfigService.parse(
+                                    document(
+                                            ",\"engineGrpc\":{\"kvCacheMaxInboundMessageBytes\":"
+                                                    + limit
+                                                    + "}")));
         }
     }
 }

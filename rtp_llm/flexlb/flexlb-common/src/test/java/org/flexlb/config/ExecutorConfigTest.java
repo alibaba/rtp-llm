@@ -21,22 +21,31 @@ class ExecutorConfigTest {
     @Test
     void eachPoolCanBeSizedIndependentlyAndRejectsInvalidValues() {
         String[] paths = {
-                "workerRegistry.executors.cacheStatusThreads",
-                "workerRegistry.executors.cacheDiffParallelism",
-                "engineGrpc.executorThreads", "engineGrpc.executorQueueCapacity",
-                "engineGrpc.eventLoopThreads"
+            "workerRegistry.executors.cacheStatusThreads",
+            "workerRegistry.executors.cacheDiffParallelism",
+            "engineGrpc.executorThreads",
+            "engineGrpc.executorQueueCapacity",
+            "engineGrpc.eventLoopThreads"
         };
         for (String path : paths) {
             ConfigTestFixtures.parse(patch(path, "16"));
-            for (String value : new String[]{"0", "-1", "null", "1.5", "\"16\"", "true", "2147483648"}) {
-                var error = assertThrows(ConfigValidationException.class,
-                        () -> ConfigTestFixtures.parse(patch(path, value)), path + "=" + value);
-                assertTrue(error.getMessage().contains(path.substring(path.lastIndexOf('.') + 1)),
+            for (String value :
+                    new String[] {"0", "-1", "null", "1.5", "\"16\"", "true", "2147483648"}) {
+                var error =
+                        assertThrows(
+                                ConfigValidationException.class,
+                                () -> ConfigTestFixtures.parse(patch(path, value)),
+                                path + "=" + value);
+                assertTrue(
+                        error.getMessage().contains(path.substring(path.lastIndexOf('.') + 1)),
                         error.getMessage());
             }
         }
-        assertThrows(ConfigValidationException.class,
-                () -> ConfigTestFixtures.parse(patch("workerRegistry.executors.cacheDiffParallelism", "32768")));
+        assertThrows(
+                ConfigValidationException.class,
+                () ->
+                        ConfigTestFixtures.parse(
+                                patch("workerRegistry.executors.cacheDiffParallelism", "32768")));
         ConfigTestFixtures.parse(patch("workerRegistry.executors.cacheDiffParallelism", "32767"));
     }
 

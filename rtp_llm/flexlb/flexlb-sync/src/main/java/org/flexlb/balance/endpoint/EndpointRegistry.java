@@ -414,7 +414,7 @@ public class EndpointRegistry {
                         if (current != null) {
                             throw new IllegalStateException(
                                     "Existing endpoint generation must be withdrawn before"
-                                        + " publication for "
+                                            + " publication for "
                                             + ipPort);
                         }
                         return candidate;

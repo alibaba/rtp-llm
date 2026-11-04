@@ -5,7 +5,6 @@ import io.grpc.Status;
 import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import io.opentelemetry.api.trace.Span;
-
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.cache.match.CacheAwareService;
@@ -194,7 +193,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     requestId, requestContext, responseObserver, completionClaimed, routeOrigin);
 
         } catch (Exception e) {
-            String requestId = RequestId.parse(request);
             Logger.error("FlexlbService.schedule error, request_id={}", requestId, e);
             completeOnce(
                     requestId,
@@ -253,14 +251,19 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 && forwardResult.masterFound()
                 && !forwardResult.masterHost().isBlank()) {
             String originalMaster = forwardResult.masterHost();
+            long originalNumericRequestId = context.getOriginalNumericRequestId();
+            RequestPhase requestPhase = context.getRequestPhase();
+            var traceContext = context.getTraceContext();
             completionClaimed.bindCancellation(
                     () ->
                             reconcileForwardedRoute(
                                     requestId,
+                                    originalNumericRequestId,
+                                    requestPhase,
                                     originalMaster,
                                     FlexlbScheduleProtocol.CancelReasonPB
                                             .CANCEL_REASON_CLIENT_CANCELLED,
-                                    context.getTraceContext()));
+                                    traceContext));
         }
 
         if (forwardResult.response() != null) {
@@ -379,7 +382,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                                         || cancelResult.response() == null) {
                                     Logger.warn(
                                             "FlexlbService.schedule cancellation reconciliation"
-                                                + " incomplete, request_id={} master={} failure={}",
+                                                    + " incomplete, request_id={} master={} failure={}",
                                             requestId,
                                             masterHost,
                                             cancelResult == null

@@ -1,23 +1,9 @@
 package org.flexlb.balance.strategy;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyDouble;
-import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
@@ -26,6 +12,7 @@ import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.SchedulerConfig;
@@ -44,6 +31,18 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Comparator;
 import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /** Regression contracts for Decode capacity projected through Prefill. */
 class CostBasedPrefillStrategyBlockerTest {
@@ -95,7 +94,7 @@ class CostBasedPrefillStrategyBlockerTest {
         when(pin.generationId()).thenReturn(generationId);
         when(directory.captureEndpoint(RoleType.PREFILL, "worker:8080")).thenReturn(pin);
         long now = System.currentTimeMillis();
-        var head = new GroupPlanner.Item(2L, 50, 20L, now, Long.MAX_VALUE, 100L, 0L);
+        var head = new GroupPlanner.Item("2", 50, 20L, now, Long.MAX_VALUE, 100L, 0L);
         Comparator<GroupPlanner.Item> fifo =
                 Comparator.comparingLong(GroupPlanner.Item::enqueueSeq);
         Comparator<GroupPlanner.Item> order =
@@ -109,7 +108,7 @@ class CostBasedPrefillStrategyBlockerTest {
         if (otherSequence != 0L) {
             active.add(
                     new GroupPlanner.Item(
-                            3L,
+                            "3",
                             otherPriority,
                             otherSequence,
                             now,
@@ -147,7 +146,7 @@ class CostBasedPrefillStrategyBlockerTest {
         when(endpoint.deliveryProjection()).thenReturn(delivery);
         var context = new BalanceContext(new FlexlbConfig());
         var request = new Request();
-        request.setRequestId(1L);
+        request.setRequestId("1");
         request.setSeqLen(100L);
         context.setRequest(request);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
@@ -166,7 +165,7 @@ class CostBasedPrefillStrategyBlockerTest {
                         expectedPrefillMs,
                         selected.serverStatus().getPrefillTime(),
                         "a preceding probe must not wait for the head or restart its collection"
-                            + " window");
+                                + " window");
             } else {
                 assertEquals("worker:8080", result.blocker().endpoint());
             }
@@ -200,7 +199,7 @@ class CostBasedPrefillStrategyBlockerTest {
         config.setDispatcher(DispatcherConfig.nonBatch());
         var context = new BalanceContext(config);
         var request = new Request();
-        request.setRequestId(1L);
+        request.setRequestId("1");
         request.setSeqLen(100L);
         context.setRequest(request);
         var reporter = mock(EngineHealthReporter.class);
@@ -209,11 +208,16 @@ class CostBasedPrefillStrategyBlockerTest {
             case "cache_hit" ->
                     doThrow(failure)
                             .when(reporter)
-                            .reportCacheHitMetrics(any(), anyLong(), anyDouble());
+                            .reportCacheHitMetrics(
+                                    any(),
+                                    org.mockito.ArgumentMatchers.anyString(),
+                                    anyLong(),
+                                    anyLong(),
+                                    anyDouble());
             case "selected_match" ->
                     doThrow(failure)
                             .when(reporter)
-                            .reportRoutingSelectedCacheMatchMetrics(any(), anyLong(), anyLong());
+                            .reportRoutingSelectedCacheMatchMetrics(any(), anyLong());
             case "candidate_match" ->
                     doThrow(failure)
                             .when(reporter)
@@ -247,7 +251,7 @@ class CostBasedPrefillStrategyBlockerTest {
         config.setDispatcher(DispatcherConfig.nonBatch());
         var context = new BalanceContext(config);
         var request = new Request();
-        request.setRequestId(1L);
+        request.setRequestId("1");
         request.setSeqLen(100L);
         context.setRequest(request);
         var strategy =
@@ -312,7 +316,10 @@ class CostBasedPrefillStrategyBlockerTest {
                     verify(secondEndpoint, never()).admissionRejectReason(anyInt());
                     verify(cache)
                             .findMatchingEngines(
-                                    any(), eq(role), eq(List.of("first", "outside", "second")));
+                                    org.mockito.ArgumentMatchers.argThat(
+                                            query ->
+                                                    query.roleType() == role
+                                                            && "target".equals(query.group())));
                     verify(pin).close();
                 }
             }

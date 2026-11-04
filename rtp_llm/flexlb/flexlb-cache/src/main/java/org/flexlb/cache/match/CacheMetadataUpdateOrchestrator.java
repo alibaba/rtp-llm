@@ -7,8 +7,8 @@ import org.flexlb.cache.match.localsync.LocalSyncCacheMatchProvider;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.EndpointTrace;
+import org.flexlb.dao.master.WorkerStatus;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -36,9 +36,12 @@ public class CacheMetadataUpdateOrchestrator {
                 configuration.isLocalStandbyEnabled());
     }
 
-    public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus) { return updateFromWorkerStatus(workerStatus, null); }
+    public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus) {
+        return updateFromWorkerStatus(workerStatus, null);
+    }
 
-    public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus, EndpointTrace.Poll pollTrace) {
+    public WorkerCacheUpdateResult updateFromWorkerStatus(
+            WorkerStatus workerStatus, EndpointTrace.Poll pollTrace) {
         if (configuration.isLocalSyncEnabled()) {
             return localSyncProvider.updateFromWorkerStatus(workerStatus, pollTrace);
         }
@@ -52,10 +55,14 @@ public class CacheMetadataUpdateOrchestrator {
     }
 
     public void removeEngineBlockCache(WorkerStatus workerStatus, EndpointTrace trace) {
-        if (configuration.isLocalSyncEnabled()) { localSyncProvider.removeEngineBlockCache(workerStatus, trace); }
+        if (configuration.isLocalSyncEnabled()) {
+            localSyncProvider.removeEngineBlockCache(workerStatus, trace);
+        }
     }
 
-    public void removeEngineBlockCache(String engineIpPort) { removeEngineBlockCache(engineIpPort, null); }
+    public void removeEngineBlockCache(String engineIpPort) {
+        removeEngineBlockCache(engineIpPort, null);
+    }
 
     public void removeEngineBlockCache(String engineIpPort, EndpointTrace trace) {
         if (configuration.isLocalSyncEnabled()) {

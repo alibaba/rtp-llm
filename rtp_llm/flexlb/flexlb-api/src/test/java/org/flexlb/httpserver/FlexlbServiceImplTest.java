@@ -1,36 +1,12 @@
 package org.flexlb.httpserver;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.inOrder;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.verifyNoMoreInteractions;
-import static org.mockito.Mockito.when;
-
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
-
 import com.google.protobuf.ByteString;
 import com.google.protobuf.CodedOutputStream;
-
 import io.grpc.Context;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
-
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryClaimKind;
 import org.flexlb.balance.scheduler.RequestState;
@@ -75,6 +51,27 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.stream.Stream;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
 
 class FlexlbServiceImplTest {
 
@@ -630,7 +627,7 @@ class FlexlbServiceImplTest {
                         batch
                                 ? org.flexlb.config.DispatcherConfig.Type.BATCH
                                 : org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
-        var bytes = com.google.protobuf.ByteString.copyFrom(new byte[1024 * 1024]);
+        var bytes = largeGenerateInput(99999L);
         var request =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                         .setRequestId(99999L)
@@ -687,13 +684,31 @@ class FlexlbServiceImplTest {
             verify(observer).onNext(any());
             verify(observer).onCompleted();
             inbound.cancel(null);
-            verify(routeService, never()).cancelRequest(anyLong(), anyLong(), any());
+            verify(routeService, never())
+                    .cancelRequest(org.mockito.ArgumentMatchers.anyString(), anyLong(), any());
         }
+    }
+
+    private static com.google.protobuf.ByteString largeGenerateInput(long requestId) {
+        return EngineRpcService.GenerateInputPB.newBuilder()
+                .setRequestId(requestId)
+                .mergeUnknownFields(
+                        com.google.protobuf.UnknownFieldSet.newBuilder()
+                                .addField(
+                                        999,
+                                        com.google.protobuf.UnknownFieldSet.Field.newBuilder()
+                                                .addLengthDelimited(
+                                                        com.google.protobuf.ByteString.copyFrom(
+                                                                new byte[1024 * 1024]))
+                                                .build())
+                                .build())
+                .build()
+                .toByteString();
     }
 
     private java.lang.ref.WeakReference<com.google.protobuf.ByteString> scheduleWithReferencedInput(
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) {
-        var input = com.google.protobuf.ByteString.copyFrom(new byte[1024 * 1024]);
+        var input = largeGenerateInput(99998L);
         service.schedule(
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                         .setRequestId(99998L)
@@ -941,7 +956,7 @@ class FlexlbServiceImplTest {
         }
         // Context listener and the transport callback can both report the same cancel.
         listener.onCancel();
-        verify(routeService, times(1)).cancelRequest(99101L, 0L, CancelReason.CLIENT_CANCELLED);
+        verify(routeService, times(1)).cancelRequest("99101", 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(duringPublication ? 0 : 1, call.deliveredResponses);
     }
 
@@ -969,7 +984,8 @@ class FlexlbServiceImplTest {
         listener.onComplete();
         inbound.cancel(null);
         assertEquals(1, call.deliveredResponses);
-        verify(routeService, never()).cancelRequest(anyLong(), anyLong(), any());
+        verify(routeService, never())
+                .cancelRequest(org.mockito.ArgumentMatchers.anyString(), anyLong(), any());
     }
 
     @Test
@@ -1031,7 +1047,7 @@ class FlexlbServiceImplTest {
         listener.onHalfClose();
         var ordered = inOrder(routeService);
         ordered.verify(routeService).route(any());
-        ordered.verify(routeService).cancelRequest(99104L, 0L, CancelReason.CLIENT_CANCELLED);
+        ordered.verify(routeService).cancelRequest("99104", 0L, CancelReason.CLIENT_CANCELLED);
     }
 
     @Test
@@ -1065,7 +1081,8 @@ class FlexlbServiceImplTest {
         verify(observer).onNext(any());
         verify(observer).onCompleted();
         inbound.cancel(null);
-        verify(routeService, never()).cancelRequest(anyLong(), anyLong(), any());
+        verify(routeService, never())
+                .cancelRequest(org.mockito.ArgumentMatchers.anyString(), anyLong(), any());
     }
 
     @Test
@@ -1074,6 +1091,9 @@ class FlexlbServiceImplTest {
         Response response = new Response();
         response.setSuccess(true);
         response.setCode(200);
+        var selectedWorker = new ServerStatus();
+        selectedWorker.setRole(RoleType.PREFILL);
+        response.setServerStatus(java.util.List.of(selectedWorker));
         when(routeService.route(any()))
                 .thenAnswer(
                         invocation -> {
@@ -1094,7 +1114,7 @@ class FlexlbServiceImplTest {
                         .setRequestId(99106L)
                         .build(),
                 observer);
-        verify(routeService).cancelRequest(99106L, 0L, CancelReason.CLIENT_CANCELLED);
+        verify(routeService).cancelRequest("99106", 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(1, deliveryFailure.getSuppressed().length);
         assertSame(telemetryFailure, deliveryFailure.getSuppressed()[0]);
     }

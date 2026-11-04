@@ -19,6 +19,7 @@
   </properties>
 
   <dependencies>
+    <dependency><groupId>org.flexlb</groupId><artifactId>flexlb-common</artifactId><version>${project.version}</version><type>test-jar</type><classifier>tests</classifier><scope>test</scope></dependency>
     <dependency>
       <groupId>org.flexlb</groupId>
       <artifactId>flexlb-common</artifactId>

@@ -32,19 +32,24 @@ class EndpointTraceTest {
     void nestedOutOfMemoryCauseSurvivesFutureWrappers() {
         var trace = new EndpointTrace();
         var poll = trace.beginPoll("STATUS", 1L);
-        var transportFailure = new IllegalStateException("UNKNOWN", new OutOfMemoryError("direct buffer memory"));
+        var transportFailure =
+                new IllegalStateException("UNKNOWN", new OutOfMemoryError("direct buffer memory"));
         var failure = new CompletionException(new ExecutionException(transportFailure));
 
         assertSame(transportFailure, EndpointTrace.unwrap(failure));
         poll.record(Stage.RPC_COMPLETED, failure);
 
-        assertEquals("IllegalStateException->OutOfMemoryError:UNKNOWN", trace.snapshot().statusPoll().error());
+        assertEquals(
+                "IllegalStateException->OutOfMemoryError:UNKNOWN",
+                trace.snapshot().statusPoll().error());
     }
 
     @Test
     void longOuterMessageCannotHideRootCauseType() {
         var trace = new EndpointTrace();
-        var failure = new IllegalStateException("x".repeat(2000), new OutOfMemoryError("direct buffer memory"));
+        var failure =
+                new IllegalStateException(
+                        "x".repeat(2000), new OutOfMemoryError("direct buffer memory"));
 
         trace.record(Stage.CACHE_CLEANUP_FAILED, failure);
 
@@ -62,23 +67,34 @@ class EndpointTraceTest {
         var trace = new EndpointTrace();
         var poll = trace.beginPoll("STATUS", 1L);
 
-        assertTimeoutPreemptively(Duration.ofSeconds(1), () -> poll.record(Stage.RPC_COMPLETED, first));
-        assertEquals("IllegalStateException->IllegalArgumentException->[cycle]:first",
+        assertTimeoutPreemptively(
+                Duration.ofSeconds(1), () -> poll.record(Stage.RPC_COMPLETED, first));
+        assertEquals(
+                "IllegalStateException->IllegalArgumentException->[cycle]:first",
                 trace.snapshot().statusPoll().error());
         poll.record(Stage.LEASE_RELEASED);
         assertTrue(trace.snapshot().statusPoll().leaseReleased());
 
         class CyclicCompletionException extends CompletionException {
             private Throwable next;
-            CyclicCompletionException() {super((Throwable) null);}
-            @Override public synchronized Throwable getCause() {return next;}
+
+            CyclicCompletionException() {
+                super((Throwable) null);
+            }
+
+            @Override
+            public synchronized Throwable getCause() {
+                return next;
+            }
         }
         var wrapper1 = new CyclicCompletionException();
         var wrapper2 = new CyclicCompletionException();
         wrapper1.next = wrapper2;
         wrapper2.next = wrapper1;
-        assertSame(wrapper1, assertTimeoutPreemptively(Duration.ofSeconds(1),
-                () -> EndpointTrace.unwrap(wrapper1)));
+        assertSame(
+                wrapper1,
+                assertTimeoutPreemptively(
+                        Duration.ofSeconds(1), () -> EndpointTrace.unwrap(wrapper1)));
     }
 
     @Test
@@ -88,12 +104,14 @@ class EndpointTraceTest {
         var finalFailure = new IllegalStateException("deadline");
         finalFailure.addSuppressed(new SocketException("connection reset"));
         var wrapped = new ExecutionException(finalFailure);
-        wrapped.addSuppressed(new IllegalArgumentException("previous attempt", new OutOfMemoryError("direct")));
+        wrapped.addSuppressed(
+                new IllegalArgumentException("previous attempt", new OutOfMemoryError("direct")));
 
         poll.record(Stage.RPC_COMPLETED, wrapped);
         poll.record(Stage.CALLBACK_FAILED, new RejectedExecutionException("later failure"));
 
-        assertEquals("IllegalStateException suppressed=[IllegalArgumentException->OutOfMemoryError;SocketException]:deadline",
+        assertEquals(
+                "IllegalStateException suppressed=[IllegalArgumentException->OutOfMemoryError;SocketException]:deadline",
                 trace.snapshot().statusPoll().error());
         assertEquals("RPC_COMPLETED", trace.snapshot().statusPoll().failureStage());
     }
@@ -101,7 +119,9 @@ class EndpointTraceTest {
     @Test
     void longCauseAndSuppressedChainsHaveBoundedSummaries() {
         Throwable failure = new OutOfMemoryError("root");
-        for (int depth = 0; depth < 100; depth++) {failure = new IllegalStateException("outer", failure);}
+        for (int depth = 0; depth < 100; depth++) {
+            failure = new IllegalStateException("outer", failure);
+        }
         for (int attempt = 0; attempt < 100; attempt++) {
             failure.addSuppressed(new SocketException("attempt " + attempt));
         }
@@ -111,7 +131,9 @@ class EndpointTraceTest {
 
         String summary = trace.snapshot().error();
         assertTrue(summary.contains("->[truncated]"));
-        assertTrue(summary.contains("suppressed=[SocketException;SocketException;SocketException;SocketException;[truncated]]"));
+        assertTrue(
+                summary.contains(
+                        "suppressed=[SocketException;SocketException;SocketException;SocketException;[truncated]]"));
         assertTrue(summary.length() < 1000);
     }
 
@@ -121,29 +143,36 @@ class EndpointTraceTest {
         var trace = new EndpointTrace();
         var poll = trace.beginPoll("STATUS", 1L);
         var failure = new CompletionException(new IllegalStateException("timeout"));
-        var recording = new FutureTask<Void>(() -> {
-            if (pollFailure) {
-                poll.record(Stage.RPC_COMPLETED, failure);
-            } else {
-                trace.record(Stage.CACHE_CLEANUP_FAILED, failure);
-            }
-            return null;
-        });
+        var recording =
+                new FutureTask<Void>(
+                        () -> {
+                            if (pollFailure) {
+                                poll.record(Stage.RPC_COMPLETED, failure);
+                            } else {
+                                trace.record(Stage.CACHE_CLEANUP_FAILED, failure);
+                            }
+                            return null;
+                        });
         Thread recorder = Thread.ofPlatform().unstarted(recording);
         try {
             // Throwable.getCause() synchronizes on the exception itself.
             synchronized (failure) {
                 recorder.start();
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-                while (recorder.getState() != Thread.State.BLOCKED && recorder.isAlive()
+                while (recorder.getState() != Thread.State.BLOCKED
+                        && recorder.isAlive()
                         && System.nanoTime() < deadline) {
                     Thread.sleep(1);
                 }
                 assertEquals(Thread.State.BLOCKED, recorder.getState());
-                assertEquals(pollFailure ? "RPC_COMPLETED" : "CACHE_CLEANUP_FAILED",
-                        pollFailure ? trace.snapshot().statusPoll().stage() : trace.snapshot().phase());
+                assertEquals(
+                        pollFailure ? "RPC_COMPLETED" : "CACHE_CLEANUP_FAILED",
+                        pollFailure
+                                ? trace.snapshot().statusPoll().stage()
+                                : trace.snapshot().phase());
                 if (pollFailure) {
-                    poll.record(Stage.CALLBACK_FAILED, new RejectedExecutionException("later failure"));
+                    poll.record(
+                            Stage.CALLBACK_FAILED, new RejectedExecutionException("later failure"));
                     assertEquals("RPC_COMPLETED", trace.snapshot().statusPoll().failureStage());
                     assertEquals("DETAILS_PENDING", trace.snapshot().statusPoll().error());
                 }
@@ -154,17 +183,22 @@ class EndpointTraceTest {
             recording.get(3, TimeUnit.SECONDS);
         }
         var snapshot = trace.snapshot();
-        assertEquals("IllegalStateException:timeout", pollFailure ? snapshot.statusPoll().error() : snapshot.error());
+        assertEquals(
+                "IllegalStateException:timeout",
+                pollFailure ? snapshot.statusPoll().error() : snapshot.error());
     }
 
     @Test
     void failureFormattingCannotInterruptProgress() {
         var trace = new EndpointTrace();
         var poll = trace.beginPoll("STATUS", 1L);
-        var failure = new IllegalStateException() {
-            @Override
-            public String getMessage() { throw new LinkageError("message unavailable"); }
-        };
+        var failure =
+                new IllegalStateException() {
+                    @Override
+                    public String getMessage() {
+                        throw new LinkageError("message unavailable");
+                    }
+                };
         poll.record(Stage.RPC_COMPLETED, failure);
         poll.record(EndpointTrace.Stage.CALLBACK_STARTED);
         poll.record(Stage.LEASE_RELEASED);
@@ -180,17 +214,19 @@ class EndpointTraceTest {
         poll.record(EndpointTrace.Stage.RPC_COMPLETED);
         var queue = new ArrayDeque<Runnable>();
         CompletableFuture.completedFuture(1)
-            .whenComplete((response, error) -> poll.record(Stage.CALLBACK_READY, error))
-            .handleAsync((response, error) -> {
-            poll.record(Stage.CALLBACK_STARTED);
-            poll.record(EndpointTrace.Stage.STATUS_LOCK_ATTEMPT);
-            var waiting = trace.snapshot().statusPoll();
-            assertEquals("STATUS_LOCK_ATTEMPT", waiting.stage());
-            assertTrue(waiting.times().callbackStartMs() >= 0);
-            assertEquals(-1, waiting.times().workerAcquiredMs());
-            poll.record(Stage.CALLBACK_ENDED);
-            return response;
-        }, queue::add);
+                .whenComplete((response, error) -> poll.record(Stage.CALLBACK_READY, error))
+                .handleAsync(
+                        (response, error) -> {
+                            poll.record(Stage.CALLBACK_STARTED);
+                            poll.record(EndpointTrace.Stage.STATUS_LOCK_ATTEMPT);
+                            var waiting = trace.snapshot().statusPoll();
+                            assertEquals("STATUS_LOCK_ATTEMPT", waiting.stage());
+                            assertTrue(waiting.times().callbackStartMs() >= 0);
+                            assertEquals(-1, waiting.times().workerAcquiredMs());
+                            poll.record(Stage.CALLBACK_ENDED);
+                            return response;
+                        },
+                        queue::add);
         var queued = trace.snapshot().statusPoll();
         assertEquals("CALLBACK_READY", queued.stage());
         assertEquals("OK", queued.rpcResult());
@@ -267,11 +303,14 @@ class EndpointTraceTest {
 
     @Test
     void busyAttemptsPreserveTheOwningPollProgress() {
-        var worker = WorkerStatus.createDiscovered(org.flexlb.dao.route.RoleType.DECODE,
-                "group", "127.0.0.1", 80, 81, "site");
+        var worker =
+                WorkerStatus.createDiscovered(
+                        org.flexlb.dao.route.RoleType.DECODE, "group", "127.0.0.1", 80, 81, "site");
         try (var lease = worker.tryBeginStatusPoll(7)) {
             lease.pollTrace().record(EndpointTrace.Stage.RPC_STARTED);
-            for (int i = 0; i < 1000; i++) { assertNull(worker.tryBeginStatusPoll(8)); }
+            for (int i = 0; i < 1000; i++) {
+                assertNull(worker.tryBeginStatusPoll(8));
+            }
             var poll = worker.trace().snapshot().statusPoll();
             assertEquals(7, poll.syncCycleId());
             assertEquals("RPC_STARTED", poll.stage());
@@ -354,8 +393,14 @@ class EndpointTraceTest {
 
     @Test
     void snapshotsRemainReadableWhileCacheMutationLockIsHeldAndOtherCallersWait() throws Exception {
-        var worker = WorkerStatus.createDiscovered(org.flexlb.dao.route.RoleType.PREFILL,
-                "group", "127.0.0.1", 80, 81, "site");
+        var worker =
+                WorkerStatus.createDiscovered(
+                        org.flexlb.dao.route.RoleType.PREFILL,
+                        "group",
+                        "127.0.0.1",
+                        80,
+                        81,
+                        "site");
         var trace = worker.trace();
         var statusLease = worker.tryBeginStatusPoll(1L);
         var cacheLease = worker.tryBeginCachePoll(1L);
@@ -366,16 +411,22 @@ class EndpointTraceTest {
                 trace.record(Stage.GENERATION_RETIRING);
                 trace.record(Stage.CACHE_INDEX_LOCK_ATTEMPT);
                 trace.record(Stage.CACHE_INDEX_LOCK_ACQUIRED);
-                var waiter = executor.submit(() -> {
-                    cacheLease.pollTrace().record(Stage.CACHE_MUTATION_LOCK_ATTEMPT);
-                    waiting.countDown();
-                    worker.cacheMutationLock.lock();
-                    try {
-                        cacheLease.pollTrace().record(Stage.CACHE_MUTATION_LOCK_ACQUIRED);
-                    } finally {
-                        worker.cacheMutationLock.unlock();
-                    }
-                });
+                var waiter =
+                        executor.submit(
+                                () -> {
+                                    cacheLease
+                                            .pollTrace()
+                                            .record(Stage.CACHE_MUTATION_LOCK_ATTEMPT);
+                                    waiting.countDown();
+                                    worker.cacheMutationLock.lock();
+                                    try {
+                                        cacheLease
+                                                .pollTrace()
+                                                .record(Stage.CACHE_MUTATION_LOCK_ACQUIRED);
+                                    } finally {
+                                        worker.cacheMutationLock.unlock();
+                                    }
+                                });
                 assertTrue(waiting.await(3, TimeUnit.SECONDS));
                 var captured = executor.submit(trace::snapshot).get(3, TimeUnit.SECONDS);
                 assertEquals("CACHE_INDEX_LOCK_ACQUIRED", captured.phase());
@@ -397,21 +448,33 @@ class EndpointTraceTest {
         var poll = trace.beginPoll("STATUS", 9);
         var start = new CountDownLatch(1);
         try (var executor = Executors.newFixedThreadPool(4)) {
-            var writers = List.of(Stage.RUNNER_STARTED, Stage.RPC_COMPLETED,
-                    Stage.STATUS_COMMITTED, Stage.LEASE_RELEASED).stream()
-                    .map(stage -> executor.submit(() -> {
-                        assertTrue(start.await(3, TimeUnit.SECONDS));
-                        for (int i = 0; i < 10_000; i++) {
-                            poll.record(stage);
-                            poll.skippedBusy();
-                        }
-                        return null;
-                    })).toList();
+            var writers =
+                    List.of(
+                                    Stage.RUNNER_STARTED,
+                                    Stage.RPC_COMPLETED,
+                                    Stage.STATUS_COMMITTED,
+                                    Stage.LEASE_RELEASED)
+                            .stream()
+                            .map(
+                                    stage ->
+                                            executor.submit(
+                                                    () -> {
+                                                        assertTrue(
+                                                                start.await(3, TimeUnit.SECONDS));
+                                                        for (int i = 0; i < 10_000; i++) {
+                                                            poll.record(stage);
+                                                            poll.skippedBusy();
+                                                        }
+                                                        return null;
+                                                    }))
+                            .toList();
             start.countDown();
             for (int i = 0; i < 1000; i++) {
                 assertEquals(9, trace.snapshot().statusPoll().syncCycleId());
             }
-            for (var writer : writers) {writer.get(5, TimeUnit.SECONDS);}
+            for (var writer : writers) {
+                writer.get(5, TimeUnit.SECONDS);
+            }
         }
         var captured = trace.snapshot().statusPoll();
         assertEquals(40_000, captured.skippedBusy());

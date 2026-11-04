@@ -13,7 +13,9 @@ import java.io.IOException;
 final class GenerateInputPayload {
     private final GenerateInputPB wireMessage;
 
-    private GenerateInputPayload(GenerateInputPB wireMessage) { this.wireMessage = wireMessage; }
+    private GenerateInputPayload(GenerateInputPB wireMessage) {
+        this.wireMessage = wireMessage;
+    }
 
     static GenerateInputPayload parse(ByteString bytes) throws InvalidProtocolBufferException {
         try {
@@ -25,8 +27,11 @@ final class GenerateInputPayload {
             for (int tag; (tag = input.readTag()) != 0; tagStart = input.getTotalBytesRead()) {
                 if (tag == 16 || tag == 18) {
                     mergeMetadata(metadata, bytes, retainedStart, tagStart);
-                    if (tag == 18) { tokens.readPacked(input, bytes); }
-                    else { tokens.writer().writeInt32NoTag(input.readInt32()); }
+                    if (tag == 18) {
+                        tokens.readPacked(input, bytes);
+                    } else {
+                        tokens.writer().writeInt32NoTag(input.readInt32());
+                    }
                     retainedStart = input.getTotalBytesRead();
                 } else if (!input.skipField(tag)) {
                     input.checkLastTagWas(0);
@@ -47,12 +52,16 @@ final class GenerateInputPayload {
                 // Unknown fields use the standard protobuf writer. On the Engine this is the
                 // known packed token_ids field again; no schema or RPC method changes.
                 var field = UnknownFieldSet.Field.newBuilder().addLengthDelimited(encoded).build();
-                parsed = parsed.toBuilder().mergeUnknownFields(
-                        UnknownFieldSet.newBuilder().mergeField(2, field).build()).build();
+                parsed =
+                        parsed.toBuilder()
+                                .mergeUnknownFields(
+                                        UnknownFieldSet.newBuilder().mergeField(2, field).build())
+                                .build();
             }
             return new GenerateInputPayload(parsed);
         } catch (InvalidProtocolBufferException malformed) {
-            // Diagnostics can outlive dispatch. Never let a parse failure pin a partial tensor/message.
+            // Diagnostics can outlive dispatch. Never let a parse failure pin a partial
+            // tensor/message.
             throw malformed.setUnfinishedMessage(null);
         } catch (IOException failure) {
             throw new InvalidProtocolBufferException(failure);
@@ -60,10 +69,16 @@ final class GenerateInputPayload {
     }
 
     /** Wire representation only: token accessors are intentionally empty until Engine decoding. */
-    GenerateInputPB.Builder toWireBuilder() { return wireMessage.toBuilder(); }
+    GenerateInputPB.Builder toWireBuilder() {
+        return wireMessage.toBuilder();
+    }
 
-    private static void mergeMetadata(GenerateInputPB.Builder metadata, ByteString bytes, int start, int end) throws IOException {
-        if (start == end) { return; }
+    private static void mergeMetadata(
+            GenerateInputPB.Builder metadata, ByteString bytes, int start, int end)
+            throws IOException {
+        if (start == end) {
+            return;
+        }
         var input = bytes.substring(start, end).newCodedInput();
         // ByteString is immutable: tensors and unknown byte fields can share its storage.
         input.enableAliasing(true);
@@ -80,24 +95,34 @@ final class GenerateInputPayload {
             int length = input.readRawVarint32();
             int previousLimit = input.pushLimit(length);
             int start = input.getTotalBytesRead();
-            while (input.getBytesUntilLimit() > 0) { input.readInt32(); }
+            while (input.getBytesUntilLimit() > 0) {
+                input.readInt32();
+            }
             input.popLimit(previousLimit);
             ByteString chunk = bytes.substring(start, input.getTotalBytesRead());
-            if (packed == null && writer == null) { packed = chunk; }
-            else { writer().writeRawBytes(chunk); }
+            if (packed == null && writer == null) {
+                packed = chunk;
+            } else {
+                writer().writeRawBytes(chunk);
+            }
         }
 
         private CodedOutputStream writer() throws IOException {
             if (writer == null) {
                 combined = ByteString.newOutput(packed == null ? 32 : Math.max(32, packed.size()));
                 writer = CodedOutputStream.newInstance(combined, 64);
-                if (packed != null) { writer.writeRawBytes(packed); packed = null; }
+                if (packed != null) {
+                    writer.writeRawBytes(packed);
+                    packed = null;
+                }
             }
             return writer;
         }
 
         private ByteString finish() throws IOException {
-            if (writer == null) { return packed == null ? ByteString.EMPTY : packed; }
+            if (writer == null) {
+                return packed == null ? ByteString.EMPTY : packed;
+            }
             writer.flush();
             return combined.toByteString();
         }

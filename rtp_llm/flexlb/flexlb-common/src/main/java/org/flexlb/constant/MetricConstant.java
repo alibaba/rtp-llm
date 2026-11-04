@@ -59,6 +59,7 @@ public class MetricConstant {
 
     /** Failed WorkerStatus gRPC check latency in microseconds. */
     public static final String ENGINE_STATUS_CHECK_FAIL_RT = "app.engine.health.check.fail.rt";
+
     public static final String STATUS_FAILURE_DETAIL = "app.status.failure.detail";
 
     /**
@@ -682,9 +683,9 @@ public class MetricConstant {
             "grpc.server.executor.max.pool.size";
 
     /**
-     * gRPC server executor rejected task counter. Rejection uses AbortPolicy.
+     * gRPC server callbacks executed by the caller when the executor is saturated or closed.
      */
-    public static final String GRPC_SERVER_EXECUTOR_REJECTED_TASKS =
+    public static final String GRPC_SERVER_EXECUTOR_CALLER_RUNS =
             "grpc.server.executor.caller.runs";
 
     /* ------------------------ Dispatch Executor Monitoring ---------------------------- */

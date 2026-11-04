@@ -1,26 +1,7 @@
 package org.flexlb.sync.runner;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.clearInvocations;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
-
 import io.grpc.Status;
 import io.netty.channel.ConnectTimeoutException;
-
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -63,6 +44,25 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 class GrpcWorkerStatusRunnerTest {
 
@@ -198,7 +198,7 @@ class GrpcWorkerStatusRunnerTest {
                 .thenReturn(response);
         new GrpcWorkerStatusRunner(
                         "test-model",
-                        status.getIpPort(),
+                        status.getLogicalIpPort(),
                         RoleType.DECODE,
                         status,
                         lease,
@@ -212,7 +212,7 @@ class GrpcWorkerStatusRunnerTest {
         response.completeExceptionally(new java.util.concurrent.CompletionException(failure));
         verify(reporter)
                 .reportStatusCheckerFail(
-                        eq("test-model"),
+                        eq("127.0.0.1:8080"),
                         eq(expected),
                         eq(RoleType.DECODE),
                         any(Stage.class),
@@ -222,6 +222,9 @@ class GrpcWorkerStatusRunnerTest {
         assertEquals(GrpcFailure.analyze(failure), analysis);
         assertEquals(kind, analysis.kind());
         assertEquals(confirmedLocal, analysis.confirmedLocalFailure());
+        verify(reporter)
+                .reportStatusCheckFailureLatency(
+                        eq(expected), eq(status.getMetricIpPort()), eq(RoleType.DECODE), anyLong());
         org.mockito.Mockito.verifyNoMoreInteractions(reporter);
         assertEquals("ERROR", status.trace().snapshot().statusPoll().rpcResult());
         assertTrue(status.trace().snapshot().statusPoll().leaseReleased());
@@ -262,7 +265,7 @@ class GrpcWorkerStatusRunnerTest {
         try {
             poll(status, directory, grpc, Runnable::run, 1L);
             WorkerEndpoint endpoint =
-                    directory.exactEndpoint(status.getRole(), status.getIpPort(), status);
+                    directory.exactEndpoint(status.getRole(), status.getLogicalIpPort(), status);
             assertNotNull(endpoint);
             when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
                     .thenReturn(
@@ -281,7 +284,7 @@ class GrpcWorkerStatusRunnerTest {
                 assertNotNull(lease);
                 new GrpcWorkerStatusRunner(
                                 "test-model",
-                                status.getIpPort(),
+                                status.getLogicalIpPort(),
                                 status.getRole(),
                                 status,
                                 lease,
@@ -300,7 +303,8 @@ class GrpcWorkerStatusRunnerTest {
                 assertNull(status.retirementReason());
                 assertSame(
                         endpoint,
-                        directory.exactEndpoint(status.getRole(), status.getIpPort(), status));
+                        directory.exactEndpoint(
+                                status.getRole(), status.getLogicalIpPort(), status));
                 try (var pin = endpoint.tryPinSchedulingGeneration()) {
                     assertNotNull(pin, "unattributed failures must preserve scheduling admission");
                 }
@@ -309,7 +313,7 @@ class GrpcWorkerStatusRunnerTest {
             var details = ArgumentCaptor.forClass(GrpcFailure.Analysis.class);
             verify(reporter, times(3))
                     .reportStatusCheckerFail(
-                            eq("test-model"),
+                            eq("127.0.0.1:8080"),
                             eq(expected),
                             eq(status.getRole()),
                             eq(Stage.RPC_COMPLETED),
@@ -341,7 +345,7 @@ class GrpcWorkerStatusRunnerTest {
                                         .build()));
         new GrpcWorkerStatusRunner(
                         "test-model",
-                        status.getIpPort(),
+                        status.getLogicalIpPort(),
                         RoleType.DECODE,
                         status,
                         status.tryBeginStatusPoll(1L),
@@ -361,7 +365,7 @@ class GrpcWorkerStatusRunnerTest {
         assertEquals(0, status.pollHealth().consecutiveWorkerFailures());
         verify(reporter)
                 .reportStatusCheckerFail(
-                        eq("test-model"),
+                        eq("127.0.0.1:8080"),
                         eq(BalanceStatusEnum.MASTER_STATUS_EXECUTOR_REJECTED),
                         eq(RoleType.DECODE),
                         any(Stage.class),
@@ -373,6 +377,7 @@ class GrpcWorkerStatusRunnerTest {
                                 Stage.CALLBACK_SUBMISSION_FAILED,
                                 "LOCAL_EXECUTOR_REJECTED")
                         .confirmedLocalFailure());
+
         org.mockito.Mockito.verifyNoMoreInteractions(reporter);
     }
 
@@ -390,7 +395,7 @@ class GrpcWorkerStatusRunnerTest {
         when(invalid.getStatusVersion()).thenThrow(new IllegalStateException("validation failed"));
         new GrpcWorkerStatusRunner(
                         "test-model",
-                        status.getIpPort(),
+                        status.getLogicalIpPort(),
                         RoleType.DECODE,
                         status,
                         status.tryBeginStatusPoll(1L),
@@ -411,7 +416,7 @@ class GrpcWorkerStatusRunnerTest {
         assertNull(status.retirementReason());
         verify(reporter)
                 .reportStatusCheckerFail(
-                        eq("test-model"),
+                        eq("127.0.0.1:8080"),
                         eq(BalanceStatusEnum.MASTER_STATUS_PROCESSING_FAILED),
                         eq(RoleType.DECODE),
                         any(Stage.class),
@@ -462,7 +467,7 @@ class GrpcWorkerStatusRunnerTest {
         var runner =
                 new GrpcWorkerStatusRunner(
                         "test-model",
-                        status.getIpPort(),
+                        status.getLogicalIpPort(),
                         RoleType.DECODE,
                         status,
                         status.tryBeginStatusPoll(1L),
@@ -477,7 +482,7 @@ class GrpcWorkerStatusRunnerTest {
                 org.junit.jupiter.api.Assertions.assertThrows(OutOfMemoryError.class, runner::run));
         verify(reporter)
                 .reportStatusCheckerFail(
-                        eq("test-model"),
+                        eq("127.0.0.1:8080"),
                         eq(BalanceStatusEnum.MASTER_STATUS_MEMORY_EXHAUSTED),
                         eq(RoleType.DECODE),
                         any(Stage.class),
@@ -518,7 +523,7 @@ class GrpcWorkerStatusRunnerTest {
                 .thenReturn(CompletableFuture.completedFuture(response));
         new GrpcWorkerStatusRunner(
                         "test-model",
-                        status.getIpPort(),
+                        status.getLogicalIpPort(),
                         RoleType.DECODE,
                         status,
                         status.tryBeginStatusPoll(1L),
@@ -532,7 +537,7 @@ class GrpcWorkerStatusRunnerTest {
 
         verify(reporter)
                 .reportStatusCheckerFail(
-                        eq("test-model"),
+                        eq("127.0.0.1:8080"),
                         eq(expected),
                         eq(RoleType.DECODE),
                         any(Stage.class),
@@ -563,7 +568,7 @@ class GrpcWorkerStatusRunnerTest {
         var registry = mock(EndpointRegistry.class);
         var directory = directory(registry, status);
         var reporter = mock(EngineHealthReporter.class);
-        when(registry.publishPreparedEndpoint(eq(status.getIpPort()), eq(status), any()))
+        when(registry.publishPreparedEndpoint(eq(status.getLogicalIpPort()), eq(status), any()))
                 .thenAnswer(
                         invocation -> {
                             status.publishPreparedStatus(invocation.getArgument(2));
@@ -580,7 +585,7 @@ class GrpcWorkerStatusRunnerTest {
                                         .build()));
         new GrpcWorkerStatusRunner(
                         "test-model",
-                        status.getIpPort(),
+                        status.getLogicalIpPort(),
                         RoleType.DECODE,
                         status,
                         status.tryBeginStatusPoll(1L),
@@ -594,7 +599,7 @@ class GrpcWorkerStatusRunnerTest {
 
         verify(reporter)
                 .reportStatusCheckerFail(
-                        eq("test-model"),
+                        eq("127.0.0.1:8080"),
                         eq(expected),
                         eq(RoleType.DECODE),
                         any(Stage.class),
@@ -612,7 +617,7 @@ class GrpcWorkerStatusRunnerTest {
                 "failure happened after state commit");
         assertEquals(0L, status.pollHealth().consecutiveWorkerFailures());
         assertFalse(status.isActiveGeneration());
-        assertNull(directory.statusSnapshot(RoleType.DECODE).get(status.getIpPort()));
+        assertNull(directory.statusSnapshot(RoleType.DECODE).get(status.getLogicalIpPort()));
         assertEquals("STATUS_RECONCILIATION_FAILED", status.trace().snapshot().unavailableReason());
         assertTrue(status.trace().snapshot().statusPoll().leaseReleased());
         var replacement =
@@ -621,7 +626,7 @@ class GrpcWorkerStatusRunnerTest {
         assertSame(
                 replacement,
                 directory.currentOrDiscover(
-                        RoleType.DECODE, status.getIpPort(), () -> replacement));
+                        RoleType.DECODE, status.getLogicalIpPort(), () -> replacement));
     }
 
     @ParameterizedTest
@@ -656,7 +661,7 @@ class GrpcWorkerStatusRunnerTest {
                 .thenReturn(CompletableFuture.completedFuture(response));
         new GrpcWorkerStatusRunner(
                         "test-model",
-                        status.getIpPort(),
+                        status.getLogicalIpPort(),
                         RoleType.DECODE,
                         status,
                         status.tryBeginStatusPoll(1L),
@@ -670,7 +675,7 @@ class GrpcWorkerStatusRunnerTest {
 
         verify(reporter)
                 .reportStatusCheckerFail(
-                        eq("test-model"),
+                        eq("127.0.0.1:8080"),
                         eq(BalanceStatusEnum.MASTER_STATUS_PROCESSING_FAILED),
                         eq(RoleType.DECODE),
                         any(Stage.class),
@@ -682,7 +687,7 @@ class GrpcWorkerStatusRunnerTest {
         assertEquals(0L, status.pollHealth().consecutiveWorkerFailures());
         assertFalse(status.isActiveGeneration());
         assertEquals(reason, status.trace().snapshot().unavailableReason());
-        assertNull(directory.statusSnapshot(RoleType.DECODE).get(status.getIpPort()));
+        assertNull(directory.statusSnapshot(RoleType.DECODE).get(status.getLogicalIpPort()));
     }
 
     @ParameterizedTest
@@ -717,7 +722,8 @@ class GrpcWorkerStatusRunnerTest {
                 .thenReturn(CompletableFuture.completedFuture(response));
         try {
             poll(status, directory, grpc, Runnable::run, 1L);
-            WorkerEndpoint endpoint = directory.exactEndpoint(role, status.getIpPort(), status);
+            WorkerEndpoint endpoint =
+                    directory.exactEndpoint(role, status.getLogicalIpPort(), status);
             assertNotNull(endpoint);
             clearInvocations(availability);
             poll(status, directory, grpc, Runnable::run, 2L);
@@ -725,7 +731,7 @@ class GrpcWorkerStatusRunnerTest {
             try (var pin = endpoint.tryPinSchedulingGeneration()) {
                 assertNotNull(pin);
             }
-            assertSame(endpoint, directory.exactEndpoint(role, status.getIpPort(), status));
+            assertSame(endpoint, directory.exactEndpoint(role, status.getLogicalIpPort(), status));
             verifyNoInteractions(availability);
         } finally {
             registry.close();
@@ -755,11 +761,12 @@ class GrpcWorkerStatusRunnerTest {
                 .thenReturn(CompletableFuture.completedFuture(response));
         try {
             poll(status, directory, grpc, Runnable::run, 1L);
-            WorkerEndpoint endpoint = directory.exactEndpoint(role, status.getIpPort(), status);
+            WorkerEndpoint endpoint =
+                    directory.exactEndpoint(role, status.getLogicalIpPort(), status);
             DecodeEndpoint.ReservationHandle reservation = null;
             if (endpoint instanceof DecodeEndpoint decode) {
                 try (var pin = decode.tryPinSchedulingGeneration()) {
-                    reservation = decode.reserve(pin, 42L, 1L, 1L, 40);
+                    reservation = decode.reserve(pin, "42", 1L, 1L, 40);
                 }
             }
             when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
@@ -788,7 +795,7 @@ class GrpcWorkerStatusRunnerTest {
                 } else {
                     var decode = (DecodeEndpoint) endpoint;
                     var capacity = new DecodeEndpoint.AdmissionCapacity(0L, 100L);
-                    assertTrue(decode.shouldRetryDispatch(42L, capacity));
+                    assertTrue(decode.shouldRetryDispatch("42", capacity));
                     decode.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
                 }
                 return;
@@ -811,11 +818,11 @@ class GrpcWorkerStatusRunnerTest {
                         DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
                         decode.acquireDispatchPermit(reservation, capacity).status());
                 assertFalse(
-                        decode.shouldRetryDispatch(42L, capacity),
+                        decode.shouldRetryDispatch("42", capacity),
                         "free Decode capacity cannot trigger retry for an unavailable worker");
                 decode.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
                 assertTrue(
-                        decode.shouldRetryDispatch(42L, capacity),
+                        decode.shouldRetryDispatch("42", capacity),
                         "lost ownership must still wake a waiter for an unavailable worker");
             }
         } finally {
@@ -846,7 +853,7 @@ class GrpcWorkerStatusRunnerTest {
         try {
             poll(status, directory, grpc, Runnable::run, 1L);
             WorkerEndpoint endpoint =
-                    directory.exactEndpoint(RoleType.DECODE, status.getIpPort(), status);
+                    directory.exactEndpoint(RoleType.DECODE, status.getLogicalIpPort(), status);
             when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
                     .thenReturn(
                             CompletableFuture.completedFuture(
@@ -904,7 +911,7 @@ class GrpcWorkerStatusRunnerTest {
             java.util.List<Runnable> applications = new java.util.ArrayList<>();
             poll(status, directory, grpc, Runnable::run, 1L);
             WorkerEndpoint endpoint =
-                    directory.exactEndpoint(RoleType.DECODE, status.getIpPort(), status);
+                    directory.exactEndpoint(RoleType.DECODE, status.getLogicalIpPort(), status);
             WorkerStatus.CommittedWorkerStatus committed = status.committedWorkerStatus();
             poll(status, directory, grpc, applications::add, 2L);
             for (int index = 3; index <= 7; index++) {
@@ -962,7 +969,7 @@ class GrpcWorkerStatusRunnerTest {
             long cycle) {
         new GrpcWorkerStatusRunner(
                         "model",
-                        status.getIpPort(),
+                        status.getLogicalIpPort(),
                         status.getRole(),
                         status,
                         status.tryBeginStatusPoll(cycle),
@@ -996,7 +1003,7 @@ class GrpcWorkerStatusRunnerTest {
         for (int index = 0; index < 4; index++) {
             new GrpcWorkerStatusRunner(
                             "model",
-                            status.getIpPort(),
+                            status.getLogicalIpPort(),
                             RoleType.DECODE,
                             status,
                             status.tryBeginStatusPoll(index),
@@ -1013,7 +1020,8 @@ class GrpcWorkerStatusRunnerTest {
                 0, status.pollHealth().consecutiveWorkerFailures());
         org.junit.jupiter.api.Assertions.assertEquals(
                 "OK", status.trace().snapshot().statusPoll().rpcResult());
-        assertSame(status, directory.statusSnapshot(RoleType.DECODE).get(status.getIpPort()));
+        assertSame(
+                status, directory.statusSnapshot(RoleType.DECODE).get(status.getLogicalIpPort()));
     }
 
     @ParameterizedTest
@@ -1041,7 +1049,7 @@ class GrpcWorkerStatusRunnerTest {
         java.util.List<Runnable> queue = new java.util.ArrayList<>();
         new GrpcWorkerStatusRunner(
                         "test-model",
-                        status.getIpPort(),
+                        status.getLogicalIpPort(),
                         RoleType.DECODE,
                         status,
                         lease,
@@ -1129,7 +1137,7 @@ class GrpcWorkerStatusRunnerTest {
         var runner =
                 new GrpcWorkerStatusRunner(
                         "test-model",
-                        status.getIpPort(),
+                        status.getLogicalIpPort(),
                         RoleType.DECODE,
                         status,
                         lease,
@@ -1193,7 +1201,7 @@ class GrpcWorkerStatusRunnerTest {
 
         new GrpcWorkerStatusRunner(
                         "test-model",
-                        status.getIpPort(),
+                        status.getLogicalIpPort(),
                         RoleType.DECODE,
                         status,
                         status.tryBeginStatusPoll(1L),
@@ -1229,7 +1237,8 @@ class GrpcWorkerStatusRunnerTest {
                             if (!message.startsWith("event=worker_trace ")
                                     || !message.contains(
                                             " generation=" + status.getGenerationId() + " ")
-                                    || !message.contains(" endpoint=" + status.getIpPort() + " ")) {
+                                    || !message.contains(
+                                            " endpoint=" + status.getLogicalIpPort() + " ")) {
                                 return;
                             }
                             messages.add(message);
@@ -1264,7 +1273,7 @@ class GrpcWorkerStatusRunnerTest {
                         RoleType.PREFILL, "example-group", "127.0.0.1", 8080, 8081, "example-site");
         RetirementLogCapture logs = new RetirementLogCapture(status);
         WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
-        directory.currentOrDiscover(status.getRole(), status.getIpPort(), () -> status);
+        directory.currentOrDiscover(status.getRole(), status.getLogicalIpPort(), () -> status);
         CacheAwareService cache = mock(CacheAwareService.class);
         EngineGrpcService grpc = mock(EngineGrpcService.class);
         when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
@@ -1278,7 +1287,7 @@ class GrpcWorkerStatusRunnerTest {
                                         .build()));
         new GrpcWorkerStatusRunner(
                         "example-model",
-                        status.getIpPort(),
+                        status.getLogicalIpPort(),
                         RoleType.PREFILL,
                         status,
                         status.tryBeginStatusPoll(1L),
@@ -1303,7 +1312,7 @@ class GrpcWorkerStatusRunnerTest {
                 lease.pollTrace().record(Stage.RUNNER_SUBMITTED);
                 new GrpcWorkerStatusRunner(
                                 "example-model",
-                                status.getIpPort(),
+                                status.getLogicalIpPort(),
                                 RoleType.PREFILL,
                                 status,
                                 lease,
@@ -1327,9 +1336,10 @@ class GrpcWorkerStatusRunnerTest {
                 finished.get(5, java.util.concurrent.TimeUnit.SECONDS);
                 cleaner.retireUnavailableWorkers();
                 assertSame(
-                        status, directory.statusSnapshot(RoleType.PREFILL).get(status.getIpPort()));
+                        status,
+                        directory.statusSnapshot(RoleType.PREFILL).get(status.getLogicalIpPort()));
                 assertNull(status.retirementReason(), "deadlines do not prove worker failure");
-                verifyNoInteractions(cache);
+                verify(cache, never()).removeEngineBlockCache(any(WorkerStatus.class), any());
             }
             status.markRemovedFromDiscovery();
             cleaner.retireUnavailableWorkers();
@@ -1367,7 +1377,7 @@ class GrpcWorkerStatusRunnerTest {
                         RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test-site");
         RetirementLogCapture logs = new RetirementLogCapture(status);
         WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
-        directory.currentOrDiscover(status.getRole(), status.getIpPort(), () -> status);
+        directory.currentOrDiscover(status.getRole(), status.getLogicalIpPort(), () -> status);
         var lease = status.tryBeginStatusPoll(1L);
         var rpc = new CompletableFuture<EngineRpcService.WorkerStatusPB>();
         EngineGrpcService grpc = mock(EngineGrpcService.class);
@@ -1377,7 +1387,7 @@ class GrpcWorkerStatusRunnerTest {
         CacheAwareService cache = mock(CacheAwareService.class);
         new GrpcWorkerStatusRunner(
                         "test-model",
-                        status.getIpPort(),
+                        status.getLogicalIpPort(),
                         RoleType.DECODE,
                         status,
                         lease,
@@ -1414,7 +1424,7 @@ class GrpcWorkerStatusRunnerTest {
             detached =
                     directory.beginRetirement(
                             RoleType.DECODE,
-                            status.getIpPort(),
+                            status.getLogicalIpPort(),
                             status,
                             "DISCOVERY_TOPOLOGY_CHANGED");
         } finally {
@@ -1422,7 +1432,7 @@ class GrpcWorkerStatusRunnerTest {
         }
         try (logs) {
             directory.completeRetirement(
-                    RoleType.DECODE, status.getIpPort(), status, detached, cache, logger);
+                    RoleType.DECODE, status.getLogicalIpPort(), status, detached, cache, logger);
             String json = logs.awaitFirst();
             assertTrue(json.contains("rpc:OK"));
             assertTrue(json.contains("stage:LEASE_RELEASED"));
@@ -1434,7 +1444,7 @@ class GrpcWorkerStatusRunnerTest {
             queue.removeFirst().run();
             assertTrue(status.trace().snapshot().statusPoll().leaseReleased());
             assertNull(
-                    registry.get(RoleType.DECODE, status.getIpPort()),
+                    registry.get(RoleType.DECODE, status.getLogicalIpPort()),
                     "late callback must not resurrect a retired worker");
         }
     }
@@ -1458,7 +1468,7 @@ class GrpcWorkerStatusRunnerTest {
         var callback = new java.util.concurrent.atomic.AtomicReference<Thread>();
         new GrpcWorkerStatusRunner(
                         "test-model",
-                        status.getIpPort(),
+                        status.getLogicalIpPort(),
                         RoleType.DECODE,
                         status,
                         lease,
@@ -1515,7 +1525,7 @@ class GrpcWorkerStatusRunnerTest {
             }
         }
         assertTrue(status.trace().snapshot().statusPoll().leaseReleased());
-        assertNotNull(registry.get(RoleType.DECODE, status.getIpPort()));
+        assertNotNull(registry.get(RoleType.DECODE, status.getLogicalIpPort()));
     }
 
     @ParameterizedTest
@@ -1536,18 +1546,8 @@ class GrpcWorkerStatusRunnerTest {
         EngineGrpcService grpc = mock(EngineGrpcService.class);
         when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
                 .thenReturn(
-                        invalidRole
-                                ? CompletableFuture.completedFuture(
-                                        EngineRpcService.WorkerStatusPB.newBuilder()
-                                                .setRoleType(
-                                                        EngineRpcService.RoleTypePB
-                                                                .ROLE_TYPE_PREFILL)
-                                                .setRole("DECODE")
-                                                .setStatusVersion(1L)
-                                                .setAlive(true)
-                                                .build())
-                                : CompletableFuture.failedFuture(
-                                        io.grpc.Status.UNAVAILABLE.asRuntimeException()));
+                        CompletableFuture.failedFuture(
+                                io.grpc.Status.UNAVAILABLE.asRuntimeException()));
 
         ExpirationCleaner cleaner = new ExpirationCleaner(cache, directory);
         for (int failure = 1; failure <= 3; failure++) {
@@ -1609,7 +1609,7 @@ class GrpcWorkerStatusRunnerTest {
     @ParameterizedTest
     @CsvSource({
         "DEADLINE_EXCEEDED,WORKER_STATUS_GRPC_TIMEOUT",
-        "UNAVAILABLE,WORKER_SERVICE_UNAVAILABLE"
+        "UNAVAILABLE,WORKER_STATUS_GRPC_FAILED"
     })
     void reportsFailedRpcLatencyWithSameWorkerTags(
             String grpcCode, BalanceStatusEnum expectedError) {
@@ -1633,7 +1633,7 @@ class GrpcWorkerStatusRunnerTest {
                         RoleType.PREFILL,
                         null,
                         status,
-                        status.tryBeginStatusPoll(),
+                        status.tryBeginStatusPoll(1L),
                         directory,
                         reporter,
                         grpc,
@@ -1644,7 +1644,13 @@ class GrpcWorkerStatusRunnerTest {
 
         ArgumentCaptor<Long> latency = ArgumentCaptor.forClass(Long.class);
         verify(reporter)
-                .reportStatusCheckerFail(expectedError, status.getMetricIpPort(), RoleType.PREFILL);
+                .reportStatusCheckerFail(
+                        eq(status.getMetricIpPort()),
+                        eq(expectedError),
+                        eq(RoleType.PREFILL),
+                        eq(Stage.RPC_COMPLETED),
+                        anyString(),
+                        any());
         verify(reporter)
                 .reportStatusCheckFailureLatency(
                         org.mockito.ArgumentMatchers.eq(expectedError),
@@ -1704,7 +1710,7 @@ class GrpcWorkerStatusRunnerTest {
                             RoleType.DECODE,
                             null,
                             status,
-                            status.tryBeginStatusPoll(),
+                            status.tryBeginStatusPoll(1L),
                             directory,
                             reporter,
                             grpc,
@@ -1851,7 +1857,7 @@ class GrpcWorkerStatusRunnerTest {
         var analysis = ArgumentCaptor.forClass(GrpcFailure.Analysis.class);
         verify(reporter)
                 .reportStatusCheckerFail(
-                        eq("test-model"),
+                        eq("127.0.0.1:8080"),
                         any(BalanceStatusEnum.class),
                         eq(RoleType.DECODE),
                         eq(stage),

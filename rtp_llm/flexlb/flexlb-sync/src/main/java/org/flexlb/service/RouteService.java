@@ -1,7 +1,6 @@
 package org.flexlb.service;
 
 import com.google.protobuf.ByteString;
-
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.RequestScheduler;
@@ -98,7 +97,7 @@ public class RouteService {
                 && !hasValidGenerateInput(balanceContext)) {
             Logger.warn(
                     "{} dispatcher rejected request without serialized generate input:"
-                        + " request_id={}",
+                            + " request_id={}",
                     balanceContext.getConfig().getDispatcher().typeName(),
                     balanceContext.getRequestId());
             return CompletableFuture.completedFuture(

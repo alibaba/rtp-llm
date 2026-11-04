@@ -30,7 +30,7 @@ class PrefillActiveIndexTest {
 
     @Test
     void decodeSubscriptionIsSharedAndReleasedWithLastQueuedIdentity() {
-        Runnable wake = () -> { };
+        Runnable wake = () -> {};
         var index = PrefillActiveIndex.ordered(16, ORDER, wake);
         var decode = mock(DecodeEndpoint.class);
         var first = item(1, 50);

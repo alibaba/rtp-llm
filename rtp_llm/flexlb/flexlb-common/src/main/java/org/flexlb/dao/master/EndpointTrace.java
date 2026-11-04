@@ -80,17 +80,35 @@ public final class EndpointTrace {
         UNAVAILABLE_DECISION(true);
 
         private final boolean retirement;
-        Stage() {this(false);}
-        Stage(boolean retirement) {this.retirement = retirement;}
+
+        Stage() {
+            this(false);
+        }
+
+        Stage(boolean retirement) {
+            this.retirement = retirement;
+        }
     }
 
-    public record PollTimes(long rpcStartMs, long rpcResultMs, long convertStartMs,
-                            long convertEndMs, long callbackReadyMs, long callbackStartMs,
-                            long workerAttemptMs, long workerAcquiredMs, long healthMs,
-                            long commitMs, long workerReleasedMs, long leaseEndMs,
-                            long callbackEndMs,
-                            long runnerSubmitMs, long runnerStartMs,
-                            long cacheAttemptMs, long cacheAcquiredMs, long cacheReleasedMs) {
+    public record PollTimes(
+            long rpcStartMs,
+            long rpcResultMs,
+            long convertStartMs,
+            long convertEndMs,
+            long callbackReadyMs,
+            long callbackStartMs,
+            long workerAttemptMs,
+            long workerAcquiredMs,
+            long healthMs,
+            long commitMs,
+            long workerReleasedMs,
+            long leaseEndMs,
+            long callbackEndMs,
+            long runnerSubmitMs,
+            long runnerStartMs,
+            long cacheAttemptMs,
+            long cacheAcquiredMs,
+            long cacheReleasedMs) {
         private void append(StringBuilder text) {
             text.append("{rpc:");
             value(text, rpcStartMs);
@@ -132,36 +150,77 @@ public final class EndpointTrace {
         }
 
         private static void value(StringBuilder text, long value) {
-            if (value < 0L) {text.append('-');} else {text.append(value);}
+            if (value < 0L) {
+                text.append('-');
+            } else {
+                text.append(value);
+            }
         }
     }
 
     public record IndexWait(long ageUs, long totalWaitUs, long contendedHoldUs, long count) {}
 
-    public record PollSnapshot(long sequence, long syncCycleId, String kind, long startedAtMs,
-                               String stage, boolean leaseReleased,
-                               String rpcResult, String failureStage, String error,
-                               PollTimes times, IndexWait indexWait, long skippedBusy, long rpcTimeoutMs,
-                               String outcome) {
-        public String pollId() {return kind + "-" + sequence;}
+    public record PollSnapshot(
+            long sequence,
+            long syncCycleId,
+            String kind,
+            long startedAtMs,
+            String stage,
+            boolean leaseReleased,
+            String rpcResult,
+            String failureStage,
+            String error,
+            PollTimes times,
+            IndexWait indexWait,
+            long skippedBusy,
+            long rpcTimeoutMs,
+            String outcome) {
+        public String pollId() {
+            return kind + "-" + sequence;
+        }
     }
 
-    public record Snapshot(long capturedAtMs, boolean retiring, String phase,
-                           String unavailableReason, long decidedAtMs, long lastSuccessAgeUs,
-                           long consecutiveFailures, long gateClosedAtMs,
-                           long cleanupWaitUs, long cleanupHoldUs,
-                           long scannedKeys, long removedMappings,
-                           String error, PollSnapshot statusPoll, PollSnapshot cachePoll) {
+    public record Snapshot(
+            long capturedAtMs,
+            boolean retiring,
+            String phase,
+            String unavailableReason,
+            long decidedAtMs,
+            long lastSuccessAgeUs,
+            long consecutiveFailures,
+            long gateClosedAtMs,
+            long cleanupWaitUs,
+            long cleanupHoldUs,
+            long scannedKeys,
+            long removedMappings,
+            String error,
+            PollSnapshot statusPoll,
+            PollSnapshot cachePoll) {
         public String compact() {
             var text = new StringBuilder().append("phase=").append(phase);
             if (retiring) {
-                text.append(" reason=").append(unavailableReason).append(" decisionMs=").append(decidedAtMs)
-                    .append(" lastSuccessAgeUs=").append(lastSuccessAgeUs)
-                    .append(" failures=").append(consecutiveFailures).append(" gateMs=").append(gateClosedAtMs)
-                    .append(" cleanupWaitUs=").append(cleanupWaitUs).append(" cleanupHoldUs=").append(cleanupHoldUs)
-                    .append(" scanned=").append(scannedKeys).append(" removed=").append(removedMappings);
+                text.append(" reason=")
+                        .append(unavailableReason)
+                        .append(" decisionMs=")
+                        .append(decidedAtMs)
+                        .append(" lastSuccessAgeUs=")
+                        .append(lastSuccessAgeUs)
+                        .append(" failures=")
+                        .append(consecutiveFailures)
+                        .append(" gateMs=")
+                        .append(gateClosedAtMs)
+                        .append(" cleanupWaitUs=")
+                        .append(cleanupWaitUs)
+                        .append(" cleanupHoldUs=")
+                        .append(cleanupHoldUs)
+                        .append(" scanned=")
+                        .append(scannedKeys)
+                        .append(" removed=")
+                        .append(removedMappings);
             }
-            if (error != null) {text.append(" error=").append(error);}
+            if (error != null) {
+                text.append(" error=").append(error);
+            }
             appendPoll(text, "statusPoll", statusPoll);
             appendPoll(text, "cachePoll", cachePoll);
             return text.toString();
@@ -169,20 +228,41 @@ public final class EndpointTrace {
 
         private static void appendPoll(StringBuilder text, String label, PollSnapshot poll) {
             if (poll != null) {
-                text.append(' ').append(label).append("={id:").append(poll.pollId()).append(",cycle:").append(poll.syncCycleId())
-                    .append(",startMs:").append(poll.startedAtMs()).append(",stage:").append(poll.stage())
-                    .append(",rpc:").append(poll.rpcResult())
-                    .append(",rpcTimeoutMs:").append(poll.rpcTimeoutMs()).append(",released:").append(poll.leaseReleased())
-                    .append(",busySkips:").append(poll.skippedBusy());
+                text.append(' ')
+                        .append(label)
+                        .append("={id:")
+                        .append(poll.pollId())
+                        .append(",cycle:")
+                        .append(poll.syncCycleId())
+                        .append(",startMs:")
+                        .append(poll.startedAtMs())
+                        .append(",stage:")
+                        .append(poll.stage())
+                        .append(",rpc:")
+                        .append(poll.rpcResult())
+                        .append(",rpcTimeoutMs:")
+                        .append(poll.rpcTimeoutMs())
+                        .append(",released:")
+                        .append(poll.leaseReleased())
+                        .append(",busySkips:")
+                        .append(poll.skippedBusy());
                 if (poll.error() != null) {
-                    text.append(",failure:").append(poll.failureStage()).append(",error:").append(poll.error());
+                    text.append(",failure:")
+                            .append(poll.failureStage())
+                            .append(",error:")
+                            .append(poll.error());
                 }
-                if (poll.outcome() != null) {text.append(",outcome:").append(poll.outcome());}
+                if (poll.outcome() != null) {
+                    text.append(",outcome:").append(poll.outcome());
+                }
                 var wait = poll.indexWait();
                 if (wait.count() != 0) {
-                    text.append(",gWaitUs:").append(wait.ageUs())
-                        .append(",gTotalUs:").append(wait.totalWaitUs()).append(",gHoldUs:").append(
-                            wait.contendedHoldUs());
+                    text.append(",gWaitUs:")
+                            .append(wait.ageUs())
+                            .append(",gTotalUs:")
+                            .append(wait.totalWaitUs())
+                            .append(",gHoldUs:")
+                            .append(wait.contendedHoldUs());
                 }
                 text.append(",tMs:");
                 poll.times().append(text);
@@ -214,18 +294,22 @@ public final class EndpointTrace {
     private volatile long removedMappings;
 
     public void record(Stage stage) {
-        if (stage == Stage.ENDPOINT_PUBLISHED && !endpointPublished.compareAndSet(false, true)) {return;}
+        if (stage == Stage.ENDPOINT_PUBLISHED && !endpointPublished.compareAndSet(false, true)) {
+            return;
+        }
         if (stage == Stage.ENDPOINT_GATE_CLOSED
-                && !gateClosedAtMs.compareAndSet(0L, System.currentTimeMillis())) {return;}
+                && !gateClosedAtMs.compareAndSet(0L, System.currentTimeMillis())) {
+            return;
+        }
         switch (stage) {
             case GENERATION_RETIRING -> retiring = true;
-            case ENDPOINT_WITHDRAWN ->
-                    gateClosedAtMs.compareAndSet(0L, System.currentTimeMillis());
+            case ENDPOINT_WITHDRAWN -> gateClosedAtMs.compareAndSet(0L, System.currentTimeMillis());
             case CACHE_INDEX_LOCK_ATTEMPT -> cleanupAttemptNanos = System.nanoTime();
             case CACHE_INDEX_LOCK_ACQUIRED -> {
                 long now = System.nanoTime();
                 long started = cleanupAttemptNanos;
-                // Close the active interval before publishing its total to avoid double counting in snapshots.
+                // Close the active interval before publishing its total to avoid double counting in
+                // snapshots.
                 cleanupAttemptNanos = 0L;
                 cleanupWaitUs = Math.max(0L, cleanupWaitUs) + elapsedUs(started, now);
                 cleanupAcquiredNanos = now;
@@ -236,10 +320,12 @@ public final class EndpointTrace {
                 cleanupAcquiredNanos = 0L;
                 cleanupHoldUs = Math.max(0L, cleanupHoldUs) + elapsedUs(started, now);
             }
-            default -> { }
+            default -> {}
         }
         phase = stage.name();
-        if (stage.retirement) {retirementPhase = stage.name();}
+        if (stage.retirement) {
+            retirementPhase = stage.name();
+        }
     }
 
     public void record(Stage stage, Throwable failure) {
@@ -257,13 +343,17 @@ public final class EndpointTrace {
     public void recordUnavailable(String reason, long lastSuccessUs, long failures) {
         unavailableReason = bounded(reason, MAX_REASON_CHARS);
         decidedAtMs = System.currentTimeMillis();
-        lastSuccessAgeUs = lastSuccessUs == 0L ? -1L
-                : TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - lastSuccessUs;
+        lastSuccessAgeUs =
+                lastSuccessUs == 0L
+                        ? -1L
+                        : TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - lastSuccessUs;
         consecutiveFailures = failures;
         record(Stage.UNAVAILABLE_DECISION);
     }
 
-    public String unavailableReason() {return unavailableReason;}
+    public String unavailableReason() {
+        return unavailableReason;
+    }
 
     public void recordCleanupCounts(long scanned, long removed) {
         scannedKeys = scanned;
@@ -327,11 +417,17 @@ public final class EndpointTrace {
             this.syncCycleId = cycle;
         }
 
-        public void record(Stage point) {record(point, (Throwable) null);}
+        public void record(Stage point) {
+            record(point, (Throwable) null);
+        }
 
-        public Stage failureStage() {return firstFailureStage.get();}
+        public Stage failureStage() {
+            return firstFailureStage.get();
+        }
 
-        public boolean hasCallbackStarted() {return callbackStartedNanos != 0L;}
+        public boolean hasCallbackStarted() {
+            return callbackStartedNanos != 0L;
+        }
 
         public void record(Stage point, Throwable failure) {
             long now = System.nanoTime();
@@ -366,13 +462,17 @@ public final class EndpointTrace {
                 }
                 case CACHE_INDEX_LOCK_ACQUIRED -> {
                     indexAcquiredNanos = now;
-                    if (indexWaitStartedNanos != 0L) {indexTotalWaitUs += elapsedUs(indexWaitStartedNanos, now);}
+                    if (indexWaitStartedNanos != 0L) {
+                        indexTotalWaitUs += elapsedUs(indexWaitStartedNanos, now);
+                    }
                     indexWaitStartedNanos = 0L;
                 }
                 case CACHE_INDEX_LOCK_RELEASED -> {
-                    if (indexAcquiredNanos != 0L) {indexContendedHoldUs += elapsedUs(indexAcquiredNanos, now);}
+                    if (indexAcquiredNanos != 0L) {
+                        indexContendedHoldUs += elapsedUs(indexAcquiredNanos, now);
+                    }
                 }
-                default -> { }
+                default -> {}
             }
             stage = point.name();
             if (failure != null && firstFailureStage.compareAndSet(null, point)) {
@@ -390,34 +490,61 @@ public final class EndpointTrace {
             record(Stage.RPC_STARTED);
         }
 
-        public void skippedBusy() {skippedBusy.incrementAndGet();}
+        public void skippedBusy() {
+            skippedBusy.incrementAndGet();
+        }
 
         private PollSnapshot snapshot(long now) {
             Stage failureStage = firstFailureStage.get();
             long waitStarted = indexWaitStartedNanos;
-            PollTimes times = new PollTimes(
-                    sinceStartMs(rpcStartedNanos), sinceStartMs(rpcCompletedNanos),
-                    sinceStartMs(conversionStartedNanos), sinceStartMs(conversionEndedNanos),
-                    sinceStartMs(callbackReadyNanos), sinceStartMs(callbackStartedNanos),
-                    sinceStartMs(workerLockAttemptNanos), sinceStartMs(workerLockAcquiredNanos),
-                    sinceStartMs(healthUpdatedNanos), sinceStartMs(statusCommittedNanos),
-                    sinceStartMs(workerLockReleasedNanos), sinceStartMs(leaseReleasedNanos),
-                    sinceStartMs(callbackEndedNanos),
-                    sinceStartMs(runnerSubmittedNanos), sinceStartMs(runnerStartedNanos),
-                    sinceStartMs(cacheLockAttemptNanos), sinceStartMs(cacheLockAcquiredNanos),
-                    sinceStartMs(cacheLockReleasedNanos));
-            IndexWait wait = new IndexWait(waitStarted == 0L ? 0L : elapsedUs(waitStarted, now),
-                    indexTotalWaitUs, indexContendedHoldUs, indexCount);
-            return new PollSnapshot(id, syncCycleId, kind, startedAtMs,
-                    stage, times.leaseEndMs() >= 0L, rpcResult,
-                    failureStage == null ? null : failureStage.name(), failureStage == null ? null : error,
-                    times, wait, skippedBusy.get(), rpcTimeoutMs, outcome);
+            PollTimes times =
+                    new PollTimes(
+                            sinceStartMs(rpcStartedNanos),
+                            sinceStartMs(rpcCompletedNanos),
+                            sinceStartMs(conversionStartedNanos),
+                            sinceStartMs(conversionEndedNanos),
+                            sinceStartMs(callbackReadyNanos),
+                            sinceStartMs(callbackStartedNanos),
+                            sinceStartMs(workerLockAttemptNanos),
+                            sinceStartMs(workerLockAcquiredNanos),
+                            sinceStartMs(healthUpdatedNanos),
+                            sinceStartMs(statusCommittedNanos),
+                            sinceStartMs(workerLockReleasedNanos),
+                            sinceStartMs(leaseReleasedNanos),
+                            sinceStartMs(callbackEndedNanos),
+                            sinceStartMs(runnerSubmittedNanos),
+                            sinceStartMs(runnerStartedNanos),
+                            sinceStartMs(cacheLockAttemptNanos),
+                            sinceStartMs(cacheLockAcquiredNanos),
+                            sinceStartMs(cacheLockReleasedNanos));
+            IndexWait wait =
+                    new IndexWait(
+                            waitStarted == 0L ? 0L : elapsedUs(waitStarted, now),
+                            indexTotalWaitUs,
+                            indexContendedHoldUs,
+                            indexCount);
+            return new PollSnapshot(
+                    id,
+                    syncCycleId,
+                    kind,
+                    startedAtMs,
+                    stage,
+                    times.leaseEndMs() >= 0L,
+                    rpcResult,
+                    failureStage == null ? null : failureStage.name(),
+                    failureStage == null ? null : error,
+                    times,
+                    wait,
+                    skippedBusy.get(),
+                    rpcTimeoutMs,
+                    outcome);
         }
 
         private long sinceStartMs(long atNanos) {
-            return atNanos == 0L ? -1L : TimeUnit.NANOSECONDS.toMillis(Math.max(0L, atNanos - startedNanos));
+            return atNanos == 0L
+                    ? -1L
+                    : TimeUnit.NANOSECONDS.toMillis(Math.max(0L, atNanos - startedNanos));
         }
-
     }
 
     /** Captures both poll kinds without locks; concurrent fields can describe adjacent instants. */
@@ -427,35 +554,55 @@ public final class EndpointTrace {
         boolean isRetiring = retiring;
         long now = System.nanoTime();
         // Read totals before active starts, matching record's clear-before-accumulate order.
-        return new Snapshot(System.currentTimeMillis(), isRetiring, isRetiring ? retirementPhase : phase,
-                unavailableReason, decidedAtMs, lastSuccessAgeUs, consecutiveFailures,
-                gateClosedAtMs.get(), ongoingTotalUs(cleanupWaitUs, cleanupAttemptNanos, now),
+        return new Snapshot(
+                System.currentTimeMillis(),
+                isRetiring,
+                isRetiring ? retirementPhase : phase,
+                unavailableReason,
+                decidedAtMs,
+                lastSuccessAgeUs,
+                consecutiveFailures,
+                gateClosedAtMs.get(),
+                ongoingTotalUs(cleanupWaitUs, cleanupAttemptNanos, now),
                 ongoingTotalUs(cleanupHoldUs, cleanupAcquiredNanos, now),
-                scannedKeys, removedMappings,
-                error.get(), statusPoll == null ? null : statusPoll.snapshot(now),
+                scannedKeys,
+                removedMappings,
+                error.get(),
+                statusPoll == null ? null : statusPoll.snapshot(now),
                 cachePoll == null ? null : cachePoll.snapshot(now));
     }
 
     private static long ongoingTotalUs(long completedUs, long startNanos, long now) {
-        return startNanos == 0L ? completedUs : Math.max(0L, completedUs) + elapsedUs(startNanos, now);
+        return startNanos == 0L
+                ? completedUs
+                : Math.max(0L, completedUs) + elapsedUs(startNanos, now);
     }
 
     private static long elapsedUs(long startNanos, long endNanos) {
-        return startNanos == 0L ? -1L : TimeUnit.NANOSECONDS.toMicros(Math.max(0L, endNanos - startNanos));
+        return startNanos == 0L
+                ? -1L
+                : TimeUnit.NANOSECONDS.toMicros(Math.max(0L, endNanos - startNanos));
     }
 
     private static String errorSummary(Throwable failure) {
-        if (failure == null) {return null;}
+        if (failure == null) {
+            return null;
+        }
         var text = new StringBuilder();
         try {
             Throwable unwrapped = unwrap(failure);
-            // Preserve types before the bounded message: an outer description must not hide the root cause.
+            // Preserve types before the bounded message: an outer description must not hide the
+            // root cause.
             appendCauseTypes(text, unwrapped);
             appendSuppressedTypes(text, failure);
             String message = unwrapped.getMessage();
-            if (message != null) {text.append(':').append(bounded(message, MAX_ERROR_MESSAGE_CHARS));}
+            if (message != null) {
+                text.append(':').append(bounded(message, MAX_ERROR_MESSAGE_CHARS));
+            }
         } catch (RuntimeException | LinkageError ignored) {
-            if (text.isEmpty()) {text.append(bounded(failure.getClass().getName(), MAX_ERROR_TYPE_CHARS));}
+            if (text.isEmpty()) {
+                text.append(bounded(failure.getClass().getName(), MAX_ERROR_TYPE_CHARS));
+            }
         }
         return text.toString();
     }
@@ -464,27 +611,41 @@ public final class EndpointTrace {
         var seen = new IdentityHashMap<Throwable, Boolean>();
         int depth = 0;
         while (failure != null && depth < MAX_CAUSE_DEPTH) {
-            if (depth != 0) {text.append("->");}
+            if (depth != 0) {
+                text.append("->");
+            }
             if (seen.put(failure, Boolean.TRUE) != null) {
                 text.append("[cycle]");
                 return;
             }
             String type = failure.getClass().getSimpleName();
-            text.append(bounded(type.isEmpty() ? failure.getClass().getName() : type, MAX_ERROR_TYPE_CHARS));
+            text.append(
+                    bounded(
+                            type.isEmpty() ? failure.getClass().getName() : type,
+                            MAX_ERROR_TYPE_CHARS));
             failure = failure.getCause();
             depth++;
         }
-        if (failure != null) {text.append("->[truncated]");}
+        if (failure != null) {
+            text.append("->[truncated]");
+        }
     }
 
     private static void appendSuppressedTypes(StringBuilder text, Throwable failure) {
         var seen = new IdentityHashMap<Throwable, Boolean>();
         int count = 0;
-        for (int depth = 0; failure != null && depth < MAX_CAUSE_DEPTH
-                && seen.put(failure, Boolean.TRUE) == null; depth++, failure = failure.getCause()) {
+        for (int depth = 0;
+                failure != null
+                        && depth < MAX_CAUSE_DEPTH
+                        && seen.put(failure, Boolean.TRUE) == null;
+                depth++, failure = failure.getCause()) {
             for (Throwable suppressed : failure.getSuppressed()) {
                 // Suppressed attempts are diagnostic history, not the final failure's causal chain.
-                if (count == 0) {text.append(" suppressed=[");} else {text.append(';');}
+                if (count == 0) {
+                    text.append(" suppressed=[");
+                } else {
+                    text.append(';');
+                }
                 if (count == MAX_SUPPRESSED_ERRORS) {
                     text.append("[truncated]]");
                     return;
@@ -493,24 +654,36 @@ public final class EndpointTrace {
                 count++;
             }
         }
-        if (count != 0) {text.append(']');}
+        if (count != 0) {
+            text.append(']');
+        }
     }
 
     public static Throwable unwrap(Throwable failure) {
-        if (!(failure instanceof CompletionException || failure instanceof ExecutionException)) {return failure;}
+        if (!(failure instanceof CompletionException || failure instanceof ExecutionException)) {
+            return failure;
+        }
         var seen = new IdentityHashMap<Throwable, Boolean>();
-        for (int depth = 0; depth < MAX_CAUSE_DEPTH
-                && (failure instanceof CompletionException || failure instanceof ExecutionException)
-                && seen.put(failure, Boolean.TRUE) == null; depth++) {
+        for (int depth = 0;
+                depth < MAX_CAUSE_DEPTH
+                        && (failure instanceof CompletionException
+                                || failure instanceof ExecutionException)
+                        && seen.put(failure, Boolean.TRUE) == null;
+                depth++) {
             Throwable cause = failure.getCause();
-            if (cause == null) {break;}
+            if (cause == null) {
+                break;
+            }
             failure = cause;
         }
         return failure;
     }
 
     private static String bounded(String text, int limit) {
-        return text == null ? "UNKNOWN" : text.substring(0, Math.min(limit, text.length()))
-                .replace('\n', ' ').replace('\r', ' ');
+        return text == null
+                ? "UNKNOWN"
+                : text.substring(0, Math.min(limit, text.length()))
+                        .replace('\n', ' ')
+                        .replace('\r', ' ');
     }
 }

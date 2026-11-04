@@ -11,8 +11,9 @@ import io.netty.bootstrap.Bootstrap;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.engine.grpc.config.ChannelConfiguration;
+import org.flexlb.engine.grpc.core.GrpcChannelFactory;
+import org.flexlb.engine.grpc.core.GrpcTarget;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
-import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
@@ -40,7 +41,7 @@ class EngineGrpcClientKeepAliveTest {
     @Test
     void loadsChannelContextWithDefaultConfig() {
         try (AnnotationConfigApplicationContext context = createChannelContext()) {
-            assertNotNull(context.getBean(EngineGrpcClient.class));
+            assertNotNull(context.getBean(GrpcChannelFactory.class));
         }
     }
 
@@ -53,9 +54,9 @@ class EngineGrpcClientKeepAliveTest {
         bootstrapLogger.addAppender(appender);
 
         try (AnnotationConfigApplicationContext context = createChannelContext()) {
-            EngineGrpcClient factory = context.getBean(EngineGrpcClient.class);
-            ManagedChannel channel = factory.createChannel(AbstractGrpcClient.createKey(
-                    "127.0.0.1", 1, AbstractGrpcClient.ServiceType.WORKER_STATUS));
+            GrpcChannelFactory factory = context.getBean(GrpcChannelFactory.class);
+            ManagedChannel channel =
+                    factory.create(new GrpcTarget("127.0.0.1", 1), 8 * 1024 * 1024, true);
             try {
                 CountDownLatch stateChanged = new CountDownLatch(1);
                 channel.notifyWhenStateChanged(ConnectivityState.IDLE, stateChanged::countDown);
@@ -69,16 +70,19 @@ class EngineGrpcClientKeepAliveTest {
             appender.stop();
         }
 
-        assertFalse(appender.list.stream()
-                .map(ILoggingEvent::getFormattedMessage)
-                .anyMatch(message -> message.contains("Unknown channel option")
-                        && message.contains("TCP_USER_TIMEOUT")));
+        assertFalse(
+                appender.list.stream()
+                        .map(ILoggingEvent::getFormattedMessage)
+                        .anyMatch(
+                                message ->
+                                        message.contains("Unknown channel option")
+                                                && message.contains("TCP_USER_TIMEOUT")));
     }
 
     @Test
     void keepAliveDefaultsKeepTheOriginalChannelBehavior() {
         try (AnnotationConfigApplicationContext context = createChannelContext()) {
-            EngineGrpcClient factory = context.getBean(EngineGrpcClient.class);
+            GrpcChannelFactory factory = context.getBean(GrpcChannelFactory.class);
             assertEquals(2_000L, factory.getKeepAliveTimeMillis());
             assertTrue(factory.isKeepAliveWithoutCalls());
         }
@@ -86,17 +90,28 @@ class EngineGrpcClientKeepAliveTest {
 
     @Test
     void keepAliveIsConfiguredFromPropertiesAndValidated() {
-        try (AnnotationConfigApplicationContext context = createChannelContext(Map.of(
-                EngineGrpcClient.KEEP_ALIVE_TIME_PROPERTY, "30000",
-                EngineGrpcClient.KEEP_ALIVE_WITHOUT_CALLS_PROPERTY, "false"))) {
-            EngineGrpcClient factory = context.getBean(EngineGrpcClient.class);
+        try (AnnotationConfigApplicationContext context =
+                createChannelContext(
+                        Map.of(
+                                GrpcChannelFactory.KEEP_ALIVE_TIME_PROPERTY, "30000",
+                                GrpcChannelFactory.KEEP_ALIVE_WITHOUT_CALLS_PROPERTY, "false"))) {
+            GrpcChannelFactory factory = context.getBean(GrpcChannelFactory.class);
             assertEquals(30_000L, factory.getKeepAliveTimeMillis());
             assertFalse(factory.isKeepAliveWithoutCalls());
         }
-        for (String invalid : new String[]{"0", "-1"}) {
-            BeanCreationException error = assertThrows(BeanCreationException.class,
-                    () -> createChannelContext(Map.of(EngineGrpcClient.KEEP_ALIVE_TIME_PROPERTY, invalid)));
-            assertTrue(NestedExceptionUtils.getMostSpecificCause(error).getMessage().contains("keepAliveTimeMillis"),
+        for (String invalid : new String[] {"0", "-1"}) {
+            BeanCreationException error =
+                    assertThrows(
+                            BeanCreationException.class,
+                            () ->
+                                    createChannelContext(
+                                            Map.of(
+                                                    GrpcChannelFactory.KEEP_ALIVE_TIME_PROPERTY,
+                                                    invalid)));
+            assertTrue(
+                    NestedExceptionUtils.getMostSpecificCause(error)
+                            .getMessage()
+                            .contains("keepAliveTimeMillis"),
                     error.getMessage());
         }
     }
@@ -109,23 +124,38 @@ class EngineGrpcClientKeepAliveTest {
      * that behavior, which rtp-llm's tolerant server does not mind; turning the setting off avoids it.
      */
     @Test
-    void keepAliveWithoutCallsSettingDecidesWhetherAnIdleChannelSurvivesDefaultServerRules() throws Exception {
-        Server server = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
-                .build()
-                .start();
+    void keepAliveWithoutCallsSettingDecidesWhetherAnIdleChannelSurvivesDefaultServerRules()
+            throws Exception {
+        Server server =
+                NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
+                        .build()
+                        .start();
         try (AnnotationConfigApplicationContext pingingContext = createChannelContext();
-             AnnotationConfigApplicationContext quietContext = createChannelContext(
-                     Map.of(EngineGrpcClient.KEEP_ALIVE_WITHOUT_CALLS_PROPERTY, "false"))) {
-            String channelKey = AbstractGrpcClient.createKey(
-                    "127.0.0.1", server.getPort(), AbstractGrpcClient.ServiceType.WORKER_STATUS);
-            ManagedChannel pinging = pingingContext.getBean(EngineGrpcClient.class).createChannel(channelKey);
-            ManagedChannel quiet = quietContext.getBean(EngineGrpcClient.class).createChannel(channelKey);
+                AnnotationConfigApplicationContext quietContext =
+                        createChannelContext(
+                                Map.of(
+                                        GrpcChannelFactory.KEEP_ALIVE_WITHOUT_CALLS_PROPERTY,
+                                        "false"))) {
+            GrpcTarget channelKey = new GrpcTarget("127.0.0.1", server.getPort());
+            ManagedChannel pinging =
+                    pingingContext
+                            .getBean(GrpcChannelFactory.class)
+                            .create(channelKey, 8 * 1024 * 1024, true);
+            ManagedChannel quiet =
+                    quietContext
+                            .getBean(GrpcChannelFactory.class)
+                            .create(channelKey, 8 * 1024 * 1024, true);
             try {
                 waitUntilReady(pinging);
                 waitUntilReady(quiet);
-                boolean pingingLeftReady = stateChangesWithin(pinging, ConnectivityState.READY, 40_000);
-                assertTrue(pingingLeftReady, "default channel should be closed by the server's too_many_pings");
-                assertEquals(ConnectivityState.READY, quiet.getState(false),
+                boolean pingingLeftReady =
+                        stateChangesWithin(pinging, ConnectivityState.READY, 40_000);
+                assertTrue(
+                        pingingLeftReady,
+                        "default channel should be closed by the server's too_many_pings");
+                assertEquals(
+                        ConnectivityState.READY,
+                        quiet.getState(false),
                         "channel that does not ping while idle was closed by the server");
             } finally {
                 pinging.shutdownNow();
@@ -139,12 +169,15 @@ class EngineGrpcClientKeepAliveTest {
     private static void waitUntilReady(ManagedChannel channel) throws InterruptedException {
         ConnectivityState state = channel.getState(true);
         while (state != ConnectivityState.READY) {
-            assertTrue(stateChangesWithin(channel, state, 5_000), "channel did not become READY, state=" + state);
+            assertTrue(
+                    stateChangesWithin(channel, state, 5_000),
+                    "channel did not become READY, state=" + state);
             state = channel.getState(false);
         }
     }
 
-    private static boolean stateChangesWithin(ManagedChannel channel, ConnectivityState currentState, long timeoutMillis)
+    private static boolean stateChangesWithin(
+            ManagedChannel channel, ConnectivityState currentState, long timeoutMillis)
             throws InterruptedException {
         CountDownLatch stateChanged = new CountDownLatch(1);
         channel.notifyWhenStateChanged(currentState, stateChanged::countDown);
@@ -155,15 +188,17 @@ class EngineGrpcClientKeepAliveTest {
         return createChannelContext(Map.of());
     }
 
-    private static AnnotationConfigApplicationContext createChannelContext(Map<String, Object> properties) {
+    private static AnnotationConfigApplicationContext createChannelContext(
+            Map<String, Object> properties) {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext();
-        context.getEnvironment().getPropertySources().addFirst(new MapPropertySource("test", properties));
+        context.getEnvironment()
+                .getPropertySources()
+                .addFirst(new MapPropertySource("test", properties));
         context.getBeanFactory().registerSingleton("configService", configService);
-        context.getBeanFactory().registerSingleton("nameResolver", mock(CustomNameResolver.class));
         context.getBeanFactory().registerSingleton("grpcReporter", mock(GrpcReporter.class));
-        context.register(ChannelConfiguration.class, EngineGrpcClient.class);
+        context.register(ChannelConfiguration.class, GrpcChannelFactory.class);
         context.refresh();
         return context;
     }

@@ -32,9 +32,14 @@ class EndpointEventProjectorTest {
         var reporter = mock(StatusFailureReporter.class);
         var projector = new EndpointEventProjector(requests, reporter);
         var projectionFailure = new OutOfMemoryError("local projection allocation");
-        doThrow(diagnosticFailure).when(reporter).report(
-                any(), eq("worker_status"), eq(Stage.STATUS_PROJECTION_FAILED),
-                eq("LOCAL_MEMORY_EXHAUSTED"), any());
+        doThrow(diagnosticFailure)
+                .when(reporter)
+                .report(
+                        any(),
+                        eq("worker_status"),
+                        eq(Stage.STATUS_PROJECTION_FAILED),
+                        eq("LOCAL_MEMORY_EXHAUSTED"),
+                        any());
 
         if (decode) {
             var endpoint = mock(DecodeEndpoint.class);
@@ -49,17 +54,26 @@ class EndpointEventProjectorTest {
             var endpoint = mock(PrefillEndpoint.class);
             var first = prefillFact();
             var second = prefillFact();
-            doThrow(projectionFailure).when(requests).processPrefillStatus(endpoint, RoleType.PDFUSION, first);
+            doThrow(projectionFailure)
+                    .when(requests)
+                    .processPrefillStatus(endpoint, RoleType.PDFUSION, first);
 
-            assertDoesNotThrow(() -> projector.onPrefillStatus(
-                    endpoint, RoleType.PDFUSION, List.of(first, second)));
+            assertDoesNotThrow(
+                    () ->
+                            projector.onPrefillStatus(
+                                    endpoint, RoleType.PDFUSION, List.of(first, second)));
 
             verify(requests).processPrefillStatus(endpoint, RoleType.PDFUSION, second);
         }
-        verify(reporter).report(eq(decode ? RoleType.DECODE : RoleType.PDFUSION),
-                eq("worker_status"), eq(Stage.STATUS_PROJECTION_FAILED),
-                eq("LOCAL_MEMORY_EXHAUSTED"),
-                argThat(failure -> failure.kind() == GrpcFailure.Kind.LOCAL_MEMORY_EXHAUSTED));
+        verify(reporter)
+                .report(
+                        eq(decode ? RoleType.DECODE : RoleType.PDFUSION),
+                        eq("worker_status"),
+                        eq(Stage.STATUS_PROJECTION_FAILED),
+                        eq("LOCAL_MEMORY_EXHAUSTED"),
+                        argThat(
+                                failure ->
+                                        failure.kind() == GrpcFailure.Kind.LOCAL_MEMORY_EXHAUSTED));
     }
 
     @Test
@@ -68,15 +82,20 @@ class EndpointEventProjectorTest {
         var reporter = mock(StatusFailureReporter.class);
         var endpoint = mock(PrefillEndpoint.class);
         var fact = prefillFact();
-        doThrow(new IllegalStateException("state contract")).when(requests)
+        doThrow(new IllegalStateException("state contract"))
+                .when(requests)
                 .processPrefillStatus(endpoint, RoleType.PREFILL, fact);
 
-        new EndpointEventProjector(requests, reporter).onPrefillStatus(
-                endpoint, RoleType.PREFILL, List.of(fact));
+        new EndpointEventProjector(requests, reporter)
+                .onPrefillStatus(endpoint, RoleType.PREFILL, List.of(fact));
 
-        verify(reporter).report(eq(RoleType.PREFILL), eq("worker_status"),
-                eq(Stage.STATUS_PROJECTION_FAILED), eq("STATUS_PROJECTION_FAILED"),
-                argThat(failure -> !failure.confirmedLocalFailure()));
+        verify(reporter)
+                .report(
+                        eq(RoleType.PREFILL),
+                        eq("worker_status"),
+                        eq(Stage.STATUS_PROJECTION_FAILED),
+                        eq("STATUS_PROJECTION_FAILED"),
+                        argThat(failure -> !failure.confirmedLocalFailure()));
     }
 
     private static PrefillState.WorkerStatusFact prefillFact() {
@@ -92,8 +111,15 @@ class EndpointEventProjectorTest {
     }
 
     static Stream<Arguments> diagnosticFailures() {
-        return Stream.of(false, true).flatMap(decode -> Stream.of(
-                Arguments.of(decode, new IllegalStateException("metrics unavailable")),
-                Arguments.of(decode, new OutOfMemoryError("metrics allocation"))));
+        return Stream.of(false, true)
+                .flatMap(
+                        decode ->
+                                Stream.of(
+                                        Arguments.of(
+                                                decode,
+                                                new IllegalStateException("metrics unavailable")),
+                                        Arguments.of(
+                                                decode,
+                                                new OutOfMemoryError("metrics allocation"))));
     }
 }

@@ -470,7 +470,7 @@ final class ExpirationTimer implements AutoCloseable {
     // ── 保留期维护：先清终态目录，再扫描 Endpoint 孤儿 ──
 
     /** Remove retained terminal records before sweeping unowned endpoint state. */
-    void maintain(BiConsumer<Long, LongPredicate> exactSweeper) {
+    void maintain(BiConsumer<Long, Predicate<String>> exactSweeper) {
         if (lifecycle.isShuttingDown()) {
             return;
         }

@@ -20,20 +20,27 @@ class NettyMemoryReporterConfigTest {
 
     @Test
     void strictConfigSupportsBothSchedulerModesAndIndependentCaptureOptIn() {
-        for (String type : new String[]{"QUEUE", "DIRECT"}) {
-            var config = ConfigTestFixtures.parse("""
+        for (String type : new String[] {"QUEUE", "DIRECT"}) {
+            var config =
+                    ConfigTestFixtures.parse(
+                            """
                     {"scheduler":{"type":"%s","nettyMemoryReporter":{
                       "enabled":true,"intervalMs":20000}},"dispatcher":{"type":"NON_BATCH"}}
-                    """.formatted(type));
+                    """
+                                    .formatted(type));
             var memory = config.getScheduler().getNettyMemoryReporter();
             assertTrue(memory.isEnabled());
             assertEquals(20_000L, memory.getIntervalMs());
             assertFalse(memory.getAutoCapture().isEnabled());
         }
-        var memory = ConfigTestFixtures.parse("""
+        var memory =
+                ConfigTestFixtures.parse(
+                                """
                 {"scheduler":{"nettyMemoryReporter":{"enabled":true,"autoCapture":{
                   "enabled":true,"thresholdBytes":123456,"cooldownMs":60000}}}}
-                """).getScheduler().getNettyMemoryReporter();
+                """)
+                        .getScheduler()
+                        .getNettyMemoryReporter();
         assertTrue(memory.getAutoCapture().isEnabled());
         assertEquals(123456L, memory.getAutoCapture().getThresholdBytes());
         assertEquals(60_000L, memory.getAutoCapture().getCooldownMs());
@@ -41,15 +48,25 @@ class NettyMemoryReporterConfigTest {
 
     @Test
     void invalidDiagnosticsFailAtStartupInsteadOfStartingUnexpectedWork() {
-        for (String patch : new String[]{
-                "{\"autoCapture\":{\"enabled\":true}}",
-                "{\"intervalMs\":0}", "{\"intervalMs\":999}",
-                "{\"enabled\":\"true\"}", "{\"enabled\":null}",
-                "{\"autoCapture\":{\"thresholdBytes\":0}}",
-                "{\"autoCapture\":{\"cooldownMs\":999}}",
-                "{\"autoCapture\":{\"heapDump\":true}}"}) {
-            var error = assertThrows(ConfigValidationException.class,
-                    () -> ConfigTestFixtures.parse("{\"scheduler\":{\"nettyMemoryReporter\":" + patch + "}}"));
+        for (String patch :
+                new String[] {
+                    "{\"autoCapture\":{\"enabled\":true}}",
+                    "{\"intervalMs\":0}",
+                    "{\"intervalMs\":999}",
+                    "{\"enabled\":\"true\"}",
+                    "{\"enabled\":null}",
+                    "{\"autoCapture\":{\"thresholdBytes\":0}}",
+                    "{\"autoCapture\":{\"cooldownMs\":999}}",
+                    "{\"autoCapture\":{\"heapDump\":true}}"
+                }) {
+            var error =
+                    assertThrows(
+                            ConfigValidationException.class,
+                            () ->
+                                    ConfigTestFixtures.parse(
+                                            "{\"scheduler\":{\"nettyMemoryReporter\":"
+                                                    + patch
+                                                    + "}}"));
             assertTrue(error.getMessage().contains("nettyMemoryReporter"), error.getMessage());
         }
     }

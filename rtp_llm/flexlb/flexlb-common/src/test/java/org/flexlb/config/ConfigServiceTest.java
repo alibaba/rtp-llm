@@ -1,16 +1,7 @@
 package org.flexlb.config;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotSame;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
@@ -18,6 +9,14 @@ import java.nio.file.Path;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConfigServiceTest {
 
@@ -103,14 +102,18 @@ class ConfigServiceTest {
         var defaults = ConfigTestFixtures.parse("{}").getGrpcServer();
         assertEquals(1024, defaults.getMaxReceivingRequests());
         assertEquals(128, defaults.getMaxReceivingControlRequests());
-        var configured = ConfigTestFixtures.parse("""
+        var configured =
+                ConfigTestFixtures.parse(
+                                """
                 {"grpcServer":{"executorCoreSize":64,"executorMaxSize":64,
                  "maxReceivingRequests":4096,"maxReceivingControlRequests":16}}
-                """).getGrpcServer();
+                """)
+                        .getGrpcServer();
         assertEquals(4096, configured.getMaxReceivingRequests());
         assertEquals(16, configured.getMaxReceivingControlRequests());
-        for (String field : new String[]{"maxReceivingRequests", "maxReceivingControlRequests"}) {
-            assertThrows(ConfigValidationException.class,
+        for (String field : new String[] {"maxReceivingRequests", "maxReceivingControlRequests"}) {
+            assertThrows(
+                    ConfigValidationException.class,
                     () -> ConfigTestFixtures.parse("{\"grpcServer\":{\"" + field + "\":-1}}"));
         }
     }
@@ -120,22 +123,33 @@ class ConfigServiceTest {
         FlexlbConfig.GrpcServerConfig defaults = ConfigTestFixtures.parse("{}").getGrpcServer();
         assertEquals(10_000L, defaults.getPermitKeepAliveTimeMs());
         assertTrue(defaults.isPermitKeepAliveWithoutCalls());
-        FlexlbConfig.GrpcServerConfig grpc = ConfigTestFixtures.parse("""
+        FlexlbConfig.GrpcServerConfig grpc =
+                ConfigTestFixtures.parse(
+                                """
                 {"grpcServer":{"permitKeepAliveTimeMs":30000,"permitKeepAliveWithoutCalls":false}}
-                """).getGrpcServer();
+                """)
+                        .getGrpcServer();
         assertEquals(30_000L, grpc.getPermitKeepAliveTimeMs());
         assertFalse(grpc.isPermitKeepAliveWithoutCalls());
-        assertEquals(0L, ConfigTestFixtures.parse("""
+        assertEquals(
+                0L,
+                ConfigTestFixtures.parse(
+                                """
                 {"grpcServer":{"permitKeepAliveTimeMs":0}}
-                """).getGrpcServer().getPermitKeepAliveTimeMs());
-        for (String patch : new String[]{
-                "{\"grpcServer\":{\"permitKeepAliveTimeMs\":-1}}",
-                "{\"grpcServer\":{\"permitKeepAliveTimeMs\":null}}",
-                "{\"grpcServer\":{\"permitKeepAliveTimeMs\":\"30000\"}}",
-                "{\"grpcServer\":{\"permitKeepAliveTimeMs\":1.5}}",
-                "{\"grpcServer\":{\"permitKeepAliveWithoutCalls\":\"true\"}}",
-                "{\"grpcServer\":{\"permitKeepAliveWithoutCalls\":null}}"}) {
-            assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse(patch), patch);
+                """)
+                        .getGrpcServer()
+                        .getPermitKeepAliveTimeMs());
+        for (String patch :
+                new String[] {
+                    "{\"grpcServer\":{\"permitKeepAliveTimeMs\":-1}}",
+                    "{\"grpcServer\":{\"permitKeepAliveTimeMs\":null}}",
+                    "{\"grpcServer\":{\"permitKeepAliveTimeMs\":\"30000\"}}",
+                    "{\"grpcServer\":{\"permitKeepAliveTimeMs\":1.5}}",
+                    "{\"grpcServer\":{\"permitKeepAliveWithoutCalls\":\"true\"}}",
+                    "{\"grpcServer\":{\"permitKeepAliveWithoutCalls\":null}}"
+                }) {
+            assertThrows(
+                    ConfigValidationException.class, () -> ConfigTestFixtures.parse(patch), patch);
         }
     }
 

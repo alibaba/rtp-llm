@@ -1,17 +1,7 @@
 package org.flexlb.balance.scheduler;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-import static org.mockito.Mockito.withSettings;
-
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
-
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
@@ -78,6 +68,15 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.LongStream;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
+
 /** External contract for temporary P/D capacity pressure. */
 class TransientCapacityQueueContractTest {
 
@@ -139,7 +138,7 @@ class TransientCapacityQueueContractTest {
                 assertEquals(0, d2.routingView().totalLoad());
                 fixture.runtime
                         .scheduler()
-                        .cancelRequest(996_001L, 0L, CancelReason.CLIENT_CANCELLED);
+                        .cancelRequest("996001", 0L, CancelReason.CLIENT_CANCELLED);
                 assertFalse(a.get(2, TimeUnit.SECONDS).isSuccess());
                 assertTrue(b.get(2, TimeUnit.SECONDS).isSuccess());
                 return;
@@ -159,14 +158,14 @@ class TransientCapacityQueueContractTest {
             assertTrue(response.isSuccess());
             assertEquals(Fixture.PREFILL_ADDRESS, prefillAddress(response));
             assertEquals("127.0.0.2:18081", decodeAddress(response));
-            assertEquals(List.of(996_002L), fixture.submission.requestIds());
+            assertEquals(List.of("996002"), fixture.submission.requestIds());
             assertFalse(a.isDone());
             assertEquals(1, fixture.prefillEndpoint.queuedRequestCount());
             fixture.runtime.applyStatus(
                     fixture.decodeStatus, statusResponse(RoleType.DECODE, 3L, false));
 
             assertTrue(a.get(2, TimeUnit.SECONDS).isSuccess());
-            assertEquals(List.of(996_002L, 996_001L), fixture.submission.requestIds());
+            assertEquals(List.of("996002", "996001"), fixture.submission.requestIds());
             assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
         }
     }
@@ -217,11 +216,11 @@ class TransientCapacityQueueContractTest {
                     initializedStatus(RoleType.DECODE, "127.0.0.3", 18081));
             var c = fixture.runtime.scheduler().submit(fixture.context(999_003L, 80));
             assertTrue(c.get(2, TimeUnit.SECONDS).isSuccess());
-            assertEquals(List.of(999_003L), fixture.submission.requestIds());
+            assertEquals(List.of("999003"), fixture.submission.requestIds());
             assertFalse(a.isDone());
             assertFalse(b.isDone());
-            fixture.runtime.scheduler().cancelRequest(999_002L, 0L, CancelReason.CLIENT_CANCELLED);
-            fixture.runtime.scheduler().cancelRequest(999_001L, 0L, CancelReason.CLIENT_CANCELLED);
+            fixture.runtime.scheduler().cancelRequest("999002", 0L, CancelReason.CLIENT_CANCELLED);
+            fixture.runtime.scheduler().cancelRequest("999001", 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(a.get(2, TimeUnit.SECONDS).isSuccess());
             assertFalse(b.get(2, TimeUnit.SECONDS).isSuccess());
             assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
@@ -301,7 +300,7 @@ class TransientCapacityQueueContractTest {
             if (recovery.equals("cancel_waiter")) {
                 fixture.runtime
                         .scheduler()
-                        .cancelRequest(993_102L, 0L, CancelReason.CLIENT_CANCELLED);
+                        .cancelRequest("993102", 0L, CancelReason.CLIENT_CANCELLED);
                 assertFalse(b.get(2, TimeUnit.SECONDS).isSuccess());
                 assertEquals(0, d2.resourceSnapshot().reserved().size());
             }
@@ -310,13 +309,13 @@ class TransientCapacityQueueContractTest {
             assertTrue(
                     a.get(2, TimeUnit.SECONDS).isSuccess(),
                     "D1 recovery must run A without waiting for B's KV or another P event");
-            assertEquals(List.of(993_101L), fixture.submission.requestIds());
+            assertEquals(List.of("993101"), fixture.submission.requestIds());
             if (recovery.equals("recover")) {
                 assertFalse(b.isDone());
                 fixture.runtime.applyStatus(
                         fixture.prefillStatus, statusResponse(RoleType.PREFILL, 3L, false));
                 assertTrue(b.get(2, TimeUnit.SECONDS).isSuccess());
-                assertEquals(List.of(993_101L, 993_102L), fixture.submission.requestIds());
+                assertEquals(List.of("993101", "993102"), fixture.submission.requestIds());
             }
             assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
         }
@@ -356,7 +355,7 @@ class TransientCapacityQueueContractTest {
                     fixture.prefillEndpoint.captureRouteProjectionInputs(),
                     "Decode heartbeats cannot invalidate a shared Prefill capacity wait");
             assertFalse(b.isDone());
-            fixture.runtime.scheduler().cancelRequest(999_102L, 0L, CancelReason.CLIENT_CANCELLED);
+            fixture.runtime.scheduler().cancelRequest("999102", 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(b.get(2, TimeUnit.SECONDS).isSuccess());
         }
     }
@@ -394,7 +393,7 @@ class TransientCapacityQueueContractTest {
             fixture.submission.unblockPreparation();
             assertTrue(a.get(2, TimeUnit.SECONDS).isSuccess());
             assertTrue(b.get(2, TimeUnit.SECONDS).isSuccess());
-            assertEquals(List.of(998_001L, 998_002L), fixture.submission.requestIds());
+            assertEquals(List.of("998001", "998002"), fixture.submission.requestIds());
             assertEquals(1, d2.routingView().totalLoad());
             assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
             assertEquals(0, d2.resourceSnapshot().activeDispatchPermits());
@@ -448,7 +447,7 @@ class TransientCapacityQueueContractTest {
                 if (cancelMiddle) {
                     fixture.runtime
                             .scheduler()
-                            .cancelRequest(997_002L, 0L, CancelReason.CLIENT_CANCELLED);
+                            .cancelRequest("997002", 0L, CancelReason.CLIENT_CANCELLED);
                     assertFalse(b.get(2, TimeUnit.SECONDS).isSuccess());
                 } else {
                     fixture.runtime.applyStatus(
@@ -462,7 +461,7 @@ class TransientCapacityQueueContractTest {
                 assertFalse(b.isDone());
                 fixture.runtime
                         .scheduler()
-                        .cancelRequest(997_002L, 0L, CancelReason.CLIENT_CANCELLED);
+                        .cancelRequest("997002", 0L, CancelReason.CLIENT_CANCELLED);
                 assertFalse(b.get(2, TimeUnit.SECONDS).isSuccess());
             }
             fixture.runtime.applyStatus(
@@ -475,14 +474,14 @@ class TransientCapacityQueueContractTest {
                         prefillStatusWithFinishedAndUnknownRunning(2L, List.of(997_002L), 0);
                 finished.getFinishedTaskInfo()
                         .get("997002")
-                        .setBatchId(fixture.submission.batchIds.get(997_002L));
+                        .setBatchId(fixture.submission.batchIds.get("997002"));
                 fixture.runtime.applyStatus(fixture.prefillStatus, finished);
             }
             assertTrue(a.get(2, TimeUnit.SECONDS).isSuccess());
             assertEquals(
                     middlePriority > 60 && !cancelMiddle
-                            ? List.of(997_002L, 997_003L, 997_001L)
-                            : List.of(997_003L, 997_001L),
+                            ? List.of("997002", "997003", "997001")
+                            : List.of("997003", "997001"),
                     fixture.submission.requestIds());
         }
     }
@@ -583,8 +582,9 @@ class TransientCapacityQueueContractTest {
             var exhausted = statusResponse(RoleType.PREFILL, 2L, false);
             exhausted.setAvailableKvCacheTokens(0L);
             fixture.runtime.applyStatus(fixture.prefillStatus, exhausted);
-            when(fixture.cache.findMatchingEngines(any(), any(), any()))
-                    .thenReturn(Map.of(Fixture.PREFILL_ADDRESS, 9, "127.0.0.2:18080", 1));
+            when(fixture.cache.findMatchingEngines(any()))
+                    .thenReturn(
+                            cacheResult(Map.of(Fixture.PREFILL_ADDRESS, 9, "127.0.0.2:18080", 1)));
             var context = fixture.context(994_001L, 50, 1_000L);
             context.getRequest().setCacheKeyBlockSize(100L);
             context.getRequest().setBlockCacheKeys(List.of(1L, 2L, 3L));
@@ -608,7 +608,7 @@ class TransientCapacityQueueContractTest {
             if (cancel) {
                 fixture.runtime
                         .scheduler()
-                        .cancelRequest(994_001L, 0L, CancelReason.CLIENT_CANCELLED);
+                        .cancelRequest("994001", 0L, CancelReason.CLIENT_CANCELLED);
                 assertFalse(response.get(2, TimeUnit.SECONDS).isSuccess());
                 assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
                 assertEquals(0, fixture.decodeEndpoint.resourceSnapshot().reserved().size());
@@ -622,7 +622,7 @@ class TransientCapacityQueueContractTest {
                 assertEquals(0, colder.observedRequestCount());
                 assertEquals(enqueueSequence, context.getWorkerEnqueueSequence());
                 assertEquals(
-                        delivery == DispatcherConfig.Type.BATCH ? List.of(994_001L) : List.of(),
+                        delivery == DispatcherConfig.Type.BATCH ? List.of("994001") : List.of(),
                         fixture.submission.requestIds());
             }
         }
@@ -682,8 +682,9 @@ class TransientCapacityQueueContractTest {
                                     RoleType.DECODE,
                                     "127.0.0.2:18081",
                                     initializedStatus(RoleType.DECODE, "127.0.0.2", 18081));
-            when(fixture.cache.findMatchingEngines(any(), any(), any()))
-                    .thenReturn(Map.of(Fixture.PREFILL_ADDRESS, 9, "127.0.0.2:18080", 1));
+            when(fixture.cache.findMatchingEngines(any()))
+                    .thenReturn(
+                            cacheResult(Map.of(Fixture.PREFILL_ADDRESS, 9, "127.0.0.2:18080", 1)));
             var bContext = fixture.context(995_002L, priorityOrdering ? 80 : 10, 1_000L);
             bContext.getRequest().setCacheKeyBlockSize(100L);
             bContext.getRequest().setBlockCacheKeys(List.of(1L, 2L, 3L));
@@ -702,7 +703,7 @@ class TransientCapacityQueueContractTest {
                         prefillAddress(response),
                         "B precedes A and must not inherit A's D1 blocker or choose a colder P");
                 assertEquals("127.0.0.2:18081", decodeAddress(response));
-                assertEquals(List.of(995_002L), fixture.submission.requestIds());
+                assertEquals(List.of("995002"), fixture.submission.requestIds());
                 assertFalse(a.isDone());
                 return;
             }
@@ -718,13 +719,16 @@ class TransientCapacityQueueContractTest {
             assertEquals(List.of(), fixture.submission.requestIds());
 
             if (recovery.equals("other_prefill")) {
-                when(fixture.cache.findMatchingEngines(any(), any(), any()))
+                when(fixture.cache.findMatchingEngines(any()))
                         .thenAnswer(
                                 invocation -> {
-                                    List<Long> keys = invocation.getArgument(0);
+                                    List<Long> keys =
+                                            ((org.flexlb.cache.domain.CacheMatchQuery)
+                                                            invocation.getArgument(0))
+                                                    .blockCacheKeys();
                                     return keys != null && !keys.isEmpty() && keys.getFirst() == 2L
-                                            ? Map.of("127.0.0.2:18080", 9)
-                                            : Map.of(Fixture.PREFILL_ADDRESS, 9);
+                                            ? cacheResult(Map.of("127.0.0.2:18080", 9))
+                                            : cacheResult(Map.of(Fixture.PREFILL_ADDRESS, 9));
                                 });
                 fixture.submission.blockPreparation();
                 var cContext = fixture.context(995_003L, 20, 1_000L);
@@ -750,14 +754,14 @@ class TransientCapacityQueueContractTest {
                 awaitCapacityWaiters(fixture.runtime.scheduler(), 2);
                 fixture.runtime
                         .scheduler()
-                        .cancelRequest(995_003L, 0L, CancelReason.CLIENT_CANCELLED);
+                        .cancelRequest("995003", 0L, CancelReason.CLIENT_CANCELLED);
                 assertFalse(c.get(2, TimeUnit.SECONDS).isSuccess());
                 Response response = e.get(2, TimeUnit.SECONDS);
                 assertTrue(response.isSuccess());
                 assertEquals("127.0.0.2:18080", prefillAddress(response));
                 assertFalse(
                         b.isDone(), "P2 progress must not move B away from its cache leader P1");
-                assertEquals(List.of(995_004L), fixture.submission.requestIds());
+                assertEquals(List.of("995004"), fixture.submission.requestIds());
             } else if (recovery.equals("retire_prefill")) {
                 EndpointRegistry.DetachedGeneration detached;
                 fixture.prefillStatus.lock.lock();
@@ -767,7 +771,7 @@ class TransientCapacityQueueContractTest {
                                     .endpointRegistry()
                                     .detachAndBeginRetirement(
                                             RoleType.PREFILL,
-                                            Fixture.PREFILL_ADDRESS,
+                                            fixture.prefillStatus.getLogicalIpPort(),
                                             fixture.prefillStatus);
                 } finally {
                     fixture.prefillStatus.lock.unlock();
@@ -784,26 +788,32 @@ class TransientCapacityQueueContractTest {
                 if (recovery.equals("cancel_waiter")) {
                     fixture.runtime
                             .scheduler()
-                            .cancelRequest(995_002L, 0L, CancelReason.CLIENT_CANCELLED);
+                            .cancelRequest("995002", 0L, CancelReason.CLIENT_CANCELLED);
                 }
                 assertFalse(b.get(3, TimeUnit.SECONDS).isSuccess());
                 fixture.runtime.applyStatus(
                         fixture.decodeStatus, statusResponse(RoleType.DECODE, 3L, false));
                 assertTrue(a.get(2, TimeUnit.SECONDS).isSuccess());
                 assertFalse(fixture.submission.awaitCommands(2, 100, TimeUnit.MILLISECONDS));
-                assertEquals(List.of(995_001L), fixture.submission.requestIds());
+                assertEquals(List.of("995001"), fixture.submission.requestIds());
                 assertEquals(0, d2.routingView().totalLoad());
             } else {
                 boolean cancelHead =
                         recovery.equals("cancel_head") || recovery.equals("cache_changed");
                 if (recovery.equals("cache_changed")) {
-                    when(fixture.cache.findMatchingEngines(any(), any(), any()))
-                            .thenReturn(Map.of(Fixture.PREFILL_ADDRESS, 1, "127.0.0.2:18080", 9));
+                    when(fixture.cache.findMatchingEngines(any()))
+                            .thenReturn(
+                                    cacheResult(
+                                            Map.of(
+                                                    Fixture.PREFILL_ADDRESS,
+                                                    1,
+                                                    "127.0.0.2:18080",
+                                                    9)));
                 }
                 if (cancelHead) {
                     fixture.runtime
                             .scheduler()
-                            .cancelRequest(995_001L, 0L, CancelReason.CLIENT_CANCELLED);
+                            .cancelRequest("995001", 0L, CancelReason.CLIENT_CANCELLED);
                     assertFalse(a.get(2, TimeUnit.SECONDS).isSuccess());
                 } else {
                     fixture.runtime.applyStatus(
@@ -819,7 +829,7 @@ class TransientCapacityQueueContractTest {
                         prefillAddress(response),
                         "a wakeup must recompute cache matches rather than pin B to P1");
                 assertEquals(
-                        cancelHead ? List.of(995_002L) : List.of(995_001L, 995_002L),
+                        cancelHead ? List.of("995002") : List.of("995001", "995002"),
                         fixture.submission.requestIds());
             }
         }
@@ -2174,21 +2184,22 @@ class TransientCapacityQueueContractTest {
 
     private static final class RecordingSubmissionPort {
         private final List<List<ScheduledRequest>> submittedItems = new CopyOnWriteArrayList<>();
-        private final Map<Long, Long> batchIds = new ConcurrentHashMap<>();
+        private final Map<String, Long> batchIds = new ConcurrentHashMap<>();
         private final Semaphore commandSignals = new Semaphore(0);
         private final Semaphore preparationSignals = new Semaphore(0);
-        private final CountDownLatch preparationReleases = new CountDownLatch(1);
+        private volatile CountDownLatch preparationReleases = new CountDownLatch(1);
         private final AtomicBoolean holdCompletions = new AtomicBoolean();
         private final AtomicBoolean blockPreparation = new AtomicBoolean();
 
         private CapacityBoundary.Attempt<BatchDeliveryStrategy.PreparedSubmission>
                 tryPrepareSubmission() {
+            CountDownLatch release = preparationReleases;
             if (blockPreparation.get()) {
                 preparationSignals.release();
                 boolean interrupted = false;
                 while (true) {
                     try {
-                        preparationReleases.await();
+                        release.await();
                         break;
                     } catch (InterruptedException interruption) {
                         interrupted = true;
@@ -2248,6 +2259,7 @@ class TransientCapacityQueueContractTest {
         }
 
         private void blockPreparation() {
+            preparationReleases = new CountDownLatch(1);
             blockPreparation.set(true);
         }
 
@@ -2268,5 +2280,13 @@ class TransientCapacityQueueContractTest {
                 throws InterruptedException {
             return commandSignals.tryAcquire(count, timeout, unit);
         }
+    }
+
+    private static org.flexlb.cache.domain.CacheMatchResult cacheResult(Map<String, Integer> hits) {
+        return new org.flexlb.cache.domain.CacheMatchResult(
+                org.flexlb.dao.cache.HostCacheMatch.fromLocalMatches(hits),
+                org.flexlb.cache.domain.CacheMatchSource.KVCM,
+                0L,
+                100L);
     }
 }

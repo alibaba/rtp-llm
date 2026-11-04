@@ -517,7 +517,12 @@ class EncoderSchedulingIntegrationTest {
         when(engine.runningQueryLen()).thenReturn(running);
         when(engine.waitingQueryLen()).thenReturn(waiting);
         EncoderEndpoint endpoint =
-                new EncoderEndpoint(status, new EndpointEventProjector(requests));
+                new EncoderEndpoint(
+                        status,
+                        new EndpointEventProjector(
+                                requests,
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.service.monitor.StatusFailureReporter.class)));
         when(directory.captureEndpoint(eq(RoleType.ENCODER), eq(ip)))
                 .thenAnswer(invocation -> endpoint.tryPinGeneration());
         return endpoint;

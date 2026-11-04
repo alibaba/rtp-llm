@@ -1,15 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -44,6 +34,16 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /** Resource assertions use real endpoint ledgers, not invocations of mocked release methods. */
 class RequestResourceAccountingTest {
@@ -112,7 +112,7 @@ class RequestResourceAccountingTest {
             f.decodeStatus(Map.of("101", task), Map.of(), TOTAL_KV - HARD_KV);
             assertEquals(1, f.decode.resourceSnapshot().runningCount());
             f.requests.cancelRequest(ID, 0, CancelReason.CLIENT_CANCELLED);
-            assertEquals(1, f.requests.liveRequestCount());
+            assertEquals(1, f.requests.trackedRequestCount());
             applyStatus(
                     f.prefill,
                     status(RoleType.PREFILL, 2L, Map.of(), Map.of("101", task), TOTAL_KV));

@@ -1,15 +1,12 @@
 package org.flexlb.dao;
 
 import com.google.protobuf.ByteString;
-
 import io.opentelemetry.context.Context;
-
 import lombok.AccessLevel;
 import lombok.Data;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.ToString;
-
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;

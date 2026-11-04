@@ -32,12 +32,14 @@ class WorkerStatusPollLeaseTest {
                 var calls = new ArrayList<Future<WorkerStatus.PollLease>>();
                 for (long cycle = 1L; cycle <= 8L; cycle++) {
                     long syncCycle = cycle;
-                    calls.add(executor.submit(() -> {
-                        start.await();
-                        return syncCycle % 2 == 0
-                                ? status.tryBeginStatusPoll(syncCycle)
-                                : status.tryBeginCachePoll(syncCycle);
-                    }));
+                    calls.add(
+                            executor.submit(
+                                    () -> {
+                                        start.await();
+                                        return syncCycle % 2 == 0
+                                                ? status.tryBeginStatusPoll(syncCycle)
+                                                : status.tryBeginCachePoll(syncCycle);
+                                    }));
                 }
                 start.countDown();
                 var admitted = new HashMap<Long, WorkerStatus.PollLease>();
@@ -48,13 +50,15 @@ class WorkerStatusPollLeaseTest {
                     }
                 }
                 try {
-                    assertEquals(2, admitted.size(), "one status poll and one cache poll may be active");
+                    assertEquals(
+                            2, admitted.size(), "one status poll and one cache poll may be active");
                     var snapshot = status.trace().snapshot();
                     assertTrue(admitted.containsKey(snapshot.statusPoll().syncCycleId()));
                     assertTrue(admitted.containsKey(snapshot.cachePoll().syncCycleId()));
                     assertEquals(0L, snapshot.statusPoll().syncCycleId() % 2);
                     assertEquals(1L, snapshot.cachePoll().syncCycleId() % 2);
-                    assertNotEquals(snapshot.statusPoll().sequence(), snapshot.cachePoll().sequence());
+                    assertNotEquals(
+                            snapshot.statusPoll().sequence(), snapshot.cachePoll().sequence());
                 } finally {
                     admitted.values().forEach(WorkerStatus.PollLease::close);
                 }
@@ -70,7 +74,9 @@ class WorkerStatusPollLeaseTest {
         status.lock.lock();
         try {
             assertTrue(status.beginRetirementAfterEndpointGateClosed());
-        } finally { status.lock.unlock(); }
+        } finally {
+            status.lock.unlock();
+        }
         status.recordStatusRpcResult(lease, true, true, null);
         assertSame(health, status.pollHealth());
         lease.close();
@@ -116,15 +122,17 @@ class WorkerStatusPollLeaseTest {
             status.recordStatusRpcResult(initial, true, true, null);
         }
         try (var lease = status.tryBeginStatusPoll(2L);
-             var executor = Executors.newFixedThreadPool(8)) {
+                var executor = Executors.newFixedThreadPool(8)) {
             var start = new CountDownLatch(1);
             var calls = new ArrayList<Future<?>>();
             for (int i = 0; i < 8; i++) {
-                calls.add(executor.submit(() -> {
-                    start.await();
-                    status.recordStatusRpcResult(lease, true, false, null);
-                    return null;
-                }));
+                calls.add(
+                        executor.submit(
+                                () -> {
+                                    start.await();
+                                    status.recordStatusRpcResult(lease, true, false, null);
+                                    return null;
+                                }));
             }
             start.countDown();
             for (var call : calls) {
@@ -179,7 +187,7 @@ class WorkerStatusPollLeaseTest {
         WorkerStatus old = workerStatus();
         WorkerStatus replacement = workerStatus();
         try (var oldLease = old.tryBeginStatusPoll(1L);
-             var replacementLease = replacement.tryBeginStatusPoll(1L)) {
+                var replacementLease = replacement.tryBeginStatusPoll(1L)) {
             var health = replacement.pollHealth();
             replacement.recordStatusRpcResult(oldLease, true, true, null);
             replacement.recordStatusRpcResult(oldLease, true, false, null);

@@ -169,7 +169,9 @@ class FlexlbGrpcForwarderTest {
                 assertTrue(event.getFormattedMessage().contains("status=UNKNOWN"));
                 assertEquals(
                         expectedDescription,
-                        event.getFormattedMessage().split(" description=", 2)[1]);
+                        event.getFormattedMessage()
+                                .split(" description=", 2)[1]
+                                .split(" cause=", 2)[0]);
                 assertFalse(event.getFormattedMessage().contains("\n"));
                 assertFalse(event.getFormattedMessage().contains("\r"));
                 assertFalse(event.getFormattedMessage().contains("\uD83D"));
@@ -608,36 +610,53 @@ class FlexlbGrpcForwarderTest {
     void telemetryErrorCannotOrphanForwardResultOrByteCharge(boolean success) throws Exception {
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         var fatal = new AssertionError("telemetry failed");
-        org.mockito.Mockito.doThrow(fatal).when(reporter).reportForwardToMasterResult(anyString(), anyString());
+        org.mockito.Mockito.doThrow(fatal)
+                .when(reporter)
+                .reportForwardToMasterResult(anyString(), anyString());
         FlexlbGrpcForwarder forwarder = forwarder(masterAt("10.0.0.2:7001"), reporter);
         ManagedChannel channel = mock(ManagedChannel.class);
         ControllableScheduleCall call = new ControllableScheduleCall();
         when(channel.newCall(any(MethodDescriptor.class), any(CallOptions.class))).thenReturn(call);
         channels(forwarder).put("10.0.0.2:7003", channel);
         var stage = forwarder.forwardScheduleToMaster(request(88001L)).toCompletableFuture();
-        var response = FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
-                .setSuccess(true).setCode(200).build();
-        if (success) { call.listener.onMessage(response); }
-        org.junit.jupiter.api.Assertions.assertThrows(AssertionError.class,
-                () -> call.listener.onClose(success ? Status.OK : Status.UNAVAILABLE, new io.grpc.Metadata()));
+        var response =
+                FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                        .setSuccess(true)
+                        .setCode(200)
+                        .build();
+        if (success) {
+            call.listener.onMessage(response);
+        }
+        org.junit.jupiter.api.Assertions.assertThrows(
+                AssertionError.class,
+                () ->
+                        call.listener.onClose(
+                                success ? Status.OK : Status.UNAVAILABLE, new io.grpc.Metadata()));
         assertTrue(stage.isDone(), "telemetry Error must not strand the result");
-        if (success) { assertSame(response, stage.join().response()); }
-        else { assertEquals("UNAVAILABLE", stage.join().failure()); }
+        if (success) {
+            assertSame(response, stage.join().response());
+        } else {
+            assertEquals("UNAVAILABLE", stage.join().failure());
+        }
         assertEquals(0L, forwardCharge(forwarder));
     }
 
     @Test
     void preparationErrorReturnsChargedBytesBeforePropagating() throws Exception {
-        FlexlbGrpcForwarder forwarder = forwarder(masterAt("10.0.0.2:7001"), mock(EngineHealthReporter.class));
+        FlexlbGrpcForwarder forwarder =
+                forwarder(masterAt("10.0.0.2:7001"), mock(EngineHealthReporter.class));
         ManagedChannel channel = mock(ManagedChannel.class);
         channels(forwarder).put("10.0.0.2:7003", channel);
         var request = mock(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.class);
         when(request.getRequestId()).thenReturn(88002L);
+        when(request.getRequestIdStr()).thenReturn("");
         when(request.getSerializedSize()).thenReturn(1024);
         var fatal = new AssertionError("protobuf preparation failed");
         when(request.toBuilder()).thenThrow(fatal);
-        assertSame(fatal, org.junit.jupiter.api.Assertions.assertThrows(AssertionError.class,
-                () -> forwarder.forwardScheduleToMaster(request)));
+        assertSame(
+                fatal,
+                org.junit.jupiter.api.Assertions.assertThrows(
+                        AssertionError.class, () -> forwarder.forwardScheduleToMaster(request)));
         assertEquals(0L, forwardCharge(forwarder));
     }
 
@@ -646,48 +665,91 @@ class FlexlbGrpcForwarderTest {
     void telemetryErrorCannotOrphanCancelResult(boolean success) throws Exception {
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         org.mockito.Mockito.doThrow(new AssertionError("cancel telemetry failed"))
-                .when(reporter).reportForwardToMasterResult(anyString(), anyString());
+                .when(reporter)
+                .reportForwardToMasterResult(anyString(), anyString());
         var forwarder = forwarder(masterAt("10.0.0.2:7001"), reporter);
         var channel = mock(ManagedChannel.class);
         var call = new ControllableCancelCall();
         when(channel.newCall(any(MethodDescriptor.class), any(CallOptions.class))).thenReturn(call);
         channels(forwarder).put("10.0.0.2:7003", channel);
-        var stage = forwarder.forwardCancelToMaster(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                .setRequestId(88003L).build()).toCompletableFuture();
-        var response = FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder().setFound(true).build();
-        if (success) { call.listener.onMessage(response); }
-        org.junit.jupiter.api.Assertions.assertThrows(AssertionError.class,
-                () -> call.listener.onClose(success ? Status.OK : Status.UNAVAILABLE, new io.grpc.Metadata()));
+        var stage =
+                forwarder
+                        .forwardCancelToMaster(
+                                FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                                        .setRequestId(88003L)
+                                        .build())
+                        .toCompletableFuture();
+        var response =
+                FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder().setFound(true).build();
+        if (success) {
+            call.listener.onMessage(response);
+        }
+        org.junit.jupiter.api.Assertions.assertThrows(
+                AssertionError.class,
+                () ->
+                        call.listener.onClose(
+                                success ? Status.OK : Status.UNAVAILABLE, new io.grpc.Metadata()));
         assertTrue(stage.isDone());
-        if (success) { assertSame(response, stage.join().response()); }
-        else { assertEquals("UNAVAILABLE", stage.join().failure()); }
+        if (success) {
+            assertSame(response, stage.join().response());
+        } else {
+            assertEquals("UNAVAILABLE", stage.join().failure());
+        }
     }
 
-    private static final class ControllableCancelCall extends io.grpc.ClientCall<
-            FlexlbScheduleProtocol.FlexlbCancelRequestPB, FlexlbScheduleProtocol.FlexlbCancelResponsePB> {
+    private static final class ControllableCancelCall
+            extends io.grpc.ClientCall<
+                    FlexlbScheduleProtocol.FlexlbCancelRequestPB,
+                    FlexlbScheduleProtocol.FlexlbCancelResponsePB> {
         Listener<FlexlbScheduleProtocol.FlexlbCancelResponsePB> listener;
         int cancelCalls;
-        @Override public void start(Listener<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseListener,
-                io.grpc.Metadata headers) { listener = responseListener; }
-        @Override public void request(int count) { }
-        @Override public void cancel(String message, Throwable cause) { cancelCalls++; }
-        @Override public void halfClose() { }
-        @Override public void sendMessage(FlexlbScheduleProtocol.FlexlbCancelRequestPB request) { }
+
+        @Override
+        public void start(
+                Listener<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseListener,
+                io.grpc.Metadata headers) {
+            listener = responseListener;
+        }
+
+        @Override
+        public void request(int count) {}
+
+        @Override
+        public void cancel(String message, Throwable cause) {
+            cancelCalls++;
+        }
+
+        @Override
+        public void halfClose() {}
+
+        @Override
+        public void sendMessage(FlexlbScheduleProtocol.FlexlbCancelRequestPB request) {}
     }
 
     @Test
     void asyncStateQueryPreservesHopDeadlineAndExplicitCancellation() throws Exception {
         var config = mock(ConfigService.class);
         when(config.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
-        var forwarder = new FlexlbGrpcForwarder(masterAt("10.0.0.2:7001"), config,
-                mock(EngineHealthReporter.class), mock(EventLoopGroup.class), mock(Executor.class));
+        var forwarder =
+                new FlexlbGrpcForwarder(
+                        masterAt("10.0.0.2:7001"),
+                        config,
+                        mock(EngineHealthReporter.class),
+                        mock(EventLoopGroup.class),
+                        mock(Executor.class));
         var channel = mock(ManagedChannel.class);
         var call = new ControllableStateCall();
         var options = ArgumentCaptor.forClass(CallOptions.class);
         when(channel.newCall(any(MethodDescriptor.class), options.capture())).thenReturn(call);
         channels(forwarder).put("10.0.0.2:7003", channel);
-        var pending = forwarder.forwardGetRequestStateToMasterAsync(
-                FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder().setRequestId(88004L).setBatchId(901L).build()).toCompletableFuture();
+        var pending =
+                forwarder
+                        .forwardGetRequestStateToMasterAsync(
+                                FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                                        .setRequestId(88004L)
+                                        .setBatchId(901L)
+                                        .build())
+                        .toCompletableFuture();
         assertFalse(pending.isDone());
         assertEquals(1, call.sent.getForwardHop());
         assertEquals(901L, call.sent.getBatchId());
@@ -696,16 +758,33 @@ class FlexlbGrpcForwarderTest {
         assertEquals(1, call.cancelCalls);
     }
 
-    private static final class ControllableStateCall extends io.grpc.ClientCall<
-            FlexlbScheduleProtocol.GetRequestStateRequestPB, FlexlbScheduleProtocol.GetRequestStateResponsePB> {
+    private static final class ControllableStateCall
+            extends io.grpc.ClientCall<
+                    FlexlbScheduleProtocol.GetRequestStateRequestPB,
+                    FlexlbScheduleProtocol.GetRequestStateResponsePB> {
         FlexlbScheduleProtocol.GetRequestStateRequestPB sent;
         int cancelCalls;
-        @Override public void start(Listener<FlexlbScheduleProtocol.GetRequestStateResponsePB> listener,
-                io.grpc.Metadata headers) { }
-        @Override public void request(int count) { }
-        @Override public void cancel(String message, Throwable cause) { cancelCalls++; }
-        @Override public void halfClose() { }
-        @Override public void sendMessage(FlexlbScheduleProtocol.GetRequestStateRequestPB request) { sent = request; }
+
+        @Override
+        public void start(
+                Listener<FlexlbScheduleProtocol.GetRequestStateResponsePB> listener,
+                io.grpc.Metadata headers) {}
+
+        @Override
+        public void request(int count) {}
+
+        @Override
+        public void cancel(String message, Throwable cause) {
+            cancelCalls++;
+        }
+
+        @Override
+        public void halfClose() {}
+
+        @Override
+        public void sendMessage(FlexlbScheduleProtocol.GetRequestStateRequestPB request) {
+            sent = request;
+        }
     }
 
     @Test
@@ -725,18 +804,34 @@ class FlexlbGrpcForwarderTest {
     void externallyCompletedCancelAndStateWrappersStopTheirLiveRpcs() throws Exception {
         var config = mock(ConfigService.class);
         when(config.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
-        var forwarder = new FlexlbGrpcForwarder(masterAt("10.0.0.2:7001"), config,
-                mock(EngineHealthReporter.class), mock(EventLoopGroup.class), mock(Executor.class));
+        var forwarder =
+                new FlexlbGrpcForwarder(
+                        masterAt("10.0.0.2:7001"),
+                        config,
+                        mock(EngineHealthReporter.class),
+                        mock(EventLoopGroup.class),
+                        mock(Executor.class));
         var channel = mock(ManagedChannel.class);
         var cancelCall = new ControllableCancelCall();
         var stateCall = new ControllableStateCall();
-        when(channel.newCall(any(MethodDescriptor.class), any(CallOptions.class))).thenReturn(cancelCall, stateCall);
+        when(channel.newCall(any(MethodDescriptor.class), any(CallOptions.class)))
+                .thenReturn(cancelCall, stateCall);
         channels(forwarder).put("10.0.0.2:7003", channel);
-        var cancel = forwarder.forwardCancelToMaster(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                .setRequestId(88006L).build()).toCompletableFuture();
+        var cancel =
+                forwarder
+                        .forwardCancelToMaster(
+                                FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                                        .setRequestId(88006L)
+                                        .build())
+                        .toCompletableFuture();
         cancel.completeExceptionally(new java.util.concurrent.TimeoutException("wrapper timeout"));
-        var state = forwarder.forwardGetRequestStateToMasterAsync(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                .setRequestId(88006L).build()).toCompletableFuture();
+        var state =
+                forwarder
+                        .forwardGetRequestStateToMasterAsync(
+                                FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                                        .setRequestId(88006L)
+                                        .build())
+                        .toCompletableFuture();
         state.complete(null);
         assertEquals(1, cancelCall.cancelCalls);
         assertEquals(1, stateCall.cancelCalls);
@@ -748,17 +843,33 @@ class FlexlbGrpcForwarderTest {
         return ((java.util.concurrent.atomic.AtomicLong) field.get(forwarder)).get();
     }
 
-    private static final class ControllableScheduleCall extends io.grpc.ClientCall<
-            FlexlbScheduleProtocol.FlexlbScheduleRequestPB,
-            FlexlbScheduleProtocol.FlexlbScheduleResponsePB> {
+    private static final class ControllableScheduleCall
+            extends io.grpc.ClientCall<
+                    FlexlbScheduleProtocol.FlexlbScheduleRequestPB,
+                    FlexlbScheduleProtocol.FlexlbScheduleResponsePB> {
         Listener<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> listener;
         int cancelCalls;
-        @Override public void start(Listener<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseListener,
-                io.grpc.Metadata headers) { listener = responseListener; }
-        @Override public void request(int count) { }
-        @Override public void cancel(String message, Throwable cause) { cancelCalls++; }
-        @Override public void halfClose() { }
-        @Override public void sendMessage(FlexlbScheduleProtocol.FlexlbScheduleRequestPB request) { }
+
+        @Override
+        public void start(
+                Listener<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseListener,
+                io.grpc.Metadata headers) {
+            listener = responseListener;
+        }
+
+        @Override
+        public void request(int count) {}
+
+        @Override
+        public void cancel(String message, Throwable cause) {
+            cancelCalls++;
+        }
+
+        @Override
+        public void halfClose() {}
+
+        @Override
+        public void sendMessage(FlexlbScheduleProtocol.FlexlbScheduleRequestPB request) {}
     }
 
     private static FlexlbGrpcForwarder forwarder(

@@ -53,7 +53,8 @@ public class NettyMemoryReporter {
         this(settings, monitor, System::nanoTime);
     }
 
-    NettyMemoryReporter(NettyMemoryReporterConfig settings, FlexMonitor monitor, LongSupplier nanoTime) {
+    NettyMemoryReporter(
+            NettyMemoryReporterConfig settings, FlexMonitor monitor, LongSupplier nanoTime) {
         this.settings = settings;
         this.monitor = monitor;
         this.nanoTime = nanoTime;
@@ -68,29 +69,44 @@ public class NettyMemoryReporter {
         try {
             discoverAllocators();
             if (settings.getAutoCapture().isEnabled()) {
-                directPool = ManagementFactory.getPlatformMXBeans(BufferPoolMXBean.class).stream()
-                        .filter(pool -> "direct".equals(pool.getName())).findFirst().orElse(null);
+                directPool =
+                        ManagementFactory.getPlatformMXBeans(BufferPoolMXBean.class).stream()
+                                .filter(pool -> "direct".equals(pool.getName()))
+                                .findFirst()
+                                .orElse(null);
             }
-            monitor.register(NETTY_DIRECT_RESERVED_BYTES, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-            monitor.register(NETTY_DIRECT_PINNED_BYTES, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-            monitor.register(NETTY_MEMORY_SAMPLE_DURATION_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-            monitor.register(NETTY_MEMORY_SAMPLE_TIMESTAMP_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+            monitor.register(
+                    NETTY_DIRECT_RESERVED_BYTES, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+            monitor.register(
+                    NETTY_DIRECT_PINNED_BYTES, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+            monitor.register(
+                    NETTY_MEMORY_SAMPLE_DURATION_MS,
+                    FlexMetricType.GAUGE,
+                    FlexPriorityType.PRECISE);
+            monitor.register(
+                    NETTY_MEMORY_SAMPLE_TIMESTAMP_MS,
+                    FlexMetricType.GAUGE,
+                    FlexPriorityType.PRECISE);
             for (AllocatorSample sample : allocators) {
                 monitor.prepare(NETTY_DIRECT_RESERVED_BYTES, sample.tags);
                 monitor.prepare(NETTY_DIRECT_PINNED_BYTES, sample.tags);
             }
             monitor.prepare(NETTY_MEMORY_SAMPLE_DURATION_MS, NO_TAGS);
             monitor.prepare(NETTY_MEMORY_SAMPLE_TIMESTAMP_MS, NO_TAGS);
-            sampler = Executors.newSingleThreadScheduledExecutor(task -> {
-                Thread thread = new Thread(task, "flexlb-netty-memory-reporter");
-                thread.setDaemon(true);
-                return thread;
-            });
-            sampler.scheduleWithFixedDelay(this::sampleSafely, 0L,
-                    settings.getIntervalMs(), TimeUnit.MILLISECONDS);
+            sampler =
+                    Executors.newSingleThreadScheduledExecutor(
+                            task -> {
+                                Thread thread = new Thread(task, "flexlb-netty-memory-reporter");
+                                thread.setDaemon(true);
+                                return thread;
+                            });
+            sampler.scheduleWithFixedDelay(
+                    this::sampleSafely, 0L, settings.getIntervalMs(), TimeUnit.MILLISECONDS);
         } catch (RuntimeException failure) {
             close();
-            logger.warn("event=netty_memory_reporter_start_failed type={}", failure.getClass().getName());
+            logger.warn(
+                    "event=netty_memory_reporter_start_failed type={}",
+                    failure.getClass().getName());
         }
     }
 
@@ -101,8 +117,9 @@ public class NettyMemoryReporter {
             // gRPC 1.65.1 uses a separate lazy singleton (normally 2 MiB chunks).
             // Its public getter lives on a package-private class. Read that getter
             // once without replacing the transport allocator or changing its settings.
-            var getter = Class.forName("io.grpc.netty.Utils")
-                    .getDeclaredMethod("getByteBufAllocator", boolean.class);
+            var getter =
+                    Class.forName("io.grpc.netty.Utils")
+                            .getDeclaredMethod("getByteBufAllocator", boolean.class);
             if (!getter.trySetAccessible()) {
                 throw new IllegalAccessException("gRPC allocator getter is inaccessible");
             }
@@ -110,10 +127,12 @@ public class NettyMemoryReporter {
             if (allocator instanceof PooledByteBufAllocator pooled) {
                 registerAllocator("grpc_default", pooled);
             } else {
-                logger.warn("event=netty_memory_allocator_unavailable source=grpc_default reason=not_pooled");
+                logger.warn(
+                        "event=netty_memory_allocator_unavailable source=grpc_default reason=not_pooled");
             }
         } catch (ReflectiveOperationException | RuntimeException failure) {
-            logger.warn("event=netty_memory_allocator_unavailable source=grpc_default type={}",
+            logger.warn(
+                    "event=netty_memory_allocator_unavailable source=grpc_default type={}",
                     failure.getClass().getName());
         }
     }
@@ -121,7 +140,10 @@ public class NettyMemoryReporter {
     void registerAllocator(String name, PooledByteBufAllocator allocator) {
         for (AllocatorSample existing : allocators) {
             if (existing.allocator == allocator) {
-                logger.info("event=netty_memory_allocator_shared source={} allocator={}", name, existing.name);
+                logger.info(
+                        "event=netty_memory_allocator_shared source={} allocator={}",
+                        name,
+                        existing.name);
                 return;
             }
         }
@@ -160,8 +182,10 @@ public class NettyMemoryReporter {
 
     private void captureIfNeeded(long totalReserved, double durationMs) {
         var capture = settings.getAutoCapture();
-        if (!capture.isEnabled() || (lastCaptureNanos != null
-                && nanoTime.getAsLong() - lastCaptureNanos < TimeUnit.MILLISECONDS.toNanos(capture.getCooldownMs()))) {
+        if (!capture.isEnabled()
+                || (lastCaptureNanos != null
+                        && nanoTime.getAsLong() - lastCaptureNanos
+                                < TimeUnit.MILLISECONDS.toNanos(capture.getCooldownMs()))) {
             return;
         }
         long jvmDirectBytes = directPool == null ? -1L : directPool.getMemoryUsed();
@@ -171,9 +195,14 @@ public class NettyMemoryReporter {
         }
         // Reuse only this scan's values. No extra scan, stack dump, JFR, or heap dump.
         for (AllocatorSample sample : allocators) {
-            logger.warn("event=netty_memory_capture allocator={} reservedBytes={} pinnedBytes={} "
+            logger.warn(
+                    "event=netty_memory_capture allocator={} reservedBytes={} pinnedBytes={} "
                             + "jvmDirectBytes={} sampleDurationMs={}",
-                    sample.name, sample.reserved, sample.pinned, jvmDirectBytes, durationMs);
+                    sample.name,
+                    sample.reserved,
+                    sample.pinned,
+                    jvmDirectBytes,
+                    durationMs);
         }
         lastCaptureNanos = nanoTime.getAsLong();
     }

@@ -120,7 +120,7 @@ public final class RouteProjection {
 
         /** New requests follow existing requests of the same priority. */
         public Probe(
-                long requestId,
+                String requestId,
                 int priority,
                 long enqueuedAtMs,
                 long expiresAtMs,

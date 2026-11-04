@@ -42,7 +42,9 @@ class FlexlbGrpcKeepAliveTest {
 
     @Test
     void pingsSoonerThanPermitKeepAliveTimeCloseTheConnection() throws Exception {
-        try (var server = new RunningServer("""
+        try (var server =
+                new RunningServer(
+                        """
                 {"permitKeepAliveTimeMs":60000,"permitKeepAliveWithoutCalls":true}""")) {
             assertEquals(ENHANCE_YOUR_CALM, server.pingRepeatedly(10));
         }
@@ -50,7 +52,9 @@ class FlexlbGrpcKeepAliveTest {
 
     @Test
     void zeroPermitKeepAliveTimeAcceptsPingsAtAnyRate() throws Exception {
-        try (var server = new RunningServer("""
+        try (var server =
+                new RunningServer(
+                        """
                 {"permitKeepAliveTimeMs":0,"permitKeepAliveWithoutCalls":true}""")) {
             assertEquals(NO_GOAWAY, server.pingRepeatedly(10));
         }
@@ -58,7 +62,9 @@ class FlexlbGrpcKeepAliveTest {
 
     @Test
     void pingsOnAnIdleConnectionCloseItUnlessPermittedWithoutCalls() throws Exception {
-        try (var server = new RunningServer("""
+        try (var server =
+                new RunningServer(
+                        """
                 {"permitKeepAliveTimeMs":0,"permitKeepAliveWithoutCalls":false}""")) {
             assertEquals(ENHANCE_YOUR_CALM, server.pingRepeatedly(10));
         }
@@ -80,22 +86,43 @@ class FlexlbGrpcKeepAliveTest {
                 port = probe.getLocalPort();
             }
             var configService = mock(ConfigService.class);
-            var merged = grpcServerJson.equals("{}")
-                    ? "{\"shutdownQuietPeriodMs\":1}"
-                    : grpcServerJson.replaceFirst("\\{", "{\"shutdownQuietPeriodMs\":1,");
-            when(configService.loadBalanceConfig()).thenReturn(ConfigService.parse("""
+            var merged =
+                    grpcServerJson.equals("{}")
+                            ? "{\"shutdownQuietPeriodMs\":1}"
+                            : grpcServerJson.replaceFirst("\\{", "{\"shutdownQuietPeriodMs\":1,");
+            when(configService.loadBalanceConfig())
+                    .thenReturn(
+                            ConfigService.parse(
+                                    """
                     {"requestLifecycle":{"request":{"timeoutMs":60000}},"grpcServer":%s}
-                    """.formatted(merged)));
-            var service = new FlexlbServiceImpl(mock(RouteService.class), mock(LBStatusConsistencyService.class),
-                    mock(EngineHealthReporter.class), mock(FlexlbGrpcForwarder.class), configService,
-                    mock(BatchSchedulerReporter.class), mock(ServerScheduleLatencyRecorder.class),
-                    mock(RequestSchedulerReporter.class));
+                    """
+                                            .formatted(merged)));
+            var service =
+                    new FlexlbServiceImpl(
+                            mock(RouteService.class),
+                            mock(LBStatusConsistencyService.class),
+                            mock(EngineHealthReporter.class),
+                            mock(FlexlbGrpcForwarder.class),
+                            configService,
+                            mock(BatchSchedulerReporter.class),
+                            mock(ServerScheduleLatencyRecorder.class),
+                            mock(RequestSchedulerReporter.class));
             // The gRPC port is the HTTP port plus FLEXLB_GRPC_PORT_OFFSET.
-            var environment = new MockEnvironment().withProperty("server.port",
-                    String.valueOf(port - FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET));
-            grpc = new FlexlbGrpcServer(service, configService, environment, new NioEventLoopGroup(1),
-                    null, new GrpcServerTimingInterceptor(),
-                    new GrpcQosHeaderInterceptor());
+            var environment =
+                    new MockEnvironment()
+                            .withProperty(
+                                    "server.port",
+                                    String.valueOf(
+                                            port - FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET));
+            grpc =
+                    new FlexlbGrpcServer(
+                            service,
+                            configService,
+                            environment,
+                            new NioEventLoopGroup(1),
+                            org.flexlb.metric.NoOpFlexMonitor.getInstance(),
+                            new GrpcServerTimingInterceptor(),
+                            new GrpcQosHeaderInterceptor());
             grpc.start();
         }
 
@@ -125,7 +152,9 @@ class FlexlbGrpcKeepAliveTest {
 
         private static byte[] frame(int type, byte[] payload) {
             var frame = ByteBuffer.allocate(9 + payload.length);
-            frame.put((byte) (payload.length >> 16)).put((byte) (payload.length >> 8)).put((byte) payload.length);
+            frame.put((byte) (payload.length >> 16))
+                    .put((byte) (payload.length >> 8))
+                    .put((byte) payload.length);
             frame.put((byte) type).put((byte) 0).putInt(0).put(payload);
             return frame.array();
         }
@@ -136,8 +165,11 @@ class FlexlbGrpcKeepAliveTest {
                 while (true) {
                     var header = new byte[9];
                     in.readFully(header);
-                    var payload = new byte[((header[0] & 0xff) << 16) | ((header[1] & 0xff) << 8)
-                            | (header[2] & 0xff)];
+                    var payload =
+                            new byte
+                                    [((header[0] & 0xff) << 16)
+                                            | ((header[1] & 0xff) << 8)
+                                            | (header[2] & 0xff)];
                     in.readFully(payload);
                     if (header[3] == FRAME_GOAWAY) {
                         goAwayCode.set(ByteBuffer.wrap(payload).getInt(4));

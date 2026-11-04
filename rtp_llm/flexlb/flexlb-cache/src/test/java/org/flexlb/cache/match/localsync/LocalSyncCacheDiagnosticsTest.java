@@ -1,11 +1,5 @@
 package org.flexlb.cache.match.localsync;
 
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
@@ -14,6 +8,12 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class LocalSyncCacheDiagnosticsTest {
 
@@ -41,7 +41,7 @@ class LocalSyncCacheDiagnosticsTest {
             verify(cache)
                     .updateEngineCache(worker, RoleType.PREFILL.getCode(), keys, lease.pollTrace());
             service.removeEngineBlockCache(worker, worker.trace());
-            verify(cache).removeEngineCache(worker.getLogicalIpPort(), worker.trace());
+            verify(cache).removeEngineCache(worker, worker.trace());
         } finally {
             worker.cacheMutationLock.unlock();
             lease.close();
@@ -52,13 +52,13 @@ class LocalSyncCacheDiagnosticsTest {
     void mutationWithoutTheGenerationCacheLockFailsBeforeReadingOrChangingKeys() {
         var cache = mock(KvCacheManager.class);
         var metrics = mock(CacheMetricsReporter.class);
-        var service = new DefaultCacheAwareService(cache, metrics);
+        var service = new LocalSyncCacheMatchProvider(cache, metrics);
         var worker =
                 WorkerStatus.createDiscovered(
                         RoleType.PREFILL, "group", "127.0.0.1", 8080, 8081, "site");
 
         assertThrows(
-                IllegalStateException.class, () -> service.updateEngineBlockCache(worker, null));
+                IllegalStateException.class, () -> service.updateFromWorkerStatus(worker, null));
         assertThrows(
                 IllegalStateException.class,
                 () -> service.removeEngineBlockCache(worker, worker.trace()));
@@ -67,7 +67,7 @@ class LocalSyncCacheDiagnosticsTest {
         try {
             assertThrows(
                     IllegalStateException.class,
-                    () -> service.updateEngineBlockCache(worker, null));
+                    () -> service.updateFromWorkerStatus(worker, null));
             assertThrows(
                     IllegalStateException.class,
                     () -> service.removeEngineBlockCache(worker, worker.trace()));

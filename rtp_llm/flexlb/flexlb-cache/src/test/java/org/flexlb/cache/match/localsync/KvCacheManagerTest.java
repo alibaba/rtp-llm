@@ -117,18 +117,16 @@ class KvCacheManagerTest {
 
     @Test
     void removesStaleCacheWhenActiveWorkerIsReplacedAtTheSameCount() {
-        when(engineLocalView.getAllEngineIpPorts()).thenReturn(Set.of("10.0.0.1:8080"));
-
+        when(engineLocalView.calculateDiff("10.0.0.1:8080@0", Set.of()))
+                .thenReturn(DiffResult.empty("10.0.0.1:8080@0"));
+        kvCacheManager.updateEngineCache(workerStatus(0, 1), "PREFILL", Set.of());
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.2:8080"));
-
-        verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080");
-        verify(engineLocalView, never()).removeAllCacheBlockOfEngine("10.0.0.2:8080");
+        verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
+        verify(engineLocalView, never()).removeAllCacheBlockOfEngine("10.0.0.2:8080@0");
     }
 
     @Test
     void keepsLogicalCacheWhenItsPhysicalEngineRemainsDiscoverable() {
-        when(engineLocalView.getAllEngineIpPorts()).thenReturn(Set.of("10.0.0.1:8080@0"));
         when(engineLocalView.calculateDiff("10.0.0.1:8080@0", Set.of()))
                 .thenReturn(DiffResult.empty("10.0.0.1:8080@0"));
         kvCacheManager.updateEngineCache(workerStatus(0, 1), "PREFILL", Set.of());
@@ -136,12 +134,16 @@ class KvCacheManagerTest {
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
 
         verify(engineLocalView, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
+        verify(globalCacheIndex, never())
+                .removeAllCacheBlockOfEngine(
+                        org.mockito.ArgumentMatchers.eq("10.0.0.1:8080@0"),
+                        org.mockito.ArgumentMatchers.anySet(),
+                        org.mockito.ArgumentMatchers.nullable(
+                                org.flexlb.dao.master.EndpointTrace.class));
     }
 
     @Test
     void removesLogicalCacheWhenItsPhysicalEngineDisappears() {
-        when(engineLocalView.getAllEngineIpPorts()).thenReturn(Set.of("10.0.0.1:8080@0"));
         when(engineLocalView.calculateDiff("10.0.0.1:8080@0", Set.of()))
                 .thenReturn(DiffResult.empty("10.0.0.1:8080@0"));
         kvCacheManager.updateEngineCache(workerStatus(0, 1), "PREFILL", Set.of());
@@ -149,7 +151,12 @@ class KvCacheManagerTest {
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.2:8080"));
 
         verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
+        verify(globalCacheIndex)
+                .removeAllCacheBlockOfEngine(
+                        org.mockito.ArgumentMatchers.eq("10.0.0.1:8080@0"),
+                        org.mockito.ArgumentMatchers.anySet(),
+                        org.mockito.ArgumentMatchers.nullable(
+                                org.flexlb.dao.master.EndpointTrace.class));
     }
 
     @Test
@@ -160,17 +167,19 @@ class KvCacheManagerTest {
         kvCacheManager.updateEngineCache(workerStatus(0, 1), "PREFILL", Set.of());
 
         kvCacheManager.removeEngineCache(logicalIpPort);
-        when(engineLocalView.getAllEngineIpPorts()).thenReturn(Set.of(logicalIpPort));
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
 
-        verify(engineLocalView, times(2)).removeAllCacheBlockOfEngine(logicalIpPort);
-        verify(globalCacheIndex, times(2)).removeAllCacheBlockOfEngine(logicalIpPort);
+        verify(engineLocalView, times(1)).removeAllCacheBlockOfEngine(logicalIpPort);
+        verify(globalCacheIndex, times(1))
+                .removeAllCacheBlockOfEngine(
+                        org.mockito.ArgumentMatchers.eq(logicalIpPort),
+                        org.mockito.ArgumentMatchers.anySet(),
+                        org.mockito.ArgumentMatchers.nullable(
+                                org.flexlb.dao.master.EndpointTrace.class));
     }
 
     @Test
     void keepsAllSiblingLogicalCachesWhenTheirPhysicalEngineRemainsDiscoverable() {
-        when(engineLocalView.getAllEngineIpPorts())
-                .thenReturn(Set.of("10.0.0.1:8080@0", "10.0.0.1:8080@1"));
         when(engineLocalView.calculateDiff("10.0.0.1:8080@0", Set.of()))
                 .thenReturn(DiffResult.empty("10.0.0.1:8080@0"));
         when(engineLocalView.calculateDiff("10.0.0.1:8080@1", Set.of()))
@@ -182,14 +191,22 @@ class KvCacheManagerTest {
 
         verify(engineLocalView, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
         verify(engineLocalView, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@1");
-        verify(globalCacheIndex, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@1");
+        verify(globalCacheIndex, never())
+                .removeAllCacheBlockOfEngine(
+                        org.mockito.ArgumentMatchers.eq("10.0.0.1:8080@0"),
+                        org.mockito.ArgumentMatchers.anySet(),
+                        org.mockito.ArgumentMatchers.nullable(
+                                org.flexlb.dao.master.EndpointTrace.class));
+        verify(globalCacheIndex, never())
+                .removeAllCacheBlockOfEngine(
+                        org.mockito.ArgumentMatchers.eq("10.0.0.1:8080@1"),
+                        org.mockito.ArgumentMatchers.anySet(),
+                        org.mockito.ArgumentMatchers.nullable(
+                                org.flexlb.dao.master.EndpointTrace.class));
     }
 
     @Test
     void removesAllSiblingLogicalCachesWhenTheirPhysicalEngineDisappears() {
-        when(engineLocalView.getAllEngineIpPorts())
-                .thenReturn(Set.of("10.0.0.1:8080@0", "10.0.0.1:8080@1"));
         when(engineLocalView.calculateDiff("10.0.0.1:8080@0", Set.of()))
                 .thenReturn(DiffResult.empty("10.0.0.1:8080@0"));
         when(engineLocalView.calculateDiff("10.0.0.1:8080@1", Set.of()))
@@ -201,18 +218,24 @@ class KvCacheManagerTest {
 
         verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
         verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080@1");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@1");
+        verify(globalCacheIndex)
+                .removeAllCacheBlockOfEngine(
+                        org.mockito.ArgumentMatchers.eq("10.0.0.1:8080@0"),
+                        org.mockito.ArgumentMatchers.anySet(),
+                        org.mockito.ArgumentMatchers.nullable(
+                                org.flexlb.dao.master.EndpointTrace.class));
+        verify(globalCacheIndex)
+                .removeAllCacheBlockOfEngine(
+                        org.mockito.ArgumentMatchers.eq("10.0.0.1:8080@1"),
+                        org.mockito.ArgumentMatchers.anySet(),
+                        org.mockito.ArgumentMatchers.nullable(
+                                org.flexlb.dao.master.EndpointTrace.class));
     }
 
     @Test
-    void treatsUnmappedLogicalKeyAsStaleEvenWhenItsPhysicalEngineRemainsDiscoverable() {
-        when(engineLocalView.getAllEngineIpPorts()).thenReturn(Set.of("10.0.0.1:8080@0"));
-
+    void discoveryWithNoOwnedSnapshotsHasNothingToRemove() {
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
-
-        verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
+        verifyNoInteractions(engineLocalView, globalCacheIndex);
     }
 
     @Test

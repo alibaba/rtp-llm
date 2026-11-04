@@ -1,17 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.accepted;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.createCommittedOwner;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.failed;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.missingEndpoint;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.prepareMember;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rejected;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rejectedPrefill;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollbackMember;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollbackReservation;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.sameIdentitySequence;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.throwRollbackFailure;
-
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryStrategy;
@@ -28,6 +16,18 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.OptionalLong;
+
+import static org.flexlb.balance.scheduler.PrefillAdmissionResources.accepted;
+import static org.flexlb.balance.scheduler.PrefillAdmissionResources.createCommittedOwner;
+import static org.flexlb.balance.scheduler.PrefillAdmissionResources.failed;
+import static org.flexlb.balance.scheduler.PrefillAdmissionResources.missingEndpoint;
+import static org.flexlb.balance.scheduler.PrefillAdmissionResources.prepareMember;
+import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rejected;
+import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rejectedPrefill;
+import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollbackMember;
+import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollbackReservation;
+import static org.flexlb.balance.scheduler.PrefillAdmissionResources.sameIdentitySequence;
+import static org.flexlb.balance.scheduler.PrefillAdmissionResources.throwRollbackFailure;
 
 /** Individual route admission, ownership, publication, and projection. */
 public final class RouteDeliveryStrategy implements DeliveryStrategy {

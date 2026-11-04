@@ -55,6 +55,34 @@ public class GrpcWorkerStatusRunner implements Runnable {
             long syncRequestTimeoutMs,
             CacheAwareService cacheAwareService,
             Executor callbackExecutor) {
+        this(
+                modelName,
+                ipPort,
+                defaultWorkerStatusPort(workerStatus),
+                roleType,
+                workerStatus,
+                pollLease,
+                workerDirectory,
+                engineHealthReporter,
+                engineGrpcService,
+                syncRequestTimeoutMs,
+                cacheAwareService,
+                callbackExecutor);
+    }
+
+    public GrpcWorkerStatusRunner(
+            String modelName,
+            String ipPort,
+            int workerStatusPort,
+            RoleType roleType,
+            WorkerStatus workerStatus,
+            WorkerStatus.PollLease pollLease,
+            WorkerDirectory workerDirectory,
+            EngineHealthReporter engineHealthReporter,
+            EngineGrpcService engineGrpcService,
+            long syncRequestTimeoutMs,
+            CacheAwareService cacheAwareService,
+            Executor callbackExecutor) {
         this.ipPort = ipPort;
         this.ip = workerStatus.getIp();
         this.workerStatusPort = workerStatusPort;
@@ -89,9 +117,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 modelName,
                 ipPort,
                 defaultWorkerStatusPort(workerStatus),
-                site,
                 roleType,
-                ignoredGroup,
                 workerStatus,
                 pollLease,
                 workerDirectory,
@@ -156,8 +182,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                 pollTrace.record(
                                         Stage.RESPONSE_DISCARDED, "WORKER_REPORTED_NOT_ALIVE");
                                 engineHealthReporter.reportStatusCheckerFail(
-                                        modelName,
                                         BalanceStatusEnum.WORKER_STATUS_SERVER_FAILED,
+                                        workerStatus.getMetricIpPort(),
                                         roleType);
                                 return;
                             }
@@ -587,12 +613,22 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     reason = retirementReason;
                 }
             }
-            engineHealthReporter.reportStatusCheckerFail(
-                    modelName, metric, roleType, stage, reason, failure);
+            try {
+                engineHealthReporter.reportStatusCheckerFail(
+                        workerStatus.getMetricIpPort(), metric, roleType, stage, reason, failure);
+            } finally {
+                if (rpcFailure) {
+                    engineHealthReporter.reportStatusCheckFailureLatency(
+                            metric,
+                            workerStatus.getMetricIpPort(),
+                            roleType,
+                            Math.max(0L, System.nanoTime() / 1000 - createTimeUs));
+                }
+            }
             if (rpcFailure) {
                 logger.debug(
                         "event=worker_status_rpc_failed endpoint={} origin={} reason={} grpcCode={}"
-                            + " rootType={} elapsedUs={}",
+                                + " rootType={} elapsedUs={}",
                         ipPort,
                         failure.confirmedLocalFailure() ? "MASTER" : "UNCONFIRMED",
                         failure.kind(),

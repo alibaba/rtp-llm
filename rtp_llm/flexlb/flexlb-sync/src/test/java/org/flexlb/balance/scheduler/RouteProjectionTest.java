@@ -1,5 +1,19 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.prediction.PrefillBatchFeatures;
+import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.projection.QueueSnapshot;
+import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.WorkSnapshot;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.util.List;
+import java.util.OptionalLong;
+import java.util.concurrent.atomic.AtomicInteger;
+
 import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.BATCH;
 import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.NOW_MS;
 import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.ROUTE;
@@ -15,20 +29,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-
-import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.prediction.PrefillBatchFeatures;
-import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.QueueSnapshot;
-import org.flexlb.balance.projection.RouteProjection;
-import org.flexlb.balance.projection.WorkSnapshot;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
-
-import java.util.List;
-import java.util.OptionalLong;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /** Canonical frozen-snapshot route timeline and candidate contract. */
 class RouteProjectionTest {
@@ -427,7 +427,7 @@ class RouteProjectionTest {
                 work(
                         List.of(
                                 new WorkSnapshot.RequestWork(
-                                        2L, WorkSnapshot.Phase.ENGINE_RUNNING, 30L)),
+                                        "2", WorkSnapshot.Phase.ENGINE_RUNNING, 30L)),
                         List.of(),
                         0L);
         WorkSnapshot mixed =
@@ -436,7 +436,7 @@ class RouteProjectionTest {
                         List.of(
                                 new WorkSnapshot.BatchWork(
                                         7L,
-                                        List.of(3L),
+                                        List.of("3"),
                                         WorkSnapshot.Phase.ENGINE_RUNNING,
                                         OptionalLong.empty())),
                         5L);

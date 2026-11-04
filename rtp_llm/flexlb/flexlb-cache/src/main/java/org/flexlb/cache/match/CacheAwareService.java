@@ -10,8 +10,8 @@ import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.EndpointTrace;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Service;
 
@@ -61,9 +61,12 @@ public class CacheAwareService {
         }
     }
 
-    public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus) { return updateFromWorkerStatus(workerStatus, null); }
+    public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus) {
+        return updateFromWorkerStatus(workerStatus, null);
+    }
 
-    public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus, EndpointTrace.Poll pollTrace) {
+    public WorkerCacheUpdateResult updateFromWorkerStatus(
+            WorkerStatus workerStatus, EndpointTrace.Poll pollTrace) {
         return updateOrchestrator.updateFromWorkerStatus(workerStatus, pollTrace);
     }
 
@@ -71,7 +74,9 @@ public class CacheAwareService {
         updateOrchestrator.removeEngineBlockCache(workerStatus, trace);
     }
 
-    public void removeEngineBlockCache(String engineIpPort) { removeEngineBlockCache(engineIpPort, null); }
+    public void removeEngineBlockCache(String engineIpPort) {
+        removeEngineBlockCache(engineIpPort, null);
+    }
 
     public void removeEngineBlockCache(String engineIpPort, EndpointTrace trace) {
         updateOrchestrator.removeEngineBlockCache(engineIpPort, trace);

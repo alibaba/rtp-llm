@@ -1,17 +1,8 @@
 package org.flexlb.sync.schedule;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.AppenderBase;
-
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.match.CacheAwareService;
@@ -35,6 +26,14 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
 class ExpirationCleanerTest {
 
     @Test
@@ -43,7 +42,7 @@ class ExpirationCleanerTest {
         CacheAwareService cache = mock(CacheAwareService.class);
         WorkerStatus status = status("127.0.0.1", 8080);
         WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
-        directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> status);
+        directory.currentOrDiscover(RoleType.PREFILL, status.getLogicalIpPort(), () -> status);
         ExpirationCleaner cleaner = new ExpirationCleaner(cache, directory);
         cleaner.retireUnavailableWorkers();
         assertTrue(status.isActiveGeneration());
@@ -76,7 +75,7 @@ class ExpirationCleanerTest {
     void logsCountsWithoutWaitingForWorkerLock() throws Exception {
         var directory = new WorkerDirectory(mock(EndpointRegistry.class));
         WorkerStatus worker = status("127.0.0.1", 8080);
-        directory.currentOrDiscover(RoleType.PREFILL, worker.getIpPort(), () -> worker);
+        directory.currentOrDiscover(RoleType.PREFILL, worker.getLogicalIpPort(), () -> worker);
         var cleaner = new ExpirationCleaner(mock(CacheAwareService.class), directory);
         var emitted = new CountDownLatch(1);
         var line = new AtomicReference<String>();

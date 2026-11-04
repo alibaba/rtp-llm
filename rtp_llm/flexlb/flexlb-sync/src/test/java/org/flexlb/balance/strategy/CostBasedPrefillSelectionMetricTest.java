@@ -1,14 +1,5 @@
 package org.flexlb.balance.strategy;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -51,6 +42,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class CostBasedPrefillSelectionMetricTest {
     private static final int FULL_FLEET_SIZE = 750;
@@ -286,7 +286,7 @@ class CostBasedPrefillSelectionMetricTest {
     void cacheLeaderWithAllDispatchSlotsOccupiedStillWins() {
         configureAffinity(600L, 5.0);
         PrefillEndpoint endpoint =
-                (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
+                (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080@0");
         var reservations =
                 new java.util.ArrayList<
                         org.flexlb.balance.endpoint.PrefillState.RouteReservation>();
@@ -294,7 +294,7 @@ class CostBasedPrefillSelectionMetricTest {
         try {
             for (long id = 31_001L; id <= 31_002L; id++) {
                 Request request = new Request();
-                request.setRequestId(id);
+                request.setRequestId(String.valueOf(id));
                 request.setSeqLen(10L);
                 BalanceContext ctx = new BalanceContext(config);
                 ctx.setRequest(request);
@@ -335,8 +335,8 @@ class CostBasedPrefillSelectionMetricTest {
     @ValueSource(booleans = {false, true})
     void cacheLookupCannotCommitARetiredOrReplacedPrefillGeneration(boolean replace) {
         configureAffinity(600L, 5.0);
-        PrefillEndpoint old = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
-        when(cache.findMatchingEngines(any(), any(), any()))
+        PrefillEndpoint old = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080@0");
+        when(cache.findMatchingEngines(any()))
                 .thenAnswer(
                         invocation -> {
                             EndpointRegistry.DetachedGeneration detached;
@@ -353,7 +353,11 @@ class CostBasedPrefillSelectionMetricTest {
                             if (replace) {
                                 publish("10.0.0.2", 8080);
                             }
-                            return Map.of("10.0.0.2:8080", 5);
+                            return new CacheMatchResult(
+                                    Map.of("10.0.0.2:8080", HostCacheMatch.local(5)),
+                                    CacheMatchSource.KVCM,
+                                    0L,
+                                    100L);
                         });
 
         var stale = strategy.select(context, RoleType.PREFILL, null);
@@ -365,16 +369,21 @@ class CostBasedPrefillSelectionMetricTest {
                 stale.status(),
                 "a cache lookup must not transfer ownership to a different endpoint generation");
         // A stale cache entry must not revive a removed worker on the next snapshot.
-        org.mockito.Mockito.doReturn(Map.of("10.0.0.2:8080", 5))
+        org.mockito.Mockito.doReturn(
+                        new CacheMatchResult(
+                                Map.of("10.0.0.2:8080", HostCacheMatch.local(5)),
+                                CacheMatchSource.KVCM,
+                                0L,
+                                100L))
                 .when(cache)
-                .findMatchingEngines(any(), any(), any());
+                .findMatchingEngines(any());
         try (SelectedRole selected = select()) {
             assertEquals(replace ? "10.0.0.2" : "10.0.0.1", selected.serverStatus().getServerIp());
         }
     }
 
     @Test
-    void cacheMatchingSeesTheLiveFleetBeforeApplyingRouteGroupCompatibility() {
+    void cacheMatchingQueriesTheRouteGroupAndIgnoresIncompatibleMatches() {
         WorkerStatus target =
                 StrategyTestSupport.workerStatus(
                         RoleType.PREFILL,
@@ -385,11 +394,20 @@ class CostBasedPrefillSelectionMetricTest {
                         true,
                         1_000_000L,
                         1_000_000L);
-        StrategyTestSupport.publishEndpoint(registry, RoleType.PREFILL, "10.0.0.2:8080", target);
+        StrategyTestSupport.publishEndpoint(registry, RoleType.PREFILL, "10.0.0.2:8080@0", target);
         context.getRequest().setCacheKeyBlockSize(100L);
         context.getRequest().setBlockCacheKeys(List.of(1L));
-        when(cache.findMatchingEngines(any(), any(), any()))
-                .thenReturn(Map.of("10.0.0.1:8080", 9, "10.0.0.2:8080", 1));
+        when(cache.findMatchingEngines(any()))
+                .thenReturn(
+                        new CacheMatchResult(
+                                Map.of(
+                                        "10.0.0.1:8080",
+                                        HostCacheMatch.local(9),
+                                        "10.0.0.2:8080",
+                                        HostCacheMatch.local(1)),
+                                CacheMatchSource.KVCM,
+                                0L,
+                                100L));
 
         var result = strategy.select(context, RoleType.PREFILL, "target");
         assertEquals(PlacementResult.Status.SUCCESS, result.status());
@@ -397,9 +415,10 @@ class CostBasedPrefillSelectionMetricTest {
             assertEquals("target", selected.serverStatus().getGroup());
         }
         @SuppressWarnings("unchecked")
-        ArgumentCaptor<List<String>> candidates = ArgumentCaptor.forClass(List.class);
-        verify(cache).findMatchingEngines(any(), any(), candidates.capture());
-        assertEquals(Set.of("10.0.0.1:8080", "10.0.0.2:8080"), Set.copyOf(candidates.getValue()));
+        ArgumentCaptor<org.flexlb.cache.domain.CacheMatchQuery> candidates =
+                ArgumentCaptor.forClass(org.flexlb.cache.domain.CacheMatchQuery.class);
+        verify(cache).findMatchingEngines(candidates.capture());
+        assertEquals("target", candidates.getValue().group());
     }
 
     @Test
@@ -413,7 +432,7 @@ class CostBasedPrefillSelectionMetricTest {
         strategy = new CostBasedPrefillStrategy(new WorkerDirectory(registry), cache, reporter);
         configureAffinity(600L, 5.0);
         PrefillEndpoint endpoint =
-                (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
+                (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080@0");
         var reservations =
                 new java.util.ArrayList<
                         org.flexlb.balance.endpoint.PrefillState.RouteReservation>();
@@ -421,7 +440,7 @@ class CostBasedPrefillSelectionMetricTest {
         try {
             for (long id = 32_001L; id <= 32_002L; id++) {
                 Request request = new Request();
-                request.setRequestId(id);
+                request.setRequestId(String.valueOf(id));
                 request.setSeqLen(10L);
                 BalanceContext ctx = new BalanceContext(config);
                 ctx.setRequest(request);
@@ -453,17 +472,17 @@ class CostBasedPrefillSelectionMetricTest {
                 result.value().close();
             }
             @SuppressWarnings("unchecked")
-            ArgumentCaptor<List<String>> candidates = ArgumentCaptor.forClass(List.class);
-            verify(cache).findMatchingEngines(any(), any(), candidates.capture());
-            assertEquals(
-                    Set.of("10.0.0.1:8080", "10.0.0.2:8080"),
-                    Set.copyOf(candidates.getValue()),
+            ArgumentCaptor<org.flexlb.cache.domain.CacheMatchQuery> candidates =
+                    ArgumentCaptor.forClass(org.flexlb.cache.domain.CacheMatchQuery.class);
+            verify(cache).findMatchingEngines(candidates.capture());
+            org.junit.jupiter.api.Assertions.assertNull(
+                    candidates.getValue().group(),
                     "alive P must reach cache matching even when immediate dispatch is full");
             assertEquals(
                     PlacementResult.Status.BLOCKED,
                     result.status(),
                     "do not fall back to the colder idle P");
-            assertEquals("10.0.0.2:8080", result.diagnostics().get("selectedEndpoint"));
+            assertEquals("10.0.0.2:8080@0", result.diagnostics().get("selectedEndpoint"));
         } finally {
             occupants.forEach(item -> endpoint.releaseCommittedItem(item.execution()));
             reservations.forEach(org.flexlb.balance.endpoint.PrefillState.RouteReservation::close);

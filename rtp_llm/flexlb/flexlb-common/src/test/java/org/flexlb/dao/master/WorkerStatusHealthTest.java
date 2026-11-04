@@ -21,7 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class WorkerStatusHealthTest {
     private static WorkerStatus worker() {
-        return WorkerStatus.createDiscovered(RoleType.PREFILL, "g", "127.0.0.1", 8080, 8081, "test");
+        return WorkerStatus.createDiscovered(
+                RoleType.PREFILL, "g", "127.0.0.1", 8080, 8081, "test");
     }
 
     private static void publish(WorkerStatus worker, long version, WorkerStatus.PollLease lease) {
@@ -33,8 +34,13 @@ class WorkerStatusHealthTest {
         lease.close();
         worker.lock.lock();
         try {
-            worker.publishPreparedStatus(worker.prepareNewStatus(WorkerStatusTestFixtures.observation(worker, response), lease));
-        } finally { worker.lock.unlock(); worker.finishStatusApplication(lease); }
+            worker.publishPreparedStatus(
+                    worker.prepareNewStatus(
+                            WorkerStatusTestFixtures.observation(worker, response), lease));
+        } finally {
+            worker.lock.unlock();
+            worker.finishStatusApplication(lease);
+        }
     }
 
     private static WorkerStatus aliveWorker() {
@@ -42,7 +48,9 @@ class WorkerStatusHealthTest {
         var lease = WorkerStatusTestFixtures.beginStatusPoll(worker, true);
         try {
             publish(worker, 1L, lease);
-        } finally { lease.close(); }
+        } finally {
+            lease.close();
+        }
         return worker;
     }
 
@@ -60,7 +68,9 @@ class WorkerStatusHealthTest {
         try (var invalid = worker.tryBeginStatusPoll(2L)) {
             worker.recordStatusRpcResult(invalid, false, true, null);
         }
-        assertFalse(worker.pollHealth().healthy(), "an invalid alive field is not a health observation");
+        assertFalse(
+                worker.pollHealth().healthy(),
+                "an invalid alive field is not a health observation");
         assertFalse(worker.isAvailableForScheduling());
         assertEquals(0L, worker.pollHealth().consecutiveWorkerFailures());
         assertNull(worker.retirementReason());
@@ -91,16 +101,23 @@ class WorkerStatusHealthTest {
                 try (var next = worker.tryBeginStatusPoll(cycle)) {
                     assertNotNull(next, "pending application must not block heartbeats");
                     worker.recordStatusRpcResult(next, true, true, null);
-                    assertFalse(worker.tryBeginStatusApplication(next), "retain only one application");
+                    assertFalse(
+                            worker.tryBeginStatusApplication(next), "retain only one application");
                     worker.finishStatusApplication(next);
-                    assertFalse(worker.tryBeginStatusApplication(next), "a different poll cannot release the owner");
+                    assertFalse(
+                            worker.tryBeginStatusApplication(next),
+                            "a different poll cannot release the owner");
                 }
             }
             assertSame(committed, worker.committedWorkerStatus());
             assertEquals(1L, worker.appliedStatusCursor().statusVersion());
-            assertTrue(worker.isAvailableForScheduling(), "local backlog does not invalidate a live worker");
+            assertTrue(
+                    worker.isAvailableForScheduling(),
+                    "local backlog does not invalidate a live worker");
             assertNull(worker.retirementReason());
-        } finally { worker.finishStatusApplication(applying); }
+        } finally {
+            worker.finishStatusApplication(applying);
+        }
     }
 
     @Test
@@ -108,15 +125,22 @@ class WorkerStatusHealthTest {
         var worker = aliveWorker();
         var initialHealth = worker.pollHealth();
         long lastSuccessUs = worker.pollHealth().lastSuccessfulPollUs();
-        List<Throwable> failures = List.of(new OutOfMemoryError("direct buffer"),
-                new TimeoutException(), new ConnectException(), new OutOfMemoryError("heap"));
+        List<Throwable> failures =
+                List.of(
+                        new OutOfMemoryError("direct buffer"),
+                        new TimeoutException(),
+                        new ConnectException(),
+                        new OutOfMemoryError("heap"));
         for (int index = 0; index < failures.size(); index++) {
             try (var lease = worker.tryBeginStatusPoll(index + 2L);
-                 var cacheLease = worker.tryBeginCachePoll(index + 2L)) {
+                    var cacheLease = worker.tryBeginCachePoll(index + 2L)) {
                 assertNotNull(lease, "failure must not stop the next status poll");
                 assertNotNull(cacheLease, "failure must not stop independent cache polling");
                 worker.recordStatusRpcResult(lease, false, false, failures.get(index));
-                assertSame(initialHealth, worker.pollHealth(), "unconfirmed failures do not republish health");
+                assertSame(
+                        initialHealth,
+                        worker.pollHealth(),
+                        "unconfirmed failures do not republish health");
                 assertEquals(0L, worker.pollHealth().consecutiveWorkerFailures());
                 assertEquals(lastSuccessUs, worker.pollHealth().lastSuccessfulPollUs());
                 assertTrue(worker.pollHealth().reportedAlive());
@@ -140,7 +164,8 @@ class WorkerStatusHealthTest {
             assertFalse(worker.pollHealth().reportedAlive());
             assertEquals(attempt < 3, worker.pollHealth().healthy());
             assertEquals(attempt < 3, worker.isAvailableForScheduling());
-            assertEquals(attempt < 3 ? null : WorkerStatus.RetirementReason.CONSECUTIVE_WORKER_FAILURES,
+            assertEquals(
+                    attempt < 3 ? null : WorkerStatus.RetirementReason.CONSECUTIVE_WORKER_FAILURES,
                     worker.retirementReason());
         }
         assertNull(worker.tryBeginStatusPoll(5L));
@@ -161,10 +186,13 @@ class WorkerStatusHealthTest {
         assertTrue(worker.isAvailableForScheduling());
 
         var secondFailure = WorkerStatusTestFixtures.receive(worker, false, null);
-        WorkerStatusTestFixtures.receive(worker, false, new IllegalStateException(new ConnectException()));
+        WorkerStatusTestFixtures.receive(
+                worker, false, new IllegalStateException(new ConnectException()));
         WorkerStatusTestFixtures.receive(worker, false, new OutOfMemoryError());
         assertSame(secondFailure, worker.pollHealth());
-        assertEquals(2L, worker.pollHealth().consecutiveWorkerFailures(),
+        assertEquals(
+                2L,
+                worker.pollHealth().consecutiveWorkerFailures(),
                 "RPC exceptions cannot confirm or clear a not-alive report");
         assertFalse(worker.pollHealth().reportedAlive());
         assertTrue(worker.isAvailableForScheduling());
@@ -173,7 +201,9 @@ class WorkerStatusHealthTest {
         WorkerStatusTestFixtures.receive(worker, false, null);
         assertEquals(3L, worker.pollHealth().consecutiveWorkerFailures());
         assertFalse(worker.isAvailableForScheduling());
-        assertEquals(WorkerStatus.RetirementReason.CONSECUTIVE_WORKER_FAILURES, worker.retirementReason());
+        assertEquals(
+                WorkerStatus.RetirementReason.CONSECUTIVE_WORKER_FAILURES,
+                worker.retirementReason());
     }
 
     @Test
@@ -193,7 +223,9 @@ class WorkerStatusHealthTest {
         WorkerStatusTestFixtures.receive(worker, false, null);
         WorkerStatusTestFixtures.receive(worker, false, null);
         assertEquals(2L, worker.pollHealth().consecutiveWorkerFailures());
-        assertTrue(worker.isAvailableForScheduling(), "a healthy response starts a new failure sequence");
+        assertTrue(
+                worker.isAvailableForScheduling(),
+                "a healthy response starts a new failure sequence");
         assertNull(worker.retirementReason());
     }
 
@@ -221,7 +253,10 @@ class WorkerStatusHealthTest {
             var failedHealth = worker.pollHealth();
             worker.recordStatusRpcResult(old, true, true, null);
             worker.recordStatusRpcResult(current, true, true, null);
-            assertSame(failedHealth, worker.pollHealth(), "a duplicate result cannot rewrite the first outcome");
+            assertSame(
+                    failedHealth,
+                    worker.pollHealth(),
+                    "a duplicate result cannot rewrite the first outcome");
             assertEquals(1L, worker.pollHealth().consecutiveWorkerFailures());
             assertTrue(worker.isAvailableForScheduling());
         }
@@ -237,11 +272,14 @@ class WorkerStatusHealthTest {
         try (var lease = worker.tryBeginStatusPoll(1L)) {
             worker.lock.lock();
             try {
-                CompletableFuture.runAsync(() -> worker.recordStatusRpcResult(lease, true, true, null))
+                CompletableFuture.runAsync(
+                                () -> worker.recordStatusRpcResult(lease, true, true, null))
                         .get(1, TimeUnit.SECONDS);
                 assertTrue(worker.pollHealth().reportedAlive());
                 assertSame(committed, worker.committedWorkerStatus());
-            } finally { worker.lock.unlock(); }
+            } finally {
+                worker.lock.unlock();
+            }
         }
     }
 
@@ -254,7 +292,8 @@ class WorkerStatusHealthTest {
         worker.lock.lock();
         try {
             CompletableFuture.runAsync(worker::markRemovedFromDiscovery).get(1, TimeUnit.SECONDS);
-            assertEquals(WorkerStatus.RetirementReason.DISCOVERY_REMOVED, worker.retirementReason());
+            assertEquals(
+                    WorkerStatus.RetirementReason.DISCOVERY_REMOVED, worker.retirementReason());
             assertFalse(worker.isAvailableForScheduling());
             var health = worker.pollHealth();
             worker.recordStatusRpcResult(lease, true, true, null);

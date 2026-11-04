@@ -24,12 +24,14 @@ final class GrpcOverloadInterceptor implements ServerInterceptor {
 
     @Override
     public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
-            ServerCall<ReqT, RespT> call, Metadata headers,
-            ServerCallHandler<ReqT, RespT> next) {
-        ThreadPoolExecutor executor = call.getMethodDescriptor().getFullMethodName().endsWith("/Cancel")
-                ? controlExecutor : this.executor;
+            ServerCall<ReqT, RespT> call, Metadata headers, ServerCallHandler<ReqT, RespT> next) {
+        ThreadPoolExecutor executor =
+                call.getMethodDescriptor().getFullMethodName().endsWith("/Cancel")
+                        ? controlExecutor
+                        : this.executor;
         if (executor.isShutdown() || executor.getQueue().remainingCapacity() == 0) {
-            call.close(Status.RESOURCE_EXHAUSTED.withDescription("FlexLB gRPC executor saturated"),
+            call.close(
+                    Status.RESOURCE_EXHAUSTED.withDescription("FlexLB gRPC executor saturated"),
                     new Metadata());
             // Do not request/deserialize the payload or enter the business handler.
             // Transport cancellation still runs through gRPC's normal buffer cleanup.

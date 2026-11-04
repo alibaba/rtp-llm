@@ -13,7 +13,9 @@ import static org.mockito.Mockito.when;
 class ChannelConfigurationSizingTest {
     @Test
     void createsConfiguredCallbackAndIoPools() {
-        var config = ConfigService.parse("""
+        var config =
+                ConfigService.parse(
+                        """
                 {"requestLifecycle":{"request":{"timeoutMs":1000}},
                  "engineGrpc":{"executorThreads":3,"executorQueueCapacity":7,"eventLoopThreads":2}}
                 """);
@@ -27,7 +29,9 @@ class ChannelConfigurationSizingTest {
             assertEquals(3, callbacks.getCorePoolSize());
             assertEquals(3, callbacks.getMaximumPoolSize());
             assertEquals(7, callbacks.getQueue().remainingCapacity());
-            assertEquals(GrpcCallbackCallerRunsPolicy.class, callbacks.getRejectedExecutionHandler().getClass());
+            assertEquals(
+                    GrpcCallbackCallerRunsPolicy.class,
+                    callbacks.getRejectedExecutionHandler().getClass());
             assertEquals(2, ((MultithreadEventExecutorGroup) clientIo).executorCount());
             assertEquals(4, ((MultithreadEventExecutorGroup) serverIo).executorCount());
         } finally {
