@@ -45,18 +45,18 @@ class ClientRole:
             if self.monitoring:
                 self.monitoring.discover(name, self.records.directory / 'components' / name)
 
-    def coordinator(self):
+    def _coordinator(self):
         nodes = [node for node in self.topology.active('client') if node['id'] == 'client-0']
         if len(nodes) != 1:
             raise ExecutionError('Expected exactly one client-0 coordinator')
         return nodes[0]['control']
 
-    async def control(self, operation, args, query_time, timeout):
+    async def _control(self, operation, args, query_time, timeout):
         envelope = {'interface': operation, 'args': args, 'context': {'run': 'foreground',
                     'query_time': query_time, 'observation': None, 'timeout_ms': max(1, int(timeout * 1000))}}
         if len(json.dumps(envelope).encode()) > 1024 * 1024:
             raise ExecutionError('Client control parameters exceed the 1 MiB limit')
-        return await post(self.coordinator(), envelope)
+        return await post(self._coordinator(), envelope)
 
     async def start_playback(self, body, query_time, timeout):
         clients = self.topology.active('client')
@@ -70,7 +70,7 @@ class ClientRole:
         # A lost acknowledgement may still leave Java sending; teardown must attempt collection.
         self.pending = True
         self.stop_timeout = body['drain_timeout_ms'] / 1000 + 15 + len(clients) * 6
-        result = await self.control('client/start', body, query_time, timeout)
+        result = await self._control('client/start', body, query_time, timeout)
         if result != {'accepted': True}:
             raise ExecutionError('Invalid Client start acknowledgement')
         return True
@@ -84,7 +84,7 @@ class ClientRole:
         return await self._stop_playback(query_time, timeout)
 
     async def _stop_playback(self, query_time, timeout):
-        result = await self.control('client/stop', {}, query_time, timeout)
+        result = await self._control('client/stop', {}, query_time, timeout)
         self.records.emit(event='client_result', result=result)
         if not isinstance(result, dict) or set(result) != {'clients', 'errors'}:
             raise ExecutionError('Invalid Client result')

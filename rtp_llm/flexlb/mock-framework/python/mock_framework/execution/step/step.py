@@ -1,4 +1,5 @@
 """Bound Case steps and the common execution lifecycle."""
+from abc import ABC, abstractmethod
 import asyncio
 from dataclasses import dataclass
 from collections.abc import Awaitable, Callable
@@ -38,7 +39,7 @@ class Expect:
 
 
 @dataclass(frozen=True)
-class Step:
+class Step(ABC):
     definition: ClassVar
     allow_background: ClassVar[bool] = True
     id: str
@@ -49,6 +50,11 @@ class Step:
     within: str | None = None
     wait_after: str = '0s'
     background: bool = False
+
+    @staticmethod
+    @abstractmethod
+    async def execute(context, arguments):
+        """Implement the action for one set of validated arguments."""
 
     async def run(self, context, results, phase_id):
         with context.records.step(phase_id, self.id, self.interface):

@@ -21,7 +21,7 @@ class EngineRole:
         self.lock = asyncio.Lock()
         self._monitor = None
 
-    def port(self):
+    def _port(self):
         # Binding is a probe, not a reservation; a subsequent bind failure fails the run.
         for _ in range(32):
             with socket.socket() as probe:
@@ -32,7 +32,7 @@ class EngineRole:
                 return port
         raise ExecutionError('Cannot allocate a fresh Engine listener port')
 
-    async def call(self, host, operation, args):
+    async def _call(self, host, operation, args):
         async with asyncio.timeout(10):
             return await post(host['url'], {'interface': 'host/' + operation, 'args': args,
                 'context': {'run': 'foreground', 'query_time': timestamp(), 'observation': None, 'timeout_ms': 9000}})
@@ -58,7 +58,7 @@ class EngineRole:
                     host_dir = self.records.directory / 'hosts' / host_name
                     host_dir.mkdir(parents=True)
                     ready = host_dir / 'ready.json'
-                    host_port = self.port()
+                    host_port = self._port()
                     members = set()
                     child = await self.supervisor.spawn(host_name, recipe['command'], recipe['cwd'],
                         {**os.environ, **recipe['env'], 'MOCK_COMPONENTS_DIR': str(directory.parent),
@@ -75,8 +75,8 @@ class EngineRole:
                         return value['url']
                     host['url'] = await self.supervisor.guard(await_ready(), float(duration(recipe['startup_timeout'])))
                     self.records.emit(event='process_ready', node=host_name, url=host['url'])
-                rpc_port, control_port = self.port(), self.port()
-                endpoint = await self.call(host, 'create', {'id': node, 'rpcPort': rpc_port, 'controlPort': control_port})
+                rpc_port, control_port = self._port(), self._port()
+                endpoint = await self._call(host, 'create', {'id': node, 'rpcPort': rpc_port, 'controlPort': control_port})
                 saved = json.loads((directory / 'endpoints.json').read_text())
                 expected = {'id': node, 'role': role, 'rpc': f'127.0.0.1:{rpc_port}',
                     'control': f'http://127.0.0.1:{control_port}', 'metrics': f'http://127.0.0.1:{control_port}/metrics'}
@@ -113,7 +113,7 @@ class EngineRole:
                 node = item['id']
                 host_name = self.instances[node]
                 host = self.hosts[host_name]
-                stopped = await self.call(host, 'stop', {'id': node})
+                stopped = await self._call(host, 'stop', {'id': node})
                 if stopped.get('id') != node or stopped.get('rpc') != item['rpc']:
                     raise ExecutionError('Host stopped an unexpected Engine')
                 host['members'].remove(node)
@@ -130,13 +130,13 @@ class EngineRole:
                         raise ExecutionError('; '.join(errors))
             return [item['rpc'] for item in selected]
 
-    async def monitor(self):
+    async def _monitor(self):
         try:
             while not self.supervisor.closing:
                 await asyncio.sleep(1)
                 async with self.lock:
                     for name, host in self.hosts.items():
-                        values = await self.call(host, 'status', {})
+                        values = await self._call(host, 'status', {})
                         expected = {item['id']: item['rpc'] for item in self.topology.active() if item['id'] in host['members']}
                         if len(values) != len(expected) or {item['id']: item['rpc'] for item in values} != expected:
                             raise ExecutionError(f'Engine membership differs in {name}')
@@ -150,7 +150,7 @@ class EngineRole:
                 await self.supervisor.guard(self.scale_out(role, count), float(duration(recipe['startup_timeout'])) * count)
 
         if self.hosts:
-            self._monitor = asyncio.create_task(self.monitor())
+            self._monitor = asyncio.create_task(self._monitor())
 
     async def stop_monitor(self):
         if self._monitor:

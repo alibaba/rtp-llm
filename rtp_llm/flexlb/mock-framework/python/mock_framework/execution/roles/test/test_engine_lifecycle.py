@@ -212,7 +212,7 @@ def test_allocator_exhaustion_fails_without_reusing_a_retired_listener(monkeypat
         def getsockname(self): return ('127.0.0.1', 12345)
     monkeypatch.setattr(socket, 'socket', Probe)
     with pytest.raises(ExecutionError, match='fresh Engine listener'):
-        owner.port()
+        owner._port()
 
 
 @pytest.mark.parametrize('operation', ['create', 'stop'])
