@@ -1,3 +1,4 @@
+from mock_framework.execution.test.helpers import FRAMEWORK
 from mock_framework.execution.step.master_get import MasterGet, MasterSelection
 from mock_framework.execution.step.master_engine_get import MasterEngineGet, EngineSelection
 import json
@@ -75,7 +76,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     from mock_framework.execution.launch import prepare_launch
     from mock_framework.execution.runner import run_case
 
-    root = Path(__file__).resolve().parents[1]
+    root = FRAMEWORK
     java = Path(os.environ['JAVA_HOME']) / 'bin/java'
     master_classpath = os.pathsep.join([str(root / 'java/master/target/test-classes'), str(root / 'java/master/target/classes'),
         (root / 'java/master/target/dependencies.txt').read_text().strip()])

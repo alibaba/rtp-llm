@@ -1,3 +1,4 @@
+from mock_framework.execution.test.helpers import FRAMEWORK
 from mock_framework.execution.step.step import Step
 import asyncio
 from dataclasses import dataclass, replace
@@ -22,7 +23,7 @@ from mock_framework.execution.step.engine_scale_in import EngineScaleIn, ScaleIn
 from mock_framework.execution.step.engine_scale_out import EngineScaleOut, ScaleOut
 from mock_framework.execution.step.prometheus_query import PrometheusQuery, Promql
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = FRAMEWORK
 
 
 @dataclass(frozen=True)
@@ -40,7 +41,7 @@ def setup_case(tmp_path, operation, mode='shared', monitor=False, invalid=False,
     if invalid:
         env['decode']['config']['seq_size_per_block'] = 0
     if master:
-        from test_master import configuration
+        from mock_framework.execution.test.test_master import configuration
         config = configuration()
         config['FLEXLB_CONFIG'] = json.dumps({'scheduler': {'type': 'DIRECT'}, 'dispatcher': {'type': 'NON_BATCH'},
             'requestLifecycle': {'request': {'timeoutMs': 3000}},

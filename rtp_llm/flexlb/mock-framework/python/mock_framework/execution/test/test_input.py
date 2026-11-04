@@ -1,3 +1,4 @@
+from mock_framework.execution.test.helpers import FRAMEWORK
 import os
 from pathlib import Path
 import struct
@@ -6,9 +7,9 @@ import subprocess
 import pytest
 import zstandard
 
-from helpers.input import MAGIC, MAX_FRAME, MAX_CHUNK_REQUESTS, read_inputs, write_inputs, pb
+from mock_framework.execution.test.helpers.input import MAGIC, MAX_FRAME, MAX_CHUNK_REQUESTS, read_inputs, write_inputs, pb
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = FRAMEWORK
 
 
 def requests(count=2050):

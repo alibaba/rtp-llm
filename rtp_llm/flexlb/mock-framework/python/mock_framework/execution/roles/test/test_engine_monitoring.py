@@ -1,3 +1,4 @@
+from mock_framework.execution.test.helpers import FRAMEWORK
 """Exercise provider discovery and exclusive push collection in the packaged Engine."""
 import json
 import os
@@ -12,7 +13,7 @@ import zipfile
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = FRAMEWORK
 JAR = ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
 JAVA = Path(os.environ['JAVA_HOME']) / 'bin/java' if os.environ.get('JAVA_HOME') else Path(shutil.which('java') or '/usr/bin/java')
 JAVAC = JAVA.with_name('javac')

@@ -1,3 +1,4 @@
+from mock_framework.execution.test.helpers import FRAMEWORK
 """Compare real DSV Frontend + C++ hash implementation with Mock Client/Engine keys."""
 import ctypes
 import importlib.util
@@ -10,8 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[4]
-FRAMEWORK = Path(__file__).resolve().parents[1]
+ROOT = FRAMEWORK.parents[2]
 
 
 @pytest.fixture(scope='module')

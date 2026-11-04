@@ -1,3 +1,4 @@
+from mock_framework.execution.test.helpers import FRAMEWORK
 import asyncio
 import json
 import struct
@@ -102,7 +103,7 @@ def test_query_defaults_to_all_clients_and_limits_details_not_counts(evidence, t
 
 
 def test_stop_uses_rpc_summary_while_request_query_requires_files(monkeypatch, tmp_path):
-    from test_client_interfaces import context, state
+    from mock_framework.execution.step.test.test_client_interfaces import context, state
     ctx = context(); ctx.records.directory = tmp_path; ctx.runtime.clients.pending = True
     async def post(*args): return {'clients': {'http://c:1': state(), 'http://c:2': state()}, 'errors': []}
     monkeypatch.setattr(client_runtime, 'post', post)
@@ -118,7 +119,7 @@ def test_killed_java_writer_leaves_readable_frames_but_no_complete_evidence(tmp_
     import shutil
     import subprocess
     import time
-    root = Path(__file__).resolve().parents[1]
+    root = FRAMEWORK
     classpath = os.pathsep.join(str(root / path) for path in [
         'java/client/target/test-classes', 'java/client/target/mock-client-1.0-SNAPSHOT-all.jar',
         'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'])

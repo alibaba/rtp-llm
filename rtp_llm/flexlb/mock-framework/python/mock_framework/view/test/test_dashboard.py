@@ -1,9 +1,10 @@
+from mock_framework.execution.test.helpers import FRAMEWORK
 """Dashboard contracts: role isolation, honest coverage, units and collapsed rows."""
 import json
 from pathlib import Path
 import re
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = FRAMEWORK
 
 
 def dashboard():

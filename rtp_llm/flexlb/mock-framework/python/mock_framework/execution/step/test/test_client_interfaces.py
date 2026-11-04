@@ -1,3 +1,4 @@
+from mock_framework.execution.test.helpers import FRAMEWORK
 from mock_framework.execution.step.client_qps import ClientQps
 import asyncio
 from types import SimpleNamespace
@@ -9,7 +10,7 @@ from mock_framework.execution.step import _metrics as metrics
 from mock_framework.execution import ExecutionError
 from mock_framework.execution.roles import client as client_runtime
 from mock_framework.execution.roles.client import ClientRole
-from helpers.input import read_inputs, write_inputs, pb
+from mock_framework.execution.test.helpers.input import read_inputs, write_inputs, pb
 
 
 def context():
@@ -22,12 +23,12 @@ def context():
     records = SimpleNamespace(emit=lambda **v: events.append(v))
     clients = ClientRole(component=None, recipe=None, supervisor=None,
         topology=topology, records=records, monitoring=None)
-    return SimpleNamespace(runtime=SimpleNamespace(topology=topology, clients=clients, case=SimpleNamespace(directory=Path(__file__).resolve().parents[1])), nodes=nodes,
+    return SimpleNamespace(runtime=SimpleNamespace(topology=topology, clients=clients, case=SimpleNamespace(directory=FRAMEWORK)), nodes=nodes,
         query_time='2026-10-28T00:00:00Z', timeout=20, records=records, events=events)
 
 
 def args():
-    return {'masters': ['master:1'], 'requests_file': str(Path(__file__).resolve().parents[1] / 'data/traffic/basic.binpb.zst'),
+    return {'masters': ['master:1'], 'requests_file': str(FRAMEWORK / 'data/traffic/basic.binpb.zst'),
             'qps': 10, 'concurrency': 2}
 
 
@@ -110,9 +111,9 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
     from mock_framework.config import compile_case
     from mock_framework.execution.launch import prepare_launch
     from mock_framework.execution.runner import run_case
-    from test_master import configuration
+    from mock_framework.execution.test.test_master import configuration
 
-    root = Path(__file__).resolve().parents[1]
+    root = FRAMEWORK
     java = str(Path(os.environ['JAVA_HOME']) / 'bin/java')
     master_classpath = os.pathsep.join([str(root / 'java/master/target/classes'),
         (root / 'java/master/target/dependencies.txt').read_text().strip()])

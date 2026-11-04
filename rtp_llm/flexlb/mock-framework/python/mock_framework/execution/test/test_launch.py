@@ -12,7 +12,7 @@ from mock_framework.execution.launch import local_launch
 
 @pytest.fixture
 def case(case_data, compile_data):
-    from test_master import configuration
+    from mock_framework.execution.test.test_master import configuration
     case_data['environment']['master']['config'] = configuration()
     case_data['environment']['decode'] = case_data['environment']['prefill']
     case_data['environment']['client'] = {'config': {}}

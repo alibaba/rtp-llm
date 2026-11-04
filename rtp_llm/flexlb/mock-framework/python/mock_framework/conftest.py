@@ -1,3 +1,4 @@
+from mock_framework.execution.test.helpers import FRAMEWORK
 from pathlib import Path
 
 import pytest
@@ -5,7 +6,7 @@ import pytest
 from mock_framework.config import load_yaml
 from mock_framework.execution.step.registry import Registry
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = FRAMEWORK
 
 
 @pytest.fixture
@@ -15,7 +16,7 @@ def registry():
 
 @pytest.fixture
 def case_data():
-    return load_yaml(ROOT / 'tests/fixtures/compile_case.yaml')
+    return load_yaml(ROOT / 'python/mock_framework/config/test/fixtures/compile_case.yaml')
 
 
 @pytest.fixture

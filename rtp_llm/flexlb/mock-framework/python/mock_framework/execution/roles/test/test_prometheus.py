@@ -1,3 +1,4 @@
+from mock_framework.execution.test.helpers import FRAMEWORK
 import asyncio
 from datetime import datetime
 import json
@@ -17,7 +18,7 @@ from mock_framework.execution.step.registry import Registry
 from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = FRAMEWORK
 
 
 @pytest.mark.skipif(not os.environ.get('PROMETHEUS_BIN'), reason='Set PROMETHEUS_BIN for real Prometheus integration')

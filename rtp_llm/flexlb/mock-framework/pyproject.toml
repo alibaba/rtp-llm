@@ -17,9 +17,10 @@ dev = ["pytest>=8,<9"]
 
 [tool.setuptools.packages.find]
 where = ["python"]
+exclude = ["*.test", "*.test.*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["python/mock_framework"]
 pythonpath = ["python"]
 
 [tool.setuptools.package-data]
