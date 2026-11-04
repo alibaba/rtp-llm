@@ -108,7 +108,7 @@ if ((${#NAVI_SCHED_BAZEL_COMMON_ARGS[@]})); then
 fi
 NAVI_SCHED_BAZEL_OPT_ARGS+=(-c opt)
 if [[ "${NAVI_SCHED_CLEAR_DELETED_PACKAGES:-}" == "1" ]]; then
-    NAVI_SCHED_BAZEL_OPT_ARGS+=("--deleted_packages=")
+    NAVI_SCHED_BAZEL_OPT_ARGS+=("--deleted_packages=__navi_sched_no_deleted_packages__")
 fi
 
 navi_sched_bazel_output_bin() {
