@@ -30,6 +30,12 @@ http_archive(
     sha256 = "3dfa02e873ff51a11ee02b9ca391807f0c8ea0529a4924afa645fbf97163f9d4",
 )
 
+http_archive(
+    name = "fmt",
+    urls = ["https://github.com/fmtlib/fmt/archive/refs/tags/9.1.0.tar.gz"],
+    strip_prefix = "fmt-9.1.0",
+)
+
 load("//3rdparty/cuda_config:cuda_configure.bzl", "cuda_configure")
 load("//3rdparty/gpus:rocm_configure.bzl", "rocm_configure")
 load("//3rdparty/py:python_configure.bzl", "python_configure")
