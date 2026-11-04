@@ -7,8 +7,7 @@ def standard_actions():
     from .master_start import MasterStart
     from .master_stop import MasterStop
     from .master_restart import MasterRestart
-    from .engine_scale_out import EngineScaleOut
-    from .engine_scale_in import EngineScaleIn
+    from .engine_scale import EngineScale
     from .prometheus_query import PrometheusQuery
     from .engine_cache_hit_rate import EngineCacheHitRate
     from .engine_prefill_tps import EnginePrefillTps
@@ -26,8 +25,7 @@ def standard_actions():
         MasterStart,
         MasterStop,
         MasterRestart,
-        EngineScaleOut,
-        EngineScaleIn,
+        EngineScale,
         PrometheusQuery,
         EngineCacheHitRate,
         EnginePrefillTps,

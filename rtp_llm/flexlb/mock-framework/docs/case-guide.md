@@ -96,24 +96,27 @@ components:
 
 统一 Engine JAR 的默认入口为 `EngineMain`。本地 Runner 为每个实例分配监听端口、配置和产物目录，启动 JVM 后等待 ready 和端点回读。Whale 每个 Pod 使用同一入口，由平台管理发现与进程。
 
-宿主的 `host/create`、`host/stop`、`host/status` 是内部原子接口，不接收集群副本数。`create` 接收 Python 分配的实例 id、rpcPort 和 controlPort；metrics 与该实例的 control 共用 HTTP 监听端口。宿主控制端口通过 `MOCK_HOST_PORT` 指定。Python 在启动监听前选择本次实验未使用的端口，Java 绑定指定端口，Runner 再核对返回地址与分配一致。端口探测不构成预留，若被其他进程抢占，启动失败并结束实验，不偷偷换端口；不能先启动服务再检查是否复用了旧地址。Python `execution/engines.py` 管理放置和实例归属，`interfaces/engines.py` 提供两项 Case 操作：
+宿主的 `host/create`、`host/stop`、`host/status` 是内部原子接口，不接收集群副本数。`create` 接收 Python 分配的实例 id、rpcPort 和 controlPort；metrics 与该实例的 control 共用 HTTP 监听端口。宿主控制端口通过 `MOCK_HOST_PORT` 指定。Python 在启动监听前选择本次实验未使用的端口，Java 绑定指定端口，Runner 再核对返回地址与分配一致。端口探测不构成预留，若被其他进程抢占，启动失败并结束实验，不偷偷换端口；不能先启动服务再检查是否复用了旧地址。
 
-| 接口 | 参数和回执 |
+Case 使用 `engine/scale` 调整 Engine 实例数。必填参数 `direction` 为 `out`（扩容）或 `in`（缩容）。`role` 默认为 `prefill`，`count` 指定时取值为 1–1024。返回实际新增或关闭的服务地址列表。
+
+| direction | 参数 |
 | --- | --- |
-| `engine/scale_out` | role 默认 prefill；count 默认 1、范围 1–1024。复用该角色的 Case config，返回新服务地址列表。角色必须已配置。 |
-| `engine/scale_in` | role 默认 prefill；targets 省略时选择该角色全部活动实例，count 省略时关闭整个候选集。count 提供时按候选顺序只选一次；显式 targets 保持输入顺序，否则按创建顺序。返回实际关闭的服务地址列表。 |
+| `out` | `count` 默认 1。复用该角色的 Case config，角色必须已配置。`targets` 仅适用于缩容。 |
+| `in` | `targets` 省略时选择该角色全部活动实例，`count` 省略时关闭整个候选集。指定 `count` 时按候选顺序只选一次。显式 `targets` 保持输入顺序，否则按创建顺序。 |
 
 空集合、重复/失效地址和超过候选数量的 count 在任何停止前报错。操作成功表示实例与发现文件更新完成，不表示 Master 已传播更新；在后续 step 读取各 Master 的实际观察。部分执行后失败会保留已知事件并结束实验，不重试或伪造整体回滚。
 
 ```yaml
 - id: added
   describe: 增加一个Decode
-  interface: engine/scale_out
-  args: {role: decode, count: 1}
+  interface: engine/scale
+  args: {direction: out, role: decode, count: 1}
 - id: removed
   describe: 关闭刚增加的实例
-  interface: engine/scale_in
+  interface: engine/scale
   args:
+    direction: in
     role: decode
     targets: {ref: steps.added}
 ```

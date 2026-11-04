@@ -12,7 +12,7 @@ import urllib.request
 from collections import deque
 import pytest
 import yaml
-from mock_framework.config import compile_case
+from mock_framework.config import ConfigError, compile_case
 from mock_framework.execution.step.registry import Registry
 from mock_framework.execution.step.registry import register_step
 from mock_framework.execution.step.step import Step
@@ -20,8 +20,7 @@ from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
 from mock_framework.execution import ExecutionError
 from mock_framework.execution.run_trace import timestamp
-from mock_framework.execution.step.engine_scale_in import EngineScaleIn, ScaleIn
-from mock_framework.execution.step.engine_scale_out import EngineScaleOut, ScaleOut
+from mock_framework.execution.step.engine_scale import EngineScale, Scale
 from mock_framework.execution.step.prometheus_query import PrometheusQuery, Promql
 
 ROOT = FRAMEWORK
@@ -77,6 +76,12 @@ def no_children(output):
     return events
 
 
+@pytest.mark.parametrize('args', [{}, {'direction': 'other'}, {'direction': 'out', 'targets': ['p:1']}])
+def test_scale_rejects_invalid_direction_or_targets(args):
+    with pytest.raises(ConfigError):
+        Registry.standard().get('engine/scale').arguments(args)
+
+
 def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics(tmp_path, monkeypatch):
     @register_step('probe/lifecycle', effect='write')
     class exercise(Step):
@@ -88,10 +93,10 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
             first = next(item for item in owner.topology.active('prefill') if item['rpc'] == original[0])
             original_files = {name: (ctx.records.directory / 'components' / first['id'] / name).read_bytes()
                               for name in ('config.json', 'effective-config.json', 'endpoints.json')}
-            removed = await EngineScaleIn.execute(ctx, ScaleIn(count=1))
+            removed = await EngineScale.execute(ctx, Scale(direction='in', count=1))
             assert len(removed) == 1 and len(ctx.globals()['prefill']) == 1
             with pytest.raises(ExecutionError):
-                await EngineScaleIn.execute(ctx, ScaleIn(targets=removed))
+                await EngineScale.execute(ctx, Scale(direction='in', targets=removed))
             # Force the allocator to encounter retired RPC and HTTP ports before fresh ports.
             candidates = deque([int(first['rpc'].rsplit(':', 1)[1]), urllib.parse.urlsplit(first['control']).port])
             real_socket = socket.socket
@@ -101,7 +106,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
                     return host, candidates.popleft() if candidates else port
             with monkeypatch.context() as patch:
                 patch.setattr(socket, 'socket', ReusedPortSocket)
-                created = await EngineScaleOut.execute(ctx, ScaleOut(count=2))
+                created = await EngineScale.execute(ctx, Scale(direction='out', count=2))
             assert not candidates
             for name, content in original_files.items():
                 assert (ctx.records.directory / 'components' / first['id'] / name).read_bytes() == content
@@ -125,7 +130,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
                     await asyncio.to_thread(urllib.request.urlopen, first['metrics'], timeout=1)
                 write_json(prom.directory / 'targets.json', list(prom.targets.values()))
             assert len(ctx.globals()['prefill']) == 3 and not set(created) & set(original)
-            assert await EngineScaleIn.execute(ctx, ScaleIn(targets=created[:1])) == created[:1]
+            assert await EngineScale.execute(ctx, Scale(direction='in', targets=created[:1])) == created[:1]
             assert len(ctx.globals()['prefill']) == 2
             endpoints = [json.loads(path.read_text()) for path in sorted(ctx.records.directory.glob('components/*/endpoints.json'))]
             for item in endpoints:
@@ -141,9 +146,9 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
             if owner.monitoring:
                 samples = await PrometheusQuery.execute(replace(ctx, query_time=timestamp()), Promql('count_over_time(rtp_llm_requests_started_total[1m])'))
                 assert {item.labels['instance'] for item in samples.samples} == {item['rpc'] for item in endpoints}
-            assert len(await EngineScaleIn.execute(ctx, ScaleIn())) == 2
+            assert len(await EngineScale.execute(ctx, Scale(direction='in'))) == 2
             assert ctx.globals()['prefill'] == []
-            assert len(await EngineScaleOut.execute(ctx, ScaleOut())) == 1
+            assert len(await EngineScale.execute(ctx, Scale(direction='out'))) == 1
             return removed + created
     monitor = bool(os.environ.get('PROMETHEUS_BIN'))
     case, registry, launch = setup_case(tmp_path, exercise, monitor)
@@ -215,8 +220,8 @@ def test_partial_scale_failure_is_not_replayed_or_reported_as_success(tmp_path, 
                 return await original(*args)
 
             setattr(owner, method, fail_second)
-            if operation == 'create': await EngineScaleOut.execute(ctx, ScaleOut(count=2))
-            else: await EngineScaleIn.execute(ctx, ScaleIn(count=2))
+            if operation == 'create': await EngineScale.execute(ctx, Scale(direction='out', count=2))
+            else: await EngineScale.execute(ctx, Scale(direction='in', count=2))
             raise AssertionError('Partial failure was swallowed')
     case, registry, launch = setup_case(tmp_path, exercise)
     output = tmp_path / 'result'
@@ -262,8 +267,8 @@ def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_addr
                     async def healthy(): return len([r for r in rows() if r['outcome'] == 'success']) >= 5
                     await until(healthy)
                     began = timestamp()
-                    removed = await EngineScaleIn.execute(ctx, ScaleIn(count=1))
-                    created = await EngineScaleOut.execute(ctx, ScaleOut())
+                    removed = await EngineScale.execute(ctx, Scale(direction='in', count=1))
+                    created = await EngineScale.execute(ctx, Scale(direction='out'))
                     expected = sorted(ctx.globals()['prefill'])
                     observations = []
                     async def converged():

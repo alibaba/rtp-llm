@@ -128,10 +128,10 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     if dynamic:
         document['phases'][0]['timeout'] = '45s'
         document['phases'][0]['steps'].extend([
-            {'id': 'added', 'describe': '创建新P', 'interface': 'engine/scale_out', 'wait_after': '3s'},
+            {'id': 'added', 'describe': '创建新P', 'interface': 'engine/scale', 'args': {'direction': 'out'}, 'wait_after': '3s'},
             {'id': 'after_add', 'describe': 'Master实际看到新P', 'interface': 'master/engine/get'},
-            {'id': 'removed', 'describe': '关闭新P', 'interface': 'engine/scale_in',
-             'args': {'targets': {'ref': 'steps.added'}}, 'wait_after': '12s'},
+            {'id': 'removed', 'describe': '关闭新P', 'interface': 'engine/scale',
+             'args': {'direction': 'in', 'targets': {'ref': 'steps.added'}}, 'wait_after': '12s'},
             {'id': 'after_remove', 'describe': 'Master清除旧P', 'interface': 'master/engine/get'}])
     case_file = tmp_path / 'case.yaml'; case_file.write_text(yaml.safe_dump(document, allow_unicode=True))
     registry = Registry.standard(); case = compile_case(case_file, registry)
