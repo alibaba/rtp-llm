@@ -21,12 +21,14 @@ dsv4_sm120_py_test(
         "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
     ],
+    sm120_build_only = True,  # DeepGEMM 2.8.2 m_grouped_fp8_fp4 grouped GEMM
     visibility = ["//visibility:public"],
 )
 
 dsv4_sm120_py_test(
     name = "test_sm120_moe_numerics",
     deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    sm120_build_only = True,  # fork grouped FP4 MoE + DeepGEMM 2.8.2
     visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
 )
 
@@ -34,6 +36,7 @@ dsv4_sm120_py_test(
     name = "test_sm120_decode_transport",
     gpu_count = 2,
     deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    sm120_build_only = True,  # fork-pinned flashinfer mxfp8 quantize dispatch
     visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
 )
 

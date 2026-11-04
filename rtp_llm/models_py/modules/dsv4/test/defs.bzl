@@ -18,12 +18,18 @@ def dsv4_py_test(name, deps, src = None, gpu_count = 1, tags = [], args = [], **
         **kwargs
     )
 
-def dsv4_sm120_py_test(name, deps, src = None, extra_srcs = [], gpu_count = 1, tags = [], args = [], env = {}, **kwargs):
-    """Opt selected contracts into the exact SM120 build and GPU pool."""
+def dsv4_sm120_py_test(name, deps, src = None, extra_srcs = [], gpu_count = 1, tags = [], args = [], env = {}, sm120_build_only = False, **kwargs):
+    """Run on the RTX 5000 Pro pool; plain cuda13 builds run these as blocking tests.
+
+    sm120_build_only keeps the exact cuda13_sm120 build for tests that need the
+    forked DeepGEMM/FlashInfer providers or more than two GPUs.
+    """
     source = src or name + ".py"
     runner = "//rtp_llm/test/pytest:pytest_main.py"
     test_env = dict(env)
     test_env["GPU_COUNT"] = str(gpu_count)
+    # using_cuda13_x86 also matches --config=cuda13_sm120 (strict superset).
+    compatible_setting = "@//:using_cuda13_sm120" if sm120_build_only else "@//:using_cuda13_x86"
     native.py_test(
         name = name,
         srcs = [source, runner] + extra_srcs,
@@ -34,7 +40,7 @@ def dsv4_sm120_py_test(name, deps, src = None, extra_srcs = [], gpu_count = 1, t
         tags = ["dsv4_cuda13", "RTX_5000_PRO_CU13"] + tags,
         exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": str(gpu_count)},
         target_compatible_with = select({
-            "@//:using_cuda13_sm120": [],
+            compatible_setting: [],
             "//conditions:default": ["@platforms//:incompatible"],
         }),
         legacy_create_init = 0,
