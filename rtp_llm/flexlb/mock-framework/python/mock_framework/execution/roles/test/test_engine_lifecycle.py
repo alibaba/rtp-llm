@@ -96,11 +96,9 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
             candidates = deque([int(first['rpc'].rsplit(':', 1)[1]), urllib.parse.urlsplit(first['control']).port])
             real_socket = socket.socket
             class ReusedPortSocket(real_socket):
-                def bind(self, address):
-                    if address == ('127.0.0.1', 0) and candidates:
-                        self.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                        address = (address[0], candidates.popleft())
-                    return super().bind(address)
+                def getsockname(self):
+                    host, port = super().getsockname()
+                    return host, candidates.popleft() if candidates else port
             with monkeypatch.context() as patch:
                 patch.setattr(socket, 'socket', ReusedPortSocket)
                 created = await EngineScaleOut.execute(ctx, ScaleOut(count=2))
