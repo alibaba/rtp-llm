@@ -124,12 +124,20 @@ def _try_register_mainse_comparers() -> None:
     Registered before any OSS fallback so mainse-flagged cases pick the
     internal comparer first.
     """
-    module_name = "rtp_llm.test.smoke.mainse.mainse_comparer"
-    try:
-        module_spec = importlib.util.find_spec(module_name)
-    except ModuleNotFoundError:
-        module_spec = None
-    if module_spec is None:
+    for package_name in (
+        "rtp_llm.test.smoke.mainse",
+        "internal_source.rtp_llm.test.smoke.mainse",
+    ):
+        module_name = f"{package_name}.mainse_comparer"
+        try:
+            module_spec = importlib.util.find_spec(module_name)
+        except ModuleNotFoundError as error:
+            if not error.name or not module_name.startswith(f"{error.name}."):
+                raise
+            module_spec = None
+        if module_spec is not None:
+            break
+    else:
         # OSS-only checkouts legitimately lack internal MainSE comparers.
         return
 
@@ -138,18 +146,18 @@ def _try_register_mainse_comparers() -> None:
     # Once the internal package is present, imports must fail loudly. Silently
     # swallowing an ImportError here only defers it into a misleading
     # "comparer not registered" error after the model server has started.
-    from rtp_llm.test.smoke.mainse.mainse_comparer import MainseComparer
-    from rtp_llm.test.smoke.mainse.mainse_decode_arpc_comparer import (
-        MainseDecodeArpcComparer,
-    )
-    from rtp_llm.test.smoke.mainse.mainse_embedding_arpc_comparer import (
-        MainseEmbeddingArpcComparer,
-    )
+    mainse_cls = importlib.import_module(f"{package_name}.mainse_comparer").MainseComparer
+    decode_arpc_cls = importlib.import_module(
+        f"{package_name}.mainse_decode_arpc_comparer"
+    ).MainseDecodeArpcComparer
+    embedding_arpc_cls = importlib.import_module(
+        f"{package_name}.mainse_embedding_arpc_comparer"
+    ).MainseEmbeddingArpcComparer
 
     _register_mainse_comparer_classes(
-        MainseDecodeArpcComparer,
-        MainseEmbeddingArpcComparer,
-        MainseComparer,
+        decode_arpc_cls,
+        embedding_arpc_cls,
+        mainse_cls,
     )
 
 
