@@ -41,6 +41,12 @@ py_test(
 )
 
 py_test(
+    name = "preprocess_submission_cleanup_test",
+    srcs = ["preprocess_submission_cleanup_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "multimodal_util_test",
     srcs = [
         "multimodal_util_test.py",

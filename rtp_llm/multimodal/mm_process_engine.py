@@ -972,17 +972,24 @@ class MMProcessEngine:
         )
 
         work_items = []
-        for index in range(0, len(mm_inputs), batch_size):
-            batch = mm_inputs[index : index + batch_size]
-            work_item = MMWorkItem(
-                batch,
-                mm_timeout_ms=self.vit_config.mm_timeout_ms,
-                embedding_cache=self._embedding_cache,
-                cache_claim=cache_claim if index == 0 else None,
-                defer_cache_complete=defer_cache_complete,
-            )
-            work_items.append(work_item)
-            self.preprocess_executor.submit(work_item)
+        try:
+            for index in range(0, len(mm_inputs), batch_size):
+                batch = mm_inputs[index : index + batch_size]
+                work_item = MMWorkItem(
+                    batch,
+                    mm_timeout_ms=self.vit_config.mm_timeout_ms,
+                    embedding_cache=self._embedding_cache,
+                    cache_claim=cache_claim if index == 0 else None,
+                    defer_cache_complete=defer_cache_complete,
+                )
+                work_items.append(work_item)
+                self.preprocess_executor.submit(work_item)
+        except Exception as error:
+            # The caller cannot receive this partial list when submission raises.
+            # Resolve our claims here so cache waiters do not remain PENDING.
+            for work_item in work_items:
+                work_item.fail_cache(error)
+            raise
 
         return work_items
 
