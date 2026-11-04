@@ -8,11 +8,13 @@ PACKAGE_NAME=navi_sched_cpp-${VERSION}
 RELEASE_DIR=${NAVI_SCHED_RELEASE_DIR:-${NAVI_SCHED_DIR}/release}
 PACKAGE_DIR=${RELEASE_DIR}/${PACKAGE_NAME}
 ARCHIVE_PATH=${RELEASE_DIR}/${PACKAGE_NAME}.tar.gz
-BUILD_ARGS=(
-    "${NAVI_SCHED_BAZEL_OPT_ARGS[@]}"
-    --config=new_abi
-    --config=release
-)
+BUILD_ARGS=()
+if ((${#NAVI_SCHED_BAZEL_OPT_ARGS[@]})); then
+    BUILD_ARGS+=("${NAVI_SCHED_BAZEL_OPT_ARGS[@]}")
+fi
+if [[ "${NAVI_SCHED_SKIP_BUILD_CONFIGS:-}" != "1" ]]; then
+    BUILD_ARGS+=(--config=new_abi --config=release)
+fi
 BUILD_PROFILE_ARGS=()
 if [[ -n "${NAVI_SCHED_BAZEL_PROFILE:-}" ]]; then
     BUILD_PROFILE_ARGS+=("--profile=${NAVI_SCHED_BAZEL_PROFILE}")
