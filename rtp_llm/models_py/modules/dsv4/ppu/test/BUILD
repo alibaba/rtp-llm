@@ -120,6 +120,16 @@ py_test(
 )
 
 py_test(
+    name = "attention_override_contracts_test",
+    srcs = ["test_attention_override_contracts.py"],
+    main = "test_attention_override_contracts.py",
+    data = [
+        "//rtp_llm/models_py:ppu_sources",
+        "//rtp_llm/models_py:prefill_policy_source_data",
+    ],
+)
+
+py_test(
     name = "fused_permute_test",
     srcs = ["test_fused_permute.py", "ppu_test_main.py"],
     main = "ppu_test_main.py",
@@ -243,6 +253,7 @@ _COMMON_CONTRACT_TESTS = [
     ":ep_chunk_rounds_test", ":isolated_metadata", ":rich_contract",
     ":chunk_options", ":platform_provider", ":prefill_communication",
     ":tp_prefill_workspace_dims", ":fp8_contract_test",
+    ":attention_override_contracts_test",
 ]
 
 # These validate PPU imports and mocked contracts, not M890P kernel numerics.
