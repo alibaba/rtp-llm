@@ -57,7 +57,8 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
                                                            world_rank_,
                                                            "worker_task",
                                                            transfer_id,
-                                                           identity);
+                                                           identity,
+                                                           AsyncProfileKind::Wait);
     auto          on_timeout  = [this, context, source, target, queue_begin, queue_timer, total_timer]() {
         queue_timer.finish(false);
         total_timer.finish(false);

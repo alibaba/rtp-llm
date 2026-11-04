@@ -76,6 +76,8 @@ private:
 
 // Value timers never allocate. Shared timers are best-effort: creation failure
 // yields an empty handle, and every caller continues its original business work.
+// Value scopes default to thread execution; shared timers default to lifecycle.
+// Queue/resource waits explicitly select Wait at their observation sites.
 class TransferStageTimer {
     struct ReporterRef {
         const BlockTreeCacheMetricsReporter* reporter;
@@ -90,9 +92,10 @@ public:
                        int64_t                                        rank        = -1,
                        const char*                                    scope       = "worker_batch",
                        uint64_t                                       transfer_id = 0,
-                       CacheStageContext                              identity    = {}) noexcept:
+                       CacheStageContext                              identity    = {},
+                       AsyncProfileKind                               kind = AsyncProfileKind::Execution) noexcept:
         TransferStageTimer(
-            ReporterRef{reporter.get()}, stage, request_id, begin, end, rank, scope, transfer_id, identity) {
+            ReporterRef{reporter.get()}, stage, request_id, begin, end, rank, scope, transfer_id, identity, kind) {
         reporter_owner_ = std::move(reporter);
     }
     // Borrowed observers are used only by workflows whose owner drains all
@@ -105,8 +108,10 @@ public:
                        int64_t                              rank        = -1,
                        const char*                          scope       = "worker_batch",
                        uint64_t                             transfer_id = 0,
-                       CacheStageContext                    identity    = {}) noexcept:
-        TransferStageTimer(ReporterRef{&reporter}, stage, request_id, begin, end, rank, scope, transfer_id, identity) {}
+                       CacheStageContext                    identity    = {},
+                       AsyncProfileKind                     kind        = AsyncProfileKind::Execution) noexcept:
+        TransferStageTimer(
+            ReporterRef{&reporter}, stage, request_id, begin, end, rank, scope, transfer_id, identity, kind) {}
 
 private:
     TransferStageTimer(ReporterRef       reporter,
@@ -117,7 +122,8 @@ private:
                        int64_t           rank,
                        const char*       scope,
                        uint64_t          transfer_id,
-                       CacheStageContext identity) noexcept:
+                       CacheStageContext identity,
+                       AsyncProfileKind  kind) noexcept:
         reporter_(reporter.reporter),
         stage_(stage),
         rank_(rank),
@@ -134,7 +140,8 @@ private:
                                                       transfer_id,
                                                       identity.path,
                                                       scope,
-                                                      identity.operation) :
+                                                      identity.operation,
+                                                      kind) :
                          AsyncProfileSpan{}) {}
 
 public:
@@ -149,14 +156,15 @@ public:
                                            int64_t                                        rank        = -1,
                                            const char*                                    scope       = "worker_batch",
                                            uint64_t                                       transfer_id = 0,
-                                           CacheStageContext                              identity    = {}) noexcept {
+                                           CacheStageContext                              identity    = {},
+                                           AsyncProfileKind kind = AsyncProfileKind::Lifecycle) noexcept {
         if ((!reporter || !reporter->stageMetricsEnabled()) && !AsyncProfileSession::enabled())
             return {};
         try {
             if (allocation_probe_)
                 allocation_probe_(stage);
             return SharedTransferStageTimer(std::make_shared<TransferStageTimer>(
-                std::move(reporter), stage, request_id, begin, end, rank, scope, transfer_id, identity));
+                std::move(reporter), stage, request_id, begin, end, rank, scope, transfer_id, identity, kind));
         } catch (...) {
             return {};
         }
@@ -169,14 +177,15 @@ public:
                                            int64_t                              rank        = -1,
                                            const char*                          scope       = "worker_batch",
                                            uint64_t                             transfer_id = 0,
-                                           CacheStageContext                    identity    = {}) noexcept {
+                                           CacheStageContext                    identity    = {},
+                                           AsyncProfileKind kind = AsyncProfileKind::Lifecycle) noexcept {
         if (!reporter.stageMetricsEnabled() && !AsyncProfileSession::enabled())
             return {};
         try {
             if (allocation_probe_)
                 allocation_probe_(stage);
             return SharedTransferStageTimer(std::make_shared<TransferStageTimer>(
-                reporter, stage, request_id, begin, end, rank, scope, transfer_id, identity));
+                reporter, stage, request_id, begin, end, rank, scope, transfer_id, identity, kind));
         } catch (...) {
             return {};
         }
