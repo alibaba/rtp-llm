@@ -1069,6 +1069,14 @@ py_test(
     python_version = "PY3",
 )
 
+py_test(
+    name = "vllm_engine_transport_shutdown_test",
+    srcs = ["test/vllm/VLLMEngineTransportShutdownTest.py"],
+    data = ["adapters/vllm/VLLMEngineTransport.py"],
+    main = "test/vllm/VLLMEngineTransportShutdownTest.py",
+    python_version = "PY3",
+)
+
 filegroup(
     name = "navi_sched_testdata",
     testonly = True,
