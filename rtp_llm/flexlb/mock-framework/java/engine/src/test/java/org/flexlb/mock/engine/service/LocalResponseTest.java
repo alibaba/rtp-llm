@@ -15,7 +15,7 @@ class LocalResponseTest {
             // Includes a multi-token step, as with a speculative decode commit.
             for (int committed : new int[] {1, 1, 3, 1, 2}) {
                 received += committed;
-                var response = LocalResponse.token(input, 223, received, committed, 0, 1000, received == 8, true);
+                var response = RpcMessages.token(input, 223, received, committed, 0, 1000, received == 8, true);
                 var chunk = response.getFlattenOutput();
                 assertEquals(7, response.getRequestId());
                 assertEquals(committed, chunk.getOutputIds().getShape(2));

@@ -3,17 +3,36 @@ package org.flexlb.mock.engine.service;
 import io.grpc.Status;
 import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.engine.cache.KvCache;
+import org.flexlb.mock.engine.config.RtpConfig;
+import org.flexlb.mock.engine.forward.ComputeModel;
+import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.execution.RtpEngineLoop;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
 
 /** Native RPC adapter; P and D owners manage request state and KV independently. */
 public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase implements AutoCloseable {
-    private final RtpServiceConfig config;
+    public record Config(String id, Role role, int blockSize, int tpSize, int dpSize, int maxSeqLen,
+                         int maxBatchTokens, ComputeModel compute, int imageToken, long cacheKeySeed) {
+        public Config {
+            if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
+                    || blockSize < 1 || tpSize < 1 || dpSize < 1 || maxSeqLen < 1 || maxBatchTokens < 0)
+                throw new IllegalArgumentException("Invalid RTP endpoint configuration");
+            Objects.requireNonNull(compute);
+        }
+
+        public static Config from(RtpConfig config) {
+            return new Config(config.id(), config.role(), config.blockSize(), config.tpSize(), config.dpSize(),
+                config.maxSeqLen(), config.maxBatchTokens(), config.compute(), config.imageToken(), config.cacheKeySeed());
+        }
+    }
+
+    private final Config config;
     private final KvCache cache;
     private final PrefillRpcServer prefill;
     private final DecodeRpcServer decode;
@@ -21,12 +40,12 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
     private final AtomicLong statusVersion = new AtomicLong();
     private volatile boolean closed;
 
-    public RtpRpcService(RtpServiceConfig config, KvCache cache, Object executionLock, TaskHistory finished,
+    public RtpRpcService(Config config, KvCache cache, Object executionLock, TaskHistory finished,
                          RtpEngineLoop engine, boolean groups) {
         this.config = config;
         this.groups = groups;
         this.cache = cache;
-        prefill = config.role() == org.flexlb.mock.protocol.Role.prefill
+        prefill = config.role() == Role.prefill
             ? new PrefillRpcServer(config, executionLock, finished, engine) : null;
         decode = prefill == null ? new DecodeRpcServer(config, executionLock, engine) : null;
     }
@@ -112,8 +131,8 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
                 .setDpSize(config.dpSize()).setDpRank(0).setTpSize(config.tpSize()).setPrecision("FP16")
                 .setStatusVersion(version).setMaxSeqLen(config.maxSeqLen()).setMaxBatchTokensSize(config.maxBatchTokens())
                 .setTotalKvCache(tokens(snapshot.totalBlocks())).setAvailableKvCache(tokens(snapshot.availableBlocks()))
-                .addAllRunningTaskInfo(tasks.tasks().stream().map(RpcTasks::task).toList())
-                .addAllFinishedTaskList(tasks.finished().stream().map(RpcTasks::task).toList()).setLatestFinishedVersion(tasks.finishedVersion())
+                .addAllRunningTaskInfo(tasks.tasks().stream().map(RpcMessages::task).toList())
+                .addAllFinishedTaskList(tasks.finished().stream().map(RpcMessages::task).toList()).setLatestFinishedVersion(tasks.finishedVersion())
                 .build();
         });
     }
