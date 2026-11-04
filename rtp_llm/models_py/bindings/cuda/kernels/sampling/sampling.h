@@ -8,6 +8,14 @@
 
 namespace rtp_llm {
 
+void sampling_from_probs(torch::Tensor probs,
+                         torch::Tensor output,
+                         torch::Tensor valid,
+                         bool          deterministic,
+                         torch::Tensor seed,
+                         torch::Tensor offset,
+                         int64_t       cuda_stream = 0);
+
 std::tuple<uint64_t, uint64_t> get_seed_and_offset(int                          increment_size,
                                                    std::optional<at::Generator> generator = std::nullopt);
 

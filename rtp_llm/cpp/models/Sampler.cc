@@ -1,5 +1,8 @@
 #include "rtp_llm/cpp/models/Sampler.h"
 #include <cstring>
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
@@ -11,7 +14,19 @@ using namespace std;
 
 namespace rtp_llm {
 
-Sampler::Sampler(const SamplerInitParams& params): copy_stream_(cuda_graph::graphGetStreamFromPool(false)) {}
+Sampler::Sampler(const SamplerInitParams& params): copy_stream_(cuda_graph::graphGetStreamFromPool(false)) {
+    if (params.model_type == "hy_v4") {
+        force_topk_ = 4096;
+        if (const char* value = std::getenv("RTP_LLM_HY4_FORCE_TOPK")) {
+            char* end         = nullptr;
+            errno             = 0;
+            const long parsed = std::strtol(value, &end, 10);
+            TORCH_CHECK(errno == 0 && end != value && *end == '\0' && parsed >= 0 && parsed <= INT_MAX,
+                        "RTP_LLM_HY4_FORCE_TOPK must be an integer in [0, INT_MAX]");
+            force_topk_ = static_cast<int>(parsed);
+        }
+    }
+}
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -138,7 +153,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  frequency_penalty,
                  do_sample,
                  generator,
-                 &buffer_holder_});
+                 &buffer_holder_,
+                 force_topk_});
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
                 // TODO(zhangjianning.zjn): would be better to eliminate the copy

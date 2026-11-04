@@ -1492,7 +1492,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                              params.eplb_config);
     }
 
-    sampler_.reset(new Sampler(SamplerInitParams{}));
+    sampler_.reset(new Sampler(SamplerInitParams{params.model_config_.model_type}));
 
     // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
     std::optional<CacheLayerLayout> kv_cache_layer_layout = std::nullopt;

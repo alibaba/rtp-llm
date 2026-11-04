@@ -12,7 +12,9 @@ class LogitsProcessorStates;
 class RecordedBatch;
 typedef std::shared_ptr<LogitsProcessorStates> LogitsProcessorStatesPtr;
 
-struct SamplerInitParams {};
+struct SamplerInitParams {
+    std::string model_type;
+};
 
 enum class LogitsProcessorPhase {
     NORMAL_DECODE,

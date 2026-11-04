@@ -71,7 +71,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'SM103_CU13', 'gpu_count':'1'},
 )
 
 # Keep the real overlap-path regressions enabled without shell overrides.

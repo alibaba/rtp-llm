@@ -21,6 +21,7 @@ private:
 
     TensorHolder            buffer_holder_;
     cuda_graph::GraphStream copy_stream_;
+    int                     force_topk_ = 0;
 };
 
 }  // namespace rtp_llm

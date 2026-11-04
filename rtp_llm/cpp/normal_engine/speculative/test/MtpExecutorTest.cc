@@ -30,6 +30,8 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling.h"
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAGeneratorImpl.h>
+#include <ATen/cuda/CUDAGraph.h>
+#include <c10/cuda/CUDAGuard.h>
 #endif
 
 namespace rtp_llm {
@@ -605,14 +607,25 @@ TEST_F(MtpExecutorTest, testCompactPointMassProposalAndRejection) {
     spec::FastTopKSampler compact(torch::Tensor(), true);
     for (int batch : {1, 4, 17}) {
         for (int width : {7, 2048, 154880}) {
-            for (int pattern : {0, 1, 2}) {
+            for (int pattern : {0, 1, 2, 3, 4, 5}) {
                 auto logits = torch::randn({batch, width}, f32);
                 if (pattern == 1)
                     logits.zero_();
                 if (pattern == 2)
                     logits.select(1, width - 1).fill_(std::numeric_limits<float>::quiet_NaN());
+                if (pattern == 3)
+                    logits.fill_(-std::numeric_limits<float>::infinity());
+                if (pattern == 4) {
+                    logits.select(1, 0).fill_(std::numeric_limits<float>::infinity());
+                    logits.select(1, width - 1).fill_(std::numeric_limits<float>::infinity());
+                }
+                if (pattern == 5) {
+                    logits.zero_();
+                    logits.select(1, width - 1).fill_(1e-8f);
+                }
                 auto a = dense.forward(logits);
                 auto b = compact.forward(logits);
+                EXPECT_TRUE(torch::equal(a.token_ids, torch::argmax(logits, -1, true)));
                 EXPECT_TRUE(torch::equal(a.token_ids, b.token_ids));
                 if (compact.compactPointMassEnabled())
                     EXPECT_FALSE(b.all_probs.defined());
@@ -662,6 +675,90 @@ TEST_F(MtpExecutorTest, testCompactPointMassProposalAndRejection) {
     // Mapped vocabularies retain the established dense representation.
     spec::FastTopKSampler mapped(torch::arange(7, i32.dtype(torch::kInt64)), true);
     EXPECT_FALSE(mapped.compactPointMassEnabled());
+    auto                  mapping = torch::arange(7, i32.dtype(torch::kInt64)).flip({0});
+    spec::FastTopKSampler remapped(mapping, true);
+    auto                  logits = torch::arange(7, f32).unsqueeze(0);
+    EXPECT_EQ(remapped.forward(logits).token_ids.item<int64_t>(), 0);
+    auto multiple = dense.forward(logits, 3);
+    EXPECT_TRUE(torch::equal(multiple.all_probs, torch::softmax(logits, -1)));
+    EXPECT_TRUE(torch::equal(multiple.token_ids, std::get<1>(torch::topk(multiple.all_probs, 3, -1))));
+}
+
+TEST_F(MtpExecutorTest, testHy4SamplerConfig) {
+    {
+        autil::EnvGuard env("RTP_LLM_HY4_FORCE_TOPK", "0");
+        Sampler         sampler(SamplerInitParams{"hy_v4"});
+        EXPECT_EQ(sampler.force_topk_, 0);
+    }
+    {
+        autil::EnvGuard env("RTP_LLM_HY4_FORCE_TOPK", "4096");
+        Sampler         sampler(SamplerInitParams{"hy_v4"});
+        Sampler         other(SamplerInitParams{"glm5"});
+        EXPECT_EQ(sampler.force_topk_, 4096);
+        EXPECT_EQ(other.force_topk_, 0);
+    }
+    for (const std::string value : {"", "-1", "2147483648", "4096x"}) {
+        autil::EnvGuard env("RTP_LLM_HY4_FORCE_TOPK", value);
+        EXPECT_THROW(Sampler(SamplerInitParams{"hy_v4"}), c10::Error);
+    }
+}
+
+TEST_F(MtpExecutorTest, testDraftArgmaxGraphAndBenchmark) {
+    const auto                 options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto                       stream  = at::cuda::getStreamFromPool();
+    c10::cuda::CUDAStreamGuard guard(stream);
+    cudaDeviceProp             device;
+    ASSERT_EQ(cudaGetDeviceProperties(&device, stream.device_index()), cudaSuccess);
+    std::cout << "HY4_DRAFT_DEVICE name=" << device.name << " sm=" << device.major << device.minor << std::endl;
+    for (int batch : {1, 16, 128}) {
+        auto          logits = torch::randn({batch, 154880}, options);
+        torch::Tensor probabilities, ids, ids32, lengths;
+        auto          run = [&](const torch::Tensor& scores) {
+            ASSERT_TRUE(
+                tryMtpGreedyPack(scores, {}, probabilities, ids, ids32, {}, {}, false, lengths, stream.stream(), true));
+        };
+        run(logits);
+        ASSERT_EQ(cudaStreamSynchronize(stream.stream()), cudaSuccess);
+        at::cuda::CUDAGraph graph;
+        graph.capture_begin();
+        run(logits);
+        graph.capture_end();
+        for (int replay = 0; replay < 3; ++replay) {
+            logits.normal_();
+            logits.select(1, replay * 2048 + 17).fill_(100.0f);
+            graph.replay();
+            EXPECT_TRUE(torch::equal(ids, torch::argmax(logits, -1, true)));
+            EXPECT_TRUE(torch::equal(ids32, ids.to(torch::kInt32)));
+        }
+        graph.reset();
+        logits.normal_();
+        auto original_ids = torch::argmax(torch::softmax(logits, -1), -1, true);
+        run(logits);
+        EXPECT_TRUE(torch::equal(ids, original_ids));
+        std::cout << "HY4_DRAFT_ACCURACY batch=" << batch
+                  << " random_mismatches=" << ids.ne(original_ids).sum().item<int64_t>() << std::endl;
+        cudaEvent_t start, stop;
+        ASSERT_EQ(cudaEventCreate(&start), cudaSuccess);
+        ASSERT_EQ(cudaEventCreate(&stop), cudaSuccess);
+        for (int trial = 0; trial < 3; ++trial) {
+            for (int side = 0; side < 2; ++side) {
+                const bool softmax = (trial + side) % 2 == 0;
+                for (int i = 0; i < 20; ++i)
+                    run(softmax ? torch::softmax(logits, -1) : logits);
+                ASSERT_EQ(cudaEventRecord(start, stream.stream()), cudaSuccess);
+                for (int i = 0; i < 100; ++i)
+                    run(softmax ? torch::softmax(logits, -1) : logits);
+                ASSERT_EQ(cudaEventRecord(stop, stream.stream()), cudaSuccess);
+                ASSERT_EQ(cudaEventSynchronize(stop), cudaSuccess);
+                float ms = 0;
+                ASSERT_EQ(cudaEventElapsedTime(&ms, start, stop), cudaSuccess);
+                std::cout << "HY4_DRAFT_ARGMAX batch=" << batch << " vocab=154880 softmax=" << softmax
+                          << " trial=" << trial << " us=" << ms * 1000.0f / 100 << std::endl;
+            }
+        }
+        ASSERT_EQ(cudaEventDestroy(start), cudaSuccess);
+        ASSERT_EQ(cudaEventDestroy(stop), cudaSuccess);
+    }
 }
 
 TEST_F(MtpExecutorTest, testCompactPointMassPreservesSamplerRngState) {

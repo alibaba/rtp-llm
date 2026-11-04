@@ -338,6 +338,8 @@ struct GreedyParams {
 
     std::vector<at::Generator> generator;
     TensorHolder*              buffer_holder = nullptr;
+    int                        force_topk             = 0;
+    bool                       use_optimized_sampling = true;
 };
 
 struct GreedyOutput {

@@ -779,7 +779,7 @@ __global__ void SamplingFromProbKernel(DType* probs, IdType* output, bool* valid
   uint64_t philox_offset = offset_arr ? offset_arr[bx] : offset_val;
 
   curand_init(philox_seed, bx, philox_offset, &state);
-  const uint32_t row_idx = indices == nullptr ? bx : indices[bx];
+  const int64_t row_idx = indices == nullptr ? static_cast<int64_t>(bx) : static_cast<int64_t>(indices[bx]);
 
   extern __shared__ __align__(
       alignof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM>))
