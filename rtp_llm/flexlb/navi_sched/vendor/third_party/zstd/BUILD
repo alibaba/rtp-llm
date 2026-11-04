@@ -1,5 +1,6 @@
 cc_library(
     name = "zstd",
     linkopts = ["-lzstd"],
+    visibility = ["//visibility:public"],
 )
 

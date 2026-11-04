@@ -1,6 +1,7 @@
 cc_library(
     name = "lz4",
     linkopts = ["-llz4"],
+    visibility = ["//visibility:public"],
 )
 
 

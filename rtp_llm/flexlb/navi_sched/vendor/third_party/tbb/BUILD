@@ -94,4 +94,5 @@ shared_lib = "libtbb.so"
 cc_library(
     name = "tbb",
     linkopts = ["-ltbb"],
+    visibility = ["//visibility:public"],
 )
