@@ -1,6 +1,6 @@
-#include "aios/navi_sched/resource/AgentSchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentSchedulerConfigR.h"
 
-#include "aios/navi_sched/resource/SchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/SchedulerConfigR.h"
 #include "unittest/unittest.h"
 
 #include <limits>
@@ -337,4 +337,4 @@ TEST(AgentSchedulerConfigRTest,
               masterConfig._subscribers.at("collector_b").configHash);
 }
 
-}
+} // namespace navi_sched

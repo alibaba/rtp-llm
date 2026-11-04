@@ -1,6 +1,6 @@
-#include "aios/navi_sched/data/AgentUpdateToMasterData.h"
-#include "aios/navi_sched/data/BlockHashUtil.h"
-#include "aios/navi_sched/data/SummaryUtil.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentUpdateToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/BlockHashUtil.h"
+#include "rtp_llm/flexlb/navi_sched/data/SummaryUtil.h"
 #include "autil/Scope.h"
 #include "autil/TimeUtility.h"
 #include "navi/engine/Type.h"
@@ -19,12 +19,9 @@ navi::SummaryErrorCode AgentUpdateToMasterData::getSummary(
 {
     auto table = builder.newTable("AgentUpdateToMasterData");
     TABLE_ADD_COLUMN_VALUE(table, "version", version);
-    TABLE_ADD_COLUMN_VALUE(table, "ordered_event_count", updates.size());
     TABLE_ADD_COLUMN_VALUE(table, "event", static_cast<int32_t>(event));
     TABLE_ADD_COLUMN_VALUE(table, "event_type", NaviSchedAgentEvent::getName(event));
     TABLE_ADD_COLUMN_VALUE(table, "event_time_us", eventTimeUs);
-    TABLE_ADD_COLUMN_VALUE(table, "execution_utilization", executionUtilization);
-    TABLE_ADD_COLUMN_VALUE(table, "execution_busy_utilization", executionBusyUtilization);
     TABLE_ADD_COLUMN_VALUE(table, "deserialize_begin_mono_us", deserializeBeginMonoUs);
     TABLE_ADD_COLUMN_VALUE(table, "deserialize_end_mono_us", deserializeEndMonoUs);
     TABLE_ADD_COLUMN_VALUE(table, "has_control", control != nullptr);
@@ -49,9 +46,6 @@ navi::SummaryErrorCode AgentUpdateToMasterData::getSummary(
     TABLE_ADD_COLUMN_VALUE(table, "scheduler_config_error", schedulerConfigError);
     if (SummaryUtil::getSummaryLevel(query) < 1) {
         return navi::SEC_OK;
-    }
-    for (const auto &update : updates) {
-        if (update) update->getSummary(query, builder);
     }
     if (control) {
         auto section = builder.newTable("AgentControlToMasterData");
@@ -237,15 +231,6 @@ navi::SummaryErrorCode AgentUpdateToMasterData::getSummary(
 void AgentUpdateToMasterData::serialize(autil::DataBuffer &dataBuffer) const
 {
     dataBuffer.write(version);
-    if ((version == NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION ||
-         version == NAVI_SCHED_AGENT_UPDATE_LEGACY_BATCH_VERSION)) {
-        dataBuffer.write(static_cast<uint32_t>(updates.size()));
-        for (const auto &update : updates) {
-            dataBuffer.write(update->version);
-            update->serializeCompactPayload(dataBuffer);
-        }
-        return;
-    }
     dataBuffer.write(event);
     dataBuffer.write(eventTimeUs);
     dataBuffer.write(control);
@@ -262,8 +247,6 @@ void AgentUpdateToMasterData::serialize(autil::DataBuffer &dataBuffer) const
     dataBuffer.write(schedulerConfigHash);
     dataBuffer.write(schedulerConfigJson);
     dataBuffer.write(schedulerConfigError);
-    dataBuffer.write(executionUtilization);
-    if (version >= 14) dataBuffer.write(executionBusyUtilization);
 }
 
 void AgentUpdateToMasterData::deserialize(autil::DataBuffer &dataBuffer)
@@ -272,133 +255,12 @@ void AgentUpdateToMasterData::deserialize(autil::DataBuffer &dataBuffer)
     deserializeEndMonoUs = 0;
     autil::ScopeGuard finishReceiveTiming([this]() {
         deserializeEndMonoUs = autil::TimeUtility::monotonicTimeUs();
-        for (const auto &update : updates) {
-            update->deserializeBeginMonoUs = deserializeBeginMonoUs;
-            update->deserializeEndMonoUs = deserializeEndMonoUs;
-        }
     });
     dataBuffer.read(version);
-    if ((version == NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION ||
-         version == NAVI_SCHED_AGENT_UPDATE_LEGACY_BATCH_VERSION)) {
-        uint32_t count = 0;
-        dataBuffer.read(count);
-        if (count < 2 || count > NAVI_SCHED_AGENT_UPDATE_MAX_BATCH_SIZE) {
-            return;
-        }
-        updates.reserve(count);
-        for (uint32_t i = 0; i < count; ++i) {
-            auto update = std::make_shared<AgentUpdateToMasterData>();
-            int32_t childVersion = 0;
-            dataBuffer.read(childVersion);
-            const auto expectedChildVersion = version == NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION
-                ? NAVI_SCHED_AGENT_UPDATE_VERSION : NAVI_SCHED_AGENT_UPDATE_MIN_SUPPORTED_VERSION;
-            if (childVersion != expectedChildVersion) {
-                updates.clear();
-                return;
-            }
-            update->version = childVersion;
-            update->deserializeCompactPayload(dataBuffer);
-            if (update->version != expectedChildVersion) {
-                updates.clear();
-                return;
-            }
-            updates.emplace_back(std::move(update));
-        }
-        return;
-    }
     if (version < NAVI_SCHED_AGENT_UPDATE_MIN_SUPPORTED_VERSION ||
         version > NAVI_SCHED_AGENT_UPDATE_VERSION) {
         return;
     }
-    deserializePayload(dataBuffer);
-}
-
-void AgentUpdateToMasterData::serializeCompactPayload(autil::DataBuffer &dataBuffer) const
-{
-    dataBuffer.write(event);
-    dataBuffer.write(eventTimeUs);
-    uint16_t fields = 0;
-    if (control) fields |= uint16_t(1) << 0;
-    if (requestEvent) fields |= uint16_t(1) << 1;
-    if (cache) fields |= uint16_t(1) << 2;
-    if (pendingCache) fields |= uint16_t(1) << 3;
-    if (latency) fields |= uint16_t(1) << 4;
-    if (workload) fields |= uint16_t(1) << 5;
-    if (!latencyModelFingerprint.empty()) fields |= uint16_t(1) << 6;
-    if (latencyModelTrusted) fields |= uint16_t(1) << 7;
-    if (latencyModelWarmStarted) fields |= uint16_t(1) << 8;
-    if (schedulerConfigRequestGeneration) fields |= uint16_t(1) << 9;
-    if (schedulerConfigGeneration) fields |= uint16_t(1) << 10;
-    if (!schedulerConfigHash.empty()) fields |= uint16_t(1) << 11;
-    if (!schedulerConfigJson.empty()) fields |= uint16_t(1) << 12;
-    if (!schedulerConfigError.empty()) fields |= uint16_t(1) << 13;
-    if (executionUtilization >= 0.0) fields |= uint16_t(1) << 14;
-    if (version >= 14 && executionBusyUtilization >= 0.0) fields |= uint16_t(1) << 15;
-    dataBuffer.write(fields);
-    if (fields & (uint16_t(1) << 0)) dataBuffer.write(*control);
-    if (fields & (uint16_t(1) << 1)) dataBuffer.write(*requestEvent);
-    if (fields & (uint16_t(1) << 2)) dataBuffer.write(*cache);
-    if (fields & (uint16_t(1) << 3)) dataBuffer.write(*pendingCache);
-    if (fields & (uint16_t(1) << 4)) dataBuffer.write(*latency);
-    if (fields & (uint16_t(1) << 5)) dataBuffer.write(*workload);
-    if (fields & (uint16_t(1) << 6)) dataBuffer.write(latencyModelFingerprint);
-    if (fields & (uint16_t(1) << 9)) dataBuffer.write(schedulerConfigRequestGeneration);
-    if (fields & (uint16_t(1) << 10)) dataBuffer.write(schedulerConfigGeneration);
-    if (fields & (uint16_t(1) << 11)) dataBuffer.write(schedulerConfigHash);
-    if (fields & (uint16_t(1) << 12)) dataBuffer.write(schedulerConfigJson);
-    if (fields & (uint16_t(1) << 13)) dataBuffer.write(schedulerConfigError);
-    if (fields & (uint16_t(1) << 14)) dataBuffer.write(executionUtilization);
-    if (fields & (uint16_t(1) << 15)) dataBuffer.write(executionBusyUtilization);
-}
-
-void AgentUpdateToMasterData::deserializeCompactPayload(autil::DataBuffer &dataBuffer)
-{
-    dataBuffer.read(event);
-    dataBuffer.read(eventTimeUs);
-    uint16_t fields = 0;
-    dataBuffer.read(fields);
-    if (version < 14 && (fields & 0x8000)) {
-        version = 0;
-        return;
-    }
-    if (fields & (uint16_t(1) << 0)) {
-        control = std::make_shared<AgentControlToMasterData>();
-        dataBuffer.read(*control);
-    }
-    if (fields & (uint16_t(1) << 1)) {
-        requestEvent = std::make_shared<AgentRequestEventToMasterData>();
-        dataBuffer.read(*requestEvent);
-    }
-    if (fields & (uint16_t(1) << 2)) {
-        cache = std::make_shared<AgentCacheToMasterData>();
-        dataBuffer.read(*cache);
-    }
-    if (fields & (uint16_t(1) << 3)) {
-        pendingCache = std::make_shared<AgentPendingCacheToMasterData>();
-        dataBuffer.read(*pendingCache);
-    }
-    if (fields & (uint16_t(1) << 4)) {
-        latency = std::make_shared<AgentLatencyToMasterData>();
-        dataBuffer.read(*latency);
-    }
-    if (fields & (uint16_t(1) << 5)) {
-        workload = std::make_shared<NaviSchedWorkloadSnapshot>();
-        dataBuffer.read(*workload);
-    }
-    if (fields & (uint16_t(1) << 6)) dataBuffer.read(latencyModelFingerprint);
-    latencyModelTrusted = (fields & (uint16_t(1) << 7)) != 0;
-    latencyModelWarmStarted = (fields & (uint16_t(1) << 8)) != 0;
-    if (fields & (uint16_t(1) << 9)) dataBuffer.read(schedulerConfigRequestGeneration);
-    if (fields & (uint16_t(1) << 10)) dataBuffer.read(schedulerConfigGeneration);
-    if (fields & (uint16_t(1) << 11)) dataBuffer.read(schedulerConfigHash);
-    if (fields & (uint16_t(1) << 12)) dataBuffer.read(schedulerConfigJson);
-    if (fields & (uint16_t(1) << 13)) dataBuffer.read(schedulerConfigError);
-    if (fields & (uint16_t(1) << 14)) dataBuffer.read(executionUtilization);
-    if (fields & (uint16_t(1) << 15)) dataBuffer.read(executionBusyUtilization);
-}
-
-void AgentUpdateToMasterData::deserializePayload(autil::DataBuffer &dataBuffer)
-{
     dataBuffer.read(event);
     dataBuffer.read(eventTimeUs);
     dataBuffer.read(control);
@@ -410,47 +272,17 @@ void AgentUpdateToMasterData::deserializePayload(autil::DataBuffer &dataBuffer)
     dataBuffer.read(latencyModelFingerprint);
     dataBuffer.read(latencyModelTrusted);
     dataBuffer.read(latencyModelWarmStarted);
-    dataBuffer.read(schedulerConfigRequestGeneration);
-    dataBuffer.read(schedulerConfigGeneration);
-    dataBuffer.read(schedulerConfigHash);
-    dataBuffer.read(schedulerConfigJson);
-    dataBuffer.read(schedulerConfigError);
-    dataBuffer.read(executionUtilization);
-    if (version >= 14) dataBuffer.read(executionBusyUtilization);
-}
-
-bool AgentUpdateToMasterData::validEnvelope() const
-{
-    return (version == NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION ||
-         version == NAVI_SCHED_AGENT_UPDATE_LEGACY_BATCH_VERSION) &&
-           event == NaviSchedAgentEvent::UNKNOWN && !control && !requestEvent &&
-           !cache && !pendingCache && !latency && !workload && eventTimeUs == 0 &&
-           executionUtilization == -1.0 && executionBusyUtilization == -1.0 &&
-           latencyModelFingerprint.empty() && !latencyModelTrusted && !latencyModelWarmStarted &&
-           schedulerConfigRequestGeneration == 0 && schedulerConfigGeneration == 0 &&
-           schedulerConfigHash.empty() && schedulerConfigJson.empty() && schedulerConfigError.empty() &&
-           updates.size() >= 2 && updates.size() <= NAVI_SCHED_AGENT_UPDATE_MAX_BATCH_SIZE &&
-           std::all_of(updates.begin(), updates.end(), [this](const auto &update) {
-               const auto expected = version == NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION
-                   ? NAVI_SCHED_AGENT_UPDATE_VERSION : NAVI_SCHED_AGENT_UPDATE_MIN_SUPPORTED_VERSION;
-               return update && update->version == expected && update->updates.empty();
-           });
+    if (version >= 8) {
+        dataBuffer.read(schedulerConfigRequestGeneration);
+        dataBuffer.read(schedulerConfigGeneration);
+        dataBuffer.read(schedulerConfigHash);
+        dataBuffer.read(schedulerConfigJson);
+        dataBuffer.read(schedulerConfigError);
+    }
 }
 
 bool AgentUpdateToMasterData::valid() const
 {
-    if ((version == NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION ||
-         version == NAVI_SCHED_AGENT_UPDATE_LEGACY_BATCH_VERSION)) {
-        return validEnvelope() && std::all_of(updates.begin(), updates.end(), [](const auto &update) {
-            return update->valid();
-        });
-    }
-    if (!std::isfinite(executionBusyUtilization) ||
-        (executionBusyUtilization != -1.0 && (executionBusyUtilization < 0.0 || executionBusyUtilization > 1.0)) ||
-        !updates.empty() || !std::isfinite(executionUtilization) ||
-        (executionUtilization < 0.0 && executionUtilization != -1.0)) {
-        return false;
-    }
     if (version < NAVI_SCHED_AGENT_UPDATE_MIN_SUPPORTED_VERSION ||
         version > NAVI_SCHED_AGENT_UPDATE_VERSION ||
         NaviSchedAgentEvent::UNKNOWN == event) {
@@ -532,18 +364,6 @@ bool AgentUpdateToMasterData::valid() const
     }
 }
 
-std::shared_ptr<AgentUpdateToMasterData> AgentUpdateToMasterData::makeBatch(
-    const std::vector<std::shared_ptr<AgentUpdateToMasterData>> &updates)
-{
-    if (updates.size() == 1) {
-        return updates.front();
-    }
-    auto batch = std::make_shared<AgentUpdateToMasterData>();
-    batch->version = NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION;
-    batch->updates = updates;
-    return batch->valid() ? batch : nullptr;
-}
-
 class AgentUpdateToMasterType : public navi::Type {
 public:
     AgentUpdateToMasterType()
@@ -571,10 +391,8 @@ public:
         if (!update) {
             return navi::TEC_NULL_DATA;
         }
-        if (update->version != NAVI_SCHED_AGENT_UPDATE_VERSION &&
-            update->version != NAVI_SCHED_AGENT_UPDATE_MIN_SUPPORTED_VERSION &&
-            update->version != NAVI_SCHED_AGENT_UPDATE_LEGACY_BATCH_VERSION &&
-            update->version != NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION) {
+        if (update->version < NAVI_SCHED_AGENT_UPDATE_MIN_SUPPORTED_VERSION ||
+            update->version > NAVI_SCHED_AGENT_UPDATE_VERSION) {
             delete update;
             return navi::TEC_FAILED;
         }
@@ -585,4 +403,4 @@ public:
 
 REGISTER_TYPE(AgentUpdateToMasterType);
 
-}
+} // namespace navi_sched

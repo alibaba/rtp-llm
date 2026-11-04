@@ -1,4 +1,4 @@
-#include "aios/navi_sched/kernel/AgentLatencyKernel.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/AgentLatencyKernel.h"
 #include "autil/TimeUtility.h"
 
 #include <cmath>
@@ -50,7 +50,7 @@ std::string formatRequestIds(const AgentLatencyInput &input)
     }
     return stream.str();
 }
-}
+} // namespace
 
 int64_t AgentLatencyKernel::predictBatchLatencyUs(const NaviSchedBatchPtr &batch) const
 {
@@ -760,7 +760,6 @@ void AgentLatencyKernel::logLatencyTrainingUpdate(
                     "fit_inflight_after_valid=%d fit_inflight_after_requests=%d "
                     "fit_inflight_after_revision=%lu fit_inflight_after_time_us=%ld "
                     "revision_before=%ld revision_after=%ld "
-                    "model_trusted_before=%d "
                     "optimizer_step_before=%ld optimizer_step_after=%ld "
                     "parameter_count=%lu parameters_before=[%s] parameters_after=[%s] "
                     "adam_m1_before=[%s] adam_m2_before=[%s] "
@@ -774,7 +773,6 @@ void AgentLatencyKernel::logLatencyTrainingUpdate(
                     fitInflight.beforeTimeUs, fitInflight.afterAvailable ? 1 : 0,
                     fitInflight.after.requestCount, fitInflight.after.revision,
                     fitInflight.afterTimeUs, before->revision, after->revision,
-                    before->overloadPredictionTrusted ? 1 : 0,
                     optimizerBefore.step, optimizerAfter.step, parameterCount,
                     parametersBefore.c_str(), parametersAfter.c_str(),
                     moment1Before.c_str(), moment2Before.c_str(), moment1After.c_str(),
@@ -1180,6 +1178,7 @@ navi::ErrorCode AgentLatencyKernel::compute(navi::KernelComputeContext &ctx)
         }
         if (!_latencyModelR->recordSample(sample, updatedSnapshot, currentSaveNeeded,
                                           input.getLatencyTrainingPhase())) {
+            // Reporting a bad sample must not stop the resident Agent graph.
             NAVI_KERNEL_LOG(WARN, "discard invalid latency sample");
             continue;
         }
@@ -1213,4 +1212,4 @@ navi::ErrorCode AgentLatencyKernel::compute(navi::KernelComputeContext &ctx)
 
 REGISTER_KERNEL(AgentLatencyKernel);
 
-}
+} // namespace navi_sched

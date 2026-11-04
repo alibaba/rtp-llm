@@ -1,4 +1,4 @@
-#include "aios/navi_sched/test/simulator/SimulatedExecutionR.h"
+#include "rtp_llm/flexlb/navi_sched/test/simulator/SimulatedExecutionR.h"
 #include "autil/TimeUtility.h"
 #include "navi/engine/Kernel.h"
 #include <algorithm>
@@ -34,6 +34,7 @@ private:
 
 private:
     KERNEL_DEPEND_ON(SimulatedExecutionR, _simulatedExecutionR);
+    // Request notifications and execution deadlines serialize through one pipe.
     navi::AsyncPipePtr _activationPipe;
     std::deque<ScheduledBatch> _pendingBatches;
     ScheduledBatch _runningBatch;
@@ -212,4 +213,4 @@ void SimulatedExecutionKernel::logExecutionSummary() const
 
 REGISTER_KERNEL(SimulatedExecutionKernel);
 
-}
+} // namespace navi_sched::test

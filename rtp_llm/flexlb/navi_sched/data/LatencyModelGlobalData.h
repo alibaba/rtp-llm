@@ -19,4 +19,4 @@ struct LatencyModelGlobalData {
     double globalZeroPoint = 0.0;
 };
 
-}
+} // namespace navi_sched

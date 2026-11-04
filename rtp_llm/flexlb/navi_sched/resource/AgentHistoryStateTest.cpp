@@ -1,6 +1,6 @@
-#include "aios/navi_sched/resource/AgentHistoryR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentHistoryR.h"
 
-#include "aios/navi_sched/resource/LatencyModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyModelR.h"
 #include "autil/CRC32C.h"
 #include "autil/DataBuffer.h"
 #include "autil/TimeUtility.h"
@@ -735,4 +735,4 @@ TEST_F(AgentHistoryStateTest,
     EXPECT_LT(updated->revision, 1024);
 }
 
-}
+} // namespace navi_sched

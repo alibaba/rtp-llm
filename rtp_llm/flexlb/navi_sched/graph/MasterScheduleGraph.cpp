@@ -1,12 +1,12 @@
-#include "aios/navi_sched/graph/MasterScheduleGraph.h"
-#include "aios/navi_sched/graph/GraphVisRecorder.h"
-#include "aios/navi_sched/resource/MasterScheduleR.h"
-#include "aios/navi_sched/resource/SchedulerConfigR.h"
-#include "aios/navi_sched/scheduler/CostSchedulerGraph.h"
-#include "aios/navi_sched/scheduler/CostSchedulerKernel.h"
-#include "aios/navi_sched/scheduler/MasterScheduleContextKernel.h"
-#include "aios/navi_sched/scheduler/MasterScheduleResultGraph.h"
-#include "aios/navi_sched/kernel/SchedulerConfigSyncKernel.h"
+#include "rtp_llm/flexlb/navi_sched/graph/MasterScheduleGraph.h"
+#include "rtp_llm/flexlb/navi_sched/graph/GraphVisRecorder.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterScheduleR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/SchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/CostSchedulerGraph.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/CostSchedulerKernel.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/MasterScheduleContextKernel.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/MasterScheduleResultGraph.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/SchedulerConfigSyncKernel.h"
 #include "autil/Lock.h"
 #include "autil/legacy/json.h"
 #include "navi/builder/GraphBuilder.h"
@@ -107,7 +107,7 @@ public:
     }
 };
 
-}
+} // namespace
 
 std::unique_ptr<navi::GraphDef> MasterScheduleGraph::buildGraph(
     const std::string &masterBizName, const std::string &contextKernelConfig,
@@ -204,6 +204,7 @@ public:
         navi::RunGraphParams params;
         params.setResourceBuildMode(navi::RBM_PARALLEL);
         params.setTimeoutMs(SCHEDULE_GRAPH_TIMEOUT_MS);
+        // This graph lives for the process lifetime; trace buffers have no cap.
         if (enableVis) {
             params.setCollectMetric(true);
             params.addParamTopoTreeStr("edge_key=*;edge_query=2");
@@ -511,4 +512,4 @@ uint64_t MasterScheduleGraph::getRestartCount() const
     return _impl->restartCount.load(std::memory_order_relaxed);
 }
 
-}
+} // namespace navi_sched

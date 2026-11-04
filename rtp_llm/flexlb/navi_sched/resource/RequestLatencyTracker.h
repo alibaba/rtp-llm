@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedConstants.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedConstants.h"
 #include "autil/Lock.h"
 
 #include <cstdint>
@@ -97,4 +97,4 @@ private:
     RequestLatencyTracker _tracker;
 };
 
-}
+} // namespace navi_sched

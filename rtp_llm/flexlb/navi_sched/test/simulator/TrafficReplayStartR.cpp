@@ -1,4 +1,4 @@
-#include "aios/navi_sched/test/simulator/TrafficReplayStartR.h"
+#include "rtp_llm/flexlb/navi_sched/test/simulator/TrafficReplayStartR.h"
 
 #include "autil/TimeUtility.h"
 #include <algorithm>
@@ -73,4 +73,4 @@ bool TrafficReplayStartR::join(const TrafficReplayStartRequestData &request,
 
 REGISTER_RESOURCE(TrafficReplayStartR);
 
-}
+} // namespace navi_sched::test

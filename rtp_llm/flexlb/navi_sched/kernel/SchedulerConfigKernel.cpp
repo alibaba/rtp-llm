@@ -1,6 +1,6 @@
-#include "aios/navi_sched/kernel/SchedulerConfigKernel.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/SchedulerConfigKernel.h"
 
-#include "aios/navi_sched/proto/SchedulerConfig.pb.h"
+#include "rtp_llm/flexlb/navi_sched/proto/SchedulerConfig.pb.h"
 #include "navi/engine/NaviRegisterMacro.h"
 #include "navi/rpc_server/NaviArpcResponseData.h"
 
@@ -95,4 +95,4 @@ navi::ErrorCode SchedulerConfigKernel::compute(navi::KernelComputeContext &ctx)
 
 REGISTER_KERNEL(SchedulerConfigKernel);
 
-}
+} // namespace navi_sched

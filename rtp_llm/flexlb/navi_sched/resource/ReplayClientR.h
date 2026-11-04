@@ -1,8 +1,8 @@
 #pragma once
 
-#include "aios/navi_sched/data/ReplayControlData.h"
-#include "aios/navi_sched/data/ClientRequestToMasterData.h"
-#include "aios/navi_sched/resource/ReplayHistoryStore.h"
+#include "rtp_llm/flexlb/navi_sched/data/ReplayControlData.h"
+#include "rtp_llm/flexlb/navi_sched/data/ClientRequestToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/resource/ReplayHistoryStore.h"
 #include "autil/Log.h"
 #include "navi/engine/AsyncPipe.h"
 #include "navi/engine/Resource.h"
@@ -81,6 +81,7 @@ private:
     std::condition_variable _condition;
     std::string _clientId;
     ReplayHistoryStore _historyStore;
+    // Bound queued payloads independently of the existing on-disk history limit.
     static constexpr size_t HISTORY_QUEUE_LIMIT = 256;
     static constexpr size_t HISTORY_QUEUE_BYTES_LIMIT = 16 * 1024 * 1024;
     std::mutex _historyMutex;
@@ -123,4 +124,4 @@ private:
 
 NAVI_TYPEDEF_PTR(ReplayClientR);
 
-}
+} // namespace navi_sched

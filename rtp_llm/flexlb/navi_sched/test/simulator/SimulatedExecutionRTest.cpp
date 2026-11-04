@@ -1,14 +1,14 @@
-#include "aios/navi_sched/test/simulator/SimulatedExecutionR.h"
+#include "rtp_llm/flexlb/navi_sched/test/simulator/SimulatedExecutionR.h"
 
-#include "aios/navi_sched/data/AgentResponseToClientData.h"
-#include "aios/navi_sched/data/BlockHashUtil.h"
-#include "aios/navi_sched/resource/AgentLatencyInputR.h"
-#include "aios/navi_sched/resource/AgentRequestR.h"
-#include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
-#include "aios/navi_sched/service/NaviSchedAgent.h"
-#include "aios/navi_sched/test/simulator/SimulatedAgentAccess.h"
-#include "aios/navi_sched/test/simulator/TrafficReplayR.h"
-#include "aios/navi_sched/test/simulator/TrafficReplayStartR.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/data/BlockHashUtil.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentLatencyInputR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentRequestR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/NonLinearPrefillModelR.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedAgent.h"
+#include "rtp_llm/flexlb/navi_sched/test/simulator/SimulatedAgentAccess.h"
+#include "rtp_llm/flexlb/navi_sched/test/simulator/TrafficReplayR.h"
+#include "rtp_llm/flexlb/navi_sched/test/simulator/TrafficReplayStartR.h"
 #include "navi/tester/NaviResourceHelper.h"
 #include "unittest/unittest.h"
 #include <cmath>
@@ -583,4 +583,4 @@ TEST_F(SimulatedExecutionRTest, testAgentStopDrainsIncompleteSharedBatch)
     EXPECT_GT(completionPipe->response->requestTiming.executionLatencyMs, 0.0);
 }
 
-}
+} // namespace navi_sched::test

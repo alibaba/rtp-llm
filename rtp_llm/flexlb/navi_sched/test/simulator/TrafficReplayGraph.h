@@ -26,4 +26,4 @@ private:
     std::unique_ptr<Impl> _impl;
 };
 
-}
+} // namespace navi_sched::test

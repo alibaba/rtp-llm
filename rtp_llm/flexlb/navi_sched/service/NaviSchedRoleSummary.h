@@ -21,4 +21,4 @@ public:
 
 NAVI_TYPEDEF_PTR(NaviSchedRoleSummary);
 
-}
+} // namespace navi_sched

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/resource/MasterStateR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterStateR.h"
 #include "autil/Log.h"
 #include "navi/engine/Navi.h"
 #include <autil/Lock.h>
@@ -97,4 +97,4 @@ private:
 
 NAVI_TYPEDEF_PTR(MasterCollectorManager);
 
-}
+} // namespace navi_sched

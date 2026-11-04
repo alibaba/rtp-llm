@@ -1,6 +1,6 @@
-#include "aios/navi_sched/graph/ClientGraphRunner.h"
-#include "aios/navi_sched/graph/GraphVisRecorder.h"
-#include "aios/navi_sched/resource/ClientResponseR.h"
+#include "rtp_llm/flexlb/navi_sched/graph/ClientGraphRunner.h"
+#include "rtp_llm/flexlb/navi_sched/graph/GraphVisRecorder.h"
+#include "rtp_llm/flexlb/navi_sched/resource/ClientResponseR.h"
 #include "autil/TimeUtility.h"
 #include "navi/builder/GraphBuilder.h"
 #include <algorithm>
@@ -9,6 +9,7 @@ namespace navi_sched {
 namespace {
 
 const std::string SCHEDULE_NODE = "navi_sched_schedule";
+const std::string DISPATCH_GUARD_NODE = "navi_sched_master_dispatch_guard";
 const std::string CLIENT_GRAPH_VIS_FILE = "./client_graph.vis";
 const std::string ADMISSION_TIMEOUT_ERROR =
     "NaviSched request admission timed out";
@@ -83,7 +84,7 @@ private:
     ClientGraphRunner::DecisionCallback _completion;
 };
 
-}
+} // namespace
 
 std::unique_ptr<navi::GraphDef> ClientGraphRunner::buildScheduleGraph(
     const std::string &clientBizName, const std::string &masterBizName,
@@ -122,18 +123,21 @@ std::unique_ptr<navi::GraphDef> ClientGraphRunner::buildScheduleGraph(
                            .kernel("navi_sched.client_forward_k");
     auto responseNode = builder.node(clientGraphId, "navi_sched_response")
                             .kernel("navi_sched.client_response_k");
-    scheduleNode.jsonAttrs("{\"fused_dispatch_guard\":true}")
-        .integerAttr("admission_timeout_ms", rpcTimeoutMs);
+    auto dispatchGuardNode = builder.node(masterGraphId, DISPATCH_GUARD_NODE)
+                                 .kernel("navi_sched.master_dispatch_guard_k")
+                                 .integerAttr("admission_timeout_ms",
+                                              rpcTimeoutMs);
     scheduleNode.out("decision").to(forwardNode.in("decision"));
+    scheduleNode.out("decision").to(dispatchGuardNode.in("decision"));
     forwardNode.out("decision").to(responseNode.in("decision"));
     forwardNode.out("decision")
-        .to(scheduleNode.in("forward_decision")).require(false);
+        .to(dispatchGuardNode.in("forward_decision"));
     forwardNode.out("response").to(responseNode.in("response"));
     if (collectReplay) {
         scheduleNode.out("replay").to(responseNode.in("replay"));
     }
     responseNode.out("finished").asGraphOutput("finished");
-    scheduleNode.out("dispatch_finished").asGraphOutput("dispatch_finished");
+    dispatchGuardNode.out("finished").asGraphOutput("dispatch_finished");
     if (!builder.ok()) {
         return nullptr;
     }
@@ -175,7 +179,7 @@ ClientRequestToMasterDataConstPtr withoutForwardPayload(
     return copy;
 }
 
-}
+} // namespace
 
 ClientGraphRunner::ClientGraphRunner(const navi::NaviPtr &navi, bool enableVis,
                                      const std::shared_ptr<ClientResponseR> &responseR,
@@ -373,4 +377,4 @@ ClientGraphRunResult ClientGraphRunner::collectResult(
     return result;
 }
 
-}
+} // namespace navi_sched

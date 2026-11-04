@@ -6,7 +6,7 @@ import types
 import unittest
 from unittest.mock import Mock, patch
 
-SOURCE = pathlib.Path(__file__).resolve().parents[2] / 'adapters/vllm/VLLMEngineTransport.py'
+SOURCE = pathlib.Path(__file__).resolve().parents[2] / 'navi_sched/adapters/vllm/VLLMEngineTransport.py'
 
 def load_transport():
     dependencies = {

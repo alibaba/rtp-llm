@@ -1,11 +1,11 @@
-#include "aios/navi_sched/adapters/rtp_llm/RtpLLMAdapter.h"
+#include "rtp_llm/flexlb/navi_sched/adapters/rtp_llm/RtpLLMAdapter.h"
 
 #include <navi_sched/NaviSchedAgent.h>
-#include "aios/navi_sched/data/AgentResponseToClientData.h"
-#include "aios/navi_sched/resource/AgentBatchR.h"
-#include "aios/navi_sched/resource/AgentRequestR.h"
-#include "aios/navi_sched/service/NaviSchedAgentImpl.h"
-#include "aios/navi_sched/service/NaviSchedRoleRuntimeAccess.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentBatchR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentRequestR.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedAgentImpl.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedRoleRuntimeAccess.h"
 #include "autil/EnvUtil.h"
 #include "autil/legacy/json.h"
 #include "navi/engine/AsyncPipe.h"
@@ -140,7 +140,7 @@ NaviSchedForwardRequest makeForwardRequest(uint64_t requestId, int64_t batchId,
     return request;
 }
 
-}
+} // namespace
 
 class RtpLLMAdapterTest : public TESTBASE {};
 
@@ -184,6 +184,7 @@ TEST_F(RtpLLMAdapterTest, testRequestAndCacheState)
     reportRtpLLMCacheStateChanged(agent, makeBlockHashes({42}), makeBlockHashes({42}),
                                   makeBlockHashes({}), makeBlockHashes({}), true, 101, 1);
     auto policyRequest = makeBatchRequest(98);
+    // RTP reserves the final block of an aligned prompt for prefill.
     policyRequest.totalTokenCount = 257;
     policyRequest.blockSize = 256;
     policyRequest.blockHashes = makeBlockHashes({42});

@@ -1,0 +1,4 @@
+py_library(
+    name = "thrift",
+    visibility = ["//visibility:public"],
+)

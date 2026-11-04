@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/resource/ReplayControlR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/ReplayControlR.h"
 #include "navi/engine/Kernel.h"
 
 namespace navi_sched {
@@ -17,4 +17,4 @@ private:
     KERNEL_DEPEND_ON(ReplayControlR, _replayControlR);
 };
 
-}
+} // namespace navi_sched

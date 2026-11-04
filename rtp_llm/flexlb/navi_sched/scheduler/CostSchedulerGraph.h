@@ -1,9 +1,9 @@
 #pragma once
 
-#include "aios/navi_sched/scheduler/CostSchedulerConfig.h"
-#include "aios/navi_sched/scheduler/CostSchedulerKernelInternal.h"
-#include "aios/navi_sched/resource/SchedulerConfigR.h"
-#include "aios/network/gig/multi_call/util/RandomGenerator.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/CostSchedulerConfig.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/CostSchedulerKernelInternal.h"
+#include "rtp_llm/flexlb/navi_sched/resource/SchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/vendor/network/gig/multi_call/util/RandomGenerator.h"
 #include "navi/engine/Data.h"
 #include "navi/engine/Kernel.h"
 
@@ -16,7 +16,7 @@
 namespace navi {
 class GraphBuilder;
 class N;
-}
+} // namespace navi
 
 namespace navi_sched {
 
@@ -282,4 +282,4 @@ private:
                     size_t workerCount);
 };
 
-}
+} // namespace navi_sched

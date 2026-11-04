@@ -1,10 +1,10 @@
-#include "aios/navi_sched/data/MasterSchedulerConfigToAgentData.h"
-#include "aios/navi_sched/resource/AgentBatchR.h"
-#include "aios/navi_sched/resource/AgentReportR.h"
-#include "aios/navi_sched/resource/AgentSchedulerConfigR.h"
-#include "aios/navi_sched/resource/AgentHistoryR.h"
-#include "aios/navi_sched/resource/LatencyModelR.h"
-#include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterSchedulerConfigToAgentData.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentBatchR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentReportR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentSchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentHistoryR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/NonLinearPrefillModelR.h"
 #include "navi/engine/Kernel.h"
 
 namespace navi_sched {
@@ -97,4 +97,4 @@ navi::ErrorCode AgentSchedulerConfigKernel::compute(
 
 REGISTER_KERNEL(AgentSchedulerConfigKernel);
 
-}
+} // namespace navi_sched

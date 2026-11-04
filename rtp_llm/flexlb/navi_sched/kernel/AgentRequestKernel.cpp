@@ -1,11 +1,11 @@
-#include "aios/navi_sched/data/AgentResponseToClientData.h"
-#include "aios/navi_sched/data/ClientRequestToMasterData.h"
-#include "aios/navi_sched/data/MasterResponseToClientData.h"
-#include "aios/navi_sched/data/NaviSchedRequestTrace.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/data/ClientRequestToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedRequestTrace.h"
 #include "autil/TimeUtility.h"
-#include "aios/navi_sched/resource/AgentRequestR.h"
-#include "aios/navi_sched/resource/AgentResponseR.h"
-#include "aios/navi_sched/resource/LatencyModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentRequestR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentResponseR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyModelR.h"
 #include "navi/engine/Kernel.h"
 #include "navi/log/NaviLogger.h"
 #include <algorithm>
@@ -15,7 +15,7 @@ namespace {
 
 const std::string MASTER_RESPONSE_TO_CLIENT_DATA_NAME = "navi_sched.master_response";
 
-}
+} // namespace
 
 class AgentRequestKernel : public navi::Kernel {
 public:
@@ -133,11 +133,13 @@ navi::ErrorCode AgentRequestKernel::init(navi::KernelInitContext &ctx)
                             _decision->latencyModelGlobal.parameterCount);
         }
     }
+    // Streaming graphs can outlive admission and have an unlimited graph timeout.
     const auto remainingMs = std::min(ctx.getTimeoutChecker()->remainTime(),
                                       getNaviSchedRpcTimeoutMs(_request->timeoutMs));
     if (remainingMs <= 0) {
         return navi::EC_TIMEOUT;
     }
+    // This is a local admission budget, not a cross-host timestamp or wire change.
     forwardRequest.request.timeoutMs = remainingMs;
     _requestId = forwardRequest.request.requestId;
     const auto submitBeginTimeUs = tracing ? autil::TimeUtility::currentTime() : 0;
@@ -221,4 +223,4 @@ navi::ErrorCode AgentRequestKernel::compute(navi::KernelComputeContext &ctx)
 
 REGISTER_KERNEL(AgentRequestKernel);
 
-}
+} // namespace navi_sched

@@ -1,4 +1,4 @@
-#include "aios/navi_sched/bindings/NaviSchedBindings.h"
+#include "rtp_llm/flexlb/navi_sched/bindings/NaviSchedBindings.h"
 
 PYBIND11_MODULE(_navi_sched_core, module)
 {

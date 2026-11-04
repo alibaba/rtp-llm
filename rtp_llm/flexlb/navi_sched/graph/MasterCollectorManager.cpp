@@ -1,8 +1,8 @@
-#include "aios/navi_sched/graph/MasterCollectorManager.h"
-#include "aios/navi_sched/data/AgentUpdateToMasterData.h"
-#include "aios/navi_sched/data/NaviSchedAgentEvent.h"
-#include "aios/navi_sched/graph/GraphVisRecorder.h"
-#include "aios/navi_sched/resource/AgentInstanceR.h"
+#include "rtp_llm/flexlb/navi_sched/graph/MasterCollectorManager.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentUpdateToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedAgentEvent.h"
+#include "rtp_llm/flexlb/navi_sched/graph/GraphVisRecorder.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentInstanceR.h"
 #include "autil/HashAlgorithm.h"
 #include "autil/LoopThread.h"
 #include "navi/builder/GraphBuilder.h"
@@ -24,7 +24,7 @@ struct CollectorRoute {
     std::string agentMeta;
 };
 
-}
+} // namespace
 
 class CollectorResultClosure : public navi::NaviUserResultClosure {
 public:
@@ -133,6 +133,7 @@ bool MasterCollectorManager::isAgentOffline(const MasterStateRPtr &masterStateR,
     std::string nodeId;
     if (!masterStateR->getAgentCollectorNodeId(collectorId, nodeId) ||
         nodeId.empty()) {
+        // A graph that failed before its first handshake still needs retries.
         return false;
     }
     auto node = masterStateR->getNodeState(
@@ -156,8 +157,7 @@ std::unique_ptr<navi::GraphDef> MasterCollectorManager::buildAgentCollectorGraph
     }
     auto sourceNode = builder.node(AGENT_SOURCE_NODE)
                           .kernel("navi_sched.agent_report_source_k")
-                          .attr("collector_id", collectorId)
-                          .integerAttr("ordered_report_version", NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION);
+                          .attr("collector_id", collectorId);
     auto ackNode = builder.node(agentGraphId, "navi_sched_agent_stop_ack")
                        .kernel("navi_sched.agent_stop_ack_k");
     auto pendingSyncNode =
@@ -258,6 +258,7 @@ bool MasterCollectorManager::openRoute(const std::string &routeId,
         params.setTaskQueueName(_taskQueueNames[hash % _taskQueueNames.size()]);
     }
     params.setResourceBuildMode(navi::RBM_PARALLEL);
+    // Streaming collectors must not retain every log until their graph ends.
     if (_visRecorder) {
         params.setCollectMetric(true);
         params.addParamTopoTreeStr("edge_key=*;edge_query=2");
@@ -396,6 +397,7 @@ size_t MasterCollectorManager::size() const
     size_t count = 0;
     for (const auto &collector : _collectors) {
         const auto &route = collector.second;
+        // Auto-discovered routes remain owned by Gig after a normal EOF.
         if (route.automatic || (route.closure && !route.closure->isCompleted())) {
             ++count;
         }
@@ -524,4 +526,4 @@ void MasterCollectorManager::syncRoutes(
     }
 }
 
-}
+} // namespace navi_sched

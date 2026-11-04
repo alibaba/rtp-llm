@@ -1,8 +1,8 @@
-#include "aios/navi_sched/resource/MasterLatencyModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterLatencyModelR.h"
 
-#include "aios/navi_sched/data/SummaryUtil.h"
-#include "aios/navi_sched/resource/LatencyResidualModel.h"
-#include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
+#include "rtp_llm/flexlb/navi_sched/data/SummaryUtil.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyResidualModel.h"
+#include "rtp_llm/flexlb/navi_sched/resource/NonLinearPrefillModelR.h"
 #include "autil/CRC32C.h"
 #include "autil/TimeUtility.h"
 
@@ -27,7 +27,7 @@ bool zeroPointsEqual(double left, double right)
     return std::abs(left - right) <= ZERO_POINT_RELATIVE_TOLERANCE *
                                          std::max({1.0, std::abs(left), std::abs(right)});
 }
-}
+} // namespace
 
 const char *MasterLatencyModelR::getRejectReasonName(RejectReason reason)
 {
@@ -386,6 +386,8 @@ bool MasterLatencyModelR::record(const std::string &agentId,
                                  &liveIt->second->model, std::memory_order_acquire);
         if (current && current->overloadPredictionTrusted &&
             current->revision < _trustMinRevision) {
+            // Normalize a model published by an older process before applying
+            // the new gate; otherwise an invalid trusted window can persist.
             auto downgraded = std::make_shared<LiveModel>(*current);
             downgraded->overloadPredictionTrusted = false;
             downgraded->lastRejectReason = "revision_below_trust_minimum";
@@ -464,6 +466,8 @@ bool MasterLatencyModelR::record(const std::string &agentId,
              (sameRevision && !sessionProgress));
         const auto rampTrustDowngrade = trustedRegression && !rampFinished;
         if (rampTrustDowngrade && staleRevision) {
+            // A reconnect can report an older untrusted snapshot while ramping.
+            // Publish the trust downgrade, but never roll back the live model.
             auto downgraded = std::make_shared<LiveModel>(*current);
             downgraded->overloadPredictionTrusted = false;
             downgraded->eventTimeUs = eventTimeUs;
@@ -608,6 +612,9 @@ bool MasterLatencyModelR::record(const std::string &agentId,
             latency.modelRevision >= _sourceMinRevision;
         if (!persistentValid) {
             ++_stats.acceptedUpdateCount;
+            // The live model update succeeded even when it is not yet eligible
+            // for cross-node persistence. Do not report that normal untrusted
+            // state as a failed record operation.
             result = true;
         } else {
             auto &candidates = _models[modelKey];
@@ -1239,4 +1246,4 @@ navi::SummaryErrorCode MasterLatencyModelR::getSummary(
 
 REGISTER_RESOURCE(MasterLatencyModelR);
 
-}
+} // namespace navi_sched

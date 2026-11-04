@@ -1,4 +1,4 @@
-#include "aios/navi_sched/data/AgentRequestEventToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentRequestEventToMasterData.h"
 
 namespace navi_sched {
 
@@ -52,4 +52,4 @@ void AgentRequestEventToMasterData::deserialize(autil::DataBuffer &dataBuffer)
     dataBuffer.read(latencyValidationStats);
 }
 
-}
+} // namespace navi_sched

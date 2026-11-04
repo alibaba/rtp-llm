@@ -1,23 +1,22 @@
-#include "aios/navi_sched/service/NaviSchedAgent.h"
-#include "aios/navi_sched/data/NaviSchedRequestTrace.h"
-#include "aios/navi_sched/navi_sched_git_version.h"
-#include "aios/navi_sched/service/NaviSchedAgentImpl.h"
-#include "aios/navi_sched/graph/AgentGraph.h"
-#include "aios/navi_sched/resource/AgentBatchR.h"
-#include "aios/navi_sched/resource/AgentCacheR.h"
-#include "aios/navi_sched/resource/AgentHistoryR.h"
-#include "aios/navi_sched/resource/AgentInstanceR.h"
-#include "aios/navi_sched/resource/AgentLatencyInputR.h"
-#include "aios/navi_sched/resource/AgentReportR.h"
-#include "aios/navi_sched/resource/AgentRequestR.h"
-#include "aios/navi_sched/resource/AgentResponseR.h"
-#include "aios/navi_sched/resource/LatencyModelR.h"
-#include "aios/navi_sched/resource/RequestLatencyTracker.h"
-#include "aios/navi_sched/config/NaviSchedConfigBuilder.h"
-#include "aios/navi_sched/resource/AgentSchedulerConfigR.h"
-#include "aios/navi_sched/service/NaviSchedAgentSummary.h"
-#include "aios/navi_sched/data/AgentResponseToClientData.h"
-#include "aios/navi_sched/scheduler/ExecutionUtilizationController.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedAgent.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedRequestTrace.h"
+#include "rtp_llm/flexlb/navi_sched/navi_sched_git_version.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedAgentImpl.h"
+#include "rtp_llm/flexlb/navi_sched/graph/AgentGraph.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentBatchR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentCacheR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentHistoryR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentInstanceR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentLatencyInputR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentReportR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentRequestR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentResponseR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/RequestLatencyTracker.h"
+#include "rtp_llm/flexlb/navi_sched/config/NaviSchedConfigBuilder.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentSchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedAgentSummary.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentResponseToClientData.h"
 #include "autil/TimeUtility.h"
 #include "autil/Log.h"
 #include "autil/Scope.h"
@@ -38,6 +37,7 @@ namespace navi_sched {
 AUTIL_DECLARE_AND_SETUP_LOGGER(navi_sched, NaviSchedAgentImplRuntime);
 namespace {
 
+// Stop must wait for cache, inflight and latency publication after batch detachment.
 class BatchLifecycleGuard {
 public:
     explicit BatchLifecycleGuard(const AgentBatchRPtr &batchR)
@@ -104,7 +104,7 @@ double validationWindowMean(double currentMean, uint64_t currentCount,
                : 0.0;
 }
 
-}
+} // namespace
 
 void NaviSchedAgentImpl::reportCacheHitPathSamples(
     const std::shared_ptr<kmonitor::MetricsReporter> &reporter,
@@ -190,15 +190,6 @@ struct NaviSchedBatchFinishReporter::State {
     {
     }
 
-    bool beginExecution()
-    {
-        auto batchR = agentBatchR.lock();
-        BatchLifecycleGuard lifecycle(batchR);
-        if (!lifecycle) return false;
-        std::lock_guard<std::mutex> lock(mutex);
-        return !finished && batchR->beginBatchExecution(batchId);
-    }
-
     bool start(const std::vector<uint64_t> &requestIds, int64_t executionStartTimeUs)
     {
         auto batchR = agentBatchR.lock();
@@ -244,6 +235,7 @@ struct NaviSchedBatchFinishReporter::State {
             } else {
                 started = true;
             }
+            // Keep lifecycle input ordering identical to the batch state ordering.
             if (started &&
                 latencyInputR->submitBatchStarted(
                     executionState.batchId, executionState.batchWaitingRequests,
@@ -255,6 +247,8 @@ struct NaviSchedBatchFinishReporter::State {
             cleanupRequestIds = ownedRequestIds;
             ownedRequestIds.clear();
         }
+        // No Observer can take over this batch after the start transition fails.
+        // Retire native workload even when another path has already aborted it.
         if (!reportR->reportNativeBatchRemoved(batchId)) {
             AUTIL_LOG(ERROR, "clear native workload after start failure failed, batchId [%ld]", batchId);
         }
@@ -318,11 +312,12 @@ struct NaviSchedBatchFinishReporter::State {
         if (backendExecutionSample) {
             batchR->recordBackendBatchExecution(*backendExecutionSample);
         }
-        const bool pendingCompleted = reportR->reportNativeBatchCompleted(
-            batchId, executionState.localBatch.pendingCacheTracked
-                         ? executionState.localBatch.localBatchId : 0);
+        reportR->reportNativeBatchRemoved(batchId);
         NaviSchedAgentImpl::reportCacheHitPathSamples(metricsReporter,
                                                       executionState.cacheHitPathSamples);
+        const bool pendingCompleted =
+            !executionState.localBatch.pendingCacheTracked ||
+            reportR->reportPendingCacheCompleted(executionState.localBatch.localBatchId);
         const auto inflight = removeTrackedRequests(
             inflightState, executionState.requestIds, reportR, "batch_finished");
         const bool latencySubmitted = latencyInputR->submitBatchFinished(
@@ -510,11 +505,6 @@ NaviSchedBatchFinishReporter::~NaviSchedBatchFinishReporter()
     if (_state) {
         _state->finishAbnormally();
     }
-}
-
-bool NaviSchedBatchFinishReporter::beginExecution()
-{
-    return _state && _state->beginExecution();
 }
 
 bool NaviSchedBatchFinishReporter::startBatch(const std::vector<uint64_t> &requestIds)
@@ -994,6 +984,7 @@ bool NaviSchedAgentImpl::submitForwardRequest(const NaviSchedForwardRequest &req
     }
     const auto responseRegisteredTimeUs = tracing ? autil::TimeUtility::currentTime() : 0;
     bool registered = false;
+    // Clone the caller's payload before taking the shared forwarding lock.
     const auto pendingRequest = std::make_shared<const AgentForwardState::PendingRequest>(
         AgentForwardState::PendingRequest{request, completionPipe, arrivalTimeUs});
     const auto lockBeginTimeUs = tracing ? autil::TimeUtility::currentTime() : 0;
@@ -1153,6 +1144,7 @@ void NaviSchedAgentImpl::handleForwardBatch(const NaviSchedBatchPtr &batch)
     }
     const auto payloadBuildBeginTimeUs = tracing ? autil::TimeUtility::currentTime() : 0;
     if (handler) {
+        // Owners keep immutable requests alive across cancellation or shutdown.
         forwarded.reserve(pendingRequests.size());
         for (const auto &pending : pendingRequests) {
             const auto &request = pending->request;
@@ -1304,16 +1296,12 @@ bool NaviSchedAgentImpl::reportObservedWorkload(
     const NaviSchedWorkloadSnapshot &snapshot,
     const std::vector<int64_t> &coveredNativeBatchIds) const
 {
-    const auto revision = _agentReportR ? _agentReportR->reportWorkloadUpdated(snapshot, coveredNativeBatchIds) : 0;
-    if (revision > 0 && _agentBatchR) {
-        _agentBatchR->updateBackendWaitingRequests(snapshot.waitingRequestCount, snapshot.runningRequestCount);
-    }
-    return revision > 0;
+    return _agentReportR && _agentReportR->reportWorkloadUpdated(snapshot, coveredNativeBatchIds) > 0;
 }
 
-bool NaviSchedAgentImpl::beginObservedBackendExecution(int32_t requestCount) const
+bool NaviSchedAgentImpl::beginObservedBackendExecution() const
 {
-    return _agentBatchR && _agentBatchR->beginBackendExecution(0, requestCount);
+    return _agentBatchR && _agentBatchR->beginBackendExecution();
 }
 
 bool NaviSchedAgentImpl::endObservedBackendExecution() const
@@ -1568,10 +1556,6 @@ bool NaviSchedAgentImpl::onUpdated()
     if (!_agentReportR) {
         return false;
     }
-    if (!_agentReportR->setExecutionUtilizationSource(_agentBatchR->getExecutionUtilizationSource(),
-            _agentBatchR->getExecutionBusyUtilizationSource())) {
-        return false;
-    }
     if (!_agentReportR->setInflightTracker(_inflightState)) {
         return false;
     }
@@ -1595,17 +1579,6 @@ std::string NaviSchedAgentImpl::makeSnapshot() const
     summary.serverIp = serverInfo.ip;
     summary.serverPort = serverInfo.port;
     summary.pdSeparated = _pdSeparated;
-    const auto execution = _agentBatchR->getExecutionUtilizationSnapshot();
-    summary.executionCapacity = execution.executionCapacity;
-    summary.executionCapacityDenominator = execution.executionCapacityDenominator;
-    summary.gpuReadyQueuedRequests = execution.gpuReadyQueuedRequests;
-    summary.executionBusyEma = execution.busyEma;
-    summary.executionActiveCount = execution.activeCount;
-    summary.executionSampleBusyUs = execution.sampleBusyUs;
-    summary.executionSampleElapsedUs = execution.sampleElapsedUs;
-    summary.executionRunningRequests = execution.runningRequests;
-    summary.executionQueuedRequests = execution.queuedRequests;
-    summary.executionUtilization = execution.utilization;
     const auto workload = _agentReportR->getWorkloadSnapshot();
     if (workload) {
         summary.workload = *workload;
@@ -1752,14 +1725,6 @@ void NaviSchedAgentImpl::reportMetrics() const
                  executionState.queuedBatchRequests);
     reportMetric("agent.requests_running", executionState.runningRequests);
     reportMetric("agent.running_batch_request_count", executionState.batchRequestCount);
-    const auto executionUtilization = _agentBatchR->getExecutionUtilizationSnapshot();
-    if (executionUtilization.utilization >= 0.0) {
-        reportMetric("agent.prefill_effective_execution_utilization_pct",
-                     executionUtilization.utilization * 100.0);
-        reportMetric("agent.execution_busy_ema_pct", executionUtilization.busyEma * 100.0);
-        reportMetric("agent.execution_capacity_ema", executionUtilization.executionCapacity);
-        reportMetric("agent.gpu_ready_queued_requests", executionUtilization.gpuReadyQueuedRequests);
-    }
     const auto cacheState = _agentReportR->getCacheState();
     const auto pendingCacheState = _agentReportR->getPendingCacheState();
     reportMetric("agent.cache_total_blocks", _cacheTotalBlocks);
@@ -2021,9 +1986,6 @@ void NaviSchedAgentImpl::reportMetrics() const
                 static_cast<double>(normalRequestDelta + abnormalRequestDelta) /
                     finishedBatchDelta);
         }
-        reportMetric("agent.report_messages_total", reportStats.deliveredMessageCount);
-        reportMetric("agent.report_combined_message_savings_total", reportStats.combinedMessageSavings);
-        reportCounterQpsMetric("agent.report_message_qps", reportStats.deliveredMessageCount);
         reportMetric("agent.report_delivery_success_total",
                      reportStats.deliverySuccessCount);
         reportMetric("agent.report_delivery_failure_total",
@@ -2115,7 +2077,8 @@ void NaviSchedAgentImpl::reportMetrics() const
             reportMetric("agent.workload_inflight_scheduled_tokens",
                          workload->inFlightScheduledTokenCount);
         }
-        {
+        if (reportStats.publishedRequestReceivedCount > 0 ||
+            reportStats.publishedFinishedBatchCount > 0) {
             const auto nowTimeUs = autil::TimeUtility::currentTime();
             const auto executionBusyTimeUs =
                 _agentBatchR->getExecutionBusyTimeUs(nowTimeUs);
@@ -2126,9 +2089,9 @@ void NaviSchedAgentImpl::reportMetrics() const
                         ? executionBusyTimeUs - _lastExecutionBusyTimeUs
                         : executionBusyTimeUs;
                 const auto elapsedUs = nowTimeUs - _lastExecutionBusyReportTimeUs;
-                const auto busyFraction = std::min(1.0, static_cast<double>(busyDeltaUs) /
-                                                          static_cast<double>(elapsedUs));
-                reportMetric("agent.prefill_card_time_utilization_pct", busyFraction * 100.0);
+                reportMetric("agent.prefill_card_time_utilization_pct",
+                             std::min(100.0, static_cast<double>(busyDeltaUs) /
+                                                 static_cast<double>(elapsedUs) * 100.0));
             }
             _lastExecutionBusyTimeUs = executionBusyTimeUs;
             _lastExecutionBusyReportTimeUs = nowTimeUs;
@@ -2382,9 +2345,9 @@ bool NaviSchedAgent::reportObservedWorkload(
     return _impl && _impl->reportObservedWorkload(snapshot, coveredNativeBatchIds);
 }
 
-bool NaviSchedAgent::beginObservedBackendExecution(int32_t requestCount) const
+bool NaviSchedAgent::beginObservedBackendExecution() const
 {
-    return _impl && _impl->beginObservedBackendExecution(requestCount);
+    return _impl && _impl->beginObservedBackendExecution();
 }
 
 bool NaviSchedAgent::endObservedBackendExecution() const
@@ -2449,4 +2412,4 @@ void NaviSchedAgent::stop()
 
 int32_t NaviSchedAgent::getGrpcPort() const { return _impl ? _impl->getGrpcPort() : -1; }
 
-}
+} // namespace navi_sched

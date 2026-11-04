@@ -1,7 +1,7 @@
 #pragma once
 
-#include "aios/navi_sched/data/ReplayControlData.h"
-#include "aios/navi_sched/resource/ReplayClientR.h"
+#include "rtp_llm/flexlb/navi_sched/data/ReplayControlData.h"
+#include "rtp_llm/flexlb/navi_sched/resource/ReplayClientR.h"
 #include "navi/engine/Kernel.h"
 
 namespace navi_sched {
@@ -22,4 +22,4 @@ private:
     navi::AsyncPipePtr _historyQueryResponsePipe;
 };
 
-}
+} // namespace navi_sched

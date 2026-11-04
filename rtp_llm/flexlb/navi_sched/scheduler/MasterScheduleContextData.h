@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/scheduler/ScheduleContext.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/ScheduleContext.h"
 #include "navi/engine/Data.h"
 
 namespace navi_sched {
@@ -19,4 +19,4 @@ public:
 
 NAVI_TYPEDEF_PTR(MasterScheduleContextData);
 
-}
+} // namespace navi_sched

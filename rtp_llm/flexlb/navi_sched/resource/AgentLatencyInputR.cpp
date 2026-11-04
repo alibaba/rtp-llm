@@ -1,5 +1,5 @@
-#include "aios/navi_sched/resource/AgentLatencyInputR.h"
-#include "aios/navi_sched/resource/AgentBatchR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentLatencyInputR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentBatchR.h"
 #include "autil/TimeUtility.h"
 
 #include <algorithm>
@@ -521,4 +521,4 @@ navi::SummaryErrorCode AgentLatencyInputR::getSummary(const std::string &query,
 
 REGISTER_RESOURCE(AgentLatencyInputR);
 
-}
+} // namespace navi_sched

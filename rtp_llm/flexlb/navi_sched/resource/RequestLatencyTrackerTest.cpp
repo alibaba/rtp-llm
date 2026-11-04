@@ -1,5 +1,5 @@
-#include "aios/navi_sched/resource/RequestLatencyTracker.h"
-#include "aios/navi_sched/data/NaviSchedLatencyPrediction.h"
+#include "rtp_llm/flexlb/navi_sched/resource/RequestLatencyTracker.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedLatencyPrediction.h"
 
 #include "unittest/unittest.h"
 
@@ -398,5 +398,5 @@ TEST_F(RequestLatencyTrackerTest, testRequestCountIsCappedAtFiveThousand)
     EXPECT_EQ(1, snapshot.invalidAddCount);
 }
 
-}
-}
+} // namespace
+} // namespace navi_sched

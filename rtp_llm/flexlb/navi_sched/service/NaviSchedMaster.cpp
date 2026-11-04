@@ -1,23 +1,23 @@
-#include "aios/navi_sched/service/NaviSchedMaster.h"
-#include "aios/navi_sched/graph/MasterCollectorManager.h"
-#include "aios/navi_sched/graph/MasterScheduleGraph.h"
-#include "aios/navi_sched/kernel/SchedulerConfigSyncKernel.h"
-#include "aios/navi_sched/kernel/ReplayControlSyncKernel.h"
-#include "aios/navi_sched/kernel/ReplayMasterControlKernel.h"
-#include "aios/navi_sched/kernel/ReplayMasterHistoryKernel.h"
-#include "aios/navi_sched/resource/MasterLatencyModelR.h"
-#include "aios/navi_sched/resource/MasterScheduleR.h"
-#include "aios/navi_sched/resource/MasterStateR.h"
-#include "aios/navi_sched/resource/LatencyResidualModel.h"
-#include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
-#include "aios/navi_sched/resource/RouteModeR.h"
-#include "aios/navi_sched/resource/SchedulerConfigR.h"
-#include "aios/navi_sched/resource/ReplayControlR.h"
-#include "aios/navi_sched/scheduler/CostSchedulerKernel.h"
-#include "aios/navi_sched/scheduler/MasterScheduleContextKernel.h"
-#include "aios/navi_sched/scheduler/MasterScheduleResultGraph.h"
-#include "aios/navi_sched/config/NaviSchedConfigBuilder.h"
-#include "aios/navi_sched/service/NaviSchedMasterSummary.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedMaster.h"
+#include "rtp_llm/flexlb/navi_sched/graph/MasterCollectorManager.h"
+#include "rtp_llm/flexlb/navi_sched/graph/MasterScheduleGraph.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/SchedulerConfigSyncKernel.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/ReplayControlSyncKernel.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/ReplayMasterControlKernel.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/ReplayMasterHistoryKernel.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterLatencyModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterScheduleR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterStateR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyResidualModel.h"
+#include "rtp_llm/flexlb/navi_sched/resource/NonLinearPrefillModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/RouteModeR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/SchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/ReplayControlR.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/CostSchedulerKernel.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/MasterScheduleContextKernel.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/MasterScheduleResultGraph.h"
+#include "rtp_llm/flexlb/navi_sched/config/NaviSchedConfigBuilder.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedMasterSummary.h"
 #include "autil/legacy/jsonizable.h"
 #include "autil/legacy/fast_jsonizable_dec.h"
 #include "kmonitor/client/core/MetricsTags.h"
@@ -133,7 +133,7 @@ struct ValidationWindowTotals {
     }
 };
 
-}
+} // namespace
 
 NaviSchedMasterNodeSummary NaviSchedMaster::makeNodeSummary(const NaviSchedNodeInfo &node,
                                                             const MasterStateR::CacheSyncStats &cacheStats,
@@ -337,6 +337,7 @@ bool NaviSchedMaster::init()
             return false;
         }
         if (costConfig.parallelism == 0) {
+            // Freeze the effective value for both the cost and result graph topology.
             schedulerConfig["parallelism"] = static_cast<int32_t>(
                 std::max<size_t>(1, std::min<size_t>(runtimeConfig.threadNum,
                     CostSchedulerConfig::MAX_PARALLELISM)));
@@ -382,14 +383,11 @@ bool NaviSchedMaster::init()
         _configuredQueueOverloadStartCycleMultiplier;
     dynamicConfig.queueOverloadFullCycleMultiplier =
         _configuredQueueOverloadFullCycleMultiplier;
-    dynamicConfig.overloadControlStrategy =
-        (_configuredQueueOverloadStartCycleMultiplier > 0 || _configuredQueueOverloadFullCycleMultiplier > 0)
-            ? "latency" : "execution_utilization";
     dynamicConfig.agent = AgentSchedulerConfig::fromServiceConfig(
         getConfig(), _configuredTimeCompression);
     if (CostSchedulerKernel::KERNEL_ID == _schedulerKernelId) {
         try {
-            autil::legacy::FromJsonString(dynamicConfig,
+            autil::legacy::FromJsonString(dynamicConfig.cost,
                                           _schedulerKernelConfig);
             const auto admission = schedulerConfig.find("admission_timeout_ms");
             if (admission != schedulerConfig.end()) {
@@ -600,15 +598,6 @@ std::string NaviSchedMaster::makeSnapshot() const
         if (!_masterScheduleR) {
             return;
         }
-        const auto execution = _masterScheduleR->getExecutionUtilizationStats();
-        summary.executionUtilizationControlEnabled = execution.enabled;
-        summary.executionUtilizationAverage = execution.average;
-        summary.executionUtilizationRawAverage = execution.rawAverage;
-        summary.executionUtilizationRunning = execution.running;
-        summary.executionUtilizationWaiting = execution.waiting;
-        summary.executionUtilizationGlobalScaling = execution.globalScaling;
-        summary.executionUtilizationIntegral = execution.integral;
-        summary.executionUtilizationReportingNodes = execution.reportingNodes;
         const auto overloadStats = _masterScheduleR->getQueueOverloadStats();
         summary.queueOverloadEvaluatedRoundCount =
             overloadStats.evaluatedRoundCount;
@@ -680,8 +669,6 @@ std::string NaviSchedMaster::makeSnapshot() const
                             dispatchStats.requestCount, dispatchStats.batchCount,
                             timeCompression);
         nodeSummary.reservationBatchCount = reservationStats.batchCount;
-        nodeSummary.executionUtilization = state->getExecutionUtilization();
-        nodeSummary.executionBusyUtilization = state->getExecutionBusyUtilization();
         nodeSummary.reservationRequestCount = reservationStats.requestCount;
         summary.activeRequestCount += reservationStats.waitingRequestCount +
                                       reservationStats.dispatchedRequestCount;
@@ -794,15 +781,6 @@ void NaviSchedMaster::reportMetrics() const
         if (!_masterScheduleR) {
             return;
         }
-        const auto execution = _masterScheduleR->getExecutionUtilizationStats();
-        reportMetric("master.execution_utilization_average_pct", execution.average * 100.0);
-        reportMetric("master.execution_utilization_raw_average_pct", execution.rawAverage * 100.0);
-        reportMetric("master.execution_utilization_running_requests", execution.running);
-        reportMetric("master.execution_utilization_waiting_requests", execution.waiting);
-        reportMetric("master.execution_utilization_global_scaling", execution.globalScaling ? 1 : 0);
-        reportMetric("master.execution_utilization_integral", execution.integral);
-        reportMetric("master.execution_utilization_reporting_nodes", execution.reportingNodes);
-        reportMetric("master.execution_utilization_control_enabled", execution.enabled ? 1 : 0);
         const auto overloadStats = _masterScheduleR->getQueueOverloadStats();
         reportMetric("master.queue_overload_average_predicted_latency_ms",
                      overloadStats.latestAveragePredictedLatencyMs);
@@ -1001,12 +979,6 @@ void NaviSchedMaster::reportMetrics() const
     std::unordered_set<std::string> activeAgentIds;
     for (const auto &state : _masterStateR->getNodeStates()) {
         const auto info = state->getInfo();
-        const auto utilization = state->getExecutionUtilization();
-        if (info.online && utilization >= 0.0) {
-            kmonitor::MetricsTags tags("agent_id", info.agentId);
-            tags.AddTag("host_ip", info.serverInfo.ip);
-            reportMetric("master.agent_execution_utilization_pct", utilization * 100.0, tags);
-        }
         if (info.online && LatencyResidualModel::validateParameters(
                 info.latencyResidualParameters)) {
             const auto residualDecay = LatencyResidualModel::decayFactor(
@@ -1440,6 +1412,8 @@ void NaviSchedMaster::reportMetrics() const
                      ? positiveActualQueueMs / positiveQueueCount
                      : 0.0);
 
+    // Window metrics describe newly observed validation events.  Do not publish
+    // zero-valued snapshots when the window is idle; KMon should show a gap.
     if (!hasValidationWindowData) {
         return;
     }
@@ -1503,4 +1477,4 @@ void NaviSchedMaster::reportMetrics() const
                      : 0.0);
 }
 
-}
+} // namespace navi_sched

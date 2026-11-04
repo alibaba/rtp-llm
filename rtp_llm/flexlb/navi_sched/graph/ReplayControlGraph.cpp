@@ -1,8 +1,8 @@
-#include "aios/navi_sched/graph/ReplayControlGraph.h"
+#include "rtp_llm/flexlb/navi_sched/graph/ReplayControlGraph.h"
 
-#include "aios/navi_sched/kernel/ReplayClientControlKernel.h"
-#include "aios/navi_sched/kernel/ReplayMasterControlKernel.h"
-#include "aios/navi_sched/kernel/ReplayMasterHistoryKernel.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/ReplayClientControlKernel.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/ReplayMasterControlKernel.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/ReplayMasterHistoryKernel.h"
 #include "autil/Log.h"
 #include "navi/builder/GraphBuilder.h"
 #include "navi/engine/NaviUserResult.h"
@@ -21,9 +21,7 @@ std::unique_ptr<navi::GraphDef> ReplayControlGraph::buildGraph(
     navi::GraphBuilder builder(graphDef.get());
     const auto masterGraphId = builder.newSubGraph(masterBizName);
     const auto clientGraphId = builder.newSubGraph(clientBizName);
-    builder.subGraph(masterGraphId)
-        .location(masterBizName, 1, 0)
-        .subGraphAttr("navi.gig.enable_biz_stat", "false");
+    builder.subGraph(masterGraphId).location(masterBizName, 1, 0);
     builder.subGraph(clientGraphId).location(clientBizName, 1, 0);
     auto master = builder.node(masterGraphId, "replay_master_control")
                       .kernel(ReplayMasterControlKernel::KERNEL_ID);
@@ -196,4 +194,4 @@ bool ReplayControlGraph::running() const
     return _state && _state->running.load(std::memory_order_acquire);
 }
 
-}
+} // namespace navi_sched

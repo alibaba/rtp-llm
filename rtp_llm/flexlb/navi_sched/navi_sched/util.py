@@ -62,24 +62,6 @@ def _makeRuntimeDetails(navi, values):
         if name in values
     }, "runtime_config")
 
-    nodes = []
-    for fields in values.pop("local_nodes", []):
-        if not isinstance(fields, Mapping):
-            raise TypeError("each local_nodes entry must be a mapping")
-        node = navi.NaviLocalNode()
-        _setFields(node, fields, "local node")
-        nodes.append(node)
-    runtime.local_nodes = nodes
-
-    subscriptions = []
-    for fields in values.pop("cm2_subscriptions", []):
-        if not isinstance(fields, Mapping):
-            raise TypeError("each cm2_subscriptions entry must be a mapping")
-        subscription = navi.NaviCm2Subscription()
-        _setFields(subscription, fields, "CM2 subscription")
-        subscriptions.append(subscription)
-    runtime.cm2_subscriptions = subscriptions
-
     vip_fields = values.pop("vip_subscription", {})
     if not isinstance(vip_fields, Mapping):
         raise TypeError("vip_subscription must be a mapping")

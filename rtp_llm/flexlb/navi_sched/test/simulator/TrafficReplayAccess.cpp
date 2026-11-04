@@ -1,8 +1,8 @@
-#include "aios/navi_sched/test/simulator/TrafficReplayAccess.h"
+#include "rtp_llm/flexlb/navi_sched/test/simulator/TrafficReplayAccess.h"
 
-#include "aios/navi_sched/service/NaviSchedClient.h"
-#include "aios/navi_sched/service/NaviSchedRoleRuntimeAccess.h"
-#include "aios/navi_sched/test/simulator/TrafficReplayGraph.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedClient.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedRoleRuntimeAccess.h"
+#include "rtp_llm/flexlb/navi_sched/test/simulator/TrafficReplayGraph.h"
 #include "autil/legacy/jsonizable.h"
 
 namespace navi_sched {
@@ -27,7 +27,7 @@ std::string makeConfig(const test::TrafficReplayConfig &config)
     return autil::legacy::ToJsonString(value, true);
 }
 
-}
+} // namespace
 
 class TrafficReplayAccess::Impl {
 public:
@@ -70,4 +70,4 @@ void TrafficReplayAccess::stop()
     }
 }
 
-}
+} // namespace navi_sched

@@ -48,6 +48,7 @@ struct CostSchedulerConfig : public autil::legacy::Jsonizable {
     int32_t maxLoopCount = 10;
     int32_t minLoopCount = 2;
     int64_t optimizationTimeBudgetUs = 0;
+    // Zero inherits the Master's Navi worker count when its graph is built.
     int32_t parallelism = 0;
     double latencyWeightConcavity = 128.0;
     double latencyTokenNormalizationPower = 1.0;
@@ -57,4 +58,4 @@ struct CostSchedulerConfig : public autil::legacy::Jsonizable {
     double discreteRepairAlphaDecay = 0.7;
 };
 
-}
+} // namespace navi_sched

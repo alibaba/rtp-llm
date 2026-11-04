@@ -1,8 +1,8 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedScheduleData.h"
-#include "aios/navi_sched/data/LatencyModelGlobalData.h"
-#include "aios/navi_sched/data/MasterDispatchHandle.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedScheduleData.h"
+#include "rtp_llm/flexlb/navi_sched/data/LatencyModelGlobalData.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterDispatchHandle.h"
 #include "navi/engine/Data.h"
 #include <autil/DataBuffer.h>
 #include <string>
@@ -47,4 +47,4 @@ public:
 
 NAVI_TYPEDEF_PTR(MasterResponseToClientData);
 
-}
+} // namespace navi_sched

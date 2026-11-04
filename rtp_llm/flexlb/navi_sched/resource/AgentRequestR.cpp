@@ -1,4 +1,4 @@
-#include "aios/navi_sched/resource/AgentRequestR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentRequestR.h"
 
 namespace navi_sched {
 
@@ -74,4 +74,4 @@ navi::SummaryErrorCode AgentRequestR::getSummary(const std::string &,
 
 REGISTER_RESOURCE(AgentRequestR);
 
-}
+} // namespace navi_sched

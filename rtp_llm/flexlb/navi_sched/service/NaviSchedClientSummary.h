@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/service/NaviSchedRoleSummary.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedRoleSummary.h"
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -28,4 +28,4 @@ public:
     uint64_t masterOtherErrorCount = 0;
 };
 
-}
+} // namespace navi_sched

@@ -1,12 +1,12 @@
-#include "aios/navi_sched/scheduler/ScheduleContext.h"
-#include "aios/navi_sched/scheduler/ScheduleContextInternal.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/ScheduleContext.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/ScheduleContextInternal.h"
 
-#include "aios/navi_sched/data/BlockHashUtil.h"
-#include "aios/navi_sched/data/MasterScheduleRequestData.h"
-#include "aios/navi_sched/data/MasterResponseToClientData.h"
-#include "aios/navi_sched/resource/LatencyResidualModel.h"
-#include "aios/navi_sched/resource/MasterLatencyModelR.h"
-#include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
+#include "rtp_llm/flexlb/navi_sched/data/BlockHashUtil.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterScheduleRequestData.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyResidualModel.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterLatencyModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/NonLinearPrefillModelR.h"
 #include "autil/HashUtil.h"
 
 #include <cmath>
@@ -148,6 +148,7 @@ double NaviSchedScheduleNode::getEstimatedBacklogLatencyMs() const
     if (!usesUnifiedLatencyPrediction()) {
         return getEstimatedQueueWaitMs();
     }
+    // Accepted requests own workload before their first batch becomes ready.
     if (!hasLatencyModel() ||
         (_workloadFeatures.getBatchCount() == 0 &&
          _workloadFeatures.getBatchSize() == 0 &&
@@ -167,16 +168,6 @@ double NaviSchedScheduleNode::getEstimatedBacklogLatencyMs() const
     return std::max(
         0.0, decayUnifiedLatency(latencyWithReportedWorkloadMs,
                                  latencyWithoutReportedWorkloadMs));
-}
-
-double NaviSchedScheduleNode::getExecutionUtilization() const
-{
-    return _node->getExecutionUtilization();
-}
-
-double NaviSchedScheduleNode::getExecutionBusyUtilization() const
-{
-    return _node->getExecutionBusyUtilization();
 }
 
 bool NaviSchedScheduleNode::hasLatencyModel() const { return bool(_latencyModel); }
@@ -401,6 +392,8 @@ double NaviSchedScheduleNode::decayUnifiedLatency(
         _reportedWorkloadFeatures.getBatchCount() == 0) {
         return latencyWithReportedWorkloadMs;
     }
+    // An elapsed-aware model has already advanced running prefill progress.
+    // Applying wall-clock decay as well would count the same progress twice.
     const auto decayedLatencyMs = _runningElapsedProgressApplied
         ? latencyWithReportedWorkloadMs
         : latencyWithReportedWorkloadMs - getWorkloadReportAgeMs();
@@ -561,6 +554,8 @@ std::optional<double> NaviSchedScheduleContext::discreteSearchImprovementPct() c
     if (initialLoss == 0.0) {
         return finalLoss == 0.0 ? std::optional<double>(0.0) : std::nullopt;
     }
+    // Normalize by |initial| so lower losses always mean positive improvement.
+    // Widen before subtraction to keep finite large losses from overflowing.
     const auto initial = static_cast<long double>(initialLoss);
     const auto improvement = static_cast<double>(
         (initial - static_cast<long double>(finalLoss)) / std::abs(initial) * 100.0L);
@@ -834,6 +829,8 @@ bool NaviSchedScheduleContext::getReplayMatch(size_t storageRequestIndex,
     if (it == _replayMatchRequestIndexes.end()) {
         return false;
     }
+    // Queue-overload filtering compacts _requests after replay capture.
+    // Retain the original row by request ID so costs use the recorded snapshot.
     matchedBlockCount = _replay->nodeMatches[it->second][storageNodeIndex]
                             .matchedBlockCount;
     return true;
@@ -841,6 +838,8 @@ bool NaviSchedScheduleContext::getReplayMatch(size_t storageRequestIndex,
 
 bool NaviSchedScheduleContext::prepareResult(int64_t queuePredictionTimeUs)
 {
+    // The Master reserves this round after the first result preparation.  Reusing
+    // that result prevents the response from matching its own reservation.
     if (_resultPrepared) {
         return true;
     }
@@ -901,6 +900,7 @@ bool NaviSchedScheduleContext::prepareResult(int64_t queuePredictionTimeUs)
         if (batchState.requestIndexes.empty()) {
             continue;
         }
+        // Use one cache observation for both execution prediction and response.
         for (auto requestIndex : batchState.requestIndexes) {
             matchedBlockCounts[requestIndex] = getCacheHitBlockCount(requestIndex, nodeIndex);
         }
@@ -1006,6 +1006,7 @@ bool NaviSchedScheduleContext::finish()
         }
         return success;
     }
+    // Finish non-debug requests before returning the larger replay value.
     for (size_t index = 0; index < requestCount(); ++index) {
         const auto &responseRequest = _responseRequests[index];
         if (!responseRequest || !responseRequest->valid()) {
@@ -1110,4 +1111,4 @@ MasterResponseToClientDataPtr NaviSchedScheduleContext::makeResponse(
     return response;
 }
 
-}
+} // namespace navi_sched

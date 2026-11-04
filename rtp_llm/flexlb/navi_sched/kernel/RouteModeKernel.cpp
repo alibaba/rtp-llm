@@ -1,6 +1,6 @@
-#include "aios/navi_sched/kernel/RouteModeKernel.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/RouteModeKernel.h"
 
-#include "aios/navi_sched/proto/RouteMode.pb.h"
+#include "rtp_llm/flexlb/navi_sched/proto/RouteMode.pb.h"
 #include "navi/engine/NaviRegisterMacro.h"
 #include "navi/rpc_server/NaviArpcResponseData.h"
 
@@ -46,4 +46,4 @@ navi::ErrorCode RouteModeKernel::compute(navi::KernelComputeContext &ctx)
 
 REGISTER_KERNEL(RouteModeKernel);
 
-}
+} // namespace navi_sched

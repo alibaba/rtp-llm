@@ -1,0 +1,1570 @@
+diff --git a/docs/backend/navi_sched.md b/docs/backend/navi_sched.md
+index e59761ffb..45ebca296 100644
+--- a/docs/backend/navi_sched.md
++++ b/docs/backend/navi_sched.md
+@@ -1,193 +1,103 @@
+-# NaviSched routing
++# NaviSched traffic simulation package
+
+-NaviSched can replace the FlexLB node-selection step while RTP-LLM continues
+-to own tokenization, model RPC, request execution, and its complete Python and
+-Torch environment. NaviSched selects a backend address; it does not forward
+-the model request.
+-
+-## Build dependencies
+-
+-The RTP C++ build consumes the versioned NaviSched C++ package as a Bazel
+-`local_repository` and depends on `@navi_sched_cpp//:navi_sched`. The package
+-contains the public headers, `libnavi_sched.so`, its non-system runtime
+-libraries, and a `CXX_ABI` marker. RTP and the package must both use the C++11
+-standard-library ABI.
+-
+-Runtime-library copy targets are provided by
+-`@navi_sched_cpp//adapters/rtp_llm`; RTP does not maintain NaviSched's runtime
+-library list.
+-
+-Install the C++ package in the RTP workspace before building:
+-
+-```bash
+-mkdir -p .navi_sched/cpp
+-tar -xzf /path/to/navi_sched_cpp-0.1.0.tar.gz \
+-  --strip-components=1 -C .navi_sched/cpp
+-```
+-
+-The resulting RTP wheel contains `libnavi_sched.so` and its runtime libraries
+-under `rtp_llm/libs`; backend processes do not import the NaviSched Python
+-wheel.
+-
+-## Frontend wheel
+-
+-Build NaviSched with `/opt/conda310/bin/python3`, then install the wheel into
+-the same Python 3.10 environment used by RTP-LLM:
+-
+-```bash
+-/opt/conda310/bin/python3 -m pip install --no-deps \
+-  /path/to/navi_sched-0.1.0-py3-none-any.whl
+-```
+-
+-The NaviSched wheel has no `Requires-Dist` entries. In particular, it neither
+-installs nor replaces Torch. RTP-LLM remains the owner of Torch, CUDA, and all
+-model-runtime dependencies.
++This RTP-LLM source tree builds a traffic-simulation package. It keeps RTP's
++process names, startup command, HTTP frontend, tokenizer, block-hash generation,
++and health-check protocol, but replaces model execution and FlexLB routing with
++NaviSched. The package has no runtime mode switch and must not be used as a model
++serving package.
+
+ ## Runtime roles
+
+-The frontend-side adapter is created by `BackendRPCServerVisitor`. It sends
+-RTP-LLM's block cache keys and prompt token count to NaviSched, receives one
+-model Server address, converts it to `RoleAddr`, and then lets the existing
+-`ModelRpcClient` send the request. NaviSched does not tokenize requests or
+-calculate block hashes.
+-
+-The backend Agent is owned by C++ `LocalRpcServer`. It starts before
+-`NormalEngine` is constructed, using:
+-
+-- `server_config.rpc_server_port` as the advertised model Server port.
+-- `server_config.ip` as the advertised model Server IP. An empty value lets
+-  the Master use the Agent discovery IP.
+-
+-The server stops and releases the engine first, then stops the Agent. The
+-long-lived collector graph sends its offline marker after request reporting
+-has ended and before the model Server exits.
++The existing RTP role selection starts these implementations:
+
+-The Master runs as a separate NaviSched process. It subscribes to Agent biz
+-topology, opens one long-lived distributed graph per Agent, and receives the
+-Agent handshake and subsequent streaming reports.
+-
+-## Configuration
+-
+-NaviSched integration is disabled by default. When disabled, RTP-LLM keeps
+-using its existing `MasterClient`, which resolves the Master through vipserver
+-and calls the Java FlexLB Master. When enabled, `NaviSchedClient` replaces only
+-that node-selection call. The model RPC path remains unchanged in both modes.
+-
+-The adapter reads its RTP-specific settings from these environment variables:
+-
+-| Variable | Role | Meaning |
++| RTP role | Implementation | Ports |
+ | --- | --- | --- |
+-| `RTP_LLM_MASTER_TYPE` | Client, Agent | Select `flexlb` or `navi_sched`; defaults to `flexlb`. |
+-| `RTP_LLM_NAVI_SCHED_ENABLED` | Client, Agent | Legacy NaviSched enable switch used only when `RTP_LLM_MASTER_TYPE` is unset. |
+-| `RTP_LLM_NAVI_SCHED_MASTER_BIZ_NAME` | Local Client | Biz name published by a directly configured Master Navi instance. |
+-| `RTP_LLM_NAVI_SCHED_BIZ_NAME` | Client, Agent | Biz whose node metadata and scheduling result are requested. |
+-| `RTP_LLM_NAVI_SCHED_TARGET_ROLE` | Client | RTP role assigned to the selected address; defaults to `PREFILL`. |
+-| `RTP_LLM_NAVI_SCHED_STRATEGY` | Client | Scheduling strategy enum: `DEFAULT`, `CUSTOM`, or `RANDOM`; defaults to `RANDOM`. |
+-| `RTP_LLM_NAVI_SCHED_STRATEGY_SCORE_SCALE` | Client | Score scale passed through the strategy parameter structure; defaults to `1.0`. |
+-| `RTP_LLM_NAVI_SCHED_AGENT_GIG_PORT` | Agent | Agent's Navi/Gig collector port; `0` selects an available port. Read by the C++ server integration. |
+-| `LOG_PATH` | Agent | Parent directory for `navi_sched.log` and the `navi_sched/` snapshot directory. |
+-
+-Example frontend configuration:
++| `FRONTEND` | RTP HTTP and tokenizer, then NaviSched Client forward | Existing frontend ports |
++| `PREFILL` | NaviSched Agent with test-only simulated execution | HTTP `START_PORT`, Navi/Gig `START_PORT + 1` |
++| `PDFUSION` | NaviSched Master with RTP-compatible heartbeat HTTP | HTTP `START_PORT`, Navi/Gig `START_PORT + 1` |
+
+-```bash
+-export RTP_LLM_MASTER_TYPE=navi_sched
+-export RTP_LLM_NAVI_SCHED_BIZ_NAME=model_backend
+-export RTP_LLM_NAVI_SCHED_TARGET_ROLE=PREFILL
+-export RTP_LLM_NAVI_SCHED_STRATEGY=RANDOM
+-```
++`DECODE` is unsupported. The normal `rtp_llm.start_server` command remains the
++entry point for all three supported roles.
+
+-The Master endpoint comes from `MODEL_SERVICE_CONFIG.master_endpoint`, the
+-same source used by the existing `HostService`. In production, its vipserver
+-domain is passed directly to Gig's `vip` subscription. Gig owns address refresh
+-and failover; Python does not resolve and repeatedly rewrite individual IPs.
++The Frontend tokenizes each request and computes RTP's existing full-block cache
++keys with a fixed 256-token block size. It sends the prompt length and cache keys
++through NaviSched Client with Agent forward enabled. Master selects a Prefill
++Agent, and Client forks the request directly to that Agent's Navi endpoint. No
++`ModelRpcClient`, CUDA engine, model weights, or FlexLB request is created.
+
+-For local testing, set `MODEL_SERVICE_CONFIG.use_local=true` and put one or
+-more comma-separated `IP:PORT` values in `master_endpoint.address`. Also set
+-`RTP_LLM_NAVI_SCHED_MASTER_BIZ_NAME` because a direct address does not carry a
+-Gig biz name. These addresses are converted to a Gig `local` subscription.
++After Agent simulation completes, Frontend returns the last user message as one
++finished response. The output is intentionally not generated text; only request
++timing, scheduling, batching, cache behavior, and NaviSched transport are under
++test.
+
+-Example backend configuration:
++## Service discovery
+
+-```bash
+-export RTP_LLM_MASTER_TYPE=navi_sched
+-export RTP_LLM_NAVI_SCHED_BIZ_NAME=model_backend
+-export RTP_LLM_NAVI_SCHED_AGENT_GIG_PORT=19100
+-```
++The package reuses RTP's existing `MODEL_SERVICE_CONFIG` endpoints:
+
+-`RTP_LLM_NAVI_SCHED_AGENT_GIG_PORT` is not the model RPC port. The former is
+-used by the Master collector graph; the latter is derived directly from RTP's
+-`server_config.rpc_server_port` and returned to the frontend for model RPC.
++- Frontend resolves the PDFUSION endpoint and connects to its Navi/Gig port,
++  which is the published HTTP port plus one.
++- Master resolves PREFILL endpoints and connects to each Agent's Navi/Gig port,
++  also the published HTTP port plus one.
++- Each role may wait for its dependency to appear, so the cluster may be started
++  in the order used by the deployment system.
+
+-## Routing behavior
++The NaviSched biz names are fixed inside the simulation package:
+
+-When enabled, NaviSched routing is attempted even if RTP's FlexLB
+-`HostService` has no Master address. Existing domain fallback remains
+-available only for connection failures. A NaviSched business result such as
+-"no available worker" is preserved as an RTP route error and does not silently
+-select a different domain node.
++- Master: `rtp_llm_master`
++- Prefill Agent: `rtp_llm_prefill`
+
+-Prompt batches with more than one sequence retain RTP's existing fallback
+-behavior. A normal single-query request is routed with RTP-LLM's block cache
+-keys and the positive TTFT timeout, then the general request timeout, then a
+-1000ms default.
++No NaviSched-specific runtime environment switch is required.
+
+-## Scheduling policy boundary
++## Health protocol
+
+-The `RANDOM` strategy is a connectivity example that selects one online node
+-from the requested biz. `DEFAULT` and `CUSTOM` delegate to the application
+-`NaviSchedScheduler` interface. Cache scoring, latency prediction, batching,
+-and feedback policy remain outside the RTP adapter.
++PREFILL and PDFUSION expose lightweight HTTP endpoints on `START_PORT`:
+
+-The transport path is already active at that point: the Master snapshot shows
+-the Agent's online state, collector address, model Server address, cache state,
+-latency state, and last update time. A scheduling implementation
+-must return the selected Agent's advertised model Server address; the RTP
+-adapter then maps it to `RoleAddr.grpc_port` without sending the request through
+-NaviSched.
++- `GET /health`
++- `GET /frontend_health`
++- `GET /hook/process_ok`
++- `GET /hook/after_start`
++- `GET /actuator/health`
++- `POST /health`
++- `POST /frontend_health`
+
+-## Validation
++PDFUSION additionally exposes `POST /rtp_llm/master/info` and returns its
++published HTTP address, an empty queue, and `ready=true`. These endpoints only
++provide RTP deployment compatibility; NaviSched state continues to flow through
++the adjacent Navi/Gig port.
+
+-The lightweight adapter tests do not import or install Torch:
++## Build inputs
+
+-```bash
+-/opt/conda310/bin/python3 -m unittest -v \
+-  rtp_llm.server.test.navi_sched_adapter_test
+-```
+-
+-They cover environment parsing, IPv4 and IPv6 addresses, timeout selection,
+-raw token forwarding, NaviSched decision conversion, and unavailable-node
+-errors. Native Agent startup, reporting, packaged-library linking, and
+-idempotent shutdown are covered in the NaviSched repository by:
++RTP consumes three matching NaviSched artifacts:
+
+ ```bash
+-bazelisk test //aios/navi_sched:navi_sched_rtp_llm_adapter_test \
+-  --config=gcc --config=release
++export NAVI_SCHED_CPP_PACKAGE=/path/to/navi_sched_cpp-0.1.0.tar.gz
++export NAVI_SCHED_WHEEL=/path/to/navi_sched-0.1.0-cp310-cp310-linux_x86_64.whl
++export NAVI_SCHED_SIMULATE_PACKAGE=/path/to/navi_sched_simulate-0.1.0.tar.gz
++cd open_source/package
++./package_docker.sh BASE_IMAGE TARGET_IMAGE DEV_IMAGE --config=cuda12
+ ```
+
+-Build the current CUDA 12.9 RTP runtime with its optional CUDA-13-only remote
+-KV dependency disabled:
++The C++ archive is unpacked before Bazel builds RTP. The formal wheel is installed
++as RTP's Python dependency. The simulate archive replaces only the wheel's native
++extension with the test build and adds its native runtime libraries under
++`/opt/navi_sched/lib`; the image prepends that directory to `LD_LIBRARY_PATH`.
++Torch, the RTP Python environment, and RTP's command layout remain owned by RTP.
+
+-```bash
+-bazelisk build //rtp_llm:rtp_llm //rtp_llm:rtp_llm_package_libs \
+-  --config=debug --config=cuda12_9 --config=sm9x \
+-  --define=use_remote_kv_cache=false --jobs=128
+-```
++The NaviSched C++ ABI and Python version must match the RTP build. All three
++NaviSched artifacts must come from the same release invocation.
+
+-At runtime, place `/usr/local/nvidia/lib64` before `/usr/lib64` and do not use
+-the CUDA 11.8 or `/usr/local/cuda/compat` libraries with this build. For the
+-Qwen2.5 cache-reuse test on this revision, set `DISABLE_FLASH_INFER=1`; RTP's
+-current FlashInfer path otherwise fails with an illegal memory access on the
+-second repeated request.
++## Validation
+
+-The NaviSched repository provides a real GPU integration test:
++The focused source tests cover the fixed mode, forward-only Client, role dispatch,
++port mapping, heartbeat response, simulated Agent attachment, and Decode rejection:
+
+ ```bash
+-cd /home/zq103303/alibaba/aios/navi_sched
+-/opt/conda310/bin/python3 test/rtp_llm/RtpLLMEndToEndTest.py \
+-  --rtp-source /home/zq103303/RTP-LLM/github-opensource \
+-  --model /home/zq103303/Qwen2.5-0.5B-Instruct \
+-  --gpu 6
++/opt/conda310/bin/python3 -m unittest -v \
++  rtp_llm.server.test.navi_sched_adapter_test \
++  rtp_llm.server.test.navi_sched_simulation_adapter_test \
++  rtp_llm.server.test.navi_sched_simulation_role_test
+ ```
+
+-It verifies tokenization, NaviSched selection, native model RPC, generated
+-output, cache reuse, Agent reports, EOF removal, and same-address restart.
++Before deployment, build the image with all three matching NaviSched artifacts and
++start one PDFUSION, at least one PREFILL, and one FRONTEND using the normal RTP
++commands. Verify both HTTP health endpoints and one Frontend request.
+diff --git a/open_source/package/maga.Dockerfile b/open_source/package/maga.Dockerfile
+index 356111e80..ea4262ca1 100644
+--- a/open_source/package/maga.Dockerfile
++++ b/open_source/package/maga.Dockerfile
+@@ -2,11 +2,22 @@ ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:$LD
+
+ ARG WHL_FILE
+ ADD $WHL_FILE /tmp/$WHL_FILE
++ARG NAVI_SCHED_WHL_FILE
++ADD $NAVI_SCHED_WHL_FILE /tmp/$NAVI_SCHED_WHL_FILE
++ARG NAVI_SCHED_SIMULATE_FILE
++ADD $NAVI_SCHED_SIMULATE_FILE /tmp/navi_sched_simulate
+ RUN /opt/conda310/bin/pip install /tmp/$WHL_FILE \
++    --find-links /tmp \
+     -i https://artifacts.antgroup-inc.cn/simple/ \
+     --extra-index-url=https://mirrors.aliyun.com/pypi/simple/ \
+     --extra-index-url=https://download.pytorch.org/whl/cu126 \
+-    && rm /tmp/$WHL_FILE
++    && cp /tmp/navi_sched_simulate/navi_sched_simulate-*/python/navi_sched/_navi_sched_core.so \
++        /opt/conda310/lib/python3.10/site-packages/navi_sched/_navi_sched_core.so \
++    && mkdir -p /opt/navi_sched/lib \
++    && cp /tmp/navi_sched_simulate/navi_sched_simulate-*/lib/* /opt/navi_sched/lib/ \
++    && rm -rf /tmp/$WHL_FILE /tmp/$NAVI_SCHED_WHL_FILE /tmp/navi_sched_simulate
++
++ENV LD_LIBRARY_PATH=/opt/navi_sched/lib:$LD_LIBRARY_PATH
+
+ ARG START_FILE
+ ADD $START_FILE /usr/bin/maga_start.sh
+diff --git a/open_source/package/package_docker.sh b/open_source/package/package_docker.sh
+index 95a5c9bb2..ee91aeddd 100755
+--- a/open_source/package/package_docker.sh
++++ b/open_source/package/package_docker.sh
+@@ -31,6 +31,26 @@ if [ -z $BAZEL_CONFIG ]; then
+     exit 1
+ fi
+
++NAVI_SCHED_WHEEL=${NAVI_SCHED_WHEEL:-}
++if [ -z "${NAVI_SCHED_WHEEL}" ] || [ ! -f "${NAVI_SCHED_WHEEL}" ]; then
++    echo "set NAVI_SCHED_WHEEL to the matching navi_sched Python wheel" >&2
++    exit 1
++fi
++NAVI_SCHED_SIMULATE_PACKAGE=${NAVI_SCHED_SIMULATE_PACKAGE:-}
++if [ -z "${NAVI_SCHED_SIMULATE_PACKAGE}" ] || [ ! -f "${NAVI_SCHED_SIMULATE_PACKAGE}" ]; then
++    echo "set NAVI_SCHED_SIMULATE_PACKAGE to the matching simulate archive" >&2
++    exit 1
++fi
++NAVI_SCHED_CPP_PACKAGE=${NAVI_SCHED_CPP_PACKAGE:-}
++if [ -n "${NAVI_SCHED_CPP_PACKAGE}" ] && [ ! -f "${NAVI_SCHED_CPP_PACKAGE}" ]; then
++    echo "NAVI_SCHED_CPP_PACKAGE does not exist: ${NAVI_SCHED_CPP_PACKAGE}" >&2
++    exit 1
++fi
++if [ -z "${NAVI_SCHED_CPP_PACKAGE}" ] && [ ! -f "$DIR/../../.navi_sched/cpp/WORKSPACE" ]; then
++    echo "install NaviSched C++ package in .navi_sched/cpp or set NAVI_SCHED_CPP_PACKAGE" >&2
++    exit 1
++fi
++
+ # render more build args
+ TAG=`date "+%Y_%m_%d_%H_%M"`_`git rev-parse --short HEAD`
+ # TODO: check arm
+@@ -44,6 +64,8 @@ else
+ fi
+ VERSION=`cat $DIR/../../open_source/version`
+ WHL_FILE=rtp_llm-$VERSION-cp310-cp310-${WHEEL_OS}_$PLATFORM.whl
++NAVI_SCHED_WHL_FILE=$(basename "${NAVI_SCHED_WHEEL}")
++NAVI_SCHED_SIMULATE_FILE=$(basename "${NAVI_SCHED_SIMULATE_PACKAGE}")
+
+ # create temp container
+ TEMP_CONTAINER_NAME=packaging_temp_$TAG
+@@ -70,9 +92,16 @@ docker cp $DIR/../.. $TEMP_CONTAINER_NAME:/FasterTransformer
+ docker cp ~/.ssh $TEMP_CONTAINER_NAME:/root/.ssh
+ docker exec -i $TEMP_CONTAINER_NAME chown -R root:root /root/.ssh
+ docker exec -i $TEMP_CONTAINER_NAME /bin/bash -c "ssh-keyscan gitlab.alibaba-inc.com >> ~/.ssh/known_hosts"
++if [ -n "${NAVI_SCHED_CPP_PACKAGE}" ]; then
++    docker cp "${NAVI_SCHED_CPP_PACKAGE}" $TEMP_CONTAINER_NAME:/tmp/navi_sched_cpp.tar.gz
++    docker exec -i $TEMP_CONTAINER_NAME /bin/bash -c \
++        "rm -rf /FasterTransformer/.navi_sched/cpp && mkdir -p /FasterTransformer/.navi_sched/cpp && tar -xzf /tmp/navi_sched_cpp.tar.gz --strip-components=1 -C /FasterTransformer/.navi_sched/cpp"
++fi
+ docker exec -i $TEMP_CONTAINER_NAME /bin/bash -c "cd /FasterTransformer/ && bazelisk build $BAZEL_CONFIG $WHEEL_TARGET"
+ rm $DIR/$WHL_FILE -f
+ docker cp $TEMP_CONTAINER_NAME:/FasterTransformer/bazel-bin/rtp_llm/$WHL_FILE $DIR/
++cp "${NAVI_SCHED_WHEEL}" "$DIR/${NAVI_SCHED_WHL_FILE}"
++cp "${NAVI_SCHED_SIMULATE_PACKAGE}" "$DIR/${NAVI_SCHED_SIMULATE_FILE}"
+
+ # prepare start script
+ START_SH_DIR="$DIR/../../internal_source/package/maga_start.sh"
+@@ -86,6 +115,8 @@ cp $START_SH_DIR $DIR/
+ echo "FROM $BASE_IMAGE:$BASE_IMAGE_TAG" > /tmp/maga.Dockerfile
+ cat $DIR/maga.Dockerfile >> /tmp/maga.Dockerfile
+ docker build --build-arg WHL_FILE=$WHL_FILE --build-arg START_FILE=maga_start.sh \
++       --build-arg NAVI_SCHED_WHL_FILE="${NAVI_SCHED_WHL_FILE}" \
++       --build-arg NAVI_SCHED_SIMULATE_FILE="${NAVI_SCHED_SIMULATE_FILE}" \
+        -f /tmp/maga.Dockerfile --network=host -t $TARGET_IMAGE:$TAG $DIR
+ docker tag $TARGET_IMAGE:$TAG $TARGET_IMAGE:latest
+ docker push $TARGET_IMAGE:$TAG
+@@ -94,4 +125,6 @@ echo "docker name: $TARGET_IMAGE:$TAG"
+
+ #cleanup context
+ rm $DIR/$WHL_FILE -f
++rm "$DIR/${NAVI_SCHED_WHL_FILE}" -f
++rm "$DIR/${NAVI_SCHED_SIMULATE_FILE}" -f
+ rm $DIR/maga_start.sh -f
+diff --git a/rtp_llm/BUILD b/rtp_llm/BUILD
+index e064af6ff..22387e3db 100755
+--- a/rtp_llm/BUILD
++++ b/rtp_llm/BUILD
+@@ -563,6 +563,8 @@ py_package(
+ )
+
+ whl_reqs = [
++    # NaviSched owns its native runtime and Python adapter as a separate wheel.
++    "navi_sched==0.1.0",
+     "filelock>=3.20.0",
+     "jinja2",
+     "sympy",
+diff --git a/rtp_llm/navi_sched_simulate.py b/rtp_llm/navi_sched_simulate.py
+new file mode 100644
+index 000000000..37d9cb357
+--- /dev/null
++++ b/rtp_llm/navi_sched_simulate.py
+@@ -0,0 +1,199 @@
++import json
++import logging
++import os
++import signal
++import threading
++import time
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++
++from rtp_llm.ops import RoleType
++
++MASTER_BIZ_NAME = "rtp_llm_master"
++PREFILL_BIZ_NAME = "rtp_llm_prefill"
++BLOCK_SIZE = 256
++
++
++class _HealthHandler(BaseHTTPRequestHandler):
++    master_address = ""
++
++    def do_GET(self):
++        if self.path in {
++            "/health",
++            "/frontend_health",
++            "/hook/process_ok",
++            "/hook/after_start",
++        }:
++            self._write(200, b"ok", "text/plain")
++            return
++        if self.path == "/actuator/health":
++            self._write(200, b'{"status":"UP"}', "application/json")
++            return
++        self.send_error(404)
++
++    def do_POST(self):
++        if self.path == "/rtp_llm/master/info" and self.master_address:
++            body = json.dumps({
++                "real_master_host": self.master_address,
++                "queue_length": 0,
++                "ready": True,
++            }).encode()
++            self._write(200, body, "application/json")
++            return
++        if self.path in {"/health", "/frontend_health"}:
++            self._write(200, b"ok", "text/plain")
++            return
++        self.send_error(404)
++
++    def log_message(self, format, *args):
++        return
++
++    def _write(self, status, body, content_type):
++        self.send_response(status)
++        self.send_header("Content-Type", content_type)
++        self.send_header("Content-Length", str(len(body)))
++        self.end_headers()
++        self.wfile.write(body)
++
++
++def _runtime_options(name, grpc_port):
++    log_dir = os.environ.get("LOG_PATH", "logs")
++    runtime_dir = os.path.join(log_dir, "navi_sched")
++    os.makedirs(runtime_dir, exist_ok=True)
++    return {
++        "name": name,
++        "enable_kmon": False,
++        "wait_no_query": False,
++        "log_file_name": os.path.join(log_dir, "navi_sched.log"),
++        "snapshot_dir": runtime_dir,
++        "gig": {
++            "grpc_port": grpc_port,
++            "log_prefix": name,
++            "snapshot_log_dir": runtime_dir,
++        },
++    }
++
++
++def _advertised_ip(server_config):
++    return str(server_config.ip or os.environ.get("POD_IP", "127.0.0.1"))
++
++
++def _prefill_nodes():
++    from rtp_llm.server.host_service import HostServiceArgs, VipServerWrapper
++
++    host_args = HostServiceArgs.create_from_env()
++    if not host_args.prefill_domain:
++        raise RuntimeError("MODEL_SERVICE_CONFIG has no prefill endpoint")
++    vip = VipServerWrapper(host_args.prefill_domain, host_args.use_local)
++    nodes = []
++    deadline = time.monotonic() + 3600
++    while not nodes and time.monotonic() < deadline:
++        for host in vip.get_hosts(refresh=True):
++            nodes.append({
++                "biz_name": PREFILL_BIZ_NAME,
++                "ip": host.ip,
++                "grpc_port": int(host.port) + 1,
++                "support_heartbeat": True,
++            })
++        if not nodes:
++            time.sleep(1)
++    if not nodes:
++        raise RuntimeError("no simulated Prefill node is available")
++    return nodes
++
++
++def _serve_role(role, http_port, master=False):
++    if not 0 < http_port < 65535:
++        raise ValueError("START_PORT must leave room for the Gig port")
++    _HealthHandler.master_address = (
++        f"{_advertised_ip(role.server_config)}:{http_port}" if master else ""
++    )
++    server = ThreadingHTTPServer(("", http_port), _HealthHandler)
++    thread = threading.Thread(target=server.serve_forever, daemon=True)
++    stopped = threading.Event()
++
++    def stop(signum, frame):
++        stopped.set()
++
++    signal.signal(signal.SIGINT, stop)
++    signal.signal(signal.SIGTERM, stop)
++    thread.start()
++    try:
++        stopped.wait()
++    finally:
++        server.shutdown()
++        server.server_close()
++
++
++def _run_master(py_env_configs):
++    from navi_sched import NaviSchedMaster
++
++    port = int(py_env_configs.server_config.start_port)
++    options = _runtime_options("sched_master", port + 1)
++    with NaviSchedMaster(
++        MASTER_BIZ_NAME,
++        runtime_config={"local_nodes": _prefill_nodes()},
++        max_wait_schedule_count=30,
++        max_wait_schedule_time_ms=0,
++        scheduler_name="random",
++        **options,
++    ) as master:
++        master.init()
++        _serve_role(py_env_configs, port, master=True)
++
++
++def _run_prefill(py_env_configs):
++    import navi_sched
++    from navi_sched import NaviSchedAgent
++
++    port = int(py_env_configs.server_config.start_port)
++    cache_capacity = 300 * 1024**3
++    token_cache_bytes = 10 * 1024
++    total_blocks = cache_capacity // (token_cache_bytes * BLOCK_SIZE)
++    options = _runtime_options("sched_agent", port + 1)
++    agent = NaviSchedAgent(
++        PREFILL_BIZ_NAME,
++        server_port=port,
++        server_ip=_advertised_ip(py_env_configs.server_config),
++        total_blocks=total_blocks,
++        runtime_config={},
++        **options,
++    )
++    config = navi_sched._navi_sched_core.NaviSchedSimulatedExecutionConfig()
++    config.cache_capacity_bytes = cache_capacity
++    config.token_cache_bytes = token_cache_bytes
++    config.noise_stddev_ratio = 0.01
++    config.time_compression = 1.0
++    handle = navi_sched._navi_sched_core.init_simulated_agent(agent, config)
++    if not handle:
++        agent.stop()
++        raise RuntimeError("failed to initialize simulated NaviSched Agent")
++    try:
++        _serve_role(py_env_configs, port)
++    finally:
++        handle.stop()
++        agent.stop()
++
++
++def _run_frontend(py_env_configs, configure):
++    from rtp_llm.start_frontend_server import start_frontend_server
++    from rtp_llm.utils.concurrency_controller import init_controller
++
++    configure(py_env_configs)
++    controller = init_controller(
++        py_env_configs.concurrency_config,
++        dp_size=py_env_configs.parallelism_config.dp_size,
++    )
++    start_frontend_server(0, 0, controller, py_env_configs)
++
++
++def run(py_env_configs, configure):
++    role = py_env_configs.role_config.role_type
++    logging.info("starting NaviSched RTP simulation role %s", role)
++    if role == RoleType.FRONTEND:
++        _run_frontend(py_env_configs, configure)
++    elif role == RoleType.PREFILL:
++        _run_prefill(py_env_configs)
++    elif role == RoleType.PDFUSION:
++        _run_master(py_env_configs)
++    else:
++        raise ValueError(f"unsupported NaviSched RTP simulation role: {role}")
+diff --git a/rtp_llm/openai/renderers/custom_renderer.py b/rtp_llm/openai/renderers/custom_renderer.py
+index 5319ab8ed..0779376a8 100644
+--- a/rtp_llm/openai/renderers/custom_renderer.py
++++ b/rtp_llm/openai/renderers/custom_renderer.py
+@@ -68,6 +68,17 @@ def _get_think_config(generate_env_config):
+     return think_mode, think_start_tag, think_end_tag
+
+
++def _last_user_text(request: ChatCompletionRequest) -> str:
++    for message in reversed(request.messages):
++        if message.role != RoleEnum.user:
++            continue
++        if isinstance(message.content, str):
++            return message.content
++        if isinstance(message.content, list):
++            return "".join(part.text or "" for part in message.content)
++    return ""
++
++
+ class StreamStatus:
+     index: int = 0
+     request: ChatCompletionRequest
+@@ -421,18 +432,23 @@ class CustomChatRenderer:
+
+         token_type_ids = []
+         input_id_tensor = torch.Tensor(input_ids).int().unsqueeze(0)
++        generate_input = GenerateInput(
++            request_id=request_id,
++            token_ids=input_id_tensor,
++            mm_inputs=mm_inputs,
++            generate_config=generate_config,
++            tokenizer=self.tokenizer,
++            token_type_ids=token_type_ids,
++            headers=normalize_request_headers(headers),
++        )
++        generate_input.navi_sched_output_ids = torch.tensor(
++            self.tokenizer.encode(
++                _last_user_text(request), add_special_tokens=False
++            ),
++            dtype=torch.int32,
++        ).unsqueeze(0)
+         output_generator: AsyncGenerator[GenerateOutputs, None] = (
+-            await backend_rpc_server_visitor.enqueue(
+-                GenerateInput(
+-                    request_id=request_id,
+-                    token_ids=input_id_tensor,
+-                    mm_inputs=mm_inputs,
+-                    generate_config=generate_config,
+-                    tokenizer=self.tokenizer,
+-                    token_type_ids=token_type_ids,
+-                    headers=normalize_request_headers(headers),
+-                )
+-            )
++            await backend_rpc_server_visitor.enqueue(generate_input)
+         )
+
+         # 处理非流式请求的合并逻辑
+diff --git a/rtp_llm/server/backend_rpc_server_visitor.py b/rtp_llm/server/backend_rpc_server_visitor.py
+index 729fc2075..d24183797 100644
+--- a/rtp_llm/server/backend_rpc_server_visitor.py
++++ b/rtp_llm/server/backend_rpc_server_visitor.py
+@@ -1,3 +1,5 @@
++from __future__ import annotations
++
+ import asyncio
+ import logging
+ import os
+@@ -7,15 +9,13 @@ from typing import TYPE_CHECKING, AsyncGenerator, List, Optional, Set
+ import torch
+
+ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+-from rtp_llm.config.generate_config import RoleAddr, RoleType
++from rtp_llm.config.generate_config import RoleAddr
+ from rtp_llm.config.model_config import ModelConfig as PyModelConfig
+-from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
+ from rtp_llm.metrics import kmonitor
+ from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+ from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
+ from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
+ from rtp_llm.server.host_service import HostService, HostServiceArgs
+-from rtp_llm.server.master_client import FlexlbResponse, MasterClient
+ from rtp_llm.server.misc import format_exception
+ from rtp_llm.server.navi_sched_adapter import (
+     create_navi_sched_client,
+@@ -26,7 +26,9 @@ from rtp_llm.server.request_headers import (
+     extract_trace_id,
+ )
+ from rtp_llm.utils.base_model_datatypes import (
++    AuxInfo,
+     GenerateInput,
++    GenerateOutput,
+     GenerateOutputs,
+     RequestInfo,
+ )
+@@ -34,6 +36,7 @@ from rtp_llm.utils.time_util import Timer
+
+ if TYPE_CHECKING:
+     from rtp_llm.config.py_config_modules import PyEnvConfigs
++    from rtp_llm.server.master_client import FlexlbResponse
+
+ route_logger = logging.getLogger("route_logger")
+
+@@ -80,36 +83,15 @@ class BackendRPCServerVisitor:
+             source_role: Caller role used for request-info correlation fields.
+         """
+         self.max_seq_len = max_seq_len
+-        self.seq_size_per_block = seq_size_per_block
++        self.seq_size_per_block = 256
+         self.pd_sep_config = pd_sep_config
+         self.sp_config = sp_config
+         self.source_role = source_role
+         self.source_ip = str(getattr(server_config, "ip", "") or "")
+         assert self.max_seq_len > 0
+
+-        # Get max_rpc_timeout_ms and decode_entrance from pd_sep_config
+-        max_rpc_timeout_ms = pd_sep_config.max_rpc_timeout_ms
+-        decode_entrance = pd_sep_config.decode_entrance
+-
+-        # Get client_config from grpc_config if provided, otherwise use empty dict
+-        if grpc_config is not None:
+-            client_config = grpc_config.get_client_config()
+-        else:
+-            client_config = {}
+-
+-        self.model_rpc_client = ModelRpcClient(
+-            addresses=addresses,
+-            client_config=client_config,
+-            max_rpc_timeout_ms=max_rpc_timeout_ms,
+-            decode_entrance=decode_entrance,
+-        )
+-
+         host_args = HostServiceArgs.create_from_env()
+-        self.backend_role_list = self.get_backend_role_list(
+-            self.pd_sep_config, host_args, vit_separation
+-        )
+         self.host_service = HostService(host_args)
+-        self.master_config = master_config
+         self._page_rr_route_cache_keys = False
+         self._page_rr_cp_size = 1
+         if parallelism_config is not None:
+@@ -121,18 +103,11 @@ class BackendRPCServerVisitor:
+             if kv_cache_sharded and tp_size > 1:
+                 self._page_rr_route_cache_keys = True
+                 self._page_rr_cp_size = tp_size
+-        navi_sched_client = create_navi_sched_client(self.host_service)
+-        self._navi_sched_enabled = navi_sched_client is not None
+-        self.master_client = navi_sched_client or MasterClient(
+-            host_service=self.host_service,
+-            server_config=server_config,
+-            master_config=master_config,
+-        )
++        self.master_client = create_navi_sched_client(self.host_service)
+         self.recent_cache_key_window = RecentCacheKeyWindow()
+         self.pd_route_retry_on_unavailable = self._pd_route_retry_on_unavailable()
+
+     async def close(self):
+-        await self.model_rpc_client.close()
+         await self.master_client.close()
+
+     @staticmethod
+@@ -167,47 +142,6 @@ class BackendRPCServerVisitor:
+             or "Socket closed" in text
+         )
+
+-    @staticmethod
+-    def get_backend_role_list(
+-        pd_sep_config,
+-        host_args: HostServiceArgs,
+-        vit_separation: Optional[VitSeparation] = None,
+-    ) -> List[RoleType]:
+-        logging.info(f"pd_sep_config: {pd_sep_config.to_string()}")
+-        role_list: List[RoleType] = []
+-
+-        if (
+-            vit_separation == VitSeparation.VIT_SEPARATION_REMOTE
+-            and host_args.vit_domain
+-        ):
+-            role_list.append(RoleType.VIT)
+-            logging.info("Added VIT role")
+-
+-        config_role_type = pd_sep_config.role_type
+-
+-        if config_role_type == RoleType.PREFILL and not pd_sep_config.decode_entrance:
+-            role_list.append(RoleType.DECODE)
+-            logging.info("Added DECODE role for PREFILL type")
+-        elif config_role_type == RoleType.DECODE and pd_sep_config.decode_entrance:
+-            role_list.append(RoleType.PREFILL)
+-            logging.info("Added PREFILL role for DECODE type")
+-        elif config_role_type == RoleType.FRONTEND:
+-            logging.info(
+-                f"Checking FRONTEND roles: decode_domain={host_args.decode_domain}, prefill_domain={host_args.prefill_domain}, pdfusion_domain={host_args.pdfusion_domain}"
+-            )
+-            if host_args.decode_domain:
+-                role_list.append(RoleType.DECODE)
+-                logging.info("Added DECODE role for FRONTEND type")
+-            if host_args.prefill_domain:
+-                role_list.append(RoleType.PREFILL)
+-                logging.info("Added PREFILL role for FRONTEND type")
+-            if host_args.pdfusion_domain:
+-                role_list.append(RoleType.PDFUSION)
+-                logging.info("Added PDFUSION role for FRONTEND type")
+-
+-        logging.info(f"configured backend role list: {role_list}")
+-        return role_list
+-
+     async def get_master_route_addrs(
+         self, input: GenerateInput
+     ) -> Optional[FlexlbResponse]:
+@@ -217,7 +151,6 @@ class BackendRPCServerVisitor:
+         request_id is frontend-generated and is not overwritten.
+         """
+         block_cache_keys = []
+-        input_pb = None
+         if not getattr(self.master_client, "uses_prompt_token_ids", False):
+             token_ids = (
+                 input.token_ids.tolist()[0]
+@@ -231,15 +164,12 @@ class BackendRPCServerVisitor:
+             )
+             block_cache_keys = self._route_cache_keys(full_block_cache_keys)
+             self._report_recent_cache_key_metrics(block_cache_keys)
+-            input_pb = trans_input(input)
+-
+         try:
+             route_result = await self.master_client.get_backend_role_addrs(
+                 block_cache_keys=block_cache_keys,
+                 cache_key_block_size=self._cache_key_block_size(),
+                 input=input,
+                 request_id=input.request_id,
+-                input_pb=input_pb,
+             )
+         except BaseException as e:
+             exception_json = format_exception(e)
+@@ -307,100 +237,14 @@ class BackendRPCServerVisitor:
+             return self.seq_size_per_block * self._page_rr_cp_size
+         return self.seq_size_per_block
+
+-    async def get_domain_route_addrs(self, input: GenerateInput):
+-        specified_roles = {addr.role for addr in input.generate_config.role_addrs}
+-        missing_roles = [
+-            role for role in self.backend_role_list if role not in specified_roles
+-        ]
+-        role_addrs: List[RoleAddr] = self.host_service.get_backend_role_addrs(
+-            missing_roles
+-        )
+-        if role_addrs:
+-            input.generate_config.role_addrs.extend(role_addrs)
+-            route_logger.warning(
+-                "fallback to host service, request_id=%s, addrs=%s",
+-                input.request_id,
+-                role_addrs,
+-            )
+-            kmonitor.report(
+-                AccMetrics.DOMAIN_ROUTE_QPS_METRIC,
+-                1,
+-            )
+-        else:
+-            route_logger.error(
+-                "host service failed, request_id=%s, missing_roles=%s",
+-                input.request_id,
+-                missing_roles,
+-            )
+-
+     async def route_ips(self, input: GenerateInput):
+-        # proactive rejection: check cached queue length before making request to master
+-        if self.master_config and not getattr(self, "_navi_sched_enabled", False):
+-            threshold = self.master_config.master_queue_reject_threshold
+-            queue_length = self.host_service.get_queue_length()
+-            if queue_length > threshold:
+-                route_logger.warning(
+-                    f"FlexLb cached queue length {queue_length} exceeds threshold "
+-                    f"{threshold}, "
+-                    f"proactively rejecting request <{input.request_id}>"
+-                )
+-                kmonitor.report(AccMetrics.MASTER_QUEUE_REJECT_QPS_METRIC, 1)
+-                raise FtRuntimeException(
+-                    exception_type=ExceptionType.TRAFFIC_LIMIT_ERROR,
+-                    message=f"Flexlb queue length {queue_length} exceeds threshold {threshold}",
+-                )
+         with Timer() as route_timer:
+-            role_addrs_specified = bool(input.generate_config.role_addrs)
+-            master_addr = self.host_service.get_master_addr()
+-            if getattr(self, "_navi_sched_enabled", False):
+-                master_available = bool(self.host_service.master_vip.domain)
+-            else:
+-                master_available = bool(master_addr)
+-            route_logger.debug("routing to master: %s", master_addr)
+-
+-            input_token_batched = False
+-            if len(input.token_ids.shape) == 2 and input.token_ids.size(0) != 1:
+-                input_token_batched = True
+-
+-            master_route_result: Optional[FlexlbResponse] = None
+-            if (
+-                not role_addrs_specified
+-                and master_available
+-                and not input_token_batched
+-            ):
+-                with Timer() as master_route_timer:
+-                    master_route_result = await self.get_master_route_addrs(input)
+-                kmonitor.report(
+-                    GaugeMetrics.MASTER_ROUTE_RT_METRIC, master_route_timer.cost_ms()
+-                )
+-            elif not role_addrs_specified:
+-                route_logger.warning(
+-                    "master address: %s or input token batched: %s is not valid, fallback to domain routing",
+-                    master_addr,
+-                    input_token_batched,
+-                )
+-            specified_roles = {addr.role for addr in input.generate_config.role_addrs}
+-            need_domain_routing = not set(self.backend_role_list).issubset(
+-                specified_roles
+-            )
+-            allow_domain_fallback = master_route_result is None or (
+-                master_route_result.connection_failed
++            with Timer() as master_route_timer:
++                master_route_result = await self.get_master_route_addrs(input)
++            kmonitor.report(
++                GaugeMetrics.MASTER_ROUTE_RT_METRIC,
++                master_route_timer.cost_ms(),
+             )
+-            if self.master_config and self.master_config.disable_domain_fallback:
+-                allow_domain_fallback = False
+-                route_logger.warning(
+-                    "master_config.disable_domain_fallback is enabled, "
+-                    "skipping domain fallback routing"
+-                )
+-            if (
+-                not input.generate_config.role_addrs or need_domain_routing
+-            ) and allow_domain_fallback:
+-                with Timer() as domain_route_timer:
+-                    await self.get_domain_route_addrs(input)
+-                kmonitor.report(
+-                    GaugeMetrics.DOMAIN_ROUTE_RT_METRIC, domain_route_timer.cost_ms()
+-                )
+-            route_logger.debug("routing to master done")
+
+         kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
+         if not input.generate_config.role_addrs:
+@@ -526,33 +370,35 @@ class BackendRPCServerVisitor:
+             raise
+
+         async def route_and_enqueue(attempt: int):
+-            if attempt > 0:
+-                input.generate_config.role_addrs = []
+-            if (
+-                getattr(self, "_navi_sched_enabled", False)
+-                or self.host_service.service_available
+-            ):
+-                await self.route_ips(input)
+-            return self.model_rpc_client.enqueue(input)
++            input.generate_config.role_addrs = []
++            await self.route_ips(input)
++            return None
+
+         async def stream_with_aux_info():
+             attempt = 0
+-            is_streaming = bool(getattr(input.generate_config, "is_streaming", False))
+             while True:
+                 yielded_output = False
++                begin_time = time.monotonic()
+                 try:
+-                    stream = await route_and_enqueue(attempt)
+-                    if is_streaming:
+-                        async for output in stream:
+-                            yielded_output = True
+-                            yield output
+-                    else:
+-                        buffered_outputs = []
+-                        async for output in stream:
+-                            buffered_outputs.append(output)
+-                        yielded_output = True
+-                        for output in buffered_outputs:
+-                            yield output
++                    await route_and_enqueue(attempt)
++                    output_ids = getattr(
++                        input, "navi_sched_output_ids", input.token_ids
++                    ).clone()
++                    elapsed_ms = (time.monotonic() - begin_time) * 1000.0
++                    yielded_output = True
++                    yield GenerateOutputs([
++                        GenerateOutput(
++                            output_ids=output_ids,
++                            input_ids=output_ids,
++                            finished=True,
++                            aux_info=AuxInfo(
++                                cost_time=elapsed_ms,
++                                first_token_cost_time=elapsed_ms,
++                                input_len=0,
++                                output_len=int(output_ids.numel()),
++                            ),
++                        )
++                    ])
+                     return
+                 except BaseException as e:
+                     set_aux_info(e)
+@@ -576,18 +422,6 @@ class BackendRPCServerVisitor:
+         return stream_with_aux_info()
+
+     def is_backend_service_ready(self, refresh: bool = False) -> bool:
+-        # COMMENTED OUT: Direct connection to prefill/decode bypasses FlexLB
+-        # roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(
+-        #     self.backend_role_list, refresh
+-        # )
+-        # if not roles:
+-        #     return False
+-        # for role in self.backend_role_list:
+-        #     if role not in [r.role for r in roles]:
+-        #         logging.warning(f"role {role} not in available roles {roles}")
+-        #         return False
+-        # return True
+-        # Always return True to force routing through FlexLB
+         return True
+
+
+diff --git a/rtp_llm/server/navi_sched_adapter.py b/rtp_llm/server/navi_sched_adapter.py
+index f7f28d3d4..b1d4267f2 100644
+--- a/rtp_llm/server/navi_sched_adapter.py
++++ b/rtp_llm/server/navi_sched_adapter.py
+@@ -1,39 +1,47 @@
+ import importlib
+-import os
+-from typing import Mapping, Optional
+-
+-MASTER_TYPE_ENV = "RTP_LLM_MASTER_TYPE"
+-FLEXLB_MASTER_TYPE = "flexlb"
+-NAVI_SCHED_MASTER_TYPE = "navi_sched"
+-NAVI_SCHED_ENABLED_ENV = "RTP_LLM_NAVI_SCHED_ENABLED"
+-_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+-
+-
+-def get_master_type(environ: Optional[Mapping[str, str]] = None) -> str:
+-    values = environ if environ is not None else os.environ
+-    master_type = values.get(MASTER_TYPE_ENV, "").strip().lower()
+-    if not master_type:
+-        legacy_enabled = (
+-            values.get(NAVI_SCHED_ENABLED_ENV, "").strip().lower() in _TRUE_VALUES
+-        )
+-        return NAVI_SCHED_MASTER_TYPE if legacy_enabled else FLEXLB_MASTER_TYPE
+-    if master_type not in (FLEXLB_MASTER_TYPE, NAVI_SCHED_MASTER_TYPE):
+-        raise ValueError(
+-            f"{MASTER_TYPE_ENV} must be {FLEXLB_MASTER_TYPE} or "
+-            f"{NAVI_SCHED_MASTER_TYPE}, got {master_type}"
+-        )
+-    return master_type
++import time
++from types import SimpleNamespace
++
++MASTER_BIZ_NAME = "rtp_llm_master"
++PREFILL_BIZ_NAME = "rtp_llm_prefill"
+
+
+ def _load_adapter():
+     return importlib.import_module("navi_sched.adapters.rtp_llm")
+
+
++def _gig_master_host_service(host_service):
++    master_vip = host_service.master_vip
++    hosts = []
++    deadline = time.monotonic() + 3600
++    while not hosts and time.monotonic() < deadline:
++        hosts = master_vip.get_hosts(refresh=True)
++        if not hosts:
++            time.sleep(1)
++    addresses = ",".join(
++        f"{host.ip}:{int(host.port) + 1}" for host in hosts
++    )
++    if not addresses:
++        raise RuntimeError("no NaviSched Master is available")
++    return SimpleNamespace(
++        master_vip=SimpleNamespace(domain=addresses, use_local=True)
++    )
++
++
+ def create_navi_sched_client(host_service):
+-    if get_master_type() != NAVI_SCHED_MASTER_TYPE:
+-        return None
+-    return _load_adapter().create_navi_sched_client(host_service)
++    adapter = _load_adapter()
++    config = adapter.NaviSchedAdapterConfig(
++        enabled=True,
++        master_biz_name=MASTER_BIZ_NAME,
++        biz_name=PREFILL_BIZ_NAME,
++        target_role="PREFILL",
++    )
++    return adapter.NaviSchedClient(
++        config=config,
++        host_service=_gig_master_host_service(host_service),
++        enable_agent_forward=True,
++    )
+
+
+ def navi_sched_enabled():
+-    return get_master_type() == NAVI_SCHED_MASTER_TYPE
++    return True
+diff --git a/rtp_llm/server/test/backend_rpc_server_visitor_test.py b/rtp_llm/server/test/backend_rpc_server_visitor_test.py
+index 82e8252ca..a2ac218e0 100644
+--- a/rtp_llm/server/test/backend_rpc_server_visitor_test.py
++++ b/rtp_llm/server/test/backend_rpc_server_visitor_test.py
+@@ -10,6 +10,12 @@ from rtp_llm.server.master_client import FlexlbResponse
+ class _FakeTokenIds:
+     shape = (3,)
+
++    def clone(self):
++        return self
++
++    def numel(self):
++        return 3
++
+
+ class _FakeGenerateConfig:
+     def __init__(self, is_streaming=False):
+@@ -54,24 +60,25 @@ class _FakeHostService:
+         return "master:1234"
+
+
+-class _FakeInputPB:
+-    def SerializeToString(self):
+-        return b"serialized-input"
+-
+-
+ class _FakeMasterClient:
+     def __init__(self):
+         self.calls = []
+
+     async def get_backend_role_addrs(
+-        self, block_cache_keys, input, request_id, input_pb_bytes=None
++        self,
++        block_cache_keys,
++        cache_key_block_size,
++        input,
++        request_id,
++        input_pb=None,
+     ):
+         self.calls.append(
+             {
+                 "block_cache_keys": block_cache_keys,
++                "cache_key_block_size": cache_key_block_size,
+                 "input": input,
+                 "request_id": request_id,
+-                "input_pb_bytes": input_pb_bytes,
++                "input_pb": input_pb,
+             }
+         )
+         return FlexlbResponse.ok(["prefill-role"], enqueued_by_master=True)
+@@ -110,6 +117,8 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
+     async def test_get_master_route_addrs_passes_pb_and_marks_master_enqueue(self):
+         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+         visitor.seq_size_per_block = 16
++        visitor._page_rr_route_cache_keys = False
++        visitor._page_rr_cp_size = 1
+         visitor.master_client = _FakeMasterClient()
+         visitor._route_cache_keys = lambda keys: keys
+         visitor._report_recent_cache_key_metrics = lambda keys: None
+@@ -119,9 +128,6 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
+         with patch(
+             "rtp_llm.server.backend_rpc_server_visitor.get_block_cache_keys",
+             return_value=[11, 22],
+-        ), patch(
+-            "rtp_llm.server.backend_rpc_server_visitor.trans_input",
+-            return_value=_FakeInputPB(),
+         ), patch(
+             "rtp_llm.server.backend_rpc_server_visitor.kmonitor"
+         ):
+@@ -131,16 +137,14 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
+         self.assertEqual(input.generate_config.role_addrs, ["prefill-role"])
+         self.assertTrue(input.enqueued_by_master)
+         self.assertEqual(visitor.master_client.calls[0]["block_cache_keys"], [11, 22])
+-        self.assertEqual(visitor.master_client.calls[0]["request_id"], 456)
+         self.assertEqual(
+-            visitor.master_client.calls[0]["input_pb_bytes"], b"serialized-input"
++            visitor.master_client.calls[0]["cache_key_block_size"], 16
+         )
++        self.assertEqual(visitor.master_client.calls[0]["request_id"], 456)
++        self.assertIsNone(visitor.master_client.calls[0]["input_pb"])
+
+     async def test_route_ips_preserves_master_route_error_code_on_route_error(self):
+         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+-        visitor.master_config = None
+-        visitor.host_service = _FakeHostService()
+-        visitor.backend_role_list = ["PREFILL"]
+
+         async def get_master_route_addrs(_input):
+             return FlexlbResponse.error_response(
+@@ -160,113 +164,50 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
+         )
+
+
+-class _RetryingModelRpcClient:
+-    def __init__(self):
+-        self.attempts = 0
+-
+-    async def enqueue(self, _input):
+-        self.attempts += 1
+-        attempt = self.attempts
+-        if attempt == 1:
+-            yield "partial-output-from-failed-attempt"
+-            raise RuntimeError("StatusCode.UNAVAILABLE recvmsg:Connection timed out")
+-        yield "successful-output"
+-
+-
+-class _SuccessfulModelRpcClient:
+-    def __init__(self, outputs):
+-        self.outputs = outputs
+-        self.attempts = 0
+-
+-    async def enqueue(self, _input):
+-        self.attempts += 1
+-        for output in self.outputs:
+-            yield output
+-
+-
+-class _AlwaysFailingModelRpcClient:
+-    def __init__(self, error):
+-        self.error = error
+-        self.attempts = 0
+-
+-    async def enqueue(self, _input):
+-        self.attempts += 1
+-        yield "partial-output-from-failed-attempt"
+-        raise self.error
+-
+-
+ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
+-    def _visitor(self, model_rpc_client) -> BackendRPCServerVisitor:
++    def _visitor(self) -> BackendRPCServerVisitor:
+         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+         visitor.max_seq_len = 1024
+-        visitor.model_rpc_client = model_rpc_client
+-        visitor.host_service = _FakeHostService()
+         visitor.pd_route_retry_on_unavailable = 3
+         visitor.fill_request_info = lambda _input: None
+         visitor.check_sp_supported = lambda _input: None
+         return visitor
+
+-    async def test_non_streaming_discards_partial_attempt_before_retry(self):
+-        client = _RetryingModelRpcClient()
+-        visitor = self._visitor(client)
++    async def test_retryable_route_error_is_retried_before_output(self):
++        visitor = self._visitor()
++        attempts = []
++
++        async def route_ips(_input):
++            attempts.append(1)
++            if len(attempts) == 1:
++                raise RuntimeError("StatusCode.UNAVAILABLE")
+
+-        stream = await visitor.enqueue(_FakeInput(is_streaming=False))
++        visitor.route_ips = route_ips
++        stream = await visitor.enqueue(_FakeInput())
+         outputs = [output async for output in stream]
+
+-        self.assertEqual(outputs, ["successful-output"])
+-        self.assertEqual(client.attempts, 2)
++        self.assertEqual(len(attempts), 2)
++        self.assertEqual(len(outputs), 1)
++        output = outputs[0].generate_outputs[0]
++        self.assertTrue(output.finished)
++        self.assertEqual(output.aux_info.input_len, 0)
++        self.assertEqual(output.aux_info.output_len, 3)
+
+-    async def test_non_streaming_replays_successful_outputs_in_order(self):
+-        client = _SuccessfulModelRpcClient(["first-output", "second-output"])
+-        visitor = self._visitor(client)
++    async def test_non_retryable_route_error_is_not_retried(self):
++        visitor = self._visitor()
++        attempts = []
+
+-        stream = await visitor.enqueue(_FakeInput(is_streaming=False))
+-        outputs = [output async for output in stream]
++        async def route_ips(_input):
++            attempts.append(1)
++            raise ValueError("bad route")
+
+-        self.assertEqual(outputs, ["first-output", "second-output"])
+-        self.assertEqual(client.attempts, 1)
++        visitor.route_ips = route_ips
++        stream = await visitor.enqueue(_FakeInput())
++        with self.assertRaisesRegex(ValueError, "bad route"):
++            async for _ in stream:
++                pass
+
+-    async def test_non_streaming_raises_after_retry_budget_exhausted(self):
+-        client = _AlwaysFailingModelRpcClient(
+-            RuntimeError("StatusCode.UNAVAILABLE recvmsg:Connection timed out")
+-        )
+-        visitor = self._visitor(client)
+-        visitor.pd_route_retry_on_unavailable = 1
+-
+-        stream = await visitor.enqueue(_FakeInput(is_streaming=False))
+-        outputs = []
+-        with self.assertRaisesRegex(RuntimeError, "StatusCode.UNAVAILABLE"):
+-            async for output in stream:
+-                outputs.append(output)
+-
+-        self.assertEqual(outputs, [])
+-        self.assertEqual(client.attempts, 2)
+-
+-    async def test_non_streaming_non_retryable_error_does_not_retry(self):
+-        client = _AlwaysFailingModelRpcClient(ValueError("bad output"))
+-        visitor = self._visitor(client)
+-
+-        stream = await visitor.enqueue(_FakeInput(is_streaming=False))
+-        outputs = []
+-        with self.assertRaisesRegex(ValueError, "bad output"):
+-            async for output in stream:
+-                outputs.append(output)
+-
+-        self.assertEqual(outputs, [])
+-        self.assertEqual(client.attempts, 1)
+-
+-    async def test_streaming_does_not_retry_after_partial_output_yielded(self):
+-        client = _RetryingModelRpcClient()
+-        visitor = self._visitor(client)
+-
+-        stream = await visitor.enqueue(_FakeInput(is_streaming=True))
+-        outputs = []
+-        with self.assertRaisesRegex(RuntimeError, "StatusCode.UNAVAILABLE"):
+-            async for output in stream:
+-                outputs.append(output)
+-
+-        self.assertEqual(outputs, ["partial-output-from-failed-attempt"])
+-        self.assertEqual(client.attempts, 1)
++        self.assertEqual(len(attempts), 1)
+
+
+ if __name__ == "__main__":
+diff --git a/rtp_llm/server/test/navi_sched_adapter_test.py b/rtp_llm/server/test/navi_sched_adapter_test.py
+index f8a95fb07..587c96fad 100644
+--- a/rtp_llm/server/test/navi_sched_adapter_test.py
++++ b/rtp_llm/server/test/navi_sched_adapter_test.py
+@@ -202,36 +202,12 @@ class NaviSchedAdapterConfigTest(unittest.TestCase):
+
+
+ class NaviSchedIntegrationTest(unittest.TestCase):
+-    def test_flexlb_mode_does_not_load_navi_sched_wheel(self):
+-        with patch.dict(
+-            "os.environ", {"RTP_LLM_MASTER_TYPE": "flexlb"}, clear=True
+-        ), patch.object(integration, "_load_adapter") as load_adapter:
+-            client = integration.create_navi_sched_client(
+-                _FakeHostService("flexlb.master.domain", use_local=False)
+-            )
+-
+-        self.assertIsNone(client)
+-        load_adapter.assert_not_called()
+-
+-    def test_navi_sched_mode_loads_wheel_adapter(self):
+-        wheel_adapter = SimpleNamespace(
+-            create_navi_sched_client=lambda host_service: "client",
+-        )
+-        with patch.dict(
+-            "os.environ", {"RTP_LLM_MASTER_TYPE": "navi_sched"}, clear=True
+-        ), patch.object(integration, "_load_adapter", return_value=wheel_adapter):
+-            client = integration.create_navi_sched_client(
+-                _FakeHostService("navi.master.domain", use_local=False)
+-            )
+-
+-        self.assertEqual("client", client)
+-
+-    def test_mode_helper_preserves_flexlb_default(self):
++    def test_simulation_package_always_enables_navi_sched(self):
+         with patch.dict("os.environ", {}, clear=True):
+-            self.assertFalse(integration.navi_sched_enabled())
++            self.assertTrue(integration.navi_sched_enabled())
+
+         with patch.dict(
+-            "os.environ", {"RTP_LLM_MASTER_TYPE": "navi_sched"}, clear=True
++            "os.environ", {"RTP_LLM_MASTER_TYPE": "flexlb"}, clear=True
+         ):
+             self.assertTrue(integration.navi_sched_enabled())
+
+diff --git a/rtp_llm/server/test/navi_sched_simulation_adapter_test.py b/rtp_llm/server/test/navi_sched_simulation_adapter_test.py
+new file mode 100644
+index 000000000..eb6b2d7fe
+--- /dev/null
++++ b/rtp_llm/server/test/navi_sched_simulation_adapter_test.py
+@@ -0,0 +1,66 @@
++import asyncio
++import importlib
++from pathlib import Path
++import sys
++import types
++import unittest
++from types import SimpleNamespace
++from unittest.mock import patch
++
++
++class _FakeClient:
++    def __init__(self, **kwargs):
++        self.kwargs = kwargs
++
++
++class _FakeAdapter(types.ModuleType):
++    class NaviSchedAdapterConfig:
++        def __init__(self, **kwargs):
++            self.__dict__.update(kwargs)
++
++    def __init__(self):
++        super().__init__("navi_sched.adapters.rtp_llm")
++        self.client = None
++
++    def NaviSchedClient(self, **kwargs):
++        self.client = _FakeClient(**kwargs)
++        return self.client
++
++
++class _MasterVip:
++    domain = "master.example"
++    use_local = False
++
++    @staticmethod
++    def get_hosts(refresh=False):
++        return [SimpleNamespace(ip="10.0.0.1", port="8088")]
++
++
++class NaviSchedSimulationAdapterTest(unittest.TestCase):
++    def test_frontend_has_no_model_rpc_client(self):
++        source = (
++            Path(__file__).parents[1] / "backend_rpc_server_visitor.py"
++        ).read_text()
++        self.assertNotIn("ModelRpcClient(", source)
++
++    def test_client_always_uses_forward_and_master_port_plus_one(self):
++        module = importlib.import_module("rtp_llm.server.navi_sched_adapter")
++        adapter = _FakeAdapter()
++        with patch.object(module, "_load_adapter", return_value=adapter):
++            client = module.create_navi_sched_client(
++                SimpleNamespace(master_vip=_MasterVip())
++            )
++
++        self.assertIs(client, adapter.client)
++        self.assertTrue(client.kwargs["enable_agent_forward"])
++        self.assertEqual(
++            "10.0.0.1:8089",
++            client.kwargs["host_service"].master_vip.domain,
++        )
++        self.assertTrue(client.kwargs["host_service"].master_vip.use_local)
++        self.assertEqual("rtp_llm_master", client.kwargs["config"].master_biz_name)
++        self.assertEqual("rtp_llm_prefill", client.kwargs["config"].biz_name)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/rtp_llm/server/test/navi_sched_simulation_role_test.py b/rtp_llm/server/test/navi_sched_simulation_role_test.py
+new file mode 100644
+index 000000000..b1b3ecb40
+--- /dev/null
++++ b/rtp_llm/server/test/navi_sched_simulation_role_test.py
+@@ -0,0 +1,118 @@
++import importlib
++import http.client
++import json
++import socket
++import sys
++import threading
++import types
++import unittest
++from types import SimpleNamespace
++from unittest.mock import patch
++
++
++class _RoleType:
++    FRONTEND = 1
++    PREFILL = 2
++    PDFUSION = 3
++    DECODE = 4
++
++
++ops = types.ModuleType("rtp_llm.ops")
++ops.RoleType = _RoleType
++sys.modules.setdefault("rtp_llm.ops", ops)
++
++module = importlib.import_module("rtp_llm.navi_sched_simulate")
++
++
++class NaviSchedSimulationRoleTest(unittest.TestCase):
++    def test_role_dispatch(self):
++        for role, function_name in (
++            (_RoleType.FRONTEND, "_run_frontend"),
++            (_RoleType.PREFILL, "_run_prefill"),
++            (_RoleType.PDFUSION, "_run_master"),
++        ):
++            config = SimpleNamespace(
++                role_config=SimpleNamespace(role_type=role)
++            )
++            with patch.object(module, function_name) as selected:
++                module.run(config, "configure")
++                if function_name == "_run_frontend":
++                    selected.assert_called_once_with(config, "configure")
++                else:
++                    selected.assert_called_once_with(config)
++
++    def test_decode_is_not_supported(self):
++        config = SimpleNamespace(
++            role_config=SimpleNamespace(role_type=_RoleType.DECODE)
++        )
++        with self.assertRaisesRegex(ValueError, "unsupported"):
++            module.run(config, None)
++
++    def test_runtime_ports_are_fixed_to_http_plus_one(self):
++        options = module._runtime_options("role", 9001)
++        self.assertEqual(9001, options["gig"]["grpc_port"])
++
++    def test_master_heartbeat_protocol(self):
++        server = module.ThreadingHTTPServer(("127.0.0.1", 0), module._HealthHandler)
++        module._HealthHandler.master_address = "127.0.0.1:8088"
++        thread = threading.Thread(target=server.serve_forever)
++        thread.start()
++        try:
++            connection = http.client.HTTPConnection(
++                "127.0.0.1", server.server_port, timeout=1
++            )
++            connection.request("POST", "/rtp_llm/master/info", b"{}")
++            response = connection.getresponse()
++            payload = json.loads(response.read())
++            self.assertEqual(200, response.status)
++            self.assertEqual("127.0.0.1:8088", payload["real_master_host"])
++            self.assertEqual(0, payload["queue_length"])
++            self.assertTrue(payload["ready"])
++        finally:
++            server.shutdown()
++            server.server_close()
++            thread.join()
++
++    def test_prefill_attaches_simulated_agent(self):
++        calls = []
++
++        class Agent:
++            def __init__(self, *args, **kwargs):
++                calls.append((args, kwargs))
++
++            def stop(self):
++                calls.append("agent_stop")
++
++        class SimulateConfig:
++            pass
++
++        class Handle:
++            def stop(self):
++                calls.append("handle_stop")
++
++        core = SimpleNamespace(
++            NaviSchedSimulatedExecutionConfig=SimulateConfig,
++            init_simulated_agent=lambda agent, config: calls.append(
++                ("attach", agent, config)
++            ) or Handle(),
++        )
++        navi_sched = types.ModuleType("navi_sched")
++        navi_sched.NaviSchedAgent = Agent
++        navi_sched._navi_sched_core = core
++        config = SimpleNamespace(
++            server_config=SimpleNamespace(start_port=8088, ip="127.0.0.1")
++        )
++        with patch.dict(sys.modules, {"navi_sched": navi_sched}), patch.object(
++            module, "_serve_role", return_value=None
++        ) as serve:
++            module._run_prefill(config)
++
++        self.assertEqual("rtp_llm_prefill", calls[0][0][0])
++        self.assertEqual(8089, calls[0][1]["gig"]["grpc_port"])
++        self.assertEqual("attach", calls[1][0])
++        serve.assert_called_once_with(config, 8088)
++        self.assertEqual(["handle_stop", "agent_stop"], calls[-2:])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/rtp_llm/start_server.py b/rtp_llm/start_server.py
+index 888bd3145..eb57621d6 100644
+--- a/rtp_llm/start_server.py
++++ b/rtp_llm/start_server.py
+@@ -482,8 +482,9 @@ def _start_post_startup_jit_cache_writer(
+ def main():
+     _install_hot_hook_runtime("main")
+     py_env_configs: PyEnvConfigs = setup_args()
+-    setup_and_configure_server(py_env_configs)
+-    start_server(py_env_configs)
++    from rtp_llm.navi_sched_simulate import run
++
++    run(py_env_configs, setup_and_configure_server)
+
+
+ def start_server(py_env_configs: PyEnvConfigs):

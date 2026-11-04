@@ -1,4 +1,4 @@
-#include "aios/navi_sched/scheduler/CostSchedulerConfig.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/CostSchedulerConfig.h"
 
 #include <cmath>
 
@@ -29,4 +29,4 @@ bool CostSchedulerConfig::valid() const
            discreteRepairAlphaDecay < 1.0;
 }
 
-}
+} // namespace navi_sched

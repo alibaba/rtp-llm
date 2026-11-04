@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/resource/RouteModeR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/RouteModeR.h"
 #include "navi/engine/Kernel.h"
 #include "navi/rpc_server/NaviArpcRequestData.h"
 
@@ -23,4 +23,4 @@ private:
                       RouteModeR::RPC_REQUEST_NAME);
 };
 
-}
+} // namespace navi_sched

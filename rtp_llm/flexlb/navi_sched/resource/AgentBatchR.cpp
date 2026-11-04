@@ -1,6 +1,6 @@
-#include "aios/navi_sched/resource/AgentBatchR.h"
-#include "aios/navi_sched/data/NaviSchedRequestTrace.h"
-#include "aios/navi_sched/data/SummaryUtil.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentBatchR.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedRequestTrace.h"
+#include "rtp_llm/flexlb/navi_sched/data/SummaryUtil.h"
 #include "autil/TimeUtility.h"
 #include "navi/log/NaviLogger.h"
 
@@ -108,7 +108,7 @@ private:
     const navi::NaviObjectLogger &_logger;
 };
 
-}
+} // namespace
 
 const int64_t DEFAULT_BATCH_TIMEOUT_MS = 10;
 const int64_t DEFAULT_CLOSED_BATCH_KEEP_MS = 60 * 1000;
@@ -124,7 +124,6 @@ AgentBatchR::AgentBatchR(int64_t batchTimeoutMs, int64_t closedBatchKeepMs)
     : navi::ExternalResource(RESOURCE_ID, navi::RS_EXTERNAL)
     , _batchTimeoutMs(std::max<int64_t>(1, batchTimeoutMs))
     , _closedBatchKeepMs(std::max<int64_t>(_batchTimeoutMs, closedBatchKeepMs))
-    , _executionUtilizationEstimator(autil::TimeUtility::monotonicTimeUs())
 {
 }
 
@@ -227,6 +226,7 @@ bool AgentBatchR::addRequest(
                                                     acceptedFailureCallback);
                         batch->scheduleBatchId = batchId;
                         batch->firstRequestTimeUs = nowTimeUs;
+                        // Only the first request establishes this Agent-local deadline.
                         const auto waitMs = batchTimeoutMs > 0 ? batchTimeoutMs : _batchTimeoutMs;
                         batch->deadlineTimeUs = nowTimeUs + waitMs * 1000;
                     } else if (batch->expectedBatchSize != expectedBatchSize) {
@@ -257,6 +257,7 @@ bool AgentBatchR::addRequest(
         if (timedOutBatch) {
             logBatchTimeout(timedOutBatch);
         }
+        // Expire before accepting the next request, even if the timer is delayed.
         if (expiredReadyBatch) {
             runCallbackBatch(expiredReadyBatch);
             finishCallbackWork();
@@ -435,12 +436,9 @@ std::vector<AgentBatchR::ExecutionState> AgentBatchR::stop()
         callbackBatches.swap(_callbackBatches);
         readyBatches.swap(_readyBatches);
         runningBatches.swap(_runningBatches);
-        for (const auto &entry : readyBatches) finishUtilizationExecutionLocked(*entry.second);
-        for (const auto &entry : runningBatches) finishUtilizationExecutionLocked(*entry.second);
         _batchWaitingRequestCount = 0;
         _queuedBatchRequestCount = 0;
         _runningRequestCount = 0;
-        refreshExecutionUtilizationLocked();
         updateReadyWithoutRunningLocked(nowTimeUs);
 
         const auto collectAborted = [&](const auto &batches) {
@@ -511,7 +509,6 @@ bool AgentBatchR::startBatch(int64_t batchId, const std::vector<uint64_t> &reque
         _executionBusyStartTimeUs = batch->startTimeUs;
     }
     _runningBatches.emplace(batchId, batch);
-    beginUtilizationExecutionLocked(*batch);
     _readyBatches.erase(it);
     _queuedBatchRequestCount -= batch->requestIdSet.size();
     _runningRequestCount += static_cast<int32_t>(batch->requestIdSet.size());
@@ -764,7 +761,6 @@ bool AgentBatchR::finishBatch(int64_t batchId,
         }
     }
     auto batchLatencyMs = std::max<int64_t>(0, nowTimeUs - batch->startTimeUs) / 1000.0;
-    finishUtilizationExecutionLocked(*batch);
     _runningBatches.erase(it);
     _runningRequestCount = std::max<int32_t>(
         0, _runningRequestCount - static_cast<int32_t>(batch->requestIdSet.size()));
@@ -780,6 +776,8 @@ bool AgentBatchR::finishBatch(int64_t batchId,
         state.requestIds.emplace_back(request.requestId);
     }
     state.localBatch = makeLocalBatchInfo(*batch);
+    // Preparation runs before startBatch. Reclassify that interval without
+    // counting it twice or making queue time negative after a clock adjustment.
     const auto preparationMs =
         std::min(nativePreparationMs, batch->backendQueueLatencyMs);
     state.batchLatencyMs = batchLatencyMs + preparationMs;
@@ -936,9 +934,6 @@ bool AgentBatchR::abortBatchRequests(
     batch->requestStats = std::move(remainingRequests);
 
     const auto abortedRequestCount = static_cast<int32_t>(abortedIds.size());
-    if (batch->executionBusy) {
-        _utilizationRunningRequests -= abortedRequestCount;
-    }
     if (readyIt != _readyBatches.end()) {
         _queuedBatchRequestCount =
             std::max<int32_t>(0, _queuedBatchRequestCount - abortedRequestCount);
@@ -991,7 +986,6 @@ bool AgentBatchR::abortBatch(int64_t batchId, ExecutionState &state)
         }
     }
     const auto nowTimeUs = autil::TimeUtility::currentTime();
-    if (batch) finishUtilizationExecutionLocked(*batch);
     updateReadyWithoutRunningLocked(nowTimeUs);
     _abnormalBatchFinishCount.fetch_add(1, std::memory_order_relaxed);
     makeExecutionState(state);
@@ -1458,21 +1452,13 @@ int64_t AgentBatchR::getExecutionBusyTimeUs(int64_t currentTimeUs) const
     return busyTimeUs;
 }
 
-bool AgentBatchR::beginBackendExecution(int64_t eventTimeUs, int32_t requestCount)
+bool AgentBatchR::beginBackendExecution(int64_t eventTimeUs)
 {
     if (eventTimeUs <= 0) {
         eventTimeUs = autil::TimeUtility::monotonicTimeUs();
     }
     autil::ScopedLock lock(_backendExecutionLock);
-    if (requestCount > 0) {
-        const auto previous = _backendExecutionCapacity.load(std::memory_order_relaxed);
-        _backendExecutionCapacity.store(previous > 0 ? previous + 0.1 * (requestCount - previous)
-                                                     : requestCount, std::memory_order_relaxed);
-    }
     _backendExecutionObserved = true;
-    _executionUtilizationEstimator.begin(eventTimeUs);
-    NAVI_LOG(INFO, "[navi-execution-utilization] phase=step_begin mono_us=%ld active=%lu",
-             eventTimeUs, _executionUtilizationEstimator.active());
     if (0 == _activeBackendExecutionCount++) {
         _backendExecutionBusyStartTimeUs = eventTimeUs;
     }
@@ -1488,18 +1474,6 @@ bool AgentBatchR::endBackendExecution(int64_t eventTimeUs)
     if (0 == _activeBackendExecutionCount) {
         return false;
     }
-    _executionUtilizationEstimator.end(eventTimeUs);
-    _backendExecutionUtilization->store(_executionUtilizationEstimator.value(), std::memory_order_relaxed);
-    refreshExecutionUtilizationLocked();
-    NAVI_LOG(INFO, "[navi-execution-utilization] phase=step_end mono_us=%ld "
-             "sample_busy_us=%ld sample_elapsed_us=%ld active=%lu busy_ema=%.9f "
-             "capacity_ema=%.6f gpu_ready_queued=%d effective=%.9f",
-             eventTimeUs, _executionUtilizationEstimator.sampleBusyUs(),
-             _executionUtilizationEstimator.sampleElapsedUs(),
-             _executionUtilizationEstimator.active(), _executionUtilizationEstimator.value(),
-             _backendExecutionCapacity.load(std::memory_order_relaxed),
-             _backendWaitingRequests.load(std::memory_order_relaxed),
-             _executionUtilization->load(std::memory_order_relaxed));
     if (0 == --_activeBackendExecutionCount) {
         _backendExecutionBusyTimeUs +=
             std::max<int64_t>(0, eventTimeUs - _backendExecutionBusyStartTimeUs);
@@ -1545,18 +1519,6 @@ navi::SummaryErrorCode AgentBatchR::getSummary(const std::string &query,
 {
     autil::ScopedLock lock(_lock);
     auto overview = builder.newTable("NaviSchedAgentBatchOverview");
-    {
-        autil::ScopedLock backendLock(_backendExecutionLock);
-        TABLE_ADD_COLUMN_VALUE(overview, "execution_busy_ema", _executionUtilizationEstimator.value());
-        TABLE_ADD_COLUMN_VALUE(overview, "execution_active_count", _executionUtilizationEstimator.active());
-        TABLE_ADD_COLUMN_VALUE(overview, "execution_sample_busy_us", _executionUtilizationEstimator.sampleBusyUs());
-        TABLE_ADD_COLUMN_VALUE(overview, "execution_sample_elapsed_us", _executionUtilizationEstimator.sampleElapsedUs());
-    }
-    TABLE_ADD_COLUMN_VALUE(overview, "execution_capacity_ema", _backendExecutionCapacity.load(std::memory_order_relaxed));
-    TABLE_ADD_COLUMN_VALUE(overview, "gpu_ready_queued_requests", _backendWaitingRequests.load(std::memory_order_relaxed));
-    TABLE_ADD_COLUMN_VALUE(overview, "execution_running_requests", _utilizationRunningRequests);
-    TABLE_ADD_COLUMN_VALUE(overview, "execution_utilization",
-                           _executionUtilization->load(std::memory_order_relaxed));
     TABLE_ADD_COLUMN_VALUE(overview, "batch_timeout_ms", _batchTimeoutMs);
     TABLE_ADD_COLUMN_VALUE(overview, "pending_batch_count", _callbackBatches.size());
     TABLE_ADD_COLUMN_VALUE(overview, "callback_failure_count",
@@ -1817,6 +1779,7 @@ void AgentBatchR::makeCallbackBatchReady(int64_t groupBatchId, CallbackBatchPtr 
     _callbackBatches.erase(it);
     if (timedOut) {
         batch->timeoutDetectedTimeUs = nowTimeUs;
+        // Freeze timeout counts before cancellation can prune the ready batch.
         batch->timeoutReceivedRequestCount = batch->requestIdSet.size();
         _timeoutBatchCount.fetch_add(1, std::memory_order_relaxed);
         const auto missing = std::max<int64_t>(
@@ -1878,68 +1841,11 @@ bool AgentBatchR::runCallbackBatch(const CallbackBatchPtr &callbackBatch)
 
 void AgentBatchR::makeExecutionState(ExecutionState &state) const
 {
-    refreshExecutionUtilizationLocked();
     state = ExecutionState();
     state.batchWaitingRequests = _batchWaitingRequestCount;
     state.queuedBatchRequests = _queuedBatchRequestCount;
     state.runningRequests = _runningRequestCount;
     state.eventTimeUs = autil::TimeUtility::currentTime();
-}
-
-AgentBatchR::ExecutionUtilizationSnapshot AgentBatchR::getExecutionUtilizationSnapshot() const
-{
-    autil::ScopedLock lock(_lock);
-    autil::ScopedLock backendLock(_backendExecutionLock);
-    ExecutionUtilizationSnapshot snapshot;
-    snapshot.busyEma = _executionUtilizationEstimator.value();
-    snapshot.activeCount = _executionUtilizationEstimator.active();
-    snapshot.sampleBusyUs = _executionUtilizationEstimator.sampleBusyUs();
-    snapshot.sampleElapsedUs = _executionUtilizationEstimator.sampleElapsedUs();
-    snapshot.runningRequests = _utilizationRunningRequests;
-    const auto total = _batchWaitingRequestCount + _queuedBatchRequestCount + _runningRequestCount;
-    snapshot.queuedRequests = std::max<int32_t>(0, total - _utilizationRunningRequests);
-    snapshot.utilization = _executionUtilization->load(std::memory_order_relaxed);
-    snapshot.executionCapacity = _backendExecutionCapacity.load(std::memory_order_relaxed);
-    snapshot.executionCapacityDenominator = snapshot.executionCapacity > 0
-        ? std::max(snapshot.executionCapacity, ExecutionUtilizationController::MIN_EXECUTION_CAPACITY) : 0.0;
-    snapshot.gpuReadyQueuedRequests = _backendWaitingRequests.load(std::memory_order_relaxed);
-    return snapshot;
-}
-
-bool AgentBatchR::beginBatchExecution(int64_t batchId)
-{
-    autil::ScopedLock lock(_lock);
-    return _readyBatches.find(batchId) != _readyBatches.end();
-}
-
-void AgentBatchR::beginUtilizationExecutionLocked(CallbackBatch &batch)
-{
-    if (batch.executionBusy) return;
-    batch.executionBusy = true;
-    _utilizationRunningRequests += static_cast<int32_t>(batch.requestIdSet.size());
-}
-
-void AgentBatchR::finishUtilizationExecutionLocked(CallbackBatch &batch)
-{
-    if (!batch.executionBusy) return;
-    batch.executionBusy = false;
-    _utilizationRunningRequests -= static_cast<int32_t>(batch.requestIdSet.size());
-}
-
-void AgentBatchR::refreshExecutionUtilizationLocked() const
-{
-    _executionUtilization->store(ExecutionUtilizationController::effectiveUtilization(
-        _backendExecutionUtilization->load(std::memory_order_relaxed),
-        _backendExecutionCapacity.load(std::memory_order_relaxed),
-        _backendWaitingRequests.load(std::memory_order_relaxed)),
-        std::memory_order_relaxed);
-}
-
-void AgentBatchR::updateBackendWaitingRequests(int32_t requestCount, int32_t runningRequests)
-{
-    if (requestCount < 0 || runningRequests < 0) return;
-    _backendWaitingRequests.store(requestCount, std::memory_order_relaxed);
-    refreshExecutionUtilizationLocked();
 }
 
 void AgentBatchR::updateReadyWithoutRunningLocked(int64_t nowTimeUs)
@@ -1964,4 +1870,4 @@ void AgentBatchR::updateReadyWithoutRunningLocked(int64_t nowTimeUs)
 
 REGISTER_RESOURCE(AgentBatchR);
 
-}
+} // namespace navi_sched

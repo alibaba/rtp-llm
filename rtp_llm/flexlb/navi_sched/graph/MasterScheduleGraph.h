@@ -53,4 +53,4 @@ private:
 
 NAVI_TYPEDEF_PTR(MasterScheduleGraph);
 
-}
+} // namespace navi_sched

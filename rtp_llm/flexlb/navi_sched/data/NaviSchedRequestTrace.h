@@ -30,4 +30,4 @@ inline bool traceRequestBatch(int64_t batchId)
     return modulus > 0 && batchId > 0 && static_cast<uint64_t>(batchId) % modulus == 0;
 }
 
-}
+} // namespace navi_sched

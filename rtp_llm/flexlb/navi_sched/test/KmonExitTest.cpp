@@ -1,4 +1,4 @@
-#include "aios/navi_sched/service/NaviSchedRole.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedRole.h"
 #include "kmonitor/client/KMonitorFactory.h"
 #include "unittest/unittest.h"
 
@@ -36,4 +36,4 @@ TEST(KmonExitTest, testOwnedKmonShutsDownDuringProcessExit)
     ASSERT_TRUE(kmonitor::KMonitorFactory::IsStarted());
 }
 
-}
+} // namespace navi_sched

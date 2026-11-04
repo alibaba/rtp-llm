@@ -1,0 +1,20 @@
+syntax = "proto3";
+import "arpc/proto/rpc_extensions.proto";
+package navi;
+
+option cc_generic_services = true;
+
+message NaviStateRequestDef {
+    bytes request = 1;
+}
+
+message NaviStateResponseDef {
+    bytes response = 1;
+}
+
+service NaviStateService {
+    option (arpc.global_service_id) = 17;
+    rpc navi(NaviStateRequestDef) returns (NaviStateResponseDef) {
+        option(arpc.local_method_id) = 17;
+    };
+}

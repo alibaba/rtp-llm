@@ -1,4 +1,4 @@
-#include "aios/navi_sched/data/MasterSchedulerConfigToAgentData.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterSchedulerConfigToAgentData.h"
 
 #include "navi/engine/Type.h"
 
@@ -82,4 +82,4 @@ public:
 
 REGISTER_TYPE(MasterSchedulerConfigToAgentType);
 
-}
+} // namespace navi_sched

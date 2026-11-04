@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/data/NaviSchedLatencySample.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedLatencySample.h"
 
 #include <memory>
 
@@ -25,4 +25,4 @@ struct NaviSchedLatencyPrediction {
 using NaviSchedLatencyPredictionConstPtr =
     std::shared_ptr<const NaviSchedLatencyPrediction>;
 
-}
+} // namespace navi_sched

@@ -44,4 +44,4 @@ public:
 
 NAVI_TYPEDEF_PTR(MasterPendingCacheSyncToAgentData);
 
-}
+} // namespace navi_sched

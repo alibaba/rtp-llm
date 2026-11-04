@@ -1,4 +1,4 @@
-#include "aios/navi_sched/adapters/rtp_llm/RtpLLMAdapter.h"
+#include "rtp_llm/flexlb/navi_sched/adapters/rtp_llm/RtpLLMAdapter.h"
 
 namespace navi_sched {
 
@@ -18,4 +18,4 @@ void verifyRtpLLMAdapterPublicApiCompile()
     (void)startBatchesAt;
 }
 
-}
+} // namespace navi_sched

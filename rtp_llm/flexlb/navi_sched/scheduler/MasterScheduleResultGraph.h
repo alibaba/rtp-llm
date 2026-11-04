@@ -1,7 +1,7 @@
 #pragma once
 
-#include "aios/navi_sched/scheduler/MasterScheduleContextKernel.h"
-#include "aios/navi_sched/scheduler/MasterScheduleContextData.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/MasterScheduleContextKernel.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/MasterScheduleContextData.h"
 
 namespace navi_sched {
 
@@ -91,6 +91,7 @@ private:
 class MasterScheduleResultBarrierKernel : public navi::Kernel {
 public:
     static const std::string KERNEL_ID;
+    // Join before draining the client graphs awakened by response delivery.
     bool isExpensive() const override { return false; }
     void def(navi::KernelDefBuilder &builder) const override;
     bool config(navi::KernelConfigContext &ctx) override;
@@ -100,4 +101,4 @@ private:
     int32_t _phase = 1;
 };
 
-}
+} // namespace navi_sched

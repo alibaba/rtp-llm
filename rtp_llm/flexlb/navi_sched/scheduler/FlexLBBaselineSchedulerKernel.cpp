@@ -1,6 +1,6 @@
-#include "aios/navi_sched/scheduler/FlexLBBaselineSchedulerKernel.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/FlexLBBaselineSchedulerKernel.h"
 
-#include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/NonLinearPrefillModelR.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -49,7 +49,7 @@ int64_t estimateSingleRequestScore(const NaviSchedScheduleContext &context,
                : 0;
 }
 
-}
+} // namespace
 
 const std::string FlexLBBaselineSchedulerKernel::KERNEL_ID =
     "navi_sched.flexlb_baseline_scheduler_k";
@@ -214,4 +214,4 @@ uint64_t FlexLBBaselineSchedulerKernel::getNodeRank(
 
 REGISTER_KERNEL(FlexLBBaselineSchedulerKernel);
 
-}
+} // namespace navi_sched

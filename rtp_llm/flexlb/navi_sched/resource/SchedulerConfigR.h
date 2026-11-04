@@ -1,8 +1,7 @@
 #pragma once
 
-#include "aios/navi_sched/resource/AgentSchedulerConfigR.h"
-#include "aios/navi_sched/scheduler/CostSchedulerConfig.h"
-#include "aios/navi_sched/scheduler/ExecutionUtilizationController.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentSchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/CostSchedulerConfig.h"
 #include "autil/Lock.h"
 #include "navi/engine/AsyncPipe.h"
 #include "navi/engine/Data.h"
@@ -57,8 +56,6 @@ public:
         int64_t maxWaitScheduleTimeMs = 30;
         int64_t queueOverloadStartCycleMultiplier = 10;
         int64_t queueOverloadFullCycleMultiplier = 30;
-        std::string overloadControlStrategy = "execution_utilization";
-        ExecutionUtilizationController::Config executionUtilization;
         int64_t admissionTimeoutMs = 1000;
         AgentSchedulerConfig agent;
     };
@@ -217,4 +214,4 @@ private:
 
 NAVI_TYPEDEF_PTR(SchedulerConfigR);
 
-}
+} // namespace navi_sched

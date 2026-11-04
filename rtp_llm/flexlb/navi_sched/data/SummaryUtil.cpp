@@ -1,4 +1,4 @@
-#include "aios/navi_sched/data/SummaryUtil.h"
+#include "rtp_llm/flexlb/navi_sched/data/SummaryUtil.h"
 #include <algorithm>
 #include <cstdlib>
 
@@ -22,4 +22,4 @@ size_t SummaryUtil::getSummaryLimit(int32_t level, size_t size)
     return level >= 3 ? size : std::min<size_t>(size, 64);
 }
 
-}
+} // namespace navi_sched

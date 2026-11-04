@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/data/NaviSchedLatencySample.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedLatencySample.h"
 #include <cstdint>
 #include <deque>
 #include <map>
@@ -82,4 +82,4 @@ private:
     uint64_t _randomSeed = 0;
 };
 
-}
+} // namespace navi_sched

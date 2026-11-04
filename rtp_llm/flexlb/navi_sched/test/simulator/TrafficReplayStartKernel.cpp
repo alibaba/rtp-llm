@@ -1,6 +1,6 @@
-#include "aios/navi_sched/test/simulator/TrafficReplayR.h"
-#include "aios/navi_sched/test/simulator/TrafficReplayStartData.h"
-#include "aios/navi_sched/test/simulator/TrafficReplayStartR.h"
+#include "rtp_llm/flexlb/navi_sched/test/simulator/TrafficReplayR.h"
+#include "rtp_llm/flexlb/navi_sched/test/simulator/TrafficReplayStartData.h"
+#include "rtp_llm/flexlb/navi_sched/test/simulator/TrafficReplayStartR.h"
 #include "navi/engine/Kernel.h"
 
 namespace navi_sched::test {
@@ -100,4 +100,4 @@ navi::ErrorCode TrafficReplayStartResultKernel::compute(navi::KernelComputeConte
 REGISTER_KERNEL(TrafficReplayStartKernel);
 REGISTER_KERNEL(TrafficReplayStartResultKernel);
 
-}
+} // namespace navi_sched::test

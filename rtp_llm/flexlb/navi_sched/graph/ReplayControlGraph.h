@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/resource/ReplayClientR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/ReplayClientR.h"
 #include "autil/Log.h"
 #include "navi/engine/Navi.h"
 
@@ -50,4 +50,4 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
-}
+} // namespace navi_sched

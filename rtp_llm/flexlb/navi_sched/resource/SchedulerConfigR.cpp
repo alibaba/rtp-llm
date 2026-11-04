@@ -1,8 +1,8 @@
-#include "aios/navi_sched/resource/SchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/SchedulerConfigR.h"
 
-#include "aios/navi_sched/kernel/SchedulerConfigKernel.h"
-#include "aios/navi_sched/resource/LatencyResidualModel.h"
-#include "aios/navi_sched/proto/SchedulerConfig.pb.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/SchedulerConfigKernel.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyResidualModel.h"
+#include "rtp_llm/flexlb/navi_sched/proto/SchedulerConfig.pb.h"
 #include "autil/legacy/fast_jsonizable_dec.h"
 #include "autil/TimeUtility.h"
 #include "navi/builder/GraphBuilder.h"
@@ -98,7 +98,7 @@ bool hasNonAgentConfigFields(const std::string &configJson,
     }
     return false;
 }
-}
+} // namespace
 
 SchedulerConfigResponseData::SchedulerConfigResponseData()
     : navi::Data(SCHEDULER_CONFIG_RESPONSE_TYPE_ID)
@@ -111,14 +111,6 @@ const std::string SchedulerConfigR::RPC_REQUEST_NAME =
 
 void SchedulerConfigR::Config::Jsonize(JsonWrapper &json)
 {
-    if (json.GetMode() == autil::legacy::Jsonizable::FROM_JSON) {
-        const auto fields = json.GetMap();
-        if (fields.find("overload_control_strategy") == fields.end() &&
-            (fields.find("queue_overload_start_cycle_multiplier") != fields.end() ||
-             fields.find("queue_overload_full_cycle_multiplier") != fields.end())) {
-            overloadControlStrategy = "latency";
-        }
-    }
     cost.Jsonize(json);
     json.Jsonize("max_wait_schedule_count", maxWaitScheduleCount,
                  maxWaitScheduleCount);
@@ -132,19 +124,12 @@ void SchedulerConfigR::Config::Jsonize(JsonWrapper &json)
                  queueOverloadFullCycleMultiplier);
     json.Jsonize("admission_timeout_ms", admissionTimeoutMs,
                  admissionTimeoutMs);
-    json.Jsonize("overload_control_strategy", overloadControlStrategy, overloadControlStrategy);
-    json.Jsonize("execution_utilization_global_scaling", executionUtilization.globalScaling, executionUtilization.globalScaling);
-    json.Jsonize("execution_utilization_target", executionUtilization.target, executionUtilization.target);
-    json.Jsonize("execution_utilization_kp", executionUtilization.proportionalGain, executionUtilization.proportionalGain);
-    json.Jsonize("execution_utilization_ki_per_second", executionUtilization.integralGainPerSecond, executionUtilization.integralGainPerSecond);
     agent.Jsonize(json);
 }
 
 bool SchedulerConfigR::Config::valid() const
 {
-    if ((overloadControlStrategy != "latency" && overloadControlStrategy != "execution_utilization") ||
-        !executionUtilization.valid() ||
-        !cost.valid() || maxWaitScheduleCount == 0 || maxWaitScheduleTimeMs < 10 ||
+    if (!cost.valid() || maxWaitScheduleCount == 0 || maxWaitScheduleTimeMs < 10 ||
         maxWaitScheduleTimeMs > std::numeric_limits<int64_t>::max() / 1000 ||
         queueOverloadStartCycleMultiplier < 0 ||
         queueOverloadFullCycleMultiplier < 0 || admissionTimeoutMs <= 0 ||
@@ -536,6 +521,8 @@ bool SchedulerConfigR::processRequest(
             target.expectedJson = AgentSchedulerConfigR::toJson(expected);
             target.expectedHash =
                 AgentSchedulerConfigR::hashJson(target.expectedJson);
+            // A reported hash predates any in-flight catch-up. Require a fresh
+            // ACK even when the new desired config equals that reported hash.
             if (!hasPendingCatchup && target.expectedHash == subscriber.configHash) {
                 target.completed = true;
             } else {
@@ -557,6 +544,7 @@ bool SchedulerConfigR::processRequest(
     }
 
     for (const auto &pipe : notificationPipes) {
+        // Keep one consumable signal so collectors need not poll on every Agent report.
         if (navi::EC_NONE != pipe->setDataOverride(nullptr, true)) {
             NAVI_KERNEL_LOG(WARN,
                             "notify Agent scheduler config subscriber failed");
@@ -989,11 +977,6 @@ bool SchedulerConfigR::applyPatch(const Config &current,
         "max_wait_schedule_time_ms",
         "queue_overload_start_cycle_multiplier",
         "queue_overload_full_cycle_multiplier",
-        "overload_control_strategy",
-        "execution_utilization_global_scaling",
-        "execution_utilization_target",
-        "execution_utilization_kp",
-        "execution_utilization_ki_per_second",
         "admission_timeout_ms",
         "batch_timeout_ms",
         "closed_batch_keep_ms",
@@ -1036,11 +1019,6 @@ bool SchedulerConfigR::applyPatch(const Config &current,
             autil::legacy::json::ParseJson(toJson(current)));
         for (auto &[name, value] : patch) {
             merged[name] = std::move(value);
-        }
-        if (patch.find("overload_control_strategy") == patch.end() &&
-            (patch.find("queue_overload_start_cycle_multiplier") != patch.end() ||
-             patch.find("queue_overload_full_cycle_multiplier") != patch.end())) {
-            merged["overload_control_strategy"] = std::string("latency");
         }
         updated = current;
         autil::legacy::FromJsonString(
@@ -1192,4 +1170,4 @@ std::string SchedulerConfigR::toAgentJson(const Config &config)
 
 REGISTER_RESOURCE(SchedulerConfigR);
 
-}
+} // namespace navi_sched

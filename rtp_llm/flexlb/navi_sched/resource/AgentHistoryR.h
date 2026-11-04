@@ -1,10 +1,10 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedCommon.h"
-#include "aios/navi_sched/data/NaviSchedLatencySample.h"
-#include "aios/navi_sched/resource/LatencyHistorySampler.h"
-#include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
-#include "aios/navi_sched/resource/AgentSchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedCommon.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedLatencySample.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyHistorySampler.h"
+#include "rtp_llm/flexlb/navi_sched/resource/NonLinearPrefillModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentSchedulerConfigR.h"
 #include "navi/engine/Resource.h"
 #include "autil/Lock.h"
 #include <memory>
@@ -104,4 +104,4 @@ private:
 
 NAVI_TYPEDEF_PTR(AgentHistoryR);
 
-}
+} // namespace navi_sched

@@ -1,6 +1,6 @@
-#include "aios/navi_sched/data/LatencyModelGlobalData.h"
+#include "rtp_llm/flexlb/navi_sched/data/LatencyModelGlobalData.h"
 
-#include "aios/navi_sched/data/AgentLatencyToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentLatencyToMasterData.h"
 
 #include <cmath>
 
@@ -33,4 +33,4 @@ void LatencyModelGlobalData::deserialize(autil::DataBuffer &dataBuffer)
     dataBuffer.read(globalZeroPoint);
 }
 
-}
+} // namespace navi_sched

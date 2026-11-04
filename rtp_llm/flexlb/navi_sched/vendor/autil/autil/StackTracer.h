@@ -1,0 +1,98 @@
+#pragma once
+
+#include <cstdint>
+#include <memory>
+#include <stdio.h>
+#include <string>
+#include <unordered_map>
+
+#include "autil/CommonMacros.h"
+#include "autil/EnvUtil.h"
+#include "autil/Lock.h"
+#include "autil/Log.h"
+
+namespace autil {
+
+#define STACK_TRACER_LOG(level, format, args...)                                                                       \
+    if (autil::StackTracer::UsingStackTracerLog()) {                                                                   \
+        AUTIL_LOG(level, "StackTracerId[%lu], " #format, autil::StackTracer::getInstance()->getTraceId(), ##args);     \
+    }
+
+#define DECLARE_STACK_TRACER_FILE(fileName)                                                                            \
+    std::string envStr = autil::EnvUtil::getEnv("STACK_TRACER_LOG");                                                   \
+    if (envStr == "true") {                                                                                            \
+        size_t maxDepth = 10;                                                                                          \
+        if (autil::EnvUtil::getEnvWithoutDefault("STACK_TRACER_MAX_DEPTH", maxDepth)) {                                \
+            autil::StackTracer::getInstance()->setMaxDepth(maxDepth);                                                  \
+        }                                                                                                              \
+        autil::StackTracer::EnableStackTracerLog();                                                                    \
+        std::string fileNameString = fileName;                                                                         \
+        if (!fileNameString.empty()) {                                                                                 \
+            fileNameString += "." + autil::StringUtil::toString((int64_t)getpid());                                    \
+            autil::StackTracer::getInstance()->initFile(fileNameString);                                               \
+        }                                                                                                              \
+    }
+
+class StackTracer {
+public:
+    class Creator {
+    public:
+        static StackTracer *create() {
+            StackTracer *ptr = new StackTracer();
+            static std::shared_ptr<StackTracer> destroyer(ptr);
+            return ptr;
+        }
+    };
+
+public:
+    StackTracer() : _maxDepth(15), _fp(NULL) {}
+    ~StackTracer() {
+        if (_fp) {
+            fclose(_fp);
+        }
+    }
+
+private:
+    StackTracer(const StackTracer &);
+    StackTracer &operator=(const StackTracer &);
+
+public:
+    static StackTracer *getInstance() {
+        if (unlikely(!ptr)) {
+            ScopedLock sl(gLock);
+            if (!ptr) {
+                ptr = Creator::create();
+            }
+        }
+        return const_cast<StackTracer *>(ptr);
+    }
+
+    size_t getTraceId() const;
+    void setMaxDepth(size_t maxDepth);
+    bool initFile(const std::string &fileName);
+
+    static bool UsingStackTracerLog() { return mUseStackTracerLog; }
+
+    static void EnableStackTracerLog() { mUseStackTracerLog = true; }
+
+private:
+    std::string getSubString(const std::string &str, char begin, char end) const {
+        size_t startPos = str.find(begin);
+        size_t endPos = str.find(end);
+        return str.substr(startPos + 1, endPos - startPos - 1);
+    }
+
+private:
+    volatile size_t _maxDepth;
+    mutable std::unordered_map<std::string, int32_t> _traceIdMap;
+    mutable ThreadMutex _lock;
+    FILE *_fp;
+
+    static bool mUseStackTracerLog;
+    static StackTracer *ptr;
+    static RecursiveThreadMutex gLock;
+};
+
+/////////////////////////////////////////////////////////////
+
+} // namespace autil

@@ -1,8 +1,8 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedScheduleData.h"
-#include "aios/navi_sched/resource/MasterStateR.h"
-#include "aios/navi_sched/service/NaviSchedRole.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedScheduleData.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterStateR.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedRole.h"
 #include "autil/Log.h"
 #include <map>
 #include <memory>
@@ -84,4 +84,4 @@ private:
         _lastValidationStats;
 };
 
-}
+} // namespace navi_sched

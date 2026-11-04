@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedScheduleData.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedScheduleData.h"
 #include <autil/DataBuffer.h>
 #include "navi/common.h"
 
@@ -20,4 +20,4 @@ public:
 
 NAVI_TYPEDEF_PTR(AgentControlToMasterData);
 
-}
+} // namespace navi_sched

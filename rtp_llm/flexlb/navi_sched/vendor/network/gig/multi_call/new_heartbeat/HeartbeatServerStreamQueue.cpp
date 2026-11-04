@@ -1,0 +1,152 @@
+#include "multi_call/new_heartbeat/HeartbeatServerStreamQueue.h"
+
+using namespace std;
+
+namespace multi_call {
+AUTIL_LOG_SETUP(multi_call, HeartbeatServerStreamQueue);
+
+HeartbeatServerStreamQueue::HeartbeatServerStreamQueue(size_t id) : _id(id), _run(true) {
+}
+
+HeartbeatServerStreamQueue::~HeartbeatServerStreamQueue() {
+    stop();
+}
+
+bool HeartbeatServerStreamQueue::init() {
+    auto threadName = "GigServerHB" + std::to_string(_id);
+    auto thread = autil::Thread::createThread(std::bind(&HeartbeatServerStreamQueue::flush, this),
+                                              threadName);
+    if (!thread) {
+        AUTIL_LOG(ERROR, "create heartbeat thread [%lu] failed", _id);
+        return false;
+    }
+    _thread = thread;
+    return true;
+}
+
+void HeartbeatServerStreamQueue::stop() {
+    {
+        autil::ScopedLock lock(_threadCond);
+        _run = false;
+    }
+    notify();
+    _thread.reset();
+    auto streamMapPtr = getStreamMap();
+    if (!streamMapPtr) {
+        return;
+    }
+    const auto &streamMap = *streamMapPtr;
+    std::vector<int64_t> streamVec;
+    for (const auto &pair : streamMap) {
+        auto clientId = pair.first;
+        streamVec.push_back(clientId);
+    }
+    removeStream(streamVec);
+}
+
+void HeartbeatServerStreamQueue::notify() {
+    autil::ScopedLock lock(_threadCond);
+    _threadCond.signal();
+}
+
+void HeartbeatServerStreamQueue::flush() {
+    while (true) {
+        {
+            autil::ScopedLock lock(_threadCond);
+            if (!_run) {
+                break;
+            }
+            _threadCond.wait();
+        }
+        if (!_run) {
+            break;
+        }
+        doFlush();
+    }
+}
+
+void HeartbeatServerStreamQueue::doFlush() {
+    auto streamMapPtr = getStreamMap();
+    if (!streamMapPtr) {
+        return;
+    }
+    const auto &streamMap = *streamMapPtr;
+    std::vector<int64_t> failedStreamVec;
+    for (const auto &pair : streamMap) {
+        auto clientId = pair.first;
+        const auto &stream = pair.second;
+        if (!stream->flush(true)) {
+            failedStreamVec.push_back(clientId);
+        }
+    }
+    removeStream(failedStreamVec);
+}
+
+HeartbeatServerStreamMapPtr HeartbeatServerStreamQueue::getStreamMap() const {
+    autil::ScopedLock lock(_streamMutex);
+    return _streamMap;
+}
+
+void HeartbeatServerStreamQueue::setStreamMap(const HeartbeatServerStreamMapPtr &newMap) {
+    autil::ScopedLock lock(_streamMutex);
+    _streamMap = newMap;
+}
+
+void HeartbeatServerStreamQueue::addStream(const HeartbeatServerStreamPtr &stream) {
+    auto oldMap = getStreamMap();
+    auto newMap = std::make_shared<HeartbeatServerStreamMap>();
+    if (oldMap) {
+        for (const auto &pair : *oldMap) {
+            const auto &stream = pair.second;
+            if (stream->cancelled()) {
+                stream->stop();
+                continue;
+            }
+            newMap->emplace(pair);
+        }
+    }
+    newMap->emplace(stream->getClientId(), stream);
+    setStreamMap(newMap);
+}
+
+void HeartbeatServerStreamQueue::removeStream(const std::vector<int64_t> &streamVec) {
+    auto oldMap = getStreamMap();
+    HeartbeatServerStreamMapPtr newMap;
+    if (oldMap) {
+        newMap = std::make_shared<HeartbeatServerStreamMap>(*oldMap);
+    } else {
+        newMap = std::make_shared<HeartbeatServerStreamMap>();
+    }
+    for (const auto &clientId : streamVec) {
+        auto it = newMap->find(clientId);
+        if (it == newMap->end()) {
+            continue;
+        }
+        const auto &stream = it->second;
+        stream->stop();
+        newMap->erase(it);
+    }
+    setStreamMap(newMap);
+}
+
+bool HeartbeatServerStreamQueue::isEmpty() const {
+    auto streamMapPtr = getStreamMap();
+    return (!streamMapPtr) || streamMapPtr->empty();
+}
+
+bool HeartbeatServerStreamQueue::isAllReplicaStopped(SignatureTy sig) const {
+    auto streamMapPtr = getStreamMap();
+    if (!streamMapPtr) {
+        return true;
+    }
+    const auto &streamMap = *streamMapPtr;
+    for (const auto &pair : streamMap) {
+        const auto &stream = pair.second;
+        if (!stream->isAllReplicaStopped(sig)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace multi_call

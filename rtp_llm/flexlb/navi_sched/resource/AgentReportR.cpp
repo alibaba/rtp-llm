@@ -1,13 +1,13 @@
-#include "aios/navi_sched/resource/AgentReportR.h"
-#include "aios/navi_sched/data/AgentCacheToMasterData.h"
-#include "aios/navi_sched/data/AgentControlToMasterData.h"
-#include "aios/navi_sched/data/AgentLatencyToMasterData.h"
-#include "aios/navi_sched/data/AgentRequestEventToMasterData.h"
-#include "aios/navi_sched/data/BlockHashUtil.h"
-#include "aios/navi_sched/data/NaviSchedAgentEvent.h"
-#include "aios/navi_sched/data/SummaryUtil.h"
-#include "aios/navi_sched/resource/LatencyModelR.h"
-#include "aios/navi_sched/resource/AgentBatchR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentReportR.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentCacheToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentControlToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentLatencyToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentRequestEventToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/BlockHashUtil.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedAgentEvent.h"
+#include "rtp_llm/flexlb/navi_sched/data/SummaryUtil.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentBatchR.h"
 #include <autil/TimeUtility.h>
 #include <autil/HashAlgorithm.h>
 #include <algorithm>
@@ -40,7 +40,7 @@ AgentLatencyToMasterDataPtr makeLatencyModelData(
     return latency;
 }
 
-}
+} // namespace
 
 const std::string AgentReportBridgeR::RESOURCE_ID = "navi_sched.agent_report_bridge_r";
 
@@ -258,24 +258,16 @@ size_t AgentReportR::reportLatencyModelUpdated(
 }
 
 AgentReportR::QueuedPublishPtr AgentReportR::enqueueWorkloadLocked(
-    NaviSchedWorkloadSnapshot &snapshot, AgentUpdateToMasterDataPtr update,
-    std::vector<AgentUpdateToMasterDataPtr> trailingUpdates)
+    NaviSchedWorkloadSnapshot &snapshot, AgentUpdateToMasterDataPtr update)
 {
-    const auto publishTrailing = [&]() -> QueuedPublishPtr {
-        if (trailingUpdates.empty()) return nullptr;
-        std::vector<SubscriberPtr> subscribers;
-        subscribers.reserve(_subscribers.size());
-        for (const auto &pair : _subscribers) subscribers.emplace_back(pair.second);
-        return enqueuePublishLocked(std::move(trailingUpdates), std::move(subscribers), true);
-    };
     const auto current = std::atomic_load_explicit(&_workloadSnapshot, std::memory_order_acquire);
     if (!update && current && snapshot.admittedBatch.empty() && current->sameWorkload(snapshot)) {
         snapshot.revision = current->revision;
-        return publishTrailing();
+        return nullptr;
     }
     if (_stopping || (current && current->revision == std::numeric_limits<uint64_t>::max())) {
         snapshot.revision = 0;
-        return publishTrailing();
+        return nullptr;
     }
     snapshot.revision = current ? current->revision + 1 : 1;
     if (!update) update = makeUpdate(NaviSchedAgentEvent::WORKLOAD_UPDATED, snapshot.eventTimeUs);
@@ -288,8 +280,7 @@ AgentReportR::QueuedPublishPtr AgentReportR::enqueueWorkloadLocked(
     std::atomic_store_explicit(&_workloadSnapshot,
         std::make_shared<const NaviSchedWorkloadSnapshot>(std::move(storedSnapshot)),
         std::memory_order_release);
-    trailingUpdates.insert(trailingUpdates.begin(), std::move(update));
-    auto task = enqueuePublishLocked(std::move(trailingUpdates), std::move(subscribers), true);
+    auto task = enqueuePublishLocked({std::move(update)}, std::move(subscribers), true);
     if (!task) {
         snapshot.revision = 0;
         return nullptr;
@@ -339,6 +330,7 @@ uint64_t AgentReportR::reportWorkloadUpdated(
         autil::ScopedLock lock(_mutex);
         if (_stopping) return 0;
         if (!_pdSeparated && _unifiedLatencyPrediction) {
+            // Preview the complete replacement before changing either owner's state.
             if (!_nativeWorkload.combine(observed, published, covered) ||
                 !_nativeWorkload.handoff(covered, retired)) return 0;
             _observedWorkload = observed;
@@ -395,6 +387,7 @@ bool AgentReportR::reportNativeRequestReceived(
             _nativeWorkload.removeUnbatchedRequests({request.requestId});
             return false;
         }
+        // One receive report commits inflight and workload together on Master.
         task = enqueueWorkloadLocked(combined, std::move(update));
     }
     finishWorkloadPublish(task);
@@ -453,53 +446,6 @@ bool AgentReportR::reportNativeBatchRemoved(int64_t localBatchId)
     retired.clear();
     finishWorkloadPublish(task);
     return combined.revision > 0;
-}
-
-bool AgentReportR::reportNativeBatchCompleted(int64_t localBatchId, int64_t pendingBatchId)
-{
-    if (pendingBatchId <= 0) {
-        reportNativeBatchRemoved(localBatchId);
-        return true;
-    }
-    QueuedPublishPtr task;
-    AgentWorkloadOwnership::RetiredBatches retired;
-    bool pendingCompleted = true;
-    bool workloadCompleted = true;
-    {
-        autil::ScopedLock cacheLock(_cacheReportLock);
-        std::vector<AgentUpdateToMasterDataPtr> updates;
-        if (pendingBatchId > 0) {
-            AgentPendingCacheToMasterData pending;
-            bool changed = false;
-            pendingCompleted = _agentPendingCacheR->retire(pendingBatchId, pending, changed) && changed;
-            if (pendingCompleted && changed) {
-                auto update = makeUpdate(NaviSchedAgentEvent::PENDING_CACHE_UPDATED, 0);
-                update->pendingCache = std::make_shared<AgentPendingCacheToMasterData>(std::move(pending));
-                updates.emplace_back(std::move(update));
-            }
-        }
-        autil::ScopedLock lock(_mutex);
-        if (!_pdSeparated && _unifiedLatencyPrediction && _nativeWorkload.hasBatch(localBatchId)) {
-            NaviSchedWorkloadSnapshot combined;
-            workloadCompleted = _nativeWorkload.handoff({localBatchId}, retired) &&
-                                _nativeWorkload.combine(observedWorkloadLocked(), combined);
-            if (workloadCompleted) {
-                task = enqueueWorkloadLocked(combined, {}, std::move(updates));
-                workloadCompleted = combined.revision > 0;
-            }
-        }
-        if (!updates.empty()) {
-            std::vector<SubscriberPtr> subscribers;
-            for (const auto &pair : _subscribers) subscribers.emplace_back(pair.second);
-            task = enqueuePublishLocked(std::move(updates), std::move(subscribers), true);
-        }
-    }
-    retired.clear();
-    finishWorkloadPublish(task);
-    if (!workloadCompleted) {
-        NAVI_KERNEL_LOG(WARN, "complete native workload report failed, batchId [%ld]", localBatchId);
-    }
-    return pendingCompleted;
 }
 
 size_t AgentReportR::reportSchedulerConfigUpdated(
@@ -720,6 +666,7 @@ size_t AgentReportR::reportCacheUpdated(const NaviSchedCacheUpdate &update) cons
 {
     QueuedPublishPtr cachePublish;
     {
+        // Cache mutation and queue insertion share one order; delivery happens below.
         autil::ScopedLock cacheReportLock(_cacheReportLock);
         AgentCacheR::State state;
         if (!_agentCacheR->apply(update, state)) {
@@ -786,6 +733,8 @@ bool AgentReportR::reportPendingCacheCompleted(int64_t localBatchId) const
         if (!_agentPendingCacheR->getReservation(localBatchId, reservation)) {
             return false;
         }
+        // A terminal batch cannot promise future cache materialization. Cache
+        // events maintain physical state independently, including late events.
         if (!retirePendingCacheLocked(localBatchId, &publishTask)) {
             return false;
         }
@@ -1016,7 +965,7 @@ bool AgentReportR::setHandshake(const AgentUpdateToMasterDataPtr &handshake)
 }
 
 bool AgentReportR::subscribe(const std::string &collectorId,
-                             const navi::AsyncPipePtr &asyncPipe, bool orderedReports)
+                             const navi::AsyncPipePtr &asyncPipe)
 {
     if (collectorId.empty() || !asyncPipe) {
         return false;
@@ -1024,6 +973,7 @@ bool AgentReportR::subscribe(const std::string &collectorId,
     SubscriberPtr subscriber;
     QueuedPublishPtr publishTask;
     {
+        // Queue the complete initial state before exposing the subscriber to deltas.
         autil::ScopedLock cacheReportLock(_cacheReportLock);
         autil::ScopedLock lock(_mutex);
         if (_stopping || !_handshake) {
@@ -1083,7 +1033,6 @@ bool AgentReportR::subscribe(const std::string &collectorId,
         subscriber = std::make_shared<Subscriber>();
         subscriber->collectorId = collectorId;
         subscriber->asyncPipe = asyncPipe;
-        subscriber->orderedReports = orderedReports;
         publishTask = enqueuePublishLocked(
             {std::move(handshake), std::move(cacheUpdate), std::move(pendingUpdate)},
             {subscriber}, false);
@@ -1206,8 +1155,6 @@ AgentReportR::Stats AgentReportR::getStats() const
         _publishedNormalFinishedRequestCount.load(std::memory_order_relaxed);
     stats.publishedAbnormalFinishedRequestCount =
         _publishedAbnormalFinishedRequestCount.load(std::memory_order_relaxed);
-    stats.deliveredMessageCount = _deliveredMessageCount.load(std::memory_order_relaxed);
-    stats.combinedMessageSavings = _combinedMessageSavings.load(std::memory_order_relaxed);
     stats.deliverySuccessCount = _deliverySuccessCount.load(std::memory_order_relaxed);
     stats.deliveryFailureCount = _deliveryFailureCount.load(std::memory_order_relaxed);
     stats.noSubscriberEventCount =
@@ -1289,34 +1236,13 @@ AgentPendingCacheR::State AgentReportR::getPendingCacheState() const
 }
 
 AgentUpdateToMasterDataPtr AgentReportR::makeUpdate(NaviSchedAgentEvent::Type event,
-                                                    int64_t eventTimeUs) const
+                                                    int64_t eventTimeUs)
 {
     auto update = std::make_shared<AgentUpdateToMasterData>();
     update->event = event;
     update->eventTimeUs =
         eventTimeUs > 0 ? eventTimeUs : autil::TimeUtility::currentTime();
-    if (const auto source = _executionUtilizationSource.load(std::memory_order_acquire)) {
-        update->executionUtilization = source->load(std::memory_order_relaxed);
-    }
-    if (const auto source = _executionBusyUtilizationSource.load(std::memory_order_acquire)) {
-        update->executionBusyUtilization = source->load(std::memory_order_relaxed);
-    }
     return update;
-}
-
-bool AgentReportR::setExecutionUtilizationSource(
-    const std::shared_ptr<const std::atomic<double>> &source,
-    const std::shared_ptr<const std::atomic<double>> &busySource)
-{
-    if (!source) return false;
-    autil::ScopedLock lock(_mutex);
-    if (_executionUtilizationOwner && _executionUtilizationOwner != source) return false;
-    if (_executionBusyUtilizationOwner && _executionBusyUtilizationOwner != busySource) return false;
-    _executionBusyUtilizationOwner = busySource;
-    _executionBusyUtilizationSource.store(busySource.get(), std::memory_order_release);
-    _executionUtilizationOwner = source;
-    _executionUtilizationSource.store(source.get(), std::memory_order_release);
-    return true;
 }
 
 void AgentReportR::attachInflightStats(
@@ -1499,7 +1425,6 @@ void AgentReportR::deliverPublish(const QueuedPublishPtr &publishTask) const
             recordPublishedEvent(update, publishTask->subscribers.empty());
         }
     }
-    AgentUpdateToMasterDataPtr message;
     size_t publishCount = 0;
     int64_t maxSetDataTimeUs = 0;
     for (const auto &subscriber : publishTask->subscribers) {
@@ -1511,37 +1436,29 @@ void AgentReportR::deliverPublish(const QueuedPublishPtr &publishTask) const
                 _deliveryFailureCount.fetch_add(1, std::memory_order_relaxed);
             }
         } else {
-            const auto send = [&](const AgentUpdateToMasterDataPtr &value, size_t eventCount) {
-                const bool trackRequestTiming = publishTask->trackStats &&
-                    (value->event == NaviSchedAgentEvent::REQUEST_RECEIVED ||
-                     std::any_of(value->updates.begin(), value->updates.end(), [](const auto &event) {
-                         return event->event == NaviSchedAgentEvent::REQUEST_RECEIVED;
-                     }));
-                const auto beginUs = trackRequestTiming ? autil::TimeUtility::currentTime() : 0;
-                const auto result = asyncPipe->setData(value);
+            for (const auto &update : publishTask->updates) {
+                const bool trackRequestTiming =
+                    publishTask->trackStats &&
+                    NaviSchedAgentEvent::REQUEST_RECEIVED == update->event;
+                const auto setDataBeginTimeUs = trackRequestTiming
+                                                    ? autil::TimeUtility::currentTime()
+                                                    : 0;
+                const auto result = asyncPipe->setData(update);
                 if (trackRequestTiming) {
-                    maxSetDataTimeUs = std::max(maxSetDataTimeUs, autil::TimeUtility::currentTime() - beginUs);
+                    maxSetDataTimeUs = std::max(
+                        maxSetDataTimeUs,
+                        autil::TimeUtility::currentTime() - setDataBeginTimeUs);
                 }
-                if (result != navi::EC_NONE) {
-                    if (publishTask->trackStats) _deliveryFailureCount.fetch_add(1, std::memory_order_relaxed);
-                    return false;
-                }
-                _deliveredMessageCount.fetch_add(1, std::memory_order_relaxed);
-                _combinedMessageSavings.fetch_add(eventCount - 1, std::memory_order_relaxed);
-                if (publishTask->trackStats) {
-                    _deliverySuccessCount.fetch_add(eventCount, std::memory_order_relaxed);
-                }
-                return true;
-            };
-            if (subscriber->orderedReports) {
-                if (!message) message = AgentUpdateToMasterData::makeBatch(publishTask->updates);
-                delivered = message && send(message, publishTask->updates.size());
-            } else {
-                for (const auto &update : publishTask->updates) {
-                    if (!send(update, 1)) {
-                        delivered = false;
-                        break;
+                if (navi::EC_NONE != result) {
+                    delivered = false;
+                    if (publishTask->trackStats) {
+                        _deliveryFailureCount.fetch_add(
+                            1, std::memory_order_relaxed);
                     }
+                    break;
+                }
+                if (publishTask->trackStats) {
+                    _deliverySuccessCount.fetch_add(1, std::memory_order_relaxed);
                 }
             }
         }
@@ -1586,4 +1503,4 @@ bool AgentReportR::removeSubscriber(const SubscriberPtr &subscriber) const
 REGISTER_RESOURCE(AgentReportR);
 REGISTER_RESOURCE(AgentReportBridgeR);
 
-}
+} // namespace navi_sched

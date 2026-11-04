@@ -1,4 +1,4 @@
-#include "aios/navi_sched/resource/ReplayClientR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/ReplayClientR.h"
 
 #include "navi/engine/NaviRegisterMacro.h"
 
@@ -165,7 +165,7 @@ void advanceFixedPacingTime(std::chrono::steady_clock::time_point &target,
     target += period * periods;
 }
 
-}
+} // namespace
 
 AUTIL_LOG_SETUP(navi_sched, ReplayClientR);
 
@@ -245,6 +245,7 @@ void ReplayClientR::enqueueNormalQuery(
     if (!_historyThread.joinable()) {
         _historyThread = std::thread(&ReplayClientR::runHistoryWriter, this);
     }
+    // Prefer recent traffic when disk cannot keep up; scheduling never waits for I/O.
     while (_historyQueue.size() >= HISTORY_QUEUE_LIMIT ||
            _historyQueueBytes + bytes > HISTORY_QUEUE_BYTES_LIMIT) {
         _historyQueueBytes -= historyRequestBytes(*_historyQueue.front().first);
@@ -834,4 +835,4 @@ size_t ReplayClientR::loadedReplaySampleCount() const
 
 REGISTER_RESOURCE(ReplayClientR);
 
-}
+} // namespace navi_sched

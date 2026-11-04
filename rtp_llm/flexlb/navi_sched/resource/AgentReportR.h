@@ -1,12 +1,12 @@
 #pragma once
 
-#include "aios/navi_sched/data/AgentUpdateToMasterData.h"
-#include "aios/navi_sched/common/NaviSchedScheduleData.h"
-#include "aios/navi_sched/resource/AgentCacheR.h"
-#include "aios/navi_sched/resource/AgentPendingCacheR.h"
-#include "aios/navi_sched/resource/RequestLatencyTracker.h"
-#include "aios/navi_sched/resource/AgentSchedulerConfigR.h"
-#include "aios/navi_sched/resource/AgentWorkloadOwnership.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentUpdateToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedScheduleData.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentCacheR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentPendingCacheR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/RequestLatencyTracker.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentSchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentWorkloadOwnership.h"
 #include "autil/LockFreeQueue.h"
 #include "navi/engine/AsyncPipe.h"
 #include "navi/engine/Resource.h"
@@ -51,8 +51,6 @@ public:
         uint64_t publishedNormalFinishedRequestCount = 0;
         uint64_t publishedAbnormalFinishedRequestCount = 0;
         uint64_t deliverySuccessCount = 0;
-        uint64_t deliveredMessageCount = 0;
-        uint64_t combinedMessageSavings = 0;
         uint64_t deliveryFailureCount = 0;
         uint64_t noSubscriberEventCount = 0;
         uint64_t publishedWorkloadUpdateCount = 0;
@@ -86,9 +84,6 @@ public:
         const std::shared_ptr<const NaviSchedLatencyModelSnapshot> &snapshot);
     bool setInflightTracker(
         const std::shared_ptr<ConcurrentRequestLatencyTracker> &tracker);
-    bool setExecutionUtilizationSource(
-        const std::shared_ptr<const std::atomic<double>> &source,
-    const std::shared_ptr<const std::atomic<double>> &busySource = nullptr);
     std::shared_ptr<const NaviSchedLatencyModelSnapshot>
     getLatencyModelSnapshot() const;
     AgentSchedulerConfigR::Snapshot getSchedulerConfigSnapshot() const;
@@ -108,7 +103,6 @@ public:
     bool reportNativeRequestsRemoved(int64_t localBatchId,
                                     const std::vector<uint64_t> &requestIds);
     bool reportNativeBatchRemoved(int64_t localBatchId);
-    bool reportNativeBatchCompleted(int64_t localBatchId, int64_t pendingBatchId);
     size_t reportSchedulerConfigUpdated(uint64_t requestGeneration,
                                         uint64_t appliedGeneration,
                                         const std::string &configHash,
@@ -170,8 +164,7 @@ public:
     size_t beginStop(int64_t eventTimeUs);
     bool waitForStopAcks(int64_t timeoutUs);
     bool confirmStop(const std::string &collectorId);
-    bool subscribe(const std::string &collectorId, const navi::AsyncPipePtr &asyncPipe,
-                   bool orderedReports = false);
+    bool subscribe(const std::string &collectorId, const navi::AsyncPipePtr &asyncPipe);
     bool unsubscribe(const std::string &collectorId, const navi::AsyncPipePtr &asyncPipe);
     size_t publish(const AgentUpdateToMasterDataPtr &update) const;
     bool finish(const std::string &collectorId);
@@ -196,7 +189,6 @@ private:
     struct Subscriber {
         std::string collectorId;
         std::weak_ptr<navi::AsyncPipe> asyncPipe;
-        bool orderedReports = false;
     };
     NAVI_TYPEDEF_PTR(Subscriber);
 
@@ -212,12 +204,11 @@ private:
     using QueuedPublishPtr = std::shared_ptr<QueuedPublish>;
 
     bool setHandshake(const AgentUpdateToMasterDataPtr &handshake);
-    AgentUpdateToMasterDataPtr makeUpdate(NaviSchedAgentEvent::Type event,
-                                         int64_t eventTimeUs) const;
+    static AgentUpdateToMasterDataPtr makeUpdate(NaviSchedAgentEvent::Type event,
+                                                 int64_t eventTimeUs);
     void attachInflightStats(const AgentUpdateToMasterDataPtr &update) const;
     QueuedPublishPtr enqueueWorkloadLocked(NaviSchedWorkloadSnapshot &snapshot,
-                                          AgentUpdateToMasterDataPtr update = {},
-                                          std::vector<AgentUpdateToMasterDataPtr> trailingUpdates = {});
+                                          AgentUpdateToMasterDataPtr update = {});
     void finishWorkloadPublish(const QueuedPublishPtr &task) const;
     NaviSchedWorkloadSnapshot observedWorkloadLocked() const;
     bool retirePendingCacheLocked(int64_t localBatchId,
@@ -251,10 +242,6 @@ private:
     std::shared_ptr<const RequestLatencyTracker::Snapshot> _inflightStats =
         std::make_shared<const RequestLatencyTracker::Snapshot>();
     std::shared_ptr<ConcurrentRequestLatencyTracker> _inflightTracker;
-    std::shared_ptr<const std::atomic<double>> _executionBusyUtilizationOwner;
-    std::atomic<const std::atomic<double> *> _executionBusyUtilizationSource{nullptr};
-    std::shared_ptr<const std::atomic<double>> _executionUtilizationOwner;
-    std::atomic<const std::atomic<double> *> _executionUtilizationSource{nullptr};
     std::atomic<uint64_t> _inflightRecomputeCount{0};
     std::atomic<uint64_t> _inflightRecomputedRequestCount{0};
     std::atomic<uint64_t> _inflightRecomputeFailureCount{0};
@@ -288,8 +275,6 @@ private:
     mutable std::atomic<uint64_t> _publishedNormalFinishedRequestCount{0};
     mutable std::atomic<uint64_t> _publishedAbnormalFinishedRequestCount{0};
     mutable std::atomic<uint64_t> _deliverySuccessCount{0};
-    mutable std::atomic<uint64_t> _deliveredMessageCount{0};
-    mutable std::atomic<uint64_t> _combinedMessageSavings{0};
     mutable std::atomic<uint64_t> _deliveryFailureCount{0};
     mutable std::atomic<uint64_t> _noSubscriberEventCount{0};
     mutable std::atomic<uint64_t> _publishedWorkloadUpdateCount{0};
@@ -300,4 +285,4 @@ private:
 
 NAVI_TYPEDEF_PTR(AgentReportR);
 
-}
+} // namespace navi_sched

@@ -1,4 +1,4 @@
-#include "aios/navi_sched/resource/MasterStateR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterStateR.h"
 
 #include <algorithm>
 #include <atomic>
@@ -9,15 +9,15 @@
 #include <optional>
 #include <stdexcept>
 
-#include "aios/navi_sched/data/BlockHashUtil.h"
-#include "aios/navi_sched/data/NaviSchedAgentEvent.h"
-#include "aios/navi_sched/data/NaviSchedRequestTrace.h"
-#include "aios/navi_sched/data/SummaryUtil.h"
-#include "aios/navi_sched/resource/LatencyModelR.h"
-#include "aios/navi_sched/resource/AgentSchedulerConfigR.h"
-#include "aios/navi_sched/resource/LatencyResidualModel.h"
-#include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
-#include "aios/navi_sched/scheduler/CostSchedulerColdStartStrategy.h"
+#include "rtp_llm/flexlb/navi_sched/data/BlockHashUtil.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedAgentEvent.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedRequestTrace.h"
+#include "rtp_llm/flexlb/navi_sched/data/SummaryUtil.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentSchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyResidualModel.h"
+#include "rtp_llm/flexlb/navi_sched/resource/NonLinearPrefillModelR.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/CostSchedulerColdStartStrategy.h"
 #include "autil/TimeUtility.h"
 #include "autil/HashAlgorithm.h"
 #include "autil/Scope.h"
@@ -544,16 +544,6 @@ void MasterStateR::NodeState::rebuildInfoSnapshot()
                                std::memory_order_release);
 }
 
-double MasterStateR::NodeState::getExecutionUtilization() const
-{
-    return _executionUtilization.load(std::memory_order_relaxed);
-}
-
-double MasterStateR::NodeState::getExecutionBusyUtilization() const
-{
-    return _executionBusyUtilization.load(std::memory_order_relaxed);
-}
-
 void MasterStateR::NodeState::fillDynamicInfo(NaviSchedNodeInfo &info) const
 {
     auto runtime = getRuntimeState();
@@ -657,7 +647,6 @@ bool MasterStateR::NodeState::reserveBatch(
     auto reservation = std::make_shared<PendingBatchReservation>();
     if (!reservation->batch.init(batchId, scheduleTimeUs, predictedLatencyMs,
                                 std::move(requests), cachePolicy)) {
-        timing->failureReason = "invalid_batch_definition";
         return false;
     }
     const auto initEndUs = autil::TimeUtility::monotonicTimeUs();
@@ -673,18 +662,15 @@ bool MasterStateR::NodeState::reserveBatch(
         timing->runtimeHoldCpuUs = autil::TimeUtility::cpuThreadTimeUs() - acquiredCpuUs;
     });
     if (!_acceptReservations) {
-        timing->failureReason = "reservations_disabled";
         return false;
     }
     if (_runtimeState.unifiedLatencyPrediction &&
         !reservation->batch.setPredictedLatencyMs(0.0)) {
-        timing->failureReason = "invalid_unified_prediction";
         return false;
     }
     auto existing = _reservationsById.find(batchId);
     if (existing != _reservationsById.end()) {
         if (!existing->second->batch.sameDefinition(reservation->batch)) {
-            timing->failureReason = "conflicting_batch_definition";
             return false;
         }
         if (pendingCacheTracked) {
@@ -701,7 +687,6 @@ bool MasterStateR::NodeState::reserveBatch(
     timing->pendingPublishUs = autil::TimeUtility::monotonicTimeUs() - pendingBeginUs;
     timing->pendingPublishCpuUs = autil::TimeUtility::cpuThreadTimeUs() - pendingBeginCpuUs;
     if (!pendingUpdated) {
-        timing->failureReason = "pending_cache_update_failed";
         return false;
     }
     const auto requestCount = reservation->batch.getRequestCount();
@@ -792,6 +777,8 @@ bool MasterStateR::NodeState::refreshReservationPredictionLocked(
     if (batch.getWaitingRequestCount() == 0) {
         return batch.setPredictedLatencyMs(0.0);
     }
+    // Unified prediction already includes reservations in its workload
+    // features, so the legacy additive queue estimate must stay disabled.
     if (_runtimeState.unifiedLatencyPrediction) {
         return batch.setPredictedLatencyMs(0.0);
     }
@@ -1593,8 +1580,6 @@ bool MasterStateR::resetAgentState(const NodeStatePtr &state,
             autil::ScopedLock runtimeLock(state->_runtimeLock);
             state->_acceptReservations = false;
             state->_runtimeState = NodeState::RuntimeState();
-            state->_executionUtilization.store(-1.0, std::memory_order_relaxed);
-            state->_executionBusyUtilization.store(-1.0, std::memory_order_relaxed);
             for (const auto &reservationPtr : state->_pendingBatchReservations) {
                 const auto &reservation = *reservationPtr;
                 for (const auto &[requestId, waiter] : reservation.dispatchWaiters) {
@@ -1733,6 +1718,8 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                                  : infoSnapshot->latencyModelFingerprint;
     const auto recordLatencyModel = [&]() {
         if (invalidLatencyModel) {
+            // Route malformed model updates through the same pool validation so
+            // the live reject counter and model snapshot stay consistent.
             if (update->latency) {
                 bool ignored = false;
                 _masterLatencyModelR->record(
@@ -1771,6 +1758,9 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
         const auto rampFinished = CostSchedulerColdStartStrategy::isRampFinished(
             update->eventTimeUs, agentStartTimeUs,
             update->latency->sessionSampleCount);
+        // The current update protocol carries the explicit trust decision. Do
+        // not infer trust from revision: revision eligibility and ramp state
+        // are validated independently below.
         const auto agentTrusted = update->latencyModelTrusted;
         bool liveUpdateAccepted = false;
         _masterLatencyModelR->record(
@@ -1836,6 +1826,9 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
         return false;
     }
     if (NaviSchedAgentEvent::LATENCY_MODEL_UPDATED == event && update->latency) {
+        // Source mismatch is a hard rejection. Check it before applying the
+        // workload/inflight part of the same report so a failed model update
+        // cannot leave a newer runtime snapshot behind.
         const auto activeSlot = _masterLatencyModelR->getLiveModelSlot(agentId);
         const auto sourceSlot =
             _masterLatencyModelR->getLiveModelSlot(agentId, sourceId);
@@ -1998,6 +1991,8 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
         if (timing) {
             timing->runtimeLockBeginMonoUs = autil::TimeUtility::monotonicTimeUs();
         }
+        // Declared before the lock so the recorded endpoint follows unlock,
+        // including early returns from the runtime transaction.
         autil::ScopeGuard finishRuntimeTiming([timing]() {
             if (timing) {
                 timing->runtimeLockReleasedMonoUs = autil::TimeUtility::monotonicTimeUs();
@@ -2176,6 +2171,8 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                     continue;
                 }
                 bool changed = false;
+                // Only an existing tracker entry is erased; prefix state is
+                // unchanged and there is no failure after mutation.
                 if (workload && workload->revision > runtime.workload.revision &&
                     runtime.unifiedLatencyPrediction) {
                     if (!reservation.batch.markAcceptedWorkloadReported(requestId)) return false;
@@ -2236,6 +2233,9 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
         if (reservationStateValid && requestLocalBatch && executionLoadEvent) {
             reservationStateValid = handoffLocalBatchInflight(*requestLocalBatch);
         }
+        // Dispatch acknowledgement and workload ownership are independent. The
+        // former releases the request guard; the latter removes reservation
+        // workload only after an authoritative load snapshot covers the batch.
         if (reservationStateValid && !requestsAborted && requestLocalBatch &&
             executionLoadEvent) {
             reservationStateValid = acknowledgeLocalBatch(*requestLocalBatch);
@@ -2282,8 +2282,6 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                 state->_pendingCacheR->clear(agentIdHash);
                 handshakePendingCleared = true;
             }
-            state->_executionUtilization.store(-1.0, std::memory_order_relaxed);
-            state->_executionBusyUtilization.store(-1.0, std::memory_order_relaxed);
             runtime.workload = workload ? *workload : NaviSchedWorkloadSnapshot();
             runtime.workload.admittedBatch = NaviSchedLocalBatchInfo();
             runtime.workloadReportReceiveTimeUs = workload ? receiveTimeUs : 0;
@@ -2314,12 +2312,6 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                 completeLocalBatch(*requestLocalBatch, !request->abnormalBatchFinished);
         }
         if (reservationStateValid) {
-            if (update->executionUtilization >= 0.0) {
-                state->_executionUtilization.store(update->executionUtilization, std::memory_order_relaxed);
-            }
-            if (update->executionBusyUtilization >= 0.0) {
-                state->_executionBusyUtilization.store(update->executionBusyUtilization, std::memory_order_relaxed);
-            }
             runtime.lastEvent = event;
             runtime.lastEventTimeUs = update->eventTimeUs;
             runtime.lastReceiveTimeUs = receiveTimeUs;
@@ -2580,6 +2572,7 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                  !hashesMatch(cache->addedTailReadyBlockHashes,
                               state->_tailReadyBlockHashes));
             if (staleCacheSnapshotIgnored) {
+                // A delayed full snapshot must not roll a verified mirror back.
             } else if (sameRevisionStateMismatch) {
                 cacheStateMismatch = true;
                 ++state->_cacheStateMismatchCount;
@@ -2734,6 +2727,9 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
     if (reservationTransitionFailed) {
         return false;
     }
+    // A model update carries the latest inflight snapshot. Commit the model only
+    // after that snapshot is accepted so a rejected report cannot advance one
+    // half of the node state.
     if (NaviSchedAgentEvent::LATENCY_MODEL_UPDATED == event &&
         !recordLatencyModel()) {
         return false;
@@ -2846,6 +2842,7 @@ MasterStateR::NodeState::PendingReplaySnapshot
 MasterStateR::NodeState::capturePendingReplaySnapshot() const
 {
     PendingReplaySnapshot snapshot;
+    // Keep cache and reservation ownership at the same cut; encode after unlock.
     autil::ScopedLock runtimeLock(_runtimeLock);
     autil::ScopedReadLock cacheLock(_cacheLock);
     snapshot.captureTimeUs = autil::TimeUtility::currentTime();
@@ -2921,6 +2918,8 @@ std::shared_ptr<NaviSchedScheduleReplay> MasterStateR::makeScheduleReplay(
         if (const auto state = std::dynamic_pointer_cast<const NodeState>(node)) {
             const auto snapshot = state->capturePendingReplaySnapshot();
             pendingStates.emplace_back(snapshot.toJson());
+            // Match against the same cut we serialize: live cache updates may
+            // otherwise make replay inputs disagree with recorded match counts.
             MasterPendingCacheR frozenPending;
             if (snapshot.pendingCache.present &&
                 !frozenPending.restoreReplayState(snapshot.agentIdHash,
@@ -3029,6 +3028,7 @@ void MasterStateR::snapshotScheduleNodes(const std::string &bizName,
         (void)agentIdHash;
         NaviSchedNodeSnapshot snapshot;
         const auto accepted = state->getScheduleSnapshot(bizName, snapshot);
+        // Include rejected candidates: they can also block the snapshot walk.
         context._snapshotRuntimeLockWaitUs += snapshot.runtimeLockWaitUs;
         context._snapshotRuntimeLockHoldUs += snapshot.runtimeLockHoldUs;
         if (accepted) {
@@ -3087,26 +3087,7 @@ void MasterStateR::reserveScheduleNodeBatch(
                 reservationTiming.runtimeWaitUs, reservationTiming.runtimeHoldCpuUs);
         }
     });
-    auto rejectReservation = [&context, nodeIndex](
-                                 const std::vector<size_t> &requestIndexes,
-                                 const char *reason) {
-        const auto batchId = context._decisions[requestIndexes.front()].batchId;
-        if (context.isCollectingReplay()) {
-            context._replay->schedulerInfo["reservation_failure_" + std::to_string(batchId)] =
-                autil::legacy::json::JsonMap{
-                    {"reason", std::string(reason)},
-                    {"agent", context._scheduleNodes[nodeIndex].getAgentId()},
-                    {"batch_id", batchId},
-                    {"request_count", uint64_t(requestIndexes.size())},
-                };
-        }
-        NAVI_KERNEL_LOG(WARN,
-                        "[navi-master-reservation-failed] schedule_id=%lu agent=%s "
-                        "batch_id=%ld requests=%lu reason=%s",
-                        context._scheduleId,
-                        context._scheduleNodes[nodeIndex].getAgentId().c_str(),
-                        batchId,
-                        requestIndexes.size(), reason);
+    auto rejectReservation = [&context](const std::vector<size_t> &requestIndexes) {
         for (auto requestIndex : requestIndexes) {
             auto &decision = context._decisions[requestIndex];
             decision.reason = "reservation_failed";
@@ -3136,7 +3117,7 @@ void MasterStateR::reserveScheduleNodeBatch(
         std::const_pointer_cast<NodeState>(std::dynamic_pointer_cast<const NodeState>(
             context._scheduleNodes[nodeIndex]._node));
     if (!state) {
-        rejectReservation(requestIndexes, "invalid_node_state");
+        rejectReservation(requestIndexes);
         return;
     }
     auto stageBeginUs = autil::TimeUtility::monotonicTimeUs();
@@ -3146,7 +3127,7 @@ void MasterStateR::reserveScheduleNodeBatch(
     registryWaitUs = stageEndUs - stageBeginUs;
     stageBeginUs = stageEndUs;
     if (!isCurrentNodeStateLocked(state->_info.agentIdHash, state)) {
-        rejectReservation(requestIndexes, "node_state_replaced");
+        rejectReservation(requestIndexes);
         return;
     }
     if (context.isCollectingReplay()) {
@@ -3192,7 +3173,7 @@ void MasterStateR::reserveScheduleNodeBatch(
                         "missing cache policy while reserving batch, "
                         "agentId [%s], batchId [%ld]",
                         state->_info.agentId.c_str(), decision.batchId);
-        rejectReservation(requestIndexes, "missing_cache_policy");
+        rejectReservation(requestIndexes);
         return;
     }
     bool pendingCacheTracked = false;
@@ -3218,9 +3199,7 @@ void MasterStateR::reserveScheduleNodeBatch(
                         "batchId [%ld], requestCount [%lu]",
                         state->_info.agentId.c_str(), decision.batchId,
                         requestIndexes.size());
-        rejectReservation(requestIndexes, reservationTiming.failureReason
-                                              ? reservationTiming.failureReason
-                                              : "unknown_reservation_failure");
+        rejectReservation(requestIndexes);
         return;
     }
     stageEndUs = autil::TimeUtility::monotonicTimeUs();
@@ -3695,16 +3674,12 @@ navi::SummaryErrorCode MasterStateR::getSummary(const std::string &query,
     std::map<std::string, CacheSyncStats> cacheSyncStats;
     std::map<std::string, ReservationStats> reservationStats;
     std::map<std::string, bool> nodeReady;
-    std::map<std::string, double> executionUtilizations;
-    std::map<std::string, double> executionBusyUtilizations;
     for (const auto &state : states) {
         auto node = state->getInfo();
         cachedBlockCounts[node.agentId] = state->getCachedBlockCount();
         cacheSyncStats[node.agentId] = state->getCacheSyncStats();
         reservationStats[node.agentId] = state->getReservationStats();
         nodeReady[node.agentId] = readyStates.end() != readyStates.find(state.get());
-        executionUtilizations[node.agentId] = state->getExecutionUtilization();
-        executionBusyUtilizations[node.agentId] = state->getExecutionBusyUtilization();
         nodes[node.agentId] = std::move(node);
     }
     auto collectors = getAgentCollectors();
@@ -3739,9 +3714,6 @@ navi::SummaryErrorCode MasterStateR::getSummary(const std::string &query,
         TABLE_ADD_COLUMN_VALUE(nodeTable, "queued_batch_requests",
                                node.queuedBatchRequests);
         TABLE_ADD_COLUMN_VALUE(nodeTable, "running_requests", node.runningRequests);
-        TABLE_ADD_COLUMN_VALUE(nodeTable, "execution_busy_utilization", executionBusyUtilizations.at(node.agentId));
-        TABLE_ADD_COLUMN_VALUE(nodeTable, "execution_utilization",
-                               executionUtilizations.at(node.agentId));
         TABLE_ADD_COLUMN_VALUE(nodeTable, "batch_timeout_count", node.batchTimeoutCount);
         TABLE_ADD_COLUMN_VALUE(nodeTable, "abnormal_batch_finish_count",
                                node.abnormalBatchFinishCount);
@@ -3880,4 +3852,4 @@ navi::SummaryErrorCode MasterStateR::getSummary(const std::string &query,
 
 REGISTER_RESOURCE(MasterStateR);
 
-}
+} // namespace navi_sched

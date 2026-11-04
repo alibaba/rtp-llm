@@ -10,4 +10,5 @@ UPDATE_SCRIPT="${SCRIPT_DIR}/update_scheduler_config.sh"
     exit 1
 }
 
+# 参数说明和所有字段列表见 update_scheduler_config.sh --help。
 exec "$UPDATE_SCRIPT" --set latency_current_sample_weight=4.0

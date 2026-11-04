@@ -1,4 +1,4 @@
-#include "aios/navi_sched/resource/AgentInstanceR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentInstanceR.h"
 #include <autil/TimeUtility.h>
 #include <atomic>
 
@@ -27,4 +27,4 @@ bool AgentInstanceR::getMeta(std::string &meta) const
 
 REGISTER_RESOURCE(AgentInstanceR);
 
-}
+} // namespace navi_sched

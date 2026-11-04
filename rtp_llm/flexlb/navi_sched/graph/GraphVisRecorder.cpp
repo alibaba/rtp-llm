@@ -1,4 +1,4 @@
-#include "aios/navi_sched/graph/GraphVisRecorder.h"
+#include "rtp_llm/flexlb/navi_sched/graph/GraphVisRecorder.h"
 #include <fstream>
 
 namespace navi_sched {
@@ -52,4 +52,4 @@ void GraphVisRecorder::write(const navi::GraphVisDef &vis, const std::string &fi
     }
 }
 
-}
+} // namespace navi_sched

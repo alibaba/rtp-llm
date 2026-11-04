@@ -36,4 +36,4 @@ public:
     int64_t startTimeMs = 0;
 };
 
-}
+} // namespace navi_sched::test

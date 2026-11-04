@@ -1,4 +1,4 @@
-#include "aios/navi_sched/resource/LatencyResidualModel.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyResidualModel.h"
 
 #include <algorithm>
 #include <cmath>
@@ -40,6 +40,8 @@ double maximumPredictionMs()
 
 double maximumNegativeDifference(int32_t lowerBucket)
 {
+    // Maximize smootherStep'(f) / 2^f on [0, 1]. This is the exact
+    // adjacent-parameter limit that keeps d(base + residual) / d(base) >= 0.
     static const double scale = []() {
         const auto fraction =
             (LN_2 + 4.0 - std::sqrt(LN_2 * LN_2 + 16.0)) / (2.0 * LN_2);
@@ -92,7 +94,7 @@ bool projectParameters(std::vector<double> &parameters)
     }
     return true;
 }
-}
+} // namespace
 
 bool LatencyResidualModel::RuntimeConfig::valid() const
 {
@@ -282,6 +284,9 @@ bool LatencyResidualModel::update(double basePredictionMs, double actualLatencyM
     if (config.learningRate == 0.0) {
         return true;
     }
+    // The residual model has no bucket below 2^MIN_BUCKET. A valid low
+    // prediction is still a valid training sample for the base model; leave
+    // residual state untouched instead of rejecting the whole fit batch.
     if (basePredictionMs < minimumPredictionMs()) {
         return true;
     }
@@ -327,4 +332,4 @@ bool LatencyResidualModel::update(double basePredictionMs, double actualLatencyM
     return true;
 }
 
-}
+} // namespace navi_sched

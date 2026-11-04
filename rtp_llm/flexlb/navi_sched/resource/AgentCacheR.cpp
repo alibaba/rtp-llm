@@ -1,6 +1,6 @@
-#include "aios/navi_sched/resource/AgentCacheR.h"
-#include "aios/navi_sched/data/BlockHashUtil.h"
-#include "aios/navi_sched/resource/AgentPendingCacheR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentCacheR.h"
+#include "rtp_llm/flexlb/navi_sched/data/BlockHashUtil.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentPendingCacheR.h"
 #include "autil/TimeUtility.h"
 
 namespace navi_sched {
@@ -264,4 +264,4 @@ navi::SummaryErrorCode AgentCacheR::getSummary(const std::string &,
 
 REGISTER_RESOURCE(AgentCacheR);
 
-}
+} // namespace navi_sched

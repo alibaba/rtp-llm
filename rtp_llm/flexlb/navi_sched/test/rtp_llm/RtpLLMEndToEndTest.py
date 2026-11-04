@@ -654,6 +654,7 @@ class RtpLLMEndToEndTest:
         )
 
     def _cache_prompt(self):
+        # Keep enough prompt tokens to populate at least one complete cache block.
         repeat_count = max(80, math.ceil(self._args.seq_size_per_block / 8) + 1)
         return (
             "KV cache scheduling must use exact framework block keys. "
@@ -913,6 +914,7 @@ class RtpLLMEndToEndTest:
             latest = max(snapshots, key=lambda path: path.stat().st_mtime_ns)
             content = latest.read_text(encoding="utf-8")
         except OSError:
+            # The snapshot writer can briefly expose a truncated file between updates.
             return None
         try:
             return json.loads(content)

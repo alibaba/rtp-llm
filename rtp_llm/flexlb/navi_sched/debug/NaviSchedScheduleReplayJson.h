@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedScheduleData.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedScheduleData.h"
 #include <string>
 
 namespace navi_sched {
@@ -11,4 +11,4 @@ public:
     static void fromJsonString(const std::string &json, NaviSchedScheduleReplay &replay);
 };
 
-}
+} // namespace navi_sched

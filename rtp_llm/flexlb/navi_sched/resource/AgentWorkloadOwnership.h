@@ -5,11 +5,13 @@
 #include <unordered_map>
 #include <vector>
 
-#include "aios/navi_sched/common/NaviSchedCommon.h"
-#include "aios/navi_sched/data/NaviSchedLatencySample.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedCommon.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedLatencySample.h"
 
 namespace navi_sched {
 
+// Protected by AgentReportR's publication lock. Owns native requests/batches that
+// have not yet been covered by an authoritative Observer workload snapshot.
 class AgentWorkloadOwnership {
 private:
     struct Batch;
@@ -38,6 +40,9 @@ public:
 
 private:
     static PreparedBatch prepareRequests(const NaviSchedRequestStats *requests, size_t count);
+    // Total prompt tokens are bounded by int64_t; their products fit in 128
+    // bits. Convert only when publishing, so removing a large owner cannot
+    // erase the contribution of a small surviving request through rounding.
     struct PrefillTotals {
         int64_t count = 0;
         int64_t hit = 0;
@@ -72,10 +77,12 @@ private:
 
     BatchList _batchOrder;
     std::unordered_map<int64_t, std::shared_ptr<Batch>> _batches;
+    // Accepted requests have workload before a local execution batch exists.
+    // They occupy capacity slots but do not yet contribute a formed batch.
     PreparedBatch _unbatched;
     size_t _requestCount = 0;
     PrefillTotals _prefillFeatures;
     int64_t _promptTokens = 0;
 };
 
-}
+} // namespace navi_sched

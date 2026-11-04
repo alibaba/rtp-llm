@@ -1,7 +1,7 @@
 #pragma once
 
-#include "aios/navi_sched/scheduler/AutoGrad.h"
-#include "aios/navi_sched/scheduler/ScheduleContext.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/AutoGrad.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/ScheduleContext.h"
 #include <autil/legacy/jsonizable.h>
 
 #include <cstdint>
@@ -349,4 +349,4 @@ private:
                                      double &threshold);
 };
 
-}
+} // namespace navi_sched

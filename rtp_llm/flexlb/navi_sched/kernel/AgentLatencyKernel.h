@@ -1,10 +1,10 @@
 #pragma once
 
-#include "aios/navi_sched/resource/AgentLatencyInputR.h"
-#include "aios/navi_sched/resource/AgentBatchR.h"
-#include "aios/navi_sched/resource/AgentReportR.h"
-#include "aios/navi_sched/resource/LatencyModelR.h"
-#include "aios/navi_sched/resource/AgentSchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentLatencyInputR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentBatchR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentReportR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentSchedulerConfigR.h"
 #include "kmonitor/client/MetricsReporterR.h"
 #include "navi/builder/GraphBuilder.h"
 #include "navi/engine/Kernel.h"
@@ -161,4 +161,4 @@ private:
     int64_t _inputPipeGeneration = 0;
 };
 
-}
+} // namespace navi_sched

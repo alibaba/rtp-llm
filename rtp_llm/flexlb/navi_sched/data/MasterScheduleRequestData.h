@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/data/ClientRequestToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/ClientRequestToMasterData.h"
 #include "navi/engine/AsyncPipe.h"
 #include "navi/engine/Data.h"
 
@@ -31,4 +31,4 @@ private:
 
 NAVI_TYPEDEF_PTR(MasterScheduleRequestData);
 
-}
+} // namespace navi_sched

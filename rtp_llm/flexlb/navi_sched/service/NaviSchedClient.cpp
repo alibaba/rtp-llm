@@ -1,12 +1,12 @@
-#include "aios/navi_sched/service/NaviSchedClient.h"
-#include "aios/navi_sched/config/NaviSchedConfigBuilder.h"
-#include "aios/navi_sched/data/ClientRequestToMasterData.h"
-#include "aios/navi_sched/graph/ClientGraphRunner.h"
-#include "aios/navi_sched/graph/ReplayControlGraph.h"
-#include "aios/navi_sched/kernel/ReplayClientControlKernel.h"
-#include "aios/navi_sched/resource/ReplayClientR.h"
-#include "aios/navi_sched/resource/ClientResponseR.h"
-#include "aios/navi_sched/service/NaviSchedClientSummary.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedClient.h"
+#include "rtp_llm/flexlb/navi_sched/config/NaviSchedConfigBuilder.h"
+#include "rtp_llm/flexlb/navi_sched/data/ClientRequestToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/graph/ClientGraphRunner.h"
+#include "rtp_llm/flexlb/navi_sched/graph/ReplayControlGraph.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/ReplayClientControlKernel.h"
+#include "rtp_llm/flexlb/navi_sched/resource/ReplayClientR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/ClientResponseR.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedClientSummary.h"
 #include "autil/NetUtil.h"
 #include "autil/TimeUtility.h"
 #include "autil/HashAlgorithm.h"
@@ -29,7 +29,7 @@ namespace {
 
 constexpr int64_t FAILURE_LOG_INTERVAL_US = 1000 * 1000;
 
-}
+} // namespace
 
 NaviSchedClient::FailureType NaviSchedClient::classifyFailure(
     const ClientGraphRunResult &result)
@@ -291,6 +291,7 @@ void NaviSchedClient::recordScheduleResult(
     }
     if (navi::EC_NONE == result.errorCode) {
         _scheduleSuccessCount.fetch_add(1, std::memory_order_relaxed);
+        // This counts a received rejection, independently of Master-side admission.
         if (result.decision->reason == "rate_limited") {
             _masterRateLimitedCount.fetch_add(1, std::memory_order_relaxed);
         }
@@ -355,6 +356,8 @@ bool NaviSchedClient::init()
         replay->blockHashes = request.blockHashes;
         replay->forwardPayload = request.forwardPayload;
         _requestReceivedCount.fetch_add(1, std::memory_order_relaxed);
+        // Replay only launches the graph. Navi drives the response stream to terminal,
+        // and the graph closure removes the detached request state at EOF.
         scheduleReplayRequest(replay, _defaultMasterBizName, request.timeoutMs);
     });
     NaviSchedConfigBuilder::NamedConfigs kernelConfigs;
@@ -446,6 +449,7 @@ bool NaviSchedClient::hasMasterBiz(const std::string &masterBizName) const
     if (!searchService) {
         return false;
     }
+    // An unpublished discovery snapshot does not establish that the biz is absent.
     const auto snapshot = searchService->getSearchServiceSnapshot();
     if (!snapshot) {
         return true;
@@ -613,4 +617,4 @@ void NaviSchedClient::reportMetrics() const
     }
 }
 
-}
+} // namespace navi_sched

@@ -1,4 +1,4 @@
-#include "aios/navi_sched/kernel/ReplayClientControlKernel.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/ReplayClientControlKernel.h"
 
 #include "navi/engine/NaviRegisterMacro.h"
 
@@ -86,4 +86,4 @@ navi::ErrorCode ReplayClientControlKernel::compute(navi::KernelComputeContext &c
 
 REGISTER_KERNEL(ReplayClientControlKernel);
 
-}
+} // namespace navi_sched

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedScheduleData.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedScheduleData.h"
 #include "navi/engine/Data.h"
 #include <cstdint>
 #include <string>
@@ -37,4 +37,4 @@ public:
 
 using AgentResponseToClientDataPtr = std::shared_ptr<AgentResponseToClientData>;
 
-}
+} // namespace navi_sched

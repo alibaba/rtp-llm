@@ -1,4 +1,4 @@
-#include "aios/navi_sched/resource/ClientResponseR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/ClientResponseR.h"
 #include "unittest/unittest.h"
 #include <atomic>
 #include <chrono>
@@ -31,7 +31,7 @@ AgentResponseToClientDataPtr makeOutput(uint64_t requestId,
     return output;
 }
 
-}
+} // namespace
 
 TEST_F(ClientResponseRTest, testStreamsResponsesUntilGraphFinishes)
 {

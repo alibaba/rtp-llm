@@ -35,4 +35,4 @@ struct AgentPendingCacheToMasterData {
 using AgentPendingCacheToMasterDataPtr =
     std::shared_ptr<AgentPendingCacheToMasterData>;
 
-}
+} // namespace navi_sched

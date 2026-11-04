@@ -1,4 +1,4 @@
-#include "aios/navi_sched/data/MasterScheduleRequestData.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterScheduleRequestData.h"
 #include "autil/TimeUtility.h"
 #include <atomic>
 
@@ -93,4 +93,4 @@ navi::SummaryErrorCode MasterScheduleRequestData::getSummary(
     return navi::SEC_OK;
 }
 
-}
+} // namespace navi_sched

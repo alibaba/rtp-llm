@@ -15,7 +15,6 @@ public:
     ~NaviSchedBatchFinishReporter();
 
 public:
-    bool beginExecution();
     bool startBatch(const std::vector<uint64_t> &requestIds);
     bool startBatch(const std::vector<uint64_t> &requestIds,
                     int64_t executionStartTimeUs);
@@ -84,7 +83,7 @@ public:
     bool reportObservedWorkload(const NaviSchedWorkloadSnapshot &snapshot) const;
     bool reportObservedWorkload(const NaviSchedWorkloadSnapshot &snapshot,
                                const std::vector<int64_t> &coveredNativeBatchIds) const;
-    bool beginObservedBackendExecution(int32_t requestCount = 0) const;
+    bool beginObservedBackendExecution() const;
     bool endObservedBackendExecution() const;
     bool reportObservedExecutionStep(double elapsedMs, int64_t prefillTokens,
                                      int64_t decodeTokens) const;
@@ -113,4 +112,4 @@ private:
     std::unique_ptr<NaviSchedAgentImpl> _impl;
 };
 
-}
+} // namespace navi_sched

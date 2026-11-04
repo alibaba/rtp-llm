@@ -1,6 +1,6 @@
-#include "aios/navi_sched/kernel/ReplayControlSyncKernel.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/ReplayControlSyncKernel.h"
 
-#include "aios/navi_sched/proto/ReplayControl.pb.h"
+#include "rtp_llm/flexlb/navi_sched/proto/ReplayControl.pb.h"
 #include "navi/engine/NaviRegisterMacro.h"
 #include "navi/rpc_server/NaviArpcResponseData.h"
 
@@ -9,7 +9,7 @@ namespace {
 
 constexpr int64_t HISTORY_QUERY_TIMEOUT_MS = 10 * 1000;
 
-}
+} // namespace
 
 const std::string ReplayControlSyncKernel::KERNEL_ID =
     "navi_sched.replay_control_sync_k";
@@ -143,4 +143,4 @@ navi::ErrorCode ReplayControlSyncKernel::compute(navi::KernelComputeContext &ctx
 
 REGISTER_KERNEL(ReplayControlSyncKernel);
 
-}
+} // namespace navi_sched

@@ -1,4 +1,4 @@
-#include "aios/navi_sched/resource/AgentWorkloadOwnership.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentWorkloadOwnership.h"
 
 #include <algorithm>
 #include <limits>
@@ -275,6 +275,7 @@ bool AgentWorkloadOwnership::combine(
     combined.totalPromptTokenCount += promptTokens;
     PrefillTotals running;
     auto slots = std::max(0, observed.maxRunningRequestCount - observed.runningCapacitySlotCount);
+    // Numeric totals are incremental; inspect only the available capacity slots.
     for (const auto &batch : _batchOrder) {
         if (batch->localBatchId > 0 && covered.count(batch->localBatchId)) continue;
         if (slots <= 0) {
@@ -325,4 +326,4 @@ bool AgentWorkloadOwnership::combine(
     return combined.valid();
 }
 
-}
+} // namespace navi_sched

@@ -18,4 +18,4 @@ private:
     std::string _meta;
 };
 
-}
+} // namespace navi_sched

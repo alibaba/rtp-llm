@@ -1,6 +1,6 @@
-#include "aios/navi_sched/resource/MasterPendingCacheR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterPendingCacheR.h"
 
-#include "aios/navi_sched/data/BlockHashUtil.h"
+#include "rtp_llm/flexlb/navi_sched/data/BlockHashUtil.h"
 
 #include <algorithm>
 #include <atomic>
@@ -279,6 +279,7 @@ MasterPendingCacheR::ApplyResult MasterPendingCacheR::applyAgentUpdate(
         return result;
     }
     if (update.fullSnapshot) {
+        // A concurrent reset can make a previously stale snapshot eligible.
         if (!preparedSnapshot) {
             prepareSnapshot();
         }
@@ -304,6 +305,7 @@ MasterPendingCacheR::ApplyResult MasterPendingCacheR::applyAgentUpdate(
                        !candidate.sameReservations(cache->agent)) {
                 failState("same_revision_state_mismatch");
             } else {
+                // Retire the old index after releasing the node write lock.
                 std::swap(cache->agent, candidate);
                 cache->overlap.batchCount =
                     cache->scheduled.countBatchOverlap(cache->agent);
@@ -521,6 +523,9 @@ uint64_t MasterPendingCacheR::getMatchedBlockCounts(
             if (previousHashes) {
                 const auto sharedLimit = std::min(
                     previousFullMatchCount, std::min(blockHashes.size(), matchableBlockCount));
+                // The caller builds these immutable lengths for this exact
+                // request order before starting parallel node queries. Cache
+                // readiness is still established under this node's read lock.
                 if (commonPrefixes && commonPrefixes->size() == requests.size()) {
                     initialMatchCount = std::min(sharedLimit, (*commonPrefixes)[requestIndex]);
                 } else if (previousHashes == &blockHashes) {
@@ -536,6 +541,8 @@ uint64_t MasterPendingCacheR::getMatchedBlockCounts(
                     }
                 }
             }
+            // Reuse only within this read-locked batch. Tail readiness is checked
+            // separately for every request, even when its full prefix is shared.
             matchedBlockCounts[requestIndex] = getMatchedBlockCountLocked(
                 nodeCache, blockHashes, cachedBlockHashes,
                 fullReadyBlockHashes, tailReadyBlockHashes,
@@ -779,6 +786,7 @@ MasterPendingCacheR::Stats MasterPendingCacheR::getStatsLocked(
     stats.agentRevisionGapCount = cache.agentRevisionGapCount;
     stats.agentStateMismatchCount = cache.agentStateMismatchCount;
     stats.agentSnapshotReady = cache.agentSnapshotReady;
+    // Readers share an immutable result until the next state mutation.
     std::atomic_store(&cache.cachedStats, std::make_shared<const Stats>(stats));
     return stats;
 }
@@ -797,4 +805,4 @@ bool MasterPendingCacheR::validateAgentStateLocked(
 
 REGISTER_RESOURCE(MasterPendingCacheR);
 
-}
+} // namespace navi_sched

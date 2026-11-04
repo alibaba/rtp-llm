@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedScheduleData.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedScheduleData.h"
 #include "navi/engine/Data.h"
 #include <autil/DataBuffer.h>
 #include <stdint.h>
@@ -40,6 +40,7 @@ public:
     bool collectReplay = false;
     NaviSchedBlockHashesConstPtr blockHashes;
     std::string forwardPayload;
+    // Process-local diagnostics; these fields never change the wire format.
     int64_t deserializeBeginTimeUs = 0;
     int64_t deserializeEndTimeUs = 0;
 };
@@ -47,4 +48,4 @@ public:
 using ClientRequestToMasterDataConstPtr =
     std::shared_ptr<const ClientRequestToMasterData>;
 
-}
+} // namespace navi_sched

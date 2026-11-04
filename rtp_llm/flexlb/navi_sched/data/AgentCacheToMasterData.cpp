@@ -1,5 +1,5 @@
-#include "aios/navi_sched/data/AgentCacheToMasterData.h"
-#include "aios/navi_sched/data/BlockHashUtil.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentCacheToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/BlockHashUtil.h"
 
 namespace navi_sched {
 
@@ -49,4 +49,4 @@ void AgentCacheToMasterData::deserialize(autil::DataBuffer &dataBuffer)
     dataBuffer.read(rtpCachedBlockCount);
 }
 
-}
+} // namespace navi_sched

@@ -94,4 +94,4 @@ private:
     bool _started = false;
 };
 
-}
+} // namespace navi_sched

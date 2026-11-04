@@ -27,4 +27,4 @@ private:
 
 NAVI_TYPEDEF_PTR(GraphVisRecorder);
 
-}
+} // namespace navi_sched

@@ -1,4 +1,4 @@
-#include "aios/navi_sched/data/AgentLatencyToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentLatencyToMasterData.h"
 
 #include <cmath>
 
@@ -74,4 +74,4 @@ void AgentLatencyToMasterData::deserialize(autil::DataBuffer &dataBuffer)
     dataBuffer.read(sessionSampleCount);
 }
 
-}
+} // namespace navi_sched

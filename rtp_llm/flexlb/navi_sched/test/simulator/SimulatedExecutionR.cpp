@@ -1,7 +1,7 @@
-#include "aios/navi_sched/test/simulator/SimulatedExecutionR.h"
+#include "rtp_llm/flexlb/navi_sched/test/simulator/SimulatedExecutionR.h"
 
-#include "aios/navi_sched/data/AgentResponseToClientData.h"
-#include "aios/navi_sched/data/BlockHashUtil.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/data/BlockHashUtil.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -17,6 +17,8 @@
 
 namespace navi_sched::test {
 const std::vector<double> SIMULATED_FORMULA_PARAMETERS = [] {
+    // Preserve the simulator's physical 280 + 50 * (u + sqrt(u*u + 4))
+    // workload, expressed in the current zero-point/curvature coordinates.
     const double zeroLinear = -964.0 / 320.0;
     const double zeroShape = 4.0 / (std::sqrt(zeroLinear * zeroLinear + 4.0) - zeroLinear);
     std::vector<double> parameters = {
@@ -887,4 +889,4 @@ NaviSchedBlockHashesConstPtr SimulatedExecutionR::calculateBlockHashes(
 REGISTER_RESOURCE(SimulatedExecutionR);
 REGISTER_RESOURCE(SimulatedExecutionBridgeR);
 
-}
+} // namespace navi_sched::test

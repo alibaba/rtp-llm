@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/data/MasterScheduleRequestData.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterScheduleRequestData.h"
 #include "autil/Lock.h"
 #include "navi/engine/AsyncPipe.h"
 #include "navi/engine/Resource.h"
@@ -21,16 +21,6 @@ public:
         double dequeueMaxWaitMs = 0.0;
     };
 
-    struct ExecutionUtilizationStats {
-        double rawAverage = 0.0;
-        uint64_t running = 0;
-        uint64_t waiting = 0;
-        bool globalScaling = false;
-        double average = 0.0;
-        double integral = 0.0;
-        size_t reportingNodes = 0;
-        bool enabled = false;
-    };
     struct QueueOverloadStats {
         uint64_t evaluatedRoundCount = 0;
         uint64_t evaluatedRequestCount = 0;
@@ -84,10 +74,6 @@ public:
                              double averagePredictedLatencyMs,
                              double dropProbability);
     QueueOverloadStats getQueueOverloadStats() const;
-    void recordExecutionUtilization(double average, double integral, size_t reportingNodes, bool enabled,
-                                    double rawAverage = 0.0, uint64_t running = 0,
-                                    uint64_t waiting = 0, bool globalScaling = false);
-    ExecutionUtilizationStats getExecutionUtilizationStats() const;
     void recordColdStartRouting(const NaviSchedColdStartRoutingStats &stats);
     ColdStartRoutingStats getColdStartRoutingStats() const;
     navi::SummaryErrorCode getSummary(const std::string &query,
@@ -124,14 +110,6 @@ private:
     std::atomic<uint64_t> _queueOverloadEvaluatedRequestCount{0};
     std::atomic<uint64_t> _queueOverloadRejectedRequestCount{0};
     std::atomic<double> _queueOverloadLatestAveragePredictedLatencyMs{0.0};
-    std::atomic<double> _executionRawAverage{0.0};
-    std::atomic<uint64_t> _executionRunning{0};
-    std::atomic<uint64_t> _executionWaiting{0};
-    std::atomic<bool> _executionGlobalScaling{false};
-    std::atomic<double> _executionUtilizationAverage{0.0};
-    std::atomic<double> _executionUtilizationIntegral{0.0};
-    std::atomic<size_t> _executionUtilizationReportingNodes{0};
-    std::atomic<bool> _executionUtilizationEnabled{false};
     std::atomic<double> _queueOverloadLatestDropProbability{0.0};
     std::atomic<uint64_t> _coldStartEvaluatedRoundCount{0};
     std::atomic<uint64_t> _coldStartTrustedRequestCount{0};
@@ -150,4 +128,4 @@ private:
 
 NAVI_TYPEDEF_PTR(MasterScheduleR);
 
-}
+} // namespace navi_sched

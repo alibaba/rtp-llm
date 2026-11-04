@@ -1,7 +1,7 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedCommon.h"
-#include "aios/navi_sched/data/NaviSchedLatencySample.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedCommon.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedLatencySample.h"
 #include "autil/Lock.h"
 #include "autil/LockFreeQueue.h"
 #include "navi/engine/AsyncPipe.h"
@@ -157,4 +157,4 @@ private:
 
 NAVI_TYPEDEF_PTR(AgentLatencyInputR);
 
-}
+} // namespace navi_sched

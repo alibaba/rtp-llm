@@ -1,6 +1,6 @@
-#include "aios/navi_sched/data/MasterLatencyModelWarmupToAgentData.h"
-#include "aios/navi_sched/resource/AgentReportR.h"
-#include "aios/navi_sched/resource/LatencyModelR.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterLatencyModelWarmupToAgentData.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentReportR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyModelR.h"
 #include "navi/engine/Kernel.h"
 
 namespace navi_sched {
@@ -65,4 +65,4 @@ navi::ErrorCode AgentLatencyModelWarmupKernel::compute(
 
 REGISTER_KERNEL(AgentLatencyModelWarmupKernel);
 
-}
+} // namespace navi_sched

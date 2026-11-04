@@ -1,10 +1,10 @@
-#include "aios/navi_sched/bindings/NaviSchedBindings.h"
-#include "aios/navi_sched/service/NaviSchedAgent.h"
-#include "aios/navi_sched/service/NaviSchedClient.h"
-#include "aios/navi_sched/service/NaviSchedMaster.h"
-#include "aios/navi_sched/test/simulator/SimulatedAgentAccess.h"
-#include "aios/navi_sched/test/simulator/SimulatedExecutionR.h"
-#include "aios/navi_sched/test/simulator/TrafficReplayAccess.h"
+#include "rtp_llm/flexlb/navi_sched/bindings/NaviSchedBindings.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedAgent.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedClient.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedMaster.h"
+#include "rtp_llm/flexlb/navi_sched/test/simulator/SimulatedAgentAccess.h"
+#include "rtp_llm/flexlb/navi_sched/test/simulator/SimulatedExecutionR.h"
+#include "rtp_llm/flexlb/navi_sched/test/simulator/TrafficReplayAccess.h"
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <algorithm>
@@ -29,7 +29,7 @@ T &unwrapRoleFacade(const py::object &role)
     return role.attr("_service").cast<T &>();
 }
 
-}
+} // namespace
 
 void bindSimulatedNaviSched(py::module_ &m)
 {
@@ -216,7 +216,7 @@ void bindSimulatedNaviSched(py::module_ &m)
         py::arg("master"));
 }
 
-}
+} // namespace navi_sched
 
 PYBIND11_MODULE(_navi_sched_core, module)
 {

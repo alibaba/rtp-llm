@@ -12,4 +12,4 @@ public:
     static size_t getSummaryLimit(int32_t level, size_t size);
 };
 
-}
+} // namespace navi_sched

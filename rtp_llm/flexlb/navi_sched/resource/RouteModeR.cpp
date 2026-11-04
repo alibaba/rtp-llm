@@ -1,7 +1,7 @@
-#include "aios/navi_sched/resource/RouteModeR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/RouteModeR.h"
 
-#include "aios/navi_sched/kernel/RouteModeKernel.h"
-#include "aios/navi_sched/proto/RouteMode.pb.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/RouteModeKernel.h"
+#include "rtp_llm/flexlb/navi_sched/proto/RouteMode.pb.h"
 #include "navi/builder/GraphBuilder.h"
 #include "navi/engine/NaviRegisterMacro.h"
 #include "navi/rpc_server/ArpcRegistryParam.h"
@@ -119,4 +119,4 @@ RouteModeR::Snapshot RouteModeR::waitAfter(uint64_t generation,
 
 REGISTER_RESOURCE(RouteModeR);
 
-}
+} // namespace navi_sched

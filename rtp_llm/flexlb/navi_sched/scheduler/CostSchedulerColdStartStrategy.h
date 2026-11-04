@@ -1,7 +1,7 @@
 #pragma once
 
-#include "aios/navi_sched/scheduler/ScheduleContext.h"
-#include "aios/network/gig/multi_call/util/RandomGenerator.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/ScheduleContext.h"
+#include "rtp_llm/flexlb/navi_sched/vendor/network/gig/multi_call/util/RandomGenerator.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -15,6 +15,7 @@ class CostSchedulerColdStartStrategy {
 public:
     struct Analysis {
         long double trustedBacklogLatencyWeightedSumMs = 0.0L;
+        // Busy nodes without a usable prediction must not dilute the mean with zero.
         int64_t trustedBacklogInflight = 0;
         int64_t trustedInflight = 0;
         double minimumTrustedBacklogLatencyMs =
@@ -83,4 +84,4 @@ private:
                                 const std::function<uint64_t()> &randomDraw = {});
 };
 
-}
+} // namespace navi_sched

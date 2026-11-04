@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/test/simulator/TrafficReplayR.h"
+#include "rtp_llm/flexlb/navi_sched/test/simulator/TrafficReplayR.h"
 #include <memory>
 
 namespace navi_sched {
@@ -20,4 +20,4 @@ private:
     std::unique_ptr<Impl> _impl;
 };
 
-}
+} // namespace navi_sched

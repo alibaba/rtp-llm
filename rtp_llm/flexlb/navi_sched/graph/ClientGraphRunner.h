@@ -1,7 +1,7 @@
 #pragma once
 
-#include "aios/navi_sched/data/ClientRequestToMasterData.h"
-#include "aios/navi_sched/data/MasterResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/data/ClientRequestToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterResponseToClientData.h"
 #include "navi/engine/Navi.h"
 #include <functional>
 
@@ -57,4 +57,4 @@ private:
     bool _expectAgentResponseStream = true;
 };
 
-}
+} // namespace navi_sched

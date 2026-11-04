@@ -1,12 +1,12 @@
 #pragma once
 
-#include "aios/navi_sched/data/AgentLatencyToMasterData.h"
-#include "aios/navi_sched/data/LatencyModelGlobalData.h"
-#include "aios/navi_sched/data/MasterLatencyModelWarmupToAgentData.h"
-#include "aios/navi_sched/data/NaviSchedLatencySample.h"
-#include "aios/navi_sched/resource/AgentHistoryR.h"
-#include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
-#include "aios/navi_sched/resource/LatencyResidualModel.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentLatencyToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/LatencyModelGlobalData.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterLatencyModelWarmupToAgentData.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedLatencySample.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentHistoryR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/NonLinearPrefillModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyResidualModel.h"
 #include "autil/Lock.h"
 #include "navi/engine/Resource.h"
 #include <atomic>
@@ -194,4 +194,4 @@ private:
 
 NAVI_TYPEDEF_PTR(LatencyModelR);
 
-}
+} // namespace navi_sched

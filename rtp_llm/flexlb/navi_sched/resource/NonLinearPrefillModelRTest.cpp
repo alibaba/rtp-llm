@@ -1,7 +1,7 @@
-#include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
-#include "aios/navi_sched/resource/LatencyModelR.h"
-#include "aios/navi_sched/resource/MasterLatencyModelR.h"
-#include "aios/navi_sched/scheduler/ScheduleContext.h"
+#include "rtp_llm/flexlb/navi_sched/resource/NonLinearPrefillModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterLatencyModelR.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/ScheduleContext.h"
 
 #include "unittest/unittest.h"
 
@@ -899,6 +899,7 @@ TEST_F(NonLinearPrefillModelRTest, testAgentRejectsNegativeWarmupWithoutChanging
             candidate.optimizerState = NonLinearPrefillModelR::makeOptimizerStateData(
                 importedOptimizer, initialParameters.size());
             warmup.candidates = {candidate};
+            // Wire-format validity alone does not validate the model's workload response.
             ASSERT_TRUE(warmup.valid());
             std::shared_ptr<const NaviSchedLatencyModelSnapshot> updated;
             EXPECT_FALSE(latency.applyColdStartCandidates(warmup, updated));
@@ -1064,6 +1065,7 @@ TEST_F(NonLinearPrefillModelRTest,
         1.0, 12.0, 5.0, 3.0, 2.0, 1.0,
         parameterForFormulaCoefficient(15, 1.0), 2.0, 7.0, 11.0,
     };
+    // Independently evaluated with 70-digit Decimal arithmetic and differences.
     const std::vector<double> expectedGradient = {
         3.821889975911229, 3.348373534738624, 0.826014753940311,
         45.99139701676822, 34.43808249247954, 366.8333775144461,

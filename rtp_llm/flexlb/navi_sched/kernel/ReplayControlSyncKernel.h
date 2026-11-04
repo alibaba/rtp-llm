@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/resource/ReplayControlR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/ReplayControlR.h"
 #include "navi/engine/Kernel.h"
 #include "navi/rpc_server/NaviArpcRequestData.h"
 
@@ -30,4 +30,4 @@ private:
     bool _timeoutActive = false;
 };
 
-}
+} // namespace navi_sched

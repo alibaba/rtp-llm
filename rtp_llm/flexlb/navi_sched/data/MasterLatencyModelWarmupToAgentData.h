@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/data/AgentLatencyToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentLatencyToMasterData.h"
 #include "navi/engine/Data.h"
 
 #include <autil/DataBuffer.h>
@@ -45,4 +45,4 @@ public:
 
 NAVI_TYPEDEF_PTR(MasterLatencyModelWarmupToAgentData);
 
-}
+} // namespace navi_sched

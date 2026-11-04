@@ -1,9 +1,9 @@
 #pragma once
 
-#include "aios/navi_sched/data/AgentLatencyToMasterData.h"
-#include "aios/navi_sched/data/NaviSchedLatencySample.h"
-#include "aios/navi_sched/resource/AgentSchedulerConfigR.h"
-#include "aios/navi_sched/scheduler/AutoGrad.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentLatencyToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedLatencySample.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentSchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/AutoGrad.h"
 #include "autil/Lock.h"
 #include "kmonitor/client/MetricsReporterR.h"
 #include "navi/engine/Resource.h"
@@ -38,6 +38,8 @@ public:
     static constexpr double NONLINEAR_SCALE = 1500.0;
     static constexpr double MIN_NONLINEAR_CURVATURE = 1e-8;
     static constexpr double DEFAULT_ZERO_ANCHOR_MAX_MS = 256.0;
+    // The feature is the sum across all running requests, so normalize at the
+    // aggregate scale rather than at one request-second.
     static constexpr double RUNNING_ELAPSED_TIME_SCALE_MS = 1'000'000.0;
     static constexpr double INITIAL_PRECEDING_REQUEST_COEFFICIENT_MS = 5.0;
     static constexpr double MIN_PRECEDING_REQUEST_COEFFICIENT_MS = 1.0;
@@ -86,6 +88,7 @@ public:
         double u = 0.0;
         double curvature = 0.0;
         double r = 0.0;
+        // -1: negative far field, 0: transition, 1: positive far field.
         int region = 0;
     };
 
@@ -236,4 +239,4 @@ private:
     mutable std::atomic<uint64_t> _unsafeWaitingStateResetCount{0};
 };
 
-}
+} // namespace navi_sched

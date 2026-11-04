@@ -12,6 +12,7 @@ namespace navi_sched {
 
 class MasterStateR;
 
+// Process-local ownership token. It must never be serialized to an Agent.
 class MasterDispatchHandle {
 public:
     bool valid() const { return bool(_state); }
@@ -28,4 +29,4 @@ private:
     size_t _requestIndex = 0;
 };
 
-}
+} // namespace navi_sched

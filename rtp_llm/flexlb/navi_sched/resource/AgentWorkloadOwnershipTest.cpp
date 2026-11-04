@@ -1,4 +1,4 @@
-#include "aios/navi_sched/resource/AgentWorkloadOwnership.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentWorkloadOwnership.h"
 
 #include <random>
 #include <chrono>
@@ -51,6 +51,7 @@ TEST(AgentWorkloadOwnershipTest, PartialCancellationAndExactHandoff)
     EXPECT_EQ(150, snapshot.runningCapacityPrefillTokenCount);
     EXPECT_EQ(200, snapshot.waitingCapacityPrefillTokenCount);
 
+    // The Observer covers batch 1; batch 2 must still be counted natively.
     auto observed = emptyObserved(1);
     observed.batchCount = observed.requestCount = observed.waitingRequestCount = 1;
     observed.remainingPrefillRequestCount = observed.runningCapacityPrefillRequestCount = 1;
@@ -272,5 +273,5 @@ TEST(AgentWorkloadOwnershipTest, AdmissionAndPromotionWorkAtLargeBatchSizes)
     }
 }
 
-}
-}
+} // namespace
+} // namespace navi_sched

@@ -1,4 +1,4 @@
-#include "aios/navi_sched/data/AgentControlToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentControlToMasterData.h"
 
 namespace navi_sched {
 
@@ -18,4 +18,4 @@ void AgentControlToMasterData::deserialize(autil::DataBuffer &dataBuffer)
     dataBuffer.read(unifiedLatencyPrediction);
 }
 
-}
+} // namespace navi_sched

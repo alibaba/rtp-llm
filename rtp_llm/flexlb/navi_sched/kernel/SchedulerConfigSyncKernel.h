@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/resource/SchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/SchedulerConfigR.h"
 #include "navi/engine/Kernel.h"
 
 namespace navi_sched {
@@ -30,4 +30,4 @@ private:
     bool _timeoutActive = false;
 };
 
-}
+} // namespace navi_sched

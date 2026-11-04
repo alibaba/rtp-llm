@@ -1,4 +1,4 @@
-#include "aios/navi_sched/resource/PendingCacheUtil.h"
+#include "rtp_llm/flexlb/navi_sched/resource/PendingCacheUtil.h"
 
 #include <algorithm>
 #include <unordered_set>
@@ -16,7 +16,7 @@ uint64_t mix(uint64_t value)
     return value ^ (value >> 31);
 }
 
-}
+} // namespace
 
 bool PendingCacheUtil::makeReservation(
     int64_t batchId, const std::vector<PendingCacheReferencedRequest> &requests,
@@ -260,6 +260,7 @@ bool PendingCacheState::upsertGenerated(
                     }
                 }
             };
+            // Unchanged hashes keep their owners and allocations during replacement.
             updateOwners(it->second.fullReadyBlockHashes, reservation.fullReadyBlockHashes,
                          _fullReadyOwners, false);
             updateOwners(it->second.tailReadyBlockHashes, reservation.tailReadyBlockHashes,
@@ -291,6 +292,7 @@ bool PendingCacheState::removeGeneratedBlocks(
     if (it == _reservations.end()) {
         return false;
     }
+    // Only MasterBatchReservation's last-reference transitions reach this path.
     auto [reducedIt, inserted] = _reducedReservations.try_emplace(batchId);
     auto &reduced = reducedIt->second;
     if (inserted) {
@@ -405,6 +407,7 @@ bool PendingCacheState::hasOwnerOutsideSchedule(
         return _reservations.at(owners.singleBatchId).scheduleBatchId != scheduleBatchId;
     }
     const auto batches = _scheduleBatchIds.find(scheduleBatchId);
+    // More owners than excluded batches guarantees an independent owner.
     if (batches == _scheduleBatchIds.end() ||
         owners.size() > batches->second.size()) {
         return true;
@@ -624,4 +627,4 @@ void PendingCacheState::eraseMetadata(
     _reservations.erase(it);
 }
 
-}
+} // namespace navi_sched

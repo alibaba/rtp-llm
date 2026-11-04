@@ -1,7 +1,7 @@
 #pragma once
 
-#include "aios/navi_sched/data/AgentPendingCacheToMasterData.h"
-#include "aios/navi_sched/resource/PendingCacheUtil.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentPendingCacheToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/resource/PendingCacheUtil.h"
 #include "autil/Lock.h"
 #include "navi/engine/Resource.h"
 
@@ -28,6 +28,7 @@ public:
                  AgentPendingCacheToMasterData &update, bool &changed);
     bool replace(const NaviSchedPendingCacheReservation &reservation,
                  AgentPendingCacheToMasterData &update, bool &changed);
+    // Cancellation may arrive out of order; only retain currently owned blocks.
     bool retain(const NaviSchedPendingCacheReservation &reservation,
                 AgentPendingCacheToMasterData &update, bool &changed);
     bool retire(int64_t batchId, AgentPendingCacheToMasterData &update,
@@ -60,4 +61,4 @@ private:
 
 NAVI_TYPEDEF_PTR(AgentPendingCacheR);
 
-}
+} // namespace navi_sched

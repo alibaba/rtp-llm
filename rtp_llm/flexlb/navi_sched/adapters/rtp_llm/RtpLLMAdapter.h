@@ -119,4 +119,4 @@ NAVI_SCHED_API void reportRtpLLMCacheStateChanged(
 NAVI_SCHED_API void resetRtpLLMCacheReportLatency();
 NAVI_SCHED_API int64_t takeRtpLLMCacheReportLatencyUs();
 
-}
+} // namespace navi_sched

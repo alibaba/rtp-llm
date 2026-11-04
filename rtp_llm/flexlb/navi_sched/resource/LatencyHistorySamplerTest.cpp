@@ -1,4 +1,4 @@
-#include "aios/navi_sched/resource/LatencyHistorySampler.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyHistorySampler.h"
 
 #include "autil/DataBuffer.h"
 #include "unittest/unittest.h"
@@ -43,7 +43,7 @@ void writeNegativeBatchSample(autil::DataBuffer &buffer)
     buffer.write(int64_t(1));
 }
 
-}
+} // namespace
 
 class LatencyHistorySamplerTest : public TESTBASE {};
 
@@ -352,4 +352,4 @@ TEST_F(LatencyHistorySamplerTest, testDeserializeRejectsInvalidFeaturesAtomicall
     EXPECT_EQ(99, history->front().eventTimeUs);
 }
 
-}
+} // namespace navi_sched

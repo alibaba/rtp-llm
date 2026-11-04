@@ -1,7 +1,7 @@
-#include "aios/navi_sched/data/AgentResponseToClientData.h"
-#include "aios/navi_sched/data/ClientRequestToMasterData.h"
-#include "aios/navi_sched/data/MasterResponseToClientData.h"
-#include "aios/navi_sched/resource/ClientResponseR.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/data/ClientRequestToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/resource/ClientResponseR.h"
 #include "navi/engine/Kernel.h"
 #include "navi/log/NaviLogger.h"
 
@@ -98,4 +98,4 @@ navi::ErrorCode ClientResponseKernel::compute(navi::KernelComputeContext &ctx)
 
 REGISTER_KERNEL(ClientResponseKernel);
 
-}
+} // namespace navi_sched

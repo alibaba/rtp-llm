@@ -1,15 +1,15 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-#include "aios/navi_sched/bindings/NaviSchedBindings.h"
-#include "aios/navi_sched/common/NaviSchedScheduleData.h"
-#include "aios/navi_sched/data/BlockHashUtil.h"
-#include "aios/navi_sched/data/AgentLatencyToMasterData.h"
-#include "aios/navi_sched/data/AgentResponseToClientData.h"
-#include "aios/navi_sched/debug/NaviSchedScheduleReplayJson.h"
-#include "aios/navi_sched/service/NaviSchedAgent.h"
-#include "aios/navi_sched/service/NaviSchedClient.h"
-#include "aios/navi_sched/service/NaviSchedMaster.h"
-#include "aios/network/gig/multi_call/subscribe/VIPSubscribeService.h"
+#include "rtp_llm/flexlb/navi_sched/bindings/NaviSchedBindings.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedScheduleData.h"
+#include "rtp_llm/flexlb/navi_sched/data/BlockHashUtil.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentLatencyToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/debug/NaviSchedScheduleReplayJson.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedAgent.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedClient.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedMaster.h"
+#include "rtp_llm/flexlb/navi_sched/vendor/network/gig/multi_call/subscribe/VIPSubscribeService.h"
 #include "autil/Log.h"
 #include "alog/Configurator.h"
 #include "alog/Logger.h"
@@ -259,11 +259,6 @@ public:
                         return touch && requestIds.count(touch->requestId) != 0;
                     }),
                 state->touchQueue.end());
-        }
-        lock.unlock();
-        if (!batch->reporter || !batch->reporter->beginExecution()) {
-            releaseForwardBatch(batch);
-            return nullptr;
         }
         return batch;
     }
@@ -535,9 +530,9 @@ public:
             nativePreparationMs);
     }
 
-    bool beginBackendExecution(int32_t requestCount) const
+    bool beginBackendExecution() const
     {
-        return _agent && _agent->beginObservedBackendExecution(requestCount);
+        return _agent && _agent->beginObservedBackendExecution();
     }
 
     bool endBackendExecution() const
@@ -854,7 +849,6 @@ void bindNaviSchedData(py::module_ &m)
                     py::arg("native_preparation_ms") = 0.0,
                     py::call_guard<py::gil_scoped_release>())
         .def("begin_backend_execution", &VLLMAgentBridge::beginBackendExecution,
-             py::arg("request_count") = 0,
              py::call_guard<py::gil_scoped_release>())
         .def("end_backend_execution", &VLLMAgentBridge::endBackendExecution,
              py::call_guard<py::gil_scoped_release>())
@@ -1247,7 +1241,7 @@ void bindNaviSchedData(py::module_ &m)
         .def("get_grpc_port", &NaviSchedAgent::getGrpcPort);
 }
 
-}
+} // namespace
 
 void bindNaviSched(py::module_ &m) { bindNaviSchedData(m); }
 
@@ -1263,4 +1257,4 @@ void bindNaviSchedModule(py::module_ &module, const char *description)
     bindNaviSched(module);
 }
 
-}
+} // namespace navi_sched

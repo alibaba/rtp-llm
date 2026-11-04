@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedScheduleData.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedScheduleData.h"
 #include "navi/engine/AsyncPipe.h"
 #include "navi/engine/Resource.h"
 #include <atomic>
@@ -76,4 +76,4 @@ private:
 
 NAVI_TYPEDEF_PTR(AgentResponseR);
 
-}
+} // namespace navi_sched

@@ -1,4 +1,4 @@
-#include "aios/navi_sched/resource/LatencyModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyModelR.h"
 #include "autil/TimeUtility.h"
 #include <algorithm>
 #include <cmath>
@@ -184,6 +184,8 @@ bool LatencyModelR::recordSample(
         (!evaluatingColdStart ||
          (coldStartSelectionCompleted && !historyAlreadyReplayed))) {
         const auto fitted = fit(getOnlineFitBatches(), updatedSnapshot);
+        // Rejected samples remain in history for sampling, but must not block
+        // every later update by staying in the unprocessed tail.
         _agentHistoryR->clearPendingFitSamples();
         if (!fitted) {
             return false;
@@ -1083,4 +1085,4 @@ void LatencyModelR::publishSnapshot(
 
 REGISTER_RESOURCE(LatencyModelR);
 
-}
+} // namespace navi_sched

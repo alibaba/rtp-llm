@@ -1,7 +1,7 @@
 #pragma once
 
-#include "aios/navi_sched/service/NaviSchedRoleSummary.h"
-#include "aios/navi_sched/common/NaviSchedScheduleData.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedRoleSummary.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedScheduleData.h"
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -60,8 +60,6 @@ public:
     int32_t batchWaitingRequests = 0;
     int32_t queuedBatchRequests = 0;
     int32_t runningRequests = 0;
-    double executionUtilization = -1.0;
-    double executionBusyUtilization = -1.0;
     uint64_t batchTimeoutCount = 0;
     uint64_t abnormalBatchFinishCount = 0;
     uint64_t masterSentRequestCount = 0;
@@ -135,14 +133,6 @@ public:
     uint64_t queueOverloadRejectedRequestCount = 0;
     double queueOverloadLatestAveragePredictedLatencyMs = 0.0;
     double queueOverloadLatestDropProbability = 0.0;
-    bool executionUtilizationControlEnabled = false;
-    double executionUtilizationRawAverage = 0.0;
-    uint64_t executionUtilizationRunning = 0;
-    uint64_t executionUtilizationWaiting = 0;
-    bool executionUtilizationGlobalScaling = false;
-    double executionUtilizationAverage = 0.0;
-    double executionUtilizationIntegral = 0.0;
-    size_t executionUtilizationReportingNodes = 0;
     uint64_t schedulerConfigGeneration = 0;
     std::string schedulerConfigHash;
     std::string schedulerConfigJson;
@@ -155,4 +145,4 @@ public:
     std::vector<NaviSchedMasterNodeSummary> nodes;
 };
 
-}
+} // namespace navi_sched

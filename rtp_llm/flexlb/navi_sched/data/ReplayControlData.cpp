@@ -1,4 +1,4 @@
-#include "aios/navi_sched/data/ReplayControlData.h"
+#include "rtp_llm/flexlb/navi_sched/data/ReplayControlData.h"
 #include "navi/engine/Type.h"
 
 namespace navi_sched {
@@ -47,7 +47,7 @@ void deserializeSummary(autil::DataBuffer &buffer, ReplayHistorySummary &summary
     }
 }
 
-}
+} // namespace
 
 ReplayHistoryUpdateData::ReplayHistoryUpdateData()
     : navi::Data(TYPE_ID)
@@ -106,6 +106,7 @@ void ReplayControlCommandData::deserialize(autil::DataBuffer &buffer)
     buffer.read(totalQps);
     buffer.read(perClientQps);
     buffer.read(loopCount);
+    // Appending fields keeps commands from the previous rolling version readable.
     if (buffer.getDataLen() > 0) {
         buffer.read(historyMode);
     }
@@ -267,4 +268,4 @@ REGISTER_TYPE(ReplayClientCapabilityType);
 REGISTER_TYPE(ReplayHistoryQueryType);
 REGISTER_TYPE(ReplayHistoryQueryResponseType);
 
-}
+} // namespace navi_sched

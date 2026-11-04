@@ -1,4 +1,4 @@
-#include "aios/navi_sched/config/NaviSchedConfigBuilder.h"
+#include "rtp_llm/flexlb/navi_sched/config/NaviSchedConfigBuilder.h"
 #include "autil/legacy/jsonizable.h"
 
 namespace navi_sched {
@@ -26,65 +26,10 @@ autil::legacy::json::JsonArray NaviSchedConfigBuilder::makeNamedConfigArray(
     return result;
 }
 
-autil::legacy::json::JsonMap NaviSchedConfigBuilder::makeLocalNode(
-    const NaviSchedLocalNode &node)
-{
-    autil::legacy::json::JsonMap value;
-    value["biz_name"] = node.bizName;
-    value["part_count"] = node.partCount;
-    value["part_id"] = node.partId;
-    value["version"] = node.version;
-    value["weight"] = node.weight;
-    value["ip"] = node.ip;
-    value["http_port"] = node.httpPort;
-    value["tcp_port"] = node.tcpPort;
-    value["grpc_port"] = node.grpcPort;
-    value["support_heartbeat"] = node.supportHeartbeat;
-    return value;
-}
-
-autil::legacy::json::JsonMap NaviSchedConfigBuilder::makeCm2Subscription(
-    const NaviSchedCm2Subscription &config)
-{
-    autil::legacy::json::JsonMap value;
-    value["zk_host"] = config.zkHost;
-    value["zk_path"] = config.zkPath;
-    if (!config.cm2Part.empty()) {
-        value["cm2_part"] = makeStringArray(config.cm2Part);
-    }
-    if (!config.cm2Group.empty()) {
-        value["cm2_group"] = makeStringArray(config.cm2Group);
-    }
-    if (!config.cm2PartNoTopoInfo.empty()) {
-        value["cm2_part_no_topo_info"] = makeStringArray(config.cm2PartNoTopoInfo);
-    }
-    if (config.cm2AllGroupTopo) {
-        value["cm2_all_group_topo"] = true;
-    }
-    if (!config.serviceKey.empty()) {
-        value["service_key"] = config.serviceKey;
-    }
-    return value;
-}
-
 autil::legacy::json::JsonMap NaviSchedConfigBuilder::makeSubscribeConfig(
     const NaviSchedRuntimeConfig &config)
 {
     autil::legacy::json::JsonMap subscribeConfig;
-    autil::legacy::json::JsonArray localNodes;
-    for (const auto &node : config.localNodes) {
-        localNodes.emplace_back(makeLocalNode(node));
-    }
-    subscribeConfig["local"] = std::move(localNodes);
-    if (1 == config.cm2Subscriptions.size()) {
-        subscribeConfig["cm2"] = makeCm2Subscription(config.cm2Subscriptions.front());
-    } else if (!config.cm2Subscriptions.empty()) {
-        autil::legacy::json::JsonArray cm2Configs;
-        for (const auto &cm2 : config.cm2Subscriptions) {
-            cm2Configs.emplace_back(makeCm2Subscription(cm2));
-        }
-        subscribeConfig["cm2_configs"] = std::move(cm2Configs);
-    }
     const auto &vip = config.vipSubscription;
     if (!vip.services.empty()) {
         autil::legacy::json::JsonMap vipConfig;
@@ -180,4 +125,4 @@ std::string NaviSchedConfigBuilder::build(const NaviSchedRuntimeConfig &config,
     return autil::legacy::ToJsonString(naviConfig, true);
 }
 
-}
+} // namespace navi_sched

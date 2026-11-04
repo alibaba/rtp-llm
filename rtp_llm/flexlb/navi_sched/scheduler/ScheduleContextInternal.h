@@ -1,8 +1,8 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedScheduleData.h"
-#include "aios/navi_sched/data/NaviSchedLatencySample.h"
-#include "aios/navi_sched/resource/LatencyResidualModel.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedScheduleData.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedLatencySample.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyResidualModel.h"
 
 #include <memory>
 #include <string>
@@ -65,8 +65,6 @@ public:
     virtual ~NaviSchedNode() = default;
 
 public:
-    virtual double getExecutionUtilization() const { return -1.0; }
-    virtual double getExecutionBusyUtilization() const { return -1.0; }
     virtual NaviSchedNodeInfo getInfo() const = 0;
     virtual bool getScheduleSnapshot(const std::string &bizName,
                                      NaviSchedNodeSnapshot &snapshot) const = 0;
@@ -92,4 +90,4 @@ public:
 
 using NaviSchedNodeConstPtr = std::shared_ptr<const NaviSchedNode>;
 
-}
+} // namespace navi_sched

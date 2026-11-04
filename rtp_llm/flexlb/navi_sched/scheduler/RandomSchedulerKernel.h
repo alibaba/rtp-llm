@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/scheduler/SchedulerBaseKernel.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/SchedulerBaseKernel.h"
 
 namespace navi_sched {
 
@@ -25,4 +25,4 @@ private:
     mutable uint64_t _state = 0x9e3779b97f4a7c15ULL;
 };
 
-}
+} // namespace navi_sched

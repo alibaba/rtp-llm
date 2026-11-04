@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/data/ReplayControlData.h"
+#include "rtp_llm/flexlb/navi_sched/data/ReplayControlData.h"
 
 #include <cstdint>
 #include <mutex>
@@ -54,4 +54,4 @@ private:
     std::vector<ReplayHistorySample> _volatileSamples;
 };
 
-}
+} // namespace navi_sched

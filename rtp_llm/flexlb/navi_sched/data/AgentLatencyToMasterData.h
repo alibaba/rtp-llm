@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedCommon.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedCommon.h"
 
 #include <autil/DataBuffer.h>
 #include "navi/common.h"
@@ -49,4 +49,4 @@ public:
 
 NAVI_TYPEDEF_PTR(AgentLatencyToMasterData);
 
-}
+} // namespace navi_sched

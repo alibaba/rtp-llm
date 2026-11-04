@@ -44,11 +44,6 @@ Master 字段在 Master 内生效，Agent 字段通过已有的 Master->Agent �
   max_wait_schedule_time_ms           调度批次最多等待的时间，单位毫秒。
   queue_overload_start_cycle_multiplier  开始过载限流的排队周期倍数，0 表示关闭。
   queue_overload_full_cycle_multiplier   达到满限流的排队周期倍数。
-  overload_control_strategy           execution_utilization（默认）或 latency；设置延迟阈值自动选择 latency。
-  execution_utilization_global_scaling 整集群聚合 running/waiting 后放缩，默认 false。
-  execution_utilization_target        等效 Prefill 执行占比目标，默认 1.10（110%）。
-  execution_utilization_kp            PI 比例系数，默认 0.05。
-  execution_utilization_ki_per_second PI 每秒积分系数，默认 0.01。
   admission_timeout_ms                Master 准入请求超时时间，单位毫秒。
   batch_timeout_ms                    Agent 凑批等待超时时间，单位毫秒。
   closed_batch_keep_ms                已完成 batch 状态保留时间，单位毫秒。
@@ -90,55 +85,79 @@ sets=()
 
 while (($# > 0)); do
     case "$1" in
-    --host)
-        (($# >= 2)) || { echo "--host requires a value" >&2; exit 2; }
-        host="$2"
-        shift 2
-        ;;
-    --port)
-        (($# >= 2)) || { echo "--port requires a value" >&2; exit 2; }
-        port="$2"
-        shift 2
-        ;;
-    --url)
-        (($# >= 2)) || { echo "--url requires a value" >&2; exit 2; }
-        url="$2"
-        shift 2
-        ;;
-    --timeout)
-        (($# >= 2)) || { echo "--timeout requires a value" >&2; exit 2; }
-        timeout="$2"
-        shift 2
-        ;;
-    --hardware)
-        (($# >= 2)) || { echo "--hardware requires a value" >&2; exit 2; }
-        hardware="$2"
-        [[ -n "$hardware" ]] || { echo "--hardware must not be empty" >&2; exit 2; }
-        shift 2
-        ;;
-    --get)
-        get_only=1
-        shift
-        ;;
-    --patch-json)
-        (($# >= 2)) || { echo "--patch-json requires a value" >&2; exit 2; }
-        patch_json="$2"
-        shift 2
-        ;;
-    --set)
-        (($# >= 2)) || { echo "--set requires KEY=VALUE" >&2; exit 2; }
-        sets+=("$2")
-        shift 2
-        ;;
-    -h|--help)
-        usage
-        exit 0
-        ;;
-    *)
-        echo "unknown option: $1" >&2
-        usage
-        exit 2
-        ;;
+        --host)
+            (($# >= 2)) || {
+                echo "--host requires a value" >&2
+                exit 2
+            }
+            host="$2"
+            shift 2
+            ;;
+        --port)
+            (($# >= 2)) || {
+                echo "--port requires a value" >&2
+                exit 2
+            }
+            port="$2"
+            shift 2
+            ;;
+        --url)
+            (($# >= 2)) || {
+                echo "--url requires a value" >&2
+                exit 2
+            }
+            url="$2"
+            shift 2
+            ;;
+        --timeout)
+            (($# >= 2)) || {
+                echo "--timeout requires a value" >&2
+                exit 2
+            }
+            timeout="$2"
+            shift 2
+            ;;
+        --hardware)
+            (($# >= 2)) || {
+                echo "--hardware requires a value" >&2
+                exit 2
+            }
+            hardware="$2"
+            [[ -n "$hardware" ]] || {
+                echo "--hardware must not be empty" >&2
+                exit 2
+            }
+            shift 2
+            ;;
+        --get)
+            get_only=1
+            shift
+            ;;
+        --patch-json)
+            (($# >= 2)) || {
+                echo "--patch-json requires a value" >&2
+                exit 2
+            }
+            patch_json="$2"
+            shift 2
+            ;;
+        --set)
+            (($# >= 2)) || {
+                echo "--set requires KEY=VALUE" >&2
+                exit 2
+            }
+            sets+=("$2")
+            shift 2
+            ;;
+        -h | --help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "unknown option: $1" >&2
+            usage
+            exit 2
+            ;;
     esac
 done
 
@@ -155,7 +174,8 @@ if ((get_only)); then
         echo "--get cannot be combined with --patch-json" >&2
         exit 2
     }
-    request_body="$(python3 - "$hardware" <<'PY'
+    request_body="$(
+        python3 - "$hardware" <<'PY'
 import json
 import sys
 
@@ -164,9 +184,10 @@ if sys.argv[1]:
     payload["hardware"] = sys.argv[1]
 print(json.dumps(payload, separators=(",", ":")))
 PY
-)"
+    )"
 else
-    request_body="$(python3 - "$hardware" "$patch_json" "${sets[@]}" <<'PY'
+    request_body="$(
+        python3 - "$hardware" "$patch_json" "${sets[@]}" <<'PY'
 import json
 import sys
 
@@ -200,7 +221,7 @@ if sys.argv[1]:
     payload["hardware"] = sys.argv[1]
 print(json.dumps(payload, separators=(",", ":")))
 PY
-)"
+    )"
 fi
 
 response_file="$(mktemp "${TMPDIR:-/tmp}/navi-scheduler-config.XXXXXX")"
@@ -218,7 +239,8 @@ if command -v curl >/dev/null 2>&1; then
         "$url")"
     request_status=$?
 else
-    http_status="$(python3 - "$url" "$request_body" "$timeout" "$response_file" <<'PY'
+    http_status="$(
+        python3 - "$url" "$request_body" "$timeout" "$response_file" <<'PY'
 import sys
 import urllib.error
 import urllib.request

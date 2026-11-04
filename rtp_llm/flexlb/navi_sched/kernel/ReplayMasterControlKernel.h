@@ -1,7 +1,7 @@
 #pragma once
 
-#include "aios/navi_sched/data/ReplayControlData.h"
-#include "aios/navi_sched/resource/ReplayControlR.h"
+#include "rtp_llm/flexlb/navi_sched/data/ReplayControlData.h"
+#include "rtp_llm/flexlb/navi_sched/resource/ReplayControlR.h"
 #include "navi/engine/Kernel.h"
 
 namespace navi_sched {
@@ -23,4 +23,4 @@ private:
     std::string _clientId;
 };
 
-}
+} // namespace navi_sched

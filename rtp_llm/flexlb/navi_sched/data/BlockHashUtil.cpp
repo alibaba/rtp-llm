@@ -1,4 +1,4 @@
-#include "aios/navi_sched/data/BlockHashUtil.h"
+#include "rtp_llm/flexlb/navi_sched/data/BlockHashUtil.h"
 
 namespace navi_sched {
 const NaviSchedBlockHashes EMPTY_BLOCK_HASHES;
@@ -33,6 +33,8 @@ size_t BlockHashUtil::getMatchableBlockCount(
         hashCount == 0) {
         return hashCount;
     }
+    // RTP drops the last match key for aligned prompts so prefill always has
+    // at least one block to execute.
     return hashCount - 1;
 }
 
@@ -50,4 +52,4 @@ void BlockHashUtil::read(autil::DataBuffer &dataBuffer,
     hashes = std::move(values);
 }
 
-}
+} // namespace navi_sched

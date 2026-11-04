@@ -1,8 +1,8 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedCommon.h"
-#include "aios/navi_sched/data/NaviSchedLatencyPrediction.h"
-#include "aios/navi_sched/data/NaviSchedLatencySample.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedCommon.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedLatencyPrediction.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedLatencySample.h"
 #include <autil/legacy/json.h>
 
 namespace navi_sched {
@@ -244,4 +244,4 @@ struct NaviSchedScheduleReplay {
     void deserialize(autil::DataBuffer &dataBuffer);
 };
 
-}
+} // namespace navi_sched

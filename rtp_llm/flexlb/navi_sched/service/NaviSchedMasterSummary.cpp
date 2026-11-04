@@ -1,5 +1,5 @@
-#include "aios/navi_sched/service/NaviSchedMasterSummary.h"
-#include "aios/navi_sched/data/AgentLatencyToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedMasterSummary.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentLatencyToMasterData.h"
 
 #include <iomanip>
 #include <sstream>
@@ -57,8 +57,6 @@ void NaviSchedMasterNodeSummary::Jsonize(JsonWrapper &json)
     json.Jsonize("batch_waiting_requests", batchWaitingRequests);
     json.Jsonize("queued_batch_requests", queuedBatchRequests);
     json.Jsonize("running_requests", runningRequests);
-    json.Jsonize("execution_utilization", executionUtilization);
-    json.Jsonize("execution_busy_utilization", executionBusyUtilization);
     json.Jsonize("batch_timeout_count", batchTimeoutCount);
     json.Jsonize("abnormal_batch_finish_count", abnormalBatchFinishCount);
     json.Jsonize("master_sent_request_count", masterSentRequestCount);
@@ -289,9 +287,6 @@ std::string NaviSchedMasterNodeSummary::format() const
            << ", queued_for_execution=" << queuedBatchRequests
            << ", running=" << runningRequests
            << "\n"
-           << std::fixed << std::setprecision(3)
-           << "    execution_busy_utilization: " << executionBusyUtilization << "\n"
-           << "    execution_utilization: " << executionUtilization << "\n"
            << "    master_dispatch: sent_requests=" << masterSentRequestCount
            << ", sent_batches=" << masterSentBatchCount
            << std::fixed << std::setprecision(3)
@@ -480,14 +475,6 @@ void NaviSchedMasterSummary::Jsonize(JsonWrapper &json)
                  queueOverloadLatestAveragePredictedLatencyMs);
     json.Jsonize("queue_overload_latest_drop_probability",
                  queueOverloadLatestDropProbability);
-    json.Jsonize("execution_utilization_control_enabled", executionUtilizationControlEnabled);
-    json.Jsonize("execution_utilization_average", executionUtilizationAverage);
-    json.Jsonize("execution_utilization_raw_average", executionUtilizationRawAverage);
-    json.Jsonize("execution_utilization_running", executionUtilizationRunning);
-    json.Jsonize("execution_utilization_waiting", executionUtilizationWaiting);
-    json.Jsonize("execution_utilization_global_scaling", executionUtilizationGlobalScaling);
-    json.Jsonize("execution_utilization_integral", executionUtilizationIntegral);
-    json.Jsonize("execution_utilization_reporting_nodes", executionUtilizationReportingNodes);
     json.Jsonize("scheduler_config_generation", schedulerConfigGeneration);
     json.Jsonize("scheduler_config_hash", schedulerConfigHash);
     json.Jsonize("scheduler_config_json", schedulerConfigJson);
@@ -546,15 +533,6 @@ std::string NaviSchedMasterSummary::format() const
            << queueOverloadLatestAveragePredictedLatencyMs
            << "\n  queue_overload_latest_drop_probability: "
            << queueOverloadLatestDropProbability
-           << "\n  execution_utilization_control_enabled: "
-           << (executionUtilizationControlEnabled ? "true" : "false")
-           << "\n  execution_utilization_raw_average: " << executionUtilizationRawAverage
-           << "\n  execution_utilization_running: " << executionUtilizationRunning
-           << "\n  execution_utilization_waiting: " << executionUtilizationWaiting
-           << "\n  execution_utilization_global_scaling: " << executionUtilizationGlobalScaling
-           << "\n  execution_utilization_average: " << executionUtilizationAverage
-           << "\n  execution_utilization_integral: " << executionUtilizationIntegral
-           << "\n  execution_utilization_reporting_nodes: " << executionUtilizationReportingNodes
            << "\n  schedule_processing_request_count: " << scheduleProcessingRequestCount
            << "\n  active_request_count: " << activeRequestCount
            << "\n  scheduler_config_generation: " << schedulerConfigGeneration
@@ -574,4 +552,4 @@ std::string NaviSchedMasterSummary::format() const
     return output.str();
 }
 
-}
+} // namespace navi_sched

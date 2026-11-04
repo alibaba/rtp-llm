@@ -1,4 +1,4 @@
-#include "aios/navi_sched/scheduler/MaxCacheHitSchedulerKernel.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/MaxCacheHitSchedulerKernel.h"
 
 #include "autil/HashUtil.h"
 
@@ -70,4 +70,4 @@ uint64_t MaxCacheHitSchedulerKernel::getNodeRank(uint64_t requestId, uint64_t ag
 
 REGISTER_KERNEL(MaxCacheHitSchedulerKernel);
 
-}
+} // namespace navi_sched

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "aios/navi_sched/data/AgentResponseToClientData.h"
-#include "aios/navi_sched/data/MasterResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterResponseToClientData.h"
 #include "navi/engine/NaviUserResult.h"
 #include "navi/engine/Resource.h"
 #include <condition_variable>
@@ -89,4 +89,4 @@ private:
 
 NAVI_TYPEDEF_PTR(ClientResponseR);
 
-}
+} // namespace navi_sched

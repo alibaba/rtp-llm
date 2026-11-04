@@ -1,5 +1,5 @@
-#include "aios/navi_sched/data/AgentResponseToClientData.h"
-#include "aios/navi_sched/resource/AgentResponseR.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentResponseR.h"
 #include "unittest/unittest.h"
 
 #include <atomic>
@@ -77,7 +77,7 @@ private:
     bool _releaseEof = false;
 };
 
-}
+} // namespace
 
 class AgentResponseRTest : public TESTBASE {
 };

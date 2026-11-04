@@ -1,4 +1,4 @@
-#include "aios/navi_sched/resource/ClientResponseR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/ClientResponseR.h"
 #include "autil/TimeUtility.h"
 #include <chrono>
 #include <vector>
@@ -393,4 +393,4 @@ navi::SummaryErrorCode ClientResponseR::getSummary(
 
 REGISTER_RESOURCE(ClientResponseR);
 
-}
+} // namespace navi_sched

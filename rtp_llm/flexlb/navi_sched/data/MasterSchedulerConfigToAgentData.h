@@ -30,4 +30,4 @@ public:
 
 NAVI_TYPEDEF_PTR(MasterSchedulerConfigToAgentData);
 
-}
+} // namespace navi_sched

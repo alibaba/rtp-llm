@@ -1,9 +1,9 @@
-#include "aios/navi_sched/graph/AgentGraph.h"
-#include "aios/navi_sched/graph/GraphVisRecorder.h"
-#include "aios/navi_sched/kernel/AgentBatchKernel.h"
-#include "aios/navi_sched/kernel/AgentLatencyKernel.h"
-#include "aios/navi_sched/resource/AgentBatchR.h"
-#include "aios/navi_sched/resource/AgentLatencyInputR.h"
+#include "rtp_llm/flexlb/navi_sched/graph/AgentGraph.h"
+#include "rtp_llm/flexlb/navi_sched/graph/GraphVisRecorder.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/AgentBatchKernel.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/AgentLatencyKernel.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentBatchR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentLatencyInputR.h"
 #include "autil/Lock.h"
 #include "autil/TimeUtility.h"
 #include "navi/builder/GraphBuilder.h"
@@ -95,7 +95,7 @@ private:
 
 NAVI_TYPEDEF_PTR(AgentGraphClosure);
 
-}
+} // namespace
 
 std::unique_ptr<navi::GraphDef> AgentGraph::buildGraph(
     const std::string &agentBizName, uint64_t batchPipeGeneration,
@@ -537,4 +537,4 @@ bool AgentGraph::abortCurrentGraphForTest()
     return true;
 }
 
-}
+} // namespace navi_sched

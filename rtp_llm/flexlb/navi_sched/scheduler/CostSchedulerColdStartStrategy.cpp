@@ -1,5 +1,5 @@
-#include "aios/navi_sched/scheduler/CostSchedulerColdStartStrategy.h"
-#include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/CostSchedulerColdStartStrategy.h"
+#include "rtp_llm/flexlb/navi_sched/resource/NonLinearPrefillModelR.h"
 
 #include <algorithm>
 #include <cmath>
@@ -145,6 +145,7 @@ ColdStartRoutingPlan buildRoutingPlan(
             ++plan.analysis.unsafeWaitingMarginalNodeCount;
         }
         const auto backlogLatencyMs = node.getEstimatedBacklogLatencyMs();
+        // Batch counters can be zero while decode still owns execution slots.
         const auto hasUnifiedWorkload =
             node.usesUnifiedLatencyPrediction() &&
             (node.getWorkloadFeatures().getPrecedingRequestCount() > 0 ||
@@ -160,6 +161,9 @@ ColdStartRoutingPlan buildRoutingPlan(
             plan.trustedNodes.emplace_back(nodeIndex);
             plan.analysis.trustedInflight += inflight;
             if (!unknownBusyBacklog) {
+                // Retain the legacy probe even when capacity is full.
+                // Reports and reservations overlap: use the largest occupancy,
+                // while execution slots and unreported reserved slots are additive.
                 const auto occupied = std::max({
                     inflight,
                     static_cast<int64_t>(node.getRunningRequests()) +
@@ -188,6 +192,7 @@ ColdStartRoutingPlan buildRoutingPlan(
                         plan.analysis.minimumTrustedBacklogRecoveryRequestCount;
                     availableCount += std::min(context.requestCount() - availableCount, available);
                 }
+                // Unified workload also owns decode requests after prefill finishes.
                 const auto backlogRequestCount = node.usesUnifiedLatencyPrediction()
                     ? std::max(inflight, node.getWorkloadFeatures().getPrecedingRequestCount())
                     : inflight;
@@ -257,7 +262,7 @@ ColdStartRoutingPlan buildRoutingPlan(
     return plan;
 }
 
-}
+} // namespace
 
 bool CostSchedulerColdStartStrategy::apply(
     NaviSchedScheduleContext &context,
@@ -476,4 +481,4 @@ bool CostSchedulerColdStartStrategy::selectUntrusted(
     return randomSample < selectedProbability;
 }
 
-}
+} // namespace navi_sched

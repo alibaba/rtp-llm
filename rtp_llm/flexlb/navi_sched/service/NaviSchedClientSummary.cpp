@@ -1,4 +1,4 @@
-#include "aios/navi_sched/service/NaviSchedClientSummary.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedClientSummary.h"
 
 namespace navi_sched {
 
@@ -64,4 +64,4 @@ std::string NaviSchedClientSummary::format() const
            std::to_string(masterOtherErrorCount);
 }
 
-}
+} // namespace navi_sched

@@ -1,0 +1,262 @@
+syntax = "proto3";
+import "proto/KernelDef.proto";
+import "proto/GraphDef.proto";
+
+package navi;
+option cc_enable_arenas = true;
+
+message SymbolTableDef {
+    map<uint64, bytes> table = 1;
+};
+
+message NaviJsonizeInfoDef {
+    uint64 member_name_hash = 1;
+    uint64 member_type_hash = 2;
+    uint64 function_name_hash = 3;
+    uint64 json_key_hash = 4;
+    bool has_default = 5;
+    uint64 file_hash = 6;
+    int64 line = 7;
+};
+
+message RegistryDef {
+    int64 id = 1;
+    bool is_build_in = 2;
+    bool navi_registry = 3;
+    uint64 source_file_hash = 4;
+    int64 line = 5;
+    uint64 module_hash = 6;
+    repeated NaviJsonizeInfoDef jsonize_info = 7;
+}
+
+message KernelRegistryDef {
+    RegistryDef registry = 1;
+    KernelDef def = 2;
+}
+
+message ResourceRegistryDef {
+    RegistryDef registry = 1;
+    ResourceDef def = 2;
+    repeated string resource_dependant = 3;
+    repeated string kernel_dependant = 4;
+}
+
+message TypeRegistryDef {
+    RegistryDef registry = 1;
+    uint64 type_id_hash = 2;
+}
+
+message ResourceInfoDef {
+    uint64 name_hash = 1;
+    ResourceStage stage = 2;
+    uint64 addr = 3;
+    uint64 type_name_hash = 4;
+    uint64 meta_hash = 5;
+}
+
+message BizPartSummaryDef {
+    int64 part_id = 1;
+    repeated ResourceInfoDef resources = 2;
+}
+
+message BizPublishInfosDef {
+    repeated uint64 biz_alias_names_hash = 1;
+    bool disable_publish = 2;
+}
+
+message KernelConfigDef {
+    uint64 name_hash = 1;
+    uint64 config_hash = 2;
+}
+
+message ResourceConfigDef {
+    uint64 name_hash = 1;
+    uint64 config_hash = 2;
+    uint64 build_mode_hash = 3;
+}
+
+message HttpAliasDef {
+    string path = 1;
+    repeated string alias = 2;
+}
+
+message CompatibleFieldInfoDef {
+    string request_info_field = 1;
+    string ec_field = 2;
+    string response_info_field = 3;
+    string eagleeye_trace_id = 4;
+    string eagleeye_rpc_id = 5;
+    string eagleeye_user_data = 6;
+}
+
+message ArpcThreadPoolDescriptorDef {
+    string name = 1;
+    uint64 thread_num = 2;
+    uint64 queue_size = 3;
+    uint64 factory = 4;
+    bool allow_shared_pool_override = 5;
+}
+
+message ProtoJsonizerDef {
+    uint64 addr = 1;
+    string class_name = 2;
+}
+
+message RegistryArpcParamDef {
+    string method = 1;
+    CompatibleFieldInfoDef compatible_info = 2;
+    ArpcThreadPoolDescriptorDef thread_pool_descriptor = 3;
+    ProtoJsonizerDef proto_jsonizer = 4;
+    HttpAliasDef alias = 5;
+    bool log_query = 6;
+}
+
+message RegistryGraphParamDef {
+    string request_data_name = 1;
+    GraphDef graph = 2;
+}
+
+message CallerResourceInfoDef {
+    string name = 1;
+    string type = 2;
+    uint64 addr = 3;
+}
+
+message RpcMessageTypeDef {
+    string request_proto = 1;
+    string request_depend_proto = 2;
+    string response_proto = 3;
+    string response_depend_proto = 4;
+    uint32 global_service_id = 5;
+    uint32 local_method_id = 6;
+}
+
+message RpcRegistryDef {
+    bool flushed = 1;
+    string service_name = 2;
+    RegistryArpcParamDef arpc_param = 3;
+    RegistryGraphParamDef graph_param = 4;
+    CallerResourceInfoDef caller = 5;
+    RpcMessageTypeDef message_type = 6;
+}
+
+message RpcInfoDef {
+    repeated RpcRegistryDef registrys = 1;
+}
+
+message GraphCacheSummaryDef {
+    string hash_key = 1;
+    uint64 size = 2;
+    uint64 node_count = 3;
+    uint64 edge_count = 4;
+    uint64 connect_count = 5;
+    int64 last_access_time = 6;
+    SessionIdDef session = 7;
+    string peer_ip = 8;
+    uint64 malloc_size = 9;
+}
+
+message CacheSummaryDef {
+    repeated GraphCacheSummaryDef graph_summarys = 1;
+    int64 total_count = 2;
+    int64 max_cache_size = 3;
+    uint64 reclaim_count = 4;
+}
+
+message BizSummaryDef {
+    uint64 name_hash = 1;
+    uint64 config_path_hash = 2;
+    repeated int64 kernel_registrys = 3;
+    repeated int64 resource_registrys = 4;
+    repeated int64 type_registrys = 5;
+    int64 part_count = 6;
+    repeated uint64 modules_hash = 7;
+    repeated uint64 config_kernel_patterns_hash = 8;
+    repeated uint64 config_kernel_blacklist_patterns_hash = 9;
+    repeated uint64 config_resource_list_hash = 10;
+    repeated uint64 kernels_hash = 11;
+    repeated uint64 kernel_blacklist_hash = 12;
+    BizPublishInfosDef publish_infos = 13;
+    repeated KernelConfigDef kernel_config = 14;
+    repeated ResourceConfigDef resource_config = 15;
+    BizPartSummaryDef biz_resources = 16;
+    repeated BizPartSummaryDef parts = 17;
+    uint64 flow_config_json = 18;
+    bool is_default = 19;
+    CacheSummaryDef cache_summary = 20;
+}
+
+message FileAppenderDef {
+    string file_name = 1;
+    string level_str = 2;
+    string log_pattern = 3;
+    bool auto_flush = 4;
+    int64 max_file_size = 5;
+    string delay_time_str = 6;
+    bool compress = 7;
+    int64 cache_limit = 8;
+    int64 log_keep_count = 9;
+    bool async_flush = 10;
+    int64 flush_threshold = 11;
+    int64 flush_interval = 12;
+    repeated TraceBtFilter bt_filters = 13;
+}
+
+message LogConfigDef {
+    int64 max_message_length = 1;
+    repeated FileAppenderDef appenders = 2;
+}
+
+message ConcurrencyConfigDef {
+    int64 thread_num = 1;
+    int64 min_thread_num = 2;
+    int64 max_thread_num = 3;
+    int64 max_thread_pool_queue_size = 4;
+    int64 queue_size = 5;
+    int64 processing_size = 6;
+    int64 thread_nice_value = 7;
+}
+
+message EngineConfigDef {
+    bool disable_perf = 1;
+    bool disable_symbol_table = 2;
+    ConcurrencyConfigDef builtin_task_queue = 3;
+    map<string, ConcurrencyConfigDef> extra_task_queues = 4;
+}
+
+message SnapshotConfigDef {
+    string config_path = 1;
+    repeated string modules = 2;
+    LogConfigDef log_config= 3;
+    EngineConfigDef engine_config = 4;
+    string default_biz_name = 5;
+    int64 sleep_before_update_us = 6;
+    int64 sleep_after_update_us = 7;
+    bool ignore_produce_error = 8;
+    bool collect_init_metric = 9;
+    int64 init_timeout_ms = 10;
+    bytes config_json = 11;
+    int64 gig_smooth_interval_us = 12;
+    bool disable_gig_all_replica_stopped = 13;
+}
+
+message RegistryTableDef {
+    map<int64, KernelRegistryDef> kernels = 1;
+    map<int64, ResourceRegistryDef> resources = 2;
+    map<int64, TypeRegistryDef> types = 3;
+    SymbolTableDef symbol_table = 4;
+};
+
+message ProcessInfoDef {
+    string cpu_info = 1;
+    string proc_maps = 2;
+}
+
+message NaviSummaryDef {
+    SnapshotConfigDef snapshot_config = 1;
+    RegistryTableDef registry_table = 2;
+    repeated BizSummaryDef bizs = 3;
+    RpcInfoDef rpc = 4;
+    reserved 5;
+    ProcessInfoDef process_info = 6;
+}

@@ -1,10 +1,10 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedScheduleData.h"
-#include "aios/navi_sched/data/LatencyModelGlobalData.h"
-#include "aios/navi_sched/data/MasterDispatchHandle.h"
-#include "aios/navi_sched/data/NaviSchedLatencySample.h"
-#include "aios/navi_sched/resource/LatencyResidualModel.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedScheduleData.h"
+#include "rtp_llm/flexlb/navi_sched/data/LatencyModelGlobalData.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterDispatchHandle.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedLatencySample.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyResidualModel.h"
 #include <limits>
 #include <memory>
 #include <optional>
@@ -62,10 +62,6 @@ using NaviSchedNodeConstPtr = std::shared_ptr<const NaviSchedNode>;
 
 class NaviSchedScheduleNode {
 public:
-    double getExecutionUtilization() const;
-    double getExecutionBusyUtilization() const;
-    int32_t getExecutionRunningRequests() const { return _workload.runningRequestCount; }
-    int32_t getExecutionWaitingRequests() const { return _workload.waitingRequestCount; }
     uint64_t getAgentIdHash() const;
     const std::string &getAgentId() const;
     int64_t getTotalBlocks() const;
@@ -348,4 +344,4 @@ private:
 
 using NaviSchedScheduleContextPtr = std::shared_ptr<NaviSchedScheduleContext>;
 
-}
+} // namespace navi_sched

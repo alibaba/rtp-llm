@@ -1,8 +1,8 @@
-#include "aios/navi_sched/scheduler/CostSchedulerGraph.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/CostSchedulerGraph.h"
 
-#include "aios/navi_sched/scheduler/CostSchedulerColdStartStrategy.h"
-#include "aios/navi_sched/scheduler/MasterScheduleContextData.h"
-#include "aios/navi_sched/scheduler/SchedulerBaseKernel.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/CostSchedulerColdStartStrategy.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/MasterScheduleContextData.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/SchedulerBaseKernel.h"
 #include "autil/TimeUtility.h"
 #include "autil/legacy/json.h"
 #include "navi/builder/GraphBuilder.h"
@@ -474,6 +474,7 @@ bool CostSchedulerGraphState::init(
 
 void CostSchedulerGraphState::beginOptimization()
 {
+    // Preparation, gradient steps and refinement share the activation deadline.
     _lastLoopEndUs = _optimizationBeginUs;
     _runBeginUs = bool(_replayInfo) ? _optimizationBeginUs : 0;
     _stepBeginUs = _runBeginUs;
@@ -738,6 +739,7 @@ bool CostSchedulerGraphState::finishRow(size_t iteration)
         return false;
     }
     _discreteEvaluated = false;
+    // Keep a feasible baseline even if the deadline permits only one step.
     if (iteration == 0) {
         const auto initialLoss = CostSchedulerKernelInternal::forwardDiscrete(
             *_context, _costs.get(), _candidateNodeIndexes.get(),
@@ -836,6 +838,7 @@ bool CostSchedulerGraphState::finishProjection(size_t iteration)
     }
     auto nowUs = autil::TimeUtility::monotonicTimeUs();
     _actualLoopCount = iteration + 1;
+    // Critical worker time in each parallel phase; excludes coordinator work.
     _context->recordCostGradientIteration(
         CostSchedulerGraphKernelUtil::maxWorkerTime(_workers, &WorkerState::gradientUs) +
         CostSchedulerGraphKernelUtil::maxWorkerTime(_workers, &WorkerState::projectionUs));
@@ -1553,4 +1556,4 @@ REGISTER_KERNEL(CostSchedulerProjectionBarrierKernel);
 REGISTER_KERNEL(CostSchedulerFinalRowKernel);
 REGISTER_KERNEL(CostSchedulerFinalizeKernel);
 
-}
+} // namespace navi_sched

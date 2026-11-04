@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedScheduleData.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedScheduleData.h"
 #include "autil/Lock.h"
 #include "navi/engine/AsyncPipe.h"
 #include "navi/engine/Resource.h"
@@ -149,4 +149,4 @@ private:
     bool _latencyStatsLogged = false;
 };
 
-}
+} // namespace navi_sched::test

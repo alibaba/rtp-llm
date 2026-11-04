@@ -1,6 +1,6 @@
-#include "aios/navi_sched/resource/MasterScheduleR.h"
-#include "aios/navi_sched/data/MasterResponseToClientData.h"
-#include "aios/navi_sched/scheduler/ScheduleContext.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterScheduleR.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/ScheduleContext.h"
 #include "autil/HashAlgorithm.h"
 #include "autil/NetUtil.h"
 #include "autil/TimeUtility.h"
@@ -28,7 +28,7 @@ ClientRequestToMasterDataConstPtr makeCanonicalRequest(
     return output;
 }
 
-}
+} // namespace
 
 const std::string MasterScheduleR::RESOURCE_ID = "navi_sched.master_schedule_r";
 
@@ -362,33 +362,6 @@ void MasterScheduleR::recordQueueOverload(size_t requestCount,
                                               std::memory_order_relaxed);
 }
 
-void MasterScheduleR::recordExecutionUtilization(double average, double integral, size_t reportingNodes, bool enabled,
-    double rawAverage, uint64_t running, uint64_t waiting, bool globalScaling)
-{
-    _executionRawAverage.store(rawAverage, std::memory_order_relaxed);
-    _executionRunning.store(running, std::memory_order_relaxed);
-    _executionWaiting.store(waiting, std::memory_order_relaxed);
-    _executionGlobalScaling.store(globalScaling, std::memory_order_relaxed);
-    _executionUtilizationAverage.store(average, std::memory_order_relaxed);
-    _executionUtilizationIntegral.store(integral, std::memory_order_relaxed);
-    _executionUtilizationReportingNodes.store(reportingNodes, std::memory_order_relaxed);
-    _executionUtilizationEnabled.store(enabled, std::memory_order_relaxed);
-}
-
-MasterScheduleR::ExecutionUtilizationStats MasterScheduleR::getExecutionUtilizationStats() const
-{
-    ExecutionUtilizationStats stats;
-    stats.rawAverage = _executionRawAverage.load(std::memory_order_relaxed);
-    stats.running = _executionRunning.load(std::memory_order_relaxed);
-    stats.waiting = _executionWaiting.load(std::memory_order_relaxed);
-    stats.globalScaling = _executionGlobalScaling.load(std::memory_order_relaxed);
-    stats.average = _executionUtilizationAverage.load(std::memory_order_relaxed);
-    stats.integral = _executionUtilizationIntegral.load(std::memory_order_relaxed);
-    stats.reportingNodes = _executionUtilizationReportingNodes.load(std::memory_order_relaxed);
-    stats.enabled = _executionUtilizationEnabled.load(std::memory_order_relaxed);
-    return stats;
-}
-
 MasterScheduleR::QueueOverloadStats MasterScheduleR::getQueueOverloadStats() const
 {
     QueueOverloadStats stats;
@@ -502,19 +475,6 @@ navi::SummaryErrorCode MasterScheduleR::getSummary(const std::string &query,
         overloadStats.latestAveragePredictedLatencyMs);
     TABLE_ADD_COLUMN_VALUE(table, "queue_overload_latest_drop_probability",
                            overloadStats.latestDropProbability);
-    const auto executionUtilization = getExecutionUtilizationStats();
-    TABLE_ADD_COLUMN_VALUE(table, "execution_utilization_control_enabled",
-                           executionUtilization.enabled);
-    TABLE_ADD_COLUMN_VALUE(table, "execution_utilization_raw_average", executionUtilization.rawAverage);
-    TABLE_ADD_COLUMN_VALUE(table, "execution_utilization_running", executionUtilization.running);
-    TABLE_ADD_COLUMN_VALUE(table, "execution_utilization_waiting", executionUtilization.waiting);
-    TABLE_ADD_COLUMN_VALUE(table, "execution_utilization_global_scaling", executionUtilization.globalScaling);
-    TABLE_ADD_COLUMN_VALUE(table, "execution_utilization_average",
-                           executionUtilization.average);
-    TABLE_ADD_COLUMN_VALUE(table, "execution_utilization_integral",
-                           executionUtilization.integral);
-    TABLE_ADD_COLUMN_VALUE(table, "execution_utilization_reporting_nodes",
-                           executionUtilization.reportingNodes);
     const auto coldStartStats = getColdStartRoutingStats();
     TABLE_ADD_COLUMN_VALUE(table, "cold_start_evaluated_round_count",
                            coldStartStats.evaluatedRoundCount);
@@ -550,4 +510,4 @@ navi::SummaryErrorCode MasterScheduleR::getSummary(const std::string &query,
 
 REGISTER_RESOURCE(MasterScheduleR);
 
-}
+} // namespace navi_sched

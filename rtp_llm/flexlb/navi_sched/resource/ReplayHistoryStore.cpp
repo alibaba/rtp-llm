@@ -1,6 +1,6 @@
-#include "aios/navi_sched/resource/ReplayHistoryStore.h"
+#include "rtp_llm/flexlb/navi_sched/resource/ReplayHistoryStore.h"
 
-#include "aios/navi_sched/data/BlockHashUtil.h"
+#include "rtp_llm/flexlb/navi_sched/data/BlockHashUtil.h"
 #include "autil/CRC32C.h"
 #include "autil/DataBuffer.h"
 
@@ -20,7 +20,7 @@
 namespace navi_sched {
 namespace {
 
-constexpr uint32_t RECORD_MAGIC = 0x4E535248;
+constexpr uint32_t RECORD_MAGIC = 0x4E535248; // NSRH
 constexpr uint32_t LEGACY_RECORD_VERSION = 1;
 constexpr uint32_t RECORD_VERSION = 2;
 constexpr int32_t HISTORY_PAYLOAD_VERSION = 1;
@@ -258,7 +258,7 @@ bool deserializeLegacyHistoryRequest(autil::DataBuffer &buffer,
     return request.valid() && buffer.getDataLen() == 0;
 }
 
-}
+} // namespace
 
 ReplayHistoryStore::~ReplayHistoryStore()
 {
@@ -341,6 +341,7 @@ bool ReplayHistoryStore::refreshLocked() const
 {
     struct stat indexed;
     struct stat current;
+    // Keep the indexed inode open so replacement cannot reuse its inode number.
     if (_indexedFd >= 0 && ::fstat(_indexedFd, &indexed) == 0 &&
         ::stat(_dataFile.c_str(), &current) == 0 &&
         indexed.st_dev == current.st_dev && indexed.st_ino == current.st_ino &&
@@ -748,4 +749,4 @@ size_t ReplayHistoryStore::residentRequestCount() const
     return _volatileSamples.size();
 }
 
-}
+} // namespace navi_sched

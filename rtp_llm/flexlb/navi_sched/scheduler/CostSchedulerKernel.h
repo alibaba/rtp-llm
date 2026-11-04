@@ -1,9 +1,9 @@
 #pragma once
 
-#include "aios/navi_sched/scheduler/CostSchedulerConfig.h"
-#include "aios/navi_sched/scheduler/SchedulerBaseKernel.h"
-#include "aios/navi_sched/resource/SchedulerConfigR.h"
-#include "aios/network/gig/multi_call/util/RandomGenerator.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/CostSchedulerConfig.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/SchedulerBaseKernel.h"
+#include "rtp_llm/flexlb/navi_sched/resource/SchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/vendor/network/gig/multi_call/util/RandomGenerator.h"
 
 namespace navi_sched {
 
@@ -29,4 +29,4 @@ private:
     mutable multi_call::RandomGenerator _randomGenerator;
 };
 
-}
+} // namespace navi_sched

@@ -1,4 +1,4 @@
-#include "aios/navi_sched/resource/AgentPendingCacheR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentPendingCacheR.h"
 
 #include <algorithm>
 
@@ -231,4 +231,4 @@ navi::SummaryErrorCode AgentPendingCacheR::getSummary(
 
 REGISTER_RESOURCE(AgentPendingCacheR);
 
-}
+} // namespace navi_sched

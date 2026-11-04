@@ -1,5 +1,5 @@
-#include "aios/navi_sched/resource/AgentResponseR.h"
-#include "aios/navi_sched/data/AgentResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentResponseR.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentResponseToClientData.h"
 
 namespace navi_sched {
 
@@ -215,6 +215,7 @@ bool AgentResponseR::cancel(uint64_t requestId, const navi::AsyncPipePtr &pipe)
         entry->pending.clear();
         entry->pipe->setEof();
     }
+    // finishAll() may have removed the entry after cancel won its state lock.
     erase(requestId, entry);
     _cancelledCount.fetch_add(1, std::memory_order_relaxed);
     notifyCancelled(requestId);
@@ -293,4 +294,4 @@ navi::SummaryErrorCode AgentResponseR::getSummary(
 
 REGISTER_RESOURCE(AgentResponseR);
 
-}
+} // namespace navi_sched

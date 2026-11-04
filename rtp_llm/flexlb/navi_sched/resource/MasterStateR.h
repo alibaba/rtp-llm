@@ -10,14 +10,14 @@
 #include <unordered_set>
 #include <vector>
 
-#include "aios/navi_sched/data/AgentUpdateToMasterData.h"
-#include "aios/navi_sched/data/ClientRequestToMasterData.h"
-#include "aios/navi_sched/common/NaviSchedScheduleData.h"
-#include "aios/navi_sched/resource/MasterBatchReservation.h"
-#include "aios/navi_sched/resource/MasterLatencyModelR.h"
-#include "aios/navi_sched/resource/MasterPendingCacheR.h"
-#include "aios/navi_sched/scheduler/ScheduleContext.h"
-#include "aios/navi_sched/scheduler/ScheduleContextInternal.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentUpdateToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/ClientRequestToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedScheduleData.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterBatchReservation.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterLatencyModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterPendingCacheR.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/ScheduleContext.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/ScheduleContextInternal.h"
 #include "kmonitor/client/MetricsReporterR.h"
 #include "navi/engine/AsyncPipe.h"
 #include "navi/engine/Resource.h"
@@ -141,8 +141,6 @@ public:
             const std::vector<NaviSchedScheduleItem> &requests,
             int64_t *matchedBlockCounts,
             const std::vector<size_t> &commonPrefixes) const override;
-        double getExecutionUtilization() const override;
-        double getExecutionBusyUtilization() const override;
         size_t getCachedBlockCount() const;
         std::shared_ptr<const LatencyInfo> getLatencyInfo() const;
         LatencyResidualModel::RuntimeConfig getResidualRuntimeConfig() const;
@@ -159,8 +157,6 @@ public:
         friend class MasterDispatchHandle;
         friend class ::NaviSchedResourceTest;
         friend class ::NaviSchedClusterTest;
-        std::atomic<double> _executionUtilization{-1.0};
-        std::atomic<double> _executionBusyUtilization{-1.0};
         struct RuntimeState {
             NaviSchedNodeLoad load;
             double lastRequestLatencyMs = 0.0;
@@ -176,6 +172,9 @@ public:
             uint64_t workloadStaleUpdateCount = 0;
             int64_t agentStartTimeUs = 0;
         };
+        // Keep the model fields and the node metadata at one publication point.
+        // Readers must not combine an info snapshot with a separately observed
+        // live-model slot.
         struct PublishedSnapshot {
             std::shared_ptr<const NaviSchedNodeInfo> info;
             std::shared_ptr<const LatencyInfo> latencyModel;
@@ -215,7 +214,6 @@ public:
         NaviSchedNodeLoad getScheduleLoad(int64_t currentTimeUs) const;
         NaviSchedNodeLoad getScheduleLoadLocked(int64_t currentTimeUs) const;
         struct ReservationTiming {
-            const char *failureReason = nullptr;
             int64_t initUs = 0;
             int64_t initCpuUs = 0;
             int64_t runtimeWaitUs = 0;
@@ -456,4 +454,4 @@ private:
 
 NAVI_TYPEDEF_PTR(MasterStateR);
 
-}
+} // namespace navi_sched

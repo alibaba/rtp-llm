@@ -1,6 +1,6 @@
-#include "aios/navi_sched/scheduler/SchedulerBaseKernel.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/SchedulerBaseKernel.h"
 
-#include "aios/navi_sched/scheduler/MasterScheduleContextData.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/MasterScheduleContextData.h"
 
 namespace navi_sched {
 
@@ -62,4 +62,4 @@ bool SchedulerBaseKernel::schedule(NaviSchedScheduleContext &) const
     return false;
 }
 
-}
+} // namespace navi_sched

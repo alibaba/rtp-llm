@@ -1,7 +1,7 @@
-#include "aios/navi_sched/service/NaviSchedRole.h"
-#include "aios/navi_sched/service/NaviSchedRoleRuntimeAccess.h"
-#include "aios/navi_sched/service/NaviSchedRoleSummary.h"
-#include "aios/network/gig/multi_call/subscribe/VIPSubscribeService.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedRole.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedRoleRuntimeAccess.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedRoleSummary.h"
+#include "rtp_llm/flexlb/navi_sched/vendor/network/gig/multi_call/subscribe/VIPSubscribeService.h"
 #include "autil/EnvUtil.h"
 #include "autil/FileRecorder.h"
 #include "autil/StringUtil.h"
@@ -13,7 +13,7 @@
 #include "kmonitor/client/core/MetricsConfig.h"
 #include "navi/config/NaviConfig.h"
 #include "navi/engine/Navi.h"
-#include "aios/network/http_arpc/HTTPRPCServer.h"
+#include "rtp_llm/flexlb/navi_sched/vendor/network/http_arpc/HTTPRPCServer.h"
 #include <multi_call/config/MultiCallConfig.h>
 #include <multi_call/rpc/GigRpcServer.h>
 #include <atomic>
@@ -34,6 +34,7 @@ struct KmonLifecycleState {
 
 KmonLifecycleState &getKmonLifecycleState()
 {
+    // Keep the guard alive through process exit, when the registered callback runs.
     static auto *state = new KmonLifecycleState();
     return *state;
 }
@@ -193,9 +194,11 @@ void releaseKmon()
         return;
     }
     --state.userCount;
+    // GIG can drain asynchronous heartbeat and metric callbacks after a role stops.
+    // Keep the process-wide factory alive until the registered exit handler runs.
 }
 
-}
+} // namespace
 
 const std::shared_ptr<navi::Navi> &NaviSchedRoleRuntimeAccess::getNavi(
     const NaviSchedRole &role)
@@ -349,6 +352,8 @@ uint64_t NaviSchedRole::reportCounterQpsMetricAt(
                            : total;
     const auto elapsedUs = reportTimeUs - it->second.reportTimeUs;
     it->second = {total, reportTimeUs};
+    // QPS represents newly observed events.  Do not publish a zero sample when
+    // the interval is idle; KMon should show a gap instead of a forced line.
     if (_metricsReporter && delta > 0 && elapsedUs > 0) {
         const auto qps = static_cast<double>(delta) * 1000000.0 /
                          static_cast<double>(elapsedUs);
@@ -521,4 +526,4 @@ std::shared_ptr<NaviSchedRoleSummary> NaviSchedRole::makeSnapshotSummary() const
     return summary;
 }
 
-}
+} // namespace navi_sched

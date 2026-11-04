@@ -1,4 +1,4 @@
-#include "aios/navi_sched/test/simulator/TrafficReplayStartData.h"
+#include "rtp_llm/flexlb/navi_sched/test/simulator/TrafficReplayStartData.h"
 
 #include "navi/engine/Type.h"
 
@@ -101,4 +101,4 @@ public:
 REGISTER_TYPE(TrafficReplayStartRequestType);
 REGISTER_TYPE(TrafficReplayStartResponseType);
 
-}
+} // namespace navi_sched::test

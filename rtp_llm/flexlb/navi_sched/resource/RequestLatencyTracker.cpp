@@ -1,5 +1,5 @@
-#include "aios/navi_sched/resource/RequestLatencyTracker.h"
-#include "aios/navi_sched/data/NaviSchedLatencyPrediction.h"
+#include "rtp_llm/flexlb/navi_sched/resource/RequestLatencyTracker.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedLatencyPrediction.h"
 
 #include <algorithm>
 #include <cmath>
@@ -303,4 +303,4 @@ RequestLatencyTracker::Snapshot ConcurrentRequestLatencyTracker::snapshot() cons
     return _tracker.snapshot();
 }
 
-}
+} // namespace navi_sched

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/scheduler/ScheduleContext.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/ScheduleContext.h"
 #include "navi/engine/Kernel.h"
 
 namespace navi_sched {
@@ -21,4 +21,4 @@ private:
         const NaviSchedScheduleContextPtr &context);
 };
 
-}
+} // namespace navi_sched

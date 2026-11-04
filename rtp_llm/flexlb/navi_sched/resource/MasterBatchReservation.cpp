@@ -1,6 +1,6 @@
-#include "aios/navi_sched/resource/MasterBatchReservation.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterBatchReservation.h"
 
-#include "aios/navi_sched/resource/PendingCacheUtil.h"
+#include "rtp_llm/flexlb/navi_sched/resource/PendingCacheUtil.h"
 #include "absl/container/flat_hash_map.h"
 
 #include <algorithm>
@@ -23,6 +23,7 @@ autil::legacy::json::JsonMap MasterBatchReservation::makeReplayState() const
     state["block_size"] = ToJson(_cachePolicy.blockSize);
     state["linear_step"] = ToJson(_cachePolicy.linearStep);
     state["hybrid_tail_required"] = ToJson(_cachePolicy.hybridTailRequired);
+    // Preserve the field name for previously captured replay files.
     state["prefix_tree_built"] = ToJson(hasPendingCacheReferences());
     state["pending_rebuild_count"] = ToJson(_pendingRebuildCount);
     state["pending_rebuild_visited_nodes"] = ToJson(_pendingRebuildVisitedNodes);
@@ -312,6 +313,7 @@ bool MasterBatchReservation::markFailedIndexes(
             fullFailure = selectedActiveCount == activeCount;
         }
     }
+    // No surviving owner needs per-block deltas; retire the whole reservation.
     if (fullFailure) {
         for (size_t index = 0; index < _requests.size(); ++index) {
             const auto state = _requests[index].state;
@@ -524,6 +526,8 @@ bool MasterBatchReservation::markAcceptedWorkloadReported(uint64_t requestId)
     const auto index = findRequest(requestId);
     if (index == _requests.size()) return false;
     if (_requests[index].state != RequestState::WAITING) return true;
+    // Accepted native workload covers this request, but the batch is not ready
+    // yet. Keep its cache reservation and dispatch waiters until ready/abort.
     auto &request = _requests.writable(index);
     if (!subtractWaitingRequest(request.request)) return false;
     if (request.dispatchAcknowledged) {
@@ -607,6 +611,8 @@ bool MasterBatchReservation::appendWaitingCapacityFeatures(
     NaviSchedLatencyFeatures running;
     NaviSchedLatencyFeatures waiting;
     auto updatedRunningCapacitySlotCount = runningCapacitySlotCount;
+    // With no state transitions, this is the same ordered sum as the scan.
+    // After removals, subtraction can lose small floating-point remainders.
     const bool reuseWaitingFeatures =
         runningCapacitySlotCount == maxRunningRequestCount &&
         _waitingRequestCount == _requests.size();
@@ -914,6 +920,7 @@ bool MasterBatchReservation::buildPendingCacheReferences()
             }
         }
     }
+    // Construction has exclusive ownership; publish COW pages after counting.
     _pendingReferences.reserve(references.size());
     for (const auto &reference : references) {
         _pendingReferences.push_back(reference);
@@ -973,6 +980,7 @@ bool MasterBatchReservation::rebuildPendingCacheReservation()
     const auto nodeCount = _pendingReferences.size();
     reservation.fullReadyBlockHashes.reserve(nodeCount);
     reservation.tailReadyBlockHashes.reserve(nodeCount);
+    // Full vectors are materialized only by explicit snapshot/restore callers.
     for (size_t index = 0; index < nodeCount; ++index) {
         const auto &node = _pendingReferences[index];
         if (node.fullRefCount == 0) {
@@ -1088,4 +1096,4 @@ void MasterBatchReservation::resetTransition(Transition &transition) const
     transition.resolved = isResolved();
 }
 
-}
+} // namespace navi_sched

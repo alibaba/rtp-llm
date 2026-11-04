@@ -1,6 +1,6 @@
-#include "aios/navi_sched/scheduler/CostSchedulerKernelInternal.h"
-#include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
-#include "aios/navi_sched/scheduler/CostSchedulerConfig.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/CostSchedulerKernelInternal.h"
+#include "rtp_llm/flexlb/navi_sched/resource/NonLinearPrefillModelR.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/CostSchedulerConfig.h"
 #include "autil/TimeUtility.h"
 
 #include <algorithm>
@@ -133,7 +133,7 @@ void updateSelectionMaximum(
     }
 }
 
-}
+} // namespace
 
 void CostSchedulerKernelInternal::normalizeWeights(
     double *weights, size_t requestCount, size_t nodeCount,
@@ -753,6 +753,7 @@ double CostSchedulerKernelInternal::forwardNodeRange(
             precedingRequestsWithReportedWorkload =
                 node.getWorkloadFeatures().getPrecedingRequestCount();
             if (capacitySplit) {
+                // Equal capacities use the same immutable rows and weights.
                 const auto reservedRequestCost =
                     reservedRunningCapacity == workloadRunningCapacity
                         ? requestCostSum
@@ -935,6 +936,7 @@ double CostSchedulerKernelInternal::forwardDiscreteImpl(
     if (pairOnly && secondNode >= nodeCount) {
         return std::numeric_limits<double>::infinity();
     }
+    // A full evaluation starts a new immutable snapshot; pair trials reuse it.
     if (!pairOnly || workspace.baselineContext != &context ||
         workspace.nodeBaselines.size() != nodeCount) {
         workspace.baselineContext = &context;
@@ -1025,6 +1027,9 @@ double CostSchedulerKernelInternal::forwardDiscreteImpl(
             inverseRequestTokenCounts[requestIndex];
     };
     if (pairOnly && nodeRequests) {
+        // Membership is ordered by original request index. Virtually remove
+        // the moved request from its source and merge it into its destination.
+        // This preserves running-slot promotion and floating-point sum order.
         const auto accumulateNode = [&](size_t nodeIndex, bool source) {
             ++workspace.nodeCapacityLoads;
             const auto &baseline = baselineFor(nodeIndex);
@@ -1039,6 +1044,7 @@ double CostSchedulerKernelInternal::forwardDiscreteImpl(
             auto totalTokens = workspace.totalPromptTokenSums[nodeIndex];
             auto assignedRequests = workspace.requestWeightSums[nodeIndex];
             auto inverseTokens = workspace.inverseTokenWeightSums[nodeIndex];
+            // Keep sums local so each request does not reload/store five vectors.
             const auto append = [&](size_t requestIndex) {
                 requestCost += (!capacitySplit || workloadSlots + assignedRequests < maxRunning)
                     ? runningCosts[requestIndex] : waitingCosts[requestIndex];
@@ -1228,12 +1234,16 @@ bool CostSchedulerKernelInternal::refineDiscreteAssignment(
         const auto tolerance = 1e-12 * std::max(1.0, std::abs(value));
         for (size_t requestIndex = 0; requestIndex < requestCount && !exhausted(); ++requestIndex) {
             const auto source = nodeIndexes[requestIndex];
+            // Removing this request has the same source queue for every target.
+            // Accepted moves occur only after this entire candidate scan.
             bool sourceNodeReady = false;
             for (size_t target = 0; target < nodeCount && !exhausted(); ++target) {
                 if (target == source) {
                     continue;
                 }
                 nodeIndexes[requestIndex] = static_cast<uint32_t>(target);
+                // Preserve ordered queues and running-slot promotion on both
+                // sides; only the unchanged source calculation can be reused.
                 const auto pairValue = forwardDiscreteImpl(
                     context, costs, nodeIndexes, requestTokenCounts,
                     inverseRequestTokenCounts, tokenNormalizationDenominator,
@@ -1621,6 +1631,7 @@ bool CostSchedulerKernelInternal::shouldRunNextLoop(
     if (completedLoopCount >= maxLoopCount) {
         return false;
     }
+    // The configured floor takes precedence over the soft optimization budget.
     if (completedLoopCount < std::min(minLoopCount, maxLoopCount) ||
         optimizationTimeBudgetUs < 0) {
         return true;
@@ -1860,4 +1871,4 @@ void CostSchedulerKernelInternal::ReplayInfo::finish(
         autil::legacy::AnyCast<autil::legacy::json::JsonMap>(replayJson));
 }
 
-}
+} // namespace navi_sched

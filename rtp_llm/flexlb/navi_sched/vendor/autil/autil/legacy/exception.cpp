@@ -1,0 +1,140 @@
+#include "autil/legacy/exception.h"
+
+#include <cstdlib>
+#include <cxxabi.h>
+#include <execinfo.h>
+
+#include "autil/Backtrace.h"
+#include "autil/EnvUtil.h"
+
+namespace autil {
+namespace legacy {
+
+// 前向兼容
+thread_local bool ExceptionBase::NeedStackTrace = false;
+
+static inline int GetBackTraceDepth() {
+    static int depth = -1;
+    if (depth >= 0) {
+        return depth;
+    }
+    depth = autil::EnvUtil::getEnv("AUTIL_BACKTRACE_DEPTH", -1);
+    if (depth < 0) {
+        depth = ExceptionBase::MAX_STACK_TRACE_SIZE;
+    }
+    return depth;
+}
+
+ExceptionBase::ExceptionBase(const std::string &message) throw()
+    : mMessage(message), mFile("<unknown file>"), mFunction("<unknown function>"), mLine(-1), mStackTraceSize(0) {}
+
+ExceptionBase::~ExceptionBase() throw() {}
+
+std::shared_ptr<ExceptionBase> ExceptionBase::Clone() const {
+    return std::shared_ptr<ExceptionBase>(new ExceptionBase(*this));
+}
+
+void ExceptionBase::Init(const char *file, const char *function, int line) {
+    mFile = file;
+    mFunction = function;
+    mLine = line;
+    if (NeedStackTrace) {
+        mStackTraceSize = backtrace(mStackTrace, GetBackTraceDepth());
+    } else {
+        mStackTraceSize = 0;
+    }
+}
+
+void ExceptionBase::SetCause(const ExceptionBase &cause) { SetCause(cause.Clone()); }
+
+void ExceptionBase::SetCause(std::shared_ptr<ExceptionBase> cause) { mNestedException = cause; }
+
+std::shared_ptr<ExceptionBase> ExceptionBase::GetCause() const { return mNestedException; }
+
+std::shared_ptr<ExceptionBase> ExceptionBase::GetRootCause() const {
+    if (mNestedException.get()) {
+        std::shared_ptr<ExceptionBase> rootCause = mNestedException->GetRootCause();
+        if (rootCause.get())
+            return rootCause;
+    }
+    return mNestedException;
+}
+
+std::string ExceptionBase::GetClassName() const { return "ExceptionBase"; }
+
+std::string ExceptionBase::GetMessage() const { return mMessage; }
+
+const char *ExceptionBase::what() const throw() { return ToString().c_str(); }
+
+const std::string &ExceptionBase::ToString() const {
+    if (mWhat.empty()) {
+        mWhat = GetExceptionHeader();
+        mWhat += "\nStack trace:\n";
+        mWhat += GetStackTrace();
+        if (mNestedException.get()) {
+            mWhat += "Caused by:\n" + mNestedException->ToString();
+        }
+    }
+    return mWhat;
+}
+
+const std::string &ExceptionBase::GetExceptionChain() const { return ToString(); }
+
+std::string ExceptionBase::GetExceptionHeader() const {
+    std::string header;
+    if (mLine > 0)
+        header = std::string(mFile) + "(" + std::to_string(mLine) + ")";
+    else
+        header = "<unknown throw location>";
+    header += ": " + GetClassName();
+    std::string customizedString = GetMessage();
+    if (!customizedString.empty()) {
+        header += ": " + customizedString;
+    }
+    return header;
+}
+
+void *const *ExceptionBase::GetStacks(size_t &size) const {
+    size = mStackTraceSize;
+    return mStackTrace;
+}
+
+std::string ExceptionBase::GetStackTrace() const {
+    if (mStackTraceSize == 0)
+        return "<No stack trace>\n";
+    char **strings = backtrace_symbols(mStackTrace, mStackTraceSize);
+    if (strings == NULL) // Since this is for debug only thus
+                         // non-critical, don't throw an exception.
+        return "<Unknown error: backtrace_symbols returned NULL>\n";
+
+    std::string result;
+    for (size_t i = 0; i < mStackTraceSize; ++i) {
+        std::string s = strings[i];
+        std::string::size_type begin = s.find('(');
+        std::string::size_type end = s.find('+', begin);
+        if (begin == std::string::npos || end == std::string::npos) {
+            result += s;
+            result += '\n';
+            continue;
+        }
+        ++begin;
+        auto mangledName = s.substr(begin, end - begin);
+        auto demangledName = Backtrace::GetDemangledName(mangledName);
+        // Ignore ExceptionBase::Init so the top frame is the
+        // user's frame where this exception is thrown.
+        //
+        // Can't just ignore frame#0 because the compiler might
+        // inline ExceptionBase::Init.
+        if (i == 0 && demangledName == "autil::legacy::ExceptionBase::Init(char const*, char const*, int)")
+            continue;
+        result += s.substr(0, begin);
+        result += demangledName;
+        result += s.substr(end);
+        result += '\n';
+    }
+    free(strings);
+    return result;
+}
+
+} // namespace legacy
+} // namespace autil

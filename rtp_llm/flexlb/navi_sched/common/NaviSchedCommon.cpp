@@ -1,5 +1,5 @@
-#include "aios/navi_sched/common/NaviSchedScheduleData.h"
-#include "aios/navi_sched/data/BlockHashUtil.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedScheduleData.h"
+#include "rtp_llm/flexlb/navi_sched/data/BlockHashUtil.h"
 #include <autil/DataBuffer.h>
 #include <autil/legacy/fast_jsonizable.h>
 #include <algorithm>
@@ -761,4 +761,4 @@ void NaviSchedScheduleReplay::deserialize(autil::DataBuffer &dataBuffer)
     }
 }
 
-}
+} // namespace navi_sched

@@ -1,4 +1,4 @@
-#include "aios/navi_sched/kernel/AgentBatchKernel.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/AgentBatchKernel.h"
 
 namespace navi_sched {
 
@@ -96,4 +96,4 @@ void AgentBatchKernel::stopBatchTimer(navi::KernelComputeContext &ctx) const
 
 REGISTER_KERNEL(AgentBatchKernel);
 
-}
+} // namespace navi_sched

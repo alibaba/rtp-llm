@@ -1,0 +1,201 @@
+#include "navi/rpc_server/NaviRpcServerR.h"
+#include "rtp_llm/flexlb/navi_sched/vendor/network/http_arpc/HTTPRPCServer.h"
+#include "navi/rpc_server/ArpcServiceRegistry.h"
+#include "navi/engine/NaviRegisterMacro.h"
+#include "navi/util/CommonUtil.h"
+#include "navi/proto/NaviSummary.pb.h"
+
+namespace navi {
+
+const std::string NaviRpcServerR::RESOURCE_ID = "navi.rpc_server_r";
+
+NaviRpcServerR::NaviRpcServerR()
+    : ExternalResource(RESOURCE_ID, RS_EXTERNAL)
+    , _snapshot(nullptr)
+    , _gigRpcServer(nullptr)
+{
+}
+
+NaviRpcServerR::NaviRpcServerR(NaviSnapshot *snapshot,
+                               multi_call::GigRpcServer *gigRpcServer)
+    : ExternalResource(RESOURCE_ID, RS_EXTERNAL)
+    , _snapshot(snapshot)
+    , _gigRpcServer(gigRpcServer)
+{
+}
+
+NaviRpcServerR::~NaviRpcServerR() {
+    stop();
+}
+
+void NaviRpcServerR::stop() {
+    autil::ScopedLock lock(_registerLock);
+    _registryMap.clear();
+    for (auto &registry : _flushedRegistry) {
+        // todo HttpArpc support refcounted alias
+        // auto httpArpcServer = _gigRpcServer->getHttpArpcServer();
+        // if (httpArpcServer) {
+        //     httpArpcServer->removeAlias(registry->getHttpAliasMap());
+        // }
+        _gigRpcServer->unRegisterArpcService(registry);
+        CommonUtil::waitUseCount(registry, 1);
+    }
+    _flushedRegistry.clear();
+}
+
+std::shared_ptr<google::protobuf::Service>
+NaviRpcServerR::doRegisterArpcService(const std::shared_ptr<google::protobuf::Service> &service,
+                                      const ArpcRegistryParam &param, Resource *caller) const {
+    if (_flushed) {
+        NAVI_KERNEL_LOG(ERROR, "can't register service after flush");
+        return nullptr;
+    }
+    auto desc = service->GetDescriptor();
+    if (!validate(desc, param)) {
+        return nullptr;
+    }
+    const auto &arpcParam = param.arpcParam;
+    const auto &serviceName = desc->full_name();
+    const auto &methodName = arpcParam.method;
+    auto registry = std::make_shared<ArpcServiceRegistry>(_snapshot, service);
+    if (!registry->init(param, caller)) {
+        NAVI_KERNEL_LOG(ERROR, "init service [%s] method [%s] registry failed",
+                        serviceName.c_str(), methodName.c_str());
+        return nullptr;
+    }
+    _registryMap[serviceName].emplace(methodName, registry);
+    NAVI_KERNEL_LOG(INFO,
+                    "register navi arpc success, service [%s] method [%s]",
+                    serviceName.c_str(), methodName.c_str());
+    return registry;
+}
+
+bool NaviRpcServerR::unRegisterArpcService(const std::shared_ptr<google::protobuf::Service> &service) {
+    autil::ScopedLock lock(_registerLock);
+    auto desc = service->GetDescriptor();
+    const auto &serviceFullName = desc->full_name();
+    auto it = _registryMap.find(serviceFullName);
+    if (_registryMap.end() == it) {
+        NAVI_KERNEL_LOG(ERROR,
+                        "can't unregister service [%p] [%s], not registered",
+                        service.get(), serviceFullName.c_str());
+        return false;
+    }
+    auto &methodMap = it->second;
+    for (auto &pair : methodMap) {
+        const auto &methodName = pair.first;
+        auto registry = pair.second;
+        if (service == registry) {
+            methodMap.erase(methodName);
+            NAVI_KERNEL_LOG(INFO, "unregister service [%p] [%s] method [%s] success",
+                            service.get(), serviceFullName.c_str(),
+                            methodName.c_str());
+            break;
+        }
+    }
+    if (methodMap.empty()) {
+        _registryMap.erase(it);
+    }
+    return true;
+}
+
+bool NaviRpcServerR::validate(const google::protobuf::ServiceDescriptor *desc,
+                              const ArpcRegistryParam &param) const
+{
+    const auto &serviceFullName = desc->full_name();
+    auto it = _registryMap.find(serviceFullName);
+    if (_registryMap.end() == it) {
+        return true;
+    }
+    const auto &methodMap = it->second;
+    const auto &methodName = param.arpcParam.method;
+    if (methodMap.end() != methodMap.find(methodName)) {
+        NAVI_KERNEL_LOG(ERROR, "service [%s] method [%s] duplicate register",
+                        serviceFullName.c_str(), methodName.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool NaviRpcServerR::flushRegistry() {
+    autil::ScopedLock lock(_registerLock);
+    for (const auto &pair : _registryMap) {
+        const auto &methodMap = pair.second;
+        for (const auto &methodPair : methodMap) {
+            if (!flushOneRegistry(methodPair.second)) {
+                return false;
+            }
+        }
+    }
+    _flushed = true;
+    NAVI_KERNEL_LOG(INFO, "flush rpc registry success, count [%lu]", _registryMap.size());
+    return true;
+}
+
+bool NaviRpcServerR::flushOneRegistry(const ArpcServiceRegistryPtr &registry) {
+    const auto &param = registry->getParam();
+    if (!param) {
+        NAVI_KERNEL_LOG(ERROR, "flush registry failed, registry param is null");
+        return false;
+    }
+    const auto &arpcParam = param->arpcParam;
+    const auto &serviceName = registry->getServiceName();
+    const auto &methodName = param->arpcParam.method;
+    if (!_gigRpcServer->registerArpcService(
+            registry, arpcParam.method, arpcParam.compatibleInfo, arpcParam.threadPoolDescriptor)) {
+        NAVI_KERNEL_LOG(ERROR,
+                        "register gig arpc service failed, service [%s] method [%s]",
+                        serviceName.c_str(),
+                        methodName.c_str());
+        return false;
+    }
+    _flushedRegistry.push_back(registry);
+    auto httpArpcServer = _gigRpcServer->getHttpArpcServer();
+    if (arpcParam.protoJsonizer && !httpArpcServer) {
+        NAVI_KERNEL_LOG(ERROR,
+                        "register http proto jsonizer failed, http server "
+                        "not started, service [%s] method [%s]",
+                        serviceName.c_str(),
+                        methodName.c_str());
+        return false;
+    }
+    if (httpArpcServer) {
+        const auto &httpAliasMap = registry->getHttpAliasMap();
+        httpArpcServer->addAlias(httpAliasMap);
+        if (arpcParam.protoJsonizer) {
+            if (!httpArpcServer->setProtoJsonizer(registry.get(), methodName, arpcParam.protoJsonizer)) {
+                NAVI_KERNEL_LOG(ERROR,
+                                "register http proto jsonizer failed, "
+                                "setProtoJsonizer failed, service [%s] method [%s]",
+                                serviceName.c_str(),
+                                methodName.c_str());
+                return false;
+            }
+        }
+    }
+    NAVI_KERNEL_LOG(
+        INFO, "flush rpc registry success, service [%s] method [%s]", serviceName.c_str(), methodName.c_str());
+    return true;
+}
+
+void NaviRpcServerR::fillProto(RpcInfoDef &rpcInfoDef) const {
+    autil::ScopedLock lock(_registerLock);
+    NaviUnorderedSet<ArpcServiceRegistry *> flushSet;
+    for (const auto &registry : _flushedRegistry) {
+        flushSet.insert(registry.get());
+    }
+    for (const auto &pair : _registryMap) {
+        const auto &methodMap = pair.second;
+        for (const auto &methodPair : methodMap) {
+            auto &registryDef = *rpcInfoDef.add_registrys();
+            methodPair.second->fillProto(registryDef);
+            auto flushed = (flushSet.end() != flushSet.find(methodPair.second.get()));
+            registryDef.set_flushed(flushed);
+        }
+    }
+}
+
+REGISTER_BUILDIN_RESOURCE(NaviRpcServerR);
+
+}
+

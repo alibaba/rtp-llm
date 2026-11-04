@@ -1,0 +1,198 @@
+syntax = "proto3";
+
+import "proto/GraphDef.proto";
+
+package navi;
+option cc_enable_arenas = true;
+
+enum NodeSchedStateDef {
+    NSS_INIT = 0;
+    NSS_IDLE = 1;
+    NSS_SCHEDULING = 2;
+    NSS_RUNNING = 3;
+    NSS_FINISH = 4;
+}
+
+enum ActivateStrategyDef {
+    ASD_REQUIRED = 0;
+    ASD_OPTIONAL = 1;
+    ASD_INDEPENDENT = 2;
+}
+
+enum PortStoreTypeDef {
+    PSTD_DATA = 0;
+    PSTD_SERIALIZE_DATA = 1;
+    PSTD_UNKNOWN = 8;
+}
+
+enum PortQueueTypeDef {
+    PQTD_LOCAL_REMOTE_SERVER_1 = 0;
+    PQTD_LOCAL_REMOTE_CLIENT_2 = 1;
+    PQTD_LOCAL_LOCAL_3 = 2;
+    PQTD_REMOTE_LOCAL_SERVER_4 = 3;
+    PQTD_REMOTE_LOCAL_CLIENT_5 = 4;
+    PQTD_REMOTE_REMOTE_CLIENT_6 = 5;
+    PQTD_UNKNOWN = 32;
+}
+
+enum IoTypeDef {
+    IOTD_INPUT = 0;
+    IOTD_OUTPUT = 1;
+};
+
+message PortQueuePartStateDef {
+    int32 part_id = 1;
+    uint64 total_data_count = 2;
+    uint64 data_count = 3;
+    bool eof = 4;
+    bool force_eof = 5;
+}
+
+message PortQueueStateDef {
+    PortStoreTypeDef store_type = 1;
+    PortQueueTypeDef queue_type = 2;
+    int32 full_part_count = 3;
+    repeated PortQueuePartStateDef parts = 4;
+}
+
+message PortStateDef {
+    string node = 1;
+    string port = 2;
+    string peer_node = 3;
+    string peer_port = 4;
+    IoTypeDef io_type = 5;
+    int32 port_id = 6;
+    int32 peer_port_id = 7;
+    EdgeQueueDef queue_def = 8;
+    bool back_pressure_eof_stop = 9;
+    PortQueueStateDef queue_state = 10;
+}
+
+message KernelInputStateDef {
+    string port = 1;
+    string input_node = 2;
+    string input_port = 3;
+    int32 slot_id = 4;
+    bool ready = 5;
+    bool finish = 6;
+    bool back_finish = 7;
+    bool optional = 8;
+    uint64 get_count = 9;
+    bool is_timeout = 10;
+    bool disconnected = 11;
+}
+
+message KernelInputGroupStateDef {
+    string name = 1;
+    bool ok = 2;
+    bool eof = 3;
+    repeated KernelInputStateDef inputs = 4;
+}
+
+message BackPressureInputStateDef {
+    int32 part_id = 1;
+    int64 update_count = 2;
+    int64 notify_max_count = 3;
+}
+
+message KernelInputPortStateDef {
+    PortStateDef port_state = 1;
+    bool ready = 2;
+    bool finish = 3;
+    repeated BackPressureInputStateDef bp_states = 4;
+}
+
+message KernelSingleAsyncPipeStateDef {
+    int32 index = 1;
+    bool ready = 2;
+    bool finish = 3;
+    bool optional = 4;
+    bool terminated = 5;
+    ActivateStrategyDef strategy = 6;
+    uint64 set_count = 7;
+    uint64 get_count = 8;
+}
+
+message KernelAsyncPipeStatesDef {
+    bool ok = 1;
+    bool independent_ready = 2;
+    bool has_ready = 3;
+    bool finish = 4;
+    bool finish_consumed = 5;
+    repeated KernelSingleAsyncPipeStateDef pipes = 6;
+    repeated KernelSingleAsyncPipeStateDef independent_pipes = 7;
+}
+
+message KernelInputStatesDef {
+    bool ok = 1;
+    bool resource_ok = 2;
+    bool has_ready = 3;
+    bool finish = 4;
+    bool finish_consumed = 5;
+    repeated KernelInputStateDef inputs = 6;
+    repeated KernelInputGroupStateDef input_groups = 7;
+    KernelInputPortStateDef port = 8;
+    KernelAsyncPipeStatesDef async_pipes = 9;
+}
+
+message KernelOutputStateDef {
+    string port = 1;
+    int32 index = 2;
+    bool eof = 3;
+    bool force_eof = 4;
+    bool ready = 5;
+    bool finish = 6;
+    bool disconnected = 7;
+    uint64 data_count = 8;
+    bool is_control = 9;
+}
+
+message KernelOutputGroupStateDef {
+    string name = 1;
+    bool ok = 2;
+    bool eof = 3;
+    repeated KernelOutputStateDef outputs = 4;
+}
+
+message BackPressureOutputStateDef {
+    int32 part_id = 1;
+    int64 update_count = 2;
+    int64 data_count = 3;
+    int64 max_data_count = 4;
+    bool eof = 5;
+}
+
+message KernelOutputPortStateDef {
+    PortStateDef port_state = 1;
+    repeated BackPressureOutputStateDef bp_states = 2;
+    bool ready = 3;
+    bool finish = 4;
+}
+
+message KernelOutputStatesDef {
+    bool ok = 1;
+    bool finish = 2;
+    repeated KernelOutputStateDef outputs = 3;
+    repeated KernelOutputGroupStateDef output_groups = 4;
+    KernelOutputPortStateDef port = 5;
+}
+
+message ExpensiveCache {
+    bool valid = 1;
+    bool expensive = 2;
+}
+
+message PendingState {
+    bool input_pending = 1;
+    bool output_pending = 2;
+    bool stop_pending = 3;
+}
+
+message KernelStatesDef {
+    NodeSchedStateDef ss_state = 1;
+    KernelInputStatesDef inputs = 2;
+    KernelOutputStatesDef outputs = 3;
+    string force_stop_node = 4;
+    ExpensiveCache expensive_cache = 5;
+    PendingState pending_state = 6;
+}

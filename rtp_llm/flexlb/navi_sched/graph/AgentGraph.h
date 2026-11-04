@@ -52,4 +52,4 @@ private:
 
 NAVI_TYPEDEF_PTR(AgentGraph);
 
-}
+} // namespace navi_sched

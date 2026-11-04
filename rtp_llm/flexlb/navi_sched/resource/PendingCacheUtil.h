@@ -1,7 +1,7 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedCommon.h"
-#include "aios/navi_sched/data/AgentPendingCacheToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedCommon.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentPendingCacheToMasterData.h"
 #include "autil/FlatHashmap.h"
 
 #include <cstdint>
@@ -43,6 +43,8 @@ struct PendingCacheStateStats {
     uint64_t checksum = 0;
 };
 
+// Locking belongs to the Agent/Master resource wrappers so the same state
+// transition code is used on both sides of the synchronization protocol.
 class PendingCacheState {
 public:
     bool upsert(const NaviSchedPendingCacheReservation &reservation,
@@ -74,6 +76,7 @@ public:
 
 private:
     friend class MasterPendingCacheR;
+    // Master reservations are produced in canonical order by construction.
     bool upsertGenerated(
         const NaviSchedPendingCacheReservation &reservation,
         bool replaceExisting, bool &changed,
@@ -94,6 +97,7 @@ private:
         const PendingCacheState *other, PendingCacheStateStats *overlap);
 
 private:
+    // Most hashes have one owner; allocate a tree only for shared hashes.
     struct BlockOwners {
         BlockOwners() = default;
         BlockOwners(const BlockOwners &other);
@@ -118,12 +122,14 @@ private:
     struct ReducedReservation {
         size_t fullReadyBlockCount = 0;
     };
+    // Retain the original vectors; live owners supply the view during export.
     std::unordered_map<int64_t, ReducedReservation> _reducedReservations;
     std::unordered_map<int64_t, uint64_t> _reservationChecksums;
+    // Agent-local batches can share one Master schedule batch.
     std::unordered_map<int64_t, std::unordered_set<int64_t>> _scheduleBatchIds;
     autil::flat_hash_map<uint64_t, BlockOwners> _fullReadyOwners;
     autil::flat_hash_map<uint64_t, BlockOwners> _tailReadyOwners;
     uint64_t _checksum = 0;
 };
 
-}
+} // namespace navi_sched

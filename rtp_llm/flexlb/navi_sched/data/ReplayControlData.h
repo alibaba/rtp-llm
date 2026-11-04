@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedScheduleData.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedScheduleData.h"
 #include "navi/engine/Data.h"
 
 #include <autil/DataBuffer.h>
@@ -117,4 +117,4 @@ NAVI_TYPEDEF_PTR(ReplayClientCapabilityData);
 NAVI_TYPEDEF_PTR(ReplayHistoryQueryData);
 NAVI_TYPEDEF_PTR(ReplayHistoryQueryResponseData);
 
-}
+} // namespace navi_sched

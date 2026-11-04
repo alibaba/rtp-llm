@@ -1,4 +1,4 @@
-#include "aios/navi_sched/kernel/SchedulerConfigSyncKernel.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/SchedulerConfigSyncKernel.h"
 
 #include "autil/TimeUtility.h"
 #include "navi/engine/NaviRegisterMacro.h"
@@ -200,4 +200,4 @@ bool SchedulerConfigSyncKernel::publishResponse(
 
 REGISTER_KERNEL(SchedulerConfigSyncKernel);
 
-}
+} // namespace navi_sched

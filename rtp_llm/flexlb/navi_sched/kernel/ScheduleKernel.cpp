@@ -1,9 +1,8 @@
-#include "aios/navi_sched/data/MasterResponseToClientData.h"
-#include "aios/navi_sched/data/NaviSchedRequestTrace.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedRequestTrace.h"
 #include "autil/TimeUtility.h"
-#include "aios/navi_sched/resource/MasterScheduleR.h"
-#include "aios/navi_sched/resource/MasterStateR.h"
-#include "aios/navi_sched/kernel/MasterDispatchGuardKernel.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterScheduleR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterStateR.h"
 #include "navi/engine/Kernel.h"
 
 namespace navi_sched {
@@ -45,9 +44,9 @@ private:
     MasterResponseToClientDataPtr _decision;
 };
 
-}
+} // namespace
 
-class ScheduleKernel : public MasterDispatchGuardKernel {
+class ScheduleKernel : public navi::Kernel {
 public:
     ~ScheduleKernel() override;
     void def(navi::KernelDefBuilder &builder) const override;
@@ -56,17 +55,18 @@ public:
     navi::ErrorCode compute(navi::KernelComputeContext &ctx) override;
 
 private:
-    KERNEL_DEPEND_DECLARE_BASE(MasterDispatchGuardKernel);
+    KERNEL_DEPEND_DECLARE();
 
 private:
     KERNEL_NAMED_DATA(ClientRequestToMasterData, _request,
                       CLIENT_REQUEST_TO_MASTER_DATA_NAME);
     KERNEL_DEPEND_ON(MasterScheduleR, _masterScheduleR);
+    KERNEL_DEPEND_ON(MasterStateR, _masterStateR);
     navi::AsyncPipePtr _responsePipe;
     navi::AsyncPipePtr _dispatchResponsePipe;
     MasterScheduleRequestDataPtr _scheduleRequest;
+    MasterResponseToClientDataPtr _decision;
     int64_t _dispatchGuardEnabled = 0;
-    bool _fusedDispatchGuard = false;
 };
 
 ScheduleKernel::~ScheduleKernel()
@@ -88,21 +88,15 @@ ScheduleKernel::~ScheduleKernel()
 void ScheduleKernel::def(navi::KernelDefBuilder &builder) const
 {
     builder.name("navi_sched.schedule_k")
-        .input("forward_decision", MASTER_RESPONSE_TO_CLIENT_TYPE_ID,
-               navi::IT_OPTIONAL, true)
         .output("decision", MASTER_RESPONSE_TO_CLIENT_TYPE_ID)
-        .output("replay", MASTER_RESPONSE_TO_CLIENT_TYPE_ID)
-        .output("dispatch_finished", "");
+        .output("replay", MASTER_RESPONSE_TO_CLIENT_TYPE_ID);
 }
 
 bool ScheduleKernel::config(navi::KernelConfigContext &ctx)
 {
     NAVI_JSONIZE(ctx, "dispatch_guard_enabled", _dispatchGuardEnabled,
                  _dispatchGuardEnabled);
-    NAVI_JSONIZE(ctx, "fused_dispatch_guard", _fusedDispatchGuard,
-                 _fusedDispatchGuard);
-    return (_dispatchGuardEnabled == 0 || _dispatchGuardEnabled == 1) &&
-        (!_fusedDispatchGuard || (_dispatchGuardEnabled && MasterDispatchGuardKernel::config(ctx)));
+    return _dispatchGuardEnabled == 0 || _dispatchGuardEnabled == 1;
 }
 
 navi::ErrorCode ScheduleKernel::init(navi::KernelInitContext &ctx)
@@ -110,14 +104,6 @@ navi::ErrorCode ScheduleKernel::init(navi::KernelInitContext &ctx)
     if (!_request) {
         NAVI_KERNEL_LOG(ERROR, "missing Client request named data on Master");
         return navi::EC_INIT_SUB_GRAPH;
-    }
-    if (_fusedDispatchGuard) {
-        _forwardDecisionPort = 0;
-        _finishedPort = 2;
-        const auto ec = MasterDispatchGuardKernel::init(ctx);
-        if (ec != navi::EC_NONE) {
-            return ec;
-        }
     }
     _responsePipe = ctx.createAsyncPipe();
     if (!_responsePipe) {
@@ -138,20 +124,16 @@ navi::ErrorCode ScheduleKernel::init(navi::KernelInitContext &ctx)
     }
     auto responsePipe = _responsePipe;
     if (_dispatchGuardEnabled) {
+        // Both the request graph and the scheduler own this wrapper. It also
+        // covers a decision discarded before this kernel can consume it.
         _dispatchResponsePipe = std::make_shared<DispatchReservationResponsePipe>(
             _responsePipe,
             std::static_pointer_cast<MasterStateR>(_masterStateR->shared_from_this()));
         responsePipe = _dispatchResponsePipe;
     }
     _scheduleRequest = _masterScheduleR->submit(request, responsePipe);
-    if (_scheduleRequest) {
-        NAVI_KERNEL_LOG(DEBUG,
-                        "[navi-request-stage] stage=master_submit input_request_id=%lu "
-                        "request_id=%lu queue_enqueue_mono_us=%ld request_timeout_ms=%ld",
-                        request->requestId, _scheduleRequest->request->requestId,
-                        _scheduleRequest->enqueueTimeUs, request->timeoutMs);
-    }
     if (!_scheduleRequest) {
+        // MasterScheduleR publishes a retryable decision before rejecting the submit.
         NAVI_KERNEL_LOG(WARN,
                         "Master schedule graph unavailable, return retryable decision, "
                         "requestId [%lu], generation [%lu]",
@@ -163,9 +145,6 @@ navi::ErrorCode ScheduleKernel::init(navi::KernelInitContext &ctx)
 
 navi::ErrorCode ScheduleKernel::compute(navi::KernelComputeContext &ctx)
 {
-    if (_fusedDispatchGuard && _decision) {
-        return MasterDispatchGuardKernel::compute(ctx);
-    }
     navi::DataPtr data;
     bool eof = false;
     if (!_responsePipe->getData(data, eof)) {
@@ -184,13 +163,7 @@ navi::ErrorCode ScheduleKernel::compute(navi::KernelComputeContext &ctx)
                         data->getTypeId().c_str());
         return navi::EC_ABORT;
     }
-    if (_fusedDispatchGuard) {
-        if (!acceptDecision(decision)) {
-            return navi::EC_ABORT;
-        }
-    } else {
-        _decision = decision;
-    }
+    _decision = decision;
     if (traceRequestBatch(decision->batchId)) {
         NAVI_KERNEL_LOG(INFO,
                         "[navi-request-stage] stage=master_output request_id=%lu "
@@ -207,9 +180,9 @@ navi::ErrorCode ScheduleKernel::compute(navi::KernelComputeContext &ctx)
     }
     ctx.setOutput(navi::PortIndex(0, navi::INVALID_INDEX), decision, true);
     ctx.setOutput(navi::PortIndex(1, navi::INVALID_INDEX), replay, true);
-    return _fusedDispatchGuard ? MasterDispatchGuardKernel::compute(ctx) : navi::EC_NONE;
+    return navi::EC_NONE;
 }
 
 REGISTER_KERNEL(ScheduleKernel);
 
-}
+} // namespace navi_sched

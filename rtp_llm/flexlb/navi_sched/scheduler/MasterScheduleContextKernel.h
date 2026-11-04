@@ -1,10 +1,10 @@
 #pragma once
 
-#include "aios/navi_sched/resource/MasterScheduleR.h"
-#include "aios/navi_sched/resource/MasterStateR.h"
-#include "aios/navi_sched/resource/MasterLatencyModelR.h"
-#include "aios/navi_sched/resource/SchedulerConfigR.h"
-#include "aios/network/gig/multi_call/util/RandomGenerator.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterScheduleR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterStateR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterLatencyModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/SchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/vendor/network/gig/multi_call/util/RandomGenerator.h"
 #include "navi/engine/Kernel.h"
 #include <atomic>
 #include <deque>
@@ -58,12 +58,6 @@ private:
     KERNEL_DEPEND_ON_FALSE(SchedulerConfigR, _schedulerConfigR);
 
 private:
-    ClusterExecutionUtilization _clusterExecutionUtilization;
-    ExecutionUtilizationController _executionUtilizationController;
-    bool _executionUtilizationLimitEnabled = false;
-    ExecutionUtilizationController::Config _executionUtilizationConfig;
-    double _averageExecutionUtilization = 0.0;
-    size_t _executionUtilizationReportingNodes = 0;
     navi::AsyncPipePtr _requestPipe;
     navi::AsyncPipePtr _roundCompletionPipe;
     std::shared_ptr<std::atomic<bool>> _roundInFlight =
@@ -91,7 +85,6 @@ public:
 public:
     void def(navi::KernelDefBuilder &builder) const override;
     navi::ErrorCode compute(navi::KernelComputeContext &ctx) override;
-    static void recordReplayAdmission(NaviSchedScheduleContext &context);
 
 protected:
     struct AdmissionPredictionAudit {
@@ -122,4 +115,4 @@ protected:
     KERNEL_DEPEND_ON(MasterScheduleR, _masterScheduleR);
 };
 
-}
+} // namespace navi_sched

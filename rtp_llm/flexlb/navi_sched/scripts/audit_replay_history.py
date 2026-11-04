@@ -68,18 +68,18 @@ def classify(stream, payload_size, record_version=LEGACY_RECORD_VERSION):
             raise ValueError("unsupported history payload version: %d" % version)
     else:
         raise ValueError("unsupported record version: %d" % record_version)
-    exact(reader, 8)
+    exact(reader, 8)  # Native request id is a raw uint64.
     biz_size = varint(reader, 32)
     if biz_size > 65536:
         raise ValueError("invalid biz length")
     exact(reader, biz_size)
-    varint(reader, 64)
-    varint(reader, 64)
+    varint(reader, 64)  # Zigzag promptTokenCount.
+    varint(reader, 64)  # Zigzag blockSize.
     hashes = varint(reader, 32)
     if hashes > 1024 * 1024:
         raise ValueError("invalid block hash count")
     exact(reader, hashes * 8)
-    varint(reader, 64)
+    varint(reader, 64)  # Zigzag timeoutMs.
     forward_size = varint(reader, 32)
     if forward_size != reader.remaining:
         raise ValueError("forward payload length mismatch")
@@ -101,6 +101,7 @@ def classify(stream, payload_size, record_version=LEGACY_RECORD_VERSION):
         raise ValueError("unknown mm_features schema")
     if features:
         return "vl"
+    # Text requests with additional tensor frames need separate inspection.
     if frame_count != 1:
         raise ValueError("extra frames in purported text request")
     if unpacker.tell() != forward_size:

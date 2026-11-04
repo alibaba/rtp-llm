@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedCommon.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedCommon.h"
 #include "autil/Lock.h"
 #include "navi/engine/Resource.h"
 #include <unordered_set>
@@ -91,4 +91,4 @@ private:
 
 NAVI_TYPEDEF_PTR(AgentCacheR);
 
-}
+} // namespace navi_sched

@@ -1,5 +1,5 @@
-#include "aios/navi_sched/data/MasterResponseToClientData.h"
-#include "aios/navi_sched/data/SummaryUtil.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/data/SummaryUtil.h"
 #include "navi/engine/Type.h"
 
 namespace navi_sched {
@@ -186,4 +186,4 @@ public:
 
 REGISTER_TYPE(MasterResponseToClientType);
 
-}
+} // namespace navi_sched

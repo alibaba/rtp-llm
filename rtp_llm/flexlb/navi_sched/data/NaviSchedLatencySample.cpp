@@ -1,6 +1,6 @@
-#include "aios/navi_sched/data/NaviSchedLatencySample.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedLatencySample.h"
 
-#include "aios/navi_sched/common/NaviSchedCommon.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedCommon.h"
 #include "autil/DataBuffer.h"
 #include <cmath>
 #include <limits>
@@ -21,7 +21,7 @@ bool validAggregate(int64_t batchCount, int64_t batchSize,
            std::isfinite(cacheHitMissTokenProductSum) &&
            cacheHitMissTokenProductSum >= 0.0;
 }
-}
+} // namespace
 
 bool NaviSchedLatencyFeatures::appendAggregate(
     int64_t batchCount, int64_t batchSize, int64_t cacheHitTokenCount,
@@ -457,4 +457,4 @@ void NaviSchedLatencyFeatures::deserialize(autil::DataBuffer &dataBuffer)
     dataBuffer.read(_runningDecodeRemainingTokenBudget);
 }
 
-}
+} // namespace navi_sched

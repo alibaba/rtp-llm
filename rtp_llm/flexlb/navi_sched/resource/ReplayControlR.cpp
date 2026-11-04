@@ -1,7 +1,7 @@
-#include "aios/navi_sched/resource/ReplayControlR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/ReplayControlR.h"
 
-#include "aios/navi_sched/kernel/ReplayControlSyncKernel.h"
-#include "aios/navi_sched/proto/ReplayControl.pb.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/ReplayControlSyncKernel.h"
+#include "rtp_llm/flexlb/navi_sched/proto/ReplayControl.pb.h"
 #include "autil/TimeUtility.h"
 #include "navi/builder/GraphBuilder.h"
 #include "navi/engine/NaviRegisterMacro.h"
@@ -43,7 +43,7 @@ bool parseHistoryMode(const std::string &value, ReplayHistoryMode &mode)
     return false;
 }
 
-}
+} // namespace
 
 ReplayControlResponseData::ReplayControlResponseData()
     : navi::Data(RESPONSE_TYPE_ID)
@@ -329,6 +329,7 @@ void ReplayControlR::notifyClockOffsetLocked(const Subscriber &subscriber)
             return;
         }
     }
+    // A failed delivery can remove a participant and change every client's share.
     notifySubscribersLocked();
 }
 
@@ -971,4 +972,4 @@ void ReplayControlR::stop()
 
 REGISTER_RESOURCE(ReplayControlR);
 
-}
+} // namespace navi_sched

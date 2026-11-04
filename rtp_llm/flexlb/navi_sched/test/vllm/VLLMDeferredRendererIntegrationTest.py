@@ -369,6 +369,8 @@ class DeferredRendererTestBase(unittest.IsolatedAsyncioTestCase):
         actual_hashes = {int.from_bytes(value, "big") for value in delta.added}
         expected = calculate_vllm_block_hashes(prediction.prompt_token_ids, 4, request=prediction)
         first_image_block = prediction.mm_features[0].mm_position.offset // 4
+        # Conservatively exclude the last logical block if its native interval
+        # reaches a final partial physical block that has no reusable hash.
         shift = len(native.prompt_token_ids) - len(prediction.prompt_token_ids)
         expected = {value for index, value in enumerate(expected)
                     if index >= first_image_block
@@ -865,6 +867,7 @@ class DeferredRendererTest(DeferredRendererTestBase):
         async with app.router.lifespan_context(app), httpx.AsyncClient(
             transport=transport, base_url="http://localhost"
         ) as client:
+            # Every renderer uses the cached native tokenizer in this process.
             with mock.patch.object(
                 self.native.get_tokenizer(), "apply_chat_template",
                 side_effect=AssertionError("preparation must reuse source tokens"),

@@ -1,4 +1,4 @@
-#include "aios/navi_sched/scheduler/RandomSchedulerKernel.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/RandomSchedulerKernel.h"
 
 namespace navi_sched {
 
@@ -32,4 +32,4 @@ uint64_t RandomSchedulerKernel::nextRandom() const
 
 REGISTER_KERNEL(RandomSchedulerKernel);
 
-}
+} // namespace navi_sched

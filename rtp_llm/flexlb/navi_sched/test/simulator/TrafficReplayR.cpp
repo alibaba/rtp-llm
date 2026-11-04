@@ -1,8 +1,8 @@
-#include "aios/navi_sched/test/simulator/TrafficReplayR.h"
+#include "rtp_llm/flexlb/navi_sched/test/simulator/TrafficReplayR.h"
 
-#include "aios/navi_sched/data/BlockHashUtil.h"
-#include "aios/navi_sched/data/MasterResponseToClientData.h"
-#include "aios/navi_sched/debug/NaviSchedScheduleReplayJson.h"
+#include "rtp_llm/flexlb/navi_sched/data/BlockHashUtil.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/debug/NaviSchedScheduleReplayJson.h"
 #include "autil/StringUtil.h"
 #include "autil/TimeUtility.h"
 #include "navi/log/NaviLogger.h"
@@ -184,7 +184,7 @@ bool getServiceName(const rapidjson::Value &object, std::string &serviceName)
     return true;
 }
 
-}
+} // namespace
 
 class TrafficReplayRequestClosure : public navi::NaviUserResultClosure {
 public:
@@ -504,6 +504,9 @@ bool TrafficReplayR::startRequest(navi::GraphDef *graphDef,
         _closures.emplace_back(closure);
         ++_inflightRequestCount;
     }
+    // Navi invokes the closure before returning a null result on every
+    // submission failure path. A second completion here would use a closure
+    // that its first callback may already have destroyed.
     navi::ResourceMap resourceMap;
     if (!resourceMap.addResource(_trafficReplayBridgeR->shared_from_this())) {
         return false;
@@ -713,4 +716,4 @@ bool TrafficReplayR::appendRecord(const std::string &json, size_t sequence)
 REGISTER_RESOURCE(TrafficReplayR);
 REGISTER_RESOURCE(TrafficReplayBridgeR);
 
-}
+} // namespace navi_sched::test

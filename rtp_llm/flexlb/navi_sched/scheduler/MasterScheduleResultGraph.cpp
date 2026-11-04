@@ -1,6 +1,6 @@
-#include "aios/navi_sched/scheduler/MasterScheduleResultGraph.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/MasterScheduleResultGraph.h"
 
-#include "aios/navi_sched/data/MasterResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterResponseToClientData.h"
 #include "autil/TimeUtility.h"
 #include "navi/engine/Type.h"
 #include <algorithm>
@@ -123,6 +123,7 @@ void MasterScheduleResultState::deliverWorker(size_t workerIndex)
 void MasterScheduleResultState::collectDeliveryFailures()
 {
     deliveryBarrierUs = autil::TimeUtility::monotonicTimeUs();
+    // A batch can span every delivery shard. Coalesce before touching reservations.
     for (const auto &delivery : deliveryWorkers) {
         workers[0].success = workers[0].success && delivery.success;
         for (auto index : delivery.failures) {
@@ -213,6 +214,8 @@ navi::ErrorCode MasterScheduleResultPrepareKernel::compute(navi::KernelComputeCo
         auto state = std::make_shared<MasterScheduleResultState>(context);
         context->_scheduleLatencyUs = std::max<int64_t>(
             0, state->beginUs - context->_scheduleBeginTimeUs);
+        // Explicit replay retains its serial publication order. Ordinary rounds
+        // never construct or copy replay data here.
         if (!context->valid()) {
             context->fail("scheduler_error");
             context->finish();
@@ -369,4 +372,4 @@ REGISTER_KERNEL(MasterScheduleResultPrepareKernel);
 REGISTER_KERNEL(MasterScheduleResultWorkerKernel);
 REGISTER_KERNEL(MasterScheduleResultBarrierKernel);
 
-}
+} // namespace navi_sched

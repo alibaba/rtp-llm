@@ -1,10 +1,10 @@
 #pragma once
 
-#include "aios/navi_sched/resource/AgentBatchR.h"
-#include "aios/navi_sched/resource/RequestLatencyTracker.h"
-#include "aios/navi_sched/service/NaviSchedAgent.h"
-#include "aios/navi_sched/service/NaviSchedRole.h"
-#include "aios/navi_sched/common/NaviSchedScheduleData.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentBatchR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/RequestLatencyTracker.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedAgent.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedRole.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedScheduleData.h"
 #include "navi/engine/AsyncPipe.h"
 
 namespace navi_sched {
@@ -46,7 +46,7 @@ public:
                                      int64_t eventTimeUs) const;
     bool reportObservedWorkload(const NaviSchedWorkloadSnapshot &snapshot,
                                const std::vector<int64_t> &coveredNativeBatchIds = {}) const;
-    bool beginObservedBackendExecution(int32_t requestCount = 0) const;
+    bool beginObservedBackendExecution() const;
     bool endObservedBackendExecution() const;
     bool reportObservedExecutionStep(double elapsedMs, int64_t prefillTokens,
                                      int64_t decodeTokens) const;
@@ -127,4 +127,4 @@ private:
     bool _stoppingReported = false;
 };
 
-}
+} // namespace navi_sched

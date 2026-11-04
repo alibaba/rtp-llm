@@ -1,4 +1,4 @@
-#include "aios/navi_sched/adapters/rtp_llm/RtpLLMAdapter.h"
+#include "rtp_llm/flexlb/navi_sched/adapters/rtp_llm/RtpLLMAdapter.h"
 
 #include <navi_sched/NaviSchedAgent.h>
 #include "autil/EnvUtil.h"
@@ -405,7 +405,7 @@ std::shared_ptr<NaviSchedAgent> createAgent(const AgentConfig &agentConfig,
     return agent;
 }
 
-}
+} // namespace
 
 RtpLLMAgentInitStatus createRtpLLMAgentFromEnvironment(
     bool enableForRole, const std::string &serverIp, int32_t serverPort,
@@ -882,7 +882,7 @@ void reportRtpLLMCacheStateChanged(
     const NaviSchedBlockHashesConstPtr &flatPresentBlockHashes,
     const NaviSchedBlockHashesConstPtr &fullReadyBlockHashes,
     const NaviSchedBlockHashesConstPtr &tailReadyBlockHashes,
-    bool                         , int64_t eventTimeUs, int64_t rtpCachedBlockCount)
+    bool /* hybridTailRequired */, int64_t eventTimeUs, int64_t rtpCachedBlockCount)
 {
     if (agent) {
         const auto beginUs = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -904,4 +904,4 @@ int64_t takeRtpLLMCacheReportLatencyUs()
     return latencyUs;
 }
 
-}
+} // namespace navi_sched

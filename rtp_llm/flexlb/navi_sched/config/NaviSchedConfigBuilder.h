@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedCommon.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedCommon.h"
 #include "autil/legacy/jsonizable.h"
 #include <map>
 #include <string>
@@ -25,11 +25,8 @@ private:
         const std::vector<std::string> &values);
     static autil::legacy::json::JsonArray makeNamedConfigArray(
         const NamedConfigs &configs);
-    static autil::legacy::json::JsonMap makeLocalNode(const NaviSchedLocalNode &node);
-    static autil::legacy::json::JsonMap makeCm2Subscription(
-        const NaviSchedCm2Subscription &config);
     static autil::legacy::json::JsonMap makeSubscribeConfig(
         const NaviSchedRuntimeConfig &config);
 };
 
-}
+} // namespace navi_sched

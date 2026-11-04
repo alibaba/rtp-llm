@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/resource/SchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/SchedulerConfigR.h"
 #include "navi/engine/Kernel.h"
 #include "navi/rpc_server/NaviArpcRequestData.h"
 
@@ -25,4 +25,4 @@ private:
     navi::AsyncPipePtr _responsePipe;
 };
 
-}
+} // namespace navi_sched

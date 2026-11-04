@@ -12,6 +12,7 @@
 
 namespace navi_sched {
 
+// Forward-mode automatic differentiation for a formula with N parameters.
 template <size_t N>
 class AutoGrad {
 public:
@@ -139,6 +140,7 @@ private:
     std::array<double, N> _gradient{};
 };
 
+// Reverse-mode automatic differentiation for a runtime parameter count.
 class AutoGradTape {
 public:
     using NodeId = uint32_t;
@@ -355,6 +357,7 @@ public:
         std::array<double, N> _values{};
     };
 
+    // Linear reductions over sequential parameters with invariant coefficients.
     template <size_t N>
     class StaticParameterLinearSums {
     public:
@@ -776,4 +779,4 @@ private:
     bool _indexedParameters = false;
 };
 
-}
+} // namespace navi_sched

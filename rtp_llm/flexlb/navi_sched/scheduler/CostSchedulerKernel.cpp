@@ -1,6 +1,6 @@
-#include "aios/navi_sched/scheduler/CostSchedulerKernel.h"
-#include "aios/navi_sched/scheduler/CostSchedulerColdStartStrategy.h"
-#include "aios/navi_sched/scheduler/CostSchedulerKernelInternal.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/CostSchedulerKernel.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/CostSchedulerColdStartStrategy.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/CostSchedulerKernelInternal.h"
 #include "autil/Scope.h"
 #include "autil/TimeUtility.h"
 
@@ -166,4 +166,4 @@ bool CostSchedulerKernel::schedule(NaviSchedScheduleContext &context) const
 
 REGISTER_KERNEL(CostSchedulerKernel);
 
-}
+} // namespace navi_sched

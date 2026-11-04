@@ -102,8 +102,9 @@ struct NaviSchedLatencySample {
     NaviSchedLatencyFeatures features;
     double latencyMs = 0.0;
     int64_t eventTimeUs = 0;
+    // Runtime-only admission metadata; persistent history does not need it.
     int64_t localBatchId = 0;
     int64_t latestAllocatedLocalBatchId = 0;
 };
 
-}
+} // namespace navi_sched

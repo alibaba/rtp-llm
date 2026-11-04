@@ -1,5 +1,5 @@
-#include "aios/navi_sched/config/NaviSchedConfigBuilder.h"
-#include "aios/navi_sched/common/NaviSchedScheduleData.h"
+#include "rtp_llm/flexlb/navi_sched/config/NaviSchedConfigBuilder.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedScheduleData.h"
 #include "unittest/unittest.h"
 
 using namespace navi_sched;
@@ -58,26 +58,15 @@ TEST_F(NaviSchedConfigBuilderTest, testBuildsSubscriptionConfig)
 {
     NaviSchedMasterConfig config;
     config.runtime.bizName = "master_biz";
-    NaviSchedLocalNode node;
-    node.bizName = "agent_biz";
-    node.ip = "127.0.0.1";
-    node.grpcPort = 12345;
-    node.supportHeartbeat = true;
-    config.runtime.localNodes.emplace_back(node);
-    NaviSchedCm2Subscription cm2;
-    cm2.zkHost = "cm2_zk";
-    cm2.zkPath = "/cm2/path";
-    cm2.cm2Group = {"group_0"};
-    config.runtime.cm2Subscriptions.emplace_back(cm2);
     config.runtime.vipSubscription.jmenvDomain = "jmenv.test";
     config.runtime.vipSubscription.services = {"vip.test"};
     config.runtime.vipSubscription.grpcPortDiff = 3;
 
     auto result = NaviSchedConfigBuilder::build(config.runtime, {"test_kernel"}, true);
     ASSERT_NE(std::string::npos, result.find("master_biz"));
-    ASSERT_NE(std::string::npos, result.find("agent_biz"));
-    ASSERT_NE(std::string::npos, result.find("127.0.0.1"));
-    ASSERT_NE(std::string::npos, result.find("cm2_zk"));
+    ASSERT_EQ(std::string::npos, result.find("cm2"));
+    ASSERT_EQ(std::string::npos, result.find("istio"));
+    ASSERT_EQ(std::string::npos, result.find("\"local\""));
     ASSERT_NE(std::string::npos, result.find("vip.test"));
     ASSERT_NE(std::string::npos, result.find("grpc_port_diff"));
     ASSERT_NE(std::string::npos, result.find("\"support_heartbeat\":true"));

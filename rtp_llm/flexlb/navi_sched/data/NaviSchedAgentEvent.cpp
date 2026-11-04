@@ -1,4 +1,4 @@
-#include "aios/navi_sched/data/NaviSchedAgentEvent.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedAgentEvent.h"
 
 namespace navi_sched {
 
@@ -70,4 +70,4 @@ std::string NaviSchedAgentEvent::getName(Type event)
     }
 }
 
-}
+} // namespace navi_sched

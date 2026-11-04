@@ -1,0 +1,101 @@
+#pragma once
+
+#include <assert.h>
+
+#include "rtp_llm/flexlb/navi_sched/vendor/network/gig/multi_call/common/ControllerParam.h"
+#include "rtp_llm/flexlb/navi_sched/vendor/network/gig/multi_call/common/common.h"
+
+namespace multi_call {
+
+class GigResponseInfo;
+class PropagationStatDef;
+
+struct QueryResultStatistic {
+public:
+    QueryResultStatistic()
+        : statIndex(-1)
+        , targetWeight(MAX_WEIGHT)
+        , callBegTime(-1)
+        , rpcBeginTime(-1)
+        , callEndTime(-1)
+        , ec(MULTI_CALL_ERROR_NO_RESPONSE)
+        , agentInfo(NULL)
+        , netLatency(INVALID_FLOAT_OUTPUT_VALUE)
+        , heartbeatPropagationStat(nullptr) {
+    }
+    ~QueryResultStatistic();
+    QueryResultStatistic(const QueryResultStatistic &) = delete;
+    QueryResultStatistic &operator=(const QueryResultStatistic &) = delete;
+
+    void rpcBegin() {
+        rpcBeginTime = autil::TimeUtility::currentTime();
+    }
+    void callEnd() {
+        if (callEndTime <= callBegTime) {
+            callEndTime = autil::TimeUtility::currentTime();
+        }
+    }
+    void setCallBegTime(int64_t beginTime) {
+        callBegTime = beginTime;
+    }
+    int64_t getLatency() const {
+        assert(callEndTime >= callBegTime);
+        return callEndTime - callBegTime;
+    }
+    int64_t getRpcLatency() const {
+        if (rpcBeginTime > 0) {
+            assert(callEndTime >= rpcBeginTime);
+            return callEndTime - rpcBeginTime;
+        } else {
+            return getLatency();
+        }
+    }
+    bool isDecWeight() const {
+        return MULTI_CALL_ERROR_DEC_WEIGHT == ec;
+    }
+    bool isFailed() const {
+        return ec > MULTI_CALL_ERROR_DEC_WEIGHT;
+    }
+    bool isEmptyAgentInfo() const {
+        return agentInfo == NULL;
+    }
+    void setTargetWeight(WeightTy weight) {
+        if (weight > MAX_WEIGHT) {
+            weight = MAX_WEIGHT;
+        } else if (weight < MIN_WEIGHT) {
+            weight = MIN_WEIGHT;
+        }
+        targetWeight = weight;
+    }
+    void setNetLatency(float netLatency_) {
+        netLatency = netLatency_;
+    }
+    float getNetLatency() const {
+        return netLatency;
+    }
+    void setAgentInfo(GigResponseInfo *pbInfo);
+    bool validateMirror() const;
+    const PropagationStatDef &getMirrorStat() const;
+
+private:
+    // for ut
+    bool operator==(const QueryResultStatistic &rhs) const;
+
+public:
+    int32_t statIndex;
+    WeightTy targetWeight;
+    int64_t callBegTime;
+    int64_t rpcBeginTime;
+    int64_t callEndTime;
+    MultiCallErrorCode ec;
+    std::string errorString;
+    GigResponseInfo *agentInfo;
+    float netLatency;
+    const PropagationStatDef *heartbeatPropagationStat;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+} // namespace multi_call
+

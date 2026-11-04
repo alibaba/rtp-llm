@@ -108,6 +108,7 @@ class RouteAddressSubscriber:
             }), encoding="utf-8")
             os.replace(temporary, self._state_file)
         except OSError:
+            # Route observation is test-only and must not affect request routing.
             pass
 
     def _watch_once(self) -> None:

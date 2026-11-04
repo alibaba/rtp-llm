@@ -1,4 +1,4 @@
-#include "aios/navi_sched/scheduler/MasterScheduleContextData.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/MasterScheduleContextData.h"
 
 #include "navi/engine/Type.h"
 
@@ -28,4 +28,4 @@ public:
 
 REGISTER_TYPE(MasterScheduleContextType);
 
-}
+} // namespace navi_sched

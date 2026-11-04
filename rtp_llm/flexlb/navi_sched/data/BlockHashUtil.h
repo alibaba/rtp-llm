@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedCommon.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedCommon.h"
 #include <autil/DataBuffer.h>
 
 namespace navi_sched {
@@ -20,4 +20,4 @@ public:
     static void read(autil::DataBuffer &dataBuffer, NaviSchedBlockHashesConstPtr &hashes);
 };
 
-}
+} // namespace navi_sched

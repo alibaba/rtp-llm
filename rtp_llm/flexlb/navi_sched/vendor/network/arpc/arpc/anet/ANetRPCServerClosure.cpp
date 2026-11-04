@@ -1,0 +1,98 @@
+#include "rtp_llm/flexlb/navi_sched/vendor/network/arpc/arpc/anet/ANetRPCServerClosure.h"
+
+#include "rtp_llm/flexlb/navi_sched/vendor/network/arpc/arpc/UtilFun.h"
+
+using namespace anet;
+
+ARPC_BEGIN_NAMESPACE(arpc)
+
+ARPC_DECLARE_AND_SETUP_LOGGER(ANetRPCServerClosure);
+
+ANetRPCServerClosure::ANetRPCServerClosure(channelid_t chid,
+                                           Connection *connection,
+                                           RPCMessage *reqMsg,
+                                           RPCMessage *resMsg,
+                                           ANetRPCMessageCodec *messageCodec,
+                                           version_t version)
+    : RPCServerClosure(reqMsg, resMsg), _chid(chid), _connection(connection) {
+    if (_connection != NULL) {
+        _connection->addRef();
+    }
+    _messageCodec = messageCodec;
+    _version = version;
+}
+
+ANetRPCServerClosure::~ANetRPCServerClosure() {
+    if (_connection != NULL) {
+        _connection->subRef();
+    }
+}
+
+void ANetRPCServerClosure::doPostPacket() {
+    Packet *packet = buildResponsePacket();
+    if (packet == NULL) {
+        return;
+    }
+    if (_tracer != nullptr) {
+        _tracer->SetServerResponseSize(packet->getDataLen());
+        _tracer->EndEncodeResponse();
+    }
+
+    assert(_connection);
+    if (!_connection->postPacket(packet)) {
+        ARPC_LOG(ERROR, "post packet error, when running ANetRPCServerClosure");
+        delete packet;
+    }
+}
+
+std::string ANetRPCServerClosure::getIpAndPortAddr() {
+    if (!_connection) {
+        return nullptr;
+    }
+    char addr[128] = {0};
+    _connection->getIpAndPortAddr(addr, 128);
+    return std::string(addr);
+}
+
+Packet *ANetRPCServerClosure::buildResponsePacket() {
+    uint32_t pcode = ARPC_ERROR_NONE;
+    Packet *packet = NULL;
+
+    if (_controller.Failed()) {
+        ErrorCode err = _controller.GetErrorCode();
+
+        /* We tell the difference of app error and ARPC error from the error code.
+         * ARPC_ERROR_NONE means user does not set the error code while setting
+         * failed. */
+        if (err > ARPC_ERROR_APP_MIN || err == ARPC_ERROR_NONE) {
+            pcode = ARPC_ERROR_APPLICATION;
+        } else {
+            pcode = err;
+        }
+
+        _resMsg = BuildErrorMsg(_controller.ErrorText(), err, _arena);
+
+        if (_resMsg == NULL) {
+            ARPC_LOG(ERROR, "build error msg return NULL");
+            return NULL;
+        }
+    }
+
+    if (_messageCodec == NULL) {
+        ARPC_LOG(ERROR, "_messageCodec is NULL, it is abnormal in none-UT cases. ");
+    } else {
+        packet = _messageCodec->EncodeResponse(_resMsg, _tracer, _version, _arena);
+
+        if (packet == NULL) {
+            ARPC_LOG(ERROR, "build packet return NULL");
+            return NULL;
+        }
+
+        packet->setChannelId(_chid);
+        pcode |= packet->getPcode();
+        packet->setPcode(pcode);
+    }
+    return packet;
+}
+
+ARPC_END_NAMESPACE(arpc)

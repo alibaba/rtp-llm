@@ -22,4 +22,4 @@ public:
 
 NAVI_TYPEDEF_PTR(MasterStopAckToAgentData);
 
-}
+} // namespace navi_sched

@@ -1,0 +1,664 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NaviSched Replay 分析器</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand-block">
+      <span class="brand-mark" aria-hidden="true">NS</span>
+      <div>
+        <h1>NaviSched Replay 分析器</h1>
+        <p id="source-line">尚未加载 Replay</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <label class="file-button" for="replay-files">打开 Replay</label>
+      <input id="replay-files" type="file" accept=".json,.jsonl" multiple>
+      <button id="refresh-runs" type="button">刷新运行列表</button>
+    </div>
+  </header>
+
+  <nav class="page-tabs" aria-label="页面导航">
+    <button class="active" data-page="comparison" type="button">
+      对比报告
+    </button>
+    <button data-page="formula" type="button">9 参数公式迁移</button>
+    <button data-page="formula-ablation" type="button">10 参数公式消融</button>
+    <button data-page="replay" type="button">优化样本</button>
+  </nav>
+
+  <main>
+    <section id="comparison-page" class="page-panel active">
+      <div class="report-heading">
+        <div>
+          <span class="section-kicker">simulate + 真实 GPU</span>
+          <h2 id="report-title">Scheduler 对比</h2>
+          <p id="report-meta"></p>
+          <p class="section-description">
+            页面先比较整体策略结果，再下钻到流量、池化、Loss、收敛和单轮调度现场。
+          </p>
+        </div>
+      </div>
+      <div id="report-empty" class="empty-state" hidden>
+        <strong>没有对比报告</strong>
+        <span>请先生成 Scheduler 对比报告。</span>
+      </div>
+      <div id="report-content">
+        <section id="report-metrics" class="metric-strip"></section>
+        <section id="report-real-section" hidden>
+          <div class="section-heading">
+            <div>
+              <span class="section-kicker">真实 8 卡验证</span>
+              <h2>CostScheduler 在 RTP-LLM 上的性能</h2>
+              <p class="section-description">
+                真实 Qwen3.5 Prefill 运行；统一展示稳态延迟、卡时、批处理、Cache、节点分布和预测误差。
+              </p>
+            </div>
+          </div>
+          <section id="report-real-metrics" class="metric-strip"></section>
+          <div id="report-real-context" class="performance-context"></div>
+          <section id="report-real-insights" class="report-insights"></section>
+          <div class="subsection-heading">
+            <h3>VLLM 8 卡 TP1 真实 Prefill 调度验证：Cost 与 FlexLB 对比</h3>
+            <p>Qwen3.5-35B-A3B-FP8 · 8 个独立单卡实例 · Prefix cache + chunked prefill · 相同 1,110 请求流、冷 Cache 和预拟合参数 · opt/release</p>
+          </div>
+          <div id="report-vllm-audit" class="table-scroll"></div>
+          <div id="report-vllm-runs" class="table-scroll"></div>
+          <div id="report-vllm-card-time" class="table-scroll"></div>
+          <div id="report-vllm-prediction" class="table-scroll"></div>
+          <div class="subsection-heading compact-heading">
+            <h3>同流量 simulate 对齐</h3>
+            <p>真实流量 sidecar 转换为无时间压缩 simulate；预测公式与执行真值使用相同的 9 参数预拟合状态。</p>
+          </div>
+          <div id="report-vllm-simulate" class="table-scroll"></div>
+          <div id="report-vllm-conclusion" class="report-conclusion"></div>
+          <div class="subsection-heading">
+            <h3>有效稳态运行：RTP-LLM 8 卡 TP1 真实 Prefill 调度性能对比</h3>
+            <p>Qwen3.5-35B-A3B-FP8 · 相同 1,488 请求流 · 丢弃前 744 个并统计后 744 个 · Replay 关闭 · opt/release</p>
+          </div>
+          <div id="report-real-runs" class="table-scroll"></div>
+          <div class="subsection-heading">
+            <h3>离散优化修复回归：问题现场与 v19 卡时收益</h3>
+            <p>同一 opt/release 修复版本；先验证 12×32 塌缩现场，再检查 v19、4k/8k 和 16k/32k 场景是否回退。异常轮次保留展示，不从聚合证据中删除。</p>
+          </div>
+          <div id="report-real-discrete-scene" class="table-scroll"></div>
+          <div id="report-real-discrete-regression" class="table-scroll"></div>
+          <div id="report-real-discrete-conclusion" class="report-conclusion"></div>
+          <div class="subsection-heading">
+            <h3>128–64k 生产长度范围：无压缩稳态仿真</h3>
+            <p>混合长度主实验包含 64 个 Agent 和 1,600 个请求，并补充短请求与隔离 64k 边界；均丢弃前 20%、使用 50 ms 窗口和全 miss。baseline 为 NaviSched max_cache_hit proxy，不是真实 FlexLB。</p>
+          </div>
+          <div id="report-real-production-range" class="table-scroll"></div>
+          <div id="report-real-production-conclusion" class="report-conclusion"></div>
+          <div class="subsection-heading">
+            <h3>卡数与单卡压力下的收益变化</h3>
+            <p>4/6/8 卡使用相同请求集合与统计窗口；按卡数分别对比 FlexLB，避免跨压力条件直接比较百分比。</p>
+          </div>
+          <div id="report-real-scaling" class="table-scroll"></div>
+          <div id="report-real-scaling-conclusion" class="report-conclusion"></div>
+          <div class="subsection-heading">
+            <h3>Normalization power 真机扫描</h3>
+            <p>按实测 token 分布匹配平均请求权重，隔离 power 变化与目标函数整体尺度变化。</p>
+          </div>
+          <div id="report-real-power-scan" class="table-scroll"></div>
+          <div id="report-real-power-conclusion" class="report-conclusion"></div>
+          <div class="subsection-heading">
+            <h3>单个真实调度现场详细分析</h3>
+            <p>Requests、Nodes 和现场状态来自 RTP-LLM 8 卡真实运行采样，不是 simulate；不同 Cost 的候选与决策是在同一真实现场上的离线反事实 Replay，并非重复在线执行。</p>
+          </div>
+          <div id="report-real-scene-context" class="decision-scene-summary"></div>
+          <div class="subsection-heading compact-heading">
+            <h3>现场请求</h3>
+            <p>等待时间是进入本轮调度时已消耗的窗口时间；Cache 命中按现场上报值计算。</p>
+          </div>
+          <div id="report-real-scene-requests" class="table-scroll"></div>
+          <div class="subsection-heading compact-heading">
+            <h3>Master 每轮调度的 Request 数</h3>
+            <p>来自单独开启 Replay 的真实采样运行；最终性能运行关闭 Replay，因此不能混作全量稳态指标。</p>
+          </div>
+          <div id="report-real-scene-schedule-requests" class="table-scroll"></div>
+          <div class="subsection-heading compact-heading">
+            <h3>节点状态与拟合预测</h3>
+            <p>单请求列是假设各自独立执行；合 Batch 列是假设两个请求同时发送到该节点。</p>
+          </div>
+          <div id="report-real-scene-nodes" class="table-scroll"></div>
+          <div class="subsection-heading compact-heading">
+            <h3>Scheduler 返回值与离散最优</h3>
+            <p>对每种目标枚举全部 8² 个节点组合；Gap 均相对同目标下的离散全局最优。</p>
+          </div>
+          <div id="report-real-scene-decisions" class="table-scroll"></div>
+          <div class="subsection-heading compact-heading">
+            <h3>四种 Cost 的定义与取值</h3>
+            <p>该现场 lambda=0，因此执行项只作为诊断值展示；总 Cost 等于延迟项原值除以请求数 2。</p>
+          </div>
+          <div id="report-real-scene-cost-definitions" class="table-scroll"></div>
+          <div class="subsection-heading compact-heading">
+            <h3>返回决策的逐 Batch Cost 分解</h3>
+            <p>每行对应 Scheduler 返回 route 中的一个物理 Batch，完整展示从请求线性量到延迟权重和 Cost 贡献的计算链路。</p>
+          </div>
+          <div id="report-real-scene-batch-costs" class="table-scroll"></div>
+          <div class="subsection-heading compact-heading">
+            <h3>返回 route 的交叉 Cost 评价</h3>
+            <p>将每种配置返回的 route 固定，再分别代入四种 Cost；单元格同时显示 Cost 和它在 64 个候选中的排名。</p>
+          </div>
+          <div id="report-real-scene-cross-costs" class="table-scroll"></div>
+          <div class="decision-scene-toolbar">
+            <label for="report-real-scene-objective">查看目标</label>
+            <select id="report-real-scene-objective"></select>
+          </div>
+          <div class="subsection-heading compact-heading">
+            <h3>全部 64 个候选分配</h3>
+            <p>默认按 Cost 排名；“Scheduler 返回”可能不是离散最优。</p>
+          </div>
+          <div id="report-real-scene-candidates" class="table-scroll decision-candidate-table"></div>
+          <div class="subsection-heading compact-heading">
+            <h3>Projected gradient 迭代轨迹</h3>
+            <p>每一步 Loss 对应更新前 route；投影后 route 是本步更新结果，二者不能错位解读。</p>
+          </div>
+          <div id="report-real-scene-trajectory" class="table-scroll decision-trajectory-table"></div>
+          <div id="report-real-scene-conclusion" class="performance-conclusion"></div>
+          <div class="subsection-heading">
+            <h3>真实调度现场：Normalization 连续 Power 扫描</h3>
+            <p>固定同一个 RTP-LLM 8 卡 snapshot，仅改变延迟权重；延迟是现场模型的反事实预测，不是重复执行的观测值。</p>
+          </div>
+          <div id="report-real-normalization-replay" class="table-scroll"></div>
+          <div class="subsection-heading compact-heading">
+            <h3>同轮真实现场汇总</h3>
+            <p>14 个去重 snapshot、25 个请求；用于检查单个现场观察到的选点变化是否重复出现。</p>
+          </div>
+          <div id="report-real-normalization-aggregate" class="table-scroll"></div>
+          <div class="subsection-heading">
+            <h3>补充参数扫描</h3>
+            <p>汇总 30/50 ms 窗口、log1p 尺度和 concavity 扫描；非严格单变量的运行会明确标注。</p>
+          </div>
+          <div id="report-real-sweeps" class="table-scroll"></div>
+          <div class="subsection-heading">
+            <h3>到达流量明细</h3>
+            <p>每个 profile 在稳态阶段包含 186 个请求；QPS 仅作为固定发送节奏下的辅助值。</p>
+          </div>
+          <div id="report-real-profiles" class="table-scroll"></div>
+          <div class="subsection-heading">
+            <h3>预测值与真实值</h3>
+            <p>Agent 指标是梯度更新前的执行预测；Master total 同时包含预测排队与执行时间。</p>
+          </div>
+          <div id="report-real-prediction" class="table-scroll"></div>
+          <section id="report-real-queue-cache-audit" class="accuracy-audit-band">
+            <div class="subsection-heading">
+              <h3>Cache Hit 与 Queue 精度审计</h3>
+              <p>10 个真实 Prefill Agent 的生产日志三方对齐；区分调度时前验、执行时真值和完成后训练数据，旧的完成时回算结果不参与精度结论。</p>
+            </div>
+            <section id="report-real-queue-cache-metrics" class="metric-strip"></section>
+            <div id="report-real-queue-cache-context" class="performance-context"></div>
+            <div class="subsection-heading compact-heading">
+              <h3>Pending Cache 命中精度</h3>
+              <p>Master 对已发送但未确认请求的 Cache key 做 reservation；执行前真实 eviction 单独列出，不归因于预测实现。</p>
+            </div>
+            <div id="report-real-cache-accuracy" class="table-scroll"></div>
+            <div class="subsection-heading compact-heading">
+              <h3>Queue 时间边界对齐</h3>
+              <p>对齐 Agent Queue、RTP ready/canrun/running 和 latency components，确认 Queue 结束后立即进入 Execution。</p>
+            </div>
+            <div id="report-real-queue-boundary" class="table-scroll"></div>
+            <div class="subsection-heading compact-heading">
+              <h3>冷启动、过渡与稳态误差</h3>
+              <p>正 bias 表示实际值高于预测值；冷启动首批 Execution 低估会被后续 Queue 逐 Batch 累积。</p>
+            </div>
+            <div id="report-real-queue-stages" class="table-scroll"></div>
+            <div class="subsection-heading compact-heading">
+              <h3>真实递推现场</h3>
+              <p>同一 Agent 的相邻 Batch，展示前一 Batch Execution 误差如何等量进入后一 Batch Queue 误差。</p>
+            </div>
+            <div id="report-real-queue-recurrence" class="table-scroll"></div>
+            <div id="report-real-queue-cache-conclusion" class="report-conclusion"></div>
+          </section>
+          <div class="subsection-heading">
+            <h3>同流量模拟验证</h3>
+            <p>使用真实 tokenizer 长度、相同请求顺序、到达 profile、缓存前缀、初值和 50 ms 窗口。</p>
+          </div>
+          <div id="report-real-simulate" class="table-scroll"></div>
+          <div class="subsection-heading">
+            <h3>KV Cache 初始化耗时拟合：实际值、拟合值与残差</h3>
+            <p>真实 RTP-LLM 稳态 Batch；使用与线上相同的 9 参数公式和 scipy.optimize.curve_fit。残差定义为实际 KV init - 预测 KV init，正值表示低估。</p>
+          </div>
+          <section id="report-kv-fit-summary" class="metric-strip"></section>
+          <div class="fit-chart-panel">
+            <canvas id="report-kv-fit-latency-chart" width="1400" height="480" aria-label="KV Cache 实际耗时与拟合预测曲线"></canvas>
+          </div>
+          <div class="fit-chart-panel">
+            <canvas id="report-kv-fit-chart" width="1400" height="480" aria-label="KV Cache 拟合残差与 Batch Token 曲线"></canvas>
+          </div>
+          <div id="report-kv-fit-bins" class="table-scroll"></div>
+          <div id="report-kv-fit-request-bins" class="table-scroll"></div>
+          <div id="report-kv-fit-parameters" class="table-scroll"></div>
+          <div id="report-kv-fit-notes" class="report-conclusion"></div>
+          <div class="subsection-heading">
+            <h3>拟合与在线更新实验</h3>
+            <p>包括 2000 样本预拟合、held-out、OLS、更新窗口和 learning rate 扫描。</p>
+          </div>
+          <div id="report-real-fitting" class="table-scroll"></div>
+          <div class="subsection-heading">
+            <h3>实验要求台账</h3>
+            <p>逐项记录历史中提出的实验想法、完成状态、证据和仍需注意的边界。</p>
+          </div>
+          <div id="report-real-ledger" class="table-scroll"></div>
+          <div class="subsection-heading">
+            <h3>排除的运行</h3>
+            <p>异常运行完整保留，但不进入性能结论。</p>
+          </div>
+          <div id="report-real-invalid" class="table-scroll"></div>
+          <div id="report-real-conclusion" class="performance-conclusion"></div>
+        </section>
+        <div id="report-insights-heading" class="section-heading">
+          <div>
+            <span class="section-kicker">结果</span>
+            <h2>关键结论</h2>
+            <p class="section-description">
+              单组实验的关键结论摘要，用于快速定位最低延迟、最短排队和最高命中率。
+            </p>
+          </div>
+        </div>
+        <section id="report-insights" class="report-insights"></section>
+        <div class="section-heading">
+          <div>
+            <span class="section-kicker">全部运行</span>
+            <h2>Scheduler 指标</h2>
+            <p class="section-description">
+              按实验目的分组展示全部运行结果；组内比较策略、lambda、窗口或循环数。
+            </p>
+          </div>
+        </div>
+        <div id="report-table" class="report-groups"></div>
+        <section id="report-workload-section" hidden>
+          <div class="section-heading">
+            <div>
+              <span class="section-kicker">流量特征</span>
+              <h2>各 Biz 的 Prompt 与实际 Cache 行为</h2>
+              <p class="section-description">
+                展示各类流量的长度分布、占比、实际 Cache 命中和批大小，解释结果对应的负载。
+              </p>
+            </div>
+          </div>
+          <div id="report-workload" class="table-scroll"></div>
+        </section>
+        <section id="report-pool-section" hidden>
+          <div class="section-heading">
+            <div>
+              <span class="section-kicker">共享池验证</span>
+              <h2>不同 Prompt 长度区间的延迟</h2>
+              <p class="section-description">
+                在相同流量和资源下比较独立池与共享池，检查长短请求混跑是否拖慢某类请求。
+              </p>
+            </div>
+          </div>
+          <section id="report-pool-insights" class="report-insights"></section>
+          <div id="report-pool" class="table-scroll"></div>
+        </section>
+        <section id="report-regression-section" hidden>
+          <div class="section-heading">
+            <div>
+              <span class="section-kicker">代码回归</span>
+              <h2>与上一版结果对比</h2>
+              <p class="section-description">
+                将同参数结果与上一版逐项对齐，标记平均延迟、P99、吞吐和命中率变化。
+              </p>
+            </div>
+          </div>
+          <div id="report-regression" class="table-scroll"></div>
+        </section>
+        <section id="report-loss-section" hidden>
+          <div class="section-heading">
+            <div>
+              <span class="section-kicker">CostScheduler 目标函数</span>
+              <h2>最终可行 Loss 分布</h2>
+              <p class="section-description">
+                汇总每轮调度最终可行解的 Loss，观察目标值的范围、尾部和稳定性。
+              </p>
+            </div>
+          </div>
+          <div id="report-loss" class="table-scroll"></div>
+        </section>
+        <section id="report-near-one-section" hidden>
+          <div class="section-heading">
+            <div>
+              <span class="section-kicker">离线边界</span>
+              <h2>lambda 接近 1 时的行为</h2>
+              <p class="section-description">
+                单独展开接近 1 的 lambda，分析偏重执行效率时的排队、利用率和吞吐变化。
+              </p>
+            </div>
+          </div>
+          <div id="report-near-one" class="table-scroll"></div>
+        </section>
+        <section id="report-optimization-section" hidden>
+          <div class="section-heading">
+            <div>
+              <span class="section-kicker">收敛</span>
+              <h2>优化收敛情况</h2>
+              <p class="section-description">
+                对同一优化样本比较不同循环数的 Loss 与阶段耗时，判断收敛收益和调度成本。
+              </p>
+            </div>
+          </div>
+          <div id="report-optimization" class="table-scroll"></div>
+        </section>
+        <section id="report-scalability-section" hidden>
+          <div class="section-heading">
+            <div>
+              <span class="section-kicker">容量</span>
+              <h2>单次调度规模</h2>
+              <p class="section-description">
+                按请求数、节点数和并行度组织单次调度压测，验证是否满足延迟预算。
+              </p>
+            </div>
+          </div>
+          <div id="report-scalability" class="table-scroll"></div>
+        </section>
+        <section id="report-profile-section" hidden>
+          <div class="section-heading">
+            <div>
+              <span class="section-kicker">CPU Profile</span>
+              <h2>运行热点与并行度</h2>
+              <p class="section-description">
+                展示调度热路径的实测开销和并行实现，用于解释规模测试中的性能瓶颈。
+              </p>
+            </div>
+          </div>
+          <div id="report-profile" class="table-scroll"></div>
+        </section>
+      </div>
+    </section>
+
+    <section id="formula-page" class="page-panel">
+      <div class="report-heading">
+        <div>
+          <span class="section-kicker">真实 Prefill 数据</span>
+          <h2>延迟公式跨节点验证</h2>
+          <p id="formula-meta"></p>
+        </div>
+      </div>
+      <div id="formula-empty" class="empty-state" hidden>
+        <strong>没有公式验证数据</strong>
+        <span>请先生成 Prefill 公式交叉验证报告。</span>
+      </div>
+      <div id="formula-content">
+        <section id="formula-metrics" class="metric-strip"></section>
+        <div id="formula-context" class="performance-context"></div>
+        <div id="formula-conclusions" class="performance-conclusion"></div>
+
+        <div class="section-heading">
+          <div>
+            <span class="section-kicker">列 A 公式 -> 行 B 样本</span>
+            <h2>老 9 参数公式交叉矩阵</h2>
+            <p class="section-description">
+              行是被评估节点 B 的 held-out 样本，列是来源节点 A 的拟合公式；单元格只显示 A 公式用于 B 样本后，相对 B 自身公式的 MAPE 误差率变化。
+            </p>
+          </div>
+        </div>
+        <div id="formula-cross-summary" class="table-scroll"></div>
+        <div id="formula-transfer-groups" class="table-scroll"></div>
+        <div id="formula-cross-matrices" class="formula-matrix-list"></div>
+
+        <div class="section-heading">
+          <div>
+            <span class="section-kicker">时间稳定性</span>
+            <h2>跨窗口迁移</h2>
+            <p class="section-description">
+              用前一窗口学到的公式预测后一窗口，区分节点固有差异与随时间变化的执行性能。
+            </p>
+          </div>
+        </div>
+        <div id="formula-cross-window" class="table-scroll"></div>
+      </div>
+    </section>
+
+    <section id="formula-ablation-page" class="page-panel">
+      <div class="report-heading">
+        <div>
+          <span class="section-kicker">真实 Prefill 数据</span>
+          <h2>9/10 参数公式消融</h2>
+          <p id="formula-ablation-meta"></p>
+        </div>
+      </div>
+      <div id="formula-ablation-empty" class="empty-state" hidden>
+        <strong>没有公式消融数据</strong>
+        <span>请先生成 9/10 参数公式消融报告。</span>
+      </div>
+      <div id="formula-ablation-content">
+        <section id="formula-ablation-metrics" class="metric-strip"></section>
+        <div id="formula-ablation-conclusions" class="performance-conclusion"></div>
+        <div class="section-heading">
+          <div>
+            <span class="section-kicker">Held-out 消融</span>
+            <h2>9 参数与 10 参数离线对比</h2>
+            <p class="section-description">
+              统一 70% 时间前段训练、30% 后段验证；第十个参数只增加 total prompt 的线性残差项。
+            </p>
+          </div>
+        </div>
+        <div id="formula-offline-ablation" class="table-scroll"></div>
+
+        <div class="section-heading">
+          <div>
+            <span class="section-kicker">真实更新节奏</span>
+            <h2>9 参数与 10 参数在线 Adam 回放</h2>
+            <p class="section-description">
+              使用默认初值、10 个 warmup 样本、每 4 个样本更新一次和 learning rate 0.022。
+            </p>
+          </div>
+        </div>
+        <div id="formula-online-ablation" class="table-scroll"></div>
+        <div id="formula-online-phases" class="table-scroll"></div>
+      </div>
+    </section>
+
+    <section id="replay-page" class="page-panel">
+    <section class="sample-selector" aria-label="Replay 选择">
+      <div class="section-heading sample-heading">
+        <div>
+          <span class="section-kicker">可用 Replay</span>
+          <h2>优化样本</h2>
+          <p class="section-description">
+            每行是一轮完整调度现场；选中后可依次查看输入、决策、代价矩阵和优化过程。
+            “真实运行现场”来自真机运行原始采样，节点规模以 Agents 列为准；
+            其余历史 JSONL 样本的 #1 和 #2 分别在流量回放约第 10,000 和 30,000 个请求附近采集；
+            两者配置相同，但请求、节点队列、Cache 和优化状态不同，并非优化前后对照。
+          </p>
+        </div>
+      </div>
+      <div id="run-table" class="table-scroll sample-table"></div>
+    </section>
+
+    <section id="empty-state" class="empty-state">
+      <strong>没有 Replay 数据</strong>
+      <span>请选择一个或多个 Replay 文件。</span>
+    </section>
+
+    <div id="workspace" hidden>
+      <nav class="view-tabs" aria-label="Replay 视图">
+        <button class="view-tab active" data-view="overview" type="button">
+          概览
+        </button>
+        <button class="view-tab" data-view="scheduler" type="button">SchedInfo</button>
+        <button class="view-tab" data-view="optimization" type="button">
+          优化过程
+        </button>
+        <button class="view-tab" data-view="raw" type="button">原始 Replay</button>
+      </nav>
+
+      <section id="overview-view" class="view-panel active">
+        <div id="replay-summary" class="metric-strip"></div>
+        <div class="section-heading">
+          <div>
+            <span class="section-kicker">负载</span>
+            <h2>Requests</h2>
+            <p class="section-description">
+              本轮参与调度的请求及其 token、block 和 Cache 特征。
+            </p>
+          </div>
+        </div>
+        <div id="request-table" class="table-scroll"></div>
+
+        <div class="section-heading">
+          <div>
+            <span class="section-kicker">容量</span>
+            <h2>Nodes</h2>
+            <p class="section-description">
+              本轮可选节点的排队、执行和容量状态。
+            </p>
+          </div>
+        </div>
+        <div id="node-table" class="table-scroll"></div>
+
+        <div class="section-heading">
+          <div>
+            <span class="section-kicker">放置关系</span>
+            <h2>Cache hit blocks</h2>
+            <p class="section-description">
+              请求与节点的 Cache 命中矩阵，用于核对最终选择的实际代价来源。
+            </p>
+          </div>
+        </div>
+        <div id="cache-table" class="table-scroll matrix-scroll"></div>
+      </section>
+
+      <section id="scheduler-view" class="view-panel">
+        <div class="scheduler-toolbar">
+          <div class="section-heading compact">
+            <div>
+              <span class="section-kicker">CostScheduler</span>
+              <h2>Request-Node 矩阵</h2>
+              <p class="section-description">
+                按请求或节点查看 Cost、Queue 和最终 Weight，并与调度结果对应。
+              </p>
+            </div>
+          </div>
+          <div class="toolbar-controls">
+            <div class="segmented" aria-label="矩阵方向">
+              <button class="active" data-orientation="request" type="button">
+                按 Request
+              </button>
+              <button data-orientation="node" type="button">按 Node</button>
+            </div>
+            <div class="segmented" aria-label="热力指标">
+              <button class="active" data-metric="cost" type="button">Cost</button>
+              <button data-metric="queue" type="button">Queue</button>
+              <button data-metric="weight" type="button">Weight</button>
+            </div>
+          </div>
+        </div>
+        <div id="selection-detail" class="selection-detail"></div>
+        <div id="scheduler-matrix" class="table-scroll matrix-scroll"></div>
+      </section>
+
+      <section id="optimization-view" class="view-panel">
+        <div class="scheduler-toolbar">
+          <div class="section-heading compact">
+            <div>
+              <span class="section-kicker">CostScheduler</span>
+              <h2>投影梯度优化</h2>
+              <p class="section-description">
+                展示每轮投影梯度更新；历史最优解决定最终节点选择。
+              </p>
+            </div>
+          </div>
+          <div class="toolbar-controls">
+            <label class="select-control" for="optimization-run">起点</label>
+            <select id="optimization-run"></select>
+            <div class="segmented" aria-label="优化矩阵方向">
+              <button class="active" data-orientation="request" type="button">
+                按 Request
+              </button>
+              <button data-orientation="node" type="button">按 Node</button>
+            </div>
+          </div>
+        </div>
+        <div id="optimization-empty" class="error-banner" hidden></div>
+        <div id="optimization-content">
+          <div id="optimization-metrics" class="metric-strip optimization-metrics"></div>
+          <div class="section-heading optimization-heading timing-heading">
+            <div>
+              <span class="section-kicker">运行时间</span>
+              <h2>耗时分解</h2>
+              <p class="section-description">
+                汇总当前样本全部优化循环中各计算阶段的耗时与占比。
+              </p>
+            </div>
+          </div>
+          <div id="optimization-timing" class="table-scroll"></div>
+          <div class="optimization-grid">
+            <div>
+              <div class="section-heading compact optimization-heading">
+                <div>
+                  <span class="section-kicker">目标函数</span>
+                  <h2>Loss 历史</h2>
+                  <p class="section-description">
+                    对比每步更新前和 simplex 投影后的可行 Loss。
+                  </p>
+                </div>
+              </div>
+              <p class="matrix-legend">
+                无约束 Loss 可能为负数；只有经过 simplex 投影后的 Loss 使用合法非负权重，
+                且每个 Request 的权重之和为 1。
+              </p>
+              <canvas id="optimization-chart" width="960" height="260"></canvas>
+              <div id="optimization-history" class="table-scroll history-scroll"></div>
+            </div>
+            <div class="optimization-step-panel">
+              <div class="section-heading compact optimization-heading">
+                <div>
+                  <span class="section-kicker">迭代</span>
+                  <h2 id="optimization-step-label">Step 0</h2>
+                  <p class="section-description">
+                    选择一个循环，查看该步的步长、Loss、阶段耗时和完整权重变化。
+                  </p>
+                </div>
+              </div>
+              <div class="step-control">
+                <input id="optimization-step" type="range" min="0" max="0" value="0">
+                <output id="optimization-step-output">0</output>
+              </div>
+              <div id="optimization-step-metrics" class="selection-detail"></div>
+            </div>
+          </div>
+          <div class="section-heading optimization-heading">
+            <div>
+              <span class="section-kicker">权重</span>
+              <h2>所选迭代矩阵</h2>
+              <p class="section-description">
+                按请求或节点展开当前循环中更新、梯度和 simplex 投影前后的权重。
+              </p>
+            </div>
+          </div>
+          <p class="matrix-legend">
+            B：更新前，G：gradient，U：投影前更新值，P：投影后
+          </p>
+          <div id="optimization-matrix" class="table-scroll matrix-scroll"></div>
+        </div>
+      </section>
+
+      <section id="raw-view" class="view-panel">
+        <div class="section-heading">
+          <div>
+            <span class="section-kicker">原始数据</span>
+            <h2>Replay JSON</h2>
+            <p class="section-description">
+              当前样本的原始结构化数据，用于精确复现和离线排查。
+            </p>
+          </div>
+        </div>
+        <pre id="raw-json"></pre>
+      </section>
+    </div>
+    </section>
+  </main>
+
+  <template id="empty-option-template">
+    <option value="">没有可用运行</option>
+  </template>
+  <script src="/app.js"></script>
+</body>
+</html>

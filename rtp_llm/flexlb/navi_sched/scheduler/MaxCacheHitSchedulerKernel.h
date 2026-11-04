@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/scheduler/SchedulerBaseKernel.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/SchedulerBaseKernel.h"
 
 namespace navi_sched {
 
@@ -24,4 +24,4 @@ private:
     KERNEL_DEPEND_DECLARE_BASE(SchedulerBaseKernel);
 };
 
-}
+} // namespace navi_sched

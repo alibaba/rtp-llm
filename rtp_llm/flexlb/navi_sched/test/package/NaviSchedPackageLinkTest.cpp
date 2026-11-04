@@ -1,6 +1,6 @@
 #include <navi_sched/NaviSchedAgent.h>
 
-#include "aios/navi_sched/adapters/rtp_llm/RtpLLMAdapter.h"
+#include "rtp_llm/flexlb/navi_sched/adapters/rtp_llm/RtpLLMAdapter.h"
 
 int main()
 {

@@ -1,7 +1,43 @@
-#include "aios/navi_sched/kernel/MasterDispatchGuardKernel.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterStateR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/SchedulerConfigR.h"
+#include "navi/engine/Kernel.h"
 #include "navi/log/NaviLogger.h"
 
 namespace navi_sched {
+
+class MasterDispatchGuardKernel : public navi::Kernel {
+public:
+    ~MasterDispatchGuardKernel() override;
+    void def(navi::KernelDefBuilder &builder) const override;
+    bool config(navi::KernelConfigContext &ctx) override;
+    navi::ErrorCode init(navi::KernelInitContext &ctx) override;
+    navi::ErrorCode compute(navi::KernelComputeContext &ctx) override;
+
+private:
+    void consumeAdmissionTimeout(navi::KernelComputeContext &ctx);
+    bool consumeDispatchAck();
+    navi::ErrorCode consumeForwardDecision(navi::KernelComputeContext &ctx);
+    void stopAdmissionTimeout(navi::KernelComputeContext &ctx);
+    void releaseUnacknowledgedReservation();
+    navi::ErrorCode finish(navi::KernelComputeContext &ctx);
+
+private:
+    KERNEL_DEPEND_DECLARE();
+    KERNEL_DEPEND_ON(MasterStateR, _masterStateR);
+    KERNEL_DEPEND_ON_FALSE(SchedulerConfigR, _schedulerConfigR);
+    MasterResponseToClientDataPtr _decision;
+    navi::AsyncPipePtr _dispatchAckPipe;
+    navi::AsyncPipePtr _admissionTimeoutPipe;
+    bool _registered = false;
+    bool _acknowledged = false;
+    bool _admissionTimedOut = false;
+    bool _admissionTimeoutStopped = false;
+    bool _forwardDecisionReceived = false;
+    bool _forwardDecisionEof = false;
+    bool _finished = false;
+    int64_t _admissionTimeoutMs = 0;
+};
 
 MasterDispatchGuardKernel::~MasterDispatchGuardKernel()
 {
@@ -64,10 +100,27 @@ MasterDispatchGuardKernel::compute(navi::KernelComputeContext &ctx)
         if (!ctx.getInput(navi::PortIndex(0, navi::INVALID_INDEX), data, eof)) {
             return navi::EC_NONE;
         }
-        auto decision = std::dynamic_pointer_cast<MasterResponseToClientData>(data);
-        if (!decision || !eof || !acceptDecision(decision)) {
+        _decision = std::dynamic_pointer_cast<MasterResponseToClientData>(data);
+        if (!_decision || !eof) {
             NAVI_KERNEL_LOG(ERROR, "invalid Master dispatch guard decision");
             return navi::EC_ABORT;
+        }
+        if (_decision->target.agentAddress.empty()) {
+            _acknowledged = true;
+        } else if (!(_decision->dispatchHandle.valid()
+                         ? _decision->dispatchHandle.registerWaiter(_dispatchAckPipe, _acknowledged)
+                         : _masterStateR->registerDispatchWaiter(
+                               _decision->target, _decision->batchId,
+                               _decision->requestId, _dispatchAckPipe, _acknowledged))) {
+            NAVI_KERNEL_LOG(
+                ERROR,
+                "failed to register Master dispatch waiter, requestId [%lu], "
+                "batchId [%ld], agentAddress [%s]",
+                _decision->requestId, _decision->batchId,
+                _decision->target.agentAddress.c_str());
+            return navi::EC_ABORT;
+        } else {
+            _registered = !_acknowledged;
         }
     }
 
@@ -94,33 +147,6 @@ MasterDispatchGuardKernel::compute(navi::KernelComputeContext &ctx)
         return finish(ctx);
     }
     return navi::EC_NONE;
-}
-
-bool MasterDispatchGuardKernel::acceptDecision(
-    const MasterResponseToClientDataPtr &decision)
-{
-    if (!decision || _decision) {
-        return false;
-    }
-    _decision = decision;
-    if (_decision->target.agentAddress.empty()) {
-        _acknowledged = true;
-    } else if (!(_decision->dispatchHandle.valid()
-                     ? _decision->dispatchHandle.registerWaiter(_dispatchAckPipe, _acknowledged)
-                     : _masterStateR->registerDispatchWaiter(
-                           _decision->target, _decision->batchId,
-                           _decision->requestId, _dispatchAckPipe, _acknowledged))) {
-        NAVI_KERNEL_LOG(
-            ERROR,
-            "failed to register Master dispatch waiter, requestId [%lu], "
-            "batchId [%ld], agentAddress [%s]",
-            _decision->requestId, _decision->batchId,
-            _decision->target.agentAddress.c_str());
-        return false;
-    } else {
-        _registered = !_acknowledged;
-    }
-    return true;
 }
 
 void MasterDispatchGuardKernel::consumeAdmissionTimeout(
@@ -167,7 +193,7 @@ navi::ErrorCode MasterDispatchGuardKernel::consumeForwardDecision(
     }
     navi::DataPtr data;
     bool eof = false;
-    if (!ctx.getInput(navi::PortIndex(_forwardDecisionPort, navi::INVALID_INDEX), data, eof)) {
+    if (!ctx.getInput(navi::PortIndex(1, navi::INVALID_INDEX), data, eof)) {
         return navi::EC_NONE;
     }
     if (data) {
@@ -217,7 +243,7 @@ navi::ErrorCode MasterDispatchGuardKernel::finish(navi::KernelComputeContext &ct
     }
 
     _finished = true;
-    if (!ctx.setOutput(navi::PortIndex(_finishedPort, navi::INVALID_INDEX), nullptr, true)) {
+    if (!ctx.setOutput(navi::PortIndex(0, navi::INVALID_INDEX), nullptr, true)) {
         NAVI_KERNEL_LOG(ERROR,
                         "finish Master dispatch guard output failed, requestId [%lu], "
                         "batchId [%ld]",
@@ -248,4 +274,4 @@ void MasterDispatchGuardKernel::releaseUnacknowledgedReservation()
 
 REGISTER_KERNEL(MasterDispatchGuardKernel);
 
-}
+} // namespace navi_sched

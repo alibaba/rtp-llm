@@ -1,5 +1,5 @@
-#include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
-#include "aios/navi_sched/data/SummaryUtil.h"
+#include "rtp_llm/flexlb/navi_sched/resource/NonLinearPrefillModelR.h"
+#include "rtp_llm/flexlb/navi_sched/data/SummaryUtil.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include <algorithm>
 #include <cmath>
@@ -317,6 +317,8 @@ bool NonLinearPrefillModelR::fit(const std::vector<NaviSchedLatencySample> &samp
     if (rejectNonPositiveWaitingCandidate && _useCapacitySplitFeature) {
         for (size_t offset = 0; offset < WAITING_PARAMETER_COUNT; ++offset) {
             const auto index = WAITING_PARAMETER_OFFSET + offset;
+            // An untrusted model may already contain zero when trust begins.
+            // Protect positive coefficients without freezing its other updates.
             if (std::isfinite(weights[index]) &&
                 (weights[index] > 0.0 || currentParameters[index] == 0.0)) {
                 continue;
@@ -369,6 +371,7 @@ bool NonLinearPrefillModelR::fit(const std::vector<NaviSchedLatencySample> &samp
     }
     reparameterize(weights, adamMoment1, adamMoment2, parameterCount,
                    nonlinearScale, NONLINEAR_SCALE);
+    // Preserve retained coordinates exactly across the internal scale conversion.
     for (size_t offset = 0; offset < WAITING_PARAMETER_COUNT; ++offset) {
         if (retainedWaitingParameters[offset]) {
             const auto index = WAITING_PARAMETER_OFFSET + offset;
@@ -451,6 +454,8 @@ bool NonLinearPrefillModelR::fit(const std::vector<NaviSchedLatencySample> &samp
         }
         const auto candidatePrediction = predict(sample.features, outputParameters);
         if (!std::isfinite(candidatePrediction) || candidatePrediction < 0.0) {
+            // Keep a bad update from poisoning future batches. The copied Adam
+            // state is intentionally discarded together with this candidate.
             ++_invalidCandidateRecoveryCount;
             NAVI_KERNEL_LOG(
                 WARN,
@@ -699,6 +704,8 @@ std::pair<double, double> NonLinearPrefillModelR::calculateRequestLinearCosts(
     if (!usesCapacitySplitParameters(weights)) {
         return {running, running};
     }
+    // Keep the generic evaluator's summation order, including zero terms, so
+    // sharing request features does not change floating-point model results.
     double waiting = 0.0;
     for (size_t index = 1; index < LINEAR_PARAMETER_COUNT; ++index) {
         waiting += 0.0 * weights[index] * PARAMETER_SCALES[index];
@@ -814,6 +821,8 @@ double NonLinearPrefillModelR::calculateLatencyFromRequestCostSum(
     const std::vector<double> &weights, double requestCostSum,
     double totalPromptTokenCount, double precedingRequestCount)
 {
+    // Zero gradient dimensions preserve AutoGrad's reciprocal arithmetic
+    // without calculating derivatives for discrete candidate evaluations.
     const AutoGrad<0> requestCost(requestCostSum);
     const auto linear =
         (requestCost +
@@ -1178,6 +1187,7 @@ double NonLinearPrefillModelR::predict(const Input &input,
     for (size_t index = 0; index < parameterCount; ++index) {
         (*gradient)[index] = prediction.gradient(index);
     }
+    // Keep the training residual on the exact same forward path as inference.
     return evaluate(input, weights, nonlinearScale);
 }
 
@@ -1350,4 +1360,4 @@ void NonLinearPrefillModelR::projectOutputParameters(
 
 REGISTER_RESOURCE(NonLinearPrefillModelR);
 
-}
+} // namespace navi_sched

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedCommon.h"
-#include "aios/navi_sched/service/NaviSchedRoleSummary.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedCommon.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedRoleSummary.h"
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -18,16 +18,6 @@ public:
     std::string serverIp;
     int32_t serverPort = 0;
     bool pdSeparated = true;
-    double executionBusyEma = 0.0;
-    size_t executionActiveCount = 0;
-    int64_t executionSampleBusyUs = 0;
-    int64_t executionSampleElapsedUs = 0;
-    int32_t executionRunningRequests = 0;
-    int32_t executionQueuedRequests = 0;
-    double executionUtilization = 0.0;
-    double executionCapacity = 0.0;
-    double executionCapacityDenominator = 0.0;
-    int32_t gpuReadyQueuedRequests = 0;
     NaviSchedWorkloadSnapshot workload;
     size_t nativeWorkloadBatchCount = 0;
     size_t nativeWorkloadRequestCount = 0;
@@ -84,4 +74,4 @@ public:
     double readyWithoutRunningCurrentMs = 0.0;
 };
 
-}
+} // namespace navi_sched

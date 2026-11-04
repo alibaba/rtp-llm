@@ -1,9 +1,9 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedCommon.h"
-#include "aios/navi_sched/data/AgentPendingCacheToMasterData.h"
-#include "aios/navi_sched/data/NaviSchedLatencySample.h"
-#include "aios/navi_sched/resource/RequestLatencyTracker.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedCommon.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentPendingCacheToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedLatencySample.h"
+#include "rtp_llm/flexlb/navi_sched/resource/RequestLatencyTracker.h"
 #include "autil/legacy/json.h"
 
 #include <array>
@@ -218,6 +218,7 @@ private:
             return (*group)[pageIndex % PAGES_PER_GROUP];
         }
 
+        // Copies share both directory groups and data pages until mutation.
         std::vector<std::shared_ptr<PageGroup>> _groups;
         size_t _size = 0;
     };
@@ -249,17 +250,20 @@ private:
     size_t _completedRequestCount = 0;
     size_t _acknowledgedWaitingRequestCount = 0;
     SharedPages<RequestEntry, 32> _requests;
+    // Request order is fixed; transactional copies can share this immutable index.
     std::shared_ptr<const std::unordered_map<uint64_t, size_t>> _requestIndexes;
     NaviSchedLatencyFeatures _waitingFeatures;
     mutable std::shared_ptr<const NaviSchedPendingCacheReservation> _pendingCacheReservation;
     mutable bool _pendingCacheDirty = false;
     RequestLatencyTracker::Snapshot _unreportedStats;
     long double _unreportedLatencySumMs = 0.0;
+    // Hash identities and per-request block indexes are immutable across copies.
     std::shared_ptr<const NaviSchedBlockHashes> _pendingBlockHashes;
     std::shared_ptr<const std::vector<uint32_t>> _requestBlockIndexes;
+    // Copies share pages until a transaction changes a reference on that page.
     SharedPages<BlockReferences, 256> _pendingReferences;
     uint64_t _pendingRebuildCount = 0;
     uint64_t _pendingRebuildVisitedNodes = 0;
 };
 
-}
+} // namespace navi_sched

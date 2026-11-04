@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedCommon.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedCommon.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -73,4 +73,4 @@ public:
                        const RuntimeConfig &config);
 };
 
-}
+} // namespace navi_sched

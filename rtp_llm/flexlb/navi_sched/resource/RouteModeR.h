@@ -42,4 +42,4 @@ private:
 
 NAVI_TYPEDEF_PTR(RouteModeR);
 
-}
+} // namespace navi_sched

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/data/ReplayControlData.h"
+#include "rtp_llm/flexlb/navi_sched/data/ReplayControlData.h"
 #include "navi/engine/AsyncPipe.h"
 #include "navi/engine/Resource.h"
 #include "navi/rpc_server/NaviRpcServerR.h"
@@ -166,4 +166,4 @@ private:
 
 NAVI_TYPEDEF_PTR(ReplayControlR);
 
-}
+} // namespace navi_sched

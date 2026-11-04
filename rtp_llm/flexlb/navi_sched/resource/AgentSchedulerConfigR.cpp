@@ -1,10 +1,10 @@
-#include "aios/navi_sched/resource/AgentSchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentSchedulerConfigR.h"
 
 #include "autil/legacy/fast_jsonizable_dec.h"
 #include "autil/HashAlgorithm.h"
 #include "navi/engine/NaviRegisterMacro.h"
-#include "aios/navi_sched/resource/LatencyResidualModel.h"
-#include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyResidualModel.h"
+#include "rtp_llm/flexlb/navi_sched/resource/NonLinearPrefillModelR.h"
 
 #include <algorithm>
 #include <cmath>
@@ -388,4 +388,4 @@ std::string AgentSchedulerConfigR::hashJson(
 
 REGISTER_RESOURCE(AgentSchedulerConfigR);
 
-}
+} // namespace navi_sched

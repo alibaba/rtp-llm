@@ -1,16 +1,16 @@
-#include "aios/navi_sched/data/AgentCacheToMasterData.h"
-#include "aios/navi_sched/data/AgentControlToMasterData.h"
-#include "aios/navi_sched/data/AgentLatencyToMasterData.h"
-#include "aios/navi_sched/data/AgentRequestEventToMasterData.h"
-#include "aios/navi_sched/data/AgentUpdateToMasterData.h"
-#include "aios/navi_sched/data/MasterPendingCacheSyncToAgentData.h"
-#include "aios/navi_sched/data/MasterLatencyModelWarmupToAgentData.h"
-#include "aios/navi_sched/data/MasterStopAckToAgentData.h"
-#include "aios/navi_sched/data/MasterSchedulerConfigToAgentData.h"
-#include "aios/navi_sched/data/NaviSchedAgentEvent.h"
-#include "aios/navi_sched/resource/MasterStateR.h"
-#include "aios/navi_sched/resource/MasterLatencyModelR.h"
-#include "aios/navi_sched/resource/SchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentCacheToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentControlToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentLatencyToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentRequestEventToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentUpdateToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterPendingCacheSyncToAgentData.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterLatencyModelWarmupToAgentData.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterStopAckToAgentData.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterSchedulerConfigToAgentData.h"
+#include "rtp_llm/flexlb/navi_sched/data/NaviSchedAgentEvent.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterStateR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/MasterLatencyModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/SchedulerConfigR.h"
 #include "autil/TimeUtility.h"
 #include "navi/engine/Kernel.h"
 
@@ -27,9 +27,6 @@ public:
     navi::ErrorCode compute(navi::KernelComputeContext &ctx) override;
 
 private:
-    navi::ErrorCode processUpdate(navi::KernelComputeContext &ctx,
-                                  const AgentUpdateToMasterDataPtr &update,
-                                  bool finishEvent, bool configNotified);
     bool applyUpdate(const AgentUpdateToMasterDataPtr &update,
                      MasterStopAckToAgentDataPtr &stopAck,
                      MasterPendingCacheSyncToAgentDataPtr &pendingCacheSync,
@@ -199,42 +196,6 @@ navi::ErrorCode MasterUpdateKernel::compute(navi::KernelComputeContext &ctx)
                         _agentId.c_str(), _collectorId.c_str());
         return navi::EC_ABORT;
     }
-    if (update && (update->version == NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION ||
-                   update->version == NAVI_SCHED_AGENT_UPDATE_LEGACY_BATCH_VERSION)) {
-        if (!update->validEnvelope()) {
-            NAVI_KERNEL_LOG(ERROR, "invalid ordered Agent update batch");
-            return navi::EC_ABORT;
-        }
-        for (size_t i = 0; i < update->updates.size(); ++i) {
-            const bool last = i + 1 == update->updates.size();
-            auto ec = processUpdate(ctx, update->updates[i], !last || !eof,
-                                    last && schedulerConfigNotified);
-            if (ec != navi::EC_NONE) return ec;
-        }
-    } else if (update) {
-        auto ec = processUpdate(ctx, update, !eof, schedulerConfigNotified);
-        if (ec != navi::EC_NONE) return ec;
-    }
-    if (eof) {
-        stopWarmupTimer(ctx);
-        releaseNode();
-        return closeOutputs(ctx);
-    }
-    if (update) return navi::EC_NONE;
-    if (!inputReady && notificationEof && timerEof &&
-        schedulerConfigNotificationEof) {
-        return navi::EC_NONE;
-    }
-    auto ec = schedulerConfigNotified
-                  ? updateSchedulerConfig(ctx)
-                  : navi::EC_NONE;
-    return navi::EC_NONE == ec ? updateLatencyWarmup(ctx) : ec;
-}
-
-navi::ErrorCode MasterUpdateKernel::processUpdate(
-    navi::KernelComputeContext &ctx, const AgentUpdateToMasterDataPtr &update,
-    bool finishEvent, bool configNotified)
-{
     MasterStopAckToAgentDataPtr stopAck;
     MasterPendingCacheSyncToAgentDataPtr pendingCacheSync;
     bool resyncRequired = false;
@@ -332,10 +293,22 @@ navi::ErrorCode MasterUpdateKernel::processUpdate(
                         _agentId.c_str(), _collectorId.c_str());
         return navi::EC_ABORT;
     }
-    if (!finishEvent) return navi::EC_NONE;
-    auto ec = configNotified || (updateApplied && update->event == NaviSchedAgentEvent::AGENT_HANDSHAKE)
-                  ? updateSchedulerConfig(ctx) : navi::EC_NONE;
-    return ec == navi::EC_NONE ? updateLatencyWarmup(ctx) : ec;
+    if (eof) {
+        stopWarmupTimer(ctx);
+        releaseNode();
+        return closeOutputs(ctx);
+    }
+    if (!inputReady && notificationEof && timerEof &&
+        schedulerConfigNotificationEof) {
+        return navi::EC_NONE;
+    }
+    // Handshake activation can prepare a catch-up update without a notification.
+    const bool schedulerConfigActivated =
+        updateApplied && NaviSchedAgentEvent::AGENT_HANDSHAKE == update->event;
+    auto ec = schedulerConfigNotified || schedulerConfigActivated
+                  ? updateSchedulerConfig(ctx)
+                  : navi::EC_NONE;
+    return navi::EC_NONE == ec ? updateLatencyWarmup(ctx) : ec;
 }
 
 bool MasterUpdateKernel::applyUpdate(const AgentUpdateToMasterDataPtr &update,
@@ -704,4 +677,4 @@ void MasterUpdateKernel::releaseNode()
 
 REGISTER_KERNEL(MasterUpdateKernel);
 
-}
+} // namespace navi_sched

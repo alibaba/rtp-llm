@@ -1,12 +1,12 @@
 #pragma once
 
-#include "aios/navi_sched/resource/AgentBatchR.h"
-#include "aios/navi_sched/resource/AgentReportR.h"
-#include "aios/navi_sched/resource/AgentRequestR.h"
-#include "aios/navi_sched/resource/AgentLatencyInputR.h"
-#include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
-#include "aios/navi_sched/resource/LatencyModelR.h"
-#include "aios/navi_sched/resource/RequestLatencyTracker.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentBatchR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentReportR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentRequestR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentLatencyInputR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/NonLinearPrefillModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/RequestLatencyTracker.h"
 #include "autil/Lock.h"
 #include "navi/engine/AsyncPipe.h"
 #include "navi/engine/Resource.h"
@@ -71,6 +71,7 @@ struct SimulatedExecutionConfig {
     int64_t tokenCacheBytes = 10LL * 1024 * 1024 * 1024 / (1024 * 1024);
     int64_t blockSize = 256;
     std::vector<double> formulaParameters;
+    // Three standard deviations are about three percent of predicted latency.
     double noiseStddevRatio = 0.01;
     uint64_t randomSeed = 1;
     double timeCompression = 1.0;
@@ -178,5 +179,5 @@ private:
     std::vector<QueueTraceEntry> _queueTrace;
 };
 
-}
-}
+} // namespace test
+} // namespace navi_sched

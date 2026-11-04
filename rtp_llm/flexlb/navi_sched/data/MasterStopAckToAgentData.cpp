@@ -1,4 +1,4 @@
-#include "aios/navi_sched/data/MasterStopAckToAgentData.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterStopAckToAgentData.h"
 #include "navi/engine/Type.h"
 
 namespace navi_sched {
@@ -60,4 +60,4 @@ public:
 
 REGISTER_TYPE(MasterStopAckToAgentType);
 
-}
+} // namespace navi_sched

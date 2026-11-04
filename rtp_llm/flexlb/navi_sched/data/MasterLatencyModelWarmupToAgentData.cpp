@@ -1,7 +1,7 @@
-#include "aios/navi_sched/data/MasterLatencyModelWarmupToAgentData.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterLatencyModelWarmupToAgentData.h"
 
-#include "aios/navi_sched/data/AgentLatencyToMasterData.h"
-#include "aios/navi_sched/data/SummaryUtil.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentLatencyToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/SummaryUtil.h"
 #include "navi/engine/Type.h"
 
 #include <cmath>
@@ -141,4 +141,4 @@ public:
 
 REGISTER_TYPE(MasterLatencyModelWarmupToAgentType);
 
-}
+} // namespace navi_sched

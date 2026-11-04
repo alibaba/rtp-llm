@@ -1,7 +1,7 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedScheduleData.h"
-#include "aios/navi_sched/service/NaviSchedRole.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedScheduleData.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedRole.h"
 #include "autil/LockFreeQueue.h"
 #include "autil/Log.h"
 #include "navi/common.h"
@@ -130,4 +130,4 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
-}
+} // namespace navi_sched

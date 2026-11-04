@@ -33,8 +33,6 @@ _RUNTIME_OPTION_NAMES = (
     "processing_size",
     "disable_perf",
     "disable_symbol_table",
-    "local_nodes",
-    "cm2_subscriptions",
     "vip_subscription",
 )
 

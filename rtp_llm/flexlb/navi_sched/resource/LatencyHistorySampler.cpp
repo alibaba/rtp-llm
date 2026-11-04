@@ -1,4 +1,4 @@
-#include "aios/navi_sched/resource/LatencyHistorySampler.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyHistorySampler.h"
 
 #include "autil/DataBuffer.h"
 #include "navi/log/NaviLogger.h"
@@ -41,7 +41,7 @@ bool validSample(const NaviSchedLatencySample &sample)
                           features.getWaitingCacheHitMissTokenProductSum()) &&
            (features.usesCapacitySplit() || features.getWaitingBatchSize() == 0);
 }
-}
+} // namespace
 
 LatencyHistorySampler::LatencyHistorySampler(uint64_t randomSeed)
     : _randomSeed(randomSeed != 0 ? randomSeed : DEFAULT_HISTORY_RANDOM_SEED)
@@ -181,6 +181,8 @@ LatencyHistorySampler::getOnlineFitBatches(
             "sequence_ids=%s",
             index, currentSequence, currentBucket, selectedSequences.size(),
             formatSequenceList(selectedSequences).c_str());
+        // Keep the current sample excluded while selecting history, then make
+        // it eligible for later batches as an already-processed sample.
         currentSequences.erase(currentSequence);
     }
     return batches;
@@ -437,4 +439,4 @@ void LatencyHistorySampler::readSample(autil::DataBuffer &dataBuffer,
     dataBuffer.read(sample.eventTimeUs);
 }
 
-}
+} // namespace navi_sched

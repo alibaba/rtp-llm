@@ -27,4 +27,4 @@ public:
     static std::string getName(Type event);
 };
 
-}
+} // namespace navi_sched

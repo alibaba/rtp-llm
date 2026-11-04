@@ -17,4 +17,4 @@ public:
     static const NaviSchedConfig &getConfig(const NaviSchedRole &role);
 };
 
-}
+} // namespace navi_sched

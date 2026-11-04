@@ -1,9 +1,9 @@
 #pragma once
 
-#include "aios/navi_sched/data/AgentLatencyToMasterData.h"
-#include "aios/navi_sched/data/LatencyModelGlobalData.h"
-#include "aios/navi_sched/data/MasterLatencyModelWarmupToAgentData.h"
-#include "aios/navi_sched/scheduler/ScheduleContextInternal.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentLatencyToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/data/LatencyModelGlobalData.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterLatencyModelWarmupToAgentData.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/ScheduleContextInternal.h"
 #include "autil/Lock.h"
 #include "autil/LoopThread.h"
 #include "navi/engine/AsyncPipe.h"
@@ -38,6 +38,8 @@ public:
         std::shared_ptr<const NaviSchedLatencyModel> model;
     };
 
+    // NodeState and the live-model pool share this slot so model publication
+    // and removal cannot leave two independently mutable model copies.
     class LiveModelSlot {
     public:
         virtual ~LiveModelSlot() = default;
@@ -236,6 +238,7 @@ private:
     std::shared_ptr<const GlobalZeroPointMap> _globalZeroPoint;
     autil::LoopThreadPtr _globalZeroPointThread;
     std::string _stateFile;
+    // Trust admission is separate from the stricter sharing/persistence gate.
     int64_t _trustMinRevision = 256;
     int64_t _sourceMinRevision = 1024;
     size_t _maxCandidates = 4;
@@ -252,4 +255,4 @@ private:
 
 NAVI_TYPEDEF_PTR(MasterLatencyModelR);
 
-}
+} // namespace navi_sched

@@ -1,4 +1,4 @@
-#include "aios/navi_sched/service/NaviSchedRoleSummary.h"
+#include "rtp_llm/flexlb/navi_sched/service/NaviSchedRoleSummary.h"
 
 #include <sstream>
 
@@ -23,4 +23,4 @@ std::string NaviSchedRoleSummary::format() const
     return output.str();
 }
 
-}
+} // namespace navi_sched

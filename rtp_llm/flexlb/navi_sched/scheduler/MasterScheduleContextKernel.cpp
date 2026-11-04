@@ -1,12 +1,12 @@
-#include "aios/navi_sched/scheduler/MasterScheduleContextKernel.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/MasterScheduleContextKernel.h"
 
-#include "aios/navi_sched/scheduler/CostSchedulerColdStartStrategy.h"
-#include "aios/navi_sched/scheduler/CostSchedulerKernel.h"
-#include "aios/navi_sched/scheduler/MasterScheduleContextData.h"
-#include "aios/navi_sched/scheduler/MasterScheduleResultGraph.h"
-#include "aios/navi_sched/data/MasterResponseToClientData.h"
-#include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
-#include "aios/navi_sched/debug/NaviSchedScheduleReplayJson.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/CostSchedulerColdStartStrategy.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/CostSchedulerKernel.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/MasterScheduleContextData.h"
+#include "rtp_llm/flexlb/navi_sched/scheduler/MasterScheduleResultGraph.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterResponseToClientData.h"
+#include "rtp_llm/flexlb/navi_sched/resource/NonLinearPrefillModelR.h"
+#include "rtp_llm/flexlb/navi_sched/debug/NaviSchedScheduleReplayJson.h"
 #include "autil/legacy/json.h"
 #include "autil/TimeUtility.h"
 #include "autil/Scope.h"
@@ -79,6 +79,8 @@ navi::ErrorCode MasterScheduleContextKernel::init(navi::KernelInitContext &ctx)
 
 navi::ErrorCode MasterScheduleContextKernel::compute(navi::KernelComputeContext &ctx)
 {
+    // The request pipe may already be at EOF while a round is finishing.
+    // Consume a separate wake signal so stop can still drain pending rounds.
     if (_roundCompletionPipe) {
         navi::DataPtr wake;
         bool wakeEof = false;
@@ -86,11 +88,6 @@ navi::ErrorCode MasterScheduleContextKernel::compute(navi::KernelComputeContext 
     }
     if (_schedulerConfigR) {
         const auto schedulerConfig = _schedulerConfigR->get();
-        _executionUtilizationLimitEnabled = schedulerConfig.config.overloadControlStrategy == "execution_utilization";
-        if (_executionUtilizationConfig.globalScaling != schedulerConfig.config.executionUtilization.globalScaling) {
-            _executionUtilizationController.reset();
-        }
-        _executionUtilizationConfig = schedulerConfig.config.executionUtilization;
         _maxWaitScheduleCount = schedulerConfig.config.maxWaitScheduleCount;
         _maxWaitScheduleTimeMs = schedulerConfig.config.maxWaitScheduleTimeMs;
         _queueOverloadStartCycleMultiplier =
@@ -160,6 +157,8 @@ std::shared_ptr<void> MasterScheduleContextKernel::beginScheduleRound()
     return std::shared_ptr<void>(
         nullptr, [inFlight = _roundInFlight, pipe = _roundCompletionPipe](void *) {
             inFlight->store(false, std::memory_order_release);
+            // This pipe belongs to this graph generation and stays open through
+            // request EOF. Termination after graph destruction needs no wake.
             if (pipe) {
                 pipe->setDataOverride(nullptr, false, true);
             }
@@ -308,6 +307,7 @@ void MasterScheduleContextKernel::buildReadyContexts(int64_t activationTimeUs)
         auto &context = contexts[request->request->bizName];
         if (!context) {
             context = std::make_shared<MasterScheduleContextData>();
+            // Every business in this activation shares preparation and cost time.
             context->context->_scheduleBeginTimeUs = activationTimeUs;
             context->context->_scheduleDeadlineUs =
                 activationTimeUs + _maxWaitScheduleTimeMs * 800;
@@ -352,7 +352,15 @@ void MasterScheduleContextKernel::buildReadyContexts(int64_t activationTimeUs)
         if (!accepted) {
             context->context->_scheduleLatencyUs = std::max<int64_t>(
                 0, autil::TimeUtility::monotonicTimeUs() - activationTimeUs);
-            MasterScheduleResultKernel::recordReplayAdmission(*context->context);
+            if (context->context->_replay) {
+                auto &schedulerInfo = context->context->_replay->schedulerInfo;
+                schedulerInfo["audit_version"] = int64_t(1);
+                schedulerInfo["schedule_id"] = context->context->_scheduleId;
+                schedulerInfo["schedule_begin_time_us"] =
+                    context->context->_scheduleBeginTimeUs;
+                schedulerInfo["schedule_latency_us"] =
+                    context->context->_scheduleLatencyUs;
+            }
             if (!context->context->finish()) {
                 NAVI_KERNEL_LOG(ERROR,
                                 "finish fully rate-limited schedule round failed, "
@@ -467,9 +475,8 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
     const auto healthyBacklogLatencyLimitMs =
         static_cast<double>(_maxWaitScheduleTimeMs) *
         _queueOverloadStartCycleMultiplier;
-    const auto coldStartAnalysis = _executionUtilizationLimitEnabled
-        ? CostSchedulerColdStartStrategy::Analysis()
-        : CostSchedulerColdStartStrategy::analyze(context, healthyBacklogLatencyLimitMs);
+    const auto coldStartAnalysis = CostSchedulerColdStartStrategy::analyze(
+        context, healthyBacklogLatencyLimitMs);
     const auto averagePredictedLatencyMs =
         coldStartAnalysis.trustedBacklogInflight > 0
             ? static_cast<double>(
@@ -477,10 +484,12 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
                   coldStartAnalysis.trustedBacklogInflight)
             : 0.0;
     const auto bootstrapUntrustedNode = coldStartAnalysis.untrustedCapacity > 0;
-    auto dropProbability = _executionUtilizationLimitEnabled ? 0.0
-        : calculateQueueOverloadDropProbability(averagePredictedLatencyMs, _maxWaitScheduleTimeMs,
-            _queueOverloadStartCycleMultiplier, _queueOverloadFullCycleMultiplier);
+    auto dropProbability = calculateQueueOverloadDropProbability(
+        averagePredictedLatencyMs, _maxWaitScheduleTimeMs,
+        _queueOverloadStartCycleMultiplier, _queueOverloadFullCycleMultiplier);
     const auto initialDropProbability = dropProbability;
+    // Expand recovery to free capacity while retaining one expected probe per
+    // minimum node when capacity is full or absent from legacy reports.
     if (_schedulerKernelId == CostSchedulerKernel::KERNEL_ID &&
         dropProbability > 0.0 &&
         std::isfinite(coldStartAnalysis.minimumTrustedBacklogLatencyMs)) {
@@ -493,59 +502,18 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
                      static_cast<double>(context.requestCount()));
         dropProbability = std::min(
             dropProbability, std::max(recoveryProbability, 1.0 - recoveryRequestFraction));
+        // Different healthy backlog values still contribute independent capacity.
         const auto healthyRecoveryFraction =
             static_cast<double>(coldStartAnalysis.healthyBacklogRecoveryRequestCount) /
             static_cast<double>(context.requestCount());
         dropProbability = std::min(dropProbability, 1.0 - healthyRecoveryFraction);
     }
-    if (_executionUtilizationLimitEnabled) {
-        const auto now = autil::TimeUtility::monotonicTimeUs();
-        {
-            long double sum = 0.0;
-            ClusterExecutionUtilization cluster;
-            _executionUtilizationReportingNodes = 0;
-            for (size_t i = 0; i < context.nodeCount(); ++i) {
-                const auto &node = context.getNode(i);
-                if (node.getWorkloadRevision() > 0) {
-                    cluster.add(node.getExecutionBusyUtilization(), node.getExecutionRunningRequests(),
-                                node.getExecutionWaitingRequests());
-                }
-                const auto value = node.getExecutionUtilization();
-                if (value >= 0.0) {
-                    sum += value;
-                    ++_executionUtilizationReportingNodes;
-                }
-            }
-            _averageExecutionUtilization = _executionUtilizationReportingNodes > 0
-                ? static_cast<double>(sum / _executionUtilizationReportingNodes) : 0.0;
-            _clusterExecutionUtilization = cluster;
-            if (_executionUtilizationConfig.globalScaling) {
-                _averageExecutionUtilization = cluster.effective();
-                _executionUtilizationReportingNodes = cluster.nodes;
-            }
-            _executionUtilizationController.update(_executionUtilizationConfig,
-                _averageExecutionUtilization, _executionUtilizationReportingNodes, now);
-            NAVI_KERNEL_LOG(DEBUG, "[navi-master-execution-utilization] nodes=%lu average=%.6f target=%.6f integral=%.6f drop_probability=%.6f",
-                _executionUtilizationReportingNodes, _averageExecutionUtilization, _executionUtilizationConfig.target,
-                _executionUtilizationController.integral(), _executionUtilizationController.probability());
-        }
-        dropProbability = _executionUtilizationController.probability();
-        if (dropProbability < 0.001) dropProbability = 0.0;
-    } else {
-        _executionUtilizationController.reset();
-    }
-    _masterScheduleR->recordExecutionUtilization(
-        _averageExecutionUtilization, _executionUtilizationController.integral(),
-        _executionUtilizationLimitEnabled ? _executionUtilizationReportingNodes : 0,
-        _executionUtilizationLimitEnabled, _clusterExecutionUtilization.average(),
-        _clusterExecutionUtilization.running, _clusterExecutionUtilization.waiting,
-        _executionUtilizationConfig.globalScaling);
     context._queueOverloadEvaluated = true;
     context._queueOverloadAveragePredictedLatencyMs = averagePredictedLatencyMs;
     context._queueOverloadDropProbability = dropProbability;
     const auto requestCount = context.requestCount();
-    if (!_executionUtilizationLimitEnabled && (context._scheduleId < 10 || context._scheduleId % 100 == 0 ||
-        (initialDropProbability > 0.0 && context._scheduleId % 10 == 0))) {
+    if (context._scheduleId < 10 || context._scheduleId % 100 == 0 ||
+        (initialDropProbability > 0.0 && context._scheduleId % 10 == 0)) {
         const auto minNodeIndex = coldStartAnalysis.minimumTrustedBacklogNodeIndex;
         const auto *minNode = minNodeIndex < context.nodeCount()
                                   ? &context.getNode(minNodeIndex) : nullptr;
@@ -959,6 +927,7 @@ void MasterScheduleResultKernel::reportPredictionMetrics(
             continue;
         }
         const auto &node = context._scheduleNodes[context._selectedNodeIndexes[index]];
+        // Unified prediction consumes workload reports instead of legacy queue reports.
         const auto reportReceiveTimeUs = node.usesUnifiedLatencyPrediction()
             ? node._workloadReportReceiveTimeUs : node._queueReportReceiveTimeUs;
         if (reportReceiveTimeUs > 0) {
@@ -1113,9 +1082,22 @@ bool MasterScheduleResultKernel::prepareContext(
     return true;
 }
 
-void MasterScheduleResultKernel::recordReplayAdmission(
-    NaviSchedScheduleContext &context)
+bool MasterScheduleResultKernel::finishContext(NaviSchedScheduleContext &context)
 {
+    const auto resultBeginUs = autil::TimeUtility::monotonicTimeUs();
+    autil::ScopeGuard reportTimings([this, &context, resultBeginUs]() {
+        reportResultTiming(context, resultBeginUs);
+    });
+    if (!prepareContext(context, resultBeginUs)) {
+        return false;
+    }
+    const auto auditEndUs = autil::TimeUtility::monotonicTimeUs();
+    _masterStateR->reserveScheduleBatches(context);
+    const auto reservedUs = autil::TimeUtility::monotonicTimeUs();
+    context._resultReserveUs = reservedUs - auditEndUs;
+    reportPredictionMetrics(context);
+    context._resultPredictionReportUs =
+        autil::TimeUtility::monotonicTimeUs() - reservedUs;
     if (context._replay) {
         auto &schedulerInfo = context._replay->schedulerInfo;
         schedulerInfo["audit_version"] = int64_t(1);
@@ -1123,9 +1105,7 @@ void MasterScheduleResultKernel::recordReplayAdmission(
         schedulerInfo["schedule_begin_time_us"] = context._scheduleBeginTimeUs;
         schedulerInfo["schedule_latency_us"] = context._scheduleLatencyUs;
         schedulerInfo["time_compression"] = context._timeCompression;
-        if (context._queuePredictionTimeUs >= context._scheduleTimeUs) {
-            schedulerInfo["queue_prediction_time_us"] = context._queuePredictionTimeUs;
-        }
+        schedulerInfo["queue_prediction_time_us"] = context._queuePredictionTimeUs;
         schedulerInfo["cold_start_target_inflight"] =
             context._coldStartRoutingStats.targetInflight;
         schedulerInfo["cold_start_trusted_node_count"] =
@@ -1234,26 +1214,9 @@ void MasterScheduleResultKernel::recordReplayAdmission(
         }
         schedulerInfo["replay_node_runtime"] = std::move(nodeRuntime);
     }
-}
-
-bool MasterScheduleResultKernel::finishContext(NaviSchedScheduleContext &context)
-{
-    const auto resultBeginUs = autil::TimeUtility::monotonicTimeUs();
-    autil::ScopeGuard reportTimings([this, &context, resultBeginUs]() {
-        reportResultTiming(context, resultBeginUs);
-    });
-    if (!prepareContext(context, resultBeginUs)) {
-        return false;
-    }
-    const auto auditEndUs = autil::TimeUtility::monotonicTimeUs();
-    _masterStateR->reserveScheduleBatches(context);
-    const auto reservedUs = autil::TimeUtility::monotonicTimeUs();
-    context._resultReserveUs = reservedUs - auditEndUs;
-    reportPredictionMetrics(context);
-    context._resultPredictionReportUs =
-        autil::TimeUtility::monotonicTimeUs() - reservedUs;
-    recordReplayAdmission(context);
     if (context._replay) {
+        // Preserve the decisions even when response delivery fails before
+        // NaviSchedScheduleContext::finish() can publish them.
         context._replay->decisions = context._decisions;
     }
     const auto deliveryBeginUs = autil::TimeUtility::monotonicTimeUs();
@@ -1314,6 +1277,7 @@ navi::ErrorCode MasterScheduleResultKernel::compute(navi::KernelComputeContext &
                 }
             }
         }
+        // All node workers, including failure cleanup, have joined before the next round.
         state->completion.reset();
     }
     if (inputs.eof()) {
@@ -1325,4 +1289,4 @@ navi::ErrorCode MasterScheduleResultKernel::compute(navi::KernelComputeContext &
 REGISTER_KERNEL(MasterScheduleContextKernel);
 REGISTER_KERNEL(MasterScheduleResultKernel);
 
-}
+} // namespace navi_sched

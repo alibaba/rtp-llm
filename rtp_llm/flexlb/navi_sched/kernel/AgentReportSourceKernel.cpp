@@ -1,5 +1,5 @@
-#include "aios/navi_sched/data/AgentUpdateToMasterData.h"
-#include "aios/navi_sched/resource/AgentReportR.h"
+#include "rtp_llm/flexlb/navi_sched/data/AgentUpdateToMasterData.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentReportR.h"
 #include "navi/engine/Kernel.h"
 
 namespace navi_sched {
@@ -21,7 +21,6 @@ private:
 private:
     KERNEL_DEPEND_ON(AgentReportR, _agentReportR);
     std::string _collectorId;
-    int64_t _orderedReportVersion = 0;
     navi::AsyncPipePtr _asyncPipe;
 };
 
@@ -43,7 +42,6 @@ void AgentReportSourceKernel::def(navi::KernelDefBuilder &builder) const
 bool AgentReportSourceKernel::config(navi::KernelConfigContext &ctx)
 {
     NAVI_JSONIZE(ctx, "collector_id", _collectorId);
-    NAVI_JSONIZE(ctx, "ordered_report_version", _orderedReportVersion, _orderedReportVersion);
     return !_collectorId.empty();
 }
 
@@ -56,8 +54,7 @@ navi::ErrorCode AgentReportSourceKernel::init(navi::KernelInitContext &ctx)
                         _collectorId.c_str());
         return navi::EC_INIT_SUB_GRAPH;
     }
-    if (!_agentReportR->subscribe(_collectorId, _asyncPipe,
-                                  _orderedReportVersion == NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION)) {
+    if (!_agentReportR->subscribe(_collectorId, _asyncPipe)) {
         NAVI_KERNEL_LOG(ERROR,
                         "subscribe Agent report source failed, collectorId [%s], "
                         "subscriberCount [%lu]",
@@ -95,4 +92,4 @@ navi::ErrorCode AgentReportSourceKernel::compute(navi::KernelComputeContext &ctx
 
 REGISTER_KERNEL(AgentReportSourceKernel);
 
-}
+} // namespace navi_sched

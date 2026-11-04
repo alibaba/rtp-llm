@@ -1,6 +1,6 @@
-#include "aios/navi_sched/kernel/ReplayMasterHistoryKernel.h"
+#include "rtp_llm/flexlb/navi_sched/kernel/ReplayMasterHistoryKernel.h"
 
-#include "aios/navi_sched/data/ReplayControlData.h"
+#include "rtp_llm/flexlb/navi_sched/data/ReplayControlData.h"
 #include "navi/engine/NaviRegisterMacro.h"
 
 namespace navi_sched {
@@ -40,4 +40,4 @@ navi::ErrorCode ReplayMasterHistoryKernel::compute(
 
 REGISTER_KERNEL(ReplayMasterHistoryKernel);
 
-}
+} // namespace navi_sched

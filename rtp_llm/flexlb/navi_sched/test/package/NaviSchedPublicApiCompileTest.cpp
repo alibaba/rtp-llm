@@ -17,20 +17,15 @@ void verifyNaviSchedPublicApiCompile(const NaviSchedAgentConfig &agentConfig,
         &NaviSchedBatchFinishReporter::finishBatch;
     bool (NaviSchedBatchFinishReporter::*finishBatchWithExecution)(
         const std::vector<NaviSchedRequestStats> &, double, double, int64_t,
-        int64_t, int64_t, int64_t, double) = &NaviSchedBatchFinishReporter::finishBatch;
-    bool (NaviSchedBatchFinishReporter::*finishBatchWithNativePreparation)(
-        const std::vector<NaviSchedRequestStats> &, double, double, int64_t,
-        int64_t, int64_t, int64_t, double, double) =
-        &NaviSchedBatchFinishReporter::finishBatch;
+        int64_t, int64_t, int64_t) = &NaviSchedBatchFinishReporter::finishBatch;
     (void)agentInit;
     (void)agentReportCacheInserted;
     (void)startBatch;
     (void)startBatchAt;
     (void)finishBatch;
     (void)finishBatchWithExecution;
-    (void)finishBatchWithNativePreparation;
     (void)agentConfig;
     (void)config;
 }
 
-}
+} // namespace navi_sched

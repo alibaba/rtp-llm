@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/test/simulator/TrafficReplayStartData.h"
+#include "rtp_llm/flexlb/navi_sched/test/simulator/TrafficReplayStartData.h"
 #include "autil/Lock.h"
 #include "navi/engine/AsyncPipe.h"
 #include "navi/engine/Resource.h"
@@ -36,4 +36,4 @@ private:
     std::map<std::string, ReplayGroupState> _groups;
 };
 
-}
+} // namespace navi_sched::test

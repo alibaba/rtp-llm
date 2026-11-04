@@ -1,5 +1,5 @@
-#include "aios/navi_sched/data/MasterStopAckToAgentData.h"
-#include "aios/navi_sched/resource/AgentReportR.h"
+#include "rtp_llm/flexlb/navi_sched/data/MasterStopAckToAgentData.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentReportR.h"
 #include "navi/engine/Kernel.h"
 
 namespace navi_sched {
@@ -42,4 +42,4 @@ navi::ErrorCode AgentStopAckKernel::compute(navi::KernelComputeContext &ctx)
 
 REGISTER_KERNEL(AgentStopAckKernel);
 
-}
+} // namespace navi_sched

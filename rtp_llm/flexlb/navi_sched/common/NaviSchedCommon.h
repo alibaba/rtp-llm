@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aios/navi_sched/common/NaviSchedConstants.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedConstants.h"
 
 #if defined(__GNUC__)
 #define NAVI_SCHED_API __attribute__((visibility("default")))
@@ -89,6 +89,7 @@ struct NaviSchedRequestStats {
     int64_t hybridSelectedReuseBlockCount = -1;
 };
 
+// Kept for RTP-LLM releases that report prefill observations separately.
 struct NaviSchedLatencyQuery {
     uint64_t requestId = 0;
     int64_t totalTokenCount = 0;
@@ -134,6 +135,7 @@ struct NaviSchedLocalBatchInfo {
     int64_t localBatchId = 0;
     int32_t requestCount = 0;
     bool pendingCacheTracked = false;
+    // Empty is the compact representation of a complete scheduled batch.
     std::vector<uint64_t> requestIds;
 };
 
@@ -173,6 +175,7 @@ struct NaviSchedWorkloadSnapshot {
     int32_t requestCount = 0;
     int32_t remainingPrefillRequestCount = 0;
     int32_t runningRequestCount = 0;
+    // Sum of continuous running durations for all currently running requests.
     double runningElapsedTimeMs = 0.0;
     int32_t runningDecodeRequestCount = 0;
     int64_t runningDecodeGeneratedTokenCount = 0;
@@ -271,8 +274,6 @@ struct NaviSchedConfig {
     bool enableVis = false;
 };
 
-using NaviSchedLocalNode = navi::NaviLocalNode;
-using NaviSchedCm2Subscription = navi::NaviCm2Subscription;
 
 struct NaviSchedRuntimeConfig : navi::NaviRuntimeConfig {
     std::string bizName;
@@ -294,8 +295,8 @@ struct NaviSchedMasterConfig {
     size_t collectorQueueCount = 0;
     size_t maxWaitScheduleCount = 30;
     int64_t maxWaitScheduleTimeMs = 10;
-    int64_t queueOverloadStartCycleMultiplier = 0;
-    int64_t queueOverloadFullCycleMultiplier = 0;
+    int64_t queueOverloadStartCycleMultiplier = 10;
+    int64_t queueOverloadFullCycleMultiplier = 30;
     std::string schedulerName = "random";
     std::string schedulerConfig;
     double timeCompression = 1.0;
@@ -316,4 +317,4 @@ struct NaviSchedAgentConfig {
     std::string latencyHistoryBinaryFingerprint;
 };
 
-}
+} // namespace navi_sched

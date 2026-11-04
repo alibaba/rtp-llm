@@ -1,6 +1,6 @@
-#include "aios/navi_sched/resource/AgentHistoryR.h"
-#include "aios/navi_sched/resource/AgentSchedulerConfigR.h"
-#include "aios/navi_sched/resource/LatencyModelR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentHistoryR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/AgentSchedulerConfigR.h"
+#include "rtp_llm/flexlb/navi_sched/resource/LatencyModelR.h"
 #include "navi/engine/Kernel.h"
 
 namespace navi_sched {
@@ -186,4 +186,4 @@ void AgentHistorySaveKernel::stopPersistTimer(navi::KernelComputeContext &ctx)
 
 REGISTER_KERNEL(AgentHistorySaveKernel);
 
-}
+} // namespace navi_sched

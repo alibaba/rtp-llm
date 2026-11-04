@@ -37,6 +37,7 @@ class VLLMImageCacheMapTest(unittest.TestCase):
 
     def test_entire_image_required_before_placeholder_and_suffix_are_confirmed(self):
         self.assertTrue(self.mapping.register(71, self.prediction, self.actual, 4).empty())
+        # First logical block is text-only; block 2 contains the one-token image.
         record = next(iter(self.mapping._records.values()))
         self.assertEqual((4,), record.required_blocks)
         self.assertEqual((block(2),), record.logical_hashes)
@@ -46,6 +47,7 @@ class VLLMImageCacheMapTest(unittest.TestCase):
         self.assertEqual((), confirmed.added_full_ready)
         self.mapping.finish(71)
         self.assertEqual({}, self.mapping._owners)
+        # Completion retains confirmed cache, but eviction revokes it.
         self.cache._full_ready.remove(block(11))
         removed = self.mapping.update([block(11)])
         self.assertEqual((block(2),), removed.removed)

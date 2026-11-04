@@ -5,9 +5,8 @@
 #include <unordered_set>
 #include <vector>
 
-#include "aios/navi_sched/common/NaviSchedCommon.h"
-#include "aios/navi_sched/resource/PendingCacheUtil.h"
-#include "aios/navi_sched/scheduler/ExecutionUtilizationController.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedCommon.h"
+#include "rtp_llm/flexlb/navi_sched/resource/PendingCacheUtil.h"
 #include "autil/Lock.h"
 #include "autil/LockFreeQueue.h"
 #include "navi/engine/AsyncPipe.h"
@@ -229,26 +228,6 @@ public:
     bool abortPendingBatch(int64_t scheduleBatchId, ExecutionState &state);
     bool abortBatch(int64_t batchId, ExecutionState &state);
     bool getExecutionState(ExecutionState &state) const;
-    bool beginBatchExecution(int64_t batchId);
-    struct ExecutionUtilizationSnapshot {
-        double busyEma = 0.0;
-        size_t activeCount = 0;
-        int64_t sampleBusyUs = 0;
-        int64_t sampleElapsedUs = 0;
-        int32_t runningRequests = 0;
-        int32_t queuedRequests = 0;
-        double utilization = 0.0;
-        double executionCapacity = 0.0;
-        double executionCapacityDenominator = 0.0;
-        int32_t gpuReadyQueuedRequests = 0;
-    };
-    ExecutionUtilizationSnapshot getExecutionUtilizationSnapshot() const;
-    const std::shared_ptr<std::atomic<double>> &getExecutionUtilizationSource() const {
-        return _executionUtilization;
-    }
-    const std::shared_ptr<std::atomic<double>> &getExecutionBusyUtilizationSource() const {
-        return _backendExecutionUtilization;
-    }
     GraphRecoveryState getGraphRecoveryState() const;
     bool setBatchTimeoutMs(int64_t batchTimeoutMs);
     void setRuntimeConfig(int64_t batchTimeoutMs, int64_t closedBatchKeepMs);
@@ -278,8 +257,7 @@ public:
     CoreStepStats takeCoreStepWindowStats() const;
     CacheHitPathStats getCacheHitPathStats() const;
     int64_t getExecutionBusyTimeUs(int64_t currentTimeUs) const;
-    bool beginBackendExecution(int64_t eventTimeUs = 0, int32_t requestCount = 0);
-    void updateBackendWaitingRequests(int32_t requestCount, int32_t runningRequests = 0);
+    bool beginBackendExecution(int64_t eventTimeUs = 0);
     bool endBackendExecution(int64_t eventTimeUs = 0);
     bool hasBackendExecutionObservation() const;
     int64_t getBackendExecutionBusyTimeUs(int64_t currentTimeUs) const;
@@ -329,7 +307,6 @@ private:
         NaviSchedCachePolicy pendingCachePolicy;
         bool abortRequested = false;
         bool callbackDispatched = false;
-        bool executionBusy = false;
         bool latencySampleValid = true;
         bool latencyValidationValid = true;
         std::unordered_set<uint64_t> requestIdSet;
@@ -373,9 +350,6 @@ private:
     void makeExecutionState(ExecutionState &state) const;
     void updateReadyWithoutRunningLocked(int64_t nowTimeUs);
     void finishExecutionBusyTimeLocked(int64_t nowTimeUs);
-    void beginUtilizationExecutionLocked(CallbackBatch &batch);
-    void finishUtilizationExecutionLocked(CallbackBatch &batch);
-    void refreshExecutionUtilizationLocked() const;
 
 private:
     DECLARE_LOGGER();
@@ -395,14 +369,6 @@ private:
     int64_t _readyWithoutRunningStartTimeUs = 0;
     int64_t _executionBusyTimeUs = 0;
     int64_t _executionBusyStartTimeUs = 0;
-    ExecutionUtilizationEstimator _executionUtilizationEstimator;
-    std::shared_ptr<std::atomic<double>> _backendExecutionUtilization =
-        std::make_shared<std::atomic<double>>(0.0);
-    std::atomic<double> _backendExecutionCapacity{0.0};
-    std::atomic<int32_t> _backendWaitingRequests{0};
-    int32_t _utilizationRunningRequests = 0;
-    std::shared_ptr<std::atomic<double>> _executionUtilization =
-        std::make_shared<std::atomic<double>>(0.0);
     mutable autil::ThreadMutex _backendExecutionLock;
     int64_t _backendExecutionBusyTimeUs = 0;
     int64_t _backendExecutionBusyStartTimeUs = 0;
@@ -434,4 +400,4 @@ private:
 
 NAVI_TYPEDEF_PTR(AgentBatchR);
 
-}
+} // namespace navi_sched

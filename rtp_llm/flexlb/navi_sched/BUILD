@@ -1,7 +1,8 @@
 package(default_visibility = ["//visibility:public"])
-load("//third_party/pybind11_bazel:build_defs.bzl", "pybind_extension")
-load("//bazel:defs.bzl", "cc_proto")
-load("//bazel:git_version.bzl", "git_version_library")
+exports_files(["test/VipSubscriptionTest.cpp"])
+load("//rtp_llm/flexlb/navi_sched/vendor/third_party/pybind11_bazel:build_defs.bzl", "pybind_extension")
+load("//rtp_llm/flexlb/navi_sched/vendor/bazel:defs.bzl", "cc_proto")
+load("//rtp_llm/flexlb/navi_sched/vendor/bazel:git_version.bzl", "git_version_library")
 
 git_version_library(
     name = "navi_sched_git_version",
@@ -15,8 +16,8 @@ cc_proto(
         "proto/RouteMode.proto",
         "proto/SchedulerConfig.proto",
     ],
-    import_prefix = "aios/navi_sched",
-    deps = ["//aios/network/arpc:proto"],
+    import_prefix = "rtp_llm/flexlb/navi_sched",
+    deps = ["//rtp_llm/flexlb/navi_sched/vendor/network/arpc:proto"],
 )
 
 cc_library(
@@ -34,13 +35,13 @@ cc_library(
         "data/*.h",
     ]),
     deps = [
-        "//aios/navi:navi",
-        "//aios/navi:navi_runtime_config",
-        "//aios/autil:hash_util",
-        "//aios/autil:json",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi_runtime_config",
+        "//rtp_llm/flexlb/navi_sched/vendor/autil:hash_util",
+        "//rtp_llm/flexlb/navi_sched/vendor/autil:json",
     ],
     alwayslink = True,
-    visibility = ["//aios/navi_sched:__subpackages__"],
+    visibility = ["//rtp_llm/flexlb/navi_sched:__subpackages__"],
 )
 
 cc_library(
@@ -48,10 +49,10 @@ cc_library(
     srcs = ["debug/NaviSchedScheduleReplayJson.cpp"],
     hdrs = ["debug/NaviSchedScheduleReplayJson.h"],
     deps = [
-        "//aios/autil:json",
+        "//rtp_llm/flexlb/navi_sched/vendor/autil:json",
         ":navi_sched_data_lib",
     ],
-    visibility = ["//aios/navi_sched:__subpackages__"],
+    visibility = ["//rtp_llm/flexlb/navi_sched:__subpackages__"],
 )
 
 cc_binary(
@@ -60,7 +61,7 @@ cc_binary(
     srcs = ["test/simulator/TrafficReplayLogConverter.cpp"],
     deps = [
         "@rapidjson//:rapidjson",
-        "//aios/autil:string_helper",
+        "//rtp_llm/flexlb/navi_sched/vendor/autil:string_helper",
     ],
 )
 
@@ -82,10 +83,10 @@ cc_binary(
     linkopts = ["-Wl,-rpath,$$ORIGIN/navi_sched"],
     deps = [
         "@rapidjson//:rapidjson",
-        "//aios/kmonitor:kmonitor_client_cpp",
-        "//aios/kmonitor:metrics_report_navi_resource",
-        "//aios/navi:navi",
-        "//aios/network/gig:multi_call",
+        "//rtp_llm/flexlb/navi_sched/vendor/kmonitor:kmonitor_client_cpp",
+        "//rtp_llm/flexlb/navi_sched/vendor/kmonitor:metrics_report_navi_resource",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi",
+        "//rtp_llm/flexlb/navi_sched/vendor/network/gig:multi_call",
         ":navi_sched_data_lib",
     ],
 )
@@ -108,10 +109,10 @@ cc_binary(
     linkopts = ["-Wl,-rpath,$$ORIGIN/navi_sched"],
     deps = [
         "@rapidjson//:rapidjson",
-        "//aios/kmonitor:kmonitor_client_cpp",
-        "//aios/kmonitor:metrics_report_navi_resource",
-        "//aios/navi:navi",
-        "//aios/network/gig:multi_call",
+        "//rtp_llm/flexlb/navi_sched/vendor/kmonitor:kmonitor_client_cpp",
+        "//rtp_llm/flexlb/navi_sched/vendor/kmonitor:metrics_report_navi_resource",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi",
+        "//rtp_llm/flexlb/navi_sched/vendor/network/gig:multi_call",
         ":navi_sched_data_lib",
     ],
 )
@@ -133,10 +134,10 @@ cc_binary(
     copts = ["-fno-access-control"],
     deps = [
         "@rapidjson//:rapidjson",
-        "//aios/kmonitor:kmonitor_client_cpp",
-        "//aios/kmonitor:metrics_report_navi_resource",
-        "//aios/navi:navi",
-        "//aios/network/gig:multi_call",
+        "//rtp_llm/flexlb/navi_sched/vendor/kmonitor:kmonitor_client_cpp",
+        "//rtp_llm/flexlb/navi_sched/vendor/kmonitor:metrics_report_navi_resource",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi",
+        "//rtp_llm/flexlb/navi_sched/vendor/network/gig:multi_call",
         ":navi_sched_data_lib",
     ],
 )
@@ -150,8 +151,8 @@ cc_library(
     include_prefix = "navi_sched",
     strip_include_prefix = "common",
     deps = [
-        "//aios/navi:navi",
-        "//aios/navi:navi_runtime_config",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi_runtime_config",
     ],
     visibility = ["//visibility:public"],
 )
@@ -174,7 +175,7 @@ cc_library(
     ],
     deps = [
         ":navi_sched_data_lib",
-        "//aios/navi:navi",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi",
     ],
     visibility = ["//visibility:public"],
 )
@@ -202,8 +203,8 @@ cc_library(
         "scheduler/RandomSchedulerKernel.h",
     ],
     deps = [
-        "//aios/autil:json",
-        "//aios/network/gig:multi_call",
+        "//rtp_llm/flexlb/navi_sched/vendor/autil:json",
+        "//rtp_llm/flexlb/navi_sched/vendor/network/gig:multi_call",
         ":navi_sched_scheduler_api",
     ],
 )
@@ -235,17 +236,17 @@ cc_library(
         ":navi_sched_agent_header",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
-        "//aios/navi:navi",
-        "//aios/autil:file_recorder",
-        "//aios/autil:crc32c",
-        "//aios/autil:hash_base",
-        "//aios/autil:hash_map",
-        "//aios/autil:json",
-        "//aios/autil:lock_free",
-        "//aios/autil:log",
-        "//aios/kmonitor:kmonitor_client_cpp",
-        "//aios/kmonitor:metrics_report_navi_resource",
-        "//aios/network/gig:multi_call",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi",
+        "//rtp_llm/flexlb/navi_sched/vendor/autil:file_recorder",
+        "//rtp_llm/flexlb/navi_sched/vendor/autil:crc32c",
+        "//rtp_llm/flexlb/navi_sched/vendor/autil:hash_base",
+        "//rtp_llm/flexlb/navi_sched/vendor/autil:hash_map",
+        "//rtp_llm/flexlb/navi_sched/vendor/autil:json",
+        "//rtp_llm/flexlb/navi_sched/vendor/autil:lock_free",
+        "//rtp_llm/flexlb/navi_sched/vendor/autil:log",
+        "//rtp_llm/flexlb/navi_sched/vendor/kmonitor:kmonitor_client_cpp",
+        "//rtp_llm/flexlb/navi_sched/vendor/kmonitor:metrics_report_navi_resource",
+        "//rtp_llm/flexlb/navi_sched/vendor/network/gig:multi_call",
         ":navi_sched_git_version",
         ":navi_sched_proto_cc_proto",
         ":navi_sched_data_lib",
@@ -258,7 +259,6 @@ cc_binary(
     additional_linker_inputs = ["scripts/navi_sched_cpp.lds"],
     linkshared = True,
     linkopts = [
-        "-Wl,-rpath,\\$$ORIGIN",
         "-Wl,-Bsymbolic",
         "-Wl,--exclude-libs=ALL",
         "-Wl,--version-script",
@@ -301,7 +301,7 @@ cc_test(
     ],
     copts = ["-fno-access-control"],
     deps = [
-        "//aios/unittest_framework",
+        "//rtp_llm/flexlb/navi_sched/vendor/unittest_framework",
         ":navi_sched_role_lib",
     ],
 )
@@ -310,7 +310,7 @@ cc_test(
     name = "navi_sched_agent_response_r_test",
     srcs = ["resource/AgentResponseRTest.cpp"],
     deps = [
-        "//aios/unittest_framework",
+        "//rtp_llm/flexlb/navi_sched/vendor/unittest_framework",
         ":navi_sched_role_lib",
     ],
 )
@@ -320,7 +320,7 @@ cc_test(
     srcs = ["resource/ReplayControlRTest.cpp"],
     data = [":wheel_python_runtime"],
     deps = [
-        "//aios/unittest_framework",
+        "//rtp_llm/flexlb/navi_sched/vendor/unittest_framework",
         ":navi_sched_role_lib",
     ],
 )
@@ -329,7 +329,7 @@ cc_test(
     name = "latency_history_sampler_test",
     srcs = ["resource/LatencyHistorySamplerTest.cpp"],
     deps = [
-        "//aios/unittest_framework",
+        "//rtp_llm/flexlb/navi_sched/vendor/unittest_framework",
         ":navi_sched_role_lib",
     ],
 )
@@ -345,8 +345,8 @@ cc_test(
         "resource/RequestLatencyTrackerTest.cpp",
     ],
     deps = [
-        "//aios/autil:lock",
-        "//aios/unittest_framework",
+        "//rtp_llm/flexlb/navi_sched/vendor/autil:lock",
+        "//rtp_llm/flexlb/navi_sched/vendor/unittest_framework",
     ],
 )
 
@@ -354,8 +354,8 @@ cc_test(
     name = "agent_history_state_test",
     srcs = ["resource/AgentHistoryStateTest.cpp"],
     deps = [
-        "//aios/navi:navi_ops_testlib",
-        "//aios/unittest_framework",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi_ops_testlib",
+        "//rtp_llm/flexlb/navi_sched/vendor/unittest_framework",
         ":navi_sched_role_lib",
     ],
 )
@@ -365,7 +365,7 @@ cc_test(
     srcs = ["resource/ClientResponseRTest.cpp"],
     data = [":wheel_python_runtime"],
     deps = [
-        "//aios/unittest_framework",
+        "//rtp_llm/flexlb/navi_sched/vendor/unittest_framework",
         ":navi_sched_role_lib",
     ],
 )
@@ -374,7 +374,7 @@ cc_test(
     name = "navi_sched_config_builder_test",
     srcs = ["test/NaviSchedConfigBuilderTest.cpp"],
     deps = [
-        "//aios/unittest_framework",
+        "//rtp_llm/flexlb/navi_sched/vendor/unittest_framework",
         ":navi_sched_role_lib",
     ],
 )
@@ -393,13 +393,6 @@ genrule(
     cmd = "cp -L $< $@",
 )
 
-genrule(
-    name = "wheel_lockless_allocator",
-    srcs = ["//aios/memory/lockless_allocator:llalloc"],
-    outs = ["navi_sched/libllalloc.so"],
-    cmd = "cp -L $< $@",
-)
-
 pybind_extension(
     name = "navi_sched/_navi_sched_core",
     additional_linker_inputs = ["scripts/navi_sched_pybind.lds"],
@@ -408,14 +401,14 @@ pybind_extension(
         "bindings/*.h",
     ]),
     deps = [
-        "//aios/alog",
-        "//aios/navi:navi",
-        "//aios/navi:navi_pybind",
-        "//aios/network/gig:multi_call",
+        "//rtp_llm/flexlb/navi_sched/vendor/alog",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi_pybind",
+        "//rtp_llm/flexlb/navi_sched/vendor/network/gig:multi_call",
         ":navi_sched_replay_debug_lib",
         ":navi_sched_role_lib",
     ],
-    visibility = ["//aios/navi_sched:__subpackages__"],
+    visibility = ["//rtp_llm/flexlb/navi_sched:__subpackages__"],
     features = [
         "static_link_cpp_runtimes",
         "static_libgcc",
@@ -478,7 +471,6 @@ py_library(
     ],
     data = [
         ":navi_sched/_navi_sched_core.so",
-        ":wheel_lockless_allocator",
         ":wheel_python_runtime",
         "scripts/update_scheduler_config.sh",
     ],
@@ -488,7 +480,7 @@ py_library(
 
 alias(
     name = "navi_sched_wheel",
-    actual = "//aios/navi_sched/tools:navi_sched_wheel",
+    actual = "//rtp_llm/flexlb/navi_sched/tools:navi_sched_wheel",
 )
 
 cc_test(
@@ -501,9 +493,9 @@ cc_test(
         ":wheel_python_runtime",
     ],
     deps = [
-        "//aios/navi:navi",
-        "//aios/autil:json",
-        "//aios/unittest_framework",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi",
+        "//rtp_llm/flexlb/navi_sched/vendor/autil:json",
+        "//rtp_llm/flexlb/navi_sched/vendor/unittest_framework",
         ":navi_sched_data_lib",
         ":navi_sched_role_lib",
     ],
@@ -518,7 +510,7 @@ cc_test(
     ],
     deps = [
         ":navi_sched_data_lib",
-        "//aios/unittest_framework",
+        "//rtp_llm/flexlb/navi_sched/vendor/unittest_framework",
     ],
 )
 
@@ -539,9 +531,9 @@ cc_test(
         "testdata/pending_cache/master-batch-3516.json",
     ],
     deps = [
-        "//aios/autil:hash_map",
-        "//aios/autil:lock",
-        "//aios/unittest_framework",
+        "//rtp_llm/flexlb/navi_sched/vendor/autil:hash_map",
+        "//rtp_llm/flexlb/navi_sched/vendor/autil:lock",
+        "//rtp_llm/flexlb/navi_sched/vendor/unittest_framework",
         ":navi_sched_data_lib",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
@@ -549,20 +541,11 @@ cc_test(
 )
 
 cc_test(
-    name = "execution_utilization_controller_test",
-    srcs = [
-        "scheduler/ExecutionUtilizationController.h",
-        "scheduler/ExecutionUtilizationControllerTest.cpp",
-    ],
-    deps = ["//aios/unittest_framework"],
-)
-
-cc_test(
     name = "latency_residual_model_test",
     srcs = ["resource/LatencyResidualModelTest.cpp"],
     data = [":wheel_python_runtime"],
     deps = [
-        "//aios/unittest_framework",
+        "//rtp_llm/flexlb/navi_sched/vendor/unittest_framework",
         ":navi_sched_role_lib",
     ],
 )
@@ -573,7 +556,7 @@ cc_test(
     copts = ["-fno-access-control"],
     data = [":wheel_python_runtime"],
     deps = [
-        "//aios/unittest_framework",
+        "//rtp_llm/flexlb/navi_sched/vendor/unittest_framework",
         ":navi_sched_role_lib",
     ],
 )
@@ -584,7 +567,7 @@ cc_test(
     copts = ["-fno-access-control"],
     data = [":wheel_python_runtime"],
     deps = [
-        "//aios/unittest_framework",
+        "//rtp_llm/flexlb/navi_sched/vendor/unittest_framework",
         ":navi_sched_role_lib",
     ],
 )
@@ -606,10 +589,10 @@ cc_test(
     copts = ["-fno-access-control"],
     data = [":wheel_python_runtime", ":navi_sched_testdata"],
     deps = [
-        "//aios/navi:navi",
-        "//aios/navi:navi_ops_testlib",
-        "//aios/unittest_framework",
-        "//aios/kmonitor:kmonitor_cpp_test_helper",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi_ops_testlib",
+        "//rtp_llm/flexlb/navi_sched/vendor/unittest_framework",
+        "//rtp_llm/flexlb/navi_sched/vendor/kmonitor:kmonitor_cpp_test_helper",
         ":navi_sched_data_lib",
         ":navi_sched_replay_debug_lib",
         ":navi_sched_role_lib",
@@ -624,7 +607,7 @@ cc_test(
         "LD_LIBRARY_PATH": "/opt/conda310/lib",
     },
     deps = [
-        "//aios/unittest_framework",
+        "//rtp_llm/flexlb/navi_sched/vendor/unittest_framework",
         ":navi_sched_role_lib",
     ],
 )
@@ -642,7 +625,7 @@ cc_binary(
         ":navi_sched_data_lib",
         ":navi_sched_replay_debug_lib",
         ":navi_sched_role_lib",
-        "//aios/navi:navi",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi",
     ],
 )
 
@@ -659,7 +642,7 @@ cc_binary(
         ":navi_sched_data_lib",
         ":navi_sched_replay_debug_lib",
         ":navi_sched_role_lib",
-        "//aios/navi:navi",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi",
     ],
 )
 
@@ -684,7 +667,7 @@ cc_binary(
     deps = [
         ":navi_sched_data_lib",
         ":navi_sched_role_lib",
-        "//aios/navi:navi",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi",
     ],
 )
 
@@ -699,8 +682,8 @@ cc_test(
         ":wheel_python_runtime",
     ],
     deps = [
-        "//aios/navi:navi",
-        "//aios/unittest_framework",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi",
+        "//rtp_llm/flexlb/navi_sched/vendor/unittest_framework",
         ":navi_sched_data_lib",
         ":navi_sched_role_lib",
     ],
@@ -746,8 +729,8 @@ cc_test(
     ],
     data = [":wheel_python_runtime"],
     deps = [
-        "//aios/navi:navi_ops_testlib",
-        "//aios/unittest_framework",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi_ops_testlib",
+        "//rtp_llm/flexlb/navi_sched/vendor/unittest_framework",
         ":navi_sched_simulator_lib",
     ],
 )
@@ -778,10 +761,10 @@ pybind_extension(
         "$(location scripts/navi_sched_pybind.lds)",
     ],
     deps = [
-        "//aios/alog",
-        "//aios/navi:navi",
-        "//aios/navi:navi_pybind",
-        "//aios/network/gig:multi_call",
+        "//rtp_llm/flexlb/navi_sched/vendor/alog",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi_pybind",
+        "//rtp_llm/flexlb/navi_sched/vendor/network/gig:multi_call",
         ":navi_sched_role_lib",
         ":navi_sched_simulator_lib",
     ],
@@ -1072,7 +1055,7 @@ py_test(
 py_test(
     name = "vllm_engine_transport_shutdown_test",
     srcs = ["test/vllm/VLLMEngineTransportShutdownTest.py"],
-    data = ["adapters/vllm/VLLMEngineTransport.py"],
+    data = ["navi_sched/adapters/vllm/VLLMEngineTransport.py"],
     main = "test/vllm/VLLMEngineTransportShutdownTest.py",
     python_version = "PY3",
 )
@@ -1081,4 +1064,13 @@ filegroup(
     name = "navi_sched_testdata",
     testonly = True,
     srcs = glob(["testdata/**"]),
+)
+
+cc_test(
+    name = "local_file_util_test",
+    srcs = ["test/LocalFileUtilTest.cpp"],
+    deps = [
+        "//rtp_llm/flexlb/navi_sched/vendor/autil:file_util",
+        "//rtp_llm/flexlb/navi_sched/vendor/autil:file_recorder",
+    ],
 )
