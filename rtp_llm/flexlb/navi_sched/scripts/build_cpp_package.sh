@@ -46,6 +46,8 @@ if [[ "${NAVI_SCHED_CLEAR_DELETED_PACKAGES:-}" == "1" ]]; then
     BUILD_COMMAND+=("--deleted_packages=__navi_sched_no_deleted_packages__")
 fi
 if [[ "${NAVI_SCHED_ANNOUNCE_RC:-}" == "1" ]]; then
+    env | sort | grep -i bazel >&2 || true
+    command -V "${BAZEL_BIN}" >&2 || true
     BUILD_COMMAND+=(--announce_rc)
 fi
 "${BUILD_COMMAND[@]}"
