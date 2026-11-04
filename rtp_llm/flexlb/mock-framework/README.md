@@ -71,7 +71,7 @@ P/D/V、Master 和 Client 各实例直接启动独立 JVM。ZooKeeper 由单独�
 | `result.json` | 最终状态、起止时间及清理错误。状态为 PASS / FAIL / ERROR / CANCELLED。 |
 | `gates.jsonl` 和事件记录 | 实际执行的步骤、门禁预期与实际值、查询时刻和窗口；未执行的检查不算通过。 |
 | 配置与源码记录 | 原始 Case、编译配置、启动配方、接口清单、源码版本和工作区差异。 |
-| `components/`、`hosts/` | 组件生效配置、端点、日志和 Client 播放结果/请求证据；共享 Engine 的 JVM 日志在宿主目录。 |
+| `components/` | 组件生效配置、端点、日志和 Client 播放结果/请求证据。 |
 | `prometheus/` | 采集配置、日志、完整性记录及 TSDB/WAL；缺指标不能补零。 |
 | `view.json` | 本次保存的大盘快照，供之后回看。 |
 
