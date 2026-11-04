@@ -110,7 +110,11 @@ vit:
   deployment:
     replicas: 1
   config:
-    checkpoint_path: ./model
+    patch_size: 14
+    downsample_ratio: 3
+    hidden_size: 4096
+    min_pixels: 295936
+    max_image_tokens: 1024
     mock.vit.skip.download: true  # 本地假 URL 回放；Whale 使用默认 false
     gpu_max_batch_size: 8
     gpu_batch_wait_ms: 10
@@ -122,28 +126,13 @@ vit:
     mock.compute.forward.expression: "2 + 0.00001 * totalImagePixels"
 ```
 
-模型元数据沿用 real 的入口：Case 的 `checkpoint_path` 指向模型目录（相对路径以 case.yaml 所在目录为基准），Whale 使用 `CHECKPOINT_PATH`。仅读取该目录的 config.json，不加载权重；V 必须提供，纯文本 P/D 和 Client 可省略。多模态运行时 Client、P/D、V 指向同一份模型配置。文件保持 real 结构，例如：
-
-```json
-{
-  "image_token_id": 1000,
-  "vision_config": {
-    "patch_size": 14,
-    "downsample_ratio": 3,
-    "min_pixels": 295936,
-    "max_image_tokens": 1024
-  },
-  "text_config": {"hidden_size": 4096}
-}
-```
-
-image_token_id 必须使用所选模型的实际值，示例值不代表 DSV4.1 的固定标记。text_config.hidden_size 控制视觉结果的逻辑字节预算。无关模型字段忽略；所需几何字段缺失或非法直接报错。
+Mock 启动不读取或挂载模型目录。ViT 配置显式提供上例中的五个几何参数。P/D 的 `max_seq_len` 默认 8192，需对齐目标模型时显式传入有效长度。多模态的 P 和 Java Client 使用相同的 `image_token_id`。参与缓存匹配的请求发起方和 Engine 使用相同的 Block 大小和有符号 int64 `cache_key_hash_seed`，本地文本用例可使用默认 seed 0。
 
 `mock.vit.skip.download` 默认 false，Whale ENV 对应 `MOCK_VIT_SKIP_DOWNLOAD`。默认模式 GET 真实 HTTP(S) URL，仅读取图片头尺寸，不生成 RGB tensor；请求中的预处理 width/height 不冒充原图尺寸。支持 JDK ImageIO 图片格式（含 PNG/JPEG/GIF/BMP）及 WebP 头尺寸，其他格式明确拒绝。使用 real 的 `download_headers`（JSON 字符串）、`mm_image_max_file_size_kb` 和 `mm_timeout_ms`；文件大小取 mm_image_max_file_size_kb（正数时）和 DSV4.1 原生 `deepseek_v41_processor.py::load_image_source` 的 10 MiB 上限中较小值（`mm_image_max_file_size_kb <= 0` 仅关闭通用限制）；下载总期限最多 60 秒，并受任务剩余期限约束，瞬态网络错误及 HTTP 408/429/500/502/503/504 最多尝试三次，重试等待 200/400ms 且不超出剩余期限。队列等待同样计入任务期限。
 
-本地假 URL 设置 `mock.vit.skip.download=true`，从回放宽高获取尺寸；仍走同一执行器、准入、队列和完成流程，不模拟下载耗时，也不伪造下载指标。真实 URL 回放可省略宽高。几何继续使用 V4.1 `plan_image_grid`/`num_image_tokens`，参数来自模型 config.json 的 vision_config；视频、音频和 tensor 输入未实现。
+本地假 URL 设置 `mock.vit.skip.download=true`，从回放宽高获取尺寸；仍走同一执行器、准入、队列和完成流程，不模拟下载耗时，也不伪造下载指标。真实 URL 回放可省略宽高。几何继续使用 V4.1 `plan_image_grid`/`num_image_tokens`，参数来自 ViT 的显式配置；视频、音频和 tensor 输入未实现。
 
-回放数据保留原始 token、URL/尺寸与单个占位位置 Image.offset；已删除 Image.length，旧图片数据需要重新生成。Client 与 P/D 从同一模型目录读取 image_token_id，LoadClient 将回放中的图片位置编码为该值。直接构造请求的测试工具在不提供模型目录时仍使用 -200 约定；部署真实模型输入时必须提供对应目录。标记出现次数必须与媒体数一致。P 的内部 Prepared 保存规范化语义 token 和 cache-only spans，缓存 hash 不再替换语义 token。Native GenerateInput 不携带布局；仅 P→D 的 GenerateRequest.multimodal_cache_spans 携带缓存身份。P/D 按原生逐块滚动算法将语义 token 与重叠 span 身份共同混入 key；同一媒体身份必须在两端得到相同 key。当前 cache-key seed 固定为 0，不宣称不同 checkpoint 的命名空间已自动推导。
+回放数据保留原始 token、URL/尺寸与单个占位位置 Image.offset；已删除 Image.length，旧图片数据需要重新生成。Client 与 P/D 显式配置相同的 image_token_id，LoadClient 将回放中的图片位置编码为该值。直接构造请求的测试工具在不设置图片标记时仍使用 -200 约定；对接真实 Frontend 时使用其实际标记。标记出现次数必须与媒体数一致。P 的内部 Prepared 保存规范化语义 token 和 cache-only spans，缓存 hash 不再替换语义 token。Native GenerateInput 不携带布局；仅 P→D 的 GenerateRequest.multimodal_cache_spans 携带缓存身份。P/D 按原生逐块滚动算法将语义 token 与重叠 span 身份共同混入 key；同一媒体身份必须在两端得到相同 key。参与匹配的组件应显式对齐 cache-key seed。
 
 V 以 miss 的图片组成 ForwardBatch，复用公式和 SimulatedCompute。计算完成后登记缓存、通知等待者；Compute 不直接改变缓存。命中和在途合并不重复计入 forward。提供 real 名称的 py_rtp_vit_embedding_forward_rt、batch_size、cache 指标及 mock_vit_theoretical_forward_rt；元数据模拟不能代替真实模型计时校准。
 

@@ -132,10 +132,6 @@ class EngineHostTest {
 
     @Test void urlOnlyFrontendRequestDownloadsRealImageAndCompletesPrefillDecode() throws Exception {
         var json = new ObjectMapper();
-        var model = directory.resolve("model"); Files.createDirectory(model);
-        json.writeValue(model.resolve("config.json").toFile(), Map.of("image_token_id", 1000,
-            "text_config", Map.of("hidden_size", 4),
-            "vision_config", Map.of("patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024)));
         var png = new java.io.ByteArrayOutputStream();
         javax.imageio.ImageIO.write(new java.awt.image.BufferedImage(56, 28, java.awt.image.BufferedImage.TYPE_INT_RGB), "png", png);
         var downloads = new java.util.concurrent.atomic.AtomicInteger();
@@ -149,9 +145,9 @@ class EngineHostTest {
         var pConfig = json.<ObjectNode>valueToTree(configuration("prefill"));
         var dConfig = json.<ObjectNode>valueToTree(configuration("decode"));
         for (var root : List.of(pConfig, dConfig)) ((ObjectNode) root.path("component").path("config"))
-            .put("checkpoint_path", model.toString()).put("seq_size_per_block", 2).put("reuse_cache", true);
+            .put("image_token_id", 1000).put("seq_size_per_block", 2).put("reuse_cache", true);
         var vConfig = org.flexlb.mock.vit.VitConfig.load(json.valueToTree(Map.of("id", "vit-0", "component_role", "vit",
-            "component", Map.of("config", Map.of("checkpoint_path", model.toString(), "vit_concurrency", 2,
+            "component", Map.of("config", Map.of("patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024, "hidden_size", 4, "vit_concurrency", 2,
                 "mock.compute.forward.expression", "1")))));
         try (var p = org.flexlb.mock.engine.rtp.RtpNode.start(org.flexlb.mock.engine.rtp.RtpConfig.load(pConfig));
              var d = org.flexlb.mock.engine.rtp.RtpNode.start(org.flexlb.mock.engine.rtp.RtpConfig.load(dConfig));

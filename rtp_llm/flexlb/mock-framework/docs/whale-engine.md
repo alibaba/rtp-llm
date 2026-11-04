@@ -39,7 +39,7 @@ docker run --rm \
 
 V 使用 `ROLE_TYPE=VIT`；native 和 Mock 参数遵循[配置参考](component-reference.md#engine-配置规则)。未提供 MOCK_NODE_ID 时，身份使用 role 与本机发布地址；需要指定发布地址时设置 MOCK_ADVERTISE_HOST。共享主机上的实例物理资源仍由平台/JVM 统计，不伪造每 Engine 的 CPU/内存。
 
-多模态 V 设置 `CHECKPOINT_PATH` 指向可读的模型目录，仅读取 config.json。默认异步 GET 图片 URL 并读取尺寸，不依赖 Frontend 提供宽高；准备执行器和 Forward 队列分离。`VIT_CONCURRENCY` 限制异步媒体工作线程，`VIT_MAX_QUEUE_SIZE` 提供额外等待额度，`VIT_GPU_MAX_BATCH_SIZE`/`VIT_GPU_BATCH_WAIT_MS` 控制就绪工作的合批。`MM_TIMEOUT_MS`、`MM_IMAGE_MAX_FILE_SIZE_KB`、`DOWNLOAD_HEADERS` 使用 real 名称与单位。支持的 URL/图片格式和模拟边界见组件参考。
+多模态 V 显式设置 `PATCH_SIZE`、`DOWNSAMPLE_RATIO`、`HIDDEN_SIZE`、`MIN_PIXELS` 和 `MAX_IMAGE_TOKENS`。默认异步 GET 图片 URL 并读取尺寸，不依赖 Frontend 提供宽高；准备执行器和 Forward 队列分离。`VIT_CONCURRENCY` 限制异步媒体工作线程，`VIT_MAX_QUEUE_SIZE` 提供额外等待额度，`VIT_GPU_MAX_BATCH_SIZE`/`VIT_GPU_BATCH_WAIT_MS` 控制就绪工作的合批。`MM_TIMEOUT_MS`、`MM_IMAGE_MAX_FILE_SIZE_KB`、`DOWNLOAD_HEADERS` 使用 real 名称与单位。支持的 URL/图片格式和模拟边界见组件参考。
 
 本地假 URL 回放设置 `mock.vit.skip.download: true`（ENV 为 `MOCK_VIT_SKIP_DOWNLOAD=true`），并提供图片宽高；它只跳过读取，仍经过相同的准入、执行器、就绪队列和结果发布流程。Whale 使用默认 false；跳过读取不能用于评估真实下载吞吐。
 
@@ -50,7 +50,7 @@ HTTP 为 START_PORT，gRPC 为 START_PORT+1；平台探针访问 HTTP `/health`�
 
 ## 部署接线边界
 
-`CHECKPOINT_PATH` 可以使用平台注入的 OSS 模型目录；Java 启动时通过 C2 Fuse 的原生只读挂载协议解析为本地目录，只读取 config.json。与 real RTP 一致，host Fuse 使用 HIPPO_FUSE_PORT、HIPPO_SLAVE_IP 和 HIPPO_APP_WORKDIR，sidecar Fuse 使用 28006 端口及 /mnt/fuse。模板须提供 /mnt/fuse 的共享卷和 HostToContainer 传播。有效配置记录本地挂载路径，避免输出带凭据的 OSS URI；不在部署 ENV 中注入下载程序。
+Mock Engine 启动不读取 checkpoint 或请求 C2 Fuse 挂载。P/D 使用显式的 `MAX_SEQ_LEN`、`IMAGE_TOKEN_ID`（多模态）和 `CACHE_KEY_HASH_SEED`（与真实 Frontend 匹配时）。Seed 使用有符号十进制 int64。部署迁移时将有效参数加入角色配置后再切换镜像。
 
 这些文件提供可构建的镜像和服务入口，不自动修改 Whale 模板、发布角色或注册 VIP。接入目标部署时，使用其现有角色发现、探针、资源和停止宽限设置。Master 仍是独立 JVM，不起本地 ZK 或 Mock 集群管理器。
 

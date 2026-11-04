@@ -207,20 +207,22 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         var config = JSON.readTree(Path.of(required("MOCK_CONFIG_FILE")).toFile());
         var settings = config.path("component").path("config");
         settings.fieldNames().forEachRemaining(name -> {
-            if (!java.util.Set.of("checkpoint_path", "seq_size_per_block").contains(name)) throw new IllegalArgumentException("Unknown Client setting: " + name);
+            if (!java.util.Set.of("image_token_id", "cache_key_hash_seed", "seq_size_per_block").contains(name)) throw new IllegalArgumentException("Unknown Client setting: " + name);
         });
-        var model = org.flexlb.mock.runtime.EngineConfig.model(settings);
-        int imageToken = org.flexlb.mock.runtime.EngineConfig.imageToken(
-            model, org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN);
+        var configuredImageToken = settings.get("image_token_id");
+        if (configuredImageToken != null && (!configuredImageToken.isIntegralNumber()
+                || !configuredImageToken.canConvertToInt() || configuredImageToken.intValue() < 0))
+            throw new IllegalArgumentException("Client image_token_id must be nonnegative int32");
+        int imageToken = settings.path("image_token_id").asInt(org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN);
         int blockSize = settings.path("seq_size_per_block").asInt(0);
         if (settings.has("seq_size_per_block") && (!settings.path("seq_size_per_block").isIntegralNumber() || !settings.path("seq_size_per_block").canConvertToInt() || blockSize < 1))
             throw new IllegalArgumentException("Client seq_size_per_block must be positive int32");
-        long seed = org.flexlb.mock.cache.CacheSequence.cacheKeySeed(model, System.getenv());
+        long seed = org.flexlb.mock.runtime.EngineConfig.signedLong(settings, "cache_key_hash_seed", 0);
         var directory = Path.of(required("MOCK_OUTPUT_DIR"));
         try (var node = new ClientNode(required("MOCK_NODE_ID"), Path.of(required("MOCK_TOPOLOGY_FILE")), directory, imageToken, blockSize, seed)) {
             var hook = new Thread(node::close, "client-shutdown"); Runtime.getRuntime().addShutdownHook(hook);
             var effective = JSON.createObjectNode().put("id", node.id).put("seq_size_per_block", blockSize).put("cache_key_hash_seed", seed);
-            if (settings.has("checkpoint_path")) effective.set("checkpoint_path", settings.get("checkpoint_path"));
+            if (configuredImageToken != null) effective.put("image_token_id", imageToken);
             save(directory.resolve("effective-config.json"), effective);
             save(directory.resolve("endpoints.json"), Map.of("id", node.id, "role", "client", "control", node.url(),
                 "rpc", URI.create(node.url()).getAuthority(), "metrics", node.url() + "/metrics"));

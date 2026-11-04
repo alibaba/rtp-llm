@@ -94,12 +94,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     engine_config = {'mock.scheduler.mode': 'group' if batched else 'fifo', 'seq_size_per_block': 16, 'test_block_num': 9, 'reserve_block_ratio': 0,
                      'max_seq_len': 4096, 'mock.compute.forward.expression': '1 + batchSize'}
     if vision:
-        model = tmp_path / 'model'
-        model.mkdir()
-        (model / 'config.json').write_text(json.dumps({'image_token_id': 1000,
-            'text_config': {'hidden_size': 4}, 'vision_config': {'patch_size': 14,
-            'downsample_ratio': 3, 'min_pixels': 0, 'max_image_tokens': 1024}}))
-        engine_config['checkpoint_path'] = str(model)
+        engine_config['image_token_id'] = 1000
         engine_config.update(reuse_cache=True, enable_memory_cache=False)
         route = json.loads(master_config['MODEL_SERVICE_CONFIG'])
         route['role_endpoints'][0]['vit_endpoint'] = {'address': 'v-domain', 'protocol': 'grpc'}
@@ -118,7 +113,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
             {'id': 'leader', 'describe': 'ZK选举产生唯一Leader', 'interface': 'master/get', 'args': {'is_leader': True}, 'expect': {'count': 1},
              'wait_after': '20s' if replicas == 2 else '12s'}]}]}
     if vision:
-        document['environment']['vit'] = {'config': {'checkpoint_path': str(model),
+        document['environment']['vit'] = {'config': {'patch_size': 14, 'downsample_ratio': 3, 'min_pixels': 0, 'max_image_tokens': 1024, 'hidden_size': 4,
             'mock.vit.skip.download': True, 'mock.compute.forward.expression': '1 + batchSize'}}
     if history_overflow:
         document['phases'][0]['steps'].append({'id': 'still_healthy', 'describe': '多轮同步后Engine仍可发现',

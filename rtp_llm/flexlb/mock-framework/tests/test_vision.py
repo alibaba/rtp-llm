@@ -27,17 +27,12 @@ def test_vision_playback_through_real_master(tmp_path, mode):
         'dispatcher': {'type': 'NON_BATCH', 'maxInflightPerPrefillWorker': 16},
         'requestLifecycle': {'request': {'timeoutMs': 5000}},
         'grpcServer': {'executorCoreSize': 4, 'executorMaxSize': 8, 'executorQueueSize': 64, 'shutdownQuietPeriodMs': 10}})
-    model = tmp_path / 'model'
-    model.mkdir()
-    (model / 'config.json').write_text(json.dumps({'image_token_id': 1000,
-        'text_config': {'hidden_size': 4}, 'vision_config': {'patch_size': 14, 'downsample_ratio': 3,
-        'min_pixels': 0, 'max_image_tokens': 1024}}))
-    engine = {'engine': 'rtp', 'config': {'checkpoint_path': 'model', 'seq_size_per_block': 2, 'test_block_num': 128,
+    engine = {'engine': 'rtp', 'config': {'image_token_id': 1000, 'seq_size_per_block': 2, 'test_block_num': 128,
         'reserve_block_ratio': 0, 'max_seq_len': 128, 'mock.compute.forward.expression': '1'}}
-    vision = {'config': {'checkpoint_path': 'model', 'mock.vit.skip.download': True, 'mm_cache_gpu_max_bytes': 1024,
+    vision = {'config': {'patch_size': 14, 'downsample_ratio': 3, 'min_pixels': 0, 'max_image_tokens': 1024, 'hidden_size': 4, 'mock.vit.skip.download': True, 'mm_cache_gpu_max_bytes': 1024,
         'mm_cache_cpu_max_bytes': 1024, 'mock.compute.forward.expression': '2 + batchSize'}}
     data = {'id': 'vision_playback', 'describe': 'Native V selection, metadata preparation, P/D generation',
-        'environment': {'master': {'config': native}, 'prefill': engine, 'decode': engine, 'vit': vision, 'client': {'config': {'checkpoint_path': 'model'}}},
+        'environment': {'master': {'config': native}, 'prefill': engine, 'decode': engine, 'vit': vision, 'client': {'config': {'image_token_id': 1000}}},
         'phases': [{'id': 'traffic', 'describe': 'Play media requests', 'timeout': '30s', 'steps': [
             {'id': 'start', 'describe': 'Play image input', 'interface': 'client/start', 'args': {
                 'requests_file': 'requests.binpb.zst', 'qps': 4, 'concurrency': 4, 'queue_capacity': 8,
