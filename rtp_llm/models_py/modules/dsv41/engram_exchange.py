@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import logging
 import ssl
 import threading
 import time
@@ -138,8 +139,14 @@ class Cohort:
             if previous is not None and previous != encoded:
                 raise ExchangeError('CONFLICTING_REPUBLICATION')
             self.documents[instance_id] = encoded
+            logging.getLogger(__name__).info(
+                'engram exchange: %s submitted (%d/%d instances)',
+                instance_id, len(self.documents), len(self.members))
             if len(self.documents) == len(self.members) and not self.building:
                 self.building = True
+                logging.getLogger(__name__).info(
+                    'engram exchange: all %d instances submitted, assembling package',
+                    len(self.members))
                 all_docs = [d for ident in sorted(self.documents)
                             for d in decode(self.documents[ident])['documents']]
                 def assemble():
@@ -154,6 +161,8 @@ class Cohort:
                         with self.condition:
                             self.payload = payload
                             self.condition.notify_all()
+                        logging.getLogger(__name__).info(
+                            'engram exchange: package assembled (%d bytes)', len(payload))
                 threading.Thread(target=assemble, daemon=True).start()
             while self.payload is None and self.error is None:
                 self.condition.wait(self.remaining())
@@ -173,6 +182,8 @@ class Cohort:
         with self.condition:
             while self.acks != self.members:
                 self.condition.wait(self.remaining())
+        logging.getLogger(__name__).info(
+            'engram exchange: all %d instances acknowledged', len(self.members))
 
 
 class ExchangeServer(ThreadingHTTPServer):
@@ -191,9 +202,14 @@ class ExchangeServer(ThreadingHTTPServer):
         self.connections = 0
         self._slots = threading.BoundedSemaphore(len(cohort.members) + 2)
         super().__init__(address, ExchangeHandler)
+        logging.getLogger(__name__).info(
+            'engram exchange: listening on %s:%d for %d instances (tls=%s)',
+            address[0], address[1], len(cohort.members), context is not None)
 
     def get_request(self):
         raw, address = super().get_request()
+        logging.getLogger(__name__).debug(
+            'engram exchange: connection from %s', address)
         try:
             # Bound every unauthenticated read: one wedged peer must not hold a
             # handler slot for the whole cohort window. The longest frame is 4 MiB.
@@ -292,6 +308,9 @@ def tls_context(tls, server=False):
 
 def remote_exchange(address, context, instance_id, group_digest, documents, deadline, verify, server_fingerprint=None):
     """One connection, one payload transfer, one receipt ACK; no steady-state use."""
+    logger = logging.getLogger(__name__)
+    logger.info('engram exchange: %s connecting to coordinator %s:%d',
+                instance_id, address[0], address[1])
     connection = None
     while connection is None:
         remaining = deadline - time.monotonic()
@@ -311,11 +330,14 @@ def remote_exchange(address, context, instance_id, group_digest, documents, dead
                 raise ExchangeError('COORDINATOR_CERTIFICATE_MISMATCH')
             candidate.sock.settimeout(max(0.001, deadline - time.monotonic()))
             connection = candidate
+            logger.info('engram exchange: %s connected', instance_id)
         except ssl.SSLError:
             candidate.close()
             raise ExchangeError('TLS_AUTHENTICATION_FAILED') from None
         except OSError:
             candidate.close()
+            logger.debug('engram exchange: %s connect retry in %.1fs',
+                         instance_id, min(0.1, max(0, deadline - time.monotonic())))
             time.sleep(min(0.1, max(0, deadline - time.monotonic())))
     try:
         def call(path, value):
@@ -334,6 +356,8 @@ def remote_exchange(address, context, instance_id, group_digest, documents, dead
             raise ExchangeError('GROUP_MISMATCH')
         verify(decoded['package'])
         call('/v1/ack', dict(instance_id=instance_id, payload_digest=digest(payload)))
+        logger.info('engram exchange: %s received package (%d bytes) and acknowledged',
+                    instance_id, len(payload))
         return decoded['package']
     finally:
         connection.close()

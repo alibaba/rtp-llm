@@ -249,6 +249,11 @@ def _annotation_cohort(env, parts):
     derivation (the gang itself is the cohort), because the annotation does not
     say how several multi-host instances group, and guessing would silently
     change an existing per-instance layout.
+
+    TODO(engram): multi-host instances sharing one storage cohort are out of
+    scope for now.  Supporting them needs the platform to publish the
+    pod-to-instance grouping (or an explicit index), not just a flat address
+    list; until then such a gang keeps one shard per host of its own instance.
     """
     path = env.get(ANNOTATION_ENV)
     try:
@@ -494,6 +499,10 @@ def exchange_leaders(config, documents, deadline, build=None):
     context = tls_context(tls) if tls else None
     server_context = tls_context(tls, server=True) if tls else None
     fingerprints = tls['instance_cert_sha256'] if tls else {}
+    logging.getLogger(__name__).info(
+        'engram exchange: role=%s instance=%s coordinator=%s:%d members=%d tls=%s',
+        'coordinator' if ident == coordinator else 'remote', ident,
+        address['host'], address['port'], len(group['members']), bool(tls))
     if ident != coordinator:
         return remote_exchange((address['host'], address['port']), context, ident, group_digest,
                                documents, deadline, verifier,
@@ -518,6 +527,7 @@ def exchange_leaders(config, documents, deadline, build=None):
 def prepare_static_engram(store, *, rank, world_size, environ=None, gang_hosts=None, leader_exchange=exchange_leaders):
     """All ranks enter once; only host representatives use cross-gang RPC."""
     env = os.environ if environ is None else environ
+    started = time.monotonic()
     config = build_config(env, world_size, rank=rank, gang_hosts=gang_hosts)
     if config is None:
         return None
@@ -547,9 +557,16 @@ def prepare_static_engram(store, *, rank, world_size, environ=None, gang_hosts=N
     leader = receiver_rank == 0
     scope = 'gang' if shared else config['instance_id']
     prefix = f'engram/{group["generation"]}/attempt/{attempt}/{scope}/'
+    logging.getLogger(__name__).info(
+        'engram startup: rank=%d world=%d instance=%s local_rank=%d p=%d shared=%s '
+        'leader=%s attempt=%d timeout=%.0fs',
+        rank, world_size, config['instance_id'], local_rank, p, shared, leader,
+        attempt, timeout)
     store.set(prefix + f'config/{receiver_rank}', group_digest.encode())
     config_keys = [prefix + f'config/{i}' for i in range(receivers)]
     if leader:
+        logging.getLogger(__name__).info(
+            'engram startup: waiting for %d group digests', receivers)
         _wait(store, config_keys, deadline)
         if any(store.get(k) != group_digest.encode() for k in config_keys):
             raise ExchangeError('INSTANCE_GROUP_CONFIG_MISMATCH')
@@ -562,26 +579,42 @@ def prepare_static_engram(store, *, rank, world_size, environ=None, gang_hosts=N
                 'RTP_ENGRAM_LOCAL_DEVICE/RTP_ENGRAM_LOCAL_NUMA unset; the self-published'
                 ' shard allocates on device %d / NUMA %d by default',
                 config['local_device'], config['local_numa'])
+        logging.getLogger(__name__).info(
+            'engram startup: publishing shard %d/%d on %s (device %d, NUMA %d)',
+            shard['index'], p - 1, shard['host_id'],
+            config['local_device'], config['local_numa'])
+        shard_started = time.monotonic()
         document = publish_shard(
             config['checkpoint'], group['model_revision'], shard['host_id'],
             group['generation'], shard['index'], p,
             device=config['local_device'], numa=config['local_numa'],
             release_input_page_cache=config['release_page_cache'], deadline=deadline,
             max_allocation_bytes=config['max_allocation_bytes'], budget_bytes=config['budget_bytes'])
+        logging.getLogger(__name__).info(
+            'engram startup: published shard %d in %.1fs',
+            shard['index'], time.monotonic() - shard_started)
         store.set(prefix + f'shard/{shard["index"]}', encode(document))
     if leader:
         shards = [sh for m in group['members'] for sh in m['shards']] if shared else member['shards']
         keys = [prefix + f'shard/{sh["index"]}' for sh in shards]
+        logging.getLogger(__name__).info(
+            'engram startup: waiting for %d shard descriptors', len(keys))
         _wait(store, keys, deadline)
         documents = [decode(store.get(key)) for key in keys]
         # A single multi-host gang already has a control channel. No extra socket.
         package = (assemble_package(group, documents, config['checkpoint']) if shared
                    else leader_exchange(config, documents, deadline))
         verify_package(group, package)
-        store.set(prefix + 'package', encode(package))
+        payload = encode(package)
+        store.set(prefix + 'package', payload)
+        logging.getLogger(__name__).info(
+            'engram startup: package assembled (%d bytes, %d shards)',
+            len(payload), len(documents))
     _wait(store, [prefix + 'package'], deadline)
     package = decode(store.get(prefix + 'package'))
     stage_package(to_memory_package(group, package))
+    logging.getLogger(__name__).info(
+        'engram startup: package staged in %.1fs', time.monotonic() - started)
     env[COUNT_ENV] = str(p)
     store.set(prefix + f'received/{receiver_rank}', b'1')
     if leader:
@@ -590,4 +623,6 @@ def prepare_static_engram(store, *, rank, world_size, environ=None, gang_hosts=N
         for key in ([prefix + 'package'] + keys + config_keys +
                     [prefix + f'received/{i}' for i in range(receivers)]):
             store.delete_key(key)
+    logging.getLogger(__name__).info(
+        'engram startup: ready in %.1fs', time.monotonic() - started)
     return None
