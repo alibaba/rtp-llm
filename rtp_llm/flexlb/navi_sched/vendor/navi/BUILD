@@ -27,6 +27,7 @@ cc_library(
 cc_library(
     name = "navi_headers",
     hdrs = glob([
+        "**/*.h",
         "common.h",
         "builder/*.h",
         "config/*.h",
