@@ -53,9 +53,7 @@ class Prometheus:
         self.metadata = {'job': self.JOB, 'recipe': recipe, 'complete': False}
 
     def save(self):
-        temporary = self.directory / 'collection.tmp'
-        write_json(temporary, self.metadata)
-        temporary.replace(self.directory / 'collection.json')
+        write_json(self.directory / 'collection.json', self.metadata)
 
     async def start(self):
         self.directory.mkdir()
@@ -109,9 +107,7 @@ class Prometheus:
             raise ExecutionError(f'{node}: managed collection requires endpoints.json with id, unique rpc and metrics URL') from error
         self.targets[node] = {'targets': [address.netloc], 'labels': {'instance': rpc,
                               '__scheme__': address.scheme, '__metrics_path__': address.path or '/metrics'}}
-        temporary = self.directory / 'targets.tmp'
-        write_json(temporary, list(self.targets.values()))
-        temporary.replace(self.directory / 'targets.json')
+        write_json(self.directory / 'targets.json', list(self.targets.values()))
         self.metadata['targets'] = dict(self.targets)
         self.save()
 

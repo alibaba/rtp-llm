@@ -5,7 +5,7 @@ import re
 
 from .environment import compile_environment
 from .compiled_case import Step, CompiledCase, Expect, Phase, Reference
-from .parser import load_yaml
+from .yaml_loader import load_yaml
 from .registry import Registry
 from .validation import ConfigError, compatible, duration, fields, text, validate
 

@@ -26,7 +26,8 @@ final class VitImageSource implements AutoCloseable {
 
     VitGeometry.Image prepare(MultimodalInputPB media, long deadline) throws IOException {
         int width, height;
-        String identity=MediaInput.key(media);
+        String requestKey=MediaInput.key(media);
+        String identity=requestKey;
         long started=System.nanoTime(), downloadNanos=0;
         if(config.skipDownload()) {
             width=media.getMmPreprocessConfig().getWidth(); height=media.getMmPreprocessConfig().getHeight();
@@ -38,7 +39,7 @@ final class VitImageSource implements AutoCloseable {
             identity=contentIdentity(bytes);
         }
         VitGeometry.dimensions(width,height);
-        var image=new VitGeometry.Image(MediaInput.key(media),width,height,
+        var image=new VitGeometry.Image(requestKey,width,height,
             VitGeometry.rows(width,height,config.patch(),config.merge(),config.minPixels(),config.maxTokens()),identity);
         if (!config.skipDownload()) {
             long elapsed=System.nanoTime()-started;

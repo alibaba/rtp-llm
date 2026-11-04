@@ -391,7 +391,9 @@ prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collect
 
 ### RTP 调度实现边界
 
-`RtpSchedulerBase` 共享请求状态、KV 引用、PD 生命周期、Forward 提交、取消和指标；`RtpScheduler` 仅做普通 FIFO 准入，`RtpGroupScheduler` 单独拥有显式组队列、残余成员和普通/组之间的选择。组标识不改变普通请求的调度方式。选择在 Engine 启动时完成，不从 Master 配置推断，也不在运行中按请求切换。`fifo` 模式应配合 Master 的 `NON_BATCH` 交付；它仍会动态组成多请求 Forward batch。本地准备立即完成；普通调度器支持远端异步准备，显式 group 暂不支持远端适配器。
+`RtpSchedulerBase` 共享请求状态、KV 引用、PD 生命周期、Forward 提交和取消，并提供运行状态和指标采样源；`RtpScheduler` 仅做普通 FIFO 准入，`RtpGroupScheduler` 单独拥有显式组队列、残余成员和普通/组之间的选择。组标识不改变普通请求的调度方式。选择在 Engine 启动时完成，不从 Master 配置推断，也不在运行中按请求切换。`fifo` 模式应配合 Master 的 `NON_BATCH` 交付；它仍会动态组成多请求 Forward batch。本地准备立即完成；普通调度器支持远端异步准备，显式 group 暂不支持远端适配器。
+
+`RtpNode` 装配指标导出，并在调度锁内调用采集。`RtpMetrics` 读取调度状态快照并按各指标的口径采样。
 
 ### 缓存准备与远端接口
 
