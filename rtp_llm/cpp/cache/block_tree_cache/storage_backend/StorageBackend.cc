@@ -116,7 +116,8 @@ void StorageBackend::setStageMetricsReporter(std::shared_ptr<BlockTreeCacheMetri
 SharedTransferStageTimer StorageBackend::stageTimer(const char*           stage,
                                                     const StorageRequest& request,
                                                     const char*           operation,
-                                                    uint64_t              trace_id) const noexcept {
+                                                    uint64_t              trace_id,
+                                                    AsyncProfileKind      kind) const noexcept {
     return TransferStageTimer::create(
         stage_metrics_enabled_.load(std::memory_order_acquire) ? std::atomic_load(&stage_metrics_reporter_) : nullptr,
         stage,
@@ -126,7 +127,8 @@ SharedTransferStageTimer StorageBackend::stageTimer(const char*           stage,
         world_rank_,
         "storage_backend",
         trace_id,
-        CacheStageContext::storage(operation));
+        CacheStageContext::storage(operation),
+        kind);
 }
 
 TransferStageTimer StorageBackend::stageValue(const char*           stage,
@@ -507,8 +509,8 @@ void StorageBackend::match(StorageRequest request, MatchDone done) {
         request.transfer_task.emplace(std::vector<TransferDescriptor>{}, timeout_, request.request_id);
     }
     const auto trace_id = storage_backend_detail::nextTraceId();
-    auto       total    = stageTimer("match_total", request, "match", trace_id);
-    auto       queue    = stageTimer("match_queue_wait", request, "match", trace_id);
+    auto       total    = stageTimer("match_total", request, "match", trace_id, AsyncProfileKind::Lifecycle);
+    auto       queue    = stageTimer("match_queue_wait", request, "match", trace_id, AsyncProfileKind::Wait);
     const bool skip_remote = !remoteCacheEnabled();
     dispatch([this, skip_remote, request = std::move(request), done = std::move(done), trace_id, total, queue](
                  Lifecycle outcome) mutable {
@@ -548,9 +550,9 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
         request.transfer_task.emplace(std::vector<TransferDescriptor>{}, timeout_, request.request_id);
     }
     const auto trace_id = storage_backend_detail::nextTraceId();
-    auto       total    = stageTimer("read_total", request, "read", trace_id);
+    auto       total    = stageTimer("read_total", request, "read", trace_id, AsyncProfileKind::Lifecycle);
     auto       state    = prepare(std::move(request), false, trace_id);
-    auto       queue    = stageTimer("read_queue_wait", state->request, "read", trace_id);
+    auto       queue    = stageTimer("read_queue_wait", state->request, "read", trace_id, AsyncProfileKind::Wait);
     const bool skip_remote = !remoteCacheEnabled();
     dispatch([this, skip_remote, state = std::move(state), match_meta = std::move(match_meta),
               done = std::move(done), total, queue](Lifecycle outcome) mutable {
@@ -640,8 +642,8 @@ bool StorageBackend::write(StorageWriteTask task) {
     RTP_LLM_CHECK(initialized_);
     RTP_LLM_CHECK(task.state_ != nullptr);
     auto state = std::move(task.state_);
-    auto total = stageTimer("write_total", state->request, "write", state->trace_id);
-    auto queue = stageTimer("write_queue_wait", state->request, "write", state->trace_id);
+    auto total = stageTimer("write_total", state->request, "write", state->trace_id, AsyncProfileKind::Lifecycle);
+    auto queue = stageTimer("write_queue_wait", state->request, "write", state->trace_id, AsyncProfileKind::Wait);
     const bool skip_remote = !remoteCacheEnabled();
     if (state->request.completion_admission) {
         state->request.completion_admission->onQueued();
