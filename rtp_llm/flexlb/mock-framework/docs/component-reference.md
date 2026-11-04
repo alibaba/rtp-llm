@@ -250,15 +250,15 @@ V 仍按 URL/预处理 key 缓存和合并在途请求，命中时不重新下�
 
 P 在 GENERATE 阶段发送 `prefill_kv_handoff.computed_kv_end`，为已计算 prompt 的排他边界，不包含首个采样 token。D 校验请求身份、已 LOAD 阶段和边界；缺省字段保留原生旧调用兼容，显式错误断言拒绝。未实现的 logprobs 请求明确返回 UNIMPLEMENTED，不伪造概率输出。
 
-共享缓存元信息由 `shared/cache/CacheMetadata` 描述，来源始终是 KvCache/BlockTree 已提交的有效块，不包含仅分配但尚未计算的工作块。快照记录逻辑 key、HBM/Host 驻留和版本；插入、介质迁移、淘汰与清空推进同一版本，并在缓存锁内投递短变更通知。Master 的原生 GetCacheStatus 仍返回逻辑可复用集合与容量，版本未改变时省略 key；Host 迁移不会误删除仍可复用的逻辑 key。
+缓存元信息由 `engine/cache/CacheMetadata` 描述，来自 KvCache/BlockTree 已提交的本地有效块。提交、淘汰和清空推进版本。Master 的原生 GetCacheStatus 返回可复用集合与容量，版本未改变时省略 key。
 
-`shared/cache/KvcmReporter` 消费同一来源，按 real Meta HTTP `/api/registerInstance`、`/api/reportEvent` 编码注册、NODE_REGISTER、HEARTBEAT、BLOCK_SNAPSHOT、BLOCK_ADD、BLOCK_DELETE 和 HOST_DOWN。当前 Full-KV 只发布实际 HBM 驻留；迁移到 Host 发送 HBM 删除，恢复到 HBM 发送新增，Host-only 缓存不会冒充 HBM。注册模型、布局和 spec 由 RTP 装配方明确传入；Reporter 和共享 KvcmDiscovery 不依赖 RtpConfig 或 Scheduler；Reporter 统一拥有发现和传输资源的关闭责任。旧 backend/rtp/KvcmPublisher 已删除，没有双实现或兼容入口。
+`engine/cache/KvcmReporter` 使用同一来源，按 real Meta HTTP `/api/registerInstance`、`/api/reportEvent` 编码注册、NODE_REGISTER、HEARTBEAT、BLOCK_SNAPSHOT、BLOCK_ADD、BLOCK_DELETE 和 HOST_DOWN。当前 Full-KV 仅发布本地 HBM 有效块。RTP 装配方提供注册模型、布局和 spec，Reporter 管理发现与传输资源。
 
 变更使用有界内存队列（100000 条），每次最多取 1000 条，按同 key 最后一次转换合并，避免 Meta 先处理 ADD 再处理 DELETE 导致结果逆序。注册和增量由同一个执行者每 20ms 处理，快照与心跳分别使用独立执行者，慢快照不阻塞 ADD/DELETE 或心跳。它们均不占用 Scheduler 线程。
 
-快照在缓存锁内一次捕获 HBM long[] 与版本，在锁外流式 JSON 编码，不构建逐 key JSON 对象树；仍保留完整请求体，并非零拷贝。对齐原生 Publisher：快照失败（包括限流）丢弃本轮，不重放、不暂停增量；下一次周期或服务端恢复请求捕获新快照。重新注册后旧快照回包不影响新注册，增量不按快照 ACK 过滤。注册和增量失败按原生默认 500ms→16s 指数退避；不使用 retry_after_ms 暂停整个数据通道。控制请求超时 1.5 秒，快照上传超时 30 秒。KVCM 响应先汇总 header 与全部 item 的恢复信号，再判断是否失败，前面的普通错误不会遮蔽后面的注册失效。心跳连续 snapshot_required=true 只触发一次，false 或重新注册重置。正常心跳或非空增量 ACK 启动/刷新 60 秒恢复窗口；超期后的心跳失败触发一次重新注册，注册和快照 ACK 不启动或续期该窗口，避免恢复风暴。队列溢出和增量失败请求新快照，不维护磁盘事件历史。关闭停止快照和心跳、收尾增量执行者，再尽力上报 HOST_DOWN；意外退出由服务端心跳失效处理。启用 enable_remote_cache 时，kv_cache_event_snapshot_interval_ms 非正数关闭数据上报，保留注册和心跳；未启用 remote 时非正数无效。
+快照在缓存锁内一次捕获 HBM long[] 与版本，在锁外流式 JSON 编码，不构建逐 key JSON 对象树；仍保留完整请求体，并非零拷贝。对齐原生 Publisher：快照失败（包括限流）丢弃本轮，不重放、不暂停增量；下一次周期或服务端恢复请求捕获新快照。重新注册后旧快照回包不影响新注册，增量不按快照 ACK 过滤。注册和增量失败按原生默认 500ms→16s 指数退避；不使用 retry_after_ms 暂停整个数据通道。控制请求超时 1.5 秒，快照上传超时 30 秒。KVCM 响应先汇总 header 与全部 item 的恢复信号，再判断是否失败，前面的普通错误不会遮蔽后面的注册失效。心跳连续 snapshot_required=true 只触发一次，false 或重新注册重置。正常心跳或非空增量 ACK 启动/刷新 60 秒恢复窗口；超期后的心跳失败触发一次重新注册，注册和快照 ACK 不启动或续期该窗口，避免恢复风暴。队列溢出和增量失败请求新快照，不维护磁盘事件历史。关闭停止快照和心跳、收尾增量执行者，再尽力上报 HOST_DOWN；意外退出由服务端心跳失效处理。快照间隔 `kv_cache_event_snapshot_interval_ms` 必须为正。
 
-Master 与 KVCM 是两个独立消费者，不要求跨服务原子提交。KVCM 不可用时不会阻塞调度或 Master RPC；最近错误、注册状态和待发送数量可从 Engine 端点的 kvcm 状态查看。远端 KV 已提供统一准备流程和逻辑读写接口，但未安装真实存储适配；事件位置仅声明本地持有缓存，不能当成成功的远端 payload 写入。
+Master 与 KVCM 是两个独立消费者，不要求跨服务原子提交。KVCM 不可用时不会阻塞调度或 Master RPC；最近错误、注册状态和待发送数量可从 Engine 端点的 kvcm 状态查看。事件位置表示 Engine 当前持有的本地缓存。
 ```yaml
 kv_cache_event_publisher_type: kvcm
 kv_cache_event_manager_endpoint: http://<meta-http-host>:<port>
@@ -267,7 +267,7 @@ kv_cache_event_instance_id: deployment_128
 kv_cache_event_snapshot_interval_ms: 600000
 ```
 
-manager_endpoint 是显式 Meta HTTP 覆盖地址，优先于发现；未配置时，shared/cache/KvcmDiscovery 使用 kvcm_enable_vipserver、kvcm_vipserver_domain 或 kvcm_server_address，通过原生 GetClusterInfo 发现 Meta HTTP leader。成功地址缓存到失败后失效，依次尝试 bootstrap 候选，不做周期轮询。instance_id 必须显式配置为共享查询空间；host_ip_port 缺省为发布 IP 加 gRPC 端口减一，与 DSV Master 身份一致。显式装配远端适配器并开启 enable_remote_cache=true 后，即使关闭事件发布仍可注册并保持控制心跳；未装配适配器却开启此项会在启动时报错。NODE_REGISTER 不宣称有 HBM 事件；心跳 extra_info 中的 rtp_remote_cache_enabled 单独记录，不能被解释成数据面已经接通。正式环境需使用匹配的 model_name 和实例组。
+manager_endpoint 是显式 Meta HTTP 覆盖地址，优先于发现；未配置时，`engine/cache/KvcmDiscovery` 使用 kvcm_enable_vipserver、kvcm_vipserver_domain 或 kvcm_server_address，通过原生 GetClusterInfo 发现 Meta HTTP leader。成功地址缓存到失败后失效，依次尝试 bootstrap 候选，不做周期轮询。instance_id 必须显式配置为共享查询空间；host_ip_port 缺省为发布 IP 加 gRPC 端口减一，与 DSV Master 身份一致。正式环境需使用匹配的 model_name 和实例组。
 
 `ExecuteFunction` 采用原生 FunctionRequest/Response：READ/WRITE 当前未提交任何外部 I/O，返回 FAILED_BUFFER_SAFE 且 payload_buffer_safe=true；其他未实现的 KVCM SDK 元数据操作返回 UNIMPLEMENTED。ShutdownRequest 的跨 rank 停机协调未模拟，返回 UNIMPLEMENTED，不生成排空证明；实例停止继续使用已有的进程生命周期和 TERM 清理路径。
 

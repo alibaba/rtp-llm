@@ -74,7 +74,7 @@ def test_provider_disables_pull_and_receives_role_metrics(tmp_path, push_provide
                START_PORT=str(port), MOCK_BIND_HOST='127.0.0.1', MOCK_ADVERTISE_HOST='127.0.0.1',
                TEST_BLOCK_NUM='17', SEQ_SIZE_PER_BLOCK='128', MAX_SEQ_LEN='2048',
                MOCK_COMPUTE_FORWARD_EXPRESSION='1', KV_CACHE_EVENT_PUBLISHER_TYPE='none',
-               ENABLE_REMOTE_CACHE='false', REPORT_CAPTURE=str(capture), kmonitorTags='test_scope^push-test')
+               REPORT_CAPTURE=str(capture), kmonitorTags='test_scope^push-test')
     with (tmp_path / 'engine.log').open('w+') as log:
         process = subprocess.Popen([str(JAVA), '-cp', os.pathsep.join((str(push_provider), str(JAR))),
                                     'org.flexlb.mock.engine.EngineMain'], env=env, stdout=log, stderr=subprocess.STDOUT)
