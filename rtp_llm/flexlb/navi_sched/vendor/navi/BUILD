@@ -26,7 +26,7 @@ cc_library(
 
 cc_library(
     name = "navi_headers",
-    hdrs = ["builder/ResourceDefBuilder.h"] + glob([
+    hdrs = glob([
         "**/*.h",
         "common.h",
         "builder/*.h",
