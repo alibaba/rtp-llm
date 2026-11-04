@@ -77,7 +77,7 @@ class RequestFilesTest {
         assertThrows(IllegalArgumentException.class, () -> new Start(null, "/input", 1.0, 1.0, 1, 1, 1000, 1000));
         assertThrows(IllegalArgumentException.class, () -> new Start(null, "/input", null, Double.NaN, 1, 1, 1000, 1000));
     }
-    @Test void invalidRequestsAndJsonInputAreRejected() throws Exception {
+    @Test void invalidRequestsAndMalformedJsonInputAreRejected() throws Exception {
         var valid = InputFixture.request();
         for (var invalid : List.of(valid.toBuilder().clearTokenIds().build(), valid.toBuilder().setTokenIds(0, -1).build(),
                 valid.toBuilder().setMaxNewTokens(0).build(), valid.toBuilder().setPriority(-1).build(),
@@ -87,11 +87,28 @@ class RequestFilesTest {
                 assertThrows(IOException.class, () -> writer.write(invalid));
             }
         }
-        var file = directory.resolve("legacy.jsonl");
-        Files.writeString(file, "{\"token_ids\":[1],\"max_new_tokens\":2}\n");
-        assertThrows(IOException.class, () -> RequestFiles.split(filePlan(file), directory.resolve("legacy"), 1, () -> false));
-        assertFalse(Files.exists(directory.resolve("legacy/0.binpb.zst")));
+        var file = directory.resolve("invalid.jsonl");
+        Files.writeString(file, "{\"token_ids\":[1],\"max_new_tokens\":2}\n"
+            + "{\"token_ids\":[2],\"max_new_tokens\":2,\"priority\":0,\"priority\":1}\n");
+        assertThrows(IOException.class, () -> RequestFiles.split(filePlan(file), directory.resolve("invalid"), 1, () -> false));
+        assertFalse(Files.exists(directory.resolve("invalid/0.binpb.zst")));
     }
+
+    @Test void readableJsonLinesArePreparedAsValidatedShards() throws Exception {
+        var file = directory.resolve("requests.jsonl");
+        Files.writeString(file, "{\"token_ids\":[1,2],\"max_new_tokens\":3,\"priority\":0,\"arrival_offset_ms\":5}\n");
+        var parts = RequestFiles.split(filePlan(file), directory.resolve("readable"), 1, () -> false);
+        try (var reader = new InputFile.Reader(Path.of(parts.getFirst().path()))) {
+            var request = reader.next();
+            assertEquals(List.of(1, 2), request.getTokenIdsList());
+            assertEquals(3, request.getMaxNewTokens());
+            assertTrue(request.hasPriority());
+            assertEquals(0, request.getPriority());
+            assertEquals(5, request.getArrivalOffsetMs());
+            assertNull(reader.next());
+        }
+    }
+
     @Test void malformedFramesNeverPublishShards() throws Exception {
         var request = InputFixture.request();
         byte[] data = frame(InputChunk.newBuilder().setSequence(1).addRequests(request).build());

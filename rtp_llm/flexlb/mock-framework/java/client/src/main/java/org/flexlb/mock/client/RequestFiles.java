@@ -7,7 +7,7 @@ import java.security.*;
 import java.util.*;
 import org.flexlb.mock.client.ClientProtocol.*;
 
-/** Validate the complete compressed source before publishing immutable compressed shards. */
+/** Validate the complete playback source before publishing immutable compressed shards. */
 final class RequestFiles {
     record Part(String path, long count, String sha256) {}
     static List<Part> split(Start plan, Path directory, int clients, java.util.function.BooleanSupplier cancelled) throws IOException {
@@ -24,7 +24,7 @@ final class RequestFiles {
             }
             Path source = Path.of(plan.requests_file());
             var before = Files.readAttributes(source, BasicFileAttributes.class);
-            try (var reader = new InputFile.Reader(source)) {
+            try (var reader = InputFile.source(source)) {
                 org.flexlb.mock.client.input.ClientInput.Request input;
                 while ((input = reader.next()) != null) {
                     InputFile.checkInterrupted();

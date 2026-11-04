@@ -1,6 +1,10 @@
 package org.flexlb.mock.client;
 
 import com.github.luben.zstd.*;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -78,7 +82,84 @@ final class InputFile {
         }
         @Override public void close() throws IOException { stream.close(); }
     }
-    static final class Reader implements AutoCloseable {
+    interface Source extends AutoCloseable {
+        Request next() throws IOException;
+        @Override void close() throws IOException;
+    }
+
+    static Source source(Path path) throws IOException {
+        return path.getFileName().toString().endsWith(".jsonl") ? new JsonLines(path) : new Reader(path);
+    }
+
+    private static final class JsonLines implements Source {
+        private static final int MAX_LINE = 8 * MAX_REQUEST;
+        private static final ObjectMapper JSON = new ObjectMapper()
+            .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+        private final BufferedReader input;
+        private long line;
+
+        JsonLines(Path path) throws IOException { input = Files.newBufferedReader(path); }
+
+        @Override public Request next() throws IOException {
+            var text = new StringBuilder();
+            int character;
+            while ((character = input.read()) != -1 && character != '\n') {
+                if (text.length() == MAX_LINE) throw new IOException("Playback line exceeds size limit: " + (line + 1));
+                text.append((char) character);
+            }
+            if (character == -1 && text.isEmpty()) return null;
+            line++;
+            try {
+                var value = JSON.readTree(text.toString());
+                fields(value, Set.of("token_ids", "max_new_tokens", "priority", "arrival_offset_ms", "images"));
+                var tokens = value.path("token_ids");
+                if (!tokens.isArray()) throw new IOException("token_ids must be an array");
+                var request = Request.newBuilder().setMaxNewTokens(integer(value.path("max_new_tokens")));
+                for (var token : tokens) request.addTokenIds(integer(token));
+                if (value.has("priority")) request.setPriority(integer(value.path("priority")));
+                if (value.has("arrival_offset_ms")) {
+                    var offset = value.path("arrival_offset_ms");
+                    if (!offset.isIntegralNumber() || !offset.canConvertToLong()) throw new IOException("Expected int64 arrival_offset_ms");
+                    request.setArrivalOffsetMs(offset.longValue());
+                }
+                if (value.has("images")) {
+                    if (!value.path("images").isArray()) throw new IOException("images must be an array");
+                    for (var image : value.path("images")) {
+                        fields(image, Set.of("url", "width", "height", "offset"));
+                        if (!image.path("url").isTextual()) throw new IOException("Expected image URL");
+                        var media = Image.newBuilder().setUrl(image.path("url").textValue()).setOffset(integer(image.path("offset")));
+                        if (image.has("width")) media.setWidth(integer(image.path("width")));
+                        if (image.has("height")) media.setHeight(integer(image.path("height")));
+                        request.addImages(media);
+                    }
+                }
+                var result = request.build();
+                validate(result);
+                return result;
+            } catch (IOException error) {
+                throw new IOException("Invalid playback JSONL at line " + line + ": " + error.getMessage(), error);
+            }
+        }
+
+        private static void fields(JsonNode value, Set<String> allowed) throws IOException {
+            if (value == null || !value.isObject()) throw new IOException("Expected a JSON object");
+            var names = value.fieldNames();
+            while (names.hasNext()) {
+                String name = names.next();
+                if (!allowed.contains(name)) throw new IOException("Unknown field: " + name);
+            }
+        }
+
+        private static int integer(JsonNode value) throws IOException {
+            if (!value.isIntegralNumber() || !value.canConvertToInt()) throw new IOException("Expected int32");
+            return value.intValue();
+        }
+
+        @Override public void close() throws IOException { input.close(); }
+    }
+
+    static final class Reader implements Source {
         private final Path path;
         private final MessageDigest digest = digest();
         private final DataInputStream stream;
@@ -96,7 +177,7 @@ final class InputFile {
                 throw error;
             }
         }
-        Request next() throws IOException {
+        @Override public Request next() throws IOException {
             checkInterrupted();
             if (finished) return null;
             if (!requests.hasNext()) {
