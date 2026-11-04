@@ -104,6 +104,24 @@ void DeviceBlockPool::releaseRemotePublicationPin(BlockIdxType block, const std:
     }
 }
 
+bool DeviceBlockPool::tryPinForRemoteConnector(BlockIdxType block) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    checkAllocatedNoLock(block);
+    const auto type = static_cast<size_t>(DeviceBlockRefType::REMOTE_CONNECTOR);
+    if (treeRefCountNoLock(block, BlockTreeRefType::FROZEN) != 0 || refcounts_by_type_[type][block] != 0) {
+        return false;
+    }
+    const bool was_active    = isActiveNoLock(block);
+    const bool was_available = isAvailableNoLock(block);
+    ++refcounts_[block];
+    ++refcounts_by_type_[type][block];
+    ++referenced_block_counts_[type];
+    updateActiveBlocksNumNoLock(block, was_active);
+    updateAvailableBlocksNumNoLock(block, was_available);
+    return true;
+}
+
 void DeviceBlockPool::incRef(BlockIdxType block, DeviceBlockRefType ref_type) {
     incRef(BlockIdList{block}, ref_type);
 }

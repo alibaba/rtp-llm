@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -8,6 +9,11 @@
 
 namespace rtp_llm {
 namespace {
+TEST(TransferTaskTest, PreservesExecutionIdInSubtask) {
+    TransferTask task({}, std::chrono::milliseconds(100), std::nullopt, "coordinator-1");
+    EXPECT_EQ(task.taskId(), "coordinator-1");
+    EXPECT_EQ(task.subtask({}).taskId(), task.taskId());
+}
 
 TEST(TransferTaskTest, SubtasksPreserveQueryIdAndDeadline) {
     TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(10), 73);

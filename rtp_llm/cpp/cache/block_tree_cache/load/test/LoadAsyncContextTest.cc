@@ -3,6 +3,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -37,12 +38,12 @@ private:
         auto config                  = std::make_shared<DeviceBlockPoolConfig>();
         config->pool_type            = BlockPoolType::DEVICE;
         config->pool_name            = "load_context_test";
-        config->physical_block_count = 4;
+        config->physical_block_count = 5;
         MemoryLayoutConfig layout;
-        layout.block_num                = 4;
+        layout.block_num                = 5;
         layout.layer_num                = 1;
         layout.kv_block_stride_bytes    = 16;
-        layout.kv_block_pool_size_bytes = 64;
+        layout.kv_block_pool_size_bytes = 80;
         config->memory_layouts.push_back(layout);
         return config;
     }
@@ -116,6 +117,9 @@ public:
     void timeoutNextRead() {
         timeout_read_ = true;
     }
+    void setReadCompletion(std::function<void()> completion) {
+        read_completion_ = std::move(completion);
+    }
     bool readPending() const {
         return executor_->pendingCount() != 0;
     }
@@ -178,6 +182,9 @@ protected:
             }
             read_group_tags_.push_back(std::move(group_tags));
         }
+        if (read_completion_) {
+            read_completion_();
+        }
     }
     void writeImpl(const StorageRequest&) override {}
 
@@ -198,6 +205,7 @@ private:
     bool                                  fail_match_{false};
     bool                                  fail_read_{false};
     bool                                  timeout_read_{false};
+    std::function<void()>                 read_completion_;
 };
 
 std::shared_ptr<const CacheTopology> makeTopology(std::vector<CacheGroupType> types = {CacheGroupType::FULL}) {
@@ -877,6 +885,62 @@ TEST(LoadAsyncContextTest, WaitDoneExitsAtDeadlineBeforeQueuedReadRetires) {
     EXPECT_FALSE(pool->isFrozen(block));
     pool->decRef(block);
     coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, InFlightReadCompletionDeterminesFreezingAfterContextDeadline) {
+    enum class Completion { SUCCESS, BUFFER_SAFE_FAILURE, UNKNOWN };
+    for (const auto completion : {Completion::SUCCESS, Completion::BUFFER_SAFE_FAILURE, Completion::UNKNOWN}) {
+        SCOPED_TRACE(static_cast<int>(completion));
+        size_t     commits     = 0;
+        size_t     aborts      = 0;
+        auto       coordinator = makeCoordinator(commits, aborts);
+        auto       backend     = std::make_shared<ManualBackend>(std::chrono::milliseconds(100));
+        auto       pool        = std::make_shared<TestBlockPool>();
+        const auto block       = pool->malloc().value();
+        pool->incRef(block);
+        initBackend(*backend, pool);
+        auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
+        ASSERT_TRUE(coordinator->registerContext(context));
+        context->setMatchCallback([&](LoadAsyncContext& current, size_t) {
+            current.setBackendTargetBlock(0, 0, block);
+            return current.commit();
+        });
+        size_t notifications = 0;
+        context->onDone([&](ErrorInfo error) {
+            ++notifications;
+            EXPECT_EQ(error.code(), ErrorCode::DEADLINE_EXCEEDED);
+        });
+        backend->setReadCompletion([&] {
+            // The read has entered I/O and still owns its destination pin.
+            block_tree_cache_test::BoundedThread<void> waiter([context] { context->waitDone(); });
+            ASSERT_EQ(waiter.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+            waiter.get();
+            EXPECT_TRUE(context->deadlineExceeded());
+            EXPECT_EQ(pool->refCount(block), 2u);
+            EXPECT_FALSE(pool->isFrozen(block));
+            if (completion == Completion::BUFFER_SAFE_FAILURE) {
+                throw StorageOperationBufferSafeFailure("payload stopped after context deadline");
+            }
+            if (completion == Completion::UNKNOWN) {
+                throw StorageOperationCompletionUnknown("payload may still write after context deadline",
+                                                        StorageQuarantineReason::SDK_ERROR);
+            }
+        });
+        context->startBackendMatch();
+        backend->completeMatch(1);
+        ASSERT_TRUE(backend->readPending());
+        backend->completeRead();
+        EXPECT_FALSE(backend->readKeys().empty());
+        EXPECT_TRUE(context->done());
+        EXPECT_FALSE(context->success());
+        EXPECT_EQ(context->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
+        EXPECT_EQ(notifications, 1u);
+        const bool unknown = completion == Completion::UNKNOWN;
+        EXPECT_EQ(pool->isFrozen(block), unknown);
+        EXPECT_EQ(pool->refCount(block), unknown ? 2u : 1u);
+        pool->decRef(block);
+        coordinator->shutdown();
+    }
 }
 
 TEST(LoadAsyncContextTest, TimelyRemoteReadDoesNotExpireIndependentHostDiskAndJoin) {

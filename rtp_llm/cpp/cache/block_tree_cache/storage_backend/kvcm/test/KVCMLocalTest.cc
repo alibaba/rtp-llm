@@ -540,6 +540,7 @@ TEST(KVCMLocalTest, LegacyEmptyRemoteResponsePreservesOneofPresence) {
 }
 
 TEST(KVCMLocalTest, ExecuteFunctionPropagatesMetadataErrorsAndPreservesTransferStatus) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     rtp_llm::initLogger();
     createDevice();
     auto environment    = makeBackendEnvironment("kvcm_rpc_result");
@@ -563,6 +564,7 @@ TEST(KVCMLocalTest, ExecuteFunctionPropagatesMetadataErrorsAndPreservesTransferS
         EXPECT_FALSE(manager.executeFunction(request, response));
     }
 
+    int operation_sequence = 0;
     for (const auto ec :
          {kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS, kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT}) {
         client_wrapper->load_status = ec;
@@ -571,17 +573,62 @@ TEST(KVCMLocalTest, ExecuteFunctionPropagatesMetadataErrorsAndPreservesTransferS
             FunctionRequestPB request;
             auto*             remote = request.mutable_remote_request();
             remote->set_op(operation);
+            const auto operation_id = "transfer_" + std::to_string(operation_sequence++);
+            remote->set_operation_id(operation_id);
             remote->add_group_tags("default");
             remote->add_block_ids(environment.block_id);
             remote->add_uris("transfer_uri");
             FunctionResponsePB response;
             EXPECT_TRUE(manager.executeFunction(request, response));
             ASSERT_TRUE(response.has_remote_response());
+            const bool timed_out = ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT;
             EXPECT_EQ(response.remote_response().transfer_status(),
-                      ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT :
-                                                                                REMOTE_TRANSFER_STATUS_FAILED);
+                      timed_out ? REMOTE_TRANSFER_STATUS_TIMEOUT : REMOTE_TRANSFER_STATUS_FAILED);
+            EXPECT_FALSE(response.remote_response().payload_buffer_safe());
+
+            QueryKVCMOperationsRequestPB  query_request;
+            QueryKVCMOperationsResponsePB query_response;
+            query_request.add_operation_ids(operation_id);
+            ASSERT_TRUE(manager.queryKVCMOperations(query_request, query_response));
+            ASSERT_EQ(query_response.operations_size(), 1);
+            EXPECT_EQ(query_response.operations(0).state(),
+                      QueryKVCMOperationsResponsePB::OperationState::RUNNING);
+            EXPECT_FALSE(manager.forgetKVCMOperation(operation_id));
         }
     }
+
+    // The SDK completes safely after the worker deadline. Keep the timeout
+    // result while recording that the blocks can be released.
+    constexpr auto timeout = std::chrono::milliseconds(100);
+    client_wrapper->save_status.reset();
+    EXPECT_CALL(*client_wrapper, saveKvCachesForTag(_, _, _, _))
+        .WillOnce(Invoke([timeout](const auto&, const auto&, const auto&, const auto&) {
+            std::this_thread::sleep_for(timeout + std::chrono::milliseconds(50));
+            return std::make_pair(true, kv_cache_manager::UriStrVec{});
+        }));
+
+    const std::string operation_id = "late_safe_write";
+    FunctionRequestPB request;
+    auto* remote = request.mutable_remote_request();
+    remote->set_op(REMOTE_OPERATION_WRITE);
+    remote->set_operation_id(operation_id);
+    remote->set_timeout_ms(timeout.count());
+    remote->add_group_tags("default");
+    remote->add_block_ids(environment.block_id);
+    remote->add_uris("transfer_uri");
+    FunctionResponsePB response;
+    ASSERT_TRUE(manager.executeFunction(request, response));
+    ASSERT_TRUE(response.has_remote_response());
+    EXPECT_EQ(response.remote_response().transfer_status(), REMOTE_TRANSFER_STATUS_TIMEOUT);
+    EXPECT_TRUE(response.remote_response().payload_buffer_safe());
+
+    QueryKVCMOperationsRequestPB query_request;
+    QueryKVCMOperationsResponsePB query_response;
+    query_request.add_operation_ids(operation_id);
+    ASSERT_TRUE(manager.queryKVCMOperations(query_request, query_response));
+    ASSERT_EQ(query_response.operations_size(), 1);
+    EXPECT_EQ(query_response.operations(0).state(), QueryKVCMOperationsResponsePB::OperationState::FINISHED);
+    EXPECT_TRUE(manager.forgetKVCMOperation(operation_id));
 }
 
 BackendHandle makeCompletionProofBackend(const BackendEnvironment&                 environment,

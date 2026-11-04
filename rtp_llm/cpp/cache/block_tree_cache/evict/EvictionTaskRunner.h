@@ -14,7 +14,7 @@ class BlockTransferDispatcher;
 class BlockTreeCacheMetricsReporter;
 class EvictionTaskRunner {
 public:
-    using EvictionDoneCallback = std::function<void(ErrorInfo)>;
+    using EvictionDoneCallback = std::function<void(TransferResult)>;
 
     EvictionTaskRunner(const std::vector<GroupSetPtr>& group_sets, const BlockTransferDispatcher* transfer_dispatcher);
 

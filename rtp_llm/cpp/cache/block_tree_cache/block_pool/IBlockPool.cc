@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
 #include <limits>
 #include <sstream>
 
@@ -118,6 +119,13 @@ void IBlockPool::incTreeRefNoLock(BlockIdxType block, size_t ref_type_index) {
         ++tree_referenced_block_counts_[ref_type_index];
     }
     ++typed_refcount;
+    if (ref_type_index == static_cast<size_t>(BlockTreeRefType::FROZEN)) {
+        RTP_LLM_LOG_DEBUG("cache block freeze pool=%s block=%d frozen_ref_count=%u frozen_blocks=%zu",
+                          poolName().c_str(),
+                          block,
+                          typed_refcount,
+                          tree_referenced_block_counts_[ref_type_index]);
+    }
     updateActiveBlocksNumNoLock(block, was_active);
     updateAvailableBlocksNumNoLock(block, was_available);
 }
@@ -126,7 +134,26 @@ void IBlockPool::freezeBlock(BlockIdxType block) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     checkAllocatedNoLock(block);
-    incTreeRefNoLock(block, treeRefTypeIndex(BlockTreeRefType::FROZEN));
+    // Each transfer task holds its own FROZEN reference. Overlapping tasks
+    // (e.g. an eviction copy and a remote write) each add one hold; the block
+    // stays frozen until every holder has confirmed its I/O has stopped.
+    const size_t frozen_index = treeRefTypeIndex(BlockTreeRefType::FROZEN);
+    incTreeRefNoLock(block, frozen_index);
+    if (config_->pool_type == BlockPoolType::DEVICE) {
+        const size_t frozen_blocks = tree_referenced_block_counts_[frozen_index];
+        const size_t total_blocks  = totalBlocksNumNoLock();
+        if (frozen_blocks * 10 > total_blocks * 3) {
+            RTP_LLM_LOG_ERROR("device pool [%s] frozen blocks exceed 30%%: frozen=%zu total=%zu",
+                              config_->pool_name.c_str(),
+                              frozen_blocks,
+                              total_blocks);
+            std::abort();
+        }
+    }
+}
+
+void IBlockPool::unfreezeBlock(BlockIdxType block) {
+    decTreeRef(block, BlockTreeRefType::FROZEN);
 }
 
 bool IBlockPool::isFrozen(BlockIdxType block) const {
@@ -168,6 +195,13 @@ void IBlockPool::decTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type
             }
             updateActiveBlocksNumNoLock(block, was_active);
             updateAvailableBlocksNumNoLock(block, was_available);
+            if (ref_type_index == static_cast<size_t>(BlockTreeRefType::FROZEN)) {
+                RTP_LLM_LOG_DEBUG("cache block unfreeze pool=%s block=%d frozen_ref_count=%u frozen_blocks=%zu",
+                                  poolName().c_str(),
+                                  block,
+                                  typed_refcount,
+                                  tree_referenced_block_counts_[ref_type_index]);
+            }
         });
 }
 

@@ -69,8 +69,12 @@ public:
     // Checks tree and external ownership together under the pool mutex.
     bool canReclaimCacheBlock(BlockIdxType block) const;
 
-    // Add one FROZEN reference; the caller decides when to release its hold.
+    // Each transfer task holds its own frozen reference; overlapping tasks each
+    // add one hold (a single task still deduplicates via FrozenTask::freeze).
+    // unfreezeBlock releases exactly one hold; the block stays frozen while any
+    // holder remains, and is reclaimed only after the last tree reference goes away.
     void freezeBlock(BlockIdxType block) noexcept;
+    void unfreezeBlock(BlockIdxType block);
     bool isFrozen(BlockIdxType block) const;
 
     // Number of distinct blocks carrying at least one tree reference of this type.

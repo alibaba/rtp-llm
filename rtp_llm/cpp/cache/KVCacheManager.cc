@@ -736,6 +736,45 @@ KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysT
     return coordinator_manager_->incrKVCacheRef(resource, cache_keys, is_connector);
 }
 
+bool KVCacheManager::queryTransferTasks(const QueryTransferTasksRequestPB& request,
+                                       QueryTransferTasksResponsePB& response) const {
+    response.clear_tasks();
+    if (!block_tree_cache_) return false;
+    using State = TransferTaskRegistry::State;
+    using PB = QueryTransferTasksResponsePB::TaskState;
+    for (const auto& id : request.task_ids()) {
+        auto* entry = response.add_tasks();
+        entry->set_task_id(id);
+        switch (block_tree_cache_->queryTransferTask(id)) {
+            case State::NOT_FOUND: entry->set_state(PB::NOT_FOUND); break;
+            case State::RUNNING: entry->set_state(PB::RUNNING); break;
+            case State::FINISHED: entry->set_state(PB::FINISHED); break;
+        }
+    }
+    return true;
+}
+
+bool KVCacheManager::queryKVCMOperations(const QueryKVCMOperationsRequestPB& request,
+                                         QueryKVCMOperationsResponsePB& response) const {
+    response.clear_operations();
+    using State = KVCMOperationRegistry::State;
+    using PB = QueryKVCMOperationsResponsePB::OperationState;
+    for (const auto& id : request.operation_ids()) {
+        auto* entry = response.add_operations();
+        entry->set_operation_id(id);
+        switch (kvcm_operation_registry_.query(id)) {
+            case State::NOT_FOUND: entry->set_state(PB::NOT_FOUND); break;
+            case State::RUNNING: entry->set_state(PB::RUNNING); break;
+            case State::FINISHED: entry->set_state(PB::FINISHED); break;
+        }
+    }
+    return true;
+}
+
+bool KVCacheManager::forgetKVCMOperation(const std::string& operation_id) {
+    return kvcm_operation_registry_.forget(operation_id);
+}
+
 bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
     if (request.has_remote_request()) {
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
@@ -749,14 +788,31 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
             return false;
         }
         const auto& remote_request = request.remote_request();
-        const bool  success        = backend->execute(remote_request, *response.mutable_remote_response());
-        if (remote_request.op() == REMOTE_OPERATION_READ || remote_request.op() == REMOTE_OPERATION_WRITE) {
-            // A handled transfer failure is carried in remote_response so the
-            // coordinator can distinguish failure from timeout. Keep the RPC
-            // successful long enough to deliver that payload to rank 0.
+        const bool  is_transfer =
+            remote_request.op() == REMOTE_OPERATION_READ || remote_request.op() == REMOTE_OPERATION_WRITE;
+        if (!is_transfer) {
+            return backend->execute(remote_request, *response.mutable_remote_response());
+        }
+
+        const auto& operation_id = remote_request.operation_id();
+        if (!kvcm_operation_registry_.start(operation_id)) {
+            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: duplicate or empty KVCM operation id");
+            // The caller must retain its blocks and query the existing operation
+            // record before releasing them. An unspecified status would be
+            // accepted as legacy success by the response aggregator.
+            response.mutable_remote_response()->set_transfer_status(REMOTE_TRANSFER_STATUS_COMPLETION_UNKNOWN);
             return true;
         }
-        return success;
+        // A handled transfer failure is carried in remote_response so the
+        // coordinator can distinguish failure from timeout. Keep the RPC
+        // successful long enough to deliver that payload to rank 0.
+        auto& remote_response = *response.mutable_remote_response();
+        backend->execute(remote_request, remote_response);
+        // The SDK can finish accessing the payload after the transfer deadline.
+        if (remote_response.payload_buffer_safe()) {
+            kvcm_operation_registry_.finish(operation_id);
+        }
+        return true;
 #else
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: KVCM support is not compiled in");
         return false;
@@ -798,7 +854,8 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
                                timeout,
                                request.mem_request().has_transfer_request_id() ?
                                    std::optional<int64_t>(request.mem_request().transfer_request_id()) :
-                                   std::nullopt);
+                                   std::nullopt,
+                               request.mem_request().task_id());
     transfer_task.setTraceId(request.mem_request().transfer_trace_id());
     const auto status = block_tree_cache_->executeTransfer(std::move(transfer_task));
     BlockTransferRequestConverter::encodeTransferResult(*memory_response, status);

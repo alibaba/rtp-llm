@@ -609,7 +609,7 @@ public:
         std::vector<FunctionRequestPB> requests(static_cast<size_t>(parallelism_config_.tp_size));
         const auto&                    spec_info = group_policy_->spec_info_map();
         const std::string              trace_id  = nextTraceId("read", read_trace_sequence_);
-        initializeRequests(requests, REMOTE_OPERATION_READ, trace_id);
+        initializeRequests(requests, REMOTE_OPERATION_READ, trace_id, request.operation_id);
         struct OriginBinding {
             size_t                        key;
             DeviceBlockPoolPtr            pool;
@@ -871,7 +871,7 @@ public:
             std::vector<FunctionRequestPB> requests(
                 static_cast<size_t>(request.decode_completion ? target_prefill_tp_ : parallelism_config_.tp_size));
             ActualUriGather                actual_uri_gather(requests.size());
-            initializeRequests(requests, REMOTE_OPERATION_WRITE, trace_id);
+            initializeRequests(requests, REMOTE_OPERATION_WRITE, trace_id, request.operation_id);
             const auto key_indices = unmaskedKeyIndices(write_location.block_mask, valid_keys_size);
             RTP_LLM_CHECK_WITH_INFO(key_indices.size() == write_location.locations.size(),
                                     "KVCM write mask/location mismatch: keys=%zu locations=%zu",
@@ -2007,10 +2007,12 @@ private:
 
     void initializeRequests(std::vector<FunctionRequestPB>& requests,
                             RemoteOpType                    operation,
-                            const std::string&              trace_id) const {
+                            const std::string&              trace_id,
+                            const std::string&              operation_id) const {
         for (auto& request : requests) {
             request.mutable_remote_request()->set_op(operation);
             request.mutable_remote_request()->set_trace_id(trace_id);
+            request.mutable_remote_request()->set_operation_id(operation_id);
         }
     }
 
@@ -2064,9 +2066,12 @@ private:
                     throw std::runtime_error("KVCM task expired before rank submission");
                 }
                 context->set_deadline(std::chrono::system_clock::now() + *remaining);
+                // Broadcast setup and deadline checks can fail before any RPC.
+                // Once a rank is attempted, retain uncertainty even if a later
+                // rank fails to submit or the RPC returns an error.
+                source_may_be_touched = true;
                 return stub->AsyncExecuteFunction(context.get(), request, queue);
             };
-            source_may_be_touched = true;
             auto result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
                 requests, timeout_ms, rpc_call, storage_request.request_id, direction, /*fatal_on_error=*/false);
             if (result == nullptr) {
@@ -2210,6 +2215,7 @@ KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                       
                    std::make_shared<BlockTreeCacheMetricsReporter>(metrics_reporter),
                    parallelism_config.world_rank,
                    std::chrono::milliseconds(kv_cache_config.kvcm_task_timeout_ms)),
+    distributed_completion_queries_(parallelism_config.tp_size > 1 && broadcast_manager != nullptr),
     impl_(std::make_unique<Impl>(*this,
                                  cache_config,
                                  kv_cache_config,
