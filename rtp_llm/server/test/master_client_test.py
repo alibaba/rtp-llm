@@ -327,7 +327,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             _FakeHostServiceWithSlave(),
             [None, FlexlbScheduleResponsePB(code=200, success=True)],
         )
-        with patch("rtp_llm.server.master_client.trans_input") as build:
+        with patch("rtp_llm.server.master_client.trans_master_input") as build:
             response = await client.get_backend_role_addrs([1], 1024, _FakeInput(), 99)
         self.assertTrue(response.is_ok)
         build.assert_not_called()
@@ -377,7 +377,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
                     )
                     original = _FakeInput()
                     with patch(
-                        "rtp_llm.server.master_client.trans_input",
+                        "rtp_llm.server.master_client.trans_master_input",
                         return_value=_FakeInputPB(),
                     ) as build, patch(
                         "rtp_llm.server.master_client.kmonitor.report"
@@ -415,7 +415,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(response=str(response)):
                 client = _CaptureMasterClient(responses=[response])
-                with patch("rtp_llm.server.master_client.trans_input") as build:
+                with patch("rtp_llm.server.master_client.trans_master_input") as build:
                     with self.assertRaises(FtRuntimeException):
                         await client.get_backend_role_addrs([1], 1024, _FakeInput(), 99)
                 build.assert_not_called()
@@ -427,7 +427,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
                 client = _CaptureMasterClient(
                     responses=[FlexlbScheduleResponsePB(code=8409)]
                 )
-                with patch("rtp_llm.server.master_client.trans_input") as build:
+                with patch("rtp_llm.server.master_client.trans_master_input") as build:
                     with self.assertRaises(FtRuntimeException):
                         await client.get_backend_role_addrs(
                             [1], 1024, _FakeInput(), 99, **kwargs
@@ -440,7 +440,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             responses=[FlexlbScheduleResponsePB(code=8409)] * 2
         )
         with patch(
-            "rtp_llm.server.master_client.trans_input", return_value=_FakeInputPB()
+            "rtp_llm.server.master_client.trans_master_input", return_value=_FakeInputPB()
         ) as build:
             with self.assertRaises(FtRuntimeException) as raised:
                 await client.get_backend_role_addrs([1], 1024, _FakeInput(), 99)
@@ -457,7 +457,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             time=lambda: 0, monotonic=Mock(side_effect=[10.0, 13.1])
         )
         with patch("rtp_llm.server.master_client.time", clock), patch(
-            "rtp_llm.server.master_client.trans_input", return_value=_FakeInputPB()
+            "rtp_llm.server.master_client.trans_master_input", return_value=_FakeInputPB()
         ):
             with self.assertRaises(FtRuntimeException) as raised:
                 await client.get_backend_role_addrs([1], 1024, _FakeInput(), 99)

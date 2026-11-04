@@ -48,6 +48,7 @@ from rtp_llm.server.mm_cache_metadata import (
     metadata_to_proto,
 )
 from rtp_llm.server.request_headers import extract_request_headers
+from rtp_llm.server.v41_input_transfer import V41InputTransfer
 from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
 
 
@@ -130,13 +131,14 @@ def _abort_ft_runtime(context, error: FtRuntimeException) -> None:
     context.abort(status, format_mm_rpc_error(error))
 
 
-class MultimodalRpcServer(MultimodalRpcServiceServicer):
+class MultimodalRpcServer(V41InputTransfer, MultimodalRpcServiceServicer):
     def __init__(
         self,
         mm_process_engine: MMProcessEngine,
         transport_config=None,
         local_device_id: int = 0,
     ):
+        V41InputTransfer.__init__(self)
         self.engine = mm_process_engine
         self._transport = create_mm_output_transport(transport_config, local_device_id)
 
@@ -298,6 +300,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         return EmptyPB()
 
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
+        multimodal_inputs = self.resolve_v41_inputs(multimodal_inputs, context)
         tags = {"source": "vit_server"}
         start_us = _now_us()
         lifecycle_reported = False

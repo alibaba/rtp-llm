@@ -14,7 +14,7 @@ from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
     multimodal_cache_keys,
-    trans_input,
+    trans_master_input,
 )
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
@@ -315,6 +315,17 @@ class BackendRPCServerVisitor:
                 raise FtRuntimeException(
                     ExceptionType.DEADLINE_EXCEEDED, "ViT routing deadline exceeded"
                 )
+            # A stale heartbeat may discover BATCH mode only during Schedule.
+            # Upload before either route so that retry cannot send patches to Master.
+            await self.model_rpc_client.upload_v41_inputs(
+                input, selected_vit, remaining
+            )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise FtRuntimeException(
+                    ExceptionType.DEADLINE_EXCEEDED,
+                    "ViT patch upload deadline exceeded",
+                )
             route_args["timeout_s"] = remaining
         if getattr(self, "_mm_cache_routing", False) and getattr(
             input, "mm_inputs", None
@@ -441,7 +452,7 @@ class BackendRPCServerVisitor:
                 input=input,
                 request_id=input.request_id,
                 input_pb=(
-                    trans_input(input)
+                    trans_master_input(input)
                     if self.host_service.requires_generate_input(
                         self.host_service.get_master_addr()
                     )
@@ -538,7 +549,7 @@ class BackendRPCServerVisitor:
                     input=input,
                     request_id=input.request_id,
                     input_pb=(
-                        trans_input(input)
+                        trans_master_input(input)
                         if self.host_service.requires_generate_input(
                             self.host_service.get_master_addr()
                         )
@@ -581,6 +592,10 @@ class BackendRPCServerVisitor:
             route_result.error_message or "",
         )
         input.mm_token_expansion = None
+        if getattr(input, "v41_payload_id", ""):
+            # Domain fallback can select a different ViT. It sends patches directly
+            # to the backend and must not carry the previous worker's handle.
+            await self.model_rpc_client.release_v41_inputs(input)
         return route_result
 
     def _report_recent_cache_key_metrics(self, block_cache_keys: List[int]) -> None:
@@ -925,6 +940,7 @@ class BackendRPCServerVisitor:
             is_streaming = bool(getattr(input.generate_config, "is_streaming", False))
             first_exc: Optional[BaseException] = None
             while True:
+                current_attempt = attempt_input
                 yielded_output = False
                 try:
                     stream = await route_and_enqueue(attempt_input)
@@ -1016,6 +1032,9 @@ class BackendRPCServerVisitor:
                         e,
                     )
                     await asyncio.sleep(min(0.2, 0.05 * attempt))
+                finally:
+                    if getattr(current_attempt, "v41_payload_id", ""):
+                        await self.model_rpc_client.release_v41_inputs(current_attempt)
 
         return stream_with_aux_info()
 
@@ -1028,11 +1047,15 @@ class BackendRPCServerVisitor:
             self.check_sp_supported(input)
             self.check_prefill_cp_supported(input)
 
-        if self.host_service.service_available:
+        try:
+            if self.host_service.service_available:
+                for input in inputs:
+                    await self.route_ips(input)
+            return await self.model_rpc_client.batch_enqueue(inputs)
+        finally:
             for input in inputs:
-                await self.route_ips(input)
-
-        return await self.model_rpc_client.batch_enqueue(inputs)
+                if getattr(input, "v41_payload_id", ""):
+                    await self.model_rpc_client.release_v41_inputs(input)
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:
         roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(

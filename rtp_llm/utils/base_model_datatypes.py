@@ -91,6 +91,9 @@ class GenerateInput:
     group_id: int = -1  # Batch group ID for force batch grouping, -1 means not set
     v41_inputs: Any = None
     enqueued_by_master: bool = False
+    # Per-attempt direct-upload receipt. dataclasses.replace resets these on retry.
+    v41_payload_id: str = field(default="", init=False, repr=False)
+    v41_payload_vit: Optional[RoleAddr] = field(default=None, init=False, repr=False)
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
     # Internal receipt from ViT metadata, bound to the selected worker and media.

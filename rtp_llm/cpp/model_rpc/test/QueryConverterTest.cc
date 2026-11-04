@@ -735,4 +735,21 @@ TEST_F(QueryConverterTest, V41TypedMetadataRoundTripPreservesCanonicalTokensAndP
     EXPECT_TRUE(torch::equal(input->v41_inputs->image_mask, input->v41_inputs->token_types.ne(-1)));
 }
 
+TEST_F(QueryConverterTest, V41DirectUploadPreservesMetadataWithoutReadingAbsentPatches) {
+    auto  wire  = v41ImageRequest();
+    auto* typed = wire.mutable_v41_inputs();
+    typed->set_payload_id(std::string(32, 'a'));
+    EXPECT_THROW(QueryConverter::transQuery(&wire), std::invalid_argument);
+    typed->mutable_images(0)->clear_patches();
+    auto input = QueryConverter::transQuery(&wire);
+    ASSERT_TRUE(input->v41_inputs);
+    EXPECT_EQ(input->v41_inputs->payload_id, std::string(32, 'a'));
+    ASSERT_EQ(input->v41_inputs->images.size(), 1);
+    EXPECT_FALSE(input->v41_inputs->images[0].patches.defined());
+    EXPECT_EQ(input->v41_inputs->images[0].content_sha256, std::string(64, 'a'));
+    EXPECT_EQ(input->v41_inputs->images[0].types.numel(), 4);
+    typed->clear_payload_id();
+    EXPECT_THROW(QueryConverter::transQuery(&wire), std::invalid_argument);
+}
+
 }  // namespace rtp_llm

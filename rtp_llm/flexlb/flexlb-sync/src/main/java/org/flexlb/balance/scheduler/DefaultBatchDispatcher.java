@@ -940,6 +940,13 @@ public class DefaultBatchDispatcher {
             throw new IllegalArgumentException(
                     "request_id mismatch between schedule request and GenerateInputPB");
         }
+        // Prefill resolves generic multimodal inputs from URLs and preprocessing metadata.
+        // Inline tensors are unused on that path and must not inflate the batch RPC.
+        for (int index = 0; index < input.getMultimodalInputsCount(); index++) {
+            if (input.getMultimodalInputs(index).hasMultimodalTensor()) {
+                input.getMultimodalInputsBuilder(index).clearMultimodalTensor();
+            }
+        }
         // This batch RPC carries independent requests. Propagate each Schedule
         // parent in its own payload, never in the shared RPC metadata.
         if (FlexlbTrace.isEnabled() && item.ctx().getTraceContext() != null) {
@@ -966,7 +973,19 @@ public class DefaultBatchDispatcher {
         // (metrics tagging only). normalize() always sets 1-100, so every
         // dispatched request carries its priority into the proto field.
         Request request = item.ctx().getRequest();
+        if (input.hasV41Inputs() && !input.getV41Inputs().getPayloadId().isEmpty()) {
+            if (request == null || request.getSelectedVit() == null) {
+                throw new IllegalArgumentException("V4.1 upload requires the selected ViT route");
+            }
+            if (input.getV41Inputs().getImagesList().stream()
+                    .anyMatch(image -> image.hasPatches())) {
+                throw new IllegalArgumentException("V4.1 upload reference contains inline patches");
+            }
+        }
         if (request != null) {
+            if (request.getSelectedVit() != null) {
+                addRoleAddr(config, buildRoleAddr(request.getSelectedVit()));
+            }
             input.setPriority(request.getPriority());
         }
         return input.build();

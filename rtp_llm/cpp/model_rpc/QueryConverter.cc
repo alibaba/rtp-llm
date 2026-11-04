@@ -283,6 +283,7 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
                                         + std::to_string(typed.schema_version()));
         }
         auto prepared         = std::make_shared<V41RequestInputs>();
+        prepared->payload_id  = typed.payload_id();
         prepared->token_types = torch::from_blob(const_cast<int32_t*>(typed.token_types().data()),
                                                  {typed.token_types_size()},
                                                  torch::kInt32)
@@ -296,7 +297,14 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
             image.start   = source.start();
             image.n_vit_h = source.n_vit_h();
             image.n_vit_w = source.n_vit_w();
-            image.patches = transTensor(source.patches());
+            if (typed.payload_id().empty()) {
+                if (!source.has_patches()) {
+                    throw std::invalid_argument("V4.1 image requires patches or a direct-upload reference");
+                }
+                image.patches = transTensor(source.patches());
+            } else if (source.has_patches()) {
+                throw std::invalid_argument("V4.1 direct-upload reference must not contain inline patches");
+            }
             image.types =
                 torch::from_blob(const_cast<int32_t*>(source.types().data()), {source.types_size()}, torch::kInt32)
                     .clone();
