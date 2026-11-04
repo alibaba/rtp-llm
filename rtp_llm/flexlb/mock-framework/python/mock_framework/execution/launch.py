@@ -8,7 +8,7 @@ from .engines import ROLES
 
 def prepare_launch(raw, case, base):
     """Launch recipes are developer bindings, separate from case business configuration."""
-    fields(raw, {'components', 'prometheus', 'zookeeper', 'engine_mode'}, {'components'}, where='launch')
+    fields(raw, {'components', 'prometheus', 'zookeeper'}, {'components'}, where='launch')
     if not isinstance(raw['components'], dict):
         raise ExecutionError('launch components must be a mapping')
     if 'zookeeper' in raw['components']:
@@ -47,13 +47,7 @@ def prepare_launch(raw, case, base):
     missing = set(case.environment) - set(components)
     if missing:
         raise ExecutionError(f'Missing component launch recipes: {sorted(missing)}')
-    mode = raw.get('engine_mode', 'shared')
-    if mode not in ('shared', 'isolated'):
-        raise ExecutionError('engine_mode must be shared or isolated')
-    engine_recipes = [recipe for role, recipe in components.items() if role in ROLES]
-    if mode == 'shared' and engine_recipes and any(recipe != engine_recipes[0] for recipe in engine_recipes[1:]):
-        raise ExecutionError('Shared Engine JVM requires identical command, cwd, env and startup_timeout for all Engine roles; put instance settings in config')
-    result = {'components': components, 'engine_mode': mode}
+    result = {'components': components}
     if zookeeper is not None:
         result['zookeeper'] = zookeeper
     if 'prometheus' in raw:
@@ -63,7 +57,7 @@ def prepare_launch(raw, case, base):
     return result
 
 
-def local_launch(case, java, prometheus, *, framework, engine_mode='shared'):
+def local_launch(case, java, prometheus, *, framework):
     """Bind a Case to locally built RTP, Client, Master and ZooKeeper artifacts."""
     import os
     framework, java = Path(framework).resolve(), Path(java).resolve()
@@ -81,7 +75,7 @@ def local_launch(case, java, prometheus, *, framework, engine_mode='shared'):
 
     prefix = [str(java), '-XX:ActiveProcessorCount=2']
     commands = {}
-    raw = {'engine_mode': engine_mode, 'prometheus': {'binary': str(Path(prometheus).resolve())}}
+    raw = {'prometheus': {'binary': str(Path(prometheus).resolve())}}
     if 'master' in case.environment:
         config = case.environment['master']['config']
         if not {'FLEXLB_CONFIG', 'MODEL_SERVICE_CONFIG'} <= config.keys():
@@ -98,8 +92,8 @@ def local_launch(case, java, prometheus, *, framework, engine_mode='shared'):
         commands['master'] = prefix + ['-Dflexlb.monitor.metric-whitelist=flexlb_', '-cp', classpath, 'org.flexlb.MasterNode']
         raw['zookeeper'] = {'command': master_prefix + ['org.flexlb.mock.master.ZookeeperNode'], 'startup_timeout': '60s'}
     if {'prefill', 'decode', 'vit'} & case.environment.keys():
-        engine = prefix + ['-cp', str(artifact('java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')),
-                           'org.flexlb.mock.host.EngineHost']
+        engine = prefix + ['-cp', str(artifact('java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar')),
+                           'org.flexlb.mock.engine.EngineMain']
         commands.update(prefill=engine, decode=engine, vit=engine)
     if 'client' in case.environment:
         commands['client'] = prefix + ['-jar', str(artifact('java/client/target/mock-client-1.0-SNAPSHOT-all.jar'))]

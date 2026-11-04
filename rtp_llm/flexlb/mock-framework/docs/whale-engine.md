@@ -12,7 +12,7 @@ Whale 拆分部署的角色类型使用 `PY_PREFILL`、`PY_DECODE`、`PY_VIT`、
 JAVA_HOME=/path/to/jdk21 python3 scripts/package-engine.py
 ```
 
-脚本调用现有 Maven 构建入口，编译 `java/host` 及其依赖，生成 `target/image`。该目录只包含 Dockerfile、固定启动脚本、Engine JAR 和 build-manifest.json。manifest 记录源码 SHA、CI 配方 SHA（本地未提供时为空）、JAR SHA256；打包默认跳过单测执行，并如实记录 tests_executed=false。修改工作区后做的本地打包不能仅凭 HEAD SHA 作为干净源码构建的证明。
+脚本调用现有 Maven 构建入口，编译 `java/engine` 及其依赖，生成 `target/image`。该目录只包含 Dockerfile、固定启动脚本、Engine JAR 和 build-manifest.json。manifest 记录源码 SHA、CI 配方 SHA（本地未提供时为空）、JAR SHA256；打包默认跳过单测执行，并如实记录 tests_executed=false。修改工作区后做的本地打包不能仅凭 HEAD SHA 作为干净源码构建的证明。
 
 ```sh
 docker build -t mock-engine:local target/image
@@ -79,7 +79,7 @@ Engine 只启用一个指标后端，不需要额外部署开关。公共构建�
 
 两种后端消费同一份结构化快照，各自只有一个采集入口，不解析 Prometheus 文本，不重复清空窗口。快照里的 QPS 已是速率、counter 是累计值，KMonitor 按 Gauge 上报，避免再次转换成 QPS；Histogram bucket/sum/count 保留为同名数值序列，不冒充原始延迟样本。SDK 的 JVM 内置资源采集关闭，避免当成每个模拟 Engine 的资源。指标实例在关闭前停止其采集线程；SDK 为 JVM 共享，在进程退出时关闭。
 
-缺少 provider 时使用 Prometheus；provider 存在但 SDK 加载或初始化失败则启动失败，不静默回退。运行期间上报异常记录错误并在后续周期继续尝试。打包会检查 reporter、SDK、SPI 及服务启动后 `/metrics` 的互斥行为；本地公共测试不能替代内部 CI 的 SDK 编译、配置测试，以及 Whale 上实际指标验收。内部配置测试命令为 `scripts/build.sh -pl java/host -am -Pinternal-monitoring -Dtest=KMonitorReporterTest -Dsurefire.failIfNoSpecifiedTests=false`。
+缺少 provider 时使用 Prometheus；provider 存在但 SDK 加载或初始化失败则启动失败，不静默回退。运行期间上报异常记录错误并在后续周期继续尝试。打包会检查 reporter、SDK、SPI 及服务启动后 `/metrics` 的互斥行为；本地公共测试不能替代内部 CI 的 SDK 编译、配置测试，以及 Whale 上实际指标验收。内部配置测试命令为 `scripts/build.sh -pl java/engine -am -Pinternal-monitoring -Dtest=KMonitorReporterTest -Dsurefire.failIfNoSpecifiedTests=false`。
 
 ### 配置初始化边界
 

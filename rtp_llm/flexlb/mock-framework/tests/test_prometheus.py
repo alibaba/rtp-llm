@@ -62,9 +62,9 @@ def test_real_prometheus_ingestion_semantic_queries_and_recorded_gates(tmp_path,
     registry = Registry.standard()
     case = compile_case(path, registry)
     java = Path(os.environ.get('JAVA_HOME', '/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home')) / 'bin/java'
-    jar = ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
-    classpath = os.pathsep.join([str(ROOT / 'java/backend/rtp/target/test-classes'), str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
-    launch = prepare_launch({'components': {'prefill': {'command': [str(java), '-cp', str(jar), 'org.flexlb.mock.host.EngineHost']}},
+    jar = ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
+    classpath = os.pathsep.join([str(ROOT / 'java/backend/rtp/target/test-classes'), str(ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
+    launch = prepare_launch({'components': {'prefill': {'command': [str(java), '-cp', str(jar), 'org.flexlb.mock.engine.EngineMain']}},
                              'prometheus': {'binary': str(binary), 'scrape_interval': '100ms'}}, case, tmp_path)
     output = tmp_path / 'result'
 

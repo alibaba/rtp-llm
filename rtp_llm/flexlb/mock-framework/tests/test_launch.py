@@ -23,7 +23,7 @@ def artifacts(tmp_path):
     framework = tmp_path / 'framework with spaces'
     for relative in ('java/master/target/classes/org/flexlb/MasterNode.class',
                      'java/master/target/classes/org/flexlb/mock/master/ZookeeperNode.class',
-                     'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar',
+                     'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar',
                      'java/client/target/mock-client-1.0-SNAPSHOT-all.jar', 'dependency.jar'):
         path = framework / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -36,15 +36,13 @@ def artifacts(tmp_path):
     return framework, java, prometheus
 
 
-@pytest.mark.parametrize('mode', ['shared', 'isolated'])
-def test_local_recipes_round_trip_without_shell_or_cwd_assumptions(case, artifacts, mode):
+def test_local_recipes_round_trip_without_shell_or_cwd_assumptions(case, artifacts):
     framework, java, prometheus = artifacts
-    launch = local_launch(case, java, prometheus, framework=framework, engine_mode=mode)
+    launch = local_launch(case, java, prometheus, framework=framework)
     assert launch == prepare_launch(launch, case, framework)
-    assert launch['engine_mode'] == mode
     assert set(launch['components']) == set(case.environment)
     assert launch['components']['prefill'] == launch['components']['decode']
-    assert launch['components']['prefill']['command'][-1] == 'org.flexlb.mock.host.EngineHost'
+    assert launch['components']['prefill']['command'][-1] == 'org.flexlb.mock.engine.EngineMain'
     assert launch['components']['master']['command'][-1] == 'org.flexlb.MasterNode'
     assert launch['zookeeper']['command'][-1] == 'org.flexlb.mock.master.ZookeeperNode'
     assert launch['components']['client']['command'][-1].endswith('mock-client-1.0-SNAPSHOT-all.jar')
@@ -58,7 +56,7 @@ def test_local_recipes_reject_missing_or_unusable_inputs(case, artifacts, damage
     if damage in ('java', 'prometheus'):
         (java if damage == 'java' else prometheus).chmod(0o644)
     elif damage == 'engine':
-        (framework / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar').unlink()
+        (framework / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar').unlink()
     elif damage == 'master':
         (framework / 'java/master/target/classes/org/flexlb/MasterNode.class').unlink()
     else:

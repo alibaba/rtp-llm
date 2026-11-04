@@ -15,29 +15,29 @@ import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.*;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
-import org.flexlb.mock.host.*;
-import org.flexlb.mock.api.model.Types.None;
+import org.flexlb.mock.engine.rtp.*;
+import org.flexlb.mock.vit.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
 class NativeVisionTest {
     @TempDir Path directory;
-    int port() throws Exception { try(var socket=new ServerSocket(0)) { return socket.getLocalPort(); } }
-    EngineHostApi.Instance create(EngineHost host,String role) throws Exception {
+    com.fasterxml.jackson.databind.JsonNode config(String role) {
         var config=role.equals("vit")?Map.of("patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024, "hidden_size", 4,"mock.vit.skip.download",true,"mm_cache_gpu_max_bytes",1024,"mock.compute",Map.of("forward",Map.of("expression","5")))
             :Map.of("mock.scheduler.mode","group","image_token_id",1000,"seq_size_per_block",2,"max_seq_len",128,"test_block_num",32,"reserve_block_ratio",0,"reuse_cache",true,"mock.compute",Map.of("forward",Map.of("expression","1")));
-        var path=directory.resolve(role+"-0");Files.createDirectories(path);
-        new ObjectMapper().writeValue(path.resolve("config.json").toFile(),Map.of("id",role+"-0","component_role",role,"component",role.equals("vit")?Map.of("config",config):Map.of("engine","rtp","config",config),"environment",Map.of()));
-        return host.create(new EngineHostApi.Create(role+"-0",port(),port()));
+        return new ObjectMapper().valueToTree(Map.of("id", role + "-0", "component_role", role,
+            "component", role.equals("vit") ? Map.of("config", config) : Map.of("engine", "rtp", "config", config)));
     }
-    FlexlbServerStatusPB server(EngineHostApi.Instance node) {
-        var address=node.rpc().split(":");return FlexlbServerStatusPB.newBuilder().setRole(node.role().toUpperCase(Locale.ROOT)).setServerIp(address[0]).setGrpcPort(Integer.parseInt(address[1])).setWorkerGeneration(1).build();
+    FlexlbServerStatusPB server(String role, Map<String, Object> endpoints) {
+        var address=endpoints.get("rpc").toString().split(":");return FlexlbServerStatusPB.newBuilder().setRole(role.toUpperCase(Locale.ROOT)).setServerIp(address[0]).setGrpcPort(Integer.parseInt(address[1])).setWorkerGeneration(1).build();
     }
-    @Test void nativeSingleAndMasterBatchRequestsTraverseVPDInOneHostWithoutSharedState() throws Exception {
-        try(var host=new EngineHost(directory)) {
-            var v=create(host,"vit");var p=create(host,"prefill");var d=create(host,"decode");var routes=List.of(server(v),server(p),server(d));
-            var stages=new AtomicInteger();var epoch=new AtomicInteger(1);var rejectedPin=new AtomicBoolean();var pChannel=ManagedChannelBuilder.forTarget(p.rpc()).usePlaintext().build();
+    @Test void nativeSingleAndMasterBatchRequestsTraverseVPD() throws Exception {
+        try (var v = VitNode.start(VitConfig.load(config("vit")), 0, 0);
+             var p = RtpNode.start(RtpConfig.load(config("prefill")));
+             var d = RtpNode.start(RtpConfig.load(config("decode")))) {
+            var routes = List.of(server("vit", v.endpoints()), server("prefill", p.endpoints()), server("decode", d.endpoints()));
+            var stages=new AtomicInteger();var epoch=new AtomicInteger(1);var rejectedPin=new AtomicBoolean();var pChannel=ManagedChannelBuilder.forTarget(p.rpcAddress()).usePlaintext().build();
             var master=NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1",0)).addService(new FlexlbServiceGrpc.FlexlbServiceImplBase() {
                 @Override public void schedule(FlexlbScheduleRequestPB request,StreamObserver<FlexlbScheduleResponsePB> response) {
                     try {
@@ -72,8 +72,7 @@ class NativeVisionTest {
                     var result=client.send(request,Duration.ofSeconds(8)).completion().toCompletableFuture().get(10,TimeUnit.SECONDS);
                     assertEquals(NativeClient.Outcome.success,result.outcome(),result.toString());assertEquals(3,result.outputTokens());
                 }
-                assertEquals(8,stages.get());assertEquals(3,host.status(new None()).size());
-                host.stop(new EngineHostApi.Stop("vit-0"));assertEquals(2,host.status(new None()).size());
+                assertEquals(8,stages.get());
             } finally { master.shutdownNow().awaitTermination(2,TimeUnit.SECONDS);pChannel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
         }
     }

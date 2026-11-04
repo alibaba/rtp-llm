@@ -14,8 +14,7 @@ from .execution.launch import local_launch
 def _launch(args, case, parser):
     if args.launch is not None or args.java is None or args.prometheus is None:
         parser.error('launch requires --java <Java21 binary> and --prometheus <binary>; --launch is not accepted')
-    launch = local_launch(case, args.java, args.prometheus, framework=Path(__file__).resolve().parents[2],
-                          engine_mode=args.engine_mode or 'shared')
+    launch = local_launch(case, args.java, args.prometheus, framework=Path(__file__).resolve().parents[2])
     encoded = yaml.safe_dump(launch, allow_unicode=True, sort_keys=False)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -44,10 +43,9 @@ def main():
     parser.add_argument('--launch', type=Path, help='Developer component launch recipes')
     parser.add_argument('--java', type=Path, help='Java 21 executable for launch generation')
     parser.add_argument('--prometheus', type=Path, help='Prometheus executable for launch generation')
-    parser.add_argument('--engine-mode', choices=['shared', 'isolated'], help='Engine placement for launch generation; default shared')
     args = parser.parse_args()
-    if args.command != 'launch' and any(value is not None for value in (args.java, args.prometheus, args.engine_mode)):
-        parser.error('--java, --prometheus and --engine-mode are only valid with launch')
+    if args.command != 'launch' and any(value is not None for value in (args.java, args.prometheus)):
+        parser.error('--java and --prometheus are only valid with launch')
     try:
         registry = Registry.standard()
         case = compile_case(args.case, registry, shared_root=args.shared_root)

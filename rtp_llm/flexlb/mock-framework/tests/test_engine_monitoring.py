@@ -13,7 +13,7 @@ import zipfile
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-JAR = ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
+JAR = ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
 JAVA = Path(os.environ['JAVA_HOME']) / 'bin/java' if os.environ.get('JAVA_HOME') else Path(shutil.which('java') or '/usr/bin/java')
 JAVAC = JAVA.with_name('javac')
 
@@ -77,7 +77,7 @@ def test_provider_disables_pull_and_receives_role_metrics(tmp_path, push_provide
                ENABLE_REMOTE_CACHE='false', REPORT_CAPTURE=str(capture), kmonitorTags='test_scope^push-test')
     with (tmp_path / 'engine.log').open('w+') as log:
         process = subprocess.Popen([str(JAVA), '-cp', os.pathsep.join((str(push_provider), str(JAR))),
-                                    'org.flexlb.mock.host.EngineMain'], env=env, stdout=log, stderr=subprocess.STDOUT)
+                                    'org.flexlb.mock.engine.EngineMain'], env=env, stdout=log, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline and process.poll() is None:

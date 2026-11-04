@@ -161,19 +161,19 @@ D 只有 KV 加载成功和生成许可均满足后才进入 Decode；Prefill-on
 | P/D/V Mock Engine | 全部放在同一个 Engine JVM | 每个 Engine 一个 JVM |
 | Client | 每个 Client 独立 JVM | 每个 Client 独立 JVM |
 
-本地运行默认采用共享模式，P/D/V 实例放在一个 JVM；独立模式用于需要进程隔离的实验。模式在运行开始前确定。共享模式新增 Engine 就在已有宿主创建对象；独立模式新增 Engine 就启动专属 JVM。不实现任意多 JVM/多实例装箱、动态迁移或共享宿主不足时自动另开 JVM。共享指代码复用，实例仍独立拥有缓存容量、请求状态和 Scheduler。
+本地 P/D/V 各实例直接启动一个 JVM。Case 通过服务地址引用实例。
 
 实例使用服务地址区分，同 IP 下用端口区分。控制、业务 RPC 和 metrics 地址之间的对应关系留在发现信息中，不向 Case 暴露额外的 JVM 身份。实例之间统一通过 TCP 通信，共 JVM 不另走 in-process 传输。Python 内部仍须保存进程与实例归属，以处理宿主退出和清理。
 
 进程 env、heap 和资源限制属于 JVM；每个 Engine 的业务参数来自自己的配置对象。共 JVM 时不能用修改进程 env 或全局 System properties 的方式切换实例配置。原生 env 风格字段可以保留其名字和值，由实例加载器从显式配置读取。
 
-停止 Engine 是关闭对象：拒绝新请求、终止活动、关闭自己拥有的 RPC/连接、释放资源并移除发现地址。共享宿主中的其他实例继续运行；最后一个 Engine 停止后宿主可保留至实验收尾，供后续扩容。独立模式完成停止后回收专属 JVM。对象清理不依赖 System.gc，也不承诺能强杀某个 Java 线程；关闭超时使实验失败并进入宿主清理。
+停止 Engine 会终止所属 JVM，释放实例监听器和缓存。其他实例继续运行。
 
-Runner 在动作前登记预期停止，结合子进程退出和有界健康检查判断结果；预期停止仍需确认完成，不能吞掉所有异常。停止单个 Engine 不允许对应共享 JVM 意外退出。宿主意外退出映射到其全部实例，记录首个根因，停止剩余发压并清理实验；不自动重启或重放未知结果的写操作。业务请求错误按 Case 门禁判断，不与基础设施退出混为一谈。
+Runner 登记预期停止，确认进程退出后撤销端点。意外退出使实验失败并回收其余进程。
 
 ### 发现文件和产物
 
-进程启动材料和实例产物分目录保存。每个输出文件只有一个写入者，不让多个 Engine 共享同一个输出目录并各自覆盖 `endpoints.json`；宿主若汇总多个实例端点，由宿主统一写。ready/endpoints 采用临时文件加原子替换发布，部分启动失败要回收已经启动的对象。沿用 `components/<角色>-<序号>/` 保存每个实例的 config、effective-config 和 endpoints；共享宿主自己的启动材料、stdout/stderr 单独保存，不能把宿主日志冒充某个 Engine 的专属日志。聚合 topology/discovery 由 Python 单写，实例不得各自覆盖这份文件。
+实例在自己的目录写配置、端点和日志。ready 与 endpoints 原子发布。Python 独占拓扑与服务发现的写入。
 
 Python 维护一份权威的当前发现信息，增加、移除和重启换地址均更新该信息。Master 等消费者能否动态加载发现变更由其自身实现负责，Case 可检查传播结果，框架不替消费者伪造路由更新。显式引用旧地址不能偷偷改指向新实例；一次运行内，Engine 的业务 RPC、控制/metrics 和宿主控制端口统一不复用，跨用途也不能复用，例如不能把旧 metrics 端口分给新 RPC。该约束只覆盖本次 Runner 管理的 Engine 和宿主，不是操作系统级端口预留。
 
@@ -313,7 +313,7 @@ Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API�
 
 强制 group、分块 Prefill、抢占/重算、vLLM 对齐版本和 connector 范围仍待确定。当前 RTP 的有界合批只覆盖现有调度契约。
 
-验收关注可观察行为：两种 JVM 放置下缩容数量和流量总量一致；共 JVM 停单实例不影响其他实例；不同队列容器报告相同请求数；batch 内取消不损伤其他请求；取消/抢占无 KV 泄漏或提前复用；每批 Forward 只记一次；任一基础设施失败不产生虚假的整体 PASS。共享宿主的实际延迟可以不同，不承诺两种放置方式性能相同。
+验收覆盖缩容和扩容后的真实 TCP 请求、取消后的 KV 释放、Forward 指标及异常退出回收。
 
 ## 当前代码职责
 
@@ -326,7 +326,7 @@ Python 接口与 Java 内部协议已分开；Engine 已接通共享/独立宿�
 | `python/mock_framework/interfaces/` | 已接通的 Case 函数：逐 Master 状态、Client start/stop、公共指标与原始 PromQL。 |
 | `java/interfaces/` | Java 内部端点的类型/校验及共享模型定义；不再定义或导出 Case API。 |
 | `java/runtime/` | HTTP 接口绑定、参数和回执校验、调用上下文、实例生命周期句柄和进程监听地址。 |
-| `java/host/` | P/D/V 统一实例装配和可执行 JAR；单实例入口 EngineMain、本地多实例宿主 EngineHost。宿主不包含调度或集群策略。 |
+| `java/engine/` | P/D/V 统一实例装配和可执行 JAR；统一入口 EngineMain。 |
 | `java/master/` | 真实 Master 的启动入口、生产状态到公共读取接口的适配、独立 ZK 启动入口。 |
 | `java/client/` | client0 协调、Player 控速、LoadClient 队列/并发/生命周期、NativeClient 原生收发与实际计时。 |
 | `java/shared/vit/` | 跨后端共用的 V Engine：图像编码、组批、embedding/hash 字节缓存和节点装配。 |
@@ -350,7 +350,7 @@ Python 运行时按以下边界组织。`RunEnvironment` 装配实例并安排�
 | `execution/topology.py` | `Topology` 的当前实例端点及文件发布；读者拿到独立快照。 |
 | `execution/components.py` | Master/Client 通用的配置文件、进程启动、ready 检查与端点登记；原生配置与端点额外校验由调用方提供。 |
 | `execution/master.py` | `MasterGroup` 的 ZK 选举环境、独立 JVM 增减、原生配置和 Master discovery 发布。 |
-| `execution/engines.py` | `EngineHosts` 的实例分配、JVM 放置、扩缩容、成员检查和宿主退出影响范围。 |
+| `execution/engines.py` | `EngineProcesses` 的实例分配、进程启停、端点回读和扩缩容。 |
 | `execution/client_group.py` | `ClientGroup` 的 Client JVM、当前播放待收尾状态、client0 控制与最终汇总校验；流量分片和控速仍由 Java 负责。 |
 | `execution/monitoring.py` | `Prometheus` 的采集器、目标、基线、末次采样和采集完整性记录；不执行 Case 语义查询。 |
 | `execution/launch.py` | 启动配方的结构校验与规范化，不持有运行状态。 |
@@ -439,7 +439,7 @@ PROMETHEUS_BIN=/path/to/prometheus ./scripts/check.sh
 
 ### 独立 Engine 服务与本地实验的边界
 
-EngineInstances 只完成配置解析和实例装配，返回实例及生效配置。EngineHost 负责本地实验的 effective-config/endpoints/ready 文件，并保留新实例不可覆盖旧产物的约束。EngineMain 不依赖这些文件，使用 START_PORT 启动单个服务，在日志中输出配置和地址；平台发现与重拉不经过 Python Runner。
+EngineMain 本地启动时原子发布 effective-config、endpoints 和 ready。Whale 启动时在日志记录有效配置和端点，平台管理发现和重拉。
 
 Engine 的 HTTP 与原生健康检查读取现有 Loop/Scheduler 失败状态，不采集指标。独立进程每秒调用同一检查，不可恢复失败退出。不开新的健康管理模块，不把普通请求失败当作 Engine 故障。
 
