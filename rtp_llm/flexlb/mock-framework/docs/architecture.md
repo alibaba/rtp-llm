@@ -57,7 +57,7 @@ Step 统一为一次接口调用，包含 id、describe、interface、args、wit
 
 普通数值查询直接返回数值，单位声明在接口上；地址集合返回列表，动作返回明确回执，逐 Master 状态保留映射。断言按结构和运算符判断，不按 MetricValue、PerMasterEngines 等业务类型名称偷偷聚合。接口文档和清单可以由 Python 定义导出，用于保存实验现场，不再依赖 Java 构建才能编译 Case。
 
-Python async 只表达非阻塞等待，不代表任意 step 可以脱离 Runner 后台执行。client/start 完成准备和开始命令后返回，Java 自行播放；client/stop 停止并收尾。Client 不引入 task ID、任务 ref 或通用后台任务框架。
+Runner 管理声明了 background 的 Step 任务。任务属于当前 Phase，Phase 结束前会等待或回收这些任务。client/start 返回表示 Java 已确认开始回放，回放仍由 ClientRole 和 Java client0 管理，使用 client/stop 停止并收齐结果。
 
 本轮重构按职责变化整体重写 Registry、Step 模型、编译和执行主链，联动 CLI、启动配方、夹具和构建入口；复用严格 YAML 解析、进程回收、采集与记录等仍成立的机制。Java 内部端点保留明确的请求/响应协议，但不再声明整套 Case API；配置类型留在所属组件，不能随旧接口目录误删。保留引用重校验、固定时间窗口、错误结果和取消清理的验收，不保留另一套旧 Case 执行入口作为兼容分支。
 
@@ -219,7 +219,7 @@ Python 在 stop 或最终清理时收集异常，不增加实时发压监控。�
 
 `client/start` 只接受 `requests_file`，路径指向标准 Protobuf＋Zstd 文件；不接受 inline requests、JSONL、xz 或格式兼容开关。相对路径基于 Case YAML 所在目录，也接受绝对路径。当前所有 Client 位于同一机器并共享文件系统，不支持 URL 或跨机器分发。
 
-唯一输入定义为 `java/client/src/main/proto/client_input.proto`，Java 由 Maven 生成，Python 测试辅助目录 tests/helpers 提交同一 protoc 3.25.1 生成的 client_input_pb2.py；输入读写器 input.py 也仅供框架测试与镜像终验生成、检查测试数据，不发布到 mock_framework 运行包。Request 保存未展开的回放输入：非空、非负 int32 token_ids，正 int32 max_new_tokens（本格式中的固定目标输出长度，LoadClient 发送 ignore_eos=true），可选非负 int32 priority（缺省为 50，显式 0 保留），可选非负 int64 arrival_offset_ms（相对于源起点的毫秒偏移，尚未除以倍速）。可选 images 保存 url、width、height、offset；每张图只占 token_ids 中的一个位置，offset 按升序排列且不得重复。LoadClient 按 checkpoint_path/config.json 中的 image_token_id 将这些位置写为图片标记；Mock V 默认异步下载真实图片，使用 Java 读取尺寸并按文件内容摘要生成模拟特征身份；本地 mock.vit.skip.download=true 时使用回放宽高，其他准入、排队和计算路径相同。Client 查询 V 元数据后计算路由长度和缓存 key，发送给后端的仍是原始媒体输入。P 在进入 Scheduler 前展开图片位置，保留语义图片标记，将逐行特征 hash 单独保存在缓存区间中；hash 不替换语义 token。完整生成参数及真实观测仍不是此播放格式的内容。未知字段、非法请求及不支持的版本均拒绝。
+唯一输入定义为 `java/client/src/main/proto/client_input.proto`，Java 由 Maven 生成，Python 测试辅助目录 python/mock_framework/execution/test/helpers 提交同一 protoc 3.25.1 生成的 client_input_pb2.py；输入读写器 input.py 也仅供框架测试与镜像终验生成、检查测试数据，不发布到 mock_framework 运行包。Request 保存未展开的回放输入：非空、非负 int32 token_ids，正 int32 max_new_tokens（本格式中的固定目标输出长度，LoadClient 发送 ignore_eos=true），可选非负 int32 priority（缺省为 50，显式 0 保留），可选非负 int64 arrival_offset_ms（相对于源起点的毫秒偏移，尚未除以倍速）。可选 images 保存 url、width、height、offset；每张图只占 token_ids 中的一个位置，offset 按升序排列且不得重复。LoadClient 按 checkpoint_path/config.json 中的 image_token_id 将这些位置写为图片标记；Mock V 默认异步下载真实图片，使用 Java 读取尺寸并按文件内容摘要生成模拟特征身份；本地 mock.vit.skip.download=true 时使用回放宽高，其他准入、排队和计算路径相同。Client 查询 V 元数据后计算路由长度和缓存 key，发送给后端的仍是原始媒体输入。P 在进入 Scheduler 前展开图片位置，保留语义图片标记，将逐行特征 hash 单独保存在缓存区间中；hash 不替换语义 token。完整生成参数及真实观测仍不是此播放格式的内容。未知字段、非法请求及不支持的版本均拒绝。
 
 文件以 `MCKINP01` 标识输入格式 v1，之后每批为 4 字节大端压缩长度加一个 Zstd 压缩的 Protobuf InputChunk。帧必须为 single-segment、声明解压长度并带校验和，压缩及解压单批上限均为 4 MiB；每请求 Protobuf 上限 1 MiB，每批至多 1024 个请求。写入器按约 1 MiB 或 1024 请求封批，不累积整个文件。InputChunk.sequence 从 1 连续递增，末批只含 total_requests；缺末批、计数不符、截断或尾随数据均报错。InputChunk 仅用于文件分块，不决定请求发送或 Engine 计算的 batch。输入和分片使用同一份格式与读写器，输入消息与执行证据消息分开定义。
 
@@ -246,10 +246,10 @@ masters 可省略，Client 默认持续发现本实验的全部 Master；显式�
   interface: client/stop
 ```
 
-测试代码通过 tests/helpers/input.py 构造 Protobuf Request 并写压缩文件（下面的导入用于 pytest 或已将 tests 加入 sys.path 的镜像终验脚本）：
+测试代码通过 python/mock_framework/execution/test/helpers/input.py 构造 Protobuf Request 并写压缩文件（下面的导入用于 pytest 或将源码目录 python 加入 sys.path 的镜像终验脚本）：
 
 ```python
-from helpers.input import pb, write_inputs
+from mock_framework.execution.test.helpers.input import pb, write_inputs
 write_inputs("traffic.binpb.zst", (
     pb.Request(token_ids=[1, 2, i + 3], max_new_tokens=3)
     for i in range(20)
@@ -270,7 +270,7 @@ write_inputs("traffic.binpb.zst", (
 
 `NativeClient` 在实际执行边界记录 ISSUED、SCHEDULE_START、SCHEDULE_RESULT、FIRST_TOKEN 和 TERMINAL。同一个逻辑请求的主备尝试共用 request_id，issued 只计一次。记录包含墙钟毫秒、单调耗时、目标 Master、尝试序号、gRPC 状态与业务错误码、首 token 耗时、实际输出 token 数及终态。不记录输入 token 正文或完整响应，错误说明最多 4096 字符，截断会标记。Schedule 响应分别保留传输状态、原始业务 code（成功通常为 200）和可空 response_success；业务拒绝不会伪装成 gRPC 传输失败。Schedule 超时/取消的结果只表示 Client 观察，不证明远端未接收；Cancel 仍是尽力而为。
 
-每个 Client 每轮独占 `components/<client>/playback/<轮次>/requests.binpb.zst`，目录与记录文件拒绝覆盖。公共字段定义是 `java/client/src/main/proto/client_evidence.proto`，Java 在 Maven 构建时生成，Python 在 `python/mock_framework/interfaces/client/` 提交同一 protoc 3.25.1 生成的 `client_evidence_pb2.py`；修改 proto 时必须重新生成两侧，不能分别手写协议。
+每个 Client 每轮独占 `components/<client>/playback/<轮次>/requests.binpb.zst`，目录与记录文件拒绝覆盖。公共字段定义是 `java/client/src/main/proto/client_evidence.proto`，Java 在 Maven 构建时生成，Python 在 `python/mock_framework/execution/roles/` 提交同一 protoc 3.25.1 生成的 `client_evidence_pb2.py`；修改 proto 时必须重新生成两侧，不能分别手写协议。
 
 每个文件由连续帧组成：4 字节大端压缩长度，再接一个带校验和的独立 Zstd frame；解压后为 varint 长度和一个 Protobuf EventBatch。每帧携带版本、Client、playback、帧序号与分片身份，每条事件有连续序号。最后一帧携带 Seal 的 issued/finished 计数。没有额外 JSONL 执行记录或永久逐请求索引，`client/requests` 只在显式查询时解码。
 
@@ -290,7 +290,7 @@ write_inputs("traffic.binpb.zst", (
   args: {outcome: error, limit: 20}
 ```
 
-实现集中在 `python/mock_framework/interfaces/client/`：`__init__.py` 定义现有 start/stop/requests 接口、参数和播放目录选择；`_records.py` 只包含返回值结构、流式解码和完整性校验；`client_evidence_pb2.py` 为生成消息。镜像终验直接复用读取函数。不提供独立请求查询 CLI，也不增加 Java 查询服务、parser 类或存储抽象。
+Case 的 start、stop、requests 各有一个 Step 文件。ClientRole 管理回放，client_evidence.py 负责流式解码和完整性校验，client_evidence_pb2.py 由同一份协议生成。镜像终验直接复用读取函数。不提供独立请求查询 CLI，也不增加 Java 查询服务、parser 类或存储抽象。
 
 ### Python 指标查询与公共指标
 
@@ -337,26 +337,28 @@ Python 接口与 Java 内部协议已分开；Engine 已接通共享/独立宿�
 | `java/shared/compute/` | Forward batch、公式、噪声、Decode 推进、停止模型和可取消计时。 |
 | `java/shared/cache/` | BlockPool 物理容量与引用、KvCache 块租约及前缀发布、BlockTree 叶子候选与驱逐、CacheSequence 语义序列与缓存身份。 |
 | `java/shared/metrics/` | 物理标签、Prometheus 文本导出与窗口均值/QPS 统计；不包含 RTP 调度语义，不提供查询代理。 |
-| `tests/`、各模块 `src/test/` | Python/跨语言集成与 Java 测试；探针不作为正式业务入口。 |
+| Python 各模块的 `test/`、Java 各模块的 `src/test/` | 源码旁的单元测试与集成探针。 |
 | `scripts/` | 构建和检查入口。 |
 
 Python 运行时按以下边界组织。`RunEnvironment` 装配实例并安排启动和收尾顺序，不分发 Case 业务操作；各服务显式接收所需依赖，不接收整个运行环境再修改它的内部状态。
 
 | 模块 | 唯一负责的状态与行为 |
 | --- | --- |
-| `execution/runner.py` | Step 的引用、参数、预算、调用、返回校验、断言、等待与结果；不判断具体接口名。 |
-| `execution/environment.py` | `RunEnvironment` 的静态装配、启动与收尾顺序。 |
-| `execution/processes.py` | `ProcessSupervisor` 的子进程所有权、退出监视、操作中断和回收；不识别 Master、Engine 或 Client 业务。 |
-| `execution/topology.py` | `Topology` 的当前实例端点及文件发布；读者拿到独立快照。 |
-| `execution/components.py` | Master/Client 通用的配置文件、进程启动、ready 检查与端点登记；原生配置与端点额外校验由调用方提供。 |
-| `execution/master.py` | `MasterGroup` 的 ZK 选举环境、独立 JVM 增减、原生配置和 Master discovery 发布。 |
-| `execution/engines.py` | `EngineHosts` 的实例分配、JVM 放置、扩缩容、成员检查和宿主退出影响范围。 |
-| `execution/client_group.py` | `ClientGroup` 的 Client JVM、当前播放待收尾状态、client0 控制与最终汇总校验；流量分片和控速仍由 Java 负责。 |
-| `execution/monitoring.py` | `Prometheus` 的采集器、目标、基线、末次采样和采集完整性记录；不执行 Case 语义查询。 |
-| `execution/launch.py` | 启动配方的结构校验与规范化，不持有运行状态。 |
-| `interfaces/` | Case 参数/返回契约及操作组合；调用对应服务或传输/查询函数。运行时服务不反向导入这一层。 |
+| `execution/runner.py` | Phase 顺序、时间预算、后台任务及整场回收。 |
+| `execution/step/` | Step 基类、注册表、比较器及每个动作的参数、执行和返回契约。 |
+| `execution/environment.py` | RunEnvironment 组装角色、管理 ZooKeeper、安排启停顺序。EndpointRegistry 持有活跃端点并发布 topology.json。 |
+| `execution/processes.py` | ProcessSupervisor 管子进程、监看和回收。角色决定何时启停及哪些退出是预期的。 |
+| `execution/roles/master.py` | MasterRole 管独立 JVM、选举配置、发现发布和原地址重启。 |
+| `execution/roles/engine.py` | EngineRole 分开管理 Host JVM 与 P/D/V 实例。 |
+| `execution/roles/client.py` | ClientRole 管 Client JVM 和回放收尾。Java client0 负责分片、控速与汇总。 |
+| `execution/roles/prometheus.py` | Prometheus 进程、目标、采集基线和末次抓取。 |
+| `execution/launch.py` | 启动配方的结构校验与规范化。 |
+| `execution/transport.py` | 共用 HTTP /invoke 请求和响应封装。 |
+| `execution/run_trace.py` | 运行快照、事件、门禁和终态。 |
 
-拓扑是 Python 根据已校验的实例端点生产的运行记录，不代表生产 Master 的成员状态或主备判断。`Topology` 统一登记与退役，发布当前 topology.json，并把快照交给 `MasterGroup` 更新活动 Master 的 discovery。Master、Client 等消费者自行加载配置；Python 不替它们推导主节点。发布失败使实验报错，保留已登记状态与进程所有权，随后清理；不宣称多个文件的发布是一个事务。
+EndpointRegistry 发布当前端点快照。MasterRole 消费快照，更新活跃 Master 的 discovery。主备状态来自各 Master 的实际观测。发布失败使实验报错，已登记状态和进程所有权留给回收路径处理。
+
+Trace 的两个 JSONL 流共用 `run_id` 和 `seq`。Step 事件、关联动作事件和门禁带有 `phase_id`、`step_id`、`action`。实例就绪或退出时可通过 `instance_id` 和 `generation` 关联。View 优先按 Step 身份匹配指标窗口，旧产物按原有查询时间关联。
 
 启动顺序固定为 Prometheus、ZK、Engine、Master、Client、采集基线。收尾先停止 Engine 健康检查，再收集 Client、完成最后采样，依次清理 Client、Master、Engine、ZK、Prometheus，最后由进程监督器回收剩余进程。某一步失败仍继续后续清理，错误进入最终结果；进程未回收时保留其所有权，不能仅删除内部记录。最终没有存活的受管进程后清空活动拓扑。
 
@@ -381,20 +383,21 @@ P 的 retained 请求计算完成后变成 READY，释放 Forward 槽位但保�
 
 ## 当前接口扩展方式
 
-在 Python 所属接口模块定义 async 函数，参数使用 dataclass、返回值使用类型注解，添加 `@case_interface`，再加入 `interfaces.FUNCTIONS`。例如：
+在 `execution/step/` 添加动作文件。在同一个文件定义参数 dataclass 和 Step 子类，实现异步 `execute()`，用 `@register_step` 声明动作名、读写属性和单位。再将这个类加入 `standard_actions()`。例如：
 
 ```python
 @dataclass(frozen=True)
-class QueueArgs:
+class RestartArgs:
     targets: list[str] | None = None
 
-@case_interface("engine/queue/size", effect="read", unit="requests")
-async def queue_size(ctx, args: QueueArgs) -> int:
-    # 实现负责目标选择、读取和缺失目标校验；此处只是扩展示意。
-    ...
+@register_step("master/restart", effect="write")
+class MasterRestart(Step):
+    @staticmethod
+    async def execute(ctx: StepContext, args: RestartArgs) -> list[str]:
+        return await ctx.runtime.masters.restart(args.targets)
 ```
 
-装饰器生成参数/返回结构，不要求接口基类，也不允许只登记名称而没有实现。边界使用 Annotated/Bounds、duration/range 标记，跨字段规则写在参数 dataclass 的 __post_init__。新增接口不改编译器或 Runner 分发逻辑；非平凡行为必须有测试。运行产物 interfaces.json 保存本次 Python 注册定义，构建不再产生 Java Case catalog。
+编译器绑定动作类。Runner 调用 Step.run()，由基类解析引用、调用动作并校验结果和门禁。角色负责操作的业务状态和资源回收。类型约束可用 Annotated、Bounds、duration 和 range，跨字段约束写在参数的 __post_init__。接口目录写入 interfaces.json。
 
 Java 内部端点仍可使用 ApiServer 和 Endpoint 的序列化/校验机制；它只约束实例请求与响应，不承担 Case 目标选择、扩缩容计数、指标聚合或 Python ref 语法。当前 MasterStateApi 使用这条内部协议；未接通的 Java Case 声明及 PrometheusQueries 已删除。
 
