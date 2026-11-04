@@ -2,6 +2,102 @@ py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
 
+
+py_test(
+    name = "diffusion_gemma_fused_ab_test",
+    srcs = [
+        "diffusion_gemma_fused_ab_test.py",
+        "diffusion_gemma_realweight_test.py",
+        "diffusion_gemma_test.py",
+    ],
+    main = "diffusion_gemma_fused_ab_test.py",
+    data = ["//:rtp_compute_ops"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:lora",
+        "//rtp_llm:models",
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib_lite",
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:torch",
+        "//rtp_llm:transformers",
+    ],
+    env = {
+        "DGM_REAL_CKPT": "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+    },
+    # opt r8 contract-6 fused elementwise kernels (qkv norm+rope, add+scale,
+    # router scale fold) vs their exact torch chains, real layer-0 weights
+    # bf16; needs the FUSE-staged checkpoint, remote/CI GPU target.
+    tags = ["H20_CU13"],
+    exec_properties = {
+        "gpu": "H20_CU13",
+        "gpu_count": "1",
+    },
+    timeout = "eternal",
+)
+
+
+py_test(
+    name = "diffusion_gemma_moe_ab_test",
+    srcs = [
+        "diffusion_gemma_moe_ab_test.py",
+        "diffusion_gemma_realweight_test.py",
+        "diffusion_gemma_test.py",
+    ],
+    main = "diffusion_gemma_moe_ab_test.py",
+    data = ["//:rtp_compute_ops"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:lora",
+        "//rtp_llm:models",
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib_lite",
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:torch",
+        "//rtp_llm:transformers",
+    ],
+    env = {
+        "DGM_REAL_CKPT": "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+    },
+    # Fused-vs-loop expert A/B with real weights (bf16-noise guard); needs
+    # the FUSE-staged checkpoint, so it is a manual remote/CI GPU target.
+    tags = ["H20_CU13"],
+    exec_properties = {
+        "gpu": "H20_CU13",
+        "gpu_count": "1",
+    },
+    timeout = "eternal",
+)
+
+py_test(
+    name = "diffusion_gemma_reuse_ab_test",
+    srcs = [
+        "diffusion_gemma_realweight_test.py",
+        "diffusion_gemma_test.py",
+    ],
+    main = "diffusion_gemma_realweight_test.py",
+    data = ["//:rtp_compute_ops"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:lora",
+        "//rtp_llm:models",
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib_lite",
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:torch",
+        "//rtp_llm:transformers",
+    ],
+    env = {
+        "DGM_REAL_CKPT": "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+    },
+    tags = ["H20_CU13"],
+    exec_properties = {
+        "gpu": "H20_CU13",
+        "gpu_count": "1",
+    },
+    timeout = "eternal",
+)
+
 py_test(
     name = "qwen_gdn_graph_replay_test_rocm",
     srcs = ["qwen_gdn_graph_replay_test.py"],
@@ -44,6 +140,107 @@ py_test(
         "gpu_count": "1",
     },
     tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "diffusion_gemma_test",
+    srcs = ["diffusion_gemma_test.py"],
+    data = ["//:rtp_compute_ops"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:lora",
+        "//rtp_llm:models",
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib_lite",
+        "//rtp_llm/models_py:models",
+    ],
+    size = "small",
+    # Imports rtp_llm.ops (librtp_compute_ops links libcuda): needs a GPU
+    # worker. Untagged, the UT lanes schedule it on CPU-only workers where
+    # the import dies with libcuda.so.1 not found (r61 ut-sm8x).
+    tags = [
+        "H20_CU13",
+    ],
+    exec_properties = {
+        "gpu": "H20_CU13",
+        "gpu_count": "1",
+    },
+)
+
+py_test(
+    name = "diffusion_gemma_realweight_test",
+    srcs = [
+        "diffusion_gemma_realweight_test.py",
+        "diffusion_gemma_test.py",
+    ],
+    data = ["//:rtp_compute_ops"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:lora",
+        "//rtp_llm:models",
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib_lite",
+        "//rtp_llm/models_py:models",
+    ],
+    size = "medium",
+    # Real-weights layer math check; runs only with DGM_REAL_CKPT set
+    # (skipped in CI). Use --spawn_strategy=standalone locally so the
+    # host-visible checkpoint path resolves.
+    # Imports rtp_llm.ops (librtp_compute_ops links libcuda): needs a GPU
+    # worker. Untagged, the UT lanes schedule it on CPU-only workers where
+    # the import dies with libcuda.so.1 not found (r61 ut-sm8x).
+    tags = [
+        "H20_CU13",
+    ],
+    exec_properties = {
+        "gpu": "H20_CU13",
+        "gpu_count": "1",
+    },
+)
+
+
+py_test(
+    name = "diffusion_gemma_loader_test",
+    srcs = ["diffusion_gemma_loader_test.py"],
+    data = ["//:rtp_compute_ops"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:lora",
+        "//rtp_llm:models",
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib_lite",
+        "//rtp_llm/models_py:models",
+    ],
+    size = "small",
+)
+
+py_test(
+    name = "diffusion_gemma_proposer_test",
+    srcs = [
+        "diffusion_gemma_proposer_test.py",
+        "diffusion_gemma_test.py",
+    ],
+    main = "diffusion_gemma_proposer_test.py",
+    data = ["//:rtp_compute_ops"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:lora",
+        "//rtp_llm:models",
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib_lite",
+        "//rtp_llm/models_py:models",
+    ],
+    size = "small",
+    # Imports rtp_llm.ops (librtp_compute_ops links libcuda): needs a GPU
+    # worker. Untagged, the UT lanes schedule it on CPU-only workers where
+    # the import dies with libcuda.so.1 not found (r61 ut-sm8x).
+    tags = [
+        "H20_CU13",
+    ],
+    exec_properties = {
+        "gpu": "H20_CU13",
+        "gpu_count": "1",
+    },
 )
 
 py_test(

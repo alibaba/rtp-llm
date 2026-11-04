@@ -214,6 +214,15 @@ def _register_builtin_lazy_models() -> None:
         "deepseek_v4_dspark", "rtp_llm.models.deepseek_v4", ["DSparkDraftModel"]
     )
     register_lazy_model(
+        "diffusion_gemma",
+        "rtp_llm.models.diffusion_gemma",
+        ["DiffusionGemmaForBlockDiffusion"],
+        ["google/diffusiongemma-26B-A4B-it"],
+    )
+    register_lazy_model(
+        "diffusion_gemma_proposer", "rtp_llm.models.diffusion_gemma_proposer"
+    )
+    register_lazy_model(
         "deepseek_vl_v2",
         "rtp_llm.models.deepseek_vl2.deepseek_vl2",
         ["DeepseekVL2ForCausalLM"],

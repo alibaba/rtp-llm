@@ -1,0 +1,370 @@
+{
+  "model_type": "diffusion_gemma",
+  "model_path": "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+  "query_result": [
+    {
+      "endpoint": "/v1/chat/completions",
+      "case_name": "vision_basic",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "data/model/qwen_vl/1.jpeg"
+                }
+              },
+              {
+                "type": "text",
+                "text": "Describe this image in one sentence."
+              }
+            ]
+          }
+        ],
+        "max_tokens": 256,
+        "temperature": 0.0,
+        "top_p": 0.01
+      },
+      "result": {
+        "id": "chat-",
+        "object": "chat.completion",
+        "created": 1792509665,
+        "model": "",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "yı<|tool_call><|tool_call>ther�<|tool_call>�<|tool_call>�re�ের�<|tool_call>�<|tool_call>ver<|tool_call>verre�<|tool_call>ma�ver<|tool_call>�<|tool_call>�maver<|tool_call>arma�maver<|tool_call>�<|tool_call>���tever<|tool_call>verreververver<|tool_call>ma<|tool_call>�maverar�<|tool_call>ararver�� f�<|tool_call>ver���ar<|tool_call>vermavermaverar�portma<|tool_call>ver<|tool_call>ver<|tool_call>vermaar<|tool_call>�<|tool_call>ma<|tool_call>�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>ma<|tool_call><|tool_call><|tool_call>�<|tool_call>ma<|tool_call>verar�<|tool_call>�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>��ma<|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>ma�ensmama<|tool_call>ma<|tool_call>�ar�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>�<|tool_call>ver<|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>��ver<|tool_call>verens�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>ma<|tool_call>ma<|tool_call>�<|tool_call>ight<|tool_call>�<|tool_call>�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>�<|tool_call>veronver<|tool_call>�<|tool_call>ma<|tool_call>he��<|tool_call>�<|tool_call>�<|tool_call><|tool_call>��<|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>verereens<|tool_call>�<|tool_call>hearens<|tool_call>�<|tool_call>�<|tool_call><|tool_call><|tool_call>�<|tool_call>heam",
+              "name": null,
+              "reasoning_content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "partial": false,
+              "tool_call_id": null
+            },
+            "finish_reason": "length",
+            "logprobs": null
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 278,
+          "total_tokens": 534,
+          "completion_tokens": 256,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": null,
+            "image_tokens": 260,
+            "video_tokens": null
+          }
+        }
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "case_name": "vision_cache_reuse",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "data/model/qwen_vl/1.jpeg"
+                }
+              },
+              {
+                "type": "text",
+                "text": "What colors dominate this picture?"
+              }
+            ]
+          }
+        ],
+        "max_tokens": 256,
+        "temperature": 0.0,
+        "top_p": 0.01
+      },
+      "result": {
+        "id": "chat-",
+        "object": "chat.completion",
+        "created": 1792509668,
+        "model": "",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "م<|tool_call><|tool_call><|tool_call>ar<|tool_call>�<|tool_call>�<|tool_call>���<|tool_call>�<|tool_call>�<|tool_call>�he�<|tool_call>verre���<|tool_call>��<|tool_call><|tool_call>�<u>�<|tool_call>�<|tool_call>maarma<|tool_call><|tool_call><mask>�<|tool_call>�ma���<|tool_call>�<|tool_call>�ar�reverarver<|tool_call>�ar�����<|tool_call>�<|tool_call>�<|tool_call>��ver<|tool_call>maon�<|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>��ver<|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>�<|tool_call>�<|tool_call>�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>�te�<|tool_call>�<|tool_call>�<|tool_call>ens<|tool_call>ma<|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>veronens<|tool_call>ar<|tool_call>�<|tool_call>ma�ma��<|tool_call>ar<|tool_call>verre�<|tool_call>ver<|tool_call>�<|tool_call>ver�ver�ma<|tool_call>�<|tool_call>�arverarver<|tool_call>verver�<|tool_call>�<|tool_call>�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>��ver�ma<|tool_call>ver<|tool_call>�<|tool_call>�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>�on�<|tool_call>�<|tool_call>�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>�����<|tool_call>�<|tool_call>���<|tool_call>he<|tool_call>he��he�<|tool_call>�<|tool_call><|tool_call><|tool_call>�<|tool_call>",
+              "name": null,
+              "reasoning_content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "partial": false,
+              "tool_call_id": null
+            },
+            "finish_reason": "length",
+            "logprobs": null
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 277,
+          "total_tokens": 533,
+          "completion_tokens": 256,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 256,
+            "image_tokens": 260,
+            "video_tokens": null
+          }
+        }
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "case_name": "vision_two_images",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Compare the following two images."
+              },
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "data/model/qwen_vl/1.jpeg"
+                }
+              },
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "data/model/qwen_vl/1.jpeg"
+                }
+              }
+            ]
+          }
+        ],
+        "max_tokens": 256,
+        "temperature": 0.0,
+        "top_p": 0.01
+      },
+      "result": {
+        "id": "chat-",
+        "object": "chat.completion",
+        "created": 1792509672,
+        "model": "",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "م<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>ver<|tool_call>verেরver<|tool_call>ver<|tool_call>ver<|tool_call>ver<|tool_call>vermaverarver<|tool_call>ver�ver<|tool_call>ver<|tool_call>ver<|tool_call>ের<|tool_call>ver fver<|tool_call>ের<|tool_call>vermaver<|tool_call>ma<|tool_call>ver<|tool_call><|tool_call><|tool_call>arphver<|tool_call>ver<|tool_call>ver<|tool_call>ververver<|tool_call>�<|tool_call>ver<|tool_call>ver<|tool_call>ar<|tool_call>ma<|tool_call>maverma<|tool_call>ma<|tool_call>ver<|tool_call>ma<|tool_call>ver<|tool_call><|tool_call><|tool_call>ma<|tool_call>ma<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>ver<|tool_call>ma<|tool_call><|tool_call><|tool_call>�<|tool_call>ight<|tool_call>�<|tool_call>ver<|tool_call>ver<|tool_call>ver�vermaver<|tool_call>ma<|tool_call>�<|tool_call>maverver<|tool_call>ver<|tool_call>ma<|tool_call>ma<|tool_call>ver<|tool_call>ver�ight fma fma<|tool_call>ma<|tool_call><|tool_call><|tool_call>�<|tool_call>ma�ma<|tool_call>ver<|tool_call>ver�ens<|tool_call>ens<|tool_call>ens<|tool_call>ver<|tool_call>maaright<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>vermamamaver<|tool_call>ver<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>maarma<|tool_call><|tool_call><|tool_call>ensmaver<|tool_call>ver<|tool_call>hemama<|tool_call>ma<|tool_call>ma<|tool_call>ight<|tool_call><|tool_call><|tool_call><|tool_call>enshe<|tool_call>ens<|tool_call>ma<|tool_call>ma<|tool_call>ma�he<|tool_call><|tool_call>�ma<|tool_call>he<|tool_call>he<|tool_call><|tool_call><|tool_call><|tool_call>maver<|tool_call>ma<|tool_call>ma<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>he<|tool_call>he<|tool_call>he<|tool_call>",
+              "name": null,
+              "reasoning_content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "partial": false,
+              "tool_call_id": null
+            },
+            "finish_reason": "length",
+            "logprobs": null
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 539,
+          "total_tokens": 795,
+          "completion_tokens": 256,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": null,
+            "image_tokens": 520,
+            "video_tokens": null
+          }
+        }
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "case_name": "reuse_full_repeat",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "data/model/qwen_vl/1.jpeg"
+                }
+              },
+              {
+                "type": "text",
+                "text": "What colors dominate this picture?"
+              }
+            ]
+          }
+        ],
+        "max_tokens": 256,
+        "temperature": 0.0,
+        "top_p": 0.01
+      },
+      "result": {
+        "id": "chat-",
+        "object": "chat.completion",
+        "created": 1792509675,
+        "model": "",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "م<|tool_call><|tool_call><|tool_call>ar<|tool_call><|tool_call><|tool_call>�<|tool_call>�<|tool_call>�ens�<|tool_call>ver<|tool_call>�<|tool_call>�<|tool_call>�ver�<|tool_call>�<|tool_call>���<|tool_call>���<|tool_call>ver�ensport�est�<|tool_call><|tool_call><|tool_call>arar�<|tool_call>ver<|tool_call>ens<|tool_call>�on�arver<|tool_call>ver<|tool_call>�ar�<|tool_call>�ar�<|tool_call>�<|tool_call>�<|tool_call>veronmamaver<|tool_call>�<|tool_call>���<|tool_call>�<|tool_call>�<|tool_call>�ar�<|tool_call>�on�<|tool_call>�<|tool_call><|tool_call><mask><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>ar��[multimodal]�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>ver<|tool_call>ma<|tool_call>ma<|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>ma<|tool_call>ver<|tool_call>�<|tool_call>�ar��veronma<|tool_call>veronma<|tool_call>ver�ver�ver<|tool_call>�ma��ver<|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>maar�onma��<|tool_call><|tool_call><|tool_call>�<|tool_call><|tool_call><|tool_call>��te<|tool_call>ens<|tool_call>ver fens<|tool_call>�<|tool_call><|tool_call><|tool_call><tfoot><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>�<|tool_call>�ar���<|tool_call>�<|tool_call>�<|tool_call>�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>�<|tool_call>�<|tool_call>�<tfoot>�he�<|tool_call>�<|tool_call>�<|tool_call>��ens<|tool_call>he<|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>",
+              "name": null,
+              "reasoning_content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "partial": false,
+              "tool_call_id": null
+            },
+            "finish_reason": "length",
+            "logprobs": null
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 277,
+          "total_tokens": 533,
+          "completion_tokens": 256,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 256,
+            "image_tokens": 260,
+            "video_tokens": null
+          }
+        }
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "case_name": "reuse_continuation",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "data/model/qwen_vl/1.jpeg"
+                }
+              },
+              {
+                "type": "text",
+                "text": "Describe this image in one sentence."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": "<|channel><|channel>thought\n<channel|>A young woman sits on the beach, smiling as she gives her Labrador dog a treat during sunset."
+          },
+          {
+            "role": "user",
+            "content": "What is the person in the image doing right now?"
+          }
+        ],
+        "max_tokens": 256,
+        "temperature": 0.0,
+        "top_p": 0.01
+      },
+      "result": {
+        "id": "chat-",
+        "object": "chat.completion",
+        "created": 1792509678,
+        "model": "",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "م<|tool_call><|tool_call>�<|tool_call><|tool_call><|tool_call><|tool_call>ens<|tool_call>ma�ar<|tool_call>�<|tool_call>ar<|tool_call>verensma<|tool_call>verarverrema�ens<|tool_call>�<|tool_call>ens<|tool_call>ver<|tool_call>ma<|tool_call>ma<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>ver<|tool_call>ver<|tool_call>ver<|tool_call>ver<|tool_call>ar<|tool_call>ar�ma<|tool_call>ens<|tool_call>�<|tool_call>�<|tool_call>ma<|tool_call>ververma�ver<|tool_call>ver<|tool_call>ens<|tool_call>���<|tool_call>ver<|tool_call>ver<|tool_call>ver<|tool_call>ver�ma<|tool_call>�<|tool_call>ens<|tool_call>ma<|tool_call>ver��<|tool_call>��<|tool_call><|tool_call>�<|tool_call>���<|tool_call>ma<|tool_call>ight fight<|tool_call>ma<|tool_call>�arver<|tool_call>�<|tool_call>�<|tool_call><|tool_call><|tool_call>ma�mareverarma<|tool_call>mamama��<|tool_call>�<|tool_call>mamama�ma fma�ma<|tool_call>ma<|tool_call>maport�<|tool_call>ma<|tool_call><|tool_call>arar<|tool_call>ar�ar�ma<|tool_call>ma�mahema<|tool_call>ver<|tool_call>�<|tool_call>ight<|tool_call>�<|tool_call>ensremama�<|tool_call>ver�ess<|tool_call>�ar<|tool_call><|tool_call>�arheess���<|tool_call>he<|tool_call>���<|tool_call>ma<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>ens<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>ma<|tool_call>ma<|tool_call>�<|tool_call>�<|tool_call><|tool_call><|tool_call>�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>maonhe<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>he<|tool_call>",
+              "name": null,
+              "reasoning_content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "partial": false,
+              "tool_call_id": null
+            },
+            "finish_reason": "length",
+            "logprobs": null
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 319,
+          "total_tokens": 575,
+          "completion_tokens": 256,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 256,
+            "image_tokens": 260,
+            "video_tokens": null
+          }
+        }
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "case_name": "reuse_mixed_fresh_miss",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "The capital of France is"
+          }
+        ],
+        "max_tokens": 256,
+        "temperature": 0.0,
+        "top_p": 0.01
+      },
+      "result": {
+        "id": "chat-",
+        "object": "chat.completion",
+        "created": 1792509682,
+        "model": "",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "م<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>�<tr>�<|tool_call>���<|tool_call>�<|tool_call>��ar��<|tool_call>���<|tool_call>���ar�<|tool_call>ar�arararar�ar���<|tool_call>�<tr>���<|tool_call>���<|tool_call>���he�<|tool_call>arar�ar��ar<|tool_call>�ar�<|tool_call>arar�<|tool_call>ar<|tool_call>�<|tool_call>�<|tool_call>�<|tool_call>ar<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>�<|tool_call>�<|tool_call><|tool_call><|tool_call>�<|tool_call>���<|tool_call>�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>�<|tool_call>�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>portar��<|tool_call>�<|tool_call>�<|tool_call>�arver�ararar��ar�<|tool_call><|tool_call><|tool_call>���<|tool_call><|tool_call>ar<|tool_call>��<|tool_call>�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>�<|tool_call>�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>arar�<|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call><|tool_call>�<|tool_call>�<|tool_call>�ar�<|tool_call>���<|tool_call>�<|tool_call>�<|tool_call>ar��<|tool_call>ar<|tool_call>�<|tool_call>�<|tool_call>����<|tool_call><|tool_call>",
+              "name": null,
+              "reasoning_content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "partial": false,
+              "tool_call_id": null
+            },
+            "finish_reason": "length",
+            "logprobs": null
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 14,
+          "total_tokens": 270,
+          "completion_tokens": 256,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": null
+        }
+      }
+    }
+  ]
+}

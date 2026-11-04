@@ -29,6 +29,7 @@ class GridRunner:
         tp_size: int = 1,
         generate_config: Optional[Dict[str, Any]] = None,
         num_measures: int = 3,
+        log_path: str = "",
     ):
         self._port = port
         self._dp_size = dp_size
@@ -41,6 +42,7 @@ class GridRunner:
         self._tp_size = tp_size
         self._generate_config = generate_config or {}
         self._num_measures = num_measures
+        self._log_path = log_path
         self._title = "Decode Result" if is_decode else "Prefill Result"
 
     def warmup(self) -> None:
@@ -96,6 +98,7 @@ class GridRunner:
                         True,
                         self._generate_config,
                         trace_name,
+                        log_path=self._log_path,
                     ).run(num_measures=self._num_measures)
                     metrics_list.append(MetricState(input_len, batch_size, metric))
 
