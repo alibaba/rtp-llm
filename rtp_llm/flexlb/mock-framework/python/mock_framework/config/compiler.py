@@ -117,7 +117,7 @@ def _view_path(value, directory, shared_root):
 
 
 def _compile_step(raw, registry, ids, previous):
-    fields(raw, {'id', 'describe', 'interface', 'args', 'expect', 'within', 'wait_after'},
+    fields(raw, {'id', 'describe', 'interface', 'args', 'expect', 'within', 'wait_after', 'background'},
            {'id', 'describe', 'interface'}, where='step')
     step_id = _identity(raw['id'], ids)
     description = text(raw['describe'], 'step.describe')
@@ -131,8 +131,13 @@ def _compile_step(raw, registry, ids, previous):
     wait_after = raw.get('wait_after', '0s')
     duration(wait_after)
     expect = _expectation(raw['expect'], interface, previous) if 'expect' in raw else None
+    background = raw.get('background', False)
+    if type(background) is not bool:
+        raise ConfigError(f'{step_id}.background: expected a boolean')
+    if background and not interface.step_type.allow_background:
+        raise ConfigError(f'{step_id}: {interface.name} must run in the foreground')
     previous[step_id] = interface.returns
-    return interface.step_type(step_id, description, interface.name, args, expect, within, wait_after)
+    return interface.step_type(step_id, description, interface.name, args, expect, within, wait_after, background)
 
 
 def _compile_phase(raw, registry, ids, previous):
