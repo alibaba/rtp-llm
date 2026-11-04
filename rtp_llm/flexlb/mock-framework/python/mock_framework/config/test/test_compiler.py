@@ -8,7 +8,7 @@ from mock_framework.execution.step.registry import Registry
 from mock_framework.execution.step.step import Step
 from mock_framework.execution.step.step import Reference
 from mock_framework.execution.step.registry import register_step, Bounds
-from mock_framework.config.environment import expand_config
+from mock_framework.config.compiler import expand_config
 
 
 @pytest.mark.parametrize('path', sorted((FRAMEWORK / 'cases').glob('*/case.yaml')),

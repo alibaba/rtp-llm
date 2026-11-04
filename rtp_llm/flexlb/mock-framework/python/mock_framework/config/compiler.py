@@ -1,15 +1,16 @@
 """Compile Case structure and typed references without starting runtime components."""
+import copy
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
 from pathlib import Path
 import re
 
-from .environment import compile_environment
+from ..execution.roles.master import validate_master_config
 from ..execution.step.step import Expect, Reference, Step
 from .yaml_loader import load_yaml
 from ..execution.step.registry import Registry
-from .validation import ConfigError, compatible, duration, fields, text, validate
+from .validation import ConfigError, compatible, duration, fields, number, text, validate
 
 @dataclass(frozen=True)
 class Phase:
@@ -178,3 +179,103 @@ def compile_case(path: str | Path, registry: Registry | None = None, *, shared_r
         view = _view_path(raw['view'], path.parent, shared_root)
     return CompiledCase(id=case_id, describe=description, name=name, directory=path.parent,
                         environment=environment, phases=tuple(phases), view=view, source=path, shared_root=shared_root)
+
+
+_RESOURCE = re.compile(r'^[1-9]\d*(?:\.\d+)?(?:KiB|MiB|GiB|TiB|[kmgtKMGT]i?|B)?$')
+_ROLES = {'master', 'client', 'prefill', 'decode', 'vit'}
+
+
+def expand_config(raw):
+    """Expand this mapping's dotted keys only; native JSON payloads stay native."""
+    if not isinstance(raw, dict):
+        raise ConfigError('config: expected mapping')
+    result = {}
+    leaves = set()
+    def entries(mapping, prefix=''):
+        for key, value in mapping.items():
+            if not isinstance(key, str):
+                raise ConfigError('Configuration keys must be strings')
+            path = prefix + key
+            # Mock configuration is a namespace, while native nested payloads stay opaque.
+            if (path == 'mock' or path.startswith('mock.')) and isinstance(value, dict) and value:
+                yield from entries(value, path + '.')
+            else:
+                yield path, value
+
+    for key, value in entries(raw):
+        parts = key.split('.')
+        if any(not part for part in parts):
+            raise ConfigError(f'Empty dotted path component: {key}')
+        node = result
+        for index, part in enumerate(parts[:-1]):
+            prefix = tuple(parts[:index + 1])
+            if prefix in leaves:
+                raise ConfigError(f'Configuration path collision: {key}')
+            node = node.setdefault(part, {})
+        if parts[-1] in node:
+            raise ConfigError(f'Configuration path collision: {key}')
+        node[parts[-1]] = copy.deepcopy(value)
+        leaves.add(tuple(parts))
+    return result
+
+
+def _compile_deployment(raw, role):
+    fields(raw, {'replicas', 'resources', 'heap'}, where=f'{role}.deployment')
+    deployment = copy.deepcopy(raw)
+    replicas = deployment.setdefault('replicas', 1)
+    if type(replicas) is not int or replicas < 1:
+        raise ConfigError(f'{role}: replicas must be a positive integer')
+
+    resources = deployment.get('resources', {})
+    fields(resources, {'cpu', 'memory'}, where=f'{role}.resources')
+    if 'cpu' in resources and number(resources['cpu']) <= 0:
+        raise ConfigError(f'{role}.resources.cpu: must be positive')
+    for name, value in [('resources.memory', resources.get('memory')), ('heap', deployment.get('heap'))]:
+        if value is not None and (not isinstance(value, str) or not _RESOURCE.fullmatch(value)):
+            raise ConfigError(f'{role}.{name}: invalid resource size')
+    return deployment
+
+
+def _load_component_config(raw, role, directory):
+    if isinstance(raw, str):
+        value = text(raw, f'{role}.config')
+        if '://' in value or directory is None:
+            raise ConfigError(f'{role}.config: expected a local file relative to the Case directory')
+        source = (Path(directory) / value).resolve()
+        try:
+            raw = load_yaml(source)
+        except ConfigError as error:
+            raise ConfigError(f'{role}.config ({source}): {error}') from error
+    if not isinstance(raw, dict):
+        raise ConfigError(f'{role}.config: expected mapping or local file path')
+    return raw
+
+
+def compile_environment(raw, *, directory=None):
+    fields(raw, _ROLES, where='environment')
+    result = {}
+    for role, component in raw.items():
+        allowed = {'deployment', 'config'}
+        required = set()
+        if role in ('prefill', 'decode'):
+            allowed.add('engine')
+            required.add('engine')
+        fields(component, allowed, required, where=role)
+        if 'engine' in component and component['engine'] != 'rtp':
+            raise ConfigError(f'{role}.engine: only RTP is implemented')
+
+        deployment = _compile_deployment(component.get('deployment', {}), role)
+        native = _load_component_config(component.get('config', {}), role, directory)
+        if role == 'master':
+            validate_master_config(native)
+        if 'checkpoint_path' in native:
+            checkpoint = Path(text(native['checkpoint_path'], f'{role}.checkpoint_path'))
+            if not checkpoint.is_absolute():
+                if directory is None:
+                    raise ConfigError(f'{role}.checkpoint_path: relative model directory requires a Case directory')
+                checkpoint = Path(directory) / checkpoint
+            native = {**native, 'checkpoint_path': str(checkpoint.resolve())}
+        result[role] = {'deployment': deployment, 'config': expand_config(native)}
+        if 'engine' in component:
+            result[role]['engine'] = component['engine']
+    return result
