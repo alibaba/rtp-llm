@@ -3,6 +3,7 @@ import asyncio
 from dataclasses import asdict
 import json
 from pathlib import Path
+import signal
 import sys
 import yaml
 
@@ -31,7 +32,20 @@ def _run(args, case, registry, parser):
     if args.output is None or args.launch is None:
         parser.error('run requires --output <new directory> and --launch <recipes.yaml>')
     launch = prepare_launch(load_yaml(args.launch), case, args.launch.resolve().parent)
-    result = asyncio.run(run_case(case, registry, launch, args.output))
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        task = asyncio.current_task()
+        loop.add_signal_handler(signal.SIGTERM, task.cancel)
+        try:
+            return await run_case(case, registry, launch, args.output)
+        finally:
+            loop.remove_signal_handler(signal.SIGTERM)
+
+    try:
+        result = asyncio.run(run())
+    except asyncio.CancelledError:
+        parser.exit(130, 'Execution cancelled\n')
     sys.stdout.write(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
     if result['status'] != 'PASS':
         parser.exit(1)

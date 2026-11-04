@@ -13,7 +13,7 @@ ROOT = FRAMEWORK
 
 
 def packager():
-    spec = importlib.util.spec_from_file_location('package_engine', ROOT / 'scripts/package-engine.py')
+    spec = importlib.util.spec_from_file_location('package_engine', ROOT / 'scripts/package-whale-engine.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -50,7 +50,7 @@ def test_context_contains_only_service_payload_and_provenance(tmp_path, monkeypa
     verified = []
     monkeypatch.setattr(module, 'check_service', lambda jar, backend: verified.append(backend))
     (framework / 'docker').mkdir()
-    for name in ('Dockerfile', 'whale_start.sh'):
+    for name in ('whale-engine.Dockerfile', 'whale_start.sh'):
         (framework / 'docker' / name).write_bytes((ROOT / 'docker' / name).read_bytes())
     stale = framework / 'target/image/old-case'
     stale.mkdir(parents=True)

@@ -96,6 +96,9 @@ class Prometheus:
     def discover(self, node, directory):
         try:
             endpoint = json.loads((directory / 'endpoints.json').read_text(encoding='utf-8'))
+            backend = endpoint.get('metrics_backend', 'prometheus')
+            if backend != 'prometheus':
+                raise ExecutionError(f'{node}: managed Prometheus requires metrics_backend=prometheus, got {backend!r}')
             address = urllib.parse.urlsplit(endpoint['metrics'])
             if endpoint.get('id') != node or address.scheme not in ('http', 'https') or not address.hostname \
                     or address.username or address.password or address.query or address.fragment:

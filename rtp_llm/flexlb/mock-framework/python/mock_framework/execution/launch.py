@@ -73,7 +73,7 @@ def local_launch(case, java, prometheus, *, framework):
     def artifact(relative):
         path = framework / relative
         if not path.is_file():
-            raise ExecutionError(f'Missing build artifact: {path}; run scripts/build.sh first')
+            raise ExecutionError(f'Missing build artifact: {path}; run scripts/build-java.sh first')
         return path
 
     def component_classpath(role):
@@ -81,7 +81,7 @@ def local_launch(case, java, prometheus, *, framework):
         dependencies = artifact(f'{root}/dependencies.txt').read_text(encoding='utf-8').strip()
         if not dependencies or any(not Path(entry).is_absolute() or not Path(entry).exists()
                                    for entry in dependencies.split(os.pathsep)):
-            raise ExecutionError(f'{role} classpath has missing or nonabsolute entries; run scripts/build.sh first')
+            raise ExecutionError(f'{role} classpath has missing or nonabsolute entries; run scripts/build-java.sh first')
         return os.pathsep.join([str(framework / root / 'classes'), dependencies])
 
     prefix = [str(java), '-XX:ActiveProcessorCount=2']
