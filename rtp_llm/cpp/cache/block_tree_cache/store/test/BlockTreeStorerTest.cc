@@ -618,6 +618,47 @@ TEST(BlockTreeStorerTest, DeviceInsertSubmitsAllBlocksOutsideTreeLockAndPinsUnti
     releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[1]);
 }
 
+TEST(BlockTreeStorerTest, RemoteReuseIntervalFiltersWritesBeforePinningAndKeepsTheLocalTreeComplete) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    auto backend = std::make_shared<PendingWriteBackend>();
+    auto env = makeStoreEnvironment("remote_reuse_interval", true, false, false, {2}, 4, backend);
+    backend->setCache(env.cache.get());
+    auto holder = allocateDeviceBlocksForTest(*env.groups[0], 3);
+    ASSERT_EQ(holder.size(), 3u);
+    const CacheKeysType keys{100, 101, 102};
+    std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(1));
+    for (size_t i = 0; i < holder.size(); ++i) {
+        resources[i][0].device_blocks = holder[i];
+    }
+
+    env.cache->insert(keys, resources, Tier::DEVICE, false, {}, 0, keys.size());
+    EXPECT_EQ(backend->submittedCount(), 0u);
+    EXPECT_EQ(env.cache->getKeySnapshot().keys, keys);
+    for (const auto& blocks : holder) {
+        EXPECT_EQ(env.device_pools[0]->refCount(blocks[0]), 2u);  // Request + tree, no remote pin.
+    }
+
+    env.cache->insert(keys, resources, Tier::DEVICE, false, {}, 1, 2);
+    EXPECT_EQ(backend->submittedCount(), 1u);
+    EXPECT_EQ(env.device_pools[0]->refCount(holder[0][0]), 3u);
+    EXPECT_EQ(env.device_pools[0]->refCount(holder[1][0]), 2u);
+    EXPECT_EQ(env.device_pools[0]->refCount(holder[2][0]), 3u);
+    backend->finishWrite();
+    EXPECT_EQ(backend->keys(), (CacheKeysType{100, 102}));
+    EXPECT_EQ(backend->blocks(), (BlockIndicesType{holder[0][0], holder[2][0]}));
+
+    // Without an adopted remote interval, all keys take the original write path.
+    env.cache->insert(keys, resources, Tier::DEVICE);
+    EXPECT_EQ(backend->submittedCount(), 2u);
+    backend->finishWrite();
+    EXPECT_EQ(backend->keys(), (CacheKeysType{100, 102, 100, 101, 102}));
+    for (const auto& blocks : holder) {
+        releaseDeviceBlocks(*env.cache, env.device_pools[0], blocks);
+    }
+}
+
 TEST(BlockTreeStorerTest, UnsupportedInsertTargetsRejectWithoutPublishingOrPinning) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
