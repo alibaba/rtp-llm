@@ -21,6 +21,37 @@ using namespace rtp_llm;
 
 namespace {
 
+GreedyOutput referenceTopPOneSample(const GreedyParams& params) {
+    auto probabilities = torch::softmax(params.logits, -1);
+    params.logits.copy_(probabilities);
+    params.output_all_probs.value().copy_(probabilities);
+    const auto batch   = probabilities.size(0);
+    auto       seeds   = torch::empty({batch}, torch::TensorOptions().dtype(torch::kInt64));
+    auto       offsets = torch::empty_like(seeds);
+    for (int64_t i = 0; i < batch; ++i) {
+        auto [seed, offset]            = get_seed_and_offset(32, params.generator[i]);
+        seeds.data_ptr<int64_t>()[i]   = seed;
+        offsets.data_ptr<int64_t>()[i] = offset;
+    }
+    auto tokens = torch::empty({batch}, probabilities.options().dtype(torch::kInt32));
+    auto valid  = torch::empty({batch}, probabilities.options().dtype(torch::kBool));
+    top_p_sampling_from_probs(probabilities,
+                              tokens,
+                              valid,
+                              std::nullopt,
+                              params.top_p,
+                              1.0,
+                              true,
+                              seeds.to(torch::kCUDA),
+                              0,
+                              offsets.to(torch::kCUDA),
+                              0,
+                              reinterpret_cast<int64_t>(at::cuda::getCurrentCUDAStream().stream()));
+    params.token_ids.select(1, params.token_ids.size(1) - 1).copy_(tokens);
+    params.cum_log_probs.value().add_(probabilities.gather(1, tokens.to(torch::kLong).unsqueeze(1)).squeeze(1).log());
+    return {valid};
+}
+
 void assertAllValid(const torch::Tensor& valid) {
     ASSERT_TRUE(valid.defined());
     ASSERT_EQ(valid.scalar_type(), torch::kBool);
@@ -751,20 +782,9 @@ TEST_F(CudaSamplerTest, testTopPOneRenormPreservesUnfilteredDistribution) {
 }
 
 TEST_F(CudaSamplerTest, testTopPOneCategoricalPreservesPublicOutputsAndRngReservation) {
-    const char* previous = std::getenv("RTP_LLM_TOP_P_ONE_CATEGORICAL");
-    const auto  saved = previous == nullptr ? std::optional<std::string>() : std::make_optional(std::string(previous));
-    struct RestoreFlag {
-        std::optional<std::string> previous;
-        ~RestoreFlag() {
-            if (previous.has_value())
-                setenv("RTP_LLM_TOP_P_ONE_CATEGORICAL", previous->c_str(), 1);
-            else
-                unsetenv("RTP_LLM_TOP_P_ONE_CATEGORICAL");
-        }
-    } restore{saved};
     torch::manual_seed(20261019);
-    for (int64_t batch : {1, 4, 17, 32}) {
-        for (int64_t vocab : {257, 248320}) {
+    for (int64_t batch : {1, 4, 17, 32, 33}) {
+        for (int64_t vocab : {257, 4096, 248320}) {
             for (int distribution : {0, 1, 2}) {
                 auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
                 auto logits  = torch::randn({batch, vocab}, options);
@@ -778,8 +798,7 @@ TEST_F(CudaSamplerTest, testTopPOneCategoricalPreservesPublicOutputsAndRngReserv
                 auto top_k   = torch::zeros_like(lengths);
                 auto temperature = torch::ones_like(top_p);
                 std::vector<torch::Tensor> samples, probabilities, log_probabilities, states;
-                for (const char* flag : {"0", "1"}) {
-                    setenv("RTP_LLM_TOP_P_ONE_CATEGORICAL", flag, 1);
+                for (bool reference : {true, false}) {
                     std::vector<at::Generator> generators;
                     for (int64_t i = 0; i < batch; ++i) {
                         auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
@@ -812,7 +831,7 @@ TEST_F(CudaSamplerTest, testTopPOneCategoricalPreservesPublicOutputsAndRngReserv
                                              std::nullopt,
                                              std::nullopt,
                                              generators});
-                        auto         result = execSampleGreedy(params);
+                        auto         result = reference ? referenceTopPOneSample(params) : execSampleGreedy(params);
                         check_cuda_error();
                         ASSERT_TRUE(result.success.all().item<bool>());
                         ASSERT_TRUE(
@@ -821,7 +840,7 @@ TEST_F(CudaSamplerTest, testTopPOneCategoricalPreservesPublicOutputsAndRngReserv
                         ASSERT_TRUE(torch::equal(probs, torch::softmax(logits, -1)));
                         auto selected = probs.gather(1, tokens.slice(1, 2).to(torch::kLong)).squeeze(1);
                         ASSERT_TRUE(torch::allclose(cum, selected.log() - 2, 1e-6, 1e-8));
-                        if (flag[0] == '0') {
+                        if (reference) {
                             samples.push_back(tokens.clone());
                             probabilities.push_back(probs.clone());
                             log_probabilities.push_back(cum.clone());

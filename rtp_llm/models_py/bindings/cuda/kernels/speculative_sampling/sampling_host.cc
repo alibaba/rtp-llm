@@ -6,8 +6,8 @@
 namespace rtp_llm {
 namespace {
 bool canUseSplitRejectionSampling(const RejectionSamplingLaunchConfig& config) {
-    return sampler::optimizationEnabled("RTP_LLM_SPLIT_REJECTION") && config.batch_size > 0 && config.batch_size <= 8
-           && config.num_speculative_tokens == 3 && config.target_vocab_size == 248320 && sampler::isSm120();
+    return config.batch_size > 0 && config.batch_size <= 8 && config.num_speculative_tokens == 3
+           && config.target_vocab_size == 248320 && sampler::isSm120();
 }
 }  // namespace
 

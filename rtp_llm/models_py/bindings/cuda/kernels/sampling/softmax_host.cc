@@ -5,9 +5,8 @@
 namespace rtp_llm {
 namespace {
 bool canUseSplitSoftmax(const torch::Tensor& logits) {
-    return sampler::optimizationEnabled("RTP_LLM_SAMPLER_SPLIT_SOFTMAX") && logits.is_contiguous()
-           && logits.scalar_type() == torch::kFloat32 && logits.dim() == 2 && logits.size(0) > 0 && logits.size(0) <= 32
-           && logits.size(1) == 248320 && sampler::isSm120();
+    return logits.is_contiguous() && logits.scalar_type() == torch::kFloat32 && logits.dim() == 2 && logits.size(0) > 0
+           && logits.size(0) <= 32 && logits.size(1) == 248320 && sampler::isSm120();
 }
 }  // namespace
 

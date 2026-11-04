@@ -74,9 +74,10 @@ GptModelOutputs MtpExecutor::forwardModel(ModelBase* model, const GptModelInputs
 
 namespace {
 
-bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
+bool readEnvFlag(const char* env_name, const char* log_tag, const char* label, bool default_enabled = false) {
     const char* env = std::getenv(env_name);
-    const bool  on  = (env != nullptr && std::string(env) == "1");
+    const bool  on =
+        default_enabled ? !(env != nullptr && std::string(env) == "0") : (env != nullptr && std::string(env) == "1");
     RTP_LLM_LOG_INFO("[%s] %s=%s -> %s=%d", log_tag, env_name, env ? env : "(unset)", label, static_cast<int>(on));
     return on;
 }
@@ -422,15 +423,13 @@ void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_ou
 }
 
 bool MtpExecutor::useDeviceInput() const {
-    static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_DEVICE_INPUT", "mtp-device-input", "enabled");
-    }();
+    static const bool enabled = []() { return readEnvFlag("RTP_LLM_DEVICE_INPUT", "mtp-device-input", "enabled"); }();
     return enabled;
 }
 
 bool MtpExecutor::checkDeviceInput() const {
     static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_DEVICE_INPUT_CHECK", "mtp-device-input", "enabled");
+        return readEnvFlag("RTP_LLM_DEVICE_INPUT_CHECK", "mtp-device-input", "enabled");
     }();
     return enabled;
 }
@@ -3273,41 +3272,34 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
 bool MtpExecutor::useStreamAsync() const {
     static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_STREAM_ASYNC", "stream-async", "useStreamAsync");
+        return readEnvFlag("RTP_LLM_STREAM_ASYNC", "stream-async", "useStreamAsync");
     }();
     return enabled;
 }
 
 bool MtpExecutor::useAsyncDeviceState() const {
     static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "async-device-state", "enabled");
+        return readEnvFlag("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "async-device-state", "enabled");
     }();
     return enabled;
 }
 
 bool MtpExecutor::useDropBroadSync() const {
-    static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_DROP_BROAD_SYNC", "drop-broad-sync", "enabled");
-    }();
+    static const bool enabled = []() { return readEnvFlag("RTP_LLM_DROP_BROAD_SYNC", "drop-broad-sync", "enabled"); }();
     return enabled;
 }
 
 bool MtpExecutor::useAsyncPrepare() const {
-    static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_MTP_ASYNC_PREPARE", "async-prepare", "enabled");
-    }();
+    static const bool enabled = []() { return readEnvFlag("RTP_LLM_MTP_ASYNC_PREPARE", "async-prepare", "enabled"); }();
     return asyncPrepareAllowed(enabled, speculativeTargetTransactionsEnabled());
 }
 
 bool MtpExecutor::useAsyncDraftPreparePostRejection() const {
     static const bool enabled = []() {
-        const char* env = std::getenv("RTP_LLM_MTP_ASYNC_DRAFT_PREPARE_POST_REJECTION");
-        const bool  on  = !(env != nullptr && std::string(env) == "0");
-        RTP_LLM_LOG_INFO("[async-prepare] RTP_LLM_MTP_ASYNC_DRAFT_PREPARE_POST_REJECTION=%s -> "
-                         "post_rejection_draft_prepare=%d",
-                         env ? env : "(unset)",
-                         static_cast<int>(on));
-        return on;
+        return readEnvFlag("RTP_LLM_MTP_ASYNC_DRAFT_PREPARE_POST_REJECTION",
+                           "async-prepare",
+                           "post_rejection_draft_prepare",
+                           /*default_enabled=*/true);
     }();
     return enabled;
 }

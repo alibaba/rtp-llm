@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-
 from rtp_llm.models_py.distributed import collective_torch as collective
 from rtp_llm.models_py.distributed import flashinfer_all_reduce as flashinfer_ar
 
@@ -75,6 +74,7 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
             collective._init_flashinfer_allreduce(
                 config,
                 disable_custom_all_reduce=True,
+                ipc_all_reduce_large_prefill=True,
             )
 
         communicator_module.init_flashinfer_allreduce.assert_called_once_with(
@@ -82,7 +82,56 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
             torch.device("cuda", 0),
             single_node=True,
             disable_custom_all_reduce=True,
+            large_prefill=True,
         )
+
+    def test_large_prefill_workspace_capacity_and_shape_policy(self):
+        from rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce import (
+            FlashInferIpcAllReduce,
+        )
+
+        for enabled in (False, True):
+            communicator = _make_communicator()
+            communicator.cpp_small_enabled = True
+            communicator._large_prefill = enabled
+            workspace = MagicMock()
+            tensor = _FakeTensor()
+            tensor.shape = (4, 2560)
+            with patch(
+                "torch.cuda.is_current_stream_capturing", return_value=False
+            ), patch(
+                "rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce.FlashInferIpcAllReduce",
+                return_value=workspace,
+            ) as factory, patch(
+                "torch.tensor", return_value=MagicMock()
+            ), patch(
+                "torch.distributed.all_reduce"
+            ):
+                self.assertTrue(communicator._create_workspace(tensor))
+            capacity = 128 * 1024 * 1024 if enabled else 32 * 2560 * 2
+            factory.assert_called_once_with(
+                communicator.group, communicator.device, max_bytes=capacity
+            )
+            self.assertIs(workspace.large_prefill, enabled)
+            policy = FlashInferIpcAllReduce.__new__(FlashInferIpcAllReduce)
+            policy.max_bytes = capacity
+            policy.large_prefill = enabled
+            with patch("torch.cuda.is_current_stream_capturing", return_value=False):
+                self.assertTrue(
+                    policy.is_buffer_size_sufficient(2, 32, 2560, torch.bfloat16)
+                )
+                for rows in (4093, 4094, 4095, 4096, 8192, 12288, 16384):
+                    self.assertEqual(
+                        policy.is_buffer_size_sufficient(2, rows, 2560, torch.bfloat16),
+                        enabled,
+                    )
+                self.assertFalse(
+                    policy.is_buffer_size_sufficient(2, 33, 2560, torch.bfloat16)
+                )
+            with patch("torch.cuda.is_current_stream_capturing", return_value=True):
+                self.assertFalse(
+                    policy.is_buffer_size_sufficient(2, 4096, 2560, torch.bfloat16)
+                )
 
     def test_shape_and_dtype_eligibility(self):
         workspace = MagicMock()

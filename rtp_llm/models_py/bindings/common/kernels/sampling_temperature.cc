@@ -5,8 +5,8 @@
 namespace rtp_llm {
 namespace {
 bool canUseTiledTemperature(const torch::Tensor& logits) {
-    return sampler::optimizationEnabled("RTP_LLM_SAMPLER_TILED_TEMPERATURE") && logits.size(0) > 0
-           && logits.size(0) <= 32 && logits.size(1) == 248320 && logits.is_contiguous() && sampler::isSm120();
+    return logits.size(0) > 0 && logits.size(0) <= 32 && logits.size(1) == 248320 && logits.is_contiguous()
+           && sampler::isSm120();
 }
 }  // namespace
 

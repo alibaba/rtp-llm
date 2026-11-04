@@ -225,7 +225,8 @@ protected:
 
     // Default-on gate for the post-rejection draft-prefill prepare fork. The
     // forked input is final (post-commit), so the hooks-mode restriction of
-    // useAsyncPrepare() does not apply; disable with
+    // useAsyncPrepare() does not apply. Keep a synchronous fallback for diagnosing
+    // prepare/communication ordering; read once at first use. Disable with
     // RTP_LLM_MTP_ASYNC_DRAFT_PREPARE_POST_REJECTION=0.
     bool useAsyncDraftPreparePostRejection() const;
 

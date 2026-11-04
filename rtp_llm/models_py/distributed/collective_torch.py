@@ -76,6 +76,7 @@ def _get_flashinfer_allreduce():
 def _init_flashinfer_allreduce(
     parallelism_config: ParallelismConfig,
     disable_custom_all_reduce: Optional[bool] = None,
+    ipc_all_reduce_large_prefill: bool = False,
 ) -> None:
     global _canonical_p2p
     if parallelism_config.tp_size <= 1:
@@ -85,6 +86,7 @@ def _init_flashinfer_allreduce(
         torch.device("cuda", parallelism_config.local_rank),
         single_node=parallelism_config.tp_size <= parallelism_config.local_world_size,
         disable_custom_all_reduce=disable_custom_all_reduce,
+        large_prefill=ipc_all_reduce_large_prefill,
     )
 
     if (
@@ -171,6 +173,7 @@ def init_distributed_environment(
     backend: str = "nccl",
     timeout: Optional[int] = None,
     disable_custom_all_reduce: Optional[bool] = None,
+    ipc_all_reduce_large_prefill: bool = False,
 ):
     """Initialize distributed environment and create process groups.
 
@@ -185,6 +188,8 @@ def init_distributed_environment(
         timeout: Timeout in seconds for process group initialization
         disable_custom_all_reduce: Explicit server-wide custom AllReduce
             override. ``None`` preserves the implementation-specific default.
+        ipc_all_reduce_large_prefill: Opt in to supported eager large-prefill IPC
+            reductions, including their larger per-rank workspace.
 
     Raises:
         RuntimeError: If already initialized and not destroyed
@@ -212,7 +217,9 @@ def init_distributed_environment(
         rocm_rccl = _get_rocm_rccl()
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
-        _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
+        _init_flashinfer_allreduce(
+            parallelism_config, disable_custom_all_reduce, ipc_all_reduce_large_prefill
+        )
         return
 
     _normalize_parallelism_ranks(parallelism_config)
@@ -247,7 +254,9 @@ def init_distributed_environment(
         _register_process_groups_to_cpp()
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
-        _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
+        _init_flashinfer_allreduce(
+            parallelism_config, disable_custom_all_reduce, ipc_all_reduce_large_prefill
+        )
         return
 
     logging.info(
@@ -288,7 +297,9 @@ def init_distributed_environment(
     if rocm_rccl is not None and parallelism_config.tp_size > 1:
         rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
     init_user_buffers_environment(parallelism_config)
-    _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
+    _init_flashinfer_allreduce(
+        parallelism_config, disable_custom_all_reduce, ipc_all_reduce_large_prefill
+    )
 
 
 def _create_process_groups(

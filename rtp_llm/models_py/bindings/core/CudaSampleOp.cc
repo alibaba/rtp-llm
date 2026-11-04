@@ -177,8 +177,7 @@ std::pair<torch::Tensor, torch::Tensor> makeSamplingSeedOffsetTensors(const std:
 }
 
 bool canUseCompactSamplerOutput(const GreedyParams& params) {
-    return sampler::optimizationEnabled("RTP_LLM_SAMPLER_COMPACT_OUTPUT") && params.token_ids.is_cuda()
-           && params.token_ids.is_contiguous() && params.token_ids.dim() == 2
+    return params.token_ids.is_cuda() && params.token_ids.is_contiguous() && params.token_ids.dim() == 2
            && params.token_ids.scalar_type() == torch::kInt32 && params.token_ids.size(0) == params.logits.size(0)
            && params.token_ids.size(0) > 1 && params.token_ids.size(0) <= 32 && params.token_ids.size(1) > 1
            && params.logits.size(1) == 248320 && sampler::isSm120();
@@ -341,7 +340,7 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
         }
     } else if (all_top_k_no_limit) {
         const bool exact_top_p_one = std::all_of(top_p_ptr, top_p_ptr + batch_size, [](auto t) { return t == 1.0f; });
-        if (exact_top_p_one && sampler::optimizationEnabled("RTP_LLM_TOP_P_ONE_CATEGORICAL")) {
+        if (exact_top_p_one) {
             // The unfiltered case needs no nucleus threshold search. Preserve
             // the existing per-request Philox reservation above (32), the
             // logits/probability outputs and every filtered/greedy fallback.

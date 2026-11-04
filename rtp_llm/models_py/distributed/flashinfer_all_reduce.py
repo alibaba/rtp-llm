@@ -50,6 +50,7 @@ class FlashInferAllReduce:
         *,
         single_node: bool,
         disable_custom_all_reduce: Optional[bool] = None,
+        large_prefill: bool = False,
     ) -> None:
         self.group = group
         self.device = device
@@ -113,7 +114,7 @@ class FlashInferAllReduce:
             self.cpp_small_enabled = False
             logging.info("FlashInfer all-reduce unavailable; using NCCL: %s", error)
 
-        self._large_prefill = os.environ.get("QWEN4_TP_LARGE_PREFILL", "0") == "1"
+        self._large_prefill = large_prefill
         policy = (not self.disabled, self.cpp_small_enabled, self._large_prefill)
         dist.all_gather_object(peers, policy, group=self.group)
         if any(peer != policy for peer in peers):
@@ -319,6 +320,7 @@ def init_flashinfer_allreduce(
     *,
     single_node: bool,
     disable_custom_all_reduce: Optional[bool] = None,
+    large_prefill: bool = False,
 ) -> Optional[FlashInferAllReduce]:
     global _communicator
     communicator = FlashInferAllReduce(
@@ -326,6 +328,7 @@ def init_flashinfer_allreduce(
         device,
         single_node=single_node,
         disable_custom_all_reduce=disable_custom_all_reduce,
+        large_prefill=large_prefill,
     )
     _communicator = None if communicator.disabled else communicator
     return _communicator

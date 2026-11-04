@@ -1,5 +1,4 @@
 import datetime
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,7 +11,6 @@ import torch.multiprocessing as mp
 
 def _worker(rank, store):
     import flashinfer.comm
-
     from rtp_llm.models_py.distributed.flashinfer_all_reduce import FlashInferAllReduce
 
     torch.cuda.set_device(rank)
@@ -47,11 +45,14 @@ def _worker(rank, store):
             group, device, single_node=True, disable_custom_all_reduce=False
         )
         assert communicator.disabled and not communicator.cpp_small_enabled
-    with patch.dict(os.environ, {"QWEN4_TP_LARGE_PREFILL": str(rank)}):
-        communicator = FlashInferAllReduce(
-            group, device, single_node=True, disable_custom_all_reduce=False
-        )
-        assert communicator.disabled and not communicator.cpp_small_enabled
+    communicator = FlashInferAllReduce(
+        group,
+        device,
+        single_node=True,
+        disable_custom_all_reduce=False,
+        large_prefill=bool(rank),
+    )
+    assert communicator.disabled and not communicator.cpp_small_enabled
     with patch.object(
         torch.cuda,
         "get_device_capability",
@@ -99,15 +100,28 @@ def _worker(rank, store):
     dist.all_reduce(x)
     torch.testing.assert_close(x, torch.full_like(x, 3), rtol=0, atol=0)
 
-    with patch.dict(os.environ, {"QWEN4_TP_LARGE_PREFILL": "0"}):
-        communicator = FlashInferAllReduce(
-            group, device, single_node=True, disable_custom_all_reduce=False
-        )
+    communicator = FlashInferAllReduce(
+        group, device, single_node=True, disable_custom_all_reduce=False
+    )
     assert not communicator.disabled and communicator.cpp_small_enabled
     x = torch.full((4, 2560), rank + 1, dtype=torch.bfloat16, device=device)
     assert communicator.should_use(x)
     actual = communicator.all_reduce(x)
     torch.testing.assert_close(actual, torch.full_like(actual, 3), rtol=0, atol=0)
+    large_prefill = FlashInferAllReduce(
+        group,
+        device,
+        single_node=True,
+        disable_custom_all_reduce=False,
+        large_prefill=True,
+    )
+    for rows in (4093, 4094, 4095, 4096, 8192, 12288, 16384):
+        value = torch.full((rows, 2560), rank + 1, dtype=torch.bfloat16, device=device)
+        assert large_prefill.should_use(value)
+        torch.testing.assert_close(
+            large_prefill.all_reduce(value), torch.full_like(value, 3), rtol=0, atol=0
+        )
+    large_prefill.destroy()
     communicator.allow_ipc_capture = True
     captures = []
     for rows in (4, 7):
