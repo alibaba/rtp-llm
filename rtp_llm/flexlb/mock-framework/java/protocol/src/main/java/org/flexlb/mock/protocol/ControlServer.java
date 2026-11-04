@@ -9,7 +9,6 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
-import org.flexlb.mock.api.RecordSchema;
 
 /** A transport bound to component objects; no case, gate or engine behavior lives here. */
 public final class ControlServer implements AutoCloseable {

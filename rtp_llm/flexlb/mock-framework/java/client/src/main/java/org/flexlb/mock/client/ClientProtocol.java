@@ -1,7 +1,7 @@
 package org.flexlb.mock.client;
 
 import java.util.*;
-import org.flexlb.mock.api.Argument;
+import org.flexlb.mock.protocol.Argument;
 import com.fasterxml.jackson.annotation.JsonInclude;
 
 /** Private Client control transport. Python owns the Case API. */
