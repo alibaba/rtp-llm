@@ -23,12 +23,16 @@ class Qwen4MoeLayer(GenericMoeLayer):
     _shared_stream = None
     _reused_shared_stream = None
     _fuse_ep_shared_gate = False
+    _ep_shared_stream = None
+    _ep_two_batch = None
 
     def prepare_shared_expert_overlap(self) -> None:
         """Allocate streams only for the explicitly qualified Qwen4 layout."""
         self._fuse_ep_shared_gate = (
             os.environ.get("QWEN_MOE_SHARED_GATE_FUSION", "0") == "1"
         )
+        if os.environ.get("QWEN_MOE_EP_SHARED_OVERLAP", "0") == "1":
+            self._prepare_ep_shared_overlap()
         if not getattr(self.config, "_qwen4_full_fp8_nvfp4", False):
             return
         from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
@@ -78,6 +82,86 @@ class Qwen4MoeLayer(GenericMoeLayer):
         self._shared_input_ready = torch.cuda.Event()
         self._shared_output_ready = torch.cuda.Event()
 
+    def _prepare_ep_shared_overlap(self) -> None:
+        from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor import (
+            DeepGemmMaskedExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_latency_router import (
+            DeepEpLowLatencyRouter,
+        )
+        from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
+
+        pc = self.parallelism_config
+        shared = self.shared_expert
+        if not (
+            pc.tp_size == 2
+            and pc.ep_size == 2
+            and pc.dp_size == 1
+            and self.use_ep_shared_allreduce
+            and not self.use_unified_tp_allreduce
+            and not self.config.eplb_config.enable_eplb()
+            and type(shared) is DenseMLP
+            and type(self.fused_moe) is FusedMoe
+            and type(self.fused_moe.router) is DeepEpLowLatencyRouter
+            and type(self.fused_moe.fused_experts) is DeepGemmMaskedExecutor
+            and type(shared.up_proj) is Fp8Linear
+            and type(shared.down_proj) is Fp8Linear
+            and type(self.shared_expert_gate) is Fp8Linear
+            and tuple(shared.up_proj.weight.shape) == (640, 2560)
+            and tuple(shared.down_proj.weight.shape) == (2560, 320)
+            and tuple(self.shared_expert_gate.weight.shape) == (1, 2560)
+            and shared.up_proj.weight.is_cuda
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(shared.up_proj.weight.device) == (9, 0)
+        ):
+            return
+        self._ep_shared_stream = _shared_stream_for_device(
+            shared.up_proj.weight.device.index
+        )
+        self._ep_shared_input_ready = torch.cuda.Event()
+        self._ep_shared_output_ready = torch.cuda.Event()
+        if (
+            os.environ.get("QWEN_MOE_EP_TBO", "0") == "1"
+            and self.correction_bias is None
+            and self.fake_balance_expert is None
+        ):
+            from .ep_tbo import QwenEpTwoBatch
+
+            self._ep_two_batch = QwenEpTwoBatch(self)
+
+    def _forward_ep_shared_overlap(self, hidden_states):
+        from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+
+        main = torch.cuda.current_stream(hidden_states.device)
+        capturing = torch.cuda.is_current_stream_capturing()
+        self._ep_shared_input_ready.record(main)
+        # Keep TP collectives on the original stream, preserving rank order.
+        # Only independent local shared-expert arithmetic uses the auxiliary.
+        try:
+            with torch.cuda.stream(self._ep_shared_stream):
+                self._ep_shared_input_ready.wait(self._ep_shared_stream)
+                try:
+                    shared = self.shared_expert(hidden_states, skip_allreduce=True)
+                    shared = self._gate_shared_expert_output(hidden_states, shared)
+                finally:
+                    self._ep_shared_output_ready.record(self._ep_shared_stream)
+            if self._ep_two_batch is not None and self._ep_two_batch.supports(
+                hidden_states
+            ):
+                experts = self._ep_two_batch.forward(self, hidden_states)
+            else:
+                experts = self._forward_routed(hidden_states)
+        finally:
+            # Allocator reuse on the original stream is ordered after the join,
+            # including when either branch raises during eager execution.
+            self._ep_shared_output_ready.wait(main)
+        if not capturing:
+            shared.record_stream(main)
+        shared = getattr(self, "tp_all_reduce", all_reduce)(shared, group=Group.TP)
+        return experts + shared
+
     def _gate_shared_expert_output(self, hidden_states, shared_expert_output):
         if not self._fuse_ep_shared_gate or self.shared_expert_gate is None:
             return super()._gate_shared_expert_output(
@@ -92,6 +176,17 @@ class Qwen4MoeLayer(GenericMoeLayer):
         return torch.sigmoid(gate) * shared_expert_output
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if (
+            self._ep_shared_stream is not None
+            and hidden_states.is_cuda
+            and hidden_states.device == self._ep_shared_stream.device
+            and hidden_states.ndim == 2
+            and hidden_states.dtype == torch.bfloat16
+            and hidden_states.is_contiguous()
+            and 1 <= hidden_states.shape[0] <= 32
+            and hidden_states.shape[1] == 2560
+        ):
+            return self._forward_ep_shared_overlap(hidden_states)
         stream = self._shared_stream
         # Larger shapes did not improve in the complete TP2 consumer. Keep
         # their established schedule and each layer's distinct event pair.
