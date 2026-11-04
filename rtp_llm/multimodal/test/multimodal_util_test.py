@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 import requests
 from PIL import Image
+from urllib3.exceptions import ReadTimeoutError
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MMPreprocessConfigPB
@@ -189,6 +190,38 @@ class TestMultiModalUtil(unittest.TestCase):
                 ExceptionType.MM_PROCESS_ERROR,
                 MMErr.URL_INVALID,
                 lambda: get_bytes_io_from_url("https://example.invalid/image"),
+            )
+
+    def test_http_stream_read_timeout(self):
+        response = requests.Response()
+        response.status_code = 200
+        response.headers["Content-Length"] = "7"
+        response.raw = Mock()
+        response.raw.stream.side_effect = ReadTimeoutError(
+            None, "https://example.com/stream-timeout", "Read timed out."
+        )
+
+        with patch(
+            "rtp_llm.multimodal.multimodal_util.request_get", return_value=response
+        ) as request_impl:
+            self.assert_mm_error(
+                ExceptionType.MM_PROCESS_ERROR,
+                MMErr.DL_TIMEOUT,
+                lambda: get_bytes_io_from_url("https://example.com/stream-timeout"),
+            )
+
+        request_impl.assert_called_once()
+        response.raw.close.assert_called_once()
+
+    def test_http_invalid_url_exception(self):
+        with patch(
+            "rtp_llm.multimodal.multimodal_util.request_get",
+            side_effect=requests.exceptions.InvalidURL(),
+        ):
+            self.assert_mm_error(
+                ExceptionType.MM_PROCESS_ERROR,
+                MMErr.URL_INVALID,
+                lambda: get_bytes_io_from_url("https://example.invalid/malformed"),
             )
 
     def test_http_failure_status(self):

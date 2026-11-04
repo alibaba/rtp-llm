@@ -239,6 +239,7 @@ def _download_http_content(
     url: str, headers: dict, max_file_size_kb: Optional[int]
 ) -> BytesIO:
     import requests
+    from urllib3.exceptions import ReadTimeoutError
 
     response = None
     try:
@@ -270,8 +271,12 @@ def _download_http_content(
         raise
     except (requests.exceptions.Timeout, TimeoutError):
         raise_mm(MMErr.DL_TIMEOUT, ExceptionType.MM_PROCESS_ERROR)
+    except requests.exceptions.ConnectionError as error:
+        # Response.iter_content wraps urllib3's read timeout in ConnectionError.
+        if error.args and isinstance(error.args[0], ReadTimeoutError):
+            raise_mm(MMErr.DL_TIMEOUT, ExceptionType.MM_PROCESS_ERROR)
+        raise_mm(MMErr.URL_INVALID, ExceptionType.MM_PROCESS_ERROR)
     except (
-        requests.exceptions.ConnectionError,
         requests.exceptions.InvalidURL,
         requests.exceptions.MissingSchema,
         requests.exceptions.InvalidSchema,
