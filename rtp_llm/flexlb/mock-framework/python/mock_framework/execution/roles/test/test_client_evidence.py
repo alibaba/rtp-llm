@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import zstandard
+from google.protobuf.json_format import MessageToDict
 
 from mock_framework.execution.roles import client_evidence_pb2 as pb
 from mock_framework.execution.step.registry import Registry
@@ -51,12 +52,43 @@ def evidence(tmp_path):
     return create
 
 
-def test_roundtrip_preserves_int64_identity_and_reconciles_summary(evidence):
+def jsonl_rows(batch):
+    header = MessageToDict(batch, preserving_proto_field_name=True)
+    del header['frame']
+    events = header.pop('events')
+    seal = header.pop('seal')
+    return [json.dumps(row) for row in [header, *events, {'seal': seal}]]
+
+
+@pytest.mark.parametrize('format', ['legacy', 'jsonl'])
+def test_roundtrip_preserves_int64_identity_and_reconciles_summary(evidence, format):
     directory, batch = evidence()
+    if format == 'jsonl':
+        (directory / 'requests.jsonl').write_text('\n'.join(jsonl_rows(batch)) + '\n')
+        (directory / 'requests.binpb.zst').unlink()
     result, = read_requests(directory)
     assert result.request_id == 9007199254740993
     assert result.attempts[0].master == 'm:1' and result.output_tokens == 3
     assert result.ttft_nanos == 40 and result.elapsed_nanos == 50
+
+
+@pytest.mark.parametrize('damage', ['missing_seal', 'sequence', 'duplicate_field', 'trailing', 'truncated'])
+def test_invalid_jsonl_is_rejected_even_when_legacy_evidence_exists(evidence, damage):
+    directory, batch = evidence()
+    rows = jsonl_rows(batch)
+    if damage == 'missing_seal':
+        rows.pop()
+    elif damage == 'sequence':
+        event = json.loads(rows[1])
+        rows[1] = json.dumps({**event, 'sequence': '99'})
+    elif damage == 'duplicate_field':
+        rows[1] = rows[1][:-1] + ', "sequence": "1"}'
+    elif damage == 'trailing':
+        rows.append('{}')
+    newline = '' if damage == 'truncated' else '\n'
+    (directory / 'requests.jsonl').write_text('\n'.join(rows) + newline)
+    with pytest.raises(ExecutionError, match=r'requests\.jsonl'):
+        list(read_requests(directory))
 
 
 @pytest.mark.parametrize('damage', ['truncated', 'checksum', 'missing_seal', 'sequence', 'duplicate', 'frame_gap',
@@ -114,7 +146,7 @@ def test_stop_uses_rpc_summary_while_request_query_requires_files(monkeypatch, t
         asyncio.run(Registry.standard().get('client/requests').invoke(ctx, {}))
 
 
-def test_killed_java_writer_leaves_readable_frames_but_no_complete_evidence(tmp_path):
+def test_killed_java_writer_leaves_readable_lines_but_no_complete_evidence(tmp_path):
     import os
     import shutil
     import subprocess
@@ -136,7 +168,8 @@ def test_killed_java_writer_leaves_readable_frames_but_no_complete_evidence(tmp_
             process.kill(); process.wait(timeout=10)
     assert process.returncode != 0
     directory = tmp_path / 'components/client-0/playback/1'
-    assert (directory / 'requests.binpb.zst').stat().st_size > 0
+    assert any(json.loads(line).get('kind') == 'FIRST_TOKEN'
+               for line in (directory / 'requests.jsonl').read_text().splitlines())
     with pytest.raises(ExecutionError, match='Missing evidence seal'):
         list(read_requests(directory))
 

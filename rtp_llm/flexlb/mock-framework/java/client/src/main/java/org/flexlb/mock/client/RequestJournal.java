@@ -1,17 +1,20 @@
 package org.flexlb.mock.client;
 
-import com.github.luben.zstd.ZstdOutputStream;
+import com.google.protobuf.MessageOrBuilder;
+import com.google.protobuf.util.JsonFormat;
 import java.io.*;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.file.*;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.concurrent.TimeUnit;
 import org.flexlb.mock.client.evidence.ClientEvidence.*;
 
 /** One bounded, nonblocking producer queue; only the writer touches disk. */
 final class RequestJournal {
-    static final int MAX_FRAME = 2 * 1024 * 1024;
+    private static final JsonFormat.Printer JSON = JsonFormat.printer()
+        .preservingProtoFieldNames().omittingInsignificantWhitespace();
     private final int capacity;
     private final ArrayDeque<Event> queue = new ArrayDeque<>();
     private final EventBatch template;
@@ -59,10 +62,10 @@ final class RequestJournal {
         if (failure != null) throw new IOException(failure);
     }
     private void write() {
-        try (file; var out = new DataOutputStream(Channels.newOutputStream(file))) {
-            long frame = 0;
+        try (file; var out = new BufferedWriter(Channels.newWriter(file, StandardCharsets.UTF_8))) {
+            boolean headerWritten = false;
             while (true) {
-                var batch = template.toBuilder().setFrame(++frame);
+                var batch = EventBatch.newBuilder();
                 synchronized (this) {
                     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
                     while (!closing && failure == null && queuedBytes < 1024 * 1024 && System.nanoTime() < deadline)
@@ -75,16 +78,23 @@ final class RequestJournal {
                     }
                     if (closing && queue.isEmpty()) batch.setSeal(seal);
                 }
-                if (batch.getEventsCount() == 0 && !batch.hasSeal()) { frame--; continue; }
-                var compressed = new ByteArrayOutputStream();
-                try (var zstd = new ZstdOutputStream(compressed, 3).setChecksum(true)) { batch.build().writeDelimitedTo(zstd); }
-                byte[] encoded = compressed.toByteArray();
-                if (encoded.length > MAX_FRAME) throw new IOException("Oversized evidence frame");
-                out.writeInt(encoded.length); out.write(encoded);
-                // Completed frames survive a later crash; only a forced final seal certifies completeness.
+                if (batch.getEventsCount() == 0 && !batch.hasSeal()) continue;
+                if (!headerWritten) {
+                    writeLine(out, template);
+                    headerWritten = true;
+                }
+                for (var event : batch.getEventsList()) writeLine(out, event);
+                if (batch.hasSeal()) writeLine(out, EventBatch.newBuilder().setSeal(batch.getSeal()).build());
+                out.flush();
+                // Only a forced final seal certifies completeness.
                 file.force(false);
                 if (batch.hasSeal()) return;
             }
         } catch (Exception error) { failure = "Client evidence write failed: " + error; }
+    }
+
+    private static void writeLine(BufferedWriter out, MessageOrBuilder row) throws IOException {
+        JSON.appendTo(row, out);
+        out.write('\n');
     }
 }

@@ -16,10 +16,10 @@ public final class EvidenceCrashProbe {
             new ObjectMapper().writeValue(topology.toFile(), List.of(master.endpoint(),
                 Map.of("id", "client-0", "role", "client", "control", client.url(), "rpc", "client:1")));
             client.start(InputFixture.plan(root, null, 20, 1, 2, 32, 30000, 30000));
-            Path path = root.resolve("components/client-0/playback/1/requests.binpb.zst");
+            Path path = root.resolve("components/client-0/playback/1/requests.jsonl");
             long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(8);
-            while (Files.size(path) == 0 && System.nanoTime() < deadline) Thread.sleep(20);
-            if (Files.size(path) == 0) throw new IllegalStateException("Evidence writer did not flush");
+            while (!Files.readString(path).contains("\"FIRST_TOKEN\"") && System.nanoTime() < deadline) Thread.sleep(20);
+            if (!Files.readString(path).contains("\"FIRST_TOKEN\"")) throw new IllegalStateException("Evidence writer did not flush");
             Files.writeString(root.resolve("written"), "ready");
             new CountDownLatch(1).await();
         }

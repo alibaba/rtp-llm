@@ -1,7 +1,7 @@
 package org.flexlb.mock.client;
 
 import static org.junit.jupiter.api.Assertions.*;
-import com.github.luben.zstd.ZstdInputStream;
+import com.google.protobuf.util.JsonFormat;
 import java.io.*;
 import java.nio.channels.FileChannel;
 import java.nio.file.*;
@@ -18,19 +18,18 @@ class RequestJournalTest {
         return new ClientProtocol.Shard(1, null, "/unused", 1, 0, 1, 100, "0".repeat(64), 1.0, null, 1, 1, 3000, 1000);
     }
     static List<EventBatch> read(Path path) throws Exception {
-        var frames = new ArrayList<EventBatch>();
-        try (var input = new DataInputStream(Files.newInputStream(path))) {
-            while (input.available() > 0) {
-                byte[] compressed = input.readNBytes(input.readInt());
-                try (var zstd = new ZstdInputStream(new ByteArrayInputStream(compressed))) {
-                    frames.add(EventBatch.parseDelimitedFrom(zstd)); assertEquals(-1, zstd.read());
-                }
-            }
+        var rows = Files.readAllLines(path);
+        if (rows.isEmpty()) return List.of();
+        var batch = EventBatch.newBuilder();
+        JsonFormat.parser().merge(rows.getFirst(), batch);
+        for (var row : rows.subList(1, rows.size())) {
+            if (row.startsWith("{\"seal\"")) JsonFormat.parser().merge(row, batch);
+            else JsonFormat.parser().merge(row, batch.addEventsBuilder());
         }
-        return frames;
+        return List.of(batch.build());
     }
     @Test void backupAttemptsAndCancellationAreRecordedIncrementally() throws Exception {
-        var path = directory.resolve("requests.binpb.zst");
+        var path = directory.resolve("requests.jsonl");
         var journal = new RequestJournal(path, "client-0", plan());
         try (var first = new NativeClientTest.Harness(); var backup = new NativeClientTest.Harness();
              var client = new NativeClient(() -> List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")), journal::record)) {
@@ -39,7 +38,7 @@ class RequestJournalTest {
             var call = client.send(NativeClientTest.request(100), Duration.ofSeconds(8));
             call.firstToken().toCompletableFuture().get(2, TimeUnit.SECONDS);
             PlaybackTest.eventually(() -> {
-                try { return Files.size(path) > 0; } catch (IOException e) { return false; }
+                try { return Files.readString(path).contains("\"FIRST_TOKEN\""); } catch (IOException e) { return false; }
             });
             assertFalse(read(path).getLast().hasSeal(), "Evidence must exist before the request ends");
             call.cancel(); call.completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
@@ -60,7 +59,7 @@ class RequestJournalTest {
         }
     }
     @Test void queueOverflowCannotSealOrSilentlyDrop() throws Exception {
-        var path = directory.resolve("requests.binpb.zst");
+        var path = directory.resolve("requests.jsonl");
         var journal = new RequestJournal(path, "client-0", plan(), 1);
         journal.record(Event.newBuilder().setKind(Event.Kind.ISSUED).setRequestId(100));
         assertNotNull(journal.failure());
@@ -68,14 +67,14 @@ class RequestJournalTest {
         assertTrue(read(path).stream().noneMatch(EventBatch::hasSeal));
     }
     @Test void ioFailureCannotReportSuccessfulClose() throws Exception {
-        var journal = new RequestJournal(directory.resolve("requests.binpb.zst"), "client-0", plan());
+        var journal = new RequestJournal(directory.resolve("requests.jsonl"), "client-0", plan());
         var field = RequestJournal.class.getDeclaredField("file"); field.setAccessible(true);
         ((FileChannel) field.get(journal)).close();
         assertThrows(IOException.class, () -> journal.finish(0, 0));
         assertTrue(journal.failure().contains("write failed"));
     }
     @Test void unfinishedRequestCannotSeal() throws Exception {
-        var path = directory.resolve("requests.binpb.zst");
+        var path = directory.resolve("requests.jsonl");
         var journal = new RequestJournal(path, "client-0", plan());
         assertThrows(IOException.class, () -> journal.finish(1, 0));
         assertTrue(read(path).stream().noneMatch(EventBatch::hasSeal));
@@ -105,7 +104,7 @@ class RequestJournalTest {
 
     @Test void businessRejectionAndDeadlineKeepDistinctEvidence() throws Exception {
         for (boolean timeout : List.of(false, true)) {
-            var path = directory.resolve(timeout ? "timeout.binpb.zst" : "rejection.binpb.zst");
+            var path = directory.resolve(timeout ? "timeout.jsonl" : "rejection.jsonl");
             var journal = new RequestJournal(path, "client-0", plan());
             try (var master = new NativeClientTest.Harness();
                  var client = new NativeClient(() -> List.of(master.endpoint().get("rpc")), journal::record)) {
