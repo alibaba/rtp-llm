@@ -70,6 +70,7 @@ from rtp_llm.dash_sc.codec import (
     DASH_ERROR_INVALID_OUTPUT,
     DASH_ERROR_RESOURCE_EXHAUSTED,
     DASH_ERROR_TIMEOUT,
+    DASH_ERROR_TPM_THROTTLED,
     DASH_ERROR_TOO_LONG,
     DASH_ERROR_UNSUPPORTED,
     DashErrorSpec,
@@ -99,6 +100,11 @@ from rtp_llm.dash_sc.inference.grammar_validator import (
     GrammarCheckUnavailable,
     GrammarCompilationError,
     GrammarValidator,
+)
+from rtp_llm.dash_sc.inference.tpm_recheck import (
+    DEFAULT_TPM_RECHECK_TIMEOUT_MS,
+    TpmRecheckResult,
+    recheck_tpm,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
@@ -910,6 +916,40 @@ def _slice_generate_output_token_span(
     return source_ids[start:end]
 
 
+_TPM_RECHECK_TIMEOUT_ENV = "DASHSC_TPM_RECHECK_TIMEOUT_MS"
+
+
+def _tpm_recheck_timeout_ms() -> int:
+    raw = os.environ.get(_TPM_RECHECK_TIMEOUT_ENV, "")
+    if not raw:
+        return DEFAULT_TPM_RECHECK_TIMEOUT_MS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_TPM_RECHECK_TIMEOUT_MS
+
+
+# Public gateway contract for any TPM recheck rejection. The callback's own
+# status code, status name, and message are passed through in extra response
+# parameters for downstream diagnosis.
+_TPM_RECHECK_PUBLIC_MESSAGE = "Requests throttling triggered."
+
+
+def _tpm_recheck_detail(
+    result: TpmRecheckResult, elapsed_ms: int, interval_ms: int
+) -> str:
+    message = (
+        f"TPM limit exceeded: request waited {elapsed_ms}ms before prefill "
+        f"(recheck threshold {interval_ms}ms); "
+        f"usage callback returned HTTP {result.callback_status_code}"
+    )
+    if result.callback_error_code:
+        message += f" (error_code={result.callback_error_code})"
+    if result.message:
+        message += f": {result.message}"
+    return message
+
+
 def _early_first_packet_snapshot(
     input: GenerateInput,
 ) -> Optional[MMRoutingSnapshot]:
@@ -1342,6 +1382,60 @@ async def iter_real_model_stream_infer(
                     (),
                 )
                 yield (fake, fake_stats) if yield_access_stats else fake
+                recheck = getattr(request_controls, "tpm_recheck", None)
+                if recheck is not None:
+                    elapsed_ms = int(time.time() * 1000) - recheck.request_ready_time_ms
+                    if elapsed_ms > recheck.interval_ms:
+                        result = await recheck_tpm(
+                            recheck.callback_url,
+                            timeout_ms=_tpm_recheck_timeout_ms(),
+                            request_id=str(request.id),
+                        )
+                        if not result.ok:
+                            error_resp = build_dash_error_response(
+                                str(request.id),
+                                request.model_name,
+                                error_spec=DASH_ERROR_TPM_THROTTLED,
+                                status_message=_TPM_RECHECK_PUBLIC_MESSAGE,
+                            )
+                            # Preserve the gateway callback's own code and
+                            # message for downstream diagnosis; the public
+                            # status is always 429 / Throttling.
+                            parameters = error_resp.infer_response.parameters
+                            parameters["callback_status_code"].int64_param = int(
+                                result.callback_status_code
+                            )
+                            if result.callback_error_code:
+                                parameters["callback_error_code"].string_param = (
+                                    result.callback_error_code
+                                )
+                            if result.status_name:
+                                parameters["callback_status_name"].string_param = (
+                                    result.status_name
+                                )
+                            if result.message:
+                                parameters["callback_status_message"].string_param = (
+                                    result.message
+                                )
+                            parameters["tpm_recheck_detail"].string_param = (
+                                _tpm_recheck_detail(
+                                    result, elapsed_ms, recheck.interval_ms
+                                )
+                            )
+                            error_stats = (
+                                0,
+                                True,
+                                DASH_ERROR_TPM_THROTTLED.finish_reason,
+                                go.prompt_token_num,
+                                0,
+                                (),
+                            )
+                            yield (
+                                (error_resp, error_stats)
+                                if yield_access_stats
+                                else error_resp
+                            )
+                            return
                 continue
             chunk_idx += 1
             logging.debug("[DashScGrpc] [%s] real infer chunk %s", tag, chunk_idx)

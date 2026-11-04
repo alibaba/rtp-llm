@@ -36,6 +36,7 @@ py_library(
         "inference/__main__.py",
         "inference/grammar_validator.py",
         "inference/servicer.py",
+        "inference/tpm_recheck.py",
         "proxy/__init__.py",
         "proxy/__main__.py",
         "proxy/service_route.py",
@@ -55,6 +56,7 @@ py_library(
     deps = [
         ":xgrammar_core_dump_control",
         "//rtp_llm:telemetry",
+        "//rtp_llm:aiohttp",
         "//rtp_llm/server:server",
         ":grpcio",
         ":jsonschema",

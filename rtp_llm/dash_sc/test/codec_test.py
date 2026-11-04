@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import struct
+import time
 from unittest import TestCase, main
 from unittest.mock import patch
 
@@ -1274,6 +1276,110 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(
             op.request_headers, {"user_id": "u1", "x-dashscope-apikeyid": "ak1"}
         )
+
+    def _tpm_request(self, attrs):
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(attrs)
+        return req
+
+    def test_parse_tpm_recheck_user_meta_priority(self) -> None:
+        req = self._tpm_request(
+            {
+                "x-dashscope-inner-requestreadytime": "1793759509454",
+                "x-dashscope-inner-model-meta": json.dumps(
+                    {"enable_tpm_recheck_interval": 500}
+                ),
+                "x-dashscope-inner-user-meta": json.dumps(
+                    {"enable_tpm_recheck_interval": 300}
+                ),
+                "x-dashscope-inner-usage-callback": "http://callback.local/limits",
+            }
+        )
+        op = parse_request_controls(req)
+        self.assertIsNotNone(op.tpm_recheck)
+        self.assertEqual(op.tpm_recheck.request_ready_time_ms, 1793759509454)
+        self.assertEqual(op.tpm_recheck.interval_ms, 300)
+        self.assertEqual(op.tpm_recheck.callback_url, "http://callback.local/limits")
+
+    def test_parse_tpm_recheck_nested_interval_and_metadata_fallback(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        op = parse_request_controls(
+            req,
+            ds_attrs={
+                "x-dashscope-inner-requestreadytime": "1000",
+                "x-dashscope-inner-model-meta": json.dumps(
+                    {"incr_rate_limit": {"enable_tpm_recheck_interval": 700}}
+                ),
+            },
+            invocation_metadata=(
+                (
+                    "X-DashScope-Inner-Usage-Callback",
+                    "https://callback.local/limits",
+                ),
+            ),
+        )
+        self.assertIsNotNone(op.tpm_recheck)
+        self.assertEqual(op.tpm_recheck.interval_ms, 700)
+        self.assertEqual(op.tpm_recheck.callback_url, "https://callback.local/limits")
+
+    def test_parse_tpm_recheck_requires_callback_and_interval(self) -> None:
+        base = {
+            "x-dashscope-inner-requestreadytime": "1000",
+            "x-dashscope-inner-user-meta": json.dumps(
+                {"enable_tpm_recheck_interval": 300}
+            ),
+            "x-dashscope-inner-usage-callback": "http://callback.local/limits",
+        }
+        for missing in (
+            "x-dashscope-inner-user-meta",
+            "x-dashscope-inner-usage-callback",
+        ):
+            attrs = dict(base)
+            attrs.pop(missing)
+            op = parse_request_controls(self._tpm_request(attrs))
+            self.assertIsNone(op.tpm_recheck, missing)
+
+        invalid_url = dict(base)
+        invalid_url["x-dashscope-inner-usage-callback"] = "file:///etc/passwd"
+        self.assertIsNone(
+            parse_request_controls(self._tpm_request(invalid_url)).tpm_recheck
+        )
+
+        invalid_interval = dict(base)
+        invalid_interval["x-dashscope-inner-user-meta"] = json.dumps(
+            {"enable_tpm_recheck_interval": 0}
+        )
+        self.assertIsNone(
+            parse_request_controls(self._tpm_request(invalid_interval)).tpm_recheck
+        )
+
+    def test_parse_tpm_recheck_empty_user_meta_falls_back_to_model_meta(
+        self,
+    ) -> None:
+        attrs = {
+            "x-dashscope-inner-requestreadytime": "1000",
+            "x-dashscope-inner-user-meta": "",
+            "x-dashscope-inner-model-meta": json.dumps(
+                {"enable_tpm_recheck_interval": 500}
+            ),
+            "x-dashscope-inner-usage-callback": "http://callback.local/limits",
+        }
+        op = parse_request_controls(self._tpm_request(attrs))
+        self.assertIsNotNone(op.tpm_recheck)
+        self.assertEqual(op.tpm_recheck.interval_ms, 500)
+
+    def test_parse_tpm_recheck_uses_default_interval_and_parse_time(self) -> None:
+        attrs = {
+            "x-dashscope-inner-usage-callback": "http://callback.local/limits",
+        }
+        before = int(time.time() * 1000)
+        with patch.dict(os.environ, {"DASHSC_TPM_RECHECK_DEFAULT_INTERVAL_MS": "250"}):
+            op = parse_request_controls(self._tpm_request(attrs))
+        after = int(time.time() * 1000)
+        self.assertIsNotNone(op.tpm_recheck)
+        self.assertEqual(op.tpm_recheck.interval_ms, 250)
+        self.assertGreaterEqual(op.tpm_recheck.request_ready_time_ms, before)
+        self.assertLessEqual(op.tpm_recheck.request_ready_time_ms, after)
 
     def test_request_identity_survives_empty_case_aliases(self) -> None:
         for empty in ("", None, " \t "):

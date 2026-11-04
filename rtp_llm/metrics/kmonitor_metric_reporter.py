@@ -85,6 +85,11 @@ class AccMetrics(Enum):
     VIT_EMBEDDING_CACHE_INFLIGHT_QPS_METRIC = "py_rtp_vit_embedding_cache_inflight_qps"
     VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC = "py_rtp_vit_embedding_cache_eviction_qps"
 
+    # DashScope TPM recheck after the early first packet.
+    DASH_SC_TPM_RECHECK_QPS_METRIC = "py_rtp_dash_sc_tpm_recheck_qps"
+    DASH_SC_TPM_RECHECK_LIMIT_QPS_METRIC = "py_rtp_dash_sc_tpm_recheck_limit_qps"
+    DASH_SC_TPM_RECHECK_ERROR_QPS_METRIC = "py_rtp_dash_sc_tpm_recheck_error_qps"
+
 
 class GaugeMetrics(Enum):
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
@@ -159,6 +164,9 @@ class GaugeMetrics(Enum):
     # Number of requests merged into one GPU forward by the MMScheduler. 1 on the
     # serial path (gpu_max_batch_size == 1); > 1 means cross-request batching kicked in.
     VIT_EMBEDDING_BATCH_SIZE_METRIC = "py_rtp_vit_embedding_batch_size"
+
+    # DashScope TPM recheck callback latency (ms).
+    DASH_SC_TPM_RECHECK_RT_METRIC = "py_rtp_dash_sc_tpm_recheck_rt"
 
     TOOL_CALL_LOOP_REPEAT_COUNT_METRIC = "py_rtp_tool_call_loop_repeat_count"
     TOOL_CALL_LOOP_CURRENT_SPAN_TOKENS_METRIC = (

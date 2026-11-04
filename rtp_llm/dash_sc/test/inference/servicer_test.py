@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import struct
+import time
 import unittest
 import weakref
 from types import SimpleNamespace
@@ -24,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import grpc
 import requests
 import torch
+from aiohttp import web
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
@@ -61,6 +63,7 @@ from rtp_llm.dash_sc.codec import (
     DashScRequestControls,
     LLMFinishReason,
     SamplingParams,
+    TpmRecheckConfig,
 )
 from rtp_llm.dash_sc.inference.grammar_validator import (
     GrammarCheckOverloaded,
@@ -69,6 +72,7 @@ from rtp_llm.dash_sc.inference.grammar_validator import (
     GrammarCompilationError,
     GrammarValidator,
 )
+from rtp_llm.dash_sc.inference.tpm_recheck import TpmRecheckResult, recheck_tpm
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     _build_mm_inputs_from_request,
@@ -759,6 +763,248 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(chunks), 1)
         self.assertFalse(hasattr(visitor.last_generate_input, "on_mm_routed"))
+
+    async def test_tpm_recheck_skips_before_threshold(self) -> None:
+        req = self._minimal_request()
+        out = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _RoutingFakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])]),
+            MMRoutingSnapshot(prompt_token_num=2, split_sizes=(), feature_hashes=()),
+        )
+        controls = DashScRequestControls(
+            tpm_recheck=TpmRecheckConfig(
+                request_ready_time_ms=int(time.time() * 1000),
+                interval_ms=10_000,
+                callback_url="http://callback.local/limits",
+            )
+        )
+        with patch(
+            "rtp_llm.dash_sc.inference.servicer.recheck_tpm", new=AsyncMock()
+        ) as recheck:
+            chunks = await _drain(
+                iter_real_model_stream_infer(
+                    req,
+                    [1, 2],
+                    SamplingParams(),
+                    controls,
+                    visitor,
+                    rtp_llm_request_id=1,
+                    yield_access_stats=True,
+                    enable_fake_first_packet=True,
+                )
+            )
+        self.assertEqual(recheck.await_count, 0)
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual(_gen_ids(chunks[1][0]), [3])
+
+    async def test_tpm_recheck_not_run_without_fake_packet(self) -> None:
+        req = self._minimal_request()
+        out = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        controls = DashScRequestControls(
+            tpm_recheck=TpmRecheckConfig(
+                request_ready_time_ms=int(time.time() * 1000) - 5_000,
+                interval_ms=1_000,
+                callback_url="http://callback.local/limits",
+            )
+        )
+        with patch(
+            "rtp_llm.dash_sc.inference.servicer.recheck_tpm", new=AsyncMock()
+        ) as recheck:
+            chunks = await _drain(
+                iter_real_model_stream_infer(
+                    req,
+                    [1, 2],
+                    SamplingParams(),
+                    controls,
+                    visitor,
+                    rtp_llm_request_id=1,
+                    yield_access_stats=True,
+                    enable_fake_first_packet=False,
+                )
+            )
+        self.assertEqual(recheck.await_count, 0)
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(_gen_ids(chunks[0][0]), [3])
+
+    async def test_tpm_recheck_200_continues(self) -> None:
+        req = self._minimal_request()
+        out = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _RoutingFakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])]),
+            MMRoutingSnapshot(prompt_token_num=2, split_sizes=(), feature_hashes=()),
+        )
+        controls = DashScRequestControls(
+            tpm_recheck=TpmRecheckConfig(
+                request_ready_time_ms=int(time.time() * 1000) - 5_000,
+                interval_ms=1_000,
+                callback_url="http://callback.local/limits",
+            )
+        )
+        result = TpmRecheckResult(
+            ok=True,
+            callback_status_code=200,
+            status_name="",
+            message="",
+        )
+        with patch(
+            "rtp_llm.dash_sc.inference.servicer.recheck_tpm",
+            new=AsyncMock(return_value=result),
+        ) as recheck:
+            chunks = await _drain(
+                iter_real_model_stream_infer(
+                    req,
+                    [1, 2],
+                    SamplingParams(),
+                    controls,
+                    visitor,
+                    rtp_llm_request_id=1,
+                    yield_access_stats=True,
+                    enable_fake_first_packet=True,
+                )
+            )
+        self.assertEqual(recheck.await_count, 1)
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual(_gen_ids(chunks[1][0]), [3])
+
+    async def test_tpm_recheck_429_stops_with_throttling_error(self) -> None:
+        req = self._minimal_request()
+        out = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _RoutingFakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])]),
+            MMRoutingSnapshot(prompt_token_num=2, split_sizes=(), feature_hashes=()),
+        )
+        controls = DashScRequestControls(
+            tpm_recheck=TpmRecheckConfig(
+                request_ready_time_ms=int(time.time() * 1000) - 5_000,
+                interval_ms=1_000,
+                callback_url="http://callback.local/limits",
+            )
+        )
+        result = TpmRecheckResult(
+            ok=False,
+            callback_status_code=429,
+            status_name="Throttling.ResourceExhausted",
+            message="tpm exceeded",
+            callback_error_code="429",
+        )
+        with patch(
+            "rtp_llm.dash_sc.inference.servicer.recheck_tpm",
+            new=AsyncMock(return_value=result),
+        ) as recheck:
+            chunks = await _drain(
+                iter_real_model_stream_infer(
+                    req,
+                    [1, 2],
+                    SamplingParams(),
+                    controls,
+                    visitor,
+                    rtp_llm_request_id=1,
+                    yield_access_stats=True,
+                    enable_fake_first_packet=True,
+                )
+            )
+        self.assertEqual(recheck.await_count, 1)
+        self.assertEqual(len(chunks), 2)
+        error = chunks[1][0].infer_response
+        self.assertEqual(error.parameters["status_code"].int64_param, 429)
+        self.assertEqual(error.parameters["status_name"].string_param, "Throttling")
+        self.assertEqual(
+            error.parameters["status_message"].string_param,
+            "Requests throttling triggered.",
+        )
+        self.assertEqual(error.parameters["callback_status_code"].int64_param, 429)
+        self.assertEqual(error.parameters["callback_error_code"].string_param, "429")
+        self.assertEqual(
+            error.parameters["callback_status_name"].string_param,
+            "Throttling.ResourceExhausted",
+        )
+        self.assertEqual(
+            error.parameters["callback_status_message"].string_param,
+            "tpm exceeded",
+        )
+        detail = error.parameters["tpm_recheck_detail"].string_param
+        self.assertIn("TPM limit exceeded", detail)
+        self.assertIn("429", detail)
+        self.assertTrue(chunks[1][1][1])
+
+    async def test_tpm_recheck_timeout_stops_with_throttling_error(self) -> None:
+        req = self._minimal_request()
+        out = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _RoutingFakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])]),
+            MMRoutingSnapshot(prompt_token_num=2, split_sizes=(), feature_hashes=()),
+        )
+        controls = DashScRequestControls(
+            tpm_recheck=TpmRecheckConfig(
+                request_ready_time_ms=int(time.time() * 1000) - 5_000,
+                interval_ms=1_000,
+                callback_url="http://callback.local/limits",
+            )
+        )
+        result = TpmRecheckResult(
+            ok=False,
+            callback_status_code=504,
+            status_name="GatewayTimeout",
+            message="timeout",
+        )
+        with patch(
+            "rtp_llm.dash_sc.inference.servicer.recheck_tpm",
+            new=AsyncMock(return_value=result),
+        ):
+            chunks = await _drain(
+                iter_real_model_stream_infer(
+                    req,
+                    [1, 2],
+                    SamplingParams(),
+                    controls,
+                    visitor,
+                    rtp_llm_request_id=1,
+                    yield_access_stats=True,
+                    enable_fake_first_packet=True,
+                )
+            )
+        self.assertEqual(len(chunks), 2)
+        error = chunks[1][0].infer_response
+        self.assertEqual(error.parameters["status_code"].int64_param, 429)
+        self.assertEqual(error.parameters["status_name"].string_param, "Throttling")
+        self.assertEqual(
+            error.parameters["status_message"].string_param,
+            "Requests throttling triggered.",
+        )
+        self.assertEqual(error.parameters["callback_status_code"].int64_param, 504)
+        self.assertEqual(
+            error.parameters["callback_status_name"].string_param,
+            "GatewayTimeout",
+        )
+        self.assertEqual(
+            error.parameters["callback_status_message"].string_param, "timeout"
+        )
+        detail = error.parameters["tpm_recheck_detail"].string_param
+        self.assertIn("TPM limit exceeded", detail)
+        self.assertIn("504", detail)
 
     async def test_v41_standard_input_failure_returns_protocol_error_before_enqueue(
         self,
@@ -6082,6 +6328,66 @@ class DashScInferenceCancellationRpcTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.access_records[-1]["status"], "OK")
         self.assertEqual(self.access_records[-1]["exc_type"], "CancelledError")
         self.assertEqual(self.access_records[-1]["output_token_len"], 1)
+
+
+class TpmRecheckClientTest(unittest.IsolatedAsyncioTestCase):
+    async def _serve(self, handler):
+        app = web.Application()
+        app.router.add_get("/limits", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        return runner, f"http://127.0.0.1:{port}/limits"
+
+    async def test_callback_200_allows_request(self) -> None:
+        async def handler(_request):
+            return web.Response(text="ok")
+
+        runner, url = await self._serve(handler)
+        try:
+            result = await recheck_tpm(url, timeout_ms=1000)
+        finally:
+            await runner.cleanup()
+        self.assertTrue(result.ok)
+        self.assertEqual(result.callback_status_code, 200)
+
+    async def test_callback_429_preserves_error_fields(self) -> None:
+        async def handler(_request):
+            return web.json_response(
+                {
+                    "status_code": 429,
+                    "status_name": "Throttling.ResourceExhausted",
+                    "status_message": "tpm exceeded",
+                },
+                status=429,
+            )
+
+        runner, url = await self._serve(handler)
+        try:
+            result = await recheck_tpm(url, timeout_ms=1000)
+        finally:
+            await runner.cleanup()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.callback_status_code, 429)
+        self.assertEqual(result.status_name, "Throttling.ResourceExhausted")
+        self.assertEqual(result.message, "tpm exceeded")
+        self.assertEqual(result.callback_error_code, "429")
+
+    async def test_callback_timeout_maps_to_504(self) -> None:
+        async def handler(_request):
+            await asyncio.sleep(0.2)
+            return web.Response(text="late")
+
+        runner, url = await self._serve(handler)
+        try:
+            result = await recheck_tpm(url, timeout_ms=50)
+        finally:
+            await runner.cleanup()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.callback_status_code, 504)
+        self.assertEqual(result.status_name, "GatewayTimeout")
 
 
 if __name__ == "__main__":

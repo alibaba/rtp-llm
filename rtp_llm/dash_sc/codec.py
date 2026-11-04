@@ -12,7 +12,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import struct
+import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -160,6 +162,16 @@ DASH_ERROR_RESOURCE_EXHAUSTED = DashErrorSpec(
     finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=429,
     status_name="Throttling.ResourceExhausted",
+)
+# Gateway TPM recheck rejection: the request was stopped before prefill because
+# the usage callback reported the user's TPM quota is exhausted. The public
+# contract requested by the gateway is exactly 429 / Throttling /
+# "Requests throttling triggered."
+DASH_ERROR_TPM_THROTTLED = DashErrorSpec(
+    error_no=LLMFinishReason.TASK_LIST_FULL,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=429,
+    status_name="Throttling",
 )
 DASH_ERROR_TIMEOUT = DashErrorSpec(
     error_no=LLMFinishReason.STOP_TIMEOUT,
@@ -878,6 +890,15 @@ def _parse_max_token_limits(
 
 
 @dataclass(frozen=True)
+class TpmRecheckConfig:
+    """Gateway-provided TPM recheck settings for the early first packet."""
+
+    request_ready_time_ms: int
+    interval_ms: int
+    callback_url: str
+
+
+@dataclass(frozen=True)
 class DashScRequestControls:
     """Request-scoped controls carried alongside ``input_ids``.
 
@@ -895,6 +916,7 @@ class DashScRequestControls:
     debug: bool = False
     request_headers: dict[str, str] = field(default_factory=dict)
     log_input_output: bool = True
+    tpm_recheck: TpmRecheckConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -1200,6 +1222,100 @@ def parse_sampling_params(
     )
 
 
+_TPM_RECHECK_READY_HEADER = "x-dashscope-inner-requestreadytime"
+_TPM_RECHECK_META_HEADERS = (
+    # User-level settings override model-level ones.
+    "x-dashscope-inner-user-meta",
+    "x-dashscope-inner-model-meta",
+)
+_TPM_RECHECK_CALLBACK_HEADER = "x-dashscope-inner-usage-callback"
+_TPM_RECHECK_DEFAULT_INTERVAL_ENV = "DASHSC_TPM_RECHECK_DEFAULT_INTERVAL_MS"
+
+
+def _default_tpm_recheck_interval_ms() -> int | None:
+    raw = os.environ.get(_TPM_RECHECK_DEFAULT_INTERVAL_ENV, "")
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _request_header_value(
+    ds_attrs: dict[str, Any] | None,
+    invocation_metadata: Iterable[tuple[object, object]],
+    name: str,
+) -> Any:
+    value = _dict_get_case_insensitive(ds_attrs, name)
+    if value is not None:
+        return value
+    lower = name.lower()
+    for key, value in invocation_metadata:
+        if str(key).lower() == lower:
+            return value
+    return None
+
+
+def _parse_tpm_recheck_interval(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(value, dict):
+        return None
+    interval = _parse_optional_int_value(value.get("enable_tpm_recheck_interval"))
+    if interval is None:
+        nested = value.get("incr_rate_limit")
+        if isinstance(nested, dict):
+            interval = _parse_optional_int_value(
+                nested.get("enable_tpm_recheck_interval")
+            )
+    return interval
+
+
+def _parse_tpm_recheck_config(
+    ds_attrs: dict[str, Any] | None,
+    invocation_metadata: Iterable[tuple[object, object]],
+) -> TpmRecheckConfig | None:
+    ready_time_ms = _parse_optional_int_value(
+        _request_header_value(ds_attrs, invocation_metadata, _TPM_RECHECK_READY_HEADER)
+    )
+    if ready_time_ms is None or ready_time_ms <= 0:
+        # The gateway may omit the ready timestamp; measure from the moment
+        # this request was parsed instead of disabling the check entirely.
+        ready_time_ms = int(time.time() * 1000)
+    interval_ms = None
+    for header in _TPM_RECHECK_META_HEADERS:
+        candidate = _parse_tpm_recheck_interval(
+            _request_header_value(ds_attrs, invocation_metadata, header)
+        )
+        if candidate is not None and candidate > 0:
+            interval_ms = candidate
+            break
+    if interval_ms is None:
+        # Both meta payloads may be absent or empty; allow an operator default.
+        interval_ms = _default_tpm_recheck_interval_ms()
+    if interval_ms is None:
+        return None
+    callback_url = _normalize_non_empty_str(
+        _request_header_value(
+            ds_attrs, invocation_metadata, _TPM_RECHECK_CALLBACK_HEADER
+        )
+    )
+    if callback_url is None or not callback_url.startswith(("http://", "https://")):
+        return None
+    return TpmRecheckConfig(
+        request_ready_time_ms=ready_time_ms,
+        interval_ms=interval_ms,
+        callback_url=callback_url,
+    )
+
+
 def parse_request_controls(
     request: predict_v2_pb2.ModelInferRequest,
     ds_attrs: dict[str, Any] | None = None,
@@ -1216,6 +1332,7 @@ def parse_request_controls(
     a compatibility fallback. The legacy ``x-ds-llm-thinking`` attribute is
     intentionally ignored.
     """
+    invocation_metadata = tuple(invocation_metadata or ())
     return_input_ids = False
     inp, raw = _find_input_raw(request, "return_input_ids")
     if inp is not None and raw:
@@ -1231,6 +1348,7 @@ def parse_request_controls(
                     return_input_ids = vf != 0.0
 
     ds_attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
+    tpm_recheck = _parse_tpm_recheck_config(ds_attrs, invocation_metadata)
     enable_thinking = _parse_optional_parameter_bool(request, "enable_thinking")
     if enable_thinking is None:
         enable_thinking = _parse_optional_bool(
@@ -1333,6 +1451,7 @@ def parse_request_controls(
         log_input_output=is_logging_consent_allowed(
             chain(ds_attrs.items(), invocation_metadata)
         ),
+        tpm_recheck=tpm_recheck,
     )
 
 
