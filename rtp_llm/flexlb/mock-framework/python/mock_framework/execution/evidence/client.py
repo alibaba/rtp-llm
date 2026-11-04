@@ -130,17 +130,8 @@ def read_requests(directory: Path, cancelled=None):
     identity = None
     try:
         plan = json.loads((directory / 'plan.json').read_text())
-        try:
-            stream = path.open('rb')
-            batches = _json_batches(stream, cancelled)
-        except FileNotFoundError:
-            from .legacy_client_evidence import read_batches
-
-            path = directory / 'requests.binpb.zst'
-            stream = path.open('rb')
-            batches = read_batches(stream)
-        with stream:
-            for header, events, seal in batches:
+        with path.open('rb') as stream:
+            for header, events, seal in _json_batches(stream, cancelled):
                 if cancelled is not None and cancelled.is_set():
                     raise ExecutionError('Client evidence scan cancelled')
                 if sealed:
@@ -154,8 +145,6 @@ def read_requests(directory: Path, cancelled=None):
                     if current != expected or not (first_request_id > 0 and stride > 0
                             and 0 <= first_index < stride and planned > 0 and concurrency > 0):
                         raise ValueError('Evidence identity does not match playback plan')
-                if current != identity:
-                    raise ValueError('Evidence frame identity/sequence mismatch')
                 for row in events:
                     event = _event(row)
                     sequence += 1

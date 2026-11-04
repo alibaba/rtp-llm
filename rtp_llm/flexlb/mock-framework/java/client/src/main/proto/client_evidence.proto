@@ -28,7 +28,7 @@ message EventBatch {
   uint32 version = 1;
   string client = 2;
   uint64 playback = 3;
-  uint64 frame = 4;
+  reserved 4;
   int64 first_request_id = 5;
   uint64 first_index = 6;
   uint32 stride = 7;

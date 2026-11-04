@@ -194,7 +194,7 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
                 seen.add(index)
     if large_input: assert seen == set(range(count))
     from mock_framework.execution.step.client_requests import playback_directories
-    from mock_framework.execution.roles.client_evidence import read_requests
+    from mock_framework.execution.evidence.client import read_requests
     assert not (output / 'topology-history.json').exists()
     topology = [json.loads(path.read_text()) for path in sorted(output.glob('components/client-*/endpoints.json'))]
     records = [record for directory in playback_directories(output, topology) for record in read_requests(directory)]

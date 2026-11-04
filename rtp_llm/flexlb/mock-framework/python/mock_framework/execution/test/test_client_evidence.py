@@ -1,30 +1,20 @@
 from mock_framework.execution.test.helpers import FRAMEWORK
 import asyncio
 import json
-import struct
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import zstandard
-from google.protobuf.json_format import MessageToDict
 
-from mock_framework.execution.roles import client_evidence_pb2 as pb
 from mock_framework.execution.step.registry import Registry
 from mock_framework.execution.step.client_requests import playback_directories
-from mock_framework.execution.roles.client_evidence import read_requests
+from mock_framework.execution.evidence.client import read_requests
 from mock_framework.execution import ExecutionError
 from mock_framework.execution.roles import client as client_runtime
 
 
-def frame(batch):
-    raw = batch.SerializeToString()
-    size, prefix = len(raw), bytearray()
-    while size > 127:
-        prefix.append((size & 127) | 128); size >>= 7
-    prefix.append(size)
-    encoded = zstandard.ZstdCompressor(write_checksum=True).compress(bytes(prefix) + raw)
-    return struct.pack('>I', len(encoded)) + encoded
+def write_rows(directory, rows):
+    (directory / 'requests.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
 
 
 @pytest.fixture
@@ -34,38 +24,30 @@ def evidence(tmp_path):
         directory.mkdir(parents=True)
         plan = dict(sequence=playback, first_request_id=first, first_index=index, stride=stride, count=1, concurrency=1)
         (directory / 'plan.json').write_text(json.dumps(plan))
-        batch = pb.EventBatch(version=1, client=name, playback=playback, frame=1,
-                              first_request_id=first, first_index=index, stride=stride, planned=1, concurrency=1)
-        for kind in [pb.Event.ISSUED, pb.Event.SCHEDULE_START, pb.Event.SCHEDULE_RESULT, pb.Event.FIRST_TOKEN, pb.Event.TERMINAL]:
-            n = len(batch.events) + 1
-            event = batch.events.add(sequence=n, request_id=first + index, epoch_ms=1000 + n, elapsed_nanos=n * 10, kind=kind)
-            if kind in (pb.Event.SCHEDULE_START, pb.Event.SCHEDULE_RESULT): event.attempt = 1; event.master = 'm:1'
-            if kind == pb.Event.SCHEDULE_RESULT: event.grpc_code = 'OK'; event.error_code = 200
-            if kind == pb.Event.TERMINAL:
-                event.outcome = outcome; event.grpc_code = 'OK'; event.ttft_nanos = 40; event.output_tokens = 3
-        batch.seal.issued = batch.seal.finished = 1
+        header = dict(version=1, client=name, playback=str(playback), first_request_id=str(first),
+                      first_index=str(index), stride=stride, planned='1', concurrency=1)
+        events = []
+        for n, kind in enumerate(('ISSUED', 'SCHEDULE_START', 'SCHEDULE_RESULT', 'FIRST_TOKEN', 'TERMINAL'), 1):
+            event = dict(sequence=str(n), request_id=str(first + index), epoch_ms=str(1000 + n),
+                         elapsed_nanos=str(n * 10), kind=kind)
+            if kind in ('SCHEDULE_START', 'SCHEDULE_RESULT'):
+                event.update(attempt=1, master='m:1')
+            if kind == 'SCHEDULE_RESULT':
+                event.update(grpc_code='OK', error_code='200')
+            if kind == 'TERMINAL':
+                event.update(outcome=outcome, grpc_code='OK', ttft_nanos='40', output_tokens=3)
+            events.append(event)
+        rows = [header, *events, {'seal': {'issued': '1', 'finished': '1'}}]
         result = dict(done=True, issued=1, finished=1, unsent=0, outcomes={v: int(v == outcome) for v in ('success', 'error', 'timeout', 'cancelled')})
         (directory / 'result.json').write_text(json.dumps(result))
-        (directory / 'requests.binpb.zst').write_bytes(frame(batch))
+        write_rows(directory, rows)
         (tmp_path / 'components/client-0/coordinator' / str(playback)).mkdir(parents=True, exist_ok=True)
-        return directory, batch
+        return directory, rows
     return create
 
 
-def jsonl_rows(batch):
-    header = MessageToDict(batch, preserving_proto_field_name=True)
-    del header['frame']
-    events = header.pop('events')
-    seal = header.pop('seal')
-    return [json.dumps(row) for row in [header, *events, {'seal': seal}]]
-
-
-@pytest.mark.parametrize('format', ['legacy', 'jsonl'])
-def test_roundtrip_preserves_int64_identity_and_reconciles_summary(evidence, format):
-    directory, batch = evidence()
-    if format == 'jsonl':
-        (directory / 'requests.jsonl').write_text('\n'.join(jsonl_rows(batch)) + '\n')
-        (directory / 'requests.binpb.zst').unlink()
+def test_roundtrip_preserves_int64_identity_and_reconciles_summary(evidence):
+    directory, _ = evidence()
     result, = read_requests(directory)
     assert result.request_id == 9007199254740993
     assert result.attempts[0].master == 'm:1' and result.output_tokens == 3
@@ -73,9 +55,9 @@ def test_roundtrip_preserves_int64_identity_and_reconciles_summary(evidence, for
 
 
 @pytest.mark.parametrize('damage', ['missing_seal', 'sequence', 'duplicate_field', 'trailing', 'truncated'])
-def test_invalid_jsonl_is_rejected_even_when_legacy_evidence_exists(evidence, damage):
-    directory, batch = evidence()
-    rows = jsonl_rows(batch)
+def test_invalid_jsonl_is_rejected(evidence, damage):
+    directory, rows = evidence()
+    rows = [json.dumps(row) for row in rows]
     if damage == 'missing_seal':
         rows.pop()
     elif damage == 'sequence':
@@ -91,29 +73,27 @@ def test_invalid_jsonl_is_rejected_even_when_legacy_evidence_exists(evidence, da
         list(read_requests(directory))
 
 
-@pytest.mark.parametrize('damage', ['truncated', 'checksum', 'missing_seal', 'sequence', 'duplicate', 'frame_gap',
-    'trailing', 'unfinished', 'identity', 'summary', 'attempt', 'first_token', 'unknown_kind', 'oversized'])
+@pytest.mark.parametrize('damage', ['duplicate', 'unfinished', 'identity', 'summary',
+                                   'attempt', 'first_token', 'unknown_kind'])
 def test_damaged_evidence_never_passes(evidence, damage):
-    directory, batch = evidence()
-    path = directory / 'requests.binpb.zst'
-    if damage == 'truncated': path.write_bytes(path.read_bytes()[:-2])
-    elif damage == 'checksum':
-        raw = bytearray(path.read_bytes()); raw[-1] ^= 1; path.write_bytes(raw)
-    elif damage == 'trailing': path.write_bytes(path.read_bytes() + frame(batch))
-    elif damage == 'oversized': path.write_bytes(struct.pack('>I', 3 * 1024 * 1024))
-    elif damage == 'summary': (directory / 'result.json').write_text('{"done": false, "issued": 2}')
-    else:
-        if damage == 'missing_seal': batch.ClearField('seal')
-        if damage == 'sequence': batch.events[2].sequence = 99
-        if damage == 'duplicate': batch.events[1].kind = pb.Event.ISSUED
-        if damage == 'frame_gap': batch.frame = 2
-        if damage == 'unfinished': del batch.events[-1]
-        if damage == 'identity': batch.client = 'client-7'
-        if damage == 'attempt': batch.events[2].attempt = 2
-        if damage == 'first_token': batch.events[-1].ClearField('ttft_nanos')
-        if damage == 'unknown_kind': batch.events[2].kind = 99
-        path.write_bytes(frame(batch))
-    with pytest.raises(ExecutionError): list(read_requests(directory))
+    directory, rows = evidence()
+    if damage == 'duplicate':
+        rows[2]['kind'] = 'ISSUED'
+    elif damage == 'unfinished':
+        del rows[-2]
+    elif damage == 'identity':
+        rows[0]['client'] = 'client-7'
+    elif damage == 'summary':
+        (directory / 'result.json').write_text('{"done": false, "issued": 2}')
+    elif damage == 'attempt':
+        rows[3]['attempt'] = 2
+    elif damage == 'first_token':
+        del rows[-2]['ttft_nanos']
+    elif damage == 'unknown_kind':
+        rows[3]['kind'] = 'UNKNOWN'
+    write_rows(directory, rows)
+    with pytest.raises(ExecutionError):
+        list(read_requests(directory))
 
 
 def test_query_defaults_to_all_clients_and_limits_details_not_counts(evidence, tmp_path):
@@ -129,7 +109,7 @@ def test_query_defaults_to_all_clients_and_limits_details_not_counts(evidence, t
     assert result['matched'] == 1 and result['records'][0]['request_id'] == 9007199254740994
     assert asyncio.run(query.invoke(ctx, {'request_ids': [1]}))['matched'] == 0
     with pytest.raises(ExecutionError): asyncio.run(query.invoke(ctx, {'targets': ['missing']}))
-    path = tmp_path / 'components/client-1/playback/1/requests.binpb.zst'
+    path = tmp_path / 'components/client-1/playback/1/requests.jsonl'
     path.write_bytes(path.read_bytes()[:-2])
     with pytest.raises(ExecutionError): asyncio.run(query.invoke(ctx, {'limit': 0, 'request_ids': [1]}))
 
@@ -184,7 +164,7 @@ def test_history_selection_does_not_overwrite_or_mix_playbacks(evidence, tmp_pat
     assert [record.request_id for record in records] == [9007199254740993, 9007199254741000]
 
 
-def test_cancelled_scan_stops_before_reading_next_frame(evidence):
+def test_cancelled_scan_stops_before_reading_next_line(evidence):
     import threading
     directory, _ = evidence()
     cancelled = threading.Event(); cancelled.set()
@@ -192,17 +172,8 @@ def test_cancelled_scan_stops_before_reading_next_frame(evidence):
 
 
 def test_zero_issued_round_can_seal_without_fabricating_terminal_events(evidence):
-    directory, batch = evidence()
-    del batch.events[:]
-    batch.seal.issued = batch.seal.finished = 0
-    (directory / 'requests.binpb.zst').write_bytes(frame(batch))
+    directory, rows = evidence()
+    write_rows(directory, [rows[0], {'seal': {}}])
     (directory / 'result.json').write_text(json.dumps(dict(done=True, issued=0, finished=0, unsent=1,
         outcomes={v: 0 for v in ('success', 'error', 'timeout', 'cancelled')})))
     assert list(read_requests(directory)) == []
-
-
-def test_small_compressed_frame_cannot_allocate_unbounded_decompressed_output(evidence):
-    directory, _ = evidence()
-    encoded = zstandard.ZstdCompressor().compress(b'x' * (3 * 1024 * 1024))
-    (directory / 'requests.binpb.zst').write_bytes(struct.pack('>I', len(encoded)) + encoded)
-    with pytest.raises(ExecutionError, match='Oversized decompressed'): list(read_requests(directory))
