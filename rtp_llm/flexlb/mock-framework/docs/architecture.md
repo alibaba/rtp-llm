@@ -203,11 +203,11 @@ Python 在 stop 或最终清理时收集异常，不增加实时发压监控。�
 
 #### 标准压缩输入与分片
 
-`client/start` 只接受 `requests_file`，路径指向标准 Protobuf＋Zstd 文件；不接受 inline requests、JSONL、xz 或格式兼容开关。相对路径基于 Case YAML 所在目录，也接受绝对路径。当前所有 Client 位于同一机器并共享文件系统，不支持 URL 或跨机器分发。
+`client/start` 通过 `requests_file` 读取 JSONL 或 Protobuf + Zstd 输入。以 `data/` 开头的路径从共享根解析，其他相对路径从 Case YAML 所在目录解析，也可使用绝对路径。当前所有 Client 位于同一机器并共享文件系统。
 
 压缩输入定义为 `java/client/src/main/proto/client_input.proto`，Java 由 Maven 生成，Python 测试辅助目录 python/mock_framework/execution/test/helpers 提交同一 protoc 3.25.1 生成的 client_input_pb2.py；输入读写器 input.py 也仅供框架测试与镜像终验生成、检查测试数据，不发布到 mock_framework 运行包。Request 保存未展开的回放输入：非空、非负 int32 token_ids，正 int32 max_new_tokens（本格式中的固定目标输出长度，LoadClient 发送 ignore_eos=true），可选非负 int32 priority（缺省为 50，显式 0 保留），可选非负 int64 arrival_offset_ms（相对于源起点的毫秒偏移，尚未除以倍速）。可选 images 保存 url、width、height、offset；每张图只占 token_ids 中的一个位置，offset 按升序排列且不得重复。LoadClient 按显式配置的 image_token_id 将这些位置写为图片标记；Mock V 默认异步下载真实图片，使用 Java 读取尺寸并按文件内容摘要生成模拟特征身份；本地 mock.vit.skip.download=true 时使用回放宽高，其他准入、排队和计算路径相同。Client 查询 V 元数据后计算路由长度和缓存 key，发送给后端的仍是原始媒体输入。P 在进入 Scheduler 前展开图片位置，保留语义图片标记，将逐行特征 hash 单独保存在缓存区间中；hash 不替换语义 token。完整生成参数及真实观测仍不是此播放格式的内容。未知字段、非法请求及不支持的版本均拒绝。
 
-文件以 `MCKINP01` 标识输入格式 v1，之后每批为 4 字节大端压缩长度加一个 Zstd 压缩的 Protobuf InputChunk。帧必须为 single-segment、声明解压长度并带校验和，压缩及解压单批上限均为 4 MiB；每请求 Protobuf 上限 1 MiB，每批至多 1024 个请求。写入器按约 1 MiB 或 1024 请求封批，不累积整个文件。InputChunk.sequence 从 1 连续递增，末批只含 total_requests；缺末批、计数不符、截断或尾随数据均报错。InputChunk 仅用于文件分块，不决定请求发送或 Engine 计算的 batch。输入和分片使用同一份格式与读写器，输入消息与执行证据消息分开定义。
+文件以 `MCKINP01` 标识输入格式 v1，之后每批为 4 字节大端压缩长度加一个 Zstd 压缩的 Protobuf InputChunk。帧必须为 single-segment、声明解压长度并带校验和，压缩及解压单批上限均为 4 MiB；每请求 Protobuf 上限 1 MiB，每批至多 1024 个请求。写入器按约 1 MiB 或 1024 请求封批，不累积整个文件。InputChunk.sequence 从 1 连续递增，末批只含 total_requests；缺末批、计数不符、截断或尾随数据均报错。InputChunk 仅用于文件分块，不决定请求发送或 Engine 计算的 batch。压缩输入和分片使用同一份格式与读写器。
 
 client0 在 start 的步骤预算内流式校验整个输入，按全局序号 `k % Client 数` 写本轮压缩分片；校验、封口、关闭和发布全部完成后才 prepare/begin。分片位于 `components/client-0/coordinator/<轮次>/shards/`，直接写压缩 `.part`，成功后原子发布为 `.binpb.zst`。input.json 只记录条数和摘要等元数据，不保存可读请求副本。准备失败不启动播放；源文件在准备期间发生可检测的大小、修改时间或文件身份变化会报错。
 
@@ -256,11 +256,11 @@ write_inputs("traffic.binpb.zst", (
 
 `NativeClient` 在实际执行边界记录 ISSUED、SCHEDULE_START、SCHEDULE_RESULT、FIRST_TOKEN 和 TERMINAL。同一个逻辑请求的主备尝试共用 request_id，issued 只计一次。记录包含墙钟毫秒、单调耗时、目标 Master、尝试序号、gRPC 状态与业务错误码、首 token 耗时、实际输出 token 数及终态。不记录输入 token 正文或完整响应，错误说明最多 4096 字符，截断会标记。Schedule 响应分别保留传输状态、原始业务 code（成功通常为 200）和可空 response_success；业务拒绝不会伪装成 gRPC 传输失败。Schedule 超时/取消的结果只表示 Client 观察，不证明远端未接收；Cancel 仍是尽力而为。
 
-每个 Client 每轮独占 `components/<client>/playback/<轮次>/requests.binpb.zst`，目录与记录文件拒绝覆盖。公共字段定义是 `java/client/src/main/proto/client_evidence.proto`，Java 在 Maven 构建时生成，Python 在 `python/mock_framework/execution/roles/` 提交同一 protoc 3.25.1 生成的 `client_evidence_pb2.py`；修改 proto 时必须重新生成两侧，不能分别手写协议。
+新运行的每个 Client 每轮写入 `components/<client>/playback/<轮次>/requests.jsonl`。首行记录版本、Client、播放轮次和分片身份，随后每行记录一个有连续序号的事件，最后一行的 `seal` 记录 issued 和 finished 计数。文件可直接查看。64 位整数使用十进制字符串，避免 JavaScript 读取时丢失精度。
 
-每个文件由连续帧组成：4 字节大端压缩长度，再接一个带校验和的独立 Zstd frame；解压后为 varint 长度和一个 Protobuf EventBatch。每帧携带版本、Client、playback、帧序号与分片身份，每条事件有连续序号。最后一帧携带 Seal 的 issued/finished 计数。没有额外 JSONL 执行记录或永久逐请求索引，`client/requests` 只在显式查询时解码。
+JSONL 与旧的 Protobuf + Zstd 证据共用 `java/client/src/main/proto/client_evidence.proto` 的字段定义。若目录中没有 `requests.jsonl`，`client/requests` 读取旧的 `requests.binpb.zst` 并检查帧、序号和封口。两种格式共用请求状态和汇总校验。回放输入和分片格式由各自的读写器处理。
 
-网络回调只向有字节上限的队列追加事件，单独写线程按约 1 MiB 或 1 秒成帧并 force 到磁盘。当前队列上限 8 MiB、Zstd level 3，是初始参数，不是最大吞吐承诺。入队、写入、持久化不是同一个状态；Client 只有等待最终 Seal 写入并 force 成功才完成。队列满、超大事件、写入失败或收尾超时使 worker 报错，client0 沿用现有监督机制停止整轮。进程意外退出可能留下未完成请求；不能补造终态，也不能把无 Seal 的文件判完整。
+网络回调向有字节上限的队列追加事件。写线程定期批量写入 JSONL，刷新缓冲区并同步到磁盘。Client 等待最终封口同步成功后才完成。队列满、超大事件、写入失败或收尾超时会使 worker 报错，由 client0 停止整轮。进程意外退出时，已写出的行可供查看，完整性检查仍要求有效封口。
 
 `client/stop` 及 Runner 收尾使用 Java 返回的最终汇总，检查参与 Client、完成状态、队列、inflight、issued/finished、outcomes 和 errors，不再重复扫描请求文件。Java 在最终 Seal 写入后才发布完成状态，写盘/封口错误通过 errors 返回。只有显式调用 `client/requests` 时才流式读取文件并检查完整性；过滤和返回条数限制不会跳过其余记录的验证。事后文件缺失或损坏由该查询报错，不追溯改写已保存的 stop 结果。
 

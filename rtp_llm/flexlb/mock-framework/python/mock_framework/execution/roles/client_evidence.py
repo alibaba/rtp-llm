@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import struct
 
+from google.protobuf.json_format import ParseDict, ParseError
 from google.protobuf.message import DecodeError
 import zstandard
 
@@ -59,28 +60,85 @@ def _batch(encoded):
     raise ValueError('Invalid EventBatch length')
 
 
+def _legacy_batches(stream):
+    while header := stream.read(4):
+        if len(header) != 4:
+            raise ValueError('Truncated evidence frame')
+        size, = struct.unpack('>I', header)
+        if not 0 < size <= MAX_FRAME:
+            raise ValueError('Invalid compressed frame size')
+        encoded = stream.read(size)
+        if len(encoded) != size:
+            raise ValueError('Truncated evidence frame')
+        yield _batch(encoded)
+
+
+def _unique_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f'Duplicate evidence JSONL field: {key}')
+        result[key] = value
+    return result
+
+
+def _json_lines(stream, cancelled):
+    while line := stream.readline(MAX_FRAME + 1):
+        if cancelled is not None and cancelled.is_set():
+            raise ExecutionError('Client evidence scan cancelled')
+        if len(line) > MAX_FRAME or not line.endswith(b'\n'):
+            raise ValueError('Oversized or truncated evidence JSONL line')
+        value = json.loads(line.decode('utf-8'), object_pairs_hook=_unique_fields)
+        if not isinstance(value, dict):
+            raise ValueError('Expected an evidence JSONL object')
+        yield value
+
+
+def _json_batches(stream, cancelled):
+    lines = _json_lines(stream, cancelled)
+    header = next(lines, None)
+    if header is None:
+        return
+    batch = ParseDict(header, pb.EventBatch())
+    if {'frame', 'events', 'seal'} & header.keys():
+        raise ValueError('Invalid evidence JSONL header')
+    for line in lines:
+        batch.frame += 1
+        if 'seal' in line:
+            if line.keys() != {'seal'} or not isinstance(line['seal'], dict):
+                raise ValueError('Invalid evidence JSONL seal')
+            ParseDict(line['seal'], batch.seal)
+            yield batch
+            if next(lines, None) is not None:
+                raise ValueError('Trailing evidence after seal')
+            return
+        ParseDict(line, batch.events.add())
+        yield batch
+        del batch.events[:]
+
+
 def read_requests(directory: Path, cancelled=None):
     """Yield completed requests with bounded memory; consume through EOF to validate the seal."""
-    path = directory / 'requests.binpb.zst'
+    path = directory / 'requests.jsonl'
     active, outcomes = {}, Counter()
     frame = sequence = issued = finished = 0
     sealed = False
     identity = None
     try:
         plan = json.loads((directory / 'plan.json').read_text())
-        with path.open('rb') as stream:
-            while header := stream.read(4):
+        try:
+            stream = path.open('rb')
+            batches = _json_batches(stream, cancelled)
+        except FileNotFoundError:
+            path = directory / 'requests.binpb.zst'
+            stream = path.open('rb')
+            batches = _legacy_batches(stream)
+        with stream:
+            for batch in batches:
                 if cancelled is not None and cancelled.is_set():
                     raise ExecutionError('Client evidence scan cancelled')
-                if sealed or len(header) != 4:
-                    raise ValueError('Trailing or truncated evidence frame')
-                size, = struct.unpack('>I', header)
-                if not 0 < size <= MAX_FRAME:
-                    raise ValueError('Invalid compressed frame size')
-                encoded = stream.read(size)
-                if len(encoded) != size:
-                    raise ValueError('Truncated evidence frame')
-                batch = _batch(encoded)
+                if sealed:
+                    raise ValueError('Trailing evidence after seal')
                 frame += 1
                 current = (batch.version, batch.client, batch.playback, batch.first_request_id,
                            batch.first_index, batch.stride, batch.planned, batch.concurrency)
@@ -156,5 +214,5 @@ def read_requests(directory: Path, cancelled=None):
                     or result['unsent'] != plan['count'] - issued
                     or result['outcomes'] != {key: outcomes[key] for key in OUTCOMES}):
                 raise ValueError('Evidence does not reconcile Client result')
-    except (OSError, ValueError, KeyError, TypeError, DecodeError, zstandard.ZstdError) as error:
+    except (OSError, ValueError, KeyError, TypeError, DecodeError, ParseError, zstandard.ZstdError) as error:
         raise ExecutionError(f'Invalid Client evidence at {path}: {error}') from error

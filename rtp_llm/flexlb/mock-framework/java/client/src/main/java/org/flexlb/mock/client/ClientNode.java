@@ -69,7 +69,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         Files.createDirectories(playback.getParent()); Files.createDirectory(playback);
         save(playback.resolve("plan.json"), args);
         if (worker != null) worker.close();
-        worker = new LoadClient(args, metrics, topology, playback.resolve("requests.binpb.zst"), id, imageToken, blockSize, cacheKeySeed);
+        worker = new LoadClient(args, metrics, topology, playback.resolve("requests.jsonl"), id, imageToken, blockSize, cacheKeySeed);
         workerSequence = args.sequence();
         return new Ack(true);
     }
