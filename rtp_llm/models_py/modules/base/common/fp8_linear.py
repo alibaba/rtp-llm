@@ -1,5 +1,7 @@
 """Graph-compatible consumers for per-tensor FP8 parameters."""
 
+import os
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -86,11 +88,22 @@ class Fp8Linear(nn.Module):
             and self.compute_weight is None
             and self.role in ("DECODE", "PDFUSION")
             and gate_up.ndim == 2
-            and gate_up.shape[0] in (4, 8, 12, 16)
-            and gate_up.shape[1] == 1280
-            and self.weight.shape[1] == 640
-            and gate_up.dtype == torch.bfloat16
             and gate_up.is_cuda
+            and (
+                (
+                    gate_up.shape[0] in (4, 8, 12, 16)
+                    and gate_up.shape[1] == 1280
+                    and self.weight.shape[1] == 640
+                )
+                or (
+                    os.environ.get("QWEN_MOE_FP8_SMALL_ROWS_FUSION", "0") == "1"
+                    and 1 <= gate_up.shape[0] <= 32
+                    and gate_up.shape[1] == 640
+                    and self.weight.shape[1] == 320
+                    and torch.cuda.get_device_capability(gate_up.device) == (9, 0)
+                )
+            )
+            and gate_up.dtype == torch.bfloat16
             and gate_up.is_contiguous()
         ):
             return None

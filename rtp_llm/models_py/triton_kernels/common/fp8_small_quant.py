@@ -1,4 +1,6 @@
-"""Exact native dynamic FP8 quantization for measured small SM120 projections."""
+"""Exact native dynamic FP8 quantization for small SM90/SM120 projections."""
+
+import os
 
 import torch
 import triton as tr
@@ -76,6 +78,44 @@ def _silu_mul_fp8_quant(
     )
 
 
+# One CTA retains the activated values through amax instead of recomputing
+# SiLU per output tile. Only the gated SM90 shared FFN uses this path.
+@tr.jit
+def _silu_mul_fp8_quant_shared(
+    gate_up,
+    q,
+    scale_output,
+    N: tl.constexpr,
+    D: tl.constexpr,
+    OUT: tl.constexpr,
+    BLOCK: tl.constexpr,
+    PAD: tl.constexpr,
+):
+    offsets = tl.arange(0, BLOCK)
+    row = offsets // D
+    col = offsets % D
+    gate = tl.load(gate_up + row * 2 * D + col, offsets < N, other=0).to(tl.float32)
+    up = tl.load(gate_up + row * 2 * D + D + col, offsets < N, other=0).to(tl.float32)
+    activated = ((gate * tl.sigmoid(gate)) * up).to(tl.bfloat16).to(tl.float32)
+    absolute = tl.abs(activated)
+    maximum = tl.max(tl.where(absolute == absolute, absolute, 0), 0)
+    scale = tl.div_rn(maximum, 448.0)
+    scale = tl.where(scale < 1.1754943508222875e-38, 0, scale)
+    tl.store(scale_output, scale)
+    inverse = tl.div_rn(1.0, tl.maximum(scale, 1.0e-9))
+    values = activated * inverse
+    values = tl.where(values == values, values, 448.0)
+    values = tl.maximum(-448.0, tl.minimum(448.0, values))
+    tl.store(q + offsets, values.to(tl.float8e4nv), offsets < N)
+    if OUT > N:
+        padding_positions = tl.arange(0, PAD)
+        tl.store(
+            q + padding_positions,
+            tl.full((PAD,), 0, tl.float32).to(tl.float8e4nv),
+            (padding_positions >= N) & (padding_positions < OUT),
+        )
+
+
 def try_silu_mul_fp8_quant(gate_up, *, output=None):
     """Fuse BF16 SiLU×Mul and dynamic FP8 quant for the small shared FFN."""
     if not (
@@ -85,12 +125,19 @@ def try_silu_mul_fp8_quant(gate_up, *, output=None):
         and gate_up.dtype == torch.bfloat16
         and gate_up.ndim == 2
         and gate_up.is_contiguous()
-        and gate_up.shape[0] in (4, 8, 12, 16)
-        and gate_up.shape[1] == 1280
+        and (
+            (gate_up.shape[0] in (4, 8, 12, 16) and gate_up.shape[1] == 1280)
+            or (
+                os.environ.get("QWEN_MOE_FP8_SMALL_ROWS_FUSION", "0") == "1"
+                and 1 <= gate_up.shape[0] <= 32
+                and gate_up.shape[1] == 640
+                and torch.cuda.get_device_capability(gate_up.device) == (9, 0)
+            )
+        )
         and torch.cuda.get_device_capability(gate_up.device) in ((9, 0), (12, 0))
     ):
         return None
-    rows, width = gate_up.shape[0], 640
+    rows, width = gate_up.shape[0], gate_up.shape[1] // 2
     if output is not None and not (
         isinstance(output, torch.Tensor)
         and output.device == gate_up.device
@@ -106,6 +153,21 @@ def try_silu_mul_fp8_quant(gate_up, *, output=None):
         )
     scale = torch.empty((1,), device=gate_up.device, dtype=torch.float32)
     block = tr.next_power_of_2(rows * width)
+    if width == 320:
+        warps = 4 if rows <= 2 else 8 if rows <= 8 or rows > 16 else 32
+        _silu_mul_fp8_quant_shared[(1,)](
+            gate_up,
+            output,
+            scale,
+            rows * width,
+            width,
+            output.numel(),
+            block,
+            tr.next_power_of_2(output.numel()),
+            num_warps=warps,
+            enable_fp_fusion=False,
+        )
+        return output, scale
     _silu_mul_fp8_quant[(tr.cdiv(output.numel(), 4096),)](
         gate_up,
         output,
@@ -131,10 +193,7 @@ def is_supported(x, output=None):
         and 1 <= x.shape[0] <= 32
         and (
             x.shape[1] in (320, 2560, 10240)
-            or (
-                x.shape[1] == 640
-                and x.shape[0] in (4, 8, 12, 16)
-            )
+            or (x.shape[1] == 640 and x.shape[0] in (4, 8, 12, 16))
         )
         and x.numel() <= 65536
         and torch.cuda.get_device_capability(x.device) in ((9, 0), (12, 0))

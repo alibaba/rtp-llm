@@ -5,6 +5,7 @@ The routed TP reduction stays on the original stream. The unsharded shared
 branch retains its BF16 output and original fused sigmoid-scale-add boundary.
 """
 
+import os
 from functools import lru_cache
 
 import torch
@@ -21,9 +22,13 @@ def _shared_stream_for_device(device_index: int):
 class Qwen4MoeLayer(GenericMoeLayer):
     _shared_stream = None
     _reused_shared_stream = None
+    _fuse_ep_shared_gate = False
 
     def prepare_shared_expert_overlap(self) -> None:
         """Allocate streams only for the explicitly qualified Qwen4 layout."""
+        self._fuse_ep_shared_gate = (
+            os.environ.get("QWEN_MOE_SHARED_GATE_FUSION", "0") == "1"
+        )
         if not getattr(self.config, "_qwen4_full_fp8_nvfp4", False):
             return
         from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
@@ -72,6 +77,19 @@ class Qwen4MoeLayer(GenericMoeLayer):
         )
         self._shared_input_ready = torch.cuda.Event()
         self._shared_output_ready = torch.cuda.Event()
+
+    def _gate_shared_expert_output(self, hidden_states, shared_expert_output):
+        if not self._fuse_ep_shared_gate or self.shared_expert_gate is None:
+            return super()._gate_shared_expert_output(
+                hidden_states, shared_expert_output
+            )
+        from .shared_gate_triton import try_shared_sigmoid_mul
+
+        gate = self.shared_expert_gate(hidden_states)
+        fused = try_shared_sigmoid_mul(gate, shared_expert_output)
+        if fused is not None:
+            return fused
+        return torch.sigmoid(gate) * shared_expert_output
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         stream = self._shared_stream
