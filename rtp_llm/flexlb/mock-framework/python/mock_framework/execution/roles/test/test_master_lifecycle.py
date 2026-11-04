@@ -96,11 +96,11 @@ def test_partial_start_failure_is_not_retried_and_reclaims_started_jvms(tmp_path
 
 
 def test_partial_stop_failure_aborts_and_keeps_completed_operations(tmp_path, monkeypatch):
-    original = ProcessSupervisor.stop_expected
-    async def fail_second(self, node, grace=3):
-        errors = await original(self, node, grace)
+    original = ProcessSupervisor.stop_intentionally
+    async def fail_second(self, node, *, mode='terminate', grace=3):
+        errors = await original(self, node, mode=mode, grace=grace)
         return [*errors, 'injected stop failure'] if node == 'master-1' else errors
-    monkeypatch.setattr(ProcessSupervisor, 'stop_expected', fail_second)
+    monkeypatch.setattr(ProcessSupervisor, 'stop_intentionally', fail_second)
     case, registry, launch = generic(tmp_path, [step('stop', 'master/stop'), step('never', 'master/start')])
     output = tmp_path / 'run'
     result = asyncio.run(run_case(case, registry, launch, output))
@@ -132,7 +132,7 @@ while True: time.sleep(1)
     async def exercise():
         records = RunTrace(output, case, launch)
         supervisor = ProcessSupervisor(records)
-        group = MasterRole(component=None, recipe=None, election={}, launcher=None,
+        group = MasterRole(component=None, recipe=None, election={},
             supervisor=supervisor, topology=None, records=records, monitoring=None)
         try:
             for name in ('master-0', 'master-1'):

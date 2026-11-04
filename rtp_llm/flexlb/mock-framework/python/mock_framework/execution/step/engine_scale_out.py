@@ -15,4 +15,4 @@ class EngineScaleOut(Step):
     @staticmethod
     async def execute(ctx: StepContext, args: ScaleOut) -> list[str]:
         """Create count instances from the role's configuration; return their service addresses."""
-        return await ctx.runtime.engines.create(args.role, args.count)
+        return await ctx.runtime.engines.scale_out(args.role, args.count)

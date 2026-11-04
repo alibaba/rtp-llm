@@ -267,7 +267,7 @@ def test_intentional_stop_retains_unreaped_process_for_final_cleanup(exit_code, 
         async def stop(names, grace):
             return await original(names, 0)
         p.stop = stop
-        errors = await p.stop_expected('engine-prefill-0')
+        errors = await p.stop_intentionally('engine-prefill-0')
         assert bool(p.children) == (exit_code is None)
         assert bool(errors) == (exit_code is None)
         assert 'engine-prefill-0' in p._expected

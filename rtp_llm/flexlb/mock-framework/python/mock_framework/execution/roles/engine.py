@@ -37,7 +37,7 @@ class EngineRole:
             return await post(host['url'], {'interface': 'host/' + operation, 'args': args,
                 'context': {'run': 'foreground', 'query_time': timestamp(), 'observation': None, 'timeout_ms': 9000}})
 
-    async def create(self, role, count):
+    async def scale_out(self, role, count):
         async with self.lock:
             if role not in ROLES or role not in self.environment or not 1 <= count <= 1024:
                 raise ExecutionError('scale_out requires a configured Engine role and count in 1..1024')
@@ -94,7 +94,7 @@ class EngineRole:
                 await self.monitoring.baseline([item['id'] for item in self.topology.active() if item['rpc'] in result])
             return result
 
-    async def remove(self, role, targets, count):
+    async def scale_in(self, role, targets, count):
         async with self.lock:
             candidates = [item for item in self.topology.active() if item['role'] == role and item['id'] in self.instances]
             known = {item['rpc']: item for item in candidates}
@@ -124,7 +124,7 @@ class EngineRole:
                 self.records.emit(event='instance_stopped', node=node, host=host_name, rpc=item['rpc'],
                                   role=item['role'], instance_id=node, host_id=host_name, generation=0)
                 if self.mode == 'isolated':
-                    errors = await self.supervisor.stop_expected(host_name)
+                    errors = await self.supervisor.stop_intentionally(host_name)
                     del self.hosts[host_name]
                     if errors:
                         raise ExecutionError('; '.join(errors))
@@ -147,7 +147,7 @@ class EngineRole:
         for role, recipe in self.recipes.items():
             if role in ROLES:
                 count = self.environment[role]['deployment']['replicas']
-                await self.supervisor.guard(self.create(role, count), float(duration(recipe['startup_timeout'])) * count)
+                await self.supervisor.guard(self.scale_out(role, count), float(duration(recipe['startup_timeout'])) * count)
 
         if self.hosts:
             self._monitor = asyncio.create_task(self.monitor())
