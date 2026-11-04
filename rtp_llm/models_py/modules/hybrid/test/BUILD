@@ -147,3 +147,18 @@ py_test(
     srcs = ["indexer_prologue_prefetch_test.py"],
     deps = py_test_deps + ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "mtp_frontend_precision_test",
+    srcs = ["mtp_frontend_precision_test.py"],
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+    tags = ["open_skip", "H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+py_test(
+    name = "cmp_moe_streams_test",
+    srcs = ["cmp_moe_streams_test.py"],
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+    tags = ["manual", "H20", "open_skip"],
+)

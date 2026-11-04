@@ -2,6 +2,8 @@ import os
 from typing import Any
 
 import torch
+from torch import nn
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.kernels.cuda.mtp_frontend import native as mtp_frontend_native
@@ -15,10 +17,9 @@ from rtp_llm.models_py.model_desc.generic_moe import GenericMoeDecoderLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import Embedding, LinearFactory, RMSNorm, RMSResNorm
 from rtp_llm.models_py.modules.hybrid.glm5_cmp import should_enable_glm5_cmp
-from rtp_llm.ops import MoeConfig, ParallelismConfig
+from rtp_llm.ops import MoeConfig, ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 _MTP_INDEXER_ROLE_NORMAL = 0
 _MTP_INDEXER_ROLE_SEED = 1
@@ -83,7 +84,16 @@ class GenericMoeMTPModel(GptModelBase):
             weights.global_weights[W.multi_tokens_predict_hnorm],
             eps=model_config.layernorm_eps,
         )
-        self._mtp_frontend_native = mtp_frontend_native()
+        # Enable only the validated GLM5 TP1 decode frontend. Keep the wider
+        # MTP optimization bundle independent and preserve other model defaults.
+        frontend_enabled = None
+        if (
+            model_config.model_type in ("glm_5", "glm_5_mtp")
+            and parallelism_config.get_attn_tp_size() == 1
+            and parallelism_config.role_type == RoleType.DECODE
+        ):
+            frontend_enabled = os.environ.get("RTP_LLM_GLM5_EH_FUSION", "1") == "1"
+        self._mtp_frontend_native = mtp_frontend_native(enabled=frontend_enabled)
         self.fc = LinearFactory.create_linear_from_weights(
             weights.global_weights, W.multi_tokens_predict_eh_proj
         )

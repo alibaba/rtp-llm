@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <ATen/core/grad_mode.h>
 #include <c10/core/DeviceGuard.h>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -1058,6 +1059,16 @@ void CudaGraphRunner::logCudaGraphPoolMemory(const char* phase) {
 }
 
 void CudaGraphRunner::initCapture() {
+    // Service startup threads do not inherit Python no_grad. Only force inference
+    // capture when one of the GLM5 decode optimizations is enabled; with both
+    // switches off, preserve the caller's original baseline grad mode.
+    const auto default_on = [](const char* name) {
+        const char* value = std::getenv(name);
+        return value == nullptr || std::strcmp(value, "1") == 0;
+    };
+    const bool optimized_capture = default_on("RTP_LLM_GLM5_EH_FUSION")
+                                   || default_on("RTP_LLM_GLM5_CMP_MOE_DUAL_STREAM");
+    at::AutoGradMode grad_mode(optimized_capture ? false : at::GradMode::is_enabled());
     c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
     if (enable_cuda_graph_) {
         RTP_LLM_LOG_INFO("CUDA graph capture is enabled");

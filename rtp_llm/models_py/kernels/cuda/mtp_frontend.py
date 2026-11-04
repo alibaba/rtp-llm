@@ -6,6 +6,7 @@ from pathlib import Path
 
 import torch
 from torch.nn.modules import module as torch_module
+
 from rtp_llm.models_py import mtp_optimization
 
 
@@ -24,8 +25,8 @@ def no_module_hooks(module):
 
 
 @lru_cache(maxsize=1)
-def native():
-    if not mtp_optimization.ENABLED:
+def native(enabled=None):
+    if not (mtp_optimization.ENABLED if enabled is None else enabled):
         return None
     try:
         from torch.utils.cpp_extension import load
@@ -43,7 +44,7 @@ def native():
 
 
 def try_mtp_frontend(native_op, embedding, hidden, e_norm, h_norm, ids, positions):
-    if native_op is None or embedding.tp_size != 1:
+    if native_op is None or embedding.tp_size != 1 or torch.is_grad_enabled():
         return None
     if not all(no_module_hooks(module) for module in (embedding, e_norm, h_norm)):
         return None
@@ -57,6 +58,7 @@ def try_mtp_frontend(native_op, embedding, hidden, e_norm, h_norm, ids, position
         or weight.shape[1] != 6144
         or ids.ndim != 1
         or ids.numel() != hidden.shape[0]
+        or positions.ndim != 1
         or positions.numel() != hidden.shape[0]
         or ids.dtype != torch.int32
         or positions.dtype != torch.int32
@@ -69,7 +71,7 @@ def try_mtp_frontend(native_op, embedding, hidden, e_norm, h_norm, ids, position
         return None
     if torch.cuda.current_device() != hidden.device.index:
         return None
-    if e_norm.weight.numel() != 6144 or h_norm.weight.numel() != 6144:
+    if e_norm.weight.shape != (6144,) or h_norm.weight.shape != (6144,):
         return None
     if e_norm.variance_epsilon != h_norm.variance_epsilon:
         return None

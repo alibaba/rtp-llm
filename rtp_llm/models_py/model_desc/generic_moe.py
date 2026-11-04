@@ -30,6 +30,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.models_py.modules.factory.linear.fixed_m_linear import fixed_m_linear
+from rtp_llm.models_py.kernels.cuda.mtp_frontend import no_module_hooks
+from rtp_llm.models_py.modules.hybrid.cmp_moe_streams import CmpMoeStreams
 from rtp_llm.models_py.modules.hybrid.glm5_cmp import (
     Glm5Cmp,
     resolve_glm5_cmp_enabled,
@@ -258,6 +260,20 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert_gate = None
             self.sigmoid_gate_scale_add = None
 
+        # CMP-only routed-first/shared overlap; disabled uses the original serial path.
+        self._cmp_moe_streams = None
+        if (
+            is_decode_role
+            and config.model_type in ("glm_5", "glm_5_mtp")
+            and parallelism_config.get_attn_tp_size() == 1
+            and self.ffn_tp_size == 1
+            and moe_config.moe_strategy in ("mega_moe", "mega_moe_fp8")
+            and self.shared_expert is not None
+            and self.shared_expert_gate is None
+            and not self._use_mega_moe_fused_shared
+        ):
+            self._cmp_moe_streams = CmpMoeStreams.from_env()
+
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
         self.group_topk = GroupTopK() if self.correction_bias is not None else None
@@ -300,6 +316,8 @@ class GenericMoeLayer(nn.Module):
         clone.correction_bias = self.correction_bias
         clone.group_topk = getattr(self, "group_topk", None)
         clone._use_mega_moe_fused_shared = self._use_mega_moe_fused_shared
+        # Graph clones execute sequentially and retain the eager-warmed stream.
+        clone._cmp_moe_streams = self._cmp_moe_streams
         return clone
 
     def forward_prepacked(
@@ -311,6 +329,26 @@ class GenericMoeLayer(nn.Module):
         """Consume router/quant resources already prepared by GLM5 CMP."""
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
+        branches = self._cmp_moe_streams
+        if (
+            branches is not None
+            and hidden_states.is_cuda
+            and hidden_states.dtype == torch.bfloat16
+            and hidden_states.ndim == 2
+            and 0 < hidden_states.shape[0] <= 32
+            and not torch.is_grad_enabled()
+            and no_module_hooks(self)
+            and no_module_hooks(self.fused_moe)
+            and all(no_module_hooks(m) for m in self.shared_expert.modules())
+        ):
+            # CMP has already packed routed inputs. Shared DenseMLP consumes
+            # the original BF16 tensor using separate scratch; EP stays on main.
+            routed, shared = branches.run(
+                lambda: self.fused_moe.forward_prepacked(hidden_states),
+                lambda: self.shared_expert(hidden_states),
+                (hidden_states, topk_ids, topk_weights),
+            )
+            return routed + shared
         experts_output = self.fused_moe.forward_prepacked(hidden_states)
         if self._use_mega_moe_fused_shared:
             return experts_output
