@@ -156,7 +156,9 @@ public:
                   const std::vector<std::vector<GroupSetResource>>& resources,
                   Tier                                              target_tier,
                   bool                                              is_resident,
-                  std::optional<int64_t>                            request_id = {});
+                  std::optional<int64_t>                            request_id = {},
+                  size_t                                            remote_reuse_begin = 0,
+                  size_t                                            remote_reuse_end = 0);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     // Skips plans containing device blocks that would remain referenced after dropping.
