@@ -119,6 +119,7 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         assertEquals(0, mockDecodeWorker.getEnqueueCount());
     }
 
+    @Test
     @Timeout(20)
     void workerOffline_uncertainDispatchExpiresWithoutAuthoritativeStatus() throws Exception {
         config.getRequestLifecycle().getRequest().setTimeoutMs(1_800L);

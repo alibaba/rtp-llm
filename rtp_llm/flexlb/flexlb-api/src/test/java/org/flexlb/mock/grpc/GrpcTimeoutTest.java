@@ -146,6 +146,7 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
                 "Subsequent request should succeed after recovery");
     }
 
+    @Test
     @Timeout(15)
     void grpcTimeout_requestExpiresWithoutEngineEvidenceAndRecovers() throws Exception {
         config.getRequestLifecycle().getRequest().setTimeoutMs(1_800L);
