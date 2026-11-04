@@ -211,7 +211,7 @@ void RtpLLMOp::init(py::object model,
     }
 
     pybind11::gil_scoped_release release;
-    grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer,
+    grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServerGuarded,
                                       this,
                                       std::move(params),
                                       std::move(propose_params),
@@ -219,9 +219,17 @@ void RtpLLMOp::init(py::object model,
                                       std::move(mm_process_engine),
                                       std::move(telemetry_config));
     grpc_server_thread_.detach();
-    while (!is_server_ready_) {
+    // Exit-aware wait: a silently dead init thread used to spin this poll forever.
+    int waited_s = 0;
+    while (!is_server_ready_ && !rpc_init_exited_.load(std::memory_order_acquire)) {
         sleep(1);  // wait 1s for server ready
+        if (++waited_s % 60 == 0) {
+            RTP_LLM_LOG_INFO("waiting for rpc server ready, %ds elapsed", waited_s);
+        }
     }
+    RTP_LLM_CHECK_WITH_INFO(is_server_ready_,
+                            "engine rpc init thread exited before the server became ready: "
+                                + (rpc_init_error_.empty() ? std::string("no exception captured") : rpc_init_error_));
 }
 
 EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config, py::object vit_config) {
@@ -364,11 +372,39 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
     }
 }
 
+void RtpLLMOp::initRPCServerGuarded(const EngineInitParams                        maga_init_params,
+                                    std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                                    py::object                                    token_processor,
+                                    py::object                                    mm_process_engine,
+                                    telemetry::TelemetryConfig                    trace_config) {
+    // A throw out of a detached thread used to abort the whole process (or, for
+    // non-throwing failure paths, vanish silently); keep the text and exit.
+    try {
+        initRPCServer(std::move(maga_init_params),
+                      std::move(propose_params),
+                      std::move(token_processor),
+                      std::move(mm_process_engine),
+                      std::move(trace_config));
+    } catch (const std::exception& e) {
+        rpc_init_error_ = e.what();
+        RTP_LLM_LOG_ERROR("engine rpc init thread failed: %s", e.what());
+    } catch (...) {
+        rpc_init_error_ = "unknown exception";
+        RTP_LLM_LOG_ERROR("engine rpc init thread failed: unknown exception");
+    }
+    rpc_init_exited_.store(true, std::memory_order_release);
+}
+
 void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_init_params,
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                              py::object                                    token_processor,
                              py::object                                    mm_process_engine,
                              telemetry::TelemetryConfig                    trace_config) {
+    // Notify init() when this thread leaves for any reason; silent death must not hang the ready-poll.
+    struct RpcInitExitNotify {
+        RtpLLMOp& op;
+        ~RpcInitExitNotify() { op.rpc_init_exited_.store(true, std::memory_order_release); }
+    } rpc_init_exit_notify{*this};
     std::string server_address;
     {
         pybind11::gil_scoped_acquire acquire;
