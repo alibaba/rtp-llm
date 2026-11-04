@@ -387,8 +387,27 @@ std::string CacheStoreConfig::to_string() const {
         << "p2p_layer_cache_buffer_store_timeout_ms: " << p2p_layer_cache_buffer_store_timeout_ms << "\n"
         << "p2p_cancel_broadcast_timeout_ms: " << p2p_cancel_broadcast_timeout_ms << "\n"
         << "cache_store_tcp_anet_rpc_thread_num: " << cache_store_tcp_anet_rpc_thread_num << "\n"
-        << "cache_store_tcp_anet_rpc_queue_num: " << cache_store_tcp_anet_rpc_queue_num << "\n";
+        << "cache_store_tcp_anet_rpc_queue_num: " << cache_store_tcp_anet_rpc_queue_num << "\n"
+        << "rdma_device_health_enabled: " << rdma_device_health_enabled << "\n"
+        << "rdma_device_health_fault_handler: " << rdma_device_health_fault_handler << "\n"
+        << "rdma_device_health_probe_interval_ms: " << rdma_device_health_probe_interval_ms << "\n"
+        << "rdma_device_health_device_fault_confirm_ms: " << rdma_device_health_device_fault_confirm_ms << "\n"
+        << "rdma_device_health_fault_window_ms: " << rdma_device_health_fault_window_ms << "\n"
+        << "rdma_device_health_unavailable_threshold_ms: " << rdma_device_health_unavailable_threshold_ms << "\n"
+        << "rdma_device_health_flap_warn_threshold: " << rdma_device_health_flap_warn_threshold << "\n";
     return oss.str();
+}
+
+RdmaDeviceHealthConfig CacheStoreConfig::toRdmaDeviceHealthConfig() const {
+    RdmaDeviceHealthConfig config;
+    config.enabled                  = rdma_device_health_enabled;
+    config.fault_handler            = rdma_device_health_fault_handler;
+    config.probe_interval_ms        = rdma_device_health_probe_interval_ms;
+    config.device_fault_confirm_ms  = rdma_device_health_device_fault_confirm_ms;
+    config.fault_window_ms          = rdma_device_health_fault_window_ms;
+    config.unavailable_threshold_ms = rdma_device_health_unavailable_threshold_ms;
+    config.flap_warn_threshold      = rdma_device_health_flap_warn_threshold;
+    return config;
 }
 
 // MiscellaneousConfig

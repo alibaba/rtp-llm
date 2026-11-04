@@ -1168,6 +1168,43 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("p2p_cancel_broadcast_timeout_ms", &CacheStoreConfig::p2p_cancel_broadcast_timeout_ms)
         .def_readwrite("cache_store_tcp_anet_rpc_thread_num", &CacheStoreConfig::cache_store_tcp_anet_rpc_thread_num)
         .def_readwrite("cache_store_tcp_anet_rpc_queue_num", &CacheStoreConfig::cache_store_tcp_anet_rpc_queue_num)
+        .def_readwrite("rdma_device_health_enabled", &CacheStoreConfig::rdma_device_health_enabled)
+        .def_readwrite("rdma_device_health_fault_handler", &CacheStoreConfig::rdma_device_health_fault_handler)
+        .def_readwrite("rdma_device_health_probe_interval_ms", &CacheStoreConfig::rdma_device_health_probe_interval_ms)
+        .def_readwrite("rdma_device_health_device_fault_confirm_ms",
+                       &CacheStoreConfig::rdma_device_health_device_fault_confirm_ms)
+        .def_readwrite("rdma_device_health_fault_window_ms", &CacheStoreConfig::rdma_device_health_fault_window_ms)
+        .def_readwrite("rdma_device_health_unavailable_threshold_ms",
+                       &CacheStoreConfig::rdma_device_health_unavailable_threshold_ms)
+        .def_readwrite("rdma_device_health_flap_warn_threshold",
+                       &CacheStoreConfig::rdma_device_health_flap_warn_threshold)
+        .def_property_readonly_static("rdma_device_health_probe_interval_ms_range",
+                                      [](py::object) {
+                                          return py::make_tuple(RdmaDeviceHealthConfig::kMinProbeIntervalMs,
+                                                                RdmaDeviceHealthConfig::kMaxProbeIntervalMs);
+                                      })
+        .def_property_readonly_static("rdma_device_health_device_fault_confirm_ms_range",
+                                      [](py::object) {
+                                          return py::make_tuple(RdmaDeviceHealthConfig::kMinDeviceFaultConfirmMs,
+                                                                RdmaDeviceHealthConfig::kMaxDeviceFaultConfirmMs);
+                                      })
+        .def_property_readonly_static("rdma_device_health_fault_window_ms_range",
+                                      [](py::object) {
+                                          return py::make_tuple(RdmaDeviceHealthConfig::kMinFaultWindowMs,
+                                                                RdmaDeviceHealthConfig::kMaxFaultWindowMs);
+                                      })
+        .def_property_readonly_static("rdma_device_health_unavailable_threshold_ms_range",
+                                      [](py::object) {
+                                          return py::make_tuple(RdmaDeviceHealthConfig::kMinUnavailableThresholdMs,
+                                                                RdmaDeviceHealthConfig::kMaxUnavailableThresholdMs);
+                                      })
+        .def_property_readonly_static("rdma_device_health_flap_warn_threshold_range",
+                                      [](py::object) {
+                                          return py::make_tuple(RdmaDeviceHealthConfig::kMinFlapWarnThreshold,
+                                                                RdmaDeviceHealthConfig::kMaxFlapWarnThreshold);
+                                      })
+        .def_property_readonly_static("rdma_device_health_min_confirm_probe_intervals",
+                                      [](py::object) { return RdmaDeviceHealthConfig::kMinConfirmProbeIntervals; })
         .def("to_string", &CacheStoreConfig::to_string)
         .def(py::pickle(
             [](const CacheStoreConfig& self) {
@@ -1190,10 +1227,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.p2p_layer_cache_buffer_store_timeout_ms,
                                       self.p2p_cancel_broadcast_timeout_ms,
                                       self.cache_store_tcp_anet_rpc_thread_num,
-                                      self.cache_store_tcp_anet_rpc_queue_num);
+                                      self.cache_store_tcp_anet_rpc_queue_num,
+                                      self.rdma_device_health_enabled,
+                                      self.rdma_device_health_fault_handler,
+                                      self.rdma_device_health_probe_interval_ms,
+                                      self.rdma_device_health_device_fault_confirm_ms,
+                                      self.rdma_device_health_fault_window_ms,
+                                      self.rdma_device_health_unavailable_threshold_ms,
+                                      self.rdma_device_health_flap_warn_threshold);
             },
             [](py::tuple t) {
-                if (t.size() != 20)
+                // 20: state pickled before the rdma_device_health_* fields were added.
+                if (t.size() != 20 && t.size() != 27)
                     throw std::runtime_error("Invalid state!");
                 CacheStoreConfig c;
                 try {
@@ -1217,6 +1262,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.p2p_cancel_broadcast_timeout_ms              = t[17].cast<int64_t>();
                     c.cache_store_tcp_anet_rpc_thread_num          = t[18].cast<int>();
                     c.cache_store_tcp_anet_rpc_queue_num           = t[19].cast<int>();
+                    if (t.size() == 27) {
+                        c.rdma_device_health_enabled                  = t[20].cast<bool>();
+                        c.rdma_device_health_fault_handler            = t[21].cast<std::string>();
+                        c.rdma_device_health_probe_interval_ms        = t[22].cast<int64_t>();
+                        c.rdma_device_health_device_fault_confirm_ms  = t[23].cast<int64_t>();
+                        c.rdma_device_health_fault_window_ms          = t[24].cast<int64_t>();
+                        c.rdma_device_health_unavailable_threshold_ms = t[25].cast<int64_t>();
+                        c.rdma_device_health_flap_warn_threshold      = t[26].cast<int64_t>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("CacheStoreConfig unpickle error: ") + e.what());
                 }

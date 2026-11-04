@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/rdma/RdmaMessager.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/rdma_health/RdmaDeviceHealth.h"
 
 #include "rtp_llm/cpp/disaggregate/cache_store/rdma/RdmaCacheStoreServiceImpl.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/rdma/RdmaCacheStoreLoadServiceClosure.h"
@@ -56,6 +57,9 @@ bool RdmaMessager::init(MessagerInitParams params) {
         RTP_LLM_LOG_WARNING("messager start failed, tcp server start failed");
         return false;
     }
+    // RDMA 初始化成功后才启动或复用共享 monitor，保证单例静态析构顺序。
+    // monitor 启动返回 false 不改变已成功的 messager 初始化结果；此处不兜底异常。
+    rdma_health::ensureMonitorStarted(init_params_.rdma_device_health, metrics_reporter_);
     RTP_LLM_LOG_INFO(
         "rdma messager init success, server port %u, io thread count %u, worker thread count %u, rdma server port %u, rdma io thread count %u, rdma worker thread count %u",
         init_params_.server_port,

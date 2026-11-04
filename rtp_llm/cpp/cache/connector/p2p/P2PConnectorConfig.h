@@ -62,6 +62,8 @@ struct P2PConnectorWorkerConfig {
             cache_store_config.cache_store_tcp_anet_rpc_thread_num;
         config.transfer_backend_config.cache_store_tcp_anet_rpc_queue_num =
             cache_store_config.cache_store_tcp_anet_rpc_queue_num;
+        config.transfer_backend_config.rdma_device_health = cache_store_config.toRdmaDeviceHealthConfig();
+
         config.p2p_layer_cache_buffer_store_timeout_ms = cache_store_config.p2p_layer_cache_buffer_store_timeout_ms;
         config.p2p_read_steal_before_deadline_ms       = cache_store_config.p2p_read_steal_before_deadline_ms;
         config.p2p_read_return_before_deadline_ms      = cache_store_config.p2p_read_return_before_deadline_ms;

@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma/RdmaKVCacheSender.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma/RdmaKVCacheReceiver.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/rdma_health/RdmaDeviceHealth.h"
 
 namespace rtp_llm {
 namespace transfer {
@@ -70,6 +71,9 @@ TransferBackendPair createBarexRdmaBackend(const TransferBackendConfig&       co
         return {};
     }
 
+    // RDMA 初始化成功后才启动或复用共享 monitor，保证单例静态析构顺序。
+    // monitor 启动返回 false 不改变已成功的 backend 初始化结果；此处不兜底异常。
+    rdma_health::ensureMonitorStarted(config.rdma_device_health, metrics_reporter);
     return {sender, receiver};
 }
 

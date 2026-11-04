@@ -70,6 +70,7 @@ cc_library(
     hdrs = glob(["*.h"], exclude = interface_includes),
     deps = [
         ":cache_store_interface",
+        "//rtp_llm/cpp/config:rdma_device_health_config",
         "//rtp_llm/cpp/disaggregate/cache_store/proto:cache_store_service_cc_proto",
         "//rtp_llm/cpp/utils:device_pin",
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",

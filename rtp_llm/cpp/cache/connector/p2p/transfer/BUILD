@@ -37,6 +37,7 @@ cc_library(
 cc_library(
     name = "transfer_backend_config",
     hdrs = ["TransferBackendConfig.h"],
+    deps = ["//rtp_llm/cpp/config:rdma_device_health_config"],
     visibility = ["//visibility:public"],
 )
 
@@ -103,6 +104,7 @@ cc_library(
             "//rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma:rdma_interface",
             "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
             "//rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma:rdma_backend",
+            "//rtp_llm/cpp/rdma_health:rdma_health_monitor",
             "//rtp_llm/cpp/utils:core_utils",
         ],
         "//conditions:default": [],

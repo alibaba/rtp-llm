@@ -57,6 +57,7 @@ cc_library(
     deps = select({
         "//:using_rdma": [
             "//rtp_llm/cpp/disaggregate/cache_store:cache_store_base",
+            "//rtp_llm/cpp/rdma_health:rdma_health_monitor",
             "//aios/network/rdma:accl_rdma",
             "@alibaba_rdma//aios/network/accl-barex:accl-barex",
             "@alibaba_rdma//aios/network/accl-barex/metric:kmonitor_metric_reporter",
