@@ -574,3 +574,31 @@ def test_embedded_view_keeps_unmanaged_custom_variables_visible(tmp_path):
     provision(tmp_path, view, 'http://localhost:9090', 1000, 2000, scrape_interval='1s', filters={})
     saved = json.loads((tmp_path / 'dashboards/embedded.json').read_text())
     assert saved['templating']['list'][0]['hide'] == 0
+
+
+def test_view_distinguishes_role_process_evidence_from_missing_roles(completed):
+    path = completed / 'configuration.json'
+    configuration = json.loads(path.read_text())
+    configuration['case']['environment'] = {'master': {}, 'prefill': {}}
+    write(path, configuration)
+    rows = [
+        {'event': 'process_started', 'node': 'master-0', 'pid': 42},
+        {'event': 'process_stopped', 'node': 'master-0', 'code': 137},
+        {'event': 'process_ready', 'node': 'master-0-restart-1', 'url': 'http://127.0.0.1:1234'},
+        {'event': 'client_result', 'result': {'clients': {}, 'errors': []}},
+        {'event': 'instance_started', 'node': 'decode-0', 'host': 'engine-shared', 'pid': 43},
+        {'event': 'process_stopped', 'node': 'engine-shared', 'code': -9},
+    ]
+    with (completed / 'events.jsonl').open('a') as stream:
+        for event in rows:
+            stream.write(json.dumps({'recorded_at': '2026-10-29T00:00:05Z', **event}) + '\n')
+    roles = experiment(completed)['roles']
+    instance, = roles['master']['instances']
+    assert instance['attempts']['master-0']['process_stopped']['code'] == 137
+    assert 'process_ready' in instance['attempts']['master-0-restart-1']
+    assert roles['prefill']['state'] == 'no_observation'
+    assert roles['vit']['state'] == 'not_deployed'
+    attempt = roles['decode']['instances'][0]['attempts']['decode-0']
+    assert attempt['instance_started']['host'] == 'engine-shared'
+    assert attempt['host_process_stopped']['code'] == -9
+    assert roles['client']['playback'][0]['result']['errors'] == []

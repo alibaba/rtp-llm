@@ -87,8 +87,13 @@ def run(setup, tmp_path, steps, **kw):
 def test_reads_writes_refs_and_gates_share_one_path(setup, tmp_path):
     result, out = run(setup, tmp_path, [step(), step('write', args={'value': {'ref': 'steps.read'}}, expect={'eq': 2})])
     assert result['status'] == 'PASS'
-    assert len([e for e in events(out) if e['event'] == 'mutation']) == 1
-    assert events(out, 'gates')[0]['actual'] == 2
+    mutation, = [e for e in events(out) if e['event'] == 'mutation']
+    gate, = events(out, 'gates')
+    assert gate['actual'] == 2
+    assert mutation['phase_id'] == gate['phase_id'] == 'phase'
+    assert mutation['step_id'] == gate['step_id'] == 'write'
+    assert mutation['run_id'] == gate['run_id'] == json.loads((out / 'result.json').read_text())['run_id']
+    assert mutation['seq'] < gate['seq']
     assert (out / 'interfaces.json').is_file()
 
 

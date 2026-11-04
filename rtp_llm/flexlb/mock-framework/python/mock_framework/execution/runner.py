@@ -28,11 +28,13 @@ def resolve(value, results, globals):
 
 
 @dataclass(frozen=True)
-class CaseContext:
+class StepContext:
     runtime: RunEnvironment
     records: Records
     query_time: str
     deadline: float
+    phase_id: str
+    results: dict
 
     @property
     def timeout(self):
@@ -44,6 +46,55 @@ class CaseContext:
     def globals(self):
         return {name: sorted(item['rpc'] for item in self.runtime.topology.active() if item['role'] == role)
                 for name, role in [('masters', 'master'), ('prefill', 'prefill'), ('decode', 'decode'), ('vit', 'vit')]}
+
+
+async def run_step(step, interface, context):
+    records = context.records
+    runtime = context.runtime
+    gate, invoked, returned = None, False, False
+    stage = 'arguments'
+    records.emit(event='step_started', phase=context.phase_id, step=step.id, interface=step.interface,
+                 describe=step.describe, query_time=context.query_time)
+    try:
+        args = resolve(step.args, context.results, context.globals())
+        arguments = interface.arguments(args)
+        expected = resolve(step.expect.comparisons, context.results, context.globals()) if step.expect else None
+        if expected is not None:
+            for op, value in expected.items():
+                validate(value, {'type': 'integer', 'minimum': 0} if op == 'count' else interface.returns, 'expect.' + op)
+            gate = {'step': step.id, 'interface': step.interface, 'args': args,
+                    'query_time': context.query_time, 'expect': expected}
+        budget = context.timeout
+        stage = 'invoke'
+        invoked = True
+        actual = await runtime.supervisor.guard(interface.call(context, arguments), budget)
+        returned = True
+        context.results[step.id] = actual
+        stage = 'expect'
+        if gate is not None:
+            gate.update(actual=actual, status='PASS' if compare(actual, expected) else 'FAIL')
+            records.emit('gates', **gate)
+            if gate['status'] == 'FAIL':
+                raise GateFailure(f'Gate {step.id} failed')
+        wait = float(duration(step.wait_after))
+        if wait > 0:
+            stage = 'wait_after'
+            records.emit(event='wait_started', step=step.id, duration=step.wait_after)
+            budget = context.timeout
+            await runtime.supervisor.guard(asyncio.sleep(wait), budget)
+        records.emit(event='step_finished', step=step.id, status='PASS', args=args, result=actual)
+    except BaseException as error:
+        status = ('CANCELLED' if isinstance(error, asyncio.CancelledError) else
+                  'FAIL' if isinstance(error, GateFailure) else 'ERROR')
+        if gate is not None and 'status' not in gate:
+            gate.update(status=status, error=str(error) or type(error).__name__)
+            records.emit('gates', **gate)
+        records.emit(event='step_finished', step=step.id, status=status,
+                     error=str(error) or type(error).__name__,
+                     error_stage=stage,
+                     outcome_unknown=invoked and not returned and interface.effect == 'write',
+                     **({'result': actual} if returned else {}))
+        raise
 
 
 async def run_case(case, registry, launch, directory):
@@ -67,51 +118,9 @@ async def run_case(case, registry, launch, directory):
                 for step in phase.steps:
                     interface = registry.get(step.interface)
                     deadline = min(phase_deadline, time.monotonic() + float(duration(step.within))) if step.within else phase_deadline
-                    context = CaseContext(runtime, records, timestamp(), deadline)
-                    gate, invoked, returned = None, False, False
-                    stage = 'arguments'
-                    records.emit(event='step_started', phase=phase.id, step=step.id, interface=step.interface,
-                                 describe=step.describe, query_time=context.query_time)
-                    try:
-                        args = resolve(step.args, results, context.globals())
-                        arguments = interface.arguments(args)
-                        expected = resolve(step.expect.comparisons, results, context.globals()) if step.expect else None
-                        if expected is not None:
-                            for op, value in expected.items():
-                                validate(value, {'type': 'integer', 'minimum': 0} if op == 'count' else interface.returns, 'expect.' + op)
-                            gate = {'step': step.id, 'interface': step.interface, 'args': args,
-                                    'query_time': context.query_time, 'expect': expected}
-                        budget = context.timeout
-                        stage = 'invoke'
-                        invoked = True
-                        actual = await runtime.supervisor.guard(interface.call(context, arguments), budget)
-                        returned = True
-                        results[step.id] = actual
-                        stage = 'expect'
-                        if gate is not None:
-                            gate.update(actual=actual, status='PASS' if compare(actual, expected) else 'FAIL')
-                            records.emit('gates', **gate)
-                            if gate['status'] == 'FAIL':
-                                raise GateFailure(f'Gate {step.id} failed')
-                        wait = float(duration(step.wait_after))
-                        if wait > 0:
-                            stage = 'wait_after'
-                            records.emit(event='wait_started', step=step.id, duration=step.wait_after)
-                            budget = context.timeout
-                            await runtime.supervisor.guard(asyncio.sleep(wait), budget)
-                        records.emit(event='step_finished', step=step.id, status='PASS', args=args, result=actual)
-                    except BaseException as error:
-                        status = ('CANCELLED' if isinstance(error, asyncio.CancelledError) else
-                                  'FAIL' if isinstance(error, GateFailure) else 'ERROR')
-                        if gate is not None and 'status' not in gate:
-                            gate.update(status=status, error=str(error) or type(error).__name__)
-                            records.emit('gates', **gate)
-                        records.emit(event='step_finished', step=step.id, status=status,
-                                     error=str(error) or type(error).__name__,
-                                     error_stage=stage,
-                                     outcome_unknown=invoked and not returned and interface.effect == 'write',
-                                     **({'result': actual} if returned else {}))
-                        raise
+                    context = StepContext(runtime, records, timestamp(), deadline, phase.id, results)
+                    with records.step(phase.id, step.id, step.interface):
+                        await run_step(step, interface, context)
                 phase_status = 'PASS'
             except GateFailure:
                 phase_status = 'FAIL'
