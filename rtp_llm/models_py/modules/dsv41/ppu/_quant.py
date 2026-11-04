@@ -545,7 +545,8 @@ def _triton_kernels():
             | (ax == 5.0)
         )
         idx = tl.where(is_boundary & ((idx & 1) == 1), idx - 1, idx)
-        sign = ((x < 0) & (idx != 0)).to(tl.uint8)
+        # Preserve the input sign even when RNE maps its magnitude to zero.
+        sign = ((x.to(tl.int32, bitcast=True) >> 31) & 1).to(tl.uint8)
         return idx | (sign << 3)
 
     @triton.jit

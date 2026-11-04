@@ -445,8 +445,17 @@ class PpuFastPathTest(unittest.TestCase):
     def test_indexer_quant_kernel_matches_reference(self):
         torch.manual_seed(29)
         q = torch.randn(64, 32, 128, dtype=torch.bfloat16, device="cuda")
+        q[0].zero_()
+        q[1, 0].zero_()
+        q[1, 0, :8] = q.new_tensor(
+            [1.5, 0.4, 1.0, 0.5, -0.0, -0.01, -0.0625, -0.125]
+        )
         payload, sf = _quant.quantize_indexer_q(q)
-        expected_payload, expected_sf, _ = _reference_mx(q.reshape(-1, 128))
+        self.assertEqual(
+            payload[1, 0, :4].view(torch.uint8).cpu().tolist(),
+            [0x37, 0x46, 0x88, 0x98],
+        )
+        expected_payload, expected_sf, _ = _reference_mx(q.cpu().reshape(-1, 128))
         torch.testing.assert_close(
             payload.reshape(-1, 64).view(torch.uint8).cpu(),
             expected_payload,
