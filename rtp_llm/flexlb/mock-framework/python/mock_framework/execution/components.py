@@ -4,7 +4,7 @@ import copy
 import json
 import os
 from ..config.validation import duration
-from .records import write_json
+from .run_trace import write_json
 from .transport import ExecutionError
 
 

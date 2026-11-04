@@ -6,7 +6,7 @@ import subprocess
 import pytest
 
 from mock_framework.config import ConfigError
-from mock_framework.execution.records import write_json
+from mock_framework.execution.run_trace import write_json
 
 ROOT = Path(__file__).resolve().parents[1]
 

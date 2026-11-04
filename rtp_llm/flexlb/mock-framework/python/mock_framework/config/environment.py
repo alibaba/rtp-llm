@@ -4,9 +4,8 @@ import json
 import re
 from pathlib import Path
 
-from .errors import ConfigError
 from .parser import load_yaml
-from .validation import fields, number, text
+from .validation import ConfigError, fields, number, text
 
 _RESOURCE = re.compile(r'^[1-9]\d*(?:\.\d+)?(?:KiB|MiB|GiB|TiB|[kmgtKMGT]i?|B)?$')
 _ROLES = {'master', 'client', 'prefill', 'decode', 'vit'}

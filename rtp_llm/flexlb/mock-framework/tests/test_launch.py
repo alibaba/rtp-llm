@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from mock_framework import cli
+from mock_framework import case as case_cli
 from mock_framework.config import load_yaml
 from mock_framework.execution import ExecutionError, prepare_launch
 from mock_framework.execution.launch import local_launch
@@ -78,17 +78,17 @@ def test_local_recipes_reject_roles_or_master_configuration_the_binaries_cannot_
 
 def test_cli_generates_a_readable_launch_file_and_refuses_overwrite(case, artifacts, tmp_path, monkeypatch):
     framework, java, prometheus = artifacts
-    monkeypatch.setattr(cli, '__file__', str(framework / 'python/mock_framework/cli.py'))
+    monkeypatch.setattr(case_cli, '__file__', str(framework / 'python/mock_framework/case.py'))
     output = tmp_path / 'launch.yaml'
     monkeypatch.setattr(sys, 'argv', ['mock-case', 'launch', str(case.directory / 'case.yaml'), '--java', str(java),
                                     '--prometheus', str(prometheus), '--output', str(output)])
-    cli.main()
+    case_cli.main()
     content = output.read_text()
     assert '&id' not in content
     launch = prepare_launch(load_yaml(output), case, output.parent)
     assert launch['components']['master']['command'][0] == str(java)
     with pytest.raises(SystemExit) as error:
-        cli.main()
+        case_cli.main()
     assert error.value.code == 2 and output.read_text() == content
 
 

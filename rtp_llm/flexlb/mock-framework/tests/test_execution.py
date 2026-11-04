@@ -11,7 +11,7 @@ import yaml
 
 from mock_framework.config import Registry, compile_case
 from mock_framework.config.registry import case_interface, Bounds
-from mock_framework.config.model import Reference
+from mock_framework.config.compiled_case import Reference
 from mock_framework.execution import ExecutionError, prepare_launch, run_case
 from mock_framework.execution.runner import resolve
 
@@ -165,7 +165,7 @@ def test_refs_do_not_eval_and_require_actual_fields():
 def test_cli_compiles_without_java_catalog(setup, tmp_path):
     case, _, _ = setup([{'id': 'leader', 'describe': 'leader', 'interface': 'master/get', 'args': {'is_leader': True}, 'wait_after': '1ms'}])
     output = tmp_path / 'compiled.json'
-    result = subprocess.run([sys.executable, '-m', 'mock_framework.cli', 'compile', str(case.source),
+    result = subprocess.run([sys.executable, '-m', 'mock_framework.case', 'compile', str(case.source),
         '--output', str(output)], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert json.loads(output.read_text())['phases'][0]['steps'][0]['wait_after'] == '1ms'

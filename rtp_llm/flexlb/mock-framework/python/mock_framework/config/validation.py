@@ -3,7 +3,9 @@ from decimal import Decimal
 import math
 import re
 
-from .errors import ConfigError
+class ConfigError(ValueError):
+    pass
+
 
 _DURATION = re.compile(r'^(-?(?:\d+(?:\.\d+)?|\.\d+))(ns|us|ms|s|m|h)$')
 _FACTORS = {'ns': '0.000000001', 'us': '0.000001', 'ms': '0.001', 's': '1', 'm': '60', 'h': '3600'}

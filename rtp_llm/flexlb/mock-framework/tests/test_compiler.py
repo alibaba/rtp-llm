@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Annotated
 import pytest
 from mock_framework.config import ConfigError, Registry, Step, compile_case
-from mock_framework.config.model import Reference
+from mock_framework.config.compiled_case import Reference
 from mock_framework.config.registry import case_interface, Bounds
 from mock_framework.config.environment import expand_config
 

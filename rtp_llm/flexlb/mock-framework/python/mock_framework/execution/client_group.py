@@ -90,7 +90,7 @@ class ClientGroup:
 
     async def drain(self):
         if self.pending:
-            from .records import timestamp
+            from .run_trace import timestamp
             async with asyncio.timeout(self.stop_timeout):
                 await self.collect(timestamp(), self.stop_timeout)
 

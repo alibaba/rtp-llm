@@ -4,8 +4,7 @@ from inspect import iscoroutinefunction, signature
 from types import UnionType
 from typing import Annotated, Literal, Union, get_args, get_origin, get_type_hints
 
-from .errors import ConfigError
-from .validation import validate
+from .validation import ConfigError, validate
 
 _PRIMITIVES = {str: 'string', int: 'integer', float: 'number', bool: 'boolean', type(None): 'null'}
 
