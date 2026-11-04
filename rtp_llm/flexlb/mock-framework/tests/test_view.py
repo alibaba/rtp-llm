@@ -10,7 +10,8 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from mock_framework.config import Registry, compile_case
+from mock_framework.config import compile_case
+from mock_framework.execution.step.registry import Registry
 from mock_framework.execution.run_trace import RunTrace
 from mock_framework.view.service import handler, serve
 from mock_framework.view.grafana import dashboard, provision

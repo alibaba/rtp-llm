@@ -6,8 +6,11 @@ from pathlib import Path
 import sys
 import yaml
 
-from .config import ConfigError, Registry, compile_case, load_yaml
-from .execution import ExecutionError, prepare_launch, run_case
+from .config import ConfigError, compile_case, load_yaml
+from .execution.step.registry import Registry
+from .execution import ExecutionError
+from .execution.launch import prepare_launch
+from .execution.runner import run_case
 from .execution.launch import local_launch
 
 

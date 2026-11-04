@@ -1,10 +1,12 @@
+from mock_framework.execution.step.master_get import MasterGet, MasterSelection
+from mock_framework.execution.step.master_engine_get import MasterEngineGet, EngineSelection
 import json
 from pathlib import Path
 
 import pytest
 
 from mock_framework.execution.roles.master import master_environment
-from mock_framework.execution.transport import ExecutionError
+from mock_framework.execution import ExecutionError
 
 
 def configuration():
@@ -68,8 +70,10 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     import subprocess
     import urllib.request
     import yaml
-    from mock_framework.config import Registry, compile_case
-    from mock_framework.execution import prepare_launch, run_case
+    from mock_framework.config import compile_case
+    from mock_framework.execution.step.registry import Registry
+    from mock_framework.execution.launch import prepare_launch
+    from mock_framework.execution.runner import run_case
 
     root = Path(__file__).resolve().parents[1]
     java = Path(os.environ['JAVA_HOME']) / 'bin/java'
@@ -252,14 +256,14 @@ def adapter_context():
 ])
 def test_adapter_keeps_per_master_observations(monkeypatch, operation, responses, expected):
     import asyncio
-    from mock_framework.interfaces import master
+    from mock_framework.execution.step import _master as master
     calls = []
     async def post(url, payload):
         calls.append(url)
         return responses[len(calls) - 1]
     monkeypatch.setattr(master, 'post', post)
-    args = master.MasterSelection(is_leader=True) if operation == 'get' else master.EngineSelection()
-    assert asyncio.run(getattr(master, operation)(adapter_context(), args)) == expected
+    args = MasterSelection(is_leader=True) if operation == 'get' else EngineSelection()
+    assert asyncio.run(({'get': MasterGet, 'engines': MasterEngineGet}[operation].execute)(adapter_context(), args)) == expected
     assert calls == ['http://m0', 'http://m1']
 
 
@@ -271,29 +275,29 @@ def test_adapter_keeps_per_master_observations(monkeypatch, operation, responses
 ])
 def test_adapter_rejects_wrong_identity_and_invalid_or_duplicate_engine(monkeypatch, operation, response):
     import asyncio
-    from mock_framework.interfaces import master
+    from mock_framework.execution.step import _master as master
     async def post(url, payload):
         return response
     monkeypatch.setattr(master, 'post', post)
-    args = master.MasterSelection(['m0:1'], is_leader=True) if operation == 'get' else master.EngineSelection(['m0:1'])
+    args = MasterSelection(['m0:1'], is_leader=True) if operation == 'get' else EngineSelection(['m0:1'])
     with pytest.raises(ExecutionError):
-        asyncio.run(getattr(master, operation)(adapter_context(), args))
+        asyncio.run(({'get': MasterGet, 'engines': MasterEngineGet}[operation].execute)(adapter_context(), args))
 
 
 def test_explicit_master_selection_and_empty_selection_do_not_broadcast(monkeypatch):
     import asyncio
-    from mock_framework.interfaces import master
+    from mock_framework.execution.step import _master as master
     calls = []
     async def post(url, payload):
         calls.append(url)
         return {'instances': []}
     monkeypatch.setattr(master, 'post', post)
-    assert asyncio.run(master.get(adapter_context(), master.MasterSelection(['m1:1'], is_leader=True))) == []
+    assert asyncio.run(MasterGet.execute(adapter_context(), MasterSelection(['m1:1'], is_leader=True))) == []
     assert calls == ['http://m1']
     with pytest.raises(ValueError):
         master.Targets([])
     with pytest.raises(ExecutionError):
-        asyncio.run(master.get(adapter_context(), master.MasterSelection(['missing:1'], is_leader=True)))
+        asyncio.run(MasterGet.execute(adapter_context(), MasterSelection(['missing:1'], is_leader=True)))
     assert calls == ['http://m1']
 
 
@@ -322,20 +326,20 @@ def test_restart_port_probe_still_rejects_an_active_listener():
 ])
 def test_standby_query_preserves_actual_master_claims(monkeypatch, leaders, expected):
     import asyncio
-    from mock_framework.interfaces import master
+    from mock_framework.execution.step import _master as master
     claims = dict(zip(['http://m0', 'http://m1'], leaders))
     async def post(url, payload):
         identity = 'master-0' if url == 'http://m0' else 'master-1'
         return {'instances': [{'id': identity}] if claims[url] else []}
     monkeypatch.setattr(master, 'post', post)
-    assert asyncio.run(master.get(adapter_context(), master.MasterSelection(is_leader=False))) == expected
+    assert asyncio.run(MasterGet.execute(adapter_context(), MasterSelection(is_leader=False))) == expected
 
 
 @pytest.mark.parametrize('targets,expected', [(None, ['m0:1', 'm1:1']), (['m1:1'], ['m1:1'])])
 def test_master_get_without_leadership_filter_lists_selected_active_masters(monkeypatch, targets, expected):
     import asyncio
-    from mock_framework.interfaces import master
+    from mock_framework.execution.step import _master as master
     async def unexpected_read(*args):
         raise AssertionError('An unfiltered listing does not query leadership')
     monkeypatch.setattr(master, '_read_master_state', unexpected_read)
-    assert asyncio.run(master.get(adapter_context(), master.MasterSelection(targets))) == expected
+    assert asyncio.run(MasterGet.execute(adapter_context(), MasterSelection(targets))) == expected

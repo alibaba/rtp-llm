@@ -5,7 +5,8 @@ import pytest
 
 from mock_framework import case as case_cli
 from mock_framework.config import load_yaml
-from mock_framework.execution import ExecutionError, prepare_launch
+from mock_framework.execution import ExecutionError
+from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.launch import local_launch
 
 

@@ -1,13 +1,35 @@
 """Compile Case structure and typed references without starting runtime components."""
+from dataclasses import dataclass
 from functools import partial
+from typing import Any
 from pathlib import Path
 import re
 
 from .environment import compile_environment
-from .compiled_case import Step, CompiledCase, Expect, Phase, Reference
+from ..execution.step.step import Expect, Reference, Step
 from .yaml_loader import load_yaml
-from .registry import Registry
+from ..execution.step.registry import Registry
 from .validation import ConfigError, compatible, duration, fields, text, validate
+
+@dataclass(frozen=True)
+class Phase:
+    id: str
+    describe: str
+    timeout: str
+    steps: tuple[Step, ...]
+
+
+@dataclass(frozen=True)
+class CompiledCase:
+    id: str
+    describe: str
+    name: str | None
+    directory: Path
+    environment: dict[str, Any]
+    phases: tuple[Phase, ...]
+    view: Path | None
+    source: Path
+
 
 _ID = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 _GLOBALS = {'type': 'object', 'properties': {
@@ -109,7 +131,7 @@ def _compile_step(raw, registry, ids, previous):
     duration(wait_after)
     expect = _expectation(raw['expect'], interface, previous) if 'expect' in raw else None
     previous[step_id] = interface.returns
-    return Step(step_id, description, interface.name, args, expect, within, wait_after)
+    return interface.step_type(step_id, description, interface.name, args, expect, within, wait_after)
 
 
 def _compile_phase(raw, registry, ids, previous):

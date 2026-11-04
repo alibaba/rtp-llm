@@ -1,3 +1,4 @@
+from mock_framework.execution.step.step import Step
 import asyncio
 from dataclasses import dataclass
 import json
@@ -6,9 +7,11 @@ from pathlib import Path
 import subprocess
 import urllib.request
 
-from mock_framework.config import Registry, compile_case
-from mock_framework.config.registry import case_interface
-from mock_framework.execution import prepare_launch, run_case
+from mock_framework.config import compile_case
+from mock_framework.execution.step.registry import Registry
+from mock_framework.execution.step.registry import register_step
+from mock_framework.execution.launch import prepare_launch
+from mock_framework.execution.runner import run_case
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -18,9 +21,11 @@ class ProbeArgs:
     pass
 
 
-@case_interface('probe/addresses', effect='read')
-async def addresses(ctx, args: ProbeArgs) -> list[str]:
-    return ctx.globals()['prefill']
+@register_step('probe/addresses', effect='read')
+class addresses(Step):
+    @staticmethod
+    async def execute(ctx, args: ProbeArgs) -> list[str]:
+        return ctx.globals()['prefill']
 
 
 def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(tmp_path):

@@ -5,7 +5,7 @@ import os
 import signal
 from ..config.validation import duration
 from .run_trace import write_json
-from .transport import ExecutionError
+from . import ExecutionError
 
 
 class ProcessSupervisor:

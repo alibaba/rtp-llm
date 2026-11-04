@@ -1,3 +1,4 @@
+from mock_framework.execution.step.step import Step
 import asyncio
 from dataclasses import dataclass
 import json
@@ -8,13 +9,16 @@ import sys
 import pytest
 import yaml
 
-from mock_framework.config import Registry, compile_case
-from mock_framework.config.registry import case_interface
-from mock_framework.execution import prepare_launch, run_case
+from mock_framework.config import compile_case
+from mock_framework.execution.step.registry import Registry
+from mock_framework.execution.step.registry import register_step
+from mock_framework.execution.launch import prepare_launch
+from mock_framework.execution.runner import run_case
 from mock_framework.execution.processes import ProcessSupervisor
 from mock_framework.execution.roles.master import master_port
 from mock_framework.execution.launch import local_launch
-from mock_framework.execution.transport import ExecutionError, post
+from mock_framework.execution import ExecutionError
+from mock_framework.execution.transport import post
 
 
 def step(name, interface, **values):
@@ -158,15 +162,17 @@ class Empty:
     pass
 
 
-@case_interface('test/client_progress', effect='read')
-async def progress(ctx, args: Empty) -> int:
-    successes = 0
-    for node in ctx.runtime.topology.active():
-        if node['role'] == 'client':
-            value = await post(node['control'], {'interface': 'worker/state', 'args': {'sequence': 1},
-                'context': {'run': 'foreground', 'query_time': ctx.query_time, 'observation': None, 'timeout_ms': 1000}})
-            successes += value['outcomes']['success']
-    return successes
+@register_step('test/client_progress', effect='read')
+class progress(Step):
+    @staticmethod
+    async def execute(ctx, args: Empty) -> int:
+        successes = 0
+        for node in ctx.runtime.topology.active():
+            if node['role'] == 'client':
+                value = await post(node['control'], {'interface': 'worker/state', 'args': {'sequence': 1},
+                    'context': {'run': 'foreground', 'query_time': ctx.query_time, 'observation': None, 'timeout_ms': 1000}})
+                successes += value['outcomes']['success']
+        return successes
 
 
 @pytest.mark.parametrize('batched', [False, True], ids=['direct', 'batch'])
