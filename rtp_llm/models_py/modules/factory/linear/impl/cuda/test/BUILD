@@ -6,8 +6,61 @@ py_test(
     name = "bf16_collective_projection_test",
     srcs = ["bf16_collective_projection_test.py"],
     deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    env = {"GPU_COUNT": "2"},
     tags = ["SM103_CU13"],
     exec_properties = {"gpu": "SM103_CU13", "gpu_count": "2"},
+)
+
+py_test(
+    name = "bf16_attention_hooks_test",
+    srcs = ["bf16_attention_hooks_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    env = {"GPU_COUNT": "2"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "2"},
+    timeout = "long",
+)
+
+py_test(
+    name = "bf16_comm_microbenchmark_tp2",
+    srcs = ["bf16_comm_microbenchmark.py"],
+    main = "bf16_comm_microbenchmark.py",
+    args = ["--world-size=2", "--phases=decode", "--samples=8", "--repeat=3"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/test/utils:hang_watchdog",
+    ],
+    env = {"GPU_COUNT": "2"},
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "2"},
+    timeout = "long",
+)
+
+py_test(
+    name = "bf16_comm_microbenchmark_tp8",
+    srcs = ["bf16_comm_microbenchmark.py"],
+    main = "bf16_comm_microbenchmark.py",
+    args = ["--world-size=8", "--profile"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/test/utils:hang_watchdog",
+    ],
+    env = {"GPU_COUNT": "8"},
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "8"},
+    timeout = "long",
+)
+
+py_test(
+    name = "kda_norm_layout_test",
+    srcs = ["kda_norm_layout_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    env = {"KDA_NORM_PROFILE": "1"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+    timeout = "long",
 )
 
 py_test(

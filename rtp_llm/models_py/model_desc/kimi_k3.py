@@ -346,13 +346,22 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
         return ready
 
     def _initialize_bf16_collective(self, init_resource):
-        if self.tp_size == 1 or init_resource.is_decode_role:
+        if self.tp_size == 1 or (
+            init_resource.is_decode_role and type(self) is not KimiK3Model
+        ):
             return
-        from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
-        from rtp_llm.models_py.modules.factory.linear.impl.cuda.bf16_comm_fusion import Bf16CollectiveProjection
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import (
+            CudaF16Linear,
+        )
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.bf16_comm_fusion import (
+            Bf16CollectiveProjection,
+        )
 
-        attentions = [layer.attention for layer in self.layers
-                      if not getattr(layer.attention, "prefill_query_cp", False)]
+        attentions = [
+            layer.attention
+            for layer in self.layers
+            if not getattr(layer.attention, "prefill_query_cp", False)
+        ]
         if not attentions or any(
             not isinstance(projection, CudaF16Linear)
             or projection.weight.dtype != torch.bfloat16
@@ -371,6 +380,7 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
             max_m=self._max_moe_tokens,
             hidden_size=self.config.hidden_size,
             output_projections=[attention.output for attention in attentions],
+            decode_staging=init_resource.is_decode_role,
         )
         for attention in attentions:
             attention._bf16_collective = collective

@@ -118,11 +118,6 @@ class KdaAttention(nn.Module):
                 )
             with profile_scope("RTP::attention.kda.input_proj"):
                 fused = self.input(full_hidden)
-        layout = getattr(metadata, "query_layout", None)
-        if layout is not None:
-            with profile_scope("RTP::attention.kda.zigzag_to_natural"):
-                fused = layout.gather_natural(fused)
-                attention_inputs = layout.natural_attention(attention_inputs)
         logical_width = 4 * self.width + self.fa_width + self.heads
         if fused.shape[-1] < logical_width:
             raise ValueError(
@@ -130,6 +125,11 @@ class KdaAttention(nn.Module):
                 f"expected at least {logical_width}"
             )
         fused = fused[..., :logical_width]
+        layout = getattr(metadata, "query_layout", None)
+        if layout is not None:
+            with profile_scope("RTP::attention.kda.zigzag_to_natural"):
+                fused = layout.gather_natural(fused)
+                attention_inputs = layout.natural_attention(attention_inputs)
         qkv, gate, fa, beta = fused.split(
             [3 * self.width, self.width, self.fa_width, self.heads], dim=-1
         )
@@ -169,13 +169,20 @@ class KdaAttention(nn.Module):
                 output = self.norm(
                     output.reshape(-1, self.heads, self.dim),
                     gate.reshape(-1, self.heads, self.dim),
+                    row_indices=(
+                        layout.rankmajor_to_natural if layout is not None else None
+                    ),
+                    out=(
+                        layout.reserve(
+                            "output", layout.physical_rows, self.width, output.dtype
+                        ).view(-1, self.heads, self.dim)
+                        if layout is not None
+                        else None
+                    ),
                 )
-        if layout is not None:
+        if layout is not None and self._fp8_output_norm:
             with profile_scope("RTP::attention.kda.natural_to_zigzag"):
-                if self._fp8_output_norm:
-                    values, scales = layout.scatter_rankmajor(values, scales)
-                else:
-                    output, _ = layout.scatter_rankmajor(output.reshape(-1, self.width))
+                values, scales = layout.scatter_rankmajor(values, scales)
         use_fused_rs = (
             self._fp8_collective is not None
             and self._fp8_collective.eligible_rs(

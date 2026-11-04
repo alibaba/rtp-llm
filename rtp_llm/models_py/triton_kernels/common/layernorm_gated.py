@@ -220,12 +220,15 @@ class RmsNormGated(torch.nn.Module):
 # The original source was licensed under the MIT license.
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+
 @triton.heuristics(
     {
         "STORE_RESIDUAL_OUT": lambda args: args["residual_out"] is not None,
         "HAS_RESIDUAL": lambda args: args["residual"] is not None,
         "HAS_WEIGHT": lambda args: args["w"] is not None,
         "HAS_BIAS": lambda args: args["b"] is not None,
+        "HAS_ROW_INDICES": lambda args: args["row_indices"] is not None,
+        "STORE_RSTD": lambda args: args["rstd"] is not None,
     }
 )
 @triton.jit
@@ -240,7 +243,9 @@ def layer_norm_gated_fwd_kernel(
     mean,  # pointer to the mean
     rstd,  # pointer to the 1/std
     eps,  # epsilon to avoid division by zero
-    T,  # number of rows in x
+    T,  # number of output head rows
+    row_indices,  # optional output-token to input-token map; -1 pads with zero
+    input_tokens,
     H: tl.constexpr,  # number of heads
     g_stride_n,
     D: tl.constexpr,  # number of columns in x
@@ -252,6 +257,8 @@ def layer_norm_gated_fwd_kernel(
     HAS_RESIDUAL: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    HAS_ROW_INDICES: tl.constexpr,
+    STORE_RSTD: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
     i_t = tl.program_id(0)
@@ -263,13 +270,32 @@ def layer_norm_gated_fwd_kernel(
         tl.extra.cuda.gdc_wait()
         tl.extra.cuda.gdc_launch_dependents()
 
-    p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
+    o_t = i_t * BT + tl.arange(0, BT)
+    if HAS_ROW_INDICES:
+        token = tl.load(row_indices + o_t // H, mask=o_t < T, other=-1)
+        valid = (o_t < T) & (token >= 0) & (token < input_tokens)
+        source_rows = token * H + o_t % H
+        b_x = tl.load(
+            x + source_rows[:, None] * D + o_d[None, :],
+            mask=valid[:, None] & m_d[None, :],
+            other=0.0,
+        ).to(tl.float32)
+    else:
+        source_rows = o_t
+        p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+        b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
     if HAS_RESIDUAL:
-        p_res = tl.make_block_ptr(
-            residual, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0)
-        )
-        b_x += tl.load(p_res, boundary_check=(0, 1)).to(tl.float32)
+        if HAS_ROW_INDICES:
+            b_x += tl.load(
+                residual + source_rows[:, None] * D + o_d[None, :],
+                mask=valid[:, None] & m_d[None, :],
+                other=0.0,
+            ).to(tl.float32)
+        else:
+            p_res = tl.make_block_ptr(
+                residual, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0)
+            )
+            b_x += tl.load(p_res, boundary_check=(0, 1)).to(tl.float32)
     if STORE_RESIDUAL_OUT:
         p_res_out = tl.make_block_ptr(
             residual_out, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0)
@@ -286,8 +312,9 @@ def layer_norm_gated_fwd_kernel(
         b_var = tl.sum(b_xbar * b_xbar, axis=1) / D
     b_rstd = 1 / tl.sqrt(b_var + eps)
 
-    p_rstd = tl.make_block_ptr(rstd, (T,), (1,), (i_t * BT,), (BT,), (0,))
-    tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), boundary_check=(0,))
+    if STORE_RSTD:
+        p_rstd = tl.make_block_ptr(rstd, (T,), (1,), (i_t * BT,), (BT,), (0,))
+        tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), boundary_check=(0,))
 
     if HAS_WEIGHT:
         b_w = tl.load(w + o_d, mask=m_d).to(tl.float32)
@@ -303,17 +330,18 @@ def layer_norm_gated_fwd_kernel(
         b_y = b_y + b_b[None, :]
 
     # swish/sigmoid output gate
-    o_t = i_t * BT + tl.arange(0, BT)
-    o_g = (o_t // H) * g_stride_n + (o_t % H) * D
+    o_g = (source_rows // H) * g_stride_n + (source_rows % H) * D
     b_g = tl.load(
         g + o_g[:, None] + o_d[None, :],
-        mask=(o_t[:, None] < T) & m_d[None, :],
+        mask=(valid[:, None] if HAS_ROW_INDICES else o_t[:, None] < T) & m_d[None, :],
         other=0.0,
     ).to(tl.float32)
     if ACTIVATION == "swish" or ACTIVATION == "silu":
         b_y = b_y * b_g * tl.sigmoid(b_g)
     elif ACTIVATION == "sigmoid":
         b_y = b_y * tl.sigmoid(b_g)
+    if HAS_ROW_INDICES:
+        b_y = tl.where(valid[:, None], b_y, 0.0)
 
     # Write output
     p_y = tl.make_block_ptr(y, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
@@ -334,9 +362,19 @@ class FusedRMSNormGated(torch.nn.Module):
             raise ValueError("FusedRMSNormGated requires a 128-element weight")
         self.weight = weight
         self.eps = eps
-        self.launch_pdl = weight.is_cuda and torch.cuda.get_device_capability(weight.device)[0] >= 9
+        self.launch_pdl = (
+            weight.is_cuda and torch.cuda.get_device_capability(weight.device)[0] >= 9
+        )
 
-    def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        gate: torch.Tensor,
+        *,
+        row_indices: Optional[torch.Tensor] = None,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Normalize heads, optionally gathering input tokens into padded output rows."""
         if x.ndim not in (2, 3) or x.shape[-1] != 128 or gate.shape != x.shape:
             raise ValueError("FusedRMSNormGated expects matching [..., 128] inputs")
         if not x.is_cuda or x.device != gate.device or x.device != self.weight.device:
@@ -346,14 +384,49 @@ class FusedRMSNormGated(torch.nn.Module):
         # The native kernel requires packed x, while gate supports row strides.
         shape = x.shape
         heads = x.shape[1] if x.ndim == 3 else 1
+        input_tokens = x.shape[0]
+        if row_indices is not None:
+            if (
+                row_indices.ndim != 1
+                or row_indices.dtype != torch.int64
+                or not row_indices.is_contiguous()
+                or row_indices.device != x.device
+                or x.dtype != torch.bfloat16
+                or gate.dtype != x.dtype
+                or self.weight.dtype != x.dtype
+            ):
+                raise ValueError(
+                    "Mapped gated RMSNorm requires BF16 inputs and a CUDA int64 token map"
+                )
+            shape = (row_indices.numel(), *shape[1:])
+        if out is not None and (
+            out.shape != shape
+            or out.dtype != x.dtype
+            or out.device != x.device
+            or not out.is_contiguous()
+            or out.numel() > 0
+            and out.untyped_storage().data_ptr()
+            in (
+                x.untyped_storage().data_ptr(),
+                gate.untyped_storage().data_ptr(),
+                self.weight.untyped_storage().data_ptr(),
+            )
+        ):
+            raise ValueError(
+                "Gated RMSNorm output must be a separate contiguous tensor with the output shape"
+            )
         x = x.contiguous().view(-1, 128)
         if gate.stride(-1) != 1 or (gate.ndim == 3 and gate.stride(1) != 128):
             gate = gate.contiguous()
-        y = torch.empty_like(x)
-        rows = x.shape[0]
+        y = torch.empty(shape, dtype=x.dtype, device=x.device) if out is None else out
+        rows = y.numel() // 128
         if rows == 0:
             return y.reshape(shape)
-        rstd = torch.empty((rows,), dtype=torch.float32, device=x.device)
+        rstd = (
+            None
+            if row_indices is not None
+            else torch.empty((rows,), dtype=torch.float32, device=x.device)
+        )
         layer_norm_gated_fwd_kernel[(triton.cdiv(rows, 16),)](
             x,
             gate,
@@ -366,6 +439,8 @@ class FusedRMSNormGated(torch.nn.Module):
             rstd,
             self.eps,
             rows,
+            row_indices=row_indices,
+            input_tokens=input_tokens,
             H=heads,
             g_stride_n=gate.stride(0),
             D=128,
@@ -484,15 +559,28 @@ def _validate_q_kv_norm(q, kv, q_weight, kv_weight):
             raise ValueError("K3 MLA norm weight shape does not match input")
 
 
-
 @triton.jit
 def _grouped_q_kv_rmsnorm_kernel(
-    Q, KV, QW, KVW, QO, KVO, SUFFIX,
-    N: tl.constexpr, QS: tl.constexpr, KVS: tl.constexpr,
-    KVOS: tl.constexpr, SS: tl.constexpr, SUFFIX_DIM: tl.constexpr,
-    QSIZE: tl.constexpr, KVSIZE: tl.constexpr,
-    EPS: tl.constexpr, ROWS: tl.constexpr,
-    QB: tl.constexpr, KVB: tl.constexpr, PDL: tl.constexpr,
+    Q,
+    KV,
+    QW,
+    KVW,
+    QO,
+    KVO,
+    SUFFIX,
+    N: tl.constexpr,
+    QS: tl.constexpr,
+    KVS: tl.constexpr,
+    KVOS: tl.constexpr,
+    SS: tl.constexpr,
+    SUFFIX_DIM: tl.constexpr,
+    QSIZE: tl.constexpr,
+    KVSIZE: tl.constexpr,
+    EPS: tl.constexpr,
+    ROWS: tl.constexpr,
+    QB: tl.constexpr,
+    KVB: tl.constexpr,
+    PDL: tl.constexpr,
 ):
     # Each branch keeps its own reduction width; latent512 is not padded to
     # Q's 2048-wide reduction. Strided projection views need no contiguous copy.
@@ -523,9 +611,11 @@ def _grouped_q_kv_rmsnorm_kernel(
             sc = tl.arange(0, KVB)
             sv = tl.load(SUFFIX + rows[:, None] * SS + sc[None, :],
                          (rows[:, None] < N) & (sc[None, :] < SUFFIX_DIM), other=0)
-            tl.store(KVO + rows[:, None] * KVOS + KVSIZE + sc[None, :], sv,
-                     (rows[:, None] < N) & (sc[None, :] < SUFFIX_DIM))
-
+            tl.store(
+                KVO + rows[:, None] * KVOS + KVSIZE + sc[None, :],
+                sv,
+                (rows[:, None] < N) & (sc[None, :] < SUFFIX_DIM),
+            )
 
 
 def grouped_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps, *, kv_suffix=None):

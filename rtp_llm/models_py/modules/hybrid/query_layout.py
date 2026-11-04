@@ -42,9 +42,21 @@ class QueryLayout:
         self.natural_to_rankmajor = self.restore[self.padding_mask]
         if self.natural_to_rankmajor.numel() != self.true_rows:
             raise ValueError("zigzag padding mask does not match real lengths")
+        self.rankmajor_to_natural = torch.full(
+            (self.physical_rows,),
+            -1,
+            dtype=torch.long,
+            device=self.device,
+        )
+        self.rankmajor_to_natural.index_copy_(
+            0,
+            self.natural_to_rankmajor,
+            torch.arange(self.true_rows, dtype=torch.long, device=self.device),
+        )
         self.natural_valid = (
             torch.ones(self.true_rows, dtype=torch.bool, device=self.device)
-            if valid_mask is None else valid_mask.bool()
+            if valid_mask is None
+            else valid_mask.bool()
         )
         if self.natural_valid.numel() != self.true_rows:
             raise ValueError("original valid mask must describe real natural rows")

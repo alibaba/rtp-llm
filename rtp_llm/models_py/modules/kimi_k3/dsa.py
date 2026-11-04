@@ -86,33 +86,66 @@ class KimiK31DSA(KimiK3MLA):
         return output.reshape(-1, self.heads * self.v_dim)
 
     def forward(self, hidden, fmha, cache, attention_inputs=None, metadata=None):
-        local_query = self.prefill_query_cp and getattr(metadata, "query_layout", None) is not None
-        with profile_scope("RTP::attention.input_all_gather"):
-            full = hidden if local_query or self.tp_size == 1 else (
-                self._mtp_bf16_collectives.all_gather(hidden)
-                if self._mtp_bf16_collectives is not None else all_gather(hidden, Group.TP)
-            )
-        with profile_scope("RTP::attention.mla.qkv_gate_input_proj"):
-            qkv, gate = self.input(full).split(
-                [self.q_rank + self.kv_rank + self.suffix_dim, self.heads * self.v_dim], dim=-1,
-            )
+        local_query = (
+            self.prefill_query_cp
+            and getattr(metadata, "query_layout", None) is not None
+        )
+        collective = self._bf16_collective
+        use_collective = (
+            not local_query
+            and collective is not None
+            and collective.eligible(hidden.shape[0], attention_inputs, metadata)
+        )
+        if use_collective:
+            with profile_scope("RTP::attention.bf16_ag_gemm"):
+                projected, full = collective.all_gather_gemm(
+                    hidden,
+                    self.input,
+                    return_input=True,
+                )
+        else:
+            with profile_scope("RTP::attention.input_all_gather"):
+                full = (
+                    hidden
+                    if local_query or self.tp_size == 1
+                    else (
+                        self._mtp_bf16_collectives.all_gather(hidden)
+                        if self._mtp_bf16_collectives is not None
+                        else all_gather(hidden, Group.TP)
+                    )
+                )
+            with profile_scope("RTP::attention.mla.qkv_gate_input_proj"):
+                projected = self.input(full)
+        qkv, gate = projected.split(
+            [self.q_rank + self.kv_rank + self.suffix_dim, self.heads * self.v_dim],
+            dim=-1,
+        )
+        del projected
         output = self._attend(qkv, fmha, cache, full)
         del full, qkv
         layout = getattr(metadata, "query_layout", None)
-        mask = None if layout is not None and layout.all_valid else (
-            layout.local_valid if local_query else attention_inputs.valid_token_mask
+        mask = (
+            None
+            if layout is not None and layout.all_valid
+            else (
+                layout.local_valid if local_query else attention_inputs.valid_token_mask
+            )
         )
         with profile_scope("RTP::attention.mla.output_gate_quant"):
             output = gate_sigmoid_mul(output, gate, mask)
-        with profile_scope("RTP::attention.mla.output_proj"):
-            output = self.output(output)
-        if not local_query and self.tp_size > 1:
-            with profile_scope("RTP::attention.output_reduce_scatter"):
-                output = (
-                    self._mtp_bf16_collectives.reduce_scatter(output)
-                    if self._mtp_bf16_collectives is not None
-                    else reduce_scatter_bf16(output, Group.TP)
-                )
+        if use_collective:
+            with profile_scope("RTP::attention.bf16_gemm_rs"):
+                output = collective.gemm_reduce_scatter(output, self.output)
+        else:
+            with profile_scope("RTP::attention.mla.output_proj"):
+                output = self.output(output)
+            if not local_query and self.tp_size > 1:
+                with profile_scope("RTP::attention.output_reduce_scatter"):
+                    output = (
+                        self._mtp_bf16_collectives.reduce_scatter(output)
+                        if self._mtp_bf16_collectives is not None
+                        else reduce_scatter_bf16(output, Group.TP)
+                    )
         owner = getattr(next(iter(fmha.values())), "workspace_owner", None)
         if owner is not None:
             owner.release_eager_buffers()
