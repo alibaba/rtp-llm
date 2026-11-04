@@ -5,7 +5,7 @@ public record ComputeSpec(Forward forward, DecodeSpec decode,
                           StoppingSpec eos) {
     public ComputeSpec {
         if (forward == null) throw new IllegalArgumentException("Compute requires forward");
-        decode = decode == null ? new DecodeSpec(null, null, null, null) : decode;
+        decode = decode == null ? new DecodeSpec(null) : decode;
         eos = eos == null ? new StoppingSpec(null, null) : eos;
     }
 

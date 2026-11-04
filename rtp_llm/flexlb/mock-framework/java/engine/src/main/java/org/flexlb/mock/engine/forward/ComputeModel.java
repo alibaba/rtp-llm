@@ -8,7 +8,7 @@ import java.io.IOException;
 import java.util.*;
 import org.flexlb.mock.protocol.Role;
 
-/** Composes Forward timing, Decode acceptance and EOS/length completion without mutating request state. */
+/** Composes Forward timing, Decode progress and EOS/length completion without mutating request state. */
 public final class ComputeModel {
     private static final ObjectMapper JSON = JsonMapper.builder()
         .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
@@ -32,9 +32,8 @@ public final class ComputeModel {
         }
         int limit() { return Math.min(maximum, maxSequence - inputTokens); }
     }
-    public record Plan(Request request, DecodeStepModel.Plan progress) {
-        public int verifyTokens() { return progress.verifyTokens(); }
-        public int additionalKvTokens() { return progress.additionalKvTokens(); }
+    public record Plan(Request request, int candidates) {
+        public int additionalKvTokens() { return Math.min(request.limit() - request.generated(), candidates) - 1; }
     }
     public record Result(int committedTokens, boolean finished, int candidates) {
         public Result { if (committedTokens < 1 || candidates < committedTokens) throw new IllegalArgumentException("Invalid generation result"); }
@@ -65,10 +64,7 @@ public final class ComputeModel {
         Map.entry("forward.noise.stddev.ratio", "forward.noise.stddev_ratio"),
         Map.entry("forward.noise.max.deviation.ms", "forward.noise.max_deviation_ms"),
         Map.entry("forward.noise.seed", "forward.noise.seed"),
-        Map.entry("decode.draft.tokens", "decode.draft_tokens"),
-        Map.entry("decode.acceptance.rate", "decode.acceptance_rate"),
         Map.entry("decode.tokens.per.step", "decode.tokens_per_step"),
-        Map.entry("decode.seed", "decode.seed"),
         Map.entry("eos.probability", "eos.probability"),
         Map.entry("eos.seed", "eos.seed"));
 
@@ -103,7 +99,6 @@ public final class ComputeModel {
         return result;
     }
 
-    public int kvReserveTokens() { return decode.reserveTokens(); }
 
     public ComputeSpec configuration() { return configuration; }
     public JsonNode effectiveConfiguration() { return JSON.valueToTree(configuration); }
@@ -111,15 +106,13 @@ public final class ComputeModel {
     public Plan prepare(Role role, Request request) {
         if (role != Role.prefill && role != Role.decode) throw new IllegalArgumentException("Unsupported generation role");
         if (role == Role.prefill && request.generated() != 0) throw new IllegalArgumentException("Prefill must produce the first token");
-        return new Plan(request, role == Role.prefill ? new DecodeStepModel.Plan(0, 1, 0, 1)
-            : decode.plan(request.round(), request.limit() - request.generated()));
+        return new Plan(request, role == Role.prefill ? 1 : decode.tokens(request.round()));
     }
 
     /** Pure result calculation: no request mutation, queue operations or resource release. */
     public Result completed(Plan plan) {
         var request = plan.request();
-        int candidates = decode.candidates(plan.progress(), request.key(), request.round());
-        return stopping.complete(request.key(), request.generated(), candidates, request.minimum(), request.limit(), request.ignoreEos());
+        return stopping.complete(request.key(), request.generated(), plan.candidates(), request.minimum(), request.limit(), request.ignoreEos());
     }
 
     public NoiseModel.Sample plan(Role role, String engineId, ForwardBatch batch) {

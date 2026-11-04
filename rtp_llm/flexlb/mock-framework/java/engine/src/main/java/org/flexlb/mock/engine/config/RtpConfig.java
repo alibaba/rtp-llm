@@ -78,7 +78,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         if (root.path("environment").has("compute")) throw new IllegalArgumentException("Removed environment.compute: use component.config.compute");
         var compute = ComputeModel.fromSettings(config, Map.of(
             "cpSize", (double) cpSize, "cpEnabled", cpEnabled ? 1.0 : 0.0, "tpSize", (double) tpSize, "dpSize", (double) dpSize));
-        if (role == Role.prefill && !compute.configuration().decode().equals(new DecodeSpec(null, null, null, null)))
+        if (role == Role.prefill && !compute.configuration().decode().equals(new DecodeSpec(null)))
             throw new IllegalArgumentException("Decode progress settings belong in Decode compute");
         if (!root.path("id").isTextual()) throw new IllegalArgumentException("Node id must be a string");
         return new RtpConfig(root.path("id").textValue(), role,

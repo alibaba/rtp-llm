@@ -553,46 +553,14 @@ class PdGenerationTest {
         }
     }
 
-    @Test void acceptedDraftsAdvanceSeveralTokensWhileBudgetTailStaysExact() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 16, 1, Map.of("decode", Map.of("draft.tokens", 3, "acceptance.rate", 1)));
+    @Test void wideDecodeStepsKeepTheBudgetTailExact() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 16, 1, Map.of("decode", Map.of("tokens.per.step", 4)));
                 var call = new Call(p, input(d, 1, 5, 10, 2000, true))) {
             call.output(1, false, 1); call.output(5, false, 4); call.output(9, false, 4); call.output(10, true, 1);
             assertEquals("completed", call.next()); assertEquals(3, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
             assertEquals(9, metric(d, "rtp_llm_forward_tokens_total", "kind=\"output\""));
-            assertEquals(12, metric(d, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
+            assertEquals(3, metric(d, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
             assertEquals(3, d.status().getFinishedTaskList(0).getIterateCount());
-        }
-    }
-
-    @Test void rejectedDraftsStillPayForAllVerificationWork() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 16, 1, Map.of("decode", Map.of("draft.tokens", 3, "acceptance.rate", 0),
-                "mock.compute", Map.of("forward", Map.of("expression", "totalStepTokens")))); var call = new Call(p, input(d, 1, 5, 10, 2000, true))) {
-            for (int n = 1; n <= 10; n++) call.output(n, n == 10, 1);
-            assertEquals("completed", call.next()); assertEquals(9, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
-            assertEquals(36, metric(d, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
-            assertTrue(metric(d, "rtp_llm_model_forward_seconds_sum", "role=\"decode\"") >= .036);
-        }
-    }
-
-    @Test void tailMustReserveTheFullVerificationWindowEvenWhenOnlyOneOutputFits() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1,
-                Map.of("decode", Map.of("draft.tokens", 3, "acceptance.rate", 1)));
-                var call = new Call(p, input(d, 1, 5, 10, 2000, true))) {
-            call.output(1, false, 1); call.output(5, false, 4); call.output(9, false, 4);
-            assertEquals(602, code(call.error(Status.Code.RESOURCE_EXHAUSTED)));
-            assertEquals(2, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
-            await(() -> d.status().getAvailableKvCache() == 16);
-        }
-    }
-
-    @Test void excessiveDraftLookaheadFailsTheRequestWithoutIntegerOverflowOrEngineFailure() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1,
-                Map.of("decode", Map.of("draft.tokens", 2147483646, "acceptance.rate", 0)));
-                var call = new Call(p, input(d, 1, 5, 4, 2000, true))) {
-            assertEquals(605, code(call.error(Status.Code.INVALID_ARGUMENT)));
-            assertEquals(0, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
-            await(() -> d.status().getAvailableKvCache() == 16);
-            assertTrue(d.status().getAlive());
         }
     }
 
@@ -605,11 +573,11 @@ class PdGenerationTest {
         }
     }
 
-    @Test void eosLengthIsStableAcrossSpeculationAndNeverOvershootsTheLastRound() throws Exception {
+    @Test void eosLengthIsStableAcrossRoundWidths() throws Exception {
         int expected = new org.flexlb.mock.engine.forward.StoppingModel(new org.flexlb.mock.engine.forward.StoppingSpec(.2, 42L)).complete("77", 0, 20, 3, 20, false).committedTokens();
-        for (int draft : new int[]{0, 3}) {
+        for (int width : new int[]{1, 4}) {
             try (var p = node("prefill", 16, 1, Map.of("eos", Map.of("probability", .2, "seed", 42)));
-                    var d = node("decode", 16, 1, Map.of("decode", Map.of("draft.tokens", draft, "acceptance.rate", 1), "eos", Map.of("probability", .2, "seed", 42)))) {
+                    var d = node("decode", 16, 1, Map.of("decode", Map.of("tokens.per.step", width), "eos", Map.of("probability", .2, "seed", 42)))) {
                 var input = input(d, 77, 5, 20, 2000, true).toBuilder(); input.getGenerateConfigBuilder().setMinNewTokens(3);
                 try (var call = new Call(p, input.build())) {
                     int sum = 0; boolean finished = false;
@@ -632,32 +600,20 @@ class PdGenerationTest {
         }
     }
 
-    @Test void decodeOwnsItsEosAndTruncationDoesNotRefundSpeculativeVerification() throws Exception {
+    @Test void decodeOwnsItsEosAndReportsOnlyCommittedOutput() throws Exception {
         try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1,
-                Map.of("decode", Map.of("draft.tokens", 4, "acceptance.rate", 1), "eos", Map.of("probability", 1)))) {
+                Map.of("decode", Map.of("tokens.per.step", 5), "eos", Map.of("probability", 1)))) {
             var input = input(d, 1, 5, 20, 2000, true).toBuilder(); input.getGenerateConfigBuilder().setMinNewTokens(3);
             try (var call = new Call(p, input.build())) {
                 call.output(1, false, 1); call.output(3, true, 2); assertEquals("completed", call.next());
-                assertEquals(5, metric(d, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
+                assertEquals(1, metric(d, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
                 assertEquals(2, metric(d, "rtp_llm_forward_tokens_total", "kind=\"output\""));
             }
             await(() -> p.status().getAvailableKvCache() == 32 && d.status().getAvailableKvCache() == 32);
         }
     }
 
-    @Test void candidateFiveWithFourPositionsLeftFinishesWithoutOvershoot() throws Exception {
-        for (var progress : List.<Map<String, Object>>of(Map.of("tokens.per.step", 5), Map.of("draft.tokens", 4, "acceptance.rate", 1))) {
-            try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1, Map.of("decode", progress));
-                    var call = new Call(p, input(d, 1, 5, 5, 2000, true))) {
-                call.output(1, false, 1); call.output(5, true, 4); assertEquals("completed", call.next());
-                assertEquals(4, metric(d, "rtp_llm_forward_tokens_total", "kind=\"output\""));
-                assertEquals(progress.containsKey("draft.tokens") ? 5 : 1,
-                    metric(d, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
-            }
-        }
-    }
-
-    @Test void averageDecodeProgressDoesNotInventSpeculativeCompute() throws Exception {
+    @Test void fractionalDecodeProgressReportsComputeAndOutputSeparately() throws Exception {
         try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1,
                 Map.of("decode", Map.of("tokens.per.step", 2.6)));
                 var call = new Call(p, input(d, 1, 3, 8, 2000, true))) {
@@ -669,6 +625,7 @@ class PdGenerationTest {
             assertEquals(3, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
             assertEquals(3, metric(d, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
             assertEquals(7, metric(d, "rtp_llm_forward_tokens_total", "kind=\"output\""));
+            assertTrue(metric(d, "mock_decode_estimate_tpot_us_sum", "") > 0);
         }
     }
 
@@ -941,14 +898,14 @@ class PdGenerationTest {
     }
 
     @Test void contextLimitFinishesBeforeRequestedLengthIncludingFirstTokenOnlyDecode() throws Exception {
-        for (int sequence : List.of(6, 9)) try (var p = node("prefill", 16, 0);
+        for (int sequence : List.of(4, 6)) try (var p = node("prefill", 16, 0);
                 var d = node("decode", 16, 0, Map.of("settings", Map.of("max_seq_len", sequence),
-                    "mock.compute", Map.of("decode", Map.of("draft.tokens", 2, "acceptance.rate", 1))))) {
+                    "mock.compute", Map.of("decode", Map.of("tokens.per.step", 3))))) {
             var request = input(d, sequence, 3, 100, 3000, true).toBuilder();
             request.getGenerateConfigBuilder().setIgnoreEos(true).setMinNewTokens(50);
             try (var call = new Call(p, request.build())) {
                 call.output(1, false, 1);
-                if (sequence == 6) call.output(1, true, 0);
+                if (sequence == 4) call.output(1, true, 0);
                 else call.output(3, true, 2);
                 assertEquals("completed", call.next());
             }

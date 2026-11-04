@@ -282,13 +282,13 @@ class RtpSchedulerTest {
         }
     }
 
-    @Test void speculativeWindowIsReservedBeforeAcceptanceAndGrowthFailureEndsOnlyThatRequest() throws Exception {
+    @Test void multiTokenStepReservesKvBeforeForward() throws Exception {
         for (int capacity : List.of(1, 2)) {
             var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration("decode"));
             var settings = (ObjectNode) root.path("component").path("config");
             settings.put("seq_size_per_block", 128);
-            ((ObjectNode) settings.path("mock.compute")).putObject("decode").put("draft.tokens", 4).put("acceptance.rate", 0);
-            var path = directory.resolve("spec-" + capacity + ".json"); json.writeValue(path.toFile(), root);
+            ((ObjectNode) settings.path("mock.compute")).putObject("decode").put("tokens.per.step", 6);
+            var path = directory.resolve("wide-step-" + capacity + ".json"); json.writeValue(path.toFile(), root);
             var config = RtpConfig.load(path);
             try (var cache = new KvCache(config.blockSize(), capacity, 0)) {
                 var scheduler = new RtpScheduler(new Object(), config, cache); var listener = new Listener();
@@ -303,10 +303,10 @@ class RtpSchedulerTest {
                         assertEquals(1, cache.snapshot(-1, false).freeBlocks());
                     } else {
                         assertNotNull(work); assertEquals(0, cache.snapshot(-1, false).availableBlocks());
-                        assertEquals(5, work.batch().dps().getFirst().requests().getFirst().stepTokens());
+                        assertEquals(1, work.batch().dps().getFirst().requests().getFirst().stepTokens());
                         complete(scheduler, work, config); drain(scheduler);
-                        assertEquals(2, request.snapshot().generated());
-                        assertEquals(0, cache.snapshot(-1, false).availableBlocks(), "Rejected drafts do not shrink the reserved window");
+                        assertEquals(7, request.snapshot().generated());
+                        assertEquals(0, cache.snapshot(-1, false).availableBlocks());
                         scheduler.finish(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "test")); drain(scheduler);
                         assertEquals(2, cache.snapshot(-1, false).freeBlocks());
                     }
@@ -585,18 +585,18 @@ class RtpSchedulerTest {
         }
     }
 
-    private RtpConfig boundaryConfig(String role, int sequence, int drafts) throws Exception {
+    private RtpConfig boundaryConfig(String role, int sequence, int width) throws Exception {
         var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration(role));
         var values = (ObjectNode) root.path("component").path("config");
         values.put("seq_size_per_block", 2).put("max_seq_len", sequence).put("concurrency_limit", 2)
             .put("max_inited_kv_cache_streams", 1);
-        ((ObjectNode) values.path("mock.compute")).putObject("decode").put("draft.tokens", drafts).put("acceptance.rate", 1);
+        ((ObjectNode) values.path("mock.compute")).putObject("decode").put("tokens.per.step", width);
         return RtpConfig.load(root);
     }
 
-    @Test void decodeClampsRequestedLengthAndSpeculativeContextBeforeForward() throws Exception {
-        for (int drafts : List.of(0, 2)) {
-            var config = boundaryConfig("decode", 10, drafts); var listener = new Listener();
+    @Test void decodeClampsRequestedLengthToContext() throws Exception {
+        for (int width : List.of(1, 3)) {
+            var config = boundaryConfig("decode", 10, width); var listener = new Listener();
             try (var cache = new KvCache(2, 16, 0);
                  var scheduler = new RtpScheduler(new Object(), config, cache)) {
                 var request = scheduler.input(new Scheduler.Input("r", 1, 0, 4, 100, 0, System.nanoTime(), Long.MAX_VALUE,
@@ -609,32 +609,27 @@ class RtpSchedulerTest {
                     complete(scheduler, work, config); drain(scheduler);
                 }
                 assertNull(listener.terminal.get());
-                assertEquals(drafts == 0 ? 6 : 3, request.snapshot().generated());
+                assertEquals(6, request.snapshot().generated());
+                assertEquals(width == 1 ? 5 : 2, rounds);
                 var metrics = scheduler.metrics().scrape();
                 assertEquals(0, RtpMetricsTest.sample(metrics, "rtp_llm_wait_stream_size", ""));
-                if (drafts > 0) {
-                    assertEquals(2, RtpMetricsTest.sample(metrics, "rtp_llm_sp_total_propose_token_num", ""));
-                    assertEquals(3, RtpMetricsTest.sample(metrics, "rtp_llm_sp_total_accepted_token_num", ""));
-                    assertEquals(2, RtpMetricsTest.sample(metrics, "rtp_llm_forward_tokens_total", "kind=\"output\""));
-                } else {
-                    assertFalse(metrics.contains("rtp_llm_sp_"));
-                }
+                assertEquals(5, RtpMetricsTest.sample(metrics, "rtp_llm_forward_tokens_total", "kind=\"output\""));
                 assertEquals(16, cache.snapshot(0, false).freeBlocks());
             }
         }
     }
 
-    @Test void speculativeReserveRejectsOverflowButAllowsExactContextBoundary() throws Exception {
+    @Test void decodeRejectsFullPromptButAllowsFirstTokenAtContextBoundary() throws Exception {
         var config = boundaryConfig("decode", 10, 2); var listener = new Listener();
         try (var cache = new KvCache(2, 16, 0);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
-            var invalid = new Scheduler.Input("invalid", 1, 0, 8, 1, 0, System.nanoTime(), Long.MAX_VALUE,
-                new CacheSequence(2, Collections.nCopies(8, 0), List.of()), false, false, 0, true);
+            var invalid = new Scheduler.Input("invalid", 1, 0, 10, 1, 0, System.nanoTime(), Long.MAX_VALUE,
+                new CacheSequence(2, Collections.nCopies(10, 0), List.of()), false, false, 0, true);
             assertEquals(RequestFailure.Reason.INVALID,
                 assertThrows(RequestFailure.class, () -> scheduler.input(invalid, new Listener())).reason());
             assertTrue(scheduler.requests().isEmpty()); assertEquals(16, cache.snapshot(0, false).freeBlocks());
-            var boundary = new Scheduler.Input("boundary", 2, 0, 7, 100, 0, System.nanoTime(), Long.MAX_VALUE,
-                new CacheSequence(2, Collections.nCopies(7, 0), List.of()), false, false, 0, true);
+            var boundary = new Scheduler.Input("boundary", 2, 0, 9, 100, 0, System.nanoTime(), Long.MAX_VALUE,
+                new CacheSequence(2, Collections.nCopies(9, 0), List.of()), false, false, 0, true);
             var request = scheduler.input(boundary, listener);
             scheduler.maintain(); drain(scheduler); generate(scheduler, request); drain(scheduler);
             assertNull(scheduler.schedule()); assertNull(listener.terminal.get(1, TimeUnit.SECONDS));

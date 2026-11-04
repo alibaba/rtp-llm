@@ -70,9 +70,8 @@ abstract class RtpSchedulerBase implements Scheduler {
 
     @Override public Request input(Input input, Listener listener) {
         if (closed) throw new RequestFailure(CLOSED, "Engine is closing");
-        int reserve = config.compute().kvReserveTokens();
-        if (input.tokens() >= config.maxSeqLen() || (long) input.tokens() + reserve > config.maxSeqLen())
-            throw new RequestFailure(INVALID, "Prompt and speculative reserve exceed the context limit");
+        if (input.tokens() >= config.maxSeqLen())
+            throw new RequestFailure(INVALID, "Prompt exceeds the context limit");
         if (input.tokens() > cache.maxRequestTokens())
             throw new RequestFailure(RequestFailure.Reason.CAPACITY, "Prompt exceeds the maximum KV capacity");
         if (active.containsKey(input.identity())) throw new RequestFailure(DUPLICATE, "Active request identity already exists");
@@ -163,7 +162,7 @@ abstract class RtpSchedulerBase implements Scheduler {
         var items = new ArrayList<ForwardBatch.Request>();
         for (var entry : selected) {
             var progress = entry.state.snapshot();
-            int tokens = prefill() ? entry.input.tokens() - entry.reused : entry.nextStep.verifyTokens();
+            int tokens = prefill() ? entry.input.tokens() - entry.reused : 1;
             items.add(new ForwardBatch.Request(entry.input.identity(), entry.input.tokens(), entry.reused,
                 prefill() ? 1 : entry.input.maxNewTokens(), progress.generated(), tokens, entry.input.priority(), List.of()));
             members.add(new Member(entry, entry.state.forward(), entry.nextStep));
@@ -219,9 +218,8 @@ abstract class RtpSchedulerBase implements Scheduler {
     }
 
     private int outputLimit(Entry entry) {
-        // Native maxTokenNum subtracts the speculative reserve from the context window.
         return Math.min(entry.input.maxNewTokens(),
-            config.maxSeqLen() - config.compute().kvReserveTokens() - entry.input.tokens());
+            config.maxSeqLen() - entry.input.tokens());
     }
 
     private int workTokens(Entry entry) {
@@ -232,9 +230,9 @@ abstract class RtpSchedulerBase implements Scheduler {
             entry.nextStep = config.compute().prepare(config.role(), new ComputeModel.Request(
                 Long.toString(entry.input.requestId()), progress.iterations(), entry.input.tokens(), progress.generated(),
                 entry.input.minNewTokens(), entry.input.maxNewTokens(),
-                config.maxSeqLen() - config.compute().kvReserveTokens(), entry.input.ignoreEos()));
+                config.maxSeqLen(), entry.input.ignoreEos()));
         if (prefill()) return entry.input.tokens();
-        return entry.nextStep.verifyTokens();
+        return 1;
     }
 
     private boolean reserve(Entry entry) {
@@ -260,13 +258,13 @@ abstract class RtpSchedulerBase implements Scheduler {
     @Override public void computeCompleted(Work work, SimulatedCompute.Outcome outcome) {
         var batch = completedBatch(work);
         long input = 0, computed = 0, output = 0, maxSequence = 0;
-        long proposed = 0, accepted = 0, speculativeStreams = 0;
+        int outputStreams = 0;
         try {
             for (var member : batch.members()) {
                 var entry = member.request();
                 maxSequence = Math.max(maxSequence, (long) entry.input.tokens() + member.step().request().generated());
-                input += prefill() ? entry.input.tokens() : member.step().verifyTokens();
-                computed += prefill() ? entry.input.tokens() - entry.reused : member.step().verifyTokens();
+                input += prefill() ? entry.input.tokens() : 1;
+                computed += prefill() ? entry.input.tokens() - entry.reused : 1;
                 if (!live(entry)) continue;
                 if (outcome.state() != SimulatedCompute.State.COMPLETED) {
                     finish(entry, new RequestFailure(CANCELLED, "Forward cancelled"));
@@ -274,11 +272,7 @@ abstract class RtpSchedulerBase implements Scheduler {
                 }
                 var result = config.compute().completed(member.step());
                 int committed = result.committedTokens();
-                if (member.step().progress().proposedTokens() > 0) {
-                    proposed += member.step().progress().proposedTokens();
-                    accepted += result.candidates();
-                    speculativeStreams++;
-                }
+                outputStreams++;
                 entry.state.commit(committed, outcome.elapsedNanos());
                 if (committed > 0 && entry.firstToken == 0) entry.firstToken = System.nanoTime();
                 entry.nextStep = null;
@@ -291,8 +285,7 @@ abstract class RtpSchedulerBase implements Scheduler {
                 int size = batch.members().size();
                 metrics.stepCompleted(new RtpMetrics.StepStats(prefill() ? size : 0, prefill() ? 0 : size,
                     maxSequence, completed - batch.scheduleStarted(), completed - batch.stepStarted(),
-                    outcome.elapsedNanos(), outcome.sample().planned().toNanos(), input, computed, output,
-                    proposed, accepted, speculativeStreams));
+                    outcome.elapsedNanos(), outcome.sample().planned().toNanos(), input, computed, output, outputStreams));
             }
         } finally { batch.members().forEach(member -> member.use().close()); }
     }
@@ -436,9 +429,8 @@ abstract class RtpSchedulerBase implements Scheduler {
             && (prefill() || !config.disableDecodeFirstReuse());
         var keys = entry.input.keys();
         int matched = Math.min(keys.size(), (entry.input.tokens() - 1) / config.blockSize());
-        long capacityTokens = (long) entry.input.tokens() + (prefill() ? 0 : config.compute().kvReserveTokens());
         long started = System.nanoTime();
-        var admission = cache.acquire(capacityTokens, reuse ? keys.subList(0, matched) : List.of());
+        var admission = cache.acquire(entry.input.tokens(), reuse ? keys.subList(0, matched) : List.of());
         entry.attemptedGeneration = admission.generation();
         if (admission.lease() == null) return admission.failure();
         entry.waitNanos = Math.max(0, System.nanoTime() - entry.timingStarted);
