@@ -28,6 +28,7 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -138,7 +139,11 @@ public class FlexlbGrpcServer {
         registerMetrics();
         registerReceivingMetrics();
 
-        server = NettyServerBuilder.forPort(port)
+        String bindAddress = environment.getProperty("flexlb.grpc.bind-address");
+        NettyServerBuilder builder = bindAddress == null || bindAddress.isBlank()
+                ? NettyServerBuilder.forPort(port)
+                : NettyServerBuilder.forAddress(new InetSocketAddress(bindAddress, port));
+        server = builder
                 .channelType(NioServerSocketChannel.class)
                 .bossEventLoopGroup(bossGroup)
                 .workerEventLoopGroup(grpcServerEventLoopGroup)
