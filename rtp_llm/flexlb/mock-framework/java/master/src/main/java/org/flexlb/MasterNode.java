@@ -42,7 +42,7 @@ public final class MasterNode {
         org.flexlb.OpenTelemetryBootstrap.configureFromEnvironment();
         var application = new SpringApplication(Application.class);
         application.setRegisterShutdownHook(false);
-        var context = application.run("--server.address=" + host, "--flexlb.grpc.bind-address=" + host,
+        var context = application.run("--server.address=" + host,
                 "--server.port=" + port, "--management.server.port=" + port,
                 "--flexlb.log.path=" + directory.resolve("logs"));
         try {

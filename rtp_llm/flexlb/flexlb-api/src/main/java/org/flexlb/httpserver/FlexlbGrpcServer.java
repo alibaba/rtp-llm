@@ -2,7 +2,6 @@ package org.flexlb.httpserver;
 
 import io.grpc.Server;
 import io.grpc.ServerInterceptors;
-import io.grpc.netty.NettyServerBuilder;
 import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -28,7 +27,6 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import java.io.IOException;
-import java.net.InetSocketAddress;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -139,11 +137,7 @@ public class FlexlbGrpcServer {
         registerMetrics();
         registerReceivingMetrics();
 
-        String bindAddress = environment.getProperty("flexlb.grpc.bind-address");
-        NettyServerBuilder builder = bindAddress == null || bindAddress.isBlank()
-                ? NettyServerBuilder.forPort(port)
-                : NettyServerBuilder.forAddress(new InetSocketAddress(bindAddress, port));
-        server = builder
+        server = GrpcServerBinding.builder(environment, port)
                 .channelType(NioServerSocketChannel.class)
                 .bossEventLoopGroup(bossGroup)
                 .workerEventLoopGroup(grpcServerEventLoopGroup)
