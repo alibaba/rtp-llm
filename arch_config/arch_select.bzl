@@ -149,10 +149,11 @@ def whl_deps():
             "fast-hadamard-transform@https://pkg.flytiger-eco.com/artifactory/pypi_generic/fast_hadamard_transform/1.1.0.post2+v0.1.0.ppu2.2.0/fast_hadamard_transform-1.1.0.post2+cu130torch2.11.0alios7u2ce-cp312-cp312-linux_x86_64.whl#sha256=a310e83135c8cc717a6568ead29fd004839aa192d8ddc0f0cf99d077b6dc2294",
         ],
         "@rtp_llm//:using_cuda13_x86": [
-            # torch 2.11+cu130 mirrored on OSS (artlab pytorch mirror has no cu130 yet,
-            # source upstream is download.pytorch.org/whl/cu130).
-            "torch==2.11.0+cu130",
-            "torchvision==0.26.0+cu130",
+            # torch 2.11+cu130 is only on the OSS mirror: artlab carries plain
+            # 2.11.0 without the +cu130 local version, so a version pin makes the
+            # production image install unresolvable.
+            "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
+            "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             # CI-built DeepGEMM: opt_glm5 with isolated SM120 GEMMs.
             "deep_gemm==2.8.0+122e18b.cu132",
             "flash-mla==1.0.0+9241ae3",
@@ -175,8 +176,8 @@ def whl_deps():
             # torch2.11+cu130, omitted from cuda13 lock.
         ],
         "@rtp_llm//:using_cuda13_arm": [
-            "torch==2.11.0+cu130",
-            "torchvision==0.26.0+cu130",
+            "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+            "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
             # DeepGEMM opt_glm5 + SM12x, CI-built against torch 2.11+cu130.
             "deep_gemm==2.8.1+057ca59",
             "flash-mla==1.0.0+2e5429f",
