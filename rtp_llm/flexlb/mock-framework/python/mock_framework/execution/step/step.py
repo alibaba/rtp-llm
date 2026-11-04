@@ -48,6 +48,11 @@ class Step:
     wait_after: str = '0s'
 
     async def run(self, context, results, phase_id):
+        with context.records.step(phase_id, self.id, self.interface):
+            await self._run(context, results, phase_id)
+
+    async def _run(self, context, results, phase_id):
+        started = time.monotonic()
         interface = self.definition
         runtime, records = context.runtime, context.records
         gate, invoked, returned = None, False, False
@@ -81,7 +86,8 @@ class Step:
                 records.emit(event='wait_started', step=self.id, duration=self.wait_after)
                 budget = context.timeout
                 await runtime.supervisor.guard(asyncio.sleep(wait), budget)
-            records.emit(event='step_finished', step=self.id, status='PASS', args=args, result=actual)
+            records.emit(event='step_finished', step=self.id, status='PASS', args=args, result=actual,
+                         duration_ms=round((time.monotonic() - started) * 1000, 3))
         except BaseException as error:
             status = ('CANCELLED' if isinstance(error, asyncio.CancelledError) else
                       'FAIL' if isinstance(error, GateFailure) else 'ERROR')
@@ -90,7 +96,7 @@ class Step:
                 records.emit('gates', **gate)
             records.emit(event='step_finished', step=self.id, status=status,
                          error=str(error) or type(error).__name__,
-                         error_stage=stage,
+                         error_stage=stage, duration_ms=round((time.monotonic() - started) * 1000, 3),
                          outcome_unknown=invoked and not returned and interface.effect == 'write',
                          **({'result': actual} if returned else {}))
             raise

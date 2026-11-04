@@ -119,6 +119,12 @@ def experiment(directory):
     if not isinstance(interfaces, dict):
         warnings.append('interfaces.json: interfaces must be an object')
         interfaces = {}
+    def observation_key(record):
+        identity = tuple(record.get(key) for key in ('run_id', 'phase_id', 'step_id'))
+        if all(isinstance(value, str) for value in identity):
+            return identity
+        return record['query_time']
+
     windows, events, annotations = {}, [], {}
     for number, event in lines('events.jsonl'):
         try:
@@ -127,7 +133,7 @@ def experiment(directory):
                 a, b = event['start'], event['end']
                 if any(type(value) not in (int, float) or not math.isfinite(value) for value in (a, b)) or b < a:
                     raise ValueError('invalid metric_window start/end')
-                windows[event['query_time']] = (round(a * 1000), round(b * 1000))
+                windows[observation_key(event)] = (round(a * 1000), round(b * 1000))
             elif kind in ('phase_started', 'phase_finished', 'step_started', 'step_finished'):
                 name = event.get('step', event.get('phase'))
                 events.append({'time': milliseconds(event['recorded_at']),
@@ -154,7 +160,7 @@ def experiment(directory):
             if not isinstance(unit, str):
                 warnings.append(f"interfaces.json: {gate['interface']}.unit must be a string")
                 unit = ''
-            a, b = windows.get(gate['query_time'], (None, None))
+            a, b = windows.get(observation_key(gate), (None, None))
             gates.append({**gate, 'title': steps.get(gate['step'], {}).get('describe', gate['step']), 'point': point,
                           'unit': unit, 'from': a, 'to': b})
             events.append({'time': a if a is not None else point, 'timeEnd': b,

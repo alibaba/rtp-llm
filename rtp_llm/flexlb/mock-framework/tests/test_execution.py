@@ -359,3 +359,20 @@ def test_constructor_failure_after_reference_resolution_is_not_an_unknown_write(
     assert failed['outcome_unknown'] is False
     assert 'value must be positive' in failed['error']
     assert mutations == []
+
+
+def test_trace_correlates_steps_and_gates_across_streams(setup, tmp_path):
+    case, registry, launch = setup([step(expect={'eq': 2})])
+    output = tmp_path / 'trace'
+    assert asyncio.run(run_case(case, registry, launch, output))['status'] == 'PASS'
+    events = [json.loads(line) for line in (output / 'events.jsonl').read_text().splitlines()]
+    gates = [json.loads(line) for line in (output / 'gates.jsonl').read_text().splitlines()]
+    result = json.loads((output / 'result.json').read_text())
+    records = events + gates
+    assert {item['run_id'] for item in records} == {result['run_id']}
+    assert sorted(item['seq'] for item in records) == list(range(1, len(records) + 1))
+    starts = {(event['phase_id'], event['step_id'], event['action']): event['seq']
+              for event in events if event['event'] == 'step_started'}
+    assert gates
+    for gate in gates:
+        assert starts[gate['phase_id'], gate['step_id'], gate['action']] < gate['seq']

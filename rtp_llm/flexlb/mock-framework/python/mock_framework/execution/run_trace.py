@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict
 from datetime import datetime, timezone
 import json
@@ -5,6 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import os
+from uuid import uuid4
 
 
 def timestamp():
@@ -24,11 +27,16 @@ def write_json(path, value):
             temporary.unlink(missing_ok=True)
 
 
+_step_identity = ContextVar('step_identity', default=None)
+
+
 class RunTrace:
     def __init__(self, directory, case, launch):
+        self.run_id = uuid4().hex
+        self._seq = 0
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=False)
-        write_json(self.directory / 'configuration.json', {'case': asdict(case), 'launch': launch})
+        write_json(self.directory / 'configuration.json', {'run_id': self.run_id, 'case': asdict(case), 'launch': launch})
         if case.view is not None:
             view = json.loads(case.view.read_text(encoding='utf-8'))
             if not isinstance(view, dict) or not isinstance(view.get('panels'), list) or not view.get('title'):
@@ -40,7 +48,23 @@ class RunTrace:
         self._streams = {name: (self.directory / f'{name}.jsonl').open('x', encoding='utf-8')
                          for name in ('events', 'gates')}
 
+    @contextmanager
+    def step(self, phase_id, step_id, action):
+        token = _step_identity.set((self, phase_id, step_id, action))
+        try:
+            yield
+        finally:
+            _step_identity.reset(token)
+
     def emit(self, stream='events', **event):
+        identity = _step_identity.get()
+        if identity is not None and identity[0] is self:
+            for key, value in zip(('phase_id', 'step_id', 'action'), identity[1:]):
+                event.setdefault(key, value)
+        if 'phase' in event:
+            event.setdefault('phase_id', event['phase'])
+        self._seq += 1
+        event.update(run_id=self.run_id, seq=self._seq)
         event.setdefault('recorded_at', timestamp())
         self._streams[stream].write(json.dumps(event, ensure_ascii=False, allow_nan=False, default=str) + '\n')
         self._streams[stream].flush()
@@ -61,6 +85,6 @@ class RunTrace:
         write_json(self.directory / 'code.json', versions)
 
     def close(self, result):
-        write_json(self.directory / 'result.json', result)
+        write_json(self.directory / 'result.json', {**result, 'run_id': self.run_id})
         for stream in self._streams.values():
             stream.close()

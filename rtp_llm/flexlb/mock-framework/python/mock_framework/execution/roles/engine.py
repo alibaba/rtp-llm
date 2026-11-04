@@ -85,7 +85,8 @@ class EngineRole:
                 host['members'].add(node)
                 self.instances[node] = host_name
                 self.topology.register(node, role, endpoint['control'], saved)
-                self.records.emit(event='instance_started', node=node, host=host_name, pid=host['child'].pid, rpc=endpoint['rpc'])
+                self.records.emit(event='instance_started', node=node, host=host_name, pid=host['child'].pid, rpc=endpoint['rpc'],
+                                  role=role, instance_id=node, host_id=host_name, generation=0)
                 if self.monitoring:
                     self.monitoring.discover(node, directory)
                 result.append(endpoint['rpc'])
@@ -120,7 +121,8 @@ class EngineRole:
                 self.topology.retire(node)
                 if self.monitoring:
                     self.monitoring.retire(node)
-                self.records.emit(event='instance_stopped', node=node, host=host_name, rpc=item['rpc'])
+                self.records.emit(event='instance_stopped', node=node, host=host_name, rpc=item['rpc'],
+                                  role=item['role'], instance_id=node, host_id=host_name, generation=0)
                 if self.mode == 'isolated':
                     errors = await self.supervisor.stop_expected(host_name)
                     del self.hosts[host_name]
