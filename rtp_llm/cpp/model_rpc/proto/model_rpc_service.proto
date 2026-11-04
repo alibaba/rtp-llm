@@ -325,6 +325,11 @@ message AuxInfoPB {
     int32 decode_disk_reuse_len = 33;
     // Sticky once either MTP verification or updates exceed the budget three times consecutively.
     bool xgrammar_update_timeout = 34;
+    // Published target-verified draft candidates, excluding anchors/bonuses.
+    // Presence distinguishes a legacy server; -1 is sticky unknown.
+    oneof speculative_verified_draft_tokens_presence {
+        int64 speculative_verified_draft_tokens = 35;
+    }
 }
 
 message PromptLogitsOutputPB {

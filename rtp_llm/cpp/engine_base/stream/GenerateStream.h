@@ -107,6 +107,9 @@ struct StreamSpecUpdateInfo {
     torch::Tensor token_logprobs;
     torch::Tensor top_logprob_token_ids;
     torch::Tensor top_logprobs;
+    // Target-verified draft candidates for this published row, excluding the
+    // anchor/bonus and before EOS/window/output clipping. -1 means unknown.
+    int64_t verified_draft_tokens = -1;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -396,6 +399,9 @@ public:
 
     const std::vector<int32_t>& speculativeAcceptedTokensPerPos() const {
         return speculative_accepted_tokens_per_pos_;
+    }
+    int64_t speculativeVerifiedDraftTokens() const {
+        return speculative_verified_draft_tokens_;
     }
 
     const ResourceContext& resourceContext() const;
@@ -985,14 +991,15 @@ protected:
     size_t                             iter_count_    = 0;
     size_t                             sp_iter_count_ = 0;
     std::vector<int32_t>               speculative_accepted_tokens_per_pos_;
-    size_t                             last_output_pos_      = 0;
-    int                                initial_reuse_length_ = 0;
-    int                                reuse_length_         = 0;
-    int                                local_reuse_length_   = 0;
-    int                                device_reuse_length_  = 0;
-    int                                remote_reuse_length_  = 0;
-    int                                host_reuse_length_    = 0;
-    int                                disk_reuse_length_    = 0;
+    int64_t                            speculative_verified_draft_tokens_ = 0;
+    size_t                             last_output_pos_                   = 0;
+    int                                initial_reuse_length_              = 0;
+    int                                reuse_length_                      = 0;
+    int                                local_reuse_length_                = 0;
+    int                                device_reuse_length_               = 0;
+    int                                remote_reuse_length_               = 0;
+    int                                host_reuse_length_                 = 0;
+    int                                disk_reuse_length_                 = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;
@@ -1089,6 +1096,7 @@ protected:
 
     // prefill TP size queried from prefill server (used for asymmetric TP)
     int prefill_tp_size_ = -1;
+
 private:
     AsyncProfileRequest request_profile_;
 };

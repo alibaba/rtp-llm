@@ -295,7 +295,8 @@ __global__ void rejection_sampling_kernel(DType*         draft_probs,
                                           const int32_t* valid_draft_lengths,
                                           const IdType*  target_candidate_ids,
                                           const DType*   accept_target_probs,
-                                          const DType*   accept_draft_probs) {
+                                          const DType*   accept_draft_probs,
+                                          int32_t*       output_verified_draft_lengths) {
     const uint32_t bx = blockIdx.x, tx = threadIdx.x;
     const uint32_t row_idx = bx;
 
@@ -318,6 +319,9 @@ __global__ void rejection_sampling_kernel(DType*         draft_probs,
     __shared__ bool s_skip_residual_sampling;
 
     if (tx == 0) {
+        if (output_verified_draft_lengths) {
+            output_verified_draft_lengths[row_idx] = valid_length;
+        }
         bool direct_target_fallback = false;
         int  pos                    = valid_length;
         for (int i = 0; i < valid_length; ++i) {
@@ -665,7 +669,8 @@ cudaError_t invokeRejectionSampling(DType*         draft_probs,
                                     const int32_t* valid_draft_lengths,
                                     const IdType*  target_candidate_ids,
                                     const DType*   accept_target_probs,
-                                    const DType*   accept_draft_probs) {
+                                    const DType*   accept_draft_probs,
+                                    int32_t*       output_verified_draft_lengths) {
     if (batch_size == 0) {
         return cudaSuccess;
     }
@@ -696,7 +701,8 @@ cudaError_t invokeRejectionSampling(DType*         draft_probs,
                     &valid_draft_lengths,
                     &target_candidate_ids,
                     &accept_target_probs,
-                    &accept_draft_probs};
+                    &accept_draft_probs,
+                    &output_verified_draft_lengths};
 
     DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
         auto kernel = rejection_sampling_kernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, VEC_SIZE, false, DType, IdType>;
@@ -728,7 +734,8 @@ cudaError_t invokeRejectionSampling(DType*         draft_probs,
                                                  const int32_t* valid_draft_lengths,                                   \
                                                  const IdType*  target_candidate_ids,                                  \
                                                  const DType*   accept_target_probs,                                   \
-                                                 const DType*   accept_draft_probs);
+                                                 const DType*   accept_draft_probs,                                    \
+                                                 int32_t*       output_verified_draft_lengths);
 
 INSTANTIATE_REJECTION_SAMPLING(float, int);
 }  // namespace rtp_llm

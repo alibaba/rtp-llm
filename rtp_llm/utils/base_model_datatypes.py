@@ -143,6 +143,8 @@ class AuxInfo:
 
     multimodal_lengths: Dict[int, int] = field(default_factory=dict)
     speculative_draft_rounds: int = 0
+    # Missing legacy-server fields and any unmeasured published round are unknown.
+    speculative_verified_draft_tokens: int = -1
     speculative_accepted_tokens_per_pos: List[int] = field(default_factory=list)
     generation_prefill_cuda_graph_status: str = (
         GENERATION_PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED

@@ -115,6 +115,30 @@ class OpenaiComparerGraphStatusTest(unittest.TestCase):
             self._parse(self._response({GRAPH_STATUS: REPLAYED})),
         )
 
+    def test_verified_draft_counter_is_ignored_only_when_absent_from_raw_golden(self):
+        field = "speculative_verified_draft_tokens"
+        self.comparer.qr_info["result"] = self._response({})
+        expected = self._parse(self._response({}))
+        actual = self._parse(self._response({field: 11}))
+        diffs = []
+        self.comparer._compare_aux_info(expected.aux_info, actual.aux_info, diffs)
+        self.assertEqual(diffs, [])
+        for value in (0, 11, -1):
+            with self.subTest(value=value):
+                self.comparer.qr_info["result"] = self._response({field: value})
+                expected = self._parse(self._response({field: value}))
+                matching = self._parse(self._response({field: value}))
+                diffs = []
+                self.comparer._compare_aux_info(
+                    expected.aux_info, matching.aux_info, diffs
+                )
+                self.assertEqual(diffs, [])
+                different = self._parse(self._response({field: value + 1}))
+                self.comparer._compare_aux_info(
+                    expected.aux_info, different.aux_info, diffs
+                )
+                self.assertTrue(any(field in item for item in diffs))
+
 
 if __name__ == "__main__":
     unittest.main()

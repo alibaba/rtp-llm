@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include "rtp_llm/cpp/normal_engine/speculative/DSparkSampleSeed.h"
 #include "rtp_llm/cpp/models/Sampler.h"
+#include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 
 #include <algorithm>
 #include <cmath>
@@ -391,6 +392,8 @@ TEST(DSparkSamplerTest, RejectionGraphsPreserveMasksAndResultOwnership) {
                 EXPECT_TRUE(torch::equal(actual.accept_len, lengths));
                 EXPECT_TRUE(torch::equal(actual.accept_tokens_cpu, expected.cpu()));
                 EXPECT_TRUE(torch::equal(actual.accept_len_cpu, lengths.cpu()));
+                EXPECT_TRUE(
+                    torch::equal(actual.verified_draft_lengths_cpu, torch::full({batch}, steps, torch::kInt32)));
                 retained.push_back(std::move(actual));
             }
             // Retained outputs occupy all slots even after their GPU events
@@ -468,12 +471,80 @@ TEST(DSparkSamplerTest, RejectionGraphReplaysChangingAllocatedLengths) {
         EXPECT_TRUE(torch::equal(actual.accept_tokens_cpu, expected_tokens.cpu()));
         EXPECT_TRUE(torch::equal(actual.accept_len_cpu, expected_lengths.cpu()));
         auto lengths_cpu = valid_lengths.defined() ? valid_lengths.cpu() : torch::full({batch}, steps, torch::kInt32);
+        EXPECT_TRUE(torch::equal(actual.verified_draft_lengths_cpu, lengths_cpu));
         for (int row : {0, 2}) {
             const int limit = lengths_cpu[row].item<int32_t>();
             EXPECT_EQ(actual.accept_len_cpu[row].item<int32_t>(), limit + 1);
             EXPECT_EQ(actual.accept_tokens_cpu[row][limit].item<int32_t>(),
                       target[row * (steps + 1) + limit][stride - 1].item<int32_t>());
         }
+    }
+}
+
+TEST(DSparkSamplerTest, VerifiedLengthHostViewRetainsGraphSlotUntilReleased) {
+    const c10::cuda::CUDAGuard guard(0);
+    constexpr int              batch = 1, steps = 5, vocab = 4;
+    const auto                 ints = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    SpeculativeSampler         sampler({}, steps);
+    sampler.prepareRejectionGraphs(torch::Device(torch::kCUDA, 0), vocab, {batch});
+    auto                       draft         = torch::ones({batch, steps}, ints);
+    auto                       target        = torch::zeros({batch * (steps + 1), 1}, ints);
+    auto                       uniform       = torch::zeros({batch, steps + 1}, ints.dtype(torch::kFloat32));
+    auto                       probabilities = torch::empty({batch, steps + 1, vocab}, uniform.options());
+    auto                       masks         = torch::zeros({2, batch}, torch::kBool);
+    std::vector<torch::Tensor> retained;
+    for (int length = 0; length < 3; ++length) {
+        SpeculativeSamplerOutput output;
+        auto                     valid = torch::full({batch}, length, ints);
+        ASSERT_TRUE(sampler.replayRejectionGraph(output, masks, draft, target, uniform, probabilities, true, valid));
+        output.transfer_done_event->synchronize();
+        retained.push_back(output.verified_draft_lengths_cpu);
+    }
+    SpeculativeSamplerOutput blocked;
+    EXPECT_FALSE(sampler.replayRejectionGraph(blocked, masks, draft, target, uniform, probabilities, true));
+    for (int row = 0; row < 3; ++row) {
+        EXPECT_EQ(retained[row].item<int32_t>(), row);
+    }
+    retained.clear();
+    ASSERT_TRUE(sampler.replayRejectionGraph(blocked, masks, draft, target, uniform, probabilities, true));
+    blocked.transfer_done_event->synchronize();
+    EXPECT_EQ(blocked.verified_draft_lengths_cpu.item<int32_t>(), steps);
+}
+
+TEST(DSparkSamplerTest, EagerVerifiedLengthsShareAcceptanceTransferAndCountRejectedCandidates) {
+    const c10::cuda::CUDAGuard guard(0);
+    constexpr int              batch = 3, steps = 5, vocab = 4;
+    ModelConfig                model;
+    model.max_seq_len = 64;
+    model.vocab_size  = vocab;
+    std::list<GenerateStreamPtr> streams;
+    for (int row = 0; row < batch; ++row) {
+        auto input                    = std::make_shared<GenerateInput>();
+        input->input_ids              = torch::tensor({2}, torch::kInt32);
+        input->generate_config        = std::make_shared<GenerateConfig>();
+        input->generate_config->top_k = 1;
+        streams.push_back(
+            std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, ResourceContext{}, nullptr));
+    }
+    const auto    ints = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    SamplerOutput draft, target;
+    draft.token_ids                 = torch::ones({batch, steps}, ints);
+    draft.token_ids_are_point_mass  = true;
+    target.token_ids                = torch::zeros({batch * (steps + 1), 1}, ints);
+    target.token_ids_are_point_mass = true;
+    target.all_probs                = torch::empty({batch, steps + 1, vocab}, ints.dtype(torch::kFloat32));
+    SpeculativeSampler sampler({}, steps);
+    for (const bool bounded : {true, false}) {
+        draft.valid_draft_lengths = bounded ? torch::tensor({-1, 2, 9}, ints) : torch::Tensor();
+        auto output               = sampler.forward(streams, draft, target);
+        output.transfer_done_event->synchronize();
+        EXPECT_TRUE(torch::equal(output.accept_len_cpu, torch::ones({batch}, torch::kInt32)));
+        const auto expected =
+            bounded ? torch::tensor({0, 2, 5}, torch::kInt32) : torch::full({batch}, steps, torch::kInt32);
+        EXPECT_TRUE(torch::equal(output.verified_draft_lengths_cpu, expected));
+        EXPECT_EQ(output.verified_draft_lengths_cpu.data_ptr<int32_t>(),
+                  output.accept_len_cpu.data_ptr<int32_t>() + batch);
+        EXPECT_EQ(output.verified_draft_length, bounded ? -1 : steps);
     }
 }
 

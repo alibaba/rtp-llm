@@ -489,6 +489,7 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             aux_info->set_decode_memory_reuse_len(response.aux_info.decode_memory_reuse_len);
             aux_info->set_decode_disk_reuse_len(response.aux_info.decode_disk_reuse_len);
             aux_info->set_speculative_draft_rounds(response.aux_info.speculative_draft_rounds);
+            aux_info->set_speculative_verified_draft_tokens(response.aux_info.speculative_verified_draft_tokens);
             for (const auto accepted_tokens : response.aux_info.speculative_accepted_tokens_per_pos) {
                 aux_info->add_speculative_accepted_tokens_per_pos(accepted_tokens);
             }

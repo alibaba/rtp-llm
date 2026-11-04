@@ -2813,8 +2813,15 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         spec_decode_output.transfer_done_event->synchronize();
     }
 
-    const auto& accept_len    = spec_decode_output.accept_len_cpu;
-    const auto& accept_tokens = spec_decode_output.accept_tokens_cpu;
+    const auto&    accept_len       = spec_decode_output.accept_len_cpu;
+    const auto&    accept_tokens    = spec_decode_output.accept_tokens_cpu;
+    const auto&    verified_lengths = spec_decode_output.verified_draft_lengths_cpu;
+    const int32_t* verified         = verified_lengths.defined() && !verified_lengths.is_cuda()
+                                      && verified_lengths.scalar_type() == torch::kInt32 && verified_lengths.dim() == 1
+                                      && verified_lengths.is_contiguous()
+                                      && verified_lengths.numel() >= static_cast<int64_t>(stream_groups.size()) ?
+                                          verified_lengths.data_ptr<int32_t>() :
+                                          nullptr;
 
     const auto& draft_model_output   = draft_prefill_output.model_output;
     const auto& draft_sampler_output = draft_prefill_output.sampler_output;
@@ -2860,6 +2867,9 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
             accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)};
         spec_update_info.speculative_propose_step = propose_step_;
         spec_update_info.accepted_draft_tokens    = std::max(0, cur_accept_len - 1);
+        spec_update_info.verified_draft_tokens    = verified && batch_idx_out < verified_lengths.numel() ?
+                                                        verified[batch_idx_out] :
+                                                        spec_decode_output.verified_draft_length;
         // Per-stream verify errors from SpecLogitsVerifyRunner ride the update
         // path so grammar/think mask failures reach the stream (main #1006).
         const size_t stream_idx = spec_update_infos.size();

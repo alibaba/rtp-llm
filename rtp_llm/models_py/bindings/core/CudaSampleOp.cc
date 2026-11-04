@@ -149,6 +149,13 @@ RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSam
         RTP_LLM_CHECK_WITH_INFO(params.valid_draft_lengths_d.size(0) == batch_size,
                                 "valid_draft_lengths_d shape[0] mismatch");
     }
+    if (params.output_verified_draft_lengths_d.defined()) {
+        checkRejectionSamplingTensor(
+            params.output_verified_draft_lengths_d, "output_verified_draft_lengths_d", torch::kInt32, 1);
+        checkSameDevice(params.output_verified_draft_lengths_d, "output_verified_draft_lengths_d", device);
+        RTP_LLM_CHECK_WITH_INFO(params.output_verified_draft_lengths_d.size(0) == batch_size,
+                                "output_verified_draft_lengths_d shape[0] mismatch");
+    }
 
     return {static_cast<int>(batch_size),
             static_cast<int>(num_speculative_tokens),
@@ -878,7 +885,9 @@ void rejectionSampling(const RejectionSamplingParams& params) {
         params.valid_draft_lengths_d.defined() ? params.valid_draft_lengths_d.data_ptr<int32_t>() : nullptr,
         compact ? params.target_probs_indices_d.data_ptr<int32_t>() : nullptr,
         compact ? accept_target_probs.data_ptr<float>() : nullptr,
-        compact ? accept_draft_probs.data_ptr<float>() : nullptr));
+        compact ? accept_draft_probs.data_ptr<float>() : nullptr,
+        params.output_verified_draft_lengths_d.defined() ? params.output_verified_draft_lengths_d.data_ptr<int32_t>() :
+                                                           nullptr));
 }
 
 bool rejectionSamplingSupportsFinalize() {
@@ -1460,6 +1469,8 @@ namespace rtp_llm {
 void rejectionSampling(const RejectionSamplingParams& params) {
     RTP_LLM_CHECK_WITH_INFO(!params.valid_draft_lengths_d.defined(),
                             "bounded rejection sampling (valid_draft_lengths_d) is CUDA-only");
+    RTP_LLM_CHECK_WITH_INFO(!params.output_verified_draft_lengths_d.defined(),
+                            "rejection verified-length payload is CUDA-only");
     auto config = validateRejectionSamplingParams(params);
     auto stream = at::hip::getCurrentHIPStream().stream();
 

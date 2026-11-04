@@ -216,6 +216,7 @@ struct AuxInfo {
     int32_t                      decode_disk_reuse_len    = 0;
     int32_t                      speculative_draft_rounds = 0;
     std::vector<int32_t>         speculative_accepted_tokens_per_pos;
+    int64_t                      speculative_verified_draft_tokens    = 0;
     std::string                  generation_prefill_cuda_graph_status = "not_requested";
     bool                         xgrammar_update_timeout              = false;
     std::optional<torch::Tensor> cum_log_probs;

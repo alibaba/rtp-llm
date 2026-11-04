@@ -232,6 +232,101 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
+TEST_F(GenerateStreamTest, PublishedVerifiedDraftCountsIgnoreFinishedRowsInSharedRound) {
+    autil::EnvGuard perf("PERF_TEST", "0");
+    auto            builder = GenerateStreamBuilder();
+    auto            make    = [&](int max_new_tokens) {
+        auto stream                              = builder.createContextStream({1, 2, 3});
+        stream->generateConfig()->max_new_tokens = max_new_tokens;
+        stream->generateConfig()->aux_info       = true;
+        stream->generateConfig()->is_streaming   = true;
+        stream->generate_status_->status.store(StreamState::RUNNING);
+        auto buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+        buffer->tokens = torch::zeros({1, 1}, torch::kInt32);
+        stream->setSPOutputBuffer(buffer);
+        return stream;
+    };
+    auto finished = make(1);
+    auto live     = make(16);
+    auto commit   = [](const GenerateStreamPtr& stream, int64_t verified) {
+        StreamSpecUpdateInfo update{torch::tensor({{17}}, torch::kInt32), 1, -1, {}, {}};
+        update.speculative_propose_step = 5;
+        update.verified_draft_tokens    = verified;
+        stream->specUpdate(update);
+    };
+    EXPECT_EQ(finished->speculativeVerifiedDraftTokens(), 0);
+    commit(finished, 3);
+    commit(live, 3);
+    ASSERT_TRUE(finished->hasEvent(StreamEvents::GenerateDone));
+    finished->generate_status_->status.store(StreamState::FINISHED);
+    // The asynchronous next shared result contains both rows; only the live
+    // row publishes. Nominal 3*sum(R)=9 differs from actual published V=11.
+    commit(finished, 5);
+    commit(live, 5);
+    EXPECT_EQ(finished->spIterCount(), 1);
+    EXPECT_EQ(live->spIterCount(), 2);
+    EXPECT_EQ(finished->speculativeVerifiedDraftTokens(), 3);
+    EXPECT_EQ(live->speculativeVerifiedDraftTokens(), 8);
+    auto output = finished->nextOutput(1);
+    ASSERT_TRUE(output.ok());
+    EXPECT_EQ(output.value().generate_outputs[0].aux_info.speculative_verified_draft_tokens, 3);
+}
+
+TEST_F(GenerateStreamTest, PublishedVerifiedDraftCountsZeroAndUnknownAreSticky) {
+    autil::EnvGuard perf("PERF_TEST", "0");
+    auto            builder = GenerateStreamBuilder();
+    for (const auto& budgets : std::vector<std::vector<int64_t>>{{0, 2, 5}, {3, -1, 2}}) {
+        auto stream                              = builder.createContextStream({1, 2, 3});
+        stream->generateConfig()->max_new_tokens = 16;
+        auto buffer                              = std::make_shared<SpeculativeExecutorStreamOutput>();
+        buffer->tokens                           = torch::zeros({1, 1}, torch::kInt32);
+        stream->setSPOutputBuffer(buffer);
+        for (const auto budget : budgets) {
+            StreamSpecUpdateInfo update{torch::tensor({{17}}, torch::kInt32), 1, -1, {}, {}};
+            update.speculative_propose_step = 5;
+            update.verified_draft_tokens    = budget;
+            stream->specUpdate(update);
+            ASSERT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
+        }
+        EXPECT_EQ(stream->spIterCount(), 3);
+        EXPECT_EQ(stream->speculativeVerifiedDraftTokens(), budgets[0] == 0 ? 7 : -1);
+        // An error packet is rejected at the same pre-publication guard as A/R.
+        StreamSpecUpdateInfo error{torch::tensor({{18}}, torch::kInt32), 1, -1, {}, {}};
+        error.speculative_propose_step = 5;
+        error.verified_draft_tokens    = 5;
+        error.error_info               = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "deliberate update error");
+        stream->specUpdate(error);
+        EXPECT_EQ(stream->spIterCount(), 3);
+        EXPECT_EQ(stream->speculativeVerifiedDraftTokens(), budgets[0] == 0 ? 7 : -1);
+    }
+}
+
+TEST_F(GenerateStreamTest, PublishedVerifiedDraftCountPrecedesTerminalWindowClipping) {
+    autil::EnvGuard perf("PERF_TEST", "0");
+    auto            builder = GenerateStreamBuilder();
+    ResourceContext context;
+    context.cache_manager = std::make_shared<KVCacheManager>(builder.init_config());
+    ASSERT_TRUE(context.cache_manager->init());
+    auto stream                              = builder.createContextStream({1, 2, 3}, nullptr, context);
+    stream->generateConfig()->max_new_tokens = 1;
+    stream->generateConfig()->aux_info       = true;
+    auto buffer                              = std::make_shared<SpeculativeExecutorStreamOutput>();
+    buffer->tokens                           = torch::zeros({1, 6}, torch::kInt32);
+    stream->setSPOutputBuffer(buffer);
+    StreamSpecUpdateInfo update{torch::tensor({{17, 18, 19, 20, 21, 22}}, torch::kInt32), 6, -1, {}, {}};
+    update.speculative_propose_step = 5;
+    update.accepted_draft_tokens    = 5;
+    update.verified_draft_tokens    = 5;
+    stream->specUpdate(update);
+    ASSERT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
+    EXPECT_EQ(stream->outputTokenLen(), 1);
+    EXPECT_EQ(stream->spIterCount(), 1);
+    EXPECT_EQ(stream->speculativeVerifiedDraftTokens(), 5);
+    auto output = stream->nextOutput(1);
+    ASSERT_TRUE(output.ok());
+    EXPECT_EQ(output.value().generate_outputs[0].aux_info.speculative_verified_draft_tokens, 5);
+}
+
 TEST_F(GenerateStreamTest, DecodeCacheActualUseIncludesHotTiersWithoutRemoteRestore) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     for (const auto tier : {Tier::DEVICE, Tier::HOST, Tier::DISK, Tier::REMOTE}) {

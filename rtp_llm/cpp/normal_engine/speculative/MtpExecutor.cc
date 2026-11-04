@@ -260,6 +260,14 @@ void applySpecLogitsAcceptLenCap(const SpecLogitsVerifyRunner::LaunchResult& ver
 
     output.accept_tokens_cpu = output.accept_tokens.to(torch::kCPU, /*non_blocking=*/true);
     output.accept_len_cpu    = output.accept_len.to(torch::kCPU, /*non_blocking=*/true);
+    if (output.graph_buffers) {
+        // Graph results originally transfer on their copy stream. This legacy
+        // cap path re-records the public event on the sampling stream; it does
+        // not prove completion of that original verified-length host view.
+        // Preserve known dense gamma, otherwise report unknown without a new
+        // transfer or synchronization. The cap never reduces target-verified L.
+        output.verified_draft_lengths_cpu = torch::Tensor();
+    }
     output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
     // The spec artifact is read by logits masking before sampling and by cap
     // application here. Recording after cap keeps future artifact pools from

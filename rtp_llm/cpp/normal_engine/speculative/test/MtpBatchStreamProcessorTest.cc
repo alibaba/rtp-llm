@@ -1374,10 +1374,11 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     auto stream_groups = StreamGroups({stream1, stream2});
 
     speculative::SpeculativeSamplerOutput spec_decode_output;
-    spec_decode_output.accept_len_cpu    = torch::tensor({5, 1}, torch::kInt32);
-    spec_decode_output.accept_tokens_cpu = torch::tensor({{2, 3, 1, 3, 2}, {2, 0, 0, 0, 0}}, torch::kInt32);
-    spec_decode_output.accept_len        = spec_decode_output.accept_len_cpu.to(torch::kCUDA);
-    spec_decode_output.accept_tokens     = spec_decode_output.accept_tokens_cpu.to(torch::kCUDA);
+    spec_decode_output.accept_len_cpu             = torch::tensor({5, 1}, torch::kInt32);
+    spec_decode_output.verified_draft_lengths_cpu = torch::tensor({4, 0}, torch::kInt32);
+    spec_decode_output.accept_tokens_cpu          = torch::tensor({{2, 3, 1, 3, 2}, {2, 0, 0, 0, 0}}, torch::kInt32);
+    spec_decode_output.accept_len                 = spec_decode_output.accept_len_cpu.to(torch::kCUDA);
+    spec_decode_output.accept_tokens              = spec_decode_output.accept_tokens_cpu.to(torch::kCUDA);
 
     MergedOutput draft_prefill_output;
     draft_prefill_output.model_output.all_hidden_states =
@@ -1396,9 +1397,41 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
     checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
     EXPECT_EQ(logits_processor->accepted_tokens, 5);
+    EXPECT_EQ(stream1->speculativeVerifiedDraftTokens(), 4);
+    EXPECT_EQ(stream2->speculativeVerifiedDraftTokens(), 0);
     // Device-state real_seq_len publication moved to the executor layer
     // (MtpExecutor::publishSyncMtpDeviceState); dispatchDecode itself only
     // performs host bookkeeping now, so no device-state asserts here.
+}
+
+TEST_F(MtpBatchStreamProcessorTest, DecodeVerifiedDraftLengthsRequireHostPayloadOrKnownDenseWidth) {
+    ModelConfig model;
+    model.max_seq_len = 128;
+    model.vocab_size  = 8;
+    model.num_layers  = 1;
+    SpeculativeExecutionConfig sp;
+    sp.type              = SP_TYPE_DSPARK;
+    sp.gen_num_per_cycle = 5;
+    MtpBatchStreamProcessor processor(model, {}, {}, makeProcessorCacheConfig(), sp, false);
+    auto                    stream = createContextStream(model, RuntimeConfig{}, ResourceContext{}, {2}, 1);
+    StreamGroups            groups({stream});
+    speculative::SpeculativeSamplerOutput result;
+    result.accept_len_cpu    = torch::ones({1}, torch::kInt32);
+    result.accept_tokens_cpu = torch::zeros({1, 6}, torch::kInt32);
+    MergedOutput      draft;
+    MtpTargetLogprobs logprobs;
+    for (const int known_width : {-1, 5}) {
+        result.verified_draft_length = known_width;
+        std::vector<StreamSpecUpdateInfo> updates;
+        processor.prepareDecodeSpecUpdateInfo(groups, result, draft, logprobs, updates);
+        ASSERT_EQ(updates.size(), 1);
+        EXPECT_EQ(updates[0].verified_draft_tokens, known_width);
+    }
+    result.verified_draft_lengths_cpu = torch::zeros({1}, torch::kInt32);
+    std::vector<StreamSpecUpdateInfo> updates;
+    processor.prepareDecodeSpecUpdateInfo(groups, result, draft, logprobs, updates);
+    ASSERT_EQ(updates.size(), 1);
+    EXPECT_EQ(updates[0].verified_draft_tokens, 0);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, EmptyDSpARKDecodeRoundPreservesEmptyEngramHistory) {
