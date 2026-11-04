@@ -3,16 +3,10 @@ from collections import Counter
 from dataclasses import dataclass
 import json
 from pathlib import Path
-import struct
 
-from google.protobuf.json_format import ParseDict, ParseError
-from google.protobuf.message import DecodeError
-import zstandard
-
-from . import client_evidence_pb2 as pb
 from .. import ExecutionError
 
-MAX_FRAME = 2 * 1024 * 1024
+MAX_LINE = 2 * 1024 * 1024
 OUTCOMES = {'success', 'error', 'timeout', 'cancelled'}
 
 
@@ -45,34 +39,6 @@ class RequestRecord:
     attempts: list[Attempt]
 
 
-def _batch(encoded):
-    content_size = zstandard.frame_content_size(encoded)
-    if content_size not in (zstandard.CONTENTSIZE_UNKNOWN, zstandard.CONTENTSIZE_ERROR) and content_size > MAX_FRAME:
-        raise ValueError('Oversized decompressed evidence frame')
-    raw = zstandard.ZstdDecompressor().decompress(encoded, max_output_size=MAX_FRAME, allow_extra_data=False)
-    size = 0
-    for i, value in enumerate(raw[:5]):
-        size |= (value & 127) << (7 * i)
-        if value < 128:
-            if size != len(raw) - i - 1:
-                raise ValueError('Invalid length-delimited EventBatch')
-            return pb.EventBatch.FromString(raw[i + 1:])
-    raise ValueError('Invalid EventBatch length')
-
-
-def _legacy_batches(stream):
-    while header := stream.read(4):
-        if len(header) != 4:
-            raise ValueError('Truncated evidence frame')
-        size, = struct.unpack('>I', header)
-        if not 0 < size <= MAX_FRAME:
-            raise ValueError('Invalid compressed frame size')
-        encoded = stream.read(size)
-        if len(encoded) != size:
-            raise ValueError('Truncated evidence frame')
-        yield _batch(encoded)
-
-
 def _unique_fields(pairs):
     result = {}
     for key, value in pairs:
@@ -83,10 +49,10 @@ def _unique_fields(pairs):
 
 
 def _json_lines(stream, cancelled):
-    while line := stream.readline(MAX_FRAME + 1):
+    while line := stream.readline(MAX_LINE + 1):
         if cancelled is not None and cancelled.is_set():
             raise ExecutionError('Client evidence scan cancelled')
-        if len(line) > MAX_FRAME or not line.endswith(b'\n'):
+        if len(line) > MAX_LINE or not line.endswith(b'\n'):
             raise ValueError('Oversized or truncated evidence JSONL line')
         value = json.loads(line.decode('utf-8'), object_pairs_hook=_unique_fields)
         if not isinstance(value, dict):
@@ -94,34 +60,72 @@ def _json_lines(stream, cancelled):
         yield value
 
 
+HEADER_FIELDS = ('version', 'client', 'playback', 'first_request_id', 'first_index', 'stride', 'planned', 'concurrency')
+EVENT_NUMBERS = ('sequence', 'request_id', 'epoch_ms', 'elapsed_nanos', 'attempt', 'error_code', 'output_tokens')
+EVENT_TEXT = ('kind', 'master', 'grpc_code', 'message', 'outcome')
+
+
+def _integer(value):
+    # ProtoJSON uses strings for 64-bit integers to preserve their precision.
+    if isinstance(value, str):
+        digits = value.removeprefix('-')
+        if digits.isascii() and digits.isdecimal():
+            value = int(value)
+    if type(value) is not int:
+        raise ValueError('Expected an evidence integer')
+    return value
+
+
+def _identity(header):
+    if header.keys() - set(HEADER_FIELDS):
+        raise ValueError('Unknown evidence header field')
+    return tuple(header.get(key, '') if key == 'client' else _integer(header.get(key, 0))
+                 for key in HEADER_FIELDS)
+
+
+def _event(row):
+    if not isinstance(row, dict) or row.keys() - {*EVENT_NUMBERS, *EVENT_TEXT, 'ttft_nanos', 'response_success'}:
+        raise ValueError('Invalid evidence event fields')
+    event = {key: _integer(row.get(key, 0)) for key in EVENT_NUMBERS}
+    if not (0 <= event['attempt'] < 2**32 and 0 <= event['output_tokens'] < 2**32):
+        raise ValueError('Invalid evidence attempt or output token count')
+    if not -(2**63) <= event['error_code'] < 2**63:
+        raise ValueError('Invalid evidence error code')
+    for key in EVENT_TEXT:
+        value = row.get(key, '')
+        if not isinstance(value, str):
+            raise ValueError(f'Expected evidence text for {key}')
+        event[key] = value
+    ttft = row.get('ttft_nanos')
+    event['ttft_nanos'] = None if ttft is None else _integer(ttft)
+    response = row.get('response_success')
+    if response is not None and type(response) is not bool:
+        raise ValueError('Expected a boolean Schedule response')
+    event['response_success'] = response
+    return event
+
+
 def _json_batches(stream, cancelled):
     lines = _json_lines(stream, cancelled)
     header = next(lines, None)
     if header is None:
         return
-    batch = ParseDict(header, pb.EventBatch())
-    if {'frame', 'events', 'seal'} & header.keys():
-        raise ValueError('Invalid evidence JSONL header')
     for line in lines:
-        batch.frame += 1
         if 'seal' in line:
             if line.keys() != {'seal'} or not isinstance(line['seal'], dict):
                 raise ValueError('Invalid evidence JSONL seal')
-            ParseDict(line['seal'], batch.seal)
-            yield batch
+            yield header, (), line['seal']
             if next(lines, None) is not None:
                 raise ValueError('Trailing evidence after seal')
             return
-        ParseDict(line, batch.events.add())
-        yield batch
-        del batch.events[:]
+        yield header, (line,), None
 
 
 def read_requests(directory: Path, cancelled=None):
     """Yield completed requests with bounded memory; consume through EOF to validate the seal."""
     path = directory / 'requests.jsonl'
     active, outcomes = {}, Counter()
-    frame = sequence = issued = finished = 0
+    sequence = issued = finished = 0
     sealed = False
     identity = None
     try:
@@ -130,79 +134,83 @@ def read_requests(directory: Path, cancelled=None):
             stream = path.open('rb')
             batches = _json_batches(stream, cancelled)
         except FileNotFoundError:
+            from .legacy_client_evidence import read_batches
+
             path = directory / 'requests.binpb.zst'
             stream = path.open('rb')
-            batches = _legacy_batches(stream)
+            batches = read_batches(stream)
         with stream:
-            for batch in batches:
+            for header, events, seal in batches:
                 if cancelled is not None and cancelled.is_set():
                     raise ExecutionError('Client evidence scan cancelled')
                 if sealed:
                     raise ValueError('Trailing evidence after seal')
-                frame += 1
-                current = (batch.version, batch.client, batch.playback, batch.first_request_id,
-                           batch.first_index, batch.stride, batch.planned, batch.concurrency)
+                current = _identity(header)
+                _, client, playback, first_request_id, first_index, stride, planned, concurrency = current
                 if identity is None:
                     identity = current
                     expected = (1, directory.parent.parent.name, plan['sequence'], plan['first_request_id'],
                                 plan['first_index'], plan['stride'], plan['count'], plan['concurrency'])
-                    if current != expected or not (batch.first_request_id > 0 and batch.stride > 0
-                            and batch.first_index < batch.stride and batch.planned > 0 and batch.concurrency > 0):
+                    if current != expected or not (first_request_id > 0 and stride > 0
+                            and 0 <= first_index < stride and planned > 0 and concurrency > 0):
                         raise ValueError('Evidence identity does not match playback plan')
-                if current != identity or batch.frame != frame or not (batch.events or batch.HasField('seal')):
+                if current != identity:
                     raise ValueError('Evidence frame identity/sequence mismatch')
-                for event in batch.events:
+                for row in events:
+                    event = _event(row)
                     sequence += 1
-                    if event.sequence != sequence or event.epoch_ms <= 0 or event.elapsed_nanos < 0:
+                    if event['sequence'] != sequence or event['epoch_ms'] <= 0 or event['elapsed_nanos'] < 0:
                         raise ValueError('Invalid event sequence or timestamp')
-                    request_id = event.request_id
-                    if event.kind == pb.Event.ISSUED:
-                        expected_id = batch.first_request_id + batch.first_index + issued * batch.stride
-                        if request_id != expected_id or issued >= batch.planned or len(active) >= batch.concurrency:
+                    request_id = event['request_id']
+                    if event['kind'] == 'ISSUED':
+                        expected_id = first_request_id + first_index + issued * stride
+                        if request_id != expected_id or issued >= planned or len(active) >= concurrency:
                             raise ValueError('Duplicate, out-of-order or out-of-plan request')
                         issued += 1
-                        active[request_id] = {'sent': event.epoch_ms, 'attempts': [], 'pending': None, 'first': None,
-                                              'elapsed': event.elapsed_nanos}
+                        active[request_id] = {'sent': event['epoch_ms'], 'attempts': [], 'pending': None, 'first': None,
+                                              'elapsed': event['elapsed_nanos']}
                         continue
                     state = active.get(request_id)
-                    if state is None or event.elapsed_nanos < state['elapsed']:
+                    if state is None or event['elapsed_nanos'] < state['elapsed']:
                         raise ValueError('Event without active request or decreasing elapsed time')
-                    state['elapsed'] = event.elapsed_nanos
-                    if event.kind == pb.Event.SCHEDULE_START:
-                        if state['pending'] or event.attempt != len(state['attempts']) + 1 or event.attempt > 2 or not event.master:
+                    state['elapsed'] = event['elapsed_nanos']
+                    if event['kind'] == 'SCHEDULE_START':
+                        if state['pending'] or event['attempt'] != len(state['attempts']) + 1 or event['attempt'] > 2 or not event['master']:
                             raise ValueError('Invalid Schedule attempt')
                         state['pending'] = event
-                    elif event.kind == pb.Event.SCHEDULE_RESULT:
+                    elif event['kind'] == 'SCHEDULE_RESULT':
                         start = state['pending']
-                        if start is None or event.attempt != start.attempt or event.master != start.master or not event.grpc_code:
+                        if start is None or event['attempt'] != start['attempt'] or event['master'] != start['master'] or not event['grpc_code']:
                             raise ValueError('Schedule result without matching attempt')
-                        state['attempts'].append(Attempt(event.attempt, event.master, start.epoch_ms, event.epoch_ms,
-                                                         event.grpc_code, event.error_code, event.message,
-                                                         event.response_success if event.HasField('response_success') else None))
+                        state['attempts'].append(Attempt(event['attempt'], event['master'], start['epoch_ms'], event['epoch_ms'],
+                                                         event['grpc_code'], event['error_code'], event['message'],
+                                                         event['response_success']))
                         state['pending'] = None
-                    elif event.kind == pb.Event.FIRST_TOKEN:
+                    elif event['kind'] == 'FIRST_TOKEN':
                         if state['first'] is not None or state['pending'] or not state['attempts']:
                             raise ValueError('Invalid first token event')
-                        state['first'] = event.elapsed_nanos
-                    elif event.kind == pb.Event.TERMINAL:
-                        if state['pending'] or event.outcome not in OUTCOMES or not event.grpc_code:
+                        state['first'] = event['elapsed_nanos']
+                    elif event['kind'] == 'TERMINAL':
+                        if state['pending'] or event['outcome'] not in OUTCOMES or not event['grpc_code']:
                             raise ValueError('Invalid terminal event')
-                        if event.HasField('ttft_nanos') != (state['first'] is not None) or (
-                                event.HasField('ttft_nanos') and not 0 <= event.ttft_nanos <= event.elapsed_nanos):
+                        ttft = event['ttft_nanos']
+                        if (ttft is not None) != (state['first'] is not None) or (
+                                ttft is not None and not 0 <= ttft <= event['elapsed_nanos']):
                             raise ValueError('Inconsistent first token and terminal result')
-                        if (event.output_tokens > 0) != (state['first'] is not None):
+                        if (event['output_tokens'] > 0) != (state['first'] is not None):
                             raise ValueError('Inconsistent output token count')
                         finished += 1
-                        outcomes[event.outcome] += 1
+                        outcomes[event['outcome']] += 1
                         del active[request_id]
-                        yield RequestRecord(batch.client, batch.playback, request_id, state['sent'], event.epoch_ms,
-                                            event.ttft_nanos if event.HasField('ttft_nanos') else None,
-                                            event.elapsed_nanos, event.output_tokens, event.outcome, event.grpc_code,
-                                            event.error_code, event.message, state['attempts'])
+                        yield RequestRecord(client, playback, request_id, state['sent'], event['epoch_ms'],
+                                            ttft, event['elapsed_nanos'], event['output_tokens'], event['outcome'],
+                                            event['grpc_code'], event['error_code'], event['message'], state['attempts'])
                     else:
                         raise ValueError('Unknown event kind')
-                if batch.HasField('seal'):
-                    if active or issued != finished or batch.seal.issued != issued or batch.seal.finished != finished:
+                if seal is not None:
+                    if (seal.keys() - {'issued', 'finished'} or active or issued != finished
+                            or _integer(seal.get('issued', 0)) != issued
+                            or _integer(seal.get('finished', 0)) != finished):
                         raise ValueError('Evidence seal does not reconcile requests')
                     sealed = True
         if not sealed:
@@ -214,5 +222,5 @@ def read_requests(directory: Path, cancelled=None):
                     or result['unsent'] != plan['count'] - issued
                     or result['outcomes'] != {key: outcomes[key] for key in OUTCOMES}):
                 raise ValueError('Evidence does not reconcile Client result')
-    except (OSError, ValueError, KeyError, TypeError, DecodeError, ParseError, zstandard.ZstdError) as error:
+    except (OSError, ValueError, KeyError, TypeError) as error:
         raise ExecutionError(f'Invalid Client evidence at {path}: {error}') from error

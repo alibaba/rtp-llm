@@ -276,7 +276,7 @@ JSONL 与旧的 Protobuf + Zstd 证据共用 `java/client/src/main/proto/client_
   args: {outcome: error, limit: 20}
 ```
 
-Case 的 start、stop、requests 各有一个 Step 文件。ClientRole 管理回放，client_evidence.py 负责流式解码和完整性校验，client_evidence_pb2.py 由同一份协议生成。镜像终验直接复用读取函数。不提供独立请求查询 CLI，也不增加 Java 查询服务、parser 类或存储抽象。
+Case 的 start、stop、requests 各有一个 Step 文件。ClientRole 管理回放，client_evidence.py 直接解析 JSONL 并校验请求和封口。读取旧压缩证据时才加载 legacy_client_evidence.py 及其生成的 client_evidence_pb2.py。镜像终验直接复用读取函数。不提供独立请求查询 CLI，也不增加 Java 查询服务、parser 类或存储抽象。
 
 ### Python 指标查询与公共指标
 
