@@ -31,15 +31,6 @@ KVCacheSpecPtr SpecBuilder::build(const KVCacheSpecDesc& desc, const SpecBuildCo
     if (layout.mode == TpCacheTransferMode::LINEAR_QKV) {
         RTP_LLM_CHECK_WITH_INFO(desc.cache_type == KVCacheSpecType::LinearAttention,
                                 "LINEAR_QKV transfer requires a linear cache spec");
-        const auto& linear    = *ctx.linear_attention_config;
-        const auto  tp        = std::max<int64_t>(1, ctx.parallelism_config->get_attn_tp_size());
-        const auto  item_size = getTypeSize(linear.conv_state_dtype);
-        layout.key_heads      = linear.linear_num_key_heads / tp;
-        layout.value_heads    = linear.linear_num_value_heads / tp;
-        layout.q_row_bytes    = layout.key_heads * linear.linear_key_head_dim * item_size;
-        layout.k_row_bytes    = layout.q_row_bytes;
-        layout.v_row_bytes    = layout.value_heads * linear.linear_value_head_dim * item_size;
-        layout.history_rows   = linear.linear_conv_kernel_dim - 1;
     } else if (layout.mode == TpCacheTransferMode::MHA_HEADS) {
         RTP_LLM_CHECK_WITH_INFO(desc.cache_type == KVCacheSpecType::MultiHeadAttention,
                                 "MHA_HEADS transfer requires an MHA cache spec");
