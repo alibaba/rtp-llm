@@ -8,18 +8,17 @@ import java.util.*;
 import org.junit.jupiter.api.*;
 
 class ApiServerTest {
-    private ApiServer server;
+    private ControlServer server;
     private static final HttpClient CLIENT = HttpClient.newHttpClient();
 
     @BeforeEach void start() throws Exception {
-        server = new ApiServer(new InetSocketAddress("127.0.0.1", 0))
-            .bind(TransportProbe.Api.class, new TransportProbe.Implementation()).start();
+        server = TransportProbe.server();
     }
     @AfterEach void close() { server.close(); }
 
     @Test void optionalMetricsEndpointIsExactAndReportsCollectionFailure() throws Exception {
         var fail = new java.util.concurrent.atomic.AtomicBoolean();
-        try (var exporter = new ApiServer(new InetSocketAddress("127.0.0.1", 0)).metrics(() -> {
+        try (var exporter = new ControlServer(new InetSocketAddress("127.0.0.1", 0)).metrics(() -> {
             if (fail.get()) throw new IllegalStateException("broken collector");
             return "# TYPE probe_total counter\nprobe_total 3\n";
         }).start()) {
@@ -49,13 +48,12 @@ class ApiServerTest {
         var response = call("probe/action", Map.of(), "background", 1000);
         assertEquals(200, response.statusCode());
         assertEquals("master-0", JsonWire.JSON.readTree(response.body()).at("/result/affected/instances/0/id").asText());
-        assertThrows(IllegalStateException.class, InvocationContext::current);
     }
 
     @Test void unhealthyComponentsReturnUnavailableWithoutCollectingMetrics() throws Exception {
         var broken = new java.util.concurrent.atomic.AtomicBoolean();
         var scrapes = new java.util.concurrent.atomic.AtomicInteger();
-        try (var service = new ApiServer(new InetSocketAddress("127.0.0.1", 0))
+        try (var service = new ControlServer(new InetSocketAddress("127.0.0.1", 0))
                 .health(() -> { if (broken.get()) throw new IllegalStateException("worker failed"); })
                 .metrics(() -> { scrapes.incrementAndGet(); return ""; }).start()) {
             var request = HttpRequest.newBuilder(URI.create(service.url() + "/health")).GET().build();
@@ -67,7 +65,7 @@ class ApiServerTest {
     }
 
     @Test void nativeOnlyNodeHealthAdvertisesNoImplementedBusinessInterfaces() throws Exception {
-        try (var nativeHost = new ApiServer(new InetSocketAddress("127.0.0.1", 0)).start()) {
+        try (var nativeHost = new ControlServer(new InetSocketAddress("127.0.0.1", 0)).start()) {
             var response = CLIENT.send(HttpRequest.newBuilder(URI.create(nativeHost.url() + "/health")).GET().build(), HttpResponse.BodyHandlers.ofString());
             assertEquals(200, response.statusCode());
             assertEquals(0, JsonWire.JSON.readTree(response.body()).get("interfaces").size());
@@ -103,8 +101,8 @@ class ApiServerTest {
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"127.0.0.1", "127.0.0.2", "::1"})
     void publishesTheActualBoundAddress(String host) throws Exception {
-        ApiServer bound;
-        try { bound = new ApiServer(new InetSocketAddress(host, 0)); }
+        ControlServer bound;
+        try { bound = new ControlServer(new InetSocketAddress(host, 0)); }
         catch (java.net.SocketException unavailable) {
             if (unavailable instanceof java.net.BindException || unavailable.getCause() instanceof java.nio.channels.UnsupportedAddressTypeException) {
                 org.junit.jupiter.api.Assumptions.assumeTrue(false, "Loopback address unavailable: " + host); return;

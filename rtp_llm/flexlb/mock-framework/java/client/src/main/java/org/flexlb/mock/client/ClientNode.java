@@ -8,7 +8,7 @@ import java.nio.file.*;
 import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
-import org.flexlb.mock.protocol.ApiServer;
+import org.flexlb.mock.protocol.ControlServer;
 import org.flexlb.mock.client.ClientProtocol.*;
 
 /** Each JVM executes locally; only client-0 coordinates the one current plan. */
@@ -21,7 +21,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
     private final Path topology, directory;
     private final ClientMetrics metrics = new ClientMetrics();
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
-    private final ApiServer api;
+    private final ControlServer api;
     private LoadClient worker;
     private long workerSequence, sequence, nextRequestId = 1;
     private Group group;
@@ -34,7 +34,13 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
     private ClientNode(String id, Path topology, Path directory, int imageToken, int blockSize, long seed) throws IOException {
         this.imageToken = imageToken; this.blockSize = blockSize; this.cacheKeySeed = seed;
         this.id = id; this.topology = topology; this.directory = directory;
-        api = new ApiServer(new InetSocketAddress("127.0.0.1", 0)).bind(ClientProtocol.class, this).metrics(metrics::scrape).start();
+        api = new ControlServer(new InetSocketAddress("127.0.0.1", 0)).route("client/start", Start.class, Ack.class, this::start)
+            .route("client/stop", Empty.class, Summary.class, this::stop)
+            .route("worker/prepare", Shard.class, Ack.class, this::prepare)
+            .route("worker/begin", Begin.class, Ack.class, this::begin)
+            .route("worker/halt", Sequence.class, Ack.class, this::halt)
+            .route("worker/state", Sequence.class, State.class, this::state)
+            .metrics(metrics::scrape).start();
     }
     public String url() { return api.url(); }
     private static void save(Path path, Object value) throws IOException {

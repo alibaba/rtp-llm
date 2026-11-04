@@ -3,18 +3,26 @@ package org.flexlb.mock.protocol;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.sun.net.httpserver.*;
 import java.io.IOException;
-import java.lang.reflect.*;
 import java.net.*;
 import java.nio.file.*;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
-import org.flexlb.mock.api.*;
+import org.flexlb.mock.api.RecordSchema;
 
 /** A transport bound to component objects; no case, gate or engine behavior lives here. */
-public final class ApiServer implements AutoCloseable {
-    private record Binding(Object target, Method method, Map<String, Object> schema) {}
+public final class ControlServer implements AutoCloseable {
+    public record Context(String run, Instant queryTime, Map<String, Object> observation) {}
+
+    @FunctionalInterface
+    public interface Operation<A, R> { R call(A args) throws Exception; }
+
+    @FunctionalInterface
+    public interface ContextOperation<A, R> { R call(A args, Context context) throws Exception; }
+
+    private record Binding(boolean background, Map<String, Object> input, Map<String, Object> output,
+                           ContextOperation<JsonNode, Object> operation) {}
     private final Map<String, Binding> bindings = new HashMap<>();
     private final HttpServer server;
     private final ExecutorService handlers = Executors.newVirtualThreadPerTaskExecutor();
@@ -22,7 +30,7 @@ public final class ApiServer implements AutoCloseable {
     private boolean started;
     private Runnable health = () -> {};
 
-    public ApiServer(InetSocketAddress address) throws IOException {
+    public ControlServer(InetSocketAddress address) throws IOException {
         server = HttpServer.create(address, 0);
         server.setExecutor(handlers);
         server.createContext("/invoke", this::invoke);
@@ -38,33 +46,35 @@ public final class ApiServer implements AutoCloseable {
         });
     }
 
-    @SuppressWarnings("unchecked")
-    public <T> ApiServer bind(Class<T> api, T implementation) {
+    public <A, R> ControlServer route(String name, Class<A> input, Class<R> output, Operation<A, R> operation) {
+        return route(name, input, output, false, (args, context) -> operation.call(args));
+    }
+
+    public <A, R> ControlServer route(String name, Class<A> input, Class<R> output, boolean background,
+                                 ContextOperation<A, R> operation) {
         if (started) throw new IllegalStateException("Cannot bind after start");
-        if (!api.isInstance(implementation)) throw new IllegalArgumentException("Implementation does not implement " + api);
-        var schemas = InterfaceRegistry.describe(api);
-        for (var method : api.getMethods()) {
-            String name = method.getAnnotation(Endpoint.class).value();
-            if (bindings.putIfAbsent(name, new Binding(implementation, method, (Map<String, Object>) schemas.get(name))) != null)
-                throw new IllegalArgumentException("Duplicate binding: " + name);
-        }
+        if (!name.matches("[a-z][a-z0-9_]*(/[a-z][a-z0-9_]*)+") || !input.isRecord())
+            throw new IllegalArgumentException("Invalid control route: " + name);
+        var binding = new Binding(background, RecordSchema.schema(input), RecordSchema.schema(output),
+            (args, context) -> operation.call(input.cast(JsonWire.decode(args, input)), context));
+        if (bindings.putIfAbsent(name, binding) != null) throw new IllegalArgumentException("Duplicate binding: " + name);
         return this;
     }
 
-    public ApiServer health(Runnable check) {
+    public ControlServer health(Runnable check) {
         if (started) throw new IllegalStateException("Cannot bind after start");
         health = Objects.requireNonNull(check);
         return this;
     }
 
-    public ApiServer start() {
+    public ControlServer start() {
         // A native-protocol node can publish transport health before business adapters are bound.
         server.start(); started = true;
         return this;
     }
 
     /** Optional pull endpoint; exposition and metric definitions belong to the component. */
-    public ApiServer metrics(Supplier<String> scrape) {
+    public ControlServer metrics(Supplier<String> scrape) {
         if (started) throw new IllegalStateException("Cannot bind after start");
         Objects.requireNonNull(scrape);
         server.createContext("/metrics", exchange -> {
@@ -117,7 +127,7 @@ public final class ApiServer implements AutoCloseable {
                 var context = request.get("context");
                 keys(context, Set.of("run", "query_time", "observation", "timeout_ms"));
                 String run = context.path("run").asText();
-                JsonWire.require(run.equals("foreground") || (run.equals("background") && Boolean.TRUE.equals(binding.schema.get("background"))), "Unsupported run mode");
+                JsonWire.require(run.equals("foreground") || (run.equals("background") && binding.background()), "Unsupported run mode");
                 JsonWire.require(context.get("timeout_ms").isIntegralNumber() && context.get("timeout_ms").canConvertToLong(), "Invalid timeout");
                 long timeout = context.get("timeout_ms").longValue();
                 JsonWire.require(timeout > 0, "Timeout must be positive");
@@ -128,20 +138,12 @@ public final class ApiServer implements AutoCloseable {
                 JsonWire.require(context.get("observation").isNull() || context.get("observation").isObject(), "Invalid observation context");
                 var observation = context.get("observation").isNull() ? null :
                     (Map<String, Object>) JsonWire.JSON.convertValue(context.get("observation"), Map.class);
-                var invocation = new InvocationContext(run, time, observation, timeout);
-                JsonWire.validate(request.get("args"), (Map<String, Object>) binding.schema.get("args"));
-                Object args = JsonWire.decode(request.get("args"), binding.method.getGenericParameterTypes()[0]);
-                pending = calls.submit(() -> {
-                    InvocationContext.enter(invocation);
-                    try { return binding.method.invoke(binding.target, args); }
-                    catch (InvocationTargetException error) {
-                        if (error.getCause() instanceof Exception cause) throw cause;
-                        throw error;
-                    } finally { InvocationContext.leave(); }
-                });
+                var invocation = new Context(run, time, observation);
+                JsonWire.validate(request.get("args"), binding.input());
+                pending = calls.submit(() -> binding.operation().call(request.get("args"), invocation));
                 Object result = pending.get(timeout, TimeUnit.MILLISECONDS);
                 JsonNode encoded = JsonWire.JSON.valueToTree(result);
-                try { JsonWire.validate(encoded, (Map<String, Object>) binding.schema.get("returns")); }
+                try { JsonWire.validate(encoded, binding.output()); }
                 catch (IllegalArgumentException error) { throw new IllegalStateException("Invalid component result: " + error.getMessage()); }
                 send(exchange, 200, Map.of("result", encoded));
             } catch (TimeoutException error) {

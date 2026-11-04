@@ -4,37 +4,11 @@ import java.lang.reflect.*;
 import java.util.*;
 import org.flexlb.mock.api.model.Types;
 
-/** Metadata comes from method signatures, not a parallel handwritten catalog. */
-public final class InterfaceRegistry {
-    private InterfaceRegistry() {}
+/** Derives validation rules from the typed control request and response records. */
+public final class RecordSchema {
+    private RecordSchema() {}
 
-    public static Map<String, Object> describe(Class<?>... interfaces) {
-        Map<String, Object> result = new TreeMap<>();
-        for (Class<?> api : interfaces) {
-            if (!api.isInterface()) throw new IllegalArgumentException("Not an interface: " + api);
-            for (Method method : api.getMethods()) {
-                Endpoint endpoint = method.getAnnotation(Endpoint.class);
-                if (endpoint == null || method.getParameterCount() != 1
-                        || !method.getParameterTypes()[0].isRecord())
-                    throw new IllegalArgumentException("API method needs an endpoint and one record argument: " + method);
-                if (!endpoint.value().matches("[a-z][a-z0-9_]*(/[a-z][a-z0-9_]*)+"))
-                    throw new IllegalArgumentException("Invalid interface name: " + endpoint.value());
-                if (endpoint.background() && endpoint.kind() != Endpoint.Kind.action)
-                    throw new IllegalArgumentException("Only actions can run in background");
-                Map<String, Object> spec = new LinkedHashMap<>();
-                spec.put("kind", endpoint.kind().name());
-                spec.put("background", endpoint.background());
-                spec.put("unit", endpoint.unit());
-                spec.put("args", schema(method.getGenericParameterTypes()[0]));
-                spec.put("returns", schema(method.getGenericReturnType()));
-                if (result.putIfAbsent(endpoint.value(), spec) != null)
-                    throw new IllegalArgumentException("Duplicate interface: " + endpoint.value());
-            }
-        }
-        return Collections.unmodifiableMap(result);
-    }
-
-    private static Map<String, Object> schema(Type type) {
+    public static Map<String, Object> schema(Type type) {
         if (type instanceof ParameterizedType p) {
             Type[] args = p.getActualTypeArguments();
             if (p.getRawType() == List.class) return Map.of("type", "array", "items", schema(args[0]));
