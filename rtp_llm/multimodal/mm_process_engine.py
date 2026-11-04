@@ -48,6 +48,14 @@ _worker_preprocess_params: Optional[dict] = None
 _worker_preprocess_func: Optional[Callable] = None
 
 
+class _PreprocessTaskError(Exception):
+    """Keep task I/O failures distinct from broken pool communication."""
+
+    def __init__(self, error: Exception):
+        super().__init__(error)
+        self.error = error
+
+
 def _worker_initializer(
     vit_config: VitConfig,
     preprocess_params: dict,
@@ -75,10 +83,16 @@ def _worker_process_task(
     if _worker_preprocess_func is None:
         raise RuntimeError("Worker process has not been initialized correctly.")
 
-    with Timer() as route_timer:
-        result = _worker_preprocess_func(
-            mm_inputs, _worker_vit_config, **_worker_preprocess_params
-        )
+    try:
+        with Timer() as route_timer:
+            result = _worker_preprocess_func(
+                mm_inputs, _worker_vit_config, **_worker_preprocess_params
+            )
+    except (OSError, EOFError) as error:
+        # For example, PIL's UnidentifiedImageError is an OSError. Letting it
+        # escape as a pool error would terminate healthy workers and discard
+        # unrelated requests that are already queued in the same pool.
+        raise _PreprocessTaskError(error) from error
     return result, route_timer.cost_ms()
 
 
@@ -164,9 +178,8 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         self.pool: Optional[multiprocessing.pool.Pool] = None
         self._consecutive_timeouts = 0
         self._max_consecutive_timeouts = vit_config.mm_preprocess_max_workers
-        # Serializes timeout-counter updates and pool rebuilds — without it
-        # concurrent get_result/submit callers can race to _rebuild_pool, double
-        # tear down the pool, or miscount consecutive timeouts.
+        # Protect normal submissions too: a rebuild temporarily clears self.pool.
+        # Preprocessing runs in workers, outside this submission/rebuild lock.
         self._pool_lock = threading.Lock()
         self._create_pool()
 
@@ -205,24 +218,23 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         if not work_item.should_preprocess:
             return
 
-        try:
-            work_item.future = self.pool.apply_async(
-                _worker_process_task, args=(work_item.mm_inputs,)
-            )
-            return
-        except (BrokenPipeError, OSError, EOFError) as e:
-            # multiprocessing.Pool surfaces broken state via these — rebuild and retry once.
-            # Keep both rebuild and the retry submission under _pool_lock so another thread
-            # cannot tear self.pool down between our rebuild and the apply_async call.
-            logging.error(f"Pool broken on submit, rebuilding: {e}", exc_info=True)
-            with self._pool_lock:
+        with self._pool_lock:
+            # A previous rebuild may have failed while creating its replacement.
+            if self.pool is None:
+                self._create_pool()
+            try:
+                work_item.future = self.pool.apply_async(
+                    _worker_process_task, args=(work_item.mm_inputs,)
+                )
+            except (BrokenPipeError, OSError, EOFError) as e:
+                logging.error(f"Pool broken on submit, rebuilding: {e}", exc_info=True)
                 self._rebuild_pool()
                 work_item.future = self.pool.apply_async(
                     _worker_process_task, args=(work_item.mm_inputs,)
                 )
-        except Exception as e:
-            logging.error(f"Unexpected error during submission: {e}", exc_info=True)
-            raise
+            except Exception as e:
+                logging.error(f"Unexpected error during submission: {e}", exc_info=True)
+                raise
 
     def get_result(self, work_item: "MMWorkItem") -> None:
         if work_item.future is None:
@@ -237,6 +249,9 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             with self._pool_lock:
                 self._consecutive_timeouts = 0
             kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, preprocess_time)
+        except _PreprocessTaskError as e:
+            logging.error("Preprocessing task failed: %s", e.error, exc_info=True)
+            raise e.error from e
         except multiprocessing.pool.TimeoutError:
             with self._pool_lock:
                 self._consecutive_timeouts += 1
