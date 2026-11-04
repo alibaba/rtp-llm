@@ -242,7 +242,7 @@ class GenerateConfigTest(TestCase):
             "ENABLE_MEMORY_CACHE": "1",
             "MEMORY_CACHE_SIZE_MB": "2048",
             "MEMORY_CACHE_SYNC_TIMEOUT_MS": "6789",
-            "BLOCK_TREE_FULL_PREFIX_SCAN_INTERVAL_MS": "30000",
+            "BLOCK_TREE_FULL_PREFIX_SCAN_INTERVAL_MS": "5000",
             "BLOCK_TREE_TRANSFER_WORKER_COUNT": "7",
             "BLOCK_TREE_BUSINESS_QUEUE_MAX_SIZE": "211",
             "BLOCK_TREE_TRANSFER_QUEUE_MAX_SIZE": "307",
@@ -268,7 +268,7 @@ class GenerateConfigTest(TestCase):
         self.assertTrue(config.enable_memory_cache)
         self.assertEqual(config.memory_cache_size_mb, 2048)
         self.assertEqual(config.memory_cache_sync_timeout_ms, 6789)
-        self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 30000)
+        self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 5000)
         self.assertEqual(config.block_tree_transfer_worker_count, 7)
         self.assertEqual(config.block_tree_business_queue_max_size, 211)
         self.assertEqual(config.block_tree_transfer_queue_max_size, 307)
@@ -321,8 +321,28 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.memory_eviction_policy, "lru")
         self.assertEqual(config.disk_eviction_policy, "fifo")
         self.assertEqual(config.reserve_block_ratio, 5)
-        self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 0)
+        self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 30000)
         self.assertFalse(hasattr(config, "write_cache_sync"))
+
+    def test_full_prefix_scan_interval_default_and_disable(self):
+        with patch.dict("os.environ", _jit_env(), clear=True):
+            self.assertEqual(
+                setup_args([]).kv_cache_config.block_tree_full_prefix_scan_interval_ms,
+                30000,
+            )
+            config = setup_args(
+                ["--block_tree_full_prefix_scan_interval_ms", "0"]
+            ).kv_cache_config
+            self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 0)
+        with patch.dict(
+            "os.environ",
+            _jit_env(BLOCK_TREE_FULL_PREFIX_SCAN_INTERVAL_MS="0"),
+            clear=True,
+        ):
+            self.assertEqual(
+                setup_args([]).kv_cache_config.block_tree_full_prefix_scan_interval_ms,
+                0,
+            )
 
     def test_disabled_crc_survives_worker_pickle_and_engine_config(self):
         import pickle
