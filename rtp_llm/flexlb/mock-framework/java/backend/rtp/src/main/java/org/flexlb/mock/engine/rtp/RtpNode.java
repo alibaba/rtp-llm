@@ -1,6 +1,8 @@
 package org.flexlb.mock.engine.rtp;
 
+import io.prometheus.client.Collector.MetricFamilySamples;
 import org.flexlb.mock.admission.RpcService;
+import org.flexlb.mock.metrics.MetricTags;
 
 import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
@@ -25,6 +27,9 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
     private ApiServer api;
     private org.flexlb.mock.metrics.MetricsOutput metrics;
     private KvcmReporter publisher;
+    private MetricSource metricSource;
+
+    private record MetricSource(Object lock, RtpMetrics metrics) {}
 
     private RtpNode(RtpConfig config, Scheduler.Factory schedulers, RemoteCache remote) {
         this.config = Objects.requireNonNull(config);
@@ -37,7 +42,14 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
             throw new IllegalArgumentException("Remote KV requires mock.scheduler.mode=fifo");
         cache = new KvCache(config.blockSize(), config.deviceBlocks(), config.reserveBlocks(), config.evictionPolicy(),
             config.deviceCache(), config.hostBlocks(), config.hostPolicy(), config.deviceWatermark(), config.hostWatermark(), remote);
-        try { service = new RpcService(config.endpoint(), cache, schedulers, config.groupScheduling()); }
+        try {
+            service = new RpcService(config.endpoint(), cache, (lock, storage, finished) -> {
+                var scheduler = schedulers.create(lock, storage, finished);
+                if (scheduler instanceof RtpSchedulerBase rtp)
+                    metricSource = new MetricSource(lock, rtp.metrics());
+                return scheduler;
+            }, config.groupScheduling());
+        }
         catch (RuntimeException error) { cache.close(); throw error; }
     }
 
@@ -64,15 +76,23 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
         try {
             var builder = NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service);
             node.rpc = builder.build().start();
-            node.metrics = org.flexlb.mock.metrics.MetricsOutput.start(node.service::collectMetrics);
+            node.metrics = org.flexlb.mock.metrics.MetricsOutput.start(node::collectMetrics);
             node.api = new ApiServer(node.address.listener(controlPort)).health(node::checkHealthy);
-            if (node.metrics.prometheus()) node.api.metrics(node.service::scrapeMetrics);
+            if (node.metrics.prometheus()) node.api.metrics(() -> MetricTags.scrape(node.collectMetrics()));
             node.api.start();
             node.publisher = node.startMetadataReporter();
             return node;
         } catch (IOException | RuntimeException | Error error) {
             try { node.close(); } catch (RuntimeException cleanup) { error.addSuppressed(cleanup); }
             throw error;
+        }
+    }
+
+    private List<MetricFamilySamples> collectMetrics() {
+        if (metricSource == null) return List.of();
+        synchronized (metricSource.lock()) {
+            service.checkHealthy();
+            return metricSource.metrics().collect();
         }
     }
 

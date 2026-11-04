@@ -172,7 +172,7 @@ class RtpRemoteSchedulerTest {
             assertNotNull(work);
             assertEquals(5, work.batch().dps().getFirst().requests().getFirst().computeTokens());
             assertEquals(1, remote.calls); complete(scheduler, work, config);
-            var text = scheduler.scrapeMetrics();
+            var text = scheduler.metrics().scrape();
             assertTrue(RtpMetricsTest.sample(text, "rtp_llm_remote_read_fail_qps", "") > 0);
             assertEquals(0, RtpMetricsTest.sample(text, "rtp_llm_remote_read_token_num_sum", ""));
             assertEquals(0, RtpMetricsTest.sample(text, "rtp_llm_stream_cache_remote_reuse_length_sum", ""));
@@ -211,7 +211,7 @@ class RtpRemoteSchedulerTest {
             var live = scheduler.tasks().getFirst();
             assertEquals(Scheduler.ReportedPhase.KV_ALLOCATED, live.phase());
             assertEquals(-1, live.executionMillis()); assertEquals(0, live.waitingMillis());
-            String loading = scheduler.scrapeMetrics();
+            String loading = scheduler.metrics().scrape();
             assertEquals(0, RtpMetricsTest.sample(loading, "rtp_llm_wait_stream_size", ""));
             assertEquals(1, RtpMetricsTest.sample(loading, "rtp_llm_loading_cache_stream_size", ""));
             assertEquals(2, RtpMetricsTest.sample(loading, "rtp_llm_kv_cache_load_ref_blocks", ""));
@@ -225,7 +225,7 @@ class RtpRemoteSchedulerTest {
             var finished = finishedLog.snapshot(0, List.of(), 0, 0).finished().getFirst();
             assertTrue(finished.waitingMillis() >= (beforeForward - value.started()) / 1_000_000);
             assertTrue(finished.executionMillis() <= (afterForward - beforeForward) / 1_000_000 + 1);
-            String text = scheduler.scrapeMetrics();
+            String text = scheduler.metrics().scrape();
             assertEquals(0, RtpMetricsTest.sample(text, "rtp_llm_loading_cache_stream_size", ""));
             assertEquals(4, RtpMetricsTest.sample(text, "rtp_llm_stream_cache_remote_reuse_length_sum", ""));
             assertEquals(0, RtpMetricsTest.sample(text, "rtp_llm_stream_cache_device_reuse_length_sum", ""));
@@ -256,7 +256,7 @@ class RtpRemoteSchedulerTest {
             complete(scheduler, work, config);
             assertNull(listener.terminal.get(1, TimeUnit.SECONDS));
             await(() -> cache.transferState().writes() == 0);
-            var text = scheduler.scrapeMetrics();
+            var text = scheduler.metrics().scrape();
             assertTrue(RtpMetricsTest.sample(text, "rtp_llm_remote_write_fail_qps", "") > 0);
             assertEquals(0, RtpMetricsTest.sample(text, "rtp_llm_remote_write_cache_block_num_sum", ""));
             assertEquals(0, RtpMetricsTest.sample(text, "rtp_llm_kv_cache_store_ref_blocks", ""));
@@ -276,7 +276,7 @@ class RtpRemoteSchedulerTest {
             var task = finishedLog.snapshot(0, List.of(), 0, 0).finished().getFirst();
             assertTrue(task.waitingMillis() <= (loadingObserved - value.started()) / 1_000_000 + 1);
             assertTrue(task.executionMillis() >= 20, "Native terminal time minus frozen wait includes a cancelled load");
-            var text = scheduler.scrapeMetrics();
+            var text = scheduler.metrics().scrape();
             assertEquals(0, RtpMetricsTest.sample(text, "rtp_llm_loading_cache_stream_size", ""));
             assertEquals(2, RtpMetricsTest.sample(text, "rtp_llm_kv_cache_load_ref_blocks", ""));
             assertTrue(RtpMetricsTest.sample(text, "rtp_llm_kv_cache_load_fail_qps", "") > 0);
