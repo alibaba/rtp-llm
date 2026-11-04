@@ -1,6 +1,7 @@
 package org.flexlb;
 
-import org.flexlb.mock.master.MasterReads;
+import java.util.function.*;
+import org.flexlb.mock.api.model.Types.*;
 
 import com.fasterxml.jackson.databind.*;
 import java.net.*;
@@ -72,4 +73,20 @@ public final class MasterNode {
         } finally { context.close(); }
     }
     private static String required(String key) { return Objects.requireNonNull(System.getenv(key), "Missing " + key); }
+
+    public static final class MasterReads implements MasterStateApi {
+        private final String id;
+        private final BooleanSupplier leader;
+        private final Function<Role, Set<String>> observed;
+        public MasterReads(String id, BooleanSupplier leader, Function<Role, Set<String>> observed) {
+            this.id = Objects.requireNonNull(id); this.leader = Objects.requireNonNull(leader);
+            this.observed = Objects.requireNonNull(observed);
+        }
+        @Override public MasterSet leadership(None args) {
+            return new MasterSet(leader.getAsBoolean() ? List.of(new MasterRef(id)) : List.of());
+        }
+        @Override public PerMasterEngines engines(EngineSelection args) {
+            return new PerMasterEngines(Map.of(id, observed.apply(args.role()).stream().sorted().toList()));
+        }
+    }
 }

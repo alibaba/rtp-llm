@@ -1,3 +1,4 @@
+from helpers.zookeeper import command as zookeeper_command
 import asyncio
 from types import SimpleNamespace
 from pathlib import Path
@@ -148,7 +149,7 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
                   'client': {'command': [java, '-jar', str(root / 'java/client/target/mock-client-1.0-SNAPSHOT-all.jar')]}}
     for role in ('prefill', 'decode'):
         components[role] = {'command': [java, '-cp', str(root / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'), 'org.flexlb.mock.engine.EngineMain']}
-    recipe = {'components': components, 'zookeeper': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.mock.master.ZookeeperNode']}}
+    recipe = {'components': components, 'zookeeper': {'command': zookeeper_command(root, java)}}
     if os.environ.get('PROMETHEUS_BIN'):
         recipe['prometheus'] = {'binary': os.environ['PROMETHEUS_BIN'], 'scrape_interval': '250ms'}
         data['phases'][0]['steps'].insert(1, {'id': 'qps', 'describe': 'Check aggregate issued rate',

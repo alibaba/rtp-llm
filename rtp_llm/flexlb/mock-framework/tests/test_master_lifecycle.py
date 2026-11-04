@@ -1,3 +1,4 @@
+from helpers.zookeeper import command as zookeeper_command
 import asyncio
 from dataclasses import dataclass
 import json
@@ -218,7 +219,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
         'client': {'command': [java, '-XX:ActiveProcessorCount=2', '-jar', str(root / 'java/client/target/mock-client-1.0-SNAPSHOT-all.jar')]}}
     for role in ('prefill', 'decode'):
         components[role] = {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', str(root / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'), 'org.flexlb.mock.engine.EngineMain']}
-    recipe = {'components': components, 'zookeeper': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', classpath, 'org.flexlb.mock.master.ZookeeperNode']}}
+    recipe = {'components': components, 'zookeeper': {'command': zookeeper_command(root, java)}}
     if os.environ.get('PROMETHEUS_BIN'):
         recipe['prometheus'] = {'binary': os.environ['PROMETHEUS_BIN'], 'scrape_interval': '250ms'}
     output = tmp_path / 'result'

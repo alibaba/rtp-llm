@@ -22,12 +22,13 @@ def case(case_data, compile_data):
 def artifacts(tmp_path):
     framework = tmp_path / 'framework with spaces'
     for relative in ('java/master/target/classes/org/flexlb/MasterNode.class',
-                     'java/master/target/classes/org/flexlb/mock/master/ZookeeperNode.class',
+                     'java/zookeeper/target/classes/org/flexlb/mock/zookeeper/ZookeeperNode.class',
                      'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar',
                      'java/client/target/mock-client-1.0-SNAPSHOT-all.jar', 'dependency.jar'):
         path = framework / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch()
+    (framework / 'java/zookeeper/target/dependencies.txt').write_text(str(framework / 'dependency.jar') + '\n')
     (framework / 'java/master/target/dependencies.txt').write_text(str(framework / 'dependency.jar') + '\n')
     java, prometheus = tmp_path / 'java', tmp_path / 'prometheus'
     for path in (java, prometheus):
@@ -44,7 +45,7 @@ def test_local_recipes_round_trip_without_shell_or_cwd_assumptions(case, artifac
     assert launch['components']['prefill'] == launch['components']['decode']
     assert launch['components']['prefill']['command'][-1] == 'org.flexlb.mock.engine.EngineMain'
     assert launch['components']['master']['command'][-1] == 'org.flexlb.MasterNode'
-    assert launch['zookeeper']['command'][-1] == 'org.flexlb.mock.master.ZookeeperNode'
+    assert launch['zookeeper']['command'][-1] == 'org.flexlb.mock.zookeeper.ZookeeperNode'
     assert launch['components']['client']['command'][-1].endswith('mock-client-1.0-SNAPSHOT-all.jar')
     assert all(recipe['command'][0] == str(java) and recipe['cwd'] == str(framework)
                for recipe in launch['components'].values())

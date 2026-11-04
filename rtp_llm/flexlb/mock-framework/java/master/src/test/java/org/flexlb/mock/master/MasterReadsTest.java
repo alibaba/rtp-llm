@@ -1,5 +1,7 @@
 package org.flexlb.mock.master;
 
+import org.flexlb.MasterNode.MasterReads;
+
 import static org.junit.jupiter.api.Assertions.*;
 import java.util.*;
 import java.util.concurrent.atomic.*;
