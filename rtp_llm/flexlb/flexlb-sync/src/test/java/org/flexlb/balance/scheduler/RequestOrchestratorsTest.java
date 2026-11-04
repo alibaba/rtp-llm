@@ -32,7 +32,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -340,5 +342,43 @@ class RequestOrchestratorsTest {
                 mock(RequestSchedulerReporter.class),
                 mock(ConfigService.class),
                 new QueueCapacity(), new ModelMetaConfig());
+    }
+
+    @Test
+    void queuePrioritiesAreSummedWithoutZeroFillingDisappearedPriorities() {
+        EndpointRegistry endpoints = mock(EndpointRegistry.class);
+        PrefillEndpoint first = mock(PrefillEndpoint.class);
+        PrefillEndpoint second = mock(PrefillEndpoint.class);
+        when(first.queuedRequestCountsByPriority()).thenReturn(Map.of(50, 2, 70, 1));
+        when(second.queuedRequestCountsByPriority()).thenReturn(Map.of(50, 3));
+        when(endpoints.snapshotPrefillEndpoints()).thenReturn(Map.of("p1", first, "p2", second));
+        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
+        SchedulerRuntime runtime = new SchedulerRuntime(mock(RequestRegistry.class), endpoints, reporter,
+                mock(RequestSchedulerReporter.class), mock(ConfigService.class), new QueueCapacity(),
+                new ModelMetaConfig());
+
+        runtime.report();
+        verify(reporter).reportBatcherQueueDepthByPriority("PREFILL", 50, 5);
+        verify(reporter).reportBatcherQueueDepthByPriority("PREFILL", 70, 1);
+        clearInvocations(reporter);
+        when(endpoints.snapshotPrefillEndpoints()).thenReturn(Map.of());
+        runtime.report();
+        verify(reporter, never()).reportBatcherQueueDepthByPriority(anyString(), anyInt(), anyInt());
+    }
+
+    @Test
+    void emptyEndpointDoesNotReportPriorityQueueDepth() {
+        EndpointRegistry endpoints = mock(EndpointRegistry.class);
+        PrefillEndpoint empty = mock(PrefillEndpoint.class);
+        when(empty.queuedRequestCountsByPriority()).thenReturn(Map.of());
+        when(endpoints.snapshotPrefillEndpoints()).thenReturn(Map.of("p1", empty));
+        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
+        SchedulerRuntime runtime = new SchedulerRuntime(mock(RequestRegistry.class), endpoints, reporter,
+                mock(RequestSchedulerReporter.class), mock(ConfigService.class), new QueueCapacity(),
+                new ModelMetaConfig());
+
+        runtime.report();
+
+        verify(reporter, never()).reportBatcherQueueDepthByPriority(anyString(), anyInt(), anyInt());
     }
 }

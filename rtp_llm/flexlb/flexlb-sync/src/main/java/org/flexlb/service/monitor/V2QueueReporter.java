@@ -51,13 +51,13 @@ public class V2QueueReporter {
 
     @PostConstruct
     public void init() {
-        monitor.register(DEPTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(OLDEST, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(PREFILL_INFLIGHT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(PREFILL_INFLIGHT_LIMIT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(WAIT, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        monitor.register(DEPTH, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
+        monitor.register(OLDEST, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
+        monitor.register(PREFILL_INFLIGHT, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
+        monitor.register(PREFILL_INFLIGHT_LIMIT, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
+        monitor.register(WAIT, FlexMetricType.TIMER, FlexPriorityType.NORMAL);
         for (String metric : new String[]{BLOCKED, ATTEMPTS, REJECTED}) {
-            monitor.register(metric, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+            monitor.register(metric, FlexMetricType.QPS, FlexPriorityType.NORMAL);
         }
     }
 
@@ -65,8 +65,8 @@ public class V2QueueReporter {
         if (request.stage() != stage) {
             return;
         }
-        FlexMetricTags tags = FlexMetricTags.of("queue", queueName(stage), "reason", reason.name(), "endpoint",
-                endpoint, "priority", String.valueOf(request.priority()));
+        FlexMetricTags tags = FlexMetricTags.of("queue", queueName(stage), "reason", reason.name(), "priority",
+                String.valueOf(request.priority()));
         report(ATTEMPTS, tags, 1L);
         if (request.recordBlock(stage, reason.name(), endpoint)) {
             report(BLOCKED, tags, 1L);
@@ -111,7 +111,7 @@ public class V2QueueReporter {
         report(AUTO_TPM_VICTIM_COUNT,
                 FlexMetricTags.of("case", scenario, "stage", fromQueue, "from_queue", fromQueue, "to_queue", toQueue,
                         "action", action, "incoming_priority", String.valueOf(preemptorPriority), "victim_priority",
-                        String.valueOf(victimPriority), "endpoint", endpoint),
+                        String.valueOf(victimPriority)),
                 1L);
     }
 
@@ -190,15 +190,14 @@ public class V2QueueReporter {
             endpoints.add(endpoint);
             FlexMetricTags tags = FlexMetricTags.of("endpoint", endpoint);
             report(PREFILL_INFLIGHT, tags, queue.inflightCount());
-            report(PREFILL_INFLIGHT_LIMIT, tags, limit);
         }
         for (String endpoint : previousPrefillEndpoints) {
             if (!endpoints.contains(endpoint)) {
                 FlexMetricTags tags = FlexMetricTags.of("endpoint", endpoint);
                 report(PREFILL_INFLIGHT, tags, 0L);
-                report(PREFILL_INFLIGHT_LIMIT, tags, 0L);
             }
         }
+        report(PREFILL_INFLIGHT_LIMIT, FlexMetricTags.of(), limit);
         previousPrefillEndpoints = Set.copyOf(endpoints);
     }
 

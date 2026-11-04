@@ -91,7 +91,7 @@ class DefaultBatchDispatcherTest {
                 MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS,
                 MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE,
                 MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE)) {
-            verify(monitor).register(metric, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+            verify(monitor).register(metric, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
             verify(monitor).report(metric, 0.0);
         }
     }

@@ -48,8 +48,8 @@ public class JvmGcMetricsReporter {
 
     @PostConstruct
     public void init() {
-        monitor.register(JVM_GC_COLLECTION_COUNT, FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
-        monitor.register(JVM_GC_PAUSE_TOTAL_MS, FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        monitor.register(JVM_GC_COLLECTION_COUNT, FlexMetricType.COUNTER, FlexPriorityType.NORMAL);
+        monitor.register(JVM_GC_PAUSE_TOTAL_MS, FlexMetricType.COUNTER, FlexPriorityType.NORMAL);
         String pid = Long.toString(ProcessHandle.current().pid());
         for (GarbageCollectorMXBean collector : collectors) {
             if (collector instanceof NotificationEmitter) {
@@ -99,7 +99,7 @@ public class JvmGcMetricsReporter {
     }
 
     /**
-     * Keeps zero-event collectors visible and preserves one-second counter samples between pauses.
+     * Keeps zero-event collectors visible between pauses; aggregation uses the registered priority.
      */
     @Scheduled(fixedRate = 1000L)
     public void reportHeartbeat() {

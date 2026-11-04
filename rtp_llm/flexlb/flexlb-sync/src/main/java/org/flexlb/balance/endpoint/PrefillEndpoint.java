@@ -193,6 +193,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /**
+     * Current queue sizes used for role-wide priority metrics.
+     */
+    public Map<Integer, Integer> queuedRequestCountsByPriority() {
+        return workerBatcher.queueSizeByPriority();
+    }
+
+    /**
      * Runs once, after every accepted generation handoff has released its hold.
      */
     @Override
@@ -543,16 +550,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
         String role = getStatus().getRole().name();
         int queueSize = workerBatcher.queueSize();
         reporter.reportBatcherQueueSize(role, engineIp, queueSize);
-        // Priority-bucketed batch queue length — single-report with priority tag.
-        // Empty queue fallback: report priority=0 depth=0 so tagged panels don't gap.
-        Map<Integer, Integer> sizeByPriority =
-                workerBatcher.queueSizeByPriority();
-        if (sizeByPriority.isEmpty()) {
-            reporter.reportBatcherQueueDepthByPriority(role, engineIp, 0, 0);
-        } else {
-            sizeByPriority.forEach((priority, size) ->
-                    reporter.reportBatcherQueueDepthByPriority(role, engineIp, priority, size));
-        }
         PrefillStats stats = prefillState.stats();
         reporter.reportInflightBatchCount(role, engineIp, stats.batchCount());
         if (configSupplier.get().getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH) {

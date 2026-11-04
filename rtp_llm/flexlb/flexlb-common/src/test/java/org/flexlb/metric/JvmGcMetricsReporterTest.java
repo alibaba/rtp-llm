@@ -75,6 +75,18 @@ class JvmGcMetricsReporterTest {
     }
 
     @Test
+    void registersGcCountersWithTwentySecondAggregation() {
+        FlexMonitor monitor = mock(FlexMonitor.class);
+        JvmGcMetricsReporter reporter = new JvmGcMetricsReporter(monitor, List.of());
+        reporter.init();
+        verify(monitor).register(JVM_GC_COLLECTION_COUNT, org.flexlb.enums.FlexMetricType.COUNTER,
+                org.flexlb.enums.FlexPriorityType.NORMAL);
+        verify(monitor).register(JVM_GC_PAUSE_TOTAL_MS, org.flexlb.enums.FlexMetricType.COUNTER,
+                org.flexlb.enums.FlexPriorityType.NORMAL);
+        reporter.close();
+    }
+
+    @Test
     void removesGcNotificationListenerWhenReporterCloses() throws Exception {
         GarbageCollectorMXBean bean = collector("G1 Young Generation");
         FlexMonitor monitor = mock(FlexMonitor.class);

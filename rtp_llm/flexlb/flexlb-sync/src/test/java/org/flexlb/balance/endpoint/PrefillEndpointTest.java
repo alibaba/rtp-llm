@@ -58,6 +58,8 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -1371,24 +1373,22 @@ class PrefillEndpointTest {
             BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
             slowEndpoint.reportBatchMetrics(reporter);
 
-            // Single-report with priority tag (no global untagged series)
             verify(reporter).reportBatcherQueueSize("PREFILL", "127.0.0.1:8080", 2);
-            // Priority buckets on the same routing.queue.length metric
-            verify(reporter).reportBatcherQueueDepthByPriority("PREFILL", "127.0.0.1:8080", 70, 1);
-            verify(reporter).reportBatcherQueueDepthByPriority("PREFILL", "127.0.0.1:8080", 0, 1);
+            assertEquals(Map.of(70, 1, 0, 1), slowEndpoint.queuedRequestCountsByPriority());
+            verify(reporter, never()).reportBatcherQueueDepthByPriority(any(), anyInt(), anyInt());
         } finally {
             slowEndpoint.close();
         }
     }
 
     @Test
-    void reportBatchMetricsEmitsPriorityZeroFallbackForEmptyQueue() {
+    void reportBatchMetricsReportsTotalDepthForEmptyQueue() {
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         endpoint.reportBatchMetrics(reporter);
 
         verify(reporter).reportBatcherQueueSize("PREFILL", "127.0.0.1:8080", 0);
-        // Empty queue fallback: single priority=0 depth=0 report so tagged panels don't gap
-        verify(reporter).reportBatcherQueueDepthByPriority("PREFILL", "127.0.0.1:8080", 0, 0);
+        assertTrue(endpoint.queuedRequestCountsByPriority().isEmpty());
+        verify(reporter, never()).reportBatcherQueueDepthByPriority(any(), anyInt(), anyInt());
     }
 
     @ParameterizedTest
@@ -1403,7 +1403,7 @@ class PrefillEndpointTest {
             metricsEndpoint.reportBatchMetrics(reporter);
 
             verify(reporter).reportBatcherQueueSize(role.name(), "127.0.0.1:8080", 0);
-            verify(reporter).reportBatcherQueueDepthByPriority(role.name(), "127.0.0.1:8080", 0, 0);
+            verify(reporter, never()).reportBatcherQueueDepthByPriority(any(), anyInt(), anyInt());
             verify(reporter).reportInflightBatchCount(role.name(), "127.0.0.1:8080", 0);
             verify(reporter).reportInflightRequestCount(role.name(), "127.0.0.1:8080", 0);
             verify(reporter).reportInflightMaxAgeMs(role.name(), "127.0.0.1:8080", 0L);

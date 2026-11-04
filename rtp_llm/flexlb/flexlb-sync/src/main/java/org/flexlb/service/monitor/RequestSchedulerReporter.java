@@ -75,27 +75,27 @@ public class RequestSchedulerReporter {
 
     @PostConstruct
     public void init() {
-        monitor.register(AUTO_TPM_REQUEST_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(AUTO_TPM_REQUEST_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
         monitor.register(AUTO_TPM_SCHEDULE_LATENCY_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_EVICTION_PLAN_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_EVICTION_COMMIT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_VICTIM_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_PREFILL_QUEUE_DEPTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_TTFT_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_PRIORITY_PREEMPT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_DECODE_RUNNING_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_DECODE_ACCEPTED_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_CANCEL_REQUEST_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_CANCEL_CONFIRM_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_CANCEL_TIMEOUT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_CANCEL_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_DECODE_ENGINE_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(AUTO_TPM_EVICTION_PLAN_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
+        monitor.register(AUTO_TPM_EVICTION_COMMIT_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
+        monitor.register(AUTO_TPM_VICTIM_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
+        monitor.register(AUTO_TPM_PREFILL_QUEUE_DEPTH, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
+        monitor.register(AUTO_TPM_TTFT_MS, FlexMetricType.TIMER, FlexPriorityType.NORMAL);
+        monitor.register(AUTO_TPM_PRIORITY_PREEMPT_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
+        monitor.register(AUTO_TPM_DECODE_RUNNING_COUNT, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
+        monitor.register(AUTO_TPM_DECODE_ACCEPTED_COUNT, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
+        monitor.register(AUTO_TPM_CANCEL_REQUEST_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
+        monitor.register(AUTO_TPM_CANCEL_CONFIRM_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
+        monitor.register(AUTO_TPM_CANCEL_TIMEOUT_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
+        monitor.register(AUTO_TPM_CANCEL_QPS, FlexMetricType.QPS, FlexPriorityType.NORMAL);
+        monitor.register(AUTO_TPM_DECODE_ENGINE_LOAD, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
         monitor.register(AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
-        monitor.register(REQUEST_LIFECYCLE_FAILURES_TOTAL, FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_VICTIM_KV_TOKENS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_DECODE_RESERVED_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_DECODE_SHADOW_KV_RESERVED, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(REQUEST_STATUS_UPDATE_TIMEOUT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(REQUEST_LIFECYCLE_FAILURES_TOTAL, FlexMetricType.COUNTER, FlexPriorityType.NORMAL);
+        monitor.register(AUTO_TPM_VICTIM_KV_TOKENS, FlexMetricType.TIMER, FlexPriorityType.NORMAL);
+        monitor.register(AUTO_TPM_DECODE_RESERVED_COUNT, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
+        monitor.register(AUTO_TPM_DECODE_SHADOW_KV_RESERVED, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
+        monitor.register(REQUEST_STATUS_UPDATE_TIMEOUT_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
         reportLifecycleFailureCounts();
         log.info("RequestSchedulerReporter initialized");
     }
@@ -312,9 +312,8 @@ public class RequestSchedulerReporter {
      * @param victimPriority normalized priority of the cancelled victim
      */
     public void reportCancelRequest(String endpoint, int victimPriority) {
-        monitor.report(AUTO_TPM_CANCEL_REQUEST_COUNT,
-                FlexMetricTags.of("endpoint", endpoint,
-                        "priority", String.valueOf(victimPriority)), 1.0);
+        monitor.report(AUTO_TPM_CANCEL_REQUEST_COUNT, FlexMetricTags.of("priority", String.valueOf(victimPriority)),
+                1.0);
     }
 
     /**
@@ -325,9 +324,8 @@ public class RequestSchedulerReporter {
      * @param victimPriority normalized priority of the cancelled victim
      */
     public void reportCancelConfirm(String endpoint, int victimPriority) {
-        monitor.report(AUTO_TPM_CANCEL_CONFIRM_COUNT,
-                FlexMetricTags.of("endpoint", endpoint,
-                        "priority", String.valueOf(victimPriority)), 1.0);
+        monitor.report(AUTO_TPM_CANCEL_CONFIRM_COUNT, FlexMetricTags.of("priority", String.valueOf(victimPriority)),
+                1.0);
     }
 
     /**
@@ -340,9 +338,8 @@ public class RequestSchedulerReporter {
      *                         whose eviction plan failed
      */
     public void reportCancelTimeout(String endpoint, int incomingPriority) {
-        monitor.report(AUTO_TPM_CANCEL_TIMEOUT_COUNT,
-                FlexMetricTags.of("endpoint", endpoint,
-                        "priority", String.valueOf(incomingPriority)), 1.0);
+        monitor.report(AUTO_TPM_CANCEL_TIMEOUT_COUNT, FlexMetricTags.of("priority", String.valueOf(incomingPriority)),
+                1.0);
     }
 
     /**

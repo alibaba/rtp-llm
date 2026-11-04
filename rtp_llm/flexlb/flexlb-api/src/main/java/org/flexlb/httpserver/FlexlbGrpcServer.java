@@ -125,16 +125,14 @@ public class FlexlbGrpcServer {
     }
 
     private void registerMetrics() {
-        monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS,
-                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS, FlexMetricType.GAUGE,
+                FlexPriorityType.NORMAL);
+        monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
+        monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
+        monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE, FlexMetricType.GAUGE,
+                FlexPriorityType.NORMAL);
+        monitor.register(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, FlexMetricType.COUNTER,
+                FlexPriorityType.NORMAL);
     }
 
     @Scheduled(fixedRate = 2000)

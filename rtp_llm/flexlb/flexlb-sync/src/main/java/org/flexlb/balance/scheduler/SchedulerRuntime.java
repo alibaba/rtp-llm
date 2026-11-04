@@ -17,6 +17,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Predicate;
@@ -183,7 +184,14 @@ final class SchedulerRuntime {
                     failure);
             return;
         }
+        Map<Integer, Integer> queueSizes = new HashMap<>();
         for (Map.Entry<String, PrefillEndpoint> entry : routingEndpoints.entrySet()) {
+            try {
+                Map<Integer, Integer> endpointQueueSizes = entry.getValue().queuedRequestCountsByPriority();
+                endpointQueueSizes.forEach((priority, size) -> queueSizes.merge(priority, size, Integer::sum));
+            } catch (RuntimeException failure) {
+                warnIsolated("Failed to read priority queue metrics: endpoint=" + entry.getKey(), failure);
+            }
             try {
                 entry.getValue().reportBatchMetrics(reporter);
             } catch (RuntimeException failure) {
@@ -201,6 +209,14 @@ final class SchedulerRuntime {
                             "Failed to report Prefill admission metrics: endpoint="
                                     + entry.getKey(), failure);
                 }
+            }
+        }
+        for (Map.Entry<Integer, Integer> queueSize : queueSizes.entrySet()) {
+            try {
+                reporter.reportBatcherQueueDepthByPriority(role.name(), queueSize.getKey(), queueSize.getValue());
+            } catch (RuntimeException failure) {
+                warnIsolated("Failed to report priority queue metrics: role=" + role
+                        + ", priority=" + queueSize.getKey(), failure);
             }
         }
     }
