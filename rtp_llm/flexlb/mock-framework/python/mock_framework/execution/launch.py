@@ -4,6 +4,7 @@ from ..config.validation import duration, fields, text
 from . import ExecutionError
 from .roles.prometheus import prepare_prometheus
 from .roles.engine import ROLES
+from .roles.master import validate_master_launch
 
 
 def prepare_launch(raw, case, base):
@@ -47,6 +48,9 @@ def prepare_launch(raw, case, base):
     missing = set(case.environment) - set(components)
     if missing:
         raise ExecutionError(f'Missing component launch recipes: {sorted(missing)}')
+    if 'master' in components:
+        validate_master_launch(case.environment['master']['config'], components['master']['env'],
+                               local_election=zookeeper is not None)
     mode = raw.get('engine_mode', 'shared')
     if mode not in ('shared', 'isolated'):
         raise ExecutionError('engine_mode must be shared or isolated')

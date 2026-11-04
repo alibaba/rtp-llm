@@ -100,3 +100,19 @@ def test_vision_uses_the_same_mixed_host_without_a_backend_tag(case, artifacts):
     case = replace(case, environment=environment)
     launch = local_launch(case, java, prometheus, framework=framework)
     assert launch['components']['vit'] == launch['components']['prefill']
+
+
+def test_launch_rejects_duplicate_master_business_setting(case, artifacts, tmp_path):
+    framework, java, prometheus = artifacts
+    launch = local_launch(case, java, prometheus, framework=framework)
+    launch['components']['master']['env'] = {'FLEXLB_CONFIG': case.environment['master']['config']['FLEXLB_CONFIG']}
+    with pytest.raises(ValueError, match='environment.master.config and launch.components.master.env'):
+        prepare_launch(launch, case, tmp_path)
+
+
+def test_launch_rejects_explicit_locally_assigned_master_identity(case, artifacts, tmp_path):
+    framework, java, prometheus = artifacts
+    launch = local_launch(case, java, prometheus, framework=framework)
+    launch['components']['master']['env'] = {'FLEXLB_ADVERTISED_IP': '127.0.0.1'}
+    with pytest.raises(ValueError, match='FLEXLB_ADVERTISED_IP is assigned'):
+        prepare_launch(launch, case, tmp_path)
