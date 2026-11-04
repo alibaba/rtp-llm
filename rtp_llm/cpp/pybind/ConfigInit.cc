@@ -517,6 +517,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("test_block_num", &KVCacheConfig::test_block_num)
         .def_readwrite("enable_sparse_kv_offload", &KVCacheConfig::enable_sparse_kv_offload)
         .def_readwrite("sparse_kv_offload_host_mb", &KVCacheConfig::sparse_kv_offload_host_mb)
+        .def_readwrite("sparse_kv_offload_hot_rows", &KVCacheConfig::sparse_kv_offload_hot_rows)
         .def_readwrite("sparse_kv_offload_test_hbm_blocks", &KVCacheConfig::sparse_kv_offload_test_hbm_blocks)
         .def_readwrite("use_block_cache", &KVCacheConfig::use_block_cache)
         .def_readwrite("enable_memory_cache", &KVCacheConfig::enable_memory_cache)
@@ -580,7 +581,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      10,
+                                      11,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -653,9 +654,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.swa_pool_blocks,
                                       self.enable_sparse_kv_offload,
                                       self.sparse_kv_offload_host_mb,
-                                      self.sparse_kv_offload_test_hbm_blocks);
+                                      self.sparse_kv_offload_test_hbm_blocks,
+                                      self.sparse_kv_offload_hot_rows);
             },
             [](py::tuple t) {
+                const py::tuple hot_rows_state = t;
+                const bool has_hot_rows =
+                    t.size() == 76 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 11;
+                if (has_hot_rows) {
+                    t    = t[py::slice(0, 75, 1)].cast<py::tuple>();
+                    t[1] = py::int_(10);
+                }
                 const py::tuple current_state = t;
                 const bool      has_current_fields =
                     t.size() == 75 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
@@ -814,6 +823,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.enable_sparse_kv_offload          = current_state[72].cast<bool>();
                     c.sparse_kv_offload_host_mb         = current_state[73].cast<int64_t>();
                     c.sparse_kv_offload_test_hbm_blocks = current_state[74].cast<int>();
+                }
+                if (has_hot_rows) {
+                    c.sparse_kv_offload_hot_rows = hot_rows_state[75].cast<int64_t>();
+                    if (c.sparse_kv_offload_hot_rows <= 0) {
+                        throw std::runtime_error("sparse_kv_offload_hot_rows must be positive");
+                    }
                 }
                 return c;
             }));

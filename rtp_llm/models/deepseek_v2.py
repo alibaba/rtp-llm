@@ -553,6 +553,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
 class DeepSeekV2(BaseModel):
     def _configure_sparse_kv_offload(self) -> None:
         from rtp_llm.ops import CacheOffloadPolicy
+        from rtp_llm.utils.sparse_kv_offload import sparse_kv_offload_max_selected_rows
 
         attn = self.model_config.attn_config
         if (
@@ -560,12 +561,12 @@ class DeepSeekV2(BaseModel):
             or self.model_config.mla_ops_type == MlaOpsType.MHA
         ):
             raise ValueError("sparse KV offload requires sparse MLA")
-        query_tokens = max(1, int(self.model_config.gen_num_per_cycle) + 1)
-        selected = self.max_generate_batch_size * query_tokens * attn.indexer_topk
-        if selected <= 0 or selected > torch.iinfo(torch.int32).max:
-            raise ValueError(
-                "sparse KV offload max_selected_rows must fit positive int32"
-            )
+        selected = sparse_kv_offload_max_selected_rows(
+            int(self.kv_cache_config.sparse_kv_offload_hot_rows),
+            int(attn.indexer_topk),
+            self.max_generate_batch_size,
+            int(self.model_config.gen_num_per_cycle),
+        )
         descs = self.model_config.kv_cache_spec_descs
         runtime_groups = {
             layer: source

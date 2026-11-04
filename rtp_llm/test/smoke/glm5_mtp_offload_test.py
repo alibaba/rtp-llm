@@ -3,6 +3,8 @@
 import json
 import logging
 import os
+import re
+import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -18,21 +20,66 @@ from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 class Glm5MtpOffloadTest(unittest.TestCase):
     def test_native_pd(self):
         role_size = int(os.getenv("RTP_GLM_MTP_ROLE_SIZE", "1"))
-        layers = int(os.getenv("RTP_GLM_MTP_LAYERS", "7"))
-        stable = os.getenv("RTP_GLM_MTP_STABLE_TOPK", "1") == "1"
+        layers = int(os.getenv("RTP_GLM_MTP_LAYERS", "4"))
+        stable = os.getenv("RTP_GLM_MTP_STABLE_TOPK", "0") == "1"
         comparison = os.getenv("RTP_GLM_MTP_COMPARE_IDS", "strict")
         self.assertIn(comparison, ("strict", "record"))
         kv_budget_mb = int(
             os.getenv("RTP_GLM_MTP_KV_MB", "16384" if layers == 78 else "2048")
         )
+        model_root = Path(os.getenv("RTP_TEST_MODEL_ROOT", "/mnt/nas1/hf"))
         model_path = str(
-            Path(os.getenv("RTP_TEST_MODEL_ROOT", "/mnt/nas1/hf"))
-            / "GLM-5.3-ms-4ed051d0"
+            model_root / os.getenv("RTP_GLM_MTP_CHECKPOINT", "GLM-5-FP8-4layer")
         )
         devices = list(get_gpu_ids())
         self.assertGreaterEqual(len(devices), 2 * role_size)
         output = Path(os.getenv("TEST_UNDECLARED_OUTPUTS_DIR", "."))
         output.mkdir(parents=True, exist_ok=True)
+        draft_source = Path(
+            os.getenv(
+                "RTP_GLM_MTP_DRAFT_CHECKPOINT", str(model_root / "GLM-5-BF16-4layer")
+            )
+        )
+        draft_config = json.loads((draft_source / "config.json").read_text())
+        draft_weights = json.loads(
+            (draft_source / "model.safetensors.index.json").read_text()
+        )["weight_map"]
+        mtp_layers = sorted(
+            {
+                int(match.group(1))
+                for key in draft_weights
+                if (
+                    match := re.fullmatch(r"model\.layers\.(\d+)\.eh_proj\.weight", key)
+                )
+            }
+        )
+        self.assertTrue(mtp_layers, f"No real NextN weights in {draft_source}")
+        # Cropped checkpoints can retain the original NextN layer number.
+        # Give the draft loader its original offset without copying weights
+        # or changing the target's four-layer configuration. Expose only the
+        # shards needed by NextN and its global weights to the fast loader.
+        draft_dir = tempfile.TemporaryDirectory(prefix="glm-mtp-", dir=output)
+        self.addCleanup(draft_dir.cleanup)
+        draft_path = draft_dir.name
+        draft_config["num_hidden_layers"] = mtp_layers[0] or 1
+        draft_config["num_nextn_predict_layers"] = len(mtp_layers)
+        draft_weights = {
+            key: shard
+            for key, shard in draft_weights.items()
+            if not key.startswith("model.layers.")
+            or any(key.startswith(f"model.layers.{layer}.") for layer in mtp_layers)
+        }
+        draft_shards = set(draft_weights.values())
+        for source in draft_source.iterdir():
+            if source.name in ("config.json", "model.safetensors.index.json"):
+                continue
+            if source.suffix == ".safetensors" and source.name not in draft_shards:
+                continue
+            (Path(draft_path) / source.name).symlink_to(source.resolve())
+        (Path(draft_path) / "config.json").write_text(json.dumps(draft_config))
+        (Path(draft_path) / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": draft_weights})
+        )
         ports = [MagaServerManager.get_free_port() for _ in range(2)]
         route = ServiceRoute(
             service_id="glm_mtp_offload",
@@ -57,7 +104,7 @@ class Glm5MtpOffloadTest(unittest.TestCase):
         )
         common = (
             f" --tp_size 1 --dp_size {role_size} --ep_size {role_size} --world_size {role_size}"
-            " --act_type BF16 --fp8_kv_cache 1 --load_method scratch --warm_up 0"
+            " --act_type BF16 --fp8_kv_cache 1"
             " --seq_size_per_block 256 --kernel_seq_size_per_block 128 --max_seq_len 4096"
             f" --max_context_batch_size 1 --concurrency_limit {2 * role_size}"
             f" --frontend_server_count 1 --kv_cache_mem_mb {kv_budget_mb} --reserver_runtime_mem_mb 2048"
@@ -68,6 +115,7 @@ class Glm5MtpOffloadTest(unittest.TestCase):
             common += f" --hack_layer_num {layers}"
         summaries = []
         baseline = None
+        mtp_baseline = None
         prefill = None
         prefill_mtp = None
         prompts = [
@@ -87,8 +135,9 @@ class Glm5MtpOffloadTest(unittest.TestCase):
                 "REMOTE_RPC_SERVER_IP": "localhost",
                 "REMOTE_SERVER_PORT": ports[1 - role],
                 "MODEL_SERVICE_CONFIG": route.model_dump_json(),
-                "RTP_LLM_DSA_MLA_DRAIN_BEFORE_MOE": "1",
                 "PYTORCH_ALLOC_CONF": "expandable_segments:True",
+                "FRONTEND_PRE_STOP_DRAIN_SECONDS": "0",
+                "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "0",
             }
             if stable:
                 env.update(
@@ -109,9 +158,18 @@ class Glm5MtpOffloadTest(unittest.TestCase):
                     else "fp8_per_block_ep_low_latency"
                 )
             else:
-                cli += " --use_deepep_moe 0 --use_all_gather 1 --moe_strategy fp8_per_block_no_dp_masked"
+                cli += " --use_deepep_moe 0 --use_all_gather 1"
+                if role == 1:
+                    # This single-rank FP8 backend supports both eager and
+                    # graph; auto uses a graph-unsafe hybrid MoE on SM100.
+                    cli += " --moe_strategy fp8_per_block_no_dp_masked"
             if mtp:
-                cli += f" --sp_type eagle --sp_model_type glm_5_mtp --sp_checkpoint_path {model_path} --gen_num_per_cycle 3"
+                cli += (
+                    f" --sp_type eagle --sp_model_type glm_5_mtp --sp_checkpoint_path {draft_path} --gen_num_per_cycle 3"
+                    # Quantize the real BF16 NextN checkpoint through the
+                    # loader, matching the target's FP8 MoE compute contract.
+                    " --sp_quantization FP8_PER_BLOCK"
+                )
             if offload:
                 cli += " --enable_sparse_kv_offload 1 --sparse_kv_offload_host_mb 1024 --sparse_kv_offload_test_hbm_blocks 2"
             manager = MagaServerManager(
@@ -184,6 +242,13 @@ class Glm5MtpOffloadTest(unittest.TestCase):
                 ]
                 for i in range(3 + 2 * role_size)
             ]
+            if resume > 1:
+                mtp_baseline = [
+                    json.loads(
+                        (output / f"mtp_1_graph_0_offload_0_{i}.json").read_text()
+                    )["output_ids"]
+                    for i in range(3 + 2 * role_size)
+                ]
         for mtp, graph, offload in modes[resume:]:
             label = f"mtp_{int(mtp)}_graph_{int(graph)}_offload_{int(offload)}"
             if prefill_mtp != mtp:
@@ -236,30 +301,52 @@ class Glm5MtpOffloadTest(unittest.TestCase):
                 self.assertEqual(ids[0], ids[2])
                 if baseline is None:
                     baseline = ids
-                mismatches = [
-                    dict(
-                        request=i,
-                        first_token=next(
-                            j
-                            for j, (x, y) in enumerate(zip(actual[0], expected[0]))
-                            if x != y
-                        ),
-                    )
-                    for i, (actual, expected) in enumerate(zip(ids, baseline))
-                    if actual != expected
-                ]
+                # Compare offload with the same speculative algorithm. Native
+                # FP8 FlashMLA changes split-K with query batch geometry; MTP
+                # verification can therefore differ from one-token decode even
+                # when Q and selected KV bytes are identical. Keep the serial
+                # MTP/non-MTP control strict and record the concurrent control
+                # separately, without accepting offload-induced differences.
+                if mtp:
+                    self.assertEqual(ids[:3], baseline[:3], label)
+                    if mtp_baseline is None:
+                        mtp_baseline = ids
+                    expected_ids = mtp_baseline
+                else:
+                    expected_ids = baseline
+
+                def differences(actual_ids, reference_ids):
+                    return [
+                        dict(
+                            request=i,
+                            first_token=next(
+                                j
+                                for j, (x, y) in enumerate(zip(actual[0], expected[0]))
+                                if x != y
+                            ),
+                        )
+                        for i, (actual, expected) in enumerate(
+                            zip(actual_ids, reference_ids)
+                        )
+                        if actual != expected
+                    ]
+
+                mismatches = differences(ids, expected_ids)
+                non_mtp_mismatches = differences(ids, baseline) if mtp else []
                 (output / f"{label}_comparison.json").write_text(
                     json.dumps(
                         dict(
                             comparison=comparison,
                             matched_requests=len(ids) - len(mismatches),
                             mismatches=mismatches,
+                            reference="mtp_1_graph_0_offload_0" if mtp else label,
+                            non_mtp_mismatches=non_mtp_mismatches,
                         ),
                         indent=2,
                     )
                 )
                 if comparison == "strict":
-                    self.assertEqual(ids, baseline, label)
+                    self.assertEqual(ids, expected_ids, label)
                 if graph:
                     session.post(
                         f"http://127.0.0.1:{decode.port}/set_log_level",
@@ -269,6 +356,7 @@ class Glm5MtpOffloadTest(unittest.TestCase):
                     generate((100, prompts[0]))
                 log = Path(decode.log_file_path).read_text(errors="replace")
                 if offload:
+                    self.assertIn("decode warmup runtime=", log)
                     self.assertRegex(log, r"sparse KV offload tag=default H=2 P=[1-9]")
                 if graph:
                     self.assertTrue(
@@ -301,6 +389,7 @@ class Glm5MtpOffloadTest(unittest.TestCase):
                         comparison=comparison,
                         matched_requests=len(ids) - len(mismatches),
                         mismatches=mismatches,
+                        non_mtp_mismatches=non_mtp_mismatches,
                         results=[result["aux_info"] for result in serial],
                         log=decode.log_file_path,
                     )

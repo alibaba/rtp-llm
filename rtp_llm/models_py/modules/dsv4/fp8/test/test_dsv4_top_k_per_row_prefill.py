@@ -216,6 +216,98 @@ def test_fast_topk_v2_short_inputs_topk_512_1024():
         _assert_equiv(out, logits, starts, ends, K, tag=f"fast_topk_v2_variable K={K}")
 
 
+def test_fast_topk_stable_cutoff_ties_and_output_order():
+    """Repeated scores must select the same keys in the same reduction order."""
+    from rtp_llm.models_py.kernels.cuda.fast_topk import (
+        fast_topk_transform_fused,
+        fast_topk_transform_ragged_fused,
+    )
+
+    for K, width in ((512, 526), (1024, 4096), (2048, 2384), (2048, 65536)):
+        starts = torch.tensor(
+            [0, 7, 13, 0, 3, 11, 5, 9], device="cuda", dtype=torch.int32
+        )
+        lengths = torch.tensor(
+            [width, width, K - 1, 0, width, width, width, width],
+            device="cuda",
+            dtype=torch.int32,
+        )
+        ends = starts + lengths
+        logits = torch.full((8, width + 16), 1e6, device="cuda")
+        for row, (start, length) in enumerate(zip(starts.tolist(), lengths.tolist())):
+            # An all-tied cutoff, a quantized score distribution with both
+            # stronger keys and cutoff ties, and short/empty padding rows.
+            scores = torch.ones(length, device="cuda")
+            if row == 1:
+                scores = (torch.arange(length, device="cuda") % 7).float() - 3
+            if row == 5:
+                scores = (
+                    1.001 + (torch.arange(length, device="cuda") % 128).float() * 1e-6
+                )
+            if row == 4:
+                scores.zero_()
+                scores[::2] = -0.0
+            if row in (6, 7):
+                # Construct subnormals through their bits: float arithmetic
+                # compiled with FTZ must not collapse their top-K ordering.
+                bits = torch.arange(length, device="cuda", dtype=torch.int32) % 128 + 1
+                if row == 7:
+                    bits = bits.bitwise_or(-2147483648)
+                scores = bits.view(torch.float32)
+            logits[row, start : start + length] = scores
+
+        expected = torch.full((8, K), -1, device="cuda", dtype=torch.int32)
+        for row, (start, length) in enumerate(zip(starts.tolist(), lengths.tolist())):
+            selected = (
+                torch.argsort(
+                    logits[row, start : start + length], descending=True, stable=True
+                )[:K]
+                .sort()
+                .values
+            )
+            expected[row, : selected.numel()] = selected.to(torch.int32)
+        for _ in range(8):
+            actual = _run_fast_topk(logits, starts, ends, K)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = _run_fast_topk(logits, starts, ends, K)
+        graph.replay()
+        torch.testing.assert_close(captured, expected, rtol=0, atol=0)
+        logits.neg_()
+        graph.replay()
+        for row, (start, length) in enumerate(zip(starts.tolist(), lengths.tolist())):
+            selected = (
+                torch.argsort(
+                    logits[row, start : start + length], descending=True, stable=True
+                )[:K]
+                .sort()
+                .values.to(torch.int32)
+            )
+            torch.testing.assert_close(
+                captured[row, : selected.numel()], selected, rtol=0, atol=0
+            )
+            assert (captured[row, selected.numel() :] == -1).all()
+        logits.neg_()
+        if K == 2048:
+            cu_q = torch.arange(9, device="cuda", dtype=torch.int32)
+            offsets = torch.tensor(
+                [3, 5, 9, 11, 17, 23, 27, 31], device="cuda", dtype=torch.int32
+            )
+            for _ in range(8):
+                paged = fast_topk_transform_fused(logits, lengths, cu_q, K)
+                # Decode windows start at zero; check it with the same inputs.
+                direct = _run_fast_topk(logits, torch.zeros_like(starts), lengths, K)
+                torch.testing.assert_close(paged, direct, rtol=0, atol=0)
+                ragged = fast_topk_transform_ragged_fused(
+                    logits, lengths, offsets, K, starts
+                )
+                shifted = torch.where(
+                    expected >= 0, expected + offsets[:, None], expected
+                )
+                torch.testing.assert_close(ragged, shifted, rtol=0, atol=0)
+
+
 def test_zero_length_row():
     """row_starts == row_ends → all -1."""
     logits, rs, re = _make(4, 1024, [1024, 0, 512, 0], seed=5)

@@ -1,21 +1,39 @@
+load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
+
 py_test(
     name = "dsv4_offload_gpu_test",
     srcs = ["dsv4_offload_gpu_test.py"],
     data = [
         "//rtp_llm/models_py/modules/dsv4/fp8/test:test_compressor_fp8_per_token.py",
         "//rtp_llm/models_py/modules/dsv4/fp8/test:test_flash_mla_decode_kernel_layout.py",
-        "//rtp_llm/models_py/modules/dsv4/fp8/test:test_mega_csa_rtp_eager.py",
-        "//rtp_llm/models_py/modules/dsv4/fp8/test:mega_attention_test_utils.py",
     ],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
     tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13"},
 )
 
+cuda13_sm100_py_test(
+    name = "dsv4_offload_mega_gpu_test",
+    srcs = ["dsv4_offload_mega_gpu_test.py", "dsv4_offload_gpu_test.py"],
+    data = [
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:test_compressor_fp8_per_token.py",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:test_flash_mla_decode_kernel_layout.py",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:test_mega_csa_rtp_eager.py",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:mega_attention_test_utils.py",
+    ],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:deep_gemm",
+    ],
+    timeout = "long",
+)
+
 py_test(
     name = "glm_indexshare_test",
     srcs = ["glm_indexshare_test.py"],
     deps = ["//rtp_llm:testlib"],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
 )
 
 py_test(
@@ -30,6 +48,9 @@ py_test(
 test_suite(
     name = "sparse_kv_offload_unit_tests",
     tests = [
+        ":dsv4_offload_gpu_test",
+        ":dsv4_offload_mega_gpu_test",
+        ":dsv4_offload_mega_gpu_test_x86",
         ":glm_indexshare_test",
         ":sparse_kv_offload_gpu_test",
         "//rtp_llm/config/test:kv_cache_config_pickle_test",

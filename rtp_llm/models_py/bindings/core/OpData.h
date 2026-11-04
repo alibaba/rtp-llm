@@ -108,6 +108,9 @@ struct GptModelInputs {
     // So, the model has different inference logic for target verify and normal inference.
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
+    // The executor sets the round's role before asynchronous preparation;
+    // target hidden states may not exist until after that preparation starts.
+    bool is_draft_extend = false;
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;

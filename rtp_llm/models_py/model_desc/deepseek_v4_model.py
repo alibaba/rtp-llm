@@ -1174,6 +1174,21 @@ class DeepSeekV4Model(GptModelBase):
         self.offload_plans = plans
         self._offload_signature = signature
 
+    def release_model_kv_cache_resources(self) -> None:
+        for layer in getattr(getattr(self, "v4", None), "layers", ()):
+            attn = layer.attn
+            attn._kv_cache = None
+            attn._block_tables_by_type = None
+
+    def release_model_offload_resources(self) -> None:
+        for layer in getattr(getattr(self, "v4", None), "layers", ()):
+            attn = layer.attn
+            attn.offload_plan = None
+            compressor = getattr(attn, "compressor", None)
+            if compressor is not None:
+                compressor.offload_plan = None
+                compressor.offload_staging = None
+
     def _should_capture_cuda_graph(self, attn: Any, is_target_verify: bool) -> bool:
         """Default: capture decode + verify, skip plain prefill.  MTP
         overrides to capture all cudagraph requests because the draft's
@@ -1223,6 +1238,8 @@ class DeepSeekV4Model(GptModelBase):
         Prefill runs eagerly (no graph). Decode uses its own sparse/compressed
         attention; the impl owns persistent metadata buffers updated in place
         by ``prepare_cuda_graph`` between replays."""
+        if getattr(self, "offload_plans", {}):
+            self.validate_sparse_kv_offload_inputs(inputs.attention_inputs)
         if cuda_graph_selection_mode == CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH:
             # DSV4 captures only decode/target-verify graphs; generation-prefill
             # capture would otherwise receive a decode impl, so degrade via the
@@ -1415,6 +1432,7 @@ class DeepSeekV4Model(GptModelBase):
             raise RuntimeError(
                 "DeepSeekV4Model.forward: PyModelInputs carries no attention inputs"
             )
+        self.validate_sparse_kv_offload_inputs(attn)
 
         # Subclass-overridable hidden-state preparation hooks.  When a
         # subclass (e.g. ``DeepSeekV4MtpModel``) overrides

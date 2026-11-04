@@ -7,6 +7,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import numpy as np
 import requests
 
 from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
@@ -15,7 +16,9 @@ from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
 
 class SparseKVOffloadModelTest(unittest.TestCase):
-    def _compare_model(self, checkpoint, model_type, fp8, layer_count=None):
+    def _compare_model(
+        self, checkpoint, model_type, fp8, layer_count=None, accuracy=False
+    ):
         indexshare = checkpoint.startswith("GLM-5.3")
         role_size = 1
         devices = list(get_gpu_ids())
@@ -44,7 +47,7 @@ class SparseKVOffloadModelTest(unittest.TestCase):
         )
         common = (
             f"--tp_size {role_size} --dp_size 1 --ep_size {role_size} --world_size {role_size} --act_type BF16"
-            " --warm_up 0 --seq_size_per_block 256 --kernel_seq_size_per_block 128"
+            " --seq_size_per_block 256 --kernel_seq_size_per_block 128"
             " --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 2"
             " --frontend_server_count 1"
             " --kv_cache_mem_mb 512 --reuse_cache 0 --enable_memory_cache 0"
@@ -70,6 +73,8 @@ class SparseKVOffloadModelTest(unittest.TestCase):
                     "FT_SERVER_TEST": "1",
                     "WORLD_SIZE": str(role_size),
                     "LOG_LEVEL": "INFO",
+                    "FRONTEND_PRE_STOP_DRAIN_SECONDS": "0",
+                    "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "0",
                     "GRPC_CLIENT_CHANNEL_BACKUP_POLL_INTERVAL_MS": "500",
                     "REMOTE_RPC_SERVER_IP": "localhost",
                     "REMOTE_SERVER_PORT": ports[1 - role],
@@ -104,11 +109,14 @@ class SparseKVOffloadModelTest(unittest.TestCase):
             "The record is "
             + "red green blue black white yellow. " * (400 if indexshare else 140),
         ]
+        if accuracy:
+            prompts[1] = "The record is " + "red green blue black white yellow. " * 340
+        logits_baselines = {}
         modes = (
-            (False, False, True),
-            (False, True, True),
-            (True, False, True),
-            (True, True, True),
+            (False, False, not accuracy),
+            (False, True, not accuracy),
+            (True, False, not accuracy),
+            (True, True, not accuracy),
         )
         if indexshare:
             modes += ((True, True, False),)
@@ -154,16 +162,20 @@ class SparseKVOffloadModelTest(unittest.TestCase):
                 if indexshare:
                     self.assertIn("SPARSE_OFFLOAD_TEST_STABLE_TOPK", startup)
                 if offload:
+                    self.assertIn("decode warmup runtime=", startup)
                     self.assertRegex(
                         startup, r"sparse KV offload tag=default H=2 P=[1-9]"
                     )
                 if graph:
                     self.assertIn("capture success for batch size", startup)
                 outputs = []
-                for index, prompt in enumerate(prompts + prompts[:1]):
+                logits = []
+                request_metrics = []
+                requests_to_run = prompts * 2 if accuracy else prompts + prompts[:1]
+                for index, prompt in enumerate(requests_to_run):
                     # DEBUG adds device synchronization; use it only for the
                     # final request that proves graph replay in the log.
-                    if graph and index == 2:
+                    if graph and index == len(requests_to_run) - 1:
                         response = session.post(
                             f"http://127.0.0.1:{decode.port}/set_log_level",
                             json={"log_level": "DEBUG"},
@@ -175,7 +187,7 @@ class SparseKVOffloadModelTest(unittest.TestCase):
                         json={
                             "prompt": prompt,
                             "generate_config": {
-                                "max_new_tokens": 12,
+                                "max_new_tokens": 32 if accuracy else 12,
                                 "top_k": 1,
                                 "top_p": 1.0,
                                 "random_seed": 42,
@@ -184,6 +196,11 @@ class SparseKVOffloadModelTest(unittest.TestCase):
                                 "return_input_ids": True,
                                 "return_output_ids": True,
                                 "aux_info": True,
+                                **(
+                                    {"min_new_tokens": 32, "return_logits": True}
+                                    if accuracy
+                                    else {}
+                                ),
                                 **(
                                     {
                                         "min_new_tokens": 12,
@@ -207,10 +224,19 @@ class SparseKVOffloadModelTest(unittest.TestCase):
                     self.assertNotIn("error_code", actual)
                     self.assertIs(actual.get("finished"), True)
                     self.assertTrue(actual["aux_info"]["pd_sep"])
+                    request_metrics.append(actual["aux_info"])
                     self.assertGreater(actual["aux_info"]["input_len"], 3 * 256)
                     if indexshare and index == 1:
                         self.assertGreater(actual["aux_info"]["input_len"], 2048)
                     self.assertTrue(actual["output_ids"][0])
+                    if accuracy:
+                        self.assertEqual(len(actual["output_ids"][0]), 32)
+                        self.assertGreater(len(actual["logits"][0]), 100000)
+                        values = np.asarray(actual["logits"], dtype=np.float32)
+                        self.assertTrue(np.isfinite(values).all())
+                        logits.append(values)
+                        if index % 2 == 1:
+                            self.assertGreater(actual["aux_info"]["input_len"], 2048)
                     if indexshare:
                         self.assertEqual(len(actual["output_ids"][0]), 12)
                         self.assertEqual(len(actual["logits"][0]), 15)
@@ -218,6 +244,64 @@ class SparseKVOffloadModelTest(unittest.TestCase):
                     else:
                         outputs.append(actual["output_ids"])
                 self.assertEqual(outputs[0], outputs[2])
+                if accuracy:
+                    self.assertEqual(outputs[1], outputs[3], "baseline must repeat")
+                    for repeated, original in ((2, 0), (3, 1)):
+                        np.testing.assert_allclose(
+                            logits[repeated],
+                            logits[original],
+                            rtol=1e-5,
+                            atol=1e-5,
+                            err_msg=f"{checkpoint} {label} baseline must repeat",
+                        )
+                    if not offload:
+                        logits_baselines[graph] = logits
+                    reference = logits_baselines[graph]
+                    differences = [
+                        float(np.max(np.abs(actual - expected)))
+                        for actual, expected in zip(logits, reference)
+                    ]
+                    (output_dir / f"{checkpoint}_{label}_accuracy.json").write_text(
+                        json.dumps(
+                            dict(
+                                requests=len(outputs),
+                                token_ids_equal=baseline is None or outputs == baseline,
+                                first_token_difference=[
+                                    next(
+                                        (
+                                            dict(
+                                                position=position,
+                                                actual=actual,
+                                                expected=expected,
+                                            )
+                                            for position, (
+                                                actual,
+                                                expected,
+                                            ) in enumerate(zip(current[0], previous[0]))
+                                            if actual != expected
+                                        ),
+                                        None,
+                                    )
+                                    for current, previous in zip(
+                                        outputs, baseline or outputs
+                                    )
+                                ],
+                                max_abs_logit_difference=differences,
+                                rtol=1e-5,
+                                atol=1e-5,
+                                request_metrics=request_metrics,
+                            ),
+                            indent=2,
+                        )
+                    )
+                    for index, (actual, expected) in enumerate(zip(logits, reference)):
+                        np.testing.assert_allclose(
+                            actual,
+                            expected,
+                            rtol=1e-5,
+                            atol=1e-5,
+                            err_msg=f"{checkpoint} {label} request {index}",
+                        )
                 if baseline is None:
                     baseline = outputs
                 else:

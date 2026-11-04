@@ -1,4 +1,5 @@
 import unittest
+import weakref
 from math import prod
 from types import MethodType, SimpleNamespace
 
@@ -632,6 +633,54 @@ class SparseOffloadRuntimeTest(_CudaStreamTestCase):
 class SparseMlaOffloadTest(_CudaStreamTestCase):
     seed = 93
 
+    def test_warmup_release_allows_new_storage_and_preserves_mtp_wrapper_identity(self):
+        from rtp_llm.models_py.model_desc.glm5_mtp import Glm5MtpModel
+
+        for model_type in (GenericMoeModel, Glm5MtpModel):
+            with self.subTest(model=model_type.__name__):
+                model = model_type.__new__(model_type)
+                torch.nn.Module.__init__(model)
+                model.config = SimpleNamespace(
+                    attn_config=SimpleNamespace(use_mla=True, is_sparse=True),
+                    kv_cache_spec_descs=offload_descs({0: (0, 1)}),
+                    gen_num_per_cycle=3,
+                )
+                model.max_generate_batch_size = 4
+                model.layers = []
+                for _ in range(2):
+                    attn = SimpleNamespace(
+                        attn_config=SimpleNamespace(kv_cache_dtype=KvCacheDataType.BASE)
+                    )
+                    attn.configure_offload = MethodType(
+                        MlaAttention.configure_offload, attn
+                    )
+                    model.layers.append(SimpleNamespace(self_attn=attn))
+                warmup = make_offload_test_cache(False)
+                model.initialize(SimpleNamespace(kv_cache=warmup))
+                runtime_ref = weakref.ref(model.offload_plans[0, "default"].runtime)
+                staging_ref = weakref.ref(
+                    model.layers[0].self_attn.offload_writer._pack_staging
+                )
+                self.assertEqual(staging_ref().numel(), 128 * 576)
+                if model_type is Glm5MtpModel:
+                    model.initialize(SimpleNamespace(kv_cache=warmup))
+                    self.assertIs(
+                        model.offload_plans[0, "default"].runtime, runtime_ref()
+                    )
+                model.initialize(SimpleNamespace(kv_cache=None))
+                model.release_kv_cache()  # Teardown is idempotent.
+                self.assertIsNone(runtime_ref())
+                self.assertIsNone(staging_ref())
+                self.assertIsNone(model.kv_cache)
+                self.assertEqual(model.offload_plans, {})
+                production = make_offload_test_cache(False)
+                model.initialize(SimpleNamespace(kv_cache=production))
+                self.assertEqual(
+                    model.offload_plans[0, "default"].storage.generations.data_ptr(),
+                    production.get_offload_storage(0, "default").generations.data_ptr(),
+                )
+                model.release_kv_cache()
+
     def test_plan_uses_physical_owner_resources(self):
         cache = make_offload_test_cache(False)
         plans = build_offload_plans(cache, offload_descs({0: (0,), 1: (1,)}))
@@ -694,13 +743,14 @@ class SparseMlaOffloadTest(_CudaStreamTestCase):
         self.assertTrue(plan.runtime.transfer_stream.query())
         self.assertFalse(plan.runtime._started)
 
-    def _compare_attention(self, fp8, graph):
-        cache = make_offload_test_cache(fp8)
+    def _compare_attention(self, fp8, graph, queries=1, top_k=128):
+        tokens = 2 * queries
+        cache = make_offload_test_cache(fp8, tokens * top_k)
         plan = build_offload_plans(cache, offload_descs({0: (0,)}))[0, "default"]
         storage = plan.runtime.storages[0]
         dtype = KvCacheDataType.FP8 if fp8 else KvCacheDataType.BASE
         writer = MlaKVCacheWriteOp(dtype)
-        writer.configure_offload(storage, 2)
+        writer.configure_offload(storage, tokens)
         width = 656 if fp8 else 576
         total = storage.total_blocks * storage.rows_per_block
         full = torch.empty(
@@ -722,12 +772,16 @@ class SparseMlaOffloadTest(_CudaStreamTestCase):
         storage.host_planes[0].copy_(full[4:])
         storage.generations.fill_(1)
         op_class = SparseMlaFp8Op if fp8 else SparseMlaOp
-        op = op_class(128, 512, 64, 128, 128, 1.0, 128)
-        reference = op_class(128, 512, 64, 128, 128, 1.0, 128)
+        op = op_class(128, 512, 64, 128, 128, 1.0, top_k)
+        reference = op_class(128, 512, 64, 128, 128, 1.0, top_k)
+        batch_indice = torch.arange(2, dtype=torch.int32).repeat_interleave(queries)
         params = SimpleNamespace(
-            batch_indice_d=torch.arange(2, dtype=torch.int32, device="cuda"),
-            batch_indice_h=torch.arange(2, dtype=torch.int32),
-            slot_mapping=torch.tensor([300, 700], dtype=torch.int64, device="cuda"),
+            batch_indice_d=batch_indice.cuda(),
+            batch_indice_h=batch_indice,
+            slot_mapping=(
+                torch.tensor([300, 700], dtype=torch.int64, device="cuda")[:, None]
+                + torch.arange(queries, device="cuda")
+            ).flatten(),
         )
         table = torch.tensor(
             [list(range(2, 12)), list(range(4, 12)) + [2, 3]],
@@ -736,14 +790,15 @@ class SparseMlaOffloadTest(_CudaStreamTestCase):
         )
         op.plan(params, table)
         reference.plan(params, table)
-        topk = torch.randint(0, 1280, (2, 1, 128), dtype=torch.int32, device="cuda")
+        topk = torch.randint(0, 1280, (tokens, 1, top_k), dtype=torch.int32, device="cuda")
         topk[0, 0, 0] = 44
         topk[1, 0, 0] = 188
         topk[..., 1] = topk[..., 0]
+        topk[..., 2:6] = torch.tensor([127, 128, 255, 256], device="cuda")
         topk[..., -1] = -1
-        q = torch.randn(2, 128, 576, dtype=torch.bfloat16, device="cuda")
-        ckv = torch.randn(2, 512, dtype=torch.bfloat16, device="cuda")
-        rope = torch.randn(2, 64, dtype=torch.bfloat16, device="cuda")
+        q = torch.randn(tokens, 128, 576, dtype=torch.bfloat16, device="cuda")
+        ckv = torch.randn(tokens, 512, dtype=torch.bfloat16, device="cuda")
+        rope = torch.randn(tokens, 64, dtype=torch.bfloat16, device="cuda")
 
         def run():
             plan.runtime.begin(op.translate_selection(topk))
@@ -774,7 +829,7 @@ class SparseMlaOffloadTest(_CudaStreamTestCase):
                 captured.replay()
             self.assertTrue(torch.isfinite(expected).all().item())
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-            packed = writer._pack_staging.view(torch.uint8).flatten(0, 1)[:2]
+            packed = writer._pack_staging.view(torch.uint8).flatten(0, 1)[:tokens]
             expected_bytes = full.view(torch.uint8).flatten(0, 1)[params.slot_mapping]
             self.assertTrue(torch.equal(packed, expected_bytes))
         self.stream.synchronize()
@@ -794,6 +849,11 @@ class SparseMlaOffloadTest(_CudaStreamTestCase):
         for graph in (False, True):
             with self.subTest(graph=graph):
                 self._compare_attention(True, graph)
+
+    def test_fp8_verify_topk_2048_crosses_native_pages(self):
+        for graph in (False, True):
+            with self.subTest(graph=graph):
+                self._compare_attention(True, graph, queries=4, top_k=2048)
 
     def test_dummy_writes_are_private_staging_only(self):
         for fp8 in (False, True):

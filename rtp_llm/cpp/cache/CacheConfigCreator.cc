@@ -404,11 +404,23 @@ CacheConfig CacheConfigCreator::createWarmupConfig(const ModelConfig&       mode
                                                    const KVCacheConfig&     kv_cache_config,
                                                    int                      gen_num_per_cycle) {
     auto config = createBasicConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
-    config.finalizeBlockNums(2, RuntimeConfig{});
+    // Keep real offload geometry and selection capacity, but only enough backing
+    // for the reserved HBM block, one writable HBM block and one host block.
+    const uint32_t blocks = kv_cache_config.enable_sparse_kv_offload ? 3 : 2;
+    config.finalizeBlockNums(blocks, RuntimeConfig{});
     auto groups = config.topology().groups();
     for (auto& group : groups) {
-        group.block_num = 2;
+        group.block_num = blocks;
+        if (kv_cache_config.enable_sparse_kv_offload && group.policy.offload.enabled) {
+            RTP_LLM_CHECK_WITH_INFO(group.policy.offload.max_selected_rows > 0,
+                                    "offload warmup requires a positive selection for tag=%s",
+                                    group.tag.c_str());
+            config.tiered_cache_configs.emplace(
+                group.tag, TieredCacheConfig{blocks, 2, group.policy.offload.max_selected_rows});
+        }
     }
+    RTP_LLM_CHECK_WITH_INFO(!kv_cache_config.enable_sparse_kv_offload || !config.tiered_cache_configs.empty(),
+                            "offload warmup requires at least one declared offload group");
     config.setTopology(std::move(groups), config.topology().layers());
     return config;
 }

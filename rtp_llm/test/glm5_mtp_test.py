@@ -86,7 +86,11 @@ class Glm5MtpTest(unittest.TestCase):
         config.attn_config.tokens_per_block = 256
         config.attn_config.kernel_tokens_per_block = 128
         Glm5Mtp._post_build_model_config(config)
-        model = SimpleNamespace(model_config=config, max_generate_batch_size=2)
+        model = SimpleNamespace(
+            model_config=config,
+            max_generate_batch_size=2,
+            kv_cache_config=SimpleNamespace(sparse_kv_offload_hot_rows=2048),
+        )
         DeepSeekV2._configure_sparse_kv_offload(model)
         main = next(
             desc for desc in config.kv_cache_spec_descs[0] if desc.tag == "default"

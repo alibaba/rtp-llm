@@ -642,13 +642,14 @@ class DeepSeekV4(DeepSeekV2):
             )
         if self.model_config.attn_config.kv_cache_dtype != KvCacheDataType.FP8:
             raise ValueError("V4 sparse KV offload requires FP8 KV cache")
-        selected = (
-            self.max_generate_batch_size
-            * max(1, int(self.model_config.gen_num_per_cycle) + 1)
-            * int(self.model_config.attn_config.indexer_topk)
+        from rtp_llm.utils.sparse_kv_offload import sparse_kv_offload_max_selected_rows
+
+        selected = sparse_kv_offload_max_selected_rows(
+            int(self.kv_cache_config.sparse_kv_offload_hot_rows),
+            int(self.model_config.attn_config.indexer_topk),
+            self.max_generate_batch_size,
+            int(self.model_config.gen_num_per_cycle),
         )
-        if not 0 < selected <= torch.iinfo(torch.int32).max:
-            raise ValueError("V4 offload max_selected_rows must fit positive int32")
         descs = self.model_config.kv_cache_spec_descs
         for layer in descs:
             for desc in layer:

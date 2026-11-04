@@ -245,6 +245,23 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.block_tree_disk_evict_low_watermark_ratio, 0.73)
         self.assertEqual(config.block_tree_disk_evict_high_watermark_ratio, 0.83)
 
+    def test_sparse_offload_hot_rows_default_env_and_cli(self):
+        with patch.dict("os.environ", _jit_env(), clear=True):
+            self.assertEqual(
+                setup_args([]).kv_cache_config.sparse_kv_offload_hot_rows, 2048
+            )
+        with patch.dict(
+            "os.environ", _jit_env(SPARSE_KV_OFFLOAD_HOT_ROWS="4096"), clear=True
+        ):
+            self.assertEqual(
+                setup_args([]).kv_cache_config.sparse_kv_offload_hot_rows, 4096
+            )
+            self.assertEqual(
+                setup_args(["--sparse_kv_offload_hot_rows", "8192"])
+                .kv_cache_config.sparse_kv_offload_hot_rows,
+                8192,
+            )
+
     def test_kv_cache_strategy_defaults_are_rollback_safe(self):
         config = PyEnvConfigs().kv_cache_config
 
@@ -435,8 +452,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 75)
-        self.assertEqual(state[:2], ("KVCacheConfig", 10))
+        self.assertEqual(len(state), 76)
+        self.assertEqual(state[:2], ("KVCacheConfig", 11))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)

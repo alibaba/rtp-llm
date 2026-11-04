@@ -97,6 +97,9 @@ class GptModelBase(nn.Module):
         return self._capture_context.for_forward(requested)
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
+        if init_resource.kv_cache is None:
+            self.release_kv_cache()
+            return True
         self.kv_cache = init_resource.kv_cache
         if self.kv_cache is not None:
             logging.info(
@@ -106,6 +109,30 @@ class GptModelBase(nn.Module):
             )
         return True
 
+    def release_model_kv_cache_resources(self) -> None:
+        """Release model-specific references to the cache being detached."""
+
+    def release_model_offload_resources(self) -> None:
+        """Release attention adapters and staging separately from other state."""
+
+    def release_sparse_kv_offload(self) -> None:
+        """Release only buffers separately budgeted by offload capacity sizing."""
+        runtimes = {
+            plan.runtime for plan in getattr(self, "offload_plans", {}).values()
+        }
+        for runtime in runtimes:
+            runtime.drain()
+            runtime.transfer_stream.synchronize()
+        self.release_model_offload_resources()
+        self.offload_plans = {}
+        self._offload_signature = None
+
+    def release_kv_cache(self) -> None:
+        """Detach temporary warmup storage before production capacity is sized."""
+        self.release_sparse_kv_offload()
+        self.release_model_kv_cache_resources()
+        self.kv_cache = None
+
     def reset_sparse_kv_offload(self) -> None:
         runtimes = {
             plan.runtime for plan in getattr(self, "offload_plans", {}).values()
@@ -114,6 +141,25 @@ class GptModelBase(nn.Module):
             runtime.drain()
             runtime.reset()
 
+    def validate_sparse_kv_offload_inputs(self, attention_inputs: Any) -> None:
+        if not getattr(self, "offload_plans", {}):
+            return
+        groups = (
+            attention_inputs.values()
+            if isinstance(attention_inputs, Mapping)
+            else (attention_inputs,)
+        )
+        for attn in groups:
+            if (
+                bool(getattr(attn, "is_prefill", False))
+                and not bool(getattr(attn, "is_target_verify", False))
+                and not bool(getattr(attn, "is_draft_extend", False))
+            ):
+                raise ValueError(
+                    "sparse KV offload does not support ordinary context prefill; "
+                    "only decode, target verify and draft extend are supported"
+                )
+
     def prepare_fmha_impl(
         self,
         inputs: PyModelInputs,
@@ -121,6 +167,7 @@ class GptModelBase(nn.Module):
         cuda_graph_selection_mode: Optional[str] = None,
     ) -> AttentionImpl | dict[str, AttentionImpl]:
         attention_inputs = get_attention_inputs_value(inputs)
+        self.validate_sparse_kv_offload_inputs(attention_inputs)
         if isinstance(attention_inputs, Mapping):
             fmha_group_tags = self._get_fmha_group_tags()
             selected_group_inputs = (

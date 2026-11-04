@@ -2998,6 +2998,47 @@ TEST_F(KVCacheManagerTest, OffloadCapacityChargesSharedRuntimeOnceButKeepsBothSt
     EXPECT_EQ(CacheConfigCreator::createConfig(model, {}, options).offload_runtime_counts.at("default"), 2u);
 }
 
+TEST_F(KVCacheManagerTest, WarmupOffloadPublishesRealStorageWithDeploymentSelectionCapacity) {
+    ModelConfig model;
+    model.num_layers                   = 2;
+    model.data_type                    = TYPE_BF16;
+    model.attn_config.use_mla           = true;
+    model.attn_config.kv_lora_rank      = 16;
+    model.attn_config.rope_head_dim     = 8;
+    model.attn_config.tokens_per_block = 8;
+    model.attn_config.kernel_tokens_per_block = 4;
+    KVCacheSpecDesc desc;
+    desc.tag        = "default";
+    desc.cache_type = MultiHeadLatentAttention;
+    desc.offload    = CacheOffloadPolicy{true, 257};
+    model.kv_cache_spec_descs = {{desc}, {desc}};
+    KVCacheConfig options;
+    options.enable_sparse_kv_offload = true;
+    // Production capacity overrides must not enlarge the temporary backing.
+    options.test_block_num = 10000;
+    options.sparse_kv_offload_host_mb = 1024;
+    options.sparse_kv_offload_test_hbm_blocks = 100;
+    const auto config = CacheConfigCreator::createWarmupConfig(model, {}, options, 3);
+    auto manager = std::make_shared<KVCacheManager>(config, true);
+    ASSERT_TRUE(manager->init());
+    const auto layout = manager->getMainModelGroupedCacheLayerLayout();
+    for (int layer = 0; layer < 2; ++layer) {
+        const auto storage = layout.at("default", layer).offload;
+        ASSERT_NE(storage, nullptr);
+        EXPECT_EQ(storage->total_blocks, 3u);
+        EXPECT_EQ(storage->hbm_blocks, 2u);
+        EXPECT_EQ(storage->max_selected_rows, 257u);
+        ASSERT_FALSE(storage->host_planes.empty());
+        EXPECT_TRUE(storage->host_planes.front().is_pinned());
+        EXPECT_EQ(storage->host_planes.front().size(0), 2);
+        EXPECT_EQ(storage->resident_planes.front().size(0), 4 + 65);
+    }
+    options.enable_sparse_kv_offload = false;
+    const auto legacy = CacheConfigCreator::createWarmupConfig(model, {}, options);
+    EXPECT_TRUE(legacy.tiered_cache_configs.empty());
+    EXPECT_EQ(legacy.group("default").block_num, 2u);
+}
+
 TEST_F(KVCacheManagerTest, OffloadMtpBudgetsDraftAndProjectsItsStorageToLocalLayer) {
     ModelConfig model;
     model.num_layers                   = 2;

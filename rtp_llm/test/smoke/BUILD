@@ -22,6 +22,29 @@ custom_smoke_test(
     data = ["//rtp_llm:sdk", "offload_test_hooks/sitecustomize.py"],
 )
 
+custom_smoke_test(
+    name = "dsv4_sparse_kv_offload_accuracy_model_test",
+    main = "dsv4_sparse_kv_offload_accuracy_test.py",
+    args = ["Dsv4SparseKVOffloadAccuracyTest.test_full_model_dspark_pd"],
+    smoke_args = "--world_size 4",
+    gpu_type = ["SM103_CU13"],
+    tags = ["model_contract", "pd_contract", "accuracy_contract"],
+    data = ["//rtp_llm:sdk"],
+)
+
+custom_smoke_test(
+    name = "sparse_kv_offload_accuracy_model_test",
+    main = "sparse_kv_offload_accuracy_test.py",
+    args = [
+        "SparseKVOffloadAccuracyTest.test_glm_fp8_accuracy",
+        "SparseKVOffloadAccuracyTest.test_deepseek_v32_accuracy",
+    ],
+    smoke_args = "--world_size 2",
+    gpu_type = ["SM103_CU13"],
+    tags = ["model_contract", "pd_contract", "accuracy_contract"],
+    data = ["//rtp_llm:sdk", "sparse_kv_offload_test.py"],
+)
+
 py_test(
     name = "disk_path_preparation_test",
     srcs = glob(

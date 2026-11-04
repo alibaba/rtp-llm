@@ -150,6 +150,7 @@ std::string KVCacheConfig::to_string() const {
         << "test_block_num: " << test_block_num << "\n"
         << "enable_sparse_kv_offload: " << enable_sparse_kv_offload << "\n"
         << "sparse_kv_offload_host_mb: " << sparse_kv_offload_host_mb << "\n"
+        << "sparse_kv_offload_hot_rows: " << sparse_kv_offload_hot_rows << "\n"
         << "sparse_kv_offload_test_hbm_blocks: " << sparse_kv_offload_test_hbm_blocks << "\n"
         << "use_block_cache: " << use_block_cache << "\n"
         << "enable_device_cache: " << enable_device_cache << "\n"

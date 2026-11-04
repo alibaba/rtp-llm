@@ -19,14 +19,15 @@ class KVCacheConfigPickleTest(TestCase):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 state = config.__getstate__()
-                self.assertEqual(len(state), 75)
-                self.assertEqual(state[:2], ("KVCacheConfig", 10))
+                self.assertEqual(len(state), 76)
+                self.assertEqual(state[:2], ("KVCacheConfig", 11))
                 self.assertEqual(
                     state[64:69], tuple(KV_CACHE_EVENT_FIELD_VALUES.values())
                 )
                 self.assertIs(state[69], enable_crc)
                 self.assertEqual(state[70:72], (0, 0))
                 self.assertEqual(state[72:75], (False, 0, 0))
+                self.assertEqual(state[75], 2048)
                 # Normalizing old fields must not mutate the supplied tuple.
                 original_state = tuple(list(state))
                 direct = KVCacheConfig.__new__(KVCacheConfig)
@@ -155,6 +156,17 @@ class KVCacheConfigPickleTest(TestCase):
         for name in values:
             self.assertEqual(getattr(restored, name), getattr(defaults, name))
         self.assertFalse(restored.enable_sparse_kv_offload)
+
+    def test_hot_rows_round_trip_and_version_ten_default(self):
+        source = KVCacheConfig()
+        source.sparse_kv_offload_hot_rows = 4096
+        restored = pickle.loads(pickle.dumps(source))
+        self.assertEqual(restored.sparse_kv_offload_hot_rows, 4096)
+        state = source.__getstate__()
+        previous = (state[0], 10, *state[2:75])
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(previous)
+        self.assertEqual(restored.sparse_kv_offload_hot_rows, 2048)
 
     def test_version_eight_preserves_legacy_offload_fields(self):
         source = KVCacheConfig()

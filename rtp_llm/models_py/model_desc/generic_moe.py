@@ -490,6 +490,8 @@ class GenericMoeModel(GptModelBase):
         )
 
     def initialize(self, init_resource) -> bool:
+        if init_resource.kv_cache is None:
+            return super().initialize(init_resource)
         self.offload_plans = {}
         descs = self.config.kv_cache_spec_descs
         if any(
@@ -511,6 +513,12 @@ class GenericMoeModel(GptModelBase):
                 * max(1, int(self.config.gen_num_per_cycle) + 1),
             )
         return super().initialize(init_resource)
+
+    def release_model_offload_resources(self) -> None:
+        for layer, _tag in getattr(self, "offload_plans", {}):
+            attn = self.layers[layer].self_attn
+            attn.offload_plan = None
+            attn.offload_writer = None
 
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
         if self._uses_sparse_mla():
@@ -581,6 +589,8 @@ class GenericMoeModel(GptModelBase):
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         try:
+            if inputs is not None and getattr(self, "offload_plans", {}):
+                self.validate_sparse_kv_offload_inputs(inputs.attention_inputs)
             return self._forward(inputs, fmha_impl)
         except Exception:
             if (

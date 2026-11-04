@@ -17,6 +17,7 @@ from rtp_llm.ops.compute_ops import (
     CacheStoreWriter,
     KVCache,
     LayerKVCache,
+    OffloadStorage,
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
@@ -135,6 +136,7 @@ class PyModelInputsCompatTest(unittest.TestCase):
             ("CacheStoreWriter", CacheStoreWriter),
             ("KVCache", KVCache),
             ("LayerKVCache", LayerKVCache),
+            ("OffloadStorage", OffloadStorage),
             ("PyAttentionInputs", PyAttentionInputs),
         ):
             with self.subTest(class_name=class_name):

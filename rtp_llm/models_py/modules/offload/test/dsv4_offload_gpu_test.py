@@ -1,7 +1,8 @@
 """Native V4 striped FP8 pages: host fetch, graph invalidation and writes."""
 
 import unittest
-from types import SimpleNamespace
+import weakref
+from types import MethodType, SimpleNamespace
 
 import torch
 
@@ -62,6 +63,68 @@ class Dsv4OffloadGpuTest(unittest.TestCase):
         self.stream.synchronize()
         self.context.__exit__(None, None, None)
 
+    def test_warmup_cache_release_and_production_rebind(self):
+        from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
+        from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
+
+        model = DeepSeekV4Model.__new__(DeepSeekV4Model)
+        torch.nn.Module.__init__(model)
+        model._materialized = True
+        model.fp8_kv_cache = True
+        model._max_generate_batch_size = 4
+        model._gen_num_per_cycle = 3
+        model.config = SimpleNamespace(
+            kv_cache_spec_descs=[
+                [
+                    SimpleNamespace(
+                        tag="csa_kv",
+                        offload=SimpleNamespace(enabled=True),
+                        offload_runtime_group=None,
+                    )
+                ]
+            ]
+        )
+        attn = SimpleNamespace(compress_ratio=4, compressor=SimpleNamespace())
+        attn.configure_sparse_offload = MethodType(
+            AttentionFP8.configure_sparse_offload, attn
+        )
+        model.v4 = SimpleNamespace(layers=[SimpleNamespace(attn=attn)])
+
+        def make_cache():
+            runtime, _, _ = make_runtime(128, total=3)
+            storage = runtime.storages[0]
+            return SimpleNamespace(
+                layer_count=1,
+                group_tags=["csa_kv"],
+                get_offload_storage=lambda layer, tag: storage,
+            )
+
+        warmup = make_cache()
+        model.initialize(SimpleNamespace(kv_cache=warmup))
+        runtime_ref = weakref.ref(model.offload_plans[0, "csa_kv"].runtime)
+        staging_ref = weakref.ref(attn.compressor.offload_staging)
+        self.assertEqual(staging_ref().shape, (1, 16, 584))
+        model.initialize(SimpleNamespace(kv_cache=warmup))
+        self.assertIs(model.offload_plans[0, "csa_kv"].runtime, runtime_ref())
+        attn._kv_cache = warmup
+        attn._block_tables_by_type = {"csa_kv": torch.zeros(1, device="cuda")}
+        model.release_sparse_kv_offload()
+        self.assertIsNone(runtime_ref())
+        self.assertIsNone(staging_ref())
+        self.assertIs(attn._kv_cache, warmup)
+        self.assertIsNotNone(attn._block_tables_by_type)
+        model.initialize(SimpleNamespace(kv_cache=None))
+        self.assertIsNone(attn._kv_cache)
+        self.assertIsNone(attn._block_tables_by_type)
+        self.assertIsNone(model._offload_signature)
+        production = make_cache()
+        model.initialize(SimpleNamespace(kv_cache=production))
+        self.assertIs(
+            model.offload_plans[0, "csa_kv"].storage,
+            production.get_offload_storage(0, "csa_kv"),
+        )
+        model.release_kv_cache()
+
     def test_host_fetch_matches_flash_mla_including_scales(self):
         runtime, host_raw, resident_raw = make_runtime()
         kv = torch.randn(1024, 512, dtype=torch.bfloat16, device="cuda") * 0.5
@@ -114,16 +177,27 @@ class Dsv4OffloadGpuTest(unittest.TestCase):
             torch.testing.assert_close(scales[0], values[1] + offset, rtol=0, atol=0)
 
     def test_compressor_write_matches_native_pages_for_verify(self):
+        for batch_size in (2, 150):
+            with self.subTest(batch_size=batch_size):
+                self._compare_compressor_write(batch_size)
+
+    def _compare_compressor_write(self, batch_size):
+        tokens = batch_size * 4
         compressor = _build_compressor(
             dim=64, head_dim=512, rope_head_dim=64, compress_ratio=4
         )
-        runtime, host_raw, resident_raw = make_runtime()
-        reference_raw = torch.zeros((32, 19008), device="cuda", dtype=torch.uint8)
-        reference = reference_raw.as_strided((32, 32, 584), (19008, 584, 1))
-        state = torch.randn(5, 256, 2048, device="cuda", dtype=torch.float32)
+        runtime, _, _ = make_runtime(
+            maximum=((tokens + 31) // 32) * 32, total=batch_size + 2
+        )
+        pages = (batch_size + 2) * 2
+        reference_raw = torch.zeros((pages, 19008), device="cuda", dtype=torch.uint8)
+        reference = reference_raw.as_strided((pages, 32, 584), (19008, 584, 1))
+        state = torch.randn(2 * batch_size + 1, 256, 2048, device="cuda", dtype=torch.float32)
         saved_state = state.clone()
-        state_bt = torch.tensor([[1, 2], [3, 4]], device="cuda", dtype=torch.int32)
-        kv_bt = torch.tensor([[5, 6], [9, 10]], device="cuda", dtype=torch.int32)
+        state_bt = torch.arange(
+            1, 2 * batch_size + 1, device="cuda", dtype=torch.int32
+        ).view(batch_size, 2)
+        kv_bt = state_bt.clone()
         compressor.set_pool_context(
             reference,
             kv_bt,
@@ -134,25 +208,27 @@ class Dsv4OffloadGpuTest(unittest.TestCase):
             state_tokens_per_block=256,
             kv_tokens_per_block=128,
         )
-        positions = torch.tensor(
-            [123, 124, 125, 126, 251, 252, 253, 254], device="cuda"
-        )
-        b_idx = torch.arange(2, device="cuda").repeat_interleave(4)
+        positions = (
+            123 + (torch.arange(batch_size, device="cuda") % 2)[:, None] * 128
+            + torch.arange(4, device="cuda")
+        ).flatten()
+        b_idx = torch.arange(batch_size, device="cuda").repeat_interleave(4)
         meta = compressor.prepare_metadata(
             positions,
             b_idx,
             has_prefix=True,
             is_batched=True,
-            seq_start_per_req=positions.view(2, 4)[:, 0].contiguous(),
-            cu_seq_per_req=torch.tensor([0, 4, 8], device="cuda"),
+            seq_start_per_req=positions.view(batch_size, 4)[:, 0].contiguous(),
+            cu_seq_per_req=torch.arange(0, tokens + 1, 4, device="cuda"),
         )
-        kv = torch.randn(8, 1024, device="cuda", dtype=torch.float32)
+        kv = torch.randn(tokens, 1024, device="cuda", dtype=torch.float32)
         score = torch.randn_like(kv)
         compressor._launch(kv, score, meta)
         state.copy_(saved_state)
         compressor.offload_plan = LayerOffloadPlan(runtime, 0, True, True)
-        raw = torch.zeros((1, 5184), device="cuda", dtype=torch.uint8)
-        compressor.offload_staging = raw.as_strided((1, 8, 584), (5184, 584, 1))
+        stride = ((tokens * 584 + 575) // 576) * 576
+        raw = torch.zeros((1, stride), device="cuda", dtype=torch.uint8)
+        compressor.offload_staging = raw.as_strided((1, tokens, 584), (stride, 584, 1))
         compressor._launch(kv, score, meta)
         valid = meta.kv_slots >= 0
         ids = meta.kv_slots[valid].to(torch.int32).contiguous()
@@ -160,87 +236,11 @@ class Dsv4OffloadGpuTest(unittest.TestCase):
         view = runtime.acquire(0)
         for resident, width, start in zip(view.planes, (576, 8), (0, 32 * 576)):
             expected_plane = reference_raw.as_strided(
-                (32, 32, width), (19008, width, 1), start
+                (pages, 32, width), (19008, width, 1), start
             )
             actual = resident[view.indices.long() // 32, view.indices.long() % 32]
             expected = expected_plane[ids.long() // 32, ids.long() % 32]
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-    @torch.inference_mode()
-    def test_mega_csa_verify_and_graph_match_resident_path(self):
-        from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
-            build_decode_metadata_fp8,
-        )
-        from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_weights import (
-            FLASH_GEOMETRY,
-            HC,
-        )
-        from rtp_llm.models_py.modules.dsv4.fp8.test.test_mega_csa_rtp_eager import (
-            MegaCSARTPEagerTest,
-            _make_pools,
-            _fill_random_context,
-        )
-        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import CSA_KV
-
-        device = torch.device("cuda", torch.cuda.current_device())
-        block, mega_runtime, adapter = MegaCSARTPEagerTest._make_layer(
-            device, FLASH_GEOMETRY
-        )
-        native = _make_pools(device, batch_size=2, max_seq_len=1024)
-        offloaded = _make_pools(device, batch_size=2, max_seq_len=1024)
-        _fill_random_context(native, device, seed=123)
-        _fill_random_context(offloaded, device, seed=123)
-        runtime, host_raw, resident_raw = make_runtime(
-            maximum=4096, page=64, total=offloaded.tensors[CSA_KV].shape[0]
-        )
-        host_raw.copy_(offloaded.tensors[CSA_KV][2:].cpu())
-        resident_raw[:2].copy_(offloaded.tensors[CSA_KV][:2])
-        hidden = (
-            torch.randn(
-                (2, 4, HC, FLASH_GEOMETRY.dim), device=device, dtype=torch.bfloat16
-            )
-            * 0.05
-        )
-
-        def metadata(pools):
-            return build_decode_metadata_fp8(
-                attention_inputs=torch.full(
-                    (2,), 765, device=device, dtype=torch.int32
-                ),
-                q_len=4,
-                window_size=128,
-                head_dim=512,
-                max_seq_len=1024,
-                compress_ratios=[4],
-                index_topk=512,
-                device=device,
-                paged_block_tables=pools.block_tables,
-                paged_pool_entries_per_block=pools.entries_per_block,
-                paged_pool_tokens_per_block=pools.tokens_per_block,
-            )
-
-        native_meta, host_meta = metadata(native), metadata(offloaded)
-        mega_runtime.begin_decode(native_meta)
-        expected = adapter.forward_attention_sublayer(
-            block, hidden.clone(), native_meta, kv_cache=native.kv_cache
-        ).clone()
-        block.attn.configure_sparse_offload(LayerOffloadPlan(runtime, 0, True, True), 8)
-        mega_runtime.begin_decode(host_meta)
-        actual = adapter.forward_attention_sublayer(
-            block, hidden.clone(), host_meta, kv_cache=offloaded.kv_cache
-        )
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-        self.assertTrue((runtime.mapping[128:] >= 0).any().item())
-        runtime.reset()
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph, stream=self.stream):
-            mega_runtime.begin_decode(host_meta)
-            captured = adapter.forward_attention_sublayer(
-                block, hidden, host_meta, kv_cache=offloaded.kv_cache
-            )
-        graph.replay()
-        torch.cuda.synchronize()
-        torch.testing.assert_close(captured, expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

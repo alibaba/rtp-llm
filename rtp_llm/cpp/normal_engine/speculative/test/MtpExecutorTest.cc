@@ -1224,6 +1224,46 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
 
 INSTANTIATE_TEST_SUITE_P(CacheTopology, MtpCacheStrideTest, ::testing::Values(0, 1, 2));
 
+TEST_F(MtpExecutorTest, testDraftExtendPrepareAndForwardAgreeBeforeHiddenStatesExist) {
+    for (const bool dspark : {false, true}) {
+        SCOPED_TRACE(dspark);
+        MtpExecutorTestConfig config;
+        config.sp_type = dspark ? SP_TYPE_DSPARK : SP_TYPE_MTP;
+        config.dspark_mask_token_id = 0;
+        auto components = createMtpExecutorComponents(config);
+        auto* executor = components.executor.get();
+        auto* draft = components.fake_draft_prefill_model.get();
+        std::vector<std::array<bool, 3>> observed;
+        draft->setInputObserver([&](const GptModelInputs& inputs) {
+            observed.push_back({inputs.is_draft_extend, inputs.is_target_verify, inputs.last_hidden_states.defined()});
+        });
+        draft->expectTargetVerify(dspark);
+        executor->setDraftPrefillModel(std::move(components.fake_draft_prefill_model));
+
+        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        GptModelInputs input;
+        input.combo_tokens = torch::zeros({8}, cuda_i32);
+        input.input_lengths = torch::full({2}, 4, cuda_i32);
+        input.prefix_lengths = torch::full({2}, 8, cuda_i32);
+        input.sequence_lengths = torch::empty({0}, cuda_i32);
+        input.is_target_verify = true;
+        if (executor->useAsyncPrepare()) {
+            executor->launchDraftPrefillPrepareAsync(input);
+            // Target verification fills the live input after the async copy.
+            input.last_hidden_states = torch::zeros({8, 2}, torch::TensorOptions().device(torch::kCUDA));
+            executor->draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+            ASSERT_EQ(observed.size(), 1u);
+            EXPECT_EQ(observed.front(), (std::array<bool, 3>{true, dspark, false}));
+        } else {
+            input.last_hidden_states = torch::zeros({8, 2}, torch::TensorOptions().device(torch::kCUDA));
+        }
+        draft->setInputs({input});
+        draft->setOutputs({GptModelOutputs{}});
+        executor->runDraftPrefillForward(input);
+        EXPECT_EQ(observed.back(), (std::array<bool, 3>{true, dspark, true}));
+    }
+}
+
 TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
     MtpExecutorTestConfig test_config;
     test_config.sp_type           = SP_TYPE_MTP;

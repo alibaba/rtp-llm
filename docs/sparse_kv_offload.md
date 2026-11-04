@@ -13,6 +13,12 @@ Sparse KV offload 的核心分工是：**cache group 描述 KV 怎么存，模�
 
 生产 decode 使用 `--reuse_cache 0`。这里关闭的是 decode prefix reuse；P 侧仍可单独启用 prefill prefix reuse。
 
+开启 offload 的 D 侧不支持普通 context prefill，也不支持 `multi_task_prompt`；配置和运行时会提前拒绝这些路径。Target verify 和 MTP draft extend 使用独立的轮次标志，仍可运行。异步 prepare 在 hidden states 尚未生成时也使用同一标志。
+
+支持默认的 `--warm_up 1`。预热使用最小的真实 tiered cache（2 个 HBM block 和 1 个 Host block），selection 上限和写入 staging 仍按部署配置分配，并执行 offload attention 路径。预热完成后释放临时 cache、plan 和 staging，再根据峰值显存建立生产 cache、重新绑定并捕获 graph。临时 KV backing 不计入运行期峰值；由容量公式单独预留的 offload buffer 也从测量值中扣除，避免重复计费。
+
+P 侧 sparse MLA prefill warmup 使用最小的普通 GPU KV cache，使 indexer 和 sparse attention 都参与预热；预热完成后解除临时绑定，再创建生产 cache。P 侧不启用 offload。
+
 ## 2. 分层与调用链
 
 ```mermaid
@@ -77,12 +83,12 @@ flowchart TD
 ```python
 policy = CacheOffloadPolicy()
 policy.enabled = True
-policy.max_selected_rows = concurrency * (gen_num_per_cycle + 1) * top_k
+policy.max_selected_rows = concurrency * max(1, gen_num_per_cycle + 1) * hot_rows
 desc.offload = policy
 desc.offload_runtime_group = runtime_groups[layer_id]
 ```
 
-`max_selected_rows` 是一次 `begin` 的 flat selection 上限，不是热缓存行数。热缓存容量按 page 向上取整：
+`hot_rows` 由 `--sparse_kv_offload_hot_rows` 配置，默认每请求、每个 query 2048 个 KV 位置；总量随并发和 speculative query 数扩展。该值必须为正且不小于模型 top-K，不改变模型自身的稀疏选择宽度。`max_selected_rows` 同时限定一次 `begin` 的 flat selection 上限；热缓存容量按 page 向上取整：
 
 ```text
 resident_rows = ceil(max_selected_rows / rows_per_page) * rows_per_page
@@ -192,11 +198,12 @@ reserve_blocks = ceil(reserve_step / seq_size_per_block)
 --role_type DECODE
 --enable_sparse_kv_offload 1
 --sparse_kv_offload_host_mb 53248
+--sparse_kv_offload_hot_rows 2048
 --kv_cache_mem_mb 0
 --reuse_cache 0
 ```
 
-`--kv_cache_mem_mb` 是所有 HBM cache 和热缓存的总预算；设为 0 时由部署脚本或固定 pool 参数控制容量。`--sparse_kv_offload_host_mb` 是每个 rank 可用的 pinned Host KV 上限。热缓存容量由 `--concurrency_limit`、模型 top-K 和 MTP/DSpark 的每轮 token 数共同决定。
+`--kv_cache_mem_mb` 是所有 HBM cache 和热缓存的总预算；设为 0 时由部署脚本或固定 pool 参数控制容量。`--sparse_kv_offload_host_mb` 是每个 rank 可用的 pinned Host KV 上限。热缓存容量由 `--concurrency_limit`、`--sparse_kv_offload_hot_rows` 和 MTP/DSpark 的每轮 token 数共同决定；也可通过环境变量 `SPARSE_KV_OFFLOAD_HOT_ROWS` 配置每请求容量。
 
 P/D 两端必须使用一致的模型和 speculative 配置。offload 只在 D 打开，P 不打开。本次验证的 V4 四卡部署为：
 
@@ -206,6 +213,10 @@ P/D 两端必须使用一致的模型和 speculative 配置。offload 只在 D �
 - DSpark 与 D 侧 CUDA Graph 开启。
 
 ## 8. 实验与结果
+
+以下吞吐来自此前的部署配置，不能直接作为本次修订的性能验收。当前默认 `hot_rows=2048`；V4 top-K 为 512 时，热缓存及相关 selection scratch 的容量上限是按 512 配置时的 4 倍，正式 Host KV 容量不因此改变。部署时必须重新核算 HBM 预算，再在相同请求长度、并发和采样设置下测量。
+
+以每个 D rank 并发 192、gamma=3 为例，43 层 V4 Flash target 有 21 个 CSA 层，每 entry 为 584 B；仅 target 热缓存 plane 从 512 调到 2048 就增加约 `192 × 4 × (2048-512) × 584 × 21 = 13.47 GiB/rank`，尚不含 draft 和管理 scratch。V4 可显式配置 `--sparse_kv_offload_hot_rows 512` 来匹配此前的容量设置；这也减少跨步保留的热行，需同时复测 Host 读取量与吞吐。GLM/DSA top-K=2048 的模型仍要求至少 2048。
 
 实验环境为 DeepSeek-V4-Flash-0731、4 张 L20D，并按 L20A 有效 HBM 预算 `189470 MiB/GPU` 校准。D 卡纯模型权重为 `82.105 GiB`，KV/state HBM pool 为 `66.38/66.17 GiB`，Host KV pool 分别为 `32/52 GiB`。
 
@@ -236,10 +247,53 @@ bazel test --config=cuda13 \
 
 bazel test --config=cuda13 \
   //rtp_llm/models_py/modules/offload/test:dsv4_offload_gpu_test \
+  //rtp_llm/models_py/modules/offload/test:dsv4_offload_mega_gpu_test_x86 \
   //rtp_llm/models_py/modules/offload/test:sparse_kv_offload_gpu_test
 ```
 
 C++ 回归覆盖 SWA reserve 单位、pool sizing、storage/version 和 coordinator 路径；GPU 入口覆盖 Host 更新后的 graph replay、compressor 写回和多 token verify。
+
+真实模型 P/D smoke 使用默认 warmup，覆盖 offload 开关、eager/CUDA graph、长输入及 block 复用；MTP smoke 还覆盖真实 NextN draft 轮次。offload 启动日志必须包含 warmup 峰值记录：
+
+```bash
+bazel test --config=cuda13 \
+  //rtp_llm/test/smoke:sparse_kv_offload_model_test \
+  //rtp_llm/test/smoke:glm5_mtp_offload_model_test
+```
+
+普通 smoke 使用 GLM-5 和 DeepSeek V3.2 四层 checkpoint。MTP smoke 默认使用 `GLM-5-FP8-4layer` 作 target、`GLM-5-BF16-4layer` 中的真实 NextN 权重作 draft，通过正常加载器按 `FP8_PER_BLOCK` 量化 draft，使单卡 graph 的 FP8 MoE backend 同时适用于 target 和 draft。可通过 `RTP_GLM_MTP_CHECKPOINT` 和 `RTP_GLM_MTP_DRAFT_CHECKPOINT` 指定本地路径。裁剪 checkpoint 保留原始 NextN 层号时，测试生成独立的 draft 配置来匹配权重偏移。上述默认命令不加载 GLM-5.3。
+
+GLM/DSA 独立精度 smoke 同时比较完整 greedy token 序列和最后一步全词表 logits（`rtol=atol=1e-5`），覆盖超过 2048 token 的输入、重复请求导致的 block 复用、2 个 HBM block 之外的 Host KV、eager/graph 和 offload 开关。比较前先检查无 offload 基线自身可重复，避免把基线波动当成 offload 误差。该入口使用默认的 MoE drain 策略，不注入稳定 top-k 测试 hook。V4 DSpark API 返回接受后的 token IDs，V4 smoke 严格比较这些 IDs；attention tensor 的数值对照由 V4 GPU 测试覆盖。
+
+```bash
+bazel test --config=cuda13 \
+  //rtp_llm/test/smoke:sparse_kv_offload_accuracy_model_test
+
+# V4 入口要求提前准备本地 checkpoint；CP overlap 和真实 DSpark 轮次开启。
+bazel test --config=cuda13 \
+  --test_env=RTP_DSV4_TEST_CHECKPOINT=/local/models/DeepSeek-V4-Flash-0731 \
+  //rtp_llm/test/smoke:dsv4_sparse_kv_offload_accuracy_model_test
+```
+
+原生 fast top-k 的边界同分候选按较小索引优先选择，输出按索引排列，保证 attention 的输入集合和归约顺序可重复。正常长行路径继续使用原 radix 筛选，仅排序选出的 K 个索引；短行或边界同分需要截断时使用稳定 compaction。粗筛候选超过 shared-memory 缓冲容量时，对完整行执行 radix refinement，避免截断候选后选错 top-K。各路径复用原有 shared memory，不增加持久 GPU buffer。GPU 回归覆盖同分、正负零、64K 近似分数导致的候选溢出、paged/ragged 转换，以及修改输入后的 CUDA Graph replay。
+
+本次在 L20D 上以同一进程、同一随机输入交替运行修复前后 kernel，两个版本均以 NVCC `-O3`、SM103 独立扩展编译；当前 Bazel 产物另行复测，耗时相近。CUDA Graph 内每次包含 10 次调用，取 5 组计时的中位数。以下是 top-k 本身的耗时，不是整模型吞吐：
+
+| 行数 | 候选数 | K | 修复前 | 修复后 |
+|---:|---:|---:|---:|---:|
+| 1 | 526 | 512 | 5.34 µs | 6.36 µs |
+| 1 | 4096 | 2048 | 3.30 µs | 9.43 µs |
+| 1 | 131072 | 2048 | 51.82 µs | 61.76 µs |
+| 128 | 131072 | 2048 | 55.36 µs | 65.58 µs |
+| 1052 | 4096 | 2048 | 32.68 µs | 71.24 µs |
+
+稳定选择和输出顺序增加了计算成本，尤其是大量短行的 prefill。该开销不能用历史 offload TPS 抵消或推算；当前修订的部署吞吐需要在空闲设备、相同模型和请求分布下重新测量。runtime 的 decode 热路径继续使用 GPU admission 和逐层 CUDA event 依赖，没有加入逐步 `.cpu()`/`.item()` 或 CPU synchronize；默认不在每层 MoE 前 drain，仍保留跨层 prefetch overlap。
+
+另测 65536 个近似分数（`1.001 + (index % 128) * 1e-6`）触发候选溢出回退：单行 43.15 → 118.31 µs，128 行 44.55 → 121.57 µs。修复前该分布的结果不是真正 top-K，旧耗时只能用于说明修复成本。回退通过范围检查跳过共同高位字节；全同分输入直接走快捷路径，单行 46.21 → 32.95 µs。溢出分布使用每 graph 3 次调用、3 组各 10 次 replay 的中位数。
+
+MTP 的 host 状态路径在 rejection 后压缩 draft extend 行数，异步 prepare 必须使用压缩后的输入。DSpARK 和保留 device 行数的异步路径仍可提前 prepare；没有为修复精度而关闭整个异步执行。
+
+MTP smoke 使用同一 MTP 配置的无 offload 结果作为严格参考，比较完整串行/并发 token 序列及 graph 结果；串行请求还严格比较非 MTP 控制组。并发的 MTP/非 MTP 差异单独写入 `non_mtp_mismatches`，不作为 offload 的精度基线。已通过独立 attention 回放确认：当前 FlashMLA 会按 query batch 形状改变 split-K；同一 query 和逐字节一致的所选 KV，在 32/11 splits 下输出最多相差 `6.1035e-5`，四层 checkpoint 的后续生成可因此产生不同 token。本次不承诺跨 batch 逐 token 一致。
 
 - 一个 runtime 当前只支持一份活动 selection，依赖引擎串行 forward 和 backing block 生命周期管理。
 - 已观察到 P/D load 取消后的在途回调问题，本分支未修复。

@@ -14,7 +14,7 @@ void validateBasicConfig(const ModelConfig& model_config) {
     (void)CacheConfigCreator::createWarmupConfig(model_config, parallelism_config, /*gen_num_per_cycle=*/0);
 }
 
-torch_ext::KVCache makeOffloadTestCache(bool fp8) {
+torch_ext::KVCache makeOffloadTestCache(bool fp8, int max_selected_rows) {
     AttentionConfigs attention;
     attention.kv_lora_rank  = 512;
     attention.rope_head_dim = 64;
@@ -33,7 +33,7 @@ torch_ext::KVCache makeOffloadTestCache(bool fp8) {
     config.dtype              = desc.dtype;
     config.fromGroupedSpecs({SpecBuilder::build(desc, context)}, {{0, 1}}, {CacheGroupType::FULL}, {desc.tag});
     config.finalizeBlockNums(6, RuntimeConfig{});
-    config.tiered_cache_configs.emplace(desc.tag, TieredCacheConfig{6, 2, 256});
+    config.tiered_cache_configs.emplace(desc.tag, TieredCacheConfig{6, 2, max_selected_rows});
     CoordinatorCacheManager manager(config);
     RTP_LLM_CHECK(manager.init());
     return torch_ext::KVCache(manager.allLayerCacheBase());
@@ -41,7 +41,7 @@ torch_ext::KVCache makeOffloadTestCache(bool fp8) {
 
 PYBIND11_MODULE(libcache_config_creator_py_test, m) {
     m.def("validate_basic_config", &validateBasicConfig);
-    m.def("make_offload_test_cache", &makeOffloadTestCache);
+    m.def("make_offload_test_cache", &makeOffloadTestCache, py::arg("fp8"), py::arg("max_selected_rows") = 256);
 }
 
 }  // namespace rtp_llm::test

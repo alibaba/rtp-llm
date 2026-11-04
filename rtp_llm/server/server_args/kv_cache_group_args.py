@@ -235,6 +235,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="Pinned host KV budget in MiB per rank.",
     )
     kv_cache_group.add_argument(
+        "--sparse_kv_offload_hot_rows",
+        env_name="SPARSE_KV_OFFLOAD_HOT_ROWS",
+        bind_to=(kv_cache_config, "sparse_kv_offload_hot_rows"),
+        type=int,
+        default=2048,
+        help="Hot KV positions per request/query; multiplied by concurrency and speculative query count. Must be at least indexer_topk.",
+    )
+    kv_cache_group.add_argument(
         "--sparse_kv_offload_test_hbm_blocks",
         env_name="SPARSE_KV_OFFLOAD_TEST_HBM_BLOCKS",
         bind_to=(kv_cache_config, "sparse_kv_offload_test_hbm_blocks"),

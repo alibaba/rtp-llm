@@ -14,11 +14,25 @@ def _normalise_pattern_entry(entry: Any) -> str:
 
 def _get_indexer_type(config: Any, layer_idx: int) -> Optional[str]:
     indexer_types = getattr(config, "indexer_types", None)
-    if indexer_types is not None and 0 <= layer_idx < len(indexer_types):
-        return _normalise_pattern_entry(indexer_types[layer_idx])
+    if indexer_types is not None:
+        if not isinstance(indexer_types, Sequence) or isinstance(indexer_types, str):
+            raise ValueError("indexer_types must be a per-layer sequence")
+        if not 0 <= layer_idx < len(indexer_types):
+            raise ValueError(f"indexer_types does not cover layer {layer_idx}")
+        value = _normalise_pattern_entry(indexer_types[layer_idx])
+        if value not in ("full", "shared"):
+            raise ValueError(f"Unsupported DSA indexer type for layer {layer_idx}: {value}")
+        return value
     pattern = getattr(config, "index_topk_pattern", None)
-    if isinstance(pattern, (str, Sequence)) and 0 <= layer_idx < len(pattern):
-        return _normalise_pattern_entry(pattern[layer_idx])
+    if pattern is not None:
+        if not isinstance(pattern, (str, Sequence)):
+            raise ValueError("index_topk_pattern must be a per-layer sequence")
+        if not 0 <= layer_idx < len(pattern):
+            raise ValueError(f"index_topk_pattern does not cover layer {layer_idx}")
+        value = _normalise_pattern_entry(pattern[layer_idx])
+        if value not in ("full", "shared"):
+            raise ValueError(f"Unsupported DSA indexer type for layer {layer_idx}: {value}")
+        return value
     return None
 
 

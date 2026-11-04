@@ -8,6 +8,7 @@ from rtp_llm.models.deepseek_v2 import DeepSeekV2, DeepSeekV2Weight
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeDecoderLayer
 from rtp_llm.utils.dsa_indexing import build_dsa_indexer_groups, dsa_layer_has_indexer
 from rtp_llm.utils.model_weight import W
+from rtp_llm.utils.sparse_kv_offload import sparse_kv_offload_max_selected_rows
 
 
 def config():
@@ -64,6 +65,9 @@ class GlmIndexShareTest(unittest.TestCase):
             )
 
     def test_reference_glm53_groups(self):
+        # The official checkpoint's explicit indexer_types and indexer weights
+        # both use these source layers (layer 78 is the separate MTP layer):
+        # https://huggingface.co/zai-org/GLM-5.3/tree/ba32f8c19c8738e2c57c71798c601d477a7bf844
         value = config()
         groups = build_dsa_indexer_groups(value, 78)
         self.assertEqual(list(groups), [0, 1, 2, *range(6, 78, 4)])
@@ -97,6 +101,26 @@ class GlmIndexShareTest(unittest.TestCase):
         value.attn_config.is_sparse = False
         self.assertFalse(dsa_layer_has_indexer(value, 0))
 
+    def test_short_explicit_pattern_cannot_fall_back_to_frequency(self):
+        for field, pattern in (
+            ("indexer_types", ["full", "shared"]),
+            ("index_topk_pattern", "FS"),
+        ):
+            with self.subTest(field=field):
+                value = config()
+                setattr(value, field, pattern)
+                with self.assertRaisesRegex(ValueError, f"{field} does not cover layer 2"):
+                    build_dsa_indexer_groups(value, 4)
+
+    def test_hot_capacity_scales_with_requests_and_speculative_queries(self):
+        self.assertEqual(sparse_kv_offload_max_selected_rows(2048, 512, 150, 3), 150 * 4 * 2048)
+        self.assertEqual(sparse_kv_offload_max_selected_rows(4096, 2048, 2, 0), 8192)
+        for rows in (0, -1, 1024):
+            with self.subTest(rows=rows), self.assertRaisesRegex(ValueError, "hot_rows"):
+                sparse_kv_offload_max_selected_rows(rows, 2048, 2, 3)
+        with self.assertRaisesRegex(ValueError, "positive int32"):
+            sparse_kv_offload_max_selected_rows(2**31, 2048, 1, 0)
+
     def test_source_only_cache_descriptors_and_offload(self):
         value = config()
         DeepSeekV2._post_build_model_config(value)
@@ -109,6 +133,7 @@ class GlmIndexShareTest(unittest.TestCase):
         model = SimpleNamespace(
             model_config=value,
             max_generate_batch_size=2,
+            kv_cache_config=SimpleNamespace(sparse_kv_offload_hot_rows=2048),
         )
         DeepSeekV2._configure_sparse_kv_offload(model)
         runtime_groups = {

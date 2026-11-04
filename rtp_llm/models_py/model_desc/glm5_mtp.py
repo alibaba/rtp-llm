@@ -29,14 +29,12 @@ class Glm5MtpModel(GenericMoeModel):
         )
 
     def initialize(self, init_resource):
+        if init_resource.kv_cache is None:
+            return GptModelBase.initialize(self, init_resource)
         # Draft decode and draft extend construct separate graph wrappers for
         # this same Python model. Keep the runtime/writer addresses captured by
         # the first wrapper valid when the second wrapper initializes.
         if getattr(self, "offload_plans", {}):
-            if init_resource.kv_cache is None:
-                raise ValueError(
-                    "GLM MTP graph wrappers require their existing KV storage"
-                )
             for (layer, tag), plan in self.offload_plans.items():
                 storage = init_resource.kv_cache.get_offload_storage(layer, tag)
                 if storage is None or (

@@ -286,6 +286,44 @@ TEST_F(NormalEngineTest, testDecodeWarmupUsesWarmupCacheTopology) {
     EXPECT_TRUE(saw_decode_warmup);
 }
 
+TEST_F(NormalEngineTest, testDecodeWarmupMeasuresTransientPeakAndRestoresCacheOnFailure) {
+    CustomConfig config;
+    ModelConfig model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    params.pd_sep_config.role_type = RoleType::DECODE;
+    auto engine = std::make_shared<NormalEngine>(params, nullptr);
+    ASSERT_TRUE(engine->stop().ok());
+    const auto production_cache = engine->resource_context_.cache_manager;
+
+    constexpr int64_t transient_bytes = 8 * 1024 * 1024;
+    bool fail_forward = false;
+    NormalExecutor::test_model_factory = [&](const GptModelInitParams&) {
+        return std::make_unique<MockModel>(model_config.vocab_size, [&](const GptModelInputs& inputs) {
+            EXPECT_TRUE(inputs.warmup);
+            // This buffer dies before decodeWarmUp reads the measurement.
+            auto transient = torch::empty(
+                {transient_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+            if (fail_forward) {
+                throw std::runtime_error("warmup forward failed");
+            }
+        });
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() { NormalExecutor::test_model_factory = nullptr; }
+    } factory_reset_guard;
+
+    const auto result = engine->decodeWarmUp(params);
+    EXPECT_GE(result.max_used_memory, transient_bytes);
+    EXPECT_EQ(engine->executor_, nullptr);
+    EXPECT_EQ(engine->resource_context_.cache_manager, production_cache);
+    fail_forward = true;
+    EXPECT_THROW(engine->decodeWarmUp(params), std::runtime_error);
+    EXPECT_EQ(engine->executor_, nullptr);
+    EXPECT_EQ(engine->resource_context_.cache_manager, production_cache);
+}
+
 TEST_F(NormalEngineTest, testCacheManagerInitFailureDoesNotPublishPartialState) {
     ModelConfig model;
     model.num_layers                          = 1;
@@ -448,6 +486,47 @@ TEST_F(NormalEngineTest, testPrefillWarmUpUsesCachelessSingleInput) {
     auto engine = std::make_shared<NormalEngine>(params, nullptr);
 
     EXPECT_TRUE(saw_cacheless_warmup);
+}
+
+TEST_F(NormalEngineTest, testSparsePrefillWarmupPublishesBothKvRoutes) {
+    CustomConfig config;
+    config.warm_up = true;
+    ModelConfig model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    params.pd_sep_config.role_type = RoleType::PREFILL;
+    params.model_config_.attn_config.use_mla = true;
+    params.model_config_.attn_config.is_sparse = true;
+    const KVCacheSpecDesc default_desc{"default", KVCacheSpecType::MultiHeadAttention};
+    KVCacheSpecDesc indexer_desc{"indexer_kv", KVCacheSpecType::OpaqueKV};
+    indexer_desc.entry_dtype = DataType::TYPE_UINT8;
+    indexer_desc.entry_elems = 132;
+    indexer_desc.entry_count_mode = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+    indexer_desc.compression_ratio = 1;
+    params.model_config_.kv_cache_spec_descs.assign(
+        static_cast<size_t>(params.model_config_.num_layers), {default_desc, indexer_desc});
+
+    bool saw_warmup = false;
+    NormalExecutor::test_model_factory = [&](const GptModelInitParams& init_params) {
+        EXPECT_NE(init_params.cache_manager, nullptr);
+        EXPECT_TRUE(init_params.kv_cache_layer_layout.has_value());
+        return std::make_unique<MockModel>(model_config.vocab_size, [&](const GptModelInputs& inputs) {
+            if (!inputs.warmup) {
+                return;
+            }
+            saw_warmup = true;
+            EXPECT_EQ(inputs.kv_cache_group_tags, (std::vector<std::string>{"default", "indexer_kv"}));
+            ASSERT_TRUE(inputs.kv_cache_kernel_block_id.defined());
+            EXPECT_EQ(inputs.kv_cache_kernel_block_id.size(0), 2);
+            EXPECT_TRUE(inputs.kv_cache_kernel_block_id.eq(0).all().item<bool>());
+        });
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() { NormalExecutor::test_model_factory = nullptr; }
+    } factory_reset_guard;
+    auto engine = std::make_shared<NormalEngine>(params, nullptr);
+    EXPECT_TRUE(saw_warmup);
 }
 
 TEST_F(NormalEngineTest, testFp8KVCache) {
@@ -1345,6 +1424,9 @@ TEST(SparseKvOffloadConfigTest, AcceptsTpDecodeAndRejectsUnsupportedCombinations
         [](auto& p) { p.kv_cache_config.enable_memory_cache = true; },
         [](auto& p) { p.kv_cache_config.enable_disk_cache = true; },
         [](auto& p) { p.kv_cache_config.enable_remote_cache = true; },
+        [](auto& p) { p.kv_cache_config.multi_task_prompt = "prompts.json"; },
+        [](auto& p) { p.kv_cache_config.multi_task_prompt_str = "{\"system\": [1, 2]}"; },
+        [](auto& p) { p.kv_cache_config.multi_task_prompt_tokens = {{"system", {1, 2}}}; },
         [](auto& p) { p.model_config_.kv_cache_spec_descs.clear(); },
     };
     for (size_t i = 0; i < unsupported.size(); ++i) {

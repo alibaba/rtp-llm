@@ -208,6 +208,7 @@ struct KVCacheConfig {
     int         test_block_num                    = 0;
     bool        enable_sparse_kv_offload          = false;
     int64_t     sparse_kv_offload_host_mb         = 0;
+    int64_t     sparse_kv_offload_hot_rows        = 2048;
     int         sparse_kv_offload_test_hbm_blocks = 0;
     int         use_block_cache                   = -1;  // -1 means not set, use Optional<int> equivalent
     bool        enable_device_cache               = true;

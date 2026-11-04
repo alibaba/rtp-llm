@@ -104,18 +104,18 @@ private:
     std::shared_ptr<KVCacheManager> previous_cache_manager_;
 };
 
-std::shared_ptr<KVCacheManager> createGenerationPrefillCudaGraphWarmUpCacheManager(const EngineInitParams& params) {
+std::shared_ptr<KVCacheManager> createPrefillWarmUpCacheManager(const EngineInitParams& params) {
     auto cache_config = CacheConfigCreator::createWarmupConfig(
         params.model_config_, params.parallelism_config, params.kv_cache_config, /*gen_num_per_cycle=*/0);
 
     RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block > 0,
-                            "generation prefill CUDA graph warmup requires a positive KV block size");
+                            "prefill warmup requires a positive KV block size");
 
     // This temporary pool only supplies the KV tensor bound into the captured
     // model. The warmup config publishes complete per-group capacities before
     // KVCacheManager allocates the reserved block 0, as in decode warmup.
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
-    RTP_LLM_CHECK_WITH_INFO(cache_manager->init(), "init generation prefill CUDA graph warmup KV cache manager failed");
+    RTP_LLM_CHECK_WITH_INFO(cache_manager->init(), "init prefill warmup KV cache manager failed");
     return cache_manager;
 }
 
@@ -155,6 +155,32 @@ private:
     int64_t                      baseline_reserved_   = 0;
 };
 #endif
+
+size_t releasePythonKvCache(const pybind11::object& py_model, bool measure_offload = false) {
+    if (!py_model || py_model.is_none()) {
+        return 0;
+    }
+    pybind11::gil_scoped_acquire gil;
+    size_t offload_fixed_bytes = 0;
+#if USING_CUDA
+    if (measure_offload && pybind11::hasattr(py_model, "release_sparse_kv_offload")) {
+        const auto device = at::cuda::current_device();
+        const auto before = c10::cuda::CUDACachingAllocator::getDeviceStats(device).allocated_bytes[0].current;
+        py_model.attr("release_sparse_kv_offload")();
+        cudaDeviceSynchronize();
+        const auto after = c10::cuda::CUDACachingAllocator::getDeviceStats(device).allocated_bytes[0].current;
+        if (before > after) {
+            offload_fixed_bytes = static_cast<size_t>(before - after);
+        }
+    }
+#endif
+    if (pybind11::hasattr(py_model, "release_kv_cache")) {
+        py_model.attr("release_kv_cache")();
+    } else {
+        py_model.attr("initialize")(torch_ext::PyModelInitResources{});
+    }
+    return offload_fixed_bytes;
+}
 }  // anonymous namespace
 
 void NormalEngine::validateSparseKvOffloadConfig(const EngineInitParams& params,
@@ -192,6 +218,9 @@ void NormalEngine::validateSparseKvOffloadConfig(const EngineInitParams& params,
                             "sparse KV offload does not support layer micro-batch");
     RTP_LLM_CHECK_WITH_INFO(!cache.enable_memory_cache && !cache.enable_disk_cache && !cache.enable_remote_cache,
                             "sparse KV offload does not support memory/disk/remote prefix connectors");
+    RTP_LLM_CHECK_WITH_INFO(cache.multi_task_prompt.empty() && cache.multi_task_prompt_str.empty()
+                                && cache.multi_task_prompt_tokens.empty(),
+                            "sparse KV offload does not support multi_task_prompt prefill on DECODE");
     RTP_LLM_CHECK_WITH_INFO(!drop_broad_sync, "sparse KV offload does not support RTP_LLM_DROP_BROAD_SYNC");
     bool declared = false;
     for (const auto& layer : params.model_config_.kv_cache_spec_descs) {
@@ -555,6 +584,9 @@ int64_t NormalEngine::getLastScheduleTime() {
 }
 
 WarmUpResult NormalEngine::warmUp(const EngineInitParams& params) {
+    if (kv_cache_config.enable_sparse_kv_offload) {
+        return decodeWarmUp(params);
+    }
     if (runtime_config.use_batch_decode_scheduler) {
         if (runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_warmup_type == 0) {
             return decodeWarmUp(params);
@@ -619,7 +651,11 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
                                                    /*primary_graph_is_prefill=*/false,
                                                    params.parallelism_config.role_type,
                                                    params.sp_config.type);
-        if (!generation_prefill_cuda_graph_requested) {
+        // Sparse MLA runs the indexer during long prefill. Its KV route must
+        // exist even when warmup does not capture a generation-prefill graph.
+        const bool sparse_mla_requires_kv_cache =
+            model_config_.attn_config.use_mla && model_config_.attn_config.is_sparse;
+        if (!generation_prefill_cuda_graph_requested && !sparse_mla_requires_kv_cache) {
             rtp_llm::setTraceMemory(true);
             executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
             THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
@@ -632,13 +668,11 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
             return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
         }
 
-        // A normal prefill warmup historically has no CacheManager. Generation
-        // prefill CUDA Graph, however, needs a real KV layout and reserved dummy
-        // block 0 during construction. Capture against a minimal temporary pool so
-        // graph-owned tensors and graph-pool reservations are included in the
-        // runtime budget before the production KV pool consumes the remaining
-        // memory. Speculative/MTP models stay on their independent warmup path.
-        auto warmup_cache_manager = createGenerationPrefillCudaGraphWarmUpCacheManager(params);
+        // Sparse MLA indexers and generation-prefill graphs need a real KV
+        // layout. Map logical warmup blocks to reserved block 0 in a minimal
+        // temporary pool; production request blocks are allocated afterwards.
+        auto warmup_cache_manager = createPrefillWarmUpCacheManager(params);
+        WarmupMemoryTracker memory_tracker;
 
         const auto baseline_status    = getGpuExecStatus().device_memory_status;
         const auto baseline_allocated = cuda_graph::graphAllocatedBytes();
@@ -667,7 +701,8 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
             std::max({positiveDelta(baseline_status.available_bytes, measured_status.available_bytes),
                       positiveDelta(measured_allocated, baseline_allocated),
                       positiveDelta(measured_reserved, baseline_reserved),
-                      measured_status.max_consumed_bytes});
+                      measured_status.max_consumed_bytes,
+                      memory_tracker.maxConsumedBytes()});
         RTP_LLM_LOG_INFO("prefill warmup runtime reservation: measured=%zu MiB allocated_delta=%zu MiB "
                          "reserved_delta=%zu MiB free_delta=%zu MiB",
                          measured_runtime_bytes / 1024 / 1024,
@@ -677,6 +712,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 
         rtp_llm::setTraceMemory(false);
         (void)executor_.reset(nullptr);
+        releasePythonKvCache(params.py_model);
         warmup_cache_manager.reset();
         cudaDeviceSynchronize();
         c10::cuda::CUDACachingAllocator::emptyCache();
@@ -727,12 +763,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
             max_consumed = std::max(max_consumed, memory_tracker->maxConsumedBytes());
         }
 
-        if (!params.py_model.is_none()) {
-            // PyWrappedModel initializes the shared Python model in place, so destroying the
-            // wrapper alone does not clear Python's references to the temporary KV tensors.
-            pybind11::gil_scoped_acquire gil;
-            params.py_model.attr("initialize")(torch_ext::PyModelInitResources{});
-        }
+        releasePythonKvCache(params.py_model);
         (void)executor_.reset(nullptr);
         rtp_llm::setTraceMemory(false);
     }
@@ -753,16 +784,41 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     rtp_llm::setTraceMemory(true);
 
     auto cache_manager = createWarmupCacheManager();
-    executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, mla_ops_type_));
-    // preRun creates its stream through resource_context_; expose the same
-    // finalized warmup topology that the temporary executor owns.
-    {
-        ScopedWarmUpCacheManagerBinding cache_binding(resource_context_, cache_manager);
-        THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
+    // The temporary KV backing is outside the runtime measurement. Offload
+    // runtime/writer buffers are created by initialize() below and accounted for
+    // separately by configureOffloadCapacity, so remove their measured footprint.
+    WarmupMemoryTracker memory_tracker;
+    size_t max_consumed = 0;
+    size_t offload_fixed_bytes = 0;
+    try {
+        executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, mla_ops_type_));
+        {
+            ScopedWarmUpCacheManagerBinding cache_binding(resource_context_, cache_manager);
+            THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
+        }
+        cudaDeviceSynchronize();
+        max_consumed = memory_tracker.maxConsumedBytes();
+        // Drop graph wrappers first, then measure only released offload buffers.
+        // Other cache-bound state (e.g. block tables) stays in the runtime peak.
+        executor_.reset(nullptr);
+        offload_fixed_bytes = releasePythonKvCache(params.py_model, kv_cache_config.enable_sparse_kv_offload);
+        cudaDeviceSynchronize();
+    } catch (...) {
+        executor_.reset(nullptr);
+        rtp_llm::setTraceMemory(false);
+        try {
+            releasePythonKvCache(params.py_model);
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_ERROR("failed to release warmup Python KV cache: %s", error.what());
+        }
+        throw;
     }
-    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
+    max_consumed -= std::min(max_consumed, offload_fixed_bytes);
+    RTP_LLM_LOG_INFO("decode warmup runtime=%zu bytes, separately budgeted offload buffers=%zu bytes",
+                     max_consumed,
+                     offload_fixed_bytes);
     rtp_llm::setTraceMemory(false);
-    (void)executor_.reset(nullptr);
+    cache_manager.reset();
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
     const auto device_status = getGpuExecStatus();
