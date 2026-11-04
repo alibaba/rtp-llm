@@ -128,6 +128,7 @@ cc_test(
     ],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",
         "//rtp_llm/cpp/models:logits_processor",
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",

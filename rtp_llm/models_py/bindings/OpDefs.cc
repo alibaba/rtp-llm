@@ -257,6 +257,8 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs())
         .def_readwrite("need_all_logits", &PyModelInputs::need_all_logits)
         .def_readwrite("need_all_hidden_states", &PyModelInputs::need_all_hidden_states)
+        .def_readwrite("is_fake_stream", &PyModelInputs::is_fake_stream)
+        .def_readwrite("warmup", &PyModelInputs::warmup)
         .def_readwrite("engram_token_windows", &PyModelInputs::engram_token_windows)
         .def_readwrite("engram_token_windows_host",
                        &PyModelInputs::engram_token_windows_host,

@@ -6,6 +6,7 @@ import os
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.v41_runtime import v41_backend_for_config
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import AtomicWeight
@@ -105,17 +106,19 @@ class DeepSeekV41(DeepSeekV4):
         config.activation_type = "SiGLU"
         DeepSeekV4._from_hf(config, ckpt_path, config_json=text)
         config.is_deepseek_v41 = True
-        config.mm_model_config.is_multimodal = True
-        image_token_id = int(raw["image_token_id"])
-        config.mm_model_config.mm_sep_tokens = [[image_token_id]]
-        # The generic multimodal path keeps feature hashes for KV-cache identity.
-        # Model/history readers must still see the checkpoint's image token.
-        config.mm_model_config.semantic_mm_token_id = image_token_id
-        config.mm_related_params.special_tokens["default_mm_token"] = (
-            "<\uff5cdeepseek_image\uff5c>"
-        )
+        config.mm_model_config.is_multimodal = v41_backend_for_config() == "cuda"
+        if config.mm_model_config.is_multimodal:
+            image_token_id = int(raw["image_token_id"])
+            config.mm_model_config.mm_sep_tokens = [[image_token_id]]
+            # The generic multimodal path keeps feature hashes for KV-cache identity.
+            # Model/history readers must still see the checkpoint's image token.
+            config.mm_model_config.semantic_mm_token_id = image_token_id
+            config.mm_related_params.special_tokens["default_mm_token"] = (
+                "<\uff5cdeepseek_image\uff5c>"
+            )
         config.deepseek_v41_config = text
-        config.mm_related_params.config["v41_config"] = raw
+        if config.mm_model_config.is_multimodal:
+            config.mm_related_params.config["v41_config"] = raw
         config.max_seq_len = int(text["max_position_embeddings"])
         config.config_dtype = text.get("dtype", text.get("torch_dtype", "bfloat16"))
         config.attn_config.v41_kv_source_layer_ids = list(text["kv_source_layer_ids"])
@@ -151,6 +154,11 @@ class DeepSeekV41(DeepSeekV4):
 
     @staticmethod
     def get_weight_cls():
+        backend = v41_backend_for_config()
+        if backend != "cuda":
+            from rtp_llm.models_py.modules.dsv41.backend import get_v41_backend
+
+            return get_v41_backend(backend).weight_cls
         return DeepSeekV41Weight
 
 

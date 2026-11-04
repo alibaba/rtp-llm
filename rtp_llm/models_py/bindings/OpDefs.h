@@ -366,6 +366,10 @@ struct PyModelInputs {
 
     // Internal homogeneous-batch signal; not part of the Generate RPC/config surface.
     bool capture_hidden_states = false;
+    // Internal scheduler signals: fake DP rows must join EP/ENP without
+    // entering the model's business cache. No Generate/HTTP API change.
+    bool is_fake_stream = false;
+    bool warmup = false;
 
     // Fixed-address int32 [layers, local_experts] accumulators; undefined when monitoring is disabled.
     torch::Tensor expert_token_counts;

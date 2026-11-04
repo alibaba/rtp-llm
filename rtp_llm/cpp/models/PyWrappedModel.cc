@@ -1225,6 +1225,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                               bert_embedding_inputs});
 
         py_model_inputs.capture_hidden_states  = capture_hidden_states;
+        py_model_inputs.is_fake_stream         = inputs.is_fake_stream;
+        py_model_inputs.warmup                 = inputs.warmup;
         py_model_inputs.need_all_logits        = inputs.need_all_logits;
         py_model_inputs.need_all_hidden_states = inputs.need_all_hidden_states;
         py_model_inputs.expert_token_counts    = expert_balancer_.stable_expert_token_counts();

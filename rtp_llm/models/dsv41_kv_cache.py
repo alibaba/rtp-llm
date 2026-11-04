@@ -149,3 +149,12 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
     model_config.cache_key_hash_seed = (
         0x4453563431494231 if bounded else 0x4453563431494631
     )
+    from rtp_llm.config.v41_runtime import v41_backend_for_config
+
+    if v41_backend_for_config() == "ppu":
+        from rtp_llm.models_py.modules.dsv41.ppu.native_protocol import (
+            NATIVE_CACHE_KEY_HASH_SEED,
+        )
+
+        # PPU logical/planar bytes and NV token-interleaved bytes cannot share keys.
+        model_config.cache_key_hash_seed = NATIVE_CACHE_KEY_HASH_SEED

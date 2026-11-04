@@ -28,6 +28,15 @@ from rtp_llm.dash_sc.server import DashScGrpcDrainAioInterceptor, DashScGrpcServ
 
 
 class V41CheckpointImageTokenTest(TestCase):
+    def test_text_only_v41_does_not_create_image_processor(self):
+        for model_type in ("deepseek_v41", "deepseek_v41_dspark"):
+            with self.subTest(model_type=model_type):
+                config = SimpleNamespace(
+                    model_type=model_type,
+                    mm_model_config=SimpleNamespace(is_multimodal=False),
+                )
+                self.assertIsNone(bg_app._v41_image_processor_config(config))
+
     @skipUnless(os.environ.get("DSV41_MODEL_PATH"), "requires V4.1 checkpoint config")
     def test_real_model_factory_config_exposes_only_image_token_id(self):
         from rtp_llm.config.dsv41_config import V41Config

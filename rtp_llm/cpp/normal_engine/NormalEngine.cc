@@ -89,6 +89,13 @@ bool deviceInputEnabled() {
     return env != nullptr && std::strcmp(env, "1") == 0;
 }
 
+bool ppuCoordinatedStopEnabled() {
+    const char* enabled = std::getenv("RTP_V41_COORDINATED_STOP");
+    const char* backend = std::getenv("RTP_V41_BACKEND");
+    return enabled != nullptr && std::strcmp(enabled, "1") == 0 && backend != nullptr
+           && std::strcmp(backend, "ppu") == 0;
+}
+
 #if USING_CUDA
 size_t positiveDelta(size_t larger, size_t smaller) {
     return larger > smaller ? larger - smaller : 0;
@@ -260,7 +267,21 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     initCacheManager(warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager done");
 
+    if (ppuCoordinatedStopEnabled() && parallelism_config.tp_size * parallelism_config.dp_size > 1) {
+        ppu_loop_stop_ = std::make_shared<PpuLoopStopState>();
+    }
     initExecutor(params, propose_params_);
+
+    if (ppuCoordinatedStopEnabled() && parallelism_config.tp_size == 1 && parallelism_config.dp_size > 1) {
+        // DP ranks can run different numbers of scheduler iterations. Vote in
+        // the model's existing EP/ENP work collective, rather than adding a
+        // second world collective to every native scheduler iteration.
+        auto state    = ppu_loop_stop_;
+        py::gil_scoped_acquire gil;
+        params.py_model.attr("bind_native_stop")(
+            py::cpp_function([state]() { return state->requested.load(); }),
+            py::cpp_function([state]() { state->observed = true; }));
+    }
 
     RTP_LLM_LOG_INFO("create normal executor done");
 
@@ -282,7 +303,7 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
         executor_.reset(new MtpExecutor(
             params, propose_params, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_));
     } else {
-        executor_.reset(new NormalExecutor(
+        auto normal_executor = std::make_unique<NormalExecutor>(
             params,
             resource_context_.cache_manager,
             false,
@@ -290,7 +311,13 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
             0,
             mla_ops_type_,
             [this]() { step_profiler_.startStep(); },
-            [this]() { step_profiler_.finishStep(); }));
+            [this]() { step_profiler_.finishStep(); });
+        if (ppu_loop_stop_ && parallelism_config.tp_size > 1 && parallelism_config.dp_size == 1) {
+            auto state = ppu_loop_stop_;
+            normal_executor->setStopControl([state]() { return state->requested.load(); },
+                                            [state]() { state->observed = true; });
+        }
+        executor_ = std::move(normal_executor);
     }
 }
 
@@ -704,7 +731,11 @@ absl::Status NormalEngine::startLoop() {
 
 absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
-    running_                    = false;
+    if (ppu_loop_stop_) {
+        ppu_loop_stop_->requested = true;
+    } else {
+        running_ = false;
+    }
     const auto scheduler_status = scheduler_->stop();
     if (!scheduler_status.ok()) {
         RTP_LLM_LOG_ERROR("scheduler stop failed: %s", scheduler_status.ToString().c_str());
@@ -729,10 +760,15 @@ void NormalEngine::loop() {
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
     setCurrentThreadDevice(getDeviceId());
-    const bool follow_root = cpu_tp_shutdown_ && parallelism_config.tp_rank != 0;
+    const bool follow_root = cpu_tp_shutdown_ && !ppu_loop_stop_ && parallelism_config.tp_rank != 0;
     // A local signal cannot skip a peer's in-flight step or its next input frame.
     // Only root chooses the terminal boundary after a complete step() returns.
     while (running_ || follow_root) {
+        if (ppu_loop_stop_ && ppu_loop_stop_->observed.load()) {
+            running_ = false;
+            RTP_LLM_LOG_INFO("V4.1 PPU engine loop coordinated stop complete");
+            break;
+        }
         try {
             auto status = step();
             if (!status.ok()) {
@@ -746,7 +782,7 @@ void NormalEngine::loop() {
             break;
         }
     }
-    if (cpu_tp_shutdown_ && parallelism_config.tp_rank == 0) {
+    if (cpu_tp_shutdown_ && !ppu_loop_stop_ && parallelism_config.tp_rank == 0) {
         CpuTpBroadcaster::instance().sendShutdown();
     }
 }

@@ -350,6 +350,7 @@ py_library(
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
         "@//:cuda_pre_12_9": flashinfer,
+        "@//:using_ppu": flashinfer + ["flash-mla", "fast-hadamard-transform"],
         "//conditions:default": []
     }) + select({
         "@//:using_cuda13_x86": rtp_kernel,
@@ -420,6 +421,13 @@ py_library(
         ":multimodal"
     ],
     data = [":alog_config"]
+)
+
+# Lightweight configuration/contract checks need no compiled operators.
+py_library(
+    name = "v41_runtime_contract",
+    srcs = ["config/v41_runtime.py"],
+    visibility = ["//visibility:public"],
 )
 
 py_library(
@@ -625,6 +633,7 @@ py_library(
     name = "rtp_llm_lib",
     deps = [
         ":rtp_llm_frontend_lib",
+        "//rtp_llm/tools/v41:tooling",
     ] + select({
         "@//:using_rocm": [
             ":models",

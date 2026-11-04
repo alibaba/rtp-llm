@@ -723,6 +723,12 @@ class ProcessManager:
                         f"after {self.POST_KILL_REAP_WINDOW}s reap window — "
                         "likely D-state; leaving for kernel reap"
                     )
+                logging.info(
+                    "Process %s (pid=%s) joined with exitcode=%s",
+                    proc.name,
+                    proc.pid,
+                    proc.exitcode,
+                )
             except Exception as e:
                 logging.error(f"Error joining process {proc.pid}: {e}")
         logging.info("All processes joined")
@@ -776,7 +782,18 @@ class ProcessManager:
             # dead-detection branch (e.g. simultaneous death between
             # iterations). Inspect final exitcodes to surface silent crashes
             # the monitor missed.
-            if not self.shutdown_requested and not self.failure_detected:
+            if self.shutdown_requested and not self.failure_detected:
+                failed_exits = [
+                    (p.name, p.exitcode)
+                    for p in self.processes
+                    if not self._is_clean_shutdown_exitcode(p.exitcode)
+                ]
+                if failed_exits:
+                    logging.error(
+                        "Children failed during requested shutdown: %s", failed_exits
+                    )
+                    self.failure_detected = True
+            elif not self.shutdown_requested and not self.failure_detected:
                 unexpected_exits = [
                     (p.name, p.exitcode)
                     for p in self.processes

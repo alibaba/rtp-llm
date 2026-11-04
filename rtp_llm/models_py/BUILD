@@ -15,6 +15,34 @@ py_library(
     ],
 )
 
+py_library(
+    name = "v41_ppu_contract",
+    srcs = [
+        "modules/dsv41/ppu/__init__.py",
+        "modules/dsv41/ppu/backend.py",
+        "modules/dsv41/ppu/native_protocol.py",
+        "modules/dsv41/ppu/pd_handoff.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "v41_dispatch_sources",
+    srcs = [
+        "__init__.py",
+        "model_desc/deepseek_v41_model.py",
+        "modules/__init__.py",
+        "modules/dsv41/__init__.py",
+        "modules/dsv41/backend.py",
+        "modules/factory/attention/register.py",
+        "modules/factory/fused_moe/register.py",
+        "modules/factory/linear/register.py",
+        "//rtp_llm:__init__.py",
+        "//rtp_llm:utils/backend_registry.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 # CPU-only subset of the DSv4 decode package: pure-torch modules plus the
 # package __init__ chain, without the CUDA/testlib closure. The lazily
 # imported paged/pool helpers (pool_slot_mapping, _pool_triton) are part of
@@ -160,6 +188,9 @@ py_library(
         "@//:using_cuda13_x86": ["flash-mla", "flash-mla-legacy", "fast-hadamard-transform", "tilelang"],
         "@//:using_cuda13_arm": ["flash-mla", "flash-mla-legacy", "tilelang"],
         "@//:using_cuda12_9_x86": flashmla,
+        # Vendor wheels are already hash-pinned by the PPU lock. TileLang is
+        # NVIDIA-only; PPU V4.1 uses sparse FlashMLA and the vendor Hadamard op.
+        "@//:using_ppu": ["flash-mla", "fast-hadamard-transform"],
         "//conditions:default": [],
     }) + select({
         "@//:using_cuda13_x86": rtp_kernel,

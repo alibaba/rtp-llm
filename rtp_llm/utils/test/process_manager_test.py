@@ -1789,6 +1789,29 @@ class TestFailureShutdownPaths(unittest.TestCase):
         self.assertTrue(self.manager.failure_detected)
         mock_exit.assert_called_once_with(1)
 
+    def test_requested_shutdown_preserves_child_failures(self):
+        """A crash during graceful shutdown must still fail the supervisor."""
+        for exitcode in (1, -signal.SIGSEGV, -signal.SIGKILL, None):
+            with self.subTest(exitcode=exitcode):
+                manager = ProcessManager()
+                manager.shutdown_requested = True
+                manager.add_process(_FakeProc("rank-0", alive=False, exitcode=exitcode))
+                with patch("os._exit") as mock_exit:
+                    manager.monitor_and_release_processes()
+                self.assertTrue(manager.failure_detected)
+                mock_exit.assert_called_once_with(1)
+
+    def test_requested_shutdown_accepts_clean_child_exitcodes(self):
+        for exitcode in (0, -signal.SIGTERM, -signal.SIGINT):
+            with self.subTest(exitcode=exitcode):
+                manager = ProcessManager()
+                manager.shutdown_requested = True
+                manager.add_process(_FakeProc("rank-0", alive=False, exitcode=exitcode))
+                with patch("os._exit") as mock_exit:
+                    manager.monitor_and_release_processes()
+                self.assertFalse(manager.failure_detected)
+                mock_exit.assert_not_called()
+
     # --- normal SIGTERM with alive backend keeps -1 semantics ---------------
 
     def test_signal_shutdown_alive_backend_no_force_kill(self):

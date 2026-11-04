@@ -29,6 +29,42 @@ class _FakeNfsManager:
 
 
 class BackendManagerStopTest(unittest.TestCase):
+    def test_ppu_groups_are_released_after_engine_and_nfs_stop(self):
+        manager = BackendManager.__new__(BackendManager)
+        destroyed = []
+
+        class OwnedEngine(_FakeEngine):
+            def __del__(self):
+                destroyed.append(self.stopped)
+
+        manager.engine = OwnedEngine()
+        manager.py_env_configs = SimpleNamespace(
+            model_args=SimpleNamespace(model_type="deepseek_v41")
+        )
+        nfs_manager = _FakeNfsManager()
+
+        def drain_device_work():
+            self.assertTrue(manager.engine.stopped)
+            self.assertEqual(destroyed, [])
+
+        def release_groups():
+            self.assertIsNone(manager.engine)
+            self.assertEqual(destroyed, [True])
+            self.assertTrue(nfs_manager.unmounted)
+
+        with patch("rtp_llm.utils.fuser._nfs_manager", nfs_manager), patch(
+            "rtp_llm.device.device_type.is_ppu", return_value=True
+        ), patch(
+            "rtp_llm.models_py.modules.dsv41.ppu.native_model.drain_native_parallel",
+            side_effect=drain_device_work,
+        ) as drain, patch(
+            "rtp_llm.models_py.modules.dsv41.ppu.native_model.shutdown_native_parallel",
+            side_effect=release_groups,
+        ) as release:
+            manager.stop()
+        drain.assert_called_once()
+        release.assert_called_once()
+
     def test_stop_unmounts_nfs_after_engine_stop(self):
         manager = BackendManager.__new__(BackendManager)
         engine = _FakeEngine()

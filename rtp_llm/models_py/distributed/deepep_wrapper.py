@@ -367,6 +367,14 @@ class DeepEPWrapper:
 
         Warning: This should only be used in tests.
         """
+        cls.shutdown()
+
+    @classmethod
+    def shutdown(cls) -> None:
+        """Release the singleton after all engine work has stopped.
+
+        Call on every group rank before destroying its process groups.
+        """
         with cls._lock:
             if cls._instance is not None:
                 cls._instance._destroy_buffer()

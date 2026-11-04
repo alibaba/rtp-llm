@@ -46,6 +46,11 @@ public:
         model_ = std::move(model);
     }
 
+    void setStopControl(std::function<bool()> requested, std::function<void()> observed) {
+        stop_requested_ = std::move(requested);
+        stop_observed_  = std::move(observed);
+    }
+
     // Test hook: if set, used to create model when py_model is None
     using ModelFactory = std::function<std::unique_ptr<ModelBase>(const GptModelInitParams&)>;
     static ModelFactory test_model_factory;
@@ -109,6 +114,8 @@ private:
     RoleType              role_type_ = RoleType::PDFUSION;
     std::function<void()> profile_step_start_;
     std::function<void()> profile_step_finish_;
+    std::function<bool()> stop_requested_;
+    std::function<void()> stop_observed_;
 
     // Stream-async worker owns a CUDA stream/thread for pinned D2H,
     // per-stream update, and KV release off the main thread.

@@ -221,6 +221,7 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     inputs.need_moe_gating           = true;
     inputs.warmup                    = true;
     inputs.skip_run                  = true;
+    inputs.stop_run                  = true;
     inputs.is_fake_stream            = true;
     inputs.is_target_verify          = true;
     inputs.pd_separation             = true;
@@ -240,6 +241,7 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlNeedMoeGating));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlWarmup));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlSkipRun));
+    EXPECT_TRUE(has(GptModelInputControlFlag::kControlStopRun));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlFakeStream));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlTargetVerify));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlPdSeparation));
@@ -377,7 +379,9 @@ TEST(ModelInputTpSyncChild, DISABLED_RunRank) {
     checkLegacyUntaggedTpRound(inputs, rank);
 
     if (rank == 0) {
-        inputs = GptModelInputs{};
+        inputs          = GptModelInputs{};
+        inputs.skip_run = true;
+        inputs.stop_run = true;
     } else {
         inputs.kv_cache_block_id        = torch::ones({1, 2, 2}, torch::kInt32);
         inputs.kv_cache_kernel_block_id = torch::ones({1, 2, 3}, torch::kInt32);
@@ -389,6 +393,7 @@ TEST(ModelInputTpSyncChild, DISABLED_RunRank) {
     config.tp_size = 2;
     config.tp_rank = rank;
     tpSyncModelInputs(inputs, config);
+    EXPECT_TRUE(inputs.stop_run);
     EXPECT_TRUE(inputs.kv_cache_group_tags.empty());
     EXPECT_TRUE(!inputs.kv_cache_block_id.defined() || inputs.kv_cache_block_id.numel() == 0);
     EXPECT_TRUE(!inputs.kv_cache_kernel_block_id.defined() || inputs.kv_cache_kernel_block_id.numel() == 0);

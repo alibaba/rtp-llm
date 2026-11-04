@@ -253,12 +253,20 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.tp_sync_input");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+        model_input.stop_run  = stop_requested_ && stop_requested_();
+        model_input.skip_run  = model_input.skip_run || model_input.stop_run;
 
         // Move metadata to CUDA before tpSyncModelInputs so broadcasts use the
         // GPU packed-buffer path instead of CPU execBroadcastCpu/unpack loops.
         ensureModelInputsOnCuda(model_input, "process.before_tp_sync");
 
         tpSyncModelInputs(model_input, parallelism_config_);
+        if (model_input.stop_run) {
+            if (stop_observed_) {
+                stop_observed_();
+            }
+            return absl::OkStatus();
+        }
         if (model_input.skip_run) {
             return absl::OkStatus();
         }

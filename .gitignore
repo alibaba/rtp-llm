@@ -75,6 +75,8 @@ git.diff
 *.mo
 *build*/
 .doctrees/
+# Generated Sphinx documentation build archives
+/docs/build_*.tar
 node_modules/
 docs/index/dist/
 

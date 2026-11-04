@@ -683,6 +683,10 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
         ll_num_max_token=ll_num_max_token,
     )
 
+    from rtp_llm.config.v41_runtime import validate_v41_server_config
+
+    validate_v41_server_config(py_env_configs)
+
     # Set local ip if not already set (e.g. for world_info / distributed_server)
     if not py_env_configs.server_config.ip:
         py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())

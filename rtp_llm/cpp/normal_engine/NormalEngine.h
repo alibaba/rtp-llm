@@ -81,6 +81,11 @@ private:
     bool isDSpark() override;
 
 private:
+    struct PpuLoopStopState {
+        std::atomic<bool> requested{false};
+        std::atomic<bool> observed{false};
+    };
+    std::shared_ptr<PpuLoopStopState>              ppu_loop_stop_;
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
     bool                                          cpu_tp_shutdown_ = false;

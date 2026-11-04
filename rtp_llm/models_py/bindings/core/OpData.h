@@ -97,6 +97,7 @@ struct GptModelInputs {
     bool need_moe_gating        = false;
     bool warmup                 = false;
     bool skip_run               = false;
+    bool stop_run               = false;
     bool is_fake_stream         = false;
 
     // Linear attention target verify should write draft tokens mamba states

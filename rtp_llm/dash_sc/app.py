@@ -148,6 +148,8 @@ def _abort_bind_barrier(bind_barrier) -> None:
 def _v41_image_token_id(model_config) -> Optional[int]:
     if model_config.model_type not in ("deepseek_v41", "deepseek_v41_dspark"):
         return None
+    if not model_config.mm_model_config.is_multimodal:
+        return None
     from rtp_llm.config.dsv41_config import V41Config
 
     # The frontend needs only the raw image placeholder id. Decode, resize,

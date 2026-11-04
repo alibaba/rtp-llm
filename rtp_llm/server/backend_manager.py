@@ -228,6 +228,28 @@ class BackendManager(object):
                         raise
             if engine_stop_error is not None:
                 raise engine_stop_error
+            model_args = getattr(
+                getattr(self, "py_env_configs", None), "model_args", None
+            )
+            if getattr(model_args, "model_type", None) == "deepseek_v41":
+                from rtp_llm.device.device_type import is_ppu
+
+                if is_ppu():
+                    import gc
+
+                    from rtp_llm.models_py.modules.dsv41.ppu.native_model import (
+                        drain_native_parallel,
+                        shutdown_native_parallel,
+                    )
+
+                    # Release native/model objects while Python and role
+                    # communication are still alive, rather than leaving
+                    # their C++/CUDA destructors to interpreter finalization.
+                    drain_native_parallel()
+                    self.engine = None
+                    gc.collect()
+                    logging.info("V4.1 native role engine objects released")
+                    shutdown_native_parallel()
 
     def ready(self):
         if self.engine is not None:

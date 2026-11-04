@@ -83,7 +83,11 @@ void LogitsProcessorFactory::init(const ModelConfig&           model_config,
 }
 
 void LogitsProcessorFactory::shutdown() {
+    // The process-wide backend owns a MetricsReporter. Its static destructor
+    // would run after KMonitorFactory::Shutdown() has deleted that monitor.
+    // Join grammar compilation and release the reporter while KMonitor lives.
     grammarBackend().reset();
+    RTP_LLM_LOG_INFO("logits processor factory grammar backend released");
 }
 
 ErrorResult<std::vector<BaseLogitsProcessorPtr>>

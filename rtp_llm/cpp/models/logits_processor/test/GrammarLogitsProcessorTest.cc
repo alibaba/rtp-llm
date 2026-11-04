@@ -194,6 +194,33 @@ TEST(GrammarLogitsProcessorTest, FactoryShutdownReleasesReporterAfterProcessorsD
     }
 }
 
+TEST(GrammarLogitsProcessorTest, FactoryShutdownReleasesBackendAndAllowsReinitialization) {
+    ModelConfig model_config;
+    auto        grammar_config = grammarConfig();
+    grammar_config.tokenizer_info_json = makeAsciiTokenizerInfo().SerializeJSON();
+    auto request = std::make_shared<GenerateInput>();
+    request->generate_config = std::make_shared<GenerateConfig>();
+    request->generate_config->regex = "ab";
+
+    LogitsProcessorFactory::init(model_config, grammar_config, "");
+    std::weak_ptr<XGrammarBackend> lifetime = LogitsProcessorFactory::grammarBackend();
+    {
+        auto processors = LogitsProcessorFactory::createLogitsProcessors(request, 1, 1, kEos);
+        ASSERT_TRUE(processors.ok()) << processors.status().ToString();
+        EXPECT_EQ(processors.value().size(), 1);
+    }
+    LogitsProcessorFactory::shutdown();
+    EXPECT_TRUE(lifetime.expired());
+    auto disabled = LogitsProcessorFactory::createLogitsProcessors(request, 1, 1, kEos);
+    EXPECT_FALSE(disabled.ok());
+    LogitsProcessorFactory::shutdown();
+
+    LogitsProcessorFactory::init(model_config, grammar_config, "");
+    auto reinitialized = LogitsProcessorFactory::createLogitsProcessors(request, 1, 1, kEos);
+    EXPECT_TRUE(reinitialized.ok()) << reinitialized.status().ToString();
+    LogitsProcessorFactory::shutdown();
+}
+
 TEST(GrammarLogitsProcessorTest, ProcessMasksInitialDecodeState) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
