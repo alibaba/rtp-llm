@@ -226,6 +226,9 @@ class SparseAttnV4DecodeFp8Op:
         extra_topk_idxs: Optional[torch.Tensor] = None,
         extra_topk_length: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        from rtp_llm.models_py.modules.dsv4.fp8._sm120_prefill_indices import (
+            remap_padding_to_first_entry,
+        )
         from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import (
             SM120_EXTRA_TOPK_WIDTHS,
             SM120_SWA_TOPK_WIDTHS,
@@ -262,6 +265,13 @@ class SparseAttnV4DecodeFp8Op:
             )
         else:
             extra_topk_lens = None
+        # FlashInfer still loads the V tile for positions its length tensor
+        # masks (softmax weight 0). Point the canonical -1 tail at the row's
+        # first live slot so a never-written pool slot cannot yield 0 * NaN,
+        # matching the prefill remap. Lengths keep masking by position.
+        swa_indices = remap_padding_to_first_entry(swa_indices)
+        if extra_indices is not None:
+            extra_indices = remap_padding_to_first_entry(extra_indices)
         # CUDA graph replay cannot allocate a 128 MiB workspace.  It must be
         # touched during eager warmup; workspace() raises if a new allocation
         # is attempted while capture is active.

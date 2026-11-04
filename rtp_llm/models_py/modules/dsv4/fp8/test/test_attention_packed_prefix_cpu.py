@@ -102,6 +102,7 @@ class PackedPrefixDispatchTest(unittest.TestCase):
             PACKAGE + ".fp8._sm120_prefill_indices",
             split_sm120_combined_tables=self.split,
             zero_extra_sentinel_row=Mock(),
+            remap_padding_to_first_entry=Mock(),
         )
         module(PACKAGE + ".kv_cache_utils", SWA_KV="swa", CSA_KV="csa", HCA_KV="hca")
         module(

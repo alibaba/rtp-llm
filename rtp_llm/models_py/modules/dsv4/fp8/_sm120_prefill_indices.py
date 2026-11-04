@@ -167,6 +167,28 @@ def zero_extra_sentinel_row(workspace: torch.Tensor, N: int) -> None:
         workspace[0, 0].zero_()
 
 
+def remap_padding_to_first_entry(indices: torch.Tensor) -> torch.Tensor:
+    """Point canonical ``-1`` padding at the row's first live paged slot.
+
+    The SM120 prefill kernels map ``idx < 0`` to pool slot 0 and still load
+    it: only the QK logit is masked (by value and by position) while the
+    loaded V joins the PV product with softmax weight 0. Paged pools are
+    ``torch.empty`` allocations whose block 0 need never have been written,
+    so the consumer's historical ``clamp_min_(0)`` can gather uninitialized
+    memory and let ``0 * NaN`` poison the row. ``canonical_topk`` leaves
+    every row a dense valid prefix with a ``-1`` tail, so column 0 is a
+    known-initialized slot of the same row whenever that row has any tile to
+    load, and rows with zero effective length load no tiles at all. Lengths
+    are untouched: the kernel still masks the remapped tail positions by
+    position, not by value.
+    """
+    if indices.dim() != 2:
+        raise ValueError(
+            f"sparse top-k indices must be 2D [rows, width], got {indices.shape}"
+        )
+    return torch.where(indices < 0, indices[:, :1], indices)
+
+
 def _ready_chunk(
     indices: torch.Tensor,
     lens: torch.Tensor,

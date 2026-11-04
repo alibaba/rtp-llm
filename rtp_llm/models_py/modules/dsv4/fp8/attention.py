@@ -6252,8 +6252,22 @@ class AttentionFP8(nn.Module):
         ), f"RoPE rows ({freqs_cis.shape[0]}) != Q rows ({s_q})"
 
         use_sm120 = is_sm120(q.device)
+        # Paged pool views come from the caller; the caches built below are
+        # packed in-method with every slot written. Only paged block 0 is
+        # never guaranteed initialized. Capture each pool before the extra
+        # cache may be rebound to the in-method packed one below.
+        paged_swa_pool = sm120_swa_cache is not None
+        paged_extra_pool = sm120_extra_cache is not None
+        if sm120_ready is not None and (paged_swa_pool or paged_extra_pool):
+            raise ValueError(
+                "sm120_ready tables zero-pad, which on a caller-owned paged "
+                "pool would load the never-written block 0"
+            )
         sm120_cache = sm120_swa_cache
         if use_sm120:
+            from rtp_llm.models_py.modules.dsv4.fp8._sm120_prefill_indices import (
+                remap_padding_to_first_entry,
+            )
             from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import (
                 SM120_EXTRA_TOPK_WIDTHS,
                 canonical_topk,
@@ -6474,10 +6488,25 @@ class AttentionFP8(nn.Module):
                         # Ready tables are producer-normalized (non-negative,
                         # zero tail): the incumbent -1 clamp is a no-op on them
                         # and must not run in place on forward-shared storage.
+                        # Paged pools are caller-owned and block 0 is never
+                        # guaranteed initialized, yet the kernel still loads
+                        # clamped entries: point padding at the row's first
+                        # live slot (canonical_topk keeps it valid whenever
+                        # the row loads tiles); lengths still mask the tail.
                         if ready_swa is None:
-                            chunk_indices.clamp_min_(0)
+                            if paged_swa_pool:
+                                chunk_indices = remap_padding_to_first_entry(
+                                    chunk_indices
+                                )
+                            else:
+                                chunk_indices.clamp_min_(0)
                         if chunk_extra_indices is not None and ready_extra is None:
-                            chunk_extra_indices.clamp_min_(0)
+                            if paged_extra_pool:
+                                chunk_extra_indices = remap_padding_to_first_entry(
+                                    chunk_extra_indices
+                                )
+                            else:
+                                chunk_extra_indices.clamp_min_(0)
                     if not hasattr(self, "_attn_sink_f32"):
                         self._attn_sink_f32 = self.attn_sink.float()
                     sparse_runner(
