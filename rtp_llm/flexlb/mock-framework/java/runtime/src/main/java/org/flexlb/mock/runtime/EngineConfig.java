@@ -76,28 +76,15 @@ public final class EngineConfig {
         return result;
     }
 
-    /** Read the native checkpoint metadata only; weights are never loaded. */
-    public static JsonNode model(JsonNode config) throws IOException { return model(config, System.getenv()); }
-
-    public static JsonNode model(JsonNode config, Map<String, String> env) throws IOException {
-        var path = config.get("checkpoint_path");
-        if (path == null) return JSON.createObjectNode();
-        if (!path.isTextual() || path.asText().isBlank())
-            throw new IllegalArgumentException("checkpoint_path must be a model directory");
-        var directory = ModelPath.resolve(path.asText(), env);
-        var model = read(directory.resolve("config.json"));
-        if (!model.isObject()) throw new IllegalArgumentException("Model config.json must be an object");
-        // Effective settings expose the mounted path, not credential-bearing OSS URLs.
-        ((ObjectNode) config).put("checkpoint_path", directory.toString());
-        return model;
-    }
-
-    public static int imageToken(JsonNode model, int fallback) {
-        var value = model.get("image_token_id");
-        if (value == null && !model.has("vision_config")) return fallback;
-        if (value == null || !value.isIntegralNumber() || !value.canConvertToInt() || value.intValue() < 0)
-            throw new IllegalArgumentException("Model image_token_id must be a nonnegative int32");
-        return value.intValue();
+    /** Read a signed int64 setting from JSON or a native environment string. */
+    public static long signedLong(JsonNode config, String key, long fallback) {
+        var value = config.get(key);
+        if (value == null) return fallback;
+        if (value.isIntegralNumber() || value.isTextual()) {
+            try { return Long.parseLong(value.asText()); }
+            catch (NumberFormatException ignored) { }
+        }
+        throw new IllegalArgumentException("Invalid integer setting: " + key);
     }
 
     private EngineConfig() {}

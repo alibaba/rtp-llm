@@ -16,20 +16,15 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class VitTest {
     @TempDir Path directory;
-    String checkpoint() throws Exception {
-        new ObjectMapper().writeValue(directory.resolve("config.json").toFile(), Map.of(
-            "image_token_id", 1000, "text_config", Map.of("hidden_size", 4),
-            "vision_config", Map.of("patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024)));
-        return directory.toString();
-    }
     VitConfig config(String expression,long device,long host,long hashes,int wait) throws Exception {
         return config(expression,device,host,hashes,wait,Map.of());
     }
     VitConfig config(String expression,long device,long host,long hashes,int wait,Map<String,Object> overrides) throws Exception {
         var path=directory.resolve(UUID.randomUUID()+".json");
-        var settings=new HashMap<String,Object>(Map.of("checkpoint_path",checkpoint(),"mock.vit.skip.download",true,
+        var settings=new HashMap<String,Object>(Map.of("mock.vit.skip.download",true,
             "mm_cache_gpu_max_bytes",device,"mm_cache_cpu_max_bytes",host,"mm_hash_key_cache_max_bytes",hashes,
             "gpu_max_batch_size",8,"gpu_batch_wait_ms",wait,"mock.compute",Map.of("forward",Map.of("expression",expression))));
+        settings.putAll(Map.of("patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024, "hidden_size", 4));
         settings.putAll(overrides);
         new ObjectMapper().writeValue(path.toFile(),Map.of("id","vit-0","component_role","vit","component",Map.of("config",settings)));
         return VitConfig.load(path);
@@ -167,7 +162,7 @@ class VitTest {
     @Test void queueOverflowRejectsWorkAndStopCompletesEveryStageWaiter() throws Exception {
         var path=directory.resolve("bounded.json");
         new ObjectMapper().writeValue(path.toFile(),Map.of("id","vit-0","component_role","vit","component",Map.of("config",Map.of(
-            "checkpoint_path",checkpoint(),"gpu_max_batch_size",1,"vit_concurrency",1,"vit_max_queue_size",0,"mock.compute",Map.of("forward",Map.of("expression","1000"))))));
+            "patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024, "hidden_size", 4,"gpu_max_batch_size",1,"vit_concurrency",1,"vit_max_queue_size",0,"mock.compute",Map.of("forward",Map.of("expression","1000"))))));
         try(var scheduler=new VitScheduler(VitConfig.load(path))) {
             var first=scheduler.submit(new VitGeometry.Image("a",28,28,1));
             long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);

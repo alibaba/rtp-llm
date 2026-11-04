@@ -241,16 +241,20 @@ class RtpConfigTest {
         return env;
     }
 
-    @Test void dsv41ModelLengthPrecedesFallbackAndExplicitLengthWins() throws Exception {
-        var model = JSON.createObjectNode().put("model_type", "deepseek_v41");
-        model.putObject("text_config").put("max_position_embeddings", 131072);
-        JSON.writeValue(directory.resolve("config.json").toFile(), model);
-        var root = root(); var config = (ObjectNode) root.path("component").path("config");
-        config.put("checkpoint_path", directory.toString()); config.remove("max_seq_len");
-        assertEquals(131072, load(root).maxSeqLen());
-        config.put("max_seq_len", 4096); assertEquals(4096, load(root).maxSeqLen());
-        config.remove("checkpoint_path"); config.remove("max_seq_len");
+    @Test void usesExplicitRoutingIdentityWithoutReadingCheckpoint() throws Exception {
+        var root = root();
+        var config = (ObjectNode) root.path("component").path("config");
+        config.remove("max_seq_len");
+        config.put("checkpoint_path", "/missing/model");
         assertEquals(8192, load(root).maxSeqLen());
+        config.put("max_seq_len", 131072).put("image_token_id", 1000)
+            .put("cache_key_hash_seed", 0x4453563431494631L);
+        var parsed = load(root);
+        assertEquals(131072, parsed.maxSeqLen());
+        assertEquals(1000, parsed.imageToken());
+        assertEquals(0x4453563431494631L, parsed.cacheKeySeed());
+        config.put("cache_key_hash_seed", "9223372036854775808");
+        assertThrows(IllegalArgumentException.class, () -> load(root));
     }
 
     @Test void nativeConcurrencyIsNotCappedByMockBookkeeping() throws Exception {

@@ -23,12 +23,14 @@ class VitDownloadTest {
     private VitConfig config(int concurrency,int waiting) throws Exception { return config(concurrency, waiting, 1); }
     private VitConfig config(int concurrency,int waiting,int maxFileSizeKb) throws Exception {
         var json=new ObjectMapper();
-        json.writeValue(directory.resolve("config.json").toFile(),Map.of("image_token_id",1000,
-            "text_config",Map.of("hidden_size",4),"vision_config",Map.of("patch_size",14,"downsample_ratio",3,"min_pixels",0,"max_image_tokens",1024)));
-        return VitConfig.load(json.valueToTree(Map.of("id","v","component_role","vit","component",Map.of("config",Map.of(
-            "checkpoint_path",directory.toString(),"vit_concurrency",concurrency,"vit_max_queue_size",waiting,
-            "gpu_max_batch_size",4,"gpu_batch_wait_ms",0,"mm_image_max_file_size_kb",maxFileSizeKb,
-            "download_headers","{\"X-Media-Test\":\"present\"}","mock.compute.forward.expression","5")))));
+        var settings = new java.util.HashMap<String, Object>(Map.of(
+            "patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024, "hidden_size", 4,
+            "vit_concurrency", concurrency, "vit_max_queue_size", waiting, "gpu_max_batch_size", 4, "gpu_batch_wait_ms", 0));
+        settings.put("mm_image_max_file_size_kb", maxFileSizeKb);
+        settings.put("download_headers", "{\"X-Media-Test\":\"present\"}");
+        settings.put("mock.compute.forward.expression", "5");
+        return VitConfig.load(json.valueToTree(Map.of("id", "v", "component_role", "vit",
+            "component", Map.of("config", settings))));
     }
     private static byte[] png() throws Exception {
         var bytes=new ByteArrayOutputStream(); ImageIO.write(new BufferedImage(56,28,BufferedImage.TYPE_INT_RGB),"png",bytes); return bytes.toByteArray();

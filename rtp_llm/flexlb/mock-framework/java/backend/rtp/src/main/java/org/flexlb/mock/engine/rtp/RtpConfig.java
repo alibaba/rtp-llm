@@ -42,12 +42,10 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         var root = JSON.createObjectNode().put("id", id).put("component_role", role.name());
         var component = root.putObject("component").put("engine", "rtp");
         component.set("config", RtpSettings.environment(env, role));
-        return load(root, env);
+        return load(root);
     }
 
-    public static RtpConfig load(JsonNode root) throws IOException { return load(root, System.getenv()); }
-
-    private static RtpConfig load(JsonNode root, Map<String, String> env) throws IOException {
+    public static RtpConfig load(JsonNode root) throws IOException {
         String component = root.path("component_role").asText();
         Role role;
         try { role = Role.valueOf(component); } catch (RuntimeException error) { throw new IllegalArgumentException("Missing/invalid RTP component role", error); }
@@ -61,8 +59,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         if (nativeInt(config, "kv_cache_event_snapshot_interval_ms", 600000, Integer.MIN_VALUE, Integer.MAX_VALUE) <= 0
                 && !nativeBool(config, "enable_remote_cache", false))
             throw new IllegalArgumentException("Nonpositive snapshot interval requires enable_remote_cache");
-        var model = EngineConfig.model(config, env);
-        finalizeSettings((ObjectNode) config, model, env);
+        finalizeSettings((ObjectNode) config);
         int blockSize = config.path("seq_size_per_block").intValue();
         int maxSeqLen = config.path("max_seq_len").intValue();
         int maxBatchTokens = config.path("max_batch_tokens_size").intValue();
@@ -101,7 +98,8 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             nativeInt(config, "max_inited_kv_cache_streams", 0, 0, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_without_cache", 0, 0, Integer.MAX_VALUE),
             cpSize, cpEnabled, tpSize, dpSize,
-            config, compute, EngineConfig.imageToken(model, org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN), org.flexlb.mock.cache.CacheSequence.cacheKeySeed(model, env));
+            config, compute, nativeInt(config, "image_token_id", org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN, 0, Integer.MAX_VALUE),
+            EngineConfig.signedLong(config, "cache_key_hash_seed", 0));
     }
 
     public boolean forceSinglePrefill() { return cpEnabled && business.path("cp_force_single_prefill").asBoolean(true); }
@@ -134,7 +132,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             .put("block_tree_memory_evict_high_watermark_ratio", hostWatermark.high());
         if (role == Role.prefill) {
             result.put("max_inited_kv_cache_streams", maxInitedKvStreams).put("max_batch_tokens_without_cache", maxUncachedBatchTokens); }
-        if (business.has("checkpoint_path")) result.set("checkpoint_path", business.get("checkpoint_path"));
+        if (business.has("image_token_id")) result.put("image_token_id", imageToken);
         result.put("concurrency_limit", maxGenerateBatchSize).put("cache_key_hash_seed", cacheKeySeed);
         boolean control = nativeBool(business,"enable_remote_cache",false);
         String events = business.path("kv_cache_event_publisher_type").asText("none");
@@ -152,19 +150,11 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
     }
 
     /** Resolve native automatic values once, before constructing any execution component. */
-    private static void finalizeSettings(ObjectNode config, JsonNode model, Map<String, String> env) {
+    private static void finalizeSettings(ObjectNode config) {
         int blockSize = nativeInt(config, "seq_size_per_block", 0, 0, Integer.MAX_VALUE);
         if (blockSize == 0) blockSize = 64; // Native ordinary-device default; no GPU probing on a Mock host.
         int maxSeqLen = nativeInt(config, "max_seq_len", 0, 0, Integer.MAX_VALUE);
-        if (maxSeqLen == 0) {
-            // DSV4.1 has a model-owned length; do not guess another model adapter's initialization.
-            boolean v41 = model.path("model_type").asText().startsWith("deepseek_v41")
-                || model.path("architectures").toString().contains("DeepseekV41")
-                || env.getOrDefault("MODEL_TYPE", "").startsWith("deepseek_v41");
-            if (!v41 && !model.isEmpty())
-                throw new IllegalArgumentException("Set max_seq_len explicitly for models without an implemented native length resolver");
-            maxSeqLen = v41 ? nativeInt(model.path("text_config"), "max_position_embeddings", null, 1, Integer.MAX_VALUE) : 8192;
-        }
+        if (maxSeqLen == 0) maxSeqLen = 8192;
         int contextBatch = nativeInt(config, "max_context_batch_size", 1, 1, Integer.MAX_VALUE);
         int maxBatchTokens = nativeInt(config, "max_batch_tokens_size", 0, 0, Integer.MAX_VALUE);
         if (maxBatchTokens == 0) {

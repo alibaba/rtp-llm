@@ -6,7 +6,7 @@
 
 本分支 `codex/mock-framework-dsv41` 基于公共 Mock 提交 `84b174c6d9`，真实 Java Master 和 Engine RPC 契约固定为 `feature/dsv41-dev-main-202161013@ba26ddf1dd86c02bcee3cc6eee966ca59e4ae7a6`。不随远端分支自动更新，也不包含真实 GPU 引擎实现。公共修改先进入 `codex/mock-framework-on-main`，再按独立提交同步；本分支的协议迁移不反向覆盖 main 的契约。
 
-多模态回放使用原始 token 和图片占位位置 `Image.offset`，不再接受预展开的 `Image.length`。Client 从 real 模型目录的 config.json 读取 image_token_id，将占位位置编码为该标记，V 给出长度/hash 元数据，P 准备计算输入并通过原生 PD 请求传递缓存身份。V4.1 几何、ViT 负载及 KVCM 接入范围见[组件参考](docs/component-reference.md)。
+多模态回放使用原始 token 和图片占位位置 `Image.offset`，不再接受预展开的 `Image.length`。Client 使用显式配置的 image_token_id，将占位位置编码为该标记，V 给出长度/hash 元数据，P 准备计算输入并通过原生 PD 请求传递缓存身份。V4.1 几何、ViT 负载及 KVCM 接入范围见[组件参考](docs/component-reference.md)。
 
 ## 准备环境
 
