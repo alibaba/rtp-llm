@@ -3,9 +3,69 @@ from pathlib import Path
 import time
 
 from ..config.validation import duration
+from . import ExecutionError
 from .environment import RunEnvironment
 from .run_trace import RunTrace, timestamp, write_json
 from .step.step import GateFailure, StepContext
+
+
+class _PhaseTasks:
+    def __init__(self):
+        self._background = {}
+        self._stopping = set()
+
+    def start(self, step_id, operation):
+        self._background[step_id] = asyncio.create_task(operation, name=step_id)
+
+    async def stop(self, step_id):
+        task = self._background.get(step_id)
+        if task is None:
+            raise ExecutionError(f'No background Step {step_id!r} in this Phase')
+        if task.done():
+            self._check(step_id, task)
+            return False
+        self._stopping.add(step_id)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self._check(step_id, task)
+        return task.cancelled()
+
+    def _check(self, step_id, task):
+        if task.done() and not (task.cancelled() and step_id in self._stopping):
+            task.result()
+
+    def check(self):
+        for step_id, task in self._background.items():
+            self._check(step_id, task)
+
+    async def run(self, operation):
+        pending = {task for task in self._background.values() if not task.done()}
+        if not pending:
+            return await operation
+        foreground = asyncio.create_task(operation)
+        try:
+            while not foreground.done() and pending:
+                _, pending = await asyncio.wait(pending | {foreground}, return_when=asyncio.FIRST_COMPLETED)
+                self.check()
+                pending.discard(foreground)
+            return await foreground
+        finally:
+            if not foreground.done():
+                foreground.cancel()
+            await asyncio.gather(foreground, return_exceptions=True)
+
+    async def finish(self):
+        pending = {task for task in self._background.values() if not task.done()}
+        while pending:
+            _, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            self.check()
+        self.check()
+
+    async def close(self):
+        for task in self._background.values():
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*self._background.values(), return_exceptions=True)
 
 
 async def run_case(case, registry, launch, directory):
@@ -25,11 +85,17 @@ async def run_case(case, registry, launch, directory):
             phase_deadline = time.monotonic() + float(duration(phase.timeout))
             records.emit(event='phase_started', phase=phase.id, describe=phase.describe)
             phase_status = 'ERROR'
+            tasks = _PhaseTasks()
             try:
                 for step in phase.steps:
+                    tasks.check()
                     deadline = min(phase_deadline, time.monotonic() + float(duration(step.within))) if step.within else phase_deadline
-                    context = StepContext(runtime, records, timestamp(), deadline)
-                    await step.run(context, results, phase.id)
+                    context = StepContext(runtime, records, timestamp(), deadline, tasks.stop)
+                    if step.background:
+                        tasks.start(step.id, step.run(context, results, phase.id))
+                    else:
+                        await tasks.run(step.run(context, results, phase.id))
+                await tasks.finish()
                 phase_status = 'PASS'
             except GateFailure:
                 phase_status = 'FAIL'
@@ -38,6 +104,7 @@ async def run_case(case, registry, launch, directory):
                 phase_status = 'CANCELLED'
                 raise
             finally:
+                await tasks.close()
                 records.emit(event='phase_finished', phase=phase.id, status=phase_status)
         result['status'] = 'PASS'
     except GateFailure as error:

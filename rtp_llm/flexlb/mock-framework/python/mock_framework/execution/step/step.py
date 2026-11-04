@@ -1,6 +1,7 @@
 """Bound Case steps and the common execution lifecycle."""
 import asyncio
 from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
 import time
 from typing import Any, ClassVar
 
@@ -39,6 +40,7 @@ class Expect:
 @dataclass(frozen=True)
 class Step:
     definition: ClassVar
+    allow_background: ClassVar[bool] = True
     id: str
     describe: str
     interface: str
@@ -46,6 +48,7 @@ class Step:
     expect: Expect | None = None
     within: str | None = None
     wait_after: str = '0s'
+    background: bool = False
 
     async def run(self, context, results, phase_id):
         with context.records.step(phase_id, self.id, self.interface):
@@ -73,7 +76,6 @@ class Step:
             invoked = True
             actual = await runtime.supervisor.guard(interface.call(context, arguments), budget)
             returned = True
-            results[self.id] = actual
             stage = 'expect'
             if gate is not None:
                 gate.update(actual=actual, status='PASS' if matches_expectation(actual, expected) else 'FAIL')
@@ -86,6 +88,7 @@ class Step:
                 records.emit(event='wait_started', step=self.id, duration=self.wait_after)
                 budget = context.timeout
                 await runtime.supervisor.guard(asyncio.sleep(wait), budget)
+            results[self.id] = actual
             records.emit(event='step_finished', step=self.id, status='PASS', args=args, result=actual,
                          duration_ms=round((time.monotonic() - started) * 1000, 3))
         except BaseException as error:
@@ -108,6 +111,7 @@ class StepContext:
     records: Any
     query_time: str
     deadline: float
+    stop_step: Callable[[str], Awaitable[bool]] | None = None
 
     @property
     def timeout(self):
