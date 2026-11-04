@@ -19,6 +19,7 @@ TEST(BatchDecodeSchedulerModeTest, LegacyConstructorDefaultsToDecode) {
     BatchDecodeScheduler scheduler(runtime, nullptr, nullptr);
     EXPECT_EQ(scheduler.scheduler_type_, BatchDecodeScheduler::kBatchDecode);
     EXPECT_EQ(scheduler.batch_size_, 1);
+    EXPECT_TRUE(scheduler.force_perf_test_);
 }
 
 TEST(BatchDecodeSchedulerModeTest, PrefillRoleDoesNotDependOnSyntheticWarmupType) {
@@ -57,10 +58,22 @@ TEST(BatchDecodeSchedulerModeTest, RuntimeControlStillOverridesInitialModeAndBat
     EXPECT_EQ(scheduler.dp_rank_, 3);
 }
 
+TEST(BatchDecodeSchedulerModeTest, RealTokenPolicySurvivesOrdinaryBatchSizeUpdates) {
+    RuntimeConfig        runtime;
+    BatchDecodeScheduler scheduler(runtime, nullptr, nullptr);
+    scheduler.updateSchedulerInfo(R"({"batch_size":4,"mode":"decode","force_perf_test":false})");
+    EXPECT_FALSE(scheduler.force_perf_test_);
+    scheduler.updateSchedulerInfo(R"({"batch_size":3,"mode":"decode"})");
+    EXPECT_EQ(scheduler.batch_size_, 3);
+    EXPECT_FALSE(scheduler.force_perf_test_);
+    scheduler.updateSchedulerInfo(R"({"batch_size":1,"force_perf_test":true})");
+    EXPECT_TRUE(scheduler.force_perf_test_);
+}
+
 namespace {
 
 template<class Stream = NormalGenerateStream>
-std::shared_ptr<Stream> makeShutdownStream(StreamState state = StreamState::WAITING) {
+std::shared_ptr<Stream> makeShutdownStream(StreamState state = StreamState::WAITING, bool perf_test = false) {
     ModelConfig model;
     model.max_seq_len                  = 64;
     model.vocab_size                   = 128;
@@ -72,9 +85,72 @@ std::shared_ptr<Stream> makeShutdownStream(StreamState state = StreamState::WAIT
     input->input_ids                       = torch::tensor({1, 2}, torch::kInt32);
     input->generate_config                 = std::make_shared<GenerateConfig>();
     input->generate_config->max_new_tokens = 1;
-    auto stream                            = std::make_shared<Stream>(input, model, runtime, resource, nullptr);
+    auto stream = std::make_shared<Stream>(input, model, runtime, resource, nullptr, 0, perf_test);
     stream->generate_status_->status.store(state);
     return stream;
+}
+
+TEST(BatchDecodeSchedulerModeTest, RealAdmissionPreservesTokensAndExplicitPerfStreams) {
+    autil::EnvGuard perf_env("PERF_TEST", "0");
+    for (const bool force_perf : {true, false}) {
+        for (const bool explicit_perf : {true, false}) {
+            SCOPED_TRACE(force_perf);
+            SCOPED_TRACE(explicit_perf);
+            RuntimeConfig        runtime;
+            BatchDecodeScheduler scheduler(runtime, nullptr, nullptr, 0, RoleType::PREFILL);
+            if (!force_perf) {
+                scheduler.updateSchedulerInfo(R"({"batch_size":1,"mode":"prefill","force_perf_test":false})");
+            }
+            auto stream                              = makeShutdownStream(StreamState::RUNNING, explicit_perf);
+            stream->generateConfig()->max_new_tokens = 10;
+            auto buffer                              = std::make_shared<SpeculativeExecutorStreamOutput>();
+            buffer->tokens                           = torch::zeros({1, 1}, torch::kInt32);
+            stream->setSPOutputBuffer(buffer);
+            scheduler.running_streams_ = {stream};
+            scheduler.initRunningStreams();
+            EXPECT_EQ(stream->isPerfTest(), force_perf || explicit_perf);
+            auto tokens = torch::tensor({{17}}, torch::kInt32);
+            stream->specUpdate({tokens, 1, -1, torch::Tensor(), torch::Tensor()});
+            ASSERT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
+            EXPECT_EQ(tokens.item<int>(), force_perf || explicit_perf ? 0 : 17);
+            EXPECT_EQ(stream->completeTokenIdsVec().back(), force_perf || explicit_perf ? 0 : 17);
+        }
+    }
+}
+
+TEST(BatchDecodeSchedulerModeTest, RealCohortWaitsForFourAndControlsTheFinalThree) {
+    autil::EnvGuard      poll_env("RTP_LLM_SCHEDULER_POLL_INTERVAL_MS", "1");
+    autil::EnvGuard      perf_env("PERF_TEST", "0");
+    RuntimeConfig        runtime;
+    BatchDecodeScheduler scheduler(runtime, nullptr, nullptr, 0, RoleType::PREFILL);
+    scheduler.updateSchedulerInfo(R"({"batch_size":4,"mode":"prefill","force_perf_test":false})");
+    for (int index = 0; index < 3; ++index) {
+        ASSERT_TRUE(scheduler.enqueue(makeShutdownStream(StreamState::RUNNING)).ok());
+    }
+    auto incomplete = scheduler.schedule();
+    ASSERT_TRUE(incomplete.ok());
+    EXPECT_TRUE(incomplete->empty());
+    ASSERT_TRUE(scheduler.enqueue(makeShutdownStream(StreamState::RUNNING)).ok());
+    auto full = scheduler.schedule();
+    ASSERT_TRUE(full.ok());
+    ASSERT_EQ(full->size(), 4);
+    for (const auto& stream : *full) {
+        EXPECT_FALSE(stream->isPerfTest());
+        stream->reportEvent(StreamEvents::GenerateDone);
+    }
+    auto drained = scheduler.schedule();
+    ASSERT_TRUE(drained.ok());
+    EXPECT_TRUE(drained->empty());
+    scheduler.updateSchedulerInfo(R"({"batch_size":3,"mode":"prefill"})");
+    for (int index = 0; index < 3; ++index) {
+        ASSERT_TRUE(scheduler.enqueue(makeShutdownStream(StreamState::RUNNING)).ok());
+    }
+    auto tail = scheduler.schedule();
+    ASSERT_TRUE(tail.ok());
+    ASSERT_EQ(tail->size(), 3);
+    for (const auto& stream : *tail) {
+        EXPECT_FALSE(stream->isPerfTest());
+    }
 }
 
 // Pause the actual scheduler polling expression, with a genuinely pending load.
