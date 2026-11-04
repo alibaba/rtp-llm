@@ -276,20 +276,4 @@ class PrefillAdmissionTest {
         }
     }
 
-    @Test void hostOnlyPrefillReusesLocalKvWithoutALoadingStage() throws Exception {
-        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration("prefill"));
-        var settings = (ObjectNode) root.path("component").path("config");
-        settings.put("seq_size_per_block", 2).put("reuse_cache", true).put("enable_device_cache", false)
-            .put("enable_memory_cache", true).put("mock.cache.memory.blocks", 8);
-        var path = directory.resolve("host.json"); json.writeValue(path.toFile(), root); var config = RtpConfig.load(path);
-        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU, false, 8, KvCache.EvictionPolicy.LRU, null, null);
-             var engine = new PrefillRpcServer(config.endpoint(), cache, RtpScheduler.factory(config))) {
-            assertTrue(engine.submit(input(1, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().isOk());
-            assertEquals(6, cache.hostSnapshot().free()); assertEquals(8, cache.snapshot(-1, false).freeBlocks());
-            var reused = engine.submit(input(2, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
-            assertEquals(4, reused.output().getFlattenOutput().getAuxInfo(0).getTotalReuseLen());
-            assertEquals(6, cache.hostSnapshot().free()); assertEquals(8, cache.snapshot(-1, false).freeBlocks());
-        }
-    }
-
 }

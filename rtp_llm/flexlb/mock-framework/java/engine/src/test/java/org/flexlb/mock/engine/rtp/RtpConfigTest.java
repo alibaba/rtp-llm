@@ -111,18 +111,16 @@ class RtpConfigTest {
         ((ObjectNode) root.path("component")).set("config", model.effective());
         assertEquals(2.6, load(root).compute().configuration().decode().tokens_per_step());
     }
-    @Test void nativeEvictionOrderingUsesOnlyTreeAndHostRequiresExplicitLogicalCapacity() throws Exception {
-        var root = root(); var config = (ObjectNode) root.path("component").path("config");
+    @Test void acceptsOnlyLocalLru() throws Exception {
+        var root = root();
+        var config = (ObjectNode) root.path("component").path("config");
         assertEquals("lru", load(root).effective().path("device_eviction_policy").asText());
-        for (String policy : java.util.List.of("lru", "lfu", "fifo")) {
-            config.put("device_eviction_policy", policy);
-            assertEquals(policy, load(root).evictionPolicy().name().toLowerCase(java.util.Locale.ROOT));
-        }
-        config.put("device_eviction_policy", "tree"); assertThrows(IllegalArgumentException.class, () -> load(root));
-        config.remove("device_eviction_policy"); config.put("DEVICE_EVICTION_POLICY", "LFU");
-        assertEquals("lfu", load(root).effective().path("device_eviction_policy").asText());
-        config.put("enable_memory_cache", true);
+        config.put("device_eviction_policy", "lfu");
         assertThrows(IllegalArgumentException.class, () -> load(root));
+        config.put("device_eviction_policy", "LRU").put("enable_memory_cache", true);
+        assertThrows(IllegalArgumentException.class, () -> load(root));
+        config.put("enable_memory_cache", false);
+        assertEquals("lru", load(root).effective().path("device_eviction_policy").asText());
     }
 
     @Test void bindsParallelismToTheFormulaWithoutImplicitScaling() throws Exception {
@@ -198,7 +196,7 @@ class RtpConfigTest {
             var root = JSON.<ObjectNode>valueToTree(RtpNodeTest.configuration(role));
             var config = (ObjectNode) root.path("component").path("config");
             config.put("cp_rotate_method", "ALL_GATHER").put("tp_size", 4).put("dp_size", 3);
-            config.put("enable_memory_cache", true).put("mock.cache.memory.blocks", 20).put("mock.scheduler.mode", "fifo");
+            config.put("mock.scheduler.mode", "fifo");
             var parsed = load(root);
             var env = new java.util.HashMap<String, String>();
             parsed.business().fields().forEachRemaining(entry -> env.put(entry.getKey().toUpperCase(java.util.Locale.ROOT).replace('.', '_'), entry.getValue().asText()));
@@ -210,18 +208,6 @@ class RtpConfigTest {
             assertThrows(IllegalArgumentException.class, () -> RtpConfig.fromEnvironment(parsed.id(), parsed.role(), env));
         }
     }
-    @Test void enablesHostAndReportsStorageSettingsAsEffective() throws Exception {
-        var root = root(); var config = (ObjectNode) root.path("component").path("config");
-        config.put("enable_memory_cache", true).put("mock.cache.memory.blocks", 32).put("memory_eviction_policy", "fifo");
-        var parsed = load(root); var effective = parsed.effective();
-        assertEquals(32, parsed.hostBlocks()); assertEquals("fifo", effective.path("memory_eviction_policy").asText());
-        assertTrue(effective.path("enable_memory_cache").booleanValue());
-        assertEquals(32, effective.path("mock.cache.memory.blocks").intValue());
-        config.put("mock.cache.memory.blocks", 0); assertThrows(IllegalArgumentException.class, () -> load(root));
-        config.put("mock.cache.memory.blocks", 32).put("block_tree_memory_evict_low_watermark_ratio", .95);
-        assertThrows(IllegalArgumentException.class, () -> load(root));
-    }
-
     @Test void resolvesNativeAutomaticBudgetsAndPreservesExplicitOverrides() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         config.remove("max_batch_tokens_size");

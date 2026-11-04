@@ -95,13 +95,7 @@ def test_vit_and_shared_process_resources_are_not_faked():
     assert '待埋点' not in items[310350]['title']
     assert 'py_rtp_vit_download_rt' in items[310350]['targets'][0]['expr']
     assert all('role="vit"' in t['expr'] for p in vit['panels'] for t in p['targets'])
-    host = next(r for r in rows if r['title'].startswith('Engine 宿主'))
-    assert all(not p['targets'] for p in host['panels'])
-    assert all('共享 JVM' in p['description'] for p in host['panels'])
-    kv = [p for p in panels() if 'Host KV 容量' in p['title']]
-    assert len(kv) == 2
-    assert all('rtp_llm_host_kv_tokens' in p['targets'][0]['expr'] for p in kv)
-    assert all('JVM 堆' in p['description'] for p in kv)
+    assert not any('Host KV 容量' in p['title'] for p in panels())
 
 
 def test_local_legends_use_prometheus_labels_and_respect_aggregation():

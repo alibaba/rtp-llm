@@ -11,13 +11,11 @@ import java.util.*;
 import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.engine.forward.*;
 import org.flexlb.mock.engine.cache.KvCache.EvictionPolicy;
-import org.flexlb.mock.engine.cache.KvCache.Watermark;
 import org.flexlb.mock.api.model.DecodeSpec;
 
 /** Native RTP names/units stay native; resolved pool capacity excludes the native null block. */
 public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, int reserveBlocks, EvictionPolicy evictionPolicy,
-                        boolean reuseCache, boolean deviceCache, int hostBlocks, EvictionPolicy hostPolicy,
-                        Watermark deviceWatermark, Watermark hostWatermark, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
+                        boolean reuseCache, boolean deviceCache, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
                         int maxGenerateBatchSize, int maxInitedKvStreams, int maxUncachedBatchTokens, int cpSize, boolean cpEnabled, int tpSize, int dpSize,
                         JsonNode business, ComputeModel compute, int imageToken, long cacheKeySeed) {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -25,11 +23,11 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
     public RtpConfig {
         if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
                 || blockSize < 1 || deviceBlocks < 1 || reserveBlocks < 0 || reserveBlocks > deviceBlocks
-                || hostBlocks < 0 || maxSeqLen < 1 || maxBatchTokens < 0 || maxGenerateBatchSize < 1 || maxInitedKvStreams < 0 || maxUncachedBatchTokens < 0 || cpSize < 1 || tpSize < 1 || dpSize < 1)
+                || maxSeqLen < 1 || maxBatchTokens < 0 || maxGenerateBatchSize < 1 || maxInitedKvStreams < 0 || maxUncachedBatchTokens < 0 || cpSize < 1 || tpSize < 1 || dpSize < 1)
             throw new IllegalArgumentException("Invalid RTP node configuration");
         business = business.deepCopy();
-        Objects.requireNonNull(evictionPolicy); Objects.requireNonNull(hostPolicy);
-        Objects.requireNonNull(deviceWatermark); Objects.requireNonNull(hostWatermark); Objects.requireNonNull(compute);
+        Objects.requireNonNull(evictionPolicy);
+        Objects.requireNonNull(compute);
     }
 
     @Override public JsonNode business() { return business.deepCopy(); }
@@ -56,9 +54,9 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         if (config.has("capacity") || config.has("capacity.device_blocks") || config.has("capacity.reserve_blocks"))
             throw new IllegalArgumentException("Removed Mock capacity settings: use test_block_num and reserve_block_ratio");
         config = normalize(config, role);
-        if (nativeInt(config, "kv_cache_event_snapshot_interval_ms", 600000, Integer.MIN_VALUE, Integer.MAX_VALUE) <= 0
-                && !nativeBool(config, "enable_remote_cache", false))
-            throw new IllegalArgumentException("Nonpositive snapshot interval requires enable_remote_cache");
+        if (nativeBool(config, "enable_memory_cache", false) || nativeBool(config, "enable_remote_cache", false))
+            throw new IllegalArgumentException("Mock RTP supports only local KV; remove Host and remote KV settings");
+        nativeInt(config, "kv_cache_event_snapshot_interval_ms", 600000, 1, Integer.MAX_VALUE);
         finalizeSettings((ObjectNode) config);
         int blockSize = config.path("seq_size_per_block").intValue();
         int maxSeqLen = config.path("max_seq_len").intValue();
@@ -71,11 +69,6 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         int ratio = nativeInt(config, "reserve_block_ratio", 5, 0, 100);
         int reserve = (int) ((long) blocks * ratio / 100);
         var policy = policy(config, "device_eviction_policy");
-        var hostPolicy = policy(config, "memory_eviction_policy");
-        boolean hostEnabled = nativeBool(config, "enable_memory_cache", false);
-        int hostBlocks = config.has("mock.cache.memory.blocks")
-            ? nativeInt(config, "mock.cache.memory.blocks", null, 0, Integer.MAX_VALUE) : 0;
-        if (hostEnabled && hostBlocks == 0) throw new IllegalArgumentException("enable_memory_cache requires mock.cache.memory.blocks");
         int tpSize = nativeInt(config, "tp_size", 1, 1, Integer.MAX_VALUE);
         int dpSize = nativeInt(config, "dp_size", 1, 1, Integer.MAX_VALUE);
         String cpMethod = cpMethod(config);
@@ -91,7 +84,6 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         return new RtpConfig(root.path("id").textValue(), role,
             blockSize, blocks, reserve, policy,
             nativeBool(config, "reuse_cache", false), nativeBool(config, "enable_device_cache", true),
-            hostEnabled ? hostBlocks : 0, hostPolicy, watermark(config, "device", 0.82, 0.90), watermark(config, "memory", 0.90, 0.94),
             nativeBool(config, "disable_decode_first_malloc_device_reuse", false),
             maxSeqLen, maxBatchTokens,
             nativeInt(config, "concurrency_limit", 32, 1, Integer.MAX_VALUE),
@@ -123,25 +115,17 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             .put("max_seq_len", maxSeqLen).put("max_batch_tokens_size", maxBatchTokens)
             .put("max_context_batch_size", business.path("max_context_batch_size").asInt())
             .put("cp_force_single_prefill", business.path("cp_force_single_prefill").asBoolean())
-            .put("dp_size", dpSize).put("tp_size", tpSize).put("cp_rotate_method", cpMethod(business))
-            .put("enable_memory_cache", hostBlocks > 0).put("mock.cache.memory.blocks", hostBlocks)
-            .put("memory_eviction_policy", hostPolicy.name().toLowerCase(Locale.ROOT))
-            .put("block_tree_device_evict_low_watermark_ratio", deviceWatermark.low())
-            .put("block_tree_device_evict_high_watermark_ratio", deviceWatermark.high())
-            .put("block_tree_memory_evict_low_watermark_ratio", hostWatermark.low())
-            .put("block_tree_memory_evict_high_watermark_ratio", hostWatermark.high());
+            .put("dp_size", dpSize).put("tp_size", tpSize).put("cp_rotate_method", cpMethod(business));
         if (role == Role.prefill) {
             result.put("max_inited_kv_cache_streams", maxInitedKvStreams).put("max_batch_tokens_without_cache", maxUncachedBatchTokens); }
         if (business.has("image_token_id")) result.put("image_token_id", imageToken);
         result.put("concurrency_limit", maxGenerateBatchSize).put("cache_key_hash_seed", cacheKeySeed);
-        boolean control = nativeBool(business,"enable_remote_cache",false);
         String events = business.path("kv_cache_event_publisher_type").asText("none");
-        if (control || !events.equals("none")) {
+        if (!events.equals("none")) {
             for (String key : List.of("kv_cache_event_manager_endpoint","kv_cache_event_instance_id","kv_cache_event_instance_group","kv_cache_event_host_ip_port", "kvcm_enable_vipserver", "kvcm_vipserver_domain", "kvcm_server_address"))
                 if (business.has(key)) result.set(key,business.get(key));
             result.put("kv_cache_event_publisher_type",events)
-                .put("kv_cache_event_snapshot_interval_ms",nativeInt(business,"kv_cache_event_snapshot_interval_ms",600000,Integer.MIN_VALUE,Integer.MAX_VALUE))
-                .put("enable_remote_cache",control);
+                .put("kv_cache_event_snapshot_interval_ms",nativeInt(business,"kv_cache_event_snapshot_interval_ms",600000,Integer.MIN_VALUE,Integer.MAX_VALUE));
             result.putObject("kvcm_capabilities").put("payload_io",false).put("hbm_events",events.equals("kvcm"));
         }
         if (role == Role.prefill) result.put("mock.scheduler.mode", groupScheduling() ? "group" : "fifo");
@@ -183,12 +167,8 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             if (value != null && !value.isTextual()) throw new IllegalArgumentException();
             return EvictionPolicy.valueOf(value == null ? "LRU" : value.textValue().toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException error) {
-            throw new IllegalArgumentException("Invalid " + key + ": expected lru, lfu, or fifo", error);
+            throw new IllegalArgumentException("Invalid " + key + ": expected lru", error);
         }
-    }
-    private static Watermark watermark(JsonNode config, String tier, double low, double high) {
-        String prefix = "block_tree_" + tier + "_evict_";
-        return new Watermark(ratio(config, prefix + "low_watermark_ratio", low), ratio(config, prefix + "high_watermark_ratio", high));
     }
     private static double ratio(JsonNode config, String key, double fallback) {
         if (!config.has(key)) return fallback;
@@ -234,9 +214,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         "kv_cache_event_publisher_type", "kv_cache_event_manager_endpoint", "kv_cache_event_instance_id",
         "kv_cache_event_instance_group", "kv_cache_event_host_ip_port", "kv_cache_event_snapshot_interval_ms",
         "kvcm_enable_vipserver", "kvcm_vipserver_domain", "kvcm_server_address",
-        "enable_remote_cache", "model_name", "concurrency_limit", "tp_size", "dp_size", "cp_rotate_method", "enable_memory_cache", "memory_eviction_policy",
-        "block_tree_memory_evict_low_watermark_ratio", "block_tree_memory_evict_high_watermark_ratio",
-        "block_tree_device_evict_low_watermark_ratio", "block_tree_device_evict_high_watermark_ratio");
+        "enable_remote_cache", "model_name", "concurrency_limit", "tp_size", "dp_size", "cp_rotate_method", "enable_memory_cache");
 
     static Set<String> nativeNames(Role role) {
         var names = new HashSet<>(COMMON);
@@ -246,7 +224,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
     static Set<String> environmentNames(Role role) {
         var names = new HashSet<>(nativeNames(role));
         // These are real internal attributes, without public server ENV bindings.
-        names.removeAll(Set.of("device_eviction_policy", "memory_eviction_policy", "disable_decode_first_malloc_device_reuse"));
+        names.removeAll(Set.of("device_eviction_policy", "disable_decode_first_malloc_device_reuse"));
         names.removeAll(KVCM_ENV_BINDINGS.values());
         return Set.copyOf(names);
     }
@@ -261,7 +239,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
     }
     static Set<String> mockNames() {
         var names = new HashSet<>(ComputeModel.settingNames());
-        names.addAll(Set.of("mock.cache.memory.blocks", "mock.scheduler.mode"));
+        names.addAll(Set.of("mock.scheduler.mode"));
         return Set.copyOf(names);
     }
     static ObjectNode normalize(JsonNode config, Role role) {

@@ -11,7 +11,6 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.flexlb.mock.engine.cache.KvCache;
-import org.flexlb.mock.engine.cache.remote.RemoteCache;
 import org.flexlb.mock.engine.cache.KvcmReporter;
 import org.flexlb.mock.engine.Scheduler;
 import org.flexlb.mock.protocol.ApiServer;
@@ -31,17 +30,10 @@ public final class RtpNode implements AutoCloseable {
 
     private record MetricSource(Object lock, RtpMetrics metrics) {}
 
-    private RtpNode(RtpConfig config, Scheduler.Factory schedulers, RemoteCache remote) {
+    private RtpNode(RtpConfig config, Scheduler.Factory schedulers) {
         this.config = Objects.requireNonNull(config);
         Objects.requireNonNull(schedulers);
-        boolean enabled = RtpConfig.nativeBool(config.business(), "enable_remote_cache", false);
-        if (enabled != (remote != null))
-            throw new IllegalArgumentException(enabled ? "enable_remote_cache requires a remote KV adapter; no storage adapter is installed"
-                : "Remote KV adapter requires enable_remote_cache=true");
-        if (remote != null && config.groupScheduling())
-            throw new IllegalArgumentException("Remote KV requires mock.scheduler.mode=fifo");
-        cache = new KvCache(config.blockSize(), config.deviceBlocks(), config.reserveBlocks(), config.evictionPolicy(),
-            config.deviceCache(), config.hostBlocks(), config.hostPolicy(), config.deviceWatermark(), config.hostWatermark(), remote);
+        cache = new KvCache(config.blockSize(), config.deviceBlocks(), config.reserveBlocks(), config.deviceCache());
         try {
             service = new RtpRpcService(config.endpoint(), cache, (lock, storage, finished) -> {
                 var scheduler = schedulers.create(lock, storage, finished);
@@ -66,13 +58,7 @@ public final class RtpNode implements AutoCloseable {
     }
 
     public static RtpNode start(RtpConfig config, int rpcPort, int controlPort, Scheduler.Factory schedulers) throws IOException {
-        return start(config, rpcPort, controlPort, schedulers, null);
-    }
-
-    /** Explicit adapter assembly; production entrypoints install no remote storage implementation. */
-    public static RtpNode start(RtpConfig config, int rpcPort, int controlPort, Scheduler.Factory schedulers,
-                                RemoteCache remote) throws IOException {
-        var node = new RtpNode(config, schedulers, remote);
+        var node = new RtpNode(config, schedulers);
         try {
             var builder = NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service);
             node.rpc = builder.build().start();
@@ -100,7 +86,7 @@ public final class RtpNode implements AutoCloseable {
         var values = config.business();
         String type = values.path("kv_cache_event_publisher_type").asText("none");
         if (!Set.of("none", "kvcm").contains(type)) throw new IllegalArgumentException("Invalid kv_cache_event_publisher_type");
-        if (type.equals("none") && !RtpConfig.nativeBool(values, "enable_remote_cache", false)) return null;
+        if (type.equals("none")) return null;
         String instance = values.path("kv_cache_event_instance_id").asText();
         String host = values.path("kv_cache_event_host_ip_port").asText(address.rpc(rpc.getPort() - 1));
         if (instance.isBlank() || host.isBlank())

@@ -6,13 +6,12 @@ import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.engine.forward.*;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.engine.cache.KvCache;
-import org.flexlb.mock.engine.cache.CacheLoad;
 import static org.flexlb.mock.engine.RequestFailure.Reason.*;
 import static org.flexlb.mock.engine.rtp.RtpSchedulerBase.Phase.*;
 
 /** Shared RTP request, KV, PD and Forward lifecycle; admission policies own their queues. */
 abstract class RtpSchedulerBase implements Scheduler {
-    enum Phase { QUEUED, CAPACITY, CACHE_LOADING, LOADING, TRANSFERRING, TRANSFERRED, RUNNING, OUTPUT, FORWARD, READY }
+    enum Phase { QUEUED, CAPACITY, LOADING, TRANSFERRING, TRANSFERRED, RUNNING, OUTPUT, FORWARD, READY }
     private final TaskHistory history;
     private final Object lock;
     protected final RtpConfig config;
@@ -33,13 +32,12 @@ abstract class RtpSchedulerBase implements Scheduler {
         final RequestState state;
         final ArrayDeque<Notice> notices = new ArrayDeque<>();
         KvCache.Lease lease;
-        CacheLoad preparation;
-        boolean cacheReported;
+
         int reused, outputToken;
         boolean prefillFinished;
         final long begun = System.nanoTime();
         long enqueuedAt = begun, waitNanos, firstToken;
-        long timingStarted, canRun, firstRunning, loadStarted, loadDone;
+        long timingStarted, canRun, firstRunning;
         long attemptedGeneration = Long.MIN_VALUE;
         Phase phase = QUEUED;
         ReportedPhase finalPhase;
@@ -67,7 +65,7 @@ abstract class RtpSchedulerBase implements Scheduler {
         this.lock = Objects.requireNonNull(lock);
         this.config = Objects.requireNonNull(config);
         this.cache = Objects.requireNonNull(cache);
-        this.metrics = new RtpMetrics(config.role().name(), this::metricState, cache);
+        this.metrics = new RtpMetrics(config.role().name(), this::metricState);
     }
 
     @Override public Request input(Input input, Listener listener) {
@@ -193,13 +191,7 @@ abstract class RtpSchedulerBase implements Scheduler {
             if (entry.lease == null && config.maxInitedKvStreams() > 0
                     && active.values().stream().filter(e -> e.lease != null).count() >= config.maxInitedKvStreams()) continue;
             if (workTokens(entry) <= 0 || !fitsPrefill(admitted, entry)) continue;
-            if (!reserve(entry)) {
-                if (entry.phase == CACHE_LOADING) {
-                    admitted.add(entry);
-                    uncached += uncachedTokens(entry);
-                }
-                continue;
-            }
+            if (!reserve(entry)) continue;
             admitted.add(entry);
             queue.remove(entry); running.add(entry); selected.add(entry);
             uncached += uncachedTokens(entry);
@@ -252,7 +244,6 @@ abstract class RtpSchedulerBase implements Scheduler {
             if (failure == KvCache.Failure.PERMANENT)
                 finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Prefill allocation exceeds capacity"));
             if (failure != null) return false;
-            if (!cacheReady(entry)) { cacheLoading(entry); return false; }
             return true;
         }
         long tokens = (long) entry.input.tokens() + entry.state.snapshot().generated() + entry.nextStep.additionalKvTokens();
@@ -368,10 +359,6 @@ abstract class RtpSchedulerBase implements Scheduler {
         long now = System.nanoTime();
         if (waitingEntries().contains(entry) || entry.phase == Phase.CAPACITY)
             entry.waitNanos = Math.max(0, now - entry.timingStarted);
-        if (entry.preparation != null && !entry.cacheReported && entry.preparation.loadAttempted()) {
-            metrics.loadFinished(entry.preparation, false, now);
-            entry.cacheReported = true;
-        }
         removeWaiting(entry);
         running.remove(entry);
         entry.state.finish(failure);
@@ -389,8 +376,6 @@ abstract class RtpSchedulerBase implements Scheduler {
             Math.max(0, now - entry.timingStarted), entry.waitNanos,
             entry.canRun == 0 ? 0 : Math.max(0, entry.canRun - entry.enqueuedAt),
             entry.canRun == 0 || entry.firstRunning == 0 ? 0 : Math.max(0, entry.firstRunning - entry.canRun),
-            entry.loadDone == 0 ? 0 : entry.loadDone - entry.loadStarted,
-            entry.loadDone == 0 || entry.firstRunning == 0 ? 0 : Math.max(0, entry.firstRunning - entry.loadDone),
             entry.firstToken == 0 ? -1 : entry.firstToken - entry.begun,
             entry.input.tokens(), progress.generated(), progress.iterations(), entry.reused));
         active.remove(entry.input.identity(), entry);
@@ -444,46 +429,33 @@ abstract class RtpSchedulerBase implements Scheduler {
     }
     protected final boolean prefill() { return config.role() == Role.prefill; }
     private KvCache.Failure acquire(Entry entry) {
-        if (entry.preparation != null) { cacheReady(entry); return null; }
+        if (entry.lease != null) return null;
         long generation = cache.allocationGeneration();
         if (entry.attemptedGeneration == generation) return KvCache.Failure.RETRYABLE;
-        boolean reuse = config.reuseCache() && (config.deviceCache() || config.hostBlocks() > 0 || cache.remoteEnabled()) && entry.input.reuse()
+        boolean reuse = config.reuseCache() && config.deviceCache() && entry.input.reuse()
             && (prefill() || !config.disableDecodeFirstReuse());
         var keys = entry.input.keys();
         int matched = Math.min(keys.size(), (entry.input.tokens() - 1) / config.blockSize());
         long capacityTokens = (long) entry.input.tokens() + (prefill() ? 0 : config.compute().kvReserveTokens());
-        var admission = cache.prepare(capacityTokens, reuse ? keys.subList(0, matched) : List.of(),
-            entry.input.deadline(), remoteLookup());
+        long started = System.nanoTime();
+        var admission = cache.acquire(capacityTokens, reuse ? keys.subList(0, matched) : List.of());
         entry.attemptedGeneration = admission.generation();
-        if (admission.load() == null) return admission.failure();
+        if (admission.lease() == null) return admission.failure();
         entry.waitNanos = Math.max(0, System.nanoTime() - entry.timingStarted);
-        entry.preparation = admission.load();
-        entry.lease = entry.preparation.lease();
+        entry.lease = admission.lease();
         entry.reused = Math.toIntExact(entry.lease.reusedTokens());
-        entry.state.attach(entry.preparation, () -> {
+        entry.state.attach(entry.lease, () -> {
+            if (!config.reuseCache() || !config.deviceCache() || !entry.input.reuse()) return;
             // The final sampled token has not entered a Forward and owns no computed KV.
             int computedOutput = !prefill() && entry.generating ? Math.max(0, entry.state.snapshot().generated() - 1) : 0;
-            boolean publish = config.reuseCache() && (config.deviceCache() || config.hostBlocks() > 0 || cache.remoteEnabled()) && entry.input.reuse();
-            entry.lease.publishAndStore(publish ? entry.input.cacheSequence().keys(computedOutput, entry.outputToken) : List.of(),
-                (long) entry.input.tokens() + computedOutput, entry.input.deadline());
+            entry.lease.publish(entry.input.cacheSequence().keys(computedOutput, entry.outputToken),
+                (long) entry.input.tokens() + computedOutput);
         });
-        cacheReady(entry);
+        metrics.cacheLookup(entry.input.tokens(), entry.reused);
+        if (config.reuseCache() && entry.input.reuse())
+            metrics.prepared((long) (entry.input.tokens() / config.blockSize()) * config.blockSize(),
+                entry.reused, System.nanoTime() - started);
         return null;
-    }
-    protected boolean remoteLookup() { return false; }
-    protected void cacheLoading(Entry entry) { throw new IllegalStateException("Asynchronous cache loading is not supported by this policy"); }
-    protected final boolean cacheReady(Entry entry) {
-        var result = entry.preparation.result();
-        if (result == null) return false;
-        if (!entry.cacheReported) {
-            entry.reused = Math.toIntExact(result.reusedTokens());
-            metrics.cacheLookup(entry.input.tokens(), entry.reused);
-            if (config.reuseCache() && entry.input.reuse())
-                metrics.prepared((long) (entry.input.tokens() / config.blockSize()) * config.blockSize(),
-                    entry.preparation, result, System.nanoTime());
-            entry.cacheReported = true;
-        }
-        return true;
     }
     @Override public List<Request> requests() { return new ArrayList<>(active.values()); }
     @Override public QueueSnapshot queues() {
@@ -526,11 +498,9 @@ abstract class RtpSchedulerBase implements Scheduler {
         synchronized (lock) {
             var counts = queues();
             var kv = cache.snapshot(0, false);
-            var host = cache.hostSnapshot();
             long block = config.blockSize();
             return new RtpMetrics.State(counts.waiting(), counts.running(), counts.loading(), counts.ready(), kv.totalBlocks() * block,
-                kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, host.total() * block, host.free() * block, config.blockSize(),
-                active.values().stream().filter(e -> !e.state.terminating() && e.phase == CACHE_LOADING).count());
+                kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, config.blockSize());
         }
     }
     RtpMetrics metrics() { return metrics; }
