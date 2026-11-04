@@ -70,3 +70,6 @@ tabulate==0.9.0
 # tensorrt 10.x cu12 series — drop for cuda13 (use TRT-LLM plugins via C++ side).
 # multimodal video decode (matches deps/requirements_base.txt on main)
 av==16.1.0 ; platform_machine == "x86_64"
+
+# SCR epsilon control-plane package (built by the SCR team).
+https://kangaroo-epsilon.oss-cn-hangzhou-zmf.aliyuncs.com/test/55275136/amd64/wheels/epsilon-0.2.7%2B95d46bb4-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
