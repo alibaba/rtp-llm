@@ -27,7 +27,6 @@ cc_library(
 cc_library(
     name = "navi_headers",
     hdrs = glob([
-        "**/*.h",
         "common.h",
         "builder/*.h",
         "config/*.h",
@@ -88,7 +87,6 @@ cc_library(
         "test_cluster/NaviFuncClosure.h",
     ]),
     include_prefix = "navi",
-    includes = ["."],
     deps = [
         ":navi_proto_cc_proto_headers",
         ":navi_builder_headers",
