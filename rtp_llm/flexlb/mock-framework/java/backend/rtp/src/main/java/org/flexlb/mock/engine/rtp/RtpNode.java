@@ -17,7 +17,7 @@ import org.flexlb.mock.engine.Scheduler;
 import org.flexlb.mock.runtime.ApiServer;
 
 /** One owned RTP P/D object with independent listeners and resources. Does not contain the case runner or a cluster controller. */
-public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
+public final class RtpNode implements AutoCloseable {
     private final RtpConfig config;
     private final KvCache cache;
     private final RpcService service;

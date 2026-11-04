@@ -7,7 +7,7 @@ import java.util.concurrent.TimeUnit;
 import org.flexlb.mock.runtime.*;
 
 /** Backend-independent V instance. The same listeners serve shared JVM and remote P. */
-public final class VitNode implements EngineInstance {
+public final class VitNode implements AutoCloseable {
     private final VitConfig config;
     private final VitService service;
     private final EngineAddress address=EngineAddress.local();
@@ -29,11 +29,11 @@ public final class VitNode implements EngineInstance {
             throw error;
         }
     }
-    @Override public Map<String,Object> endpoints() {
+    public Map<String,Object> endpoints() {
         return Map.of("id",config.id(),"role","vit","rpc",address.rpc(rpc.getPort()),"control",address.http(api.port()),
             "metrics",metrics.prometheus()?address.http(api.port())+"/metrics":"","metrics_backend",metrics.prometheus()?"prometheus":"kmonitor","metadata_only",true,"supported_rpc",List.of("GetWorkerStatus","GetCacheStatus","RemoteMultimodalEmbedding","GetMultimodalHashes","AsyncSubmitEmbedding"));
     }
-    @Override public void checkHealthy() { if(closed || rpc == null || rpc.isShutdown()) throw new IllegalStateException("V stopped");service.checkHealthy(); }
+    public void checkHealthy() { if(closed || rpc == null || rpc.isShutdown()) throw new IllegalStateException("V stopped");service.checkHealthy(); }
     @Override public synchronized void close() {
         if(closed) return;closed=true;
         try { if(metrics!=null) metrics.close(); }

@@ -1,6 +1,16 @@
 package org.flexlb.mock.engine;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.Locale;
+import java.util.function.Supplier;
+import org.flexlb.mock.api.model.Types.Role;
+import org.flexlb.mock.engine.rtp.RtpConfig;
+import org.flexlb.mock.engine.rtp.RtpNode;
+import org.flexlb.mock.runtime.EngineAddress;
+import org.flexlb.mock.runtime.EngineConfig;
+import org.flexlb.mock.vit.VitConfig;
+import org.flexlb.mock.vit.VitNode;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -20,27 +30,34 @@ public final class EngineMain {
         if (ready != null && configuration == null)
             throw new IllegalArgumentException("Local Engine launch requires MOCK_CONFIG_FILE");
         int rpcPort = Integer.parseInt(System.getenv().getOrDefault("MOCK_RPC_PORT", Integer.toString(port + 1)));
+        if (rpcPort < 1 || rpcPort > 65535 || rpcPort == port)
+            throw new IllegalArgumentException("Engine listeners must use distinct valid ports");
+        if (ready != null) {
+            Path output = Path.of(System.getenv("MOCK_OUTPUT_DIR"));
+            for (Path artifact : java.util.List.of(ready, output.resolve("effective-config.json"), output.resolve("endpoints.json")))
+                if (Files.exists(artifact)) throw new IllegalArgumentException("Engine startup artifact already exists: " + artifact);
+        }
         var started = configuration == null
-            ? EngineInstances.startEnvironment(System.getenv(), port + 1, port)
-            : EngineInstances.start(Path.of(configuration), rpcPort, port);
+            ? startEnvironment(System.getenv(), port + 1, port)
+            : start(EngineConfig.read(Path.of(configuration)), rpcPort, port);
         var stopped = new CountDownLatch(1);
-        try (var node = started.node()) {
+        try (var node = started) {
             var hook = new Thread(() -> {
-                stopped.countDown();
-                node.close();
+                try { node.close(); }
+                finally { stopped.countDown(); }
             }, "engine-shutdown");
             Runtime.getRuntime().addShutdownHook(hook);
             try {
-                node.checkHealthy();
+                node.health().run();
                 System.out.println(new ObjectMapper().writeValueAsString(Map.of(
-                    "event", "engine_started", "endpoints", node.endpoints(), "effective_config", started.effective())));
+                    "event", "engine_started", "endpoints", node.endpoints().get(), "effective_config", started.effective())));
                 if (ready != null) {
                     Path output = Path.of(System.getenv("MOCK_OUTPUT_DIR"));
                     publish(output.resolve("effective-config.json"), started.effective());
-                    publish(output.resolve("endpoints.json"), node.endpoints());
-                    publish(ready, Map.of("url", node.endpoints().get("control")));
+                    publish(output.resolve("endpoints.json"), node.endpoints().get());
+                    publish(ready, Map.of("url", node.endpoints().get().get("control")));
                 }
-                while (!stopped.await(1, TimeUnit.SECONDS)) node.checkHealthy();
+                while (!stopped.await(1, TimeUnit.SECONDS)) node.health().run();
             } finally {
                 if (ready != null) Files.deleteIfExists(ready);
                 try { Runtime.getRuntime().removeShutdownHook(hook); } catch (IllegalStateException stopping) { }
@@ -55,5 +72,42 @@ public final class EngineMain {
         } finally {
             Files.deleteIfExists(temporary);
         }
+    }
+
+    private record Started(Runnable stop, Runnable health, Supplier<Map<String, Object>> endpoints,
+                           JsonNode effective) implements AutoCloseable {
+        @Override public void close() { stop.run(); }
+    }
+
+    private static Started startEnvironment(Map<String, String> env, int rpcPort, int controlPort) throws Exception {
+        String role = env.getOrDefault("ROLE_TYPE", "").toLowerCase(Locale.ROOT);
+        String id = env.getOrDefault("MOCK_NODE_ID", role + "-" + EngineAddress.local().advertise());
+        if (id == null || !id.startsWith(role + "-")) throw new IllegalArgumentException("Missing/invalid MOCK_NODE_ID for ROLE_TYPE");
+        if (role.equals("vit")) {
+            var config = VitConfig.fromEnvironment(id, env);
+            var node = VitNode.start(config, rpcPort, controlPort);
+            return new Started(node::close, node::checkHealthy, node::endpoints, config.effective());
+        }
+        if (!role.equals("prefill") && !role.equals("decode")) throw new IllegalArgumentException("Unknown ROLE_TYPE: " + role);
+        var config = RtpConfig.fromEnvironment(id, Role.valueOf(role), env);
+        var node = RtpNode.start(config, rpcPort, controlPort);
+        return new Started(node::close, node::checkHealthy, node::endpoints, config.effective());
+    }
+
+    private static Started start(JsonNode root, int rpcPort, int controlPort) throws Exception {
+        String role = root.path("component_role").asText();
+        if (role.isBlank() || !root.path("id").asText().startsWith(role + "-"))
+            throw new IllegalArgumentException("Instance identity differs from role");
+        if (role.equals("vit")) {
+            var config = VitConfig.load(root);
+            var node = VitNode.start(config, rpcPort, controlPort);
+            return new Started(node::close, node::checkHealthy, node::endpoints, config.effective());
+        }
+        if (!role.equals("prefill") && !role.equals("decode"))
+            throw new IllegalArgumentException("Unknown Engine role: " + role);
+        // P/D select an LLM backend; V uses one shared implementation.
+        var config = RtpConfig.load(root);
+        var node = RtpNode.start(config, rpcPort, controlPort);
+        return new Started(node::close, node::checkHealthy, node::endpoints, config.effective());
     }
 }
