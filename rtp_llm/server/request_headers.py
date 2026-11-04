@@ -99,3 +99,20 @@ def dashscope_greennet_metadata(headers: Optional[Mapping[str, Any]]) -> tuple:
     if request_id:
         metadata += (("x-dashscope-request-id", request_id),)
     return metadata
+
+
+def extract_qos_priority(input: Any) -> int:
+    """Use the same QoS priority for scheduling and Worker RPCs."""
+    headers = getattr(input, "headers", None)
+    if headers:
+        value = headers.get("x-dashscope-inner-qos-level")
+        if value is not None:
+            try:
+                return int(str(value).strip())
+            except (TypeError, ValueError):
+                pass
+    config = getattr(input, "generate_config", None)
+    priority = getattr(config, "qos_priority", None)
+    if priority is not None and priority > 0:
+        return priority
+    return 50
