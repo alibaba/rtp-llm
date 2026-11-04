@@ -139,6 +139,10 @@ public:
         use_device_malloc_block_pool_ = use_device_malloc_block_pool;
     }
 
+    void setSkipRemoteReusedWrite(bool skip_remote_reused_write) {
+        skip_remote_reused_write_ = skip_remote_reused_write;
+    }
+
     void setCPSlotMapper(std::shared_ptr<CPSlotMapper> cp_slot_mapper) {
         cp_slot_mapper_ = std::move(cp_slot_mapper);
     }
@@ -305,6 +309,7 @@ protected:
     size_t                                 reserveBlocksForPool(size_t group_id) const;
     std::vector<DeviceBlockPoolPtr>        group_block_pools_;
     RoleType                               role_type_{RoleType::PDFUSION};
+    bool                                   skip_remote_reused_write_{false};
     // Drain pending copies before releasing the cache groups and pools.
     std::unique_ptr<GpuBlockCopy> gpu_block_copy_;
 

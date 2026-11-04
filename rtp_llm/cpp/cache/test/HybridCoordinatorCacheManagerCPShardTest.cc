@@ -8,7 +8,9 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -27,7 +29,27 @@ using TestHybridTypeCoordinatorCacheManager = BlockTreeCacheTestAllocator<Coordi
 
 namespace {
 
-// Two-group hybrid: group_id=0 linear (won't be exercised here), group_id=1 full (the CP-shard target).
+class CPRecordingBackend: public StorageBackend {
+public:
+    ~CPRecordingBackend() override { shutdown(); }
+    std::vector<StorageRequest> writes;
+
+protected:
+    bool initImpl() override { return true; }
+    StorageMatchResult matchImpl(const StorageRequest& request) override {
+        return {request.local_matched_blocks_num, nullptr};
+    }
+    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {}
+    void writeImpl(const StorageRequest& request) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        writes.push_back(request);
+    }
+
+private:
+    std::mutex mutex_;
+};
+
+// Two-group hybrid; resolve pool IDs from tags because topology IDs are canonicalized.
 CacheConfig makeCPHybridConfig() {
     CacheConfig config;
     config.dtype              = rtp_llm::DataType::TYPE_FP16;
@@ -96,8 +118,8 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, PrefillNeedBlocksUsesEachGroups
     ASSERT_TRUE(allocator->init());
     allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
     auto       resource    = makeBatchRes(1, config, {});
-    auto       linear_pool = allocator->groupBlockPools()[0];
-    auto       full_pool   = allocator->groupBlockPools()[1];
+    auto       linear_pool = allocator->groupBlockPools()[config.topology().groupIdForTag("linear")];
+    auto       full_pool   = allocator->groupBlockPools()[config.topology().groupIdForTag("full")];
     const auto linear      = linear_pool->malloc(1).value();
     const auto full        = full_pool->malloc(2).value();
     linear_pool->incRef(linear);
@@ -115,8 +137,8 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, RecomputeDetachesSuffixUsingGro
     auto       allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
     allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
-    const auto linear_pool   = allocator->groupBlockPools()[0];
-    const auto pool          = allocator->groupBlockPools()[1];
+    const auto linear_pool   = allocator->groupBlockPools()[config.topology().groupIdForTag("linear")];
+    const auto pool          = allocator->groupBlockPools()[config.topology().groupIdForTag("full")];
     auto       resource      = makeBatchRes(1, config, {100, 101, 102, 103});
     auto       linear_blocks = linear_pool->malloc(2);
     ASSERT_TRUE(linear_blocks.has_value());
@@ -303,6 +325,64 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, InsertIntoCacheUsesCanonicalKey
     ASSERT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup("full", match.matched_device_resources),
               full_blocks);
     block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), match.matched_device_resources);
+}
+
+TEST_F(HybridCoordinatorCacheManagerCPShardTest, RemoteReuseCountsFilterCanonicalKeysForEachBatch) {
+    const auto config = makeCPHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(
+        config, AllocationType::DEVICE, nullptr, 0, RoleType::PREFILL);
+    allocator->setSkipRemoteReusedWrite(true);
+    auto backend = std::make_shared<CPRecordingBackend>();
+    KVCacheConfig kv_config;
+    kv_config.enable_remote_cache = true;
+    allocator->setBlockTreeCacheConfigForTest(kv_config);
+    allocator->setStorageBackendForTest(backend);
+    ASSERT_TRUE(allocator->init());
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
+    auto resource = makeBatchRes(3, config, {100, 101, 102, 103, 104, 105});
+    const auto& pools = allocator->groupBlockPools();
+    for (int batch = 0; batch < 3; ++batch) {
+        const auto linear = pools[0]->malloc(3).value();
+        const auto full = pools[1]->malloc(3).value();
+        pools[0]->incRef(linear);
+        pools[1]->incRef(full);
+        resource->setBatchBlocks(batch, "linear", {NULL_BLOCK_IDX, linear[0], NULL_BLOCK_IDX, linear[1],
+                                                  NULL_BLOCK_IDX, linear[2]});
+        resource->setBatchBlocks(batch, "full", full);
+    }
+    resource->cacheResource(0).setDeviceReuseBlockNum(1);
+    resource->cacheResource(0).setStorageBackendReuseBlockNum(1);
+    resource->cacheResource(2).setDeviceReuseBlockNum(2);
+    resource->cacheResource(2).setStorageBackendReuseBlockNum(5);  // End extends past publish_prefix.
+    auto tokens = makeTokens(3, 24, 4);
+    size_t resident = 0;
+    allocator->insertIntoCache(InsertInfo{resource, tokens, false}, resident);
+    backend->shutdown();
+    ASSERT_EQ(backend->writes.size(), 3u);
+    const std::vector<std::vector<size_t>> kept{{0, 2}, {0, 1, 2}, {0, 1}};
+    const CacheKeysType canonical{101, 103, 105};
+    for (int batch = 0; batch < 3; ++batch) {
+        const auto write = std::find_if(backend->writes.begin(), backend->writes.end(), [&](const auto& current) {
+            return std::any_of(current.handles.front().begin(), current.handles.front().end(), [&](const auto& handle) {
+                return handle.tag == "full" && handle.block == resource->blocks(batch, "full").front();
+            });
+        });
+        ASSERT_NE(write, backend->writes.end());
+        CacheKeysType expected;
+        for (const size_t key : kept[batch]) {
+            expected.push_back(canonical[key]);
+        }
+        EXPECT_EQ(*write->keys, expected);
+        for (size_t key = 0; key < kept[batch].size(); ++key) {
+            ASSERT_EQ(write->handles[key].size(), 2u);
+            for (const auto& handle : write->handles[key]) {
+                const size_t position = handle.tag == "linear" ? kept[batch][key] * 2 + 1 : kept[batch][key];
+                EXPECT_EQ(handle.block, resource->blocks(batch, handle.tag)[position]);
+            }
+        }
+    }
+    EXPECT_EQ(allocator->blockTreeCacheOwner()->getKeySnapshot().keys, (CacheKeysType{101, 103, 105}));
+    allocator->free({resource, tokens});
 }
 
 // 6) Two-malloc smoke: cp_size=4 sharding, request occupies 8 logical blocks ⇒ 2 per rank.

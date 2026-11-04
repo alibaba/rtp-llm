@@ -1116,8 +1116,18 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
         }
         insert_keys.resize(publish_prefix);
         resources.resize(publish_prefix);
+        size_t remote_reuse_begin = 0;
+        size_t remote_reuse_end   = 0;
+        if (skip_remote_reused_write_) {
+            // Remote reuse is recorded only after adopting a successful load; counts use canonical keys.
+            const auto& resource = kv_cache_resource->cacheResource(batch_id);
+            remote_reuse_end = std::min(resource.reuseBlockNum(), publish_prefix);
+            remote_reuse_begin =
+                std::min(resource.reuseBlockNum() - resource.storageBackendReuseBlockNum(), remote_reuse_end);
+        }
         resident_prefix_length += block_tree_cache_->insert(
-            insert_keys, resources, insert_info.target_tier, insert_info.is_resident, insert_info.request_id);
+            insert_keys, resources, insert_info.target_tier, insert_info.is_resident, insert_info.request_id,
+            remote_reuse_begin, remote_reuse_end);
     }
 }
 

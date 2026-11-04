@@ -317,6 +317,8 @@ bool KVCacheManager::init() {
     }
 
     coordinator_manager_->setCPSlotMapper(cp_slot_mapper_);
+    coordinator_manager_->setSkipRemoteReusedWrite(pd_sep_config_.role_type == RoleType::PREFILL
+                                                  && kv_cache_config_.kvcm_min_replica_count <= 1);
     RTP_LLM_CHECK_WITH_INFO(coordinator_manager_->init(), "CoordinatorCacheManager init failed");
     initLinearReplayPool();
     // Observe real pool capacity, including asynchronous eviction and lease release.
