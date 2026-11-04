@@ -19,9 +19,14 @@ if [[ -n "${NAVI_SCHED_BAZEL_PROFILE:-}" ]]; then
 fi
 
 cd "${REPO_ROOT}"
-"${BAZEL_BIN}" --batch build \
-    "${BUILD_ARGS[@]}" \
-    "${BUILD_PROFILE_ARGS[@]}" \
+BUILD_COMMAND=(
+    "${BAZEL_BIN}" --batch build
+    "${BUILD_ARGS[@]}"
+)
+if (( ${#BUILD_PROFILE_ARGS[@]} )); then
+    BUILD_COMMAND+=("${BUILD_PROFILE_ARGS[@]}")
+fi
+"${BUILD_COMMAND[@]}" \
     //rtp_llm/flexlb/navi_sched:libnavi_sched.so \
     //rtp_llm/flexlb/navi_sched:navi_sched_public_api_compile \
     //rtp_llm/flexlb/navi_sched:rtp_llm_adapter_public_api_compile
