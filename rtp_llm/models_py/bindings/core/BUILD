@@ -64,11 +64,10 @@ cc_library(
     name = "common_defines",
     hdrs = [
         "CommonDefines.h",
-        # Header-only sampling-temperature policy (env flag + the shared
-        # "temperature is folded into the force_topk candidates" predicate).
-        # Exported here because every target that compiles CudaSampleOp.cc
-        # already depends on :common_defines; RTP_LLM_CHECK_WITH_INFO comes from
-        # those targets' existing utils deps.
+        # Header-only sampling-temperature policy: the single source of truth
+        # for the "this round folds the temperature into the force_topk
+        # candidates" decision, shared by the CUDA greedy sampler and the
+        # upstream logits-ownership decision. Pure std, no utils dependency.
         "SampleTemperature.h",
     ],
     copts = copts(),

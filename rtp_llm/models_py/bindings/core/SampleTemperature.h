@@ -1,10 +1,6 @@
 #pragma once
 
-#include <cerrno>
 #include <cstdint>
-#include <cstdlib>
-
-#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
@@ -12,35 +8,18 @@ namespace rtp_llm {
 // that every component that needs to know whether this round's temperature is
 // folded into the force_topk candidate scaling — including upstream decisions
 // that keep the logits buffer private / un-cloned — reads the *same* predicate
-// and cannot drift from the sampler or parse the environment twice.
+// and cannot drift from the sampler.
+//
+// The fold is unconditional: there is no environment switch. The gates in
+// greedyTemperatureFoldedForRequest are correctness conditions, not tunables —
+// each one marks a round where folding would change the numbers, so that round
+// keeps the legacy full-vocabulary in-place pass.
 //
 // Equivalence the fold relies on: for T > 0 the map x -> x * inv(T) is strictly
 // monotone, so top-k over `logits` selects exactly the candidate set top-k over
 // the tempered row would select. Scaling those k values right before their
 // softmax therefore yields the same distribution as tempering all V logits
 // first, minus one [batch, vocab] read+write.
-
-// RTP_LLM_SAMPLE_TEMPERATURE_IN_SELECT: "1" (or unset) folds the temperature
-// into the candidate scaling; "0" restores the legacy full-vocabulary
-// temperature pass. Any other value is a hard error.
-inline bool parseSampleTemperatureInSelect(const char* value) {
-    if (value == nullptr) {
-        return true;
-    }
-    char* end = nullptr;
-    errno     = 0;
-    long flag = std::strtol(value, &end, 10);
-    RTP_LLM_CHECK_WITH_INFO(errno == 0 && end != value && *end == '\0' && (flag == 0 || flag == 1),
-                            "RTP_LLM_SAMPLE_TEMPERATURE_IN_SELECT must be 0 or 1, got '%s'",
-                            value);
-    return flag == 1;
-}
-
-// Cached for the process (the flag is read on the first sampler call).
-inline bool sampleTemperatureInSelectEnabled() {
-    static const bool enabled = parseSampleTemperatureInSelect(std::getenv("RTP_LLM_SAMPLE_TEMPERATURE_IN_SELECT"));
-    return enabled;
-}
 
 // Per-row logits scale that reproduces batchApplyTemperaturePenalty
 // (sampling_penalty_kernels.cu) bit-for-bit: the kernel precomputes
@@ -57,8 +36,9 @@ inline float sampleTemperatureInvScale(float temperature) {
 // scaling, i.e. the sampler leaves `logits` untempered in place and a caller
 // that declared the buffer private may skip its defensive clone.
 //
-// Every fact below keeps the legacy in-place pass:
-//  * env flag off;
+// Every fact below is a correctness gate (not a tunable): it marks a round in
+// which folding would change the numbers, so that round keeps the legacy
+// full-vocabulary in-place pass.
 //  * force_topk <= 0 — the sampler softmaxes the full row, so there is no
 //    narrower consumer for the temperature;
 //  * has_do_sample_false_row — those rows are restored to untouched logits
@@ -89,9 +69,8 @@ inline bool greedyTemperatureFoldedForRequest(int64_t      batch_size,
                                               bool         has_cum_log_probs,
                                               bool         has_return_original_all_probs,
                                               bool         has_active_logits_penalty) {
-    if (!sampleTemperatureInSelectEnabled() || force_topk <= 0 || has_do_sample_false_row || has_cum_log_probs
-        || has_return_original_all_probs || has_active_logits_penalty || batch_size <= 0
-        || temperatures_host == nullptr) {
+    if (force_topk <= 0 || has_do_sample_false_row || has_cum_log_probs || has_return_original_all_probs
+        || has_active_logits_penalty || batch_size <= 0 || temperatures_host == nullptr) {
         return false;
     }
     bool any_scaled = false;

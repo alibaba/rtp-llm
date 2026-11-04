@@ -752,8 +752,12 @@ void run_topk_select_kernel(const TopkSelectArgs& args) {
     KU_ASSERT(args.return_value == Config::return_value, "Dispatch failure");
     static_assert(cute::is_same_v<typename Config::ValueT, float>);
     static_assert(cute::is_same_v<typename Config::OutIdxT, int32_t>);
-    static_assert((Config::max_topk == 512 || Config::max_topk == 4096) && !Config::sorted_index
-                  && !Config::sorted_value);
+    // Capacity buckets this FP32 kernel instantiates. K1024 is the DSpARK
+    // candidate cap aligned with DeepInfer; the class-level plan assert above
+    // already admits it, so the launcher must not narrow the set back to
+    // 512/4096.
+    static_assert((Config::max_topk == 512 || Config::max_topk == 1024 || Config::max_topk == 4096)
+                  && !Config::sorted_index && !Config::sorted_value);
     KU_ASSERT(args.vocab_size < MAX_VOCAB_SIZE, "`vocab_size` is too big");
 
     using Kernel = TopkSelectKernelFP32<Config, FILTER_FINITE>;

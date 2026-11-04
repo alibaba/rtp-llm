@@ -3,9 +3,9 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
-// Shared sampling-temperature policy (env flag + "temperature is folded into the
-// force_topk candidates" predicate), so the logits-ownership decision here and
-// the sampler read the same switch.
+// Shared sampling-temperature policy: the same predicate the CUDA sampler uses
+// to decide that this round's temperature is folded into the force_topk
+// candidates, so the logits-ownership decision below cannot drift from it.
 #include "rtp_llm/models_py/bindings/core/SampleTemperature.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
@@ -20,7 +20,6 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <algorithm>
 #include <atomic>
-#include <cerrno>
 #include <cstdint>
 #include <cstdlib>
 #include <map>
@@ -1008,28 +1007,6 @@ AcceptedMtpLogprobSelection collectAcceptedMtpLogprobRows(const StreamGroups&  s
 // row in place instead of a private [rows, vocab] clone?
 // ---------------------------------------------------------------------------
 
-// RTP_LLM_SPEC_LOGITS_NO_CLONE=0 restores the defensive clone. It is an
-// independent switch from RTP_LLM_SAMPLE_TEMPERATURE_IN_SELECT: the elision
-// additionally requires the temperature fold (whose predicate lives in
-// SampleTemperature.h and is shared with the sampler), so turning that one off
-// falls back to the clone as well.
-bool specLogitsNoCloneEnabled() {
-    static const bool enabled = []() {
-        const char* value = std::getenv("RTP_LLM_SPEC_LOGITS_NO_CLONE");
-        if (value == nullptr) {
-            return true;
-        }
-        char* end = nullptr;
-        errno     = 0;
-        long flag = std::strtol(value, &end, 10);
-        RTP_LLM_CHECK_WITH_INFO(errno == 0 && end != value && *end == '\0' && (flag == 0 || flag == 1),
-                                "RTP_LLM_SPEC_LOGITS_NO_CLONE must be 0 or 1, got '%s'",
-                                value);
-        return flag == 1;
-    }();
-    return enabled;
-}
-
 bool allTemperaturesOne(int64_t batch_size, const float* temperatures_host) {
     return batch_size > 0 && temperatures_host != nullptr
            && std::all_of(temperatures_host, temperatures_host + batch_size, [](float t) { return t == 1.0f; });
@@ -1041,9 +1018,10 @@ bool allTemperaturesOne(int64_t batch_size, const float* temperatures_host) {
 //
 //  1. processLogits: temperature. `invokeBatchApplyTemperaturePenalty` multiplies
 //     the whole [rows, vocab] row by 1/(T+1e-6) in place. Removed by the
-//     candidate-scaling fold (RTP_LLM_SAMPLE_TEMPERATURE_IN_SELECT); when the
-//     batch has no temperature at all (every row T == 1.0f) the legacy chain
-//     skips the kernel, so it is inactive there too.
+//     candidate-scaling fold (the shared policy in SampleTemperature.h: the
+//     temperature is applied to the k selected candidate values instead of the
+//     full row); when the batch has no temperature at all (every row T == 1.0f)
+//     the legacy chain skips the kernel, so it is inactive there too.
 //  2. processLogits: repetition/presence/frequency penalty.
 //     `invokeBatchApplyRepetitionPenalty` rewrites logits elementwise, *after*
 //     the temperature step in the legacy chain, so it cannot commute with the
@@ -1096,9 +1074,15 @@ bool logitsViewDeepSelectReady(const torch::Tensor& logits) {
 
 // True when `sampler_inputs.logits` must stay a private copy.
 //
+// For the compact-candidate path this predicate is the *only* thing the clone
+// decision depends on: every condition below proves that this round has no
+// in-place writer of the logits row, so the model output view can be reused by
+// the sampler as-is. (The all-greedy point-mass elision has its own, stricter
+// gate: its fused top-1 kernel additionally needs a contiguous full-vocab row.)
+//
 // Argument that the alias path is exact: `logits` is the only tensor whose
 // contents the sampler might change, and writers 1-7 are the complete list of
-// in-place mutations in the CUDA chain. The predicate above makes every one of
+// in-place mutations in the CUDA chain. The predicate below makes every one of
 // them unreachable, so the sampled token, the compact candidate indices and
 // their renormalized probabilities are computed from exactly the same values as
 // on the clone path (identical inputs, identical kernels) - bit-for-bit, not
@@ -1110,9 +1094,6 @@ bool logitsViewDeepSelectReady(const torch::Tensor& logits) {
 // captureMtpDecodeTargetLogprobs before the gather, row statistics in the
 // post-sampling finalize).
 bool needsPrivateLogits(const SpecLogitsWriters& writers) {
-    if (!specLogitsNoCloneEnabled()) {
-        return true;
-    }
     if (writers.has_active_processor || writers.has_logits_processor) {
         return true;  // writers 6, 7
     }

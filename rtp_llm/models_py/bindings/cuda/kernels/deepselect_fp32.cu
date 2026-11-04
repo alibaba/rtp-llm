@@ -52,8 +52,6 @@ __global__ void markovScaledLogitsKernel(const float* __restrict__ logits,
         }
     }
 }
-
-constexpr int kPrefilterK = 4096;
 }  // namespace
 #endif
 
@@ -158,10 +156,11 @@ static void deepselect_fp32_impl(const torch::Tensor& logits,
     TORCH_CHECK(ends.dim() == 1 && ends.size(0) == rows && ends.is_contiguous(),
                 "DeepSelect ends must be contiguous [M]");
     const int64_t topk = output.dim() == 2 ? output.size(1) : 0;
-    TORCH_CHECK(output.dim() == 2 && output.size(0) == rows && (topk == 512 || topk == 4096) && output.stride(1) == 1
+    TORCH_CHECK(output.dim() == 2 && output.size(0) == rows
+                    && (topk == 512 || topk == 1024 || topk == 4096) && output.stride(1) == 1
                     && output.stride(0) >= topk && output.stride(0) % 8 == 0
                     && reinterpret_cast<uintptr_t>(output.data_ptr()) % 32 == 0,
-                "DeepSelect output must be [M,512|4096] with unit inner stride and 32B row/base alignment");
+                "DeepSelect output must be [M,512|1024|4096] with unit inner stride and 32B row/base alignment");
     // Strided views can make the overlap analyzer return TooHard. Reject
     // shared storage conservatively, matching the Python metadata gate.
     TORCH_CHECK(!output.is_alias_of(logits) && !output.is_alias_of(ends),
@@ -169,11 +168,14 @@ static void deepselect_fp32_impl(const torch::Tensor& logits,
     at::assert_no_overlap(output, logits);
     at::assert_no_overlap(output, ends);
     if (output_values) {
-        TORCH_CHECK(topk == 4096 && output_values->is_cuda() && output_values->device() == logits.device()
+        // K1024 shares the K4096 fused-value epilogue; the K512 bucket keeps the
+        // legacy gather fallback (no value output) so its instantiations stay put.
+        TORCH_CHECK((topk == 1024 || topk == 4096) && output_values->is_cuda()
+                        && output_values->device() == logits.device()
                         && output_values->scalar_type() == torch::kFloat32 && output_values->sizes() == output.sizes()
                         && output_values->is_contiguous() && !output_values->is_alias_of(logits)
                         && !output_values->is_alias_of(ends) && !output_values->is_alias_of(output),
-                    "DeepSelect value output requires separate contiguous CUDA FP32 [M,4096] storage");
+                    "DeepSelect value output requires separate contiguous CUDA FP32 [M,1024|4096] storage");
     }
     if (candidate_counts) {
         TORCH_CHECK(candidate_counts->is_cuda() && candidate_counts->device() == logits.device()
@@ -235,6 +237,26 @@ static void deepselect_fp32_impl(const torch::Tensor& logits,
         } else {
             dispatch(TopkSelectConfig<float, int32_t, false, false, false, 4096, 256, 1, 4096, 4096, 3>{});
         }
+    } else if (topk == 1024) {
+        // K1024 bucket. One CTA per row at occupancy 1 with the wide
+        // (8192-element) round: the K512 fallback config's geometry, which
+        // already fits the 227 KiB SM103 dynamic shared-memory budget, plus
+        // 2 * 1024 * 8 B of survivor pairs over its 512-wide counterpart
+        // (~211 KiB total).
+        //
+        // Minimal instantiation set: only the finite-filter-free epilogue is
+        // emitted for this bucket (no caller filters finite values at K1024, and
+        // every extra config costs one compilation per target architecture).
+        TORCH_CHECK(!filter_finite, "K1024 DeepSelect does not instantiate the finite-filtered epilogue");
+        if (output_values) {
+            topk_select_fp32::run_topk_select_kernel<
+                TopkSelectConfig<float, int32_t, false, false, true, 1024, 512, 1, 8192, 4096, 3>,
+                /*FILTER_FINITE=*/false>(args);
+        } else {
+            topk_select_fp32::run_topk_select_kernel<
+                TopkSelectConfig<float, int32_t, false, false, false, 1024, 512, 1, 8192, 4096, 3>,
+                /*FILTER_FINITE=*/false>(args);
+        }
     } else if (rows > properties->multiProcessorCount
                && sizeof(MultiWaveKernel::SharedMemoryPlanFP32) * MultiWaveConfig::target_occupancy
                       <= properties->sharedMemPerBlockOptin) {
@@ -282,15 +304,21 @@ std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_topk(const torch::Tenso
     const bool logits_row_major_view = logits.dim() == 2 && logits.stride(1) == 1 && logits.stride(0) >= logits.size(1)
                                        && logits.stride(0) % 256 == 0
                                        && reinterpret_cast<uintptr_t>(logits.data_ptr()) % 16 == 0;
-    if ((k == 4096 || (k > 0 && k <= 512)) && logits.is_cuda() && logits.scalar_type() == torch::kFloat32
-        && logits.dim() == 2 && logits.size(1) >= (k == 4096 ? 4096 : 512) && logits.size(1) < MAX_VOCAB_SIZE
-        && logits_row_major_view && at::cuda::getDeviceProperties(logits.get_device())->major == 10
+    // Width of the bucket this k is served from. K1024 and K4096 are exact
+    // buckets; any smaller k uses the 512 bucket and is trimmed afterwards.
+    const int64_t width = k == 4096 ? 4096 : (k == 1024 ? 1024 : 512);
+    // K1024 and K4096 read the selected values straight out of the selector,
+    // which removes the post-selection gather over the full row.
+    const bool fused_values = k == 1024 || k == 4096;
+    if ((k == 4096 || k == 1024 || (k > 0 && k <= 512)) && logits.is_cuda()
+        && logits.scalar_type() == torch::kFloat32 && logits.dim() == 2 && logits.size(1) >= width
+        && logits.size(1) < MAX_VOCAB_SIZE && logits_row_major_view
+        && at::cuda::getDeviceProperties(logits.get_device())->major == 10
         && (at::cuda::getDeviceProperties(logits.get_device())->minor == 0
             || at::cuda::getDeviceProperties(logits.get_device())->minor == 3)) {
-        const int64_t width   = k == 4096 ? 4096 : 512;
-        auto          indices = torch::empty({logits.size(0), width}, logits.options().dtype(torch::kInt32));
-        auto          ends    = torch::full({logits.size(0)}, logits.size(1), logits.options().dtype(torch::kInt32));
-        auto          values  = k == 4096 ? torch::empty({logits.size(0), width}, logits.options()) : torch::Tensor();
+        auto indices = torch::empty({logits.size(0), width}, logits.options().dtype(torch::kInt32));
+        auto ends    = torch::full({logits.size(0)}, logits.size(1), logits.options().dtype(torch::kInt32));
+        auto values  = fused_values ? torch::empty({logits.size(0), width}, logits.options()) : torch::Tensor();
         deepselect_fp32(logits, ends, indices, /*filter_finite=*/false, values.defined() ? &values : nullptr);
         auto indices64 = indices.to(torch::kInt64);
         if (!values.defined()) {
@@ -308,12 +336,17 @@ std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_topk(const torch::Tenso
 }
 
 #if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
-static std::tuple<torch::Tensor, torch::Tensor>
-prefilter_topk4096(const torch::Tensor& logits, const torch::Tensor* markov_bias, const torch::Tensor* temperature) {
+static std::tuple<torch::Tensor, torch::Tensor> prefilter_topk(const torch::Tensor& logits,
+                                                               const torch::Tensor* markov_bias,
+                                                               const torch::Tensor* temperature,
+                                                               int64_t              width) {
     const bool with_markov = markov_bias != nullptr;
+    TORCH_CHECK(deepselect_fp32_candidate_width_supported(width),
+                "DSpARK candidate prefilter width must be one of 512, 1024 or 4096, got ",
+                width);
     TORCH_CHECK(logits.is_cuda() && logits.scalar_type() == torch::kFloat32 && logits.dim() == 2
-                    && logits.size(1) >= kPrefilterK,
-                "K4096 prefilter requires CUDA FP32 [B,V] logits with V >= 4096");
+                    && logits.size(1) >= width,
+                "DSpARK candidate prefilter requires CUDA FP32 [B,V] logits with V >= K");
     if (with_markov) {
         TORCH_CHECK(markov_bias->is_cuda() && markov_bias->device() == logits.device()
                         && markov_bias->scalar_type() == torch::kBFloat16 && markov_bias->sizes() == logits.sizes()
@@ -321,28 +354,29 @@ prefilter_topk4096(const torch::Tensor& logits, const torch::Tensor* markov_bias
                         && temperature->device() == logits.device() && temperature->scalar_type() == torch::kFloat32
                         && temperature->dim() == 1 && temperature->size(0) == logits.size(0)
                         && temperature->is_contiguous(),
-                    "Markov K4096 prefilter requires BF16 contiguous bias and FP32 temperatures");
+                    "Markov candidate prefilter requires BF16 contiguous bias and FP32 temperatures");
     }
     auto scores = with_markov ? markov_scaled_logits(logits, *markov_bias, *temperature) : logits;
-    return deepselect_fp32_topk(scores, kPrefilterK);
+    return deepselect_fp32_topk(scores, width);
 }
 #endif
 
-std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_topk_prefilter(const torch::Tensor& logits) {
+std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_topk_prefilter(const torch::Tensor& logits, int64_t k) {
 #if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
-    return prefilter_topk4096(logits, nullptr, nullptr);
+    return prefilter_topk(logits, nullptr, nullptr, k);
 #else
-    return deepselect_fp32_topk(logits, 4096);
+    return deepselect_fp32_topk(logits, k);
 #endif
 }
 
 std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_markov_topk_prefilter(const torch::Tensor& logits,
                                                                                const torch::Tensor& markov_bias,
-                                                                               const torch::Tensor& temperature) {
+                                                                               const torch::Tensor& temperature,
+                                                                               int64_t              k) {
 #if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
-    return prefilter_topk4096(logits, &markov_bias, &temperature);
+    return prefilter_topk(logits, &markov_bias, &temperature, k);
 #else
-    return deepselect_fp32_topk(markov_scaled_logits(logits, markov_bias, temperature), 4096);
+    return deepselect_fp32_topk(markov_scaled_logits(logits, markov_bias, temperature), k);
 #endif
 }
 

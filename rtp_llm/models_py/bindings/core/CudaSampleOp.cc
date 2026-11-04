@@ -465,11 +465,15 @@ bool logitsPenaltyActive(const GreedyParams& params, int64_t batch_size) {
 
 // Sampler-side query: will this round apply the temperature to the force_topk
 // candidates instead of the full [batch, vocab] logits row? The shared rules
-// (env flag + temperature rules + output contract + penalty ordering) live in
+// (temperature rules + output contract + penalty ordering) live in
 // SampleTemperature.h so upstream callers reach the same answer; this wrapper
 // only contributes the sampler-specific facts (the effective force_topk width
 // and whether a logits penalty is active). See greedyTemperatureFoldedForRequest
 // for the monotonicity argument and the full list of disqualifiers.
+//
+// There is no environment switch: every condition feeding this decision is what
+// makes the fold numerically correct, and a round that fails any of them simply
+// keeps the full-vocabulary pass in processLogits.
 bool greedyTemperatureInSelect(const GreedyParams& params, int64_t batch_size, bool has_do_sample_false_row) {
     const int64_t force_topk = greedyForceTopk(params, batch_size, /*fused_greedy_top1=*/false);
     return greedyTemperatureFoldedForRequest(batch_size,
@@ -1309,8 +1313,8 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // 1. Apply temperature penalty
     // NOTE: this is the ROCm sampleGreedy, a separate compilation branch from
     // the CUDA one; its sampler has no force_topk/compact-candidate branch, so
-    // it cannot fold the temperature into a narrower consumer and keeps the
-    // full-vocabulary pass (RTP_LLM_SAMPLE_TEMPERATURE_IN_SELECT does not apply).
+    // it cannot fold the temperature into a narrower consumer and always keeps
+    // the full-vocabulary pass.
     if (std::any_of(params.temperature.data_ptr<float>(),
                     params.temperature.data_ptr<float>() + batch_size,
                     [&](auto t) { return t != 1.0f; })) {
@@ -1724,7 +1728,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
 
     // NOTE: generic PyTorch-fallback sampleGreedy (no CUDA flashinfer sampler,
     // no force_topk branch), so the temperature has to stay on the full logits
-    // row; RTP_LLM_SAMPLE_TEMPERATURE_IN_SELECT only affects the CUDA path.
+    // row; the fold only exists on the CUDA path.
     if (std::any_of(params.temperature.data_ptr<float>(),
                     params.temperature.data_ptr<float>() + batch_size,
                     [](auto temperature) { return temperature != 1.0f; })) {

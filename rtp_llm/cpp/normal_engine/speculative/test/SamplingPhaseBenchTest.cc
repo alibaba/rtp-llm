@@ -11,7 +11,10 @@
 //                once with the legacy eager finalize
 //
 // Fixed scenario: bs=64, gamma=3, vocab=129280, temperature=0.3, top_p=0.95,
-// top-k disabled, BF16 Markov weights with rank=256, K=4096 candidates.
+// top-k disabled, BF16 Markov weights with rank=256. The candidate width K
+// (DSpARK force_topk) is a runtime knob: SAMPLING_BENCH_CANDIDATE_WIDTH accepts
+// 512 / 1024 / 4096 and defaults to 1024, so the next comparison round can
+// measure K=1024 against the legacy K=4096 on the same binary.
 //
 // Every result is printed as ONE line of JSON prefixed with
 // ``SAMPLING_PHASE_BENCH `` (and mirrored into
@@ -31,6 +34,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cerrno>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -69,18 +73,45 @@ namespace {
 // ---------------------------------------------------------------------------
 // Fixed scenario.
 // ---------------------------------------------------------------------------
-constexpr int64_t kBatch            = 64;
-constexpr int64_t kGamma            = 3;
-constexpr int64_t kVocab            = 129280;
-constexpr int64_t kMarkovRank       = 256;
-constexpr int     kCandidateWidth   = 4096;  // RTP_LLM_DSPARK_FORCE_TOPK default
-constexpr float   kTemperature      = 0.3f;
-constexpr float   kTopP             = 0.95f;
-constexpr int     kDefaultWarmup    = 20;
-constexpr int     kDefaultReps      = 100;
-constexpr int64_t kFingerprintSeed  = 20261104;
-constexpr int64_t kFingerprintCount = 16;  // leading token ids reported
-constexpr int64_t kHashCount        = 64;  // 8x8 leading candidate ids hashed
+constexpr int64_t kBatch                 = 64;
+constexpr int64_t kGamma                 = 3;
+constexpr int64_t kVocab                 = 129280;
+constexpr int64_t kMarkovRank            = 256;
+constexpr int     kDefaultCandidateWidth = 1024;  // aligned with DeepInfer's K=1024
+constexpr int     kSmallCandidateWidth   = 512;
+constexpr int     kLegacyCandidateWidth  = 4096;  // RTP_LLM_DSPARK_FORCE_TOPK default
+constexpr float   kTemperature           = 0.3f;
+constexpr float   kTopP                  = 0.95f;
+constexpr int     kDefaultWarmup         = 20;
+constexpr int     kDefaultReps           = 100;
+constexpr int64_t kFingerprintSeed       = 20261104;
+constexpr int64_t kFingerprintCount      = 16;  // leading token ids reported
+constexpr int64_t kHashCount             = 64;  // 8x8 leading candidate ids hashed
+
+// Candidate width (DSpARK force_topk): the next comparison round measures K=1024
+// against the legacy K=4096, and every consumer below (draft force_topk, target
+// compact all_probs/indices, rejection candidate rows) must follow the same width
+// or the phases stop being comparable. SAMPLING_BENCH_CANDIDATE_WIDTH accepts
+// 512 / 1024 / 4096; anything else is a hard error instead of a silent default.
+int candidateWidth() {
+    static const int width = []() {
+        const char* value = std::getenv("SAMPLING_BENCH_CANDIDATE_WIDTH");
+        if (value == nullptr || *value == '\0') {
+            return kDefaultCandidateWidth;
+        }
+        char* end         = nullptr;
+        errno             = 0;
+        const long parsed = std::strtol(value, &end, 10);
+        TORCH_CHECK(errno == 0 && end != value && *end == '\0'
+                        && (parsed == kSmallCandidateWidth || parsed == kDefaultCandidateWidth
+                            || parsed == kLegacyCandidateWidth),
+                    "SAMPLING_BENCH_CANDIDATE_WIDTH must be one of 512, 1024, 4096; got '",
+                    value,
+                    "'");
+        return static_cast<int>(parsed);
+    }();
+    return width;
+}
 
 struct TimingStats {
     double event_us_median = 0.0;
@@ -395,8 +426,9 @@ TargetFixture makeTargetFixture(int64_t rows) {
     fixture.top_k             = torch::zeros({rows}, host_i32);
     fixture.top_p             = torch::full({rows}, kTopP, host_f32);
     fixture.temperature       = torch::full({rows}, kTemperature, host_f32);
-    fixture.all_probs         = torch::empty({rows, kCandidateWidth}, fp32);
-    fixture.all_probs_indices = torch::empty({rows, kCandidateWidth}, i32);
+    const int width           = candidateWidth();
+    fixture.all_probs         = torch::empty({rows, width}, fp32);
+    fixture.all_probs_indices = torch::empty({rows, width}, i32);
     fixture.generators        = makeGenerators(rows);
     allocateGreedySamplingBuffers(fixture.sampling_buffers, rows);
 
@@ -412,7 +444,7 @@ TargetFixture makeTargetFixture(int64_t rows) {
     params.output_all_probs          = fixture.all_probs;
     params.output_all_probs_indices  = fixture.all_probs_indices;
     params.skip_logits_probs_restore = true;
-    params.force_topk                = kCandidateWidth;
+    params.force_topk                = width;
     params.generator                 = fixture.generators;
     // Set by the caller once the fixture sits in its final storage.
     params.sampling_buffers = nullptr;
@@ -515,7 +547,7 @@ std::string targetKernelProbeJson(const TargetFixture& fixture,
     auto valid  = torch::empty({fixture.rows}, torch::TensorOptions().device(torch::kCUDA).dtype(torch::kBool));
 
     auto select_run = [&]() {
-        auto selected = torch_ext::deepselect_fp32_topk(fixture.pristine, kCandidateWidth);
+        auto selected = torch_ext::deepselect_fp32_topk(fixture.pristine, candidateWidth());
         (void)selected;
     };
     auto compact_softmax_run = [&]() {
@@ -559,15 +591,26 @@ std::string targetKernelProbeJson(const TargetFixture& fixture,
         << ",\"full_vocab_top_p_renorm_event_us_median\":" << jsonUs(full_vocab_renorm_stats.event_us_median)
         << ",\"full_vocab_top_p_sampling_event_us_median\":" << jsonUs(full_vocab_sampling_stats.event_us_median)
         << ",\"full_width_scratch_zero_event_us_median\":" << jsonUs(full_width_zero_stats.event_us_median)
+        << ",\"candidate_width\":" << candidateWidth()
         << ",\"note\":\"standalone probe spans at this row count; deepselect falls back to ATen topk when "
            "deepselect_fp32_available is false\"}";
     return out.str();
 }
 
 // ---------------------------------------------------------------------------
-// Rejection-phase fixture: compact (K4096 candidate) DSpARK verify shapes.
-// Draft candidates and target candidates share the same sorted, unique
-// vocabulary IDs so the draft remap hash always finds the sampled draft token.
+// Rejection-phase fixture: compact DSpARK verify shapes with *partially
+// overlapping* draft/target candidate sets.
+//
+// Production draft and target candidates are different vocabulary slices and
+// only partially overlap, so remap_draft_topk (models_py/bindings/cuda/kernels/
+// speculative_sampling) exercises real hash-table hits and misses. Giving both
+// sides identical candidate ids made every lookup hit and turned the served
+// 87us remap into the 28us this bench used to report.
+//
+// Layout: draft ids are a permutation of [100, 100+W); target ids are a
+// permutation of [100+W/2, 100+W/2+W). The windows intersect on W/2 ids, and
+// every sampled draft token is forced into that intersection, so q(draft) and
+// q(target) stay resolvable for the acceptance test.
 // ---------------------------------------------------------------------------
 struct RejectionFixture {
     torch::Tensor draft_probs;
@@ -580,6 +623,9 @@ struct RejectionFixture {
     torch::Tensor do_sample;
     torch::Tensor output_token_ids;
     torch::Tensor output_accepted_token_num;
+    int           width                    = 0;
+    int64_t       overlap_ids              = 0;
+    int64_t       substituted_draft_tokens = 0;
 };
 
 RejectionFixture makeRejectionFixture() {
@@ -587,21 +633,46 @@ RejectionFixture makeRejectionFixture() {
     const auto i32  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
     const auto b    = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kBool);
 
+    const int     width = candidateWidth();
     const int64_t steps = kGamma;
     const int64_t slots = kGamma + 1;
+    const int64_t half  = width / 2;
 
     RejectionFixture fixture;
-    // Sorted unique candidate vocabulary IDs, identical for every row/slot.
-    const auto candidate_ids     = (torch::arange(kCandidateWidth, i32) + 100).reshape({1, 1, kCandidateWidth});
-    fixture.target_probs_indices = candidate_ids.expand({kBatch, slots, kCandidateWidth}).contiguous();
-    fixture.draft_probs_indices  = candidate_ids.expand({kBatch, steps, kCandidateWidth}).contiguous();
-    fixture.draft_probs          = torch::softmax(torch::randn({kBatch, steps, kCandidateWidth}, fp32), -1);
-    fixture.target_probs         = torch::softmax(torch::randn({kBatch, slots, kCandidateWidth}, fp32), -1);
+    fixture.width                = width;
+    fixture.overlap_ids          = half;
+    const auto draft_window      = torch::randperm(width, i32) + 100;
+    const auto target_window     = torch::randperm(width, i32) + (100 + half);
+    fixture.draft_probs_indices  = draft_window.reshape({1, 1, width}).expand({kBatch, steps, width}).contiguous();
+    fixture.target_probs_indices = target_window.reshape({1, 1, width}).expand({kBatch, slots, width}).contiguous();
+    fixture.draft_probs          = torch::softmax(torch::randn({kBatch, steps, width}, fp32), -1);
+    fixture.target_probs         = torch::softmax(torch::randn({kBatch, slots, width}, fp32), -1);
 
-    const auto draft_choice  = fixture.draft_probs.argmax(-1);
+    // Keep the draft's own argmax when it already lands in the overlap window
+    // (draft ids >= 100 + W/2 are also target candidates); otherwise substitute
+    // a deterministic overlap id so the remap hash resolves the sampled token.
+    // The substitution is a fixture device only; it does not change which kernel
+    // work the rejection launch performs.
+    const auto  draft_choice_cpu    = fixture.draft_probs.argmax(-1).to(torch::kCPU).contiguous();
+    const auto  draft_window_cpu    = draft_window.to(torch::kCPU).contiguous();
+    auto        draft_token_ids_cpu = torch::zeros({kBatch, steps}, torch::TensorOptions().dtype(torch::kInt32));
+    const auto* choices             = draft_choice_cpu.data_ptr<int64_t>();
+    const auto* window              = draft_window_cpu.data_ptr<int32_t>();
+    auto*       sampled_ids         = draft_token_ids_cpu.data_ptr<int32_t>();
+    for (int64_t row = 0; row < kBatch; ++row) {
+        for (int64_t step = 0; step < steps; ++step) {
+            const int64_t slot_index = row * steps + step;
+            int32_t       id         = window[choices[slot_index]];
+            if (id < static_cast<int32_t>(100 + half)) {
+                id = static_cast<int32_t>(100 + half + (slot_index % half));
+                ++fixture.substituted_draft_tokens;
+            }
+            sampled_ids[slot_index] = id;
+        }
+    }
+    fixture.draft_token_ids = draft_token_ids_cpu.to(i32);
+
     const auto target_choice = fixture.target_probs.argmax(-1);
-    fixture.draft_token_ids =
-        fixture.draft_probs_indices.gather(2, draft_choice.unsqueeze(-1)).squeeze(-1).to(torch::kInt32);
     const auto target_tokens =
         fixture.target_probs_indices.gather(2, target_choice.unsqueeze(-1)).squeeze(-1).to(torch::kInt32);
 
@@ -679,7 +750,7 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
                                       markov_w2,
                                       static_cast<size_t>(kVocab),
                                       /*batch_all_greedy=*/false,
-                                      /*force_topk=*/kCandidateWidth,
+                                      /*force_topk=*/candidateWidth(),
                                       /*joint_max_top_k=*/0,
                                       /*copy_token_ids=*/false);
         };
@@ -697,7 +768,7 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
                                                 markov_w2,
                                                 static_cast<size_t>(kVocab),
                                                 /*batch_all_greedy=*/false,
-                                                /*force_topk=*/kCandidateWidth,
+                                                /*force_topk=*/candidateWidth(),
                                                 /*joint_max_top_k=*/0,
                                                 /*copy_token_ids=*/false);
         TORCH_CHECK(output.token_ids.defined() && output.all_probs.defined() && output.all_probs_indices.defined(),
@@ -714,7 +785,7 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
 
         std::ostringstream entry;
         entry << "{\"batch\":" << batch << ",\"draft_vocab\":" << kVocab << ",\"gamma\":" << kGamma
-              << ",\"candidate_width\":" << kCandidateWidth << "," << jsonTiming(stats)
+              << ",\"candidate_width\":" << candidateWidth() << "," << jsonTiming(stats)
               << ",\"three_round_total_event_us_median\":" << jsonUs(stats.event_us_median)
               << ",\"three_round_total_host_us_median\":" << jsonUs(stats.host_us_median)
               << ",\"per_round_event_us\":" << jsonUs(stats.event_us_median / static_cast<double>(kGamma))
@@ -830,7 +901,7 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
         // Legacy top-level timing fields stay the compact (production) path;
         // the three explicit variant objects below carry the comparison.
         entry << "{\"label\":" << jsonString(labelled_rows.first) << ",\"rows\":" << rows << ",\"vocab\":" << kVocab
-              << ",\"candidate_width\":" << kCandidateWidth << "," << jsonTiming(compact_result.timing) << ","
+              << ",\"candidate_width\":" << candidateWidth() << "," << jsonTiming(compact_result.timing) << ","
               << jsonTiming(with_clone_stats, "target_with_clone_") << ","
               << jsonTiming(clone_only_stats, "target_clone_only_")
               << ",\"target_clone_overhead_event_us_median\":" << jsonUs(clone_overhead_us)
@@ -854,9 +925,9 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
 
         // The compact fixture must actually be the compact path; these catch a
         // fixture that silently declined the force_topk gate.
-        EXPECT_EQ(compact_result.params_force_topk, kCandidateWidth) << "compact fixture lost force_topk";
+        EXPECT_EQ(compact_result.params_force_topk, candidateWidth()) << "compact fixture lost force_topk";
         ASSERT_EQ(compact_result.probs_shape.size(), 2U);
-        EXPECT_EQ(compact_result.probs_shape[1], static_cast<int64_t>(kCandidateWidth))
+        EXPECT_EQ(compact_result.probs_shape[1], static_cast<int64_t>(candidateWidth()))
             << "compact fixture all_probs is not [rows, K]";
         EXPECT_TRUE(compact_result.indices_defined) << "compact fixture lost candidate IDs";
         EXPECT_TRUE(compact_result.success_ok) << "compact target sampling reported a failed row at rows=" << rows;
@@ -910,7 +981,7 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
                         "sampling_target_compact_phase(call=%d,rows=%d,force_topk=%d,indices=%d,vocab=%d)",
                         call,
                         static_cast<int>(trace_fixture.rows),
-                        kCandidateWidth,
+                        candidateWidth(),
                         1,
                         static_cast<int>(kVocab));
                     trace_fixture.resetLogits();
@@ -927,7 +998,7 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
                 trace->save(path);
                 target_trace_path = path;
                 std::cout << "SAMPLING_TARGET_TRACE path=" << path << " calls=5 rows=" << trace_fixture.rows
-                          << " force_topk=" << kCandidateWidth << " vocab=" << kVocab
+                          << " force_topk=" << candidateWidth() << " vocab=" << kVocab
                           << " output_all_probs_indices=1 skip_logits_probs_restore="
                           << (trace_fixture.params.skip_logits_probs_restore ? 1 : 0)
                           << " deepselect_fp32_available=" << (torch_ext::deepselect_fp32_available() ? 1 : 0)
@@ -979,17 +1050,15 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
     const bool draft_ok      = !gate_draft || draft_three_round_us <= max_draft_us;
     const bool target_ok     = !gate_target || target_verify_us <= max_target_us;
 
-    // The target phase runs the production op chain, so a sampler-side change
-    // (e.g. folding the temperature into the force_topk candidate scaling) is
-    // visible as a delta between two runs of this same binary. Record the
-    // selector so a pre/post pair is self-describing.
-    const char* temperature_mode = std::getenv("RTP_LLM_SAMPLE_TEMPERATURE_IN_SELECT");
+    // The target phase runs the production op chain. There is no selector for
+    // the temperature fold any more (it is unconditional), so this scenario
+    // block records only shape/dtype facts plus the candidate width.
 
     std::ostringstream scenario;
     scenario << "{\"batch\":" << kBatch << ",\"gamma\":" << kGamma << ",\"vocab\":" << kVocab
              << ",\"draft_vocab\":" << kVocab << ",\"temperature\":" << std::fixed << std::setprecision(2)
              << kTemperature << ",\"top_p\":" << kTopP << ",\"top_k\":\"disabled\",\"markov_dtype\":\"bf16\""
-             << ",\"markov_rank\":" << kMarkovRank << ",\"candidate_width\":" << kCandidateWidth
+             << ",\"markov_rank\":" << kMarkovRank << ",\"candidate_width\":" << candidateWidth()
              << ",\"warmup\":" << warmup << ",\"reps\":" << reps << ",\"seed\":" << kFingerprintSeed
              << ",\"device\":" << jsonString(device_label.str()) << ",\"deepselect_fp32_available\":"
              << (torch_ext::deepselect_fp32_available() ? "true" : "false")
@@ -1002,20 +1071,26 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
              << ",\"sampling_buffers_kind\":"
                 "\"GreedySamplingBuffers(pinned int64 seed_host/offset_host/output_ids_ptrs_host + "
                 "CUDA int64 seed_device/offset_device, max_batch_size=rows)\""
-             << ",\"sample_temperature_in_select\":"
-             << jsonString(temperature_mode == nullptr ? "unset" : temperature_mode)
              << ",\"target_variants\":[\"compact\",\"full_vocab\",\"greedy_top1\"]"
+             << ",\"rejection_candidate_sets\":\"partial\""
              << ",\"target_trace\":"
              << (target_trace_path.empty() ? std::string("\"none\"") : jsonString(target_trace_path)) << "}";
 
     std::ostringstream rejection_json;
-    rejection_json << "{\"batch\":" << kBatch << ",\"gamma\":" << kGamma << ",\"candidate_width\":" << kCandidateWidth
+    rejection_json << "{\"batch\":" << kBatch << ",\"gamma\":" << kGamma << ",\"candidate_width\":" << candidateWidth()
                    << ",\"finalize_folded\":{" << jsonTiming(rejection_folded_stats) << "}"
                    << ",\"finalize_eager\":{" << jsonTiming(rejection_eager_stats) << ",\"zero_init_included\":true}"
                    << ",\"accepted_len_sum\":" << accepted_sum
                    << ",\"accepted_len_first16\":" << jsonIntArray(accepted_first)
                    << ",\"tokens_hash_first8x8\":" << tokens_hash
-                   << ",\"accepted_in_range\":" << (accepted_ok ? "true" : "false") << "}";
+                   << ",\"accepted_in_range\":" << (accepted_ok ? "true" : "false")
+                   << ",\"candidate_overlap\":{\"strategy\":\"partial\""
+                   << ",\"width\":" << rejection_fixture.width << ",\"overlap_ids\":" << rejection_fixture.overlap_ids
+                   << ",\"draft_only_ids\":" << (rejection_fixture.width - rejection_fixture.overlap_ids)
+                   << ",\"target_only_ids\":" << (rejection_fixture.width - rejection_fixture.overlap_ids)
+                   << ",\"substituted_draft_tokens\":" << rejection_fixture.substituted_draft_tokens
+                   << ",\"sampled_draft_tokens_in_target\":true}"
+                   << "}";
 
     std::ostringstream checks;
     checks << "{\"max_draft_us\":" << (gate_draft ? jsonUs(max_draft_us) : std::string("null"))

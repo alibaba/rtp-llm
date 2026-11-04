@@ -185,3 +185,25 @@ cc_test_wrapper(
         "MI308X-ROCM7",
     ],
 )
+
+# Pure-CPU gate table for the shared sampling-temperature policy
+# (rtp_llm/models_py/bindings/core/SampleTemperature.h). The header is
+# header-only std code, so this target needs neither CUDA nor torch: it pins
+# every condition under which folding the temperature into the force_topk
+# candidate scaling stays bit-identical to the full-vocabulary pass, plus the
+# 1/(T + 1e-6) factor that reproduces batchApplyTemperaturePenalty exactly.
+cc_test(
+    name = "sample_temperature_test",
+    srcs = ["SampleTemperatureTest.cc"],
+    deps = [
+        # Exports SampleTemperature.h as a header-only std library.
+        "//rtp_llm/models_py/bindings/core:common_defines",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = copts(),
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "GPU_COUNT": "0",
+    },
+    tags = ["cpu"],
+)

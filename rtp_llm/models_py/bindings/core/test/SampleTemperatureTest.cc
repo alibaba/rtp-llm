@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <limits>
 #include <numeric>
-#include <stdexcept>
 #include <vector>
 
 // Pure-CPU unit tests for the shared sampling-temperature policy
@@ -100,31 +99,12 @@ TEST(SampleTemperatureTest, CandidateSetAndProbabilitiesMatchTemperedRow) {
     }
 }
 
-TEST(SampleTemperatureTest, EnvFlagParsing) {
-    // Unset defaults to the folded path.
-    EXPECT_TRUE(parseSampleTemperatureInSelect(nullptr));
-    EXPECT_TRUE(parseSampleTemperatureInSelect("1"));
-    EXPECT_FALSE(parseSampleTemperatureInSelect("0"));
-}
-
-TEST(SampleTemperatureTest, EnvFlagParsingRejectsInvalidValues) {
-    EXPECT_THROW(parseSampleTemperatureInSelect("2"), std::runtime_error);
-    EXPECT_THROW(parseSampleTemperatureInSelect("-1"), std::runtime_error);
-    EXPECT_THROW(parseSampleTemperatureInSelect("true"), std::runtime_error);
-    EXPECT_THROW(parseSampleTemperatureInSelect(""), std::runtime_error);
-}
-
-// Gating table of the shared decision. Skips when the process runs with the
-// legacy switch (the flag is cached on first use, so it cannot be retried
-// in-process).
+// Gating table of the shared decision. Every gate below is a correctness
+// condition (not a tunable switch): each one names a case where folding the
+// temperature into the candidate scaling would not be bit-identical to the
+// full-vocabulary pass it replaces.
 class GreedyTemperatureFoldedForRequestTest: public ::testing::Test {
 protected:
-    void SetUp() override {
-        if (!sampleTemperatureInSelectEnabled()) {
-            GTEST_SKIP() << "RTP_LLM_SAMPLE_TEMPERATURE_IN_SELECT=0 forces the legacy path";
-        }
-    }
-
     static constexpr int64_t kBatch     = 4;
     static constexpr int     kForceTopk = 4096;
 
