@@ -310,21 +310,32 @@ class StoreTest(JitCacheTestBase):
             next(item for item in jit.COMPONENTS if item.name == "triton"),
             local_dir=self.root / "local" / "triton",
         )
+        entry = component.local_dir / "hash"
+        entry.mkdir(parents=True)
+        products = {
+            "kernel.hgbin": b"ppu-binary",
+            "kernel.json": b'{"name": "kernel"}',
+            "__grp__kernel.json": json.dumps(
+                {
+                    "child_paths": {
+                        name: str(entry / name)
+                        for name in ("kernel.json", "kernel.hgbin")
+                    }
+                }
+            ).encode(),
+        }
+        for name, payload in products.items():
+            (entry / name).write_bytes(payload)
         manager = jit.JitCacheManager(
             jit.Scope("test", component.local_dir.parent, (component,)), ""
         )
-        expected = {
-            "triton/hash/kernel.json": b"{}",
-            "triton/hash/kernel.hgbin": b"ppu-binary",
-        }
-        for rel, payload in expected.items():
-            path = component.local_dir.parent / rel
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(payload)
         snap_store = self.make_store()
         snap_store.publish_snapshot(manager._snapshot_files())
         restored = snap_store.prepare_restore(self.root / "restored")
-        self.assertEqual(contents(restored.staging), expected)
+        self.assertEqual(
+            contents(restored.staging),
+            {f"triton/hash/{name}": payload for name, payload in products.items()},
+        )
 
     def test_deep_gemm_completed_entry_survives_snapshot_restore(self):
         component = replace(
@@ -718,6 +729,25 @@ class ScopeTest(JitCacheTestBase):
         with _fake_probes(pkg=missing):
             triton_only = jit.resolve_scope(self.root)
         self.assertEqual([x.name for x in triton_only.components], ["triton"])
+
+    def test_artifact_rules_fork_scope_from_incomplete_old_snapshots(self):
+        current = self.scope_id()
+        old_components = tuple(
+            (
+                replace(
+                    item,
+                    rules=(
+                        jit.rule(frozenset(), ".autotune.json"),
+                        jit.rule(jit.CREATED, ".json", ".cubin", ".hsaco", ".so"),
+                    ),
+                )
+                if item.name == "triton"
+                else item
+            )
+            for item in jit.COMPONENTS
+        )
+        with mock.patch.object(jit, "COMPONENTS", old_components):
+            self.assertNotEqual(current, self.scope_id())
 
     def test_torch_extensions_scope_tracks_rtp_kernel_build(self):
         def with_kernel(version):
@@ -1496,7 +1526,9 @@ class BackendTest(JitCacheTestBase):
         ) as rank_start, mock.patch.object(jit, "start_from_config") as jit_start:
             result = backend.start_backend_server(controller, configs, pipe_writer)
         self.assertEqual(result, "served")
-        rank_start.assert_called_once_with(controller, configs, 3, pipe_writer)
+        rank_start.assert_called_once_with(
+            controller, configs, 3, pipe_writer, service_draining=None
+        )
         jit_start.assert_not_called()
 
     def test_bootstrap_failure_releases_the_manager(self):
@@ -1556,7 +1588,7 @@ class BackendTest(JitCacheTestBase):
         ), mock.patch.object(
             backend,
             "local_rank_start",
-            side_effect=lambda *_: events.append("rank") or "served",
+            side_effect=lambda *_, **kwargs: events.append("rank") or "served",
         ), mock.patch.object(
             # A hard exit here would truncate the caller's own teardown.
             backend.os,
@@ -1572,7 +1604,7 @@ class BackendTest(JitCacheTestBase):
         class FakeBackendManager:
             instance = None
 
-            def __init__(self, _configs):
+            def __init__(self, _configs, service_draining=None):
                 self.request_shutdown = mock.Mock()
                 self.serve_forever = mock.Mock()
                 FakeBackendManager.instance = self
@@ -1631,7 +1663,7 @@ class BackendTest(JitCacheTestBase):
 
     @staticmethod
     def _fake_create(proc):
-        def fake(_gc, _cfg, _ctx, processes, readers):
+        def fake(_gc, _cfg, _ctx, processes, readers, service_draining=None):
             processes.append(proc)
             readers.append(mock.Mock())
 

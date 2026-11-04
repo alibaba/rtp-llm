@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -22,7 +23,6 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
-
 
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
@@ -142,13 +142,13 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          cache_manager,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
-    model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.metrics_reporter               = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         is_propose_ ? HiddenStateCaptureModelRole::DRAFT : HiddenStateCaptureModelRole::TARGET,
         role_type_,
         warm_up_,
         params.model_config_.hidden_state_capture_layer_ids);
-    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
         const auto& model_cache_config =
@@ -223,10 +223,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     }
     RtpLLMExecutorMetricsCollector executor_collector;
     RtpLLMTokenPSMetricsCollector  tps_collector;
-    auto                           tps_active_guard =
-        tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && !streams.empty());
-    auto wall_tps_active_guard =
-        wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && !streams.empty());
+    auto tps_active_guard      = tps_reporter_.makeActiveGuard(isKmonMetricReportingEnabled() && metrics_reporter_
+                                                          && tp_rank_ == 0 && !warm_up_ && !streams.empty());
+    auto wall_tps_active_guard = wall_tps_reporter_.makeActiveGuard(isKmonMetricReportingEnabled() && metrics_reporter_
+                                                                    && tp_rank_ == 0 && !warm_up_ && !streams.empty());
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     SamplerOutput   sampler_output;
@@ -386,6 +386,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     if (metrics_reporter_ && tp_rank_ == 0) {
         token_counts_by_priority = stream_groups.tokenCountsByPriority();
     }
+    FrontendMetricsStep<GenerateStreamPtr> frontend_step(stream_groups.allStreams(),
+                                                         isKmonMetricReportingEnabled() && tp_rank_ == 0 && !warm_up_);
     if (useStreamAsync() && is_decode_only && !zero_token_batch) {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output(stream_async)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -402,6 +404,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
+        frontend_step.publish({static_cast<int64_t>(stream_groups.contextExecuteTokenSize()),
+                               static_cast<int64_t>(stream_groups.contextExecuteTokenSizeWithCache()),
+                               static_cast<int64_t>(stream_groups.totalDecodeBatchSize()),
+                               tps_execute_time_us,
+                               std::nullopt});
         reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
 
         return dispatchOutputAsync(stream_groups,
@@ -431,6 +438,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
+        frontend_step.publish({static_cast<int64_t>(stream_groups.contextExecuteTokenSize()),
+                               static_cast<int64_t>(stream_groups.contextExecuteTokenSizeWithCache()),
+                               static_cast<int64_t>(stream_groups.totalDecodeBatchSize()),
+                               tps_execute_time_us,
+                               std::nullopt});
         reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
 
         if (profile_step_finish_) {
@@ -445,7 +457,7 @@ void NormalExecutor::reportMetrics(const StreamGroups&                        st
                                    RtpLLMTokenPSMetricsCollector&             tps_collector,
                                    int64_t                                    tps_execute_time_us,
                                    const StreamGroups::TokenCountsByPriority& token_counts_by_priority) {
-    if (tp_rank_ > 0) {
+    if (tp_rank_ > 0 || warm_up_ || !isKmonMetricReportingEnabled()) {
         return;
     }
     if (metrics_reporter_) {

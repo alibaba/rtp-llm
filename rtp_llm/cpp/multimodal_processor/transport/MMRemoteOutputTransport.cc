@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/multimodal_processor/transport/MMRemoteOutputTransport.h"
 
 #include "rtp_llm/cpp/model_rpc/MultimodalPbConverter.h"
@@ -37,7 +38,7 @@ void MMTransportMetrics::reportRpcClientError(const std::string& endpoint,
     if (!grpc_code.empty()) {
         error_tags.AddTag("grpc_code", grpc_code);
     }
-    reporter_->report(1, "rtp_llm_vit_rpc_client_error_qps", kmonitor::MetricType::QPS, &error_tags, true);
+    reportKmonMetric(reporter_, 1, "rtp_llm_vit_rpc_client_error_qps", kmonitor::MetricType::QPS, &error_tags);
 }
 
 void MMTransportMetrics::reportRpcMetrics(const std::string& endpoint,
@@ -50,9 +51,9 @@ void MMTransportMetrics::reportRpcMetrics(const std::string& endpoint,
     kmonitor::MetricsTags tags;
     tags.AddTag("source", kMetricSourceInferenceClient);
     tags.AddTag("target", endpoint);
-    reporter_->report(cost_us, "rtp_llm_vit_rpc_client_rt_us", kmonitor::MetricType::GAUGE, &tags, true);
-    reporter_->report(request_bytes, "rtp_llm_vit_rpc_request_bytes", kmonitor::MetricType::GAUGE, &tags, true);
-    reporter_->report(response_bytes, "rtp_llm_vit_rpc_response_bytes", kmonitor::MetricType::GAUGE, &tags, true);
+    reportKmonMetric(reporter_, cost_us, "rtp_llm_vit_rpc_client_rt_us", kmonitor::MetricType::GAUGE, &tags);
+    reportKmonMetric(reporter_, request_bytes, "rtp_llm_vit_rpc_request_bytes", kmonitor::MetricType::GAUGE, &tags);
+    reportKmonMetric(reporter_, response_bytes, "rtp_llm_vit_rpc_response_bytes", kmonitor::MetricType::GAUGE, &tags);
 }
 
 // ---- MMRemoteOutputTransport ----

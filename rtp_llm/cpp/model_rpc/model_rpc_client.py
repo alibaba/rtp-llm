@@ -779,6 +779,9 @@ def trans_input(input_py: GenerateInput):
         input_py.generate_config.normalized_hidden_states
     )
     generate_config_pb.is_streaming = input_py.generate_config.is_streaming
+    generate_config_pb.frontend_metric_streaming = (
+        input_py.generate_config.frontend_metric_streaming
+    )
     generate_config_pb.timeout_ms = input_py.generate_config.timeout_ms
     if input_py.generate_config.sp_advice_prompt_token_ids:
         generate_config_pb.sp_advice_prompt_token_ids.extend(
@@ -948,23 +951,88 @@ def multimodal_cache_keys(input_py: GenerateInput) -> list[str]:
     return keys
 
 
-# 假设 trans_tensor 函数将 Protobuf 的 TensorPB 转换为 numpy array
-# from .utils import trans_tensor
+def _trans_frontend_metric_envelope(outputs_pb: GenerateOutputsPB) -> GenerateOutputs:
+    """Decode wrapper-level private metrics even when the payload is empty."""
+    return GenerateOutputs(
+        frontend_metric_only=bool(outputs_pb.frontend_metric_only),
+        frontend_sp_tpot_samples=[
+            (int(sample.sequence_id), float(sample.tpot_us))
+            for sample in outputs_pb.frontend_sp_tpot_samples
+        ],
+        frontend_input_len=(
+            int(outputs_pb.frontend_input_len.value)
+            if outputs_pb.HasField("frontend_input_len")
+            else None
+        ),
+        frontend_output_len=(
+            int(outputs_pb.frontend_output_len.value)
+            if outputs_pb.HasField("frontend_output_len")
+            else None
+        ),
+        frontend_context_token_num=(
+            int(outputs_pb.frontend_context_token_num.value)
+            if outputs_pb.HasField("frontend_context_token_num")
+            else None
+        ),
+        frontend_context_token_num_with_cache=(
+            int(outputs_pb.frontend_context_token_num_with_cache.value)
+            if outputs_pb.HasField("frontend_context_token_num_with_cache")
+            else None
+        ),
+        frontend_context_execute_time_us=(
+            int(outputs_pb.frontend_context_execute_time_us.value)
+            if outputs_pb.HasField("frontend_context_execute_time_us")
+            else None
+        ),
+        frontend_context_execute_time_with_cache_us=(
+            int(outputs_pb.frontend_context_execute_time_with_cache_us.value)
+            if outputs_pb.HasField("frontend_context_execute_time_with_cache_us")
+            else None
+        ),
+        frontend_generate_token_num=(
+            int(outputs_pb.frontend_generate_token_num.value)
+            if outputs_pb.HasField("frontend_generate_token_num")
+            else None
+        ),
+        frontend_generate_execute_time_us=(
+            int(outputs_pb.frontend_generate_execute_time_us.value)
+            if outputs_pb.HasField("frontend_generate_execute_time_us")
+            else None
+        ),
+        frontend_speculative_verify_rounds=(
+            int(outputs_pb.frontend_speculative_verify_rounds.value)
+            if outputs_pb.HasField("frontend_speculative_verify_rounds")
+            else None
+        ),
+        frontend_speculative_accepted_token_num=(
+            int(outputs_pb.frontend_speculative_accepted_token_num.value)
+            if outputs_pb.HasField("frontend_speculative_accepted_token_num")
+            else None
+        ),
+        frontend_speculative_proposed_draft_tokens=(
+            int(outputs_pb.frontend_speculative_proposed_draft_tokens.value)
+            if outputs_pb.HasField("frontend_speculative_proposed_draft_tokens")
+            else None
+        ),
+    )
 
 
 def trans_output(
     input_py: GenerateInput, outputs_pb: GenerateOutputsPB, stream_state: StreamState
 ) -> GenerateOutputs:
-    _validate_prefill_only_response(input_py, outputs_pb, stream_state)
+    if not outputs_pb.frontend_metric_only:
+        _validate_prefill_only_response(input_py, outputs_pb, stream_state)
     logging.debug("outputs_pb = %s", outputs_pb)
     output_pb = outputs_pb.flatten_output
     num_outputs = len(output_pb.finished)
+    outputs_py = _trans_frontend_metric_envelope(outputs_pb)
 
     if num_outputs == 0:
-        return GenerateOutputs()
+        return outputs_py
 
     first_output = not stream_state.seen_output
-    stream_state.seen_output = True
+    if not outputs_py.frontend_metric_only:
+        stream_state.seen_output = True
 
     logits_index = input_py.generate_config.logits_index
     aux_info_flag = input_py.generate_config.aux_info
@@ -1005,9 +1073,10 @@ def trans_output(
             )
         )
     ):
-        return GenerateOutputs(
-            BatchedTerminalOutputs(all_output_ids, input_py.token_ids.reshape(1, -1))
+        outputs_py.generate_outputs = BatchedTerminalOutputs(
+            all_output_ids, input_py.token_ids.reshape(1, -1)
         )
+        return outputs_py
     all_hidden_states = (
         trans_tensor(output_pb.hidden_states)
         if output_pb.HasField("hidden_states")
@@ -1068,7 +1137,6 @@ def trans_output(
             "end_pos": pl_pb.end_pos,
         }
 
-    outputs_py = GenerateOutputs()
     input_token_ids = input_py.token_ids.reshape(1, -1)
 
     # 遍历每个 beam/output
@@ -1163,7 +1231,8 @@ def trans_output(
             output_py.custom_output = all_custom_output[i]
 
         if (
-            logits_index is not None
+            not outputs_py.frontend_metric_only
+            and logits_index is not None
             and all_logits is not None
             and current_aux_info
             and current_aux_info.output_len == logits_index
@@ -1406,7 +1475,8 @@ class ModelRpcClient(object):
                 if response is None:
                     break
                 output_py = trans_output(input_py, response, stream_state)
-                last_output = output_py
+                if not output_py.frontend_metric_only:
+                    last_output = output_py
                 if use_fetch_response and _is_finished_response(response):
                     terminal_seen = True
                 if terminal_seen:

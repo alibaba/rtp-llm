@@ -148,7 +148,7 @@ def _tp2_worker(rank: int, nccl_port: int, result_queue: mp.Queue) -> None:
 
         with patch.object(dist, "init_process_group", _init_pg):
             with patch(
-                "rtp_llm.models_py.distributed.collective_torch.init_symm_mem_communicator",
+                "rtp_llm.models_py.distributed.symm_mem.init_symm_mem_communicator",
                 lambda *_a, **_kw: None,
             ):
                 init_distributed_environment(
@@ -412,7 +412,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         cp_op.plan(mla_params, block_table_device, attn_inputs=attn_inputs)
 
         # With tp_size=1, all_gather is identity; mock it to avoid requiring distributed init
-        def _identity_all_gather(tensor, group=None):
+        def _identity_all_gather(tensor, group=None, role=None):
             return tensor
 
         q0_idx_list, q1_idx_list = generate_q_indices(chunk_lengths)
@@ -574,7 +574,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         cp_op.write_cache_store_impl = None
         cp_op.plan(mla_params, block_table_device, attn_inputs=attn_inputs)
 
-        def _identity_all_gather(tensor, group=None):
+        def _identity_all_gather(tensor, group=None, role=None):
             return tensor
 
         q0_idx_list, q1_idx_list = generate_q_indices(chunk_lengths)
@@ -598,6 +598,38 @@ class SparseMlaFp8CPOpTest(TestCase):
             )
         torch.cuda.synchronize()
         self.assertEqual(out.shape, (total_q_len, num_heads, kv_lora_rank))
+
+    def test_scheduler_keeps_graph_shape_and_handles_empty_chunk_tails(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+            flashmla_sparse_cp_impl as cp_impl,
+        )
+
+        for graph in (False, True):
+            for rows in (0, 2):
+                with self.subTest(graph=graph, rows=rows):
+                    op = cp_impl.SparseMlaFp8CPOp(
+                        64, 512, 64, 512, 64, 1.0, 128, use_cuda_graph=graph
+                    )
+                    with patch.object(
+                        cp_impl, "get_mla_metadata", return_value=(object(), None)
+                    ) as metadata:
+                        op._refresh_fp8_kernel_metadata(rows)
+                        first = op._fp8_kernel_metadata_q0
+                        op._refresh_fp8_kernel_metadata(rows)
+                        self.assertEqual(
+                            metadata.call_count, (1 if graph else 2) if rows else 0
+                        )
+                        if graph:
+                            self.assertIs(op._fp8_kernel_metadata_q0, first)
+                            with self.assertRaisesRegex(
+                                RuntimeError, "changed scheduler shape"
+                            ):
+                                op._refresh_fp8_kernel_metadata(2 if rows == 0 else 0)
+                        else:
+                            op._refresh_fp8_kernel_metadata(0)
+                            self.assertIsNone(op._fp8_kernel_metadata_q0)
+                            op._refresh_fp8_kernel_metadata(2)
+                            self.assertIsNotNone(op._fp8_kernel_metadata_q0)
 
     def test_chunk_tail_positions_and_empty_rank_collectives(self):
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
@@ -667,7 +699,7 @@ class SparseMlaFp8CPOpTest(TestCase):
                     events = []
                     op.kv_cache_write_op = Mock()
                     op.kv_cache_write_op.forward.side_effect = (
-                        lambda *args: events.append("write")
+                        lambda *args, **kwargs: events.append("write")
                     )
                     op.write_cache_store_impl = None
                     q = torch.zeros(local, 64, 576)
@@ -675,7 +707,7 @@ class SparseMlaFp8CPOpTest(TestCase):
                     k_pe = torch.zeros(local, 64)
                     gathered = [torch.randn(padded, 512), torch.randn(padded, 64)]
 
-                    def gather(tensor, group):
+                    def gather(tensor, group, role):
                         result = gathered[len(events)]
                         events.append("gather")
                         return result
@@ -1027,7 +1059,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         # from 2 ranks (rank0 has first 4, rank1 has last 4).
         _all_gather_returns = iter([input_ckv.contiguous(), input_k_pe.contiguous()])
 
-        def _mock_all_gather_tp2(tensor, group=None):
+        def _mock_all_gather_tp2(tensor, group=None, role=None):
             return next(_all_gather_returns)
 
         q0_idx_list, q1_idx_list = generate_q_indices(chunk_lengths)

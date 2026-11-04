@@ -261,6 +261,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         help=(
             "Decode CUDA Graph capture batch sizes configuration. "
             "Supports comma-separated list format, e.g., '1,2,4,8,16,32'. "
+            "Draft/MTP prefill CUDA Graph derives its sequence lengths from these batch buckets. "
             "If not set, default logic will be used to generate batch sizes."
         ),
     )
@@ -281,6 +282,18 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         type=str2bool,
         default=None,
         help="设置为 `True` 时，禁用ROCm平台自定义的 AllGather (AG) 实现，可能回退到标准库（如 RCCL）的 AllGather。",
+    )
+
+    hw_kernel_group.add_argument(
+        "--enable_fuse_kernels",
+        env_name="ENABLE_FUSE_KERNELS",
+        bind_to=(hw_kernel_config, "enable_fuse_kernels"),
+        type=str2bool,
+        default=True,
+        help=(
+            "Enable optional MLA, Indexer and MLP fusion kernels. "
+            "Required layout kernels (strided slice and output BMM) remain enabled."
+        ),
     )
 
 

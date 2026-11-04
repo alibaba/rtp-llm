@@ -651,6 +651,18 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     auto              prefill_remote_reuse_len = prefill_context.getStream()->remoteReuseLength();
     auto              prefill_memory_reuse_len = prefill_context.getStream()->hostReuseLength();
     auto              prefill_disk_reuse_len   = prefill_context.getStream()->diskReuseLength();
+    auto    frontend_metric_streaming = prefill_context.getStream()->generateConfig()->frontend_metric_streaming;
+    int64_t prefill_frontend_context_token_num                  = 0;
+    int64_t prefill_frontend_context_token_num_with_cache       = 0;
+    int64_t prefill_frontend_context_execute_time_us            = 0;
+    int64_t prefill_frontend_context_execute_time_with_cache_us = 0;
+    if (frontend_metric_streaming) {
+        prefill_frontend_context_token_num            = prefill_context.getStream()->frontendContextTokenNum();
+        prefill_frontend_context_token_num_with_cache = prefill_context.getStream()->frontendContextTokenNumWithCache();
+        prefill_frontend_context_execute_time_us      = prefill_context.getStream()->frontendContextExecuteTimeUs();
+        prefill_frontend_context_execute_time_with_cache_us =
+            prefill_context.getStream()->frontendContextExecuteTimeWithCacheUs();
+    }
     // Decode workers do not receive ViT features in PD mode, so preserve the
     // prefill-side media usage metadata when forwarding their responses.
     const auto multimodal_lengths =
@@ -689,6 +701,13 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
                                 prefill_remote_reuse_len,
                                 prefill_memory_reuse_len,
                                 prefill_disk_reuse_len);
+        }
+        if (frontend_metric_streaming) {
+            mergeFrontendContextMetrics(response,
+                                        prefill_frontend_context_token_num,
+                                        prefill_frontend_context_token_num_with_cache,
+                                        prefill_frontend_context_execute_time_us,
+                                        prefill_frontend_context_execute_time_with_cache_us);
         }
         if (!prefill_context.rpc_context.writer->Write(response)) {
             RTP_LLM_LOG_WARNING("request [%ld] write outputs pb failed", request_id);
@@ -749,6 +768,29 @@ void PrefillRpcServer::mergeMultimodalLengths(GenerateOutputsPB&        response
             (*output_lengths)[type] = length;
         }
     }
+}
+
+void PrefillRpcServer::mergeFrontendContextMetrics(GenerateOutputsPB& response,
+                                                   int64_t            token_num,
+                                                   int64_t            token_num_with_cache,
+                                                   int64_t            execute_time_us,
+                                                   int64_t            execute_time_with_cache_us) {
+    const auto decode_token_num =
+        response.has_frontend_context_token_num() ? response.frontend_context_token_num().value() : 0;
+    const auto decode_token_num_with_cache = response.has_frontend_context_token_num_with_cache() ?
+                                                 response.frontend_context_token_num_with_cache().value() :
+                                                 0;
+    const auto decode_execute_time_us =
+        response.has_frontend_context_execute_time_us() ? response.frontend_context_execute_time_us().value() : 0;
+    const auto decode_execute_time_with_cache_us = response.has_frontend_context_execute_time_with_cache_us() ?
+                                                       response.frontend_context_execute_time_with_cache_us().value() :
+                                                       0;
+    response.mutable_frontend_context_token_num()->set_value(decode_token_num + token_num);
+    response.mutable_frontend_context_token_num_with_cache()->set_value(decode_token_num_with_cache
+                                                                        + token_num_with_cache);
+    response.mutable_frontend_context_execute_time_us()->set_value(decode_execute_time_us + execute_time_us);
+    response.mutable_frontend_context_execute_time_with_cache_us()->set_value(decode_execute_time_with_cache_us
+                                                                              + execute_time_with_cache_us);
 }
 
 grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& prefill_context) {
