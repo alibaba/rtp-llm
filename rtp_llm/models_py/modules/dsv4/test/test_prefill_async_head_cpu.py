@@ -127,6 +127,7 @@ def _extract_attn():
         "_build_suffix_pool_slot_mapping",
         "_build_suffix_cp_sliced_slot_mapping",
         "_sm120_paged_cache_prefill_enabled",
+        "_swa_paged_slots_fully_covered",
         "_use_cp_cache_hit_raw_q_merge",
         "_force_cp_cache_hit_raw_q_merge",
         "_force_all_cp_raw_q_merge",

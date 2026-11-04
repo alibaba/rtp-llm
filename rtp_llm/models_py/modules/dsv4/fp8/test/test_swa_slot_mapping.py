@@ -40,6 +40,9 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
     compute_swa_slot_mapping,
     compute_swa_slot_mapping_from_positions,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.attention import (
+    _swa_paged_slots_fully_covered,
+)
 
 
 def _ref_compute_swa_slot_mapping(
@@ -878,6 +881,21 @@ class SwaSlotMappingTest(unittest.TestCase):
         self.assertEqual(got[0].item(), -1)
         self.assertEqual(got[127].item(), -1)
         self.assertGreater(got[128].item(), 0)
+
+    def test_paged_prefill_falls_back_when_write_slots_contain_negative(self):
+        """Any -1 write slot must abandon the direct-paged prefill route."""
+        dense = torch.tensor([0, 5, 129, 511], dtype=torch.long, device=self.device)
+        sparse = torch.tensor([0, -1, 129, -1], dtype=torch.long, device=self.device)
+        self.assertTrue(_swa_paged_slots_fully_covered(dense))
+        self.assertFalse(_swa_paged_slots_fully_covered(sparse))
+        # Edge inputs: empty tables have nothing to miss, missing tables are
+        # already outside the paged route.
+        self.assertTrue(
+            _swa_paged_slots_fully_covered(
+                torch.empty(0, dtype=torch.long, device=self.device)
+            )
+        )
+        self.assertTrue(_swa_paged_slots_fully_covered(None))
 
     def test_cp_sliced_uses_ring_for_owner_but_logical_block_for_table(self):
         """CP SWA sharding must not derive block-table rows from ring slices."""

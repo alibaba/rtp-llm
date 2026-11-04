@@ -143,6 +143,22 @@ def _sm120_paged_cache_prefill_enabled() -> bool:
     return os.environ.get("DSV4_SM120_PAGED_CACHE_PREFILL", "0") == "1"
 
 
+def _swa_paged_slots_fully_covered(
+    swa_slot_mapping: Optional[torch.Tensor],
+) -> bool:
+    """Whether every SWA write slot is a real physical pool slot.
+
+    Sparse SWA block tables leave ``-1`` for tokens whose logical block has no
+    writable pool slot (evicted or not yet allocated).  The SM120 paged prefill
+    consumer indexes the cache with these values, so any ``-1`` must abandon
+    the route.  Host-syncs (``.item()``): callers stay outside CUDA graph
+    capture, where paged prefill never runs.
+    """
+    if swa_slot_mapping is None or swa_slot_mapping.numel() == 0:
+        return True
+    return not bool((swa_slot_mapping < 0).any().item())
+
+
 def _use_cp_cache_hit_raw_q_merge() -> bool:
     # The raw-Q/O/LSE merge implementation is still an experimental validation
     # path: it avoids KV gather communication, but its current index planning is
@@ -5487,18 +5503,31 @@ class AttentionFP8(nn.Module):
                 swa_flat_slots.to(torch.long),
                 swa_slot_mapping.to(device=device, dtype=torch.long),
             )
-            cmp_pool_slot_mapping = _build_suffix_pool_slot_mapping(
-                block_table=cmp_bt_int32,
-                seq_lens=cmp_seq_lens,
-                gather_lens=cmp_seq_lens,
-                entries_per_block=cmp_eb,
-                tokens_per_block_for_block_table=cmp_eb,
-                ring_entries=cmp_eb,
-                # ``gather_lens == cmp_seq_lens == (prefix+S)//ratio`` —
-                # its max is exactly the host-derived ``N_max`` outside graph
-                # capture (``total_cmp_tokens`` set); else legacy.
-                max_gather_host=N_max if total_cmp_tokens is not None else None,
-            )
+            if not (
+                device.type == "cuda" and torch.cuda.is_current_stream_capturing()
+            ) and not _swa_paged_slots_fully_covered(swa_slot_mapping):
+                # Sparse SWA tables leave -1 write slots that the paged
+                # consumer would treat as physical slots; keep the workspace
+                # path.  The coverage readback is only run outside capture.
+                swa_pool_slot_mapping = None
+            else:
+                cmp_pool_slot_mapping = _build_suffix_pool_slot_mapping(
+                    block_table=cmp_bt_int32,
+                    seq_lens=cmp_seq_lens,
+                    gather_lens=cmp_seq_lens,
+                    entries_per_block=cmp_eb,
+                    tokens_per_block_for_block_table=cmp_eb,
+                    ring_entries=cmp_eb,
+                    # ``gather_lens == cmp_seq_lens == (prefix+S)//ratio``: its
+                    # max is exactly the host-derived ``N_max`` outside graph
+                    # capture (``total_cmp_tokens`` set).  During capture the
+                    # device max would sync mid-capture and replay lengths can
+                    # change, so size from the capacity bound ``N_max`` — which is
+                    # also the flat row stride ``N`` the paged consumer indexes
+                    # with.
+                    max_gather=N_max if total_cmp_tokens is None else None,
+                    max_gather_host=N_max if total_cmp_tokens is not None else None,
+                )
 
         return WorkspaceMeta(
             M=M,
