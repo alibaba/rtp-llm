@@ -286,7 +286,7 @@ manager_endpoint 是显式 Meta HTTP 覆盖地址，优先于发现；未配置�
 
 同一 deadline 覆盖调度和取流，并受更短原生 timeout 限制。取消/错误/超时结束当前 RPC，向该请求最后尝试的 Master 尽力发一次有界 Cancel，不随新的选举结果改变取消目标；Cancel 失败写日志，不承诺远端释放。连接复用、请求上下文独立，close 取消活动并等待有界 Cancel 后关闭所拥有连接。
 
-协议测试使用夹具，真实接线测试使用生产 Master，二者都真实消费 P/D 输出。标准 Protobuf 输入的 Player、LoadClient、client0 协调和 start/stop 已接通，主备发送只改变 Schedule 目标选择与传输失败重试边界。Client 逐请求执行记录已接通；运行时只读标准 Protobuf＋Zstd 输入，仓库不提供旧采集格式转换工具；Engine 与 Master 的完整服务端证据仍未接通。
+协议测试使用夹具，真实接线测试使用生产 Master，二者都真实消费 P/D 输出。LoadClient 回放、client-0 协调和 start/stop 已接通，主备发送只改变 Schedule 目标选择与传输失败重试边界。Client 逐请求执行记录已接通；回放源支持 JSONL 和 Protobuf＋Zstd，worker 分片使用 Protobuf＋Zstd，仓库不提供旧采集格式转换工具；Engine 与 Master 的完整服务端证据仍未接通。
 
 ## 指标、采集和查询
 

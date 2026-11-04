@@ -104,12 +104,12 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         }
         try {
             save(directory.resolve("coordinator/" + created.number + "/plan.json"), Map.of("clients", created.peers, "config", args));
-            var parts = RequestFiles.split(args, directory.resolve("coordinator/" + created.number + "/shards"), created.peers.size(), () -> created.stop || closed);
-            long total = parts.stream().mapToLong(RequestFiles.Part::count).reduce(0, Math::addExact);
+            var parts = ReplayInput.split(args, directory.resolve("coordinator/" + created.number + "/shards"), created.peers.size(), () -> created.stop || closed);
+            long total = parts.stream().mapToLong(ReplayInput.Part::count).reduce(0, Math::addExact);
             synchronized (this) { nextRequestId = Math.addExact(created.firstId, total); }
             save(directory.resolve("coordinator/" + created.number + "/input.json"), Map.of("count", total, "shards", parts));
             for (int i = 0; i < created.peers.size(); i++) {
-                InputFile.checkInterrupted();
+                ReplayInput.checkInterrupted();
                 if (created.stop || closed) throw new IOException("Client start stopped during preparation");
                 var part = parts.get(i);
                 int slots = args.concurrency() / created.peers.size() + (i < args.concurrency() % created.peers.size() ? 1 : 0);
@@ -119,7 +119,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
             }
             long startAt = System.currentTimeMillis() + Math.max(1000, created.peers.size() * 100L);
             for (String peer : created.peers) {
-                InputFile.checkInterrupted();
+                ReplayInput.checkInterrupted();
                 if (created.stop || closed) throw new IOException("Client start stopped before begin");
                 call(peer, "worker/begin", new Begin(created.number, startAt));
             }
