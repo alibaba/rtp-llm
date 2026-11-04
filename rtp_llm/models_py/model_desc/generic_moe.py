@@ -414,12 +414,27 @@ class GenericMoeLayer(nn.Module):
             return experts_output + self._finish_shared_overlap(shared)
         return experts_output + self.shared_expert(hidden_states)
 
+    def prepare_fused_mhc_inputs(self, hidden_states):
+        if (
+            os.environ.get("GLM53_MHC_PACK_FUSION", "1") != "1"
+            or self.routed_tp_size != 1
+            or self.ep_size <= 1
+            or self.gate_chunk_rows != 0
+            or self.correction_bias is None
+            or self.fake_balance_expert is not None
+            or not self._use_mega_moe_fused_shared
+            or not hasattr(self.fused_moe, "prepare_fused_mhc_inputs")
+        ):
+            return None
+        return self.fused_moe.prepare_fused_mhc_inputs(hidden_states)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         x_fp8: "Optional[torch.Tensor]" = None,
         x_scale: "Optional[torch.Tensor]" = None,
         sequence_parallel_layout=None,
+        prepacked_mega=None,
     ) -> torch.Tensor:
         routing_hidden = hidden_states
         routing_layout = None
@@ -461,44 +476,74 @@ class GenericMoeLayer(nn.Module):
             routing_hidden = shard_tokens(hidden_states, routing_layout)
         num_tokens, _ = hidden_states.shape
         routing_tokens = routing_hidden.shape[0]
-        if local_router:
-            router_logits = self.gate.forward_shard(routing_hidden, routing_layout)
-        elif self.gate_chunk_rows > 0 and num_tokens > 0:
-            router_logits = fixed_m_linear(
-                self.gate, hidden_states, self.gate_chunk_rows
-            )
+        if prepacked_mega is not None:
+            if (
+                local_router
+                or routing_layout is not None
+                or prepacked_mega["owner"] is not self.fused_moe
+                or prepacked_mega["tokens"] != num_tokens
+            ):
+                raise ValueError(
+                    "Prepacked mHC inputs require the original unsharded MoE"
+                )
+            topk_weights = prepacked_mega["weights"]
+            topk_ids = prepacked_mega["ids"]
         else:
-            router_logits = self.gate(hidden_states)
-        router_logits_fp32 = router_logits.float()
-
-        topk_weights = torch.empty(
-            (routing_tokens, self.top_k),
-            dtype=torch.float32,
-            device=hidden_states.device,
-        )
-        # different executor may need different topk_ids dtype
-        topk_ids_dtype = self.fused_moe.topk_ids_dtype
-        topk_ids = torch.empty(
-            (routing_tokens, self.top_k),
-            dtype=topk_ids_dtype,
-            device=hidden_states.device,
-        )
-
-        if self.correction_bias is not None:
-            self.group_topk(
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                scores=router_logits_fp32,
-                correction_bias=self.correction_bias,
-                n_group=self.config.moe_n_group,
-                topk_group=self.config.moe_topk_group,
-                topk=self.top_k,
-                renormalize=self.config.has_moe_norm,
-                routed_scaling_factor=self.config.routed_scaling_factor,
+            topk_weights = torch.empty(
+                (routing_tokens, self.top_k),
+                dtype=torch.float32,
+                device=hidden_states.device,
             )
-        else:
-            # Top-K selection using C++ SelectTopkOp
-            self.select_topk(router_logits_fp32, topk_ids, topk_weights)
+            # different executor may need different topk_ids dtype
+            topk_ids_dtype = self.fused_moe.topk_ids_dtype
+            topk_ids = torch.empty(
+                (routing_tokens, self.top_k),
+                dtype=topk_ids_dtype,
+                device=hidden_states.device,
+            )
+        routes_ready = False
+        if (
+            not local_router
+            and self.gate_chunk_rows == 0
+            and self.correction_bias is not None
+            and hasattr(self.gate, "forward_routes")
+        ):
+            routes_ready = self.gate.forward_routes(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                self.correction_bias,
+                self.config.moe_n_group,
+                self.config.moe_topk_group,
+                self.top_k,
+                self.config.has_moe_norm,
+                self.config.routed_scaling_factor,
+            )
+        if not routes_ready:
+            if local_router:
+                router_logits = self.gate.forward_shard(routing_hidden, routing_layout)
+            elif self.gate_chunk_rows > 0 and num_tokens > 0:
+                router_logits = fixed_m_linear(
+                    self.gate, hidden_states, self.gate_chunk_rows
+                )
+            else:
+                router_logits = self.gate(hidden_states)
+            router_logits_fp32 = router_logits.float()
+            if self.correction_bias is not None:
+                self.group_topk(
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    scores=router_logits_fp32,
+                    correction_bias=self.correction_bias,
+                    n_group=self.config.moe_n_group,
+                    topk_group=self.config.moe_topk_group,
+                    topk=self.top_k,
+                    renormalize=self.config.has_moe_norm,
+                    routed_scaling_factor=self.config.routed_scaling_factor,
+                )
+            else:
+                # Top-K selection using C++ SelectTopkOp
+                self.select_topk(router_logits_fp32, topk_ids, topk_weights)
 
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
@@ -539,12 +584,17 @@ class GenericMoeLayer(nn.Module):
                 self.routed_tp_size,
             )
         shared_expert_output = self._start_shared_overlap(hidden_states, x_fp8, x_scale)
-        experts_output = self.fused_moe(
-            hidden_states=routed_hidden,
-            topk_weights=routed_weights,
-            topk_ids=routed_ids,
-            activation="SiGLU",
-        )
+        if prepacked_mega is not None:
+            experts_output = self.fused_moe.forward_prepacked(
+                routed_hidden, prepacked_mega
+            )
+        else:
+            experts_output = self.fused_moe(
+                hidden_states=routed_hidden,
+                topk_weights=routed_weights,
+                topk_ids=routed_ids,
+                activation="SiGLU",
+            )
         if self.shared_expert_local:
             # Full FP8 shared weights consume exactly the routed branch's local
             # rows. A fused shared expert is already included by EP combine.

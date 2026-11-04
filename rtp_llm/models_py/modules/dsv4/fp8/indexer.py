@@ -129,6 +129,9 @@ def _topk_canonicalize_enabled() -> bool:
 _FUSED_PREFILL_TOPK_CANONICALIZE = (
     os.environ.get("GLM53_PREFILL_FUSED_TOPK_CANONICALIZE", "0") == "1"
 )
+_FUSED_DECODE_TOPK_CANONICALIZE = (
+    os.environ.get("GLM53_DECODE_FUSED_TOPK_CANONICALIZE", "1") == "1"
+)
 
 
 def canonicalize_topk_output(out: torch.Tensor) -> None:
@@ -136,8 +139,10 @@ def canonicalize_topk_output(out: torch.Tensor) -> None:
     if not _topk_canonicalize_enabled():
         return
     if (
-        _FUSED_PREFILL_TOPK_CANONICALIZE
-        and metadata_cache() is not None
+        (
+            (_FUSED_PREFILL_TOPK_CANONICALIZE and metadata_cache() is not None)
+            or (_FUSED_DECODE_TOPK_CANONICALIZE and metadata_cache() is None)
+        )
         and out.dtype == torch.int32
         and out.ndim == 2
         and (
@@ -175,9 +180,13 @@ def _run_decode_topk(
     """Select decode indices with the same stable tie rule as GLM53 prefill."""
     topk, width = out.shape[1], logits.shape[1]
     k_eff = min(topk, width)
-    out.fill_(-1)
+    native_topk = k_eff > 0 and topk in (512, 1024, 2048) and _persistent_topk_enabled()
+    # Native selectors fully overwrite the output, including short-row padding.
+    # Keep initialization for the torch fallback and retain stable tie selection.
+    if not (native_topk and os.environ.get("GLM53_INDEXER_SKIP_TOPK_FILL", "1") == "1"):
+        out.fill_(-1)
     stable = backend == "topk_v3_tie_break"
-    if k_eff > 0 and topk in (512, 1024, 2048) and _persistent_topk_enabled():
+    if native_topk:
         if stable:
             # The ragged selector also accepts decode rows: their windows
             # start at zero and end at the live, graph-updated context lengths.
@@ -483,6 +492,11 @@ class IndexerFP8(PoolBackedModule):
         self.softmax_scale = self.head_dim**-0.5
         self.compress_ratio = compress_ratio
         self.rotate_q = bool(rotate_q)
+        self._glm_gate_quant = (
+            compressor_kpool_mode
+            and self.rotate_q
+            and os.environ.get("GLM53_INDEXER_GATE_QUANT_FUSION", "1") == "1"
+        )
         self._glm_weights_chunk_rows = (
             int(os.environ.get("GLM53_INDEXER_WEIGHTS_CHUNK_ROWS", "0"))
             if compressor_kpool_mode
@@ -576,7 +590,7 @@ class IndexerFP8(PoolBackedModule):
         return (
             self.compressor.kpool_mode
             and self.rotate_q
-            and os.environ.get("GLM53_INDEXER_FUSED_Q_QUANT", "0") == "1"
+            and os.environ.get("GLM53_INDEXER_FUSED_Q_QUANT", "1") == "1"
         )
 
     def _quantize_q(self, q: torch.Tensor, weights: torch.Tensor):
@@ -937,7 +951,20 @@ class IndexerFP8(PoolBackedModule):
                     bsz, q_len, 1
                 ).to(dtype=torch.int32)
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
-            weights = self._compute_weights(x)
+            fuse_gate_quant = (
+                self._glm_gate_quant
+                and self._fuse_glm_q_quant()
+                and not self._glm_weights_chunk_rows
+                and x.is_contiguous()
+                and x.dtype == torch.bfloat16
+                and self.head_dim == 128
+                and self.weights_proj.dtype == torch.float32
+                and self.weights_proj.is_contiguous()
+                and self.weights_proj.shape == (self.n_heads, 4096)
+                and self.n_heads in (32, 64)
+            )
+            if not fuse_gate_quant:
+                weights = self._compute_weights(x)
 
             # Always use DeepGEMM (FP8 path). Decode uses a static score
             # width from the cache/block-table upper bound; replay updates
@@ -950,7 +977,23 @@ class IndexerFP8(PoolBackedModule):
             # The block table is the only capture-stable bound for all replays.
             T_max = max(32, T_cache)
 
-            q_fp8, w_fold = self._quantize_q(_as_bf16_contig(q), weights.contiguous())
+            if fuse_gate_quant:
+                from rtp_llm.models_py.triton_kernels.glm53_indexer_gate_quant import (
+                    gate_quant,
+                )
+
+                q_fp8, w_fold = gate_quant(
+                    x.reshape(-1, 4096),
+                    self.weights_proj,
+                    _as_bf16_contig(q).reshape(-1, self.n_heads, 128),
+                    head_tile=2 if bsz * q_len <= 64 else 8,
+                )
+                q_fp8 = q_fp8.view(q.shape)
+                w_fold = w_fold.view(q.shape[:-1])
+            else:
+                q_fp8, w_fold = self._quantize_q(
+                    _as_bf16_contig(q), weights.contiguous()
+                )
             ctx_lens_2d = compressed_len.view(bsz, q_len)
             bt_i32 = self._kv_block_table[:bsz].to(torch.int32).contiguous()
             # ``_kv_pool_view`` is 3D ``[num_blocks, eb, 132]`` from production

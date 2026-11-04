@@ -68,14 +68,12 @@ def has_fp8_mqa_logits() -> bool:
 
 
 _sched_cache: Optional[torch.Tensor] = None
-_num_sms_cache: int = 0
 
 
 def _get_num_sms(device: torch.device) -> int:
-    global _num_sms_cache
-    if _num_sms_cache == 0:
-        _num_sms_cache = torch.cuda.get_device_properties(device).multi_processor_count
-    return _num_sms_cache
+    # The scheduler metadata and launch must use the same configured SM budget.
+    # Physical SM count can differ when DeepGEMM is deliberately limited.
+    return int(_deep_gemm.get_num_sms())
 
 
 def fp8_paged_indexer_score(

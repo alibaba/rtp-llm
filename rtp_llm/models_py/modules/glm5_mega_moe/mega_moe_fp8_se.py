@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 import torch
@@ -40,6 +41,24 @@ class GLM5MegaMoEFP8SE(GLM5MegaMoEFP8):
             return
 
         import torch.distributed as dist
+
+        # Launch controls are process scoped. Set them before
+        # symmetric buffers and graph warmup select their launch configuration.
+        import deep_gemm
+
+        if hasattr(deep_gemm, "set_pdl"):
+            deep_gemm.set_pdl(os.environ.get("GLM53_DG_PDL", "1") == "1")
+        if os.environ.get("GLM53_DG_NUM_SMS") is not None:
+            import deep_gemm
+
+            num_sms = int(os.environ["GLM53_DG_NUM_SMS"])
+            if (
+                not 1
+                <= num_sms
+                <= torch.cuda.get_device_properties(0).multi_processor_count
+            ):
+                raise ValueError("GLM53_DG_NUM_SMS exceeds the device SM count")
+            deep_gemm.set_num_sms(num_sms)
 
         cfg = self.cfg
         device = self._mega_l1_w.device
@@ -189,6 +208,7 @@ class GLM5MegaMoEFP8SE(GLM5MegaMoEFP8):
         indices: torch.Tensor | None,
         *,
         inputs_prepacked: bool,
+        shared_scales_prepacked: bool = False,
     ) -> torch.Tensor:
         import deep_gemm
 
@@ -217,12 +237,13 @@ class GLM5MegaMoEFP8SE(GLM5MegaMoEFP8):
             tokens,
             self.cfg.n_activated_experts,
         )
-        stage_shared_fp8_input_scales(
-            buf.x_sf,
-            buf.shared_l1_acts_sf,
-            tokens,
-            block_m,
-        )
+        if not shared_scales_prepacked:
+            stage_shared_fp8_input_scales(
+                buf.x_sf,
+                buf.shared_l1_acts_sf,
+                tokens,
+                block_m,
+            )
         self._maybe_pre_kernel_barrier(tokens)
         _sync_cuda_graph_warmup_ranks(
             f"glm5.mega_moe_fp8_se.layer{self.cfg.layer_id}.before_deepgemm",

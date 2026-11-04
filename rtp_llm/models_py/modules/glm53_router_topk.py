@@ -9,7 +9,27 @@ from triton.experimental.gluon import language as tl
 from triton.experimental.gluon.language import BlockedLayout, SliceLayout
 from triton.experimental.gluon.language.extra import libdevice
 
-_NUM_WARPS = 4  # One warp per row; four independent rows share a CTA.
+_NUM_WARPS = 2  # Measured SM100 choice: one warp per row, two rows per CTA.
+
+
+@gluon.jit
+def _splitk_score(logits, row, col, E: tl.constexpr, M):
+    offset = row * E + col
+    valid = (row < M) & (col < E)
+    pitch = M * E
+    p0 = tl.load(logits + offset, valid, 0)
+    p1 = tl.load(logits + pitch + offset, valid, 0)
+    p2 = tl.load(logits + 2 * pitch + offset, valid, 0)
+    p3 = tl.load(logits + 3 * pitch + offset, valid, 0)
+    p4 = tl.load(logits + 4 * pitch + offset, valid, 0)
+    p5 = tl.load(logits + 5 * pitch + offset, valid, 0)
+    p6 = tl.load(logits + 6 * pitch + offset, valid, 0)
+    p7 = tl.load(logits + 7 * pitch + offset, valid, 0)
+    # Match the deployed combine: per-thread even/odd partials accumulate
+    # left-to-right, then the two warp contributions are added.
+    a = libdevice.add_rn(libdevice.add_rn(libdevice.add_rn(p0, p2), p4), p6)
+    b = libdevice.add_rn(libdevice.add_rn(libdevice.add_rn(p1, p3), p5), p7)
+    return libdevice.add_rn(a, b)
 
 
 @gluon.jit(do_not_specialize=["M"])
@@ -27,6 +47,7 @@ def _route_single_group(
     BLOCK: tl.constexpr,
     M,
     BM: tl.constexpr,
+    SPLIT_K: tl.constexpr = 1,
 ):
     layout: tl.constexpr = BlockedLayout([1, 1], [1, 32], [BM, 1], [1, 0])
     row = (
@@ -34,7 +55,10 @@ def _route_single_group(
         + tl.arange(0, BM, layout=SliceLayout(1, layout))
     )[:, None]
     col = tl.arange(0, BLOCK, layout=SliceLayout(0, layout))[None, :]
-    x = tl.load(logits + row * STRIDE + col, (row < M) & (col < E), 0)
+    if SPLIT_K == 8:
+        x = _splitk_score(logits, row, col, E, M)
+    else:
+        x = tl.load(logits + row * STRIDE + col, (row < M) & (col < E), 0)
     b = tl.load(bias + col * BS, col < E, 0)
     score = libdevice.div_rn(1.0, libdevice.add_rn(1.0, libdevice.exp(-x)))
     biased = libdevice.add_rn(score, b)
@@ -68,9 +92,12 @@ def _route_single_group(
         candidates = tl.where(col == index, -float("inf"), candidates)
     # Recompute just K sigmoids after selection. This avoids K extra full-row
     # reductions and holding all E original scores live across the TopK loop.
-    selected_x = tl.load(
-        logits + row * STRIDE + selected_ids, (row < M) & (slots < K), 0
-    )
+    if SPLIT_K == 8:
+        selected_x = _splitk_score(logits, row, selected_ids, E, M)
+    else:
+        selected_x = tl.load(
+            logits + row * STRIDE + selected_ids, (row < M) & (slots < K), 0
+        )
     selected_scores = libdevice.div_rn(
         1.0, libdevice.add_rn(1.0, libdevice.exp(-selected_x))
     )
@@ -113,7 +140,7 @@ def _runner(device, index_dtype, e, stride, bs, k, norm, scale, warps, m):
     # M controls only the grid and tail mask. Keep it runtime so variable
     # request lengths reuse the compiled code (including M=1).
     grid = (triton.cdiv(m, warps), 1, 1)
-    constants = (e, stride, bs, k, norm, scale, triton.next_power_of_2(e), m, warps)
+    constants = (e, stride, bs, k, norm, scale, triton.next_power_of_2(e), m, warps, 1)
     kernel = _route_single_group.warmup(
         torch.float32,
         torch.float32,
@@ -172,7 +199,7 @@ def fused_router_topk(weights, ids, scores, bias, groups, selected, k, norm, sca
             ):
                 return False
     warps = _NUM_WARPS or 4
-    constants = (288, 288, 1, 8, norm, scale, 512, m, warps)
+    constants = (288, 288, 1, 8, norm, scale, 512, m, warps, 1)
     if (
         all(ptr % 16 == 0 for ptr in pointers)
         and not torch.cuda.is_current_stream_capturing()
@@ -192,3 +219,44 @@ def fused_router_topk(weights, ids, scores, bias, groups, selected, k, norm, sca
             enable_reflect_ftz=False,
         )
     return True
+
+
+def fused_splitk_router_topk(partial, bias, weights, ids, norm, scale):
+    """Combine eight FP32 split-K tiles and route into caller-owned outputs."""
+    m = partial.shape[1]
+    if (
+        partial.shape != (8, m, 288)
+        or m not in (48, 192, 240, 288)
+        or partial.dtype != torch.float32
+        or bias.shape != (288,)
+        or bias.dtype != torch.float32
+        or weights.shape != (m, 8)
+        or ids.shape != (m, 8)
+        or weights.dtype != torch.float32
+        or ids.dtype not in (torch.int32, torch.int64)
+    ):
+        raise ValueError("Unsupported GLM53 split-K routing shape or dtype")
+    if any(
+        t.device != partial.device or not t.is_contiguous()
+        for t in (partial, bias, weights, ids)
+    ):
+        raise ValueError("Split-K routing requires contiguous tensors on one device")
+    _route_single_group[(triton.cdiv(m, _NUM_WARPS),)](
+        partial,
+        bias,
+        weights,
+        ids,
+        288,
+        288,
+        1,
+        8,
+        norm,
+        scale,
+        512,
+        m,
+        _NUM_WARPS,
+        8,
+        num_warps=_NUM_WARPS,
+        enable_fp_fusion=False,
+        enable_reflect_ftz=False,
+    )

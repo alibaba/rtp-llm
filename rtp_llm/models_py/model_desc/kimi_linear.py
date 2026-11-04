@@ -105,17 +105,16 @@ from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import to_torch_dtype
 from torch import nn
 
+from rtp_llm.models_py.modules.glm53_mega_mhc import (
+    can_use_mega_mhc,
+    fused_post_pre_rms,
+)
+
 _CULA_LOGGED_DEVICES: set[int] = set()
 _INPLACE_HC_NORM = os.environ.get("GLM53_INPLACE_HC_NORM", "0") == "1"
-_PREPARED_BLOCK_MAPS = (
-    os.environ.get("GLM53_PREFILL_PREPARED_BLOCK_MAPS", "0") == "1"
-)
-_KDA_GRAPH_BETA_LOGITS = (
-    os.environ.get("GLM53_KDA_GRAPH_BETA_LOGITS", "0") == "1"
-)
-_HC_VALIDATED_DISPATCH = (
-    os.environ.get("GLM53_HC_VALIDATED_DISPATCH", "0") == "1"
-)
+_PREPARED_BLOCK_MAPS = os.environ.get("GLM53_PREFILL_PREPARED_BLOCK_MAPS", "0") == "1"
+_KDA_GRAPH_BETA_LOGITS = os.environ.get("GLM53_KDA_GRAPH_BETA_LOGITS", "0") == "1"
+_HC_VALIDATED_DISPATCH = os.environ.get("GLM53_HC_VALIDATED_DISPATCH", "0") == "1"
 
 
 class KimiLinearMetadata(object):
@@ -1467,22 +1466,16 @@ class KimiLinearDecoderLayer(nn.Module):
                 hc_shapes_validated,
             )
         attn_pre = (
-            self.attn_hc.pre_assume_valid
-            if hc_shapes_validated
-            else self.attn_hc.pre
+            self.attn_hc.pre_assume_valid if hc_shapes_validated else self.attn_hc.pre
         )
         attn_post = (
-            self.attn_hc.post_assume_valid
-            if hc_shapes_validated
-            else self.attn_hc.post
+            self.attn_hc.post_assume_valid if hc_shapes_validated else self.attn_hc.post
         )
         ffn_pre = (
             self.ffn_hc.pre_assume_valid if hc_shapes_validated else self.ffn_hc.pre
         )
         ffn_post = (
-            self.ffn_hc.post_assume_valid
-            if hc_shapes_validated
-            else self.ffn_hc.post
+            self.ffn_hc.post_assume_valid if hc_shapes_validated else self.ffn_hc.post
         )
         residual = hidden_states
         hidden_states, post, comb = attn_pre(residual)
@@ -1529,22 +1522,16 @@ class KimiLinearDecoderLayer(nn.Module):
         hc_shapes_validated,
     ) -> DecodeLayerOutput:
         attn_pre = (
-            self.attn_hc.pre_assume_valid
-            if hc_shapes_validated
-            else self.attn_hc.pre
+            self.attn_hc.pre_assume_valid if hc_shapes_validated else self.attn_hc.pre
         )
         attn_post = (
-            self.attn_hc.post_assume_valid
-            if hc_shapes_validated
-            else self.attn_hc.post
+            self.attn_hc.post_assume_valid if hc_shapes_validated else self.attn_hc.post
         )
         ffn_pre = (
             self.ffn_hc.pre_assume_valid if hc_shapes_validated else self.ffn_hc.pre
         )
         ffn_post = (
-            self.ffn_hc.post_assume_valid
-            if hc_shapes_validated
-            else self.ffn_hc.post
+            self.ffn_hc.post_assume_valid if hc_shapes_validated else self.ffn_hc.post
         )
         layout = attn_meta.token_shard
         cp_layout = attn_meta.mla_cp_layout
@@ -1631,6 +1618,7 @@ class KimiLinearDecoderLayer(nn.Module):
         post as standalone kernels.
         """
 
+        norm_done = False
         if post is None:
             residual = hidden_states
             hidden_states, post, comb = self.attn_hc.pre(residual)
@@ -1639,12 +1627,26 @@ class KimiLinearDecoderLayer(nn.Module):
                 raise RuntimeError(
                     "deferred mHC state requires residual/post/comb together"
                 )
-            residual, hidden_states, post, comb = self.attn_hc.fused_post_pre(
-                hidden_states, residual, post, comb
+            if can_use_mega_mhc(
+                hidden_states, residual, post, comb, self.attn_hc, self.input_layernorm
+            ):
+                residual, hidden_states, post, comb = fused_post_pre_rms(
+                    hidden_states,
+                    residual,
+                    post,
+                    comb,
+                    self.attn_hc,
+                    self.input_layernorm,
+                )
+                norm_done = True
+            else:
+                residual, hidden_states, post, comb = self.attn_hc.fused_post_pre(
+                    hidden_states, residual, post, comb
+                )
+        if not norm_done:
+            hidden_states = self.input_layernorm(
+                hidden_states, hidden_states if _INPLACE_HC_NORM else None
             )
-        hidden_states = self.input_layernorm(
-            hidden_states, hidden_states if _INPLACE_HC_NORM else None
-        )
 
         if self.layer_type == HybridAttentionType.LINEAR:
             hidden_states = self.self_attn(
@@ -1663,14 +1665,39 @@ class KimiLinearDecoderLayer(nn.Module):
             )
 
         assert residual is not None and post is not None and comb is not None
-        residual, hidden_states, post, comb = self.ffn_hc.fused_post_pre(
-            hidden_states, residual, post, comb
-        )
-        self._wait_pinned_mla_before_moe(fmha_impl)
-        hidden_states = self.post_attention_layernorm(
-            hidden_states, hidden_states if _INPLACE_HC_NORM else None
-        )
-        hidden_states = self.mlp(hidden_states)
+        prepacked_mega = None
+        if can_use_mega_mhc(
+            hidden_states,
+            residual,
+            post,
+            comb,
+            self.ffn_hc,
+            self.post_attention_layernorm,
+        ):
+            if hasattr(self.mlp, "prepare_fused_mhc_inputs"):
+                prepacked_mega = self.mlp.prepare_fused_mhc_inputs(hidden_states)
+            residual, hidden_states, post, comb = fused_post_pre_rms(
+                hidden_states,
+                residual,
+                post,
+                comb,
+                self.ffn_hc,
+                self.post_attention_layernorm,
+                mega_inputs=prepacked_mega,
+            )
+            self._wait_pinned_mla_before_moe(fmha_impl)
+        else:
+            residual, hidden_states, post, comb = self.ffn_hc.fused_post_pre(
+                hidden_states, residual, post, comb
+            )
+            self._wait_pinned_mla_before_moe(fmha_impl)
+            hidden_states = self.post_attention_layernorm(
+                hidden_states, hidden_states if _INPLACE_HC_NORM else None
+            )
+        if prepacked_mega is not None:
+            hidden_states = self.mlp(hidden_states, prepacked_mega=prepacked_mega)
+        else:
+            hidden_states = self.mlp(hidden_states)
         return hidden_states, residual, post, comb
 
 

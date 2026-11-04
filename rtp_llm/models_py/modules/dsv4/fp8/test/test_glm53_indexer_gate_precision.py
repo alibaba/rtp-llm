@@ -42,6 +42,7 @@ def fixture(q_len=1, dtype=torch.float32):
     model.rotate_q, model.freqs_cis = True, None
     model.prefill_topk_backend = model.decode_topk_backend = "topk_v3_tie_break"
     model._glm_weights_chunk_rows = 0
+    model._glm_gate_quant = True
     model.compressor = _CachedKeys()
     model.wq_b = torch.nn.Linear(
         2, 32 * 128, bias=False, device="cuda", dtype=torch.bfloat16

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cstdlib>
 #include <condition_variable>
 #include <exception>
 #include <memory>
@@ -137,7 +138,18 @@ public:
         if (forward_callback_) {
             forward_callback_();
         }
-        return output_holder.get();
+        auto output = output_holder.get();
+        // STREAM_ASYNC publishes device views, as the real CUDA model does.
+        // CPU-only fixture hidden states cannot be gathered by CUDA indices.
+        const char* async = std::getenv("RTP_LLM_STREAM_ASYNC");
+        if (async && std::string(async) == "1") {
+            for (auto* tensor : {&output.logits, &output.hidden_states, &output.all_hidden_states}) {
+                if (tensor->defined()) {
+                    *tensor = tensor->to(torch::kCUDA);
+                }
+            }
+        }
+        return output;
     }
 
     void checkTensorField(const char* name, const torch::Tensor& actual, const torch::Tensor& expected) {
@@ -179,7 +191,13 @@ public:
 
     spec::FastTopKSamplerOutput forward(const torch::Tensor& logits, int top_k = 1) override {
         checkInputs(logits);
-        return output_holder.get();
+        auto output = output_holder.get();
+        const char* async = std::getenv("RTP_LLM_STREAM_ASYNC");
+        if (async && std::string(async) == "1") {
+            output.token_ids = output.token_ids.to(torch::kCUDA);
+            output.all_probs = output.all_probs.to(torch::kCUDA);
+        }
+        return output;
     }
 
     void checkInputs(const torch::Tensor& logits) {
@@ -248,7 +266,17 @@ public:
         if (forward_callback_) {
             forward_callback_();
         }
-        return output_holder.get();
+        auto output = output_holder.get();
+        const char* async = std::getenv("RTP_LLM_STREAM_ASYNC");
+        if (async && std::string(async) == "1") {
+            if (output.token_ids.defined()) {
+                output.token_ids = output.token_ids.to(torch::kCUDA);
+            }
+            if (output.all_probs.defined()) {
+                output.all_probs = output.all_probs.to(torch::kCUDA);
+            }
+        }
+        return output;
     }
 
     void checkInputs(const SamplerInputs& inputs) {
@@ -343,6 +371,7 @@ struct MtpExecutorComponents {
 
 class MtpExecutorTest: public DeviceTestBase {
 public:
+    MtpExecutor* output_executor_ = nullptr;
     GenerateStreamPtr createContextStream(const ModelConfig&     model_config,
                                           const RuntimeConfig&   runtime_config,
                                           const ResourceContext& resource_context,
@@ -376,6 +405,14 @@ public:
                                            .narrow(0, spec_update_info.num_new_tokens - 1, 1)
                                            .to(torch::kCUDA);
         stream->specUpdate(update_info);
+        const char* async = std::getenv("RTP_LLM_STREAM_ASYNC");
+        if (async && std::string(async) == "1") {
+            for (auto* tensor : {&sp_buffer->hidden_states, &sp_buffer->all_probs}) {
+                if (tensor->defined()) {
+                    *tensor = tensor->to(torch::kCUDA);
+                }
+            }
+        }
         return stream;
     }
 
@@ -384,11 +421,28 @@ public:
                      const vector<int>&       expect_propose_tokens,
                      const vector<float>&     expect_all_probs,
                      const vector<float>&     expect_last_hidden_states) {
+        // Prefill and Decode both return before host bookkeeping in STREAM_ASYNC.
+        // Drain the fixture's runner before observing host buffers; Prefill does
+        // not use the Decode per-stream pending counter.
+        if (output_executor_) {
+            output_executor_->spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+        }
+        stream->waitPendingAsyncBookkeeping();
+        if (auto event = stream->getPendingSwapDoneEvent()) {
+            std::static_pointer_cast<torch::Event>(event)->synchronize();
+        }
         auto token_ids = stream->getCompleteTokenIds()->completeTokenIdsVec(0);
         EXPECT_EQ(expect_token_ids, token_ids);
 
         auto sp_output_buffer = stream->getSPOutputBuffer();
         auto tokens           = sp_output_buffer->tokens;
+        const char* async = std::getenv("RTP_LLM_STREAM_ASYNC");
+        if (async && std::string(async) == "1") {
+            // CUDA PDFUSION intentionally leaves the legacy CPU proposal at
+            // -1 to avoid D2H. Validate the authoritative device mirrors.
+            tokens = torch::cat({sp_output_buffer->target_token_gpu.reshape({-1}),
+                                 sp_output_buffer->propose_tokens_gpu.reshape({-1})});
+        }
         auto tokens_h         = tokens.cpu().clone();
         EXPECT_EQ(expect_propose_tokens, toVec<int>(tokens_h));
 
@@ -531,6 +585,7 @@ public:
         components.runtime_config           = runtime_config;
         components.resource_context         = resource_context;
 
+        output_executor_ = components.executor.get();
         return components;
     }
 
@@ -658,19 +713,18 @@ TEST_F(MtpExecutorTest, testFakeDecodeStreamGetsReusableIndexerSeedBeforeColdChe
     EXPECT_FALSE(disabled_fake_stream->getMtpAsyncDeviceState().mtp_indexer_topk_gpu.defined());
 }
 
-TEST_F(MtpExecutorTest, testFakeDecodeStreamSeedsCompressedIndexerCoordinates) {
+TEST_F(MtpExecutorTest, testFakeDecodeStreamSeedsRawIndexerCoordinates) {
     MtpExecutorTestConfig test_config;
     auto                  components                 = createMtpExecutorComponents(test_config);
     components.executor->mtp_indexer_share_enabled_  = true;
     components.executor->mtp_indexer_topk_           = 6;
-    components.executor->mtp_indexer_compress_ratio_ = 4;
 
     auto fake_stream = MtpExecutor::createMinFakeDecodeStream(test_config.gen_num_per_cycle,
                                                               components.model_config,
                                                               components.runtime_config,
                                                               components.resource_context,
                                                               components.model_config);
-    fake_stream->setSeqLength(19);  // four complete KPool groups plus a three-token tail
+    fake_stream->setSeqLength(19);  // raw-token coordinates include the incomplete KPool tail
 
     std::list<GenerateStreamPtr> streams{fake_stream};
     std::list<GenerateStreamPtr> prefill_streams;
@@ -678,7 +732,7 @@ TEST_F(MtpExecutorTest, testFakeDecodeStreamSeedsCompressedIndexerCoordinates) {
     components.executor->prepareStreams(streams, prefill_streams, decode_streams);
 
     const auto seed_cpu = fake_stream->getMtpAsyncDeviceState().mtp_indexer_topk_gpu.cpu();
-    EXPECT_TRUE(torch::equal(seed_cpu, torch::tensor({{0, 1, 2, 3, -1, -1}}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(seed_cpu, torch::tensor({{13, 14, 15, 16, 17, 18}}, torch::kInt32)));
 }
 
 TEST_F(MtpExecutorTest, testComputeMtpTargetLogprobsKeepsOnlyCompactFp32Statistics) {

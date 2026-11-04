@@ -743,6 +743,10 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTok
 
     GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {5}, 1);
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
+    // This test checks history replication, so make history a real consumer.
+    // Pure greedy MTP now defaults to the independently tested compact buffer.
+    stream1->generateConfig()->repetition_penalty = 1.1f;
+    stream2->generateConfig()->repetition_penalty = 1.1f;
     stream1->setScoreLen(sp_config.gen_num_per_cycle + 1);
     stream2->setScoreLen(sp_config.gen_num_per_cycle + 1);
 

@@ -3,6 +3,7 @@
 # with rtp-llm's block_map-based continuous batching for ssm_state indexing.
 
 import logging
+import os
 from typing import Optional
 
 import torch
@@ -11,6 +12,32 @@ import triton.language as tl
 from rtp_llm.models_py.triton_kernels.fla.op import exp, softplus
 
 logger = logging.getLogger(__name__)
+
+
+def _verify_launch_config():
+    value = os.environ.get("GLM53_KDA_VERIFY_CONFIG", "16,1,3")
+    if value in ("", "0"):
+        return None
+    try:
+        config = tuple(int(part) for part in value.split(","))
+    except ValueError as error:
+        raise ValueError("GLM53_KDA_VERIFY_CONFIG must be BV,warps,stages") from error
+    if (
+        len(config) != 3
+        or config[0] not in (8, 16, 32, 64)
+        or config[1] not in (1, 2, 4, 8)
+        or config[2] not in (1, 2, 3)
+    ):
+        raise ValueError("unsupported GLM53_KDA_VERIFY_CONFIG")
+    logger.info("GLM53 batch-48 KDA verify launch config: %s", config)
+    return config
+
+
+_VERIFY_LAUNCH_CONFIG = _verify_launch_config()
+_HOIST_GATE_ENABLED = os.environ.get("GLM53_KDA_HOIST_GATE", "1") == "1"
+# T includes the target token: MTP4 requires T=5, not the old T=4 path.
+# The changed BV/warp reduction can change rounding; =0 restores that path.
+_FAST_VERIFY_ENABLED = os.environ.get("GLM53_KDA_FAST_VERIFY", "1") == "1"
 
 
 @triton.jit
@@ -69,6 +96,7 @@ def fused_recurrent_kda_fwd_kernel(
     ALLOW_NEG_EIGVAL: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
     STORE_STATES: tl.constexpr,
+    HOIST_GATE: tl.constexpr,
     num_stages: tl.constexpr,
 ):
     pid = tl.program_id(0).to(tl.int64)
@@ -135,6 +163,13 @@ def fused_recurrent_kda_fwd_kernel(
             p_h0 = p_h0 + o_k[None, :] * V + o_v[:, None]
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
+    if HOIST_GATE and USE_GATE_IN_KERNEL:
+        gate_rate_invariant = exp(tl.load(A_log + i_hv).to(tl.float32))
+        if HAS_DT_BIAS:
+            gate_bias_invariant = tl.load(
+                dt_bias + i_hv * K + o_k, mask=mask_k, other=0
+            ).to(tl.float32)
+
     for i_t in tl.range(0, T, num_stages=num_stages):
         b_q = tl.load(p_q, mask=mask_k, other=0, eviction_policy="evict_last").to(
             tl.float32
@@ -156,18 +191,24 @@ def fused_recurrent_kda_fwd_kernel(
             tl.float32
         )
         if USE_GATE_IN_KERNEL:
-            b_A = tl.load(A_log + i_hv).to(tl.float32)
-            if HAS_DT_BIAS:
-                b_bias = tl.load(
-                    dt_bias + i_hv * K + o_k,
-                    mask=mask_k,
-                    other=0,
-                ).to(tl.float32)
-                b_g = b_g + b_bias
-            if USE_LOWER_BOUND:
-                b_gk = lower_bound * tl.sigmoid(exp(b_A) * b_g)
+            if HOIST_GATE:
+                gate_rate = gate_rate_invariant
+                if HAS_DT_BIAS:
+                    b_g = b_g + gate_bias_invariant
             else:
-                b_gk = -exp(b_A) * softplus(b_g)
+                b_A = tl.load(A_log + i_hv).to(tl.float32)
+                if HAS_DT_BIAS:
+                    b_bias = tl.load(
+                        dt_bias + i_hv * K + o_k,
+                        mask=mask_k,
+                        other=0,
+                    ).to(tl.float32)
+                    b_g = b_g + b_bias
+                gate_rate = exp(b_A)
+            if USE_LOWER_BOUND:
+                b_gk = lower_bound * tl.sigmoid(gate_rate * b_g)
+            else:
+                b_gk = -gate_rate * softplus(b_g)
         else:
             b_gk = b_g
 
@@ -267,12 +308,19 @@ def fused_recurrent_kda_fwd(
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK, BV = triton.next_power_of_2(K), 32
     num_warps = 4
+    num_stages = 2
     if (
         decode_low_warps
         and block_map is not None
         and (
             (T == 1 and 16 <= N <= 64)
             or (T == 4 and cu_seqlens is None and 1 <= N <= 64)
+            or (
+                _VERIFY_LAUNCH_CONFIG is not None
+                and N == 48
+                and T == 4
+                and cu_seqlens is None
+            )
         )
         and H == HV == 64
         and K == V == 128
@@ -286,6 +334,33 @@ def fused_recurrent_kda_fwd(
         # SM103 retains its existing single-token tuning until verify is measured.
         if capability == (10, 0) or (T == 1 and capability == (10, 3)):
             BV, num_warps = 16, 1
+        # Keep experimental tuning inside the measured full-batch verify
+        # domain (T=4 already uses BV=16 and one warp upstream).
+        # Other devices, shapes and single-token decode retain their
+        # existing launch configuration and FP32 state arithmetic.
+        if (
+            capability == (10, 0)
+            and N == 48
+            and T == 4
+            and cu_seqlens is None
+            and _VERIFY_LAUNCH_CONFIG is not None
+        ):
+            BV, num_warps, num_stages = _VERIFY_LAUNCH_CONFIG
+    if (
+        _FAST_VERIFY_ENABLED
+        and decode_low_warps
+        and N == 48
+        and 2 <= T <= 6
+        and cu_seqlens is None
+        and block_map is not None
+        and H == HV == 64
+        and K == V == 128
+        and not state_v_first
+        and initial_state is not None
+        and initial_state.dtype == torch.float32
+        and torch.cuda.get_device_capability(q.device) == (10, 0)
+    ):
+        BV, num_warps, num_stages = _VERIFY_LAUNCH_CONFIG or (16, 1, 3)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
 
@@ -344,8 +419,18 @@ def fused_recurrent_kda_fwd(
         ALLOW_NEG_EIGVAL=allow_neg_eigval,
         STATE_V_FIRST=state_v_first,
         STORE_STATES=store_states,
+        HOIST_GATE=(
+            _HOIST_GATE_ENABLED
+            and N == 48
+            and (T == 4 or (_FAST_VERIFY_ENABLED and 2 <= T <= 6))
+            and cu_seqlens is None
+            and H == HV == 64
+            and K == V == 128
+            and initial_state is not None
+            and initial_state.dtype == torch.float32
+        ),
         num_warps=num_warps,
-        num_stages=2,
+        num_stages=num_stages,
     )
     return o, final_state
 

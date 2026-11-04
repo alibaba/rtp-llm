@@ -51,9 +51,9 @@ struct CachedEnvFlag {
     std::string value;
 };
 
-CachedEnvFlag cacheEnvFlag(const char* env_name, const char* log_tag, const char* label) {
+CachedEnvFlag cacheEnvFlag(const char* env_name, const char* log_tag, const char* label, bool default_on = false) {
     const char* env = std::getenv(env_name);
-    return CachedEnvFlag{env_name, log_tag, label, env != nullptr && std::string(env) == "1", env ? env : "(unset)"};
+    return CachedEnvFlag{env_name, log_tag, label, env ? std::string(env) == "1" : default_on, env ? env : "(unset)"};
 }
 
 void logCachedEnvFlag(const CachedEnvFlag& flag) {
@@ -90,7 +90,9 @@ const CachedEnvFlag kStreamAsyncFlag = cacheEnvFlag("RTP_LLM_STREAM_ASYNC", "str
 const CachedEnvFlag kAsyncDeviceStateFlag =
     cacheEnvFlag("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "async-device-state", "enabled");
 const CachedEnvFlag kDropBroadSyncFlag = cacheEnvFlag("RTP_LLM_DROP_BROAD_SYNC", "drop-broad-sync", "enabled");
-const CachedEnvFlag kAsyncPrepareFlag  = cacheEnvFlag("RTP_LLM_MTP_ASYNC_PREPARE", "async-prepare", "enabled");
+const CachedEnvFlag kAsyncPrepareFlag  = cacheEnvFlag("RTP_LLM_MTP_ASYNC_PREPARE", "async-prepare", "enabled", true);
+const CachedEnvFlag kBatchBookkeepingFlag =
+    cacheEnvFlag("RTP_LLM_BATCH_MTP_BOOKKEEPING_COPY", "mtp-batch-bookkeeping", "enabled", true);
 const CachedEnvFlag kMtpIndexerShareFlag =
     cacheEnvFlag("RTP_LLM_ENABLE_MTP_INDEXER_SHARE", "mtp-indexer-share", "enabled");
 const bool kDebugTargetVerifyInputEnabled  = cacheDebugFlag("RTP_LLM_DEBUG_TARGET_VERIFY_INPUT");
@@ -3439,8 +3441,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             }
             if (all_device_state) {
                 // Batch gather: [batch, propose_step+1] -> pick column [accept_len-1] per row
-                auto accept_tokens_2d = torch::cat(accept_tokens_slices, 0);  // [batch, cols]
-                auto accept_len_batch = torch::cat(accept_len_slices, 0);     // [batch]
+                auto accept_tokens_2d = torch::cat(accept_tokens_slices, 0);  // [batch, cols], read only
+                auto accept_len_batch = torch::cat(accept_len_slices, 0);     // [batch], read only
                 auto idx_long         = (accept_len_batch.to(torch::kInt64) - 1).reshape({(int64_t)batch_size, 1});
                 pre_target_token_t =
                     accept_tokens_2d.gather(1, idx_long).reshape({(int64_t)batch_size}).to(torch::kInt32);
@@ -3811,6 +3813,17 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         last_hidden_all         = hidden_3d.gather(1, idx_expanded).squeeze(1);
     }
 
+    // The accepted-token index is already prepared for hidden-state gathering.
+    // Gather all target tokens together so publishing per-stream state only
+    // creates views, instead of launching subtract/cast/index_select per stream.
+    torch::Tensor target_tokens_all;
+    if (kBatchBookkeepingFlag.on && batch_size > 0) {
+        target_tokens_all = accept_tokens_gpu_all
+                                .gather(1, hidden_idx_all.reshape({batch_size, 1}))
+                                .reshape({batch_size})
+                                .to(torch::kInt32);
+    }
+
     // 3. One clone for all probs
     torch::Tensor draft_probs_all;
     if (draft_all_probs_full.defined()) {
@@ -3843,9 +3856,13 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         // and publish equivalent per-stream views here.
         auto sp_output_buffer = stream->getSPOutputBuffer();
         if (sp_output_buffer) {
-            auto target_idx = (state.accept_len_gpu - 1).to(torch::kLong);
-            sp_output_buffer->target_token_gpu =
-                state.accept_tokens_gpu.squeeze(0).index_select(/*dim=*/0, target_idx).to(torch::kInt32);
+            if (kBatchBookkeepingFlag.on) {
+                sp_output_buffer->target_token_gpu = target_tokens_all.narrow(0, idx, 1);
+            } else {
+                auto target_idx = (state.accept_len_gpu - 1).to(torch::kLong);
+                sp_output_buffer->target_token_gpu =
+                    state.accept_tokens_gpu.squeeze(0).index_select(/*dim=*/0, target_idx).to(torch::kInt32);
+            }
             sp_output_buffer->propose_tokens_gpu = state.propose_tokens_gpu;
         }
         stream->setMtpAsyncDeviceState(std::move(state));

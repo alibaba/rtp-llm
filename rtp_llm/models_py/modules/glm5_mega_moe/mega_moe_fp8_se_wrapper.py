@@ -67,6 +67,57 @@ class MegaMoeFp8SEWrapper(MegaMoeWrapper):
         clone.expert_num = self.expert_num
         return clone
 
+    def prepare_fused_mhc_inputs(self, hidden_states):
+        """Expose this graph clone's own activation/routing destinations."""
+        import deep_gemm
+
+        tokens = hidden_states.shape[0]
+        module = self.mega_moe
+        buf = module._mega_buf
+        if (
+            hidden_states.ndim != 2
+            or tokens not in (48, 192, 240, 288)
+            or hidden_states.shape[1] != 4096
+            or hidden_states.dtype != torch.bfloat16
+            or hidden_states.device != buf.x.device
+            or tokens > buf.num_max_tokens_per_rank
+            or tokens > module._mega_y.shape[0]
+        ):
+            return None
+        block_m = deep_gemm.get_block_m_for_mega_moe_fp8(
+            module.cfg.ep_size,
+            module.cfg.n_routed_experts,
+            buf.num_max_tokens_per_rank,
+            tokens,
+            module.cfg.n_activated_experts,
+        )
+        return {
+            "owner": self,
+            "tokens": tokens,
+            "x_fp8": buf.x[:tokens],
+            "routed_sf": buf.x_sf[:tokens],
+            "shared_sf": buf.shared_l1_acts_sf[:tokens],
+            "block_m": block_m,
+            "weights": buf.topk_weights[:tokens],
+            "ids": buf.topk_idx[:tokens],
+        }
+
+    def forward_prepacked(self, hidden_states, metadata):
+        if (
+            metadata["owner"] is not self
+            or metadata["tokens"] != hidden_states.shape[0]
+        ):
+            raise ValueError(
+                "Prepacked MegaMoE inputs belong to another graph or shape"
+            )
+        return self.mega_moe._forward_impl(
+            hidden_states,
+            None,
+            None,
+            inputs_prepacked=True,
+            shared_scales_prepacked=True,
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,

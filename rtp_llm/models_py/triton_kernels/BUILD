@@ -50,6 +50,7 @@ py_library(
 
 py_library(
     name = "triton_kernels",
+    srcs = glob(["*.py"]),
     deps = [
         ":autotune_cache",
         ":causal_conv1d",

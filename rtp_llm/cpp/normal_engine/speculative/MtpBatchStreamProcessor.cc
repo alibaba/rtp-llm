@@ -20,7 +20,7 @@
 namespace rtp_llm {
 namespace {
 
-torch::Tensor cloneHiddenSlice(const torch::Tensor& hidden_states, int64_t start, int64_t length) {
+torch::Tensor cloneHiddenSlice(const torch::Tensor& hidden_states, int64_t start, int64_t length, bool clone = true) {
     if (!hidden_states.defined() || length <= 0) {
         return torch::Tensor();
     }
@@ -31,7 +31,8 @@ torch::Tensor cloneHiddenSlice(const torch::Tensor& hidden_states, int64_t start
                             start,
                             length,
                             hidden_states.size(0));
-    return hidden_states.narrow(0, start, length).clone();
+    auto slice = hidden_states.narrow(0, start, length);
+    return clone ? slice.clone() : slice;
 }
 
 torch::Tensor clonePrefillLastHiddenSlice(const torch::Tensor& hidden_states,
@@ -677,16 +678,20 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     }
 
     int64_t batch_idx = 0;
-    for (auto& stream : all_streams) {
-        auto complete_token_ids = stream->completeTokenIds();
-        auto seq_len            = static_cast<int64_t>(stream->seqLength());
+    // A single-column CUDA buffer is the explicitly gated history-free MTP
+    // workspace from allocateSamplerInputs. Greedy sampling fully overwrites it.
+    if (!(sampler_inputs.token_ids.is_cuda() && sampler_inputs.token_ids.size(1) == 1)) {
+        for (auto& stream : all_streams) {
+            auto complete_token_ids = stream->completeTokenIds();
+            auto seq_len            = static_cast<int64_t>(stream->seqLength());
 
-        copyScoreSamplerTokenIds(
-            sampler_inputs.token_ids, complete_token_ids, batch_idx, static_cast<int64_t>(score_len), seq_len);
-        batch_idx += static_cast<int64_t>(score_len);
-        RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
-                          stream->streamLogTag().c_str(),
-                          tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
+            copyScoreSamplerTokenIds(
+                sampler_inputs.token_ids, complete_token_ids, batch_idx, static_cast<int64_t>(score_len), seq_len);
+            batch_idx += static_cast<int64_t>(score_len);
+            RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
+                              stream->streamLogTag().c_str(),
+                              tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
+        }
     }
 
     auto vocab_size           = (size_t)model_output.logits.size(1);
@@ -1250,6 +1255,22 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
     const auto& draft_model_output   = draft_prefill_output.model_output;
     const auto& draft_sampler_output = draft_prefill_output.sampler_output;
 
+    // Own each payload once for the whole cohort. Stream updates keep tensor
+    // views alive independently, so per-stream clones add launches without
+    // providing additional ownership or isolation of the read-only payload.
+    static const bool batch_copy = []() {
+        const auto* flag = std::getenv("RTP_LLM_BATCH_MTP_BOOKKEEPING_COPY");
+        return flag == nullptr || std::string(flag) == "1";
+    }();
+    torch::Tensor owned_probs;
+    torch::Tensor owned_hidden;
+    if (batch_copy) {
+        owned_probs = draft_sampler_output.all_probs.to(torch::kCUDA).clone();
+        if (propose_step_ > 1 && draft_model_output.all_hidden_states.defined()) {
+            owned_hidden = draft_model_output.all_hidden_states.clone();
+        }
+    }
+
     int batch_idx_in      = 0;
     int batch_idx_out     = 0;
     int token_offset      = 0;
@@ -1261,7 +1282,8 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
 
         // speculative decoding info
         torch::Tensor propose_all_probs =
-            draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+            batch_copy ? owned_probs.narrow(0, batch_idx_out, next_batch_size) :
+                         draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
 
         // This scalar read runs on the bookkeeping worker after accept_len is
         // ready, so it does not sync the main thread. Move to main thread only
@@ -1270,7 +1292,8 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
 
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1) {
-            last_hidden_states =
+            last_hidden_states = batch_copy ?
+                cloneHiddenSlice(owned_hidden, token_offset + cur_accept_len - 1, 1, /*clone=*/false) :
                 cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + cur_accept_len - 1, 1);
         }
 

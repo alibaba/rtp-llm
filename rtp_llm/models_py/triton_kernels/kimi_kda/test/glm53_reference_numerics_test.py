@@ -11,6 +11,8 @@ kernel. They do not certify full-model quality or the FP8-to-FP4 MoE path.
 """
 
 import unittest
+import importlib
+from unittest.mock import patch
 
 import torch
 
@@ -105,6 +107,130 @@ class Glm53ReferenceNumericsTest(unittest.TestCase):
             rows = torch.arange(batch, device="cuda")
             table[:, 0] = table[rows, accepted + 1]
             reference_state = torch.stack(checkpoints, dim=1)[rows, accepted]
+
+    def test_mtp4_fast_verify_and_graph_against_fp32_recurrence(self):
+        # Validate SM100's actual launch geometry on SM100 or SM103. On SM103
+        # only the Python dispatch decision is emulated; Triton still compiles
+        # for the real CUDA Runtime architecture. This is not a speed test.
+        kda = importlib.import_module(
+            "rtp_llm.models_py.triton_kernels.kimi_kda.fused_recurrent"
+        )
+        capability = torch.cuda.get_device_capability()
+        if capability not in ((10, 0), (10, 3)):
+            self.skipTest("SM10x launch validation")
+        batch, heads, dim = 48, 64, 128
+        for tokens in (2, 3, 4, 5, 6):
+            for length in (81921, 82047):
+                for fast in (False, True):
+                    with self.subTest(tokens=tokens, length=length, fast=fast):
+                        table = torch.zeros(
+                            batch, 660, device="cuda", dtype=torch.int32
+                        )
+                        read_col, write_col = (length - 2) // 128, (length - 1) // 128
+                        for row in range(batch):
+                            base = 1 + row * (tokens + 1)
+                            table[row, read_col] = base
+                            first_write = base + int(read_col != write_col)
+                            table[row, write_col : write_col + tokens] = torch.arange(
+                                first_write,
+                                first_write + tokens,
+                                device="cuda",
+                                dtype=torch.int32,
+                            )
+                        seed = (
+                            torch.randn(
+                                1 + batch * (tokens + 1), heads, dim, dim, device="cuda"
+                            )
+                            * 0.02
+                        )
+                        state = seed.clone()
+                        lengths = torch.full(
+                            (batch,), length, device="cuda", dtype=torch.int32
+                        )
+                        q, k, v, g = [
+                            torch.randn(
+                                batch, tokens, heads, dim, device="cuda"
+                            ).bfloat16()
+                            * 0.3
+                            for _ in range(4)
+                        ]
+                        beta = (
+                            torch.randn(batch, tokens, heads, device="cuda") * 8
+                        ).bfloat16()
+                        a_log = torch.linspace(-3, 2, heads, device="cuda")
+                        bias = torch.linspace(-3, 3, heads * dim, device="cuda").view(
+                            heads, dim
+                        )
+                        args = dict(
+                            q=q,
+                            k=k,
+                            v=v,
+                            g=g,
+                            beta=beta,
+                            A_log=a_log,
+                            dt_bias=bias.flatten(),
+                            initial_state=state,
+                            use_qk_l2norm_in_kernel=True,
+                            use_gate_in_kernel=True,
+                            use_beta_sigmoid_in_kernel=True,
+                            lower_bound=-5.0,
+                            block_map=table,
+                            sequence_lengths=lengths,
+                            seq_size_per_block=128,
+                            decode_low_warps=True,
+                        )
+
+                        def assert_reference(output):
+                            ref_state = seed[table[:, read_col].long()].clone()
+                            expected_pool = seed.clone()
+                            for token in range(tokens):
+                                expected, ref_state = reference_step(
+                                    q[:, token],
+                                    k[:, token],
+                                    v[:, token],
+                                    g[:, token],
+                                    beta[:, token],
+                                    a_log,
+                                    bias,
+                                    ref_state,
+                                )
+                                torch.testing.assert_close(
+                                    output[:, token],
+                                    expected.bfloat16(),
+                                    rtol=1 / 128,
+                                    atol=2e-5,
+                                )
+                                expected_pool[table[:, write_col + token].long()] = (
+                                    ref_state
+                                )
+                            torch.testing.assert_close(
+                                state, expected_pool, rtol=3e-5, atol=3e-6
+                            )
+
+                        with (
+                            patch.object(kda, "_FAST_VERIFY_ENABLED", fast),
+                            patch(
+                                "torch.cuda.get_device_capability", return_value=(10, 0)
+                            ),
+                        ):
+                            output, _ = fused_recurrent_kda(**args)
+                            assert_reference(output)
+                            stream = torch.cuda.Stream()
+                            stream.wait_stream(torch.cuda.current_stream())
+                            with torch.cuda.stream(stream):
+                                fused_recurrent_kda(**args)
+                            stream.synchronize()
+                            graph = torch.cuda.CUDAGraph()
+                            with torch.cuda.graph(graph, stream=stream):
+                                output, _ = fused_recurrent_kda(**args)
+                            q.mul_(0.97)
+                            a_log.add_(0.001)
+                            state.copy_(seed)
+                            graph.replay()
+                            torch.cuda.synchronize()
+                            assert_reference(output)
+                        del graph, args, state, seed, output
+                        torch.cuda.empty_cache()
 
     def test_fp32_gated_norm_single_output_rounding(self):
         torch.manual_seed(530901)

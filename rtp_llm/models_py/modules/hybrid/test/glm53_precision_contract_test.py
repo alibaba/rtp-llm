@@ -1,6 +1,8 @@
 """Independent FP32 oracles for GLM router and four-tap convolution."""
 
 import unittest
+import os
+from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
@@ -27,7 +29,8 @@ class Glm53PrecisionContractTest(unittest.TestCase):
         weight = (
             torch.randn(4096, 288, device="cuda", dtype=torch.bfloat16).float() / 64
         )
-        router = Glm53FP32Router(weight)
+        with patch.dict(os.environ, {"GLM53_ROUTER_BF16_PARTS": "0"}):
+            router = Glm53FP32Router(weight)
         bias = torch.randn(288, device="cuda") * 0.01
         for batch in (1, 7, 48, 384, 8193):
             x = torch.randn(batch, 4096, device="cuda", dtype=torch.bfloat16)

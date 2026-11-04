@@ -1,4 +1,7 @@
-"""GLM-5.3 router projection in FP32, with bounded activation storage."""
+"""Batched GLM53 routing; set GLM53_ROUTER_BF16_PARTS=0 for FP32 linear."""
+
+import logging
+import os
 
 import torch
 import torch.nn.functional as F
@@ -24,22 +27,132 @@ class Glm53FP32Router(nn.Module):
             raise ValueError("router chunk_rows must be positive")
         self.register_buffer("weight", weight.T.contiguous())
         self.chunk_rows = chunk_rows
+        self.split_parts = int(os.environ.get("GLM53_ROUTER_BF16_PARTS", "2"))
+        if self.split_parts not in (0, 2, 3):
+            raise ValueError("GLM53_ROUTER_BF16_PARTS must be 0, 2, or 3")
+        if self.split_parts and self.weight.shape in ((256, 4096), (288, 4096)):
+            logging.info(
+                "[GLM53 router opt] BF16 parts=%d weight_shape=%s",
+                self.split_parts,
+                tuple(self.weight.shape),
+            )
+            from rtp_llm.models_py.triton_kernels.glm53_router_split import (
+                split_weights,
+            )
+
+            for index, component in enumerate(split_weights(self.weight)):
+                self.register_buffer(f"split_weight_{index}", component)
+
+    def _project(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if (
+            self.split_parts
+            and hidden_states.is_cuda
+            and hidden_states.dtype == torch.bfloat16
+            and hidden_states.ndim == 2
+            and hidden_states.is_contiguous()
+            and metadata_cache() is None
+            and 0 < hidden_states.shape[0] <= 384
+            and self.weight.shape[0] in (256, 288)
+            and self.weight.shape[1] == 4096
+            and torch.cuda.get_device_capability(hidden_states.device)
+            in ((10, 0), (10, 3))
+        ):
+            if (
+                os.environ.get("GLM53_ROUTER_SPLIT_K", "1") == "1"
+                and self.split_parts == 2
+                and hidden_states.shape[0] in (48, 192, 240, 288)
+                and self.weight.shape[0] == 288
+            ):
+                from rtp_llm.models_py.triton_kernels.glm53_router_splitk import router
+
+                return router(
+                    hidden_states,
+                    (self.split_weight_0, self.split_weight_1, self.split_weight_2),
+                )
+            from rtp_llm.models_py.triton_kernels.glm53_router_split import router
+
+            return router(
+                hidden_states,
+                (self.split_weight_0, self.split_weight_1, self.split_weight_2),
+                parts=self.split_parts,
+            )
+        return F.linear(hidden_states.float(), self.weight)
+
+    def forward_routes(
+        self, hidden_states, weights, ids, bias, groups, selected, k, norm, scale
+    ):
+        """Optional GEMM epilogue path; unsupported configurations use forward."""
+        if (
+            os.environ.get("GLM53_ROUTER_REDUCE_TOPK", "1") != "1"
+            or metadata_cache() is not None
+            or self.split_parts != 2
+            or os.environ.get("GLM53_ROUTER_SPLIT_K", "1") != "1"
+            or torch.backends.cuda.matmul.allow_tf32
+            or not hidden_states.is_cuda
+            or hidden_states.dtype != torch.bfloat16
+            or hidden_states.ndim != 2
+            or hidden_states.shape[0] not in (48, 192, 240, 288)
+            or hidden_states.shape[1] != 4096
+            or not hidden_states.is_contiguous()
+            or torch.cuda.get_device_capability(hidden_states.device)
+            not in ((10, 0), (10, 3))
+            or self.weight.shape != (288, 4096)
+            or groups != 1
+            or selected != 1
+            or k != 8
+        ):
+            return False
+        if (
+            weights.shape != (hidden_states.shape[0], 8)
+            or weights.dtype != torch.float32
+            or not weights.is_contiguous()
+            or ids.shape != weights.shape
+            or ids.dtype not in (torch.int32, torch.int64)
+            or not ids.is_contiguous()
+            or bias.shape != (288,)
+            or bias.dtype != torch.float32
+            or any(t.device != hidden_states.device for t in (weights, ids, bias))
+        ):
+            return False
+        from rtp_llm.models_py.triton_kernels.glm53_router_splitk import gemm
+        from rtp_llm.models_py.modules.glm53_router_topk import fused_splitk_router_topk
+        import triton
+
+        m = hidden_states.shape[0]
+        partial = torch.empty(
+            (8, m, 288), device=hidden_states.device, dtype=torch.float32
+        )
+        bm = 16 if m == 48 else 32
+        gemm[(triton.cdiv(m, bm), triton.cdiv(288, 64), 8)](
+            hidden_states,
+            self.split_weight_0,
+            self.split_weight_1,
+            partial,
+            m,
+            288,
+            4096,
+            bm,
+            64,
+            64,
+            8,
+            num_warps=4,
+            num_stages=3,
+        )
+        fused_splitk_router_topk(partial, bias, weights, ids, norm, scale)
+        return True
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if torch.backends.cuda.matmul.allow_tf32:
             raise RuntimeError("GLM-5.3 FP32 router requires matmul.allow_tf32=False")
         if metadata_cache() is not None and not tokenwise_router_enabled():
             return self._fixed_projection(hidden_states, _PREFILL_PROJECTION_ROWS)
-        # Project Decode and MTP verification rows together in FP32. Splitting
-        # them into single-token GEMVs creates a large graph of tiny kernels.
-        # FP32 reduction order may vary with the batch shape.
+        # Keep Decode/MTP rows together, including the explicit FP32 fallback.
+        # The optional BF16 decomposition approximates the FP32 weight; it is
+        # independent of the Prefill fixed-M precision policy.
         if hidden_states.shape[0] <= self.chunk_rows:
-            return F.linear(hidden_states.float(), self.weight)
+            return self._project(hidden_states)
         return torch.cat(
-            [
-                F.linear(x.float(), self.weight)
-                for x in hidden_states.split(self.chunk_rows)
-            ],
+            [self._project(x) for x in hidden_states.split(self.chunk_rows)],
             dim=0,
         )
 

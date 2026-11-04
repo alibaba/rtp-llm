@@ -518,6 +518,10 @@ class SparseMlaFp8Op(SparseMlaOp):
         self._sched_meta_key = None
         # Gather workspace (None when path is disabled / no work to do)
         self._gather: Optional[_GatherWorkspace] = None
+        from .glm53_native_sparse import Glm53NativeSparse
+
+        self._glm53_native_sparse = Glm53NativeSparse()
+        self._native_tokens_per_request = 1
 
     def _reset_sched_meta(self, num_q_tokens_per_head_k: int) -> None:
         key = (
@@ -567,6 +571,16 @@ class SparseMlaFp8Op(SparseMlaOp):
         # get_mla_metadata returns an empty FlashMLASchedMeta; the kernel fills
         # it on first call, then reuses it for the rest of the forward.
         self._reset_sched_meta(int(mla_params.batch_indice_h.shape[0]) * self.num_heads)
+
+        # Target verify is a fixed-length request batch. Use its real metadata
+        # shape; normal decode and variable-length Prefill remain one row each.
+        from .glm53_native_sparse import native_query_length
+
+        self._native_tokens_per_request = native_query_length(
+            attn_inputs,
+            int(mla_params.batch_indice_h.shape[0]),
+            int(block_table.shape[0]),
+        )
 
         # Gather path: only for prefill, gated by env var.
         gather_enabled = (
@@ -687,6 +701,18 @@ class SparseMlaFp8Op(SparseMlaOp):
         src = _as_uint8(kv)
         if src.ndim == 4:
             src = src.squeeze(2)
+
+        if self._glm53_native_sparse.supports(q, src):
+            native_indices = _pad_flashmla_topk(global_indices, self.kernel_top_k)
+            native_output = self._glm53_native_sparse.forward(
+                q,
+                src,
+                native_indices,
+                self.scale,
+                tokens_per_request=self._native_tokens_per_request,
+            )
+            if native_output is not None:
+                return native_output
 
         output = q.new_empty(
             (q.shape[0], self.num_heads, self.kv_lora_rank),
