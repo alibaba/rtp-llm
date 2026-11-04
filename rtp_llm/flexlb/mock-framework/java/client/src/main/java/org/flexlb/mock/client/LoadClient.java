@@ -30,7 +30,7 @@ final class LoadClient implements AutoCloseable {
     private long issued, finished, drainDeadline = Long.MAX_VALUE;
 
     LoadClient(Shard plan, ClientMetrics metrics, java.nio.file.Path topology, java.nio.file.Path evidence, String id) throws Exception {
-        this(plan, metrics, topology, evidence, id, org.flexlb.mock.multimodal.MediaInput.IMAGE_TOKEN);
+        this(plan, metrics, topology, evidence, id, org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN);
     }
     LoadClient(Shard plan, ClientMetrics metrics, java.nio.file.Path topology, java.nio.file.Path evidence, String id, int imageToken) throws Exception {
         this(plan, metrics, topology, evidence, id, imageToken, 0, 0L);

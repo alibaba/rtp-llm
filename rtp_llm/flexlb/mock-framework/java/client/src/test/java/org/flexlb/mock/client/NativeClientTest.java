@@ -380,7 +380,7 @@ class NativeClientTest {
             client.send(request(987).toBuilder().setCacheKeyBlockSize(2).build(), Duration.ofSeconds(3))
                     .completion().toCompletableFuture().get(4, TimeUnit.SECONDS);
             assertNotNull(observed.get());
-            assertEquals(new org.flexlb.mock.cache.CacheSequence(2, List.of(1, 2, 3), List.of(), seed).keys(),
+            assertEquals(new org.flexlb.mock.protocol.CacheSequence(2, List.of(1, 2, 3), List.of(), seed).keys(),
                     observed.get().getBlockCacheKeysList());
         } finally { server.shutdownNow().awaitTermination(2, TimeUnit.SECONDS); }
     }

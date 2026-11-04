@@ -14,7 +14,7 @@ import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.service.grace.ApplicationLifecycle;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.mock.api.master.MasterStateApi;
-import org.flexlb.mock.runtime.ApiServer;
+import org.flexlb.mock.protocol.ApiServer;
 import org.springframework.boot.SpringApplication;
 import org.springframework.core.SpringProperties;
 import org.springframework.core.env.AbstractEnvironment;

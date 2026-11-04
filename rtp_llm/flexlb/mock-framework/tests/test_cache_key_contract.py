@@ -58,8 +58,8 @@ def test_real_frontend_and_mock_have_identical_signed_block_keys(native_hash, mo
     spec.loader.exec_module(frontend)
     expected = frontend.get_block_cache_keys(tokens, block, multimodal_cache_spans=spans, cache_key_seed=seed)
     java = str(Path(os.environ['JAVA_HOME']) / 'bin/java') if 'JAVA_HOME' in os.environ else shutil.which('java')
-    classpath = os.pathsep.join(str(FRAMEWORK / 'java/shared/cache/target' / entry) for entry in ('test-classes', 'classes'))
-    completed = subprocess.run([java, '-cp', classpath, 'org.flexlb.mock.cache.CacheKeyProbe', str(block),
+    classpath = os.pathsep.join(str(FRAMEWORK / 'java/protocol/target' / entry) for entry in ('test-classes', 'classes'))
+    completed = subprocess.run([java, '-cp', classpath, 'org.flexlb.mock.protocol.CacheKeyProbe', str(block),
         ','.join(map(str, tokens)), ';'.join(f'{offset}:' + ','.join(map(str, hashes)) for offset, hashes in spans), str(seed)],
         capture_output=True, text=True, check=True)
     actual = [int(value) for value in completed.stdout.strip().split(',') if value]
