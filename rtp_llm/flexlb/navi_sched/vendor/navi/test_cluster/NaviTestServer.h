@@ -5,7 +5,7 @@
 #include "navi/engine/ResourceMap.h"
 #include <arpc/ANetRPCServer.h>
 #include "rtp_llm/flexlb/navi_sched/vendor/network/http_arpc/HTTPRPCServer.h"
-#include <multi_call/config/MultiCallConfig.h>
+#include "rtp_llm/flexlb/navi_sched/vendor/network/gig/multi_call/config/MultiCallConfig.h"
 
 namespace navi {
 
@@ -17,24 +17,21 @@ public:
     bool addPartId(NaviPartId partId);
     NaviPartId getPartCount() const;
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper &json) override;
+
 public:
     std::string bizConfig;
     NaviPartId partCount;
     std::set<NaviPartId> partIdSet;
 };
 
-class NaviTestServer
-{
+class NaviTestServer {
 public:
-    NaviTestServer(const std::string &name,
-                   const std::string &loader,
-                   const std::string &configPath,
-                   const ResourceMapPtr &rootResourceMap);
+    NaviTestServer(const std::string &name, const std::string &loader,
+                   const std::string &configPath, const ResourceMapPtr &rootResourceMap);
     ~NaviTestServer();
+
 public:
-    bool addBiz(const std::string &bizName,
-                NaviPartId partCount,
-                NaviPartId partId,
+    bool addBiz(const std::string &bizName, NaviPartId partCount, NaviPartId partId,
                 const std::string &bizConfig);
     void addSubConfig(multi_call::LocalConfig &localSubConfig);
     bool createDepends();
@@ -42,10 +39,9 @@ public:
                const std::shared_ptr<ModuleManager> &moduleManager);
     std::shared_ptr<ModuleManager> getModuleManager() const;
     NaviPtr getNavi() const;
-    bool isSame(const std::string &serverName,
-                const std::string &loader,
-                const std::string &configPath,
-                const ResourceMapPtr &rootResourceMap);
+    bool isSame(const std::string &serverName, const std::string &loader,
+                const std::string &configPath, const ResourceMapPtr &rootResourceMap);
+
 private:
     bool createGigServer();
     bool startNavi(const std::string &gigConfigStr,
@@ -54,6 +50,7 @@ private:
                      autil::legacy::json::JsonMap &metaMap);
     std::string getLoadParam(const std::string &gigConfigStr);
     void loop();
+
 private:
     std::string _name;
     std::string _loader;
@@ -66,6 +63,7 @@ private:
     std::shared_ptr<multi_call::GigRpcServer> _gigServer;
     NaviPtr _navi;
     std::vector<multi_call::ServerBizTopoInfo> _topoInfoVec;
+
 private:
     AUTIL_LOG_DECLARE();
 };
