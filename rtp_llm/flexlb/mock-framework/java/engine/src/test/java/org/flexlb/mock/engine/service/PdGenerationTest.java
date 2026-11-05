@@ -703,7 +703,7 @@ class PdGenerationTest {
             assertEquals(4, d.status().getAvailableKvCache()); holder.close();
             assertNull(call.outputs.poll(150, TimeUnit.MILLISECONDS));
             assertEquals(8, d.status().getAvailableKvCache());
-            assertTrue(d.node.cache().snapshot(-1, true).keys().isEmpty());
+            assertEquals(0, d.node.cache().snapshot(-1, true).keys().length);
             assertEquals(1, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
         }
     }
@@ -712,7 +712,7 @@ class PdGenerationTest {
         try (var p = node("prefill", 8, 1); var d = node("decode", 3, 1); var call = new Call(p, input(d, 1, 3, 6, 2000, true))) {
             for (int i = 1; i <= 4; i++) call.output(i, false, 1);
             assertEquals(602, code(call.error(Status.Code.RESOURCE_EXHAUSTED)));
-            assertEquals(6, d.status().getAvailableKvCache()); assertTrue(d.node.cache().snapshot(-1, true).keys().isEmpty());
+            assertEquals(6, d.status().getAvailableKvCache()); assertEquals(0, d.node.cache().snapshot(-1, true).keys().length);
         }
     }
 

@@ -80,9 +80,14 @@ final class BlockTree {
     int size() { return nodes.size(); }
     long version() { return version; }
     CacheMetadata.SnapshotKeys metadataKeys() {
-        return new CacheMetadata.SnapshotKeys(version, nodes.keySet().stream().mapToLong(Long::longValue).toArray());
+        return new CacheMetadata.SnapshotKeys(version, keys());
     }
-    Set<Long> keys() { return Set.copyOf(nodes.keySet()); }
+    long[] keys() {
+        var keys = new long[nodes.size()];
+        int index = 0;
+        for (long key : nodes.keySet()) keys[index++] = key;
+        return keys;
+    }
     void clear() {
         for (var node : nodes.values()) {
             node.cache.close(); changed(node.key, false);

@@ -250,7 +250,7 @@ class RtpSchedulerTest {
             read.close();
             assertEquals(RequestFailure.Reason.CLOSED, listener.terminal.get(2, TimeUnit.SECONDS).reason());
             assertEquals(8, cache.snapshot(0, false).availableBlocks());
-            assertTrue(cache.snapshot(-1, true).keys().isEmpty());
+            assertEquals(0, cache.snapshot(-1, true).keys().length);
         }
     }
 
@@ -508,7 +508,7 @@ class RtpSchedulerTest {
                     assertTrue(remote.isCancelled());
                     assertFalse(remote.complete(1));
                     assertFalse(listener.output.isDone());
-                    assertTrue(cache.snapshot(-1, true).keys().isEmpty());
+                    assertEquals(0, cache.snapshot(-1, true).keys().length);
                 } else {
                     // An unrelated local request can run while the first waits for KV.
                     var local = new Listener();
