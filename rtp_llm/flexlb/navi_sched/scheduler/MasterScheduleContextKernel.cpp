@@ -501,32 +501,20 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
     if (0 == context.requestCount() || 0 == context.nodeCount()) {
         return context.requestCount() > 0;
     }
-    const auto healthyBacklogLatencyLimitMs =
-        static_cast<double>(_maxWaitScheduleTimeMs) * _queueOverloadStartCycleMultiplier;
     const auto coldStartAnalysis = _executionUtilizationLimitEnabled
                                        ? CostSchedulerColdStartStrategy::Analysis()
-                                       : CostSchedulerColdStartStrategy::analyze(
-                                             context, healthyBacklogLatencyLimitMs);
+                                       : CostSchedulerColdStartStrategy::analyze(context);
     const auto averagePredictedLatencyMs =
         coldStartAnalysis.trustedBacklogInflight > 0
             ? static_cast<double>(coldStartAnalysis.trustedBacklogLatencyWeightedSumMs /
                                   coldStartAnalysis.trustedBacklogInflight)
             : 0.0;
-    const auto bootstrapUntrustedNode = coldStartAnalysis.untrustedCapacity > 0;
     auto dropProbability =
         _executionUtilizationLimitEnabled
             ? 0.0
             : calculateQueueOverloadDropProbability(
                   averagePredictedLatencyMs, _maxWaitScheduleTimeMs,
                   _queueOverloadStartCycleMultiplier, _queueOverloadFullCycleMultiplier);
-    const auto initialDropProbability = dropProbability;
-    if (_schedulerKernelId == CostSchedulerKernel::KERNEL_ID && dropProbability > 0.0 &&
-        std::isfinite(coldStartAnalysis.minimumTrustedBacklogLatencyMs)) {
-        const auto recoveryProbability = calculateQueueOverloadDropProbability(
-            coldStartAnalysis.minimumTrustedBacklogLatencyMs, _maxWaitScheduleTimeMs,
-            _queueOverloadStartCycleMultiplier, _queueOverloadFullCycleMultiplier);
-        dropProbability = std::min(dropProbability, recoveryProbability);
-    }
     if (_executionUtilizationLimitEnabled) {
         const auto now = autil::TimeUtility::monotonicTimeUs();
         {
@@ -582,46 +570,6 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
     context._queueOverloadAveragePredictedLatencyMs = averagePredictedLatencyMs;
     context._queueOverloadDropProbability = dropProbability;
     const auto requestCount = context.requestCount();
-    if (!_executionUtilizationLimitEnabled &&
-        (context._scheduleId < 10 || context._scheduleId % 100 == 0 ||
-         (initialDropProbability > 0.0 && context._scheduleId % 10 == 0))) {
-        const auto minNodeIndex = coldStartAnalysis.minimumTrustedBacklogNodeIndex;
-        const auto *minNode =
-            minNodeIndex < context.nodeCount() ? &context.getNode(minNodeIndex) : nullptr;
-        NAVI_KERNEL_LOG(
-            INFO,
-            "[navi-master-overload-evaluation] schedule_id=%lu schedule_time_us=%ld "
-            "requests=%lu trusted_nodes=%lu untrusted_nodes=%lu trusted_inflight=%ld "
-            "known_backlog_inflight=%ld average_predicted_latency_ms=%.3f "
-            "minimum_predicted_latency_ms=%.3f drop_probability=%.6f "
-            "schedule_cycle_ms=%ld start_multiplier=%ld full_multiplier=%ld "
-            "initial_drop_probability=%.6f trusted_unknown_busy_nodes=%lu "
-            "minimum_node_count=%lu "
-            "minimum_recovery_requests=%lu healthy_recovery_requests=%lu "
-            "minimum_agent=%s minimum_inflight=%d minimum_batch_waiting=%d "
-            "minimum_queued=%d minimum_running=%d minimum_workload_requests=%ld "
-            "minimum_workload_age_ms=%.3f minimum_batch_timeout_count=%lu "
-            "minimum_abnormal_batch_finish_count=%lu",
-            context._scheduleId, context._scheduleTimeUs, requestCount,
-            coldStartAnalysis.trustedNodeCount, coldStartAnalysis.untrustedNodeCount,
-            coldStartAnalysis.trustedInflight, coldStartAnalysis.trustedBacklogInflight,
-            averagePredictedLatencyMs, coldStartAnalysis.minimumTrustedBacklogLatencyMs,
-            dropProbability, _maxWaitScheduleTimeMs, _queueOverloadStartCycleMultiplier,
-            _queueOverloadFullCycleMultiplier, initialDropProbability,
-            coldStartAnalysis.trustedUnknownBusyNodeCount,
-            coldStartAnalysis.minimumTrustedBacklogNodeCount,
-            coldStartAnalysis.minimumTrustedBacklogRecoveryRequestCount,
-            coldStartAnalysis.healthyBacklogRecoveryRequestCount,
-            minNode ? minNode->getAgentId().c_str() : "none",
-            minNode ? minNode->getInflightRequests() : -1,
-            minNode ? minNode->getBatchWaitingRequests() : -1,
-            minNode ? minNode->getQueuedBatchRequests() : -1,
-            minNode ? minNode->getRunningRequests() : -1,
-            minNode ? minNode->getWorkloadFeatures().getPrecedingRequestCount() : -1L,
-            minNode ? minNode->getWorkloadReportAgeMs() : -1.0,
-            minNode ? minNode->getBatchTimeoutCount() : 0,
-            minNode ? minNode->getAbnormalBatchFinishCount() : 0);
-    }
     if (dropProbability <= 0.0) {
         _masterScheduleR->recordQueueOverload(requestCount, 0, averagePredictedLatencyMs,
                                               dropProbability);
@@ -644,9 +592,8 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
         auto &responseRequest = context._responseRequests[storageIndex];
         uint64_t randomSample = 0;
         const auto dropped =
-            !bootstrapRequest &&
             shouldDropRequest(dropProbability, &randomSample, randomDraw);
-        if (context.isCollectingReplay() && !bootstrapRequest && dropProbability > 0.0 &&
+        if (context.isCollectingReplay() && dropProbability > 0.0 &&
             dropProbability < 1.0) {
             context._queueOverloadRandomDecisions.push_back(
                 {storageIndex, randomSample, dropProbability, !dropped});
@@ -1278,8 +1225,6 @@ void MasterScheduleResultKernel::recordReplayAdmission(NaviSchedScheduleContext 
         schedulerInfo["cold_start_minimum_ramped_target_inflight"] =
             context._coldStartRoutingStats.minimumRampedTargetInflight;
         schedulerInfo["cold_start_evaluated"] = context._coldStartRoutingStats.evaluated;
-        schedulerInfo["cold_start_bootstrap_request_count"] =
-            context._coldStartBootstrapRequestCount;
         schedulerInfo["queue_overload_evaluated"] = context._queueOverloadEvaluated;
         schedulerInfo["queue_overload_average_predicted_latency_ms"] =
             context._queueOverloadAveragePredictedLatencyMs;

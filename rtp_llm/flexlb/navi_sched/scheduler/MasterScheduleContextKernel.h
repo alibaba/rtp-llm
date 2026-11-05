@@ -41,9 +41,6 @@ private:
     int64_t getNextScheduleDelayMs(int64_t currentTimeUs) const;
     bool stopScheduleTimer(navi::KernelComputeContext &ctx);
     bool updateScheduleTimer(navi::KernelComputeContext &ctx, int64_t currentTimeUs);
-    void retireCancelledRequests();
-    bool retireRequest(const MasterScheduleRequestDataPtr &request,
-                       int64_t currentTimeUs);
     std::shared_ptr<void> beginScheduleRound();
     void buildReadyContexts(int64_t activationTimeUs);
     bool prepareAdmission(const std::shared_ptr<MasterScheduleContextData> &context,

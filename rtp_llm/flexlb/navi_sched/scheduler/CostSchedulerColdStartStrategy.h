@@ -17,11 +17,6 @@ public:
         long double trustedBacklogLatencyWeightedSumMs = 0.0L;
         int64_t trustedBacklogInflight = 0;
         int64_t trustedInflight = 0;
-        double minimumTrustedBacklogLatencyMs = std::numeric_limits<double>::infinity();
-        size_t minimumTrustedBacklogNodeIndex = std::numeric_limits<size_t>::max();
-        size_t minimumTrustedBacklogNodeCount = 0;
-        size_t minimumTrustedBacklogRecoveryRequestCount = 0;
-        size_t healthyBacklogRecoveryRequestCount = 0;
         size_t trustedUnknownBusyNodeCount = 0;
         double targetInflight = 0.0;
         size_t trustedNodeCount = 0;
