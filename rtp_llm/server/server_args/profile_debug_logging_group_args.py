@@ -149,6 +149,6 @@ def init_profile_debug_logging_group_args(
             "按确定性间隔采样仅录制该比例的 decode step（如 0.1 表示约每 10 个 decode step 录 1 个），"
             "纯 prefill 批始终全量录制；同时含 prefill 和 decode 的混合批整体参与采样，"
             "未采中时其中的 prefill 记录也会跳过。"
-            "1.0 表示录制全部批次，0.0 表示仅录制纯 prefill 批。默认为 0.1（10%）"
+            "1.0 表示录制全部批次，0.0 表示仅录制纯 prefill 批。默认为 0.1（10%%）"
         ),
     )

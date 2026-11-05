@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import os
-
 import torch
 
+from rtp_llm.models_py.kernels.cuda.qsa.contracts import (
+    qsa_strict_validation_enabled as qsa_strict_validation_enabled,
+)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
 from rtp_llm.models_py.utils.cache_payload_view import (
     CachePayloadGeometry,
@@ -15,25 +16,6 @@ from rtp_llm.models_py.utils.cache_payload_view import (
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 
 _same_tensor_metadata = same_tensor_metadata
-
-
-def qsa_strict_validation_enabled() -> bool:
-    """Whether QSA keeps the legacy host-synchronous per-check validation.
-
-    Production leaves ``RTP_LLM_QSA_STRICT_VALIDATION`` unset: engine and
-    allocator invariants become device-side asserts (a violation traps the
-    device and surfaces fail-stop at the next host synchronization), while
-    request-data checks stay on pinned host tensors. Tests and CI set the
-    variable to ``1`` to restore the per-check host validation with its exact
-    legacy diagnostics. The flag is read on every call so tests can toggle it
-    with ``patch.dict(os.environ, ...)``.
-    """
-    return os.environ.get("RTP_LLM_QSA_STRICT_VALIDATION", "") not in (
-        "",
-        "0",
-        "false",
-        "False",
-    )
 
 
 def qsa_assert_valid(verdict: torch.Tensor, message: str) -> None:

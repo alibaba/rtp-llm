@@ -5,6 +5,7 @@ copied parameters requires restarting the model; no view advertises live update.
 """
 
 import copy
+from dataclasses import dataclass
 
 import torch
 

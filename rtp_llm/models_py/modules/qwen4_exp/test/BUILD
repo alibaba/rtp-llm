@@ -5,6 +5,18 @@ load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
 package(default_visibility = ["//visibility:public"])
 
 models_py_test(
+    name = "sparse_paged_slim_test",
+    src = "sparse_paged_slim_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
+    name = "sparse_paged_trust_test",
+    src = "sparse_paged_trust_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
     name = "target_reduce_test",
     src = "target_reduce_test.py",
 )
