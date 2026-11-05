@@ -5,6 +5,7 @@ import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.projection.WorkSnapshot.Phase;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.enums.PriorityPreemptionProgress;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.util.Failures;
 import org.flexlb.util.PriorityNormalizer;
 
@@ -217,6 +218,7 @@ public final class PrefillState {
 
     /** Canonical resource facts for one exact route. Guarded by {@link #lock}. */
     static final class RequestEntry {
+        long engineCoveredTokens;
         OwnershipStage ownership;
         final RequestRoute route;
         Phase individualPhase;
@@ -287,6 +289,73 @@ public final class PrefillState {
     final LongSupplier clock;
     private org.flexlb.balance.strategy.PrefillTokenWorkload tokenWorkload;
     private long pendingTokenLimit;
+    record EngineWorkKey(long requestId, long batchId) {
+        EngineWorkKey {
+            // Ordinary C++ streams use -1; legacy protobuf reports may omit the field (0).
+            if (batchId == -1L) { batchId = 0L; }
+        }
+    }
+    private Map<EngineWorkKey, Long> engineTokenWork = Map.of();
+    private long engineTokens;
+    private long engineCoveredTokens;
+
+    private static EngineWorkKey engineKey(RequestEntry entry) {
+        long batchId = entry.batch != null ? entry.batch.batchId
+                : entry.reservation instanceof BatchReservation lease ? lease.batchId : 0L;
+        return new EngineWorkKey(entry.route.requestId(), batchId);
+    }
+
+    Map<EngineWorkKey, Long> prepareEngineTokenWork(WorkerStatus.StatusObservation observation, boolean full) {
+        if (tokenWorkload == null) { return Map.of(); }
+        Set<EngineWorkKey> finished = new HashSet<>();
+        if (full) {
+            for (var task : observation.finishedTasks().values()) {
+                finished.add(new EngineWorkKey(task.requestId(), task.batchId()));
+            }
+        }
+        Map<EngineWorkKey, Long> work = new HashMap<>();
+        for (var task : observation.engine().runningTaskList().values()) {
+            var key = new EngineWorkKey(task.requestId(), task.batchId());
+            if (task.isPriorityCancelOverlayOnly() || finished.contains(key)) { continue; }
+            long input = Math.max(0L, task.inputLength());
+            long tokens = input - Math.clamp(task.prefixLength(), 0L, input);
+            var local = requests.get(task.requestId());
+            if (input == 0L) {
+                tokens = local != null && engineKey(local).equals(key)
+                        ? computeTokens(local.route) : engineTokenWork.getOrDefault(key, 0L);
+            }
+            work.merge(key, tokens, Math::max);
+        }
+        return Map.copyOf(work);
+    }
+
+    private void refreshEngineCoverage(RequestEntry entry) {
+        long covered = Math.min(computeTokens(entry.route), engineTokenWork.getOrDefault(engineKey(entry), 0L));
+        engineCoveredTokens = Math.addExact(engineCoveredTokens - entry.engineCoveredTokens, covered);
+        entry.engineCoveredTokens = covered;
+    }
+
+    /** Status scans are linear; admission, release and routing only update/read aggregate counters. */
+    private void replaceEngineTokenWork(Map<EngineWorkKey, Long> next) {
+        for (var key : engineTokenWork.keySet()) {
+            var local = requests.get(key.requestId());
+            if (local != null) { local.engineCoveredTokens = 0L; }
+        }
+        engineTokenWork = next;
+        engineTokens = 0L;
+        engineCoveredTokens = 0L;
+        for (var entry : next.entrySet()) {
+            engineTokens = Math.addExact(engineTokens, entry.getValue());
+            var local = requests.get(entry.getKey().requestId());
+            if (local != null) { refreshEngineCoverage(local); }
+        }
+    }
+
+    private org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot tokenWorkloadLocked() {
+        var local = tokenWorkload.snapshot();
+        return new org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot(local.completedTokens(),
+                saturatedAdd(local.pendingTokens(), engineTokens - engineCoveredTokens), local.plannedTokens());
+    }
     private java.util.function.Supplier<EngineQueueAdmission.State> engineQueueState = () -> EngineQueueAdmission.State.UNKNOWN;
 
     void configureEngineQueueAdmission(java.util.function.Supplier<EngineQueueAdmission.State> state) {
@@ -322,7 +391,7 @@ public final class PrefillState {
         try {
             return tokenWorkload == null
                     ? new org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot(0L, 0L)
-                    : tokenWorkload.snapshot();
+                    : tokenWorkloadLocked();
         } finally { lock.unlock(); }
     }
 
@@ -331,7 +400,7 @@ public final class PrefillState {
     }
 
     private boolean tokenCapacityAvailable() {
-        return tokenWorkload == null || tokenWorkload.snapshot().pendingTokens() < pendingTokenLimit
+        return tokenWorkload == null || tokenWorkloadLocked().pendingTokens() < pendingTokenLimit
                 || engineQueueAdmission.getAsBoolean();
     }
 
@@ -341,7 +410,10 @@ public final class PrefillState {
 
     private void acceptTokenWork(RequestRoute route) {
         route.releaseTokenPlan();
-        if (tokenWorkload != null) { tokenWorkload.accept(computeTokens(route)); }
+        if (tokenWorkload != null) {
+            tokenWorkload.accept(computeTokens(route));
+            refreshEngineCoverage(requests.get(route.requestId()));
+        }
     }
     /** Monotonic ownership/work revision used by projection snapshots. */
     private volatile long mutationVersion;
@@ -440,7 +512,11 @@ public final class PrefillState {
         }
         if (entry.ownership == OwnershipStage.COMMITTED || entry.ownership == OwnershipStage.DIRECT_RESERVED) { committedWorkCapture = null; }
         boolean removed = requests.remove(entry.route.requestId(), entry);
-        if (removed && tokenWorkload != null) { tokenWorkload.release(computeTokens(entry.route)); }
+        if (removed && tokenWorkload != null) {
+            tokenWorkload.release(computeTokens(entry.route));
+            engineCoveredTokens -= entry.engineCoveredTokens;
+            entry.engineCoveredTokens = 0L;
+        }
         return removed;
     }
 
@@ -610,6 +686,7 @@ public final class PrefillState {
                     this, entry, batchId, generationHandoff);
             batches.put(batchId, new PrefillBatch(batchId, lease));
             entry.reservation = lease;
+            if (tokenWorkload != null) { refreshEngineCoverage(entry); }
             recordMutationLocked();
             return new ReservationResult<>(CapacityStatus.ACQUIRED, lease);
         } finally {
@@ -733,6 +810,7 @@ public final class PrefillState {
                 member.reservation = null;
                 member.ownership = OwnershipStage.COMMITTED;
             }
+            if (tokenWorkload != null) { refreshEngineCoverage(member); }
         }
         if (failed != null) { removeEntry(failed); }
         committedWorkCapture = null;
@@ -821,6 +899,7 @@ public final class PrefillState {
                 if (entry != null) {
                     entry.reservation = null;
                     if (entry.ownership == OwnershipStage.DIRECT_RESERVED) { removeEntry(entry); }
+                    else if (tokenWorkload != null) { refreshEngineCoverage(entry); }
                 }
                 kind = RequestRelease.RESERVED; // A queue preparation never consumes its waiting seat.
             } else if (entry != null) {
@@ -844,6 +923,7 @@ public final class PrefillState {
         // Assigned before publication; only the owning State applies the facts under its lock.
         long nowMs;
         long unknownRequests;
+        Map<EngineWorkKey, Long> engineTokenWork;
         Map<Long, List<RequestRoute>> predictionInputs;
         StatusReconciliation result;
 
@@ -885,6 +965,8 @@ public final class PrefillState {
         for (long prediction : predictions.values()) {
             checkArgument(prediction >= 0L, "Negative batch prediction");
         }
+        long previousPending = tokenWorkload == null ? 0L : tokenWorkloadLocked().pendingTokens();
+        boolean engineWorkChanged = !engineTokenWork.equals(reduction.engineTokenWork);
         // The version check also validates the capacity facts captured in the prepared result.
         for (var change : reduction.batchOutcomes.entrySet()) {
             PrefillBatch batch = change.getKey();
@@ -912,6 +994,7 @@ public final class PrefillState {
             batch.outcome.executionStarted |= phase.getValue() == Phase.ENGINE_RUNNING;
             batch.servicePhase = phase.getValue();
         }
+        replaceEngineTokenWork(reduction.engineTokenWork);
         unknownEngineRequestCount = reduction.unknownRequests;
         for (long batchId : reduction.predictionInputs.keySet()) {
             PrefillBatch batch = batches.get(batchId);
@@ -919,11 +1002,16 @@ public final class PrefillState {
             batch.phaseBaseMs = reduction.nowMs;
             batch.lastObservedAtMs = Math.max(batch.lastObservedAtMs, reduction.nowMs);
         }
-        if (reduction.result.schedulingInputsChanged()) {
+        var result = reduction.result;
+        if (engineWorkChanged) {
+            result = new StatusReconciliation(result.requestStatuses(), result.batchCompletions(), true,
+                    result.capacityReleased() || tokenWorkload != null && tokenWorkloadLocked().pendingTokens() < previousPending);
+        }
+        if (result.schedulingInputsChanged()) {
             committedWorkCapture = null;
             recordMutationLocked();
         }
-        return reduction.result;
+        return result;
     }
 
     /**
@@ -972,6 +1060,9 @@ public final class PrefillState {
             }
             for (PrefillBatch batch : batches.values()) { if (batch.preparation == null) { batch.members.clear(); } }
             requests.clear();
+            engineTokenWork = Map.of();
+            engineTokens = 0L;
+            engineCoveredTokens = 0L;
             batches.clear();
             committedBatchCount = 0;
             activeIndex.clear();

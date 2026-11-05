@@ -109,7 +109,10 @@ class QueuedDeliveryWithdrawalRaceTest {
     void migrationReturnsLocalReservationsAndRetainsIdentityAndDeadline() throws Exception {
         try (var fixture = new Fixture()) {
             long deadline = fixture.context.data().getRequestExpiresAtMs();
+            assertEquals(16L, fixture.prefill.ownership.tokenWorkload().pendingTokens());
             assertTrue(fixture.owner.migrateQueuedRoute(fixture.route));
+            assertEquals(0L, fixture.prefill.ownership.tokenWorkload().pendingTokens());
+            assertEquals(0L, fixture.prefill.ownership.tokenWorkload().plannedTokens());
             assertSame(fixture.prefill, fixture.context.prefillMigrationSource());
             assertNull(fixture.context.snapshot().route());
             assertNull(fixture.context.snapshot().placement());
@@ -237,6 +240,7 @@ class QueuedDeliveryWithdrawalRaceTest {
             applyStatus(prefill, status(RoleType.PREFILL));
             applyStatus(decode, status(RoleType.DECODE));
             var state = new PrefillState(new ReentrantLock(), PrefillActiveIndex.ordered(16, WorkerBatcher.PRIORITY_QUEUE_ORDER), System::currentTimeMillis);
+            ReflectionTestUtils.invokeMethod(state, "enableTokenWorkload", 1_000_000L);
             ReflectionTestUtils.setField(prefill, "ownership", state);
             batcher = new WorkerBatcher("withdrawal-race", prefill, QueueExecutionSettings.capture(config), dispatcher, state);
             ReflectionTestUtils.setField(prefill, "batcher", batcher);

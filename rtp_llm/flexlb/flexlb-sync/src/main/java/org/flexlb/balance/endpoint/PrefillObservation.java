@@ -43,6 +43,7 @@ public final class PrefillObservation {
             outcome.successfulCompletion |= success;
             outcome.learningEligible &= success;
         }
+        reduction.engineTokenWork = state.prepareEngineTokenWork(observation, full);
         active(state, observation.engine(), reduction, statuses);
         boolean released = !reduction.terminals.isEmpty() || reduction.unknownRequests < state.unknownEngineRequestCount;
         reduction.nowMs = full ? nowMs : state.clock.getAsLong();
