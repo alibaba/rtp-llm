@@ -220,6 +220,10 @@ class Qwen35Moe(Qwen3NextBase):
         with open(config_path) as reader:
             config_json = json.loads(reader.read())
 
+        return cls._create_config_from_json(ckpt_path, config_json)
+
+    @classmethod
+    def _create_config_from_json(cls, ckpt_path: str, config_json: dict) -> ModelConfig:
         text_config_json = config_json["text_config"]
 
         config = cls._model_config_cls()

@@ -54,11 +54,10 @@ class Qwen4Exp(Qwen35Moe):
         return Qwen4ExpModel
 
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config = super()._create_config(ckpt_path)
+    def _create_config_from_json(cls, ckpt_path: str, config_json: dict) -> ModelConfig:
+        config = super()._create_config_from_json(ckpt_path, config_json)
         config.model_type = "qwen4_exp"
         root = Path(ckpt_path)
-        config_json = json.loads((root / "config.json").read_text())
         source_quant = config_json.get("quantization_config")
         text_config = config_json.get("text_config", config_json)
         # PLE hashes use the training document boundary, independently of the

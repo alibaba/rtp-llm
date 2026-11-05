@@ -1,7 +1,5 @@
 """Qwen4-Exp one-layer MTP draft model."""
 
-import json
-import os
 from typing import Any, Collection, Dict, List
 
 from rtp_llm.config.model_config import ModelConfig
@@ -224,10 +222,8 @@ class Qwen4ExpMTP(Qwen4Exp):
         return names
 
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config = super()._create_config(ckpt_path)
-        with open(os.path.join(ckpt_path, "config.json")) as reader:
-            root_config = json.load(reader)
+    def _create_config_from_json(cls, ckpt_path: str, root_config: dict) -> ModelConfig:
+        config = super()._create_config_from_json(ckpt_path, root_config)
         text_config = root_config["text_config"]
         mtp_config = text_config.get("mtp")
         if not isinstance(mtp_config, dict):

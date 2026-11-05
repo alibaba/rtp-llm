@@ -1,10 +1,18 @@
 package(default_visibility = ["//visibility:public"])
 
+py_library(
+    name = "config_fixture",
+    srcs = ["config_fixture.py"],
+)
+
 py_test(
     name = "qwen4_exp_test",
     srcs = ["qwen4_exp_test.py"],
     env = {"GPU_COUNT": "0"},
-    deps = ["//rtp_llm:testlib"],
+    deps = [
+        ":config_fixture",
+        "//rtp_llm:testlib",
+    ],
 )
 
 py_test(
@@ -18,7 +26,10 @@ py_test(
     name = "qwen4_exp_mtp_component_test",
     srcs = ["qwen4_exp_mtp_component_test.py"],
     env = {"GPU_COUNT": "0"},
-    deps = ["//rtp_llm:testlib"],
+    deps = [
+        ":config_fixture",
+        "//rtp_llm:testlib",
+    ],
 )
 
 py_test(
