@@ -1,5 +1,6 @@
-cc_library(
+cc_import(
     name = "lz4",
+    shared_library = "liblz4.so",
     deps = ["@lz4_pkg//:lz4"],
     visibility = ["//visibility:public"],
 )
