@@ -253,10 +253,9 @@ bool NonLinearPrefillModelR::validateParameterValues(const double *parameters,
         CACHE_SOURCE_PARAMETER_COUNT != parameterCount) {
         return false;
     }
-    for (size_t index = PARAMETER_COUNT; parameterCount == CACHE_SOURCE_PARAMETER_COUNT &&
-                                         index < CAPACITY_SPLIT_PARAMETER_COUNT;
-         ++index) {
-        if (parameters[index] != 0.0) {
+    for (size_t index = 0; parameterCount == CACHE_SOURCE_PARAMETER_COUNT &&
+                           index < parameterCount; ++index) {
+        if (isInactiveCacheSourceParameter(index) && parameters[index] != 0.0) {
             return false;
         }
     }
@@ -350,8 +349,7 @@ bool NonLinearPrefillModelR::fitImpl(
                           const auto current = index++;
                           if (source) {
                               return !std::isfinite(scale) ||
-                                     (current >= PARAMETER_COUNT &&
-                                              current < CAPACITY_SPLIT_PARAMETER_COUNT
+                                     (isInactiveCacheSourceParameter(current)
                                           ? scale != 0.0
                                           : scale <= 0.0);
                           }
@@ -522,6 +520,19 @@ bool NonLinearPrefillModelR::fitImpl(
                                   scales[NONLINEAR_CURVATURE_PARAMETER_INDEX];
     projectOutputParameters(weights, adamMoment1, adamMoment2, minimumCurvature,
                             scaleRatio);
+    if (usesExecutionCacheSource()) {
+        // Retain the previous split-model state when an update crosses an output floor.
+        const auto restoreAtFloor = [&](size_t index, double floor) {
+            if (previousWeights[index] > floor && updatedOutputParameters[index] <= floor) {
+                weights[index] = previousWeights[index];
+                adamMoment1[index] = previousMoment1[index];
+                adamMoment2[index] = previousMoment2[index];
+            }
+        };
+        restoreAtFloor(BASE_LATENCY_PARAMETER_INDEX,
+                       positiveParameterFloor(BASE_LATENCY_PARAMETER_INDEX, 1.0));
+        restoreAtFloor(NONLINEAR_CURVATURE_PARAMETER_INDEX, minimumCurvature);
+    }
     if (updatedOutputParameters[BASE_LATENCY_PARAMETER_INDEX] !=
             weights[BASE_LATENCY_PARAMETER_INDEX] ||
         updatedOutputParameters[NONLINEAR_CURVATURE_PARAMETER_INDEX] !=
@@ -1180,10 +1191,10 @@ bool NonLinearPrefillModelR::validateOptimizerState(const OptimizerState &state,
         state.step <= 0) {
         return false;
     }
-    for (size_t index = PARAMETER_COUNT; parameterCount == CACHE_SOURCE_PARAMETER_COUNT &&
-                                         index < CAPACITY_SPLIT_PARAMETER_COUNT;
-         ++index) {
-        if (state.adamMoment1[index] != 0.0 || state.adamMoment2[index] != 0.0) {
+    for (size_t index = 0; parameterCount == CACHE_SOURCE_PARAMETER_COUNT &&
+                           index < parameterCount; ++index) {
+        if (isInactiveCacheSourceParameter(index) &&
+            (state.adamMoment1[index] != 0.0 || state.adamMoment2[index] != 0.0)) {
             return false;
         }
     }

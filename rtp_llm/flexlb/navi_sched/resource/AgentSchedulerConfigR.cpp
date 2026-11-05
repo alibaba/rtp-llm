@@ -97,8 +97,7 @@ std::string AgentSchedulerConfig::validationError() const
     for (size_t index = 0; index < scaleCount; ++index) {
         const double scale = latencyParameterLearningRateScales[index];
         if (scaleCount == NonLinearPrefillModelR::CACHE_SOURCE_PARAMETER_COUNT) {
-            const bool inactive = index >= NonLinearPrefillModelR::PARAMETER_COUNT &&
-                                  index < NonLinearPrefillModelR::CAPACITY_SPLIT_PARAMETER_COUNT;
+            const bool inactive = NonLinearPrefillModelR::isInactiveCacheSourceParameter(index);
             if (!std::isfinite(scale) || (inactive ? scale != 0.0 : scale <= 0.0)) {
                 return "latency_parameter_learning_rate_scales[" + std::to_string(index) +
                        (inactive ? "] must be zero for inactive cache-source coordinates"

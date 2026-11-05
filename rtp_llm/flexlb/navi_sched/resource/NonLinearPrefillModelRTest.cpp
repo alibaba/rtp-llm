@@ -1730,6 +1730,38 @@ TEST_F(NonLinearPrefillModelRTest, testExecutionCacheSourceValidationAndInvalida
     EXPECT_EQ(1, combined.getBatchSize());
 }
 
+TEST_F(NonLinearPrefillModelRTest, testCacheSourceFitRetainsOutputStateAcrossFloor)
+{
+    using Model = NonLinearPrefillModelR;
+    Model model;
+    model._pdSeparated = true;
+    model.setExecutionGeometryEnabled(true);
+    model.setExecutionCacheSourceEnabled(true);
+    auto parameters = model.getInitialParameters();
+    constexpr auto base = Model::BASE_LATENCY_PARAMETER_INDEX;
+    parameters[base] = 0.0001;
+
+    NaviSchedLatencyFeatures features;
+    features.appendRequest(0, 4096);
+    ASSERT_TRUE(features.appendBatchCount(1));
+    ASSERT_TRUE(features.setExecutionGeometry(1, 4096));
+    ASSERT_TRUE(features.setExecutionCacheSource(0, 0));
+    const auto prediction = model.predictConfigured(features, parameters);
+    ASSERT_GT(prediction, 0.0);
+    auto before = model.getOptimizerState();
+    before.adamMoment1[base] = 0.001;
+    before.adamMoment2[base] = 0.000001;
+    ASSERT_TRUE(model.restoreOptimizerState(before));
+
+    std::vector<double> updated;
+    ASSERT_TRUE(model.fit({{features, prediction * 0.5}}, parameters, updated, 8.0, 2.0));
+    const auto after = model.getOptimizerState();
+    EXPECT_EQ(before.step + 1, after.step);
+    EXPECT_DOUBLE_EQ(parameters[base], updated[base]);
+    EXPECT_DOUBLE_EQ(before.adamMoment1[base], after.adamMoment1[base]);
+    EXPECT_DOUBLE_EQ(before.adamMoment2[base], after.adamMoment2[base]);
+}
+
 TEST_F(NonLinearPrefillModelRTest, testCacheSourceJointFitAndOptimizerIdentity)
 {
     NonLinearPrefillModelR model;
@@ -1771,8 +1803,28 @@ TEST_F(NonLinearPrefillModelRTest, testCacheSourceJointFitAndOptimizerIdentity)
     NonLinearPrefillModelR::OptimizerState restored;
     ASSERT_TRUE(NonLinearPrefillModelR::makeOptimizerState(wire, restored));
     EXPECT_EQ(state.adamMoment1, restored.adamMoment1);
-    wire.adamMoment1[10] = 1.0;
-    EXPECT_FALSE(NonLinearPrefillModelR::makeOptimizerState(wire, restored));
+    for (size_t index = 10; index < 19; ++index) {
+        auto invalidWire = wire;
+        invalidWire.adamMoment1[index] = 1.0;
+        EXPECT_FALSE(NonLinearPrefillModelR::makeOptimizerState(invalidWire, restored));
+        invalidWire = wire;
+        invalidWire.adamMoment2[index] = 1.0;
+        EXPECT_FALSE(NonLinearPrefillModelR::makeOptimizerState(invalidWire, restored));
+    }
+
+    // A unified model may carry moments in those same nine coordinates.
+    constexpr size_t unifiedCount = NonLinearPrefillModelR::CAPACITY_SPLIT_PARAMETER_COUNT;
+    wire.adamMoment1.resize(unifiedCount);
+    wire.adamMoment2.resize(unifiedCount);
+    for (size_t index = 10; index < unifiedCount; ++index) {
+        wire.adamMoment1[index] = -1.0;
+        wire.adamMoment2[index] = 1.0;
+    }
+    ASSERT_TRUE(NonLinearPrefillModelR::makeOptimizerState(wire, restored));
+    const auto unifiedWire = NonLinearPrefillModelR::makeOptimizerStateData(restored, unifiedCount);
+    EXPECT_EQ(wire.adamMoment1, unifiedWire.adamMoment1);
+    EXPECT_EQ(wire.adamMoment2, unifiedWire.adamMoment2);
+    EXPECT_EQ(wire.step, unifiedWire.step);
 }
 
 namespace {

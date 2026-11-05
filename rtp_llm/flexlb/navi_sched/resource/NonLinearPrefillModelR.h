@@ -25,6 +25,10 @@ public:
     static constexpr size_t MAX_PARAMETER_COUNT = CACHE_SOURCE_PARAMETER_COUNT;
     static constexpr size_t EXTERNAL_READ_ACTIVATION_PARAMETER_INDEX = 19;
     static constexpr size_t EXTERNAL_READ_VOLUME_PARAMETER_INDEX = 20;
+    static constexpr bool isInactiveCacheSourceParameter(size_t index)
+    {
+        return index >= PARAMETER_COUNT && index < CAPACITY_SPLIT_PARAMETER_COUNT;
+    }
     static constexpr size_t WAITING_PARAMETER_OFFSET = PARAMETER_COUNT;
     static constexpr size_t WAITING_PARAMETER_COUNT = 5;
     static constexpr int64_t BINARY_VERSION = 24;
