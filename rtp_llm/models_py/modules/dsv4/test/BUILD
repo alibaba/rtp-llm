@@ -4,6 +4,12 @@ _DSV4_TEST_DEPS = [
 ]
 
 py_test(
+    name = "test_tilelang_tmpdir",
+    srcs = ["test_tilelang_tmpdir.py"],
+    deps = ["//rtp_llm/models_py:modules"],
+)
+
+py_test(
     name = "test_forward_metadata",
     srcs = ["test_forward_metadata.py"],
     deps = _DSV4_TEST_DEPS,

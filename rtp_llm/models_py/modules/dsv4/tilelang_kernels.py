@@ -19,34 +19,14 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.tilelang_tmpdir import (
+    ensure_tvm_tmpdir_writable as _ensure_tvm_tmpdir_writable,
+)
+
 _log = _logging.getLogger(__name__)
 
 _TILELANG_AVAILABLE: bool = False
 _SPARSE_ATTN_KERNEL_CACHE: dict = {}
-
-
-def _ensure_tvm_tmpdir_writable() -> None:
-    """Route TVM debug tempdirs away from a root-owned /tmp parent."""
-    import os
-    import tempfile
-
-    default_parent = os.path.join(tempfile.gettempdir(), "tvm-debug-mode-tempdirs")
-    if os.path.exists(default_parent) and os.access(default_parent, os.W_OK):
-        return
-    if not os.path.exists(default_parent):
-        try:
-            os.makedirs(default_parent, exist_ok=True)
-            return
-        except OSError:
-            pass
-
-    fallback = os.path.join("/tmp", f"rtp_tvm_tmp_{os.getuid()}")
-    try:
-        os.makedirs(fallback, exist_ok=True)
-    except OSError:
-        return
-    os.environ["TMPDIR"] = fallback
-    tempfile.tempdir = None
 
 
 def _ensure_libz3_loadable() -> None:
