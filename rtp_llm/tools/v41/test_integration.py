@@ -129,6 +129,7 @@ class IntegrationTest(unittest.TestCase):
                         "SP_TYPE": "dspark",
                         "DSV41_CED": "1",
                         "REUSE_CACHE": "1",
+                        "GRPC_CLIENT_CHANNEL_BACKUP_POLL_INTERVAL_MS": "5000",
                     },
                 )
                 runtime = V41RuntimeConfig.from_env(env)
@@ -142,6 +143,9 @@ class IntegrationTest(unittest.TestCase):
                 self.assertEqual(env["REUSE_CACHE"], "0")
                 self.assertEqual(env["CACHE_STORE_RDMA_MODE"], "0")
                 self.assertEqual(env["DECODE_ENTRANCE"], "0")
+                self.assertEqual(
+                    env["GRPC_CLIENT_CHANNEL_BACKUP_POLL_INTERVAL_MS"], "500"
+                )
         self.assertEqual(
             preset_env("decode", "/weights", rdma=True)["CACHE_STORE_RDMA_MODE"], "1"
         )

@@ -82,6 +82,9 @@ def preset_env(
             "DIST_COMM_TIMEOUT": "1800",
             "DECODE_RETRY_TIMES": "0",
             "DECODE_ENTRANCE": "0",
+            # RPCPool's 5 s watchdog needs ACK polling while both PD peers
+            # wait for Prefill/KV work outside their synchronous gRPC calls.
+            "GRPC_CLIENT_CHANNEL_BACKUP_POLL_INTERVAL_MS": "500",
         }
     )
     if bool(prefill_address) != bool(decode_address):
