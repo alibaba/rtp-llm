@@ -14,7 +14,6 @@
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
 #include "rtp_llm/models_py/bindings/common/kernels/sampling_temperature.h"
-#include "rtp_llm/models_py/bindings/common/kernels/sampling_host_utils.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/softmax_host.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling_host.h"
 #include <cstddef>
@@ -179,8 +178,7 @@ std::pair<torch::Tensor, torch::Tensor> makeSamplingSeedOffsetTensors(const std:
 bool canUseCompactSamplerOutput(const GreedyParams& params) {
     return params.token_ids.is_cuda() && params.token_ids.is_contiguous() && params.token_ids.dim() == 2
            && params.token_ids.scalar_type() == torch::kInt32 && params.token_ids.size(0) == params.logits.size(0)
-           && params.token_ids.size(0) > 1 && params.token_ids.size(0) <= 32 && params.token_ids.size(1) > 1
-           && params.logits.size(1) == 248320 && sampler::isSm120();
+           && params.token_ids.size(0) > 1 && params.token_ids.size(1) > 1;
 }
 
 void processLogits(const GreedyParams& params, const torch::Tensor& device_tokens, torch::Tensor& transposed_tokens) {
@@ -440,8 +438,8 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
 
 GreedyOutput sampleGreedy(const GreedyParams& params) {
     auto device_tokens = params.token_ids.to(torch::kCUDA, true);
-    // Keep the legacy staging outside the tuned range. In the compact path,
-    // processLogits creates transposed history only if a penalty consumes it.
+    // Compact output staging depends only on the token buffer layout. Build
+    // transposed history lazily when a repetition/presence/frequency penalty consumes it.
     auto transposed_tokens =
         canUseCompactSamplerOutput(params) ? torch::Tensor() : device_tokens.transpose(0, 1).contiguous();
 
