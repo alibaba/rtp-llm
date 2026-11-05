@@ -85,7 +85,6 @@ def try_select_batched(
     cache = shared.setdefault("prefill_score_bounds", {})
     counts_key = ("batch_key_counts", attn.compress_ratio)
     entry = cache.get(counts_key)
-    produced = cache.get(("producer_key_counts", attn.compress_ratio))
     if (
         isinstance(entry, tuple)
         and len(entry) == 3
@@ -95,21 +94,13 @@ def try_select_batched(
         key_counts = entry[2]
     else:
         # Replacing CP tensors invalidates bounds as well as the cached counts.
-        # A same-source producer may publish again at L8/L14; keep object identity.
         if entry is not None:
             cache.clear()
             shared.pop("prefill_sparse_plans", None)
-        if (
-            produced is not None
-            and produced[0] is cp.prefix_lengths
-            and produced[1] is cp.input_lengths_global
-        ):
-            key_counts = produced[2]
-        else:
-            key_counts = (
-                cp.prefix_lengths + cp.input_lengths_global
-            ) // attn.compress_ratio
-            key_counts = key_counts.to(torch.int32)
+        key_counts = (
+            cp.prefix_lengths + cp.input_lengths_global
+        ) // attn.compress_ratio
+        key_counts = key_counts.to(torch.int32)
         cache[counts_key] = (cp.prefix_lengths, cp.input_lengths_global, key_counts)
     candidates = shared.get("candidates")
     if (

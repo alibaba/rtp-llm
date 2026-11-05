@@ -3846,3 +3846,1197 @@ DeepInfer 对照源码：<https://github.com/deepseek-ai/DeepInfer/blob/main/dee
 **边界与决策。** 四种形状中位数均向好，但 B32/B64 轮次波动较大，且对照/候选是不同 P 服务实例、总 KV 容量有小差异；目前仅是正向信号，未证明稳定的模型级收益。没有完成本候选的多输出 E2E 精度、自然 MAL、完整峰值显存或长时稳定性，因此不能把这个局部候选称为生产验收通过。它使 packet 搬运代码更短、去掉一次无条件清零；暂不扩展为独立 stream 或新的 shape 分支。
 
 **最终提交范围（2026-11-03）。** L20 CED 低行数拆分试验已回退；本次只保留源层 packet 搬运简化及不可达 producer metadata 分支删除。工作树已 rebase 到 `3d8126f1ba`。rebase 后 CPU 合同测试 2/2、producer metadata 测试 25/25 通过，两位独立 reviewer 未发现确定性正确性缺陷。CP4 NCCL 4/4 是相同 Python 补丁在 rebase 前的证据。PD4+4 TCP 混合请求的两轮完整结果分别为 37/40 与 35/40 成功，失败含 `CACHE_STORE_LOAD_BUFFER_TIMEOUT`、`CACHE_STORE_CALL_PREFILL_TIMEOUT` 和客户端读超时；随后同清单提高 KV/客户端超时的验证在 35/40 停滞后按用户要求停止。原始记录在 `rtp_llm_eval/runs/deepseek_v41/review_all_e2e_20261103/`。这些 TCP E2E 结果不构成最终 HEAD 的完整稳定性或生产 RDMA 验收。
+
+### 2026-11-03：L8–L20 逐段拆分、L20 CED 阈值单项试验（HEAD `b12d1b4f8f`）
+
+**范围与实测口径。** 本节仅针对选定工作树的 DSpark CP4 target Prefill；P 服务是 GPU4–7 的 TP4/EP4/CP4，D 服务是 GPU0–3。Baseline 指当前 HEAD 原 L20 阈值逻辑；candidate 只删除 `ced.py::CEDPlan.can_split_l20` 的 `seq_len_full < 65536` 性能门槛。两边保持同一 checkpoint、源码其余内容、请求文本、实际 prefix 命中、输出预算和无 profiler 的完整 batch Prefill engine RT 口径。工作树另有先前的 `attention_v41.py::_start_prefill_x_gather_async` 去 `.contiguous()` 一行；它在两臂均存在，独立 reviewer 核对唯一调用方传入连续 send。曾试删 L2/L8/L14 CSA 异步状态快照；独立 B8 100K 的稳态中位 245.107→250.375 ms，无收益且可能破坏投影重叠，已撤回，不算作本候选。
+
+**逐层定位。** B8×100K、每请求实际 prefix=94208、fresh 约8192 的 rank0 profiler-on trace 中，L8/L14 源层 CPU scope 为16.664/17.253 ms、991/1035 个 CPU op；其紧邻消费层 L9/L15 为5.180/5.215 ms、各245个 CPU op。源层比消费层多出投影 packet、ratio=2 压缩状态、Global/Indexer 写池及池读回；CPU op 数不能直接换算为整批 RT。L8/L14 各有 7 次 `aten::cat`，合计 CPU 事件约0.24/0.23 ms；单独 GPU4 上同布局 8 段×1024 行×5120 BF16 的 cat CUDA-event 中位0.0353 ms，因此删除 cat 本身不是这轮的高收益方案。实际 zigzag packet 规划：B8 ratio=2 三包，rank0 本地片段数7/8/1；B32×32K 一包64片段，拼接是实数据搬运，不可简单删。DeepInfer 的 [`userbuffer.cp.all_gather`](https://github.com/deepseek-ai/DeepInfer/blob/main/deepinfer/model_executor/models/v4_modules/attn.py#L785) 在投影后启动通信并延后取结果；RTP 还必须在固定160 MiB通信预算内恢复 zigzag 全局行序，不能只替换 API。
+
+**L20 What/Where/When/Why/How。** 原阈值在 `CEDPlan.can_split_l20` 中仅看本批总 fresh 行数，不是内存/正确性约束。B8 盐化请求的总 fresh 为65534，刚低于门槛，L20 被迫先对完整 query 执行注意力、Indexer 选择和 FFN，再在 L21 compact；删门槛后，`prefill/forward.py::forward_layers` 调 `block.py::forward_prefill_ced_l20`，先由 `_prefill_produce` 按原顺序写完整 SWA/Global/Indexer 源池，再 compact 查询与 mHC/FFN 状态，最后对 compact 行做 `_prefill_query`。真实接口、FFN 再分块和 mHC 数值门禁仍保留；小形状不能满足时仍走 Stage0。旧阈值路径对照到纯 CED 候选的 B8 profiler-on L20 CPU op 从1373降到971，`topk` 16→2、`slice` 336→152、`as_strided` 568→306；这是工作量证据，非 profiler-off RT。
+
+| 无 profiler 负载 | Baseline 稳态中位（第3–5轮） | 纯 CED candidate 稳态中位 | 差值 | 原始记录 |
+| --- | ---: | ---: | ---: | --- |
+| B4×100K，92% prefix复用 | 129.270 ms | 120.262 ms | −9.008 ms | `state_sync_{baseline,ced_only}_20261103.json` |
+| B8×100K，92% prefix复用 | 245.107 ms | 228.574 ms | −16.533 ms | 同上 |
+
+两臂各轮请求全部完成，实际 prefix 命中逐项相同；一 token P-only 的 `output_ids=[0]` / 响应哈希相同只证明占位字段一致，不作为生成精度证明。纯候选在 B32/B64×32768 输入、prefix=31744 下三轮全部完成、每轮可用 KV 容量回到运行前值；没有相同旧阈值实例的 B32/B64 对照，不报这两组的收益。fresh=129/256/1024 且 prefix=94208 的单请求均完成。三个 timeline 的 L20 scope 均没有普通 `dsv4.fp8.attn.L20.prefill` 注解，而旧阈值路径有该注解；它们实际进入 L20 split。`dsv41.ced.compact` 外层范围总在 L21 出现，不能据其时间位置判定 Stage0；此前误判已更正。小形状因此新增数值与性能验证责任。源码合同测试 `test_ced` 71/71、`git diff --check` 通过。独立只读最终审查无明确正确性阻断项。P-only 结果不覆盖多输出真实生成：本机 TCP PD 的短请求通过，32800-token 长请求客户端180秒超时；长输入 E2E 精度、自然 MAL、峰值显存和长时稳定性仍未验，当前候选不得称生产验收通过。
+
+**接下来按单项推进（先单算子，后同请求整批，再 E2E）：**
+
+1. **L8/L14 ratio=2 源层状态**：CSA 旧状态必须在环写前读取。已撤回同步读替代异步快照；除非有新的同 rank 时序证据，不重复该方案。
+2. **L8/L14/L20 本地打包**：`_prefill_x_group_plan` 的纯 CPU 规划先前 B8/B32/B64 约41/150/293 µs；cat 单项上界本节已测。下一步按实际 packet 分布统计 BF16 pack、FP32 send 填充和 GEMM 的独立 CUDA 时间及 CPU 提交；若只有亚毫秒且 GPU 队列已覆盖，就不引入额外分支。
+3. **L8/L14/L20 投影与 CP gather**：分别测 GEMM→send、collective wait、全局序恢复，检查 L20 ratio=1 双 packet 与160 MiB上界。只有完整链有可暴露节省时才改；不能靠倍增 packet 预算换少一次 collective。
+4. **L8/L14/L20 压缩和写池**：`_produce_global` 已用 fused tile metadata；逐 tile 统计 ratio=2 pair/carry/state、ratio=1直接压缩、Global FP4和Indexer FP4写入的 launch、读写字节及 owner。优先删除未触发的旧门禁或重复物化，保持所有 prefix、跨 tile pair 和物理 slot 合同。
+5. **源池读回和 query**：核对 `prefill_pool_ready` 等待与输出投影是否暴露在关键路径；L8/L14 密集 Indexer/TopK 黑盒分块此前数值ID和性能均未达标，先搁置。L20 的 CED 路径在长 fresh 输入中减少完整 query 工作量；低行数风险见后续对照，当前保留原门槛。
+
+上述每项需明确 baseline/variant 的唯一差异、实际 dispatch、全准入 shape 的数值/内存边界；先跑单算子或单链否证，再使用同一输入做完整 batch Prefill engine RT，最后按变更风险补 E2E 精度、MAL 与稳定性。不要把 profiler-on scope、CPU op 数、P-only 占位输出和 PD TCP 超时混成同一结论。
+
+
+### 2026-11-03：复核 L20 提前拆分 65536 门槛并撤回删除试验
+
+**What / Where / When。** `prefill/ced.py::CEDPlan.can_split_l20` 原先用 `original_context.seq_len_full < 65536` 禁止 L20 提前拆分。该值是本 forward 全 batch 的 fresh 行数；prefix 长度不计入。低于门槛仍可在 L21 进行 CED，只是在 L20 保留完整 query 计算。门槛最早随 2026-10-09 的 V4.1 CED 迁移提交引入；提交和合入 PR 均未说明 65536 的依据。它可能是保护短输入的性能门槛，属于实测支持的推断，不是作者意图的已验证事实。
+
+**How / Why / 风险机制。** L20 split 先在所有 fresh 行上写 SWA、HCA 和 Indexer 源池，再 compact 查询与 mHC/FFN 状态，只对保留行做 L20 query；L21 则消费 compact 表。`can_split_l20` 的真实接口、compact FFN、mHC 支持门禁未删，因而删 65536 不会自动解除这些正确性门禁。但单请求 fresh=129 时 CED 需留最近 128 行，L20 query 只少算 1 行，同时增加行规划、交换、meta 重建等工作；小输入可能明显劣化。L20 全量源池写入、ratio=1 索引和末端 restore 的正确性与峰值显存仍需单独验证，不能从 P-only 成功推出 E2E 精度。
+
+**匹配实测。** GPU4–7 的同一 TP4/EP4/CP4 P 服务配置、checkpoint 和 Python 除门槛外相同；两臂每个请求 SHA256、实际输入及 prefix 复用行数相同。每形状三轮、无 profiler、完整 batch Prefill engine RT（ms）取中位数。Baseline 为 `can_split_l20` 保留门槛；candidate 只删除该门槛。B1 prefix=94208、fresh=129/256/1024；B64 无 prefix、每请求 fresh=512。原始逐轮值与请求哈希在 `rtp_llm_eval/runs/deepseek_v41/dense_tail_20261102/l20_threshold_risk_{baseline,candidate_retry}_20261103.json`。
+
+| 输入 | 保留门槛 | 删除门槛 | candidate-baseline |
+| --- | ---: | ---: | ---: |
+| B1 fresh 129 | 88.847 | 99.099 | +10.252 |
+| B1 fresh 256 | 88.320 | 101.457 | +13.137 |
+| B1 fresh 1024 | 89.528 | 146.639 | +57.111 |
+| B64 fresh 512/request | 129.009 | 126.379 | −2.630 |
+
+B1 fresh1024 的 candidate 三轮为150.259/118.630/146.639 ms，波动明显，57.111 ms 只视为该组三轮的中位差；129/256 的方向也同为回退。B64 的 2.630 ms 正向差值小，尚非稳健收益。candidate 小 fresh timeline 的 L20 缺少常规 `dsv4.fp8.attn.L20.prefill` 注解，说明实际进入 L20 split；`dsv41.ced.compact` 的 L21 范围不能辨认该分支。 两臂额外的 profiler-on 单请求 trace 在相同 fresh=129/1024、prefix=94208 下显示，L20 四 rank 的 CPU scope 为 baseline 5.959–6.380/5.735–6.247 ms，candidate 8.099–8.689/7.904–13.193 ms；scope 内 CPU op 数 baseline 均为436/438–442，candidate 为681–791/636–685。rank0 candidate L20 还出现新的 `nccl:all_to_all`，其 MoE 注解由 `deepgemm_mega_gate` 变成 `gate_linear_bf16`＋`mega_se_gate_pack`。这些是 split 引入交换与路由路径切换的直接证据；它们不能单独解释无 profiler 下完整 batch RT 的全部差值，也不能从注解判断数值是否一致。trace 路径见 `profile_{baseline,ced_only}_small{129,1024}_20261103.json`。
+
+**结论与后续。** 直接删除 65536 会在已验证的小 shape 上形成性能回退，故撤回该代码与相应测试改动。原门槛仍是粗糙的 batch 总行数启发式：B64×512 总 fresh=32768 可能略有收益，B1×1024 明显无益。下一步优先定位 L20 split 在小输入上的规划/交换固定开销，并比较实际 L20 full/compact 行数与 GPU 链时间；若不能用现有不变量简化，保留门槛，不再添加新的多条件 shape 准入分支。本次不宣称峰值显存、KV 容量、E2E 精度或自然 MAL 验收。
+
+
+### 2026-11-03：L20 门槛替代方案的固定开销否证与 DeepInfer 边界对照
+
+**What / When。** 此轮仅复核已有同 shape L20 Stage0 / 提前拆分 trace 和源码，不修改执行代码或启动服务。Stage0 指 L20 全行计算、L21 compact；提前拆分指 L20 全量写源池后 compact 查询/状态，再算 L20 query 与 FFN。两臂的 CED L21 消费域保持相同。DeepInfer 公共源码的 YoCo compact 在第一个 consumer 层边界切 metadata；consumer 层仍用 full hidden 写 main/index KV，再用 compact 查询。公开的 `off/mask/compact` 是部署模式，默认 `off`；没有在此路径看到 RTP 的 L20 65536 总 fresh 行门槛。DeepInfer 的 65536 benchmark batch 参数不能解释 RTP 的门槛。
+
+**Where / How。** RTP `_RowExchange.compact` 每次对一个张量 `index_select → all_to_all_single → [zero + index_copy]`；`CEDPlan.compact_l20` 依次处理 residual/post/comb/input_ids/pre_mix_out，Block 随后处理 x_pre/qr，`l20_query_metadata` 再处理 freqs_cis。这是 L20 提前拆分引入的八项交换调用，非一张物理张量的免费 view。`CEDPlan.router_projection` 设置 `gate._ced_row_projection`，以原始行的路由计算保持数值合同；`moe/mega_gate.py::can_use_mega_gate` 明确拒绝此状态，于是 L20 MoE 由 `deepgemm_mega_gate` 转为 `gate_linear_bf16` + `mega_se_gate_pack`。该回退是有意的数值门禁，不是删掉一两个条件就能安全恢复的融合。
+
+**Why / 现有 trace 的反证。** B1 prefix94208、fresh129 的 L20 四 rank CPU scope，Stage0 为5.959–6.380ms、436 CPU op；提前拆分为8.099–8.689ms、681–791 CPU op。fresh1024 时 Stage0 为5.735–6.247ms、438–442 op；提前拆分为7.904–13.193ms、636–685 op。提前拆分的 rank0 `nccl:all_to_all` CPU 注解和为 fresh129 的1.012ms、fresh1024 的0.301ms；该注解和既不含其他选行/构造/路由工作，也不是 GPU 通信或整批 RT 的严格上界。仅把交换调用数减少，不会消除 `gate._ced_row_projection` 所需的路由链。相反，B8×100K、92%复用的 rank0 L20 CPU scope，Stage0 21.160ms/1373 op，提前拆分16.381ms/971 op，说明长 fresh 的 L20 查询节省超过额外规划和交换。trace 在 `service_cp4/engine_log/cp4_singleton_20261102/timelines_raw/prefill/{baseline_small129,ced_only_small129,baseline_small1024,ced_only_small1024,state_sync_b8_v2,ced_only_b8}_20261103_wr*.json`。
+
+**决策。** “融合八次交换后直接取消65536门槛”尚无数值安全性或完整 batch 收益依据，且多 dtype 打包、拆包、额外缓冲会增加代码和峰值显存；本轮不实施。DeepInfer 式单一 L21 边界是最简洁的结构候选，但按已有同请求长输入 A/B，B4/B8 第3–5轮无 profiler engine RT 中位会从120.262/228.574ms回到129.270/245.107ms（约+9.008/+16.533ms）；这是本机 CP4 DSpark 条件的 tradeoff，不能外推所有 shape。若继续保留 L20 长输入收益，先单独攻克原始行路由数值合同与交换归并，并以各 shape、精度、峰值显存、KV 容量及 E2E 验收；不再用另一个无根据的总行数阈值替换65536。
+
+
+**同服务门槛邻域补证（2026-11-03）。** 在原门槛 P 服务 PID 1625404、GPU4–7 TP4/EP4/CP4 上，B8 无 prefix 两个相邻总 fresh 行数分别为 8×8191=65528 与 8×8192=65536，实际响应均为8/8完成、每请求 reuse=0。无 profiler 单轮完整 batch engine RT 为209.505/194.411ms；另用不同单 token suffix 保存四 rank profiler-on trace，对应 RT 为206.631/194.963ms。这两组相邻 shape 的文本不同且每臂仅一轮，不作为稳定加速 A/B。profiler-on 的 L20 scope 中，65528 行时四 rank 都有常规 `dsv4.fp8.attn.L20.prefill` 注解、无 `all_to_all`；65536 行时四 rank 都无常规注解、各出现8个 `nccl:all_to_all` 注解与 `gate_linear_bf16`，证实真实运行的准入切换。L20 CPU scope 分别为6.971–7.180ms/8.337–11.634ms，CPU op 各 rank 733/829–878。完整 batch RT 方向与 L20 CPU scope 方向相反，说明不能靠 CPU op 计数推断最终收益。原始请求/trace 索引为 `rtp_llm_eval/runs/deepseek_v41/dense_tail_20261102/l20_threshold_near_boundary_{short_no_prefix,profile}_20261103.json`。另一次试图构造 B8×100K、92%复用邻域的请求在 180s 客户端期限内未返回，记录 `l20_threshold_near_boundary_same_service_20261103.json` 为 INCOMPLETE；它不提供任何性能结论，服务随后检查 alive 且 idle。
+
+### 2026-11-03：L20 CED 行交换冗余布局调用
+
+**What / Where / When。** `prefill/ced.py::_RowExchange.compact/restore` 在 L20 CED 提前裁查询的 CP4 路径，对 `index_select(0, ...)` 的结果又调用 `.contiguous()`，再传给 `torch.distributed.all_to_all_single`。本轮仅删除这两处冗余调用；没有修改行索引、split size、collective 顺序、接收缓冲或现有准入门槛。
+
+**Why / How。** `index_select` 已生成独立、连续的新发送张量，后续 `.contiguous()` 返回同一对象，不产生新的拷贝 kernel；因此这项变更删掉的是每次行交换的 Python/ATen 调用与一处误导性的布局转换表述，并非 GPU 数据搬运。CPU 多形状/类型/非连续源的探针确认输出连续且 `.contiguous()` 返回原对象。四卡 NCCL 对 `L20` 单请求及混合批次 compact/restore 的实际 collective 验证四个 rank 全部通过；CPU `test_ced` 72/72 通过。原始 GPU 日志：`/tmp/validate_ced_index_select_nccl_20261103.log`。没有用这项改动推算整批 Prefill engine RT 或宣称 E2E 收益；驻留 P 服务尚未加载这两行改动。
+
+### 2026-11-03：`prefill_wr0_2.json` 小执行量空泡、cache 恢复与源层通信分析
+
+#### 证据、窗口与统计边界
+
+本节是只读分析及优化建议，未实施代码改动或启动新实验。原始附件：`/data0/ruixuan.zrx/.codex/attachments/14d2a87e-8f0b-4355-8092-df6d98b11eba/prefill_wr0_2.json`。trace 从北京时间 2026-11-03 17:57:20.323 起约 2.986 秒，记录 rank 0 / GPU 0，distributed world size=4；设备元数据为 SM100、NVIDIA L20A。分析容器为 `ruixuan.zrx_GPU`，当前选定工作树 HEAD 为 `b12d1b4f8fa150d169b464fe2f206ab1e1c2b394`、分支 `feature/dsv41-dev-main-202161013`，包含既有未提交修改。采集进程 PID 535681 已退出，不能核实当时加载的 Python/native 包 SHA；以下源码定位是当前工作树对执行机制的解释，不是采集版本一致性证明。
+
+窗口连续包含四次有请求的 Prefill。`prefill_stream_size` 是请求数，不是 CUDA stream 数；prefix 为已有前缀，execute 为本次新执行 token，均为事件所报的 batch 总量。
+
+| 请求数 | Prefix tokens | Execute tokens | Prefill 步骤 CPU 墙钟范围 | Target forward CPU 墙钟范围 |
+| --- | ---: | ---: | ---: | ---: |
+| 9 | 649216 | 26485 | 290.7 ms | 271.4 ms |
+| 8 | 521216 | 288730 | 994.1 ms | 845.6 ms |
+| 11 | 1526784 | 240141 | 894.7 ms | 771.9 ms |
+| 40 | 5516288 | 89369 | 460.3 ms | 426.0 ms |
+
+步骤依次包含 target forward、target sampling、DSpARK draft Prefill 和 cache-store publication。DSpARK draft Prefill 在此处用于提交 prompt-suffix feature KV，不代表执行了五轮 draft proposal；`mtp_step=5` 不能直接解释为该窗口的 proposal 次数。调用点见 `cpp/normal_engine/speculative/MtpExecutor.cc:1735,1841,1878`。
+
+整窗 GPU kernel、memcpy、memset 累加耗时为 **2151.9 ms**。排除 Q LoRA B/O projection 主 GEMM、mega attention、可识别 indexer 投影/logits/量化/RoPE/TopK/规划、MoE 主/Gate GEMM、LLM head GEMM，以及 mHC 后，剩余约 **440.7 ms / 20.5%**，其中其他计算及辅助工作约250.1 ms、NCCL 116.3 ms、memcpy 74.2 ms、memset 0.1 ms。保留 MoE pack/scale staging 和 Q LoRA B 前量化等辅助工作。`torch_ext::main_kernel<...>` 已由 `models_py/bindings/cuda/kernels/topk_v3.cu:123` 核实为 TopK，不能当作未归属小计算。此口径是设备活动累加值，包含跨流重叠与 NCCL peer wait，不是墙钟占比或可直接兑现的加速空间；CPU 提交、编译、等待开销另计。
+
+#### 问题一：BS=9、高 prefix 复用、低 execute token 的主机提交瓶颈
+
+**What / When。** BS=9 的 prefix 占总输入约96.1%，CP4 后每卡只执行约6.6K新 token。相对 trace 起点28.005–299.398 ms的 target forward 内，合并所有 GPU 流后活动区间仅94.5 ms，空闲176.9 ms，占该范围65.2%。空泡主要是大量短间隔累积，不是一个百毫秒同步点。
+
+**How / Why。** 逐个空泡用 correlation ID 关联下一 GPU 操作及其 runtime/driver 提交 API：约156.5 ms发生在下一操作的 API 开始之前；约20.3 ms发生在 API 开始之后，另有约0.04 ms窗口末尾空闲。前者直接支持“GPU 等主机提交”的判断，后者仍可能含 launch、流依赖及 peer 等待。该范围主线程有12431次 ATen 操作、3375次 CUDA runtime/driver 调用；API 活动并集约22.8 ms，不等于全部主机准备时间。
+
+ATen 中 `as_strided/view/slice` 分别3311/1927/1738次，`empty` 1350次，`record_stream` 329次；view 未必搬数据，但 Python、dispatcher、描述符遍历和多次通信提交仍逐个执行。大执行量时GPU backlog可能覆盖这些工作，小执行量时会暴露。源码入口为 `fp8/attention_v41.py::_prefill_sparse_attention:983`；`_mega_position_chunks:649`、`_prefill_chunk_meta:2207` 已有复用，不能把已有缓存能力描述为尚未实现。
+
+**优化顺序。**
+
+1. 优先删除每层重复构造：把本 forward/源层组不变的 chunk 描述符、workspace切片、view一次建好，继续核实哪些 `split/slice/empty` 真正重复，避免新增形状分支。
+2. 复用scratch与明确拥有者的tensor集合，减少临时分配、递归descriptor遍历和重复 `record_stream`；不能删除异步消费者仍需要的存储生命周期保护。
+3. 收缩连续norm/quant、metadata、pack的小操作提交链，优先使用已有融合入口。最后才评估不含通信的计算段CUDA Graph；动态池状态和collective不支持假定整段可直接捕获。
+
+**验收与边界。** 固定相同请求、prefix、execute长度与CP拓扑，比较ATen/API数、156.5 ms迟提交空泡及profiler关闭后的完整batch forward RT。176.9 ms只是观察到的空泡上界，不能承诺全部消除；单个view调用变少也不能证明模型级收益。
+
+#### 问题二：BS=11前置窗口、异步load与后台eviction风暴
+
+**What / When。** 从上一批之后的新step到本批embedding结束，117.2 ms应拆为以下三个范围，不能全部标为调度或load：
+
+| 相对时间 | 墙钟耗时 | 事件 |
+| --- | ---: | --- |
+| 1318.204–1338.391 ms | 20.2 ms | `engine.normal.schedule` |
+| 1338.391–1357.027 ms | 18.6 ms | execute、输入收集/同步、forward准备 |
+| 1357.027–1435.429 ms | 78.4 ms | `dsv4.prefill.embedding` |
+
+调度内部 `evaluateAndUpdateStreams` 约4.65 ms、`admitWaitingStreams` 约15.20 ms，后者包含多次请求级 `initKVBlock → KVCacheManager::malloc`。启动/完成状态推进见 `cpp/engine_base/stream/GenerateStateMachine.cc:55,118`；`StreamCacheResource.cc:244,563` 保存allocator async context并检查是否需要进入LOADING_CACHE。请求需完成自己的load后才能运行；其他请求的load与当前batch前向可以重叠。
+
+**后台工作证据。** 在1318.2–1435.4 ms中，出现135批device→host transfer、135次eviction结算；实际GPU记录3669次DtoH memcpy、约931.8 MB、累加18.8 ms；后台HtoD 913次、约877.1 MB、累加10.7 ms。这里同时存在请求恢复和设备缓存向host驱逐，不能把DtoH当作load本身。135批的CPU阶段范围及锁等待存在并行/嵌套，不可直接累加成前台延迟。
+
+**展示归属纠正。** `cache.transfer.*` 是异步timer记录后回填的区间。`cpp/utils/AsyncProfilingScope.h::AsyncProfileSession::finish:111` 输出名称和起止时间，不保存真实worker TID；`cpp/engine_base/TorchProfiler.cc:139` 在停止采集时统一report到Kineto。因此这些事件画在主线程轨道下方，不证明主线程同步执行了对应后台工作。当前展示不支持从垂直嵌套推导真实CPU调用树。
+
+**未证实的停顿原因。** embedding范围内主线程lookup与 `_expand_hc_kernel` 间缺少细分记录。`prefill/_hc_expand_triton.py:12,27` 以tokens为constexpr，第一次使用不同长度发生导入/JIT/cache加载是候选解释；CPU争用等也未排除。此前倾向归因为JIT仍不够充分，不能把78.4 ms确认为编译或load等待。另一个独立事件是第三次draft forward中240176字节pageable HtoD：主机 `cudaMemcpyAsync` 87.4 ms、实际GPU copy约0.005 ms，期间GPU仍执行此前target任务，反映提交端等待GPU backlog，不是带宽不足。
+
+**Where / How / Why。** `cpp/cache/block_tree_cache/transfer/TransferExecutor.cc:103` 按descriptor分批，随后展开多层/多平面copy tiles；`transfer/CrcTransferService.cc:144` 是CRC启用时的独立copy入口。`evict/BlockTreeEvictor.cc:452` 的完成回调重新拿共享树锁并结算，`:653` 的watermark逻辑继续推进后续批次，形成小批传输、回调与结算链。`load/BlockTreeLoader.cc:680` 在启用device cache的成功load后将缓存引用迁入device并移除来源层引用；若很快再次驱逐，可能需要重新搬出。但附件没有block/node ID，未证明这些DtoH与刚加载的块相同，不能把可能的往返确认为已观测thrashing。
+
+**优化顺序与验收。**
+
+1. 减少前台admission逐请求重复lookup、分配、树遍历和锁获取；区分必须等页可用的admission与可提前进行的lookup。验收20.2 ms调度及request load-to-ready，不能用后台阶段耗时和替代。
+2. 合并同方向/设备/布局的相邻tiles，复用地址长度数组，减少传输提交与完成结算次数；按字节量验证批次，CRC入口需独立确认。保持CRC、失败处理和GPU-ready语义。
+3. 平滑驱逐并限制在途background批数，预留device空闲页，减少load、eviction与前台对树锁/CPU/PCIe的竞争。已有load/background任务类别区分，先核实实际资源隔离，避免重复增加线程池。
+4. 用block/node身份补证恢复后再次驱逐；仅在证明往返后评估保留不可变host backing等所有权设计，并核算host容量、引用、失效与释放语义。
+5. 改善异步trace的worker归属和阶段关联，并补embedding停顿的编译/主机采样证据。观察性改进本身不算性能收益。
+
+分别报告调度、load-to-ready、实际字节/copy数、结算锁等待、驱逐流量和profiler-off TTFT/forward RT。单纯copy kernel变少不证明admission变快。
+
+#### 问题三：源层AllGather/Broadcast的用途、分块原因和隐藏位置
+
+| 通信链 | 内容与消费者 | 当前源码 |
+| --- | --- | --- |
+| 每层SWA AllGather | 当前CP分片的新SWA KV，供该层attention使用 | `fp8/attention.py::_prefill_compute_qkv:4447` |
+| 源层投影AG/Broadcast | owner上的FP32投影values/scores，供压缩器写main/index/state池 | `fp8/attention_v41.py::_prefill_projected_x_groups:145` |
+| owned-pool AllGather | 各rank拥有的压缩main/index KV行，供indexer和稀疏attention消费 | `fp8/_v41_owned_pool.py::_gather_planned:609,724` |
+
+**分块原因。** 投影packet按zigzag owner span组织；只有一个owner时broadcast，多owner时all-gather。broadcast避免非owner发送padding，不应直接替换成AG。投影send+gather有约160 MiB预算，压缩slab最多32768行；owned-pool另有scratch分组/分段预算。因此取消chunk或直接倍增预算会改变峰值显存及KV容量，不是无代价简化。
+
+**串行机制。** `attention_v41.py:184,194` 在当前packet投影之后启动通信，立即取回等待句柄；`:294–332` 让通信流等待compute，collective完成后让compute等待event，再restore/压缩、进入下一packet。`async_op=True`避免的主要是CPU阻塞，不会让下一packet投影自动越过这个GPU依赖。owned-pool已在独立indexer Q/weight投影前启动、消费前等待，但其内部仍按group执行pack→AG→restore；不能把已有overlap描述为完全关闭。还需保留Q/workspace别名、旧state快照及ratio=2跨tile carry的读写顺序。
+
+**优化顺序。**
+
+1. 对投影packet评估有界两槽流水：上一packet通信时提前提交下一packet独立owner投影，压缩仍按全局顺序消费。send/receive各槽需有明确所有权和event复用边界；只在实测暴露收益大于额外内存/调度成本时保留。
+2. 将等待推迟到真实消费者，优先提交不依赖通信结果的Q投影或metadata；不得跨越workspace覆盖和池写入依赖。owned-pool的pack/AG/restore也应检查相邻group可独立推进的部分。
+3. 在原容量合同内合并相邻owner span、减少collective次数，再比较大packet减少launch与小packet提早流水的权衡。所有rank必须采用相同group/segment边界及collective顺序，即使某rank没有有效行。
+
+**成本与验收。** 全窗AllGather累加98.5 ms、broadcast15.1 ms，包含所有相关链与peer等待，不等于源层可省时间。应对齐四rank的packet就绪、collective开始/结束、restore及消费者事件，验证下一packet投影确实与上一packet通信重叠，并报告consumer暴露等待、完整batch RT、额外scratch峰值和KV容量。单rank累计NCCL耗时不能证明网络瓶颈，也不能直接换算收益。
+
+#### 执行优先级与交付门禁
+
+先收缩BS=9的重复CPU构造/提交链，同时梳理cache驱逐风暴与传输/结算粒度；再对源层做有界packet流水。每个候选只改变一个机制，先用同shape单链否证，再做相同请求的profiler-off完整batch Prefill RT；源码简化、减少工作、隐藏等待和模型级收益分别报告。跨请求前缀、冷热cache、混合长短、CP padding、ratio=1/2、跨tile carry、所有权、峰值内存、精度及必要的E2E稳定性均需按变更范围验证。本节未产生任何候选实现或新增性能/精度验收结果。
+
+### 2026-11-03：在线源层通信第一步：删除重复 NCCL Work 等待
+
+**What / Where / When。** 对 CP4 target Prefill 源层投影 packet 的 `attention_v41.py::_wait_prefill_x_gather`，删除消费者流上的第二次 `Work.wait()`；`_start_prefill_x_gather_async` 仍在通信流中调用 `Work.wait()`，随后在同一流记录 completion event，消费者流仍 `wait_event`。这没有改变 owner、packet 切分、NCCL collective 顺序、send/receive 缓冲或 FP32 投影。原 `attention_v41.py` 去 `.contiguous()` 的既有未提交修改不属于本次变更。
+
+**Why / How。** 第一次 `Work.wait()` 将 NCCL 内部流工作加入通信流，completion event 排在其后；消费者 `wait_event` 已把数据就绪依赖加入当前流。再次在消费者流对同一 Work 调用 `wait()` 不增加读取正确性保障，却重复一次 C10d 提交。这个结论依赖现有 CUDA/NCCL stream-wait 语义；实际模型级 RT 收益尚未验证。代码简化仅删一行，无新 predicate、state、buffer 或 fallback。
+
+**验证。** `test_attention_v41_cp_raw_groups` CPU 2/2 通过；GPU4–7 四 rank NCCL 的 `test_b129_fresh257_cp4` 和 `test_mixed_and_long_cp4` 各通过，均覆盖 ratio=1/2、跨流读写、全局行序、精确投影及原 512 MiB 测试临时峰值界。本阶段初始验证尚未重启驻留 P 服务；后续模型级结果见下文“模型级验收”。
+
+**通信容量判断。** 默认 256 MiB owned-pool scratch 中，`_v41_owned_pool.py::plan_groups` 的 CP4 local cap 为 `floor(256 MiB / (356×5+16+16×4))=144320` 行。在线 BS40 的总历史 5605657 token 对 L20 ratio=1 至少需 10 组、对 ratio=2 至少需 5 组；trace 的 owned-pool AllGather 分别是 L20 13 次、L2/L8/L14 各 6 次。该下界只用总行数和 scratch 容量，不能解释额外组数的具体请求边界，也不能把减少组数换算为 RT 收益。先保留固定显存合同，不通过直接增大 scratch 追求更少 collective。
+
+**四 rank 微探针（2026-11-03）。** `/tmp/dsv41_source_wait_probe_20261103.py` 在 GPU4–7、2048×1024 FP32 send/8192×1024 receive、100次交错调用中，只计消费者侧 `wait_event` 加可选第二次 `Work.wait()` 的 CPU 调用范围：新路径四 rank 中位为1.152–1.263 µs，旧路径为2.690–2.904 µs，每 packet 约少1.5–1.7 µs。探针每轮同步并校验 AllGather 输出，但并非完整投影/压缩链，也不是在线 Prefill RT；按几十个packet算收益仍为亚毫秒级。若后续 profiler-off 整批 RT 无稳定差异，仅将其报告为冗余同步删除与代码简化，不夸大模型收益。
+
+### 2026-11-03：在线 BS9 空泡按 CUDA 提交归属再分层
+
+**What / How。** 对同一 `prefill_wr0_2.json` 的 BS9 target forward，以 rank0 所有 kernel/memcpy/memset 的活动并集求空档，用下一 GPU 事件的 correlation ID 找最早 CUDA runtime/driver API，再按该 API 的主线程时间归入 `forward(layer=N)`。全窗口 GPU 空档176.85ms，其中 API开始前156.54ms，复核文档前节数值。前API空档归属 L2/L8/L14/L20 分别11.27/9.00/8.54/10.70ms，共39.51ms；L24/L28/L32/L36分别6.42/5.50/5.64/5.65ms，共23.21ms；其他层与准备/收尾分散承担其余约93.82ms。归属表示下一操作由哪个CPU层提交，不表示该层独占前一GPU空档或可全部删除。
+
+**Where / Why。** BS9的四源层各有一次投影packet的owner重排；L2/L8/L14/L20的 `aten::slice` 输入 `[26512,1024/512]` 与 `[32768,1024/512]` 各73次，吻合每层约73个zigzag源段在 `attention_v41.py::_prefill_projected_x_groups` 中形成 `source_views` 并写入slab。两类slice的CPU op范围每源层合计约0.58–0.60ms，四层约2.4ms；Python list/descriptor开销尚未独立测得，不能把39.51ms全部归因于这146个slice。全forward的329次 `aten::record_stream` CPU op累计0.917ms，也不足以单独解释156.54ms空档。下一个BS9候选需先证明一整段重复构造在当前层路径可删除，不以个别view或record_stream数量推算模型收益。
+
+### 2026-11-03：源层重复等待的模型级验收与 BS9 下一步判定
+
+**E2E 精度与自然接受长度。** 选定工作树的 CP4 Prefill 服务（GPU4–7，TP4/EP4，DSpark/CED）在删除第二次 `Work.wait()` 后重新启动；Decode 服务在 GPU0–3。冻结的 B4 请求 SHA256 `53cf28515cf83622646e8c2999d41b54db89776cc8b194cadb28f7f50cfed02f`：每条约8300输入token、零prefix复用、自然拒绝采样、各输出256 token。旧进程与新进程均返回4/4 HTTP成功、`pd_sep=true`、零复用；四条输出 token 序列逐位相同。原生 `speculative_draft_rounds` 分别为82/67/77/60，`speculative_accepted_tokens_per_pos` 两臂逐项相同，按 `GenerateStream.cc:1401-1408` 的“每轮接受draft token”合同，MAL=1+接受draft数/rounds，四行分别为3.171/3.881/3.325/4.250，合并745个接受draft token、286轮，MAL=3.605；两臂逐项相同。原始记录：`/data0/ruixuan.zrx/rtp_llm_eval/runs/deepseek_v41/dense_tail_20261102/sourcewait_pd_baseline_20261103.json` 与 `sourcewait_pd_candidate_fresh_20261103.json`。一次候选请求恰逢 Decode 服务一小时强制重启，P→D连接失败；另一次候选的首行命中7168-token prefix，不属于同条件比较。两个失败/不匹配记录已保留，最终重启 Prefill 清除复用后才完成上述对照。
+
+**完整 batch Prefill engine RT。** 相同冻结请求及复用条件下，profiler关闭的 P 服务 B4/B8、100K输入且92%复用，正式轮中位数（ms）旧臂129.499/222.008，新臂130.220/222.219；B32/B64、32K输入且96.875%复用，旧臂136.121/240.467，新臂134.956/246.232。原始记录位于同目录 `b4b8_sourcewait_{baseline,candidate}_20261103.json` 与 `sourcewait_{baseline,candidate}_b32b64_20261103.json`。启动先后、GPU/allocator条件与波动下，没有稳定整批RT收益；这些数只支持删除重复同步造成的局部CPU工作及代码简化。E2E B4整体墙钟旧臂11450ms、新臂11425ms，包含传输与Decode，不是 Prefill收益。P 服务重启前后 `total_kv_cache` 由441680896变为约437416960，不是同一显存初态，不能据此证明容量不变；该改动不新增显式张量或buffer，但模型级峰值显存仍需同条件测量。
+
+**BS9 下一步。** 在线 BS9 的 L20 `forward(layer=20)` 主线程范围约19.96ms，`dsv41.prefill.pool.async_start` 约2.50ms，`aten::slice` 277次累计约1.26ms，`aten::topk` 7次累计约1.56ms（TopK路径已搁置）。四源层投影的146次相关slice/层约0.6ms/层，不足以解释39.5ms前API空泡；把它们替成另一套packet重排会增加所有权与容量复杂度，当前无收益证明。下一候选需先在同一BS9窗口定位 `pool.async_start` 及metadata/launcher的整段可删除重复工作，并证明CPU提交空档下降；不按单个view计数作性能承诺。缓存方面仅观察到BS11后台eviction风暴，未有block ID证明load后即evict，同轮不改缓存所有权或驱逐策略。
+
+### 2026-11-03：在线通信、BS9 主机提交、Cache 三专题复核与实验设计
+
+本节使用同一在线 rank0 `prefill_wr0_2.json` 的 correlation ID 将 C10d CPU 范围、CUDA launch 和 NCCL GPU kernel 配对；原始逐批清单为 `/data0/ruixuan.zrx/rtp_llm_eval/runs/deepseek_v41/dense_tail_20261102/source_packet_192m_20261103/online_comm_inventory.json`、`online_comm_kernels.json`。这是采样窗口的活动与归属，不把 CPU 范围、GPU kernel 累加或跨流重叠直接当作整批 RT 收益。
+
+#### A. 源层投影通信：分块次数、字节放大与暴露时间分开治理
+
+**What / Where / When。** L2/L8/L14 的 ratio=2 投影为每新 token 1024 个 FP32 元素，L20 ratio=1 为 512 个 FP32 元素。`attention_v41.py::_prefill_x_chunk_rows` 在 CP4 下以 160 MiB 的 send+receive 预算分别限定每 rank 8192/16384 行；`_prefill_x_group_plan` 还限定每个全局顺序 slab 32768 行。`_prefill_projected_x_groups` 每 packet 聚合本 rank 的 zigzag 源片、GEMM、执行一次 all-gather 或单 owner broadcast，再按全局行序拼回 slab；`_produce_global` 顺序消费 slab、维护 ratio=2 跨 slab carry/state 并写 Global/Indexer KV。SWA gather、源投影 exchange、owned-pool gather 是三次不同用途的通信，不能合算为源投影 packet。
+
+| 在线 batch（prefix / fresh） | L2/L8/L14 每层投影 packet（AG+BC） | 每层投影 receive extent | L20 投影 packet（AG+BC） | L20 receive extent | 后续 owned-pool gather（ratio2 / L20） |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| BS9（649216 / 26485） | 1（1+0） | 103.6 MiB | 1（1+0） | 51.8 MiB | 1 / 2 |
+| BS8（521216 / 288730） | 24（17+7） | 2159.2 MiB | 11（10+1） | 968.5 MiB | 1 / 2 |
+| BS11（1526784 / 240141） | 26（7+19） | 1474.6 MiB | 10（7+3） | 977.3 MiB | 2 / 5 |
+| BS40（5516288 / 89369） | 3（3+0） | 349.7 MiB | 3（3+0） | 179.7 MiB | 6 / 13 |
+
+纠正此前粗估：BS8 是 ratio2 **24** 次、L20 **11** 次，不是约25/12。BS8 ratio2 每层有效 FP32 行仅约1128 MiB，receive extent 2159 MiB，约1.91倍；L20有效约564 MiB，receive extent 968 MiB，约1.72倍。放大来自等长 AG 的 `max(owner rows) × 4` 和 packet 边界，不是 Global/Indexer KV 重复写。BS11 BC 多，说明单 owner 串行片也导致频繁 collective。BS40 的 owned-pool 次数反而更多；源投影不是所有在线大 batch 的主要通信次数来源。
+
+**可观测收益上界与失败实验。** BS8 的源投影 C10d CPU 累计 L2/L8/L14/L20 约4.34/3.51/3.26/1.52 ms，配对 NCCL GPU kernel 累计约5.93/6.50/6.39/2.67 ms；GPU kernel 累计跨流且可能等 peer，不能把约21.5 ms当作可兑现的模型加速。BS9 各源层仅一个投影 collective，配对 GPU 约0.09–0.17 ms；BS9 的主机空档不能靠减少这里的 packet 数解决。仅把固定预算 160→192 MiB，模拟平衡 BS8 ratio2 packet 16→10、receive extent 288760→329370 行（增14%），发送/接收额外峰值预算32 MiB；冻结 B8×36090 fresh 的 P-only profiler-off 完整 batch RT 中位数 876.507→881.921 ms（各五个正式轮次），容量记录437416960→437374976。该候选已回退，不能报告为收益。把 tile 切细后填满 packet 的规划实验也出现 receive extent 大增，故不按 packet 数独立选方案。
+
+**下一候选的具体机制与顺序。**
+
+1. 先在现有 packet 与 160 MiB 上做**整段成本分解**：逐 packet 记录有效 owner 行、等长填充行、AG/BC、投影 GEMM、重排 cat、NCCL API/设备时段、消费者 wait；在 BS8/BS11 取真实 per-request suffix 序列重放 planner。验收先看 `实际传输字节/有效字节`、累积 host 提交与 `wait_event` 后真正暴露的空档。若削减 packet 只增加填充字节或不能减少暴露时间，就停止此候选。
+2. 优先研究**固定容量、按 owner 有效行的变长交换**。每 packet 保留现有全局行序、32768 行 slab 与 160 MiB 上界；比较 NCCL P2P/`all_to_all_single` split-size 传输真实有效行与当前等长 AG 的完整「投影→交换→重排→压缩」链。必须四 rank 同序调用、处理零行 owner、尾 packet、B≤128 常见范围及 B≤1024 准入上界，且验证 NCCL/P2P 对 GPU 等待和 host launch 的新开销。若四方消息多于节省的 padding，放弃，不加运行时收益阈值分支。
+3. 仅在步骤2有端到端链收益时替换单一交换实现；ratio=2 的 pair/carry/state 必须保持跨 packet 和请求边界数值合同。L20 ratio=1 可单独研究「owner 本地生成最终 Global/Indexer 池记录再交换」以去掉 FP32 投影 wire，但要先证明 FP4 压缩、RoPE、索引写槽的所有权和跨 rank 缓存一致，且不能同时保留旧 FP32 wire 与新增全量临时池。不得直接把 DeepInfer 的整批 `userbuffer.cp.all_gather` 搬来：其 `BucketBuffer` 在会话内固定容量并以 getter 延迟等待，RTP 当前可准入 fresh 总行数更大、wire 为 FP32 且本环境 `deep_ep` 未导出 `BucketBuffer`。可借鉴的是通信先发、在 Q/SWA 投影期间重叠以及明确的 buffer/session 生命周期。
+
+#### B. BS9 主机提交：定位整段可删除工作，不以小算子计数替代因果
+
+**What / Where / When。** 在线 BS9 target forward 的 GPU 活动并集94.5 ms、空档176.85 ms，其中156.54 ms 位于下一 GPU 操作对应 CUDA API 开始前。四源层对应的下一提交前空档39.51 ms，reindex L24/L28/L32/L36 对应23.21 ms，其余层及边界分散93.82 ms。这是归属到下一提交点，不是各层 CPU exclusive time。四源层每层约73个 zigzag 源片形成约146次 `aten::slice`，CPU ATen 范围约0.58–0.60 ms/层；全forward 329次 `record_stream` 范围总计0.917 ms，均不能解释39.51 ms。L20 的 `pool.async_start` 范围约2.50 ms，且它会启动 owned-pool gather，不能无条件删除。
+
+**下一步单算子/调用链验证。** 针对 BS9 每 rank 约6628 fresh 行，按 `Block._forward_prefill_fast_fp8 → AttentionV41FP8._prefill_produce → _prefill_compute_qkv → _prefill_projected_x_groups → _produce_global → try_gather_prefill_pools` 对 4 个源层建立主线程 exclusive Python/ATen/CUDA API 火焰图，同时用关联事件确定 GPU backlog 是否已覆盖其 CPU 工作。优先测试一个**现有融合入口的完整链**：`attn_norm → quant → QKV`，而不是直接删 `can_fuse_prefill_attn_norm_input_quant` 的 `<32768` 门槛；该门槛源于 standalone wrapper 回退，真实完整链可能不同，但在 full-chain 基准、数值和整批 RT 前只作为假设。`PrefillWorkspace.attention_metadata` 和 `_mega_position_chunks` 已缓存，不能再报为待做缓存。对 73 段源片的 planner 只在 profile 确认 Python 构造为主成本后考虑组内 L2/L8/L14 共用不可变 metadata；不为不足1ms的 slice 单独增加跨层状态。验收是 API 前空档、CPU exclusive 区间、kernel count、profiler-off BS9 完整 batch RT 与数值同时变化；记录新增 predicate/state/interface 数，若只少几个 view 而空档不变即退役。
+
+#### C. Cache：区分驱逐批次、真实 copy 和同块往返
+
+**What / Where / When。** BS11 的117.2 ms前置窗口包含20.2 ms schedule（其中 admission 15.2 ms）、18.6 ms gather/execute准备及78.4 ms embedding。该窗口内135个 DtoH worker batch 共有3669个 descriptor，平均27.18个/批，实际3669次 DtoH memcpy约931.8 MB；另有913次 HtoD memcpy约877.1 MB。`TransferExecutor.cc:103-126` 已按 `max_descriptors_per_batch_` 执行；trace中许多批次含约30–32 descriptor，因此这不是“135个单块小批”。`BlockTreeEvictor.cc:452` 完成回调结算及`:638` watermark 再调度会获取树锁；completion lock-wait 135次、p95约1.12 ms，但异步 profile timer 被统一回填到 Kineto，显示轨道不等于真实主线程栈。trace缺 block/node ID，尚不能认定同块 HtoD→DtoH thrash。
+
+**优化方案与验收。** 先为该窗口建立 block/node 匿名稳定 ID 的 transfer 配对记录（request、方向、tier、发起/完成、字节、resident状态）及真实 worker TID/锁拥有者；只采样目标 batch，避免全服务记录开销。以同 ID 在短时间内 load 后 evict、再 load 作为 thrash 证据，并核对前台 `initKVBlock → KVCacheManager::malloc` 的锁等待。若证实同块往返，优先在已有 eviction 水位/准入策略中避免刚 load 的块立即作为候选，验证 hit率、容量、内存压力和恢复；若仅 completion 锁竞争，研究合并结算、缩短锁内操作；若 copy API 提交主导，才在相同方向/plane/相邻地址/CRC 合同下合并 tile。调高 descriptor batch cap最多减少 worker/回调批数，**不会消除3669次实际 copy**，不能先把它当解决方案。先单算子/可复现 cache 压力验证，再比较 BS11 schedule/admission、load-to-ready、PCIe/NVLink字节、实际 memcpy 数与完整 E2E RT；不以异步 timer 求和宣称加速。
+
+**候选状态。** 192 MiB packet 预算与「切细填满」已退役；三个专题的通信协议、BS9完整链及cache归因仍是方案/待测，不是已合入的性能优化。本次没有新增可执行代码路径；现有用户工作树中的 CED 与其他修改保持原状。
+
+### 2026-11-03：新目标的首个源层通信实现与失败候选
+
+**目标。** 在不随输入总行数增长的临时显存预算内简化 L2/L8/L14/L20 的 CP4 源投影通信及 CPU 提交。先优化实际传输、缓冲和调用链，再判定完整 batch Prefill engine RT；保持 zigzag 顺序、ratio=2 跨 tile carry/state、Global/Indexer KV 写入和数值合同。BS≤1024 为生产准入域，常见 BS≤128 优先。不可用更多复杂 shape 准入或收益阈值分支换取局部结果。
+
+**变长交换探针已否决。** `/tmp/dsv41_variable_exchange_probe_20261103.py` 在 GPU4–7 使用同一 8192×1024 FP32 packet 对比现有等长 AG 与按有效行发送的 grouped P2P；每形状20次计时，报告四 rank 各自中位数的最大值。平衡 4×8192 行：AG CPU/GPU 0.0298/0.2176ms、P2P 0.1130/0.3253ms；两 owner 各8192行：AG 0.0342/0.2188ms、P2P 0.0639/0.2680ms，尽管接收范围128→64MiB；单 owner：AG 0.0242/0.2140ms、P2P 0.0538/0.2019ms，但生产单 owner 已选 Broadcast。因此「去掉 AG padding 就改 P2P」不成立，不添加 P2P 运行时分支；该探针未包括投影/压缩，不能外推模型 RT。
+
+**已实施的单 owner 缓冲合并。** `attention_v41.py::_prefill_projected_x_groups` 的单 owner packet 让 Broadcast 直接就地使用 `send`，`_start_prefill_x_gather_async` 不再将 owner 的投影从 `send` 复制到独立 `exchanged`。多 owner AG 仍使用原独立 receive；两者 collective 顺序、payload dtype/数值、每包行序不变。原单 owner 每 packet 在所有 rank 多申请一个最多32MiB的 receive，owner 另做一次 DtoD copy；现省去这两项，新增 flag/state/fallback 为0。BS11 在线 ratio2 每源层有19个单 owner packet，故此改动触达该形状；BS9没有单 owner packet，不能声称解决其 CPU 空档。
+
+**单算子与模型边界。** `/tmp/dsv41_broadcast_alias_probe_20261103.py` 的 8192×1024 FP32 Broadcast（30次、四rank）owner0旧/新 CPU最大中位 0.0256/0.0163ms，GPU最大中位0.0821/0.0825ms；owner3为0.0211/0.0187ms、0.0829/0.0828ms。该微探针证明删除主机提交与重复缓冲，但GPU通信时长基本不变。CPU planner 2/2、真实四rank NCCL mixed+long/B129/wide+B1024/mixed+B1024 共4/4通过，覆盖 ratio1/2、跨流修改后重跑、精确 FP32 投影与小/大/零长度边界。P-only 冻结四条108272 fresh token、零复用、每条输出1 token的完整 batch engine RT，旧服务正式三轮 332.252/335.687/333.754ms（中位333.754）；新服务重启后正式三轮340.354/339.037/333.234ms（中位339.037）。新服务首轮4285ms是加载/JIT，未纳入正式比较；四条输出 ID 相同。当前不能报告模型RT加速；精度证据仅FP32投影精确测试和一token输出，完整E2E/MAL待后续组合验收。旧/新服务 `total_kv_cache` 约437416960/437408768，启动显存状态不同；32MiB是单 owner packet 的显式临时缓冲上界减少，不等于已测得模型峰值减少。原始请求及两臂结果在 `.../source_packet_192m_20261103/bc_alias_b1/`。
+
+**下一机制。** 现有源层 `_prefill_produce` 先完整执行 QKV，再惰性启动投影通信；DeepInfer 先启动投影 gather，随后 Q/SWA 投影，以掩盖一部分通信。下一算子候选是在现有160MiB与32768行界内，提前提交首个源 packet，待 QKV/SWA 后消费；必须先证明 stream/event、x 所有权、CSA旧状态、失败路径清理、首包与后续包顺序和额外同时存活的缓冲上界。若单算子全链与峰值显存不成立，不把异步状态机加进生产代码。
+
+**独立审查。** 一名只读 reviewer 对本次 Broadcast 缓冲合并未发现已确认的正确性阻断：单 owner 的 GEMM 写满 `packet_rows`，其他 rank 的 `send` 在广播后才读取；通信流等待生产流，NCCL Work 在完成事件前加入通信流，消费流再等待该事件。审查未覆盖既有 `.contiguous()` 与第二次 `Work.wait()` 的未提交改动。PD 精度/MAL、峰值显存及模型级性能收益仍未通过，不把这项局部简化标为整个新目标完成。
+
+### 2026-11-04：首包重叠实验与下一通信所有权设计
+
+**首包重叠的决定性探针。** `/tmp/dsv41_first_packet_overlap_probe_20261104.py` 在 GPU4–7 比较现有 `QKV代理GEMM→源投影/通信/恢复` 与用现有 `_v41_cp_async.launch` 把首个完整源 packet 提交到 CP 通信流、再执行 QKV代理GEMM。它使用生产的 FP32 packed projection GEMM、真实 `_prefill_projected_x_groups`、CP4 NCCL 与全局恢复，冻结 BF16 5120 输入和 ratio2 1024 宽 wire；不包含真实 CSA 压缩、Index 写池、MoE 或服务 CPU 调度。八次正式 CUDA-event、四 rank 中位最大值：BS9（9×2943 fresh）1.075→0.618ms，单请求108272 fresh 2.885→2.998ms，BS8（8×36090 fresh）3.944→4.117ms。BS9 局部可重叠，但另两形状无收益，且新实现须增加 Pending 生命周期、失败路径清理、异步输入保活和首包/后续包交接。当前**不实施首包异步状态机**；这个试验不能被算作模型 RT 收益，也不能证明整个源层通信不可优化。
+
+**为何继续追所有权，而非继续放大 packet。** 现路径 `attention_v41.py::_prefill_projected_x_groups` 先把本 rank 的 BF16 hidden 投影为 1024/512 宽 FP32，再以 AG/BC 让每 rank 得到全局顺序投影；`_produce_global` 在每 rank 都进行压缩与 FP4 写池，随后 `try_gather_prefill_pools` 又把 owned Global/Indexer 行聚回。前一道通信搬 FP32 投影，后一道通信搬已压缩记录，且前一道造成多 rank 重复压缩。L20 ratio1 每 token 独立压缩、无跨 token pair；理论上可由源 token 所在 rank 本地压缩，然后按 KV 物理页 owner 路由 288B Global 与68B Indexer 记录，接收 owner 按本地表写池，继续使用现有 owned-pool readback。仅按有效 payload 算，L20 FP32 源投影为2048B/token，最终双池记录为356B/token；BS8 288730 fresh 的有效 wire 从约564MiB对应的 FP32 行降为约98MiB记录，尚未计入 route metadata、对齐、AllToAll复制和额外暂存。这个数字是候选传输字节下界，不是实际总通信或收益。
+
+**必须先证明的合同。** `fp8/_v41_producer_metadata.py::_raw_slot` 以 `pos//OWNER % CP` 选物理 owner，接收 rank 才有自己的 pool/table slot。L20 可先验证「源 rank 按 CP local real rows 计算最终记录→附 request/absolute position 路由→物理 owner 写池」的 bounded 32768 行算子链；需要同源结果与当前 `compress_main`、`store_index` 的 FP4 payload/scale 在容许精度内一致，并对零有效行、256-token page 边界、prefix续算、B≤1024、乱序到达和四rank collective顺序做独立 oracle。必须核算 send/receive/metadata、持久池和后续 pool gather 的同时峰值，禁止先物化整批 FP32 再局部压缩。L2/L8/L14 ratio2 另有跨 tile/cp-owner 的 predecessor、carry 与 CSA_STATE；只有 L20 的局部链成立后，才设计边界状态交换，不将 L20 的独立行假设误用到 ratio2。
+
+**L20 路由几何与通信单算子（2026-11-04）。** `/tmp/dsv41_l20_local_route_geometry_20261104.py` 从 CP4 zigzag 位置和 `pos//256 %4` 页 owner 构造每个32768行 tile 的源→目的4×4矩阵；等长模拟 BS8（8×36090 fresh）有9个 tile、215808/288720行跨 rank，356B双池记录加8B逻辑行号约74.9MiB远端有效 payload、108条非空远端链路。单请求108272 fresh为4个 tile、约28.0MiB远端 payload。这个估算只计有效数据，不含 NCCL协议、pack和持久池。`/tmp/dsv41_l20_alltoall_probe_20261104.py` 使用每 tile 变长 `all_to_all_single`、每行364B、四卡20次正式计时：BS9 1 tile CPU/GPU最大中位0.028/0.060ms；单请求108272的4 tile为0.083/0.137ms；等长模拟BS8的9 tile为0.186/0.257ms。每 tile最大 send+receive scratch分别约4.7/11.5/6.1MiB；探针预先分配了所有 tile，**其进程实际峰值不是生产的固定容量证明**。当前 FP32源投影AG/BC与该算子并非同一数据/计算边界，不能用这些数宣称模型收益。
+
+**L20 本地数值与路由 oracle（2026-11-04）。** `/tmp/dsv41_l20_local_producer_oracle_20261104.py` 在四卡使用真实 packed BF16→FP32 native GEMM、`_v41_prefill_global.compress_main` 和 `store_index`，以32768全局行逐 tile 本地生产，再用364B记录（288B Global、64B Indexer payload、4B Indexer scale、8B逻辑行号）执行变长 AllToAll。BS9（9×2943，prefix各72135）与单请求108272 fresh（4 tile）中，本地 latent、index投影和最终两池记录均与全局 FP32 oracle逐字节相等；接收 rank 的每条记录按逻辑行号重新匹配也逐字节相等。初次错误地把 Indexer 池视为逐行68B连续记录，造成大量假差异；源代码 `_v41_prefill_global.py::_prefill_index_store_kernel:337-340` 证实池实际是 **64B payload平面 + 4B scale平面**，按正确布局打包后差异为0。探针以完整全局 oracle 常驻作为对照，其 rank0增量分块峰值 BS9约88.4MiB、单请求约180.9MiB；这不是生产全链峰值，且探针用CPU布尔选择构造局部行，尚未满足在线 CPU 提交合同。生产实现仍须用紧凑分段规划、固定两槽以内暂存、物理 slot 写入、异常清理和完整源投影→路由→压缩/写池→后续读池计时验证。
+
+**完整投影→压缩→路由链的 tile 反证（2026-11-04）。** `/tmp/dsv41_l20_full_chain_probe_20261104.py` 以相同 BF16 5120 输入和现有 packed FP32 GEMM、`compress_main`、`store_index` 比较：baseline 走当前源投影 AG/BC→全局顺序压缩；candidate 在源 rank 按固定 tile 压缩→把 Global 288B、Indexer payload64B、scale4B及逻辑行号8B打包→变长 AllToAll→按 owner 散到输出。四 rank 的 owned 行在 BS9、108272 fresh、等长 B8×36090 上均与 baseline 的最终 FP4 记录逐字节相等。CUDA event/CPU 时间均为五次热轮、四 rank 各自中位数的最大值；源 pool readback和真实服务其余层未计入，两臂仅是独立链，不是模型 RT。
+
+| candidate 全局 tile 行数 | 形状 | baseline CPU/GPU ms | candidate CPU/GPU ms | baseline/candidate 增量峰值 MiB |
+| ---: | --- | ---: | ---: | ---: |
+| 32768 | BS9 9×2943 | 0.878/0.902 | 0.582/0.674 | 141.6/88.2 |
+| 32768 | 单请求108272 | 1.946/2.009 | 1.704/1.741 | 222.9/344.0 |
+| 32768 | B8 8×36090 | 5.077/5.166 | 4.615/4.710 | 175.0/208.1 |
+| 16384 | BS9 | 0.795/0.840 | 0.957/0.986 | 141.6/79.5 |
+| 16384 | 单请求108272 | 1.530/1.805 | 1.918/2.336 | 222.9/271.8 |
+| 16384 | B8 | 4.200/4.358 | 6.976/7.021 | 175.0/203.6 |
+| 8192 | BS9 | 0.767/0.807 | 1.755/1.802 | 141.6/50.8 |
+| 8192 | 单请求108272 | 1.582/1.848 | 3.270/3.747 | 222.9/186.0 |
+| 8192 | B8 | 3.959/4.202 | 11.958/12.058 | 175.0/158.3 |
+
+数值是单次探针会话，不是带误差条的稳定收益；不同 tile 探针会话的 baseline 也随 GPU/allocator 状态变化，**只能在同一行内比较**。候选代码为临时外部原型，采用 `index_select`、三段 `torch.cat`/scatter 和每 tile 一次 AllToAll；它还没有固定大小的可复用分配，峰值“增量”不等于生产 KV 容量变化。32768 行的微小链收益伴随长输入约121MiB增量峰值；缩小 tile 后小算子与CPU提交把收益反转。结论是退役当前 Python打包原型，保留「源 rank 本地压缩再按 owner 路由」作为需要**融合记录打包、避免全行 `index_select`、明确固定 scratch 与物理 slot 写入**的设计方向。仅在融合后的完整链同时改善常见BS9、长单请求、B8并通过容量门禁时才进入生产代码；不得增加按shape切换新旧算法的运行时分支。
+
+### 2026-11-04：源投影单视图零拷贝与模型边界验收
+
+**What / Where / When。** 在线 BS8（8 请求、总 fresh 288730 行）在 L2/L8/L14 各有 10 次、L20 有 4 次 `_prefill_projected_x_groups` 本 rank 仅一个有效 BF16 源片，但原代码依然调用 `torch.cat(local_views)`，产生 `aten::_foreach_copy_`、新临时缓冲和主机调度。L2/L8/L14/L20 的源层 Prefill 都走该函数；输入由 `_prefill_x_group_plan` 已确认是连续 `[本rank行,5120]` BF16，单个行切片自身连续，native `cublas_gemm_bf16_bf16_fp32_packed` 仅读输入，后续压缩不原位修改该输入。现仅在 `len(local_views)==1` 时将该视图直接传给投影 GEMM；多片仍按原顺序 cat。没有新增状态、算法选择阈值或通信协议，单片路径少一次 BF16 DtoD copy 与临时分配，不改变 FP32 send、AG/BC、global slab、ratio2 carry/state 或写池。
+
+**单算子证据。** `/tmp/dsv41_single_view_gemm_probe_20261104.py` 在 GPU4 比较同一 native GEMM 的 `cat((view,))+GEMM` 和 `GEMM(view)`，每形状40轮；2424/5187/8192/16384 行的 CPU 中位 ms 分别 0.02499→0.01446、0.02752→0.01466、0.02414→0.01393、0.02369→0.01372，GPU ms 分别 0.04606→0.03627、0.07350→0.05189、0.09531→0.07269、0.18037→0.12923；显式额外 BF16 临时量分别 24/50.65/80/160 MiB→0。真实四 rank NCCL/packed GEMM 的 raw-groups、mixed+long、B129 fresh257、wide+B1024、mixed+B1024 六个测试全通过；这是算子/投影输出证据，不等同于模型精度或峰值显存验收。
+
+**冻结整批对照。** 两次服务均在 GPU4–7 用同一 CP4 DSpark Prefill 配置、同一新生成的六轮 B8×36090 fresh 输入，均确认每轮 8 请求聚成一个 batch、prefix reuse 全为0、全部完成、每请求输出1 token一致。修改前服务 PID1783777 于22:39:50启动，源码于23:02:26修改；重启后的候选 PID1805245 于23:07:10启动。首轮仅预热，正式5轮完整 batch Prefill engine RT：修改前 896.318/882.416/877.917/870.357/869.404 ms，中位877.917；候选 885.947/878.440/889.561/880.524/880.862 ms，中位880.862，约+0.3%。结果未显示模型RT收益，不能以单算子节省推断服务加速。两臂原始响应、prefix、finished、输出、状态位于 `/data0/ruixuan.zrx/rtp_llm_eval/runs/deepseek_v41/dense_tail_20261102/source_packet_192m_20261103/single_view_20261104/`；首次复用旧语料的尝试因一请求命中35840 prefix而判为 INCOMPLETE，未纳入比较。
+
+**剩余通信边界。** `send[counts[rank]:].zero_()` 看似额外小算子，但 AG 会传输每 rank 的等长 padding；删掉会发送未初始化的显存内容，当前不作为安全简化。`torch.cat(source_views,out=slab)` 是把各 owner 的有效行按全局 zigzag 顺序写入固定 32768 行消费 slab，不能因单视图优化而直接删除。通信 packet 次数及 BS9 主线程提交空档仍未解决；下一候选必须以完整链暴露等待和固定容量为依据，避免添加按 shape 选择的第二套路径。
+
+**DeepInfer 对照的精确边界。** 只读快照 `553741557a57df44a46fb3ab72b6aafeaf945337` 的 `v4_modules/attn.py:785` 在投影后立即调用 `_make_cp_gather_getter`，再执行 Q/SWA 投影；`parallel_utils/cp.py:17-54` 的 `BucketBuffer` 会话分配接收区并返回延迟 wait 的 getter。该结构减少 Python 按包规划、打包与提交，是明确的通信重叠/存储所有权模式；它仍有一次源投影 all-gather，不能笼统说成“没有通信小算子”。RTP 的总 fresh 行可远大于单个固定 bucket，因此直接把整批投影塞进一个 `all_gather` 会打破输入长度无关的临时显存合同；先前首包提前提交探针仅在 BS9 局部有益，单请求长输入和 B8 退化，故没有引入新的异步状态机。
+
+### 2026-11-04：L20 本地 FP4 路由融合探针及 CPU 规划反证
+
+**具体改进的边界。** L20 ratio=1 的每 token 压缩互不依赖。独立探针 `/tmp/dsv41_l20_fused_route_probe_20261104.py` 在源 rank 用原生 BF16→FP32 GEMM、生产 `compress_main`/`store_index` 生成 FP4 Global 288B 和 Indexer 64B payload+4B scale，Triton 把两池记录和逻辑行号融合打包为364B，再做 CP4 `all_to_all_single`，接收后用一个 Triton kernel 散到目标 owner 的记录数组。原 Python 原型的 `index_select` 被连续 BF16 源片视图或必要的多片 `cat` 替代。输出行号、源位置、目的页仍来自原型预先计算的路由计划；本段数字只是完整投影→压缩→交换→散写的单算子链，**没有**包含生产物理页写槽、后续 owned-pool gather、模型其余层或每次请求的 CPU 计划构造。
+
+| 32768 行 tile，四卡热轮最大中位 | 原链 CPU/GPU ms | 融合链 CPU/GPU ms | 原链/融合链增量峰值 MiB |
+| --- | ---: | ---: | ---: |
+| BS9×2943，prefix 72135 | 0.741/0.766 | 0.512/0.557 | 141.6/88.0 |
+| 单请求108272 fresh | 1.613/1.639 | 1.132/1.186 | 210.5/91.1 |
+| B8×36090 fresh | 4.277/4.375 | 2.902/3.006 | 175.0/204.3 |
+| B128×257 fresh | 3.994/4.012 | 1.024/1.115 | 162.6/106.7 |
+| B1024×257 fresh | 31.777/31.795 | 4.591/4.618 | 170.5/180.4 |
+
+每行原链和融合链在同一四卡会话比较，FP4 Global/Indexer 所有 owner 行逐字节相同。长单请求原型用全行 `index_select` 时融合链峰值335.1MiB；改用连续源片视图后降为91.1MiB。B8 仍比原链高约29MiB。16384 tile 在 B8 的融合链 CPU/GPU 6.272/6.389ms，对应原链4.626/4.713ms；缩 tile 导致更多小算子/collective，不能靠减小 tile 保证性能。
+
+**把计划计入后的结果。** 上表预先计算 route，不能作为服务优化收益。按 zigzag 半段与256-token页边界生成 `(源行, 全局行, 绝对位置, 目的rank)` 的朴素 CPU plan，在 B128/B1024 分别花约71/149ms。改为按全局 tile 与源半段求交、用闭式公式计算每个目的rank的页覆盖行数，纯 Python 计划在 BS9/长单请求/B8/B128/B1024 分别约0.52/0.12/0.55/11.35/37.35ms；其 CPU 结果与逐 token oracle 的行号、位置、目的rank、split sizes 完全相同。一次上传所有紧凑描述符、由 Triton 生成每行位置和发送槽位后，包含每 forward 的计划与上传的完整链如下：
+
+| 形状 | 原链 CPU/GPU ms | 新链含计划 CPU/GPU ms | 结论 |
+| --- | ---: | ---: | --- |
+| BS9 | 0.721/0.752 | 0.961/0.992 | 回退 |
+| 单请求108272 | 1.550/1.765 | 1.360/1.520 | 局部改善 |
+| B8×36090 | 4.431/4.617 | 3.669/3.696 | 局部改善 |
+| B128×257 | 4.102/4.122 | 6.068/6.096 | 回退 |
+| B1024×257 | 28.360/28.380 | 46.728/46.814 | 明显回退 |
+
+这些仍是合成权重/输入的四卡探针，输出记录精确；不同表来自不同会话，不跨表计算加速比。`numpy` 向量化计划使 B128/B1024 的计划约2.06/20.71ms，但 BS9/B8 约1.06/1.52ms，且没有补上生产物理槽写入。**结论：不把这条 Python AllToAll 路由加入生产，也不按 batch 阈值保留两套算法。** 下一可行前提是把 route 几何/计数压到已有 C++ Gatherer 或固定容量 GPU metadata 内，并证明 split sizes 不造成设备到主机同步；在完整生产 pool readback、各合理 shape、峰值/KV容量和模型 RT 前，它只是研究候选。当前生产代码保留现有固定预算 FP32 projected exchange 与已经独立验证的单视图冗余拷贝消除。
+
+### 2026-11-04：源投影 AllGather 就地缓冲
+
+**What / Where / When。** `attention_v41.py::_prefill_projected_x_groups` 在 L2/L8/L14 ratio=2 及 L20 ratio=1 的 CP 源层 Prefill，把本 rank 的 packed BF16 投影直接写入 AllGather 接收缓冲的 rank 对应切片；单 owner 的 Broadcast 仍直接写入它自己的接收缓冲。`_start_prefill_x_gather_async` 在通信流上提交原有 collective，并保留 Work、完成 event 与消费者流等待。NCCL 的 AllGather 接口明确允许 send buffer 指向 receive buffer 中本 rank 的区间（[NVIDIA 文档](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/api/colls.html)）。此处没有改变 packet 规划、collective 顺序、FP32 wire、全局行重排、32768 行消费 slab 或 Global/Indexer 写池。
+
+**Why / How。** 原多 owner packet 分配最多 32 MiB 的 FP32 `send` 和 128 MiB 的 `exchanged`（CP4 ratio=2 packet 为8192×1024；ratio=1为16384×512）。GEMM 现写入 `exchanged[rank*packet_rows:(rank+1)*packet_rows]`，尾部 padding 在原位清零；AllGather 从该视图读取并填满整个 `exchanged`。显式 packet 缓冲上界由160降至128 MiB，与总 fresh 行数无关；这只是当前 packet 的缓冲节省，不等于实测模型峰值显存节省。少一次 `torch.empty`，多一个零拷贝 view；NCCL 传输字节、packet 次数和 CPU planner 工作不变。单 owner Broadcast 别名及单片 BF16 `cat` 消除已在前两节记录，均属于同一目标的任务 diff。
+
+**单算子与边界验证。** `/tmp/dsv41_inplace_ag_probe_20261104.py` 在 GPU4–7 对 1/777/8192/16384 行、512/1024 宽的四 rank NCCL 输出做逐元素精确比较，全部相等。8192×1024 FP32 的独立 send/receive 与就地方式，20轮 GPU 最大 rank 中位数为0.23936/0.24107ms，探针增量峰值192/160 MiB（包含 NCCL 内部常驻/临时量）；16384×512 为0.23219/0.24882ms，同样少32 MiB。通信算子未显示延迟收益。现有 `test_attention_v41_cp_raw_groups.py` 加入 send 指针等于 receive 的 rank 切片地址断言；CPU planner 与真实四 rank NCCL mixed、B129、wide+B1024、mixed+B1024 共6个测试通过，覆盖 packed GEMM、AG/BC、零行 owner、ratio1/2 和不同 packet 边界。`git diff --check` 通过。
+
+**完整 batch Prefill RT。** GPU4–7 同配置 P-only CP4 DSpark、同一冻结的 B8×36090 fresh 输入、每轮8条请求且无 prefix reuse、每条输出1 token一致。旧进程先于修改启动；新进程修改后启动。两臂都取同一请求文件的 j2–j5 四个热轮：旧 engine RT 为875.922/879.078/882.747/889.676ms，中位880.9125ms；新为888.126/880.089/878.773/881.979ms，中位881.034ms。差0.1215ms，属中性观察，**不报告模型级加速**。原始响应在 `/data0/ruixuan.zrx/rtp_llm_eval/runs/deepseek_v41/dense_tail_20261102/source_packet_192m_20261103/ag_inplace_20261104/`；新服务启动期间的首次请求与预热交叠而未纳入正式对比。
+
+**其他输入与 E2E 边界。** 新进程的 B32/B64、每请求32768输入且31744 prefix reuse 各完成3轮：B32 engine 最大值中位135.593ms，B64为245.389ms，全部请求完成，测试前后 KV 容量均437426176 token。历史 B32/B64 文件属于不同源码/服务状态，不能作匹配收益对照。PD 分离短请求经 P frontend 进入 P→D，`pd_sep=true`，7输入 token、2输出 token，3.07s 完成；另一个16384输入、15360 prefix reuse、2输出 token 请求也经 P→D 成功，12.07s 完成。同样16384输入、15360复用的256输出 token 请求完成，13.92s；该请求证明长 Decode 阶段可以运行，未与旧版作输出或 MAL 比较。32800输入 token 的长请求卡在本机 TCP 传输，已停止客户端等待，PD 结果为 INCOMPLETE。第一次误把 D backend 作为前端请求，返回 `GenerateStreamCall` 未实现的 HTTP500；这是请求路由错误，不是模型错误。尚未测得这一步的服务峰值显存、完整 E2E 精度/MAL、32K 长请求 PD 及生产 RDMA 表现。
+
+**决定与下一点。** 保留 AllGather 就地缓冲作为无新准入分支的容量/代码简化；它未解决 BS9 的 CPU 提交空档，也未缩短长输入的 packet 数。继续按真实在线 shape 分解每个 packet 的 GEMM、collective、恢复与消费者暴露等待，并只在完整链收益与容量同时成立时修改通信粒度。L20 本地 FP4 AllToAll 的 Python route 原型已被上述「计划计入后」实验否决，不重新引入 shape 阈值路径。
+
+**简化与独立审查。** 在上述验证后，按 `code-simplifier` 对确切任务 diff 做了一次约束检查：没有可高置信度删除的任务新增状态、开关或分支；未改动无关的 `ced.py` 和 `stub_source`。一名全新只读 reviewer 对 `attention_v41.py` 和 raw-groups 测试相对当前 HEAD 的补丁未发现确定性阻断：四 rank 在零行 owner 下仍按共同 packet 计划发 collective，AG send 精确别名本 rank receive 切片，BC owner 使用整个 receive，producer stream→NCCL→completion event→consumer stream 的顺序保持，单片 BF16 视图满足 native GEMM 连续输入要求。该 review 未重新运行 GPU 测试，不能替代尚缺的模型精度、峰值显存、RDMA 或长时稳定性证据。
+
+### 2026-11-04：L20 交换 FP4 记录的等长 AllGather 探针
+
+**机制和适用范围。** 与上文需要按物理页 owner 规划 split sizes 的 AllToAll 不同，`/tmp/dsv41_l20_record_ag_probe_20261104.py` 让 L20 ratio=1 在源 rank 用真实 packed GEMM、`compress_main`、`store_index` 生成 FP4 Global 288B 和 Indexer 68B，再把每条记录连同8B全局行号（共364B）按固定32768全局行 tile 做 CP4 等长 AllGather。每个 rank 收到完整记录后按行号恢复全局顺序。相对当前 FP32 投影 wire 的2048B/token，记录 wire 有效部分为364B/token；等长 padding、打包/解包与元数据上传仍计入实际成本。此实验只涵盖 L20 的独立行数学，**不能直接推广到 L2/L8/L14 的跨 tile pair/state**。
+
+**探针修正。** 最初长单请求比较报 CUDA illegal access，是探针将全局槽号误作 tile 内 `boundary_indices`；已改为 tile 内0起索引。最初 B1024 回退由每个源片单独创建 `torch.arange` 的大量小算子造成，已换为每 tile 一次描述符上传及一个 Triton 行号 kernel。合并同一 rank 内源地址和全局行号均相邻的片段后，长单请求也免去不必要的 BF16 `cat`。只有以下最终探针记录可用于判断；早期错误/失真的运行不计入。
+
+| 四卡五轮热态，完整投影→压缩→交换→恢复链 | 当前 FP32 交换 CPU/GPU ms | FP4 记录 AG CPU/GPU ms | 当前/候选增量峰值 MiB |
+| --- | ---: | ---: | ---: |
+| BS9×2943，prefix72135 | 0.847/0.870 | 0.789/0.822 | 180.7/91.6 |
+| 单请求108272 fresh | 1.772/1.825 | 2.034/2.065 | 242.5/119.5 |
+| B8×36090 fresh | 4.696/4.780 | 5.165/5.208 | 263.1/213.3 |
+| B128×257 fresh | 4.313/4.347 | 2.952/2.983 | 212.2/116.3 |
+| B1024×257 fresh | 31.021/31.094 | 28.377/28.423 | 253.0/199.6 |
+
+所有形状、四 rank 的最终 Global/Indexer FP4 记录与原链逐字节一致。表中 CPU 是 Python 调用墙时钟，GPU 是该链的 CUDA event；每行同一运行配对，尚无模型级结果。候选 scratch 按 tile 有界，但此探针把完整输出池当作 oracle 张量，没有实现生产物理页写槽、后续 owned-pool readback、跨层共享或服务显存容量。长单请求和 B8 的完整链反而慢约0.24/0.43ms；因此**不把此协议接入生产代码，也不加按 batch 阈值切换**。一个明确发现是源片相邻时多次 `torch.cat`/小元数据算子会吞掉降低 wire 字节数的收益；下一步优先在现有生产投影链删除可证明冗余的 BF16 源片合并拷贝，再重新看通信临界路径。
+
+### 2026-11-04：在现有源投影链消除相邻 BF16 源片拷贝
+
+**What / Where / When。** `attention_v41.py::_prefill_projected_x_groups` 在 CP4 target Prefill 的 L2/L8/L14/L20，为每个 packet 收集当前 rank 的 BF16 源片。原实现仅在恰好一个源片时避免 `torch.cat`；即使多个源片的输入行地址连续，仍建多个 tensor view、分配 BF16 打包缓冲并复制，再送入只读的 packed GEMM。现用整数 `(source, rows)` 检查相邻，连续时给 GEMM 一个 `x[start:start+local_rows]` 视图；不连续时仍按原序 `cat`。这是已有「直接视图或打包」判定的扩展，没有新开关、shape 阈值、通信协议、FP32 wire、Global/Indexer 写池或跨 tile ratio2 状态变化。
+
+**Why / How。** `_prefill_x_group_plan` 逐请求按 zigzag 生成片段，同一 rank 的若干连续请求片段可恰好拼成一个物理连续区间。CPU 计划模拟的 BS9×2943、B128×257、B1024×257 在 ratio1/2 均出现这种片段；B32/B64 每请求1024 fresh 的 packet 中，四 rank 的连续源片分别覆盖32768/65536行。单算子 `/tmp/dsv41_adjacent_pack_probe_20261104.py` 对一个 BS9、18片、6624行的真实计划几何：1024宽旧 `cat+GEMM` CPU/GPU中位0.0433/0.0952ms，直接视图+GEMM为0.0115/0.0578ms，少64.7MiB BF16 临时拷贝；B128、248片、8184行的1024宽为0.3418/0.3698→0.0109/0.0685ms，少79.9MiB。这是单 packet 局部机制，不是模型收益；探针两臂 GEMM FP32 输出逐元素相等。新的 CPU 测试断言相邻多片 GEMM 输入直接别名原 `x`；CPU测试3/3、四卡真实 NCCL测试4/4通过，包含 mixed/long、B129、wide+B1024、mixed+B1024，`git diff --check`通过。
+
+**完整 batch 边界。** 同一 P-only CP4 DSpark 配置、同一冻结 B32/B64 32K输入且31744 prefix reuse 的请求文件，旧 P 进程 PID1832138 加载修改前代码，正式三轮 engine RT：B32 133.487/133.050/134.529ms（中位133.487），B64 239.332/238.931/239.257ms（中位239.257）；重启后新 P 进程 PID1867140 加载修改后代码，三轮 B32 152.942/135.218/133.432ms（中位135.218），B64 252.211/245.106/239.760ms（中位245.106）。所有请求完成、复用长度正确；候选明显呈逐轮降温，末轮分别接近旧中位，故**不能报告稳定模型收益或确定性回退**。旧/新进程 KV 容量437426176/436858880 token；代码本身删除临时拷贝，但启动环境/allocator状态不同，容量差不能归因于这一改动，也不能宣称容量门禁通过。B8×36090 fresh、零复用、同一请求文件旧中位881.034ms、新中位882.082ms，四个配对正式轮的输出 token ID 均相同，符合无相邻片可省时的中性预期。原始结果分别在 `.../source_packet_192m_20261103/adjacent_spans_baseline_20261104.json`、`adjacent_spans_candidate_20261104.json` 和 `.../ag_inplace_20261104/adjacent_spans_b8_candidate.json`。
+
+**补充热态轮次。** 为剔除新进程前几轮降温，仍在同一候选 PID1867140 上又运行相同的 B32/B64 请求及前缀构建：B32 133.322/135.158/132.789ms（中位133.322），B64 241.086/239.035/242.026ms（中位241.086），容量稳定436858880，全部请求完成；原始数据为 `.../source_packet_192m_20261103/adjacent_spans_candidate_warm_20261104.json`。与旧进程中位分别相差−0.165/+1.829ms，仍属模型RT中性观察，不能据此宣布稳定收益。
+
+**E2E 烟测与独立审查。** 新 P 进程 PID1867140 经 P frontend 完成一次16K fresh、256输出 token 的 PD 分离请求，`pd_sep=true`、`reuse_len=0`、全部输出完成；原始响应在 `.../ag_inplace_20261104/adjacent_spans_pd_16k_256_candidate.json`。这没有旧版配对输出或 MAL 分布，不能作精度验收。一名全新只读 reviewer 核查两文件任务 diff、全局 zigzag 计划、相邻/非相邻 BF16 源片、AG/BC 缓冲别名、padding、NCCL Work/event 顺序及 B≤1024 测试覆盖，未发现确定性阻断；没有代跑 GPU。`git diff --check`通过。`black` 在当前 `/opt/conda310/bin/python3` 中未安装，未以此作为检查通过项。
+
+**状态。** 当前实现作为减少明确冗余 BF16 拷贝的候选保留；代码简化检查删掉了已无 tensor 引用生命周期作用的 `del local_spans`，没有再加策略层。其配对模型精度/MAL、同启动条件的峰值显存和 KV 容量、混合长度 E2E 及生产 RDMA 尚未完成，不标为整个源层通信目标已验收。
+
+### 2026-11-04：通信缓冲复用和 BF16 wire 反证
+
+**缓冲复用。** 在 `attention_v41.py::_prefill_projected_x_groups` 暂时把每 packet 的 `exchanged=torch.empty` 改为每源层一个固定上界 FP32 scratch 切片，以减少主机分配。四 rank 真实 NCCL、同一投影与恢复链的七次热轮对照见 `/tmp/dsv41_scratch_reuse_probe_20261104.py` 和 `/tmp/dsv41_scratch_reuse_probe_20261104.json`；探针将旧/新两臂实现固定在脚本内，以免回退源码后把同一函数误作两臂。BS9、1024宽，per-packet→scratch 的 CPU/GPU 最大 rank 中位为 0.445/0.475→0.427/0.474 ms；B128×257 为3.557/3.581→3.558/3.601 ms。B8×36090、512宽为1.757/2.100→1.698/2.033 ms，但增量峰值222.6→280.1 MiB；长单请求108272、512宽为0.610/1.075→0.616/1.061 ms，峰值169.7→192 MiB。B1024×257、512宽为25.881/26.341→25.574/25.600 ms，峰值203.8→265.8 MiB。原因是固定 scratch 按 packet 上限预留，而不少真实 packet 的最大 owner 行数远小于上限；单次少量主机分配不能抵消显存容量风险。**该改动与其地址复用断言已回退**；保留按实际 packet 大小分配的既有实现，不添加动态扩容分支。各数是独立投影/通信算子链，不是完整 batch RT。
+
+**BF16 wire。** 另一个仅在外部探针 `/tmp/dsv41_bf16_wire_probe_20261104.py` 中试验的候选，把现有 packed GEMM 的 FP32 输出逐 packet cast 为 BF16、用 BF16 NCCL wire、恢复 slab 时再 upcast FP32。单 owner BC 必须让发送与接收别名；初版探针未遵守此合同，得到的异常数值无效。修正后 B8 ratio1/2 投影恢复的最大绝对误差为0.015625、平均绝对误差约0.0017；B8 ratio1 CPU/GPU由 FP32 wire 的1.768/2.028 ms 变为 BF16 wire 的2.406/2.557 ms，ratio2由3.506/3.651变为3.263/3.437 ms。按现有 C++ packed GEMM 固定 FP32 输出，cast 与 upcast 增加额外小算子和内存流量，且不同形状收益不一致；此候选**未进入生产代码**。直接产出 BF16 的 native GEMM 是另一个涉及 ABI/精度合同的课题，尚未验证，不能把此探针外推为可行收益。
+
+**下一项。** 对在线 BS8/BS11 逐 packet 记录有效/填充行、GEMM、NCCL、恢复与 consumer wait 的暴露时间；只在完整投影→通信→压缩链证明确实减少关键路径、显存上界与 KV 容量同时成立时改变通信协议。BS9 仅一个源投影 collective，不能靠合并 packet 解决其主机空档。
+
+**当前候选回归。** 撤回 scratch 后，CPU planner/alias 测试3/3、GPU4–7真实四 rank NCCL 测试4/4再次通过。驻留 CP4 Prefill PID1867140 与 Decode 服务均健康；相同冻结 B4、每条约8300 fresh token、无 prefix、自然 DSpark 采样、各输出256 token 的 PD 请求再次4/4完成。请求 SHA256 与 `sourcewait_pd_baseline_20261103.json` 一致，四条完整输出 ID 和逐位置接受计数完全一致，合并 MAL=3.605；候选原始记录在 `.../source_packet_192m_20261103/ag_inplace_20261104/source_current_pd_b4_256_20261104.json`。这补充当前驻留版本的功能/接受长度证据；当前版本尚无严格同显存初态的峰值和 KV 容量 A/B，也无生产 RDMA 环境的独立 E2E 验收。
+
+### 2026-11-04：短输入源层恢复 slab 按实际行数分配
+
+**What / Where / When。** `attention_v41.py::_prefill_projected_x_groups` 的全局顺序 FP32 恢复 slab 原来每源层固定分配32768行，CP4 target Prefill 的 L2/L8/L14/L20 即使本次总 fresh 行数更少也是如此。现用 `min(cp_ctx.seq_len_full, 32768)` 作为 slab 行数；既有 `_prefill_x_group_plan` 已校验所有 packet 合计等于 `seq_len_full`，故没有越界。这里不变更 packet 大小、NCCL次数、Global/Indexer 写入、ratio2 carry 或模型数值路径；没有新增状态、开关与 shape fallback。
+
+**Why / How。** 一个单请求1024 fresh 行在 ratio2 的1024宽源层，slab 显式分配由128 MiB降至4 MiB；在线 BS9约26485 fresh 行由128 MiB降至约103.5 MiB。长输入仍为128 MiB上界。短输入最后一个 `yield` 只暴露实际 `filled` 行；全量32768行的输出行为保持原样。CPU测试在5行案例检查实际底层 storage 字节数，3/3通过；修改后的四 rank NCCL mixed/long、B129、wide+B1024、mixed+B1024 测试4/4通过，`git diff --check`通过。上述是显式 slab 容量推导与算子合同验证，尚不是服务级峰值显存、KV容量或完整 batch RT 结论。驻留 PID1867140 在修改前启动，未加载本项；其前述PD结果只适用于修改前的候选代码。
+
+**服务加载后补验。** 任务自有 Prefill 服务轮换至 PID1904842（GPU4–7），四个模型 rank 的 cwd 与 PYTHONPATH 指向选定工作树；Decode 服务保持运行。相同冻结 B4、每条约8300 fresh token、自然DSpark采样、每条256输出的PD请求4/4完成，完整输出ID和逐位置接受计数与旧基线相同，合并MAL=3.605；记录为 `.../source_packet_192m_20261103/ag_inplace_20261104/source_sized_slab_pd_b4_256_20261104.json`。冻结的B32/B64、32K输入且31744 prefix复用请求在新服务各1轮预热加3轮正式：完整batch Prefill engine RT正式中位分别135.360/240.951 ms，KV容量每轮436850688 token；原始记录为同目录`sized_slab_b32b64_v2_20261104.json`。与前一服务的热态中位133.322/241.086 ms相比中性，且这两个shape总fresh行数分别32768/65536，slab仍满32768行，本就不期待由缩容带来收益。NVML 10ms采样的四卡峰值各轮相同，不能解析短寿命slab的峰值贡献；旧/新启动环境不同，容量差8192 token不能归因于该改动。仍缺受影响的短输入服务级配对峰值、KV容量，以及生产RDMA验收。
+
+**长前缀复用回归。** 新服务使用相同冻结请求，分别先建每请求94208-token前缀，再测B4/B8每请求102400输入、94208复用（fresh8192），每形状首轮单列、后三轮完整batch Prefill engine RT中位分别130.723/218.020 ms；八个目标请求全部完成且复用长度正确。原始记录为同目录`sized_slab_b4b8_long92_20261104.json`。旧版本的相同请求源等待基线中位129.499/222.008 ms，但两个进程的重启/显存初态不同，这组跨进程数据只说明未见明显回退，不能证明稳定加速。此形状B4总fresh32768行、B8总fresh65536行，恢复 slab 本身不缩容。reviewer 对最新任务 diff 未发现确定性正确性问题，明确指出短 slab 的模型级峰值/容量与生产RDMA仍缺。
+
+**受影响短输入 E2E。** 新服务单请求8312 fresh token、零复用、256输出，经 PD 分离自然采样完成，Prefill 服务KV容量请求前后均436850688 token；记录为同目录`sized_slab_b1_short_pd_20261104.json`。该请求在1024宽源层显式 slab 从128 MiB缩到约32.5 MiB；5ms NVML采样1782次所见四卡 used 值始终不变，说明驻留/缓存分配遮蔽了短暂张量的物理显存变化，**不能**当作模型级峰值节省证明。此请求使用新盐避免prefix命中，缺少同请求的修改前配对精度与RT；功能完成、CPU storage断言和四 rank数值合同各自成立，不合并成精度验收。
+
+### 2026-11-04：源层投影通信预算按实际接收缓冲重算
+
+**What / Where / When。** L2/L8/L14 的 ratio=2 源投影及 L20 的 ratio=1 源投影在 CP4 Prefill 使用 `attention_v41.py::_prefill_x_chunk_rows` 限定每个 packet 的 owner 行数。先前公式按 `(CP+1)×投影宽×FP32` 估算 send + receive，但现有 `_prefill_projected_x_groups` 的 AllGather send 已别名为 receive 的本 rank 切片，Broadcast 的 send 与 receive 是同一对象。故旧 160 MiB 常量对应实际 CP4 ratio=2 receive 仅 128 MiB（8192 行），并非用户指定的硬性容量限制。本次用固定 256 MiB **实际 receive** 预算，公式改为 `CP×投影宽×FP32`；ratio=2 上限 16384 owner 行，ratio=1 上限受 32768 全局行 slab 限制为 32768 行。没有新增 shape 门槛或算法分支。单个 AllGather receive 上界 256 MiB，与总输入长度无关；流式全局 slab 上界为 32768×投影宽×FP32，二者是不同的同时存活缓冲。
+
+**Why / How。** 原来的 128 MiB 是修改后的发送缓冲所有权与旧预算公式不匹配所产生的实际限制。放大 packet 可减少每层 CPU 计划/提交和 collective 次数，但 AllGather 会把各 rank 有效行补齐到本 packet 最大 owner 行数，所以 packet 越大不一定越快。四 rank NCCL 原生 BF16→FP32 GEMM→交换→全局行恢复探针 `/tmp/dsv41_projected_capacity_sweep_20261104.py` 对同一输入比较 128/256/512 MiB 并逐元素核对恢复结果：B1×108272 fresh 的 packet 10→4、CPU 提交中位 1.394→0.673 ms、GPU 2.517→1.987 ms，探针峰值额外显存 256.0→339.5 MiB；B8×36090 fresh 的 packet 16→10、CPU 2.523→1.878 ms，但等长传输 extent 1128.0→1286.6 MiB，GPU 3.449→3.696 ms，峰值额外显存 198.5→358.1 MiB；合成偏斜 B11 的 packet 22→9、GPU 5.459→3.001 ms。512 MiB 对 B1/B8 不再减少 packet，且偏斜 B11 的 padding 增多并使 GPU 回退到 3.715 ms。探针结果保存在 `/tmp/dsv41_projected_capacity_sweep_20261104.json`。这是**投影通信恢复局部测量**，不等于压缩链或模型 RT 收益；B11 是合成分布，不能当作在线 trace 的原始请求长度。
+
+**模型与容量验证。** CPU planner 多形状边界测试 3/3、四卡 NCCL 混合输入测试 4/4 通过。旧 Prefill 服务在强制一小时结束点退出，未能重采同进程 B8 基线；新服务加载 256 MiB 候选后，冻结 BS8×36090 fresh、零复用四轮完整 batch Prefill engine RT 为 878.992/875.838/879.455/872.690 ms，热轮中位 875.838 ms。旧服务同形状热轮中位约 880.9 ms，但请求盐与进程初态不同，几毫秒差距仅可判为未见明显模型级回退。BS32/BS64 每条 32768 输入、31744 prefix 复用的热轮中位 134.234/238.365 ms，全部完成；BS4/BS8 每条 102400 输入、94208 复用的热轮中位 129.635/219.673 ms，全部完成且复用长度正确。BS4 有一轮 1932.315 ms 异常值，不能据中位数宣称稳定性。新服务所报 KV 总容量 436918272 token，测试前后不变；10ms NVML 采样所见四卡 used 峰值在 BS32/BS64 轮次均未变化，caching allocator 遮蔽短暂缓冲，不能据此证明服务峰值显存不增加。原始记录为同一评估目录下的 `cap256_b8_fresh_digits_20261104.json`、`cap256_b32b64_rerun_20261104.json`、`cap256_b4b8_long92_20261104.json`。PD 分离 B4×约8300 fresh、自然 DSpark 256 输出全部完成，四条输出 ID 与此前 128 MiB 版本相同，逐位置接受计数亦相同，服务前后 KV 容量不变；记录为 `cap256_pd_b4_256_20261104.json`。本机 TCP 长请求、生产 RDMA 及容量可归因 A/B 仍缺。保留这一单路径候选作为已验证的通信预算纠偏，不把局部 B1 加速外推为模型级收益；后续若模型容量或稳定性门禁不成立，直接退回，不新增 shape 选择分支。
+
+
+### 2026-11-04：源层通信 packet 全局范围与临时总内存解耦
+
+**What / Where / When。** 对上述 256 MiB / 32K packet 候选继续定位后，当前工作树改为 `attention_v41.py::_prefill_x_group_plan` 固定允许一个通信 packet 覆盖最多 2×32768 全局行，而 `_prefill_projected_x_groups` 的输出 slab 仍为最多32768行；单包 FP32 receive 固定最多224 MiB。L2/L8/L14 的 ratio=2 和 L20 的 ratio=1 CP4 源层共享这条路径。一个通信包可分两次 yield 给压缩器；`gathered` 在两次消费之间保持存活，不改变 zigzag 行序、ratio=2 carry、Global/Indexer 写入或 collective 顺序。新增配置/shape 门槛/算法分支为0。
+
+**为什么先前256 MiB未快。** 四卡 native GEMM→NCCL→全局恢复探针的 CUDA event 将 BS8×36090 fresh 的16包、128 MiB实际 receive 口径测为 NCCL累计2.028 ms、消费者暴露等待2.054 ms；10包、256 MiB receive + 32K packet 口径变为2.326/2.339 ms。等待接近NCCL时长，通信在此投影链基本没有被计算掩盖；这不能证明链路带宽已打满。逐包计划显示前者的四 rank owner 行数各约4512，几乎无填充；后者常是约(4512,9024,9024,9024)，因 32K 全局行截止点把第八个 zigzag 片段切到下个包，等长 AllGather extent 从1128.0升到1286.6 MiB。该增量才是局部回退的直接机制，事件原始记录：`/tmp/dsv41_cap_comm_events_20261104.json`。
+
+**新单路径方案与局部结果。** 将 packet 全局范围扩为64K，仍从固定32K slab 分批交给压缩器，使 BS8 的 AllGather owner 行重新平衡。224 MiB receive 下，同一 BS8 从16包降到6包，extent 保持1128.0 MiB，四卡完整投影→交换→恢复 GPU中位从3.462降到3.240 ms，CPU中位从2.692降到1.379 ms。B1×108272 fresh 从10包、2.797 ms降到2包、1.387 ms；合成偏斜B11从22包、5.459 ms降到6包、2.493 ms；B64×1024从2包、1.574 ms到2包、1.476 ms。合成B11不代表在线真实请求分布。224 MiB与256 MiB在BS8包数和extent相同，224 MiB在合成B11少传约128 MiB、局部GPU更快。原始四卡精度与性能记录：`/tmp/dsv41_projected_capacity_sweep_packet64k_caps_20261104.json`。上述仅是局部投影链，非模型级收益。
+
+**固定显存界与边界测试。** 实现同时存活的主要任务缓冲上界：receive 224 MiB；ratio=2 slab最多128 MiB、BF16打包最多140 MiB，合计492 MiB；ratio=1 slab最多64 MiB、BF16打包最多280 MiB，合计568 MiB。仓库原先的512 MiB临时峰值断言是旧预算假设，224 MiB / 64K候选在混合长请求的实际最大峰值558.3 MiB，因此不能直接沿用。先在仓库外测试副本以768 MiB门限完成四卡 4/4，并单独采样各 rank峰值；再将正式测试改为由上述上界加余量支持的固定640 MiB门限，四卡 mixed、单请求1M行、B1024、ratio1/2、跨stream复用 4/4通过，CPU planner随机/边界3/3通过。640 MiB与总输入长度无关；测试测得峰值和数学主缓冲界分别记录，不把模型驻留显存变化当作已证明。正式日志：`/tmp/dsv41_cap224_packet65536_nccl_640m_20261104.log`。P服务已按任务权限轮换以加载新候选，完整batch Prefill RT、服务KV容量/峰值、PD精度仍待当前进程测量；生产RDMA仍未验。
+
+
+**服务加载后的模型边界。** 任务自有 P 服务 PID1989349 从选定工作树重新加载224 MiB/64K候选；D服务未切换。相同 BS8×36090 fresh 请求，首轮engine RT 1028.954 ms（预热），下一轮客户端等候超过90秒而中止，未得到完整四轮正式中位；后续两个独立、输入长度36090且reuse=0的请求完成，完整batch Prefill engine RT分别873.901/877.925 ms。早先256 MiB/32K版本四轮热中位875.838 ms；请求/服务初态并非严格相同，当前只能认为模型级收益未证实，且客户端超时原因未定位。中止记录 `/tmp/dsv41_cap256_b8_fresh_digits_20261104/cap224_packet64k_b8_fresh_20261104.json`，其后成功探针为同会话原始输出。
+
+BS32/BS64 每请求32768输入、31744 prefix复用，正式两轮engine RT中位133.918/242.363 ms，KV总容量每轮436868096 token；BS4/BS8 每请求102400输入、94208复用，后三轮engine RT中位130.645/216.900 ms，全部完成且reuse长度正确。与上一服务的134.234/238.365 ms、129.635/219.673 ms相比属中性范围，跨进程KV容量/显存初态不匹配，不能归因比较容量。原始记录：`.../ag_inplace_20261104/cap224_packet64k_b32b64_20261104.json` 和 `cap224_packet64k_b4b8_long92_20261104.json`。PD分离 B4×约8300 fresh、自然 DSpark 256输出全部完成，原请求SHA与256 MiB/32K版相同，四条输出ID与逐位置接受计数均相同，P测试前后KV容量不变，原始记录 `cap224_packet64k_pd_b4_256_20261104.json`。这属于功能/精度回归证据，不消除BS8客户端等待、生产RDMA和服务峰值显存可归因比较的缺口。
+
+
+**通信暴露时间复测及最终局部判断。** 相同四卡原生投影链、固定输入、关闭 profiler，仅加入 CUDA event 记录后，BS8×36090 fresh 的128 MiB/16包 NCCL累计2.050 ms、消费者暴露等待2.101 ms；224 MiB/6包为1.932/1.961 ms。B1×108272 fresh 的等待1.953→0.643 ms；合成偏斜B11的等待4.324→1.607 ms。两臂等待与NCCL时长相近，故 **通信未被本链其他计算充分掩盖**。这组 event 没有物理链路吞吐计数，不能断言128 MiB时带宽已饱和。原始记录 `/tmp/dsv41_cap_comm_events_packet64k_20261104.json`。代码简化约束检查仅覆盖本任务 diff，未发现可高置信度删除的新增分支/状态；新增 shape 条件为0。独立只读review未发现确定性正确性阻断，指出 BS8 >90秒客户端等待、模型级稳定收益、可归因服务显存/KV对照与生产RDMA尚缺，不作生产可提交结论。
+
+
+### 2026-11-04：固定双包流水的源层通信计算候选
+
+**目标及边界。** 优化对象为 L2/L8/L14/L20 的 CP4 源层 `_prefill_projected_x_groups` 中 BF16 hidden→FP32 Global/Index 投影、NCCL AG/BC、全局行恢复这一段完整链；20% 门槛按同输入、同四卡、无 profiler 的 GPU CUDA event 中位计算，不能代替完整 batch Prefill engine RT。旧路径每包按“投影→NCCL→等待→恢复”串行。前轮 BS8 的 NCCL约1.93 ms/完整链3.24 ms，消费者等待约1.96 ms，证明本链通信暴露且存在流水空间。
+
+**设计与不变量。** 在固定224 MiB receive / 64K packet / 32K输出slab 上，`_prefill_projected_x_groups` 保持最多两个在途 packet：先投影并发起 packet i 的NCCL，再投影并发起 packet i+1，随后等待并恢复 i；GPU通信流中NCCL仍按全局 packet 顺序串行，计算流与通信流用原有事件排序。下一包的投影可覆盖上一包通信，下一包通信可覆盖上一包行恢复以及调用方对已yield slab的压缩。每包send是本rank receive切片；receive由 `_V41AsyncXGather` 保持到消费者取完；yield时当前slab不会在下次`next()`前改写。ratio=2 carry由调用方在推进generator前克隆，Global/Indexer写入仍发生在推进前。无按shape切换的第二算法；代价是双receive和更高固定临时显存上界。小算子尚未融合，不能声称已减少算子数；目前仅让部分下发/设备操作被通信覆盖。
+
+**逐级证据。** 仓库外两包原型在相同BF16 GEMM、NCCL与全局恢复、逐元素核对下，BS8链2.816→2.238 ms（约20.5%），但原型直接写目标tensor、不含生产32K slab。已将流水落实到生产generator后，四卡原生projection、不同stream复用、混合/1M单请求/B1024、ratio1/2数值测试4/4通过，CPU规划测试3/3通过。真实generator局部链 BS8 3.240→2.286 ms（29.4%），合成偏斜B11 2.493→2.054 ms（17.6%），B1超长1.387→1.256 ms（9.4%），B64×1024 1.476→1.446 ms（约2%）；所以**20%只在已测BS8链成立**，不对所有准入shape或模型整体宣称。BS8原生探针临时峰值约684 MiB（旧约472 MiB）；测试将固定断言设为1 GiB，以覆盖两个receive、slab和BF16 pack同时存活。一次以旧640 MiB断言运行时rank0实测约685 MiB并触发失败，其他rank在NCCL清理等待；已让各rank先all_reduce峰值再共同断言，避免测试假死。原始原型、真实generator和GPU测试记录分别为 `/tmp/dsv41_source_pipeline_probe_20261104.json`、`/tmp/dsv41_pipeline_full_generator_20261104.json`、`/tmp/dsv41_pipeline_nccl_1g_20261104.log`。任务自有P服务正在轮换以加载候选；模型级完整batch、PD精度、服务峰值/KV容量和生产RDMA尚未由新进程验收。
+
+**新进程服务验收及剩余缺口。** 同一 P-only CP4 DSpark 服务加载双包代码后，BS32/BS64 每请求32768输入且31744 prefix 复用的两轮正式 engine RT 中位分别135.341/240.038 ms；BS4/BS8 每请求102400输入且94208复用的后三轮中位129.527/217.611 ms。请求均完成、复用长度正确；KV总容量在BS32/BS64测试前后都是436918272 token。相对前一候选相近，但服务与缓存初态不相同，不能归因计算模型级收益。原始记录是同目录 `pipeline_b32b64_20261104.json` 和 `pipeline_b4b8_long92_20261104.json`。BS8×36090 fresh 的两个独立热请求 engine RT为873.144/889.262 ms，前一候选约873.901/877.925 ms，同样没有稳定模型级收益；另一次四轮批测首轮3344.751 ms，随后客户端30秒超时且服务恢复空闲，原因未定位，见 `/tmp/dsv41_cap256_b8_fresh_digits_20261104/pipeline_b8_fresh_20261104.json`。不能把这次超时算作稳定性通过或代码回归的已证实原因。
+
+PD 分离 B4×约8300 fresh、自然 DSpark 每条256输出的同 SHA 请求完成；与前一候选四条输出 ID、文本、draft 轮数及逐位置接受计数完全相同，P服务前后 KV容量不变。原始记录为同目录 `pipeline_pd_b4_256_20261104.json`。这是该请求的精度与 MAL 回归证据，不是数据集精度、55分钟稳定性或生产 RDMA 验收。双包 receive 理论上限448 MiB，另有最多128 MiB ratio2 或64 MiB ratio1输出 slab；单个BF16源打包上限分别约140/280 MiB，峰值与总输入长度无关。四卡测试对混合、百万行单请求及B1024的增量 allocator峰值逐rank检查为≤1 GiB；在线服务由于缓存/其他常驻分配及采样频率，尚无可归因的峰值显存 A/B。当前候选让 BS8 的局部链超过20%门槛，但没有完成全形状与模型层20%的目标；小算子数靠64K packet减少，双包本身没有融合小算子，并增加约212 MiB BS8临时峰值。后续应按固定预算继续减少恢复/打包的 Python 下发，而不是增加按 shape 选算法的分支。
+
+**简化与审查。** 已把失效的「one in-flight」注释更新为单 packet handle；随后对任务 diff 做一次 `code-simplifier` 检查，未找到可安全删除的双包生命周期状态。`git diff --check`、`py_compile` 和 CPU planner 3/3再次通过。一名全新只读 reviewer 核对双包 receive 保活、collective 全局顺序、ratio2 carry 与四卡测试，没有发现确定性正确性阻断。审查同样指出224 MiB/64K串行与双包的CPU中位1.379→1.397 ms，没有证明双包降低 CPU；B8临时峰值472→684 MiB，模型级收益与稳定性仍未证实。本轮未提交或推送。
+
+### 2026-11-04：三轮后续优化实验与取舍
+
+三轮均针对当前224 MiB / 64K / 双包候选做仓库外探针，没有把失败方案加到生产代码。在线 trace 只给出 BS9/BS8/BS40 的 prefix/fresh **合计**，未给出逐请求 fresh 向量；以下用相同 batch 和合计 fresh 的等长近似重放，不能把它说成原始在线请求。典型 B32/B64 用每请求1024 fresh，单长请求用108272 fresh。两臂用同一源代码、同一四卡、ratio1/2 的 BF16 packed GEMM、真实 CP4 NCCL 和 FP32 全局行恢复，并核对最终输出；这些是局部链，不包含 Global/Indexer 压缩写池或整批模型。
+
+1. **固定容量与packet范围。** 将 receive 上界224→320 MiB、全局packet范围64K→128K；输出slab保持32K。planner中 BS8 ratio2 6→4包、L20 ratio1 5→3包且ratio2 receive extent同为1128 MiB；BS9仍1包。GPU4–7配对实测 BS8 ratio2 2.315→2.390 ms、ratio1 1.414→1.454 ms，临时峰值分别684→868、522→866 MiB；BS40 ratio1 1.283→0.976 ms、B64 ratio2 1.465→1.236 ms，但BS40 ratio2 1.196→1.362 ms。更少的包不能抵消大包串行段与内存代价，按主要 BS8 不保留。原始记录 `/tmp/dsv41_round1_cap320_packet128k_gpu4to7_20261104.json`。GPU0–3首次运行有明显4–28 ms离群时间，已单独保留为诊断，不计收益。
+2. **首包提前与QKV重叠。** 用现有 `_v41_cp_async.launch` 在独立流提交首个完整源packet，同时在计算流运行QKV代理GEMM；当前双包实现下 BS9 GPU局部链0.672→0.681 ms、BS8 2.704→3.052 ms、BS40 1.489→1.589 ms、单长请求1.204→1.335 ms。无需为单一形状引入新的Pending生命周期和清理状态机，方案退役。代理不含真实SWA、压缩和MoE，不能代表整批RT。原始记录 `/tmp/dsv41_round2_early_pipeline_20261104.json`。
+3. **相邻片段合并。** 只合并同owner、BF16源地址及全局目的均连续的planner片段，保持packet/传输字节不变。BS9每层72→63片，BS40 320→约280片，B64 ratio2 512→386片。首次固定顺序测得BS9 ratio2 0.690→0.554 ms；把两臂顺序反转后，候选0.584 ms、基线0.522 ms，收益不复现；BS8 ratio2两轮均约2.31 ms。新增planner判断没有稳定GPU/CPU收益，故不合入。正序/反序原始记录 `/tmp/dsv41_round3_piece_coalesce_20261104.json`、`/tmp/dsv41_round3_piece_coalesce_reverse_20261104.json`。
+
+**当前决定。** 保留三轮之前已验证的固定双包代码；本轮没有新增可执行分支、状态或算子。该候选在BS8大量fresh输入的局部投影通信链约快29.4%，但尚未证明完整模型或在线混合shape整体收益。下一性能突破需重新量化源层真实消费者等待及BS9的CPU提交空档，不能把packet减少或片段数减少当成充分条件。
+
+**独立审查与 E2E 精度。** 三轮探针退役后，对保留的四文件任务 diff 做一次全新只读审查：未发现确定性正确性或可维护性阻断；审查认可双receive保活、全局collective顺序、32K slab消费和ratio2 carry先克隆再推进generator的所有权链，同时明确模型级加速仍未证实。当前代码与上一轮 `code-simplifier` 检查时相同，未重跑简化程序或制造新的清理改动。
+
+在 GPU4–7 Prefill CP4 + GPU0–3 Decode 的本机 TCP PD 服务上，用同一 manifest SHA256 `a11ed66e4a92b7939a634aa5f77d5be1f246f2f27289ff5689e0a917226059da`、同一 `standard_eval.py` SHA256 `c0ac03d67bd794281d6e787b37bbec4932ecae33cb938e7632918a9ad1804589`、同一请求参数跑 GSM8K 300 + LongBench 160。460/460响应，HTTP/生成/评分错误均0；GSM8K 289/300=96.33%，历史同清单287/300=95.67%；LongBench主分22.119%（截断43/160），历史21.760%（截断45/160）。这支持本轮未见明显E2E精度回退；两次服务及缓存初态不同，不把分数小幅上升归因到源层代码。当前生成墙钟739.4秒，历史358.4秒，也不能当作代码性能A/B。原始响应、生成摘要与评分摘要位于 `/data0/ruixuan.zrx/rtp_llm_eval/runs/deepseek_v41/dense_tail_20261102/source_packet_192m_20261103/ag_inplace_20261104/three_rounds_20261104/quality_gsm300_lb160/`；两个exit文件均为0。完成后P服务alive且空闲，KV容量436918272 token。生产RDMA、匹配服务级峰值显存及长期稳定性仍未测；三轮没有获得可保留的新增性能收益，因此不能宣称目标已全部完成或可提交。
+
+**补充形状覆盖。** 当前双包代码在四卡局部链上另测两个总 fresh=240141 的 BS11 近似分布（11个等长请求；一个自定义长短混合分布），ratio2均5包、GPU中位约1.97/1.90 ms，ratio1均4包、约1.18/1.33 ms；两者不是在线 BS11 的原始逐请求长度。典型100K输入、92%复用对应每请求8192 fresh，B4 ratio2/ratio1均1包、GPU约0.46/0.30 ms，B8为2/1包、约0.80/0.44 ms。此探针仅测现有实现，没有匹配版本比较，也没有完整压缩/模型，不能从这些数推导收益；它补充了packet数、链耗时和固定临时峰值观察。记录 `/tmp/dsv41_bs11_100k_component_20261104.json`。B32/B64 32K、97%复用及B4/B8 100K、92%复用的完整batch服务结果沿用同一已加载可执行代码的前段记录。
+
+### 2026-11-04：源层通信复核、BF16 直出与解除冗余包长门槛
+
+**What / Where / When。** 对象仍是 `attention_v41.py::_prefill_projected_x_groups` 的 L2/L8/L14/L20 CP4 Prefill 源投影→通信→全局行恢复。当前 224 MiB 接收预算决定每 rank 的最大 projected 行数；另外的全局包长 65536 行只会进一步拆包，不约束接收区。L20 ratio=1 的 512 宽投影在 CP4 下每 rank 可放 28672 行，四 rank 合计最多 114688 行，因此 65536 是独立且冗余的性能门槛。L2/L8/L14 ratio=2 的 1024 宽投影每 rank 上限 14336 行、全局最多 57344 行，原 65536 门槛本来就不会触发。
+
+**外部实现对照与为何不能直接照搬。** DeepInfer `v4_modules/attn.py::_make_cp_gather_getter` 在源投影后启动 `userbuffer.cp.all_gather`，继续做 Q/SWA，在压缩前调用 getter；`parallel_utils/cp.py::CPManager` 用 `BucketBuffer` session 管理固定容量、别名和等待。SGLang 的待合并 PR #40179 在默认流提前做 CP all-gather，并尝试多流 overlap；其依赖 PR #40548 把 compressor/indexer 纳入捕获以减少 CPU launch。当前安装的 `deep_ep` 没有 `BucketBuffer`/`BufferAllocator`，直接替换通信原语需要依赖升级和重新验证；RTP 的 fresh 总行还可能超过单 bucket 容量。已有首包提前代理探针在 BS8、BS40、长单请求均回退（前节），所以这轮先删与接收预算无关的包长条件，不引入新流状态或按 shape 切换。
+
+**L20 BF16 直出实验。** ratio=1 无跨 token 递归状态，`torch.mm(..., out=BF16 send)` 直接输出 512 宽 BF16 投影，NCCL 交换同 dtype；`_v41_prefill_global.py::compress_main` 在 kernel 内升 FP32 后继续原归一/FP4 Global 与 Indexer 写池。ratio=2 仍用原 native BF16×BF16→FP32 GEMM、FP32通信和跨块状态。四卡直接 GEMM+AG 的每 rank 6624/8192/16384/32768 行，最大 rank GPU 中位 FP32→BF16 分别为 0.145→0.115、0.169→0.140、0.275→0.197、0.507→0.327 ms；CPU提交略增加约0.005–0.009 ms。真实 packet generator 的临时峰值在 BS9 168.6→116.6 MiB、B8 大量fresh 523→349 MiB；其 GPU event受服务干扰呈多毫秒异常离群，不能用于模型收益断言。真实模型旧包长下，B32/B64 32K、97%复用 engine RT 中位约143.320/240.741 ms，B4/B8 100K、92%复用约130.021/221.464 ms；相对 FP32旧进程没有稳定模型级收益。PD B4×约8300 fresh、自然 DSpark 每条256输出完成，输出 ID 在四条请求的第4/101/62/62位首次与 FP32 不同，属于数值变化，不能叫逐位精度相同。
+
+第一次同 manifest 质量运行 GSM8K 287/300、LongBench 7.894%，但 91 条 LongBench 请求在 Decode 服务满一小时重启窗口收到 `8207_REMOTE_ALLOCATE_RESOURCE_READ_FAILED / decode server is draining`；这份分数无效。Decode 自动恢复后完整复测 460/460 无生成或评分错误，GSM8K 288/300=96.00%（FP32对照289/300=96.33%），LongBench 主分21.338%（FP32对照22.119%），截断49/160（对照43/160）。同 manifest、scorer SHA和请求参数，差距小但不等于数值等价，且服务/缓存初态未严格配对。有效原始证据在 `.../ag_inplace_20261104/bf16_l20_quality_retry_20261104/quality_gsm300_lb160/`；失效运行保留在相邻的 `bf16_l20_quality_20261104` 目录。BF16 仅作为内存/通信候选，不能报告完整模型收益或生产精度签收。
+
+**解除 65536 包长条件的独立 A/B。** 改动是 `_prefill_x_group_plan` 只按 `counts[owner] + rows > limit` 截包，并去掉 generator 上的 65536 行断言；没有新 flag、shape 判断、缓冲或后备算法。四卡同一源代码、BF16 ratio1、交替12轮、真实 NCCL+恢复：B8×36090 fresh 的包数5→3、CPU/GPU最大rank中位 1.160/1.278→0.832/1.129 ms，临时峰值349→508 MiB；单请求108272 fresh 包数2→1、0.445/0.526→0.298/0.496 ms，峰值约138 MiB；BS9 9×2943 和 ratio2 路径包数、耗时均中性。ratio1 每个 receive 仍≤224 MiB，同时最多两个在途，输出 slab≤64 MiB，局部 BF16 pack 的上界独立于总输入行数；更大包导致两个 receive 同时较满，所以峰值上升但上界不变。CPU planner 包括 B=1024、单请求1M行、零长及随机长短混合3/3通过；四卡 mixed/long、B129、B1024、宽形状4/4通过。仓库外成对探针是 `/tmp/dsv41_no_global_packet_cap_probe_20261104.py`。
+
+**模型级边界。** 新 P 进程加载解除门槛代码后，同一 B8×36090 fresh 四轮（首轮预热）热中位875.563 ms，旧 65536 版875.951 ms，属于模型级中性；KV总容量在各自服务内测试前后恒定，分别436892672和436910080 token，跨进程差值不能归因于本改动。B32/B64 32K、97%复用为133.378/242.311 ms；B4/B8 100K、92%复用为129.611/220.945 ms，全部完成且reuse长度正确，相对旧版仍属中性范围。记录在同目录 `bf16_l20_nocap_b32b64_20261104.json`、`bf16_l20_nocap_b4b8_long92_20261104.json` 和 `/tmp/dsv41_cap256_b8_fresh_digits_20261104/bf16_nocap_b8cold_20261104.json`。NVML采样没有捕获短暂峰值，服务级可归因峰值显存仍未完成；局部探针的峰值与固定预算已单列。
+
+**合并候选的配对局部链。** 同一进程用当前代码构造两个 arm：baseline 把 L20 投影强制为原 native FP32 输出并恢复旧 65536 全局包门槛；candidate 用 L20 BF16 直出和仅按224 MiB接收预算截包。保持 CP4、输入、权重、NCCL、双包流水、32K输出 slab 和逐元素 oracle一致，四卡交替20轮：B8×36090 fresh 的 CPU/GPU最大rank中位2.407/2.433→1.659/1.687 ms，局部 GPU 降约30.7%，临时峰值523→508 MiB；单请求108272 fresh 的 GPU 0.660→0.530 ms，降约19.6%；BS9 0.521→0.513 ms，B64 1.582→1.564 ms。B8×8192 fresh（100K输入、92%复用）的局部 GPU 0.514→0.472 ms。该数只覆盖 L20 ratio1 的“投影→通信→恢复”，不包括压缩、Global/Indexer写池、L2/L8/L14或完整模型；不能据此宣称四源层合计或 engine RT 达到20%。原始 `/tmp/dsv41_combined_source_ab_20261104.json`，首次脚本运行因仓库外探针的元组解包错误退出，修正后完整20轮通过，生产代码不受该错误影响。
+
+**BS9 CPU 新切入点。** 在线 `prefill_wr0_2.json` 的 BS9 target forward 271.393 ms；GPU空档176.85 ms，其中156.54 ms在下一 GPU 操作对应 CUDA API 开始前。四个源层的下一提交前空档合计39.51 ms，但 source packet planner 离线 CPU 中位仅约0.046 ms/层，恢复72个 view 的 CPU范围约0.6 ms/层，不能把39.51 ms归咎于规划。按互不重叠的重复层范围，`dsv4.moe.routed_experts` 40次合计24.148 ms（单次0.555–0.798），`dsv4.fp8.attn.swa_kv_full.cp_gather_varlen` 40次合计17.720 ms，`dsv4.fp8.attn.prefill.output_proj` 40次15.517 ms；Prefill metadata 两次 `build_all_ratios` 合计6.784 ms，其中 ratio0一次4.709 ms。MoE代码从 `moe_layer.py::_run_chunk/_forward_gate_pack` 经 `mega_se.py::forward/_launch` 进 `deep_gemm.fp8_fp4_mega_moe`；trace中40次该范围内可见的 gate 范围5.465 ms、`cuLaunchKernelEx` 1.903 ms、slice 1.516 ms和 empty 1.187 ms，余下主机时间的精确归属尚未由native stack证实。下一轮 BS9 应先用匹配请求和native/CPU栈确认 MegaMoE 每层未归属的提交成本，再核对 `cp_all_gather_full_varlen` 的40次同步通信/恢复；这些是量级明确的新候选，不能用减少 source view 数量代替。外部 pinned descriptor/Triton恢复在BS9 512宽约0.028/0.042→0.033/0.049 ms、1024宽GPU亦略差；index-select map 每包需要约0.3 ms CPU构建及0.1–2 ms H2D，GPU亦较慢，仅B64大batch局部受益，均未进入生产代码。
+
+**BS9 的下一条具体 CPU 验证链。** `attention.py::_prefill_compute_qkv` 每层调用 `cp.py::cp_all_gather_full_varlen` 同步构造 rank-major SWA KV 并做全局行恢复；40个 `swa_kv_full.cp_gather_varlen` 范围17.720 ms可细分为 `.launch` 9.568 ms、`.restore` 4.950 ms、余下约3.202 ms。首层 `.launch` 的 `c10d::_allgather_base_` 范围0.266 ms，其内 `record_param_comms` 0.222 ms；这提示 PyTorch collective 主机调度是候选，但 profiler本身可能加大该范围，必须关 profiler用同一调用边界复测。下一次单算子实验保持同一 SWA KV、CP rank序、`unpad_restore`、GPU等待语义，比较当前同步 `all_gather_into_tensor+index_select` 与固定会话缓冲/延迟wait；如新通信原语需要额外依赖，应先核对ABI与生命周期，不把依赖升级混入本次小改。`_run_chunk/_forward_gate_pack` 的 MoE 24.148 ms则单独做 native 栈归因，验证真实 C++ launch/参数构造是否占据无 GPU 提交空档，再决定是否能删去重复 host 工作。两者都要求无 profiler 的完整 BS9 Prefill RT 和数值验收；目前只是量化优先级，尚未实施。
+
+**精简与独立审查。** 对本轮可执行任务差异做一次 `code-simplifier` 约束检查：新增的 ratio1 dtype 分流是 BF16 输出与 FP32 ratio2 状态的必要边界；去掉全局包长门槛已经删除一个条件，未发现可高置信度再删的新增状态或包装。`git diff --check`通过。全新只读 reviewer 对当前 HEAD 和六个任务文件检查 packet 上界、双包receive保活、NCCL事件依赖、ratio2 carry 以及 BF16→FP32压缩边界，未发现确定性代码阻断；指出四卡单元测试用精确可表示的权重，不能替代真实模型数值证据。有效质量集已补上真实模型证据，但完整模型20%收益、可归因服务峰值、生产RDMA与长期稳定性仍未成立。本轮未提交或推送；无关的 `prefill/ced.py` 与 `stub_source` 保持原样。
+
+### 2026-11-04：首包提前后完整 batch RT 中性的原因与 Zero-CTA 判断
+
+**What / Where / When。** 对 L2/L8/L14/L20 CP4 target Prefill 的源层投影与通信，临时实验把每层第一个 projected packet 提前到 `_prefill_compute_qkv` 前提交，其余 packet、压缩、SWA KV、Global/Indexer 写入保持原路径。候选已退役并恢复本轮之前的可执行代码；以下完整 batch RT 取 profiler 关闭的相同请求 manifest，GPU 因果顺序取独立 profiler trace，不能把 profiler 下的模型总耗时当作 A/B。
+
+**完整 batch 结果。** B8×约36090 fresh、零复用的配对四轮：候选 1030.655/867.899/1016.262/874.904 ms，原路径 991.855/980.144/872.747/870.653 ms；后 3 轮中位 874.904/872.747 ms，差约 2.16 ms，在波动内。B32/B64 每请求32768输入、31744复用的热轮中位候选 134.313/240.990 ms，原路径 134.780/241.094 ms；B4/B8 每请求102400输入、94208复用的热轮中位候选 127.836/216.361 ms，原路径 127.787/221.400 ms。B8 长复用约5 ms差值不能从少量跨进程轮次判为稳定收益。原始文件分别为 `/tmp/dsv41_early_source_paired_20261104/{candidate,baseline}.json`、`/tmp/dsv41_early_source_b32b64_{candidate,baseline}_20261104.json`、`/tmp/dsv41_early_source_b4b8_long92_{candidate,baseline}_20261104.json`。
+
+**Why / How：重叠的是首包，不是整条源链。** 四 rank 的 B8 冷输入 trace 中，L2/L8/L14 每层有 7 个 projected AllGather packet，L20 有 3 个。候选仅移动每层第一个，因此总计24个源包中仅4个提前。rank0 的首包 GPU NCCL 时长为 L2 0.481、L8 0.573、L14 0.424、L20 0.438 ms；其他 rank 首包可能更慢。rank0 首包分别与非NCCL计算重叠约0.480/0.411/0.301/0.266 ms；rank1 L14 则未测出这类重叠。三处 ratio2 源层每层全部源 NCCL kernel 累计约2.4–3.4 ms，L20 约0.6–1.2 ms（rank/arm有差异），但这些是 kernel duration，不是可直接相加的模型 wall time。单纯提前四个首包的理论机会是毫秒级，对约0.87 s的完整 batch 过小；余下 packet 仍在压缩消费者链上提交/等待。
+
+**SWA 与源通信关系。** 候选的 source 首包在 Q/SWA 投影期间运行，随后 SWA AllGather 执行；baseline 的 SWA AllGather 先于 source 首包。rank0 的 L8/L14 与 rank1/2 的多个层中，候选的 SWA NCCL 开始仅比 source 首包结束晚约0.002–0.004 ms。源 NCCL 在 stream19、SWA NCCL 在 stream7，二者用同一 TP process group；这种近邻顺序显示没有获得源 AG 与 SWA AG 的实质同时执行，并提示通信顺序/资源竞争可抵消首包提前收益。它不能仅凭时间相邻证明 NCCL communicator 强制串行或证明 SM 竞争；需要隔离通信原语与相同请求的多轮 trace 才能确认。候选 profiler trace 的 L2 还有一个 CPU `aten::mm` 范围约60 ms、内部没有对应长 CUDA API；因此 profiler-on 的 rank0 target-forward 785.260 ms 对 baseline 622.103 ms 不能作为这项源通信调度的性能结论。四 rank raw trace 位于 `.../timelines_raw/prefill/{early_source_b8_cold_batch_20261104_wr*_4,baseline_source_b8_cold_batch_20261104_wr*_1}.json`。
+
+**Zero-CTA 是否可直接开。** 当前源通信 `attention_v41.py::_start_prefill_x_gather_async` 用普通 `torch.empty` receive 切片、PyTorch `all_gather_into_tensor` / `broadcast` 和 TP process group；SWA 通信 `cp.py::_cp_all_gather_into_empty` 也用普通 `torch.empty`。trace 中源 AG 是 `ncclDevKernel_AllGather_RING_LL`、32 CTA、544 threads/block。当前 Torch 报 NCCL 2.28.9，GPU4–7 互连显示 NV18，驱动580.105.08。NVIDIA 文档指出 NVLink 上 Zero-CTA 自NCCL2.28起支持，但要求对称注册的 NCCL window 与 `NCCL_CTA_POLICY_ZERO` communicator（https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/bufferreg.html#zero-cta-optimization）。当前这条 PyTorch c10d 路径未建立上述 window/communicator，因此没有可证明生效的单一开关；DeepInfer `userbuffer.cp` 是 DeepEP `BucketBuffer` 会话，不等同于给当前 c10d 设置 Zero-CTA。Zero-CTA可能减少 NCCL 对 SM 的占用，但不能消除传输量、后续23个包、依赖等待或内存带宽竞争。是否改善完整 batch RT 尚未测量，不能把它当成既定修复。下一步应先用相同 packet、同一四卡做普通 NCCL 与真实 Zero-CTA 的投影+SWA双通信局部 A/B，验证原语、数值、rank一致顺序、峰值显存与局部等待；仅局部收益成立后再决定是否值得引入新的通信缓冲/生命周期，并做完整 batch 配对验证。
+
+### 2026-11-04：反事实验证——整批单包 AllGather 与完整 Q 投影
+
+**问题修正。** 上节的“只提前首包”实验并未回答“能否把本次源通信整体提到 Q/SWA 前”的问题。原因在当前 `attention_v41.py::_prefill_x_chunk_rows`：224 MiB receive预算之外，它还用32768 owner行门槛限制单包；`_prefill_projected_x_groups` 又以双包generator在 `_produce_global` 消费时推进。B8约288736 fresh行的 ratio2 源层实际每层7个源AG，仅4个源层各1包被提前。DeepInfer `v4_modules/attn.py` 在源投影后启动 `userbuffer.cp.all_gather`，随后计算 Q/SWA、发起SWA AG、计算 Q B，最后在压缩器消费源结果；其 `CPManager` 通过 DeepEP `BucketBuffer` session持有整次通信结果。SGLang未合并的 PR #40179则在默认流提前做CP AG，再并行执行SWA存储、compressor和indexer；前置PR #40548特别指出不捕获compressor/indexer时CPU下发会抹去多流收益。这些是两种不同的机制，不能简化成“多移一个首包”。参考：https://github.com/deepseek-ai/DeepInfer/blob/main/deepinfer/model_executor/models/v4_modules/attn.py ，https://github.com/deepseek-ai/DeepInfer/blob/main/deepinfer/model_executor/parallel_utils/cp.py ，https://github.com/sgl-project/sglang/pull/40179 ，https://github.com/sgl-project/sglang/pull/40548 。
+
+**整批单包局部测量。** 在同一容器GPU4–7、四rank真NCCL、profiler关、每形状6次CUDA event取各rank中位再取最大rank，用已投影的FP32 ratio2源张量做**一次**完整 AllGather。其他算子用本checkpoint的 Q A宽1280、SWA宽512、本rank Q B宽8192 BF16 GEMM；另用实际CP zigzag `unpad_restore`做一次全局行恢复。串行顺序为 Q A/SWA投影→SWA AG→源AG→全局行恢复→Q B；提前版为源AG发起→Q A/SWA投影→SWA AG→等待源AG→全局行恢复→Q B。B9约26485 fresh：0.452→0.420 ms，约7.1%；B8每请求8192 fresh（总65536）：0.975→0.814 ms，约16.5%；B8每请求36092 fresh（总288736）：4.153→3.421 ms，约17.6%。进一步把完整 Q B放在源AG等待前，B8冷输入只从3.421到3.361 ms，另省0.061 ms；B9与B8复用形状未获该增量。无全局行恢复的对应B8冷输入为3.742→3.051 ms，说明恢复的成本不能漏算。原始脚本/结果 `/tmp/dsv41_full_ag_restore_overlap_probe_20261104.py`、`/tmp/dsv41_full_ag_restore_overlap_probe_20261104.json`；不含真实源投影、压缩、Global/Indexer写池和整批模型，因此不宣称生产收益或数值验收。首次探针试图调本地未更新的native packed GEMM失败，已将测量边界收窄到已投影张量，失败不计性能数据。
+
+**内存与方案。** Ratio2源接收按 `global fresh rows ×1024×4字节` 估算，B9约103.5 MiB、B8 92%复用256 MiB、B8冷输入1128 MiB；整批单包的全局顺序恢复若另存tensor再加同等大小。完整 Q B若提前保留到注意力消费，B8冷输入还需约1128 MiB，而当前V4.1 Q workspace只保留最多16384查询行。因此上面的0.061 ms额外收益不足以支持立即引入完整Q存储；可先保留现有按块Q B。当前服务 `max_batch_tokens_size=2097153`，多请求总逻辑token受 `FIFOScheduler::fitsPrefillTokenLimits` 约束，极端单次ratio2整批AG接收可到约8 GiB，另有zigzag padding；若整批恢复也不分块，临时内存进一步翻倍。单包对常见shape有潜力，但不能无预算地作为全部准入shape的默认实现。
+
+**下一可验证实现。** 用一个固定的较大通信superchunk预算（初始测试1.25 GiB接收；最终由峰值和KV容量决定），去掉与receive预算无关的32768 owner行门槛；B9、B32/B64 32K复用、B4/B8 100K复用、B8冷输入都可在ratio2层成为一个通信包。全局行恢复和ratio2压缩继续用现有32768行消费slab，保持跨块carry和固定内存上界；不要按shape切两套算法。把首个superchunk的投影和AG放到Q/SWA之前，其余大输入按同一固定预算循环，后续如仍暴露等待，再验证与SGLang类似的有界多流compressor生产。先做单算子数值、通信/恢复/压缩时间及峰值，再做配对完整batch RT；未测之前“有望获得局部收益”不等于已证明模型收益。B9当前本来只有1个源通信包，扩大包预算不会解决其156 ms级CPU提交空档；它需要独立的CPU链分析。
+
+### 2026-11-04：大包与提前首包的反证
+
+**What / Where / When。** 在 `attention_v41.py::_prefill_x_chunk_rows` 中，实验 A 将四个源层 L2/L8/L14/L20 的 CP4 投影通信包改成固定 1280 MiB receive 与 1024 MiB 本地 BF16 pack 上界，取消每包 32768 全局行门槛；实验 B 再把首包投影和 AllGather 提前到 `_prefill_compute_qkv` 之前。压缩消费仍为 32768 行 slab。两项均用同一 GPU4–7、同一请求集、关闭 profiler 的 CP4 DSpark P 服务测完整 batch Prefill engine RT；没有改变 Global/Indexer KV 语义。实验性代码因下述结果退役，数值与性能原始记录保留在 `/tmp/dsv41_early_source_paired_20261104/` 与 `/tmp/dsv41_superchunk_*_20261104.json`。
+
+**单算子 Why / How。** 四 rank 原生 ratio2 投影、NCCL、恢复及 Q/SWA 局部链，BS8 每请求约 36090 fresh（零复用）：原固定 224 MiB receive 产生 6 包，CPU中位 2.608 ms、GPU 3.628 ms、增量峰值 895 MiB；A+B 单包 CPU 0.742 ms、GPU 4.206 ms、峰值 1961 MiB。512/640 MiB 的中间容量也只降低 CPU，GPU 分别升至 3.766/3.904 ms。更大的传输与 Q/SWA 投影争用 GPU/链路，减少包数不能单独证明完整链加速。B8 长输入 92%复用和 B64 热请求的局部链各有约 0.1–0.2 ms收益，但不足以推断完整模型。独立双 process group 同时发源 AG 与 SWA AG 的 BS8 冷输入局部链仅 1.966→1.859 ms；其新 communicator 生命周期复杂度不值得为此进入模型。原始四 rank 探针为 `/tmp/dsv41_source_qswa_cap_sweep_20261104.json` 和 `/tmp/dsv41_dual_comm_probe_20261104.json`。
+
+**完整 batch 验收。** 基线为本工作树 224 MiB receive、32768 owner行门槛、首包不提前的已有双包流水；A为单包大预算，B为A再提前首包。BS8 冷输入四轮去首轮后三轮中位：基线 874.676 ms，A 879.825 ms，B 870.070 ms；约 0.5% 的 B 差值低于服务噪声。BS32/BS64 每请求32768输入、31744前缀复用的热轮中位：基线 133.609/240.827 ms，A 134.860/239.596 ms，B 133.260/245.108 ms。BS4/BS8 每请求102400输入、94208前缀复用：基线 130.761/220.130 ms，A 129.674/220.338 ms，B 128.239/220.530 ms。没有跨形状稳定收益，B64 还出现回退。BS9 每请求75010输入、71680复用，B的后三轮中位 120.804 ms，但本次没有同态基线，不能用它宣称收益。全部结果仅为 P-only 完整 batch Prefill RT，不是 PD质量或 RDMA 验收。
+
+**Timeline 归因与限制。** B 的真实 BS8 冷输入 rank0 trace 显示 L2首包源 AG 1.931 ms，与 Q GEMM 只重叠约 0.767 ms；L8/L14 源 AG 分别 2.207/2.095 ms，与本层 Q 工作重叠约 0.1 ms。SWA AG 在源 AG 结束后立即开始，无法把全部源通信隐藏在 Q/SWA 后面。四 rank trace 见 `.../timelines_raw/prefill/superchunk_early_b8_cold_unique_20261104_wr{0,1,2,3}_2.json`。旧 baseline profiler trace 事件覆盖不完整，因此不得拿两份 profiler-on 的模型 RT 作 A/B。GPU数值只验证了四 rank 局部投影/恢复；退役方案不做 PD精度/MAL/稳定性/生产RDMA提交验收。下一步针对 32768 行压缩 slab 的 kernel 数量做独立原型，再判断是否值得动生产代码。
+
+### 2026-11-04：64K 源层压缩消费块候选
+
+**What / Where / When。** `attention_v41.py::_produce_global` 在 L2/L8/L14 ratio2 和 L20 ratio1 的 Prefill 源层，以固定全局行 slab 逐块生成元数据、压缩、写 Global KV、投影并写 Indexer KV；`_v41_producer_metadata.py::prepare_fused_tile` 生成每块的请求/位置/物理槽映射。候选把消费块从32768改为65536行，保留跨块 ratio2 carry 和顺序，块数约减半；适用范围为现有 CP4 源层，不新增按输入 shape 选择路径。第一轮同时影响了通信包的全局行上限；现将通信包单独保持32768行，第二轮完整 batch 验证待完成。
+
+**Why / How 与单算子。** 对同一65536行输入，在 GPU4 单卡真实 `compress_main`→`F.linear(index_wk)`→`store_index` 链上，两个32K块改为一个64K块，ratio1 GPU事件中位0.434→0.359 ms、CPU下发中位0.361→0.194 ms；ratio2 GPU0.379→0.247 ms、CPU0.429→0.235 ms。两臂的 BF16 latent、FP4 Global KV和68B Indexer KV逐值一致。该原型不含 CP AllGather、模型其他层或engine调度，不能把约17%/35%的局部GPU差值说成整批收益。原型 `/tmp/dsv41_compress_tile_probe_20261104.py`；元数据全套25/25、producer 7/7、四卡NCCL混合/百万行和偏斜/B1024均通过。64K的 ratio2 slab上限为65536×1024×4=256 MiB，比32K多128 MiB；单层固定峰值仍与总输入行数无关，在线峰值尚需归因测量。
+
+**第一轮完整 batch 结果与故障记录。** 第一轮把压缩消费块和通信包全局行上限一同升到64K；同GPU4–7、同 P-only 服务配置、关闭profiler，BS8每请求约36090 fresh、零复用的后三轮 engine RT中位876.156 ms，对前述32K/224MiB基线874.676 ms；BS32/64每请求32768输入、31744复用为135.408/239.980 ms，对133.609/240.827 ms；BS4/8每请求102400输入、94208复用为130.650/218.492 ms，对130.761/220.130 ms。BS9每请求75010输入、71680复用为121.133 ms；同态近期候选120.804 ms，且该shape不足32K fresh，差值只能视为噪声。所有成功请求的前缀复用长度符合预期，BS32/64的KV总容量在同轮前后保持436952064。原始记录 `/tmp/dsv41_early_source_paired_20261104/tile64_fixed_candidate_20261104.json`、`/tmp/dsv41_tile64_b32b64_candidate_20261104.json`、`/tmp/dsv41_tile64_b4b8_candidate_20261104.json`、`/tmp/dsv41_superchunk_bs9_tile64_candidate_20261104.json`。
+
+第一次模型请求在恢复首包实验代码时触发 `_prefill_produce` 重复 QKV 调用，第一次调用释放大输入的共享量化张量，第二次在 `_v41_fused_qkv.py:86` reshape 出错并使 P rank退出。该错误由本轮撤回实验的编辑引入，发生在64K压缩前；已删除重复调用，静态检查及10项CPU/producer测试通过，新服务上上述请求均成功。失败原始记录 `/tmp/dsv41_early_source_paired_20261104/tile64_candidate_20261104.json` 和当时 P 服务日志，不能计入64K算子本身的准确性或性能证明。第一轮整批结果基本持平，因此第二轮固定32K通信包、只扩大压缩消费块；若依旧无稳定收益，应审视增加的临时显存与测试维护成本。尚未完成 PD质量/MAL、生产RDMA或独立review，不能提交。
+
+**第二轮隔离实验。** 为避免把通信包变化误计成压缩收益，`attention_v41.py::_CP_PROJECTED_PACKET_ROWS` 固定32768行，压缩 slab 与 `_v41_producer_metadata._RAW_TILE_ROWS` 固定65536行，receive仍限224 MiB；没有新增 shape 分支。四卡NCCL混合/百万行、元数据25/25、producer/CPU10/10再次通过。BS8零复用的首次服务批次后三轮中位918.273 ms，但该批落在启动后不久且三轮879–960 ms波动大；随后的同一prompt重复命中35840前缀，已作为无效冷输入数据排除。再用四轮不同的全新prompt确认零复用，后三轮中位872.951 ms，对前述32K基线874.676 ms，差约1.7 ms，尚不足以宣称稳定整批收益。BS32/64 32K输入、97%复用的热轮中位134.832/237.276 ms，对133.609/240.827 ms；BS4/8 100K输入、92%复用为130.458/219.354 ms，对130.761/220.130 ms。BS9每请求75010输入、71680复用为123.247 ms，因合计fresh不足32K，块数不变，该差异不归因64K。记录：`/tmp/dsv41_early_source_paired_20261104/tile64_decoupled_20261104.json`、`/tmp/dsv41_tile64_decoupled_unique_cold_20261104/repeated_cold.json`、`/tmp/dsv41_tile64_decoupled_b32b64_20261104.json`、`/tmp/dsv41_tile64_decoupled_b4b8_20261104.json`、`/tmp/dsv41_superchunk_bs9_tile64_decoupled_20261104.json`。BS32/64各三轮与32K基线请求 SHA、单步输出token全部一致；同轮总KV容量保持436901888，跨服务基线容量436909056，差7168 token但不能排除启动/allocator初态，暂不作因果归因。
+
+**PD精度与内存上界。** 同一 BS4×约8300 fresh、自然 DSpark、每请求256输出、PD分离TCP请求，候选与先前已启用L20 BF16源投影的 `bf16_l20_candidate_pd_b4_256_20261104.json` 请求SHA相同，四条输出ID、文本、draft轮数和逐位置接受计数全部一致；P服务前后KV容量436901888不变。与更旧的FP32 L20基线输出有分歧，但该分歧在BF16 L20候选已存在，不能归咎64K块。记录 `/tmp/dsv41_tile64_decoupled_pd_b4_256_20261104.json`。在ratio2路径，最多两个224 MiB receive、一个256 MiB FP32 slab、一个140 MiB BF16 local pack、4 MiB元数据scratch、32 MiB latent和8 MiB index projection，所列主临时缓冲合计约888 MiB，与总输入长度无关；ratio1的receive实存最多112 MiB×2、local pack最多280 MiB、slab64 MiB、latent64 MiB、index16 MiB、scratch4 MiB，合计约652 MiB。此为代码尺寸上界，不含持久KV池、Q/SWA工作区和分配器保留额外开销。在线NVML采样不能隔离这些短暂缓冲，不能拿它当精确峰值A/B。大规模质量集、长期稳定性及生产RDMA仍未验收。
+
+### 2026-11-04：源层重复计数与 CSA 状态写回的单算子清理
+
+**What / Where / When。** 当前 CP4 DSpark target Prefill 的 L2/L8/L14 ratio2 与 L20 ratio1 源层，`attention_v41.py::_produce_global` 原先每到源层都用 GPU 小算子重新计算 `floor((prefix+fresh)/ratio)` 并发布 `producer_key_counts`；`_v41_batched_prefill_select.py::try_select_batched` 又持有按 CP 张量身份复用的 `batch_key_counts`。现在删除前一份计算和发布及消费端的 `producer_key_counts` 分支，首次批量检索计算一次，L8/L14 复用同一 ratio2 计数。未增加配置、形状分流或临时缓冲。源层 `CSA_STATE` 写回原来由 `_v41_prefill_global.py::_prefill_state_store_kernel` 每原始行启动一个 Triton program，即使槽位为 -1 也启动；现在每 8 行一个 program，用已有槽位表掩码只搬运有效 FP32 value/score，`store_states` 接口与 pool、stride、trap 语义保持。
+
+**Why / How。** 在所附在线旧 trace `prefill_wr0_2.json` 中，`_prefill_state_store_kernel` 共63次、中位单次GPU kernel约20.64 µs；它只在 ratio2 源层调用，不可把63次时长直接相加当作 RT。状态槽不仅是请求尾，还含逻辑块尾环位，关系到 prefix 复用和 chunk 续算，因此没有改成每请求一行。DeepInfer 的 `Compressor.forward_pre_norm` 调 `compress_and_update_state_prefill`，其状态更新与压缩同阶段；RTP 的闭包对跨消费块、先读旧环状态、再写块尾环位，直接照搬会增加跨块尾行处理。当前8行掩码修改只变更单 kernel 执行几何；代码对应 `fp8/_v41_prefill_global.py`，DeepInfer 对照为 `https://github.com/deepseek-ai/DeepInfer/blob/main/deepinfer/model_executor/models/v4_modules/compress.py`。
+
+**单算子证据。** 仓库外 `/tmp/dsv41_state_store_group_probe_20261104.py` 在 GPU4 用相同 FP32 value/score、槽位与状态池对原逐行 kernel 和8行 kernel 做 CUDA Graph 批量重放；每256行一个有效槽的合成稀疏模式下，32K行中位17.65→5.90 µs、64K行34.53→10.46 µs；每8行一槽的64K行为35.13→11.91 µs。64K全行有效时86.25→81.07 µs，256行全行有效时1.59→1.97 µs，说明短密集输入可能有亚微秒级退化。所有模式状态池逐值一致。合成槽位密度不等于生产真实槽位分布，故此结果只证明算子机制。接入后 `test_v41_prefill_global.py` 10/10（含非连续行stride、尾部不足8行、CUDA Graph）、`test_v41_producer_metadata.py` 25/25，通过；开启 trap 的合法槽位 JIT 编译与运行通过。一次 `code-simplifier` 约束复查仅删除向量化后可证明多余的有效行判断，复测10/10、`py_compile` 与 `git diff --check` 均通过。
+
+**整批与精度。** 仅有64K压缩块、旧计数与旧状态 kernel 的 P-only 服务，BS32/BS64每请求32768输入、31744复用，后两轮 engine RT 中位135.059/240.477 ms；只删重复计数为133.166/238.361 ms；再启用8行状态 kernel为136.302/241.122 ms。三进程启动及缓存初态不同，数毫秒差值不能判定稳定收益。最终内核的BS4/BS8每请求102400输入、94208复用为131.286/219.682 ms，对较早64K候选130.458/219.354 ms也属中性。BS32/BS64 六组请求SHA和单步输出ID全部相同。自然DSpark、PD分离TCP的BS4×约8300 fresh、每条256输出与前一64K候选四条输出ID、文本、draft轮数和每位置接受数全部相同，证据 `/tmp/dsv41_state_group_pd_b4_256_20261104.json`。BS9×75010输入首次旧/新对照的复用长度74752/71680不同，该比较无效；同工作量重复后中位99.731/103.871 ms仍属小样本波动。最终内核在71680复用的BS9中位123.090 ms，与前一候选123.247 ms接近。最终服务启动时真实warmup至14:28:17才结束，14:26发起的冷输入因客户端120秒超时被剔除；另一次复用35840也不是冷输入。重新生成前缀不同且实测零复用的BS8约36090 fresh四轮完成，后3轮中位1016.702 ms；这批提示词不同于早先873 ms的批次，不作跨批回退归因。原始记录为 `/tmp/dsv41_keycounts_b32b64_{before,after}_20261104.json`、`/tmp/dsv41_state_group_b32b64_20261104.json`、`/tmp/dsv41_state_group_b4b8_100k_20261104.json`、`/tmp/dsv41_superchunk_bs9_{keycounts_before,keycounts_after_warm,state_group}_20261104.json` 与 `/tmp/dsv41_state_group_cold_unique_20261104/cold.json`。
+
+**容量、审查与剩余门禁。** 最终服务测试前后 KV 总容量固定437300224；上一个服务固定433139712，跨启动差值方向与代码变化不一致，不能归因于状态 kernel 或计数删除。8行状态 kernel 不新建缓冲，64K slab 的固定容量界仍见上一节；无可归因在线峰值显存A/B。最终完整任务 diff 经新的一名只读 reviewer 审查，无剩余确定性正确性阻断；其发现一个测试把通信 packet 上限误写成压缩 slab 上限，现已改为 `_CP_PROJECTED_PACKET_ROWS` 并重跑对应测试。生产 RDMA、长时稳定性、数据集质量仍未验收；不可把局部3倍 kernel 收益报告成完整 batch 20%收益或生产可提交状态。
+
+### 2026-11-04：CP ratio2 前驱 CSA 状态读取融合
+
+**What / Where / When。** 在 L2/L8/L14 的 CP4、KV 分片、非 CUDA Graph 的 target Prefill 中，`attention_v41.py::_prefill_produce` 在 QKV 投影前异步快照旧 `CSA_STATE`；旧路径由 `prefix_lengths.long()`、减一/截断、`arange` 请求号、状态槽位映射、池 gather 与无效槽清零组成，随后按 TP 组 all-reduce。现在 `fp8/_v41_prefill_metadata.py::read_predecessor_states` 一次 Triton kernel 从原池读到 `[B,1024]` FP32 快照，保留异步流及原 all-reduce；`_v41_attention_jit_warmup.py::_warm_pool` 在启动期预热该 kernel。没有新增配置开关、shape 门槛或备用算法。`_v41_cp_async.launch` 现在只记录该回调实际读取的 prefix、CSA 池和 CSA 块表，不再遍历所有块表。
+
+**Why / How。** 所附在线 BS9 trace `prefill_wr0_2.json` 的 `state.async_start` 在三个 CSA 源层分别约1.382/1.231/1.210 ms（CPU 包围范围，含一次 NCCL all-reduce 下发及可能交错的缓存回调，不能直接归因到这些 Torch 小算子）。新 kernel 沿用原状态槽公式：位置 `max(prefix-1,0)`，逻辑块列 `(pos//TPB)%COLS`，环偏移 `pos%(EB*CP)`，只有偏移对应本 rank 且物理块号正数时读取；其他 rank 写零，再由原 all-reduce 合并。快照在源层写新状态前完成，ratio2 的跨 chunk carry 与尾环写回不变。DeepInfer 的 `Compressor.forward_pre_norm` 把状态更新与压缩合在 `compress_and_update_state_prefill`；本轮针对 RTP 可独立移除的**读旧状态**下发链，未声称两者压缩实现完全相同。
+
+**单算子先验。** GPU4、BS9、相同状态池/表/前缀，旧路径（不含 all-reduce）与新路径交错各8组×100次测 CPU enqueue：中位77.2→16.8 µs/调用；这是局部下发时间，不是完整源层或模型收益。新输出与旧 `cp_state_slot_mapping` 加池索引在 FP32 上逐元素一致；测试覆盖 int32/int64、BS9/128/1024、CP4 四个 rank、空/非空前缀、环回、非连续 prefix 和带 padding 的块表，`test_v41_prefill_metadata.py` 13/13 通过。新输出仅一个 `[B,1024]` 快照；旧实现也产生同形状快照，新增临时内存不随 fresh 总行数增长。
+
+**整批与精度。** 与上一版8行状态写回候选对同 SHA、同实际复用长度复测：BS32/64×32768输入、31744复用，后两轮 engine RT 中位136.302/241.122→134.868/241.179 ms；BS4/8×102400输入、94208复用为131.286/219.682→129.868/218.929 ms；在线 BS9×75010输入、71680复用为123.090→120.469 ms。BS32/64 单步输出 ID 完全相同；BS4/8 请求 SHA、输入及复用长度逐轮相同。自然 DSpark、TCP PD 分离 B4×约8300 fresh、每条256输出，四条输出 ID、文本、draft轮数与逐位置接受数均与前一候选相同，P 服务前后 KV 容量固定436892672。证据 `/tmp/dsv41_predecessor_b32b64_20261104.json`、`/tmp/dsv41_predecessor_b4b8_100k_20261104.json`、`/tmp/dsv41_superchunk_bs9_predecessor_20261104.json`、`/tmp/dsv41_predecessor_pd_b4_256_20261104.json`。跨服务几毫秒变化仍需更稳服务证据；没有证明完整模型20%收益。生产 RDMA、长稳、数据集质量及可归因服务峰值显存尚未验收。
+
+### 下一专题：Broadcast、全局顺序与有界源层通信
+
+**What / Where / When。** `attention_v41.py::_prefill_x_group_plan` 按 zigzag 全局行序组 packet；`_prefill_projected_x_groups` 对本 rank 的行投影、按 owner 收到 slab，再调用 `_start_prefill_x_gather_async`。packet 只有一个 hidden owner 时走 Broadcast，多个 owner 时走等长 AllGather；L2/L8/L14 用每 fresh 行1024个 FP32，即4096 B，L20 当前用512个 BF16，即1024 B。下表是用当前 planner 对明确 fresh 长度向量的**静态模拟**，非在线 timeline 实测；B64总fresh=580608采用等长代理向量，不能代表原在线逐请求分布。
+
+| fresh 向量 | ratio2 collective (Broadcast/AllGather) | ratio1 collective (Broadcast/AllGather) |
+| --- | ---: | ---: |
+| B32×1024；B4×8192 | 1 (0/1) | 1 (0/1) |
+| B64×1024；B8×8192 | 2 (0/2) | 2 (0/2) |
+| B9×3330 | 1 (0/1) | 1 (0/1) |
+| B8×36090、零复用 | 10 (1/9) | 10 (1/9) |
+| 单请求1048576 | 74 (68/6) | 40 (40/0) |
+| B64×9072，合计580608代理 | 19 (0/19) | 19 (0/19) |
+| 12请求长短混合测试向量，合计214693 | 11 (3/8) | 10 (7/3) |
+
+**Why。** 常用复用形状的 Broadcast 已为零，直接删除分支不减少它们的 collective 数。若保留原 packet 只把单 owner Broadcast 改成 AllGather，每张卡须接收4份等长 rank 区，3份为 padding；单长请求会把这类包的接收字节放大约4倍而包数不变。更进一步把各 owner 长段提早放在同一轮 AG，当前按全局顺序消费的压缩器须保留未来 owner 的数据；单请求1048576时每段约131072行，单是其他3个 owner 的一个完整 FP32 投影段就约1.5 GiB，随输入长度增长，违背固定临时显存合同。这个下界来自当前**消费顺序**，不是 Broadcast 的业务语义。DeepInfer 当前 `attn.py::_make_cp_gather_getter` 对局部投影调用 `userbuffer.cp.all_gather` 并延迟取结果；SGLang 当前 CUDA `dsv4/compressor.py` 先算 `kv_score` 投影，再经 `cp_materialize_global_token_order` 汇集；其 interleave 实现对该 forward 做一次完整等长 AG 与重排，没有证明可在 RTP 的百万 fresh 同一 forward 下保持固定临时显存。来源：`https://github.com/deepseek-ai/DeepInfer/blob/main/deepinfer/model_executor/models/v4_modules/attn.py`、`https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/attention/dsv4/compressor.py`、`https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/cp/interleave.py`。
+
+**How：下一可执行结构。** 不再把所有**未压缩**投影复制到四卡。ratio2 的 `compress_pairs` 对完成的相邻 token pair 独立归一：同一 hidden owner 的 pair 在本地压缩、归一、编码为 Global+Indexer 的356 B结果；跨 owner pair 不在本地冒险配对，把两行 raw value/score 放入下述同一轮有界 AG，收到后各 rank 用同一压缩器补算。请求首行接续半个 pair 时，仍先异步快照旧 `CSA_STATE`。把每逻辑块及请求尾需要持久化的 raw 状态行也放进**同一轮**AG，并与跨界 raw 行去重。rank-major 消息由 compact pair 记录与必需 raw 记录组成；所有 rank 按 host 前缀长度及 zigzag 布局导出的确定性位置映射恢复 Global/Indexer/State 物理槽位，随后沿用已有 pool readback 服务当前 query。ratio1 每 token 独立，不需要 raw pair，但仍使用相同有界消息机制。每 rank send≤56 MiB、四卡接收≤224 MiB，固定本地投影块及量化输出包；packet 次数由结果字节预算决定，不由输入总行数决定。所有 rank 按同一 host 几何提交相同次序的 AG，不增加按收益阈值切算法的 shape 分支。要保留原来的量化时机、前缀旧状态快照先于新写、跨 chunk carry、同块状态环的最终值、池物理 owner及当前 query 输出。
+
+CPU owner/halo 原型 `/tmp/dsv41_local_pair_halo_oracle_20261104.py` 对上述典型向量及 B1024 混合短请求比对了 pair 输入：所有形状一致，B9 有36个跨 owner pair、B1024短混合有1024个，其他列出的形状为0。这只证明行几何，不证明 FP4、状态池、NCCL 或完整模型。实现顺序：先做 raw/compact 记录和恢复的局部数值、池写入验证，再做四卡通信/内存界，最后同形状 E2E 精度、MAL、完整 batch RT 和简化审查。
+
+**物理槽位的量化。** 另一个只读原型 `/tmp/dsv41_local_owner_traffic_20261104.py` 按当前 `seq_size_per_block=256`、CP4、`CSA_STATE` 的 `TPB=1024` 与 `EB=2/rank` 对同组向量计算物理 owner；后二者由 `OpaqueKVCacheSpec::seqSizePerBlock/stateRingEntries/entryCount` 与 DSV4.1 state desc 推导，仍需服务实值核对。B64×1024 fresh 的32768个完成 pair 中，24576个由不同于 Global 物理 owner 的 hidden rank 产生；512条状态尾行中，384条 hidden/state owner 不同。需汇集的 FP4 main+index 约11.12 MiB、状态尾 FP32 约2 MiB，对比当前未压缩投影256 MiB；这些只是**payload 算术量**，不含 collective padding、pack/restore、旧前缀读池和 CUDA 工作区，不能当作实测带宽或端到端收益。单请求1048576 fresh 的对应量为178+32 MiB，对比4 GiB；B1024每请求1–8 fresh 则状态尾覆盖全部4608行，约18 MiB，和当前投影18 MiB接近，说明短请求必须做同算法的小算子/CPU回退验收，不能只看通信字节。
+
+**四卡通信下界探针。** `/tmp/dsv41_source_collective_fused_boundary_probe_20261104.py` 在 GPU4–7 真实 NCCL 上按当前 planner 的 Broadcast/AG 包大小重放旧传输，另一臂按上述 compact pair + 状态尾/跨界 raw 去重后的每 rank 字节数做固定224 MiB接收上限的等长 AG。5轮取后4轮中位 GPU event 时间，比较两臂的**collective 传输下界**；探针没有本地投影/压缩、记录打包、跨界 pair 补算、物理池写入、读旧前缀或 Q/SWA/MoE，也没有还原当前双包的计算掩盖，不能当作生产代码或完整 batch 收益。数据 `/tmp/dsv41_source_collective_fused_boundary_probe_20261104.json`：
+
+| fresh 向量 | ratio2 旧包数/新包数、旧→新通信 ms | ratio1 旧包数/新包数、旧→新通信 ms |
+| --- | --- | --- |
+| B32×1024 | 1/1，0.225→0.079 | 1/1，0.095→0.075 |
+| B64×1024 | 2/1，0.416→0.089 | 2/1，0.163→0.088 |
+| B4×8192 | 1/1，0.220→0.077 | 1/1，0.092→0.079 |
+| B8×8192 | 2/1，0.411→0.080 | 2/1，0.164→0.089 |
+| B9×3330 | 1/1，0.208→0.085 | 1/1，0.091→0.084 |
+| B8×36090 零复用 | 10/1，2.016→0.129 | 10/1，0.723→0.177 |
+| 单请求1048576 | 74/1，9.605→0.330 | 40/2，4.645→0.554 |
+| B64×9072，合计580608代理 | 19/1，3.606→0.213 | 19/1，1.329→0.314 |
+| B1024每请求1–8 fresh | 1/1，0.084→0.082 | 1/1，0.055→0.042 |
+
+这些数证明“可用一轮有界 compact AG 表达同一几何”且通信本身有足够优化空间；是否保留算法取决于真实 pack/压缩重排/状态写池后仍有收益及代码复杂度是否下降。尤其 B1024 ratio2 的新接收约19.39 MiB，比旧18 MiB略大，局部通信几乎持平；不能以长输入极大改善掩盖短请求风险。
+
+### 2026-11-04：按请求成组 AllGather 的反证与局部数值证明
+
+**What / Where / When。** 在 CP4 target Prefill 的 L2/L8/L14/L20 源层，继续检验能否把 `attention_v41.py::_prefill_x_group_plan` 的全局顺序 packet 改成“完整请求组成一个有界 cohort，每 rank 连续投影本地行，然后 AllGather”。实验只在 `/tmp/dsv41_cohort_overlap_probe_20261104.py` 等仓库外脚本运行，生产路径仍是原有 Broadcast/AllGather 选择。在线 P 服务配置 `max_seq_len=131072`，但仓库原有 planner 测试还覆盖单请求1048576；不能把当前服务配置误当作代码的通用形状上限。
+
+**Why / How。** 一个 cohort 收齐其全部请求的四 rank 行后，可以直接借 `CPContext.unpad_restore` 恢复 zigzag 全局行序；这避免逐 owner Broadcast 和按片段生成大量 CPU tensor view。原型保留 RTP 的“先启动下一次通信，再消费上一次”的跨包重叠（`attention_v41.py::_prefill_projected_x_groups` 的 launch/consume 次序），使用同一个 FP32/BF16 投影 GEMM、真实四卡 NCCL 和 `torch.index_select(out=...)` 恢复。所有已测输出与原路径逐元素相同；单算子链包括投影、NCCL 和恢复，不含压缩、物理 KV 写池、Q/SWA/MoE 或服务 E2E。五轮 GPU event 取中位，再取四 rank 最大值。batch 数不是固定8，形状覆盖 1、8、11、32、64、1024，以及 32K/100K 高复用、36K 零复用和总 fresh 580608 的等长代理。
+
+| 源层/形状 | 旧 packet→cohort 次数 | 旧→cohort 链 GPU ms | 原型峰值额外显存 MiB，旧→cohort | cohort 接收预算 |
+| --- | ---: | ---: | ---: | ---: |
+| ratio2，B8×36090 fresh | 10→8 | 2.793→2.145 | 628→285 | 256 MiB |
+| ratio2，B64×9072，总580608 fresh，等长代理 | 19→10 | 4.897→3.979 | 504→498 | 256 MiB |
+| ratio2，单请求108272 fresh | 4→1 | 1.669→0.982 | 680→425 | 512 MiB |
+| ratio2，合成偏斜 B11 | 9→3 | 2.446→1.632 | 669→754 | 512 MiB |
+| ratio1，B8×36090 fresh | 10→8 | 2.022→1.488 | 224→73 | 64 MiB |
+| ratio1，B64×9072，总580608 fresh，等长代理 | 19→10 | 4.100→1.906 | 126→125 | 64 MiB |
+
+原始四卡记录：`/tmp/dsv41_cohort_overlap_cap256_20261104.json`、`/tmp/dsv41_cohort_overlap_long_cap512_20261104.json`、`/tmp/dsv41_cohort_overlap_ratio1_cap64_20261104.json`；其他典型形状的 512 MiB 原型输出见 `/tmp/dsv41_cohort_ag_stages_cap512_20261104.json`，但该文件是串行 cohort 版本，不能与上述重叠结果混为同一方案。512 MiB 双缓冲重叠在 B64 总 fresh 580608 ratio2 的额外峰值约995 MiB，虽然链 GPU 降到约3.78 ms；固定256 MiB cohort + 两包重叠把峰值控制在约498 MiB，链 GPU 约3.98 ms。串行 cohort 在同形状约5.16 ms，高于旧路径约4.86 ms；恢复跨包重叠才有可见收益。各轮受服务共驻和 NCCL 抖动影响，以上是局部机制证据，不外推为完整 batch Prefill RT。
+
+**数值前提。** `/tmp/dsv41_pair_numeric_oracle_20261104.py` 用当前 `_v41_prefill_global.compress_main/store_index` CUDA kernel，比较全局顺序与按 hidden owner 重排的同批 pair：B9 混合奇数 prefix、B32/B64 每请求1024 fresh 且31744 prefix、B4/B8 每请求8192 fresh 且94208 prefix，以及 B1024 每请求1–8 fresh。六个样例的 ratio2 与 ratio1 latent 最大差为0，Global FP4 和 Indexer FP4 池字节差数均为0；B9 混合样例有18个跨 owner pair，B1024 有1024个。结果 `/tmp/dsv41_pair_numeric_oracle_20261104.json`。这是利用相同 pair 输入检验压缩与量化对处理顺序的独立性，未证明实际 CP 物理 owner 写池、CSA 状态尾、NCCL 记录打包或服务精度。
+
+**决策与下一实现边界。** 按请求 cohort AG 证明“去 Broadcast + 减 CPU 下发”值得做，但固定256 MiB 接收预算不能装下一条108272 fresh 的 ratio2 请求；若用512 MiB覆盖该请求，双包在总580608代理形状会把临时峰值增至约995 MiB。为同时保留超长形状和固定显存上限，不能只把原 packet 的 Broadcast 改为 AllGather，也不能引入按请求长度切两套生产算法。下一步仍以本地完成 pair 压缩、只交换 compact latent/必要 FP32 状态尾和跨 owner 原始行的统一流式算法为主：先在四 rank 上实现物理 owner 槽位和状态环数值原型，再评估固定缓冲与完整投影→通信→压缩链；若复杂度不减或无模型收益则不替换生产路径。
+
+**CSA 状态环顺序的新增边界。** 当前 `_v41_producer_metadata._raw_slot` 对状态槽使用 `column=(pos//TPB)%table_cols` 和 `offset=pos%(EB*CP)`，而 `_produce_global` 目前按全局 pos 顺序写；如果多个逻辑块映射同一物理列，旧路径的最后一次写决定最终状态。按 hidden owner 顺序直接写会改变该最后写。CPU 槽位顺序原型 `/tmp/dsv41_state_owner_order_oracle_20261104.py` 对上述 B4 100K 复用、单请求108272 fresh、B64总580608代理、B9混合及 B1024 短请求，以 CP4、TPB1024、EB2/rank 和表列数1/4/128扫描：例如单请求108272在 `table_cols=4` 时848条候选状态尾行落到32个物理槽，若按 owner 顺序写，32槽最终值均错；先按实际物理槽选择最大绝对位置则与全局顺序写相同。该表列数是刻意覆盖环回的假设，实际服务表列数尚未读取，不能宣称当前服务发生这些冲突。统一 compact 算法必须依实际块表槽位做“最新 pos 胜出”或保证状态写序，不能只验证 Global/Indexer 字节。结果 `/tmp/dsv41_state_owner_order_oracle_20261104.json`。
+
+**全典型形状补验与波动。** 随后在同一四卡进程按 ratio2 256 MiB、ratio1 64 MiB cohort 接收上限逐个跑 B32/B64 32K且97%复用、B4/B8 100K且92%复用、B9 replay、B8 36K零复用、B64总fresh580608等长代理、B1024每请求1–8 fresh；每组原路径与 cohort 路径的投影恢复结果一致，完整原始表 `/tmp/dsv41_cohort_overlap_all_shapes_20261104.json`。ratio2 的 B32、B64、B4、B8、B9、冷B8、580608代理、B1024 的当前→cohort GPU链中位依次为 0.838→0.440、2.532→0.858、0.573→0.523、0.761→0.646、0.804→0.615、2.798→2.184、4.825→3.964、11.099→0.268 ms；其中 B64 当前路径在另一同机轮次曾为1.398 ms，不能把2.532当稳定基线。ratio1 冷 B8 在该连续多形状轮次为2.184→3.069 ms，与独立轮次2.022→1.488 ms矛盾；需要同进程交错复测和分段 timeline 才能解释，不能只挑快的轮次宣布全形状收益。该候选尚未进入生产代码，也未做模型 E2E。
+
+冷 B8 ratio1 的反向顺序独立复测（先 cohort 后旧路径）为1.747→1.885 ms，记录 `/tmp/dsv41_cohort_overlap_ratio1_reverse_cap64_20261104.json`；这支持上一轮3.069 ms是非稳定样本，但还没有同期 GPU/服务争用记录，不能定位其根因或把该 shape 判为稳定加速。
+
+**概念纠正与接线边界（2026-11-04）。** “必须按全局行序消费整段原始投影”不是模型业务契约。业务契约是 ratio2 的相邻绝对位置配对、旧 `CSA_STATE` 与跨 tile carry、Global/Indexer 物理槽以及最终状态环值正确；ratio1 没有配对。当前 `attention_v41.py::_produce_global` 接受全局顺序的投影 tile，是现有接口约束。请求 cohort 原型先让各 rank 对本地连续 hidden 行投影，一轮 AllGather 得到 rank-major 结果，再用 `CPContext.unpad_restore` 恢复为该接口的 tile；通信无需按全局行序组包。上文讨论“未来 owner 数据保留”仅适用于**在固定内存预算内完整汇集超长请求、且不改变现有压缩器消费方式**这一组合，不应外推为业务必需。
+
+rebase 到 `9e3a33ecd1983502e0be47f544c32305489faf33` 后，生产源码仍是 `_prefill_x_group_plan` 的 owner packet 和 `_start_prefill_x_gather_async` 的单 owner Broadcast。一次把 cohort 原型接入生产的暂存尝试通过 CPU 行序和四卡 NCCL 的宽 batch/B1024 测试，但单请求1048576 fresh 的 ratio2 完整接收约4 GiB，违反现有 NCCL 合同测试的额外临时显存≤1 GiB；该接线已撤回，补丁留在 `/tmp/dsv41_cohort_integration_attempt_20261104.patch`，恢复 kernel 试稿在 `/tmp/dsv41_cp_source_restore_attempt_20261104.py`。没有 E2E 或生产性能结论。后续设计必须使超长请求也有固定预算，同时避免把单 owner Broadcast 简单改名成四份 padding 的 AllGather。
+
+**分块 cohort 修正。** 上述4 GiB仅是“整条1M请求的所有 raw 投影同时驻留”的峰值，不能据此否定统一 AllGather。把每个 rank 的连续本地行按固定 `C` 行切开，同一 local offset 的四 rank 一起 AG；每轮4个 rank 都有有效投影，无单 owner packet。以 ratio2、`C=16384`、每行1024个FP32为例，单轮接收 `4×16384×1024×4=256 MiB`，单请求1M fresh 的每 rank 本地262144行需要16轮；双接收缓冲仍为固定512 MiB，与总 fresh 行数无关。ratio1每行512个BF16，同 `C` 的单轮接收32 MiB。最后一轮各 rank 的本地剩余行数相同，可用实际行数提交 collective，不必零填充。
+
+**剩余计算约束。** 每轮AG结果按rank排列，`unpad_restore` 给出全局行到`rank×chunk_length+local_idx`的映射；分轮后不能再假定一次AG包含完整请求。若沿用当前 `_produce_global` “从全局0到尾依次产出raw tile”的接口，早到的其他rank数据必须暂存，或者在需要时重新汇集，前者可突破固定显存、后者增加通信。统一分块AG的正确接线应让压缩端按全局位置索引直接消费本轮结果、按物理槽写Global/Indexer池；ratio2在跨轮/跨owner处保留两行pair所需的halo，首fresh行仍用旧`CSA_STATE`快照，状态环同槽多次更新时按最大绝对位置确定最终值。ratio1不需pair halo。这个接线仍是待实现与验证的方案，不是当前生产代码；通信上的Broadcast/AllGather二选一可以删，但不能只改collective调用而不改消费接口。
+
+### 2026-11-04：固定 tile 的 rank-major AllGather 接线与在线验收（进行中）
+
+**What / Where / When。** 在 `attention_v41.py::_prefill_produce` 的 CP4、分片 KV、真实池已绑定的 L2/L8/L14/L20 source Prefill 中，实验接线用 `_v41_cp_source_plan.py` 固定每 rank 16384 本地行的 tile，`_prefill_rank_major_source_tiles` 直接把本地投影写入 AllGather receive 的本 rank view；`_v41_cp_source_metadata.py` 按 zigzag 绝对位置生成 pair、状态和物理槽位，`_produce_global_cp` 从 rank-major receive 压缩并写池。ratio2 用一行 halo 和最多 7B 个跨 segment pair，状态环只让同物理槽的最终绝对位置写入。新路径仍是未提交实验；原 owner packet/Broadcast 回退仍在代码内，尚未达到最终简化目标。
+
+**固定内存合同。** ratio2 单 receive 最多 `4×16385×1024×4≈256 MiB`，至多两包在途约512 MiB；边界行上界 `2×7×B×1024×4` 字节，B≤1024 时约56 MiB。ratio1 单 receive 最多约64 MiB。与总 fresh token 数无关，但实际 peak 显存尚无可归因 A/B。CPU 行序、四 rank NCCL 投影、GPU Global/Indexer/CSA 状态字节 oracle 已覆盖奇数 prefix、短段、B32/B64 32K、B4/B8 100K、B1024 和单请求跨 tile；这些是局部证据，不代替服务验收。记录 `/tmp/dsv41_cp_source_pool_oracle_20261104.json`、`/tmp/dsv41_rank_major_nccl_oracle_20261104.py`、`/tmp/dsv41_cp_source_method_nccl_20261104.py`。
+
+**首轮失败与根因。** 初次服务试跑出现跨请求缓存污染：`_begin_forward` 未清除新加的 `cp_source_plans`/`cp_source_geometry_gpu`，启动短请求的计划被 B8 2048-token priming 沿用，P rank 退出；已在 forward 开始清理，随后 B8 priming/129-token 续算和五组完整 batch 请求通过。首轮同配置、同 corpus 的正式两轮 engine RT（ms）为：B8×(2048+129) 旧路径87.52/87.98、新路径95.44/92.38；B32×32K、31744复用旧134.40/133.79、新154.55/155.28；B64同形状旧241.15/234.73、新253.04/252.16；B4×100K、94208复用旧132.09/130.65、新154.53/154.21；B8×100K旧221.89/221.94、新253.25/252.73。两条路径各自启动服务，故数毫秒差异要谨慎，但20–31 ms 的长输入回退清晰。原始输出 `/tmp/dsv41_rank_major_model_ab_20261104/{baseline_matched,candidate_fixed}/summary.json`。
+
+**CPU 同步定位与第二轮。** 目标 batch profiler 必须在前端数秒的长文本处理后启动；`start_step=800,num_steps=1000` 才捕到 B32 目标，短 profile 只捕到空转或激活请求。首轮新路径 L8/L14/L20 每层用 `torch.tensor(descriptors, device='cuda')` 上传描述符，在目标 trace 中引起约8–10 ms 的 `cudaStreamSynchronize`；旧路径对应层无此同步。新 `upload_plan` 将 ratio2 与 ratio1 描述符在 L2 前用 pinned host 缓冲非阻塞上传，一次 forward 复用；L8/L14 的上述同步在目标 trace 中消失。第二轮正式两轮 engine RT：B32 134.91/132.97 ms，B64 241.79/243.81 ms，B4 100K 146.08/130.19 ms，B8 100K 221.19/219.63 ms。前两组基本持平、B4 波动，尚无稳定整批收益；记录 `/tmp/dsv41_rank_major_model_ab_20261104/candidate_async_meta/summary.json` 和 `/tmp/dsv41_rank_major_profile_20261104/candidate_async_target/timelines/`。
+
+**所有权纠正与下一步。** 一次 L20 ratio1 “本地压缩后直接写本 rank 池”的试稿在代码审查时撤销，未用于模型请求。`_v41_producer_metadata.py::_raw_slot` 按 `owner=pos//owner_tokens_per_block` 决定物理槽 rank；zigzag hidden owner 按请求 segment 决定，两者可能不同，例如 256-token 物理 owner 块内有两个各128行、分居不同 rank 的 segment。即使 ratio1 没有跨 token pair，也不能仅凭本地投影直接写本地池。若改为先本地压缩，必须把 compact Global/Indexer 结果路由到物理 owner，再按槽写；ratio2 另需跨 segment pair 和状态环处理。当前未证明这套交换的精度、显存或 RT；不能把第二轮中性结果当作完成或提交门禁通过。
+
+**首包提前启动的否定实验。** 以已缓存 GPU 描述符的第二轮为基线，另把 source tile 的首个 AllGather 在 Q/SWA 投影前启动，后续 tile 仍与前 tile 消费重叠。五组同 corpus 正式两轮 engine RT（ms）：B8短新段88.99/91.48，B32 32K 134.19/133.91，B64 32K 243.23/239.77，B4 100K 130.52/130.20，B8 100K 222.61/220.67；相对第二轮没有稳定收益。该试验还要求维护“AG 已发出但 Q/SWA 准备抛异常”的 buffer 生命周期，因此已从工作树撤销，不能将短暂提前启动视为最终方案。记录 `/tmp/dsv41_rank_major_model_ab_20261104/candidate_early_ag/summary.json`。
+
+**本轮代码决策。** 固定 tile rank-major AG 即使消除了每层描述符同步，典型输入只有持平结果，且保留旧回退时增加约两百行在线控制流。已从工作树撤出这条实验接线和两份新模块，恢复本轮开始前的 `attention_v41.py` 与相关测试；原型快照保存在 `/tmp/dsv41_attention_v41_rank_major_async_meta_20261104.py`、`/tmp/dsv41_cp_source_{plan,metadata}_candidate_20261104.py`。当前在线生产路径仍是 owner packet 的 Broadcast/AllGather 选择；文中其余“候选接线”描述只作为已否定实验的历史记录。下一路线必须同时处理 hidden owner 与物理 KV owner 的路由、跨 owner pair、状态槽最终写者，且在单算子链和完整 batch RT 上优于原路径后才接入。
+
+### 2026-11-04：按物理池 owner 路由投影的下一步证据
+
+**What / Where / When。** 当前 CP4 target Prefill 的 L2/L8/L14/L20 源层仍在 `fp8/attention_v41.py::_prefill_projected_x_groups` 用全局顺序 packet 汇集投影，单 owner packet 在 `_start_prefill_x_gather_async` 走 Broadcast。新方向是在固定 16384 本地行 tile 内按 `fp8/_v41_producer_metadata.py::_raw_slot` 的 Global/Indexer 物理 owner 分组，投影行一次 AllToAll 送往实际写池的 rank，再按请求和绝对位置恢复顺序；ratio2 的状态尾行须另按 `CSA_STATE` owner 随同路由。**这仍是仓库外原型，没有进入在线代码。**
+
+**Why：物理所有权与 hidden 所有权不同。** Global/Indexer 的 owner 是 `(pos//OWNER)%CP`，而 hidden 的 owner 来自 zigzag segment；CSA 状态 owner 又是 `(pos%(EB*CP))//EB`。当前服务 2026-11-04 18:26 的 `engine.log` 报告主块 `seq_size_per_block=256`，`csa_state` 为 1024 token/block 且8192 B/block；结合每状态 1024 个 FP32 值，可核得每块 2 条状态。以这组实值、CP4 的几何代理计算，B32/B64 32K、97% prefix 复用时 hidden 与 Global owner 相同的 fresh 行仅 25%。本地投影直接写本 rank 池会丢掉另外 75% 的物理写入。ratio2 的完成 pair 两行落在同一个偶数大小 owner 块，因而可在目的 rank 配对；但混合奇数 prefix 的 B37 代理有 114 个跨 hidden rank pair、14 个跨固定 local tile pair，后者需要一行前驱 halo。单请求 1M 的 `CSA_STATE` 末尾 8192 个候选写入在假设 4 个环列时只有 32 个最终物理槽；重排后必须以每个 `(请求、状态 owner、环列、环偏移)` 的最大绝对位置选最终写者。几何与状态检查在 `/tmp/dsv41_physical_route_pair_state_oracle_20261104.py/.json`；4环列仍是刻意覆盖环回的假设，不代表当前实际块表列数。
+
+**How：先验算术与真实四卡单算子链。** `/tmp/dsv41_owner_route_geometry_20261104.py/.json` 显示 ratio2 每 tile 最大接收量：B32 32K 为32 MiB、B64 32K 为64 MiB、B8 100K为64 MiB；同 tile 的 rank-major AG 接收量分别为128、256、256 MiB。`/tmp/dsv41_physical_owner_a2a_probe_20261104.py/.json` 用 GPU4–7 测 `index_select` pack+NCCL：对应 B32/B64/B8 的各 rank 中位数最大值约0.215→0.144、0.393→0.251、0.393→0.166 ms。加入目的端按绝对位置 `index_select` 重排后，`/tmp/dsv41_physical_route_reorder_probe_20261104.py/.json` 比较 AG+全局恢复与 A2A pack+路由+owner 内恢复，ratio2 为0.265→0.147、0.488→0.272、0.489→0.189 ms；ratio1 为0.105→0.073、0.157→0.100、0.158→0.086 ms。相同探针也验证 B9 奇数 prefix、单请求 131072 的收到行与预期 source 行一致。数值是局部 GPU event 中位，非完整源层、非完整 batch RT；源层投影、压缩、FP4 写池、状态、pool readback、CPU 规划和 Q/SWA 重叠尚不在探针里。
+
+**容量和接线门槛。** 固定 tile 时，ratio2 的一份原始接收上界约64 MiB/rank，加发送、最多一行跨 tile halo、状态尾重复发送与至多两份在途缓冲后仍可给出与总 fresh 长度无关的界；实际峰值必须在线量测。下一步先在四 rank 原型中让 Global/Indexer 物理池字节、CSA 环最终值和旧前缀快照与现路径一致，再把 source 投影→A2A→压缩→池写完整链做单算子 A/B；仅当这些证据和 BS8短段、BS32/64 32K、BS4/8 100K、BS9混合、单长请求的完整 batch RT 一起支持收益时，才替换旧 Broadcast/AG 分支并做 E2E 精度、MAL、稳定性和独立审查。当前不存在可报告的这条 A2A 路径 E2E 收益。
+
+**物理 owner 的数值前提。** `/tmp/dsv41_physical_route_numeric_oracle_20261104.py/.json` 用现有 CUDA `compress_main`、`store_index` 将同一批 ratio2 pair 或 ratio1 token 按物理 owner 重排，再与全局顺序基线比较。B9混合奇数 prefix、B32/B64 32K、B4/B8 100K、B1024短请求六组中，latent 最大差为0，Global/Indexer FP4 池字节差为0。该测试沿用相同投影值和人为确定的输出槽号；它证明压缩/量化对物理 owner 的处理顺序独立，不证明真实 NCCL、块表、CSA 环或在线模型精度。
+
+**有界 plan 与状态环 CUDA 核验。** `/tmp/dsv41_physical_owner_plan_20261104.py/.json` 以连续绝对位置在256-token物理块边界切 run，再按固定本地 tile 生成 send/receive 和目的 owner 内顺序；B32/B64、B8 100K、B9奇数、B1024短、B37混合和单请求1M的每个 fresh 行均恰好归属一次，B37的8个非段边界跨 tile pair 可由每 tile 一行 halo 在目的 rank 恢复。单请求1M被固定切为16轮，每轮每 rank 最多发送16385行、接收16388行；这仅是 raw 主消息的几何界，尚未包含 CSA 最终行和在途缓冲。状态最终写者规划只访问每请求最后至多 `table_cols` 个逻辑块、每块至多8条尾行，并与全量位置扫描得到同一 `(请求、owner、环列、环偏移)→最大绝对位置` 映射。`/tmp/dsv41_physical_owner_state_gpu_oracle_20261104.py/.json` 用现有 `store_states` kernel 将这些最终行按倒序写入，与按逻辑块顺序逐块提交的 FP32 状态池比对，B32/B64、B8 100K、B9、B1024、单请求131072及1M、4/128环列均无差异。逐块提交是有序语义基线；当前 kernel 对同一 launch 内的重复槽写入没有原子定序，因此刻意缩小至4环列时不能用一次全量 launch 作为可靠的“最后写者”参考。真实块表地址和多 rank 通信仍待接线验证。
+
+**小算子选择的反证。** 把 CPU run 描述符直接交给单个 Triton copy kernel，试图同时替换 pack/unpack 的两个 `index_select`，在四卡完整 pack→A2A→restore 链反而变慢：B32 ratio2 为0.166→0.189 ms，B64为0.276→0.281 ms，B1024短请求为0.083→0.367 ms（左侧为 `index_select`，右侧为 run copy；各 rank 中位数最大值）。B1024 的 run 数多、每 run 有效行少，固定 32×256 CTA 的空算/调度成本盖过减少的索引读取。代码 `/tmp/dsv41_physical_route_kernels_20261104.py`，四卡结果 `/tmp/dsv41_physical_route_run_probe_20261104.json`。这条直拷贝实现不会接入生产。更合理的组合是 **CPU 只规划连续 run，GPU 一次性展开 pack/restore 索引并在四个源层复用，再用已更快的 `index_select`**；单 GPU 对 B64、B1024、单请求1M首 tile 的展开结果与逐行 CPU 索引完全相同。仍需测 GPU 展开本身、计划上传与整层 CPU 下发，不能把一次性展开视为已证明的模型收益。
+
+**一次性索引展开和完整局部源链。** `/tmp/dsv41_physical_route_index_expand_probe_20261104.py/.json` 在 GPU4 上测 run→pack/unpack 索引两个 kernel 合计中位约0.046–0.051 ms/轮，B32/B64、B8 100K、B1024短、单请求1M首 tile 相近；此成本若在每 forward 规划一次可被四个源层分摊，探针未计 pinned 描述符上传及 CPU 建 run。`/tmp/dsv41_physical_route_with_state_probe_20261104.py/.json` 把不同 Global owner 的状态最终行也装入同一 A2A，B32/B64/B8 100K ratio2 的 AG+全局恢复→A2A+物理 owner 恢复分别为0.280→0.167、0.492→0.274、0.500→0.193 ms；所有 Global 与额外 state 行均在 FP32/BF16 全矩阵上与 AllGather 参考逐元素一致。`/tmp/dsv41_physical_route_full_source_probe_20261104.py/.json` 再把同一权重的本地 BF16×BF16 投影、NCCL、恢复、现有 CUDA `compress_main`、BF16 index GEMM、FP4 Global/Indexer 写池接入一轮单 tile，B32/B64 32K和B4/B8 100K 的 ratio2 GPU event 中位（各 rank 最大）为0.430→0.280、0.774→0.476、0.426→0.277、0.774→0.391 ms；ratio1分别0.279→0.251、0.470→0.260、0.278→0.249、0.469→0.257 ms。两臂使用同一隐藏矩阵、投影权重、压缩/量化 kernel 与物理槽规则，四组各 rank 的 Global/Indexer FP4 池字节差为0。**这条链仍未包含状态写入、pool readback、Q/SWA/MoE 的重叠、真实块表、CPU 下发与完整模型 RT；单算子链的毫秒差不能外推为服务收益。**
+
+### 2026-11-04：拒绝可变 split CPU 计划，转向本地压缩后等长 AllGather
+
+**What / Why。** 前一物理 owner A2A 探针只计 GPU；`/tmp/dsv41_physical_route_cpu_plan_probe_20261104.py/.json` 测得当前 Python 连续 run→每 rank/dst 可变 split 计划一次中位：B32 2.61 ms、B64 5.21 ms、B8 100K 2.52 ms、B1024短50.82 ms、单请求1M 39.28 ms。它远大于上节的单源层 GPU 收益，还需要每 forward 为 ratio1/2 规划并上传，故不能直接集成，也不应新增一个按收益阈值切旧/新路径的分支。瓶颈来自 Python 为每请求、rank、物理 owner、tile 建 run 并排序；不是 AllToAll kernel 自身。`CSA_STATE` 最终行计划单独计时约 B32 0.041、B64 0.080、B1024 1.096、单1M 0.005 ms，主要成本是物理 owner 的可变 split/run 恢复。
+
+**How：下一条统一结构。** 每个 hidden rank 对本地连续 tile 做源层投影；ratio2 在本地完成组内相邻 pair 的压缩、index 投影和 FP4 编码，ratio1 每 token 独立编码。用**固定 tile、等长 AllGather**交换每条有效记录的 288B Global 和 68B Indexer，接收端按物理 slot 直接写对应的共享池；每 rank 在同一轮只提交固定容量记录，padding 用无效 slot 跳过。ratio2 跨 hidden segment 的 pair、prefix 旧 CSA 快照、跨 tile carry 和最终状态行需要额外 raw 记录；它们应与 compact 记录合成同一个有界消息或证明额外 collective 不抵消收益。这样避免 per-owner Broadcast 和 A2A 的可变 split CPU 计划，且发送体积主要由已压缩条目而非 4096B/原始行决定。ratio1 的压缩后交换在较小形状可能受 pack/scatter 固定成本影响；它与 ratio2 是真实层域差异，不应靠 batch 阈值切算法。
+
+**Indexer 物理布局陷阱。** 首版 compact 探针 Global 字节相同但 Indexer 大量不一致；追到 `fp8/_v41_prefill_global.py::_prefill_index_store_kernel`：68B/entry 的物理块是先 `ENTRIES×64B` payload、再 `ENTRIES×4B` scale，并非行交错68B。首次把临时池按每行68B复制导致 scale/payload错位，不是模型数值误差。`/tmp/dsv41_compact_source_kernels_20261104.py` 的 pack/scatter 现按实际 planar 布局计算源、目的块内 offset，随机 byte 往返及以下真实 kernel 比对通过。未来生产接线必须沿用这个块内布局，不能仅凭池 tensor 的最后维度68推断记录步长。
+
+**单 tile 的完整局部算子链。** `/tmp/dsv41_compact_source_full_chain_probe_20261104.py/.json` 用 GPU4–7 按四轮交错测同一 BF16 hidden/权重/前缀、真实投影、现有 `compress_main`/`store_index`、FP4 pack、NCCL AllGather、物理 owner scatter；比较臂为 raw 投影 AG 后每 rank 重复压缩。vectorized 8-record pack/scatter，ratio2 的 B32/B64 32K、B4/B8 100K、B8×36090无复用首 tile、B64总fresh580608首 tile 的 GPU event 中位（各 rank 最大）依次为 0.430→0.313、0.779→0.328、0.429→0.298、0.779→0.322、0.778→0.346、0.781→0.365 ms；ratio1 为0.287→0.293、0.470→0.320、0.280→0.297、0.472→0.312、0.480→0.311、0.477→0.322 ms。所有这些输入每 rank 的 Global/Indexer FP4 池字节差为0，包括B8×36090第一 tile的6个无效 padding 行。ratio1 B32/B4各有约0.006/0.017 ms局部回退，不能声称全形状加速。该探针仍只处理偶数 prefix、对齐的组内 pair；不包括跨段/跨 tile pair、CSA state、CED、pool readback、真实块表、CPU 规划和完整 batch engine RT。下一步必须先补齐这些业务边界并测完整源链，之后才允许接入在线代码、删除旧 Broadcast 分支。
+
+**例外数据和固定 packet 的反证。** `/tmp/dsv41_compact_source_plan_20261104.py/.json` 用解析式覆盖 B8短段、B9奇数prefix、B32/B64 32K、B4/B8 100K、B37混合、B1024短段、B64总580608 fresh、单请求1M；pair 数与逐token oracle相同，跨hidden-rank pair 与 CSA 环最终写者均有界。一次 Python 计划在 B32/B64 分别约0.317/0.629 ms，B1024约7.722 ms；若四源层重复执行会吞掉局部 GPU 收益。`/tmp/dsv41_compact_exception_probe_20261104.py/.json` 把本地 pair FP4记录、跨rank原始pair行与 CSA最终状态行汇集到等长 packet，使用现有 `compress_main/store_index/store_states`；B8短奇数prefix、B9混合奇数prefix、B32/B64 32K及B4/B8 100K在每个rank的最终Global、Indexer字节和CSA状态FP32值均与全局原始投影参考相同。完整一tile GPU链各rank中位最大值：B8短0.382→0.716 ms，B9混合0.431→0.720，B32 0.446→0.474，B64 0.802→0.474，B4 0.448→0.456，B8 0.799→0.492。短奇数请求因例外行汇集与二次pair压缩明显回退；当前**不把 compact packet 原型接入生产**，也不靠 batch 阈值保留两套路径。这些是合成输入/人工槽位、单tile探针，尚非真实块表、跨tile、CED或模型E2E。
+
+### 2026-11-04：源层 packet 行序恢复的单 kernel 候选
+
+**What / Where / When。** 当前试验补丁仅改 `fp8/attention_v41.py::_prefill_projected_x_groups.consume` 的 CP 源层 Prefill 接收后恢复：以 `fp8/_v41_prefill_packet_restore.py::restore_packet` 的有界片段描述符和一次 Triton 拷贝代替每片一个PyTorch view加 `torch.cat(source_views,out=slab)`。L2/L8/L14 ratio2 与 L20 ratio1 共用；原 owner packet、单owner Broadcast/多owner AllGather、投影dtype、双包流水、32768行压缩slab、Global/Indexer/CSA写池均未变。这是缩小旧路径CPU下发的一步，**尚未完成统一 cohort AG 和删除 Broadcast 的总目标**。CPU测试需要的非CUDA拷贝保留一个设备域分支；在线CUDA路径没有按形状或收益阈值分支。
+
+**Why / How。** B32/B64每个32768行 packet 可有256个zigzag片段，旧恢复创建256个view。试验代码上传每片的输出终点/源起点两个int32，用GPU二分找到每个输出行的源行，再直接写同一slab；每packet描述符最多32768项、与整批总fresh长度无关，原接收及slab容量不增加。独立GPU4微测把32768×1024 FP32、256片的恢复 CPU wall/GPU event 中位从约0.36/0.35 ms降到含pinned描述符上传的约0.13/0.11 ms；8片长段约0.077/0.060→0.096/0.079 ms，局部略慢。脚本 `/tmp/dsv41_packet_restore_probe_20261104.py`。现有CPU zigzag/packet合同3/3、四rank NCCL mixed/long/B129/B1024 4/4、BF16/FP32且片段1–256的直接GPU逐值测试通过；`py_compile`和`git diff --check`通过。代码简化检查去掉重复的copy_rows状态及多余二分轮次；简化后的CPU、直接GPU与四rank NCCL回归均通过。
+
+**完整batch Prefill RT与限制。** GPU4–7、同一CP4 DSpark P-only启动配置、同一冻结请求，旧进程PID3006281加载修改前代码，新进程PID3031677加载单kernel候选；每形状首轮预热、后两轮正式，单位ms：B8每条2048prefix+129fresh为101.346/100.074→89.678/94.148；B32每条32768输入、31744复用为138.569/135.789→134.764/133.902；B64同形状为242.206/239.444→241.231/240.399；B4每条102400输入、94208复用为130.054/130.134→131.734/131.290；B8同长形状为219.907/220.896→221.155/221.113。候选同进程再做热态轮，正式两轮依次B8短95.371/95.867、B32 134.450/134.835、B64 240.629/240.232、B4 128.988/130.303、B8长219.089/221.675。全部目标请求结束，实际fresh数及复用长度与旧臂一致，返回文本相同；原始文件在 `/tmp/dsv41_rank_major_model_ab_20261104/packet_restore_{baseline,candidate,candidate_warm}/`。B32观察到约2–3ms下降，其余长形状持平或波动；短B8表面约5–9ms下降远超这个恢复算子的可解释量，不能归因。不同进程/热态、每臂正式轮少，**尚无全形状稳定E2E收益结论**。候选服务总KV容量观测437460992 token，旧服务容量本次未在同口径记录，峰值显存门禁未完成。16K输入、256输出的本机TCP PD烟测120秒超时，之后P/D均健康、运行队列计数为零，但该请求仍在Prefill任务表中处于`TASK_PHASE_RECEIVED`，因此安全重启门禁拒绝强杀服务，反向A/B尚未进行；此样本没有精度结论。该独立候选因服务收益不稳定且额外增加一个Triton模块，已从工作树撤出；实验记录保留。PID3031677仍加载撤出前的候选，下一次安全轮换后才会加载磁盘上的原有恢复代码。
+
+
+### 2026-11-04：单 owner Broadcast 是否能直接并入 AllGather
+
+**What / Where / When。** 只读统计当前 `attention_v41.py::_prefill_x_group_plan` 的 CP4 源层 packet：B32/B64 每请求1024 fresh、B4/B8 每请求8192 fresh以及B8每请求129 fresh，在 ratio2 的 packet 中单 owner 数均为0；B9混合奇数请求4包中有1包单 owner。单请求131072 fresh 的 ratio2 有10包，其中4包单 owner；单请求1048576 fresh 的 ratio2 有74包，其中68包单 owner，ratio1有40包且全部单 owner。此分支在所测短批次不执行，在超长单请求保护通信效率。对应代码是 `_prefill_projected_x_groups.launch` 的 `collective_owner` 和 `_start_prefill_x_gather_async` 的 Broadcast/AllGather 选择。统计脚本基于现有CPU合同构造的CP zigzag几何，未使用服务请求分布，因此“典型在线占比”仍需线上计数确认。
+
+**Why / How：不能只替换通信API。** `/tmp/dsv41_force_ag_owner_packet_probe_20261104.py` 保留完全相同的 packet、投影、恢复和输出，唯一把单 owner packet 的 Broadcast 强制改为4 rank等长 AllGather，四rank输出逐元素相同。在单请求131072 fresh、ratio2的投影→交换→恢复局部链，各rank GPU event 中位最大值3.019→3.353 ms，约慢11%，CPU调用1.609→1.532 ms；B9混合ratio2为1.004→1.057 ms，额外峰值约477.9→520.6 MiB。B32/B8长复用本就没有单 owner 包，所谓两臂差异是测量波动。一次AllGather中的其他三个rank发送padding，减少了Python分支但没有减少传输；超长单请求的额外通信未被局部计算掩盖。这是局部链，不是完整模型RT或峰值显存验收。故不在现有组包上机械删除Broadcast，也不新增按batch阈值回退。
+
+**下一结构问题。** 若统一成“本地连续投影→固定tile cohort AllGather→zigzag恢复”，短请求可减少pack/collective调用，但超长请求的rank-major tile跨越多个远隔全局segment；只把收到的rank-major数据放进32768行全局slab会要求保留尚不能按全局顺序消费的行，可能超出固定预算。正确的有界版本需要让压缩器按绝对位置独立消费各segment，并显式补跨segment的相邻pair及最终CSA state；前一固定tile rank-major接线已用这条路验证数值，但同步元数据修复后完整batch RT在B32/B64 32K和B4/B8 100K仍基本持平，且因保留旧回退增加约200行控制流，已退役（见上节）。下一候选必须把旧路径整体替换并删去对应状态/分支，同时先证明新metadata和跨owner pair的CPU成本低于删去的packet计划；仅能减少copy或collective次数不足以判定完成。当前尚无达到该条件的新生产补丁或E2E收益。
+
+**排除另一项低优先级搬运。** `_produce_global` 写完新Global/Indexer后，`_v41_prefill_pools.py::try_gather_prefill_pools` 经 `_v41_joint_pool.py::try_gather` 把本次可见的完整Global/Indexer池记录取回；新记录也被取回。这确有回读，但32K输入、31744 prefix复用时新条目只占约3.125%，100K输入、94208复用时约8%。直接绕开新条目要同时保持FP4量化再反量化后的Global值、Indexer packed payload/scale以及物理owner汇集；改变池接口会引入新鲜/历史拼接。对这些高复用主形状，先验最多只消除池回读流量的一小部分，当前不以此为下一生产补丁。零复用长输入可能不同，仍需独立完整链测量。DeepInfer当前`CPManager`用DeepEP `BucketBuffer`会话及延迟wait；本容器的`deep_ep`没有`BucketBuffer`，RTP现有`UserBufferCommunicator.all_gather`会同步等待接收流，不能把它直接替换当前异步NCCL调用并宣称同等重叠。[DeepInfer CP实现](https://github.com/deepseek-ai/DeepInfer/blob/main/deepinfer/model_executor/parallel_utils/cp.py#L289-L358)。
+
+**下一轮的可执行关键：用区间计数代替逐行Python路由。** Global KV物理owner由`_v41_producer_metadata.py::_raw_slot`的`pos // OWNER % CP`决定。对CP4且OWNER=256的绝对位置区间`[a,b)`，发往owner `d` 的行数是`F_d(b)-F_d(a)`，其中`F_d(x)=floor(x/1024)*256+clip(x%1024-d*256,0,256)`。一个本地tile最多与每请求的8个zigzag段相交；按这些交集求四个owner的精确split，CPU复杂度随请求数与tile数增长，不随段内token行数增长。`/tmp/dsv41_analytic_owner_counts_20261104.py` 在B8短奇数、B9混合奇数、B32/B64 32K、B4/B8 100K、B64总580608、单请求1M、B1024短段和50组随机长度/prefix上逐行oracle相等。一次全tile计划的本轮首次Python循环/NumPy向量化墙时钟：B32 0.784/0.136ms、B64 1.480/0.153ms、B8 100K 0.185/0.076ms、B1024 12.738/1.862ms；单请求1M跨16tile 0.597/0.921ms。这是容器CPU临时探针、含首次NumPy分配，未纳入服务，也未证明GPU pack/scatter、状态尾路由或完整模型收益。
+
+**下一验证门槛。** 对每个本地固定tile，sender用小的请求/段前缀表和`F_d`把原始投影一次打包为按物理owner分区的消息；等长rank之间交换改为精确split的AllToAll；receiver按请求、绝对位置散到物理owner本地顺序，再只在该owner压缩及写Global/Indexer。ratio2的相邻token pair不跨偶数大小的OWNER=256块，因此两行会送同一个Global owner；但跨hidden-rank、跨tile的pair仍需明确的前驱行，旧CSA state快照与状态环最终写者还需单独证明。固定tile最坏单rank接收可达`4×TILE×1024×4`字节，不能用平均分布推内存预算。先完成真四卡GPU pack→A2A→恢复→压缩→FP4池字节/状态的局部链，计入一次共享CPU计划与固定缓冲；若比当前路径没有可靠收益，不接线E2E。当前**没有**可提交的这条新路径，也没有它的E2E性能收益。
+
+**通信dtype的补充反证。** `/tmp/dsv41_ratio2_bf16_direct_ag_probe_20261104.py` 用四卡比较现有两列native FP32 packed GEMM→FP32 AllGather与两次`torch.mm(out=BF16)`→BF16 AllGather→FP32提升；512、8192、16384本地行的局部GPU中位最大值分别为0.101→0.086、0.282→0.278、0.508→0.506ms，长形状基本相同；CPU调用约0.04–0.05→0.06–0.07ms变慢。投影最大绝对差约0.00098、平均约0.000079（此探针权重/输入缩放不同于实际模型），没有验证压缩池和E2E精度。当前PyTorch BF16双GEMM不能为ratio2提供稳定链路收益，不进入生产。未来若改native packed GEMM的输出dtype，须另行验证内核效率与模型精度。
+
+**精确路由次序的CPU oracle。** `/tmp/dsv41_analytic_owner_route_oracle_20261104.py` 在上述典型/边界和30组随机case中验证：每本地tile的source→物理owner split与逐行oracle相同；按请求、段和owner的前缀和公式计算的sender打包位置唯一、无空洞；receiver落点唯一且按`(request, absolute_position)`升序；所有fresh行恰好一次。它不假设owner间等长，也未把ratio2相邻pair误认为能跨256-token物理owner块。向量化计算split及两端基址的首次墙时钟：B32/B64 32K约0.205/0.235ms，B4/B8 100K约0.173/0.190ms，B64总580608约2.187ms，B1024短约1.396ms，单请求1M跨16tile约2.867ms。旧的逐run Python规划B32/B64约2.61/5.21ms；此处代码只是仓库外布局原型，尚缺GPU pack/scatter和CSA状态尾，不能把规划提速当成模型收益。生产若采用此路线，split/基址须在四个源层共享一次，不能每层重算。
+
+**GPU索引与真实四卡源链补证。** `/tmp/dsv41_analytic_owner_index_gpu_20261104.py` 只从每请求`chunk_end/half/prefix`和上述段前缀表在GPU生成sender打包索引与receiver重排索引；B8短、B9奇数混合、B32/B64 32K、B64总580608首/中tile、B1024短和单请求1M中tile都与逐行CPU oracle相同，两个kernel合计GPU事件约0.05ms/tile。`/tmp/dsv41_analytic_owner_full_source_probe_20261104.py/.json` 再把GPU生成索引接入真实四卡投影→AllToAll→压缩→Global/Indexer FP4写池单tile链；特殊CSA状态尾继续按此前`state_extras`计划附在目标owner分区，GPU主行索引与旧逐行run索引完全相同。B32/B64 32K、B4/B8 100K的ratio2四rank GPU中位最大值（原始AG链→物理owner路由）为0.431→0.319、0.778→0.478、0.438→0.298、0.777→0.395ms；ratio1为0.283→0.273、0.472→0.275、0.280→0.264、0.470→0.270ms。每rank最终Global/Indexer FP4池字节差均为0。GPU索引需每tile一次并可跨四源层复用；本探针的CPU压缩元数据仍用逐行oracle预建且不计入计时，CSA状态尾只验证收包位置、未写最终状态池。故这些数值不能当E2E、不能宣称完整CPU计划已消失，也不满足生产接线门禁。
+
+**短段复测。** 同一原型把B8每条129 fresh/奇数prefix和B9每条约3330 fresh/混合奇数prefix加入四卡链；ratio2原始AG→物理owner路由分别为0.285→0.290ms（轻微回退）和0.407→0.324ms；ratio1为0.278→0.249和0.286→0.288ms。全部Global/Indexer池字节相同。该单tile探针不含一次共享CPU计划及GPU索引0.05ms，也不等于现有在线owner packet路径的同状态E2E；尤其B8短输入不能据局部数字宣称全形状加速。原型只在有完整状态/跨tile/真实块表/E2E后才可取代旧路径，不允许用batch阈值双路径绕开短形状。
+
+**CSA 最终状态写入补证。** 在同一四卡原型加入最终状态行的A2A附加记录，并实际调用现有`store_states`；B8短奇数prefix、B9混合奇数prefix、B32/B64 32K和B4/B8 100K的每rank Global/Indexer池字节及CSA状态FP32值均与原始AG参考链相同。计入状态写入的单tile ratio2 GPU事件中位（各rank最大，原始AG→物理owner路由）依次为0.345→0.364、0.415→0.390、0.441→0.366、0.790→0.491、0.441→0.364、0.789→0.406ms；GPU主行索引一次生成约0.05ms/tile，尚未计入各源层时间。结果在`/tmp/dsv41_analytic_owner_full_source_probe_20261104.py/.json`。本次只证明一轮tile的最终状态写入；状态环回、跨tile pair、真实块表和完整batch RT仍未通过。因此不能把该原型作为生产补丁或E2E收益。尤其B8短段的ratio2局部回退仍需统一结构解决，不能增加按batch阈值回退分支。
+
+**更小的统一候选：只压缩本 rank 实际写池的条目。** A2A路由需要新协议、跨tile pair halo和状态最终写者，当前还不适合替换服务。现有AllGather已把原始投影按全局序恢复，而`_v41_prefill_global.compress_main`与后续`F.linear(index_wk)`仍对所有完成条目计算，最后用物理slot `-1`丢掉另外三个rank的结果。单tile四卡原型`/tmp/dsv41_owned_compressor_probe_20261104.py/.json`只把boundary压缩为本rank Global/Indexer owner条目，保留相同投影、AllGather、原始全行CSA状态写入；B8短奇数、B9混合、B32/B64 32K、B4/B8 100K的Global/Indexer FP4池字节和最终状态FP32值均一致。两臂本轮实测ratio2 B32为0.512→0.431ms、B64为0.794→0.691ms；ratio1 B32为0.323→0.286ms、B64为0.499→0.326ms。这组局部数据在服务冷重启期间采集，GPU竞争可能放大数字，只用来决定是否接线。
+
+当前候选在`_v41_producer_metadata.raw_tile_plan/prepare_fused_tile`按`(pos//owner_tokens_per_block)%cp_size`直接生成有主的boundary，ratio1与ratio2共用同一条compact输出分支；`attention_v41._produce_global`的投影汇集、CSA全行状态与完整池读回未改。新CPU计划按请求前缀和加二分定位tile，复杂度`O(B+tile数·log B)`；GPU从`starts/lengths`直接生成索引，不上传逐行元数据。对B≤1024、奇数prefix和百万行单请求，解析计划与逐token oracle相同；GPU索引原型`/tmp/dsv41_owned_boundary_gpu_probe_20261104.py`所测各典型shape约0.023ms/tile。生产改动的融合元数据及真实池写入专项通过，完整batch Prefill RT、峰值显存和PD质量仍在测，不能报告E2E收益。旧Broadcast仍在现有投影通信中，当前候选解决的是AllGather之后重复压缩与索引GEMM，不宣称已完成通信重构。
+
+**候选的首轮模型验收（尚非收益结论）。** 当前源层候选的GPU真实池/CSA state专项单测25项通过，`py_compile`与`git diff --check`通过。GPU4–7同一CP4 P-only服务配置、同一冻结语料、每形状预热一轮后各测两轮、输出1 token的完整batch engine RT中位（旧进程加载修改前源码→新进程加载候选，单位ms）：B8×(2048 prefix+129 fresh) 109.439→89.055，B32×(31744+1024) 133.889→133.709，B64同形状241.957→242.568，B4×(94208+8192) 131.479→130.329，B8同长形状222.964→219.267。实际执行行数和返回文本逐请求一致。B8短的基线轮117.108/101.770 ms波动很大，表面差值远超源层局部算子的可解释幅度；B32/B64未见可分辨收益，B8长的3.697 ms差值也尚无足够重复与同进程归因。原始记录在`/tmp/dsv41_rank_major_model_ab_20261104/owned_compressor_{baseline,candidate}/summary.json`。候选PD4+4使用本机TCP传输、8312输入/256自然输出的功能烟测通过（`/tmp/dsv41_owned_compressor_short_pd_20261104.json`），但没有原生MAL或参考质量读数；NVML 5 ms采样的四张P卡前后/峰值相同不能证明真实峰值无增加。旧进程总KV容量437460992 token、新进程437486592 token，跨进程差异不归因于代码。当前不能报告稳定E2E收益、PD质量或生产可提交状态。
+
+**固定容量合包试验。** `attention_v41.py::_CP_PROJECTED_PACKET_ROWS/_CP_PROJECTED_TRANSPORT_MAX_BYTES`当前临时试稿由32768行/224 MiB改为65536行/256 MiB；没有新增shape准入或通信回退分支。`_prefill_x_group_plan`保持每rank贡献≤16384行（ratio2）及总packet≤65536行；ratio2等长AG接收≤256 MiB，两包在途≤512 MiB，再加固定65536行恢复slab≤256 MiB，均与整批fresh总长度无关。CPU几何探针`/tmp/dsv41_packet_capacity_plan_compare_20261104.py`算得：B64每请求1024 fresh、B8每请求8192 fresh各2→1包，单请求131072 fresh 10→2包且该形状单owner包4→0；B32每请求1024与B4每请求8192均仍1包。B64总580608 fresh的ratio2为19→10包，接收总量约2268 MiB不变。固定512 MiB预算相对256 MiB在上述主要shape不再减包，且B64总580608会把ratio2接收总量增至约2374 MiB，故先试较小的256 MiB。四卡本地投影→NCCL→全局恢复的ABBA GPU事件（旧→新，ms）：B64 1.603→1.484，B8 100K 0.613→0.680，单请求131K 2.937→1.180；CPU调用分别1.589→1.459、0.470→0.346、1.557→0.378。B8的GPU时间未改善，不能从包数推断收益。探针`/tmp/dsv41_packet_capacity_gpu_probe_20261104.py`没有完整模型或池发布；CP规划测试3项、融合生产元数据25项、四卡NCCL mixed/long/B129/B1024专项已通过（长测试第一次在D驻留卡因测试自身4 GiB分配OOM，换P驻留卡后通过）。新服务的完整batch RT尚待测。旧单owner Broadcast仍保留供少量不满cohort与超长边界形状；本试验减少它出现的机会，并未宣称统一AG完成。
+
+**变长AG是否能直接统一。** 四卡`torch.distributed.all_gather(list, local)`可正确处理单owner、混合owner和四rank满额，且单owner时不需发送padding；但它仍建立四个输出view和额外Python调用。`/tmp/dsv41_uneven_ag_async_abba_20261104.py`的4096×1024 FP32/卡异步ABBA局部GPU事件中位：单owner Broadcast约0.05 ms、变长AG约0.05 ms；四rank满额等长`all_gather_into_tensor`约0.12–0.13 ms、变长AG约0.15–0.16 ms，CPU调用由约0.03增至约0.06–0.08 ms。混合owner一组发生多毫秒等待，等长AG本身也约4.6 ms，说明该轮局部样本存在rank间等待，不能按两者差值归因。当前没有证据支持用变长AG替换所有packet，也没有将其接入服务。
+
+**合包试稿的完整batch结论与撤回。** P服务在旧容量时已加载上述owner-only候选；仅把packet上限调到65536行/256 MiB后重启同配置服务，仍用同一冻结语料、每形状预热一次再测两轮，输出1 token。两臂正式轮中位（旧→新，ms）：B8短89.055→91.460，B32 32K 133.709→134.063，B64 32K 242.568→245.268，B4 100K 130.329→130.467，B8 100K 219.267→220.318；所有目标的实际fresh数相同，两臂的首token文本与token ID按请求一致。新进程的总KV容量441798656 token、旧进程437486592 token，跨进程差异和调度噪声限制毫秒级归因；但没有任何主shape显示稳定完整batch收益。原始结果在`/tmp/dsv41_rank_major_model_ab_20261104/{owned_compressor_candidate,packet_capacity_256mb_candidate}/summary.json`。因此已把两常量和相应测试期望恢复为32768行/224 MiB；运行中的P服务在下次安全轮换前仍是已撤回容量配置，不能把运行态误报为磁盘源码。单owner边界搜索`/tmp/dsv41_single_owner_search_{20261104,bounded_20261104}.py`显示即使限制单请求长度≤131K、总fresh≤580608，混合请求仍可能有8191行单owner尾包；强行等长AG会把该包约32 MiB有效接收放大为约128 MiB，故不能用删分支替代cohort重设计。
+
+**真正双流重叠的局部反证。** 现有`_prefill_produce`在`_prefill_compute_qkv`后才迭代源投影generator，因此源投影本身未被Q/KV投影覆盖；更早的“首包提前发出”只提前了提交点。`/tmp/dsv41_true_source_overlap_probe_20261104.py`将ratio2本地packed投影+NCCL AG放独立CUDA流，与模拟Q/KV两次BF16 GEMM并行。首轮16384本地行报告串行2.839→重叠0.716 ms，复测分解`/tmp/dsv41_true_source_overlap_breakdown_20261104.py`显示source单独0.526、Q/KV单独0.217、串行0.736、重叠0.723 ms；首轮大差值来自未稳定的跨rank等待，复测可归因的GPU差仅约0.013 ms，CPU提交反而增加约0.027 ms。8192行首轮串行0.401→重叠0.397 ms也基本持平。这是模拟Q/KV链而非模型E2E；在没有进一步收益证据前，不为它增加提前启动状态、异常清理及跨流buffer生命周期逻辑。
+
+### 2026-11-04：围绕 loadCache 暴露时间的联合准入与 Prefill 流水线设计
+
+**任务纠正与结论。** 用户提出 chunk prefill 的主要目的，是降低单批新 token 与非 DEVICE prefix KV 的恢复规模，使下一批恢复尽可能与上一批 forward 重叠。之前把它主要当作“拆大计算请求”的分析不完整。应优先设计**加载感知的准入和有界预取流水线**，再决定是否需要移植 main 的请求内 chunk prefill。以下是只读源码与旧 trace 支撑的设计，未修改调度/加载生产实现，也没有端到端收益数字。源码基于当前 HEAD `9e3a33ecd1983502e0be47f544c32305489faf33` 及既有 dirty 工作树；不能据此断言该工作树生成了 11 月 3 日的 trace。
+
+**What / When：高命中可能同时缩短掩盖窗口、增加恢复工作。** 在 Prefill 请求经 cache lookup 后、计算 batch 确定前，要分别考虑新算 token、DEVICE 已命中 KV、HOST/DISK/远端需恢复 KV。logical prefix token 数不是搬运量：DEVICE 命中不产生恢复，同一 prefix 的共享在途加载不应重复计物理字节，各 cache group 的物理条目、压缩比、CP owner 和块对齐也不同。请求内 chunk prefill 通常只缩小本轮新算范围；若首个新 token 仍依赖完整有效 prefix，则其恢复依赖不会因 fresh chunk 变小自动消失。只有改变跨请求组成、延后冷请求加载，或明确改变复用/重算策略，才会降低本轮恢复规模；逐层/按块流式消费 prefix 是另一项依赖与容量工程，不能视为 main 功能自带。
+
+高 prefix 命中而 fresh 少时，计算时间可能短、非 DEVICE 恢复仍重。因而“batch tokens 越小越好”并不成立：更短 forward 既缩短可重叠窗口，也增加 step 固定 CPU 成本。目标是足够的有效计算吞吐、受限的恢复/显存占用、较少的暴露等待，而非单一 token 上限或最高 cache 命中率。
+
+**Where / How：当前有什么、缺什么。**
+
+| 当前入口（相对仓库根，行号以本次读取为准） | 已有机制 | 尚未覆盖的约束 |
+| --- | --- | --- |
+| `rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.cc:398–455`，`admitWaitingStreams` | uncached token 配额、batch/逻辑总 token 检查、已初始化 KV 请求数限制；异步加载中的请求也消耗本轮准入额度 | 没有按层级、唯一物理字节、目标页和预期完成时间联合准入。uncached 配额在下个候选之前只检查“已累计值”，并非严格检查“累计值+本候选”；首请求另有 :217 的放行语义 |
+| `rtp_llm/cpp/engine_base/stream/GenerateStateMachine.cc:55–92,118–125` | `initKVBlock → asyncLoadCache → LOADING_CACHE → loadCacheDone → WAITING` | transfer 异步不等于该请求可提前 forward；需要的 prefix 未就绪仍不能进入正确计算 |
+| `rtp_llm/cpp/normal_engine/NormalEngine.cc:883–933`，`step` | engine 线程先 `schedule()` 再 `executor_->process()` | 本路径不是在同一个 forward 内持续对新候选补发 cache lookup/load 的准入泵；已提交加载可在后台运行，transfer 线程池不替代候选准入 |
+| `rtp_llm/cpp/cache/CoordinatorCacheManager.cc:559–638,649–724` | lookup 得到恢复描述；后端 match 可异步回调；随后预留/分配目标块 | 若等到 transfer worker 才限流，早期目标页占用、CPU 准备和驱逐压力可能已经产生。预算需进入目标物化之前 |
+| `rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h:82–84`；`load/BlockTreeLoader.cc:353–434` | 已有 load descriptors、joined loads、backend handles，以及 commit/LOAD 队列 | 可以复用计划与提交的衔接点计唯一物理成本，不应另建一套 cache lookup。现有 match 有引用/状态副作用，不能无限创建“尚未 commit 的计划” |
+| `rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.cc:135–138` | load 与 evict/store 已有独立 transfer 线程池 | 两池仍共享物理带宽、CPU 和部分 cache 锁/资源；再拆线程池不是缺失的核心机制 |
+
+**Trace 对流水线机会的证据与边界。** 对原始 `prefill_wr0_2.json` 按 target forward 窗口统计恢复阶段的**开始时间**：BS=8 的 forward 为 329.528–1175.122 ms，共845.594 ms；5个 `host_to_device.h2d` 阶段均在330.106–331.411 ms启动，该 forward 内未观察到新的 disk read、backend match/read 阶段启动。BS=11/40 的 target forward 内这些阶段启动数为0。这支持“恢复发起集中于 step 边界，未形成持续补充的 lookahead”这一判断，与当前 engine 调用顺序一致。**它不表示窗口内没有此前已发起的搬运，也不证明当时有足够候选请求可预取**；缺少请求到达/队列记录，不能把845 ms直接换算为可回收时间。
+
+BS=11 约117.2 ms前置区间包含 schedule约20.2 ms、input/prepare约18.6 ms、embedding约78.4 ms，不能全部归为 load wait。同期约931.8 MB D2H是驱逐方向、约877.1 MB H2D是恢复方向；大量小传输和结算共享资源会造成争用，但旧 trace 缺少块ID，尚不能证明这些是同一批块的反复进出。异步补记 scope 的纵向摆放不能作真实 CPU 阻塞栈，scope/kernel 时间也不能直接相加当作暴露延迟。
+
+**建议业务流程：将“准备加载的集合”和“立即执行的集合”解耦。**
+
+1. 前瞻加载窗口从等待队列选择候选，区分 DEVICE ready、已有在途可 join、需新恢复三类。只给新物理传输收费；每个 rank、每种介质分别记录字节、描述符/块数、目标页和年龄。跨 rank 的恢复预计完成时间取关键路径，不能拿 rank0 字节除以峰值带宽代表整个 CP4。
+2. 执行窗口只从已达到现有全 rank 可用条件的请求取 batch，按 CP padding 后实际 fresh 工作量、prefix 引起的 attention/read 成本、请求数和容量选取；不把冷请求与 ready 请求强绑定等待。显式 group/PD 协议有成组契约时保留该契约。保证大请求/冷请求有年龄与进度保障，不能为了热请求吞吐永久饥饿。
+3. forward(n) 期间推进候选(n+1)的 lookup、目标准备与恢复；完成后进入有界 ready 集合。若同时有 ready 工作，优先启动计算，不应先同步做完大量下一批规划再启动 GPU。已有提交任务的异步执行不够，额度释放后应能继续补充候选。
+4. 不直接另开线程并发调用完整 `schedule()/moveToNext()`。优先复用已有异步回调及加载队列，让有界控制器仅推进加载计划；stream 状态迁移、计算 batch 决策和模型 collective 仍归现有 engine 所有，跨 rank 传输走原有协调链。是否必须新增控制线程取决于代码接线验证；单纯每 step 预发一个固定候选组可作为较小首版，但不能保证长 forward 内的持续补充。
+5. 完成的是“带目标时间的预取”，不是把所有等待请求立即恢复。额度不足就延后，避免预取挤走当前/即将使用的 KV，制造更多 evict→restore。无 ready 工作时只能承担不可避免的冷启动等待；不能通过隐藏等待时间指标宣称收益。
+
+**联合预算与容量不变量。** 建议先实现少量明确预算，不一开始引入复杂在线优化器：
+
+- 计算预算：CP 对齐后的 fresh tokens，加请求数/逻辑上下文约束；其目标是控制 forward 时长和显存，不能代表 load 成本。
+- 恢复预算：HOST、DISK、远端各自的唯一在途物理字节，并限制描述符/块数，避免“字节很少但几千个小操作”。同一 prefix 的 joined waiter 不重复收费，但要跟踪其引用和取消。
+- 显存预算：恢复目标页与 ready 未消费页、当前计算及新 KV 增长、既有工作区/安全余量同时受限。传输完成可归还“在途传输”额度，**不能同时归还仍被 ready 请求占用的显存额度**。容量不足产生的 D2H 驱逐及其结算也要纳入代价，而非只限 H2D。
+- 时间预算：用实测的“排队+介质读取+H2D+校验/结算+最慢 rank ready”估计恢复时长，和当前 forward 剩余窗口比较；不同阶段有流水化/共享带宽，不能把所有阶段耗时机械相加。预取深度初始取一批等价工作，再根据尾延迟和驻留压力调整。
+- 超预算单请求必须有合法进度路径：在物理容量允许时以受控独占额度分段传输、提前多轮准备，直到原有 ready 条件满足；不能为了严守小的常规配额而永久不准入。若整条依赖本就超容量，需要明确失败或已有合法重算/容量方案，不能把“允许单请求绕过预算”变成 OOM。
+- 额度释放覆盖成功、失败、超时、取消及 shared load 最后引用，且必须恰好一次；DMA 未确认停止时不能回收目标页。lookup/match 引用也要受限并可回滚，不能把 transfer 排队上限当作全部资源上限。
+
+**为何这比仅缩小 batch 更直接。** 设相同工作负载下下一批完整恢复时间为L，可用且未被其他依赖占据的上一批计算窗口为F，理想两级流水线的暴露恢复约为 `max(0,L-F)`。这只是解释机制的近似，真实结果还需计准备CPU、驱逐、分阶段瓶颈和搬运使forward变慢的干扰。缩小 batch 如果只减F、不相应减L，暴露量反而会增加。联合预算则同时限制L与容量，让下一批在需要计算前尽量ready。它主要**平滑和重叠**固定请求集合的恢复；不自动降低总恢复字节。只有共享去重、避免驱逐后重载、提高驻留复用，或有证据地选择部分prefix重算，才会减少总搬运。
+
+**与 main chunk prefill 的关系及落地顺序。** 此前查到本地 `origin/main` 的 `1d20e29a428f1bc1497c92ee415bbfd925291ccf`（#1460）是请求内 fresh token 分段功能；其 grant/window 在 cache ready 后约束计算，没有给非 DEVICE prefix 恢复建立字节预算。当前目标不应以前置 cherry-pick 整个功能为条件。先在现有调度/加载路径打通：候选成本观测→目标物化前的预算→有界下一批预取→ready计算/冷加载解耦；再用实测判断是否必须拆单请求才能把 forward 控制在目标窗口。需要请求内 chunk 时再移植，并验证 DSV4.1 的 CP 对齐、CSA状态/压缩边界、cache块增长、DSpARK/MTP中间chunk及最终输出契约。仅新增 token 配额不能替代这些验证。
+
+不建议第一步就把低层prefix命中截短来重算。只有比较“该部分恢复的暴露成本”与“重算及其额外KV/状态成本”，并证明有效复用边界、模型数值和缓存一致性后，才考虑这条独立策略；高命中不等于必须全部恢复，也不等于随意丢弃即可。
+
+**验收。** 基线为当前未改动的生产调度/加载路径，候选为同模型、相同请求到达序列/长度/复用块、相同CP/TP与介质/容量下的联合准入流水线。先只比调度/加载改动，保持请求内chunk设置一致；之后再单独比较chunk。至少记录：
+（a）request排队→match→目标页准备→提交→所有rank ready→forward 的关联时间，真实线程与请求/块/传输ID；
+（b）每step真实CPU准备、GPU暴露等待、copy/forward重叠、forward自身RT、每层级唯一恢复字节及D2H/小拷贝数；
+（c）inflight及ready驻留峰值、驱逐/重载、共享join率、冷请求最大等待和失败/取消资源回收；
+（d）关闭profiler后的吞吐、TTFT/尾延迟、完整batch RT、DSV4.1精度/MAL及稳定性。
+优先回放高prefix低fresh、小batch、冷prefix大恢复、长短混合、无候选冷启动及容量紧张场景。生产是RDMA，若只做本地HOST或TCP验证，应单列证据边界。成功应同时满足暴露等待下降、完整服务指标改善、容量不超限且正确性/公平性不退化；仅H2D时间被画在forward下面不算完成。
+
+
+### 2026-11-04：结合线上 Prefill 配置调整加载优化优先级
+
+**证据边界。** 输入为用户提供的 Prefill zone JSON（附件 `a5386c81-7890-46ee-84fb-b9d4e357e907/已粘贴的文本.txt`），不是从线上进程读取的最终配置。继续使用用户选择的容器与工作树，当前源码 HEAD 为 `9e3a33ecd1983502e0be47f544c32305489faf33`，保留既有 dirty 文件。以下区分 JSON 声明、当前源码语义和待线上日志核实的 SDK/运行时事实；没有修改部署、服务或可执行代码。文中只摘录相关非凭据参数。
+
+**What / When：实际优化对象是 CP4 Prefill 的 HOST 与远端恢复。** JSON 声明 `WORLD_SIZE=4,DP_SIZE=1,PREFILL_CP_SIZE=4,PREFILL_CP_KV_CACHE_SHARDED=1`，模型为 DSV4.1，DSpARK 开启；`ENABLE_MEMORY_CACHE=1,ENABLE_REMOTE_CACHE=1,ENABLE_DISK_CACHE=0`。因此优先分析 DEVICE←HOST 和 DEVICE←远端两条恢复路径及 DEVICE→HOST 驱逐。本地磁盘缓存的容量、路径、staging、IO 参数虽列在 JSON，但按当前配置关闭，不应据旧 trace 的 disk 事件认定它在线上活动。远端 PACE 的 transparent tiering 是独立后端机制，本地 disk 关闭不证明远端没有慢层。没有线上版本/启动日志，不能断言这份配置生成旧 trace。
+
+**调度参数与旧 trace 的交叉检验。**
+
+| 参数声明 | 当前源码语义与影响 | 优化判断 |
+| --- | --- | --- |
+| `MAX_BATCH_TOKENS_WITHOUT_CACHE=768000` | `server/server_args/fifo_scheduler_group_args.py:26–35`，按 CP padding 后 fresh tokens 计的单轮软上限，允许最后整个请求越界 | 旧 trace 四批 fresh 为26485/288730/240141/89369，均明显低于该值；降到384000大概率仍触不到这些 batch。262144/131072可作为逐级实验点，但前者主要触及BS8，不直接约束BS11/40的重prefix恢复，也不保证硬切batch |
+| `MAX_BATCH_TOKENS_SIZE=102400000` | `cpp/engine_base/schedulers/FIFOScheduler.cc:210–240,265–275`，把prefix计入的逻辑token限制，不是恢复字节限制 | 对旧trace最大5605657 logical tokens很宽松。可以按真实准入需求收敛这个容量上界，但不能把logical prefix当物理恢复量，也不能只为缩内存而误限合法长请求 |
+| 未显式配置 `MAX_INITED_KV_CACHE_STREAMS` | `fifo_scheduler_group_args.py:65–71` 默认0，不限制。FIFO会同时统计waiting/loading/running中已有KV的stream | 可做32、16的独立粗限流实验；这是总初始化请求数，不是单step batch size或仅load请求数。不能设得刚好等于当前compute batch而挤掉所有lookahead空间；显式group须满足组容量 |
+| `CONCURRENCY_LIMIT=256,CP_FORCE_SINGLE_PREFILL=0` | 前者是入口最大并发，后者允许CP Prefill多请求组成batch | 不等于GPU batch=256，也不提供load字节预算。保持足够候选有助于ready/cold解耦，不应首先靠压低入口并发掩盖内部调度问题 |
+| `DSV4_CHUNK_TOKENS=12288` | `models_py/modules/dsv41/chunk_env.py:16–49`，共用模型内chunk值；`moe/moe_layer.py:53–63` 和 `fp8/attention.py:4559` 消费它 | 是MoE/attention等算子的分块，不是请求内调度chunk prefill；不减少首次prefix恢复依赖。改小可能增加小算子/CPU下发，不作为解决batch prepare的第一步 |
+| `DSV4_PREFILL_CP_OVERLAP=1,RTP_LLM_STREAM_ASYNC=1` | 分别作用于模型CP重叠、executor/device-state等异步路径 | 不等于forward期间持续补充候选load，也不能据此认定联合流水线已存在 |
+
+**GDR、pin与传输预算的三项纠正。**
+
+1. `RTP_LLM_REMOTE_CACHE_ENABLE_GDR_ZERO_COPY=1` 加SDK多个GDR/direct开关表达的是远端直达GPU的意图。当前 `cpp/cache/KVCacheManager.cc:339–349` 把开关传给KVCM；`block_tree_cache/storage_backend/kvcm/KVCMStorageBackend.cc:1712–1765` 还要求GPU dedicated allocation、合法注册范围等条件，某些条件下会记录standard fallback。应逐cache group检查 `KVCM pool registration ... mode=gdr|standard`、SDK实际读模式及payload落点。它不会自动消除独立的HOST→DEVICE恢复，见H2D不能直接判定GDR失效。
+2. JSON中的 `RTP_LLM_PIN_HOST_BLOCK_POOL=0` 在当前仓库代码未找到读取点。当前HOST池经 `block_pool/HostBlockPool.cc:108` 使用 `AlignedHostMemory`；其 `:38–54,135–169` 默认CUDA下 `cudaHostAlloc`，并强制pinned/registered backing。实际选择变量是 `RTP_LLM_HOST_BLOCK_POOL_PIN_MODE`。不能把旧开关翻为1就宣称解决pageable拷贝；线上wheel是否沿用当前实现仍需核对。
+3. `MM_TRANSPORT_MODE` 在 `server/server_args/vit_group_args.py:295–302` 是多模态输出传输。JSON中的 `MM_RDMA_MAX_INFLIGHT_BYTES` 未在当前源码找到对应读取点，可能来自其他版本/脚本，不能当作本次prefix load的4 GiB预算。PACE的 `TAIR_MEMPOOL_TIERED_MAX_INFLIGHT=1028` 等SDK参数也不能直接等价成跨rank恢复字节预算；当前仓库无法证明外部SDK的精确作用域与单位。
+
+**资源账：恢复量与驻留容量相互影响。** `MEMORY_CACHE_SIZE_MB=114688` 在 `kv_cache_group_args.py:289–295` 是单rank容量，按MiB换算112 GiB，四rank配置预算448 GiB，不是总共112 GiB。还要计入SDK/sidecar、模型host数据、pinned staging及其他进程；224Gi的 `/dev/shm` 限额不等于这些heap/pinned池的统一上限。PACE本地内存参数还列有32768，是否每sidecar/每Pod及其单位要从启动日志确认，不能简单乘四相加。资源声明cpu6400、mem819200的具体平台单位也需核对。
+
+`RESERVER_RUNTIME_MEM_MB=60000` 是约58.6 GiB/rank运行时显存预算，不是KV容量。按 `cpp/cache/MemoryEvaluationHelper.cc:91–138`，没有显式KV容量覆盖时，会取配置预留与warmup峰值等需求的最大值再推导KV容量。若远高于真实最大工作负载需要，可能挤小DEVICE池、降低device命中、增加HOST/remote恢复和驱逐；若确为必要峰值，则不能降。应先限制/测量实际工作负载及持久/临时峰值，再核实是否可归还DEVICE KV。模型端 `deepseek_v41_base_model.py:616–618,647–655` 也读取传入的max batch token容量参与规划；需核实实际InitResource值，不能假定102400000只影响一个调度if。
+
+`RESERVE_BLOCK_RATIO=2` 在 `CoordinatorCacheManager.cc:88–97` 是2%的block保留，既不是2个块，也不是2倍，更不是加载预算。未覆盖时的DEVICE驱逐水位默认low0.82/high0.90（`kv_cache_group_args.py:385–398`）。预留、驱逐水位和runtime reserve是三个不同约束，不应一起提高/降低：更积极驱逐可能增加D2H，更少容量安全余量也可能导致分配等待。需要按实际空闲、active/ready/inflight引用与驱逐原因定位。
+
+**CPU与小拷贝。** `BLOCK_TREE_TRANSFER_WORKER_COUNT=16` 是每rank每个池的worker数；load与evict/store两池，四rank共128个transfer worker配置槽位，尚不计业务、RPC、CRC和SDK。JSON还列 `TAIR_MEMPOOL_CLIENT_READ_TP_NUM=64,PACE_BIND_CORE_NUM=16`；SDK读线程池与绑核作用域需线上核对，不能把配置槽位当成同时运行线程，但应重点检查cpuset、CPU throttling、runqueue和NUMA，尤其不能让transfer/SDK挤占engine提交线程。
+
+`MEMORY_CACHE_MAX_DESCRIPTORS_PER_TRANSFER_BATCH=32` 不是每次32 MiB，也不是32个memcpy；`transfer/DeviceHostTransferExecutor.cc:151–197` 会按group、layer等把descriptor展开成copy tiles。当前实现已有cuda_batch/sm/generic策略顺序（同文件:48–50），需要确认旧trace与线上实际选择，不能直接要求新增已有batch API。建议先保持32比较worker16与8；若CPU争用证实且load延迟不退化再保留较小并发。若仍由小操作主导，再单独比较descriptor32与64，并记录实际tile数、批量API/回退及forward干扰。PACE read subbatch16、SDK并发1028等暂不一起改，避免失去归因。
+
+**综合落地顺序。**
+
+- A：固定线上最终解析值、wheel/源码版本、cache group容量/GDR模式及各层命中字节。保持负载到达序列、QPS、输出长度和拓扑，建立基线；不从配置截取推导未提供的max_seq_len、实际max_generate_batch_size或SLA。
+- B：先做独立、可回滚的粗限流实验。fresh软上限768000→262144，若仍无效且需要再试131072；另做总初始化请求数0→32/16。每次只变一个参数，观察BS、fresh、唯一load bytes、CPU准备、ready等待和完整服务指标。高prefix低fresh场景仅调fresh cap仍可能完全不变。
+- C：查清CPU/小拷贝路径与DEVICE容量。根据证据分别调整worker或descriptor；最大工作负载内存验收后才考虑收敛过大的runtime预留/容量规划。先减少恢复需求和无效争用，不继续堆并发。
+- D：实现上一节的加载感知准入与lookahead。物化目标块之前，按每rank的HOST/remote唯一字节、descriptor数、目标页预算准入；已经在途的shared prefix去重。根据“当前forward剩余窗口、负载下实测带宽/排队、校验结算和最慢rank”估计下一批何时ready。ready计算集与冷加载集解耦，并同时保留容量、取消、超时和大请求进度不变量。
+- E：只有请求内fresh粒度仍妨碍目标计算窗口时，才接入真正的scheduler chunk prefill；保留CED、bounded SWA replay及CP状态契约。不能用逻辑prefix长度统一推恢复成本，需从真实cache group恢复计划取数。
+
+**验收与当前结论。** 这份配置强化了“入口候选充足、fresh cap宽松、缺少物理load准入、传输并发可能挤占CPU、DEVICE容量可能影响恢复频率”的优化方向；后两项是待证实的假设。当前尚无线上最终配置、真实group注册/占用、SDK模式、CPU争用和同负载A/B，不能给出确定最优worker、load字节预算或收益比例。以暴露load/CPU准备下降、profiler-off吞吐及TTFT尾延迟改善为主，同时要求forward不被后台IO拖慢、DEVICE/HOST峰值受控、驱逐重载不升、精度/MAL/公平性和超时回收不退化。本次只完成配置结合源码的分析，未操作线上服务。
+
+### 2026-11-04 晚：有界 cohort AllGather 统一通信的整批反证
+
+**What / Where / When。** 在同一 HEAD `9e3a33ec` 的 CP4 DSpark target Prefill L2/L8/L14/L20 源层，试改 `fp8/attention_v41.py::_prefill_x_group_plan/_prefill_projected_x_groups/_start_prefill_x_gather_async`：packet 由逐全局顺序的 32768 总行上限改为各 rank 固定上限；逐 owner Broadcast 与多 owner AllGather 两分支先统一为变长列表 `all_gather`，再试统一等长 `all_gather_into_tensor`。两个版本都已撤销，当前工作树恢复先前 owner packet 路径。前者在单 owner 包不搬运空 rank 的 padding，后者为均衡 packet 保留 NCCL 快路径。所有版本接收缓冲均受 224 MiB/rank 的 ratio2 上界约束，和输入总长无关；最多两包在途、另有 64 MiB 压缩 slab。
+
+**Why / How。** 四卡别名原型验证变长 `all_gather` 的发送切片可直接别名接收缓冲本 rank 区段，空贡献也正确；但该列表接口的局部 CPU 提交比等长 `_allgather_base_` 慢。cohort 扩大了多 owner 单包机会，却没有在 224 MiB 预算下减少 B32、B64、B4/B8 100K 的 ratio2 包数：分别仍为 1、2、1/2；ratio1 B64/B8 100K 从 2 降到 1。等长版保留无效尾部清零以免跨 rank 发送未初始化数据。DeepInfer 的 `userbuffer.cp.all_gather` 是 `deep_ep.BucketBuffer` 会话接口，复用预分配对称缓冲；本机 `deep_ep` 包没有 `BucketBuffer`，不能把 PyTorch NCCL 列表接口当作等价实现。DeepInfer ratio2 的源投影同样保持 FP32，故不以 BF16 降精度作为本次替换。
+
+**验证。** CPU packet 合同 3/3、真实四卡 NCCL 混合/单请求 1M/B129/B1024 四组均通过，投影逐元素一致，测试中的附加峰值低于 1 GiB。P-only CP4 服务每臂重启后启动预热，使用同一冻结语料、每形状 1 次 warmup 和 2 次正式 complete-batch `max(aux_info.cost_time)`；三个臂所有正式轮的实际 fresh 行、复用长度、输出 token ID 与文本一致。旧 owner packet → 变长 cohort → 等长 cohort 的正式两轮中位数（ms）：B8×(2048+129) 89.055→100.608→95.849；B32×(31744+1024) 133.709→134.280→142.882（等长两轮为132.481/153.283，明显有服务波动）；B64 同形状 242.568→241.029→238.064；B4×(94208+8192) 130.329→129.868→130.092；B8 同形状 219.267→218.715→225.607。跨进程变化和B32波动禁止把数毫秒差异解释成稳定收益，B8短段明确不支持保留新实现。原始结果 `/tmp/dsv41_rank_major_model_ab_20261104/{owned_compressor_candidate,cohort_var_ag_candidate,cohort_fixed_ag_candidate}/summary.json`；撤回版本源码快照 `/tmp/dsv41_attention_v41_cohort_fixed_ag_20261104.py`。
+
+**下一结构方向。** 继续验证按 Global/Indexer 物理 KV owner 路由投影的有界 A2A，使每 rank 直接压缩并写自己持有的槽，减少当前 AG 后恢复完整全局投影的搬运。先补真实块表及跨 tile pair/CSA 环的四卡完整链，再接服务做同 corpus、BS9 混合和自然 DSpark 质量/MAL；只有完整 batch RT 稳定受益且代码减少在线分支时替换旧路径。当前不存在这条路线的 E2E 收益或提交结论。
+
+**与当前 packet 链的同权重局部对照。** `/tmp/dsv41_a2a_vs_packet_full_source_probe_20261104.py/.json` 改用当前 `_prefill_projected_x_groups` 作为局部基线，覆盖投影→owner packet通信→全局恢复→现有 `compress_main`、Global/Indexer FP4写入及最终状态写入；另一臂为同权重投影→预计算的物理 owner 索引→A2A→owner 内恢复→同样压缩和写池。四 rank 交替，B8短、B9混合、B32/B64 32K、B4/B8 100K 均完成。ratio2 中可重复的 B32 最大rank中位 0.475→0.283 ms、B64 0.856→0.485 ms，B8短 0.132→0.090 ms；ratio1 B64 0.526→0.265 ms。部分臂有 2–7 ms 跨rank等待尖峰，不能据此报告额外收益。ratio2 Global/Indexer FP4 字节逐位一致；B8短状态快照最高 FP32 差约2e-5，ratio1 B8短在 rank0 有5个主池字节、9个索引池字节差，属于不同 GEMM M 形状舍入后的数值差异，仍需 E2E 精度检查。**A2A 索引和 CPU 规划在计时前完成，基线 packet 规划在计时内完成，因此这个局部差额是接线潜力而非公平整层/模型收益。**
+
+**请求边界对齐的有界 tile。** 固定每rank本地16384行但只在任意偏移截断，会使 ratio2 少数 segment 边界的后一个 token 先于前驱送到物理 owner（B37 混合例有6个“前驱来自未来 tile”）。改为尽量把完整请求的本地 chunk 放同一 tile；单请求 chunk 超过16384时只在其前、后半段之间切一刀。生产准入 `P+n≤131072` 且 CP4 zigzag，故每半段 `ceil(n/8)≤16384`，单 tile 本地行上界16384；源投影 ratio2 的普通 A2A 接收最宽松上界为 `4×16384×1024×4=256 MiB/rank`，与总 fresh 长度无关。跨 tile 的完成 pair 只可能位于长请求 segment3→4 边界，两行都由 rank3 持有、Global owner也相同，保留至多一行/长请求 carry 后在后一 tile 压缩。`/tmp/dsv41_request_aligned_tile_oracle_20261104.py/.json` 的九个典型/边界形状和100组随机 B≤128、每请求 n≤131072 均通过；B64总 fresh580608 为10 tile，BS32/64 32K和BS4/8 100K各1 tile，单请求131071且奇数 prefix 为2 tile/1 carry。`/tmp/dsv41_a2a_odd_long_pair_probe_20261104.py/.json` 进一步用真实四卡 A2A、现有压缩和FP4写池检查该最难边界，四 rank 的 Global/Indexer FP4 字节均与一次全局参考一致。状态额外路由、真实物理块表、CPU规划/索引展开成本和服务 E2E 仍未进入此两 tile 验证；普通 A2A 接收256 MiB不包含状态额外记录和在途缓冲，完整容量界需接线前补齐。
+
+**完整调用成本反证（22:47–22:53）。** 曾在工作树短暂加入未接线的 ratio1 `_v41_cp_owner_route.py`，按解析式生成物理 owner split、GPU pack/reorder/槽位，再用 `all_to_all_single` 传投影。四卡真实 NCCL 测试对 B8短奇数前缀、B9混合、B32/B64 32K、B8 100K、单请求131072的每个 owner 行位置、请求号、投影值和主/索引物理槽均通过独立逐行 oracle。首次完整调用探针 `/tmp/dsv41_owner_route_producer_call_probe_20261104.py/.json` 把CPU规划和元数据 H2D 计入后，新路径各典型形状约24ms；`/tmp/dsv41_owner_route_rank0_20261104.json` 的 profiler 指出10次 pageable H2D 每次触发 `cudaStreamSynchronize`，合计CPU约22ms，实际H2D kernel仅几十微秒。改为一次 pinned host 拼包和一次异步 H2D 后，六形状的元数据/投影/A2A/恢复/槽位整调用CPU中位约0.72–1.33ms，不再有10次同步；但四卡GPU事件各rank最大值在B9、B32、B64、B8 100K仍约2.5–2.6ms，旧 packet 路径约0.17–0.28ms。单请求131072为0.35ms对旧0.61ms；B8短有明显的服务竞争/跨rank等待波动。profiler显示剩余暴露主要是 `ncclDevKernel_SendRecv` 在等待 peer，不是索引kernel。前述把CPU规划预计算在计时外的局部A2A优势因此**不足以证明在线默认路径加速**。该 ratio1 模块已从工作树撤回，未接入模型；既无新增在线分支，也无它的E2E/精度结论。下一次考虑A2A必须先证明共享规划、rank同时提交和通信重叠后完整调用在常见BS上胜出，再承担ratio2状态/跨tile/真实块表接线成本。
+
+**当前更小的CPU候选。** 当前`attention_v41.py::_prefill_produce`对L2/L8/L14分别调用相同`_prefill_x_group_plan`，其CP zigzag行序、packet容量与FP32投影宽度在一个forward内完全相同；L20仅因BF16单投影宽度不同而需另一份计划。CPU单调用计划热态中位：B8短约0.039ms、B32约0.15ms、B64约0.30ms、B64总fresh580608约0.31ms、B1024短段约4.90ms；重复三次没有改变任何packet。候选在已有每forward清理的`prefill_meta_common`中按投影宽度缓存不可变packet元组，L8/L14直接复用L2结果，未改变投影、Broadcast/AG选择、压缩、Global/Indexer/CSA写入或精度契约。它删除重复CPU遍历，但增加一次字典缓存，故必须单列“CPU工作减少”与“代码是否更简洁”，并用当前完整batch RT验收；若后者无收益且复杂度不抵，应撤回。基线服务PID3327177同一冻结语料正式两轮（ms）：B8短111.742/113.479，B32 32K134.778/135.358，B64 32K238.420/239.569，B4 100K131.002/129.379，B8 100K224.425/217.754；每形状另有一轮warmup，原始请求和响应见`/tmp/dsv41_rank_major_model_ab_20261104/packet_plan_cache_baseline_20261104/`。候选服务刚在22:58启动，尚无候选结果，不能报收益。
+
+**候选验收与撤回（23:04）。** 候选服务PID3387143加载了上述缓存，保持同一checkpoint、CP4/TP4/EP4、P-only服务和冻结语料；每形状一轮warmup、两轮无profiler正式测量。候选正式两轮（ms）：B8短99.299/93.047，B32 32K135.570/134.602，B64 32K244.281/236.598，B4 100K130.932/131.763，B8 100K222.940/220.525。B32中位与旧臂差0.018ms；B64、B4、B8长中位分别慢1.445、1.157、0.643ms，均小于轮次波动；B8短表面快16.438ms，远超此形状可省的约0.08ms重复CPU规划，不能归因。所有正式轮的请求数、fresh、reuse、响应文本与ID一致，但P-only占位输出不证明真实P→D精度。候选增加了缓存分支和forward存活的Python packet元组，却没有可归因的完整batch收益，故已从工作树撤回；`attention_v41.py`恢复原调用方式，未留下新的在线分支。原始结果在`/tmp/dsv41_rank_major_model_ab_20261104/packet_plan_cache_{baseline,candidate}_20261104/`。PID3387143进程仍加载撤回前的Python版本，待下一次安全轮换/一小时强制重启后才与磁盘同步；在此之前不把该进程当作当前源码的验收样本。
+
+### 2026-11-04 23:35：源层本地压缩后汇集的四卡算子链原型
+
+**What / Where / When。** 对同一 HEAD 的 DSpark CP4 target Prefill L2/L8/L14（ratio=2）及 L20（ratio=1），在未接入线上代码的 `/tmp/dsv41_local_compress_ag_state_probe_20261104.py` 中对照两条链：现有 `attention_v41.py::_prefill_projected_x_groups` 的本地投影→逐全局顺序 packet 通信→恢复→`_v41_prefill_global.compress_main/store_index/store_states`，以及原型的本地投影→按 zigzag segment 拿前驱→本地压缩及 FP4 量化→汇集 356B 的 Global/Indexer 条目和少量 FP32 state 尾行→按物理 owner 写回。原型额外的前驱与状态 AllGather 均计入计时，基线和候选共用同一权重、输入、压缩/量化 kernel 与状态槽结果；测试工作在空闲的 GPU4–7，驻留 Prefill 服务未停止。它不是生产代码、不是完整 batch Prefill RT。
+
+**Why / How。** 现有 ratio2 每个源层对本地两批约 8,388,608 个 FP32 数各做一次 AllGather，单次每 rank 接收约128 MiB；在已确认覆盖 BS8 100K 目标请求的四 rank trace 中，L2/L8/L14 的源 FP32 AG 各约0.44/0.50/0.49 ms GPU kernel。前驱只用于 ratio2 分片首个完成 pair，其他 pair 可在本地计算。`OpaqueKVCacheSpec.h::stateRingEntries` 对当前 `compression_ratio=2,state_ring_overlap=0` 给出每块2条、CP4合计8条尾部 raw state；因此无须复制整段 FP32 投影来写 CSA state。原型从每个 zigzag segment 汇集末行作为前驱，压缩本地有效行，汇集量化的 288B Global + 68B Indexer，以及符合每逻辑块最后8行/请求尾规则的 FP32 state，再由每 rank 选择自己持有的物理槽。它去掉逐 owner Broadcast，也避免了传完整源 FP32 投影。
+
+**GPU算子链验收（ms，四rank中位最大值；每臂连续20次/轮，ABBA交替，不能外推为模型RT）。**
+
+| 输入（每请求 prefix+fresh） | ratio2 现有→本地压缩 | ratio1 现有→本地压缩 |
+| --- | ---: | ---: |
+| BS8，2049+129，奇数边界 | 0.714→0.511 | 0.617→0.285 |
+| BS9，约71680+3330，混合奇偶 | 0.766→0.552 | 0.638→0.326 |
+| BS32，31744+1024 | 1.230→0.505 | 1.123→0.309 |
+| BS64，31744+1024 | 2.092→0.531 | 2.074→0.321 |
+| BS4，94208+8192 | 0.663→0.527 | 0.500→0.312 |
+| BS8，94208+8192 | 0.995→0.528 | 0.779→0.316 |
+
+六组 ratio2 的 Global FP4 字节均相同；BS8短奇数边界 Indexer 有最多3个字节差，ratio1 同形状主池最多5字节、Indexer最多4字节差，局部 BF16 latent 最大差0.015625。BS9和四组典型形状的 Global/Indexer 字节一致。ratio2 全块尾 CSA state 对照最大 FP32 差：BS8短约1.96e-5，其余0。首轮在 GPU0–3 测得多次约4.6ms 的跨 rank 等待阶跃，随后发现这四卡利用率100%，因此已丢弃该轮性能数字；上述表格仅来自 GPU4–7 重测。原始逐 rank JSON 为 `/tmp/dsv41_local_compress_ag_state_probe_20261104.json`，脚本同时打印 latent/index/条目对照。算子链上可见收益来自减少重复的全局压缩/索引投影以及交换更窄的数据；不能用其百分比代替完整 batch engine RT。
+
+**尚未接线的硬门禁。** 原型的行位置、物理 owner 和槽位表由 CPU oracle 在计时前建立，且只测单 tile；真实服务必须按请求边界分为本地至多16384行的固定内存 tile，处理单请求长段前/后半 tile 的跨 tile 前驱，并通过真实 CP 块表把压缩后条目与 state 写入物理池。候选须一次性替换旧 owner packet 路径，不能加“按 BS/收益阈值切换”的新分支；通过 GPU 元数据或复用的有界 pinned 计划避免逐行 pageable H2D 同步。先完成单请求、B≤1024混合长短、奇数前缀/长度、prefix复用、CED、跨 tile、pool容量和显存界，再跑无 profiler 的完整 batch RT、真实 P→D 精度/MAL、稳定性及独立 review。当前生产工作树仅新增本记录，没有启用原型，也没有 E2E 收益结论。
+
+**跨 tile 最难边界补证（23:43）。** `/tmp/dsv41_local_compress_odd_long_probe_20261104.py/.json` 将单请求 `prefix=1,fresh=131071` 按每 rank 本地 16384 行切为前/后两 tile；segment3→4 的 pair 跨 tile，保留前一 tile 的投影尾行作为后一 tile 前驱。四卡真实 NCCL、现有 compressor/量化核及状态存储逐项对照一次完整全局参考：Global/Indexer FP4 字节均无差异，全部 CSA 块尾 state 的最大 FP32 差为0。这个证明消除了先前仅有 A2A 路由跨 tile 校验、没有本地压缩后汇集校验的缺口；仍只使用模拟连续槽和计时外 CPU oracle，真实块表及完整模型待接线验证。
+
+**计时解释补充。** 上表基线调用生产 packet planner，候选的 zigzag/槽位 CPU oracle 在计时前构建，所以不能把差值全视为可实现的在线收益。一个直接把每行元数据用 Python/NumPy 展开的实验，生成四 rank 行索引的 CPU 中位：BS8短约0.24ms、BS9约0.32ms、BS32约0.97ms、BS64约1.96ms、BS8 100K约0.34ms；若每源层重复计算，可抵消 GPU 收益。可接线方案必须让每forward仅保留 O(B+tile数) 的请求/segment 描述，在 GPU 按描述生成行元数据或通过一个有界 pinned H2D 传输，逐 tile 重用缓冲；不能把计时外的逐行 oracle 原样搬进生产，更不能用 B 或收益阈值分流。旧 planner cache 的整批RT反证仍成立，它只缓存旧 packet，不解决此新流程的元数据成本。
+
+**通信量与显存推导（BS8，94208+8192/请求，CP4）。** 每 rank 16,384 个本地有效 raw 行。ratio2 现路径汇集 65,536 行×1024×4B≈256 MiB/rank（trace中分2次 FP32 AG），本地压缩后每 rank 8,192 完成 pair×356B≈2.78 MiB，CSA state 按每256 raw token块每rank最多2尾行约512×1024×4B=2 MiB，再加16个 segment 尾投影约64 KiB；两次汇集的接收量合计约19.4 MiB/rank。ratio1 现路径汇集 65,536×512×2B=64 MiB/rank；压缩后每rank 16,384×356B≈5.56 MiB，接收约22.25 MiB。这里不计两臂都需要的历史 Global/Indexer 池读回、SWA汇集、Indexer打分及MoE，故仅是源段交换的业务字节数，非整批通信量。固定本地 tile 上限16,384行且最多128请求/tile时，ratio2投影64MiB，压缩输出、CSA尾行和segment前驱的四卡接收均由tile大小与请求数约束；拼包、输入压紧和在途缓冲必须在接线时逐项计入峰值，不能只用这张字节表声称总显存上界。
+
+**源分支更新（23:47）。** 已从 `origin/feature/dsv41-dev-main-202161013` 抓取并 fast-forward 5 个提交，当前 HEAD `993801bb48847560075fb9018650038fe1410677`，与 upstream 0/0；原 dirty 文件及 `stub_source` 经临时 stash 恢复，`git diff --check` 通过，临时 stash 已清理。新增上游提交只涉及 cache/RPC/scheduler 文件，与本节源层 Python 文件无交叠。上述四卡原型在更新前 HEAD `9e3a33ec` 运行，其对应源层文件在本次更新中未被上游修改；完整 E2E 仍需以新 HEAD 重新验证。
+
+**最新 HEAD 聚焦复测（23:50）。** 在 `993801bb48` 上重跑相同脚本、GPU4–7 与六形状 ratio1/2，四rank Global/Indexer/CSA 对照仍通过。现有→本地压缩的四rank最大中位（ms）：BS8短 ratio2 0.728→0.489、ratio1 0.625→0.307；BS9 0.767→0.562、0.677→0.309；BS32 1.235→0.510、1.453→0.416；BS64 2.073→0.514、1.909→0.306；BS4 100K 0.616→0.522、0.518→0.319；BS8 100K 0.946→0.516、0.755→0.400。原始日志 `/tmp/dsv41_local_compress_ag_state_probe_latest_20261104.log`。两轮的BS32 ratio1等少数数值有运行环境波动，按业务结论仅保留“候选算子链更快”的方向，不报告在线速度提升或当前代码可提交。
+
+**去掉逐行 CPU 映射的实现关键（23:54）。** 复用已有 `_v41_producer_metadata.prepare_fused_tile` 在任意至多65536全局 raw 行 tile 生成本 rank 真正拥有的 Global/Indexer 槽、绝对位置和请求号；请求对齐的本地16384行 tile 恰好对应连续的至多65536全局 raw 行。对每个拥有的压缩条目 `(req,p)`，可在 GPU 用 `half=ceil(n/8)`、`segment=(p-prefix)//half`、`source_rank=min(segment,7-segment)` 与每个 segment 的首个完成 pair 位置，计算其在 rank-major 压缩 AG 接收缓冲中的下标；CPU 只需 O(B) 的每segment起始计数，不用生成每行的全局恢复表。ratio1同公式步长1，ratio2只取完成 pair，真实 Global/Indexer 槽仍由现有融合元数据核提供。独立 `/tmp/dsv41_local_compress_compact_mapping_oracle_20261104.py` 对BS8短奇数、BS9混合、BS32/64、BS4/8 100K、单请求131071/131072两tile、BS1024每请求1行和100组随机请求逐行检验了该解析式，无错。CSA state尾行可单独用块尾公式生成小型描述，保留现有状态槽核。接线时应把映射计算和FP4写池融合成一个kernel，避免先物化全局顺序压缩张量再做copy；这仍是方案/CPU oracle证据，尚无生产kernel和E2E。
+
+**融合槽位写入原型（23:56）。** `/tmp/dsv41_local_compress_scatter_kernel_probe_20261104.py` 的 Triton kernel 直接按 `source_rank/segment` 解析接收缓冲下标，并把356B分配到 Global 的288B逐条布局与 Indexer 的64B payload+4B scale分平面布局；它消费已经算好的物理槽，分别覆盖BS8短、BS9、BS32、BS8 100K及ratio1/2的随机FP4字节对照。将该核接入四卡算子链的 `/tmp/dsv41_local_compress_fused_scatter_probe_20261104.py/.json` 后，六形状ratio1/2的Global/Indexer/CSA对照继续通过；算子链四rank最大中位（ms）为BS8短0.683→0.449/0.602→0.274，BS9 0.762→0.493/0.642→0.278，BS32 1.261→0.493/1.636→0.375，BS64 2.032→0.493/1.901→0.283，BS4 100K 0.641→0.498/0.504→0.280，BS8 100K 0.888→0.490/0.778→0.281（每对先ratio2、后ratio1）。原始日志在 `/tmp/dsv41_local_compress_fused_scatter_probe_20261104.log`；计时外CPU oracle和模拟连续槽的局限仍适用。相对四次 `index_select/index_copy_` 的原型，单核写池减少了候选GPU小算子，但这不是已接入生产的代码简化或模型收益。
+
+### 2026-11-05：本地连续投影 → 有界 cohort AllGather → zigzag 恢复的实现及验收
+
+**What / Where / When。** 工作树仍为 `feature/dsv41-dev-main-202161013`、HEAD `993801bb48847560075fb9018650038fe1410677`，保留其他 dirty 文件。当前候选仅在 DSpark target CP Prefill 的 KV 源层 L2/L8/L14（ratio=2）和 L20（ratio=1）改变压缩前投影的汇集；主路径在 `fp8/attention_v41.py::_prefill_x_cohort_plan/_prefill_projected_x_cohorts/_start_prefill_x_gather_async`，恢复核在 `fp8/_v41_producer_metadata.py::restore_projected_cohort`。旧路径先按全局顺序形成 owner packet，单 owner 用 Broadcast、多 owner 用 AllGather，再用 `cat` 组全局 slab；新路径按请求组成最多65536全局行的有界 cohort，投影本 rank 连续行，使用一次等长 AllGather，通过 zigzag 映射恢复后交给原压缩器。非分片 CP 的 `prepare_raw` 也按 cohort 范围计划边界索引，避免回到逐 tile `arange/cat/_slots`。未增加按 BS、行数收益阈值选择新旧算法的运行时开关。
+
+**Why / How。** 旧 Broadcast 本身没有业务语义，只因 packet 可能仅含一个 owner；统一 AG 消除了这套 collective 分支和逐 owner 拼接。每个 rank 的 send 直接别名 AG 接收缓冲中的本 rank 切片，无独立 send→receive 拷贝；恢复为一张全局顺序 tensor 是现有 ratio2 配对、跨 tile carry、Global/Indexer/CSA 写池的输入契约。ratio2 投影保持 FP32、宽1024，ratio1 保持 BF16、宽512。CP4 每 cohort 最多16384本地行、65536全局行；单层在途 AG/恢复 tensor 上限分别为 ratio2 256+256 MiB、ratio1 64+64 MiB，且 consumer 在下一 cohort 前释放旧 tile 视图。这个上界与整批 fresh 总行数无关，但不包括压缩器、元数据、模型持久 KV 及 allocator reserve，不能冒充完整模型峰值。当前服务 `max_seq_len=131072`；超过它的单请求会进入单 owner cohort，等长 AG 会传大量零填充，故不能外推到更高 max_seq_len。
+
+**代码与算子证据。** 对本轮开始时的源文件快照 `/tmp/dsv41_attention_v41_before_cohort_20261105.py` 和 `/tmp/dsv41_producer_metadata_before_cohort_20261105.py`，attention 主文件少102行，元数据文件多71行，合计少31行。概念上删除 Broadcast 和 packet `cat`/拷贝，但 cohort 规划仍保留兼容超长单请求的拆段分支，不宣称条件判断总数下降。BS8×100K、92% prefix复用、fresh共65536的有效 trace 在 `/tmp/dsv41_cohort_service_profile2_20261105/profile/timelines/cohort_b8_100k_fresh_20261105b_profile_00_wr0_3.json`；L2/L8/L14/L20 每源层一次源 AG，旧 trace 每层两次。旧 trace 来自较早 WIP，CPU scope和kernel计数只用于定位结构差异，不能直接作为严格 A/B 延迟。源 AG GPU 核约0.37/0.38/0.40/0.12 ms，而完整 batch 约220 ms；这些 kernel 可重叠，不能把相加值当暴露的关键路径或直接推整批收益。
+
+**无 profiler 的完整 batch Prefill RT。** 基线=本轮开始前相同 HEAD/工作树的 owner packet+Broadcast/AG 路径；候选=统一 cohort AG 路径。均为 CP4 Prefill 角色、同固定请求语料、一次预热后各两次正式运行，量取每批各请求 `engine_cost_max_ms` 最大值；实测 reuse/fresh与目标一致，一 token 输出 ID/文本两轮全部一致。原始 JSON 在 `/tmp/dsv41_rank_major_model_ab_20261104/cohort_{baseline,candidate}_20261105/summary.json`；BS9 在同目录 `cohort_{baseline,candidate}_b9_20261105/summary.json`。
+
+| 每请求 prefix+fresh | 基线两次 ms | 候选两次 ms | 判断 |
+| --- | ---: | ---: | --- |
+| BS8，2048+129 | 88.161 / 102.128 | 107.129 / 99.718 | 无稳定收益，短输入可能偏慢 |
+| BS32，31744+1024 | 135.657 / 132.162 | 134.713 / 150.326 | 无稳定收益 |
+| BS64，31744+1024 | 236.153 / 240.718 | 240.001 / 242.099 | 无稳定收益 |
+| BS4，94208+8192 | 127.579 / 129.830 | 128.625 / 129.222 | 持平 |
+| BS8，94208+8192 | 220.296 / 219.637 | 217.064 / 219.636 | 持平 |
+| BS9，混合约72K prefix+3.3K fresh | 122.170 / 122.159 | 123.695 / 121.709 | 持平 |
+
+**精度、MAL、稳定性。** CPU producer/规划测试16项与简化后规划器3项通过；此前四卡 NCCL 的 mixed/B1024/1M 路径、真实 Global/Indexer/CSA 写入对照通过；本次新增非分片 CP cohort 索引 GPU 对照通过，`py_compile` 和 `git diff --check` 通过。真实 PD4+4 P→D 质量测评 `/tmp/dsv41_cohort_quality_20261105/` 共460/460成功，GSM8K 286/300、LongBench 0.202746，后者52次输出截断。历史同清单结果为285/300、0.238453、45次截断，但来自不同代码与采样运行，460条中仅53条输出完全一致；此差值尚不能归因于本轮，也不足以证明精度无回退。原长输入混合清单的 MAL `/tmp/dsv41_cohort_mal_20261105/` 为125/128成功，3次长输入 TCP 读超时（180s）；成功子集 MAL 3.90595。按先前 TCP 约束，改用 LongBench 原 prompt 不超过50000字符、并发8、最多256输出 token、超时300s：`/tmp/dsv41_cohort_mal_short_20261105/` 128/128成功、MAL 3.86468；同一短长各半清单四轮连续压测 `/tmp/dsv41_cohort_stress_short_20261105/` 256/256成功、356.6s、MAL 3.90444、请求 P95/P99 22.17/23.45s，服务结束后 `/health` 仍返回 ok。短清单不等同于原长输入清单，其 MAL 不与历史不同样本值比较。
+
+**独立审查与结论。** 三名独立只读 reviewer 分别审了正确性、性能泛化、可维护性；应用 `code-simplifier` 约束检查后，第四名 fresh reviewer 对最终六个任务文件复审，未确认新增正确性 blocker。已修复其指出的 ratio1 dtype、跨 cohort 旧 tensor 生命周期及非分片 CP 元数据回退。仍有性能泛化风险：单请求超过当前131072准入上限时 AG 零填充放大；极短 fresh 的 CP padding 使投影行数高于有效行；多 cohort 没有旧路径的下一包通信/当前包压缩重叠。完整模型峰值显存缺基线同负载对照，PD测量是本机TCP而非生产RDMA，LongBench历史差异未归因。更关键的是完整 batch Prefill RT 没有稳定收益，故当前候选**保留为未提交优化原型，未达到生产提交门槛**。下一轮应从“压缩前投影必须全量复制”改为本地压缩后交换较窄 Global/Indexer/CSA 数据，复用本节已经验证的有界 cohort/物理槽元数据，先消除 CPU逐行 oracle，再对全部典型shape做 matched E2E A/B；不再仅调 AG 分块大小或叠加按shape切换的性能分支。
+
+
+### 2026-11-05 03:55：源层通信后续实验与候选收敛
+
+**What / Where / When。** 在已选择的 `ruixuan.zrx_GPU` 容器、`feature/dsv41-dev-main-202161013` 工作树、HEAD `993801bb48847560075fb9018650038fe1410677`，继续分析 DSpark CP4 target Prefill 的 L2/L8/L14/L20 源层。当前线上候选仍是 `attention_v41.py::_prefill_projected_x_cohorts` 的本地投影、cohort AllGather 和 `_v41_producer_metadata.py::restore_projected_cohort` 的 zigzag 恢复；本节 BF16 合并投影实验已撤销，未提交、未作为新路径保留。前四卡自有 Decode watchdog 和服务在实验后恢复，`30320/health` 返回 200；后四卡未操作。
+
+**为什么减少 collective 没有变成通信掩盖。** `_prefill_produce` 先运行 `_prefill_compute_qkv`，之后创建 `_prefill_projected_x_cohorts` 生成器，再执行 SWA 准备；创建生成器本身不投影、不启动 AllGather，直到 `_produce_global` 的 `for t0,x_tile in tiles` 才迭代。此时 QKV/SWA 已完成，源投影后紧接 AG wait 和 zigzag 恢复；代码时序限制了独立计算覆盖。有效 B1 cold120K 的四 rank trace `/tmp/dsv41_front4_target_profile_retry1_20261105/timelines/` 中，各 rank 的 L2/L8/L14 共6次 FP32 源 AG、L20 共2次 BF16 源 AG，NCCL kernel 与非 NCCL compute kernel 无重叠。rank0 FP32 AG 各约0.35–0.42 ms、L20 BF16约0.135–0.153 ms；这些时长不能简单相加为完整 batch RT。提前一个 AG 与 Q GEMM 的局部 A/B `/tmp/dsv41_source_first_ag_overlap_probe_retry1_20261105.json` 为约1.503 vs1.508 ms，没有支持“仅前移首包即可获益”。下一候选须证明覆盖全部 cohort 或减少源数据复制量，不能只在 Python 语句顺序上声称异步重叠。
+
+**候选一：RTP UserBuffer替代NCCL AG，retired。** `distributed/user_buffers.py::all_gather` 底层的 `UserBuffersOp.cc` ring AG 会先将输入拷贝进 IPC 区、再把本地块拷入输出；它不是 DeepInfer `deep_ep.BucketBuffer` 的零拷贝同义替换，且当前容器的 `deep_ep` 包不提供 `BucketBuffer`。四卡同输入、输出逐值核对的独立算子对照 `/tmp/dsv41_ub_vs_nccl_ag_20261105.json`：每 rank 15000×1024 FP32，NCCL AG 0.3547 ms，RTP UB 0.3936 ms；8192×1024 FP32为0.2103 vs0.2511 ms；7500×512 BF16为0.0818 vs0.1027 ms。UB CPU调用也更慢（首形状43.25 vs56.31 µs）。探针显式 cleanup 后析构重复 cleanup 报错，随后一次附加探针发生 allocator 崩溃，原因未证实；不把 UB 作为稳定的服务候选，也不复跑该探针。全局 `NCCL_PROTO=SIMPLE` 独立试验在驻留 Decode 干扰下出现多次4.7–9 ms尖峰，无稳定改进，不修改运行配置。
+
+**候选二：ratio2 FP32原始投影改为合并BF16 GEMM与BF16 AG，retired。** 原实现的两份BF16权重经 native packed GEMM 输出1024维 FP32，再按cohort汇集；实验把权重拼接成一份，用 `torch.mm` 输出BF16，通信字节减半。单GPU 15000行投影约0.1148→0.0972 ms；随机pair压缩的latent相对RMSE约0.00286、最大绝对差0.0625，只是独立代理数值，不能代替E2E质量。真实前四卡 P-only CP4、同冻结语料、每shape一次预热两次正式，候选 BS8短116.423/103.986 ms、BS32 32K 133.101/133.290、BS64 32K 237.798/239.402、BS4 100K 134.390/131.403、BS8 100K 213.016/215.239；前次 FP32 cohort 值分别107.129/99.718、134.713/150.326、240.001/242.099、128.625/129.222、217.064/219.636 ms，非同步匹配控制且波动明显。B1 cold120K候选361.281/362.019/362.784 ms，前次 FP32 361.732/360.437/357.366 ms；无全形状稳定收益。BS9实验夹具请求的实测复用差一token（71681 vs71680），因此该case无有效候选结果。单算子节省和个别形状快数毫秒不足以承担额外精度风险；已把实验实现及专项测试撤销，保留原ratio2 FP32数值合同。撤销后四卡 B129、B1024 cohort 测试和 `test_v41_prefill_global` 10项通过，`py_compile`、`git diff --check`通过。原始服务输出在 `/tmp/dsv41_front4_bf16_candidate_20261105/` 和 `/tmp/dsv41_bf16_model_ab_20261105/`。
+
+**候选三：zigzag恢复核多行CTA，retired。** 现 `restore_projected_cohort` 一行一个CTA。用相同输入和逐值oracle比较每CTA 4/8/16行，在GPU0、驻留Decode服务下：65536×1024 FP32的 BS64 32K 旧0.09053 ms，8行0.09110 ms；BS8 100K旧0.09038，8行0.09104；B1 120K前半60000行旧0.08288，8行0.08469。L20用65536×512 BF16时旧0.04995，8行0.03179 ms，但每层至多一个/少数cohort，整体节省上限仅几十微秒，增加dtype特化分支的维护成本不合算。探针 `/tmp/dsv41_restore_tile_probe_20261105.py/.json`；无服务E2E声称。
+
+**下一结构方向。** 不再调 AG 包大小、协议、UB或恢复CTA。优先把已验证的“本地压缩后交换356B Global/Indexer条目 + 少量CSA state”原型接到真实块表和GPU元数据：在每forward复用 O(B+tile数) 请求描述，元数据核生成物理槽、pair前驱与状态尾；压缩结果汇集后按当前rank持有的物理槽直接写池。需要先核算跨请求/奇偶前缀、单请求131071两tile、B≤1024混合与容量上界，再做真实四卡算子链、完整batch RT和E2E精度/MAL；不能沿用原型计时外CPU逐行oracle。这个候选目标是同时删除 FP32 全量 AG 和全局恢复，才有足够的源层收益空间。
+
+
+### 2026-11-05 04:10：源 cohort AG 的 CPU/流语义收敛
+
+**What / Where / When。** 仅收敛 `attention_v41.py::_prefill_projected_x_cohorts/_gather_prefill_x_cohort`，作用于 CP4 target Prefill 的 L2/L8/L14/L20 源层。旧实现每 cohort 用 `all_gather_into_tensor(async_op=True)` 后立刻 `work.wait()`，把 Work、event、接收缓冲封装为 handle，消费点又立刻等 event；新实现保持同一个 CP 通信流与 compute→CP→compute 边，直接用默认同步提交和 `current.wait_stream(stream)`。删除专用 handle 类与双 helper，没有新增按shape/dtype/收益阈值的分支，压缩输入dtype、AG负载、恢复顺序和池写入均未改变。
+
+**Why / How。** 这里的 `async_op=True` 仍要立刻在同一通讯流等待，后面的恢复核没有独立计算可与其并行；handle不承担跨层在途生命周期。四卡独立算子合同 `/tmp/dsv41_ag_sync_semantics_probe_20261105.json` 使用15000×1024 FP32/rank、相同 CP 通信流与相同跨流依赖、24组交替测量：同步提交的CPU调用中位35–38 µs，旧异步+立即wait为39–44 µs；GPU完整AG约0.35 ms，两臂相当。另一个分段计时 `/tmp/dsv41_source_cpu_breakdown_20261105.json` 表明 `work.wait()` 本身仅约7 µs，旧 AG start约77–96 µs（包含额外封装/stream切换及运行噪声），不能声称它阻塞了0.35 ms GPU通信。该分段计时的GPU总时长受驻留Decode竞争影响，不作性能结论。
+
+**验证与收益边界。** 4 rank NCCL B129、B1024及宽形状合同共3项通过；随后简化 event 为 `current.wait_stream(stream)`，B129/B1024共2项复测通过，语法与 `git diff --check`通过。P-only CP4相同冻结语料，前次 cohort 候选→本次新 helper，两次正式完整batch RT(ms)：BS8短107.129/99.718→95.356/91.731；BS32 32K 134.713/150.326→154.494/135.394；BS64 32K 240.001/242.099→241.115/243.040；BS4 100K 128.625/129.222→130.666/130.053；BS8 100K 217.064/219.636→217.833/217.514。B1 cold120K的三次正式为361.732/360.437/357.366→366.145/358.725/358.218。两个服务批次并非同进程交替，BS32仍有波动，故只报告“消除无用句柄/少量CPU调用成本”，不报告稳定整批RT收益。所有五典型形状的三轮复用行数、执行行数和单token输出ID与前次候选一致；B1 120K的四轮输出ID也一致。原始结果 `/tmp/dsv41_bf16_model_ab_20261105/sync_ag_candidate/summary.json`、`/tmp/dsv41_long_boundaries_20261105/sync_ag_candidate_120k/b1_cold_n120000/summary.json`。P-only运行后，前四卡原有Decode watchdog/服务已重启且`30320/health`恢复200；后四卡未操作。此简化不是源层通信重构的终点，本地压缩后窄交换仍是主要方向。
+
+
+### 2026-11-05 04:22：在线BS9旧trace的源层CPU空档再归因
+
+**What / Where / When。** 用户提供的在线rank0/GPU0 `prefill_wr0_2.json` 中，BS9 target forward约271.393 ms、GPU kernel/copy busy union约94.514 ms、空档union约176.848 ms。这里的“156.5 ms在下一GPU API前”是许多空档的合计，**不是单个156 ms停顿**；在该forward内实际最长单个GPU空档约1.703 ms。旧源层L2/L8/L14/L20各一次源AG结束后到下一GPU操作的空档分别约1.538/1.288/1.310/1.368 ms，合计5.504 ms；不能把全部176.848 ms归因到源层。
+
+**Why / How。** 四个空档的主CPU线程都出现144个 `aten::slice` 与144个 `aten::as_strided`，末尾一次 `aten::_foreach_copy_`；L2空档中源张量形状为[26512,1024]、输出slab为[32768,1024]，72对slice覆盖zigzag片段。与本轮前旧 `attention_v41.py::_prefill_projected_x_groups::consume` 将每个packet的 `pieces` 逐片构成 `source_views`、再 `torch.cat(...,out=slab)` 的数据流和尺寸一致；这是源码与trace共同支持的归因，不应误指为当前 `_v41_prefill_kv_workspace.combine_kv` 的BF16 SWA拷贝。当前cohort候选已把这段恢复改为单次 `restore_projected_cohort` kernel，删除旧逐piece的Python view/cat链；但当前尚无相同BS9新trace证明GPU空档实际缩短，且先前B9完整batch A/B约122 ms持平。因此只能确认**旧路径的小算子来源和新路径的代码/算子删减**，不能报告5.5 ms模型收益。下一次有P-only服务窗口时用同一BS9语料采当前trace，核对这四个AG后空档是否消失或转移，再按实际暴露位置选择MoE `_run_chunk/_launch` 或40层SWA `cp_all_gather_full_varlen` 作为BS9 CPU优化对象。原trace路径 `/data0/ruixuan.zrx/.codex/attachments/3cb09304-53da-45f8-8898-468445132b6e/prefill_wr0_2.json`。
+
+**本轮窄范围完成审查。** 一名 fresh 只读 reviewer 仅检查 `attention_v41.py:184,225-236` 的 AG helper 收敛；当前 PyTorch 同步 collective 在内部等待 Work，`current.wait_stream(stream)` 建立恢复前依赖，未发现确定性正确性阻断。review 未覆盖工作树其他 WIP、生产RDMA、MAL或完整模型显存；完整batch测试在最后一处 event→wait_stream 代码简化前运行，之后四卡 B129/B1024流合同复测通过，不能把前者称作最终逐行版本的完整服务验收。
+
+### 2026-11-05 09:35：当前源 cohort 路径的 BS9 target trace 与容量分支收敛
+
+**What / Where / When。** 当前 HEAD `993801bb48847560075fb9018650038fe1410677`、CP4 DSpark target Prefill、P GPU4–7/D GPU0–3；固定新语料 BS9，9 请求各约75K输入，服务实际统一复用71680，整批 fresh 32290 行。无 profiler 的完整 batch engine RT 基线三轮为129.900/128.368/128.241 ms；删除越界单 owner 分支后的另一次服务三轮为133.678/133.087/133.373 ms，启动与缓存/时间环境不同，且该分支在这些输入下原本不可达，故不报告性能收益。两个服务均用 TCP 的本机 P-only 请求，不能当作生产 RDMA 的 P→D 结果。后者的四 rank target trace 在 `source_compact_exchange_20261105/owner_removed_b9_target_trace_5000/timelines/`，解析表为同目录 `source_target_analysis.json`；前两次采样分别只录到64行激活请求和空闲调度步，已排除，不能用于 BS9 target 结论。
+
+**Why / How：源 AG 与 CPU。** 对真正的32290 fresh 行 target，L2/L8/L14 的源投影 AG 每 rank 发送 `[8082,1024]` FP32，L20 发送 `[8082,512]` BF16；四 rank GPU AG 时长中位分别约0.197/0.194/0.207/0.089 ms，所有源 AG 与非 NCCL compute kernel 的观察重叠均为0。AG 结束至下一 compute kernel 中位仅2.3/2.5/3.1/3.8 μs：旧在线 trace 的 AG 后约1.3–1.5 ms Python 恢复空档在此负载下没有重现。rank0 源层 CPU 包围范围分别6.714/5.632/5.717/10.794 ms；这是下发范围，不是其独占的 GPU/模型耗时。L20 的后段有15次 `aten::topk` 和约6 ms CPU 工作，不能统统归因于源通信。当前 L2/L8/L14 每层约68–70次 `aten::slice`，L20约126次，均没有 `aten::_foreach_copy_`；旧在线 BS9（不同请求与环境）各源层约239–265次 slice，不能把两组 CPU 范围直接作 A/B RT 百分比。
+
+**容量分支。** `attention_v41.py::_prefill_x_cohort_plan/_prefill_projected_x_cohorts` 原来在单请求 fresh 超过模型131072位置准入时逐 owner 发零填充 AG，额外维护 owner 字段及分段循环；这不是当前生产准入域需要的业务路径。现改为当每 rank 的半 chunk 超过固定16384行 tile 上限时，在 collective 前报容量错误；准入域内 cohort 仍是本地连续投影→AG→zigzag 恢复，发送 view 直接别名 AG 接收缓冲自己的 rank 段。删掉 owner 组包和零填充，未加按收益/BS 切换路径，实际准入输入的通信字节与顺序不变。CPU 合同4项及四 rank NCCL 的混合/131072边界、宽 batch/B129/B1024共4项通过；完整服务输出、精度和独立审查在本条记录时仍需归档，故本项只算可维护性简化。
+
+**下一结构候选。** 当前源 AG 本身已经是每源层一次且后续 compute 紧接，继续合包不会消掉这约0.09–0.21 ms 的未掩盖通信。下一步应把 ratio2 的本地 segment 前驱交换与本地压缩算完，再把356B FP4 Global/Indexer 条目和少量原始 CSA state 尾行放入同一个有界 AG 消息，按 `prepare_fused_tile` 的真实块表槽位融合散写；ratio1 不需要前驱或 CSA state。这样避免当前整段1024 FP32/512 BF16源投影 AG，并避免压缩和 index 投影在四 rank 重复。现有分开通信的原型虽在算子链上较快，但 CPU 逐行 oracle、模拟槽位和额外 collective 不能原样接线；合包需要证明跨 zigzag segment、跨 tile、奇数前缀、ring 覆盖、B≤1024与131072容量，并把元数据成本计入计时。此结构仍是设计，不是当前代码的性能收益。
+
+### 2026-11-05 10:00：合并窄交换原型、状态行解析式与零条目边界
+
+**What / Where / When。** 在同一 `ruixuan.zrx_GPU` 容器和上述 HEAD，继续检查 `attention_v41.py::_prefill_produce/_produce_global` 的 CP4 源层 L2/L8/L14（ratio=2）与 L20（ratio=1）。当前生产候选的 cohort AG 仍是投影后全量汇集；`/tmp/dsv41_local_compress_combined_ag_probe_20261105.py`、`/tmp/dsv41_state_scatter_offsets_gpu_probe_20261105.py` 仅是工作树外原型，未接入服务。09:35记录中待归档的同 corpus P-only 输出已核对：BS8短、BS32/64 32K、BS8 100K、BS9 的请求完成数、实际复用长度及输出 ID 与该次基线相同；原始结果为 `/tmp/dsv41_bf16_model_ab_20261105/back4_{current_20261105,owner_removed_20261105}/summary.json` 和 `/tmp/dsv41_back4_b9_model_20261105/b9_{unique_20261105,owner_removed_20261105}/summary.json`。这只验证旧分支删除的执行等价，不是本节窄交换的模型验收。
+
+**Why：旧后处理也是源层通信和 CPU 成本。** 新 BS9 四 rank trace 的投影 AG 是每源层一次，GPU 约0.09–0.21 ms，结束到后续 compute 约2–4 μs；继续做更早的 Q 并行并不会自然消掉通信。四源层的 `dsv41.prefill.pool.async_start` 在 rank0 CPU 包围范围约0.985/0.902/0.941/1.203 ms，其中还包含 `_v41_owned_pool.try_gather` 的元数据、FP4 pool pack、AG、restore、输出视图和 `record_stream`。它不是可直接相加的 GPU 等待；例如 L2 该范围的 owned AG CPU annotation 0.180 ms、pack 0.101 ms、`aten::record_stream` 11 次合计0.014 ms。要获得整层收益，窄交换应同时替代“先写物理池，再把同一条目读出并做第二次 CP pool AG”的后处理，而非只缩短首个投影 AG；接收后的同一 FP4 消息应同时生成物理 Global/Indexer 池和给检索/注意力消费的 BF16/FP4 视图。此为设计推断，尚未有生产接线的耗时证明。
+
+**How：有界解析映射。** ratio2 状态写入规则以绝对位置 `p` 和请求终点 `e=P+n` 判断 `p+8≥min(下个256块边界,e)`；每个逻辑块末8行及请求尾被保存。定义 `H(p,e)=8·floor(p/256)+clamp(p−max(256·floor(p/256),min(256·(floor(p/256)+1),e)−8),0,8)`，则同一请求区间 `[a,b)` 的状态行数为 `H(b,e)−H(a,e)`，segment 内状态序号由这个差计算。GPU O(B) kernel 从 device `input_lengths/prefix_lengths` 对每rank两段做 cumsum，直接生成每请求8段的状态消息偏移，不构造逐 token CPU 列表。`/tmp/dsv41_state_scatter_offsets_gpu_probe_20261105.py` 对 BS8短奇数边界、BS9、BS32/64 32K、BS8 100K、单请求131071奇数前缀及131072两 tile、BS1024和30组随机多 tile，逐段对照独立逐行 oracle，全部通过。GPU事件中位 B9/B64/B1024约0.026/0.026/0.026 ms；四rank计数若需供 NCCL 主机 API 定长使用，可由相同公式在 host 对共同输入长度做向量化 O(B) 计算，一次每ratio/tile；探针 B9 ratio2约0.083 ms、B64约0.102 ms、B1024约0.336 ms，均需计入未来完整链计时。此解析式以当前 `csa_state` 的 `TPB=256, EB·CP=8` 为前提，若真实配置变化须从实际池规格推导，不能硬套。
+
+**单算子与边界证据。** 合并原型先交换每 zigzag segment 的 ratio2 前驱，再在本地调用现有压缩和 FP4 存储核，把356B Global+Indexer 条目与稀疏 FP32 状态行合成一次定长 `uint8` AG，最后按 owner 散写。四卡分别比对 Global/Indexer 字节与状态值；六组典型形状的四rank最大中位数（ms）当前 cohort算子链→窄交换：ratio2 BS8短0.495→0.421、BS9约0.460→0.436、BS32 0.460→0.424、BS64 0.831→0.427、BS4 100K 0.465→0.417、BS8 100K 0.830→0.426；ratio1大多亦下降，但不同运行的数值有波动。新增 BS1024×8（prefix0）ratio2 0.629→0.422、BS1×65536（prefix65536）0.830→0.417，四rank的 Global/Indexer FP4 字节与状态一致。BS1024×1（奇数 prefix1）仅 rank0 有完成的 pair，其他 rank 必须以零有效条目参加同一轮 collective；原型补充这个正确性分支后 ratio2 0.632→0.428，FP4 字节一致。`prefix0,fresh1` 的 ratio2 完成 pair 总数为0，原型的“latent 必非空”断言因此失败；生产接线须显式覆盖全体 rank 零条目 collective 和无新 Global 条目的状态推进。该失败是原型合同缺口，不能据此判断当前生产路径异常。
+
+**上界与下一门禁。** 请求对齐的本地 tile 固定最多16384行，不随总 fresh 长度增长；最宽松 ratio2 单rank原始投影64 MiB，压缩条目消息≤16384/2×356≈2.8 MiB，状态行按“至多每本地行一条”保守上界64 MiB，四rank接收消息≤约267 MiB；前驱每rank最多2B×4096，B≤1024时≤8 MiB，四rank接收≤32 MiB。实际状态稀疏，但不能以典型平均值取代峰值证据；最终还须计入 FP4 pack、BF16输出、两轮在途、Graph/allocator及KV容量。原型目前由 CPU 逐行 oracle 预先建部分发送/接收标签，使用模拟连续槽位，且未直接物化最终消费者输出；因此单算子百分比不能当作模型收益。下一步先消除这三项欠账，再以冻结 BS9、BS32/64 32K、BS4/8 100K、奇数前缀、单请求131072、B≤1024覆盖做完整batch RT、显存、真实PD质量/MAL和独立审查。不能把该方案作为按shape切换的新路径。
+
+**10:12 数据依赖纠正。** 上段“同一窄消息可替代第二次 pool AG”的想法仅对**fresh 后缀条目**成立，不能据此外推至 prefix 复用。`_v41_prefill_pools.try_gather_prefill_pools → _v41_joint_pool.try_gather → _v41_owned_pool.try_gather` 根据每请求绝对终点 `end//ratio` 读**全历史**的 Global/Indexer 物理池。新 BS9 trace 中，L2/L8/L14 每源层各有一包约30,348,288 B/rank 的 pool AG；L20有47,208,448 B和13,488,128 B两包。相比之下，fresh32290行仅约16145条 ratio2 或32290条 ratio1；即使本地压缩后窄交换解决了新条目写入，历史前缀仍必须通过现有 pool 读回或另行设计分布式检索，不能直接删除这批 AG 与 CPU 准备。因此窄交换的独立模型收益上限应以**源投影 AG、全rank重复压缩和新条目搬运**重算，不包含历史 pool AG 的完全消失。这个修正使原方案的代码成本/收益比需要重新评估，不能按原型算子链数字直接接线。
+
+**下一处低复杂度候选。** 现 `_v41_owned_pool.py::plan_groups` 的默认临时 scratch 为256 MiB，固定上限而非按形状切换算法。对相同 BS9（L20 ratio1）提高到512 MiB可把 pool AG从2包合为1包；BS32 L20从2→1，BS64的三个ratio2源层各2→1、L20 4→2，BS8短和BS4长不变；单层最大临时 scratch 可从约247–254 MiB增至约465–509 MiB。它可能减少 L20 CPU 下发与小算子，但必须测实际整批RT、显存峰值和KV容量。第一次256 MiB新服务基线错误地以 `USE_BATCH_DECODE_SCHEDULER=0`、`MAX_BATCH_TOKENS_SIZE=524288`、`CONCURRENCY_LIMIT=128` 启动，旧有效基线实际是1/2097153/64；所以这次服务的慢值不能用于256↔512 A/B。重启为匹配配置后再验，保留该失配记录作为无效对照。
+
+### 2026-11-05 10:35：固定 scratch 上限 A/B 与接收缓冲别名
+
+**What / Where / When。** 在同一 HEAD、CP4 DSpark target P 服务、相同语料、`USE_BATCH_DECODE_SCHEDULER=1`、`MAX_BATCH_TOKENS_SIZE=2097153`、`CONCURRENCY_LIMIT=64` 下比较 `_v41_owned_pool.py::_MAX_SCRATCH_MB` 的256与512 MiB，仅上限不同。五组矩阵与独立 BS9 均一次预热、两次正式；每组实际 prefix 复用、fresh 数与输出 ID 跨臂一致。原始数据 `/tmp/dsv41_pool_limit_arm_20261105/{pool256_matched_v2,pool512_matched_v2}/result.json`，逐请求结果 `/tmp/dsv41_bf16_model_ab_20261105/{pool256_matched_v2_matrix,pool512_matched_v2_matrix}/summary.json`，BS9在 `/tmp/dsv41_back4_b9_model_20261105/`。这里量的是 P-only 完整 batch 的 `engine_cost_max_ms`，不是生产 RDMA P→D。
+
+| 形状（每请求prefix+fresh） | 256 MiB正式两次 ms | 512 MiB正式两次 ms | 判断 |
+| --- | ---: | ---: | --- |
+| BS8，2048+129 | 88.764 / 106.227 | 89.410 / 109.647 | 波动大，无收益 |
+| BS32，31744+1024 | 134.453 / 134.319 | 133.539 / 134.215 | 持平 |
+| BS64，31744+1024 | 238.752 / 244.516 | 243.590 / 242.866 | 持平 |
+| BS4，94208+8192 | 276.443异常 / 131.065 | 129.809 / 131.003 | 正常样本持平 |
+| BS8，94208+8192 | 216.339 / 221.283 | 221.331 / 227.773 | 无收益，可能略慢 |
+| BS9，约71680+3330（实际fresh共32290） | 131.602 / 131.802 | 131.588 / 130.650 | 持平 |
+
+**Why / How。** 512 MiB使部分源层的全历史 Global/Indexer pool 汇集包数下降，但每包变大，且整批主要成本仍在其余40层计算与后续检索；减少 collective 数未形成可见完整 batch 收益。两次服务均从空进程开始，同序列 NVML 采样峰值约236–240 GiB/卡，allocator/其他持久分配掩盖了几百 MiB临时上限差，不能据此宣称峰值严格相同。默认仍为256 MiB，不增加按形状调参分支。
+
+**下一处更小的代码简化。** `_v41_owned_pool.py::_gather_planned` 原先分配独立 `send_buffer` 和 `receive_buffer`；pack kernel填前者，NCCL再写后者。这是两个持久临时张量但无业务上的独立副本需求。现让 send 直接别名 receive 的本rank切片，删掉一次分配，`plan_groups/plan_segmented_groups` 同步把 scratch 每本地行从 `356·(CP+1)+16` 降到 `356·CP+16` 字节。CP4 256 MiB预算下，BS9 ratio1从2包变1包、scratch约244 MiB；BS32 ratio1仍2包、BS64 ratio2仍2包。该候选没有新开关或 shape 分支。14项 CPU、15项单卡 CUDA、四卡 NCCL 对照已通过；完整服务RT/显存/质量仍在后续验收，不能以算子通过宣称模型收益。
+
+**别名候选的完整 batch 实测（10:41）。** 与上表256 MiB基线只有这次缓冲别名/预算公式不同，端口、调度及请求语料相同；正式两次 P-only `engine_cost_max_ms` 为：BS8短106.995/107.248，BS32 271.935异常/135.299，BS64 242.666/238.700，BS4长128.431/127.908，BS8长217.477/217.985，BS9 129.022/126.660。六形状正式请求的实际复用长度和输出 ID 都与基线一致。BS9可能有约2–5ms收益，其他形状在波动范围内，不能据此报告泛化的整批RT加速。原始 `/tmp/dsv41_pool_limit_arm_20261105/poolalias256_matched_v2/result.json`、`/tmp/dsv41_bf16_model_ab_20261105/poolalias256_matched_v2_matrix/summary.json` 和 `/tmp/dsv41_back4_b9_model_20261105/poolalias256_matched_v2_b9/summary.json`。该次 NVML 跨整个矩阵峰值每卡约239–247 GiB，比基线读数有波动且启动前驻留不同；只能证明服务没有OOM，不能证明模型峰值显存降低。按规划器上界，CP>1时alias每本地行少356B临时分配，但规划器可能用释放的预算合并更多行，因此某些形状的实际scratch峰值不会下降。
+
+**独立审查。** Fresh 只读 reviewer 对 `_v41_owned_pool.py` 与 `test_v41_owned_pool.py` 本次差异未发现确定正确性阻断；确认输入别名偏移与恢复核相符、`work.wait()`维持组间流依赖、scratch覆盖 receive/slots/inverse。未覆盖其他脏文件；CP2真实NCCL、PD完整生成精度及归因明确的模型峰值仍缺。最初单卡 CUDA测试因已有测试替身 `publish` 只收一个参数而失败；将其对齐当前双参数接口后15项全部通过，且新增别名地址断言；代码 `git diff --check` 通过。
+
+**PD路由及初步完整链路。** 首次用端口30420的P-only服务发多token请求时客户端60秒超时；检查有效环境发现Decode的`PD_PREFILL_START_PORT=30220`，与P服务`30420`不匹配，因此不是alias正确性证据。将同一候选P服务接到30220后，短请求3.37秒HTTP200、输出`4`且`pd_sep=true`。复用既定短长各半清单、并发8、每请求最多256输出token、两个轮次共128请求：128/128 HTTP200且PD路由正确，原生MAL=`1+accepted_draft_tokens/draft_rounds`=3.983859（12386/4151），耗时135.4秒；历史同清单3.864684，采样结果有波动，不能由差值推断alias改善或劣化。原始 `/tmp/dsv41_pool_alias_mal_short_20261105/`，前一轮 `/tmp/dsv41_cohort_mal_short_20261105/`。完整300 GSM8K+160 LongBench固定清单正在验收。
+
+**旧BS9 target trace补读。** 256 MiB、别名前的有效rank0 trace里，L2/L8/L14的全历史pool AG GPU各约0.213/0.216/0.256ms，其中与其他compute GPU kernel重叠约0.134/0.134/0.143ms；L20两包约0.353和0.210ms，第一包重叠约0.136ms，第二包无可见compute重叠。此为原trace的GPU时间区间交集，不是完整batch因果加速估计；但它解释为什么只把两包合一、却不改变历史prefix条目总字节时，完整batch难有稳定收益。该target的L20 `aten::topk` 15次CPU范围合计约2.125ms，但L20 CPU范围约10.794ms内GPU kernel/copy时间并集约10.67ms，不能把CPU算子时长直接相加为模型暴露延迟。下一候选应先从trace按关键路径判别真正暴露的CPU下发或GPU工作，再决定是否改算子；不能仅以scope里有很多小算子作为性能证明。
+
+**完整PD精度验收。** 候选P GPU4–7/端口30220与现有D GPU0–3/端口30320配对，固定清单 `gsm300_lb160_from_quality2173_20261024.jsonl`，自然采样、四worker、同一评分器与300/160固定分母；`standard_eval.py run` 460/460完成、零生成错误，耗时720.5秒。`score` 460/460可评分、零缺失：GSM8K 288/300=0.96；LongBench任务宏平均0.205154，49次预算截断计入主分数。先前同清单cohort候选为286/300、0.202746、52次截断，两次是独立采样，不能把2题或0.0024差值归因为alias收益，但未见整体精度明显回退。结果及contract在 `/data0/ruixuan.zrx/rtp_llm_eval/runs/deepseek_v41/source_compact_exchange_20261105/alias_pd_quality_20261105_1049/`。128请求混合MAL和这份质量均使用本机TCP传输；生产RDMA未验，不能替代RDMA部署证明。
+
+**真正BS9 target的前后trace（11:09）。** 第一次新trace只捕获到64行预热请求，已排除；重新使用`num_steps=5000`并将profile紧贴target启动后，四rank均捕获到实际`fresh=32290`、源AG send `[8082,1024]`（ratio2）/`[8082,512]`（ratio1）。新trace `/data0/ruixuan.zrx/rtp_llm_eval/runs/deepseek_v41/source_compact_exchange_20261105/alias_b9_target_trace_5000_20261105/timelines/`。L20全历史pool由旧两次AG每rank47,208,448+13,488,128B合为新一次60,696,576B；rank0 GPU核旧0.353+0.210≈0.563ms，新0.397ms；L20 CPU层范围旧10.794ms、新10.592ms。L2/L8/L14仍各一包30,348,288B，通信量不变；新L2各rankAG核有0.178–0.514ms明显波动，不能把某一rank某一轮的差值当稳定收益。旧/新带profiler完整batch分别159.636/174.947ms，与无profiler的两轮正式RT结论方向相反，说明这些trace只用于结构、重叠及小算子归因，不能用于报告模型加速。固定预算别名确实减少分配并让BS9 L20合包，但尚无跨所有输入的稳定RT收益。
+
+**CP2兼容性补证。** 单卡CUDA测试已模拟CP1/2/4的pool输出，真实CP4 NCCL已比对普通及分段pool字节。额外两卡真实NCCL在同一输出buffer中放置本rank发送切片，1,000,000B/rank的AllGather字节对照通过；脚本`/tmp/dsv41_cp2_nccl_alias_smoke_20261105.py`。它验证的是CP2别名collective原语，不等于完整CP2模型验收。一个使用逐行参考实现核验131K条目的离线CP2探针耗时过高，已停止，没有把它误记为通过。
+
+### 2026-11-05：源层异步池汇集的块表保活范围与下一处 CPU 空隙
+
+**What / Where / When。** 在 `attention_v41.py::_produce_global` 的 CP4、KV sharded、CUDA eager 源层 L2/L8/L14/L20，`_v41_cp_async.launch` 的输入从整个 `self._block_tables_by_type` 字典收窄为 Global 与 Indexer 两张块表（当前第1553–1560行）。`_v41_prefill_pools.try_gather_prefill_pools` → `_v41_joint_pool.try_gather` → `_v41_owned_pool.try_gather` 的池读回调只读取这两张表；ratio2 的 CSA state 在更早的独立快照中保活，不属于池读回调。它没有改变 pool、collective、kernel、发送/接收别名或精度算法，也没有新增开关和 shape 分支。非法缺表布局的异常可能由回调内 `ValueError` 提前变为索引时的 `KeyError`；该布局不在当前生产准入域，独立审查未发现对外依赖。
+
+**Why / How 与可观测效应。** `_v41_cp_async._record_stream` 会递归遍历传入字典并对其中 CUDA tensor 记录通信 stream；把不被回调读取的表也传入，会在每个源层重复 CPU dispatcher 调用。BS9 target 的同一类 trace 中，四个源层各自的 `dsv41.prefill.pool.async_start` 内 `aten::record_stream` 都从11次变为7次；这证明每层删掉4次无关保活调用。该 CPU scope 旧约0.894–1.055ms，新约1.030–1.305ms；由于跨次 profiling 波动和其它 CPU 工作，它**没有**证明 scope 或完整 batch 更快。新带 profiler BS9 target RT 219.479ms，旧带 profiler 174.947ms，不能把两次不同服务状态下的 profiler RT 用作回退归因。
+
+**同口径完整 Prefill RT（无 profiler）。** 上一版仅 pool send/receive 别名，当前版在它之上再收窄块表保活；模型、服务参数、corpus、P-only CP4、两轮 measure 和复用命中保持一致。各组旧→新两次 RT（ms）：BS8短 106.995/107.248→99.364/97.553；BS32 32K 97%复用 271.935（离群）/135.299→136.171/137.452；BS64同形状242.666/238.700→245.301/239.362；BS4 100K 92%复用128.431/127.908→132.612/131.562；BS8同形状217.477/217.985→218.718/224.746；BS9混合长短实际fresh 32290行为129.022/126.660→131.021/128.613。六组的复用长度和一 token 输出 ID 均相同；没有跨 shape 稳定加速，尤其不能由短输入两轮改善宣称模型收益。新运行峰值显存取自 NVML：四卡约237525–242521MiB，和先前驻留不同，不是可归因的模型显存对照。结果位于 `/tmp/dsv41_pool_limit_arm_20261105/poolalias_tables256_matched_v2/result.json`、对应 `*_matrix/summary.json` 和 `*_b9/summary.json`。
+
+**PD 验收边界。** 先前 alias 版本的 460 题精度与 128 请求 MAL 已通过，不能自动转移为本次额外块表保活修改的通过证据。本次原并发8、每请求最多256输出的128请求脚本在第一批产生9条300秒 TCP HTTP ReadTimeout，已停止；另一个明确缩小为并发4、最多32输出、16请求的探针首批4条在120秒超时，也已停止。两侧健康，单条4-token PD 请求曾在8.72秒返回HTTP200；清空任务自有 Decode 服务状态并重启后，同样单请求3.09秒HTTP200。超时发生在当前TCP PD/Decode链路，不能由它断言 Prefill 算法错误；但这轮多请求 PD 稳定性尚未通过。原始超时记录在 `/tmp/dsv41_pool_alias_tables_mal_short_20261105/` 与 `/tmp/dsv41_pool_alias_tables_pd_smoke_20261105/`。独立只读 reviewer 对本次 owned-buffer + 块表范围差异未发现确定正确性阻断，明确没有认定 E2E 性能或生产验收完成。
+
+**下一优先级（尚未实现）。** 当前 BS9 target rank0 trace 的 `dsv4.fp8.prefill_meta.build_all_ratios` 约3.854ms CPU，其中 ratio0 约3.391ms、103个 CPU op；从 `prepare_cp_context` 到首次 `ced.restore` 的161.833ms时间段内，全部 GPU kernel/copy 的忙碌区间并集约150.828ms，最大空隙1.299ms落在 CP context 准备，多个约0.2–0.6ms空隙落在 ratio0 元数据准备。此处比已删的4次 `record_stream` 更可能影响 BS9 的 CPU 下发，但 GPU 空隙与 CPU scope 的重叠只是候选定位，尚未证明因果。下一轮先逐项核对 `prefill_meta.py::build_and_propagate_prefill_meta_fp8` 与 `attention_v41.py::_build_shared_prefill_meta` 的 tensor 创建、转换与缓存命中，再选择不增加分支的单点改动，以算子和完整 batch 分层验证。
+
+**对首批元数据峰值的复核。** `attention.py::_build_swa_prefill_meta_varlen` 创建 `packed_row_offsets` 的9元素 CPU→CUDA `torch.tensor` 在一次带 profiler 的首批 ratio0 范围内出现约0.85ms `aten::copy_`，但同一trace后四批 ratio0 只有约0.64–0.93ms；旧trace首批也约3.33ms、后四批约0.71–1.05ms。单算子在 GPU4 上100轮的主机提交中位数，9元素直接上传15.2µs、现有 `_v41_swa_metadata._upload` pinned路径10.9µs；64元素14.7→12.7µs，1024元素47.9→45.0µs，输出逐值相同。由此不能把首批的0.85ms归因为常态 pageable 拷贝开销；没有为了几微秒再改共享 `attention.py` 基类或增加 pinned 状态/分支。下一次元数据优化应先区分首批 JIT/分配与重复稳态，并定位真正持续暴露的主机空隙。
+
+**PD重启复核。** 任务自有 Decode 服务重启后两端健康，单请求4输出token的PD链路3.09秒HTTP200；相同的并发4、最多32输出、16请求探针首批4条仍在120秒超时，故不是单纯的旧Decode队列残留。该探针已停止，结果在 `/tmp/dsv41_pool_alias_tables_pd_smoke_after_drestart_20261105/`；不得将单请求成功升格成多请求精度/MAL通过。共享代码和本机TCP传输之外的原因仍需独立定位，生产RDMA未验。
+
+
+### 2026-11-05：核实 Prefill load 是否在 FIFO 之前生产
+
+**结论与证据边界。** 对用户选定工作树当前HEAD `993801bb48847560075fb9018650038fe1410677` 和原始 `prefill_wr0_2.json` 分别核对：本次普通Prefill恢复是在FIFO准入过程中发起，不能理解成请求入FIFO之前已由独立生产者启动。“异步”描述底层匹配/传输与完成回调，不自动表示入队前预取。其他线上版本是否不同仍需实际wheel/入口证据。
+
+**原始trace的直接证据。** 重新解析全部真实 `ph=X` 事件，找到55次 `StreamCacheResource::initKVBlock()` 与55次 `StreamCacheResource::asyncLoadCache()`。110个scope均在engine线程TID543001，开始和结束全部落在同线程的 `FIFOScheduler::admitWaitingStreams(...)` 及外层 `engine.normal.schedule(reserve_step=15)` scope内。这里检查的是实际函数scope的完整包含关系，不使用异步补记 `cache.transfer.*` 的纵向位置推断CPU调用栈。它证明该trace已捕获请求的恢复发起入口在FIFO内；不证明trace窗口外或其他部署不存在其他入口。
+
+**当前调用链。** `cpp/model_rpc/PrefillRpcServer.cc:508–514` 的 `enqueueRequest` 调 `engine_->enqueue`；`cpp/normal_engine/NormalEngine.cc:815–834` 创建/验证stream后交 `scheduler_->enqueue`，没有在这里调用cache恢复。`cpp/engine_base/schedulers/FIFOScheduler.cc:418–428` 在准入检查之后置 `CanRun`，调用 `moveToNext`；`cpp/engine_base/stream/GenerateStateMachine.cc:55–86` 要求CanRun，然后 `initKVBlock → asyncLoadCache → LOADING_CACHE`。实际创建/推进allocator load发生于 `StreamCacheResource::initKVBlock → cache_manager->malloc → CoordinatorCacheManager`；`StreamCacheResource.cc:563–565` 的 `asyncLoadCache()` 本身只返回 `allocator_load_context_ != nullptr`，不是首次提交任务的入口。远端match回调或transfer worker随后异步推进任务，不改变最初从FIFO发起这一事实。
+
+**必须区分的入队前路径。** `cpp/model_rpc/DecodeRpcServer.cc:483–516` 确实会在decode调度入队/P-D handoff之前初始化目标KV，等待allocator load，成功后标记LoadInitiated。这是Decode侧路径，不能替代Prefill侧调用链。`PrefillRpcServer::remoteLoadCacheStart:517–535` 则是在enqueue之后等待本地stream条件，再向Decode发送P/D load控制消息，不能与本地prefix KV恢复混为一谈。
+
+**对优化设计的影响。** 当前路径可在FIFO先准入冷请求、让其加载，再让已ready请求计算；但forward期间持续对新候选发起恢复并未由“asyncLoadCache”这个函数名保证。若某线上版本的确有入队前producer，则FIFO内的batch token或初始化计数可能已经晚于恢复发起；预算必须移动到那个producer的目标块物化/提交之前。不能仅凭用户对异步架构的预期认定已运行该路径，也不能把当前分支的行为外推到未核实的线上wheel。
+
+### 2026-11-05：内源 RDMA 容器验收与运行时显存增长
+
+**What / Where / When。** 在新容器 `ruixuan.zrx_GPU_RDMA_dsv41_20261105` 中挂载 `/dev/infiniband`，使用原工作树的 CP4 DSpark target Prefill（GPU4–7）和 DP4 Decode（GPU0–3）。测试源码为本节性能采集时的 `993801bb48847560075fb9018650038fe1410677` 候选；内源 `internal_source/rtp_llm/cpp/disaggregate/cache_store/RdmaClient.cpp` 提供 P/D RDMA 实现，启动项为 `CACHE_STORE_RDMA_MODE=1`、`ACCL_USE_NICS=mlx5_bond_0`。新容器内 `ibv_rc_pingpong` 4096B×100 次实际收发通过；Decode 各 rank 日志出现 `RdmaClient::init` 和到 Prefill 四个端口的 `rdma connection ... success`，随后真实 P/D 请求返回 HTTP200、`pd_sep=true`。只看到 RDMA 初始化并不足以证明传输了 KV；这里同时有请求成功和连接日志。容器、构建、启动及原始数据在 `rtp_llm_eval/runs/deepseek_v41/source_compact_exchange_20261105/rdma_container_20261105/`。本节数据属于 rebase 前运行制品；随后工作树已快进到 `cc9fd78e299cbbb82a2cee5590e894bc88ccc347` 并逐字节恢复相同候选 diff，新 HEAD 的重建与复验另记。
+
+**精度、MAL 与长输入。** 固定 300 GSM8K+160 LongBench 清单，四并发、自然采样、同一 manifest/评分器/超时/输出预算的 RDMA P/D 生成 460/460 成功、零错误；GSM8K 285/300=0.9500，LongBench 主分数 0.220848、52 次预算截断。前一份本机 TCP、同清单四并发的别名候选为 288/300=0.9600、0.205154、49 次截断；两次为独立采样且传输不同，不将差值归因为算法增益或精度回退。八并发补测 460/460、零错误，GSM8K 287/300、LongBench 0.224990。另有 128 请求混合短长（并发8、最多256输出 token）全部 `pd_sep=true`，原生 MAL=`1+accepted_draft_tokens/draft_rounds`=3.95337。BS4/BS8 的 102400 输入、94208 prefix 复用：目标请求分别 4/4 与 8/8 走 P/D，实际每请求 fresh 8196（聊天模板多4行），均 HTTP200、无超时；其前缀预热只生成1 token，`pd_sep=false` 是请求路由结果，不计作 P/D 目标失败。
+
+**运行时显存：事实与原因。** `NormalEngine.cc::shouldUseDeviceMallocKVCacheBacking` 在 P/D cache-store RDMA 下启用原生 CUDA KV 池；`DeviceBlockPool.cc::initializeDeviceMallocBuffer` 的 rank0 日志列出 Prefill 固定池 109.912 GiB、Decode 固定池 164.251 GiB。故 PyTorch `memory_reserved` 不覆盖全部 KV；每100 ms采整卡 NVML。Prefill 新进程在大量请求前 GPU4–7 为 217971/220017/219894/216822 MiB；BS32 31744+1024 语料预热后各增加11266 MiB；BS64 31744+1024 目标与后续轮次没有再升；BS8 94208+8192 预热后再增加7168/11264/11264/11264 MiB。第一次阶跃在13:49:04.868，早于 BS32 首批预热完成13:49:06.425和目标完成13:49:13.860；第二次在13:50:38.450，处于 BS8 长前缀预热。性能脚本 `matched_prefill_matrix.py` 通过 `workload.PRIME_BATCH_SIZE=16` 一次处理最多16个全新前缀，因此这两个高水位对应大批 fresh 预热，不是目标请求的32K/65K fresh 独自产生。原生 KV 池已在启动时分配，阶跃最可能是运行时临时缓冲与缓存分配器高水位；仅凭整卡 NVML 无法精确归属到某个 PyTorch 张量。Decode GPU0–3 在整段质量/MAL/100K请求中保持 261407/261657/261474/261420 MiB，任务运行时无额外 GPU 进程。Prefill 高水位后四卡为236417/242559/242436/239364 MiB，`nvidia-smi` 最少剩余约32 GiB。100 ms采样不能证明未捕获到短于采样间隔的瞬时峰值。
+
+**稳定性。** 10分钟连续并发8混合负载，29轮共3712/3712真实 P/D 请求成功、零错误，综合原生 MAL 3.89750；每五轮穿插一次 BS8 100K，5轮共40/40目标请求成功。整段5922次100 ms采样中八卡各自的 NVML 驻留值完全不变，未观察到逐轮显存增长或 OOM；这个结论限于该负载与时长。两次早先的服务 SIGTERM 来自外部信号，日志前无显存尖峰且 cgroup OOM 计数为零，来源仍未证实，不能归因于显存泄漏。
+
+**源层 trace 与 DeepInfer 对照。** 新 BS8 100K target 四 rank trace 在 `profile_b8_long_rdma/timelines/`。L2/L8/L14 的单次 FP32 源投影 AG 核约0.368–0.432 ms，核结束到下一恢复 kernel 约1–6 µs；它们没有可见的 AG 后 CPU 长空档。L20 层的约79–90个小于10 µs的 kernel 多数来自 TopK v3、gather/index 等消费路径，不能归给源投影通信；此处只作结构归因，profiler-on 的226.586 ms不能与无 profiler 的完整batch RT直接比较。DeepInfer `attn.py::V4Attention.forward` 在 Q/SWA 投影前启动 CP 汇集，`parallel_utils/cp.py::CPManager` 使用 DeepEP `BucketBuffer` 会话及消费点 wait。当前 RTP `distributed/user_buffers.py::UserBufferCommunicator.all_gather` 是 CUDA IPC memcpy/ring 实现，先复制输入到共享缓冲、再复制本地输出，并非同一实现；当前运行包 `deep_ep` 没有 `BucketBuffer`。直接替换 API 会引入额外复制和依赖升级，未作为本轮生产改动。先前同负载的首包提前启动局部探针亦未见稳定模型收益；下一步应以当前 trace 的暴露关键路径评估全 cohort 覆盖或缩小源消息，而非仅减少 collective 名称。
+
+### 2026-11-05 15:40：全 cohort 通信掩盖实验退役
+
+**What / Where / When。** 在 RDMA 容器的 CP4 DSpark target Prefill 上，曾把 `attention_v41.py::_prefill_projected_x_cohorts` 改为首 cohort 在 `_prefill_compute_qkv` 前提交 AG、后续 cohort 在当前块消费前预提交下一次 AG。它是单一算法，不按 shape 切换；四卡 B129、混合与单请求131072的真实 NCCL 投影/行序/临时显存合同通过。此实验代码已经撤回，原有 dirty 候选保留。运行时服务进程仍载入实验版本直到下次重启，不能把随后服务结果误标为撤回后版本。
+
+**Why / How：实际掩盖。** BS8×100K（每请求94208 prefix+8192 fresh）rank0 baseline 的 L2/L8/L14 源 FP32 AG 各约0.368/0.379/0.414 ms，GPU 非 NCCL compute 重叠为0。实验版对应约0.400/0.417/0.541 ms，重叠约0.232/0.248/0 ms，说明首包提前提交并非每层都能掩盖。更长的 BS8 混合在线近似shape、实际全批 prefix524288/fresh288730，原路径 L2/L8/L14 各8次源 FP32 AG，总核驻留约2.00/2.33/2.18 ms，compute 重叠为0；实验版2.01/2.74/2.29 ms，其中重叠约0.97/1.25/1.06 ms。L2首包主要与 Q GEMM 重叠约0.294 ms；后续每包仅与约0.04 ms压缩主核和约0.02–0.03 ms index store 重叠。下一包的投影、接收缓冲分配与跨流记录也占用当前块消费前的关键路径；SWA与源 AG 共用 CP 通信流，不能把AG交叠量当作模型收益。四rank原始 trace 位于 `rdma_container_20261105/profile_b8_long_pipeline/timelines/` 和 `online_pipeline_b8_5000_20261105/bs8/timelines/`；baseline 位于 `profile_b8_long_rdma/timelines/` 和 `online_fresh_matched_profile_1000_20261105/bs8/timelines/`。在线近似shape的两组总 fresh 匹配，prompt和服务时窗不完全相同，因此只证明交叠机制，不用 profiler-on RT作严格AB。
+
+**完整 batch 与取舍。** 无 profiler、相同冻结语料，旧服务两轮正式 engine RT vs实验服务两轮：BS8短98.695/91.337→95.011/92.512 ms；BS32 32K 131.569/134.720→133.893/591.088 ms（第二轮异常，未归因）；BS64 32K 244.003/241.082→242.951/239.295 ms；BS4 100K 129.126/135.848→131.316/130.574 ms；BS8 100K 220.172/217.752→221.083/223.455 ms。不同服务时窗、BS32异常和无跨shape稳定收益使该重叠候选不满足保留条件，已撤回，不做质量/MAL及提交验收。实验的四卡 NCCL B129/混合/131072结果只能证明局部正确性，不能证明完整模型数值或稳定性。Bazel CUDA13目标在当前容器因旧 GCC12配置和Abseil编译冲突不可用，采用现有runfiles依赖执行四卡Python测试；该工具链问题与算法结果分开记录。
+
+**下一设计边界。** 当前单 cohort典型形状的源 AG只有约0.1–0.4 ms，多 cohort即使交叠也受下一包投影/压缩比例限制。要拿稳定整批收益，下一候选必须减少压缩前全量投影AG及恢复，而非继续移动首包等待点。已有“本地压缩后窄交换”算子原型尚缺真实物理槽、GPU元数据与prefix历史pool消费接线；这些是生产实现门禁。历史 Global/Indexer池AG仍需按全历史读取，不可误称能被fresh窄消息替代。先做真实槽位与零条目边界的局部接线，证明端到端消息字节与额外状态/拷贝上界，再做六典型shape的算子和模型RT，未拿到稳定收益前不提交新路径。
+
+### 2026-11-05 16:20：源层 no-CTA AllGather 可行性与接线代价
+
+**What / Where / When。** 只评估 DSpark target CP4 Prefill 的源层投影汇集：`attention_v41.py::_prefill_projected_x_cohorts`（141–182）把 L2/L8/L14 的 ratio=2 BF16 输入投影为每行 1024 个 FP32 数，L20 的 ratio=1 为每行 512 个 BF16 数；`_gather_prefill_x_cohort`（211–222）在 CP stream 调 PyTorch `all_gather_into_tensor`。`_v41_producer_metadata.py::_RAW_TILE_ROWS`（18）固定每轮最多 65536 全局行，CP4 单 rank 最多 16384 行，所以 ratio=2 发送上界 64 MiB，ratio=1 为 16 MiB。测试在同机 GPU0–3、NVIDIA L20D/NV18、Torch 2.11.0+cu130、NCCL 2.28.9 进行，GPU4–7 的模型服务未被探针占用。
+
+**Why：现状不能只设环境变量。** 当前 send 是 gathered receive 中第 `cp_rank` 段的别名，不同 rank 的注册窗口内偏移不同；receive 又是普通 `torch.empty`。给这条原布局直接加 `NCCL_CTA_POLICY=2` 后，四卡数据正确，但 profiler 仍看到 `ncclDevKernel_AllGather_RING_LL`，没有 Copy Engine。NCCL zero-CTA 要求 communicator 策略和对称注册的 source/destination 窗口同时成立。原生 NCCL `ncclMemAlloc` + `ncclCommWindowRegister(..., NCCL_WIN_COLL_SYMMETRIC)` 探针满足合同；普通策略 trace 为 `ncclSymkDevKernel_AllGather_STMC`，zero-CTA trace 为 P2P/DtoD GPU memcpy，且四 rank 输出逐字节检查通过。PyTorch 2.11 的 `torch.distributed._symmetric_memory.empty/rendezvous` 也可走 Copy Engine，但初始化进程组必须提供 `device_id`；首次未提供时探针在 `rendezvous` SIGSEGV，补齐后四卡通过，并非当前模型故障。
+
+**How：固定缓冲的可行数据流。** 每 rank 对称注册固定 64 MiB send 和 256 MiB receive；源层投影直接写 send 的前 `local_rows`，AG 写 receive 前 `4*local_rows`，现有 zigzag restore 再按全局行序消费。四卡用同一对固定缓冲的变长 view 验证了 4/8/16/32/64 MiB，输出均为正确 rank 序；64 MiB view 的 PyTorch trace 也仅见 GPU memcpy。四源层顺序消费可以共享同一对缓冲，不随 fresh 总长度增加。实测每 rank 可用显存减少 383,778,816 B（约366 MiB，含分配粒度等开销）；首次分配和两次 `rendezvous` 约0.6–0.7 s，因此必须跨 forward 复用，不能按 cohort/batch 注册。它保留了现有 receive→zigzag restore，不会删除该恢复操作，也不能凭算子收益声称模型 RT 改善。
+
+**四卡单算子结果。** 下表是原生 NCCL 对称窗口、相同 send/receive 缓冲下，16 次计时去掉前2次后的四 rank 最大中位数；单位 ms。普通策略与 zero-CTA 只差 communicator 的 CTA policy，数据量和注册方式一致。
+
+| 每 rank 发送 | 普通 CTA | zero-CTA | 结论 |
+| --- | ---: | ---: | --- |
+| 64 KiB | 0.0210 | 0.0288 | 小包变慢 |
+| 4 MiB | 0.0473 | 0.0510 | 变慢 |
+| 8 MiB | 0.0702 | 0.0780 | 变慢 |
+| 16 MiB | 0.1191 | 0.1035 | 加快约13% |
+| 32 MiB | 0.2106 | 0.1872 | 加快约11% |
+| 64 MiB | 0.4136 | 0.3244 | 加快约22% |
+
+64 MiB AG 与 BF16 GEMM 并行时，GEMM 单独约0.07 ms 的窗口，普通/zero-CTA 总时长约0.419/0.320 ms；GEMM 单独约0.25 ms 的窗口，约0.429/0.447 ms，zero-CTA 的逐次结果波动很大（约0.31–0.59 ms）。后者不能证明稳定交叠收益，也尚未分离跨 rank 主机提交偏差与真实带宽竞争。PyTorch 固定缓冲的 64 MiB AG 约0.34 ms，与原生探针量级一致，但两种 API 的 GPU event 边界不同，不把数值混作严格 AB。
+
+**决定与剩余门禁。** no-CTA 在当前硬件上技术可行，并能加快较大的源消息；它不是原路径的无代码开关。接入需要服务级 NCCL policy、跨 target forward 共享且同步管理的注册缓冲、额外约366 MiB/rank 常驻显存，以及源层从 receive 别名改为独立 send。小消息实测回退，与“统一简洁路径、所有合理 shape 泛化”的目标存在冲突。本轮不往生产源层叠加形状分支或未证实模型收益的新状态；原始可执行代码未改。若后续接入，应先证明完整 batch RT 在短输入、BS9、BS32/64 32K、BS4/8 100K和在线混合 shape 均无显著劣化，检查 SWA/其他 TP collective 受全局 CTA policy 影响、峰值显存、质量/MAL与稳定性，再做独立审查。当前优先继续缩减压缩前投影必须汇集的字节量，而不是仅调换搬运引擎。
+
+探针与 trace：`/data0/ruixuan.zrx/rtp_llm_eval/runs/deepseek_v41/source_compact_exchange_20261105/rdma_container_20261105/nocta_ag_probe_20261105.json`、`nocta_ag_probe_4_16_20261105.json`、`nocta_ag_overlap_8192_20261105.json`、`nocta_torch_fixed_rank{0,1,2,3}.json`、`nocta_ag_trace_policy{0,2}.json`、`nocta_torch_alias_policy2.json`、`nocta_torch_fixed_64m_trace.json`（后几项均在同目录）。
+
+补充对照：相同 8 MiB/rank、未注册的 PyTorch receive 别名布局，`NCCL_CTA_POLICY=0/2` 两种 trace 都是 `ncclDevKernel_AllGather_RING_LL`（单次 GPU kernel 约0.0699/0.0741 ms）。这仅证明该独立探针的普通 AG 未改用 Copy Engine，不证明整模型 SWA 或其他 collective 在全局 policy 下无性能变化；后者仍须模型 trace/RT 验收。`nocta_torch_alias_policy0.json` 与上文的 policy2 trace 同目录。
+
+### 2026-11-05：相邻源投影 cohort 合并与计算覆盖候选
+
+**目标与范围。** 仅改 DSpark CP4 target Prefill 的 L2/L8/L14（ratio=2）和 L20（ratio=1）本地源投影汇集。`attention_v41.py::_prefill_x_cohort_plan` 仍按全局行序生成至多 65536 行的压缩器 tile；`_prefill_projected_x_cohorts` 将相邻 tile 的本地连续行并为一个固定上限的通信组，对同一段 hidden 一次投影、一次 AllGather，然后逐 tile 进行原有 zigzag restore。压缩器输入的全局行序、ratio=2 跨 tile carry、旧状态、Global/Indexer KV 写槽与池格式均未改。发送 tensor 直接别名接收 tensor 的本 rank 区间，没有新增 send→receive 拷贝。没有按 batch size、总 fresh 行数或经验收益阈值切换算法。
+
+**上界与流水。** 每次 AG 接收的显式预算为 320 MiB；同一时刻至多有当前组和下一组两个接收缓冲，以及一个原有压缩器 tile 的恢复结果。由 `2×320 + 65536×1024×4` 得源投影汇集与恢复的逻辑张量上界 896 MiB，独立于 fresh 总长度；库内工作区/分配粒度另计。多组且非 CUDA Graph capture 时，第一组在 QKV/SWA 准备之前提交至 CP stream；消费第一组时提交下一组。单组及 capture 保持同步消费，避免小 shape 的额外事件/保活下发。ratio=2 的旧 CSA state snapshot 仍先排在同一 CP stream，故首组 AG 能否在每层实际覆盖 QKV，尤其 L14，必须由模型 timeline 证明；与 SWA AG 的通信资源竞争也要看完整 batch 关键路径。
+
+**形状与四卡正确性。** 在线 BS8 的 288728 fresh 行由每源 8 个压缩器 tile 变为 ratio=2 的 4 次 AG、ratio=1 的 1 次 AG；典型 BS32/BS64 32K、97%复用和 BS4/BS8 100K、92%复用均维持每源 1 次 AG。真实四 rank NCCL+源 GEMM 测试覆盖在线 BS8、单请求 131072、混合长短、BS9、上述四组典型复用 fresh 行、B129 和 B1024 等边界；两种 ratio 的恢复输出逐值相等，跨 stream 重用也通过。在线 BS8 的测试观测 ratio=2 临时分配峰值 1043443712 B（约995 MiB），ratio=1 为341966848 B；这是算子夹具的增量，不是模型整卡峰值。
+
+**阶段计时及局限。** 固定 320 MiB、四 rank 取最慢 rank 的独立投影→AG→恢复→copy 链测量，在线 BS8 ratio=2 中位数 3.127→2.962 ms，ratio=1 为约1.60→1.03 ms；单请求131K ratio=2 的旧循环→候选为1.360→1.452 ms，提示流水调度/额外存储可能回退。增加受控 QKV GEMM 与 SWA AG 窗口后，在线 BS8 ratio=2 为3.725→3.521 ms，单请求131K 为1.677→1.641 ms。后一个诊断仍用 copy 代替真实压缩器，也没有旧 CSA state AllReduce；不能推出完整模型 RT 收益。固定预算 sweep 的在线 BS8 ratio=2 中位数：320/512/768/1152 MiB 约2.962/2.780/2.716/2.760 ms，对应算子夹具峰值705/989/1271/1269 MiB；暂保留320 MiB，优先控制模型显存增长。原始数据在 `rtp_llm_eval/runs/deepseek_v41/source_compact_exchange_20261105/rdma_container_20261105/ag_cohort_pipeline_20261105/` 的 `sweep_rank*.json`、`overlap_rank*.json` 和 `stream_rank*.json`。
+
+**未完成门禁。** 当前新候选尚未完成同源码运行制品的完整 batch Prefill RT A/B、模型 timeline、PD 精度/MAL 和模型 NVML 峰值对照。启动前检查发现 GPU0/1/6/7 长时间有非本任务占用（约832–836 MiB 且持续 7–19% 利用率），未占用/停止这些进程，RDMA P4+D4 服务未启动。不能将四卡算子通过认作生产可提交状态；待八卡可用后按固定语料复测短输入、BS9、BS32/64 32K、BS4/8 100K和在线混合 shape，并检查源层/SWA AG 的暴露时间和并发通信竞争。
+
+**独立审查后修正。** 审查指出首轮提前启动的 `Pending` 被生成器闭包额外保活，理论上可能在当前组、下一组之外多留一份首组接收。现将它作为生成器参数传入并及时释放参数引用；修正后的在线 BS8 四卡逐值输出、跨 stream 重用和 1 GiB 显存门禁通过。夹具的峰值分配仍为 ratio=2 的 1043443712 B，说明之前的观测峰值不足以单独定位该引用的实际显存影响；逻辑双接收上界则不再依赖闭包回收。独立 reviewer 对修正后的 scoped 代码未发现其他确定正确性缺陷，模型级门禁仍如上未完成。
+
+### 2026-11-05：BS8×100K 源层 AllReduce 与“最后 AG 被掩盖”的因果复核
+
+**What / Where / When。** 对照 `rdma_container_20261105/profile_b8_long_pipeline/timelines/b8_long_pipeline_target_5000_20261105_wr{0,1,2,3}_1.json` 与 `profile_b8_long_rdma/timelines/b8_long_rdma_target_5000_20261105_wr0_1.json`。该步为 CP4 target Prefill：BS8、每请求 prefix94208/fresh8192，总 fresh65536。前者是后来已撤回的“首 cohort 提前投影 AG”实验进程 trace，不能当作当前回退后源码的执行结果。源层 L2/L8/L14 各一次 FP32 投影 AG，每 rank64 MiB；L20 为 ratio=1 的 BF16 投影 AG，每 rank16 MiB。`attention_v41.py::_prefill_produce`（2256–2298）在 L2/L8/L14 先异步读旧 `csa_state`；`_v41_prefill_metadata.py::_predecessor_state_kernel`（263–299）只在该请求旧状态的 owner rank 读到 FP32 值，其他 rank 贡献0；`attention_v41.py::_gather_shards`（1099–1107）对 `[B,1024]` 做 TP AllReduce-sum，使每 rank 都取得旧状态供 ratio=2 跨前缀压缩。L20 ratio=1 不读 `csa_state`，无此归约。它搬的是 prefix 末尾的状态，不是 fresh 投影，也不是 Global/Indexer KV。
+
+**归约不是此次 AG 实验新增。** 两版 BS8 步 trace 都有同样五类/次序的 `c10d::allreduce_`：L2/L8/L14 各一个 `[8,1024]` FP32 状态归约；一个 `[8,5120]` 的 CP 最后 hidden 行归约（`ZigzagProcessor.cc::handleOutputsLastHidden` 199–213）；一个 `[1]` 的 DSpark cache-store 成功状态 Min 归约（`MtpExecutor.cc::reduceDSparkCacheStoreStatus` 728–742）。后两者发生在 target 40层计算之后，与源层投影 AG 不是一条数据依赖。
+
+**Why / How：同一通信流造成 L14 的失窗。** `_v41_cp_async.py::_communication_stream`（65–69）和 `attention_v41.py::_gather_prefill_x_cohort`（211–222）都取 `_get_cp_comm_stream`。状态 AllReduce 先占该流，源投影 AG 排在后面。rank0 上，L14 的32 KiB状态归约 GPU kernel约447 µs，紧接的64 MiB AG约541 µs；Q GEMM、Q norm、SWA写在 AG 开始约280/105/78 µs前已启动，并在 AG 开始约60 µs前全部结束，故该 AG 的计算交叠为0。四 rank 的 L14状态归约核驻留约447/17/454/295 µs，强烈提示等待/就绪偏差，不可按32 KiB的带宽时间解释；未经跨 rank 时钟校准，不能指认具体迟到 rank。旧 trace 中相同归约也存在，rank0约271 µs，因此不能把它说成新版本增加的一次通信，或把单次447 µs认作稳定回退。
+
+| rank0 源层 | AG 单rank payload | AG GPU驻留 | 同时运行的非NCCL计算区间并集 | 尚无计算覆盖的区间* |
+| --- | ---: | ---: | ---: | ---: |
+| L2 ratio2 | 64 MiB FP32 | 400 µs | 232 µs | 168 µs |
+| L8 ratio2 | 64 MiB FP32 | 417 µs | 248 µs | 169 µs |
+| L14 ratio2 | 64 MiB FP32 | 541 µs | 0 µs | 541 µs |
+| L20 ratio1 | 16 MiB BF16 | 230 µs | 224 µs | 6 µs |
+
+\*此列是时间轴区间差，不是可直接相加的完整batch RT收益。L20的AG短、没有CSA状态归约，Q GEMM约184 µs、Q norm约34 µs、SWA写约21 µs正好覆盖其传输；L2/L8的相同窗口只有约230–250 µs，盖不住400 µs以上AG。四rank的L20 AG均几乎被覆盖（未覆盖约1–29 µs），L14在rank0/2完全失窗，在rank1/3部分交叠。在线多cohort形状中，ratio2后续AG仍约240–320 µs，而当前块压缩/索引写提供的窗口约90–115 µs；只提前首包不能盖住所有通信。
+
+**下一验证焦点。** 对 L14 先测四rank同一步 `csa_state` 读取完成、归约开始/结束、首包投影准备、AG开始/结束的相对就绪时间，分清CPU提交、rank等待、流串行三部分。简单交换状态AR与AG顺序只会移动等待，不自动减少总通信；任何独立通信流/组或状态复制都必须先证明前缀复用、跨chunk状态与内存所有权。对 L2/L8 的硬下限则是64 MiB AG长于本层可独立Q/SWA计算窗口，优先缩小压缩前投影通信字节，再评估 no-CTA 与稳定完整batch RT。单算子64 MiB no-CTA约0.324 ms，仍长于约0.23–0.25 ms窗口，不能单独实现完全掩盖。
+
+### 2026-11-05：当前 AG cohort 候选的独立复审与 RDMA P4+D4 质量验收
+
+**What / Where / When。** 当前工作树 HEAD `cc9fd78e299cbbb82a2cee5590e894bc88ccc347`，待验差异是 `attention_v41.py::_prefill_projected_x_cohorts` 的有界 cohort 合并、提前提交首个 AllGather、随后一组通信与当前组压缩重叠；作用于 CP4 target Prefill 的 L2/L8/L14/L20 源层。独立只读 reviewer 先指出首组接收缓冲可能被生成器闭包延长生命周期；修复后复审未发现新的确定缺陷，四 rank NCCL 精确值与缓冲重用测试通过。复审只覆盖这项 scoped 修改，不覆盖工作树内其他历史 WIP。
+
+**How / Why：真实模型质量。** 在 `ruixuan.zrx_GPU_RDMA_dsv41_20261105` 用 GPU4–7 跑 CP4 Prefill、GPU0–3 跑 DP4 Decode，`CACHE_STORE_RDMA_MODE=1`；本轮未停止各卡原有小型外部进程。固定 manifest SHA256 `a11ed66e4a92b7939a634aa5f77d5be1f246f2f27289ff5689e0a917226059da`，4 并发、自然采样，GSM8K 300 + LongBench 160 共 460/460 HTTP 成功、`pd_sep=true`、零生成和评分错误；GSM8K 289/300=0.96333，LongBench task macro=0.57549，9 次输出预算截断。相同 manifest、评分器及请求合同的历史参考为 291/300=0.97000、0.58330、7 次截断。两次是独立自然采样，差异不可直接归因于 AG 修改。原始响应和分数在 `rtp_llm_eval/runs/deepseek_v41/source_compact_exchange_20261105/rdma_container_20261105/ag_cohort_pipeline_20261105/quality_20261105T1044Z/quality_gsm300_lb160/`。
+
+**MAL 与运行状态。** 固定混合短长 64 题重复两遍、8 并发、每题最多 256 输出 token 的 128/128 请求均 `pd_sep=true`、零错误。按原生计数汇总 `MAL=1+accepted_draft_tokens/draft_rounds=1+10820/3433=4.15176`；同口径历史参考 `1+10469/3309=4.16380`。当前服务五个 worker status 端点均 HTTP200；Decode GPU0–3 各剩约 13–14 GiB，Prefill GPU4–7 各剩约 55–59 GiB，主日志未找到 CUDA OOM、RDMA/NCCL fail/error 或 fatal error。显存数字是验收结束时 NVML 快照，不是本轮峰值增长证明；先前候选的压力/增长数据不能代替本轮同制品峰值采样。MAL 原始响应与摘要在同一质量验收目录的 `raw_mal_responses.jsonl`、`raw_mal_summary.json`。
+
+**未完成门禁。** 各卡仍有外部 GPU 占用，故本轮没有把其完整 batch Prefill RT 当成正式 A/B；待独占窗口采集基线/候选的相同多 shape RT、通信 timeline 和 NVML 峰值增长。当前证据支持 scoped review、四卡算子正确性与 RDMA P4+D4 自然采样质量/MAL，不支持宣称稳定性能收益或生产可提交。
+
+### 2026-11-05：有界 cohort 合并与提前 AG 的八卡完整 batch RT 验收
+
+**What / Where / When。** 在 `ruixuan.zrx_GPU_RDMA_dsv41_20261105`，P GPU4–7 为 CP4 DSpark target Prefill，D GPU0–3 为 DP4 Decode，当前 HEAD `cc9fd78e299cbbb82a2cee5590e894bc88ccc347`。本轮比较的基线是同一 dirty 工作树、只把 `attention_v41.py::_prefill_projected_x_cohorts` 换回上一版“每 cohort 一次 AG”的实现（SHA256 `7fe5170043f16720d6a6e002711301b54257e14f90199dd0e97a88b68416a7ed`）；候选是相邻 cohort 合并、首包提前启动及下一包/当前压缩交叠（SHA256 `9758225daa88bab8ff4fdaa3bb1da0d92b78bb59d78dc9e09f4c67d44305da41`）。此基线不是更早的逐 owner Broadcast 路径。两个 P 服务均启动时设置 `use_batch_decode_scheduler: 1`，同配置、同冻结语料、各 shape 一次预热；标准形状各两次正式，在线形状各三次正式。先候选、再基线、最后候选对波动 shape 复测；基线测完后源码已逐字节恢复候选 SHA。D 在接近一小时实例寿命时用同配置自有进程重启；未停止外部任务。
+
+**How / 测量边界。** 主指标是每个完整 one-token batch 的响应 `max(aux_info.cost_time)`，再取正式轮中位数；它是无 profiler 的 P 侧 Prefill engine RT，D 虽驻留但这些 one-token 请求不计 P→D 传输和多 token Decode 时间。每组实际复用和 fresh 行数校验通过，基线/候选对应轮的输出 token ID 全部相同。首次启动时过早升高 batch 目标，卡住启动真实预热；该无效 run 被终止和保留，恢复 batch=1 并确认日志 `startup grpc warmup finished` 后用新目录重跑。首次重试的短形状 prime 命中该无效 run 的缓存，因此生成了同长度、验证 token 数及 prefix 对齐的新短语料；两臂均用此语料。
+
+| shape（总 prefix / fresh） | 上一版逐 cohort AG 基线 ms | 合并+流水候选首轮 ms | 候选复测 ms | 判断 |
+| --- | ---: | ---: | ---: | --- |
+| BS8 短，16,384 / 1,032 | 95.995 | 94.794 | — | 波动范围内 |
+| BS32×32K，1,015,808 / 32,768 | 132.958 | 145.964（133.399/158.529） | 133.384（134.103/132.665） | 首轮单次慢值未复现 |
+| BS64×32K，2,031,616 / 65,536 | 238.859 | 239.773 | — | 持平 |
+| BS4×100K，376,832 / 32,768 | 131.245 | 131.468 | — | 持平 |
+| BS8×100K，753,664 / 65,536 | 218.792 | 220.783 | — | 无收益 |
+| BS9 固定混合，645,120 / 32,290 | 130.065 | 128.868 | — | 波动范围内 |
+| 在线 BS9 相同实际 shape，652,288 / 26,485 | 112.083 | 109.744 | 114.094 | 两次候选跨越基线，无稳定收益 |
+| 在线 BS8 相同实际 shape，524,288 / 288,730 | 923.328 | 917.879 | 924.375 | 两次候选跨越基线，无稳定收益 |
+
+**Timeline 与通信核验。** 当前候选另采 profiler-on 的在线 BS9 和 BS8 四 rank target trace。`online_profiles/{bs9,bs8}/timelines/` 各四个非空 JSON；rank0 的 target step 标注了表中实际 batch/prefix/fresh，其他 rank 用最长 target-model-forward scope 确认窗口；每 rank 的 ratio2 大 FP32 源投影 AG 分别为 3 次和 12 次，即 L2/L8/L14 各 1 次和 4 次。完整清单与校验在 `ag_cohort_pipeline_20261105/perf_20261105T1130Z/timeline_validation.json`。BS8 rank0 profiled step 为约933.2 ms，BS9约163.9 ms；它们只用于定位，不能与无 profiler 的 engine RT 比较或用 NCCL kernel 耗时之和计算收益。
+
+**显存、结论与缺口。** 当前候选额外跑一次在线 BS8 同形状诊断，在 priming+target 期间每100 ms采 NVML，共79组采样；GPU4–7 的观测物理显存始终为234339/232289/235238/237286 MiB，未见本次新增高水位，剩余约36–42 GiB。该观察发生在先前形状已把池/allocator 预热之后，不是冷服务峰值增长或基线/候选 HBM 差的证明。五个 worker 验收后均 alive、running/waiting=0，主日志未见 CUDA OOM、RDMA/NCCL fatal。原始逐轮和汇总在 `rdma_container_20261105/matrix/agcohort_{pipeline_retry2_20261105T1132Z,baseline_20261105T1140Z,candidate_confirm_20261105T1151Z}/`、`ag_cohort_pipeline_20261105/perf_20261105T1130Z/{online_unprofiled,online_unprofiled_baseline,online_unprofiled_confirm,comparison_summary.json,online_memory_diag_nvml.csv}`。在已测形状中，合并/流水增加代码和临时状态，但未获得稳定完整 batch RT 收益；**性能验收不通过，不应报告加速或提交生产**。当前一小时实例寿命、外部 GPU 负载与两轮波动仍限制极小百分比的判断；若继续保留该改动，须先找到可归因的模型关键路径收益。此前同源码 RDMA P4+D4 自然采样质量/MAL 已通过，但本轮 one-token RT 不构成多 token P→D serving 性能 A/B。
+
+**补充：真正的八卡 P→D 多 token E2E。** 在恢复后的当前候选 P4+D4 RDMA 服务，用不同内容但相同实际 prefix/fresh 行数各发三轮在线 BS9/BS8，每请求固定32输出 token、top-k=1，三轮均完整成功且所有响应 `pd_sep=true`：BS9 是27/27请求、864输出 token，BS8是24/24请求、768输出 token。BS9 的每批 `max(aux_info.cost_time)` 为992.212/759.036/765.035 ms，中位765.035 ms，HTTP整批wall为3462.606/3211.776/3194.850 ms，中位3211.776 ms；BS8分别为1595.085/1639.196/1597.858 ms，中位1597.858 ms，HTTP wall为4540.365/4605.080/4433.686 ms，中位4540.365 ms。两种时间边界不可混用；P→D含通信与自然Decode，较 one-token P侧 Prefill RT 不是同一指标。此 E2E 测量只有当前候选，没有同语料基线 P→D A/B，因此证明服务路径与绝对耗时，不证明相对加速。原始请求、响应、逐轮计数和脚本在 `ag_cohort_pipeline_20261105/perf_20261105T1130Z/online_pd_e2e/` 与同目录 `run_online_pd_e2e.py`。
+
+
+### 2026-11-05：源层首包 AG 失窗、历史坑与下一轮统一流水设计
+
+**目标与口径。** 当前工作树为 `feature/dsv41-dev-main-202161013`、HEAD `cc9fd78e299cbbb82a2cee5590e894bc88ccc347`，源层候选文件 SHA256 为 `9758225daa88bab8ff4fdaa3bb1da0d92b78bb59d78dc9e09f4c67d44305da41`。比较的基线是同一 dirty 工作树仅恢复上一版“每 cohort 一次 AllGather”；候选是固定 320 MiB 接收预算的相邻 cohort 合并及提前提交。主指标是无 profiler 的完整 one-token batch Prefill engine RT；GPU kernel 时间只用于归因。
+
+**新核验事实。** `attention_v41.py::_prefill_projected_x_cohorts` 的 `asynchronous = len(groups) > 1 and not capture` 使所有单组形状在 `_produce_global` 消费生成器时才做本地投影和 AG；此时 `_prefill_compute_qkv`、SWA 工作区/写池已提交。典型 BS8 短、BS32/64 32K 97%复用、BS4/8 100K 92%复用、BS9 混合均为单组，因此“首包提前”在这些形状根本没有执行。在线 BS8（prefix 524288/fresh 288730）有每 ratio=2 源层四组；四 rank trace 中 rank0 的 L2/L8/L14 首个 FP32 AG 分别运行约 545/775/548 µs，与非 NCCL kernel 区间并集重叠仅约 1/0/1 µs。后三组各有约 189–241 µs 计算重叠，但每个 AG 仍有约 325–433 µs 未覆盖。在线 BS9（prefix 652288/fresh 26485）每源层单组；L2 首 AG 在 rank0/1/3 约 1241/1251/1250 µs，rank2 约 160 µs，说明至少存在明显的 collective 就绪差异；是否由 rank2 CPU 下发、先前 SWA/历史池通信或其他等待造成，现有 trace 尚未证明。
+
+**首包为何失窗。** `_prefill_produce` 先用 `_v41_cp_async.launch` 把旧 CSA state 读取与 AllReduce 排入 CP 通信流，后创建源投影首包；`_prefill_projected_x_cohorts.project` 在同一流先做 global_wkv/global_wgate GEMM 再调用 AG。在线 BS8 的 L8 首包之前，状态 AllReduce GPU 驻留约 479 µs；L2/L14 的该次归约约 17/16 µs，但源投影 GEMM 也排在 AG 前。三个首包开始时，SWA 写 kernel 结束在 AG 开始约 0–1 µs 前，因此“CPU 提前调用”没有形成实际 GPU 重叠。GPU kernel 驻留可包含等 peer；不将其等同纯传输带宽或直接相加为 RT。
+
+**已踩过的坑。** (1) 保留惰性单组分支会让最常见的 shape 失去提前通信；只对多组提前不具有 shape 泛化性。(2) 之前仅提前首 cohort 的实验在 BS8 100K 的 L2/L8 只覆盖约 232/248 µs、L14 为零；完整 batch RT 无稳定收益，因此已撤回。现在重新打开它的前提是查明并改变首包前的状态归约/投影排队，而不是重跑同样实现。(3) 仅减少 AG 包数可能扩大首包投影与通信时长，必须同时统计首包和后续包的未覆盖区间及接收缓冲峰值。(4) 单次 AG 时长含 rank 等待；BS9 rank2 约 160 µs 与其他 rank 约 1.25 ms 的差异不能归因为带宽。(5) no-CTA 需要对称注册 send/receive，当前 PyTorch receive 别名布局仅设 NCCL_CTA_POLICY 不会生效；已有单算子 64 MiB 有收益、4/8 MiB 回退，不能先叠加 shape 分支。(6) FP32 ratio=2 本地投影后发送 4096 B/raw token；更窄的“本地压缩后交换”需重证跨 rank pair、CSA carry、物理 Global/Indexer 写槽和前缀历史池读取，不可直接替换 source AG。
+
+**DeepInfer 对照。** DeepInfer `V4Attention.forward` 先算 `shared_hidden_kv_proj`，通过 `userbuffer.cp.all_gather` 返回等待句柄，再执行 `_project_q_and_swa`、`_prepare_swa_kv` 与 `_project_q_b`，到 `_compute_kv_ca_index`/`_store_main_kv` 才等待。其 `CPManager.all_gather` 会先发通信，句柄的 `wait` 才取得结果；注册缓冲由 session 复用。源码：<https://github.com/deepseek-ai/DeepInfer/blob/main/deepinfer/model_executor/models/v4_modules/attn.py#L3514-L3549>、<https://github.com/deepseek-ai/DeepInfer/blob/main/deepinfer/model_executor/parallel_utils/cp.py#L341-L358>。其顺序说明 RTP 的首包应以实际 GPU 启动/等待点来验收；不能由 API 调用顺序推定掩盖。
+
+**下一候选与最小证伪。** 在不增新 shape 准入分支的前提下，让每个非 capture CP 源层的首组都提前提交，并把与投影/AG 无数据依赖的旧 CSA state 归约排在首 AG 之后、压缩消费之前；仍用现有 CP 流保证 collective 顺序，保留固定 320 MiB 接收预算和最多两组在途。先用四 rank 真实 NCCL 检查单组/多组、ratio=1/2、prefix=0/非零、跨块 carry、异常与缓冲生命周期，再用 matched trace 分层报告首包 AG 开始时间、Q/SWA 重叠和未覆盖区间。若首包依旧不重叠或 Q/SWA/其他通信因竞争变慢，则退役这次顺序调整，转向窄交换；不能靠增加形状阈值掩盖失败。只有典型 shape 的 profiler-off 完整 batch RT、峰值/常驻显存、KV 容量及所需精度/MAL 均成立才报告稳定收益。
+
+**本轮实施与新发现。** 当前候选已移除单组惰性门槛，并把首组本地投影和 AG 提交移到 CSA state 快照之前；这改变的是同一 CP 通信流中的排队顺序，不改变压缩器消费顺序、固定接收预算或池格式。四 rank 真实 NCCL 的典型复用与在线 BS8 形状测试已通过；在线 BS8 的 ratio=2/1 夹具临时分配峰值分别为 739225600/341966848 B，低于原 1 GiB 门禁。原测试使用 `unittest.mock.patch(..., wraps=...)` 记录每次 AG 的 tensor 参数，四个约 282 MiB 接收结果被 Mock 保活，造成 1.33 GiB 的虚假峰值；已改为只计调用次数的普通包装函数。测量显存时必须检查测试钩子是否改变 tensor 生命周期。
+
+**模型验收状态。** 修改前同源码、同旧 checkpoint 服务的无 profiler 六形状两次正式 Prefill engine RT 中位数（ms）依次为：BS8 短 92.473、BS32×32K 132.957、BS64×32K 240.370、BS4×100K 129.516、BS8×100K 216.869、BS9 混合 129.840。每组一次预热、两次正式；两次波动不能独自证明百分比收益。重启候选服务时，启动脚本指定的 `.../model_deepseek_v41_flash_314113f8/config.json` 已从共享目录消失，服务在加载配置阶段报 `FileNotFoundError`；这是外部 checkpoint 文件缺失，不是本次代码计算错误。其他可见模型副本尚未证实与旧 checkpoint 相同，不将旧 checkpoint 的基线和别的权重的候选混比。模型 timeline、候选 RT、模型峰值显存和质量/MAL 因此仍未验收；恢复同一 checkpoint 后继续。
+
+**补充边界验证。** `test_attention_v41_cp_mixed_nccl.py` 在 GPU4–7 真实 NCCL 全部六项通过（298.463 s），覆盖在线 BS8、典型 BS32/64 与 BS4/8 复用、混合长短、单请求 131072、B129、B1024、跨流重用和 ratio=1/2 的逐值源投影恢复；`test_attention_v41_cp_raw_groups.py` 四项 CPU 行序测试通过。这里的“逐值”只用于证明通信重排和行序没有丢数据，模型级输出质量仍以 E2E 验收为准。NCCL 夹具不能证明当前代码的首包 GPU overlap 或完整 batch RT；后两项必须在模型服务恢复后采 trace 与无 profiler A/B。
+
+**3FS checkpoint 辨认。** 容器中存在 `/mnt/hf3fs/3fs/models/DeepSeek-V4.1-Flash`、`DeepSeek-V4.1-Flash-1017` 和 `/mnt/nas1/hf/DeepSeek-V4.1-Flash`；三者配置、权重索引哈希及 48 分片文件大小一致，但这不足以证明权重相同。逐分片首末各 1 MiB 的联合指纹显示 3FS 默认目录与 NAS 副本相同（`98b046f2...`），`-1017` 不同（`3fcb6707...`）。这是抽样指纹，非完整文件哈希；已删除的 `314113f8` 目录没有可比对的原始指纹。本轮以 3FS 默认目录做新的同权重、同源码 A/B；其结果独立于旧 `314113f8` 基线报告，不把 `-1017` 混入。
+
+**验收环境坑与更正。** NAS 与 3FS 默认目录的抽样指纹相同，但本机读取同一分片的 64 MiB 样本分别约 8.19 s 与 0.11 s；NAS 服务加载过慢，已停止该次任务自有进程，改用 3FS 默认目录做后续 matched A/B。3FS 权重分片约 68 s 读完，Engram 另有两张约 95 GiB 的共享 host 表，需要首次填充并在每个 rank 建立租约；服务端口已监听仍可能因 startup warmup gate 返回 HTTP 503，正式 RT 必须等待该 gate 通过。首次 3FS Prefill 启动在真实预热返回时失败：当前 `model_rpc_client.py::trans_output` 读取 `AuxInfoPB.speculative_verified_draft_tokens`，而旧 `bazel-bin` 的 Python pb2 缺此字段；`model_rpc_service.proto` 已定义 field 35。仅重建 `//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto` 后，实际导入的 descriptor 已包含该字段；首次失败不能当成源层计算回归。P/D 均已用同一 3FS 默认目录与更新 pb2 重启，新的模型验收结果另记。
+
+**首包提前仍未形成所需 GPU 掩盖。** 新顺序候选（SHA256 `4c462458d05993122ad01dca765f7590731ad010c43539a6914aec6a4a111f98`）在 3FS 默认 checkpoint 的六个典型形状与在线 BS8/BS9 上均完成无 profiler 请求，实际复用/fresh 行数符合输入合同。在线 BS8（524288 prefix/288730 fresh）的 profiler trace 有四 rank 文件，但 rank0 未捕获本次 target 源 AG，故首包判断只用 rank1–3：L2 首个 ratio=2 FP32 AG 的 GPU 驻留约 955/916/648 µs，与非 NCCL kernel 的区间并集仅重叠约 109/103/128 µs；L8 首包分别约 569/1092/563 µs，重叠约 137/105/134 µs；L14 某些 rank 的 AG 驻留超过 1.8–2.5 ms，包含等待同伴的可能，不能解读为纯链路传输。在线 BS9 单组源 AG 的三层首包重叠一般仅 12–56 µs。这里的 overlap 是同 GPU 时间区间，不是可直接相加的 Prefill RT。
+
+**为什么只调换 launch 顺序仍失败。** 在线 BS8 rank1 L2 中，首包 AG 开始前约 639/180 µs，CP stream 上两次源投影 GEMM 分别运行约69/89 µs；与此同时计算流上的 QKV GEMM 约在 AG 前602 µs 启动，运行446 µs。第二次源 GEMM 直到 QKV GEMM 接近结束才获得执行，AG 开始时 QKV norm 已到尾部，随后只有约108 µs SWA 相关计算与其重叠。推断是两条流的 GEMM 资源争用和首包投影排队共同把 AG 推到 QKV 尾部；仅凭 trace 不能把间隔完全归因于某一硬件调度策略。下一候选在首组源投影 GEMM 后、AG 前记录 CUDA event，让计算流上的 QKV 等这个 event 再启动，仍不等待 AG。此边会牺牲首组源投影与 QKV 的同时运行，换取 AG 与较长 QKV 的真正同时运行；只增加一个源层通用的 GPU 依赖，不增加 shape 阈值或新的通信包。要用同 checkpoint old-order/new-order/event-order 三臂，逐 rank 检查首包、SWA AG、状态归约和无 profiler batch RT；若计算争用转移或短 shape 回退，则撤回 event 方案。
+
+### 2026-11-05：投影完成事件与接收上限的同 checkpoint 对照
+
+**What / Where / When。** CP4 target Prefill 的 L2/L8/L14/L20 源层，在 `attention_v41.py::_prefill_projected_x_cohorts` 的首组本地源投影之后、首组 AllGather 之前记录 CUDA event；`_prefill_produce` 在 QKV 之前提交首组。计算流只等投影完成，不等 AG，随后 QKV/SWA 与 AG 同时运行。此路径在 eager CP Prefill 生效；Graph capture 不创建事件，沿已有同步路径。默认接收上限仍为每次 320 MiB，与总 fresh 行数无关。参照臂：old-order（首组在 QKV 后提交）、reorder-only（QKV 前提交但不建立投影优先级）、event-order（本候选）。三臂使用同一 3FS 默认 `DeepSeek-V4.1-Flash` checkpoint、P 端 CP4、相同 tokenizer、配置和 workload；旧消失的 `314113f8` checkpoint 不纳入比较。
+
+**Why / How：首包确实被掩盖。** reorder-only 的源 GEMM 与 QKV GEMM 争用，AG 实际从 QKV 尾部才开始。event-order 先让源 GEMM 完成，然后放行 QKV；在线 BS8（实际 prefix 524288、fresh 288730）的 L2 首包 AG，四 rank 的 GPU 驻留约 664/748/654/519 µs，同 GPU 非 NCCL kernel 的时间区间并集分别重叠约 663/748/653/519 µs。在线 BS9（prefix 652288、fresh 26485）L2 首包约 173–178 µs，重叠约 137–144 µs。分析文件在 `ag_overlap_reorder_20261105/event_online_{b8,b9}_source_ag.json`；区间重叠只说明 GPU 同时运行，不能直接相加为模型 RT。BS8 四 rank 的源 AG 平均总驻留约 9.59 ms、平均暴露约 5.78 ms；reorder-only 三个捕获 target 的 rank 分别平均约 10.19/7.91 ms。后续组的 AG 仍有约 200–400 µs/组的暴露，首包掩盖不能解决全部通信等待。
+
+**无 profiler 的完整 batch RT（ms；每臂同 checkpoint，首轮 warmup 不计，下表为后两轮中位数）。** old-order / event-order：BS8×(P2048,n129) 109.5/98.0（old-order 两轮 92.8、126.3，噪声大）；BS32×(P31744,n1024) 133.4/135.1；BS64 同形状 244.2/242.7；BS4×(P94208,n8192) 132.5/134.6；BS8 同形状 215.0/220.5；混合 BS9 129.1/129.4。在线形状三轮中位数：BS9 116.5/113.1，BS8 927.7/914.7。故 event-order 有可归因的首包 GPU 掩盖和长在线形状约 1.4% 的本轮 RT 改善，但六形状并未出现一致模型级收益；短输入单次波动不能作为收益。结果目录分别为 `matrix/ag_reorder_3fs_baseline_v2_20261105`、`matrix/ag_projection_first_3fs_20261105` 和 `ag_overlap_reorder_20261105/online_3fs_{baseline,projection_first}`。
+
+**内存与分块反证。** 固定接收上限 320 MiB 的四 rank NCCL 三组测试通过，在线 BS8 ratio=2 临时峰值约 739 MiB/卡。尝试把唯一常量提升到 640 MiB：ratio=2 源层 AG 从 4 次降到 2 次，算子值逐项一致，但峰值变为 1,330,622,464 B/卡（约 1.24 GiB，增加约 591 MiB）。同 checkpoint 在线 BS8 完整 batch RT 中位数约 921 ms，慢于 320 MiB event-order 的约 915 ms；在线 BS9 约 112/113 ms 持平，六形状也无一致改进。因此撤回 640 MiB 与测试中临时放宽的 2 GiB 合同。这个实验说明减少 collective 次数本身不能证明收益；在此形状下更大的单次 NCCL 驻留和缓冲成本抵消了调用数减少。是否存在更优固定上限仍未证明，下一步应按 AG 暴露、通信带宽、压缩阶段可并行工作及峰值 KV 容量共同评估，而非单独增大包。
+
+### 2026-11-05：把首组投影放在计算流，删除事件同步
+
+**What / Where / When。** 最终候选继续作用于 CP4 eager target Prefill 的四个源层，使用 `attention_v41.py::_prefill_projected_x_cohorts`：首组 `project()` 在当前计算流生成本地连续投影；通信流的 `launch()` 只负责该组 `AllGather`；计算流随后提交 QKV/SWA。后续组仍在通信流投影并汇集，与前组压缩重叠。Graph capture 沿原有同步路径，接收上限保持 320 MiB。相比 event-order，删去一个 CUDA event、一次 `wait_event` 和 `project()` 的可选事件参数；首组通信侧只记录 AG 缓冲的存储所有权，不再记录已经在计算流消费完的 `x` 和权重。`send` 是 `gathered` 的本 rank view，不新增 send→receive copy。
+
+**Why / How：流依赖与数据所有权。** 计算流的源 GEMM 先于 QKV，`launch()` 内部让通信流等待当时的计算流工作，故 AG 必须在首组投影写完后读 `send`；计算流不等待 AG，继续执行 QKV/SWA。消费生成器在读取 `gathered` 时经 `Pending.wait()` 插入事件依赖，restore 后才交给压缩器。通信流的 `record_stream(gathered)` 保证别名 view 的底层存储在 AG 完成前不会被 allocator 复用。四 rank NCCL 六组测试通过（在线 BS8、常见 prefix、混合/超长、B1024 等），逐项投影值、全局行序、跨流原地重用、现有 1 GiB 峰值合同均通过。
+
+**同 checkpoint 的无 profiler RT。** old-order / event-order / 简化版（ms，首轮 warmup 后两轮中位数）：BS8×(P2048,n129) 109.5/98.0/92.3，old-order 的 92.8/126.3 波动较大；BS32×(P31744,n1024) 133.4/135.1/133.5；BS64 同形状 244.2/242.7/241.0；BS4×(P94208,n8192) 132.5/134.6/130.0；BS8 同形状 215.0/220.5/220.2；混合 BS9 129.1/129.4/130.5。在线 BS8（prefix 524288、fresh 288730）三轮中位数 old-order/event-order/简化版为 927.7/914.7/915.6 ms；简化版三轮为 916.0/914.8/915.6 ms。在线 BS9（prefix 652288、fresh 26485）为 116.5/113.1/111.1 ms。故短/超长在线形状有本轮收益，六形状中仍有约 1–2% 的混合 BS9 与 BS8 长前缀点差，当前不能宣称所有准入 shape 均严格提速。数据分别在 `matrix/ag_compute_first_3fs_20261105`、`ag_overlap_reorder_20261105/online_3fs_compute_first`。
+
+**实际 GPU 掩盖。** 简化版在线 BS8 四 rank L2 首包 AG 驻留约 561/951/868/803 µs，非 NCCL 计算区间重叠约 561/924/864/799 µs；平均源 AG 总暴露约 5.13 ms/卡，event-order 约 5.78 ms/卡，reorder-only 约 7.91 ms/卡（后者仅三个 rank 捕获 target）。在线 BS9 四 rank 源 AG 平均暴露约 0.20 ms/卡，event-order 约 0.14 ms/卡；这里的微秒仅用于说明 GPU 重叠，不等于完整 batch RT。trace/分析结果在 `ag_overlap_reorder_20261105/online_profiles_compute_first` 和 `direct_online_{b8,b9}_source_ag.json`。
+
+**RDMA P4+D4 精度/MAL 与局限。** 简化版在同一 3FS checkpoint 上，128/128 混合请求均为 `pd_sep=true`、零错误，自然采样 MAL=3.943（3996 draft rounds，接受 11761 draft token）；event-order 同清单 MAL=3.870（4127 rounds，接受 11843）。固定 300 GSM8K +160 LongBench 清单两版都是 460/460、零生成/评分错误。event-order GSM8K 96.0%、LongBench 宏平均 20.52%；简化版第一次 95.33%/17.96%，同版重复运行 96.0%/22.27%，说明自然采样的同版 LongBench 摆动 4.31 个百分点，超过两版首次差异 2.56 点；不能把一次得分差归因于流顺序，也不能把这个统计结果当逐 token 精度证明。以上清单均为 SHA256 `a11ed66e4a92b7939a634aa5f77d5be1f246f2f27289ff5689e0a917226059da`，输出在 `ag_overlap_reorder_20261105/quality_{projection_first,compute_first}`。旧 128 条 MAL 清单已从磁盘消失，因此本轮 MAL 使用现存质量清单的 GSM8K/LongBench 各 32 条重复两轮，不能与旧清单作严格 A/B。
+
+**后续风险定位。** [NCCL 官方 Zero-CTA AllGather 文档](https://docs.nvidia.com/deeplearning/nccl/archives/nccl_2307/user-guide/docs/usage/bufferreg.html#zero-cta-optimization)要求对称注册窗口和 communicator 的 `NCCL_CTA_POLICY_ZERO`；当前 PyTorch `dist.all_gather` 路径并未证明满足这两个条件，单调 `NCCL_MAX_CTAS` 不等于 Zero-CTA。它可能降低 AG 与 GEMM 并发时的 SM 争用，但需要独立的传输实现、内存上界和跨 shape 性能证据，不应混入本次简单流顺序改动。更深入的“本地先压缩后通信”还需跨 CP zigzag 边界传递 ratio=2 压缩状态并确保每 rank 的 Global/Indexer 池一致，属于另一项结构设计。
+
+**运行时容量核对。** event-order 的 RDMA P 服务与简化版 P 服务使用相同池规格，`swa_kv`/`decoder_swa_kv`/`csa_state` 的容量均为 10239 块；`csa_kv`/`hca_kv`/`indexer_kv` 分别为 439354 与 439296 块，相差 58/约 439k（0.013%）。两次服务启动时 allocator/驻留状态不同，不能把这 58 块归因于代码；至少没有观察到随 fresh token 总量增长的持久源层缓冲或显著 KV 容量损失。算子级单次/双缓冲临时量仍有 1 GiB 的测试上界，真实模型运行时 CUDA 峰值未做同起点的精确 A/B，因此“峰值显存完全不增”未获证明。
+
+### 2026-11-05：同流 AllGather 提交简化与最新验收状态
+
+**What / Where / When。** `attention_v41.py::_gather_prefill_x_cohort` 在源层 cohort 的通信流已经是当前流时，直接提交 `all_gather_into_tensor`。原实现仍执行一次本流等待本流，并重复进入本流上下文；这部分只增加 CPU/CUDA 提交操作，没有提供跨流依赖。计算流调用和 Graph capture 仍走原跨流分支，以保留原有同步合同。此变更不增加 shape 门槛、临时张量或数据复制；固定 cohort 接收上限仍是 320 MiB。
+
+**How / 验证。** 四 rank NCCL 的在线 BS8、常见 prefix、混合 B1024 三组实值和缓冲重用测试通过；新增测试显式覆盖计算流调用时的跨流分支。源码编译检查与 scoped diff 空白检查通过。同一 3FS checkpoint 的完整 batch Prefill engine RT（ms）以 old-order / 最新同流简化表示：短 BS8 109.5/118.6（两臂均有较大轮间波动），BS32×32K 133.4/131.8，BS64×32K 244.2/242.9，BS4×100K 132.5/128.6，BS8×100K 215.0/221.1，混合 BS9 129.1/137.3（最新两轮 146.2/128.4）。在线精确形状 BS8（prefix 524288、fresh 288730）三轮中位数 927.7/914.2；在线 BS9（prefix 652288、fresh 26485）116.5/114.3，后者有一轮 152.5 ms 异常值。latest 数据在 `matrix/ag_same_stream_3fs_20261105` 与 `ag_overlap_reorder_20261105/online_3fs_same_stream`；old-order 数据在前述 baseline 目录。当前不能称所有形状稳定加速；减少提交操作本身也不证明模型级收益。
+
+**RDMA 门禁与原因边界。** 最新同流版本的 P4+D4、8 并发混合 MAL 两次分别只有 113/128 和 109/128 `pd_sep=true` 成功；失败码均为 `8302 CACHE_STORE_LOAD_CONNECT_FAILED`。第二次已重启自有 Decode 服务，故不能仅用旧服务接近一小时寿命解释。Decode 日志在 `RdmaClientHostConnections` 报连接超时、`XChannelImpl::WriteHeartbeat` 的 RDMA work-completion 错误，Prefill 日志随即报告 `remoteLoadCacheEnd` 失败；这指向 P→D 缓存传输连接，而不是已观察到的 token 数值错误。当前尚未证明连接故障与本次 Python 源层修改有无因果关系，最新版本的 P/D 精度、MAL 与生产提交门禁因此未通过。原始摘要在 `ag_overlap_reorder_20261105/quality_same_stream{,_retry}/raw_mal_summary.json`。
+
+**全新 P/D 配对复测（2026-11-06 00:00 前后）。** 只停止并重启本轮自有的 P、D 进程组，待两端实际预热结束后，仍使用 3FS checkpoint `/mnt/hf3fs/3fs/models/DeepSeek-V4.1-Flash`、相同代码和 RDMA 配置。先做短请求确认 `pd_sep=true`，随后同一清单的 8 并发混合 128/128 请求成功、零错误，`MAL=1+12382/4263=3.90453`。同 manifest SHA、4 并发自然采样的 GSM8K 300 + LongBench 160 为 460/460 HTTP200、`pd_sep=true`、零生成/评分错误；GSM8K 289/300=96.33%，LongBench task macro=22.89%。结果在 `ag_overlap_reorder_20261105/quality_same_stream_freshpair/`。这证明当前代码可完成一轮真实 RDMA P4+D4 精度和 MAL 验收，也说明先前服务的 RDMA 连接状态影响了结果；但仅凭重启后通过不能精确归因连接故障，也未证明长时稳定性。与 compute-first 版的自然采样质量比较须考虑其同版本 LongBench 重复运行从 17.96% 到 22.27% 的波动。
+
+**运行期显存与复测性能。** 全新配对上的同在线 BS9（实际 prefix 652288、fresh 26485）和 BS8（prefix 524288、fresh 288730）各 1 次预热、3 次正式完整 batch Prefill engine RT：第一次新提示词的中位数分别 110.31/920.31 ms；再次换用等长且前缀不同的新提示词分别 114.67/918.30 ms。old-order 同 checkpoint 基线分别 116.5/927.7 ms，差值很小，不能保证任意负载均获益。P GPU4–7 用 NVML 每 20 ms 采样第一次在线运行，已用显存从 227.50/224.27/227.37/225.22 GB 到峰值 237.17/233.94/233.81/233.81 GB，增加 9/9/6/8 GiB；结束后仍处于该高水位，包含 KV 驻留和 caching allocator，不能计为 AG scratch。第二次相同形状、不同提示词的完整运行中四卡峰值较开头均增加 0 B，说明这两轮没有持续增长；不能由此推断更长序列或更多轮次的全局上界。原始采样和每轮响应在 `ag_overlap_reorder_20261105/memory_freshpair_summary_run{1,2}.json`、`online_3fs_same_stream_freshpair_memory{,_run2}/`。静态 AG receive 上限 320 MiB 和算子级 <1 GiB 临时峰值合同仍须与这项 NVML 容量证据分开解释。
+
+**较短 fresh 的回归点。** 另在全新服务用同一 `BS8×(P94208,n8192)` 语料复测，预热 224.785 ms，正式两轮 222.465/218.314 ms，中位数 220.390 ms；old-order 基线 215.0 ms，最新候选先前 221.1 ms。两次候选接近，提示这组仍可能有约 2.5% 的完整 batch RT 回退；未取得同一服务时窗的旧顺序基线复测，不把差值归因于首包 QKV/AG 流顺序。该形状不能用隐藏的 shape 准入分支绕过，应先定位暴露的 GPU/CPU 关键路径，再决定是否统一调整所有 cohort 的调度。结果在 `matrix/ag_same_stream_3fs_freshpair_b8_100k_20261106/`。
+
+**该形状的四 rank timeline 补证。** 用同 corpus 尚未跑过的 profile round 捕获完整目标 step，实际 prefix 753664、fresh 65536，profile-on 完整 batch engine RT 223.471 ms；四 rank trace 在 `ag_overlap_reorder_20261105/profile_b8_100k_same_stream_freshpair/timelines/`。其中 rank1/2/3 各识别到 L2/L8/L14 三个 FP32 源投影 AG 和 L20 一个 BF16 源投影 AG；四者 GPU 驻留合计约 1.423/1.675/1.415 ms。按 AG 时间段内其它非 NCCL kernel 的并集粗估，未被其它 GPU kernel 覆盖的合计约 0.531/0.785/0.538 ms，L20 AG 几乎完全重叠。rank0 trace 未捕获符合识别条件的源 AG，因此不把这组三 rank 的暴露时间外推成四 rank 的精确关键路径。此证据说明源 AG 本身留下的 GPU 空档量级不足以单独解释候选相对旧顺序约 5 ms 的 RT 差；可能的 CPU 提交、其它层通信争用或服务/轮次噪声仍需同窗口基线 trace 才能区分。`source_ag_analysis.json` 保存了每个识别 kernel 的时长、stream 和覆盖区间；这不是按 NCCL 时长相加得到的端到端收益。
+
+### 2026-11-06：六典型形状多轮复测与源 AG 暴露上界
+
+**What / Where / When。** 当前同流版本使用 `attention_v41.py::_prefill_projected_x_cohorts` 首组本地投影、通信流 AG，以及 `_prefill_produce` 的 QKV/SWA 与通信交叠；压缩器在 `_produce_global` 按 cohort 恢复后的全局行序消费。3FS checkpoint `/mnt/hf3fs/3fs/models/DeepSeek-V4.1-Flash`，CP4 DSpark target P GPU4–7，非 profiler 的完整 batch Prefill engine RT 定义为该批请求 `aux_info.cost_time` 的最大值。每形状一轮预热、五轮正式，全部核对实际 prefix 命中和 fresh 行数。原始请求及摘要在 `ag_overlap_reorder_20261105/multi_round_20261106/corpus/` 和 `result/candidate_20261106/summary.json`。
+
+| 批形状（每请求 prefix+fresh） | 全批 prefix/fresh | 五轮正式 RT（ms） | 中位数（ms） | 历史 old-order 中位数（ms，仅两轮） |
+| --- | ---: | --- | ---: | ---: |
+| BS8，2048+129 | 16384/1032 | 91.846、91.465、91.160、89.955、97.097 | 91.465 | 109.512，旧轮有 126.268 异常值 |
+| BS32，31744+1024 | 1015808/32768 | 136.216、134.408、136.222、135.625、131.993 | 135.625 | 133.361 |
+| BS64，31744+1024 | 2031616/65536 | 238.649、240.123、243.677、241.458、237.385 | 240.123 | 244.209 |
+| BS4，94208+8192 | 376832/32768 | 128.664、128.243、127.811、128.504、128.972 | 128.504 | 132.532 |
+| BS8，94208+8192 | 753664/65536 | 223.931、219.707、1076.516、217.262、217.324 | 219.707 | 214.995 |
+| 混合 BS9 | 645120/32290 | 129.766、129.268、129.863、130.545、129.901 | 129.863 | 129.060 |
+
+在线同 shape 重复五轮：BS8 实际全批 prefix/fresh=524288/288730，中位数 918.729 ms；BS9 为 652288/26485，中位数 112.355 ms，正式轮分别见 `multi_round_20261106/online_candidate/`。历史 old-order 三轮中位数为 927.673/116.514 ms。两臂的轮数与服务时窗不同，不能据这些差值声称各形状稳定收益；尤其 BS8×100K 的约 5 ms 点差尚未证明由源层调度引起。此前两轮显示的短 BS8 与混合 BS9 大回退，在当前五轮中没有重复。BS8×100K 的 1076.516 ms 是八请求同一 forward 的异常轮，等待时间为零；01:05:36.566 scheduler 开始、01:05:37.633 首次 EPLB 汇报，时间吻合但没有该轮的 GPU/CPU trace，不能断言 EPLB 是阻塞原因。`ExpertLoadMonitor.cc::recordStep` 在监控窗口满时调用 `consumeWindow`（含跨 rank AG 和 host scalar 读取），属于待定的周期性抖动假设。
+
+**How / Why：有效 target timeline。** 六形状各取一个 profile round 的四 rank trace，逐个辨认 L2/L8/L14 的 FP32 投影 AG 和 L20 的 BF16 投影 AG。BS32/BS64 初次采集只录到缓存激活请求：`TorchProfiler.cc:20,261` 将 `num_steps` 截至 1000，约 3.5 s 的空闲 engine step 先于大请求进入引擎耗尽；延后 `start_step` 后重采，四 rank 各出现 BS32 的 8388608、BS64 的 16777216 FP32 AG 输入元素，证明已录到目标 forward。有效 trace 在 `multi_round_20261106/profiles/` 与 `profiles_offset_large/`，解析在 `profiles/target_timeline_analysis.json`。Profiler-on RT 不与上表 profiler-off RT 比较。
+
+| 形状 | 四 rank 源 AG 驻留合计范围（ms/卡） | AG 时间内未被其它非 NCCL GPU kernel 覆盖的范围（ms/卡） |
+| --- | ---: | ---: |
+| BS32×32K | 0.732–0.858 | 0.257–0.389 |
+| BS64×32K | 1.375–1.555 | 0.485–0.692 |
+| BS4×100K | 0.704–0.759 | 0.198–0.286 |
+| BS8×100K | 1.341–1.452 | 0.482–0.578 |
+| 混合 BS9 | 0.718–0.838 | 0.234–0.340 |
+
+这些数是每 rank 时间区间并集的局部上界，不是整批关键路径或可相加的模型收益。BS8 短输入的四 rank AG 时长/覆盖差异极大，且 SWA AG 同时出现明显 rank 等待，故不以该 profiler 轮量化首包收益。BS8×100K rank0 的 L2 首包可直接观察到：源投影两次约 0.06 ms GEMM 后发 0.427 ms FP32 AG；其中约 0.241 ms 与 QKV GEMM、Q norm、SWA 写入交叠，剩余约 0.187 ms 暴露；L8/L14 同类。L20 BF16 AG 基本全被计算覆盖。因而继续微调首包等待点的单次潜在收益很小，5 ms 模型点差要从 CPU 提交、SWA/其它 collective rank 到达差异或轮次干扰中找证据。
+
+**对照失败与恢复。** 曾在同工作树暂时把首组投影改成压缩器消费时惰性启动，拟构造仅调度顺序不同的对照；但在启动服务自己的 gRPC 预热尚未结束时，外部跑数就开始，8-token 预热和测量请求重叠，服务随后不再推进。该实验没有有效 RT，不能把卡住归因于惰性调度。已停止该自有实验服务、从事前备份恢复 `attention_v41.py`，恢复前后 SHA256 均为 `5e388e7cbaae0f14342ab0228554680a8d4d4103a558b0a6d507fe8f42d070dd`，并启动原候选服务。下次同窗口对照必须等启动预热明确结束、所有 rank 空闲，再开始正式流量。
+
+**下一优化判断。** 单 cohort 的源 AG 暴露最多约 0.7 ms/卡，继续增加同类首包事件/分支的收益上限低。优先用匹配时窗确认 BS8×100K 点差及周期性 EPLB 轮；再定位四源层 CPU cohort 规划和压缩器 tile 元数据的重复工作，核实是否能在一次 forward 内共享且不新增 shape 门槛。在线 BS8 多 cohort 的 AG 暴露仍较高，若要显著降通信，应论证 ratio=1/2 的本地压缩后交换及跨 zigzag 边界 carry、各 rank 一致的 Global/Indexer 池写入，不能只替换 Broadcast/AG API 或增加经验阈值分支。
+
+**源层 CPU 细分观察。** 同批 target 的 rank0 Torch profiler CPU 注释中，L2/L8/L14 注意力作用域在 BS32×32K 分别约 6.57/6.04/5.75 ms，直接消费层 L3/L9/L15 约 1.64/1.60/1.59 ms；BS64×32K 为 8.03/7.13/7.00 vs 1.70/1.63/1.67 ms；BS4×100K 为 6.26/5.63/5.52 vs 1.50/1.53/1.51 ms；BS8×100K 为 9.43/7.97/8.08 vs 2.05/2.00/1.95 ms；混合 BS9 为 6.70/5.80/5.72 vs 1.63/1.62/1.62 ms。BS8×100K 的 L2 内有 603 个 `cpu_op` 事件、56 次 `aten::empty`，L3 为 103/16；L2 的 `aten::record_stream` 23 次合计约 0.044 ms，四次 `c10d::_allgather_base_` CPU 作用域合计约 0.498 ms。这些 CPU 事件嵌套且 profiler 增加开销，不能相加当 RT，也不能仅凭“比消费层多”判定冗余：源层还承担投影、状态、压缩、索引和池写。下一次 CPU 变更应在 `_prefill_projected_x_cohorts` 与 `_produce_global` 的计划、分配、恢复和压缩边界分别定位可复用的 host 工作与真正的同步点；验证删除了多少操作并另测 profiler-off 完整批次。

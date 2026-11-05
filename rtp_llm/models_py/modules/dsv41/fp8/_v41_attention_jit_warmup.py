@@ -563,6 +563,18 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
         pool = torch.zeros(
             (2 * layout.entries, 1024), dtype=torch.float32, device=device
         )
+        table = torch.ones((1, 2), dtype=torch.int32, device=device)
+        for dtype in (torch.int32, torch.int64):
+            prefixes = torch.ones(1, dtype=dtype, device=device)
+            meta.read_predecessor_states(
+                prefixes,
+                table,
+                pool,
+                layout.entries,
+                layout.tokens_per_block,
+                cp_size,
+                cp_rank,
+            )
         for stride, slot_offset in ((512, 0), (512, 1), (1024, 0), (1024, 1)):
             values = torch.zeros((rows, stride), dtype=torch.float32, device=device)
             state_slots = _private_slots(rows + slot_offset, layout.entries, device)[
@@ -760,7 +772,12 @@ def _warm_fused_producer_metadata(layouts, cp_size, cp_rank, device):
             (8, producer._RAW_TILE_ROWS), dtype=torch.int64, device=device
         )
         for batch in (1, 129, 257, 513):
-            starts = torch.zeros(batch, dtype=torch.int64, device=device)
+            starts = torch.full(
+                (batch,),
+                cp_rank * layouts[0].owner_tokens_per_block,
+                dtype=torch.int64,
+                device=device,
+            )
             lengths = torch.full((batch,), 2, dtype=torch.int64, device=device)
             tile_layouts = tuple(
                 producer.SlotLayout(
@@ -779,7 +796,7 @@ def _warm_fused_producer_metadata(layouts, cp_size, cp_rank, device):
                     lengths,
                     ratio,
                     tile_layouts,
-                    (0, 2, 0, 1 if ratio == 2 else 2),
+                    (0, 2, 1 if ratio == 2 else 2),
                     scratch,
                 ),
                 "streamed producer metadata",

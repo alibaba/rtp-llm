@@ -67,6 +67,9 @@ from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
     FP4_GLOBAL_ENTRY_BYTES,
     FP4_INDEXER_ENTRY_BYTES,
 )
+from rtp_llm.models_py.modules.dsv41.fp8._v41_producer_metadata import (
+    _RAW_TILE_ROWS as _PRODUCE_GLOBAL_TILE_ROWS,
+)
 from rtp_llm.models_py.modules.dsv41.fp8.attention import (
     _CACHE_TAG_BY_NAME,
     AttentionFP8,
@@ -76,159 +79,163 @@ from rtp_llm.models_py.modules.dsv41.rope import apply_rotary_emb, precompute_fr
 from rtp_llm.models_py.modules.dsv41.utils import _v4_fp8_linear
 from rtp_llm.models_py.utils.memory import dispose_tensor
 
-# Bound both CP hidden-state transfers and the subsequent projections.
-_PRODUCE_GLOBAL_TILE_ROWS = 32768
-
-# Bound projected CP transport independently of the total Prefill row count.
-# At CP4 and ratio=2 (width=1024), send plus gather use at most 160 MiB.
-_CP_PROJECTED_TRANSPORT_MAX_BYTES = 160 * 1024**2
+# Bound one source AllGather receive independently of total Prefill rows.
+_CP_SOURCE_RECEIVE_BYTES = 320 * 1024**2
 
 
-def _prefill_x_chunk_rows(cp_ctx, output_width):
-    bytes_per_row = (cp_ctx.cp_size + 1) * output_width * torch.float32.itemsize
-    return min(
-        _PRODUCE_GLOBAL_TILE_ROWS, _CP_PROJECTED_TRANSPORT_MAX_BYTES // bytes_per_row
-    )
-
-
-def _prefill_x_group_plan(x, cp_ctx, *, output_width):
-    """Stream every zigzag source through bounded global-order packets."""
-    lengths = getattr(cp_ctx, "input_lengths_global_host", None)
-    chunks = getattr(cp_ctx, "chunk_lengths_per_req", None)
-    limit = _prefill_x_chunk_rows(cp_ctx, output_width) if output_width > 0 else 0
+def _prefill_x_cohort_plan(cp_ctx):
+    """Group whole zigzag requests into bounded, global-order cohorts."""
+    lengths = cp_ctx.input_lengths_global_host
+    chunks = cp_ctx.chunk_lengths_per_req
+    cp_size = cp_ctx.cp_size
+    if lengths is None or chunks is None or not lengths or len(lengths) != len(chunks):
+        raise ValueError("CP source cohorts require the full zigzag layout")
     if (
-        limit <= 0
-        or cp_ctx.cp_size < 1
-        or lengths is None
-        or chunks is None
-        or len(chunks) != len(lengths)
+        not 1 <= cp_size < _PRODUCE_GLOBAL_TILE_ROWS
         or getattr(cp_ctx, "gather_restore_positions", None) is not None
         or getattr(cp_ctx, "swa_replay_start", None) is not None
         or getattr(cp_ctx, "swa_replay_starts_host", None) is not None
-        or x.ndim != 2
-        or x.dtype != torch.bfloat16
-        or not x.is_contiguous()
-        or x.shape[0] != cp_ctx.chunk_length
+    ):
+        raise ValueError("CP source cohorts require the full zigzag layout")
+    if (
+        sum(lengths) != cp_ctx.seq_len_full
         or sum(chunks) != cp_ctx.chunk_length
-        or sum(lengths) != cp_ctx.seq_len_full
-        or cp_ctx.padded_seq_len != cp_ctx.cp_size * cp_ctx.chunk_length
+        or getattr(cp_ctx, "padded_seq_len", cp_size * cp_ctx.chunk_length)
+        != cp_size * cp_ctx.chunk_length
+        or any(
+            length <= 0 or chunk != 2 * ((length + 2 * cp_size - 1) // (2 * cp_size))
+            for length, chunk in zip(lengths, chunks)
+        )
     ):
-        return None
-    alignment = 2 * cp_ctx.cp_size
-    if any(
-        length < 0 or chunk != 2 * ((length + alignment - 1) // alignment)
-        for length, chunk in zip(lengths, chunks)
-    ):
-        return None
+        raise ValueError("CP source cohorts require the full zigzag layout")
+    limit = _PRODUCE_GLOBAL_TILE_ROWS // cp_size
+    cohorts = []
+    local = global_row = first_local = first_global = 0
+    for length, chunk in zip(lengths, chunks):
+        if chunk > limit:
+            if local > first_local:
+                cohorts.append((first_local, local, first_global, global_row))
+            half = chunk // 2
+            if half > limit:
+                raise ValueError("CP source request exceeds the model sequence limit")
+            front = min(length, cp_size * half)
+            cohorts.append((local, local + half, global_row, global_row + front))
+            cohorts.append(
+                (local + half, local + chunk, global_row + front, global_row + length)
+            )
+            local += chunk
+            global_row += length
+            first_local, first_global = local, global_row
+        else:
+            if local - first_local + chunk > limit:
+                cohorts.append((first_local, local, first_global, global_row))
+                first_local, first_global = local, global_row
+            local += chunk
+            global_row += length
+    if local > first_local:
+        cohorts.append((first_local, local, first_global, global_row))
+    return tuple(cohorts)
 
-    def packets():
-        pieces = []
-        counts = [0] * cp_ctx.cp_size
-        cursor = packet_start = 0
-        for owner, source, rows in _prefill_x_tile_plan(cp_ctx, limit):
-            if pieces and (
-                counts[owner] + rows > limit
-                or cursor - packet_start + rows > _PRODUCE_GLOBAL_TILE_ROWS
-            ):
-                yield tuple(pieces), tuple(counts), packet_start, cursor
-                pieces, counts, packet_start = [], [0] * cp_ctx.cp_size, cursor
-            pieces.append((owner, source, rows, cursor))
-            counts[owner] += rows
-            cursor += rows
-        if pieces:
-            yield tuple(pieces), tuple(counts), packet_start, cursor
-        assert cursor == cp_ctx.seq_len_full
 
-    return packets()
-
-
-def _prefill_projected_x_groups(x, cp_ctx, groups, weights):
-    """Project owner spans, exchange bounded packets, and restore global rows."""
+def _prefill_projected_x_cohorts(x, cp_ctx, cohorts, weights):
+    """Gather bounded adjacent cohorts, then restore the original compressor tiles."""
     from rtp_llm.ops.compute_ops import rtp_llm_ops
 
+    from ._v41_cp_async import launch
+    from ._v41_producer_metadata import restore_projected_cohort
+
+    if (
+        x.ndim != 2
+        or x.shape[0] != cp_ctx.chunk_length
+        or x.dtype != torch.bfloat16
+        or not x.is_contiguous()
+    ):
+        raise ValueError("CP source projection requires contiguous BF16 local rows")
     width = weights[0].shape[0] * len(weights)
-    limit = _prefill_x_chunk_rows(cp_ctx, width)
-    slab = torch.empty(
-        (_PRODUCE_GLOBAL_TILE_ROWS, width), device=x.device, dtype=torch.float32
+    projected_dtype = torch.bfloat16 if len(weights) == 1 else torch.float32
+    max_local_rows = _CP_SOURCE_RECEIVE_BYTES // (
+        cp_ctx.cp_size * width * projected_dtype.itemsize
     )
-    emitted = filled = 0
-    for pieces, counts, start, end in groups:
-        assert pieces and start == emitted + filled
-        assert end > start and end - start <= _PRODUCE_GLOBAL_TILE_ROWS
-        packet_rows = max(counts)
-        assert 0 < packet_rows <= limit
-        owners = [rank for rank, count in enumerate(counts) if count]
-        collective_owner = owners[0] if len(owners) == 1 else None
-        send = torch.empty((packet_rows, width), device=x.device, dtype=torch.float32)
-        local_views = []
-        for owner, source, rows, _ in pieces:
-            if owner == cp_ctx.cp_rank:
-                local_views.append(x[source : source + rows])
-        if local_views:
-            local_rows = counts[cp_ctx.cp_rank]
-            packed = torch.cat(local_views)
-            assert packed.shape[0] == local_rows
-            rtp_llm_ops.cublas_gemm_bf16_bf16_fp32_packed(packed, weights, send)
-            del packed, local_views
-        # All-gather reads every rank's padding; broadcast reads only its owner.
-        if collective_owner is None:
-            send[counts[cp_ctx.cp_rank] :].zero_()
-        exchanged = torch.empty(
-            (
-                (1 if collective_owner is not None else cp_ctx.cp_size) * packet_rows,
-                width,
-            ),
-            device=x.device,
-            dtype=torch.float32,
+    groups = []
+    first = 0
+    while first < len(cohorts):
+        stop = first + 1
+        while (
+            stop < len(cohorts)
+            and cohorts[stop][1] - cohorts[first][0] <= max_local_rows
+        ):
+            stop += 1
+        groups.append((first, stop))
+        first = stop
+
+    def project(group):
+        first, stop = group
+        local_start = cohorts[first][0]
+        local_rows = cohorts[stop - 1][1] - local_start
+        gathered = torch.empty(
+            (cp_ctx.cp_size * local_rows, width), device=x.device, dtype=projected_dtype
         )
-        pending = _start_prefill_x_gather_async(
-            send,
-            cp_ctx,
-            (
-                collective_owner,
-                0,
-                (1 if collective_owner is not None else cp_ctx.cp_size) * packet_rows,
-            ),
-            exchanged,
-        )
-        gathered = _wait_prefill_x_gather(pending)
-        del pending, send, exchanged
-        offsets = [0] * cp_ctx.cp_size
-        source_views = []
-        copy_start = filled
-        for owner, _, rows, destination in pieces:
-            assert destination == emitted + filled
-            base = 0 if collective_owner is not None else owner * packet_rows
-            copied = 0
-            while copied < rows:
-                count = min(rows - copied, _PRODUCE_GLOBAL_TILE_ROWS - filled)
-                source_views.append(
-                    gathered[
-                        base
-                        + offsets[owner]
-                        + copied : base
-                        + offsets[owner]
-                        + copied
-                        + count
-                    ]
+        send = gathered[cp_ctx.cp_rank * local_rows : (cp_ctx.cp_rank + 1) * local_rows]
+        if projected_dtype == torch.bfloat16:
+            torch.mm(x[local_start : local_start + local_rows], weights[0].T, out=send)
+        else:
+            rtp_llm_ops.cublas_gemm_bf16_bf16_fp32_packed(
+                x[local_start : local_start + local_rows], weights, send
+            )
+        return send, gathered
+
+    def gather(group):
+        send, gathered = project(group)
+        _gather_prefill_x_cohort(send, cp_ctx, gathered)
+        return gathered
+
+    # Project the first group on the compute stream, then overlap its
+    # AllGather with QKV/SWA. Later groups overlap current-group compression.
+    asynchronous = not torch.cuda.is_current_stream_capturing()
+    if asynchronous:
+        first_send, first_gathered = project(groups[0])
+
+        def gather_first():
+            _gather_prefill_x_cohort(first_send, cp_ctx, first_gathered)
+            return first_gathered
+
+        initial = launch(x.device, gather_first, inputs=(first_gathered,))
+    else:
+        initial = None
+
+    def tiles(initial_pending):
+        pending = initial_pending
+        del initial_pending
+        for index, group in enumerate(groups):
+            gathered = pending.wait() if pending is not None else gather(group)
+            pending = (
+                launch(
+                    x.device,
+                    lambda g=groups[index + 1]: gather(g),
+                    inputs=(x, *weights),
                 )
-                copied += count
-                filled += count
-                if filled == _PRODUCE_GLOBAL_TILE_ROWS:
-                    torch.cat(source_views, out=slab[copy_start:filled])
-                    source_views = []
-                    yield emitted, slab
-                    emitted += filled
-                    filled = 0
-                    copy_start = 0
-            offsets[owner] += rows
-        if source_views:
-            torch.cat(source_views, out=slab[copy_start:filled])
-        del source_views, gathered
-        assert end == emitted + filled
-    assert emitted + filled == cp_ctx.seq_len_full
-    if filled:
-        yield emitted, slab[:filled]
+                if asynchronous and index + 1 < len(groups)
+                else None
+            )
+            first, stop = group
+            local_start = cohorts[first][0]
+            local_rows = cohorts[stop - 1][1] - local_start
+            for cohort in cohorts[first:stop]:
+                global_start, global_end = cohort[2:]
+                restored = restore_projected_cohort(
+                    gathered,
+                    cp_ctx.unpad_restore,
+                    global_start,
+                    local_start,
+                    cp_ctx.chunk_length,
+                    local_rows,
+                    global_end - global_start,
+                )
+                yield global_start, restored
+                del restored
+            del gathered
+
+    return tiles(initial)
 
 
 def _prefill_request_row_slices(common):
@@ -257,79 +264,21 @@ def _prefill_request_row_slices(common):
     return tuple(slices)
 
 
-class _V41AsyncXGather:
-    """One in-flight, globally ordered hidden-state tile."""
-
-    __slots__ = ("work", "completion_event", "gathered")
-
-    def __init__(self, work, completion_event, gathered):
-        self.work = work
-        self.completion_event = completion_event
-        self.gathered = gathered
-
-
-def _prefill_x_tile_plan(cp_ctx, tile_rows=None):
-    """Visit each request's zigzag halves in global order, excluding padding."""
-    if tile_rows is None:
-        tile_rows = _PRODUCE_GLOBAL_TILE_ROWS
-    lengths = cp_ctx.input_lengths_global_host
-    if lengths is None:
-        lengths = cp_ctx.input_lengths_global.tolist()
-    local_base = 0
-    for length, chunk in zip(lengths, cp_ctx.chunk_lengths_per_req):
-        half = chunk // 2
-        active_segments = (
-            min(2 * cp_ctx.cp_size, (length + half - 1) // half) if half else 0
-        )
-        for segment in range(active_segments):
-            rows = min(half, length - segment * half)
-            front = segment < cp_ctx.cp_size
-            owner = segment if front else 2 * cp_ctx.cp_size - segment - 1
-            local_start = local_base + (0 if front else half)
-            for offset in range(0, rows, tile_rows):
-                yield owner, local_start + offset, min(tile_rows, rows - offset)
-        local_base += chunk
-
-
-def _start_prefill_x_gather_async(x: torch.Tensor, cp_ctx, tile, buffer):
-    """Exchange one bounded projected source packet."""
+def _gather_prefill_x_cohort(x: torch.Tensor, cp_ctx, buffer):
+    """Gather a projected cohort on the CP stream before its consumer runs."""
     from rtp_llm.models_py.distributed import collective_torch
     from rtp_llm.models_py.distributed.collective_torch import Group
 
-    owner, start, rows = tile
     process_group = collective_torch._get_group(Group.TP)
-    gathered = buffer[:rows]
-    if owner is not None and owner == cp_ctx.cp_rank:
-        gathered.copy_(x[start : start + rows])
     current = torch.cuda.current_stream(x.device)
     stream = _get_cp_comm_stream(x.device)
+    if current == stream:
+        torch.distributed.all_gather_into_tensor(buffer, x, group=process_group)
+        return
     stream.wait_stream(current)
     with torch.cuda.stream(stream):
-        work = (
-            torch.distributed.all_gather_into_tensor(
-                gathered, x.contiguous(), group=process_group, async_op=True
-            )
-            if owner is None
-            else torch.distributed.broadcast(
-                gathered,
-                src=torch.distributed.get_global_rank(process_group, owner),
-                group=process_group,
-                async_op=True,
-            )
-        )
-        # NCCL runs on its internal stream; order the event after completion.
-        # With the default nonblocking Work wait, this only adds a GPU edge.
-        work.wait()
-        completion_event = torch.cuda.Event()
-        completion_event.record(stream)
-    return _V41AsyncXGather(work, completion_event, gathered)
-
-
-def _wait_prefill_x_gather(handle: _V41AsyncXGather) -> torch.Tensor:
-    current = torch.cuda.current_stream(handle.gathered.device)
-    current.wait_event(handle.completion_event)
-    handle.work.wait()
-    return handle.gathered
+        torch.distributed.all_gather_into_tensor(buffer, x, group=process_group)
+    current.wait_stream(stream)
 
 
 def rms_norm(x, weight, eps):
@@ -1255,6 +1204,7 @@ class AttentionV41FP8(AttentionFP8):
         *,
         prefill,
         projected_tiles=None,
+        source_cohorts=None,
         swa=None,
         previous_state=None,
     ):
@@ -1315,21 +1265,24 @@ class AttentionV41FP8(AttentionFP8):
                 layouts, ratio, len(lengths_host), x_full.device
             )
             tile_plan = iter(
-                _v41_producer_metadata.raw_tile_plan(lengths_host, prefixes_host, ratio)
+                _v41_producer_metadata.raw_tile_plan(
+                    lengths_host,
+                    prefixes_host,
+                    ratio,
+                    cp.cp_size,
+                    cp.cp_rank,
+                    layouts[0].owner_tokens_per_block,
+                    ranges=(
+                        ((cohort[2], cohort[3]) for cohort in source_cohorts)
+                        if source_cohorts is not None
+                        else None
+                    ),
+                )
             )
             tile_scratch = torch.empty(
                 (8, _PRODUCE_GLOBAL_TILE_ROWS),
                 device=x_full.device,
                 dtype=torch.int64,
-            )
-            key_counts = torch.div(starts + lengths, ratio, rounding_mode="floor").to(
-                torch.int32
-            )
-            score_cache = self._shared_attention.setdefault("prefill_score_bounds", {})
-            score_cache[("producer_key_counts", ratio)] = (
-                cp.prefix_lengths,
-                cp.input_lengths_global,
-                key_counts,
             )
         if producer_meta is None and not tile_metadata:
             # Unsupported descriptors preserve the old dtype and callback path.
@@ -1360,6 +1313,11 @@ class AttentionV41FP8(AttentionFP8):
                     self._slots,
                     regions,
                     tile_rows=tile_rows,
+                    ranges=(
+                        ((cohort[2], cohort[3]) for cohort in source_cohorts)
+                        if source_cohorts is not None
+                        else None
+                    ),
                 )
         previous = None
         producer_seq_ends = (
@@ -1659,7 +1617,8 @@ class AttentionV41FP8(AttentionFP8):
                             main_pool,
                             index_pool,
                             seq_ends,
-                            self._block_tables_by_type,
+                            self._block_tables_by_type[self._global_region()],
+                            self._block_tables_by_type[INDEXER_KV],
                             swa,
                         ),
                     )
@@ -2358,6 +2317,19 @@ class AttentionV41FP8(AttentionFP8):
                 self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
             return common, qkv, swa, swa_starts, None
         previous_state = None
+        projected_tiles = None
+        source_cohorts = None
+        if common.cp_on:
+            owner = self._owner()
+            weights = (
+                (owner.global_wkv, owner.global_wgate)
+                if self.compress_ratio == 2
+                else (owner.global_wkv,)
+            )
+            source_cohorts = _prefill_x_cohort_plan(common.cp_ctx)
+            projected_tiles = _prefill_projected_x_cohorts(
+                x, common.cp_ctx, source_cohorts, weights
+            )
         if (
             x.is_cuda
             and self.compress_ratio == 2
@@ -2369,12 +2341,20 @@ class AttentionV41FP8(AttentionFP8):
         ):
             from ._v41_cp_async import launch
 
+            state_pool = self._source_pool(CSA_STATE)
+            state_table = self._block_tables_by_type[CSA_STATE]
+
             def read_previous_state():
-                starts = common.prefix_lengths.long()
-                return self._read_state(
-                    (starts - 1).clamp_min(0),
-                    torch.arange(len(starts), device=x.device),
+                previous = prefill_metadata.read_predecessor_states(
+                    common.prefix_lengths,
+                    state_table,
+                    state_pool,
+                    self._source_entries(CSA_STATE, state_pool),
+                    require_pool_tokens_per_block(self._kv_cache, region=CSA_STATE),
+                    common.cp_ctx.cp_size,
+                    common.cp_ctx.cp_rank,
                 )
+                return self._gather_shards(previous)
 
             # Snapshot the old ring state before this layer can write it, while
             # QKV projection and SWA preparation proceed on the compute stream.
@@ -2384,8 +2364,8 @@ class AttentionV41FP8(AttentionFP8):
                     read_previous_state,
                     inputs=(
                         common.prefix_lengths,
-                        self._source_pool(CSA_STATE),
-                        self._block_tables_by_type,
+                        state_pool,
+                        state_table,
                     ),
                 )
             # Forward's finally block joins this even if QKV preparation raises
@@ -2394,25 +2374,6 @@ class AttentionV41FP8(AttentionFP8):
         qkv = self._prefill_compute_qkv(
             x, common, shared_input_quant=shared_input_quant
         )
-        projected_tiles = None
-        if common.cp_on:
-            owner = self._owner()
-            weights = (
-                (owner.global_wkv, owner.global_wgate)
-                if self.compress_ratio == 2
-                else (owner.global_wkv,)
-            )
-            x_groups = _prefill_x_group_plan(
-                x,
-                common.cp_ctx,
-                output_width=len(weights) * self.head_dim,
-            )
-            assert (
-                x_groups is not None
-            ), "CP source groups require the full zigzag layout"
-            projected_tiles = _prefill_projected_x_groups(
-                x, common.cp_ctx, x_groups, weights
-            )
         # Read old SWA tails before writes wrap over them in long prefill chunks.
         fuse_swa_fresh = self._can_fuse_swa_fresh(qkv, common)
         swa, swa_starts = self._swa_prefill_workspace(
@@ -2478,6 +2439,7 @@ class AttentionV41FP8(AttentionFP8):
                 lengths,
                 prefill=True,
                 projected_tiles=projected_tiles,
+                source_cohorts=source_cohorts,
                 swa=swa,
                 previous_state=previous_state,
             )

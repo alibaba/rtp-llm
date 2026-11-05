@@ -203,7 +203,7 @@ def _prefill_compress_main_kernel(
     row = tl.program_id(0).to(tl.int64)
     token = tl.load(boundary_indices + row).to(tl.int64)
     columns = tl.arange(0, 512)
-    current = tl.load(values + token * VALUE_STRIDE + columns)
+    current = tl.load(values + token * VALUE_STRIDE + columns).to(tl.float32)
     position = tl.load(positions + token).to(tl.int64)
     if RATIO == 2:
         request = tl.load(requests + token).to(tl.int64)
@@ -257,7 +257,7 @@ def _prefill_compress_main_kernel(
         )
 
 
-@triton.jit(do_not_specialize=["STATE_ROWS"])
+@triton.jit(do_not_specialize=["ROWS", "STATE_ROWS"])
 def _prefill_state_store_kernel(
     values,
     scores,
@@ -266,23 +266,29 @@ def _prefill_state_store_kernel(
     VALUE_STRIDE: tl.constexpr,
     SCORE_STRIDE: tl.constexpr,
     STATE_STRIDE: tl.constexpr,
+    ROWS,
     STATE_ROWS,
     TRAP: tl.constexpr,
 ):
-    row = tl.program_id(0).to(tl.int64)
-    slot = tl.load(slots + row).to(tl.int64)
-    if slot >= 0:
-        if TRAP:
-            if slot >= STATE_ROWS:
-                _trap()
-        d = tl.arange(0, 512)
-        tl.store(
-            state + slot * STATE_STRIDE + d, tl.load(values + row * VALUE_STRIDE + d)
-        )
-        tl.store(
-            state + slot * STATE_STRIDE + 512 + d,
-            tl.load(scores + row * SCORE_STRIDE + d),
-        )
+    row = (tl.program_id(0) * 8 + tl.arange(0, 8)).to(tl.int64)
+    slot = tl.load(slots + row, row < ROWS, other=-1).to(tl.int64)
+    if TRAP:
+        if tl.max(slot, 0) >= STATE_ROWS:
+            _trap()
+    valid = slot >= 0
+    d = tl.arange(0, 512)
+    value = tl.load(
+        values + row[:, None] * VALUE_STRIDE + d[None, :], valid[:, None], other=0
+    )
+    score = tl.load(
+        scores + row[:, None] * SCORE_STRIDE + d[None, :], valid[:, None], other=0
+    )
+    tl.store(state + slot[:, None] * STATE_STRIDE + d[None, :], value, valid[:, None])
+    tl.store(
+        state + slot[:, None] * STATE_STRIDE + 512 + d[None, :],
+        score,
+        valid[:, None],
+    )
 
 
 @triton.jit(do_not_specialize=["POOL_STRIDE", "BLOCKS"])
@@ -375,7 +381,8 @@ def compress_main(
         and 0 <= count <= rows
         and math.isfinite(eps)
         and eps > 0
-        and _matrix(values, rows, 512, torch.float32, device)
+        and values.dtype in (torch.float32, torch.bfloat16)
+        and _matrix(values, rows, 512, values.dtype, device)
         and _vector(norm, 512, device, (torch.float32, torch.bfloat16))
         and _vector(positions, rows, device)
         and _vector(boundary_indices, count, device)
@@ -385,7 +392,8 @@ def compress_main(
     ):
         return None
     if ratio == 2 and not (
-        _matrix(scores, rows, 512, torch.float32, device)
+        values.dtype == torch.float32
+        and _matrix(scores, rows, 512, torch.float32, device)
         and _vector(req_ids, rows, device)
         and isinstance(starts, torch.Tensor)
         and _vector(starts, starts.numel(), device)
@@ -448,7 +456,7 @@ def store_states(values, scores, state_slots, state_pool):
     ):
         return False
     if rows:
-        _prefill_state_store_kernel[(rows,)](
+        _prefill_state_store_kernel[(triton.cdiv(rows, 8),)](
             values,
             scores,
             state_slots,
@@ -456,6 +464,7 @@ def store_states(values, scores, state_slots, state_pool):
             values.stride(0),
             scores.stride(0),
             state_pool.stride(0),
+            rows,
             state_pool.shape[0],
             trap_invalid_kv_access_enabled(),
             num_warps=4,

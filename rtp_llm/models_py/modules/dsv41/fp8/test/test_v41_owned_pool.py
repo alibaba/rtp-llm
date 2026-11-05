@@ -228,7 +228,7 @@ class OwnedPoolHostTest(unittest.TestCase):
                         self.assertEqual(group.local_rows, max(actual_owned))
                         cursor = group.stop
                     self.assertEqual(cursor, batch)
-                    coefficient = 356 * (cp + 1 if cp > 1 else 1) + 16
+                    coefficient = 356 * cp + 16
                     self.assertEqual(
                         plan.temporary_bytes,
                         coefficient * plan.max_local_rows + 16 * plan.max_output_rows,
@@ -247,14 +247,14 @@ class OwnedPoolHostTest(unittest.TestCase):
         self.assertLess(plan.groups[0].local_rows, plan.groups[1].local_rows)
         self.assertEqual(
             plan.temporary_bytes,
-            1796 * plan.groups[1].local_rows + 16 * plan.groups[0].rows,
+            (356 * 4 + 16) * plan.groups[1].local_rows + 16 * plan.groups[0].rows,
         )
         self.assertLessEqual(plan.temporary_bytes, 1_200_000)
         for batch, ratio, groups in (
-            (32, 1, (17, 15)),
+            (32, 1, (21, 11)),
             (32, 2, (32,)),
-            (64, 1, (17, 17, 17, 13)),
-            (64, 2, (35, 29)),
+            (64, 1, (21, 21, 21, 1)),
+            (64, 2, (43, 21)),
         ):
             plan = owned.plan_groups(
                 (32768 // ratio,) * batch,
@@ -591,12 +591,15 @@ class OwnedPoolCudaTest(unittest.TestCase):
                     device_offsets=torch.tensor(
                         starts, dtype=torch.int64, device="cuda"
                     ),
-                    publish=lambda result: result,
+                    publish=lambda result, index_allocations=None: result,
                 )
                 before = workspace.output.clone()
 
             def collect(receive, send, size, owner_rank):
                 self.assertEqual(owner_rank, rank)
+                self.assertEqual(
+                    send.data_ptr(), receive.data_ptr() + rank * send.numel()
+                )
                 group_index = len(calls)
                 self.assert_bits(send, expected_packets[group_index][rank])
                 receive.copy_(torch.cat(expected_packets[group_index]))

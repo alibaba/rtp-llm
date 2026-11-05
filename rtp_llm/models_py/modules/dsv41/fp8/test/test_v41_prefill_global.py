@@ -223,6 +223,14 @@ class PrefillGlobalGateTest(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class PrefillGlobalCudaTest(unittest.TestCase):
+    def test_ratio_one_bf16_projection_matches_promoted_input(self):
+        bf16, fp32 = _case(1024, 1), _case(1024, 1)
+        bf16.values = bf16.values.bfloat16()
+        fp32.values = bf16.values.float()
+        actual, expected = _compress(bf16), _compress(fp32)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(bf16.main_pool, fp32.main_pool, rtol=0, atol=0)
+
     def _compare(self, rows, ratio, **kwargs):
         ref, got = _case(rows, ratio, **kwargs), _case(rows, ratio, **kwargs)
         unchanged = [
