@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -105,7 +106,7 @@ AdmissionPeak estimateApproximatePeak(const std::vector<AdmissionStreamInfo>& st
         begin = end;
     }
 
-    // This is deliberately a best-effort KV admission filter, not a lifecycle capacity guarantee. Before this
+    // This aggregate estimate is a best-effort KV admission filter, not a lifecycle capacity guarantee. Before this
     // optimization, PDFusion admitted every candidate that passed the existing batch/token limits, and an
     // allocator-side MALLOC_FAILED was an allowed product outcome. This heuristic only rejects a subset of those
     // candidates, reducing allocation failures without changing the existing failure semantics; it may still
@@ -114,8 +115,8 @@ AdmissionPeak estimateApproximatePeak(const std::vector<AdmissionStreamInfo>& st
     // Summing each stream's independent peak is O(N) to compute, but treats non-coincident peaks as simultaneous and
     // substantially under-admits work, reducing batching concurrency and throughput. Tracking every stream lifetime
     // and KV-group allocation/release boundary would avoid that conservatism, but adds disproportionate implementation
-    // complexity and scheduler-lock latency. This performance-oriented scheduler therefore evaluates physical blocks
-    // only at the logical-token peak.
+    // complexity and scheduler-lock latency. The aggregate estimate therefore evaluates physical blocks only at the
+    // logical-token peak. Independent pools additionally enforce separate physical-peak bounds during admission.
     for (const auto& stream : streams) {
         if (stream.remaining_kv_steps < peak.decode_step) {
             break;
@@ -128,9 +129,12 @@ AdmissionPeak estimateApproximatePeak(const std::vector<AdmissionStreamInfo>& st
 }  // namespace
 
 struct PDFusionRatioScheduler::AdmissionPeakState {
-    std::vector<AdmissionStreamInfo> streams;
-    AdmissionPeak                    peak;
-    int64_t                          initial_need_blocks = 0;
+    std::vector<AdmissionStreamInfo>          streams;
+    AdmissionPeak                             peak;
+    int64_t                                   initial_need_blocks = 0;
+    std::vector<KVCachePoolAdmissionEstimate> independent_pools;
+    std::vector<int64_t>                      max_pool_growth;
+    std::vector<int64_t>                      max_pool_peak;
 };
 
 PDFusionRatioScheduler::PDFusionRatioScheduler(const RuntimeConfig&                   runtime_config,
@@ -237,16 +241,27 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
         }
     }
 
-    made_progress |= evaluateAndUpdateStreams(running_streams_) > 0;
-    made_progress |= promotePendingDecodeStreams() > 0;
-    if (!running_streams_.empty()) {
+    const bool                   independent_decode = useIndependentPoolDecode();
+    std::list<GenerateStreamPtr> decode_batch;
+    if (independent_decode) {
+        decode_batch = scheduleIndependentPoolDecode(made_progress);
+    } else {
+        protected_decode_stream_.reset();
+        made_progress |= evaluateAndUpdateStreams(running_streams_) > 0;
+        made_progress |= promotePendingDecodeStreams() > 0;
+        decode_batch = running_streams_;
+    }
+    if (!decode_batch.empty()) {
         decode_since_prefill_ += 1;
         prefill_since_decode_ = 0;
     }
     if (!pending_decode_streams_.empty() || (made_progress && !waiting_streams_.empty())) {
         schedule_trigger_ = true;
     }
-    if (running_streams_.empty() && !made_progress && !waiting_streams_.empty()) {
+    if (independent_decode && decode_batch.empty() && !made_progress && !running_streams_.empty()) {
+        // A completed reserve owner's asynchronous release may still be in flight.
+        cond_.wait_for(lock, kNoProgressScheduleGap, [this] { return stop_ || schedule_trigger_; });
+    } else if (running_streams_.empty() && !made_progress && !waiting_streams_.empty()) {
         cond_.wait_for(lock, kNoProgressScheduleGap, [this] {
             return stop_ || schedule_trigger_ || !loading_cache_streams_.empty() || !running_streams_.empty()
                    || !pending_decode_streams_.empty();
@@ -255,7 +270,117 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
 
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
-    return running_streams_;
+    return decode_batch;
+}
+
+bool PDFusionRatioScheduler::useIndependentPoolDecode() const {
+    if (pd_sep_config_.role_type != RoleType::PDFUSION || !cache_manager_
+        || !cache_manager_->cacheConfig().use_independent_block_pools) {
+        return false;
+    }
+    // Beam expansion allocates inside output dispatch. Keep lifetime reservations for that path.
+    const auto single_sequence = [](const auto& streams) {
+        return std::all_of(
+            streams.begin(), streams.end(), [](const auto& stream) { return stream->maxBatchSize() == 1; });
+    };
+    return single_sequence(running_streams_) && single_sequence(pending_decode_streams_)
+           && single_sequence(loading_cache_streams_)
+           && std::all_of(waiting_streams_.begin(), waiting_streams_.end(), [](const auto& stream) {
+                  return !isAdmittedWaitingStream(stream) || stream->maxBatchSize() == 1;
+              });
+}
+
+std::list<GenerateStreamPtr> PDFusionRatioScheduler::scheduleIndependentPoolDecode(bool& made_progress) {
+    made_progress |= !pending_decode_streams_.empty();
+    running_streams_.splice(running_streams_.end(), pending_decode_streams_);
+    if (running_streams_.empty()) {
+        protected_decode_stream_.reset();
+        return {};
+    }
+    admission_peak_state_.reset();
+    buildAdmissionPeakState();
+    const auto reserve      = admission_peak_state_->max_pool_peak;
+    bool       reserve_fits = true;
+    for (size_t gid = 0; gid < reserve.size(); ++gid) {
+        reserve_fits &=
+            reserve[gid] <= static_cast<int64_t>(admission_peak_state_->independent_pools[gid].available_blocks);
+    }
+    if (std::find(running_streams_.begin(), running_streams_.end(), protected_decode_stream_)
+        == running_streams_.end()) {
+        protected_decode_stream_.reset();
+    }
+    if (!protected_decode_stream_) {
+        if (reserve_fits) {
+            protected_decode_stream_ = running_streams_.front();
+        } else {
+            // Actual prefix hits and shared references can leave less capacity than the maximum
+            // remaining peak. A shorter request may still finish and release the pinned blocks.
+            for (const auto& stream : running_streams_) {
+                const auto pools = stream->estimateIndependentPoolNeeds();
+                if (std::all_of(pools.begin(), pools.end(), [](const auto& pool) {
+                        return pool.peak_need_blocks <= static_cast<int64_t>(pool.available_blocks);
+                    })) {
+                    protected_decode_stream_ = stream;
+                    break;
+                }
+            }
+        }
+        // Preserve the standalone fast path for output limits larger than the pool. Deferred
+        // release and connector references must drain before this fallback is safe.
+        if (!protected_decode_stream_ && admission_peak_state_->streams.size() == 1
+            && running_streams_.front()->ownsAllIndependentPoolRequests()) {
+            protected_decode_stream_ = running_streams_.front();
+        }
+    }
+    admission_peak_state_.reset();
+
+    // Prefill leaves enough free blocks for any one admitted request to complete. The owner may
+    // consume that reserve until it finishes; its newly allocated blocks then become available
+    // again. Other requests can allocate only outside the reserve, or run without growing KV.
+    // This avoids both lifetime-sum under-admission and a deadlock between partially grown streams.
+    std::list<GenerateStreamPtr> batch;
+    const auto                   owner   = protected_decode_stream_;
+    const auto                   advance = [&](auto it) {
+        auto       stream = *it;
+        const auto state  = stream->moveToNext();
+        if (state == StreamState::RUNNING) {
+            batch.push_back(stream);
+            return std::next(it);
+        }
+        made_progress = true;
+        it            = running_streams_.erase(it);
+        addStreamToNewState(stream, state);
+        return it;
+    };
+    if (owner) {
+        advance(std::find(running_streams_.begin(), running_streams_.end(), owner));
+    }
+    for (auto it = running_streams_.begin(); it != running_streams_.end();) {
+        const auto& stream = *it;
+        if (stream == owner) {
+            ++it;
+            continue;
+        }
+        bool can_run = stream->hasError() || stream->hasEvent(StreamEvents::GenerateDone);
+        if (!can_run) {
+            can_run          = true;
+            const auto pools = stream->estimateIndependentPoolNeeds(/*include_lifecycle_peak=*/false);
+            for (size_t gid = 0; gid < pools.size(); ++gid) {
+                if (pools[gid].initial_need_blocks > 0
+                    && pools[gid].initial_need_blocks + reserve[gid]
+                           > static_cast<int64_t>(pools[gid].available_blocks)) {
+                    can_run = false;
+                    break;
+                }
+            }
+        }
+        if (can_run) {
+            it = advance(it);
+        } else {
+            ++it;
+        }
+    }
+    return batch;
 }
 
 PDFusionRatioScheduler::RoundType PDFusionRatioScheduler::chooseRound() {
@@ -280,8 +405,26 @@ void PDFusionRatioScheduler::buildAdmissionPeakState() {
     state->streams.reserve(loading_cache_streams_.size() + running_streams_.size() + pending_decode_streams_.size()
                            + waiting_streams_.size());
     auto append_stream = [&](const GenerateStreamPtr& s) {
-        state->streams.push_back({s, remainingKVAllocationSteps(s)});
-        state->initial_need_blocks += estimateInitialNeedBlocks(s);
+        const auto pools = s->estimateIndependentPoolNeeds();
+        state->streams.push_back({s, pools.empty() ? remainingKVAllocationSteps(s) : 0});
+        if (pools.empty()) {
+            state->initial_need_blocks += estimateInitialNeedBlocks(s);
+        }
+        if (state->independent_pools.empty()) {
+            state->independent_pools = pools;
+            state->max_pool_growth.resize(pools.size());
+            state->max_pool_peak.resize(pools.size());
+        } else {
+            for (size_t gid = 0; gid < pools.size(); ++gid) {
+                state->independent_pools[gid].initial_need_blocks += pools[gid].initial_need_blocks;
+                state->independent_pools[gid].peak_need_blocks += pools[gid].peak_need_blocks;
+            }
+        }
+        for (size_t gid = 0; gid < pools.size(); ++gid) {
+            state->max_pool_growth[gid] =
+                std::max(state->max_pool_growth[gid], pools[gid].peak_need_blocks - pools[gid].initial_need_blocks);
+            state->max_pool_peak[gid] = std::max(state->max_pool_peak[gid], pools[gid].peak_need_blocks);
+        }
     };
     for (const auto& s : loading_cache_streams_) {
         append_stream(s);
@@ -297,8 +440,10 @@ void PDFusionRatioScheduler::buildAdmissionPeakState() {
             append_stream(s);
         }
     }
-    std::sort(state->streams.begin(), state->streams.end(), longerLifetimeFirst);
-    state->peak           = estimateApproximatePeak(state->streams);
+    if (state->independent_pools.empty()) {
+        std::sort(state->streams.begin(), state->streams.end(), longerLifetimeFirst);
+        state->peak = estimateApproximatePeak(state->streams);
+    }
     admission_peak_state_ = std::move(state);
 }
 
@@ -306,14 +451,39 @@ bool PDFusionRatioScheduler::tryAddToAdmissionPeakState(const GenerateStreamPtr&
                                                         int64_t                  initial_capacity,
                                                         int64_t                  lifecycle_capacity) {
     auto&     state              = *admission_peak_state_;
-    const int remaining_kv_steps = remainingKVAllocationSteps(new_stream);
+    const auto candidate_pools    = new_stream->estimateIndependentPoolNeeds();
+    const int  remaining_kv_steps = candidate_pools.empty() ? remainingKVAllocationSteps(new_stream) : 0;
     // Preserve the idle fast path, where the allocator reports an impossible standalone request.
     const bool    enforce_capacity = !state.streams.empty();
     // Device KV-cache matching happens later in the allocator. At scheduler admission time the actual prefix hit is
     // unknown, so use the conservative no-hit estimate here.
-    const int64_t initial_delta    = estimateInitialNeedBlocks(new_stream);
+    const int64_t initial_delta = candidate_pools.empty() ? estimateInitialNeedBlocks(new_stream) : 0;
 
-    if (enforce_capacity
+    const bool cooperative = pd_sep_config_.role_type == RoleType::PDFUSION && new_stream->maxBatchSize() == 1
+                             && std::all_of(state.streams.begin(), state.streams.end(), [](const auto& info) {
+                                    return info.stream->maxBatchSize() == 1;
+                                });
+    if (enforce_capacity) {
+        for (size_t gid = 0; gid < candidate_pools.size(); ++gid) {
+            const auto& current           = state.independent_pools[gid];
+            const auto& candidate         = candidate_pools[gid];
+            const auto  initial_available = current.available_blocks > current.reserve_blocks ?
+                                                current.available_blocks - current.reserve_blocks :
+                                                0;
+            const auto  initial           = current.initial_need_blocks + candidate.initial_need_blocks;
+            const auto  growth =
+                std::max(state.max_pool_growth[gid], candidate.peak_need_blocks - candidate.initial_need_blocks);
+            // Keep a common reserve large enough for any single stream, and arbitrate its use on
+            // each decode step. Beam/PD paths retain the sum of lifetime peaks.
+            const auto peak = cooperative ? initial + growth : current.peak_need_blocks + candidate.peak_need_blocks;
+            if (initial > static_cast<int64_t>(initial_available)
+                || peak > static_cast<int64_t>(current.available_blocks)) {
+                return false;
+            }
+        }
+    }
+
+    if (candidate_pools.empty() && enforce_capacity
         && (state.initial_need_blocks + initial_delta > initial_capacity
             || state.peak.need_blocks > lifecycle_capacity)) {
         return false;
@@ -324,16 +494,32 @@ bool PDFusionRatioScheduler::tryAddToAdmissionPeakState(const GenerateStreamPtr&
                                             AdmissionStreamInfo{new_stream, remaining_kv_steps},
                                             longerLifetimeFirst);
     const auto candidate_it   = state.streams.insert(insert_it, {new_stream, remaining_kv_steps});
-    auto       candidate_peak = estimateApproximatePeak(state.streams);
+    auto       candidate_peak = candidate_pools.empty() ? estimateApproximatePeak(state.streams) : AdmissionPeak{};
     // Adding work cannot invalidate a block requirement already sampled before this candidate.
     candidate_peak.need_blocks = std::max(candidate_peak.need_blocks, state.peak.need_blocks);
-    if (enforce_capacity && candidate_peak.need_blocks > lifecycle_capacity) {
+    if (candidate_pools.empty() && enforce_capacity && candidate_peak.need_blocks > lifecycle_capacity) {
         state.streams.erase(candidate_it);
         return false;
     }
 
     state.initial_need_blocks += initial_delta;
     state.peak = candidate_peak;
+    if (state.independent_pools.empty()) {
+        state.independent_pools = candidate_pools;
+        state.max_pool_growth.resize(candidate_pools.size());
+        state.max_pool_peak.resize(candidate_pools.size());
+    } else {
+        for (size_t gid = 0; gid < candidate_pools.size(); ++gid) {
+            state.independent_pools[gid].initial_need_blocks += candidate_pools[gid].initial_need_blocks;
+            state.independent_pools[gid].peak_need_blocks += candidate_pools[gid].peak_need_blocks;
+        }
+    }
+    for (size_t gid = 0; gid < candidate_pools.size(); ++gid) {
+        state.max_pool_growth[gid] =
+            std::max(state.max_pool_growth[gid],
+                     candidate_pools[gid].peak_need_blocks - candidate_pools[gid].initial_need_blocks);
+        state.max_pool_peak[gid] = std::max(state.max_pool_peak[gid], candidate_pools[gid].peak_need_blocks);
+    }
     return true;
 }
 
@@ -428,6 +614,7 @@ int64_t PDFusionRatioScheduler::decodeSincePrefillForTest() {
 void PDFusionRatioScheduler::cancelExtraStreams() {
     cancelStreams(pending_decode_streams_);
     cancelStreams(new_streams_);
+    protected_decode_stream_.reset();
 }
 
 bool PDFusionRatioScheduler::hasExtraStreams() const {

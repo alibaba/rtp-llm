@@ -34,6 +34,13 @@ struct KVCachePoolMetricsSnapshot {
     float       used_ratio           = 0.0f;
 };
 
+struct KVCachePoolAdmissionEstimate {
+    size_t  available_blocks    = 0;
+    size_t  reserve_blocks      = 0;
+    int64_t initial_need_blocks = 0;
+    int64_t peak_need_blocks    = 0;
+};
+
 class KVCacheAllocator {
 public:
     KVCacheAllocator(const CacheConfig&                 config,
@@ -83,6 +90,24 @@ public:
                                     int                            reserve_step,
                                     bool                           enable_reuse_cache,
                                     int                            target_batch_size) const;
+
+    // Empty for shared pools. Independent pools cannot borrow one another's free blocks.
+    virtual std::vector<KVCachePoolAdmissionEstimate>
+    estimateIndependentPoolNeeds(const BatchKVCacheResource& resource,
+                                 int                         seq_len,
+                                 int                         common_seq_len,
+                                 int                         remaining_tokens,
+                                 int                         reserve_step,
+                                 bool                        enable_reuse_cache,
+                                 int                         target_batch_size,
+                                 bool                        enable_device_cache = false) const {
+        return {};
+    }
+
+    // Only needed for the standalone decode fallback, not routine capacity estimates.
+    virtual bool ownsAllIndependentPoolRequests(const BatchKVCacheResource& resource) const {
+        return false;
+    }
 
     MallocResult malloc(const MallocInfo& malloc_info);
     virtual void blockCopy(int src_block_index, int dest_block_index);

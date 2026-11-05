@@ -46,7 +46,17 @@ public:
     size_t                  totalBlocksNum() const override;
     size_t                  maxAvailableTokensNum() const override;
     KVCacheTokenCapacity    tokenCapacity(size_t default_seq_size_per_block) const override;
-    std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const override;
+    std::vector<KVCachePoolMetricsSnapshot>   poolMetricsSnapshots() const override;
+    std::vector<KVCachePoolAdmissionEstimate>
+            estimateIndependentPoolNeeds(const BatchKVCacheResource& resource,
+                                         int                         seq_len,
+                                         int                         common_seq_len,
+                                         int                         remaining_tokens,
+                                         int                         reserve_step,
+                                         bool                        enable_reuse_cache,
+                                         int                         target_batch_size,
+                                         bool                        enable_device_cache = false) const override;
+    bool    ownsAllIndependentPoolRequests(const BatchKVCacheResource& resource) const override;
     void    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr) override;
     int64_t getMrCostTimeMs() const override;
 

@@ -3,7 +3,41 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
+#include <numeric>
+
 namespace rtp_llm {
+
+int KVCacheGroup::estimateSparsePeakFromSlotCosts(std::vector<int>         block_costs,
+                                                  int                      final_slots,
+                                                  int                      new_slot_cost,
+                                                  int                      reserve_step,
+                                                  int                      retained_tail_blocks,
+                                                  bool                     enable_reuse_cache,
+                                                  int                      linear_step,
+                                                  const std::vector<bool>& pinned_slots) {
+    int physical_blocks = std::accumulate(block_costs.begin(), block_costs.end(), 0);
+    int peak_blocks     = physical_blocks;
+    int next_expired    = 0;
+    block_costs.reserve(std::max(final_slots, static_cast<int>(block_costs.size())));
+    while (static_cast<int>(block_costs.size()) < final_slots) {
+        block_costs.push_back(new_slot_cost);
+        physical_blocks += new_slot_cost;
+        peak_blocks = std::max(peak_blocks, physical_blocks);
+
+        const int last_expired = static_cast<int>(block_costs.size()) - retained_tail_blocks - 1 - reserve_step;
+        // Every slot crosses the retained window once. Reuse checkpoints remain
+        // allocated, as do blocks held by another request or connector. Releasing
+        // this stream's reference to those blocks cannot replenish its reserve.
+        for (; next_expired <= last_expired; ++next_expired) {
+            const auto slot = static_cast<size_t>(next_expired);
+            if ((!enable_reuse_cache || (next_expired + 1) % linear_step != 0)
+                && (slot >= pinned_slots.size() || !pinned_slots[slot])) {
+                physical_blocks -= block_costs[slot];
+            }
+        }
+    }
+    return peak_blocks;
+}
 
 bool KVCacheGroup::init() {
     auto layer_tensors = block_pool_->allLayerCacheBase();

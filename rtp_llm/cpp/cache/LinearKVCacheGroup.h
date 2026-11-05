@@ -42,6 +42,10 @@ public:
     void free(const BlockIndicesType& block_indices) override;
     void reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
     int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;
+    int            estimateNextNeedBlocks(int                     seq_len,
+                                          const BlockIndicesType& current_block_indices,
+                                          int                     reserve_step,
+                                          bool                    enable_reuse_cache) const override;
     int  estimatePeakNeedBlocks(int                     seq_len,
                                 const BlockIndicesType& current_block_indices,
                                 int                     remaining_tokens,
@@ -61,6 +65,10 @@ public:
     bool           shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const;
 
 private:
+    std::vector<size_t> allocationPositions(const BlockIndicesType& current_blocks,
+                                            int                     seq_len,
+                                            int                     reserve_step,
+                                            bool                    enable_reuse_cache) const;
     void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;
     int  materializedTailBlockCount() const;
     int  retainedTailBlockCount() const;

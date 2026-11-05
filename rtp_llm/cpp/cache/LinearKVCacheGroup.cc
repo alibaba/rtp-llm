@@ -1,46 +1,11 @@
 #include "rtp_llm/cpp/cache/LinearKVCacheGroup.h"
 
 #include <algorithm>
-#include <numeric>
 #include <unordered_set>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
-namespace {
-
-int estimatePeakFromSlotCosts(std::vector<int> block_costs,
-                              int              final_slots,
-                              int              new_slot_cost,
-                              int              reserve_step,
-                              int              retained_tail_blocks,
-                              bool             enable_reuse_cache,
-                              int              linear_step) {
-    int physical_blocks = std::accumulate(block_costs.begin(), block_costs.end(), 0);
-    int peak_blocks     = physical_blocks;
-
-    while (static_cast<int>(block_costs.size()) < final_slots) {
-        block_costs.push_back(new_slot_cost);
-        physical_blocks += new_slot_cost;
-        peak_blocks = std::max(peak_blocks, physical_blocks);
-
-        for (int slot = static_cast<int>(block_costs.size()) - retained_tail_blocks - 1 - reserve_step; slot >= 0;
-             --slot) {
-            auto& cost = block_costs[static_cast<size_t>(slot)];
-            if (cost == 0) {
-                continue;
-            }
-            if (enable_reuse_cache && (slot + 1) % linear_step == 0) {
-                continue;
-            }
-            physical_blocks -= cost;
-            cost = 0;
-        }
-    }
-    return peak_blocks;
-}
-
-}  // namespace
 
 void LinearKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
     out.clear();
@@ -110,8 +75,27 @@ int LinearKVCacheGroup::estimatePeakNeedBlocks(int                     seq_len,
         }
     }
 
-    const int peak_blocks = estimatePeakFromSlotCosts(
-        std::move(block_costs), total_slots, 1, reserve_step, retainedTailBlockCount(), enable_reuse_cache, step);
+    if (!current_block_indices.empty()) {
+        // The next allocation can restore an active read/reserve slot inside an existing sparse
+        // table. Include that restoration before simulating subsequent growth and cleanup.
+        for (const auto pos : allocationPositions(current_block_indices, seq_len, reserve_step, enable_reuse_cache)) {
+            if (pos < block_costs.size()) {
+                block_costs[pos] = 1;
+            }
+        }
+    }
+
+    const auto pinned_slots = current_block_indices.empty() ?
+                                  std::vector<bool>{} :
+                                  block_pool_->externallyReferencedSlots(current_block_indices);
+    const int  peak_blocks  = estimateSparsePeakFromSlotCosts(std::move(block_costs),
+                                                            total_slots,
+                                                            1,
+                                                            reserve_step,
+                                                            retainedTailBlockCount(),
+                                                            enable_reuse_cache,
+                                                            step,
+                                                            pinned_slots);
     return std::max(peak_blocks - current_physical_blocks, 0);
 }
 
@@ -142,13 +126,13 @@ int LinearKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
         block_costs.push_back(shouldMaterializeBlock(slot, seq_len, reserve_step, enable_reuse_cache) ? batch_size : 0);
     }
 
-    return estimatePeakFromSlotCosts(std::move(block_costs),
-                                     final_total,
-                                     batch_size,
-                                     reserve_step,
-                                     retainedTailBlockCount(),
-                                     enable_reuse_cache,
-                                     step);
+    return estimateSparsePeakFromSlotCosts(std::move(block_costs),
+                                           final_total,
+                                           batch_size,
+                                           reserve_step,
+                                           retainedTailBlockCount(),
+                                           enable_reuse_cache,
+                                           step);
 }
 
 NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
@@ -198,6 +182,33 @@ MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
     return result;
 }
 
+std::vector<size_t> LinearKVCacheGroup::allocationPositions(const BlockIndicesType& current_blocks,
+                                                            int                     seq_len,
+                                                            int                     reserve_step,
+                                                            bool                    enable_reuse_cache) const {
+    const int           total_slots = needBlocksNum(seq_len, 0, reserve_step);
+    std::vector<size_t> positions;
+    for (int i = 0; i < total_slots; ++i) {
+        if (i < static_cast<int>(current_blocks.size())) {
+            // Historical prefix holes are not recomputed; only active tail/reserve slots can be restored.
+            if (isNullBlockIdx(current_blocks[i]) && shouldMaterializeBlock(i, seq_len, reserve_step, false)) {
+                positions.push_back(i);
+            }
+        } else if (shouldMaterializeBlock(i, seq_len, reserve_step, enable_reuse_cache)) {
+            positions.push_back(i);
+        }
+    }
+    return positions;
+}
+
+int LinearKVCacheGroup::estimateNextNeedBlocks(int                     seq_len,
+                                               const BlockIndicesType& current_block_indices,
+                                               int                     reserve_step,
+                                               bool                    enable_reuse_cache) const {
+    return static_cast<int>(
+        allocationPositions(current_block_indices, seq_len, reserve_step, enable_reuse_cache).size());
+}
+
 bool LinearKVCacheGroup::malloc(BlockIds&            block_ids,
                                 int                  seq_len,
                                 bool                 enable_reuse_cache,
@@ -214,28 +225,12 @@ bool LinearKVCacheGroup::malloc(BlockIds&            block_ids,
         return shouldMaterializeBlock(pos, seq_len, reserve_step, enable_reuse_cache);
     };
 
-    std::vector<size_t> positions_to_backfill;
     const auto&         existing_blocks = block_ids.blocks();
-    const int           existing_scan   = std::min(current_blocks_len, total_slots);
-    for (int i = 0; i < existing_scan; ++i) {
-        // Prefix reuse restores only its terminal recurrent state. Earlier
-        // NULL slots are historical snapshots that will not be recomputed.
-        // Recreating them solely for retention would publish uninitialized
-        // states under valid prefix keys. Only an active tail/reserve slot can
-        // be backfilled; newly appended slots still follow the retention rule.
-        if (shouldMaterializeBlock(i, seq_len, reserve_step, false)
-            && isNullBlockIdx(existing_blocks[static_cast<size_t>(i)])) {
-            positions_to_backfill.push_back(static_cast<size_t>(i));
-        }
-    }
-
-    int need_alloc_blocks = 0;
-    need_alloc_blocks += static_cast<int>(positions_to_backfill.size());
-    for (int i = current_blocks_len; i < total_slots; i++) {
-        if (should_materialize(i)) {
-            need_alloc_blocks++;
-        }
-    }
+    const auto          positions = allocationPositions(existing_blocks, seq_len, reserve_step, enable_reuse_cache);
+    const auto          append_begin =
+        std::lower_bound(positions.begin(), positions.end(), static_cast<size_t>(current_blocks_len));
+    const std::vector<size_t> positions_to_backfill(positions.begin(), append_begin);
+    const int                 need_alloc_blocks = static_cast<int>(positions.size());
 
     if (need_alloc_blocks > 0) {
         const auto free_blocks_num = freeBlocksNum();
