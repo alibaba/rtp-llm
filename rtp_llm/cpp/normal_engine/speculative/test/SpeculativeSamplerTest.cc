@@ -1449,27 +1449,35 @@ TEST(DSparkSamplerTest, Compact4096StridedRowsPreserveMasksTiesAndTemperature) {
     }
 }
 
-TEST(DSparkSamplerTest, Compact4096RoundsAfterFp32MarkovAddition) {
+TEST(DSparkSamplerTest, CompactTopKRoundsAfterFp32MarkovAddition) {
     const c10::cuda::CUDAGuard guard(0);
     const auto*                device = at::cuda::getDeviceProperties(0);
     if (CUDART_VERSION < 13000 || device->major != 10 || (device->minor != 0 && device->minor != 3)) {
-        GTEST_SKIP() << "FP16 draft Top4096 requires the CUDA 13 Blackwell path";
+        GTEST_SKIP() << "FP16 draft TopK requires the CUDA 13 Blackwell path";
     }
-    constexpr int64_t k      = 4096;
-    const auto        opts   = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
-    auto              logits = torch::full({1, k + 2}, -2048.0f, opts);
-    auto              bias   = torch::full_like(logits, 2044.0f);
-    bias.narrow(1, 0, k - 1).fill_(2052.0f);  // k-1 clear winners, corrected score 4
-    // Both corrected scores round to 1 in FP16. Rounding bias before addition
-    // gives 2; selecting in FP32 keeps the larger score above 1.
-    bias.select(1, k - 1).fill_(2049.0f + 1.0f / 4096);
-    bias.select(1, k).fill_(2049.0f + 1.0f / 2048);
-    auto [values, ids] = torch_ext::draft_markov_topk(logits, bias, torch::ones({1}, opts), k);
-    auto boundary      = ids.masked_select(values.eq(1.0f));
-    ASSERT_EQ(boundary.numel(), 1);
-    EXPECT_EQ(values.eq(4.0f).sum().item<int64_t>(), k - 1);
-    const auto id = boundary.item<int64_t>();
-    EXPECT_TRUE(id == k - 1 || id == k);
+    const auto opts = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto t = torch::tensor({1.0f, 0.5f}, opts);
+    for (int64_t k : {1, 255, 1024, 1025, 4096}) {
+        SCOPED_TRACE(k);
+        auto logits = torch::full({2, k + 2}, -2048.0f, opts);
+        auto bias   = torch::full_like(logits, 2044.0f);
+        bias.narrow(1, 0, k - 1).fill_(2052.0f);  // k-1 clear winners, corrected score 4
+        // Both corrected scores round to 1 in FP16. Rounding bias before addition
+        // gives 2; selecting in FP32 keeps the larger score above 1.
+        bias.select(1, k - 1).fill_(2049.0f + 1.0f / 4096);
+        bias.select(1, k).fill_(2049.0f + 1.0f / 2048);
+        auto [values, ids] = torch_ext::draft_markov_topk(logits, bias, t, k);
+        ASSERT_EQ(values.sizes(), (torch::IntArrayRef{2, k}));
+        ASSERT_EQ(ids.sizes(), values.sizes());
+        auto scores = values * t.unsqueeze(1);
+        for (int row = 0; row < 2; ++row) {
+            auto boundary = ids[row].masked_select(scores[row].eq(1.0f));
+            ASSERT_EQ(boundary.numel(), 1);
+            EXPECT_EQ(scores[row].eq(4.0f).sum().item<int64_t>(), k - 1);
+            const auto id = boundary.item<int64_t>();
+            EXPECT_TRUE(id == k - 1 || id == k);
+        }
+    }
 }
 
 TEST(DSparkDraftCommitTest, ProductionShapeDraftTrace) {
