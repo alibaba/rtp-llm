@@ -467,6 +467,7 @@ py_library(
         "navi_sched/adapters/vllm/VLLMDeferredRenderer.py",
         "navi_sched/adapters/vllm/VLLMEngineObserver.py",
         "navi_sched/adapters/vllm/VLLMEngineTransport.py",
+        "navi_sched/adapters/vllm/VLLMForwardProtocol.py",
         "navi_sched/adapters/vllm/VLLMImageCacheMap.py",
         "navi_sched/adapters/vllm/VLLMNativePreparation.py",
         "navi_sched/adapters/vllm/VLLMAdapterUtils.py",
