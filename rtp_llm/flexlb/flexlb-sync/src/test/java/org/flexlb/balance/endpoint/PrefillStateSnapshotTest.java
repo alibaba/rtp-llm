@@ -1520,6 +1520,128 @@ class PrefillStateSnapshotTest {
         assertEquals(80L, after.work().materialize().totalRemainingWorkMsAt(clock.get()).orElseThrow());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void engineAndLocalTokensDeduplicateInEitherArrivalOrderAndSurviveCancellation(boolean localFirst) {
+        state.enableTokenWorkload(1_000_000);
+        var local = item(81);
+        var active = task(81, TaskPhase.RECEIVED, 0L, 0L);
+        active.setBatchId(0L);
+        active.setInputLength(200L);
+        active.setPrefixLength(50L);
+        PrefillState.RouteReservation lease = null;
+        try {
+            if (localFirst) { lease = state.reserveUnqueuedRoute(local, 1, 0).reservation(); }
+            reconcile(Map.of(), Map.of("81", active), unused -> 0L);
+            if (!localFirst) { lease = state.reserveUnqueuedRoute(local, 1, 0).reservation(); }
+            assertEquals(150, state.tokenWorkload().pendingTokens(), "use max(local, Engine) for the same execution");
+            reconcile(Map.of(), Map.of("81", active, "duplicate", active), unused -> 0L);
+            assertEquals(150, state.tokenWorkload().pendingTokens());
+            state.release(lease, null);
+            lease = null;
+            assertEquals(150, state.tokenWorkload().pendingTokens(), "local release does not erase observed Engine work");
+            active.setInputLength(0L);
+            reconcile(Map.of(), Map.of("81", active), unused -> 0L);
+            assertEquals(150, state.tokenWorkload().pendingTokens(), "legacy reports retain the last available size");
+            var cleared = reconcile(Map.of("81", active), Map.of("81", active), unused -> 0L);
+            assertTrue(cleared.capacityReleased());
+            assertEquals(0, state.tokenWorkload().pendingTokens());
+            reconcile(Map.of("81", active), Map.of(), unused -> 0L);
+            assertEquals(0, state.tokenWorkload().score());
+        } finally { if (lease != null) { state.release(lease, null); } }
+    }
+
+    @Test
+    void engineTokenChangesWakeCapacityWaitersEvenWhenRequestCountsStayEqual() {
+        state.enableTokenWorkload(1000);
+        var active = task(82, TaskPhase.RECEIVED, 0L, 0L);
+        active.setInputLength(200L);
+        reconcile(Map.of(), Map.of("82", active), unused -> 0L);
+        active.setInputLength(80L);
+        var changed = reconcile(Map.of(), Map.of("82", active), unused -> 0L);
+        assertTrue(changed.schedulingInputsChanged());
+        assertTrue(changed.capacityReleased());
+        assertEquals(80, state.tokenWorkload().pendingTokens());
+        assertFalse(reconcile(Map.of(), Map.of("82", active), unused -> 0L).capacityReleased());
+        reconcile(Map.of(), Map.of(), unused -> 0L);
+        assertEquals(0, state.tokenWorkload().pendingTokens());
+    }
+
+    @Test
+    void engineBatchIdentityFencesCoverageAndPriorityOverlaysDoNotAddWork() {
+        state.enableTokenWorkload(1000);
+        var local = item(83);
+        enqueue(local);
+        var active = task(83, TaskPhase.RECEIVED, 0L, 0L);
+        active.setInputLength(100L);
+        var overlay = task(84, TaskPhase.PENDING, 0L, 0L);
+        overlay.setInputLength(900L);
+        overlay.setPriorityPreemptionProgress(org.flexlb.enums.PriorityPreemptionProgress.CANCELING);
+        reconcile(Map.of(), Map.of("83", active, "84", overlay), unused -> 0L);
+        assertEquals(200, state.tokenWorkload().pendingTokens(), "batch 10 and the unbatched local owner are different executions");
+        var lease = state.reserveBatch(local, 10L, 2, generation.tryAcquireHandoff()).reservation();
+        assertEquals(100, state.tokenWorkload().pendingTokens());
+        state.release(lease, null).generationHandoff().close();
+        assertEquals(200, state.tokenWorkload().pendingTokens(), "rollback restores the unbatched identity");
+        assertSame(local, state.updateQueue(PrefillState.QueueChange.REMOVE, local, 0, clock.get()));
+        assertEquals(100, state.tokenWorkload().pendingTokens());
+        commitBatch(List.of(local), 10L);
+        assertEquals(100, state.tokenWorkload().pendingTokens());
+        active.setBatchId(11L);
+        reconcile(Map.of(), Map.of("83", active), unused -> 0L);
+        assertEquals(200, state.tokenWorkload().pendingTokens());
+        var oldTerminal = task(83, TaskPhase.RUNNING, 0L, 0L);
+        reconcile(Map.of("83", oldTerminal), Map.of("83", active), unused -> 0L);
+        assertEquals(100, state.tokenWorkload().pendingTokens(), "batch 10 completion does not erase batch 11");
+        state.retireGenerationOwnership();
+        assertEquals(0, state.tokenWorkload().score(), "Engine observations belong to their endpoint generation");
+    }
+
+    @Test
+    void concurrentEngineObservationAndLocalReleaseRetainExactlyOneCopy() throws Exception {
+        state.enableTokenWorkload(1_000_000);
+        try (var threads = Executors.newFixedThreadPool(2)) {
+            for (int i = 0; i < 32; i++) {
+                var local = item(9000 + i);
+                var lease = state.reserveUnqueuedRoute(local, 1, 0).reservation();
+                var active = task(local.requestId(), TaskPhase.RECEIVED, 0L, 0L);
+                active.setBatchId(0L);
+                active.setInputLength(100L);
+                var start = new CountDownLatch(1);
+                var report = threads.submit(() -> {
+                    assertTrue(start.await(2, TimeUnit.SECONDS));
+                    return reconcile(Map.of(), Map.of("active", active), unused -> 0L);
+                });
+                var release = threads.submit(() -> {
+                    assertTrue(start.await(2, TimeUnit.SECONDS));
+                    return state.release(lease, null);
+                });
+                start.countDown();
+                report.get(3, TimeUnit.SECONDS);
+                release.get(3, TimeUnit.SECONDS);
+                assertEquals(100, state.tokenWorkload().pendingTokens());
+                reconcile(Map.of(), Map.of(), unused -> 0L);
+                assertEquals(0, state.tokenWorkload().score());
+            }
+        }
+    }
+
+    @Test
+    void observedWorkAndOptionalCompletionWindowDoNotDoubleCount() {
+        state.enableTokenWorkload(1000, () -> false, 10_000L);
+        var local = item(85);
+        commitBatch(List.of(local), 100L);
+        var task = task(85, TaskPhase.RUNNING, 0L, 10L);
+        task.setInputLength(100L);
+        reconcile(Map.of(), Map.of("85", task), unused -> 0L);
+        assertEquals(100, state.tokenWorkload().score());
+        reconcile(Map.of("85", task), Map.of("85", task), unused -> 0L);
+        assertEquals(0, state.tokenWorkload().pendingTokens());
+        assertEquals(100, state.tokenWorkload().completedTokens());
+        reconcile(Map.of("85", task), Map.of(), unused -> 0L);
+        assertEquals(100, state.tokenWorkload().score());
+    }
+
     private PrefillState.StatusReconciliation reconcile(Map<String, TaskInfo> finished, Map<String, TaskInfo> active,
                            ToLongFunction<List<RequestRoute>> repredictor) {
         WorkerStatusResponse response = new WorkerStatusResponse();
