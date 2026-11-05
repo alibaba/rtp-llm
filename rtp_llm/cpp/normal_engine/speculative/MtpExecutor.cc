@@ -1834,7 +1834,17 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // DSpARK commit input was bound from the explicit target-forward output
     // above. Re-reading mutable Python model state here is both redundant and
     // invalid for CUDA graph replay, where Python is not executed.
-    if (!is_dspark_) {
+    bool preserve_compacted_hidden = false;
+#if USE_PPU
+    // PPU host rejection selects rows from the normalized target output.
+    // Reading the raw buffer's prefix again would undo that selection.
+    preserve_compacted_hidden = model_input.last_hidden_states.defined()
+                                && model_output.all_hidden_states.defined()
+                                && model_input.last_hidden_states.dim() == 2
+                                && model_output.all_hidden_states.dim() == 2
+                                && model_input.last_hidden_states.size(0) < model_output.all_hidden_states.size(0);
+#endif
+    if (!is_dspark_ && !preserve_compacted_hidden) {
         maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     }
     broadcastPostRejectionInputs(model_input);
