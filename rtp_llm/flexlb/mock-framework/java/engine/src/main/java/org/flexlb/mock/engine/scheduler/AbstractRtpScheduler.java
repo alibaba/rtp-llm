@@ -82,7 +82,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
 
     }
     private record Member(Entry request, RequestState.Use use, ComputeModel.Plan step) {}
-    private record Batch(List<Member> members, long scheduleStarted, long stepStarted) {}
+    private record Batch(List<Member> members, long scheduleStarted, long stepStarted, long inputStarted) {}
     private record Notice(Runnable action, boolean terminal) {}
 
     AbstractRtpScheduler(Object lock, RtpConfig config, KvCache cache, TaskHistory history) {
@@ -184,14 +184,8 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
             }
         }
         if (selected.isEmpty()) return null;
-        long prepareStarted = System.nanoTime();
         var members = new ArrayList<Member>();
-        var items = new ArrayList<ForwardBatch.Request>();
         for (var entry : selected) {
-            var progress = entry.state.snapshot();
-            int tokens = prefill() ? entry.input.tokens() - entry.reused : 1;
-            items.add(new ForwardBatch.Request(entry.input.identity(), entry.input.tokens(), entry.reused,
-                prefill() ? 1 : entry.input.maxNewTokens(), progress.generated(), tokens, entry.input.priority(), List.of()));
             members.add(new Member(entry, entry.state.forward(), entry.nextStep));
             long now = System.nanoTime();
             if (entry.firstRunning == 0) {
@@ -200,8 +194,17 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
             }
             entry.phase = FORWARD;
         }
+        // Real prepares streams before starting its step timer, then gathers model input.
+        long prepareStarted = System.nanoTime();
+        var items = new ArrayList<ForwardBatch.Request>();
+        for (var member : members) {
+            var entry = member.request();
+            int tokens = prefill() ? entry.input.tokens() - entry.reused : 1;
+            items.add(new ForwardBatch.Request(entry.input.identity(), entry.input.tokens(), entry.reused,
+                prefill() ? 1 : entry.input.maxNewTokens(), member.step().request().generated(), tokens, entry.input.priority(), List.of()));
+        }
         var batch = new ForwardBatch(config.id() + "/" + ++batchSequence, List.of(new ForwardBatch.Partition(0, items)));
-        executing = new Work(new Batch(List.copyOf(members), scheduleStarted, System.nanoTime()), batch);
+        executing = new Work(new Batch(List.copyOf(members), scheduleStarted, System.nanoTime(), prepareStarted), batch);
         metrics.batchPrepared(System.nanoTime() - prepareStarted);
         return executing;
     }
@@ -282,13 +285,17 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
     @Override public void computeCompleted(Work work, SimulatedCompute.Outcome outcome) {
         var batch = completedBatch(work);
         long input = 0, computed = 0, output = 0, maxSequence = 0;
-        int outputStreams = 0;
+        // Like Real's staged accept_len, this describes the completed computation,
+        // before cancellation filtering and EOS/max-length output truncation.
+        long tpotStepNanos = System.nanoTime() - batch.inputStarted();
+        long acceptedTokens = 0;
         try {
             for (var member : batch.members()) {
                 var entry = member.request();
                 maxSequence = Math.max(maxSequence, (long) entry.input.tokens() + member.step().request().generated());
                 input += prefill() ? entry.input.tokens() : 1;
                 computed += prefill() ? entry.input.tokens() - entry.reused : 1;
+                acceptedTokens += member.step().candidates();
                 if (!live(entry)) continue;
                 if (outcome.state() != SimulatedCompute.State.COMPLETED) {
                     finish(entry, new RequestFailure(CANCELLED, "Forward cancelled"));
@@ -296,7 +303,6 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
                 }
                 var result = config.compute().completed(member.step());
                 int committed = result.committedTokens();
-                outputStreams++;
                 entry.state.commit(committed, outcome.elapsedNanos());
                 if (committed > 0 && entry.firstToken == 0) entry.firstToken = System.nanoTime();
                 entry.nextStep = null;
@@ -309,7 +315,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
                 int size = batch.members().size();
                 metrics.stepCompleted(new RtpMetrics.StepStats(prefill() ? size : 0, prefill() ? 0 : size,
                     maxSequence, completed - batch.scheduleStarted(), completed - batch.stepStarted(),
-                    outcome.elapsedNanos(), outcome.sample().planned().toNanos(), input, computed, output, outputStreams));
+                    outcome.elapsedNanos(), outcome.sample().planned().toNanos(), input, computed, output, acceptedTokens, tpotStepNanos));
             }
         } finally { batch.members().forEach(member -> member.use().close()); }
     }

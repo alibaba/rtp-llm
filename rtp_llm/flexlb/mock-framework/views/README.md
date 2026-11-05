@@ -62,7 +62,7 @@ View 的 `annotation_steps` 只配置默认选择，省略则全部显示，空�
 |---|---|---|
 | Forward 组装 | `rtp_llm_context_batch_size` / `generate_batch_size`，`execute_token_size`，`max_seq_len`；含 Context 的条件系列只在 P 上产生 | Decode 执行 Token 取 verify/step，不拿整段历史输入相加；不把 running 请求数当作本批大小 |
 | 执行步 | P/D `rtp_llm_step_latency_us` | 完成的非空执行步，从调度返回到处理完输出，微秒；包含 Mock 执行和输出处理 |
-| 每输出 token 耗时 | D `mock_decode_estimate_tpot_us`、Client `mock_client_tpot_seconds` | D 按步耗时和实际提交量估算。Client 按成功请求首尾 token 到达间隔计算。 |
+| 每输出 token 耗时 | D `rtp_llm_sp_estimate_tpot_us`、Client `mock_client_tpot_seconds` | D 按输入组装至计算完成的耗时和本批截断前验收 token 数估算，参与 stream 包含入批后取消但计算完成者。Client 按成功请求首尾 token 到达间隔计算。 |
 | 请求终态 | `rtp_llm_latency_us`、`wait_latency_us`、`first_token_latency_us`、`input_token_length`、`output_token_length`、`iterate_count`、`query_batch_size` | 如 real，仅 success/cancel/timeout 产生流统计；无首 Token 则不报首 Token 耗时；query batch 是 beam 数，当前为 1 |
 | D Loading | `rtp_llm_stream_loading_cache_latency_us` | 从实际 beginTransfer 到 transferCompleted，不含等待 P 计算；其他 loading 阶段不混用 |
 | ViT 调度 | `py_rtp_vit_embedding_queue_size` / `queue_wait_rt` / `batch_size` / `forward_rt` | 队列项是提交的工作 chunk；运行图片数另为 Mock 辅助项 |

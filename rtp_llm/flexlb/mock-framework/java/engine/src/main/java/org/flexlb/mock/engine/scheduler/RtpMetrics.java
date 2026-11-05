@@ -22,7 +22,7 @@ final class RtpMetrics {
 
     record StepStats(int context, int generate, long maxSequence, long scheduleToCompletionNanos, long stepNanos,
                      long forwardNanos, long plannedNanos, long input, long computed, long output,
-                     int outputStreams) {}
+                     long acceptedTokens, long tpotStepNanos) {}
 
     public record State(long waiting, long running, long loading, long ready, long totalTokens, long availableTokens,
                         long freeTokens, long heldTokens, int blockSize) {
@@ -219,7 +219,7 @@ final class RtpMetrics {
             Map.of("tier", "DEVICE", "trigger_type", "capacity"));
     }
 
-    void batchPrepared(long nanos) { events.observe("mock_forward_batch_prepare_us", nanos / 1000.0); }
+    void batchPrepared(long nanos) { events.observe("rtp_llm_gather_model_input_us", nanos / 1000.0); }
 
     void streamingFinished(boolean streaming) {
         events.increment(streaming ? "rtp_llm_is_streaming_qps" : "rtp_llm_not_streaming_qps");
@@ -253,12 +253,12 @@ final class RtpMetrics {
         long executionNanos = prefill ? step.scheduleToCompletionNanos() : step.stepNanos();
         if (step.forwardNanos() < 0 || step.plannedNanos() < 0 || step.input() < 0 || step.computed() < 0
             || step.computed() > step.input() || step.output() < 0 || executionNanos < 0 || step.stepNanos() < 0
-            || step.outputStreams() < 0 || step.outputStreams() > step.output())
+            || step.acceptedTokens() < 0 || step.tpotStepNanos() < 0)
             throw new IllegalArgumentException("Invalid step observation");
         recordBatch(step.context(), step.generate(), step.computed(), step.maxSequence());
         positiveMicros("rtp_llm_step_latency_us", step.stepNanos());
-        if (!prefill && step.outputStreams() > 0)
-            events.observe("mock_decode_estimate_tpot_us", step.stepNanos() / 1000.0 * step.outputStreams() / step.output());
+        if (!prefill && step.generate() > 0 && step.acceptedTokens() > 0)
+            events.observe("rtp_llm_sp_estimate_tpot_us", step.tpotStepNanos() / 1000.0 * step.generate() / step.acceptedTokens());
         recordForward(step, executionNanos, prefill ? step.computed() : step.output());
     }
 

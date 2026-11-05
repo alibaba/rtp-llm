@@ -1381,7 +1381,7 @@
         {
           "id": 100159,
           "type": "timeseries",
-          "title": "ForwardBatch 输入准备耗时（Mock）",
+          "title": "输入组装耗时",
           "gridPos": {
             "x": 0,
             "y": 83,
@@ -1395,7 +1395,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(mock_forward_batch_prepare_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_gather_model_input_us_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_gather_model_input_us_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -9251,7 +9251,7 @@
         {
           "id": 200159,
           "type": "timeseries",
-          "title": "ForwardBatch 输入准备耗时（Mock）",
+          "title": "输入组装耗时",
           "gridPos": {
             "x": 0,
             "y": 737,
@@ -9265,7 +9265,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(mock_forward_batch_prepare_us{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_gather_model_input_us_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_gather_model_input_us_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -10465,7 +10465,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "(sum by(${decode_group})(rate(mock_decode_estimate_tpot_us_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(mock_decode_estimate_tpot_us_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_sp_estimate_tpot_us_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_sp_estimate_tpot_us_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -10514,7 +10514,7 @@
               ]
             }
           },
-          "description": "仅统计有提交输出 token 的 Decode 执行步，使用窗口内样本均值。",
+          "description": "仅统计计算完成且有模拟验收 token 的 Decode 步。耗时从输入组装开始，到输出处理前结束；验收量在 EOS/长度截断前统计，保留入批后取消但计算完成的 stream。使用窗口内事件样本均值。",
           "links": [
             {
               "title": "RTP-LLM 原面板",

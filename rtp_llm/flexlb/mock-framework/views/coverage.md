@@ -25,7 +25,7 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | prefill | 10382 | input wall tps with catch | 已上报 | rtp_llm_context_wall_tps_with_cache |
 | prefill | 231 | model forward rt | 已上报 | rtp_llm_model_forward_us |
 | prefill | 10081 | wall tps report interval | 已上报 | rtp_llm_wall_tps_report_interval_us |
-| prefill | 159 | gather model input rt | Mock 批输入准备耗时 | mock_forward_batch_prepare_us |
+| prefill | 159 | gather model input rt | 输入组装耗时 | rtp_llm_gather_model_input_us |
 | prefill | 215 | 请求队列排队延迟 | 已上报 | rtp_llm_wait_latency_us |
 | prefill | 234 | first token latency | 已上报 | rtp_llm_first_token_latency_us |
 | prefill | 121 | framework qps | 已上报 | rtp_llm_framework_qps |
@@ -105,7 +105,7 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | decode | 10373 | total tps | 已上报 | rtp_llm_total_tps |
 | decode | 231 | model forward rt | 生产基线缺席，Mock 诊断独立展示 | rtp_llm_model_forward_us |
 | decode | 10081 | wall tps report interval | 已上报 | rtp_llm_wall_tps_report_interval_us |
-| decode | 159 | gather model input rt | Mock 批输入准备耗时 | mock_forward_batch_prepare_us |
+| decode | 159 | gather model input rt | 输入组装耗时 | rtp_llm_gather_model_input_us |
 | decode | 215 | 请求队列排队延迟 | 已上报 | rtp_llm_wait_latency_us |
 | decode | 234 | first token latency | 已上报 | rtp_llm_first_token_latency_us |
 | decode | 121 | framework qps | 已上报 | rtp_llm_framework_qps |
@@ -121,7 +121,7 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | decode | 10588 | stream loading cache latency | 已上报 | rtp_llm_stream_loading_cache_latency_us |
 | decode | 10098 | model inputs dump latency | 待埋点 | rtp_llm_model_inputs_log_us |
 | decode | 232 | sample rt | 待埋点 | rtp_llm_sample_input_us |
-| decode | 10112 | TPOT(估计值) | Mock 步耗时估计 | mock_decode_estimate_tpot_us |
+| decode | 10112 | TPOT(估计值) | 原生统计边界的步耗时估计 | rtp_llm_sp_estimate_tpot_us |
 | decode | 10586 | py framework error qps | 待埋点 | py_rtp_master_queue_reject_qps |
 | decode | 10589 | stream enqueue to canrun latency | 待埋点 | rtp_llm_stream_enqueue_to_canrun_us |
 | decode | 10629 | stream update rt | 待埋点 | rtp_llm_stream_update_latency_us |

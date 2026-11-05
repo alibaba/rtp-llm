@@ -179,9 +179,13 @@ def test_real_engine_observations_return_to_rtp_panels_and_mock_rows_only_compar
     for panel_id in (100160, 200160, 300452, 310351):
         assert '待埋点' not in items[panel_id]['title']
     assert 'py_rtp_vit_preprocess_rt{' in items[300452]['targets'][2]['expr']
-    assert 'mock_decode_estimate_tpot_us_sum{' in items[210112]['targets'][0]['expr']
+    assert 'rtp_llm_sp_estimate_tpot_us_sum{' in items[210112]['targets'][0]['expr']
     assert any('mock_client_tpot_seconds' in t['expr'] for t in items[5]['targets'])
-    assert not any('rtp_llm_sp_' in t['expr'] for p in panels() for t in p['targets'])
+    assert all('rtp_llm_sp_' not in t['expr'] or 'rtp_llm_sp_estimate_tpot_us' in t['expr']
+               for p in panels() for t in p['targets'])
+    for panel_id in (100159, 200159):
+        assert 'rtp_llm_gather_model_input_us_sum{' in items[panel_id]['targets'][0]['expr']
+        assert 'rtp_llm_gather_model_input_us_count{' in items[panel_id]['targets'][0]['expr']
 
 
 def test_custom_panels_follow_their_own_address_selection_without_losing_business_dimensions():
