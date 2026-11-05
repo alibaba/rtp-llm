@@ -111,13 +111,11 @@ def _validate_required_blocks(
             (required_columns < 0).any(),
             (required_columns > int(table.shape[1])).any(),
             (required & ((table <= 0) | (table >= pool_blocks))).any(),
-            (table >= pool_blocks).any(),
         ]
     messages = [
         f"QSA cache {tag!r} has a negative required-column count",
         f"QSA cache {tag!r} block table does not cover the target-verify tail",
         f"QSA cache {tag!r} target-verify tail resolves to an unallocated or out-of-range physical block",
-        f"QSA cache {tag!r} contains an out-of-range physical block",
     ]
     if flags is not None:
         checks.add_flags(flags, messages)

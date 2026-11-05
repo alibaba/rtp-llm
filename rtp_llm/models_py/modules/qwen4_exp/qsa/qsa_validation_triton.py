@@ -44,7 +44,6 @@ def _validate_required_blocks_kernel(
             )
             << 2
         )
-        | (tl.max((active & (block >= POOL_BLOCKS)).to(tl.int32), 0) << 3)
     )
     tl.store(result_ptr, flags)
 

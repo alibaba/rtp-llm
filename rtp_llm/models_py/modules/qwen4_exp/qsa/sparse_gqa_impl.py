@@ -76,6 +76,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         self._trusted_prefill_cu_seqlens: Optional[torch.Tensor] = None
         self._qsa_main_cache_mutation_started = False
         self._qsa_target_visible_lengths = None
+        self._qsa_main_geometry = None
         self._validate_runtime_mode()
         rope_writer_cls = (
             FusedRopeKVCachePrefillOpQKVOut
@@ -145,6 +146,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         """Reset the main-cache phase before the paired side-cache write."""
         self._qsa_main_cache_mutation_started = False
         self._qsa_target_visible_lengths = None
+        self._qsa_main_geometry = None
 
     def qsa_main_cache_mutation_started(self) -> bool:
         """Whether the fused main KV writer may have mutated its cache."""

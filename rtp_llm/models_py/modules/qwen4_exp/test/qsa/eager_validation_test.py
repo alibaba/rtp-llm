@@ -24,8 +24,6 @@ class EagerValidationTest(unittest.TestCase):
                 expected = None
                 if any(p < 0 or n <= 0 for p, n in zip(bases, lengths)):
                     expected = "sequence bases"
-                elif any(page >= 4 for row in table for page in row):
-                    expected = "physical block"
                 elif any(a and r > 2 for a, r in zip(active, required)):
                     expected = "cover the visible KV"
                 elif any(

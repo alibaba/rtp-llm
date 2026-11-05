@@ -18,10 +18,28 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_nvf
     CutlassNvfp4Executor,
     _prefill_library,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.utils.nvfp4_weights import (
+    Nvfp4WeightViews,
+)
 from rtp_llm.utils.model_weight import W
 
 
 class CutlassNvfp4ExecutorTest(unittest.TestCase):
+    def test_shared_weight_views_do_not_require_cutlass_activation_scales(self):
+        weights = {
+            W.moe_w1: torch.zeros(2, 16, 16, dtype=torch.uint8),
+            W.moe_w2: torch.zeros(2, 16, 16, dtype=torch.uint8),
+            W.moe_s1: torch.ones(2, 16, 16).to(torch.float8_e4m3fn),
+            W.moe_s2: torch.ones(2, 16, 16).to(torch.float8_e4m3fn),
+        }
+        views = Nvfp4WeightViews(SimpleNamespace(ep_size=1, ep_rank=0), None, weights)
+        self.assertEqual(views.w1.dtype, torch.int64)
+        self.assertEqual(views.block_scales[0].dtype, torch.int32)
+        weights[W.moe_w1_i_s] = torch.tensor([1.0, 2.0])
+        weights[W.moe_w2_i_s] = torch.ones(2)
+        with self.assertRaisesRegex(ValueError, "uniform finite positive"):
+            views.cutlass_quant_scales()
+
     def test_prefill_library_keeps_configured_path_and_checksum_together(self):
         config = SimpleNamespace(
             prefill_library="config.so", prefill_library_sha256="config-sha"

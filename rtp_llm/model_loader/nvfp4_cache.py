@@ -100,7 +100,7 @@ class Nvfp4ExpertCache:
                     name: tensor_sha(value) for name, value in tensors.items()
                 }:
                     raise ValueError("NVFP4 cache payload checksum mismatch")
-            except (SafetensorError, ValueError, KeyError, TypeError) as error:
+            except (OSError, SafetensorError, ValueError, KeyError, TypeError) as error:
                 logging.warning("Rebuilding invalid NVFP4 cache %s: %s", path, error)
                 # Replace atomically below; unlinking here could remove a valid
                 # entry another loader has just published.

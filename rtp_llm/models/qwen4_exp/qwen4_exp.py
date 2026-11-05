@@ -46,7 +46,19 @@ class Qwen4Exp(Qwen35Moe):
         config = getattr(self, "model_config", None)
         validate_qwen4_runtime(config, self.parallelism_config)
         freeze_runtime_config(config, self.parallelism_config)
+        self._validate_checkpoint(config)
         return super().load(skip_python_model=skip_python_model)
+
+    @staticmethod
+    def _validate_checkpoint(config: ModelConfig) -> None:
+        if not getattr(config, "_qwen4_fp8_source", False):
+            return
+        from rtp_llm.models.qwen4_exp.moe_fp8 import validate_moe_fp8_checkpoint
+
+        root = Path(config.ckpt_path)
+        config_json = json.loads((root / "config.json").read_text())
+        index = json.loads((root / "model.safetensors.index.json").read_text())
+        validate_moe_fp8_checkpoint(config_json, index["weight_map"], root)
 
     def _py_model_class(self):
         from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpModel
@@ -57,7 +69,6 @@ class Qwen4Exp(Qwen35Moe):
     def _create_config_from_json(cls, ckpt_path: str, config_json: dict) -> ModelConfig:
         config = super()._create_config_from_json(ckpt_path, config_json)
         config.model_type = "qwen4_exp"
-        root = Path(ckpt_path)
         source_quant = config_json.get("quantization_config")
         text_config = config_json.get("text_config", config_json)
         # PLE hashes use the training document boundary, independently of the
@@ -72,11 +83,6 @@ class Qwen4Exp(Qwen35Moe):
             "torch_dtype", ""
         )
         config._qwen4_fp8_source = bool(source_quant)
-        if source_quant:
-            from rtp_llm.models.qwen4_exp.moe_fp8 import validate_moe_fp8_checkpoint
-
-            index = json.loads((root / "model.safetensors.index.json").read_text())
-            validate_moe_fp8_checkpoint(config_json, index["weight_map"], root)
         cls._configure_precision_recipe(config)
         return config
 

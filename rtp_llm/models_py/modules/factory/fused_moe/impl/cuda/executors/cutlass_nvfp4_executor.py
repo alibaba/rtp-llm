@@ -65,7 +65,7 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
         super().__init__(config, quant_config, weights)
         prepared = Nvfp4WeightViews(config, quant_config, weights)
         self.w1, self.w2 = prepared.w1, prepared.w2
-        self.quant_scales = prepared.quant_scales
+        self.quant_scales = prepared.cutlass_quant_scales()
         self.ep_size, self.ep_rank = prepared.ep_size, prepared.ep_rank
         self.tp_size, self.tp_rank = prepared.tp_size, prepared.tp_rank
         self.sm120_prefill = None

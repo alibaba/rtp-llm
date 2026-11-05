@@ -12,7 +12,7 @@ from .fmha_plans import (
     PrefillRequest,
     _PrefillRequests,
 )
-from .fmha_validation import _validate_main_cache_layout
+from .fmha_validation import _validate_main_cache_layout, consume_main_geometry
 
 
 def _prepare_paged_inputs(
@@ -146,20 +146,11 @@ def _prepare_paged_inputs(
                 "page_size": page_size,
             }
         )
-    required_columns = (kv_lens[:, -1].to(torch.int64) + page_size - 1) // page_size
-    columns = torch.arange(
-        int(block_table.shape[1]), device=block_table.device
-    ).unsqueeze(0)
-    required = columns < required_columns.unsqueeze(1)
-    invalid = required & ((block_table <= 0) | (block_table >= cache_blocks))
     selected_indices = selected_indices.contiguous()
     # One host verdict for the complete plan, before the main cache writer.
     # The private FMHA consumer reuses this exact plan in the same invocation.
     verdict = (
         ((sequence_lengths < 0).any() | (kv_lens < 0).any()).to(torch.int32)
-        | ((required_columns > int(block_table.shape[1])).any().to(torch.int32) << 1)
-        | (invalid.any().to(torch.int32) << 2)
-        | ((block_table >= cache_blocks).any().to(torch.int32) << 3)
         | ((selected_indices < -1).any().to(torch.int32) << 4)
         | (
             ((selected_indices >= 0) & (selected_indices >= kv_lens.unsqueeze(-1)))
@@ -167,7 +158,25 @@ def _prepare_paged_inputs(
             .to(torch.int32)
             << 5
         )
-    ).item()
+    )
+    if not consume_main_geometry(
+        self, kv_cache.kv_cache_base, block_table, lengths_source, tokens
+    ):
+        required_columns = (kv_lens[:, -1].to(torch.int64) + page_size - 1) // page_size
+        columns = torch.arange(
+            int(block_table.shape[1]), device=block_table.device
+        ).unsqueeze(0)
+        required = columns < required_columns.unsqueeze(1)
+        invalid = required & ((block_table <= 0) | (block_table >= cache_blocks))
+        verdict = (
+            verdict
+            | (
+                (required_columns > int(block_table.shape[1])).any().to(torch.int32)
+                << 1
+            )
+            | (invalid.any().to(torch.int32) << 2)
+        )
+    verdict = verdict.item()
     if verdict & 1:
         raise ValueError("qwen4_exp sparse GQA sequence lengths must be non-negative")
     if verdict & 2:
@@ -180,10 +189,6 @@ def _prepare_paged_inputs(
             "out-of-range physical block"
         )
 
-    if verdict & 8:
-        raise RuntimeError(
-            "qwen4_exp QSA paged main block table contains an out-of-range physical block"
-        )
     if verdict & 16:
         raise ValueError("selected indices may only use -1 as padding")
     if verdict & 32:

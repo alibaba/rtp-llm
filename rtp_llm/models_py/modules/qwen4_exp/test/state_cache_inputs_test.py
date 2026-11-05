@@ -1,6 +1,7 @@
 import gc
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -13,6 +14,7 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.state_cache_inputs import (
     prepare_state_cache_inputs,
     state_page_table,
 )
+from rtp_llm.models_py.utils.cache_payload_view import same_tensor_metadata
 
 
 class _CacheGeometry:
@@ -33,6 +35,26 @@ def _expand(table, factor):
 
 
 class StateCacheInputsTest(unittest.TestCase):
+    def test_equal_metadata_is_read_once_and_inplace_changes_are_rechecked(self):
+        left = torch.tensor([1, 2], dtype=torch.int32)
+        right = left.clone()
+        cache = {}
+        with patch("torch.equal", wraps=torch.equal) as equal:
+            self.assertTrue(same_tensor_metadata(left, right, cache=cache))
+            self.assertTrue(same_tensor_metadata(left, right, cache=cache))
+            equal.assert_called_once()
+            right[0] = 3
+            self.assertFalse(same_tensor_metadata(left, right, cache=cache))
+            self.assertEqual(equal.call_count, 2)
+
+    def test_inference_metadata_is_rechecked_with_each_forward_cache(self):
+        with torch.inference_mode():
+            left = torch.tensor([1, 2], dtype=torch.int32)
+            right = left.clone()
+            self.assertTrue(same_tensor_metadata(left, right, cache={}))
+            right[0] = 3
+            self.assertFalse(same_tensor_metadata(left, right, cache={}))
+
     def test_tag_local_geometry_and_metadata(self):
         factors = {PLE_STATE_TAG: 1, PLE_NGRAM_CTX_TAG: 2, INDEXER_STATE_TAG: 4}
         groups = {}

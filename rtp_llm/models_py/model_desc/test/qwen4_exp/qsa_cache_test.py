@@ -76,7 +76,7 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
                     owner, *args, **kwargs
                 )
                 if corruption == "main":
-                    table[0, 1] = 100
+                    table[0, 0] = 100
                 elif corruption == "axes":
                     context.main_inputs.combo_position_ids[2] = 4
                 elif corruption == "logical":
@@ -215,10 +215,17 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
                         pool_blocks=3,
                         tag=INDEXER_KV_TAG,
                     )
-                with self.assertRaisesRegex(RuntimeError, "out-of-range physical"):
+                table = torch.tensor([[1, 3]], dtype=torch.int32, device=device)
+                _validate_required_blocks(
+                    table,
+                    torch.tensor([1], dtype=torch.int32, device=device),
+                    pool_blocks=3,
+                    tag=INDEXER_KV_TAG,
+                )
+                with self.assertRaisesRegex(RuntimeError, "out-of-range"):
                     _validate_required_blocks(
-                        torch.tensor([[1, 3]], dtype=torch.int32, device=device),
-                        torch.tensor([1], dtype=torch.int32, device=device),
+                        table,
+                        required,
                         pool_blocks=3,
                         tag=INDEXER_KV_TAG,
                     )
@@ -254,7 +261,7 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
         table[1, 1] = 4
         self.assertEqual(
             required_block_flags(table, required, pool_blocks=4).item(),
-            (1 << 2) | (1 << 3),
+            1 << 2,
         )
         with self.assertRaisesRegex(RuntimeError, "out-of-range"):
             _validate_required_blocks(

@@ -307,7 +307,9 @@ class Qwen4ExpTest(unittest.TestCase):
             "rtp_llm.models.qwen4_exp.moe_fp8.validate_moe_fp8_checkpoint"
         ) as validate:
             cfg = Qwen4Exp.create_config(self._temp_dir.name)
-        validate.assert_called_once()
+            validate.assert_not_called()
+            Qwen4Exp._validate_checkpoint(cfg)
+            validate.assert_called_once()
         cfg.quant_config = Fp8BlockWiseQuantConfig(is_quanted=True)
         cfg.quantization = json.dumps(
             {
@@ -328,6 +330,26 @@ class Qwen4ExpTest(unittest.TestCase):
         self.assertTrue(cfg._qwen4_full_fp8_nvfp4)
         self.assertEqual(cfg.dense_weight_dtype, "fp8")
         self.assertEqual(cfg.expert_weight_dtype, "fp4")
+
+    def test_invalid_source_manifest_is_rejected_before_parent_load(self):
+        data = self._config()
+        data["quantization_config"] = {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [128, 128],
+        }
+        Path(self._temp_dir.name, "config.json").write_text(json.dumps(data))
+        Path(self._temp_dir.name, "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {}})
+        )
+        cfg = Qwen4Exp.create_config(self._temp_dir.name)
+        model = self._loaded_model()
+        model.model_config._qwen4_fp8_source = True
+        model.model_config.ckpt_path = cfg.ckpt_path
+        with mock.patch.object(Qwen35Moe, "load") as parent:
+            with self.assertRaisesRegex(ValueError, "exactly the split MoE experts"):
+                model.load()
+        parent.assert_not_called()
 
     def test_quantization_preset_carries_the_complete_recipe(self):
         cfg = init_quant_config("QWEN4_FP8_NVFP4")

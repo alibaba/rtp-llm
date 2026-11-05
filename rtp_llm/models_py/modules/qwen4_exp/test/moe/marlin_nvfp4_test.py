@@ -209,7 +209,7 @@ class MarlinNvfp4Test(unittest.TestCase):
             tp_rank=0,
             w1=q1.view(torch.int64),
             w2=q2.view(torch.int64),
-            quant_scales=[None, sf1, None, None, sf2, None],
+            block_scales=(sf1, sf2),
         )
         native.weights.update(
             {

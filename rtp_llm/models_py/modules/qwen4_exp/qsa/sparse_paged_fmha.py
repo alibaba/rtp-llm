@@ -32,7 +32,6 @@ def _validate_sparse_paged_indices(
     """Check paged reads with one device-to-host verdict on valid inputs."""
     table_width = int(block_table.shape[1])
     invalid_lengths = (kv_lens < 0) | (kv_lens > table_width * page_size)
-    invalid_pool = block_table >= cache_blocks
     if selected.numel():
         invalid_negative = selected < -1
         invalid_visible = (selected >= 0) & (selected >= kv_lens.unsqueeze(-1))
@@ -48,12 +47,17 @@ def _validate_sparse_paged_indices(
             safe_logical_blocks.to(torch.long),
         )
         invalid_missing = (selected >= 0) & (physical <= 0)
+        invalid_pool = (selected >= 0) & (physical >= cache_blocks)
         invalid_selection = (
-            invalid_negative | invalid_visible | invalid_logical | invalid_missing
+            invalid_negative
+            | invalid_visible
+            | invalid_logical
+            | invalid_missing
+            | invalid_pool
         )
-        failed = invalid_lengths.any() | invalid_pool.any() | invalid_selection.any()
+        failed = invalid_lengths.any() | invalid_selection.any()
     else:
-        failed = invalid_lengths.any() | invalid_pool.any()
+        failed = invalid_lengths.any()
     if not bool(failed.item()):
         return
 
@@ -70,10 +74,10 @@ def _validate_sparse_paged_indices(
             raise ValueError("selected index exceeds the block-table width")
         if bool(invalid_missing.any().item()):
             raise ValueError("selected index resolves to an unallocated cache block")
-    max_physical = int(block_table.max().item())
-    raise ValueError(
-        f"block table physical id {max_physical} exceeds cache blocks {cache_blocks}"
-    )
+        max_physical = int(physical.masked_fill(selected < 0, 0).max().item())
+        raise ValueError(
+            f"block table physical id {max_physical} exceeds cache blocks {cache_blocks}"
+        )
 
 
 def main_kv_scale_view(cache, scale, *, kv_heads, page_size):

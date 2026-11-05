@@ -320,6 +320,8 @@ class PLECacheViews:
 
     @staticmethod
     def _same_metadata(
-        lhs: PyAttentionInputs, rhs: PyAttentionInputs, name: str
+        lhs: PyAttentionInputs, rhs: PyAttentionInputs, name: str, *, cache=None
     ) -> bool:
-        return same_tensor_metadata(getattr(lhs, name, None), getattr(rhs, name, None))
+        return same_tensor_metadata(
+            getattr(lhs, name, None), getattr(rhs, name, None), cache=cache
+        )

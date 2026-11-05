@@ -54,8 +54,8 @@ class Qwen4DecodeMarlinExecutor(FusedMoeExpertExecutor):
             self.ep_size,
             self.ep_rank,
             q2.data_ptr(),
-            native.quant_scales[1].data_ptr(),
-            native.quant_scales[4].data_ptr(),
+            native.block_scales[0].data_ptr(),
+            native.block_scales[1].data_ptr(),
         )
         prior = getattr(owner, "_qwen4_marlin_layout", None)
         if prior is not None:
@@ -71,12 +71,12 @@ class Qwen4DecodeMarlinExecutor(FusedMoeExpertExecutor):
             moe.w1 = q1.view(torch.int32).reshape(experts, k // 16, both_n * 2)
             moe.w2 = q2.view(torch.int32).reshape(experts, n // 16, k * 2)
             moe.s1 = (
-                native.quant_scales[1]
+                native.block_scales[0]
                 .view(torch.float8_e4m3fn)
                 .reshape(experts, k // 16, both_n)
             )
             moe.s2 = (
-                native.quant_scales[4]
+                native.block_scales[1]
                 .view(torch.float8_e4m3fn)
                 .reshape(experts, n // 16, k)
             )
@@ -84,8 +84,8 @@ class Qwen4DecodeMarlinExecutor(FusedMoeExpertExecutor):
             moe.workspaces = {}
             self.moe = moe
             return
-        sf1 = _linear_scales(native.quant_scales[1], experts, both_n, k // 16)
-        sf2 = _linear_scales(native.quant_scales[4], experts, k, n // 16)
+        sf1 = _linear_scales(native.block_scales[0], experts, both_n, k // 16)
+        sf2 = _linear_scales(native.block_scales[1], experts, k, n // 16)
         g1, g2 = native.weights[W.moe_w1_s2], native.weights[W.moe_w2_s2]
         for scale in (sf1, sf2, g1, g2):
             if not bool(torch.isfinite(scale.float()).all()) or bool(
@@ -93,7 +93,7 @@ class Qwen4DecodeMarlinExecutor(FusedMoeExpertExecutor):
             ):
                 raise ValueError("Marlin NVFP4 requires finite nonnegative scales")
         moe = Nvfp4MarlinMoE(q1, sf1, g1, q2, sf2, g2, self.ep_size, self.ep_rank)
-        destinations = (q1, q2, native.quant_scales[1], native.quant_scales[4])
+        destinations = (q1, q2, native.block_scales[0], native.block_scales[1])
         converted = (moe.w1, moe.w2, moe.s1, moe.s2)
         for target, source in zip(destinations, converted):
             if (

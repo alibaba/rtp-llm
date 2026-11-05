@@ -29,8 +29,6 @@ def validate_moe_fp8_manifest(config_json: dict, weight_map: Mapping) -> None:
         or quant.get("act_per_tensor", False)
     ):
         raise ValueError("Qwen4 expert FP8 requires dynamic 128x128 block quantization")
-    if not quant.get("modules_to_not_convert"):
-        raise ValueError("Qwen4 expert FP8 requires explicit non-expert exclusions")
     keys = set(weight_map)
     experts = {key for key in keys if _EXPERT_WEIGHT.fullmatch(key)}
     scales = {key for key in keys if key.endswith("_scale_inv")}

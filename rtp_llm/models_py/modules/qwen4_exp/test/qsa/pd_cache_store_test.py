@@ -164,7 +164,7 @@ class Qwen4PDCacheStoreTest(unittest.TestCase):
         model._build_attn_meta = lambda *args: None
         model._ple_input_ids = lambda inputs: inputs.input_ids
         model._start_eager_ple_prefetch = lambda *args: {}
-        model._apply_ple = lambda layer, hidden, *args: hidden
+        model._apply_ple = lambda layer, hidden, *args, metadata_cache: hidden
         model._attention_tag = lambda layer: "full"
         model._layer_fmha_impl = lambda *args: None
         inputs = SimpleNamespace(

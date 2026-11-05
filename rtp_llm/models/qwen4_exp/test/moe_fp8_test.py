@@ -49,6 +49,16 @@ class Qwen4MoeFp8Test(unittest.TestCase):
     def test_accepts_complete_target_and_draft(self):
         validate_moe_fp8_manifest(self.config, self.keys)
 
+    def test_exclusions_metadata_is_not_required_for_valid_tensor_coverage(self):
+        for exclusions in (None, []):
+            with self.subTest(exclusions=exclusions):
+                quant = self.config["quantization_config"]
+                if exclusions is None:
+                    quant.pop("modules_to_not_convert")
+                else:
+                    quant["modules_to_not_convert"] = exclusions
+                self._validate_checkpoint(self._checkpoint_tensors())
+
     def test_rejects_missing_projection_and_scale(self):
         keys = dict(self.keys)
         name = next(iter(keys))
@@ -89,7 +99,6 @@ class Qwen4MoeFp8Test(unittest.TestCase):
         for change in (
             {"activation_scheme": "static"},
             {"weight_block_size": [64, 128]},
-            {"modules_to_not_convert": []},
         ):
             config = copy.deepcopy(self.config)
             config["quantization_config"].update(change)

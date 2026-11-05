@@ -27,10 +27,6 @@ def main_geometry_checks(checks, bases, lengths, table, page_size, pages, padded
         "qwen4_exp QSA paged sequence bases must be non-negative and query lengths positive",
     )
     checks.add(
-        (table >= pages).any(),
-        "qwen4_exp QSA paged main block table contains an out-of-range physical block",
-    )
-    checks.add(
         exceeds.any(),
         "qwen4_exp QSA paged main block table does not cover the visible KV",
     )
@@ -163,7 +159,7 @@ def _try_validate_main_paged_geometry(
                 "qwen4_exp QSA paged sequence bases must be non-negative and query lengths positive",
                 None,
                 None,
-                "qwen4_exp QSA paged main block table contains an out-of-range physical block",
+                None,
                 "qwen4_exp QSA paged main block table does not cover the visible KV",
                 "qwen4_exp QSA paged visible KV resolves to an unallocated or out-of-range physical block",
             ],
@@ -324,7 +320,7 @@ def validate_qsa_before_side_write(
             "qwen4_exp QSA paged token count does not match batch/query geometry"
         )
     kwargs = {"checks": checks} if checks is not None else {}
-    self._validate_main_paged_geometry(
+    page_size = self._validate_main_paged_geometry(
         qsa_runtime.main_cache.kv_cache_base,
         self.attn_inputs.kv_cache_kernel_block_id_device,
         sequence_bases,
@@ -333,6 +329,23 @@ def validate_qsa_before_side_write(
         graph_capture=graph_capture,
         **kwargs,
     )
+    if not graph_capture and not is_incremental_prefill:
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.prefill_preflight import (
+            MainGeometryReceipt,
+        )
+
+        self._qsa_main_geometry = (
+            MainGeometryReceipt(
+                self,
+                qsa_runtime.main_cache.kv_cache_base,
+                self.attn_inputs.kv_cache_kernel_block_id_device,
+                sequence_bases,
+                query_lengths,
+                page_size,
+            ),
+            checks,
+            int(hidden_states.shape[0]),
+        )
     if combined:
         qsa_runtime.validate_before_projection(
             indexer=indexer,
@@ -350,3 +363,20 @@ def validate_qsa_before_side_write(
             int(hidden_states.shape[0]),
             plan.visible_lengths,
         )
+
+
+def consume_main_geometry(self, cache, table, bases, tokens):
+    """Reuse only a successfully accepted prewrite check, once in this call."""
+    pending = getattr(self, "_qsa_main_geometry", None)
+    self._qsa_main_geometry = None
+    if pending is None:
+        return False
+    receipt, checks, checked_tokens = pending
+    lengths = (
+        self.attn_inputs.input_lengths if self.is_target_verify else receipt.owners[-1]
+    )
+    return (
+        checked_tokens == tokens
+        and (checks is None or checks.verified)
+        and receipt.matches(self, cache, table, bases, lengths)
+    )

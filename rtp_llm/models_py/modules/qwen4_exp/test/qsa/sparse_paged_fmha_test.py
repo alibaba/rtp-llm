@@ -164,11 +164,19 @@ class SparsePagedIndexValidationTest(unittest.TestCase):
                         page_size=4,
                         cache_blocks=3,
                     )
+        table = torch.tensor([[1, 3]], dtype=torch.int32)
+        _validate_sparse_paged_indices(
+            table,
+            lengths,
+            torch.tensor([[[0]]], dtype=torch.int32),
+            page_size=4,
+            cache_blocks=3,
+        )
         with self.assertRaisesRegex(ValueError, "exceeds cache blocks"):
             _validate_sparse_paged_indices(
-                torch.tensor([[1, 3]], dtype=torch.int32),
+                table,
                 lengths,
-                torch.tensor([[[0]]], dtype=torch.int32),
+                torch.tensor([[[4]]], dtype=torch.int32),
                 page_size=4,
                 cache_blocks=3,
             )

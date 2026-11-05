@@ -783,6 +783,8 @@ class SparseGqaImplForwardTest(unittest.TestCase):
         expected = _ragged_paged_reference(
             qkv, cache, block_table, prefixes, input_lengths, selected
         )
+        # Request 0 reads only its first two columns, including the live tail.
+        block_table[0, -1] = 1000
         calls = []
 
         def _record_paged(q, paged_cache, table, kv_lens, indices, **kwargs):
@@ -932,7 +934,7 @@ class SparseGqaImplForwardTest(unittest.TestCase):
             int(geometry_flags(lengths, prefixes, table, 4, 8, False).item()) & 1
         )
 
-    def test_paged_geometry_rechecks_strided_metadata_and_all_physical_pages(self):
+    def test_paged_geometry_rechecks_strided_metadata_and_visible_pages(self):
         for device in ("cpu", _DEV):
             for dtype in (torch.int32, torch.int64):
                 with self.subTest(device=device, dtype=dtype):
@@ -954,9 +956,11 @@ class SparseGqaImplForwardTest(unittest.TestCase):
 
                     self.assertEqual(validate(), 4)
                     table[0, -1] = 1000
+                    self.assertEqual(validate(), 4)
+                    table[0, 1] = 1000
                     with self.assertRaisesRegex(RuntimeError, "physical block"):
                         validate()
-                    table[0, -1] = 3
+                    table[0, 1] = 2
                     table[1, 0] = 0
                     with self.assertRaisesRegex(RuntimeError, "visible KV"):
                         validate()
@@ -1110,7 +1114,6 @@ class SparseGqaImplForwardTest(unittest.TestCase):
             "future",
             "page",
             "capacity_overflow",
-            "unused_page",
         ):
             with self.subTest(corruption=corruption):
                 impl, qkv, cache, selected = self._incremental_plan_case()
@@ -1127,9 +1130,6 @@ class SparseGqaImplForwardTest(unittest.TestCase):
                     selected[3, 0] = 8
                 elif corruption == "capacity_overflow":
                     impl.attn_inputs.prefix_lengths[0] = 2147483644
-                elif corruption == "unused_page":
-                    # Request 0 needs only two pages; the final column is unused.
-                    impl.attn_inputs.kv_cache_kernel_block_id_device[0, -1] = 1000
                 else:
                     impl.attn_inputs.kv_cache_kernel_block_id_device[1, 0] = 0
                 with patch.object(

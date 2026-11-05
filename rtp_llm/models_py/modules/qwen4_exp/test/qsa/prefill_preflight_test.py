@@ -5,9 +5,12 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.prefill_preflight import (
+    MainGeometryReceipt,
     main_geometry_preflight,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa import fmha_validation
+from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import SparseGqaFmhaImpl
+from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
 
 
 class PrefillPreflightTest(unittest.TestCase):
@@ -62,14 +65,65 @@ class PrefillPreflightTest(unittest.TestCase):
             with main_geometry_preflight(entries):
                 self.fail("Invalid live metadata entered the model body")
 
-    def test_bad_unused_page_is_rejected_before_any_receipt_is_published(self):
+    def test_only_visible_pages_are_required_before_publishing_receipts(self):
         entries = [self.fixture(), self.fixture()]
         entries[1][0].attn_inputs.kv_cache_kernel_block_id_device[0, -1] = 5
+        with main_geometry_preflight(entries):
+            self.assertEqual(self.validate(entries[1]), 4)
+        entries[1][0].attn_inputs.kv_cache_kernel_block_id_device[0, 1] = 5
         with self.assertRaisesRegex(RuntimeError, "out-of-range physical block"):
             with main_geometry_preflight(entries):
                 self.fail("Invalid page entered the model body")
         for impl, *_ in entries:
             self.assertIsNone(getattr(impl, "_model_prefill_geometry", None))
+
+    def test_decode_reuses_only_accepted_geometry_once_in_the_same_transaction(self):
+        impl, cache, bases, lengths = self.fixture()
+        impl.is_target_verify = True
+        impl.attn_inputs.input_lengths = lengths
+        table = impl.attn_inputs.kv_cache_kernel_block_id_device
+        checks = DeviceChecks()
+        self.assertEqual(
+            fmha_validation._validate_main_paged_geometry(
+                impl, cache, table, bases, lengths, cache.device, checks=checks
+            ),
+            4,
+        )
+        receipt = MainGeometryReceipt(impl, cache, table, bases, lengths, 4)
+
+        def consume():
+            return fmha_validation.consume_main_geometry(impl, cache, table, bases, 4)
+
+        impl._qsa_main_geometry = (receipt, checks, 4)
+        self.assertFalse(consume())
+        checks.verify()
+        impl._qsa_main_geometry = (receipt, checks, 4)
+        self.assertTrue(consume())
+        self.assertFalse(consume())
+
+        impl._qsa_main_geometry = (receipt, checks, 4)
+        SparseGqaFmhaImpl.begin_qsa_cache_transaction(impl)
+        self.assertFalse(consume())
+        impl._qsa_main_geometry = (receipt, checks, 4)
+        table[0, 1] = 0
+        self.assertFalse(consume())
+        with self.assertRaisesRegex(RuntimeError, "unallocated"):
+            self.validate((impl, cache, bases, lengths))
+
+    def test_failed_or_extended_checks_cannot_authorize_a_main_writer(self):
+        checks = DeviceChecks()
+        invalid = torch.tensor(False, device="cuda")
+        checks.add(invalid, "invalid metadata")
+        checks.verify()
+        self.assertTrue(checks.verified)
+        invalid.fill_(True)
+        with self.assertRaisesRegex(RuntimeError, "invalid metadata"):
+            checks.verify()
+        self.assertFalse(checks.verified)
+        invalid.fill_(False)
+        checks.verify()
+        checks.add(torch.tensor(False, device="cuda"), "new check")
+        self.assertFalse(checks.verified)
 
     def test_receipt_cleanup_after_model_failure_and_new_host_lengths(self):
         entry = self.fixture()

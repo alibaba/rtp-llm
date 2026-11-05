@@ -1,10 +1,7 @@
 """Complete official-FP8 to dense-FP8/routed-NVFP4 weight recipe."""
 
-from rtp_llm.config.quant_config import (
-    QWEN4_FP8_NVFP4_RECIPE,
-    Fp8BlockWiseQuantConfig,
-    ModelOptFp4Config,
-)
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.config.qwen4_exp_config import is_qwen4_precision_recipe
 from rtp_llm.model_loader.ffn_weight import MoeWeight
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.utils.model_weight import W
@@ -23,14 +20,7 @@ class Qwen4MoeFp4WeightInfo(ModelWeightInfo):
         self._vocab_storage = vocab_storage
 
     def to_quant_weight_info(self, quant_config):
-        if (
-            not isinstance(quant_config, ModelOptFp4Config)
-            or quant_config.model_recipe != QWEN4_FP8_NVFP4_RECIPE
-            or quant_config.is_quanted()
-            or quant_config.bits != 4
-            or quant_config.group_size() != 16
-            or quant_config.source_fp8_block_size != 128
-        ):
+        if not is_qwen4_precision_recipe(quant_config):
             raise ValueError(
                 "Qwen4 requires the complete FP8/NVFP4 recipe from official FP8 source"
             )

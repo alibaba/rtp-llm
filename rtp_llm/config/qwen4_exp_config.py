@@ -193,20 +193,25 @@ def freeze_runtime_config(config, parallelism):
     return snapshot
 
 
+def is_qwen4_precision_recipe(quant):
+    return (
+        isinstance(quant, ModelOptFp4Config)
+        and quant.model_recipe == QWEN4_FP8_NVFP4_RECIPE
+        and quant.bits == 4
+        and quant.group_size() == 16
+        and not quant.is_quanted()
+        and quant.source_fp8_block_size == 128
+        and quant.activation_amax == 32.0
+        and not quant.mixed_attention
+        and quant.require_contiguous_experts
+    )
+
+
 def build_qwen4_quant_config(quantization, source_fp8):
     requested = init_quant_config(quantization) if quantization else None
     full_fp8 = bool(source_fp8)
     if requested is not None and (
-        not isinstance(requested, ModelOptFp4Config)
-        or requested.model_recipe != QWEN4_FP8_NVFP4_RECIPE
-        or not full_fp8
-        or requested.bits != 4
-        or requested.group_size() != 16
-        or requested.is_quanted()
-        or requested.source_fp8_block_size != 128
-        or requested.activation_amax != 32.0
-        or requested.mixed_attention
-        or not requested.require_contiguous_experts
+        not full_fp8 or not is_qwen4_precision_recipe(requested)
     ):
         raise ValueError("qwen4_exp supports BF16 source or the QWEN4_FP8_NVFP4 recipe")
     if full_fp8:
@@ -257,14 +262,7 @@ def validate_qwen4_runtime(config, parallelism):
     quant = getattr(config, "quant_config", None)
     if full_fp8 and getattr(config, "tie_word_embeddings", False):
         raise RuntimeError("qwen4_exp FP8/NVFP4 requires untied word embeddings")
-    if full_fp8 and (
-        not isinstance(quant, ModelOptFp4Config)
-        or quant.model_recipe != QWEN4_FP8_NVFP4_RECIPE
-        or quant.is_quanted()
-        or quant.bits != 4
-        or quant.group_size() != 16
-        or quant.source_fp8_block_size != 128
-    ):
+    if full_fp8 and not is_qwen4_precision_recipe(quant):
         raise RuntimeError("qwen4_exp requires the complete FP8/NVFP4 precision recipe")
     if full_fp8 and int(getattr(parallelism, "ep_size", 1)) > int(
         parallelism.get_attn_tp_size()

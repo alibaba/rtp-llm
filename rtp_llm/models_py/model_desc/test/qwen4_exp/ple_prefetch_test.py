@@ -32,7 +32,7 @@ class Qwen4ExpPLEForwardPreparationTest(TestCase):
         model._layer_fmha_impl = lambda *args: None
         model.hyper_connection_mixer = lambda hidden: (hidden, None, None)
         model._start_eager_ple_prefetch = Mock(return_value={})
-        model._apply_ple = Mock(side_effect=lambda i, hidden, *args: hidden)
+        model._apply_ple = Mock(side_effect=lambda i, hidden, *args, **kwargs: hidden)
         events = []
         model.word_embedding = lambda frame: (
             events.append("embedding") or torch.zeros(frame.input_ids.numel(), _HIDDEN)
@@ -56,6 +56,7 @@ class Qwen4ExpPLEForwardPreparationTest(TestCase):
         ):
             for prefill in (False, True):
                 previous = None
+                previous_metadata_cache = None
                 for tokens in ([1, 2], [3, 4]):
                     with self.subTest(prefill=prefill, tokens=tokens):
                         events.clear()
@@ -75,6 +76,11 @@ class Qwen4ExpPLEForwardPreparationTest(TestCase):
                         prepare.assert_called_once_with(frame)
                         prepared = model._start_eager_ple_prefetch.call_args.args[2]
                         self.assertIs(model._apply_ple.call_args.args[2], prepared)
+                        metadata_cache = model._apply_ple.call_args.kwargs[
+                            "metadata_cache"
+                        ]
+                        self.assertIsInstance(metadata_cache, dict)
+                        self.assertIsNot(metadata_cache, previous_metadata_cache)
                         self.assertIsNot(prepared, previous)
                         self.assertEqual(prepared.tolist(), [tokens[0], 7])
                         self.assertEqual(frame.input_ids.tolist(), tokens)
@@ -83,6 +89,7 @@ class Qwen4ExpPLEForwardPreparationTest(TestCase):
                             ["embedding", "ids"] if prefill else ["ids", "embedding"],
                         )
                         previous = prepared
+                        previous_metadata_cache = metadata_cache
 
 
 class Qwen4ExpPLEPrefetchTest(PLERuntimeFixture, TestCase):

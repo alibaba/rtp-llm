@@ -196,6 +196,7 @@ class PLEExecution:
         input_ids: torch.Tensor,
         attention_inputs: Any,
         prefetch=None,
+        metadata_cache=None,
     ) -> torch.Tensor:
         ple = self.ple_layers[str(layer_idx)]
         state_inputs = select_attention_inputs_for_tag(attention_inputs, PLE_STATE_TAG)
@@ -209,7 +210,9 @@ class PLEExecution:
             is_target_verify != bool(ctx_inputs.is_target_verify)
             or bool(state_inputs.is_prefill) != bool(ctx_inputs.is_prefill)
             or any(
-                not self._same_metadata(state_inputs, ctx_inputs, name)
+                not self._same_metadata(
+                    state_inputs, ctx_inputs, name, cache=metadata_cache
+                )
                 for name in (
                     "input_lengths",
                     "prefix_lengths",

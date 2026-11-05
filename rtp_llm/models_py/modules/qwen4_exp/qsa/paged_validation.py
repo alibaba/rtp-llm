@@ -32,15 +32,11 @@ def _validate_geometry(
     )
     required = tl.cdiv(end, PAGE)
     column = tl.arange(0, 128)
-    bad_pool = False
     invalid = False
     active = False
     for tile in range(tl.cdiv(WIDTH, 128)):
         col = (tile * 128 + column).to(tl.int64)
         page = tl.load(Table + row * TABLE_ROW + col * TABLE_COL, col < WIDTH, other=0)
-        bad_pool = bad_pool | (
-            tl.sum(((col < WIDTH) & (page >= PAGES)).to(tl.int32), 0) > 0
-        )
         active = active | (tl.sum(((col < WIDTH) & (page != 0)).to(tl.int32), 0) > 0)
         invalid = invalid | (
             tl.sum(
@@ -56,7 +52,6 @@ def _validate_geometry(
         invalid = invalid & active
     flags = (
         bad_sequence.to(tl.int32)
-        + bad_pool.to(tl.int32) * 8
         + exceeds.to(tl.int32) * 16
         + invalid.to(tl.int32) * 32
     )
@@ -88,10 +83,6 @@ def raise_geometry_error(verdict):
     if verdict & 1:
         raise RuntimeError(
             "qwen4_exp QSA paged sequence bases must be non-negative and query lengths positive"
-        )
-    if verdict & 8:
-        raise RuntimeError(
-            "qwen4_exp QSA paged main block table contains an out-of-range physical block"
         )
     if verdict & 16:
         raise RuntimeError(

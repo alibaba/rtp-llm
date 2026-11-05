@@ -8,18 +8,23 @@ class DeviceChecks:
         self._checks = []
         self._flags = []
         self._offsets = []
+        self.verified = False
 
     def add(self, invalid, message, error_type=RuntimeError):
         self.add_flags(invalid, [message], error_type)
 
     def add_flags(self, flags, messages, error_type=RuntimeError):
+        self.verified = False
         self._offsets.append(len(self._checks))
         self._flags.append(flags)
         self._checks.extend((message, error_type) for message in messages)
 
     def verify(self, payload=None):
+        self.verified = False
         if not self._checks:
-            return None if payload is None else payload.tolist()
+            host_payload = None if payload is None else payload.tolist()
+            self.verified = True
+            return host_payload
         if len(self._checks) > 63:
             raise RuntimeError("too many QSA device checks in one invocation")
         if len(self._flags) == 1:
@@ -42,4 +47,5 @@ class DeviceChecks:
         for bit, (message, error_type) in enumerate(self._checks):
             if message is not None and host_verdict & (1 << bit):
                 raise error_type(message() if callable(message) else message)
+        self.verified = True
         return host_payload

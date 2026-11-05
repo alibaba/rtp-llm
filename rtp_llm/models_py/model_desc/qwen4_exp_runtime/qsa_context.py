@@ -205,7 +205,9 @@ class Qwen4ExpQSARuntimeContext:
         ):
             main_value = getattr(self.main_inputs, name, None)
             if any(
-                not _same_tensor_metadata(main_value, getattr(inputs, name, None))
+                not _same_tensor_metadata(
+                    main_value, getattr(inputs, name, None), cache=self.metadata_cache
+                )
                 for inputs in all_inputs[1:]
             ):
                 raise RuntimeError(

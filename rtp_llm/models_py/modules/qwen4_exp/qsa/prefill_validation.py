@@ -40,14 +40,13 @@ def _validate_packed_inputs(
         bad = tl.sum(((b < B) & ((end - start) != length)).to(tl.int32), 0) > 0
         bad = bad | (tl.load(Cu) != 0) | (tl.load(Cu + B) != N)
         tl.atomic_or(Flag, 1, bad, sem="relaxed")
-    # Each request checks its full table row once, including unused columns.
+    # Each request validates the physical pages in its visible KV range.
     if row < B:
         prefix = tl.load(Prefixes + row).to(tl.int64)
         length = tl.load(Lengths + row).to(tl.int64)
         # Widen before rounding up so large invalid prefixes cannot wrap.
         required = tl.cdiv(prefix + length, PAGE_SIZE)
         column = tl.arange(0, 128)
-        out_of_range = False
         invalid = False
         active = False
         for tile in range(tl.cdiv(WIDTH, 128)):
@@ -56,9 +55,6 @@ def _validate_packed_inputs(
                 Table + row.to(tl.int64) * TABLE_ROW + col * TABLE_COL,
                 col < WIDTH,
                 other=0,
-            )
-            out_of_range = out_of_range | (
-                tl.sum(((col < WIDTH) & (page >= PAGES)).to(tl.int32), 0) > 0
             )
             active = active | (
                 tl.sum(((col < WIDTH) & (page != 0)).to(tl.int32), 0) > 0
@@ -77,11 +73,7 @@ def _validate_packed_inputs(
         if PADDED:
             required = tl.where(active, required, 0)
             invalid = invalid & active
-        flags = (
-            out_of_range.to(tl.int32) * 8
-            + (required > WIDTH).to(tl.int32) * 16
-            + invalid.to(tl.int32) * 32
-        )
+        flags = (required > WIDTH).to(tl.int32) * 16 + invalid.to(tl.int32) * 32
         tl.atomic_or(Flag, flags, flags != 0, sem="relaxed")
     low = 0
     high = B
@@ -139,7 +131,7 @@ def validate_prefill_inputs(
         raise ValueError(
             "qwen4_exp incremental prefill cu_seqlens do not match input lengths"
         )
-    raise_geometry_error(flags & (8 | 16 | 32))
+    raise_geometry_error(flags & (16 | 32))
     if flags & 2:
         raise ValueError("selected indices may only use -1 as padding")
     if flags & 4:

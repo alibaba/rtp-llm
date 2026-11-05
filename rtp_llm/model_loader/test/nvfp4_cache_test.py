@@ -203,33 +203,45 @@ class Nvfp4CacheTest(unittest.TestCase):
                 save_file(changed, str(path), metadata=metadata)
                 self._assert_rebuilt(expected)
 
-    def test_read_permission_error_is_not_requantized(self):
-        self.cache.get_or_quantize(self.weight, **self.args)
+    def test_read_permission_error_requantizes(self):
+        expected = self.cache.get_or_quantize(self.weight, **self.args)
         with (
             mock.patch(
                 "rtp_llm.model_loader.nvfp4_cache.safe_open",
                 side_effect=PermissionError("cache is unreadable"),
             ),
             mock.patch(
-                "rtp_llm.model_loader.nvfp4_cache.quantize_expert_to_nvfp4"
+                "rtp_llm.model_loader.nvfp4_cache.quantize_expert_to_nvfp4",
+                wraps=quantize_expert_to_nvfp4,
             ) as quantize,
+            self.assertLogs(level="WARNING"),
         ):
-            with self.assertRaisesRegex(PermissionError, "cache is unreadable"):
-                self.cache.get_or_quantize(self.weight, **self.args)
-        quantize.assert_not_called()
+            got = self.cache.get_or_quantize(self.weight, **self.args)
+        quantize.assert_called_once()
+        for actual, reference in zip(got, expected):
+            torch.testing.assert_close(
+                actual.float(), reference.float(), atol=0, rtol=0
+            )
 
     @unittest.skipIf(os.geteuid() == 0, "requires non-root file permissions")
-    def test_unreadable_file_is_not_requantized(self):
-        self.cache.get_or_quantize(self.weight, **self.args)
+    def test_unreadable_file_requantizes(self):
+        expected = self.cache.get_or_quantize(self.weight, **self.args)
         path = next(Path(self.temp.name).glob("*.safetensors"))
         path.chmod(0)
         self.addCleanup(path.chmod, 0o600)
-        with mock.patch(
-            "rtp_llm.model_loader.nvfp4_cache.quantize_expert_to_nvfp4"
-        ) as quantize:
-            with self.assertRaises(OSError):
-                self.cache.get_or_quantize(self.weight, **self.args)
-        quantize.assert_not_called()
+        with (
+            mock.patch(
+                "rtp_llm.model_loader.nvfp4_cache.quantize_expert_to_nvfp4",
+                wraps=quantize_expert_to_nvfp4,
+            ) as quantize,
+            self.assertLogs(level="WARNING"),
+        ):
+            got = self.cache.get_or_quantize(self.weight, **self.args)
+        quantize.assert_called_once()
+        for actual, reference in zip(got, expected):
+            torch.testing.assert_close(
+                actual.float(), reference.float(), atol=0, rtol=0
+            )
 
     def test_failed_rebuild_preserves_entry_and_can_retry(self):
         expected = self.cache.get_or_quantize(self.weight, **self.args)

@@ -1163,11 +1163,17 @@ class Qwen4ExpModel(Qwen35Model):
         input_ids: torch.Tensor,
         attention_inputs: Any,
         prefetch=None,
+        metadata_cache=None,
     ) -> torch.Tensor:
         if str(layer_idx) not in self.ple_layers:
             return hyper_states
         return self._ple_execution()._apply_ple(
-            layer_idx, hyper_states, input_ids, attention_inputs, prefetch
+            layer_idx,
+            hyper_states,
+            input_ids,
+            attention_inputs,
+            prefetch,
+            metadata_cache,
         )
 
     def _attention_tag(self, layer_idx: int) -> str:
@@ -1464,6 +1470,7 @@ class Qwen4ExpModel(Qwen35Model):
                     hyper_states,
                     ple_input_ids,
                     attention_inputs,
+                    metadata_cache=qsa_metadata_cache,
                     **({"prefetch": ple_prefetch[i]} if i in ple_prefetch else {}),
                 )
             if self.kv_cache is None:
