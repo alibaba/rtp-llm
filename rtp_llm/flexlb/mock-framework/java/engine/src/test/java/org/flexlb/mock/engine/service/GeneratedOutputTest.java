@@ -5,9 +5,25 @@ import java.util.ArrayDeque;
 import java.util.concurrent.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.AfterEach;
 import static org.junit.jupiter.api.Assertions.*;
 
 class GeneratedOutputTest {
+    private final ManualDeadline deadlines = new ManualDeadline();
+    private static class ManualDeadline extends ScheduledThreadPoolExecutor {
+        Runnable expiration;
+        ManualDeadline() { super(1); setRemoveOnCancelPolicy(true); }
+        @Override public ScheduledFuture<?> schedule(Runnable action, long delay, TimeUnit unit) {
+            assertEquals(TimeUnit.MINUTES.toNanos(10), unit.toNanos(delay));
+            expiration = action;
+            return super.schedule(action, 1, TimeUnit.DAYS);
+        }
+    }
+    @AfterEach void closeDeadlines() { deadlines.shutdownNow(); }
+    private GeneratedOutput output(Executor executor) {
+        return new GeneratedOutput(executor, deadlines, 10000, ignored -> {});
+    }
+
     private static class Observer extends ServerCallStreamObserver<GenerateOutputsPB> {
         volatile boolean ready, cancelled, completed;
         Runnable onReady, onCancel;
@@ -36,7 +52,7 @@ class GeneratedOutputTest {
 
     @Test void lateFetchRetainsOnlyProgressAndBuildsBoundedFramesOnDemand() {
         var tasks = new ArrayDeque<Runnable>();
-        var output = new GeneratedOutput(tasks::add, 10000);
+        var output = output(tasks::add);
         for (int length = 1; length <= 100000; length++)
             output.advance(7, 42, length, AuxInfoPB.getDefaultInstance(), length == 100000);
         output.finish(null);
@@ -52,7 +68,7 @@ class GeneratedOutputTest {
 
     @Test void unwritableConsumerCoalescesAllUpdatesIntoOneSenderTask() {
         var tasks = new ArrayDeque<Runnable>(); var observer = new Observer();
-        var output = new GeneratedOutput(tasks::add, 10000); output.attach(observer, () -> {});
+        var output = output(tasks::add); output.attach(observer, () -> {});
         for (int n = 1; n <= 10000; n++) output.advance(7, 42, n, AuxInfoPB.getDefaultInstance(), n == 10000);
         assertEquals(1, tasks.size()); tasks.remove().run();
         assertEquals(0, observer.frames);
@@ -77,7 +93,7 @@ class GeneratedOutputTest {
         };
         observer.ready = true;
         try (var threads = Executors.newVirtualThreadPerTaskExecutor()) {
-            var output = new GeneratedOutput(threads, 10000); output.attach(observer, () -> {});
+            var output = output(threads); output.attach(observer, () -> {});
             output.advance(7, 42, 1, AuxInfoPB.getDefaultInstance(), false);
             assertTrue(entered.await(2, TimeUnit.SECONDS));
             assertTimeoutPreemptively(java.time.Duration.ofSeconds(1), () -> {
@@ -92,20 +108,74 @@ class GeneratedOutputTest {
     @Test void decodeFinalMarkerDoesNotRepeatThePrefillToken() {
         var tasks = new ArrayDeque<Runnable>(); var observer = new Observer();
         observer.ready = true; observer.received = 1;
-        var output = new GeneratedOutput(tasks::add, 10000); output.startAt(1); output.attach(observer, () -> {});
+        var output = output(tasks::add); output.startAt(1); output.attach(observer, () -> {});
         output.advance(7, 42, 1, AuxInfoPB.getDefaultInstance(), true); output.finish(null);
         tasks.remove().run();
         assertEquals(1, observer.received); assertEquals(1, observer.frames);
         assertEquals(1, observer.finals); assertTrue(observer.completed);
     }
 
+    @Test void completedUnwritableOutputExpiresAndRemovesRegistryEntry() {
+        var tasks = new ArrayDeque<Runnable>(); var observer = new Observer();
+        var registry = new java.util.HashMap<Long, GeneratedOutput>();
+        var output = new GeneratedOutput(tasks::add, deadlines, 10000, expired -> registry.remove(7L, expired));
+        registry.put(7L, output);
+        output.attach(observer, () -> fail("Output expiry must not cancel computation"));
+        output.advance(7, 42, 100, AuxInfoPB.getDefaultInstance(), true);
+        tasks.remove().run();
+        assertNull(deadlines.expiration); // No output timer during computation.
+        output.finish(null); tasks.remove().run();
+        assertNull(observer.failure); assertEquals(1, registry.size());
+        deadlines.expiration.run(); tasks.remove().run();
+        assertTrue(registry.isEmpty());
+        assertEquals(io.grpc.Status.Code.DEADLINE_EXCEEDED, io.grpc.Status.fromThrowable(observer.failure).getCode());
+        assertEquals(0, observer.frames); assertTrue(output.discardable());
+        observer.ready = true; observer.onReady.run(); assertTrue(tasks.isEmpty());
+    }
+
+    @Test void expirationCleansRegistryEvenWhileAWriteIsBlocked() throws Exception {
+        var entered = new CountDownLatch(1); var release = new CountDownLatch(1); var failed = new CountDownLatch(1);
+        var removed = new java.util.concurrent.atomic.AtomicBoolean();
+        var observer = new Observer() {
+            @Override public void onNext(GenerateOutputsPB value) {
+                entered.countDown();
+                try { assertTrue(release.await(3, TimeUnit.SECONDS)); }
+                catch (InterruptedException error) { throw new RuntimeException(error); }
+                super.onNext(value);
+            }
+            @Override public void onError(Throwable error) { super.onError(error); failed.countDown(); }
+        };
+        observer.ready = true;
+        try (var threads = Executors.newVirtualThreadPerTaskExecutor()) {
+            var output = new GeneratedOutput(threads, deadlines, 10000, expired -> removed.set(true));
+            output.attach(observer, () -> fail("Delivery expiry must not cancel computation"));
+            output.advance(7, 42, 1, AuxInfoPB.getDefaultInstance(), true);
+            assertTrue(entered.await(2, TimeUnit.SECONDS)); output.finish(null);
+            deadlines.expiration.run();
+            assertTrue(removed.get()); assertNull(observer.failure); // No concurrent observer calls.
+            release.countDown(); assertTrue(failed.await(2, TimeUnit.SECONDS));
+            assertEquals(io.grpc.Status.Code.DEADLINE_EXCEEDED, io.grpc.Status.fromThrowable(observer.failure).getCode());
+            assertFalse(observer.completed);
+        } finally { release.countDown(); }
+    }
+
+    @Test void deliveredOutputCancelsItsDeadlineAndCannotExpireLater() {
+        var tasks = new ArrayDeque<Runnable>(); var observer = new Observer(); observer.ready = true;
+        var output = new GeneratedOutput(tasks::add, deadlines, 10000, expired -> fail("Already delivered"));
+        output.attach(observer, () -> {});
+        output.advance(7, 42, 1, AuxInfoPB.getDefaultInstance(), true); output.finish(null);
+        tasks.remove().run();
+        assertTrue(observer.completed); assertTrue(deadlines.getQueue().isEmpty());
+        deadlines.expiration.run(); assertNull(observer.failure); assertTrue(tasks.isEmpty());
+    }
+
     @Test void cancellationAndErrorsDiscardUndeliveredProgress() {
         var tasks = new ArrayDeque<Runnable>(); var observer = new Observer();
-        var output = new GeneratedOutput(tasks::add, 10000); output.attach(observer, () -> {});
+        var output = output(tasks::add); output.attach(observer, () -> {});
         output.advance(7, 42, 10000, AuxInfoPB.getDefaultInstance(), false);
         var error = new IllegalStateException("failed"); output.finish(error); tasks.remove().run();
         assertSame(error, observer.failure); assertEquals(0, observer.frames); assertTrue(output.discardable());
-        var second = new GeneratedOutput(tasks::add, 10000); var cancelled = new Observer();
+        var second = output(tasks::add); var cancelled = new Observer();
         var notified = new java.util.concurrent.atomic.AtomicBoolean();
         second.attach(cancelled, () -> notified.set(true)); cancelled.cancelled = true; cancelled.onCancel.run();
         tasks.remove().run(); assertTrue(notified.get()); assertEquals(0, cancelled.frames);
