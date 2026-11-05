@@ -17,6 +17,9 @@ import org.flexlb.mock.cache.KvCache;
 import org.flexlb.mock.engine.TaskHistory;
 import org.flexlb.mock.cache.CacheSequence;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.io.TempDir;
 
 class RtpSchedulerTest {
@@ -61,6 +64,125 @@ class RtpSchedulerTest {
     private static void generate(Scheduler scheduler, Scheduler.Request request) {
         loaded(scheduler, request);
         scheduler.control(request, new Control.Generate(42));
+    }
+
+    private RtpConfig metricConfig(double tokensPerStep, double eos, int maxSequence) throws Exception {
+        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration("decode"));
+        var values = (ObjectNode) root.path("component").path("config");
+        values.put("seq_size_per_block", 2).put("concurrency_limit", 2).put("max_seq_len", maxSequence);
+        ((ObjectNode) values.path("mock.compute")).putObject("decode").put("tokens.per.step", tokensPerStep);
+        ((ObjectNode) values.path("mock.compute")).putObject("eos").put("probability", eos);
+        var path = directory.resolve("metric.json"); json.writeValue(path.toFile(), root);
+        return RtpConfig.load(path);
+    }
+    private static Scheduler.Input metricInput(long id, int maxNewTokens) {
+        var base = input(id, false);
+        return new Scheduler.Input(base.identity(), id, 0, 5, maxNewTokens, 0, base.started(), base.deadline(),
+            base.cacheSequence(), false, false, 0, false, false);
+    }
+    private static String completeAndCheckTpot(RtpFifoScheduler scheduler, Scheduler.Work work, RtpConfig config,
+                                               String beforeMetrics, long beforeSchedule, long afterSchedule, int accepted, int streams) throws Exception {
+        // Leave a measurable execution interval so using truncated output or the wrong
+        // stream population cannot accidentally satisfy the clock-bound assertions.
+        Thread.sleep(20);
+        long beforeComplete = System.nanoTime();
+        complete(scheduler, work, config);
+        long afterComplete = System.nanoTime();
+        var text = scheduler.metrics().scrape();
+        double tpot = eventMeanDelta(beforeMetrics, text, "rtp_llm_sp_estimate_tpot_us");
+        assertTrue(tpot >= (beforeComplete - afterSchedule) / 1000.0 * streams / accepted, text);
+        assertTrue(tpot <= (afterComplete - beforeSchedule) / 1000.0 * streams / accepted, text);
+        assertFalse(text.contains("mock_decode_estimate_tpot_us"));
+        assertFalse(text.contains("mock_forward_batch_prepare_us"));
+        double gather = eventMeanDelta(beforeMetrics, text, "rtp_llm_gather_model_input_us");
+        assertTrue(gather >= 0 && gather <= (afterSchedule - beforeSchedule) / 1000.0, text);
+        drain(scheduler);
+        return text;
+    }
+
+    private static double eventMeanDelta(String before, String after, String name) {
+        double oldCount = before.contains(name + "_count{") ? RtpMetricsTest.sample(before, name + "_count", "") : 0;
+        double oldSum = before.contains(name + "_sum{") ? RtpMetricsTest.sample(before, name + "_sum", "") : 0;
+        double count = RtpMetricsTest.sample(after, name + "_count", "") - oldCount;
+        assertEquals(1, count, name);
+        return (RtpMetricsTest.sample(after, name + "_sum", "") - oldSum) / count;
+    }
+
+    @ParameterizedTest
+    @CsvSource({"0,3,128,2", "1,5,128,1", "0,5,7,1"})
+    void eosOutputLimitAndSequenceLimitDoNotReplaceAcceptanceWithDeliveredTokens(
+            double eos, int maxNewTokens, int maxSequence, int delivered) throws Exception {
+        var config = metricConfig(4, eos, maxSequence); var listener = new Listener();
+        try (var cache = new KvCache(config.blockSize(), 32, 0);
+             var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
+            var request = scheduler.input(metricInput(1, maxNewTokens), listener);
+            scheduler.maintain(); drain(scheduler); generate(scheduler, request);
+            var beforeMetrics = scheduler.metrics().scrape();
+            long before = System.nanoTime(); var work = scheduler.schedule(); long after = System.nanoTime();
+            var text = completeAndCheckTpot(scheduler, work, config, beforeMetrics, before, after, 4, 1);
+            assertEquals(delivered, RtpMetricsTest.sample(text, "rtp_llm_forward_tokens_total", "kind=\"output\""));
+            assertEquals(1 + delivered, request.snapshot().generated());
+            assertNull(listener.terminal.get(1, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test void completedBatchIncludesCancelledStreamAcceptanceButNeverPublishesItsOutput() throws Exception {
+        var config = metricConfig(2.6, 0, 128); var listener = new Listener();
+        try (var cache = new KvCache(config.blockSize(), 64, 0);
+             var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
+            var first = scheduler.input(metricInput(1, 20), new Listener());
+            scheduler.maintain(); drain(scheduler); generate(scheduler, first);
+            complete(scheduler, scheduler.schedule(), config); drain(scheduler);
+            complete(scheduler, scheduler.schedule(), config); drain(scheduler);
+            var second = scheduler.input(metricInput(2, 20), listener);
+            scheduler.maintain(); drain(scheduler); generate(scheduler, second);
+            var beforeMetrics = scheduler.metrics().scrape();
+            long before = System.nanoTime(); var work = scheduler.schedule(); long after = System.nanoTime();
+            scheduler.finish(second, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel during forward"));
+            // First stream is in Decode round 2 (two tokens), second in round 0 (three).
+            var text = completeAndCheckTpot(scheduler, work, config, beforeMetrics, before, after, 5, 2);
+            assertEquals(9, first.snapshot().generated());
+            assertEquals(1, second.snapshot().generated());
+            assertEquals(8, RtpMetricsTest.sample(text, "rtp_llm_forward_tokens_total", "kind=\"output\""));
+            assertEquals(RequestFailure.Reason.CANCELLED, listener.terminal.get(1, TimeUnit.SECONDS).reason());
+        }
+    }
+
+    @ParameterizedTest @ValueSource(booleans = {true, false})
+    void allCancelledBatchReportsTpotOnlyIfComputationCompleted(boolean completed) throws Exception {
+        var config = metricConfig(4, 0, 128);
+        try (var cache = new KvCache(config.blockSize(), 32, 0);
+             var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
+            var request = scheduler.input(metricInput(1, 20), new Listener());
+            scheduler.maintain(); drain(scheduler); generate(scheduler, request);
+            var beforeMetrics = scheduler.metrics().scrape();
+            long before = System.nanoTime(); var work = scheduler.schedule(); long after = System.nanoTime();
+            scheduler.finish(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel all"));
+            assertTrue(scheduler.cancelled(work));
+            if (completed) {
+                var text = completeAndCheckTpot(scheduler, work, config, beforeMetrics, before, after, 4, 1);
+                assertEquals(0, RtpMetricsTest.sample(text, "rtp_llm_forward_tokens_total", "kind=\"output\""));
+            } else {
+                var sample = config.compute().plan(config.role(), config.id(), work.batch());
+                scheduler.computeCompleted(work, new SimulatedCompute.Outcome(SimulatedCompute.State.CANCELLED, sample, 0));
+                drain(scheduler);
+                assertFalse(scheduler.metrics().scrape().contains("rtp_llm_sp_estimate_tpot_us_count{"));
+            }
+        }
+    }
+
+    @Test void cancelledBeforeSelectionDoesNotProduceStepMetrics() throws Exception {
+        var config = metricConfig(4, 0, 128);
+        try (var cache = new KvCache(config.blockSize(), 32, 0);
+             var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
+            var request = scheduler.input(metricInput(1, 20), new Listener());
+            scheduler.finish(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel before selection"));
+            drain(scheduler);
+            assertNull(scheduler.schedule());
+            var text = scheduler.metrics().scrape();
+            assertFalse(text.contains("rtp_llm_sp_estimate_tpot_us_count{"));
+            assertFalse(text.contains("rtp_llm_gather_model_input_us_count{"));
+        }
     }
 
     @Test void retainedPrefillKeepsKvThroughReadUntilTransferAcknowledgement() throws Exception {
@@ -620,7 +742,7 @@ class RtpSchedulerTest {
                     assertEquals(3, RtpMetricsTest.mean(metrics, "rtp_llm_sp_total_accepted_token_num", ""));
                     assertEquals(2, RtpMetricsTest.sample(metrics, "rtp_llm_forward_tokens_total", "kind=\"output\""));
                 } else {
-                    assertFalse(metrics.contains("rtp_llm_sp_"));
+                    assertFalse(metrics.contains("rtp_llm_sp_total_propose_token_num"));
                 }
                 assertEquals(16, cache.snapshot(0, false).freeBlocks());
             }

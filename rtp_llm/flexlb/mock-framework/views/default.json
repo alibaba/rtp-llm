@@ -1381,7 +1381,7 @@
         {
           "id": 100159,
           "type": "timeseries",
-          "title": "ForwardBatch 输入准备耗时（Mock）",
+          "title": "gather model input rt",
           "gridPos": {
             "x": 0,
             "y": 83,
@@ -1395,7 +1395,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(mock_forward_batch_prepare_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "avg by(${prefill_group})(rtp_llm_gather_model_input_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -1444,7 +1444,7 @@
               ]
             }
           },
-          "description": "Mock 构造本轮 ForwardBatch 的实际耗时，单位 µs。",
+          "description": "构造本轮 Forward 输入的耗时，不包含选批、KV 准备和模拟 Forward。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -9101,7 +9101,7 @@
         {
           "id": 200159,
           "type": "timeseries",
-          "title": "ForwardBatch 输入准备耗时（Mock）",
+          "title": "gather model input rt",
           "gridPos": {
             "x": 0,
             "y": 701,
@@ -9115,7 +9115,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(mock_forward_batch_prepare_us{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "avg by(${decode_group})(rtp_llm_gather_model_input_us{instance=~\"${decode_instance}\",role=\"decode\"})",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -9164,7 +9164,7 @@
               ]
             }
           },
-          "description": "Mock 构造本轮 ForwardBatch 的实际耗时，单位 µs。",
+          "description": "构造本轮 Forward 输入的耗时，不包含选批、KV 准备和模拟 Forward。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -12502,81 +12502,6 @@
             }
           },
           "description": ""
-        },
-        {
-          "id": 810123,
-          "type": "timeseries",
-          "title": "Decode TPOT（步耗时估计）",
-          "gridPos": {
-            "x": 0,
-            "y": 926,
-            "w": 12,
-            "h": 9
-          },
-          "datasource": {
-            "type": "prometheus",
-            "uid": "mock-prometheus"
-          },
-          "targets": [
-            {
-              "refId": "A",
-              "expr": "avg by(${decode_group})(mock_decode_estimate_tpot_us{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · {{${decode_group}}}",
-              "datasource": {
-                "type": "prometheus",
-                "uid": "mock-prometheus"
-              }
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "µs",
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "drawStyle": "line",
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "fillOpacity": 0,
-                "showPoints": "auto",
-                "spanNulls": false
-              },
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green",
-                    "value": null
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "options": {
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            },
-            "legend": {
-              "displayMode": "table",
-              "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
-            }
-          },
-          "description": "Mock Decode 步耗时 ÷ 每条产出请求本轮提交的平均 token 数。",
-          "links": [
-            {
-              "title": "RTP-LLM 原面板",
-              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=10112",
-              "targetBlank": true
-            }
-          ]
         },
         {
           "id": 200225,

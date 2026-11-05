@@ -55,7 +55,7 @@ abstract class AbstractRtpScheduler implements Scheduler {
 
     }
     private record Member(Entry request, RequestState.Use use, ComputeModel.Plan step) {}
-    private record Batch(List<Member> members, long scheduleStarted, long stepStarted) {}
+    private record Batch(List<Member> members, long scheduleStarted, long stepStarted, long inputStarted) {}
     private record Notice(Runnable action, boolean terminal) {}
 
     AbstractRtpScheduler(Object lock, RtpConfig config, KvCache cache, TaskHistory history) {
@@ -157,14 +157,8 @@ abstract class AbstractRtpScheduler implements Scheduler {
             }
         }
         if (selected.isEmpty()) return null;
-        long prepareStarted = System.nanoTime();
         var members = new ArrayList<Member>();
-        var items = new ArrayList<ForwardBatch.Request>();
         for (var entry : selected) {
-            var progress = entry.state.snapshot();
-            int tokens = prefill() ? entry.input.tokens() - entry.reused : entry.nextStep.verifyTokens();
-            items.add(new ForwardBatch.Request(entry.input.identity(), entry.input.tokens(), entry.reused,
-                prefill() ? 1 : entry.input.maxNewTokens(), progress.generated(), tokens, entry.input.priority(), List.of()));
             members.add(new Member(entry, entry.state.forward(), entry.nextStep));
             long now = System.nanoTime();
             if (entry.firstRunning == 0) {
@@ -173,8 +167,17 @@ abstract class AbstractRtpScheduler implements Scheduler {
             }
             entry.phase = FORWARD;
         }
+        long prepareStarted = System.nanoTime();
+        var items = new ArrayList<ForwardBatch.Request>();
+        for (var member : members) {
+            var entry = member.request();
+            int tokens = prefill() ? entry.input.tokens() - entry.reused : member.step().verifyTokens();
+            items.add(new ForwardBatch.Request(entry.input.identity(), entry.input.tokens(), entry.reused,
+                prefill() ? 1 : entry.input.maxNewTokens(), member.step().request().generated(), tokens,
+                entry.input.priority(), List.of()));
+        }
         var batch = new ForwardBatch(config.id() + "/" + ++batchSequence, List.of(new ForwardBatch.Partition(0, items)));
-        executing = new Work(new Batch(List.copyOf(members), scheduleStarted, System.nanoTime()), batch);
+        executing = new Work(new Batch(List.copyOf(members), scheduleStarted, System.nanoTime(), prepareStarted), batch);
         metrics.batchPrepared(System.nanoTime() - prepareStarted);
         return executing;
     }
@@ -253,7 +256,8 @@ abstract class AbstractRtpScheduler implements Scheduler {
 
     @Override public void computeCompleted(Work work, SimulatedCompute.Outcome outcome) {
         var batch = completedBatch(work);
-        long input = 0, computed = 0, output = 0, outputStreams = 0, maxSequence = 0;
+        long input = 0, computed = 0, output = 0, candidateTokens = 0, maxSequence = 0;
+        long tpotStepNanos = System.nanoTime() - batch.inputStarted();
         long proposed = 0, accepted = 0, speculativeStreams = 0;
         try {
             for (var member : batch.members()) {
@@ -261,23 +265,26 @@ abstract class AbstractRtpScheduler implements Scheduler {
                 maxSequence = Math.max(maxSequence, (long) entry.input.tokens() + member.step().request().generated());
                 input += prefill() ? entry.input.tokens() : member.step().verifyTokens();
                 computed += prefill() ? entry.input.tokens() - entry.reused : member.step().verifyTokens();
+                ComputeModel.Result result = null;
+                if (outcome.state() == SimulatedCompute.State.COMPLETED) {
+                    result = config.compute().completed(member.step());
+                    candidateTokens += result.candidates();
+                    if (member.step().progress().proposedTokens() > 0) {
+                        proposed += member.step().progress().proposedTokens();
+                        accepted += result.candidates();
+                        speculativeStreams++;
+                    }
+                }
                 if (!live(entry)) continue;
                 if (outcome.state() != SimulatedCompute.State.COMPLETED) {
                     finish(entry, new RequestFailure(CANCELLED, "Forward cancelled"));
                     continue;
                 }
-                var result = config.compute().completed(member.step());
                 int committed = result.committedTokens();
-                if (member.step().progress().proposedTokens() > 0) {
-                    proposed += member.step().progress().proposedTokens();
-                    accepted += result.candidates();
-                    speculativeStreams++;
-                }
                 entry.state.commit(committed, outcome.elapsedNanos());
                 if (committed > 0 && entry.firstToken == 0) entry.firstToken = System.nanoTime();
                 entry.nextStep = null;
                 output += committed;
-                if (committed > 0) outputStreams++;
                 if (prefill()) { running.remove(entry); entry.phase = READY; entry.prefillFinished = result.finished(); }
                 emit(entry, committed, result.finished());
             }
@@ -287,7 +294,7 @@ abstract class AbstractRtpScheduler implements Scheduler {
                 metrics.stepCompleted(new RtpMetrics.StepStats(prefill() ? size : 0, prefill() ? 0 : size,
                     maxSequence, completed - batch.scheduleStarted(), completed - batch.stepStarted(),
                     outcome.elapsedNanos(), outcome.sample().planned().toNanos(), input, computed, output,
-                    proposed, accepted, speculativeStreams, outputStreams));
+                    proposed, accepted, speculativeStreams, candidateTokens, tpotStepNanos));
             }
         } finally { batch.members().forEach(member -> member.use().close()); }
     }

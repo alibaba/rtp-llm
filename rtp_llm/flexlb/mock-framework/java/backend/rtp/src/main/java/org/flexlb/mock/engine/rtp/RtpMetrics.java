@@ -23,7 +23,7 @@ final class RtpMetrics {
 
     record StepStats(int context, int generate, long maxSequence, long scheduleToCompletionNanos, long stepNanos,
                      long forwardNanos, long plannedNanos, long input, long computed, long output,
-                     long proposed, long accepted, long speculativeStreams, long outputStreams) {}
+                     long proposed, long accepted, long speculativeStreams, long candidateTokens, long tpotStepNanos) {}
 
     public record State(long waiting, long running, long loading, long ready, long totalTokens, long availableTokens,
                         long freeTokens, long heldTokens, int blockSize) {
@@ -211,7 +211,7 @@ final class RtpMetrics {
         events.observe("rtp_llm_kv_cache_evicted_block_lifetime_ms", nanos / 1_000_000.0,
             Map.of("tier", "DEVICE", "trigger_type", "force_drop", "group_type", "full"));
     }
-    void batchPrepared(long nanos) { events.observe("mock_forward_batch_prepare_us", nanos / 1000.0); }
+    void batchPrepared(long nanos) { positiveMicros("rtp_llm_gather_model_input_us", nanos); }
     void streamingFinished(boolean streaming) {
         events.increment(streaming ? "rtp_llm_is_streaming_qps" : "rtp_llm_not_streaming_qps");
     }
@@ -242,12 +242,13 @@ final class RtpMetrics {
         if (step.forwardNanos() < 0 || step.plannedNanos() < 0 || step.input() < 0 || step.computed() < 0
             || step.computed() > step.input() || step.output() < 0 || executionNanos < 0 || step.stepNanos() < 0
             || step.proposed() < 0 || step.accepted() < 0 || step.speculativeStreams() < 0
+            || step.candidateTokens() < 0 || step.tpotStepNanos() < 0
             || (step.proposed() > 0 && (step.speculativeStreams() == 0 || step.accepted() < step.speculativeStreams())))
             throw new IllegalArgumentException("Invalid step observation");
         recordBatch(step.context(), step.generate(), step.proposed() > 0 ? step.accepted() : step.computed(), step.maxSequence());
         recordStepLatency(step.stepNanos(), step.proposed(), step.accepted(), step.speculativeStreams());
-        if (!prefill && step.output() > 0 && step.outputStreams() > 0)
-            events.observe("mock_decode_estimate_tpot_us", step.stepNanos() / 1000.0 * step.outputStreams() / step.output());
+        if (!prefill && step.generate() > 0 && step.candidateTokens() > 0)
+            events.observe("rtp_llm_sp_estimate_tpot_us", step.tpotStepNanos() / 1000.0 * step.generate() / step.candidateTokens());
         long tpsTokens = prefill ? step.computed() : step.proposed() > 0 ? step.accepted() : step.output();
         recordForward(step, executionNanos, tpsTokens);
     }
@@ -263,7 +264,6 @@ final class RtpMetrics {
         events.observe("rtp_llm_sp_avg_accept_token_num", acceptedPerStream);
         events.observe("rtp_llm_sp_avg_accept_rate", (double) accepted / (proposed + speculativeStreams));
         events.observe("rtp_llm_sp_avg_fix_accept_rate", (double) (accepted - speculativeStreams) / proposed);
-        events.observe("rtp_llm_sp_estimate_tpot_us", micros / acceptedPerStream);
     }
 
     private void recordForward(StepStats step, long executionNanos, long tpsTokens) {
