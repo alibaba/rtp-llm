@@ -73,7 +73,6 @@ class RtpSchedulerTest {
             assertFalse(listener.terminal.isDone()); assertEquals(5, cache.snapshot(0, false).availableBlocks());
             assertThrows(RequestFailure.class, () -> scheduler.control(request, RtpControl.TRANSFER_ACKNOWLEDGED));
             var read = scheduler.beginTransfer(request);
-            scheduler.transferCompleted(request, new RtpTransferResult(false, null));
             scheduler.control(request, RtpControl.TRANSFER_ACKNOWLEDGED);
             assertEquals(5, cache.snapshot(0, false).availableBlocks()); assertFalse(listener.terminal.isDone());
             read.close(); drain(scheduler);

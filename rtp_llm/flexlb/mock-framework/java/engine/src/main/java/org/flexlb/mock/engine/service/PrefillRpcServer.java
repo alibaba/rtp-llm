@@ -8,7 +8,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler.RtpControl;
-import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler.RtpTransferResult;
 import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.engine.execution.RtpEngineLoop;
@@ -225,11 +224,7 @@ final class PrefillRpcServer implements AutoCloseable {
         try { return engine.beginTransfer(session.request); }
         catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
     }
-    void transferCompleted(Session session, RtpTransferResult result) {
-        try { engine.transferCompleted(session.request, result); }
-        catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
-    }
-    void transferred(Session session) {
+    private void acknowledgeLoad(Session session) {
         try { engine.control(session.request, RtpControl.TRANSFER_ACKNOWLEDGED); }
         catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
     }
@@ -483,8 +478,7 @@ final class PrefillRpcServer implements AutoCloseable {
                     throw Status.DATA_LOSS.withDescription("Invalid LOAD acknowledgement").asRuntimeException();
                 synchronized (this) {
                     if (terminal) return;
-                    transferCompleted(source, new RtpTransferResult(prefillFinished, null));
-                    transferred(source);
+                    acknowledgeLoad(source);
                     transferUse.close(); transferUse = null;
                 }
                 if (prefillFinished) stream.onNext(frame(RemoteStage.PREFILL_COMPLETE));

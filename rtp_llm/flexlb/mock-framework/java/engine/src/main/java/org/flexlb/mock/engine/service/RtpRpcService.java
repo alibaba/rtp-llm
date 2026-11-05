@@ -85,7 +85,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
 
     @Override public void enqueueBatch(EnqueueBatchRequestPB request, StreamObserver<EnqueueBatchResponsePB> response) {
         if (prefill == null || !groups) { super.enqueueBatch(request, response); return; }
-        PrefillBatch.enqueue(prefill, request, response);
+        PrefillEnqueueHandler.enqueue(prefill, request, response);
     }
 
     @Override public void enqueueGroup(EnqueueGroupRequestPB request, StreamObserver<EnqueueBatchResponsePB> response) {
@@ -96,7 +96,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
             if (item.hasInput()) external.setInput(item.getInput());
             slot.addRequests(external);
         }
-        PrefillBatch.enqueue(prefill, EnqueueBatchRequestPB.newBuilder().setBatchId(request.getBatchId())
+        PrefillEnqueueHandler.enqueue(prefill, EnqueueBatchRequestPB.newBuilder().setBatchId(request.getBatchId())
             .setFetchAttachTimeoutMs(request.getFetchAttachTimeoutMs()).addDpSlots(slot).build(), response);
     }
 
