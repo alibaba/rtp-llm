@@ -243,7 +243,9 @@ class Glm53CollectiveGemmTest(unittest.TestCase):
         from rtp_llm.models_py.distributed import glm53_collective_gemm
 
         workspace = glm53_collective_gemm._STATE.workspace
-        alias = workspace.buffer[workspace._data_offset_bytes :][:8192]
+        alias = workspace.buffer[glm53_collective_gemm._STATE.data_offset_bytes :][
+            :8192
+        ]
         alias = alias.view(torch.bfloat16).reshape(1, 4096)
         with self.assertRaisesRegex(ValueError, "alias"):
             reduce_scatter_glm53(alias)

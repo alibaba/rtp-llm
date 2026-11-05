@@ -23,6 +23,8 @@ class _State:
     gemm_reduce_scatter: bool = False
     stable_reduce_scatter: bool = False
     peer_pointers: Optional[torch.Tensor] = None
+    data_offset_bytes: int = 0
+    reduce_partials: Any = None
 
 
 _STATE: Optional[_State] = None
@@ -65,6 +67,8 @@ def configure_glm53_collective_gemm(group, hidden: int) -> None:
     symm_mem.enable_symm_mem_for_group(group.group_name)
     deep_gemm = workspace = None
     peer_pointers = None
+    data_offset_bytes = 0
+    reduce_partials = None
     if rs or stable_rs:
         import deep_gemm
 
@@ -76,12 +80,30 @@ def configure_glm53_collective_gemm(group, hidden: int) -> None:
             group, max_m=max_tokens, n=hidden, device=torch.cuda.current_device()
         )
         if stable_rs:
+            # Both supported workspace ABIs store the rank-major BF16 payload
+            # after the control region. Do not depend on a private Python field
+            # removed in DeepGEMM 2.8.2.
+            data_offset_bytes = (
+                workspace.num_bytes - max_tokens * hidden * torch.bfloat16.itemsize
+            )
+            if data_offset_bytes < 128 or data_offset_bytes % 128:
+                raise RuntimeError("Unsupported GLM stable RS workspace layout")
+            reduce_partials = getattr(deep_gemm._C, "gemm_rs_reduce", None)
+            if reduce_partials is None:
+                reduce_partials = getattr(deep_gemm._C, "bf16_gemm_rs_reduce", None)
+            if not callable(reduce_partials):
+                raise RuntimeError("DeepGEMM is missing the GEMM/RS reduction binding")
             peer_pointers = torch.tensor(
                 workspace.buffer_ptrs, dtype=torch.uint64, device=workspace.device
             )
             # The first model forward may use another stream. Reuse the same
             # handoff contract as GEMM/RS for pointer-table initialization.
-            workspace._last_stream = torch.cuda.current_stream(workspace.device)
+            stream = torch.cuda.current_stream(workspace.device)
+            completion = getattr(workspace, "_completion_event", None)
+            if completion is not None:
+                completion.record(stream)
+            else:
+                workspace._last_stream = stream
     _STATE = _State(
         group,
         max_tokens,
@@ -92,6 +114,8 @@ def configure_glm53_collective_gemm(group, hidden: int) -> None:
         gemm_reduce_scatter=rs,
         stable_reduce_scatter=stable_rs,
         peer_pointers=peer_pointers,
+        data_offset_bytes=data_offset_bytes,
+        reduce_partials=reduce_partials,
     )
 
 
@@ -151,7 +175,12 @@ def reduce_scatter_glm53(tensor: torch.Tensor) -> torch.Tensor:
     with torch.profiler.record_function("RTP::glm53.prefill.stable_reduce_scatter"):
         with workspace._launch_lock, torch.cuda.device(workspace.device):
             stream = torch.cuda.current_stream(workspace.device)
-            if workspace._last_stream is not None and workspace._last_stream != stream:
+            completion = getattr(workspace, "_completion_event", None)
+            if completion is not None:
+                stream.wait_event(completion)
+            elif (
+                workspace._last_stream is not None and workspace._last_stream != stream
+            ):
                 stream.wait_stream(workspace._last_stream)
             source.record_stream(stream)
             publish_glm53_partials[grid](
@@ -160,17 +189,20 @@ def reduce_scatter_glm53(tensor: torch.Tensor) -> torch.Tensor:
                 local_numel,
                 world,
                 workspace.rank,
-                workspace._data_offset_bytes,
+                state.data_offset_bytes,
                 block,
             )
             # These release/acquire-system barriers publish remote stores and
             # prevent the next GEMM/RS or RS from overwriting unconsumed partials.
             workspace._barrier(0)
-            state.deep_gemm._C.bf16_gemm_rs_reduce(
+            state.reduce_partials(
                 output, workspace.buffer, world, physical, state.hidden
             )
             workspace._barrier(1)
-            workspace._last_stream = stream
+            if completion is not None:
+                completion.record(stream)
+            else:
+                workspace._last_stream = stream
     return output
 
 
