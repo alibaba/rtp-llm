@@ -6,6 +6,8 @@ import torch
 
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import INDEXER_STATE_TAG
 
+from .state_cache_inputs import prepare_state_cache_inputs
+
 
 def draft_graph_lanes(inputs, token_capacity):
     batch = inputs.input_lengths_device.numel()
@@ -54,11 +56,14 @@ class DraftPrefillGraphReplay(Mapping):
     model-wide callback with all cache groups, rather than each FMHA separately.
     """
 
-    def __init__(self, impls, bounds, position_factor, token_capacity):
+    def __init__(
+        self, impls, bounds, position_factor, token_capacity, state_cache=None
+    ):
         self.impls = impls
         self.bounds = bounds
         self.position_factor = position_factor
         self.token_capacity = token_capacity
+        self.state_cache = state_cache
 
     def __getitem__(self, key):
         return self.impls[key]
@@ -70,6 +75,7 @@ class DraftPrefillGraphReplay(Mapping):
         return len(self.impls)
 
     def prepare_cuda_graph(self, groups):
+        groups = prepare_state_cache_inputs(groups, self.state_cache)
         anchor = groups[next(iter(self.impls))]
         lengths = anchor.input_lengths
         prefixes = anchor.prefix_lengths
@@ -106,8 +112,8 @@ class DraftPrefillGraphReplay(Mapping):
             ) or not torch.equal(inputs.prefix_lengths, anchor.prefix_lengths):
                 raise RuntimeError("QSA draft graph cache groups disagree on lengths")
             if tag == INDEXER_STATE_TAG:
-                # The graph runner refreshes the raw state table on device;
-                # unlike kernel tables, it has no refreshed host mirror.
+                # The model's state view derives physical pages from the
+                # refreshed kernel table; do not use a stale host mirror.
                 state_geometry = (inputs.kv_cache_block_id_device, pool_size, page_size)
                 continue
             table = inputs.kv_cache_kernel_block_id

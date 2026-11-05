@@ -44,6 +44,9 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_transaction import (
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
     Qwen4ExpQSARuntimeContext,
 )
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.state_cache_inputs import (
+    prepare_state_cache_inputs,
+)
 from rtp_llm.models_py.modules import FMHAImplBase
 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     ZeroCenteredFusedQKRMSNorm,
@@ -1443,6 +1446,7 @@ class Qwen4ExpModel(Qwen35Model):
                 if target_hidden is not None
                 else PyModelOutputs(hidden)
             )
+        attention_inputs = prepare_state_cache_inputs(attention_inputs, self.kv_cache)
         side_cache_writers = (
             prepare_side_cache_store_writers(
                 attention_inputs, self.kv_cache, layer_count=len(self.layers)
@@ -1491,7 +1495,6 @@ class Qwen4ExpModel(Qwen35Model):
             else prepared_hyper
         )
 
-        attention_inputs = get_attention_inputs_value(inputs)
         ple_input_ids = inputs.input_ids
         if self.ple_layers:
             ple_input_ids = self._ple_input_ids(inputs)

@@ -4,6 +4,12 @@ package(default_visibility = ["//visibility:public"])
 
 exports_files(["test_main.py"])
 
+qwen4_test(
+    name = "state_cache_inputs_test",
+    src = "state_cache_inputs_test.py",
+    gpu = "L20_CU13",
+)
+
 # Keep the standalone grouped-FP8 kernel test free of the native-engine testlib.
 py_library(
     name = "sparse_paged_reference",

@@ -235,6 +235,7 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
             bounds,
             self.cuda_graph_position_id_len_factor(),
             int(inputs.input_ids.numel()),
+            state_cache=self.kv_cache,
         )
 
     def _build_attn_meta(self, inputs, device, is_cuda_graph=False):

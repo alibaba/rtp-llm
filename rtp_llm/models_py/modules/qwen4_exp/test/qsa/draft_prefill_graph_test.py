@@ -115,6 +115,30 @@ class DraftPrefillGraphTest(unittest.TestCase):
             hook.prepare_cuda_graph(groups)
         delegate.prepare_cuda_graph.assert_not_called()
 
+    def test_replay_resolves_state_pages_from_refreshed_kernel_table(self):
+        hook, groups, delegate = self._replay()
+        state = groups[INDEXER_STATE_TAG]
+        physical = state.kv_cache_block_id_device
+        expanded = physical[..., None] * 2 + torch.arange(2, dtype=torch.int32)
+        state.kv_cache_kernel_block_id_device = torch.where(
+            physical[..., None] > 0, expanded, 0
+        ).flatten(1)
+        state.kv_cache_block_id_device = None
+        state.kv_cache_block_id = torch.zeros_like(physical)
+        state.is_cuda_graph = True
+        hook.state_cache = SimpleNamespace(
+            get_seq_size_per_block=lambda tag: 256,
+            get_kernel_seq_size_per_block=lambda tag: 128,
+        )
+        hook.bounds[-1] = (INDEXER_STATE_TAG, 12, 256, False)
+        hook.prepare_cuda_graph(groups)
+        delegate.prepare_cuda_graph.assert_called_once_with(groups["full"])
+        delegate.reset_mock()
+        state.kv_cache_kernel_block_id_device[1, :2].zero_()
+        with self.assertRaisesRegex(RuntimeError, "raw-state pages"):
+            hook.prepare_cuda_graph(groups)
+        delegate.prepare_cuda_graph.assert_not_called()
+
     def test_replay_ignores_unused_host_cu_padding_tail(self):
         hook, groups, delegate = self._replay()
         groups["full"].cu_seqlens[-1] = 12

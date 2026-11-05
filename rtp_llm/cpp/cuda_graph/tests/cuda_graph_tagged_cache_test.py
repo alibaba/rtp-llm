@@ -6,11 +6,15 @@ import weakref
 from typing import Optional
 
 import torch
+
 from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import (
     CudaGraphRunner,
     DirtyCudaGraphCaptureError,
 )
 from rtp_llm.models_py.model_desc.block_map import get_primary_attention_inputs
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.state_cache_inputs import (
+    state_page_table,
+)
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     CudaGraphSelectionMode,
 )
@@ -63,35 +67,54 @@ class GraphModeTaggedModel(TaggedBlockTableModel):
         return super().forward(inputs, fmha_impl)
 
 
-class TaggedPhysicalBlockTableModel(TaggedBlockTableModel):
-    """Read allocator-page maps used by model-local side-cache kernels."""
+class TaggedStateBlockTableModel(TaggedBlockTableModel):
+    """Derive model-owned state pages from the graph's only block tables."""
+
+    def __init__(self, blocks_per_physical=1):
+        self.blocks_per_physical = blocks_per_physical
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
         attention_inputs = inputs.attention_inputs
-        full_id = attention_inputs["full"].kv_cache_block_id_device[0, 0]
-        aux_id = attention_inputs["aux"].kv_cache_block_id_device[0, 0]
+        for attention in attention_inputs.values():
+            if attention.kv_cache_block_id_device is not None:
+                raise RuntimeError("graph allocated an extra physical block table")
+        full_id = state_page_table(
+            attention_inputs["full"].kv_cache_kernel_block_id_device,
+            self.blocks_per_physical,
+        )[0, 0]
+        aux_id = state_page_table(
+            attention_inputs["aux"].kv_cache_kernel_block_id_device,
+            self.blocks_per_physical,
+        )[0, 0]
         signature = (full_id + 16 * aux_id).to(inputs.input_hiddens.dtype)
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
-class SelectivePhysicalBlockTableModel(TaggedBlockTableModel):
-    def __init__(self, tags, physical_tag):
+class StateTablePaddingModel(TaggedBlockTableModel):
+    def __init__(self, tags, state_tag):
         self.tags = tags
-        self.physical_tag = physical_tag
+        self.state_tag = state_tag
 
     def forward(self, inputs, fmha_impl=None):
         groups = inputs.attention_inputs
         signature = inputs.input_hiddens.new_zeros(())
         for tag in self.tags:
             attention = groups[tag] if isinstance(groups, dict) else groups
-            table = attention.kv_cache_block_id_device
-            if tag == self.physical_tag:
-                if table is None:
-                    raise RuntimeError("missing declared physical table")
+            if attention.kv_cache_block_id_device is not None:
+                raise RuntimeError("graph allocated an extra physical block table")
+            if tag == self.state_tag:
+                table = state_page_table(attention.kv_cache_kernel_block_id_device, 2)
                 signature = signature + table.sum().to(signature.dtype)
-            elif table is not None:
-                raise RuntimeError("unrequested physical table was allocated")
         return PyModelOutputs(inputs.input_hiddens + signature)
+
+
+def _set_state_kernel_table(attention, batch, width, value, factor):
+    row = torch.tensor(
+        [value * factor + j for _ in range(width) for j in range(factor)],
+        dtype=torch.int32,
+    ).repeat(batch, 1)
+    attention.kv_cache_kernel_block_id = row.pin_memory()
+    attention.kv_cache_kernel_block_id_device = row.cuda()
 
 
 class GraphLifecycleModel(TaggedBlockTableModel):
@@ -848,12 +871,12 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         expected_output = torch.full_like(output.hidden_states, expected)
         torch.testing.assert_close(output.hidden_states, expected_output)
 
-    def test_tagged_physical_block_tables_refresh_on_replay(self) -> None:
+    def test_tagged_state_tables_refresh_from_kernel_tables_on_replay(self) -> None:
         for target_verify in (False, True):
             with self.subTest(target_verify=target_verify):
                 runner = CudaGraphRunner()
                 runner.init_decode(
-                    TaggedPhysicalBlockTableModel(),
+                    TaggedStateBlockTableModel(2),
                     HIDDEN_SIZE,
                     TOKENS_PER_BLOCK,
                     KERNEL_BLOCK_TABLE_WIDTH,
@@ -861,7 +884,6 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     GROUP_TAGS,
                     target_verify,
                     2 if target_verify else 1,
-                    physical_block_table_tags=GROUP_TAGS,
                 )
                 for full, aux in ((3, 7), (5, 2)):
                     inputs = (
@@ -876,15 +898,15 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                         else _build_decode_inputs(GROUP_TAGS, {"full": 1, "aux": 1})
                     )
                     for tag, value in (("full", full), ("aux", aux)):
-                        inputs.attention_inputs[tag].kv_cache_block_id_device = (
-                            torch.full((2, 1), value, dtype=torch.int32, device="cuda")
+                        _set_state_kernel_table(
+                            inputs.attention_inputs[tag], 2, 1, value, 2
                         )
                     self._assert_replay_signature(runner, inputs, full + 16 * aux)
 
-    def test_mtp_block_table_update_refreshes_side_physical_tables(self) -> None:
+    def test_mtp_block_table_update_refreshes_model_state_views(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedPhysicalBlockTableModel(),
+            TaggedStateBlockTableModel(2),
             HIDDEN_SIZE,
             TOKENS_PER_BLOCK,
             KERNEL_BLOCK_TABLE_WIDTH,
@@ -892,7 +914,6 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             GROUP_TAGS,
             True,
             2,
-            physical_block_table_tags=GROUP_TAGS,
         )
         inputs = _build_target_verify_inputs(
             GROUP_TAGS,
@@ -901,9 +922,11 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             query_len=2,
             prefix_len=1,
         )
+        for tag in GROUP_TAGS:
+            _set_state_kernel_table(inputs.attention_inputs[tag], 2, 1, 1, 2)
         self.assertTrue(runner.prepare(inputs))
-        inputs.attention_inputs["full"].kv_cache_block_id_device.fill_(4)
-        inputs.attention_inputs["aux"].kv_cache_block_id_device.fill_(6)
+        _set_state_kernel_table(inputs.attention_inputs["full"], 2, 1, 4, 2)
+        _set_state_kernel_table(inputs.attention_inputs["aux"], 2, 1, 6, 2)
         runner.updateBlockTables(inputs)
         output = runner.forward(inputs)
         torch.cuda.synchronize()
@@ -911,23 +934,22 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             output.hidden_states, torch.full_like(output.hidden_states, 100)
         )
 
-    def test_physical_tables_are_scoped_and_cleared_after_shrink(self):
-        for tags, physical_tag in (
+    def test_state_tables_follow_kernel_padding_after_shrink(self):
+        for tags, state_tag in (
             (GROUP_TAGS, "full"),
             (GROUP_TAGS, "aux"),
             (["aux"], "aux"),
             (GROUP_TAGS, None),
         ):
-            with self.subTest(tags=tags, physical_tag=physical_tag):
+            with self.subTest(tags=tags, state_tag=state_tag):
                 runner = CudaGraphRunner()
                 runner.init_decode(
-                    SelectivePhysicalBlockTableModel(tags, physical_tag),
+                    StateTablePaddingModel(tags, state_tag),
                     HIDDEN_SIZE,
                     TOKENS_PER_BLOCK,
                     KERNEL_BLOCK_TABLE_WIDTH,
                     [4],
                     tags,
-                    physical_block_table_tags=[physical_tag] if physical_tag else [],
                 )
                 for batch, width in ((3, 2), (1, 1), (2, 1)):
                     inputs = _build_decode_inputs(
@@ -937,15 +959,13 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                         block_count=width,
                     )
                     for attention in inputs.attention_inputs.values():
-                        attention.kv_cache_block_id_device = torch.full(
-                            (batch, width), 7, dtype=torch.int32, device="cuda"
-                        )
+                        _set_state_kernel_table(attention, batch, width, 7, 2)
                     if len(tags) == 1:
                         inputs.attention_inputs = get_primary_attention_inputs(inputs)
                     self.assertTrue(runner.prepare(inputs))
                     runner.updateBlockTables(inputs)
                     output = runner.forward(inputs).hidden_states.clone()
-                    expected = batch * width * 7 if physical_tag else 0
+                    expected = batch * width * 7 if state_tag else 0
                     torch.testing.assert_close(
                         output, torch.full_like(output, expected)
                     )
@@ -1940,7 +1960,10 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         # The shared staging row is wider than the model-local capture row.
         # Upstream replay semantics permit that and copy only the intersection.
         inputs = _build_decode_inputs(
-            GROUP_TAGS, {"full": 5, "aux": 3}, batch_size=3, block_count=KERNEL_BLOCK_TABLE_WIDTH + 2
+            GROUP_TAGS,
+            {"full": 5, "aux": 3},
+            batch_size=3,
+            block_count=KERNEL_BLOCK_TABLE_WIDTH + 2,
         )
         self.assertTrue(runner.canRun(inputs))
         self.assertTrue(runner.canPrepare(inputs))
@@ -1949,18 +1972,34 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
 
     def test_topology_real_and_fake_allocator_bounds(self) -> None:
         # Enum values: LINEAR=0, FULL=1, SWA=2. Only FULL expands physical IDs.
-        self.assertEqual(CudaGraphRunner.topologyWidths([8, 32], [8, 8], [1, 1], 64, 0, 1), [8, 4])
-        self.assertEqual(CudaGraphRunner.topologyWidths([8, 32], [8, 8], [1, 1], 64, 1, 1), [12, 4])
-        self.assertEqual(CudaGraphRunner.topologyWidths([512], [64], [1], 513, 0, 1), [16, 8])
-        self.assertEqual(CudaGraphRunner.topologyWidths([8], [2], [0], 64, 1, 1), [8, 1])
-        self.assertEqual(CudaGraphRunner.topologyWidths([8], [2], [0], 64, 9, 1), [16, 1])
-        self.assertEqual(CudaGraphRunner.topologyWidths([8], [2], [2], 64, 9, 1), [10, 1])
-        self.assertEqual(CudaGraphRunner.topologyWidths([512], [64], [1], 1, 0, 5), [8, 40])
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([8, 32], [8, 8], [1, 1], 64, 0, 1), [8, 4]
+        )
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([8, 32], [8, 8], [1, 1], 64, 1, 1), [12, 4]
+        )
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([512], [64], [1], 513, 0, 1), [16, 8]
+        )
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([8], [2], [0], 64, 1, 1), [8, 1]
+        )
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([8], [2], [0], 64, 9, 1), [16, 1]
+        )
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([8], [2], [2], 64, 9, 1), [10, 1]
+        )
+        self.assertEqual(
+            CudaGraphRunner.topologyWidths([512], [64], [1], 1, 0, 5), [8, 40]
+        )
         self.assertEqual(CudaGraphRunner.topologyWidths([8], [8], [1], 1, 0, 0), [1, 1])
         for sequence, reserve, fake in ((0, 0, 1), (2**63 - 1, 1, 1), (1, 0, 2**63)):
             with self.subTest(sequence=sequence, reserve=reserve, fake=fake):
                 with self.assertRaises(RuntimeError):
-                    CudaGraphRunner.topologyWidths([8], [2], [1], sequence, reserve, fake)
+                    CudaGraphRunner.topologyWidths(
+                        [8], [2], [1], sequence, reserve, fake
+                    )
 
     def test_topology_width_end_to_end_preserves_last_column(self) -> None:
         for tags in (GROUP_TAGS, list(reversed(GROUP_TAGS))):
@@ -1968,7 +2007,12 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 with self.subTest(tags=tags, reserve=reserve, fake_count=fake_count):
                     spans = {"full": 8, "aux": 32}
                     real_width, fake_width = CudaGraphRunner.topologyWidths(
-                        [spans[tag] for tag in tags], [8, 8], [1, 1], 64, reserve, fake_count
+                        [spans[tag] for tag in tags],
+                        [8, 8],
+                        [1, 1],
+                        64,
+                        reserve,
+                        fake_count,
                     )
                     self.assertEqual(max(real_width, fake_width), width)
                     runner = CudaGraphRunner()
@@ -1992,12 +2036,16 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 runner.init_decode(
                     TaggedBlockTableModel(), HIDDEN_SIZE, 64, width, [4], GROUP_TAGS
                 )
-                inputs = _build_decode_inputs(GROUP_TAGS, {"full": 5, "aux": 3}, block_count=width)
+                inputs = _build_decode_inputs(
+                    GROUP_TAGS, {"full": 5, "aux": 3}, block_count=width
+                )
                 self._assert_replay_signature(runner, inputs, 53)
 
         with self.assertRaisesRegex(RuntimeError, "positive kernel block table width"):
             runner = CudaGraphRunner()
-            runner.init_decode(TaggedBlockTableModel(), HIDDEN_SIZE, 64, 0, [4], GROUP_TAGS)
+            runner.init_decode(
+                TaggedBlockTableModel(), HIDDEN_SIZE, 64, 0, [4], GROUP_TAGS
+            )
 
     def test_generation_prefill_keeps_host_width_gate(self) -> None:
         runner = CudaGraphRunner()
@@ -2024,7 +2072,9 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             wide_tags[tag] = attention
         wide.attention_inputs = wide_tags
         self.assertFalse(runner.canRun(wide))
-        self.assertEqual(runner.getGenerationPrefillStatus(), "graph_input_shape_mismatch")
+        self.assertEqual(
+            runner.getGenerationPrefillStatus(), "graph_input_shape_mismatch"
+        )
         self.assertFalse(runner.canPrepare(wide))
 
     def test_decode_clears_rounded_batch_sequence_metadata(self) -> None:

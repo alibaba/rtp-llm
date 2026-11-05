@@ -74,8 +74,6 @@ public:
         input_embedding_scalar_(graph_params.input_embedding_scalar),
         model_data_type_(graph_params.model_data_type),
         kv_cache_group_tags_(graph_params.kv_cache_group_tags),
-        physical_block_table_tags_(graph_params.physical_block_table_tags.begin(),
-                                   graph_params.physical_block_table_tags.end()),
         position_id_len_factor_(graph_params.position_id_len_factor),
         metrics_reporter_(std::move(metrics_reporter)),
         generation_prefill_cuda_graph_max_requests_(graph_params.generation_prefill_cuda_graph_max_requests),
@@ -89,12 +87,6 @@ public:
         RTP_LLM_CHECK_WITH_INFO(max_kernel_block_table_width_ > 0,
                                 "CUDA graph requires a positive kernel block table width");
         max_bs_ = graph_params.max_context_batch_size;
-        for (const auto& tag : physical_block_table_tags_) {
-            RTP_LLM_CHECK_WITH_INFO(std::find(kv_cache_group_tags_.begin(), kv_cache_group_tags_.end(), tag)
-                                        != kv_cache_group_tags_.end(),
-                                    "physical CUDA graph block table has no cache group: %s",
-                                    tag.c_str());
-        }
         if (py::hasattr(py_instance_, "cuda_graph_engram_window_size")) {
             engram_window_size_ = py_instance_.attr("cuda_graph_engram_window_size")().cast<int>();
         }
@@ -294,7 +286,6 @@ private:
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
 
     std::vector<std::string>                   kv_cache_group_tags_;
-    std::unordered_set<std::string>            physical_block_table_tags_;
     int                                        position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter_;
     int                                        engram_window_size_{0};
