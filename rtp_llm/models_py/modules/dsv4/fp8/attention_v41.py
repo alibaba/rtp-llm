@@ -37,6 +37,9 @@ from rtp_llm.models_py.modules.dsv4._v41_qualify_once import (
     tables_seen as _qp_tables_seen,
 )
 from rtp_llm.models_py.modules.dsv4._rope_only_triton import rope_only_inplace
+from rtp_llm.models_py.modules.dsv4._v41_inv_rope_triton import (
+    apply_inverse_rope_output as _e5b_apply,
+)
 from rtp_llm.models_py.modules.dsv4.bounded_replay import (
     enabled as bounded_replay_enabled,
 )
@@ -876,9 +879,7 @@ class AttentionV41FP8(AttentionFP8):
 
         o = o.reshape(-1, self.n_heads, self.head_dim)
         if self._wo_a_bf16_v41 is not None:
-            apply_rotary_emb(
-                o[..., -self.rope_head_dim :].unsqueeze(0), freqs, inverse=True
-            )
+            _e5b_apply(o[..., -self.rope_head_dim :], freqs)
             grouped = o.reshape(o.shape[0], self.n_groups, -1)
             projected = _woa_fp8_project_or_bf16(
                 grouped,
@@ -886,6 +887,20 @@ class AttentionV41FP8(AttentionFP8):
                 getattr(self, "_wo_a_stk_w", None),
                 getattr(self, "_wo_a_stk_s", None),
             )
+            from rtp_llm.models_py.modules.dsv4.fp8._v41_woa_strided_quant import (
+                quantize_strided_gtr,
+                woa_strided_quant_enabled,
+            )
+
+            if woa_strided_quant_enabled() and getattr(
+                self.wo_b, "_sm120_linear", None
+            ) is not None:
+                # E5a: quantize straight from the permuted einsum result —
+                # the flatten(1) bf16 copy exists only to feed the sgl
+                # quantizer, which the strided kernel replaces byte-for-byte.
+                quantized = quantize_strided_gtr(projected)
+                if quantized is not None:
+                    return self.wo_b.forward_quantized(*quantized, out=out)
             return self.wo_b(projected.flatten(1), out=out)
         if _v41_output_projection.is_supported(
             o, freqs, self._wo_a_stk_w, self._wo_a_stk_s
@@ -903,9 +918,7 @@ class AttentionV41FP8(AttentionFP8):
                 o, freqs, self._wo_a_stk_w, self._wo_a_stk_s
             )
             return self.wo_b(projected, out=out)
-        apply_rotary_emb(
-            o[..., -self.rope_head_dim :].unsqueeze(0), freqs, inverse=True
-        )
+        _e5b_apply(o[..., -self.rope_head_dim :], freqs)
         grouped = o.reshape(o.shape[0], self.n_groups, -1)
         projected = torch.stack(
             [

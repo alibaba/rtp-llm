@@ -2066,6 +2066,25 @@ class AttentionFP8(nn.Module):
             == getattr(self.wkv, "scale_ue8m0", None)
         )
 
+    def _can_share_sm12x_qkv_quant(self) -> bool:
+        """E6 gate: both projections consume the same quantizer output on
+        the SM120 FlashInfer path (flag checked here so OFF arms never pay
+        the attribute probes)."""
+        from rtp_llm.models_py.modules.dsv4._v41_shared_qkv_quant import (
+            e6_shared_qkv_quant_enabled,
+        )
+
+        if not e6_shared_qkv_quant_enabled():
+            return False
+        for layer in (self.wq_a, self.wkv):
+            if (
+                not hasattr(layer, "_quantize_input")
+                or not hasattr(layer, "forward_quantized")
+                or getattr(layer, "_sm120_linear", None) is None
+            ):
+                return False
+        return getattr(self.wq_a, "K", None) == getattr(self.wkv, "K", None)
+
     def can_fuse_prefill_attn_norm_input_quant(
         self, x: torch.Tensor, norm_weight: torch.Tensor
     ) -> bool:
@@ -5466,6 +5485,24 @@ class AttentionFP8(nn.Module):
                 with record_function_range("dsv4.fp8.attn.qkv.shared_input_quant"):
                     x_2d = x_3d.reshape(-1, x_3d.shape[-1])
                     shared_input_quant = self.wq_a.quantize_input(x_2d)
+        elif (
+            shared_input_quant is None
+            and self._can_share_sm12x_qkv_quant()
+        ):
+            # E6 (DSV41_E6_SHARED_QKV_QUANT): the DeepGEMM gate above is
+            # closed on consumer SM12x, but both projections are the same
+            # V41MXFP8Linear class whose forward IS
+            # forward_quantized(*_quantize_input(x)) — quantize the normed
+            # rows once and feed both. Same quantizer, same input bytes,
+            # deterministic kernel → byte-exact.
+            from rtp_llm.models_py.modules.dsv4._v41_shared_qkv_quant import (
+                announce_e6,
+            )
+
+            with record_function_range("dsv4.fp8.attn.qkv.shared_input_quant"):
+                x_2d = x_3d.reshape(-1, x_3d.shape[-1])
+                shared_input_quant = self.wq_a._quantize_input(x_2d)
+            announce_e6()
         else:
             shared_input_quant = None
 

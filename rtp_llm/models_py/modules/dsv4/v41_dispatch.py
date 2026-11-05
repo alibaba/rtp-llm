@@ -1,8 +1,29 @@
 """Recipe-bound V4.1 EP payloads: E4M3, packed UE8M0, FP32 weights and IDs."""
 
 from dataclasses import dataclass
+import os
 
 import torch
+
+_E3_FLAG = "DSV41_E3_DISPATCH_LEAN"
+_E3_ANNOUNCED = False
+
+
+def e3_dispatch_lean_enabled() -> bool:
+    """E3 (Batch-4b B): drop the dispatch-side world-x repeat copy and the
+    unpack values copy-out (the routing index_select reads the strided
+    packet slice directly). Wire bytes and all downstream tensor VALUES are
+    unchanged; only copies move. Default 0."""
+    return os.environ.get(_E3_FLAG, "0") == "1"
+
+
+def _announce_e3(where: str) -> None:
+    global _E3_ANNOUNCED
+    if not _E3_ANNOUNCED:
+        _E3_ANNOUNCED = True
+        import sys
+
+        print(f"[E3LEAN] dispatch-lean engaged ({where})", file=sys.stderr, flush=True)
 
 from rtp_llm.models_py.modules.dsv4.v41_expert import (
     V41_EXPERT_RECIPE,
@@ -114,6 +135,18 @@ class V41DispatchLayout:
             payload.shape[0], dtype=torch.bool, device=payload.device
         )
         _validate_routes(weights, indices, valid_rows, self.experts)
+        if e3_dispatch_lean_enabled() and values.stride(1) == 1:
+            # E3: hand the routing the strided packet view directly — its
+            # index_select copies the same bytes into routed_x; scales and
+            # route tensors stay contiguous copies (small, and consumers
+            # validate/flatten them).
+            _announce_e3("unpack")
+            return (
+                values,
+                packed.contiguous().view(torch.uint8)[:, : self.hidden // 32].contiguous(),
+                weights.contiguous(),
+                indices.contiguous(),
+            )
         return (
             values.view(torch.uint8).contiguous().view(torch.float8_e4m3fn),
             packed.contiguous().view(torch.uint8)[:, : self.hidden // 32].contiguous(),

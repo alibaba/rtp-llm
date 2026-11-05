@@ -182,6 +182,23 @@ class Gate(nn.Module):
             self._w_bf16 = cached
         return cached
 
+    def _weight_fp32(self) -> torch.Tensor:
+        """Lazy-cached FP32 view of ``self.weight`` (E2, DSV41_E2_ROUTER_
+        PLUMBING): the fp32_logits path cast [384, 5120] per layer per chunk
+        (~7.9MB materialization x 21/19 x 8); the weights are frozen after
+        load, so one cast per process is bitwise identical."""
+        if self.weight.dtype == torch.float32:
+            return self.weight
+        cached = getattr(self, "_w_fp32", None)
+        if (
+            cached is None
+            or cached.shape != self.weight.shape
+            or cached.device != self.weight.device
+        ):
+            cached = self.weight.to(torch.float32)
+            self._w_fp32 = cached
+        return cached
+
     def forward(
         self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -228,8 +245,12 @@ class Gate(nn.Module):
             # tensor cores (operands are BF16-derived, exactly representable
             # in TF32; only accumulation order differs). Default off keeps
             # the SIMT sgemm bit-for-bit.
+            from rtp_llm.models_py.modules.dsv4._v41_cp_local_router import (
+                router_plumbing_enabled as _e2_enabled,
+            )
+
             x_fp32 = x.float()
-            w_fp32 = self.weight.float()
+            w_fp32 = self._weight_fp32() if _e2_enabled() else self.weight.float()
             mode = _router_tc_mode()
             scores = _router_linear(x_fp32, w_fp32, mode)
             if (
@@ -254,12 +275,28 @@ class Gate(nn.Module):
         if _dbg is not None:
             _rt.record_if_level(2, f"{_dbg}_linear_scores", scores)
 
+        return self._route_scores(scores, x.size(0), _dbg, input_ids)
+
+    def _route_scores(
+        self,
+        scores: torch.Tensor,
+        n_rows: int,
+        _dbg: Optional[str] = None,
+        input_ids: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Epilogue of ``_forward_local`` extracted verbatim (E2) so the
+        padded-router fast path can route the local rows only. Per-row
+        determinism across batch sizes is bitwise-proven (R7 variant D:
+        fused ids+weights equal for [:T] routing vs full-batch routing
+        sliced)."""
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
         # P2 fast path: fuse softplus+sqrt+bias+topk+normalize for the
         # default V4 score_func='sqrtsoftplus' + non-hash routing.
         if (
             not self.hash
             and self.bias is not None
-            and _use_fused_gate(self.score_func, x.size(0))
+            and _use_fused_gate(self.score_func, n_rows)
         ):
             return fused_sqrtsoftplus_gate(
                 scores.contiguous(),

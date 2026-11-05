@@ -36,6 +36,55 @@ import os
 
 import torch
 
+_E2_FLAG = "DSV41_E2_ROUTER_PLUMBING"
+_E2_BUFFERS: dict = {}
+_E2_ANNOUNCED = False
+
+
+def router_plumbing_enabled() -> bool:
+    """E2 (Batch-4b A): cached FP32 gate weight + persistent zero-padded
+    FP32 row buffer + top-k over the local rows only. Default ON since
+    Batch-4b decision R15.1 (parity byte-exact with engagement
+    proven, A/B median −6.1 ms 2/3); ``=0`` (any non-1 value)
+    restores the per-call zeros+cast+full-batch-epilogue path. Bitwise:
+    the cached cast equals the per-call ``weight.float()``; the buffer
+    contents equal ``torch.zeros(...); pad[:t] = x`` then ``.float()``
+    (bf16->fp32 widening is exact); routing [:t] rows of the scores equals
+    routing the full padded batch and slicing (per-row determinism proven
+    bitwise in R7 variant D)."""
+    return os.environ.get(_E2_FLAG, "1") == "1"
+
+
+def _padded_fp32_buffer(x: torch.Tensor, t: int, m_full: int) -> torch.Tensor:
+    """Persistent per-(device, shape) FP32 buffer: rows [0,t) receive x
+    (exact bf16->fp32 cast via copy_), rows [t, watermark) re-zero when t
+    shrinks, the rest stays zero from allocation."""
+    key = (str(x.device), int(m_full), int(x.shape[1]))
+    entry = _E2_BUFFERS.get(key)
+    if entry is None:
+        buf = torch.zeros((m_full, x.shape[1]), dtype=torch.float32, device=x.device)
+        entry = [buf, 0]
+        _E2_BUFFERS[key] = entry
+    buf, last_t = entry
+    buf[:t].copy_(x)
+    if last_t > t:
+        buf[t:last_t].zero_()
+    entry[1] = t
+    return buf
+
+
+def _announce_e2(t: int) -> None:
+    global _E2_ANNOUNCED
+    if not _E2_ANNOUNCED:
+        _E2_ANNOUNCED = True
+        import sys
+
+        print(
+            f"[E2ROUTER] cached-weight + persistent-pad + local-topk engaged (t={t})",
+            file=sys.stderr,
+            flush=True,
+        )
+
 
 def cp_local_router_enabled() -> bool:
     """DSV41_CP_LOCAL_ROUTER: default ON (R8 decision 1, byte-exact via the
@@ -69,6 +118,30 @@ def padded_local_routes(gate, x, m_full):
         raise ValueError(
             f"DSV41_CP_LOCAL_ROUTER padded M {m_full} < local rows {t}"
         )
+    if (
+        router_plumbing_enabled()
+        and getattr(gate, "fp32_logits", False)
+        and not getattr(gate, "hash", False)
+        and x.dtype == torch.bfloat16
+        and x.is_cuda
+        and not torch.cuda.is_current_stream_capturing()
+    ):
+        # E2 fast path: persistent FP32 pad (no per-call 42MB memset + 84MB
+        # cast), cached FP32 weight (no per-call 7.9MB cast), and the epilogue
+        # over the local rows only (3/4 of the top-k work saved). The GEMM
+        # keeps the M=m_full shape (bitwise parity requirement). The router-TC
+        # verify hook is diagnostics for non-default TC modes and is skipped
+        # here; production mode "0" has no hook.
+        from rtp_llm.models_py.modules.dsv4._v41_router_tc import (
+            router_linear as _router_linear,
+            router_tc_mode as _router_tc_mode,
+        )
+
+        _announce_e2(t)
+        buf = _padded_fp32_buffer(x, t, m_full)
+        scores = _router_linear(buf, gate._weight_fp32(), _router_tc_mode())
+        weights, indices = gate._route_scores(scores[:t], t)
+        return weights.contiguous(), indices.contiguous()
     pad = torch.zeros((m_full, x.shape[1]), dtype=x.dtype, device=x.device)
     pad[:t] = x
     weights, indices = gate._forward_local(pad, None)

@@ -111,6 +111,23 @@ class V41MXFP8Linear(torch.nn.Module):
         )
         if m:
             if self._sm120_linear is not None:
+                from rtp_llm.models_py.modules.dsv4._v41_scale_swizzle import (
+                    e7_scale_swizzle_enabled,
+                    swizzle_from_packed_int32,
+                )
+
+                if e7_scale_swizzle_enabled():
+                    # E7: one kernel straight from the int32 column-major
+                    # TMA scales to the 128x4-swizzled flat buffer the
+                    # CUTLASS GEMM consumes (clone/slice/contiguous copy +
+                    # block_scale_interleave pass both removed).
+                    swizzled = swizzle_from_packed_int32(x_s, m, self.K // 32)
+                    self._sm120_linear.forward_quantized_preswizzled(
+                        x_q.reshape(m, self.K),
+                        swizzled,
+                        out=output.reshape(m, self.N),
+                    )
+                    return output
                 # Each int32 contains four consecutive group32 exponents.
                 # Force dense strides even for a singleton packed column:
                 # contiguous() may retain its padded last stride.

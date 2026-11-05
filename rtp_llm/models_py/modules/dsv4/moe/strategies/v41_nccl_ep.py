@@ -3,7 +3,7 @@
 import hashlib
 import json
 import os
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 
 import torch
 
@@ -15,6 +15,70 @@ from rtp_llm.models_py.modules.dsv4.v41_return import V41ReturnLayout, pack_retu
 from .base import register_strategy
 from .nccl_ep_mxfp8 import NcclEpMxfp8Strategy
 from .v41_grouped_fp4 import V41GroupedFP4Strategy
+
+_FUSED_TAIL_FLAG = "DSV41_EP_FUSED_COMBINE_TAIL"
+_EPTAIL_ANNOUNCED = False
+_EPTAIL_DEBUG_SITES: set = set()
+
+
+def _eptail_debug_once(state: str) -> None:
+    """One-shot-per-site [EPTAILDBG] state print (DSV41_EP_TAIL_DEBUG=1) —
+    diagnostics for engagement troubleshooting; silent by default."""
+    if os.environ.get("DSV41_EP_TAIL_DEBUG", "0") != "1":
+        return
+    site = state.split(":", 1)[0]
+    if site in _EPTAIL_DEBUG_SITES:
+        return
+    _EPTAIL_DEBUG_SITES.add(site)
+    import sys
+
+    print(f"[EPTAILDBG] {state}", file=sys.stderr, flush=True)
+
+
+def _fused_combine_tail_enabled() -> bool:
+    """E8: fused EP combine tail (mxfp8 peer-sum dequant + shared add + cast
+    in one kernel at moe_layer combine time). Default ON since Batch-4b
+    decision 1: bitwise-equal to the two-kernel tail (identical per-element
+    op order; microbench 0/26M mismatches, parity byte-exact with
+    engagement proven, A/B median −12.1 ms 2/3). ``=0`` (any
+    non-1 value) restores the two-kernel tail."""
+    return os.environ.get(_FUSED_TAIL_FLAG, "1") == "1"
+
+
+@dataclass(frozen=True)
+class DeferredMXFP8PeerSum:
+    """Returned MXFP8 payload whose peer-sum is deferred to the fused
+    combine-tail kernel (the strategy cannot see the shared expert)."""
+
+    payload: torch.Tensor
+    n_rows: int
+    world_size: int
+
+
+def run_deferred_combine(deferred, shared, out_dtype, out):
+    """Execute the fused tail for a DeferredMXFP8PeerSum (moe_layer side)."""
+    global _EPTAIL_ANNOUNCED
+    if not _EPTAIL_ANNOUNCED:
+        _EPTAIL_ANNOUNCED = True
+        import sys
+
+        print(
+            "[EPTAIL] fused mxfp8 peer-sum+shared epilogue engaged "
+            f"(rows={int(deferred.n_rows)}, world={int(deferred.world_size)})",
+            file=sys.stderr,
+            flush=True,
+        )
+    from .._nccl_ep_mxfp8_combine import mxfp8_peer_sum_shared_epilogue
+
+    return mxfp8_peer_sum_shared_epilogue(
+        deferred.payload,
+        shared,
+        int(deferred.n_rows),
+        int(shared.shape[1]),
+        int(deferred.world_size),
+        out_dtype,
+        out=out,
+    )
 
 
 @register_strategy
@@ -168,6 +232,24 @@ class V41NcclEpStrategy(NcclEpMxfp8Strategy):
         self._admitted_identity = identity
         return group, world, rank
 
+    def _all_to_all_dense_send(self, payload, counts, cols, group):
+        """E3 list-form exchange: every rank receives the full `payload`
+        (uniform counts guaranteed by the caller); receives land in one
+        contiguous buffer via row views."""
+        from ...v41_dispatch import _announce_e3
+
+        _announce_e3("dense-send")
+        recv = torch.empty(
+            (sum(counts), cols), dtype=torch.uint8, device=payload.device
+        )
+        outs = []
+        off = 0
+        for n in counts:
+            outs.append(recv[off : off + n])
+            off += n
+        torch.distributed.all_to_all(outs, [payload] * len(counts), group=group)
+        return recv
+
     def synchronized_chunk_extent(self, local_tokens, device):
         try:
             self._admit(device)
@@ -196,13 +278,24 @@ class V41NcclEpStrategy(NcclEpMxfp8Strategy):
             payload = pack_dispatch(
                 x, weights, indices, valid, self.layout, fused=self._dispatch_pack_fused
             )
-            received = self._all_to_all(
-                payload.repeat(world, 1),
-                [rows] * world,
-                counts,
-                self.layout.payload_bytes,
-                group,
-            )
+            from ...v41_dispatch import e3_dispatch_lean_enabled
+
+            if e3_dispatch_lean_enabled() and all(n == rows for n in counts):
+                # E3: dense dispatch sends the SAME rows to every rank; the
+                # list-form all_to_all issues grouped NCCL sends straight from
+                # `payload` — identical wire bytes, no world-x repeat
+                # materialization (~22MB alloc+copy per layer at 4k chunks).
+                received = self._all_to_all_dense_send(
+                    payload, counts, self.layout.payload_bytes, group
+                )
+            else:
+                received = self._all_to_all(
+                    payload.repeat(world, 1),
+                    [rows] * world,
+                    counts,
+                    self.layout.payload_bytes,
+                    group,
+                )
             local = self._local.local
             layout = (
                 "masked" if sum(counts) <= local.masked_token_limit else "contiguous"
@@ -215,7 +308,21 @@ class V41NcclEpStrategy(NcclEpMxfp8Strategy):
                 self.return_layout.payload_bytes,
                 group,
             )
+            _eptail_debug_once(
+                f"strategy-tail: cls={type(self).__name__} mode={self.return_layout.mode} "
+                f"flag={_fused_combine_tail_enabled()} "
+                f"defer={getattr(self, '_defer_tail', None)} "
+                f"env={os.environ.get(_FUSED_TAIL_FLAG)}"
+            )
             if self.return_layout.mode == "mxfp8":
+                # Deferred tail ONLY for the moe_layer chunked path (the only
+                # consumer wired for DeferredMXFP8PeerSum); _run_chunk sets
+                # _defer_tail around its strategy calls. Warmup/decode/
+                # single-round forwards keep the in-strategy peer sum.
+                if _fused_combine_tail_enabled() and getattr(
+                    self, "_defer_tail", False
+                ):
+                    return DeferredMXFP8PeerSum(returned, rows, world)
                 from .._nccl_ep_mxfp8_combine import mxfp8_dequant_peer_sum
 
                 return mxfp8_dequant_peer_sum(

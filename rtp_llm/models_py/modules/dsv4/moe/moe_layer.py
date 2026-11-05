@@ -348,7 +348,19 @@ class MoE(nn.Module):
             else:
                 weights, indices = routes
             with record_function_range("dsv4.moe.routed_experts"):
-                routed = self._strategy(x, weights, indices)
+                self._strategy._defer_tail = not self._is_decode_role
+                try:
+                    routed = self._strategy(x, weights, indices)
+                finally:
+                    self._strategy._defer_tail = False
+            from .strategies.v41_nccl_ep import DeferredMXFP8PeerSum
+
+            if isinstance(routed, DeferredMXFP8PeerSum):
+                if routed.n_rows != 0:
+                    raise RuntimeError(
+                        "synchronized empty MoE chunk returned non-empty output"
+                    )
+                return
             if routed.numel() != 0:
                 raise RuntimeError(
                     "synchronized empty MoE chunk returned non-empty output"
@@ -403,10 +415,14 @@ class MoE(nn.Module):
             self._shared_executor.start(self.shared_experts, x)
         try:
             with record_function_range("dsv4.moe.routed_experts"):
-                if prepared is not None:
-                    routed = self._strategy.run_dispatch_prepared(prepared)
-                else:
-                    routed = self._strategy(x, weights, indices)
+                self._strategy._defer_tail = not self._is_decode_role
+                try:
+                    if prepared is not None:
+                        routed = self._strategy.run_dispatch_prepared(prepared)
+                    else:
+                        routed = self._strategy(x, weights, indices)
+                finally:
+                    self._strategy._defer_tail = False
         except Exception:
             with record_function_range("dsv4.moe.shared_expert_finish"):
                 self._shared_executor.finish()
@@ -414,8 +430,25 @@ class MoE(nn.Module):
 
         with record_function_range("dsv4.moe.shared_expert_finish"):
             shared = self._shared_executor.finish()
+        from .strategies.v41_nccl_ep import (
+            DeferredMXFP8PeerSum,
+            run_deferred_combine,
+        )
+
+        if os.environ.get("DSV41_EP_TAIL_DEBUG", "0") == "1":
+            from .strategies.v41_nccl_ep import _eptail_debug_once
+
+            _eptail_debug_once(
+                f"combine: routed_type={type(routed).__name__} "
+                f"decode_role={self._is_decode_role}"
+            )
         with record_function_range("dsv4.moe.add_shared"):
-            combined = combine_routed_and_shared(routed, shared, x.dtype, out=out)
+            # E8: the fused combine tail (peer-sum dequant + shared add +
+            # cast in one kernel) when the strategy deferred its peer sum.
+            if isinstance(routed, DeferredMXFP8PeerSum):
+                combined = run_deferred_combine(routed, shared, x.dtype, out)
+            else:
+                combined = combine_routed_and_shared(routed, shared, x.dtype, out=out)
             if combined.data_ptr() != out.data_ptr():
                 out.copy_(combined)
 
@@ -661,10 +694,14 @@ class MoE(nn.Module):
             self._shared_executor.start(self.shared_experts, x)
         try:
             with record_function_range("dsv4.moe.routed_experts"):
-                if prepared is not None:
-                    y = self._strategy.run_dispatch_prepared(prepared)
-                else:
-                    y = self._strategy(x, weights, indices)
+                self._strategy._defer_tail = not self._is_decode_role and not _dbg
+                try:
+                    if prepared is not None:
+                        y = self._strategy.run_dispatch_prepared(prepared)
+                    else:
+                        y = self._strategy(x, weights, indices)
+                finally:
+                    self._strategy._defer_tail = False
         except Exception:
             with record_function_range("dsv4.moe.shared_expert_finish"):
                 self._shared_executor.finish()
@@ -706,5 +743,22 @@ class MoE(nn.Module):
                 x.dtype,
                 x.device,
             )
-            y = combine_routed_and_shared(y, shared_y, x.dtype, out=out[:T])
+            from .strategies.v41_nccl_ep import (
+                DeferredMXFP8PeerSum,
+                run_deferred_combine,
+            )
+
+            if os.environ.get("DSV41_EP_TAIL_DEBUG", "0") == "1":
+                from .strategies.v41_nccl_ep import _eptail_debug_once
+
+                _eptail_debug_once(
+                    f"forward-tail combine: y_type={type(y).__name__} "
+                    f"decode_role={self._is_decode_role} dbg={bool(_dbg)}"
+                )
+            if isinstance(y, DeferredMXFP8PeerSum):
+                # E8 fused tail: peer-sum dequant + shared add + cast, one
+                # kernel, identical op order (bitwise-equal by construction).
+                y = run_deferred_combine(y, shared_y, x.dtype, out[:T])
+            else:
+                y = combine_routed_and_shared(y, shared_y, x.dtype, out=out[:T])
             return y.view(shape)

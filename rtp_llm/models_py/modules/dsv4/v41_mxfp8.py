@@ -184,6 +184,70 @@ class V41MXFP8Linear(nn.Module):
             else torch.empty(shape, device=x.device, dtype=torch.bfloat16)
         )
 
+    def _activation_scales(self, raw_scales, rows):
+        """E7 (DSV41_E7_SCALE_SWIZZLE): swizzle linear uint8 activation
+        scales with one Triton kernel instead of the per-call flashinfer
+        block_scale_interleave pass; byte-identical output (GPU byte-compare
+        gated). Falls back whenever the flag is off or the layout differs."""
+        from rtp_llm.models_py.modules.dsv4._v41_scale_swizzle import (
+            e7_scale_swizzle_enabled,
+            swizzle_linear,
+        )
+
+        if (
+            e7_scale_swizzle_enabled()
+            and self.backend != "eager"
+            and raw_scales.dtype == torch.uint8
+            and raw_scales.is_contiguous()
+            and raw_scales.shape == (rows, self.K // GROUP_SIZE)
+        ):
+            return swizzle_linear(raw_scales)
+        return self._interleave(raw_scales)
+
+    def forward_quantized_preswizzled(self, values, swizzled_scales, *, out=None):
+        """E7 entry: ``swizzled_scales`` is already the flat 128x4-swizzled
+        UE8M0 buffer (byte-identical to ``self._interleave`` of the linear
+        view), so both scale copies are skipped."""
+        if values.dtype != torch.float8_e4m3fn:
+            raise ValueError("V4.1 prequantized input must be E4M3")
+        if self.backend == "eager":
+            raise ValueError("preswizzled scales require the FlashInfer backend")
+        output = self._output(values, out, (swizzled_scales,))
+        rows = values.numel() // self.K
+        if (
+            swizzled_scales.dtype != torch.uint8
+            or swizzled_scales.device != values.device
+            or not swizzled_scales.is_contiguous()
+        ):
+            raise ValueError("V4.1 preswizzled scales must be contiguous CUDA uint8")
+        self._check_packed(swizzled_scales, rows)
+        if torch.is_grad_enabled() and any(
+            t.requires_grad for t in (values, self.weight)
+        ):
+            raise ValueError("V4.1 MXFP8 linear is inference-only")
+        if not rows:
+            return output
+        flat, result = values.reshape(rows, self.K), output.view(rows, self.N)
+        with torch.cuda.device(values.device):
+            capturing = torch.cuda.is_current_stream_capturing()
+            if capturing and rows not in self._warmed_rows:
+                raise RuntimeError(
+                    "V4.1 GEMM shape must be warmed before graph capture"
+                )
+            self._gemm(
+                flat,
+                self.weight.T,
+                swizzled_scales,
+                self._packed_scales,
+                out=result,
+                out_dtype=torch.bfloat16,
+                use_8x4_sf_layout=False,
+                backend="cutlass",
+            )
+            if not capturing:
+                self._warmed_rows.add(rows)
+        return output
+
     def forward_quantized(self, values, scales, *, out=None):
         if values.dtype != torch.float8_e4m3fn:
             raise ValueError("V4.1 prequantized input must be E4M3")
@@ -232,7 +296,7 @@ class V41MXFP8Linear(nn.Module):
                 raise RuntimeError(
                     "V4.1 GEMM shape must be warmed before graph capture"
                 )
-            a_scales = self._interleave(raw_scales)
+            a_scales = self._activation_scales(raw_scales, rows)
             self._check_packed(a_scales, rows)
             self._gemm(
                 flat,

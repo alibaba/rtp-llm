@@ -73,6 +73,40 @@ class FlagParsingTest(unittest.TestCase):
                 self.assertFalse(clr.cp_local_router_enabled())
 
 
+class E2PlumbingTest(unittest.TestCase):
+    def test_flag_default_on_since_r15(self):
+        # Batch-4b R15 decision 1: adopted default (parity proven +
+        # A/B median −6.1 ms 2/3); =0 stays the escape hatch.
+        env = dict(os.environ)
+        env.pop("DSV41_E2_ROUTER_PLUMBING", None)
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertTrue(clr.router_plumbing_enabled())
+
+    def test_flag_on_off_values(self):
+        with mock.patch.dict(os.environ, {"DSV41_E2_ROUTER_PLUMBING": "1"}):
+            self.assertTrue(clr.router_plumbing_enabled())
+        for value in ("0", "true", ""):
+            with mock.patch.dict(os.environ, {"DSV41_E2_ROUTER_PLUMBING": value}):
+                self.assertFalse(clr.router_plumbing_enabled())
+
+    def test_padded_fp32_buffer_exact_and_watermark(self):
+        x = torch.randn(3, 8).bfloat16()
+        buf = clr._padded_fp32_buffer(x, 3, 6)
+        self.assertEqual(buf.dtype, torch.float32)
+        self.assertTrue(torch.equal(buf[:3], x.float()))
+        self.assertTrue(torch.equal(buf[3:], torch.zeros(3, 8)))
+        # persistent buffer, shrinking t re-zeroes the watermark tail
+        x2 = torch.randn(2, 8).bfloat16()
+        buf2 = clr._padded_fp32_buffer(x2, 2, 6)
+        self.assertIs(buf, buf2)
+        self.assertTrue(torch.equal(buf2[:2], x2.float()))
+        self.assertTrue(torch.equal(buf2[2:], torch.zeros(4, 8)))
+        # growing back is exact again
+        buf3 = clr._padded_fp32_buffer(x, 3, 6)
+        self.assertTrue(torch.equal(buf3[:3], x.float()))
+        self.assertTrue(torch.equal(buf3[3:], torch.zeros(3, 8)))
+
+
 class PaddedMathTest(unittest.TestCase):
     def test_identity_when_m_full_equals_rows(self):
         gate = StubGate()
@@ -98,7 +132,9 @@ class PaddedMathTest(unittest.TestCase):
         seen = gate.seen[0]
         self.assertEqual(tuple(seen.shape), (m_full, dim))
         self.assertTrue(torch.equal(seen[:t], x))
-        self.assertTrue(torch.equal(seen[t:], torch.zeros(m_full - t, dim, dtype=seen.dtype)))
+        self.assertTrue(
+            torch.equal(seen[t:], torch.zeros(m_full - t, dim, dtype=seen.dtype))
+        )
         # outputs are the front slice, contiguous, correctly typed/shaped
         self.assertEqual(tuple(weights.shape), (t, 3))
         self.assertEqual(tuple(indices.shape), (t, 3))
@@ -139,9 +175,7 @@ class GuardTest(unittest.TestCase):
     def test_cp_size_rejected(self):
         gate = StubGate()
         with self.assertRaises(NotImplementedError):
-            clr.cp_local_padded_routes(
-                gate, self._x(), fake_cp(4, cp_size=2)
-            )
+            clr.cp_local_padded_routes(gate, self._x(), fake_cp(4, cp_size=2))
 
     def test_non_contiguous_rejected(self):
         gate = StubGate()

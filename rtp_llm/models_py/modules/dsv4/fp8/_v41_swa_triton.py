@@ -15,11 +15,38 @@ codec, or selected as a fallback for an already allocated 584B cache.
 
 from __future__ import annotations
 
+import os
+import sys
 from typing import TYPE_CHECKING, Optional
 
 import torch
 import triton
 import triton.language as tl
+
+_E1FRT_FLAG = "DSV41_E1_FUSED_ROUNDTRIP_SWA"
+_E1FRT_ANNOUNCED = False
+
+
+def e1_fused_roundtrip_enabled() -> bool:
+    """E1 micro-alt (Batch-4b part 2): fuse the roundtrip_swa quant+dequant
+    into one kernel. Default ON since Batch-5 (R16): the pool bytes are
+    never materialized; byte-gate 0/15,925,248 vs the two-kernel roundtrip
+    (6 distributions incl. zeros/extremes), GPU parity byte-exact
+    with engagement proven x8, A/B median −5.1 ms 2/3.
+    ``=0`` restores the temporary-pool two-kernel path."""
+    return os.environ.get(_E1FRT_FLAG, "1") == "1"
+
+
+def _announce_e1frt() -> None:
+    global _E1FRT_ANNOUNCED
+    if not _E1FRT_ANNOUNCED:
+        _E1FRT_ANNOUNCED = True
+        print(
+            "[E1FRT] fused SWA roundtrip engaged",
+            file=sys.stderr,
+            flush=True,
+        )
+
 
 if TYPE_CHECKING:
     from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
@@ -286,6 +313,31 @@ def dequantize_swa_k_cache(
     return out
 
 
+@triton.jit
+def _fused_roundtrip_swa_kernel(kv, out, input_stride, out_stride):
+    """roundtrip_swa without the temporary pool page: the quantize body and
+    the dequantize body of the two-kernel path, concatenated verbatim so the
+    E4M3 payload and UE8M0 exponent roundtrip through registers with the
+    identical values (no arithmetic added, removed or reordered)."""
+    row = tl.program_id(0).to(tl.int64)
+    columns = tl.arange(0, 512)
+    values = tl.load(kv + row * input_stride.to(tl.int64) + columns).to(tl.float32)
+    # --- quantize body (== _quantize_and_insert_swa_kernel, non-CP path) ---
+    groups = values.reshape((16, 32))
+    maximum = tl.maximum(tl.max(tl.abs(groups), 1), 1e-4)
+    exponent = tl.ceil(tl.log2(maximum * (1.0 / 448.0)))
+    scaled = tl.clamp(groups * tl.exp2(-exponent)[:, None], -448.0, 448.0)
+    payload = scaled.to(tl.float8e4nv).to(tl.uint8, bitcast=True)
+    encoded = tl.clamp(exponent + 127.0, 0.0, 255.0).to(tl.uint8)
+    # --- dequantize body (== _load_swa_row) ---
+    payload_fp8 = payload.to(tl.float8e4nv, bitcast=True)
+    deq = (
+        payload_fp8.to(tl.float32).reshape((16, 32))
+        * tl.exp2(encoded.to(tl.float32) - 127.0)[:, None]
+    ).reshape((512,))
+    tl.store(out + row * out_stride.to(tl.int64) + columns, deq)
+
+
 def roundtrip_swa(kv: torch.Tensor) -> torch.Tensor:
     """Give fresh attention rows the same precision as stored SWA rows.
 
@@ -297,6 +349,22 @@ def roundtrip_swa(kv: torch.Tensor) -> torch.Tensor:
     rows = kv.shape[0]
     if not rows:
         return kv.clone()
+    if (
+        e1_fused_roundtrip_enabled()
+        and kv.stride(1) == 1
+        and kv.dtype in (torch.bfloat16, torch.float16, torch.float32)
+        and not torch.cuda.is_current_stream_capturing()
+    ):
+        _announce_e1frt()
+        out = torch.empty((rows, HEAD_DIM), device=kv.device, dtype=kv.dtype)
+        _fused_roundtrip_swa_kernel[(rows,)](
+            kv,
+            out,
+            kv.stride(0),
+            out.stride(0),
+            num_warps=4,
+        )
+        return out
     pool = torch.empty((1, rows, ENTRY_BYTES), device=kv.device, dtype=torch.uint8)
     slots = torch.arange(rows, device=kv.device, dtype=torch.int32)
     quantize_and_insert_swa_k_cache(kv, pool, slots)

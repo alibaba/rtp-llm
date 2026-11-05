@@ -116,12 +116,21 @@ class V41LocalMoE(nn.Module):
     ):
         """Route BF16 or explicit received E4M3/linear UE8M0 rows without reweighting."""
         dtype = torch.bfloat16 if input_scales is None else torch.float8_e4m3fn
+        from rtp_llm.models_py.modules.dsv4.v41_dispatch import (
+            e3_dispatch_lean_enabled as _e3_enabled,
+        )
+
+        # E3: the unpacked dispatch values may be a row-strided view of the
+        # received packet (stride(1)==1); routing only index_selects rows.
+        x_layout_ok = x.is_contiguous() or (
+            _e3_enabled() and x.stride(1) == 1 and x.stride(0) >= x.shape[1]
+        )
         if (
             x.ndim != 2
             or x.shape[1] != self.experts.dim
             or x.dtype != dtype
             or x.device != self.experts.device
-            or not x.is_contiguous()
+            or not x_layout_ok
             or (torch.is_grad_enabled() and x.requires_grad)
         ):
             raise ValueError(
