@@ -1245,7 +1245,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_model_forward_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_model_forward_us_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_model_forward_us_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "{{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -1470,7 +1470,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_wait_latency_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_wait_latency_us_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_wait_latency_us_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -1545,7 +1545,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group},deployment_name)(rtp_llm_first_token_latency_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group},deployment_name)(rate(rtp_llm_first_token_latency_us_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group},deployment_name)(rate(rtp_llm_first_token_latency_us_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "Prefill · deployment_name={{deployment_name}} · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -1770,7 +1770,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_latency_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_latency_us_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_latency_us_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -2056,7 +2056,7 @@
         {
           "id": 100160,
           "type": "timeseries",
-          "title": "step latency",
+          "title": "step latency（实例均值最大值）",
           "gridPos": {
             "x": 12,
             "y": 119,
@@ -2070,7 +2070,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "max by(${prefill_group})(rtp_llm_step_latency_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "max by(${prefill_group})(rate(rtp_llm_step_latency_us_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]) / (rate(rtp_llm_step_latency_us_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]) > 0))",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -2295,7 +2295,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group},cache_dependency,loading_entered)(rtp_llm_stream_canrun_to_running_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group},cache_dependency,loading_entered)(rate(rtp_llm_stream_canrun_to_running_us_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group},cache_dependency,loading_entered)(rate(rtp_llm_stream_canrun_to_running_us_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "Prefill · cache_dependency={{cache_dependency}} · loading_entered={{loading_entered}} · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -2670,7 +2670,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_stream_enqueue_to_canrun_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_stream_enqueue_to_canrun_us_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_stream_enqueue_to_canrun_us_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -2965,7 +2965,7 @@
         {
           "id": 100220,
           "type": "timeseries",
-          "title": "context_batch_size_when_has_context",
+          "title": "context_batch_size_when_has_context（实例均值最大值）",
           "gridPos": {
             "x": 12,
             "y": 173,
@@ -2979,7 +2979,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "max by(${prefill_group})(rtp_llm_context_batch_size_when_has_context{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "max by(${prefill_group})(rate(rtp_llm_context_batch_size_when_has_context_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]) / (rate(rtp_llm_context_batch_size_when_has_context_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]) > 0))",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -3054,7 +3054,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_query_batch_size{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_query_batch_size_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_query_batch_size_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -3204,7 +3204,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_context_batch_size{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_context_batch_size_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_context_batch_size_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -3354,7 +3354,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_max_seq_len{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_max_seq_len_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_max_seq_len_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -3429,7 +3429,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_max_seq_len_when_has_context{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_max_seq_len_when_has_context_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_max_seq_len_when_has_context_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -3504,7 +3504,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_input_token_length{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_input_token_length_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_input_token_length_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -3565,7 +3565,7 @@
         {
           "id": 110099,
           "type": "timeseries",
-          "title": "context batch size / max agg",
+          "title": "context batch size / max agg（实例均值最大值）",
           "gridPos": {
             "x": 12,
             "y": 209,
@@ -3579,7 +3579,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "max by(${prefill_group})(rtp_llm_context_batch_size{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "max by(${prefill_group})(rate(rtp_llm_context_batch_size_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]) / (rate(rtp_llm_context_batch_size_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]) > 0))",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -3879,7 +3879,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_execute_token_size_when_has_context{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_execute_token_size_when_has_context_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_execute_token_size_when_has_context_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -3954,7 +3954,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_execute_token_size{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_execute_token_size_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_execute_token_size_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -6403,7 +6403,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group},mtp_model_type)(rtp_llm_kv_cache_reuse_length{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group},mtp_model_type)(rate(rtp_llm_kv_cache_reuse_length_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group},mtp_model_type)(rate(rtp_llm_kv_cache_reuse_length_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "Prefill · mtp_model_type={{mtp_model_type}} · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -6478,7 +6478,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_stream_cache_device_reuse_length{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_stream_cache_device_reuse_length_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_stream_cache_device_reuse_length_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -7087,7 +7087,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_match_cost_time_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_match_cost_time_us_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_match_cost_time_us_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -7312,7 +7312,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group},trigger_type)(rtp_llm_kv_cache_evicted_block_lifetime_ms{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group},trigger_type)(rate(rtp_llm_kv_cache_evicted_block_lifetime_ms_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group},trigger_type)(rate(rtp_llm_kv_cache_evicted_block_lifetime_ms_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "Prefill · trigger_type={{trigger_type}} · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -9190,7 +9190,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_wait_latency_us{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_wait_latency_us_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_wait_latency_us_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -9265,7 +9265,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group},deployment_name)(rtp_llm_first_token_latency_us{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "(sum by(${decode_group},deployment_name)(rate(rtp_llm_first_token_latency_us_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group},deployment_name)(rate(rtp_llm_first_token_latency_us_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "Decode · deployment_name={{deployment_name}} · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -9490,7 +9490,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_latency_us{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_latency_us_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_latency_us_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -9776,7 +9776,7 @@
         {
           "id": 200160,
           "type": "timeseries",
-          "title": "step latency",
+          "title": "step latency（实例均值最大值）",
           "gridPos": {
             "x": 12,
             "y": 737,
@@ -9790,7 +9790,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "max by(${decode_group})(rtp_llm_step_latency_us{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "max by(${decode_group})(rate(rtp_llm_step_latency_us_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]) / (rate(rtp_llm_step_latency_us_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]) > 0))",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -10015,7 +10015,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group},cache_dependency,loading_entered)(rtp_llm_stream_canrun_to_running_us{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "(sum by(${decode_group},cache_dependency,loading_entered)(rate(rtp_llm_stream_canrun_to_running_us_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group},cache_dependency,loading_entered)(rate(rtp_llm_stream_canrun_to_running_us_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "Decode · cache_dependency={{cache_dependency}} · loading_entered={{loading_entered}} · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -10465,7 +10465,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_stream_enqueue_to_canrun_us{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_stream_enqueue_to_canrun_us_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_stream_enqueue_to_canrun_us_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -10774,7 +10774,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_iterate_count{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_iterate_count_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_iterate_count_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -10849,7 +10849,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_query_batch_size{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_query_batch_size_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_query_batch_size_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -11074,7 +11074,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_max_seq_len{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_max_seq_len_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_max_seq_len_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -11149,7 +11149,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_input_token_length{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_input_token_length_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_input_token_length_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -11224,7 +11224,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_generate_batch_size{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_generate_batch_size_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_generate_batch_size_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -11374,7 +11374,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_output_token_length{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_output_token_length_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_output_token_length_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -11435,7 +11435,7 @@
         {
           "id": 200439,
           "type": "timeseries",
-          "title": "output token length (Max 最大值)",
+          "title": "output token length (Max 最大值)（实例均值最大值）",
           "gridPos": {
             "x": 12,
             "y": 845,
@@ -11449,7 +11449,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "max by(${decode_group})(rtp_llm_output_token_length{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "max by(${decode_group})(rate(rtp_llm_output_token_length_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]) / (rate(rtp_llm_output_token_length_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]) > 0))",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -11524,7 +11524,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_execute_token_size{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_execute_token_size_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_execute_token_size_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -11599,7 +11599,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group},timeout)(rtp_llm_output_token_length{instance=~\"${decode_instance}\",role=\"decode\",timeout=\"true\"})",
+              "expr": "(sum by(${decode_group},timeout)(rate(rtp_llm_output_token_length_sum{instance=~\"${decode_instance}\",role=\"decode\",timeout=\"true\"}[$__rate_interval]))) / (sum by(${decode_group},timeout)(rate(rtp_llm_output_token_length_count{instance=~\"${decode_instance}\",role=\"decode\",timeout=\"true\"}[$__rate_interval])) > 0)",
               "legendFormat": "Decode · timeout={{timeout}} · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -14057,7 +14057,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_match_cost_time_us{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_match_cost_time_us_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_match_cost_time_us_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -14282,7 +14282,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group},trigger_type)(rtp_llm_kv_cache_evicted_block_lifetime_ms{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "(sum by(${decode_group},trigger_type)(rate(rtp_llm_kv_cache_evicted_block_lifetime_ms_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group},trigger_type)(rate(rtp_llm_kv_cache_evicted_block_lifetime_ms_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "Decode · trigger_type={{trigger_type}} · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -16399,7 +16399,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${vit_group})(py_rtp_vit_download_rt{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "(sum by(${vit_group})(rate(py_rtp_vit_download_rt_sum{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval]))) / (sum by(${vit_group})(rate(py_rtp_vit_download_rt_count{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval])) > 0)",
               "legendFormat": "ViT · download · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -16408,7 +16408,7 @@
             },
             {
               "refId": "B",
-              "expr": "avg by(${vit_group})(py_rtp_vit_preprocess_other_rt{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "(sum by(${vit_group})(rate(py_rtp_vit_preprocess_other_rt_sum{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval]))) / (sum by(${vit_group})(rate(py_rtp_vit_preprocess_other_rt_count{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval])) > 0)",
               "legendFormat": "ViT · preprocess_time · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -16417,7 +16417,7 @@
             },
             {
               "refId": "C",
-              "expr": "avg by(${vit_group})(py_rtp_vit_preprocess_rt{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "(sum by(${vit_group})(rate(py_rtp_vit_preprocess_rt_sum{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval]))) / (sum by(${vit_group})(rate(py_rtp_vit_preprocess_rt_count{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval])) > 0)",
               "legendFormat": "ViT · total · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -16492,7 +16492,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${vit_group})(py_rtp_vit_download_rt{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "(sum by(${vit_group})(rate(py_rtp_vit_download_rt_sum{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval]))) / (sum by(${vit_group})(rate(py_rtp_vit_download_rt_count{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval])) > 0)",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -16567,7 +16567,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${vit_group})(py_rtp_vit_preprocess_other_rt{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "(sum by(${vit_group})(rate(py_rtp_vit_preprocess_other_rt_sum{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval]))) / (sum by(${vit_group})(rate(py_rtp_vit_preprocess_other_rt_count{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval])) > 0)",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -16703,7 +16703,7 @@
         {
           "id": 310366,
           "type": "timeseries",
-          "title": "vit images total num",
+          "title": "每请求图片数量（请求加权均值）",
           "gridPos": {
             "x": 12,
             "y": 1320,
@@ -16717,7 +16717,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${vit_group})(py_rtp_vit_image_count{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "(sum by(${vit_group})(rate(py_rtp_vit_image_count_sum{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval]))) / (sum by(${vit_group})(rate(py_rtp_vit_image_count_count{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval])) > 0)",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -16792,7 +16792,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${vit_group})(py_rtp_vit_embedding_rt{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "(sum by(${vit_group})(rate(py_rtp_vit_embedding_rt_sum{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval]))) / (sum by(${vit_group})(rate(py_rtp_vit_embedding_rt_count{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval])) > 0)",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -16928,7 +16928,7 @@
         {
           "id": 310353,
           "type": "timeseries",
-          "title": "vit embedding length",
+          "title": "每请求 Embedding 长度（请求加权均值）",
           "gridPos": {
             "x": 0,
             "y": 1338,
@@ -16942,7 +16942,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${vit_group})(py_rtp_vit_embedding_length{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "(sum by(${vit_group})(rate(py_rtp_vit_embedding_length_sum{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval]))) / (sum by(${vit_group})(rate(py_rtp_vit_embedding_length_count{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval])) > 0)",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -17092,7 +17092,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${vit_group})(py_rtp_vit_embedding_queue_wait_rt{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "(sum by(${vit_group})(rate(py_rtp_vit_embedding_queue_wait_rt_sum{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval]))) / (sum by(${vit_group})(rate(py_rtp_vit_embedding_queue_wait_rt_count{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval])) > 0)",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -18142,7 +18142,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${vit_group})(py_rtp_vit_request_rt{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "(sum by(${vit_group})(rate(py_rtp_vit_request_rt_sum{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval]))) / (sum by(${vit_group})(rate(py_rtp_vit_request_rt_count{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval])) > 0)",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -18217,7 +18217,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${vit_group})(py_rtp_vit_embedding_forward_rt{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "(sum by(${vit_group})(rate(py_rtp_vit_embedding_forward_rt_sum{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval]))) / (sum by(${vit_group})(rate(py_rtp_vit_embedding_forward_rt_count{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval])) > 0)",
               "legendFormat": "实际 · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -18226,7 +18226,7 @@
             },
             {
               "refId": "B",
-              "expr": "avg by(${vit_group})(mock_vit_theoretical_forward_rt{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "(sum by(${vit_group})(rate(mock_vit_theoretical_forward_rt_sum{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval]))) / (sum by(${vit_group})(rate(mock_vit_theoretical_forward_rt_count{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval])) > 0)",
               "legendFormat": "计划 · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -18294,7 +18294,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${vit_group})(py_rtp_vit_embedding_batch_size{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "(sum by(${vit_group})(rate(py_rtp_vit_embedding_batch_size_sum{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval]))) / (sum by(${vit_group})(rate(py_rtp_vit_embedding_batch_size_count{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval])) > 0)",
               "legendFormat": "请求数 · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -20424,7 +20424,7 @@
           "targets": [
             {
               "refId": "A_prefill",
-              "expr": "avg by(${prefill_group})(rtp_llm_model_forward_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_model_forward_us_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_model_forward_us_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "Prefill · 模型 forward 耗时 | 部署角色= · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -23779,7 +23779,7 @@
         {
           "id": 409202,
           "type": "timeseries",
-          "title": "Worker 服务端处理查询多久：平均 / 最大",
+          "title": "Worker 服务端处理查询多久：平均 / 最大（实例均值最大值）",
           "gridPos": {
             "x": 12,
             "y": 1712,
@@ -23793,8 +23793,8 @@
           "targets": [
             {
               "refId": "A_prefill",
-              "expr": "avg by(${prefill_group})(rtp_llm_rpc_worker_status_total_rt_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
-              "legendFormat": "Prefill · Status 服务端处理·平均 · {{${prefill_group}}}",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_rpc_worker_status_total_rt_us_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_rpc_worker_status_total_rt_us_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
+              "legendFormat": "Prefill · Status 服务端处理·平均 | 部署角色= · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -23802,8 +23802,8 @@
             },
             {
               "refId": "A_decode",
-              "expr": "avg by(${decode_group})(rtp_llm_rpc_worker_status_total_rt_us{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · Status 服务端处理·平均 · {{${decode_group}}}",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_rpc_worker_status_total_rt_us_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_rpc_worker_status_total_rt_us_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
+              "legendFormat": "Decode · Status 服务端处理·平均 | 部署角色= · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -23811,8 +23811,8 @@
             },
             {
               "refId": "B_prefill",
-              "expr": "max by(${prefill_group})(rtp_llm_rpc_worker_status_total_rt_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
-              "legendFormat": "Prefill · Status 服务端处理·最大 · {{${prefill_group}}}",
+              "expr": "max by(${prefill_group})(rate(rtp_llm_rpc_worker_status_total_rt_us_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]) / (rate(rtp_llm_rpc_worker_status_total_rt_us_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]) > 0))",
+              "legendFormat": "Prefill · Status 服务端处理·最大 | 部署角色= · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -23820,8 +23820,8 @@
             },
             {
               "refId": "B_decode",
-              "expr": "max by(${decode_group})(rtp_llm_rpc_worker_status_total_rt_us{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · Status 服务端处理·最大 · {{${decode_group}}}",
+              "expr": "max by(${decode_group})(rate(rtp_llm_rpc_worker_status_total_rt_us_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]) / (rate(rtp_llm_rpc_worker_status_total_rt_us_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]) > 0))",
+              "legendFormat": "Decode · Status 服务端处理·最大 | 部署角色= · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -23829,8 +23829,8 @@
             },
             {
               "refId": "C_prefill",
-              "expr": "avg by(${prefill_group})(rtp_llm_rpc_cache_status_total_rt_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
-              "legendFormat": "Prefill · Cache 服务端处理·平均 · {{${prefill_group}}}",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_rpc_cache_status_total_rt_us_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_rpc_cache_status_total_rt_us_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
+              "legendFormat": "Prefill · Cache 服务端处理·平均 | 部署角色= · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -23838,8 +23838,8 @@
             },
             {
               "refId": "C_decode",
-              "expr": "avg by(${decode_group})(rtp_llm_rpc_cache_status_total_rt_us{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · Cache 服务端处理·平均 · {{${decode_group}}}",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_rpc_cache_status_total_rt_us_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_rpc_cache_status_total_rt_us_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
+              "legendFormat": "Decode · Cache 服务端处理·平均 | 部署角色= · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -23847,8 +23847,8 @@
             },
             {
               "refId": "D_prefill",
-              "expr": "max by(${prefill_group})(rtp_llm_rpc_cache_status_total_rt_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
-              "legendFormat": "Prefill · Cache 服务端处理·最大 · {{${prefill_group}}}",
+              "expr": "max by(${prefill_group})(rate(rtp_llm_rpc_cache_status_total_rt_us_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]) / (rate(rtp_llm_rpc_cache_status_total_rt_us_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]) > 0))",
+              "legendFormat": "Prefill · Cache 服务端处理·最大 | 部署角色= · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -23856,8 +23856,8 @@
             },
             {
               "refId": "D_decode",
-              "expr": "max by(${decode_group})(rtp_llm_rpc_cache_status_total_rt_us{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · Cache 服务端处理·最大 · {{${decode_group}}}",
+              "expr": "max by(${decode_group})(rate(rtp_llm_rpc_cache_status_total_rt_us_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]) / (rate(rtp_llm_rpc_cache_status_total_rt_us_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]) > 0))",
+              "legendFormat": "Decode · Cache 服务端处理·最大 | 部署角色= · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"

@@ -1,7 +1,7 @@
 package org.flexlb.mock.engine.rtp;
 
 import org.flexlb.mock.metrics.MetricTags;
-import org.flexlb.mock.metrics.WindowMetrics;
+import org.flexlb.mock.metrics.EventMetrics;
 
 import io.prometheus.client.*;
 import java.util.*;
@@ -38,7 +38,7 @@ final class RtpMetrics {
     private static final String[] LABELS = {"role"};
     private final CollectorRegistry registry = new CollectorRegistry();
     private final Map<String, String> tags;
-    private final WindowMetrics events;
+    private final EventMetrics events;
     private final Counter.Child started, cacheInputs, cacheHits, contextSeconds, contextWithCacheSeconds;
     private final Map<Outcome, Counter.Child> finished = new EnumMap<>(Outcome.class);
     private final Map<String, Counter.Child> tokens = new HashMap<>();
@@ -64,11 +64,11 @@ final class RtpMetrics {
         this.clock = Objects.requireNonNull(clock);
         prefill = role.equals("prefill");
         windowStarted = clock.getAsLong();
-        events = new WindowMetrics(role, clock);
-        events.register(registry);
         var physical = new HashMap<>(MetricTags.fromEnvironment(System.getenv()));
         physical.put("dp_rank", "0"); // The current Engine supports exactly one DP worker.
         tags = Map.copyOf(physical);
+        events = new EventMetrics(role, clock, tags);
+        events.register(registry);
         String[] identity = {role};
         started = counter("rtp_llm_requests_started_total", "Accepted engine requests.").labels(identity);
         contextSeconds = counter("rtp_llm_context_forward_seconds_total", "Forward seconds with nonzero Prefill computation.").labels(identity);
@@ -174,16 +174,16 @@ final class RtpMetrics {
     void requestFinished(Outcome outcome, RequestStats stats, boolean reportCacheReuse) {
         // Real emits stream timings for success, cancellation and timeout, not arbitrary internal errors.
         if (outcome != Outcome.error) {
-            events.observe("rtp_llm_latency_us", stats.elapsedNanos() / 1000.0);
-            events.observe("rtp_llm_wait_latency_us", stats.waitNanos() / 1000.0);
+            positiveMicros("rtp_llm_latency_us", stats.elapsedNanos());
+            positiveMicros("rtp_llm_wait_latency_us", stats.waitNanos());
             positiveMicros("rtp_llm_stream_enqueue_to_canrun_us", stats.enqueueToCanRunNanos());
             positiveMicros("rtp_llm_stream_canrun_to_running_us", stats.canRunToRunningNanos());
-            if (stats.firstTokenNanos() >= 0) events.observe("rtp_llm_first_token_latency_us", stats.firstTokenNanos() / 1000.0);
-            events.observe("rtp_llm_input_token_length", stats.inputTokens());
+            positiveMicros("rtp_llm_first_token_latency_us", stats.firstTokenNanos());
+            observePositive("rtp_llm_input_token_length", stats.inputTokens());
             if (reportCacheReuse) events.observe("rtp_llm_kv_cache_reuse_length", stats.reusedTokens());
-            events.observe("rtp_llm_output_token_length", stats.outputTokens());
-            events.observe("rtp_llm_iterate_count", stats.iterations());
-            events.observe("rtp_llm_reuse_length", stats.reusedTokens());
+            observePositive("rtp_llm_output_token_length", stats.outputTokens());
+            observePositive("rtp_llm_iterate_count", stats.iterations());
+            observePositive("rtp_llm_reuse_length", stats.reusedTokens());
             events.observe("rtp_llm_query_batch_size", 1); // Native query batch is beams, not the scheduler batch.
         }
         finished.get(outcome).inc();

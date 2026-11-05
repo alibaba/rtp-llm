@@ -122,7 +122,8 @@ def test_local_legends_use_prometheus_labels_and_respect_aggregation():
     items = {p['id']: p for p in panels()}
     forward = items[100231]['targets'][0]
     assert forward['legendFormat'] == '{{${prefill_group}}}'
-    assert forward['expr'].startswith('avg by(${prefill_group})(')
+    assert 'rtp_llm_model_forward_us_sum{' in forward['expr']
+    assert 'rtp_llm_model_forward_us_count{' in forward['expr']
     decode_forward = items[600019]['targets'][0]
     assert decode_forward['legendFormat'].startswith('{{${decode_group}}}')
     assert decode_forward['expr'].startswith('avg by(${decode_group})(')
@@ -181,7 +182,7 @@ def test_real_engine_observations_return_to_rtp_panels_and_mock_rows_only_compar
     for panel_id in (100160, 200160, 200178, 200548, 300452, 310351):
         assert '待埋点' not in items[panel_id]['title']
     assert items[200548]['fieldConfig']['defaults']['unit'] == 'percentunit'
-    assert 'py_rtp_vit_preprocess_rt{' in items[300452]['targets'][2]['expr']
+    assert 'py_rtp_vit_preprocess_rt_sum{' in items[300452]['targets'][2]['expr']
     assert all('role="decode"' in t['expr'] for p in panels() for t in p['targets']
                if 'rtp_llm_sp_' in t['expr'])
 

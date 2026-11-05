@@ -7,7 +7,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.flexlb.mock.metrics.MetricTags;
-import org.flexlb.mock.metrics.WindowMetrics;
+import org.flexlb.mock.metrics.EventMetrics;
 import io.grpc.stub.StreamObserver;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
@@ -22,7 +22,7 @@ import org.flexlb.mock.engine.TaskHistory;
  */
 public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implements AutoCloseable {
     private final CollectorRegistry rpcRegistry = new CollectorRegistry();
-    private final WindowMetrics rpcMetrics;
+    private final EventMetrics rpcMetrics;
     private final Map<String, String> metricTags;
     private final AdmissionConfig config;
     private final KvCache cache;
@@ -37,11 +37,11 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
         this.config = config;
         this.groups = groups;
         this.cache = cache;
-        rpcMetrics = new WindowMetrics(config.role().name());
-        rpcMetrics.register(rpcRegistry);
         var tags = new HashMap<>(MetricTags.fromEnvironment(System.getenv()));
         tags.put("dp_rank", "0");
         metricTags = Map.copyOf(tags);
+        rpcMetrics = new EventMetrics(config.role().name(), System::nanoTime, metricTags);
+        rpcMetrics.register(rpcRegistry);
         prefill = config.role() == org.flexlb.mock.api.model.Types.Role.prefill
             ? new PrefillAdmission(config, executionLock, finished, engine, this::recordCancellation) : null;
         decode = prefill == null ? new DecodeAdmission(config, executionLock, engine, this::recordCancellation) : null;

@@ -96,8 +96,8 @@ class RtpSchedulerTest {
             complete(scheduler, batch, config); drain(scheduler);
             assertEquals(RequestFailure.Reason.CANCELLED, first.terminal.get(1, TimeUnit.SECONDS).reason());
             String observations = scheduler.metrics().scrape();
-            assertTrue(observations.lines().anyMatch(line -> line.startsWith("rtp_llm_generate_batch_size{") && line.endsWith(" 2.0")), observations);
-            assertTrue(observations.lines().anyMatch(line -> line.startsWith("rtp_llm_execute_token_size{") && line.endsWith(" 2.0")), observations);
+            assertEquals(2, RtpMetricsTest.mean(observations, "rtp_llm_generate_batch_size", ""));
+            assertEquals(2, RtpMetricsTest.mean(observations, "rtp_llm_execute_token_size", ""));
             assertEquals(1, a.snapshot().generated()); assertEquals(2, b.snapshot().generated());
             assertEquals(new QueueSnapshot(0, 1, 0, 0), scheduler.queues());
             assertTrue(scheduler.metrics().scrape().lines().anyMatch(line -> line.startsWith("rtp_llm_model_forward_seconds_count{")
@@ -109,7 +109,7 @@ class RtpSchedulerTest {
             String terminalMetrics = scheduler.metrics().scrape();
             for (String name : List.of("rtp_llm_latency_us", "rtp_llm_wait_latency_us", "rtp_llm_first_token_latency_us",
                     "rtp_llm_input_token_length", "rtp_llm_output_token_length", "rtp_llm_iterate_count", "rtp_llm_query_batch_size"))
-                assertTrue(terminalMetrics.contains(name + "{"), terminalMetrics);
+                assertTrue(terminalMetrics.contains(name + "_count{"), terminalMetrics);
         }
     }
 
@@ -616,8 +616,8 @@ class RtpSchedulerTest {
                 var metrics = scheduler.metrics().scrape();
                 assertEquals(0, RtpMetricsTest.sample(metrics, "rtp_llm_wait_stream_size", ""));
                 if (drafts > 0) {
-                    assertEquals(2, RtpMetricsTest.sample(metrics, "rtp_llm_sp_total_propose_token_num", ""));
-                    assertEquals(3, RtpMetricsTest.sample(metrics, "rtp_llm_sp_total_accepted_token_num", ""));
+                    assertEquals(2, RtpMetricsTest.mean(metrics, "rtp_llm_sp_total_propose_token_num", ""));
+                    assertEquals(3, RtpMetricsTest.mean(metrics, "rtp_llm_sp_total_accepted_token_num", ""));
                     assertEquals(2, RtpMetricsTest.sample(metrics, "rtp_llm_forward_tokens_total", "kind=\"output\""));
                 } else {
                     assertFalse(metrics.contains("rtp_llm_sp_"));

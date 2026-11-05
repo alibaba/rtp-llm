@@ -7,7 +7,7 @@ import org.flexlb.mock.metrics.*;
 /** Per-V instance telemetry; no simulated per-process CPU/GPU utilization. */
 final class VitMetrics {
     final CollectorRegistry registry = new CollectorRegistry();
-    final WindowMetrics events = new WindowMetrics("vit");
+    final EventMetrics events = new EventMetrics("vit");
     VitMetrics() {
         events.register(registry);
         for (String name : List.of("py_rtp_vit_qps", "py_rtp_vit_success_qps", "py_rtp_vit_error_qps",

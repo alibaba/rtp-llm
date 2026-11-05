@@ -19,6 +19,7 @@ class MetricsOutputTest {
 
     @Test void duplicateOrBrokenProvidersCannotSilentlyFallBack() {
         MetricReporter broken = new MetricReporter() {
+            public void observe(String name, Map<String,String> tags, double value) { fail("No event expected"); }
             public void initialize(Map<String,String> env) { throw new IllegalStateException("SDK unavailable"); }
             public void report(List<MetricFamilySamples> snapshot) { fail(); }
         };
@@ -30,6 +31,7 @@ class MetricsOutputTest {
         var received = new CountDownLatch(2);
         var collections = new AtomicInteger();
         MetricReporter reporter = new MetricReporter() {
+            public void observe(String name, Map<String,String> tags, double value) { fail("No event expected"); }
             public void initialize(Map<String,String> env) { assertEquals("tags", env.get("kmonitorTags")); }
             public long intervalMillis() { return 10; }
             public void report(List<MetricFamilySamples> snapshot) { received.countDown(); }

@@ -71,8 +71,9 @@ View 的 `annotation_steps` 只配置默认选择，省略则全部显示，空�
 | ViT 请求 | `py_rtp_vit_qps` / `success_qps` / `error_qps`，`image_count` / `embedding_length` / `embedding_rt` | 统计计算/等待调用；纯 metadata/hash 命中不产生新的计算请求；下载由异步准备执行器完成，没有 Tensor 数据搬运 |
 | ViT 缓存 | `py_rtp_vit_embedding_cache_{hit,miss,inflight,eviction}_qps`、`tokens` / `bytes` | GPU+CPU 逻辑驻留合计，不能作为真实 GPU/JVM 物理占用 |
 
-新增事件 Gauge 用采集窗口均值而非只保留最后一个事件；无事件时不发耗时样本。`_sum` / `_count` 为本地累计查询辅助量。QPS 按实际窗口秒数换算，空闲为零。它们与 KMonitor 的固定上报周期并非逐点相同；共享 JVM 不能导出可信的单 Engine CPU/堆/GPU 利用率，资源面板继续留空。
 
 P/D KV 仅模拟本地 Full-KV 池和 LRU。大盘删除 Host 容量、Memory KVCache、Disk/Remote 复用和远程 connector 引用面板；保留本地容量、请求引用和前缀复用观测。ViT 的 CPU/GPU embedding 缓存不属于 P/D KV，保留原有面板。
 
 Worker 新增 Status/Cache RPC 请求率与处理耗时、本地缓存条目/匹配/淘汰寿命、streaming 请求终态和 ForwardBatch 输入准备耗时。Prefill 的 30 分钟理论 cache key 重叠与实际复用分开展示，理论重叠不代表本地仍持有 KV。查询继续使用 P/D/V 独立选择器与默认聚合。
+
+事件耗时和长度不再导出同名窗口均值 Gauge。Prometheus 使用 Summary 的累计 `_sum` / `_count`，均值用区间增量汇总后相除，保留事件权重；无事件和抓取不会清空累计量。KMonitor 接收原名的原始样本，SDK 负责次数、总和和极值。事件 QPS 在 KMonitor 提交原始计数，Prometheus 按实际窗口换算；状态和已计算的 TPS/QPS 保持 Gauge。Prometheus 的跨实例最大均值不等同于单次事件最大值。

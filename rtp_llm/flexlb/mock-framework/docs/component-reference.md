@@ -267,8 +267,8 @@ RTP 后端的 RtpMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独
 | rtp_llm_host_kv_tokens | Gauge | 本地 Host total/free token 容量，与 Device 分开。 |
 | rtp_llm_cache_lookup_tokens_total / rtp_llm_cache_hit_tokens_total | Counter | 分配时实际输入/历史命中 token，取消不撤销已发生查找。 |
 | rtp_llm_forward_tokens_total | Counter，kind=input/compute/output | 完成 Forward 的 token；input/compute 汇总本批全部执行成员，output 只计有效提交。全部取消的 Forward 不补完成样本。 |
-| rtp_llm_model_forward_us | Gauge | Prefill 完成 Forward 的采集窗口均值，微秒。当前生产 MTP 兼容口径下 Decode 缺席。 |
-| rtp_llm_step_latency_us | Gauge | P/D 完成的非空执行步耗时，微秒，从调度返回到处理完本轮输出。 |
+| rtp_llm_model_forward_us | Prometheus Summary / KMonitor 事件 Gauge | Prefill 每次完成 Forward 的微秒样本，均值按 sum/count 增量计算。Decode 缺席。 |
+| rtp_llm_step_latency_us | Prometheus Summary / KMonitor 事件 Gauge | P/D 完成的非空执行步耗时，微秒，从调度返回到处理完本轮输出。 |
 | rtp_llm_{context,generate,total}_tps | Gauge | 有效执行时间内的 token/s。P 的 context 计未命中计算量，with_cache 计输入；D 的 draft 模型计停止条件截断前的验收量（含 bonus）。 |
 | rtp_llm_sp_* | Gauge | 仅 D 的 draft 模型记录步耗时、提议/验收、每流验收、接受率及估计 TPOT。估计 TPOT 为步耗时除以每流平均验收量。 |
 | mock_model_forward_actual_us | Gauge | P/D 最近一次完成 Forward 的模拟实际耗时，微秒，用于与计划值对照。 |
@@ -287,7 +287,6 @@ P/D 已补 `rtp_llm_{context,generate}_batch_size`、执行 Token 数、最长�
 
 ViT 使用相同的物理元数据与 Prometheus instance 发现；QPS、Embedding 队列/等待/Forward/合批、请求图片数/输出长度，以及缓存命中/未命中/在途合并/淘汰和逻辑驻留量均按 real 名称导出。实际读取时提供 rtp_llm_vit_image_fetch_rt_us（μs）；成功完成图片准备后采样总耗时、下载及其余耗时（ms）。其余耗时包括读尺寸、内容摘要和几何计算。跳过读取时这些指标无样本。py_rtp_vit_preprocess_queue_size 是尚未完成准备的工作数（含排队和执行），py_rtp_vit_embedding_rt 仅计成功工作的就绪排队加 Forward，py_rtp_vit_request_rt 覆盖阻塞媒体调用的成功/失败全程，包括缓存命中等待但不含 RPC 传输和输出编码。未实现的像素预处理和 CUDA Graph 指标不补零。详见 [指标覆盖与边界](../views/README.md)。
 
-新增事件 Gauge 为采集窗口均值，无事件的窗口不发耗时样本；其 `_sum` / `_count` 辅助累计量不清零。QPS 使用真实窗口秒数换算，空闲归零；窗口与 KMonitor 固定周期不保证逐点相同。Forward 最近值统一使用 `mock_model_forward_actual_us`，Histogram 仍以秒记录完成的模拟 Forward。下表的 `engine/decode/tps` 用于衡量按墙钟计的已提交输出 token 速率。
 
 累计量预建 0，抓取不清零；分母为 0 不补比率。以下查询在 Python `interfaces/metrics.py` 实现，直接调用本次托管 Prometheus：
 
@@ -371,3 +370,5 @@ KVCM 元数据仍只上报逻辑 KV。心跳独立于串行数据任务，大快
 KVCM 心跳与串行数据上报独立执行；回复会扫描全部 item 的重新注册/快照提示，旧注册代次的心跳反馈不会作用到新注册。快照仍保留同一版本与报文直到 ACK，随后才推进版本、发送增量；失败重试保留 retry_after_ms 约束。
 
 WorkerStatus/CacheStatus 的 RPC QPS、耗时和取消由 RpcService 上报；Scheduler 上报 streaming 请求终态、本地缓存条目数、匹配耗时、淘汰块寿命和 Mock batch 准备耗时。`rtp_llm_kv_cache_reuse_length` 在请求终态上报，与输入长度同口径。Prefill 最近 30 分钟 cache key 命中是理论重叠统计，不表示缓存仍驻留；实际复用按成功准入时的本地命中统计。
+
+事件耗时和长度不再导出同名窗口均值 Gauge。Prometheus 使用 Summary 的累计 `_sum` / `_count`，均值用区间增量汇总后相除，保留事件权重；无事件和抓取不会清空累计量。KMonitor 接收原名的原始样本，SDK 负责次数、总和和极值。事件 QPS 在 KMonitor 提交原始计数，Prometheus 按实际窗口换算；状态和已计算的 TPS/QPS 保持 Gauge。Prometheus 的跨实例最大均值不等同于单次事件最大值。
