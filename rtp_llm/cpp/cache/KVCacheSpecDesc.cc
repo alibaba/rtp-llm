@@ -26,22 +26,18 @@ KVCacheSpecPtr SpecBuilder::build(const KVCacheSpecDesc& desc, const SpecBuildCo
             break;
     }
     RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "unknown KVCacheSpecType=%d", static_cast<int>(desc.cache_type));
-    auto& layout = spec->tp_transfer;
-    layout.mode  = desc.tp_transfer_mode;
-    if (layout.mode == TpCacheTransferMode::LINEAR_QKV) {
-        RTP_LLM_CHECK_WITH_INFO(desc.cache_type == KVCacheSpecType::LinearAttention,
-                                "LINEAR_QKV transfer requires a linear cache spec");
-    } else if (layout.mode == TpCacheTransferMode::MHA_HEADS) {
-        RTP_LLM_CHECK_WITH_INFO(desc.cache_type == KVCacheSpecType::MultiHeadAttention,
-                                "MHA_HEADS transfer requires an MHA cache spec");
-    } else {
-        RTP_LLM_CHECK_WITH_INFO(layout.mode == TpCacheTransferMode::LEGACY
-                                    || (layout.mode == TpCacheTransferMode::REPLICATED
-                                        && (desc.cache_type == KVCacheSpecType::OpaqueKV
-                                            || desc.cache_type == KVCacheSpecType::OpaqueState)),
-                                "invalid cache TP transfer mode for tag=%s",
-                                desc.tag.c_str());
-    }
+    const auto mode = desc.tp_transfer_mode;
+    RTP_LLM_CHECK_WITH_INFO(
+        mode == TpCacheTransferMode::LEGACY
+            || (mode == TpCacheTransferMode::LINEAR_QKV && desc.cache_type == KVCacheSpecType::LinearAttention)
+            || (mode == TpCacheTransferMode::MHA_HEADS && desc.cache_type == KVCacheSpecType::MultiHeadAttention)
+            || (mode == TpCacheTransferMode::REPLICATED
+                && (desc.cache_type == KVCacheSpecType::OpaqueKV || desc.cache_type == KVCacheSpecType::OpaqueState)),
+        "invalid cache TP transfer mode: tag=%s cache_type=%d mode=%d",
+        desc.tag.c_str(),
+        static_cast<int>(desc.cache_type),
+        static_cast<int>(mode));
+    spec->tp_transfer.mode = mode;
     return spec;
 }
 
