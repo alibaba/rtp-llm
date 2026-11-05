@@ -87,6 +87,7 @@ cc_library(
         "util/ReadyBitMap.h",
         "util/BitMap.h",
         "util/EnvParam.h",
+        "util/CommonUtil.h",
         "pybind/NaviRuntimeConfig.h",
     ]),
     include_prefix = "navi",
