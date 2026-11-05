@@ -3,6 +3,15 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "collective_projection_gemm_rs_test",
+    srcs = ["collective_projection_gemm_rs_test.py"],
+    data = ["//rtp_llm/models_py:collective_projection_gemm_rs_test_sources"],
+    deps = ["//rtp_llm:torch"],
+    env = {"GPU_COUNT": "0"},
+    timeout = "short",
+)
+
+py_test(
     name = "bf16_collective_projection_test",
     srcs = ["bf16_collective_projection_test.py"],
     deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
