@@ -30,6 +30,14 @@ if [[ "$v41_role" == graph-cache-device ]]; then
     exec "$v41_python" -B -m unittest rtp_llm.models_py.modules.dsv41.ppu.test.test_graph_cache
 fi
 : "${RTP_V41_TEST_CHECKPOINT:?checkpoint directory required}"
+if [[ "$v41_role" == graph-fidelity ]]; then
+    export RTP_V41_PPU_MOE_BACKEND=megamoe
+    unset RTP_V41_PPU_MOE_PRECISION
+    exec "$v41_python" -B rtp_llm/models_py/modules/dsv41/ppu/tools/driver_decode_graph_dp8.py \
+        --config-path "$RTP_V41_TEST_CHECKPOINT/config.json" \
+        --checkpoint-path "$RTP_V41_TEST_CHECKPOINT" --nproc 8 --timeout 5400 \
+        --output "$v41_output/graph-fidelity.json"
+fi
 v41_args=(
     --config-path "$RTP_V41_TEST_CHECKPOINT/config.json"
     --checkpoint-path "$RTP_V41_TEST_CHECKPOINT"

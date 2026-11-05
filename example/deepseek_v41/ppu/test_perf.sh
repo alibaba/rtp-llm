@@ -76,10 +76,13 @@ if graph:
         assert report["model_layers"] == [40], report
         assert report["decode_graph_replays"] > 0, report
         assert report["engines"], report
+        bound_engines = [engine for engine in report["engines"] if engine["layers"]]
+        assert sum(engine["layers"] for engine in bound_engines) == 40, report
         for engine in report["engines"]:
             assert engine["backend"] == "megamoe" and engine["precision"] == "w4a4", engine
-            assert engine["mega_moe_calls"] > 0, engine
             assert engine["grouped_gemm_calls"] == 0, engine
+        for engine in bound_engines:
+            assert engine["mega_moe_calls"] > 0, engine
     assert sum(engine["mega_received_assignments"] for report in reports
                for engine in report["engines"]) > 0, reports
     print("DP8 full 40-layer decode Graph replay counts:",

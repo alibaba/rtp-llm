@@ -58,6 +58,19 @@ sh_test(
     }),
 )
 
+sh_test(
+    name = "decode_graph_fidelity_test",
+    srcs = ["test_functional.sh"],
+    args = ["graph-fidelity"],
+    env = {"GPU_COUNT": "8"},
+    tags = ["manual", "PPU-ZW890P"],
+    timeout = "eternal",
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
 [
     sh_test(
         name = name,
