@@ -32,7 +32,7 @@ final class PrefillRpcServer implements AutoCloseable {
     private final ScheduledThreadPoolExecutor deadlines = new ScheduledThreadPoolExecutor(1,
         Thread.ofPlatform().daemon().name("rtp-pd-deadline").factory());
     private final Map<Long, Call> active = new HashMap<>();
-    private final Map<Long, BufferedOutput> outputs = new LinkedHashMap<>();
+    private final Map<Long, GeneratedOutput> outputs = new LinkedHashMap<>();
     private record Fence(long expires, boolean preempted) {}
     private static final long REGISTRY_TTL = TimeUnit.MINUTES.toNanos(10);
     private final Map<Long, Fence> fences = new LinkedHashMap<>();
@@ -91,7 +91,8 @@ final class PrefillRpcServer implements AutoCloseable {
         private Result success(EngineScheduler.Request request, boolean finished) {
             return new Result(RpcMessages.token(input, RpcMessages.sampledToken(input), 1, 1, request.reused(), request.remoteReused(), System.nanoTime() - request.input().started(), finished, false), Status.OK, 0);
         }
-        @Override public void output(EngineScheduler.Request request, EngineScheduler.Output output) {
+        @Override public void progressed(EngineScheduler.Request request) {
+            var output = request.progress();
             if (retained) result.complete(success(request, output.finished()));
         }
         @Override public void terminal(EngineScheduler.Request request, RequestFailure failure) {
@@ -351,7 +352,7 @@ final class PrefillRpcServer implements AutoCloseable {
 
     void fetch(long id, StreamObserver<GenerateOutputsPB> observer) {
         var response = (ServerCallStreamObserver<GenerateOutputsPB>) observer;
-        BufferedOutput output; Fence fence;
+        GeneratedOutput output; Fence fence;
         synchronized (this) { output = outputs.get(id); fence = fences.get(id); }
         if (fence != null && fence.preempted() && fence.expires() > System.nanoTime()) {
             response.onError(preempted()); return;
@@ -405,7 +406,7 @@ final class PrefillRpcServer implements AutoCloseable {
 
     private final class Call {
         GenerateInputPB input;
-        final BufferedOutput output;
+        final GeneratedOutput output;
         final boolean deferred;
         final CompletableFuture<Void> admitted = new CompletableFuture<>(), prepared = new CompletableFuture<>();
         final CompletableFuture<Session> batchSource;
@@ -421,7 +422,7 @@ final class PrefillRpcServer implements AutoCloseable {
         Call(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, String target, long attachMillis, boolean grouped) {
             this.input = input; this.target = target; this.deferred = response == null;
             batchSource = grouped ? new CompletableFuture<>() : null;
-            output = new BufferedOutput(workers, attachMillis > 0 ? attachMillis : TimeUnit.MINUTES.toMillis(10));
+            output = new GeneratedOutput(workers, attachMillis > 0 ? attachMillis : TimeUnit.MINUTES.toMillis(10));
             context = (deferred ? Context.ROOT : Context.current()).withCancellation();
             started = System.nanoTime();
             deadline = RpcMessages.deadline(input, started, deferred ? Long.MAX_VALUE : rpcDeadline());

@@ -35,7 +35,7 @@ final class DecodeRpcServer implements AutoCloseable {
 
     private final class Call implements StreamObserver<GenerateRequestPB>, EngineScheduler.Listener {
         final ServerCallStreamObserver<GenerateOutputsPB> response;
-        final BufferedOutput delivery;
+        final GeneratedOutput delivery;
         final long started = System.nanoTime();
         final long rpcDeadline;
         GenerateInputPB input;
@@ -50,27 +50,29 @@ final class DecodeRpcServer implements AutoCloseable {
             this.response = response;
             rpcDeadline = context.getDeadline() == null ? Long.MAX_VALUE
                 : RpcMessages.after(started, context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
-            delivery = new BufferedOutput(transport, TimeUnit.MINUTES.toMillis(10));
+            delivery = new GeneratedOutput(transport, TimeUnit.MINUTES.toMillis(10));
             delivery.attach(response, () -> {
                 boolean expired = context.getDeadline() != null && context.getDeadline().isExpired();
-                stop(this, expired ? Status.DEADLINE_EXCEEDED.withDescription("Decode RPC deadline expired")
+                disconnected(this, expired ? Status.DEADLINE_EXCEEDED.withDescription("Decode RPC deadline expired")
                     : Status.CANCELLED.withDescription("Decode RPC cancelled"), expired ? 603 : 8100);
             });
         }
         @Override public void onNext(GenerateRequestPB frame) { accept(this, frame); }
-        @Override public void onError(Throwable error) { stop(this, Status.CANCELLED.withDescription("Decode stream closed"), 8100); }
+        @Override public void onError(Throwable error) { disconnected(this, Status.CANCELLED.withDescription("Decode stream closed"), 8100); }
         @Override public void onCompleted() {
             synchronized (executionLock) {
                 if (stage != Stage.GENERATING && stage != Stage.FINISHING) stop(this, Status.CANCELLED.withDescription("P closed before generation"), 8100);
             }
         }
-        @Override public boolean cancelled() { return response.isCancelled(); }
         @Override public void allocated(EngineScheduler.Request request) { acknowledge(this); }
-        @Override public void output(EngineScheduler.Request request, EngineScheduler.Output progress) {
-            var output = RpcMessages.token(input, token, progress.generated(), progress.committed(), request.reused(), request.remoteReused(),
-                System.nanoTime() - started, progress.finished(), true).toBuilder();
-            output.getFlattenOutputBuilder().getAuxInfoBuilder(0).setIterCount(progress.iterations() + 1);
-            send(this, output.build());
+        @Override public void progressed(EngineScheduler.Request request) {
+            var progress = request.progress();
+            int elapsedUs = (int) Math.min(Integer.MAX_VALUE, (System.nanoTime() - started) / 1000);
+            var info = AuxInfoPB.newBuilder().setInputLen(input.getTokenIdsCount())
+                .setIterCount(progress.iterations() + 1).setPrefixLen(request.reused()).setTotalReuseLen(request.reused())
+                .setLocalReuseLen(request.reused() - request.remoteReused()).setRemoteReuseLen(request.remoteReused()).setPdSep(true)
+                .setCostTimeUs(elapsedUs).setFirstTokenCostTimeUs(elapsedUs);
+            delivery.advance(input.getRequestId(), token, progress.generated(), info.build(), progress.finished());
         }
         @Override public void terminal(EngineScheduler.Request request, RequestFailure failure) {
             ended(this, RpcErrors.status(failure), RpcErrors.code(failure));
@@ -111,6 +113,7 @@ final class DecodeRpcServer implements AutoCloseable {
                         throw Status.FAILED_PRECONDITION.withDescription("Single-token request is already complete at Prefill").asRuntimeException();
                     call.stage = Stage.GENERATING;
                     call.token = frame.getFirstGenerateTokenId();
+                    call.delivery.startAt(1);
                     engine.control(call.request, new RtpControl.Generate(call.token));
                 } else {
                     throw Status.FAILED_PRECONDITION.withDescription("Expected ALLOCATE, LOAD, then GENERATE or PREFILL_COMPLETE").asRuntimeException();
@@ -189,6 +192,15 @@ final class DecodeRpcServer implements AutoCloseable {
         synchronized (executionLock) {
             if (call.terminal || call.response.isCancelled()) throw Status.CANCELLED.asRuntimeException();
             call.delivery.add(output);
+        }
+    }
+
+    private void disconnected(Call call, Status status, long code) {
+        synchronized (executionLock) {
+            // Once GENERATE is accepted, D computes independently of its P output consumer.
+            // Scheduler deadlines, explicit engine cancellation and node shutdown still own termination.
+            if (call.stage == Stage.GENERATING || call.stage == Stage.FINISHING) return;
+            stop(call, status, code);
         }
     }
 

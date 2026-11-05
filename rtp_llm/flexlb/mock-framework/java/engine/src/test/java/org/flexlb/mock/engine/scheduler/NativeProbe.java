@@ -72,11 +72,11 @@ public final class NativeProbe {
             int count = 0;
             var generated = pRpc.generateStreamCall(nativeInput.build());
             while (generated.hasNext()) {
-                var output = generated.next(); count++;
+                var output = generated.next(); count += Math.toIntExact(output.getFlattenOutput().getOutputIds().getShape(2));
                 if (output.getFlattenOutput().getAuxInfo(0).getOutputLen() != count || output.getFlattenOutput().getFinished(0) != (count == 4))
                     throw new IllegalStateException("Invalid automatic P/D output");
             }
-            if (count != 4) throw new IllegalStateException("Automatic P/D did not produce four outputs");
+            if (count != 4) throw new IllegalStateException("Automatic P/D did not produce four tokens");
             var batched = nativeInput.setRequestId(46).build();
             var ack = pRpc.enqueueBatch(EnqueueBatchRequestPB.newBuilder().setBatchId(7).setFetchAttachTimeoutMs(1000)
                 .addDpSlots(EnqueueBatchDpSlotPB.newBuilder().addRequests(EnqueueBatchExternalInputPB.newBuilder().setInput(batched))).build());
@@ -84,11 +84,11 @@ public final class NativeProbe {
             int batchCount = 0;
             var fetched = pRpc.fetchResponse(FetchRequestPB.newBuilder().setRequestId(46).build());
             while (fetched.hasNext()) {
-                var output = fetched.next(); batchCount++;
+                var output = fetched.next(); batchCount += Math.toIntExact(output.getFlattenOutput().getOutputIds().getShape(2));
                 if (output.getFlattenOutput().getAuxInfo(0).getOutputLen() != batchCount || output.getFlattenOutput().getFinished(0) != (batchCount == 4))
                     throw new IllegalStateException("Invalid fetched P/D output");
             }
-            if (batchCount != 4) throw new IllegalStateException("Fetch did not produce four outputs");
+            if (batchCount != 4) throw new IllegalStateException("Fetch did not produce four tokens");
             var cancelled = pRpc.cancel(CancelRequestPB.newBuilder().setRequestId(47).build());
             var fenced = pRpc.enqueueBatch(EnqueueBatchRequestPB.newBuilder().addDpSlots(EnqueueBatchDpSlotPB.newBuilder()
                 .addRequests(EnqueueBatchExternalInputPB.newBuilder().setInput(nativeInput.setRequestId(47)))).build());

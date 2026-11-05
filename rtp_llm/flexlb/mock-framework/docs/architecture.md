@@ -104,7 +104,7 @@ ForwardBatch 是本轮执行输入，不是 running 容器本身。它固定请�
 
 EngineScheduler 调用在同一短锁下串行化；锁不覆盖计算等待或网络发送。公共 EngineLoop 使用一个虚拟线程等待事件和最近 deadline，入队、控制/执行完成、容量释放和关闭都会唤醒；没有固定周期轮询，容量版本未变化时不反复尝试初始分配。没有可执行 batch 也必须处理取消、期限和传输结果，不能依赖下一次 Forward 才收尾。
 
-通知按请求顺序、锁外执行。每个请求最多一个尚未处理完的调度通知；RTP 输出通知只交给协议容器，不等待 Fetch 或网络可写，不暂停后续计算。计算接纳上限覆盖等待调度通知完成的请求；协议结果按独立保留上限清理。通知失败进入该请求的失败清理；终态通知等基础设施异常使 Engine 的后续状态读取明确报错。
+生命周期通知按请求顺序、锁外执行。生成进度仅保留累计长度、迭代数和完成标记；待处理进度通知合并为最新状态，不保存逐轮输出。计算资格不检查网络可写、输出发送进度或回调是否结束；正常终态在计算完成时提交，KV 释放不等待交付。通知串行化只保护协议回调顺序，不改变 running 成员参与下一轮 Forward 的资格。
 
 批次取消按成员处理：取消成员不再提交结果，但资源引用保留到该 Forward 结束。只有全部成员终止或 Engine 关闭时才取消整个模拟执行。旧回调按执行对象和请求句柄核验，不能用复用的请求 ID 找到新请求继续推进。一次完成的 Forward 只记录一次耗时，计算量包含这轮实际执行的全部成员，输出量只计有效提交。
 
@@ -390,7 +390,7 @@ RECEIVED、KV_ALLOCATED、RUNNING、KV 资源和按版本查询的 finished 记�
 协议层缓冲输出并异步发送，Fetch 断开只丢弃该连接的待发输出，不取消计算；显式 Cancel 和请求 deadline
 仍终止计算。输出注册表不叠加固定请求数上限，未接入结果按 fetch_attach_timeout_ms（默认十分钟）
 过期并回收已完成项，不另设会拒绝活跃请求的容量上限。正常性能 Case 应在 Prefill 完成前接入 Fetch；晚接入可读取
-保留输出，但补发间隔不代表真实 TPOT。不模拟输出消费者背压。
+保留累计输出长度，Fetch 附着后按发送游标即时生成内容，补发帧可合并多轮进度；补发间隔不代表计算侧 TPOT。不模拟输出消费者对计算的背压。
 
 公共 EngineLoop 使用 Condition 等待事件，避免 Java 21 Object.wait 占用共享虚拟线程承载线程。
 
@@ -398,7 +398,7 @@ Master HA Case 在 environment 中声明两个独立 Master JVM，启动后通�
 
 原生 Master 的正常停止和最终清理使用每进程 60 秒退出预算，覆盖选举交接、gRPC 静默期和资源回收。最终清理按启动尝试的逆序逐个等待退出，期间保持其他 Master、Engine 和 ZooKeeper 存活；超时仍强杀并记录清理错误，不把退出失败当作成功。
 
-接入层只处理原生 RPC 的解析、响应关联和异步输出；EngineScheduler 是队列、计算进度、容量和终态的唯一来源。D 的网络不可写只阻塞输出缓冲发送，不再阻塞 Decode Forward 或 KV 释放；缓冲仍受请求生成长度和整体输出保留策略约束。PD 交接只保留 ALLOCATE→Prefill 完成→LOAD/ACK→GENERATE 或 PREFILL_COMPLETE，不实现额外来源注册表、Reader 所有权及自定义 proto。Wire 阶段仅用于拒绝乱序帧，不代替 EngineScheduler 的调度状态。
+接入层只处理原生 RPC 的解析、响应关联和异步输出；EngineScheduler 是队列、计算进度、容量和终态的唯一来源。D 的网络不可写只影响发送游标，不阻塞 Decode Forward 或 KV 释放；积压输出仅保留固定大小进度，输出会话仍按保留策略清理。PD 交接只保留 ALLOCATE→Prefill 完成→LOAD/ACK→GENERATE 或 PREFILL_COMPLETE，不实现额外来源注册表、Reader 所有权及自定义 proto。Wire 阶段仅用于拒绝乱序帧，不代替 EngineScheduler 的调度状态。
 
 RTP 接入位于 `java/engine` 的 `service` 包。RtpRpcService 路由原生 RPC，PrefillRpcServer 和 DecodeRpcServer 管理各自的协议会话。RtpEngineLoop 连接 RPC 与 EngineScheduler。P 默认使用 FIFO，显式组模式使用 RtpPrefillGroupScheduler，D 使用普通调度。
 
@@ -435,3 +435,9 @@ KvCache 同步取得本地容量和复用前缀。资源释放或新前缀发布
 EngineScheduler 的 allocator loading 与 D 的 PD 协议等待分开统计。WorkerStatus 按 real 输出 phase/is_waiting，不再填写 real 未实现的 waiting_query_len/running_query_len；活动 execution_time_ms=-1，终态总耗时减最后一次离开 WAITING 时冻结的 wait 得到 execution_time_ms。正常加载后重新调度会更新 wait，加载中取消则保留之前的 wait；不能把该字段当作纯 Forward 时长。微秒阶段指标在终态上报，具体名称、零值和统计窗口见 component-reference。
 
 KvCache 投递类型化的 match/read/write 完成事件，由 RTP 指标层映射 real 名称与单位，不把协议细节放入 EngineScheduler。读取未成功不增加远端复用，写入确认数由适配器返回；独立拉取 LOAD/STORE 引用与逻辑在途状态，后台写失败不依赖请求是否还存活。未模拟的 SDK/payload 子阶段没有指标样本。
+
+### 合成输出与 P/D 链路假设
+
+RPC GeneratedOutput 每请求只保存生成长度、发送游标、合成 token ID、固定大小的 AuxInfo、握手和终态标记。没有响应列表或逐轮 token 数组。可写时按两游标的差值即时构造增量 protobuf，单帧最多 4096 token，最后一份数据交付后再 onCompleted。未附着 Fetch、慢消费者和阻塞的 onNext 均不反向暂停计算；RPC 自身和网络栈的在途帧不计入这份固定大小状态。合并后的帧不保留原 Forward 边界，Client TTFT/TPOT 反映实际交付，计算侧指标仍按每轮原始事件统计。
+
+P/D 输出链路假定健康，不用链路拥塞或发送失败模拟 D 性能。ALLOCATE/LOAD 未完成时仍必须满足协议与 KV 就绪；GENERATE 接受后，P 断连或取消该输出流不撤销 D 的计算，D 继续到 EOS、长度上限、自身 deadline 或节点关闭。输出不可达可能丢响应；不新增重传、落盘或故障恢复流程。Scheduler 的显式 finish/cancel 仍可终止请求。

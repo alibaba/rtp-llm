@@ -28,7 +28,7 @@ public final class RtpEngineLoop implements AutoCloseable {
     private Pending pending;
     private volatile boolean closed;
     private boolean dirty;
-    private int delivering;
+    private int notifying;
     private RuntimeException failure;
 
     private static final class Pending {
@@ -168,17 +168,17 @@ public final class RtpEngineLoop implements AutoCloseable {
 
     private void dispatch() {
         for (var notification : scheduler.takeNotifications()) {
-            delivering++;
+            notifying++;
             notifications.execute(() -> {
                 try { notification.run(); }
                 catch (RuntimeException error) { synchronized (lock) { fail(error); } }
                 finally {
-                    synchronized (lock) { delivering--; if (closed) dispatch(); }
+                    synchronized (lock) { notifying--; if (closed) dispatch(); }
                     wake();
                 }
             });
         }
-        if (closed && delivering == 0 && scheduler.requests().isEmpty()) notifications.shutdown();
+        if (closed && notifying == 0 && scheduler.requests().isEmpty()) notifications.shutdown();
     }
 
     private void ensureOpen() {

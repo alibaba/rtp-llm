@@ -38,17 +38,16 @@ public interface EngineScheduler extends AutoCloseable {
     interface Request {
         Input input();
         RequestState.Snapshot snapshot();
+        Progress progress();
         int reused();
         default int remoteReused() { return 0; }
     }
 
-    record Output(int generated, int iterations, int committed, boolean finished) {}
+    record Progress(int generated, int iterations, boolean finished) {}
 
     interface Listener {
-        default boolean writable() { return true; }
-        default boolean cancelled() { return false; }
         default void allocated(Request request) {}
-        void output(Request request, Output output);
+        void progressed(Request request);
         void terminal(Request request, RequestFailure failure);
     }
 
