@@ -10,7 +10,7 @@
 
 启动参数 reuse_cache 控制请求级复用，Engine 配置中的 reuse_cache 控制实例策略，两者共同生效。
 
-指标接口支持 mode: interval 和 mode: series。interval 返回一个值，gauge 取区间平均并跨 Worker 求和，比率用分子分母的区间增量汇总后相除，延迟均值用耗时增量除以样本数，P95/P99 合并 bucket 增量后求分位数。series 返回按采集周期排列的数值列表，gte/lte 要求每个点都满足。派生 counter 查询的内部统计长度固定为四个采集周期。缺点、缺实例、NaN 和零分母均报错，不能当作通过。
+指标接口的 mode 默认为 interval，Case 中省略不写；逐点检查时显式写 mode: series。interval 返回一个值，gauge 取区间平均并跨 Worker 求和，比率用分子分母的区间增量汇总后相除，延迟均值用耗时增量除以样本数，P95/P99 合并 bucket 增量后求分位数。series 返回按采集周期排列的数值列表，gte/lte 要求每个点都满足。派生 counter 查询的内部统计长度固定为四个采集周期。缺点、缺实例、NaN 和零分母均报错，不能当作通过。
 
 此 Case 的 interval 成功率针对测量区间内完成的请求。client/stop 另检查全部已发请求终态完整性，返回的 outcomes 保留排空期间失败，供结果审查。
 

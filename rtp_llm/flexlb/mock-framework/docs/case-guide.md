@@ -16,6 +16,16 @@ uv run --locked mock-case compile <case目录>/case.yaml \
 
 顶层为 `id`、可选 `name`、`describe`、`environment`、`phases` 和可选 `view`。Phase 顺序执行。每个 Step 直接写 `interface` 与 `args`，可选 `expect`、`within`、`wait_after` 和 `background`。phase 必须有正的 `timeout`。ID 全局唯一，引用必须来自前置步骤或允许的全局发现字段。
 
+### ID 命名要求
+
+新增或修改 Case 时，ID 统一使用小写 `snake_case`，并在同一个 Case 中全局唯一。Case ID 描述场景并与目录名一致，例如 `version_regression`；Phase ID 描述阶段，例如 `startup`、`performance`。
+
+Step ID 必须采用“动作 + 对象”，必要时追加统计量或时序条件。启动和停止使用 `start_client`、`stop_client`；读取并保存结果使用 `get_master_a`；带断言的检查使用 `check_master_leader`、`check_prefill_tps`、`check_client_ttft_p95`、`check_client_success_rate_after_drain`。不要只写 `traffic`、`leader`、`drain` 或指标名。ID 用于引用和事件定位，具体参数、阈值与说明放在 args、expect 和 describe 中。重命名时同步更新 Step 引用及 View 的 annotation_steps。
+
+这些是 Case 编写和评审要求；编译器目前只校验标识符格式、唯一性和引用，不强制动作前缀。
+
+### Step 执行与等待
+
 Step 默认在前台运行。`background: true` 让 Runner 在当前 Phase 并行执行该 Step。Phase 结束前等待未完成的后台 Step，时间计入 Phase 预算。一个后台 Step 失败时，Runner 取消同 Phase 的其他在途 Step 并回收。后续 Phase 可以引用已成功完成的后台结果。
 
 固定等待写成 step 的 `wait_after: 5s`，默认 `0s`，必须是非负的带单位时长。执行顺序为“调用接口 → 检查 expect → wait_after → 下一步”；最后一个 step 也执行等待。等待计入该 step 的 within 和 phase 的 timeout，期间继续监视组件退出并响应取消；调用或断言失败不执行等待。返回值和 ref 仍是原调用结果，等待不会刷新结果或查询时间；等待后的检查需要下一次接口调用。
@@ -34,19 +44,19 @@ phases:
     describe: 检查发现信息
     timeout: 10s
     steps:
-      - id: leader
+      - id: check_master_leader
         describe: 检查唯一主 Master
         interface: master/get
         args: {is_leader: true}
         expect: {count: 1}
         wait_after: 1s
-      - id: leader_engines
+      - id: get_leader_prefill_engines
         describe: 记录主 Master 的 Prefill 发现结果
         interface: master/engine/get
         args:
-          targets: {ref: steps.leader}
+          targets: {ref: steps.check_master_leader}
           role: prefill
-      - id: tps
+      - id: check_prefill_tps
         describe: 检查所有 Prefill 的计算吞吐
         interface: engine/prefill/tps
         args:
@@ -59,9 +69,14 @@ phases:
 
 ### 查询和断言
 
-普通指标优先使用语义接口，YAML 不写 PromQL。当前支持 `latest` 和相对该 step 固定查询时刻的区间 `[-60s, 0s]`；`client/success_rate` 必须显式提供区间，不接受 latest 或 all，也不隐式切换为整轮累计成功率。其他指标的时间语义保持各自定义；`all` 的跨轮次查询窗口尚未实现，目前拒绝。
+普通指标优先使用语义接口，YAML 不写 PromQL。range 使用相对该 Step 固定查询时刻的区间，例如 `[-60s, 0s]`，不支持 `latest` 或 `all`。省略 range 时默认最近 60 秒；`client/success_rate` 必须显式提供 range，不隐式切换为整轮累计成功率。
 
-`latest` 使用前 60 秒内最近两次样本的 irate；区间使用 increase。执行器固定 `query_time`，指标实现记录实际查询点、表达式和窗口，不重新取墙钟。`expect` 支持 eq、列表 count 或数值 gte/lte。eq 是结构相等，列表顺序参与比较；实例查询返回排序后的地址列表。普通数值直接返回 float，不包装为 `{value, unit}`；单位在接口定义里。逐 Master 状态返回 `{master服务地址: [engine服务地址, ...]}`。
+数值指标的 `mode` 默认为 `interval`，Case 中省略 `mode: interval`，只有逐点检查时才写 `mode: series`：
+
+- `interval` 返回区间汇总数值。Gauge 按实例取区间采样均值再求和；吞吐 counter 用区间增量除以时长；命中率、成功率分别汇总分子与分母的增量后相除，不平均比率采样点；延迟均值使用 sum/count 的增量比值，P95/P99 合并 histogram bucket 增量后计算。
+- `series` 返回按采集周期排列的数值列表，gte/lte 要求每一个点都满足。Counter 派生指标每点使用四个采集周期的滚动统计长度，由实现确定，不另配置 lookback 或 step。
+
+执行器固定每个 Step 的 `query_time`，指标实现记录实际查询点、表达式和时间范围，不重新取墙钟。缺点、缺实例、非有限数值或零分母均报错。`expect` 支持 eq、列表 count 或数值 gte/lte。eq 是结构相等，列表顺序参与比较；实例查询返回排序后的地址列表。普通数值返回 float，series 返回数值列表，不包装为 `{value, unit}`；单位在接口定义里。逐 Master 状态返回 `{master服务地址: [engine服务地址, ...]}`。
 
 原始 `prometheus/query` 只接受 promql，在固定 query_time 执行一次 instant query；历史窗口写进表达式。返回 `{samples: [{labels, value, sample_time}], query_time}`，不自动把它压成数值或对全部序列应用同一阈值。空 vector 保留为空；业务数值门禁使用语义接口，缺数据报错而不是补零。
 
