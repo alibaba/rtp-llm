@@ -101,15 +101,6 @@ class GptModelBase(nn.Module):
     def capture_context(self, requested: bool) -> CaptureContext:
         return self._capture_context.for_forward(requested)
 
-    def compute_logits(self, hidden: torch.Tensor) -> Optional[torch.Tensor]:
-        """Optionally own the output head after normalization and row selection.
-
-        Return contiguous FP32 [rows, padded_vocab] on the hidden device,
-        including TP gathering. None delegates computation and TP gathering to
-        the native head. The caller retains vocabulary trimming and sampling.
-        """
-        return None
-
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
         if self.kv_cache is not None:

@@ -220,7 +220,7 @@ class Qwen4ExpMTP(Qwen4Exp):
         ):
             from rtp_llm.model_loader.fp8_weight import FP8_STORAGE_SCALE_SUFFIX
 
-            return names + tuple(name + FP8_STORAGE_SCALE_SUFFIX for name in names)
+            return names + (W.embedding + FP8_STORAGE_SCALE_SUFFIX, W.lm_head_s)
         return names
 
     @classmethod

@@ -24,6 +24,8 @@
 #include <c10/cuda/CUDAStream.h>
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/attention_input_metadata.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant.h"
+#include <ATen/ops/_scaled_mm.h>
 #endif
 
 using namespace std;
@@ -1393,36 +1395,48 @@ sliceKvCacheBlockIdByBatch(const torch::Tensor& kv_cache_block_id, size_t batch_
 
 torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& hidden) {
     RTP_LLM_PROFILE_SCOPE("py_model.computeLogits");
-    const auto& kernel = weights_.lm_head->kernel;
-    {
-        py::gil_scoped_acquire gil;
-        if (py::hasattr(py_model_, "compute_logits")) {
-            // A model-owned head returns full, padded-vocabulary FP32 logits.
-            // None delegates to the native head, including its TP collective.
-            auto result = py_model_.attr("compute_logits")(hidden);
-            if (!result.is_none()) {
-                auto logits = result.cast<torch::Tensor>();
-                TORCH_CHECK(logits.device() == hidden.device() && logits.scalar_type() == torch::kFloat32
-                                && logits.dim() == 2 && logits.size(0) == hidden.size(0)
-                                && logits.size(1) == kernel.size(0) * device_props_.tp_size && logits.is_contiguous(),
-                            "compute_logits must return contiguous FP32 [rows, padded_vocab] on the hidden device");
-                return logits;
-            }
-        }
-    }
-    TORCH_CHECK(kernel.scalar_type() == torch::kBFloat16 || kernel.scalar_type() == torch::kHalf
-                    || kernel.scalar_type() == torch::kFloat32 || kernel.scalar_type() == torch::kFloat64,
-                "native LM head requires floating-point weights; provide compute_logits for a scaled head");
+    const auto&   head   = *weights_.lm_head;
+    const auto&   kernel = head.kernel;
     torch::Tensor logits;
     {
         RTP_LLM_PROFILE_SCOPE("py_model.computeLogits(lm_head_mm)");
-#if USING_CUDA
-        if (kernel.scalar_type() == torch::kBFloat16) {
-            logits = torch_ext::cublas_gemm_bf16_bf16_fp32(hidden.to(torch::kBFloat16), kernel);
-        } else
+        if (kernel.scalar_type() == torch::kFloat8_e4m3fn) {
+#if USING_CUDA && defined(ENABLE_FP8)
+            TORCH_CHECK(head.scales.defined() && head.scales.numel() == 1
+                            && head.scales.scalar_type() == torch::kFloat32 && head.scales.device() == hidden.device()
+                            && kernel.device() == hidden.device(),
+                        "FP8 LM head requires its FP32 weight scale on the hidden device");
+            auto rows = hidden.to(torch::kBFloat16).contiguous();
+            if (rows.size(0) == 0) {
+                logits = torch::empty({0, kernel.size(0)}, rows.options().dtype(torch::kFloat32));
+            } else if (kernel.size(0) % 16 != 0 || kernel.size(1) % 16 != 0) {
+                auto weight = (kernel.to(torch::kFloat32) * head.scales).to(torch::kBFloat16);
+                logits      = torch::mm(rows, weight.t()).to(torch::kFloat32);
+            } else {
+                // Quantize only live rows; zero padding must not change their amax domain.
+                const auto padded_rows = ((rows.size(0) + 15) / 16) * 16;
+                auto       quantized   = torch::empty({padded_rows, rows.size(1)}, kernel.options());
+                auto       scale       = torch::zeros({1}, rows.options().dtype(torch::kFloat32));
+                per_tensor_quant_fp8(rows, quantized, scale, false);
+                logits = at::_scaled_mm(quantized, kernel.t(), scale, head.scales, {}, {}, torch::kBFloat16)
+                             .narrow(0, 0, rows.size(0))
+                             .to(torch::kFloat32);
+            }
+#else
+            TORCH_CHECK(false, "FP8 LM head requires a CUDA build with FP8 support");
 #endif
-        {
-            logits = torch::mm(hidden.to(kernel.dtype()), kernel.t()).to(torch::kFloat32);
+        } else {
+            TORCH_CHECK(kernel.scalar_type() == torch::kBFloat16 || kernel.scalar_type() == torch::kHalf
+                            || kernel.scalar_type() == torch::kFloat32 || kernel.scalar_type() == torch::kFloat64,
+                        "native LM head requires floating-point weights");
+#if USING_CUDA
+            if (kernel.scalar_type() == torch::kBFloat16) {
+                logits = torch_ext::cublas_gemm_bf16_bf16_fp32(hidden.to(torch::kBFloat16), kernel);
+            } else
+#endif
+            {
+                logits = torch::mm(hidden.to(kernel.dtype()), kernel.t()).to(torch::kFloat32);
+            }
         }
     }
     if (device_props_.tp_size > 1) {

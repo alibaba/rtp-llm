@@ -20,6 +20,8 @@
 #include "kmonitor/client/MetricType.h"
 #include "kmonitor/client/core/MetricsRecord.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
+#include "rtp_llm/cpp/engine_base/WeightsConverter.h"
+#include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/HiddenStateCapturePublisher.h"
@@ -50,6 +52,20 @@ struct PyWrappedModelTestPeer {
     static GptModelOutputs
     forwardPostLayersLastHidden(PyWrappedModel& model, const torch::Tensor& hidden, const GptModelInputs& inputs) {
         return model.forwardPostLayersLastHidden(hidden, inputs);
+    }
+
+    static GptModelOutputs nativePostLayers(PyWrappedModel&      model,
+                                            const torch::Tensor& hidden,
+                                            const torch::Tensor& indexes,
+                                            bool                 compact,
+                                            bool                 need_all_logits) {
+        GptModelInputs inputs;
+        inputs.lm_output_indexes = indexes;
+        if (compact) {
+            return model.forwardPostLayersLastHidden(hidden, inputs);
+        }
+        return model.forwardPostLayers(
+            hidden, true, need_all_logits, indexes, false, hidden.size(0), inputs, torch::Tensor(), true);
     }
 
     static bool generationPrefillCudaGraphReady(const PyWrappedModel& model) {
@@ -1613,6 +1629,57 @@ runCustomOutput(py::object py_model, py::object handler, torch::Tensor indexes, 
     return result;
 }
 
+std::unique_ptr<Weights> convertNativeLmHead(torch::Tensor kernel, torch::Tensor scales, bool mixed_quantization) {
+    auto globals = std::make_unique<TensorMap>();
+    globals->emplace(W::lm_head, std::move(kernel));
+    if (scales.defined()) {
+        globals->emplace(W::lm_head_s, std::move(scales));
+    }
+    QuantAlgo quantization;
+    if (mixed_quantization) {
+        quantization.setQuantAlgo("modelopt_fp4", 4, 16);
+    }
+    return WeightsConverter(false, quantization).createGptWeights(std::make_unique<TensorMaps>(1), std::move(globals));
+}
+
+py::object makeNativeLmHead(py::object                   py_model,
+                            torch::Tensor                kernel,
+                            std::optional<torch::Tensor> scales,
+                            int                          tp_size,
+                            int                          tp_rank,
+                            size_t                       vocab_size) {
+    if (!isRuntimeInitialized()) {
+        initRuntime(kernel.get_device(), false, false, MlaOpsType::AUTO);
+    }
+    auto                weights = convertNativeLmHead(kernel, scales.value_or(torch::Tensor()), true);
+    GptModelDescription description;
+    description.data_type                    = DataType::TYPE_BF16;
+    description.norm_type                    = NormType::rmsnorm;
+    description.attention_conf.head_num      = 1;
+    description.attention_conf.kv_head_num   = 1;
+    description.attention_conf.size_per_head = kernel.size(1);
+    description.output_vocab_size            = vocab_size;
+    description.output_vocab_padded_size     = kernel.size(0) * tp_size;
+    GptModelInitParams params{*weights, description, std::nullopt};
+    params.parallelism_config.tp_size    = tp_size;
+    params.parallelism_config.tp_rank    = tp_rank;
+    params.parallelism_config.local_rank = kernel.get_device();
+    auto model                           = std::make_shared<PyWrappedModel>(params, std::move(py_model));
+    return py::cpp_function(
+        [model](const torch::Tensor& hidden, const torch::Tensor& indexes, bool compact, bool need_all_logits) {
+            auto outputs = PyWrappedModelTestPeer::nativePostLayers(*model, hidden, indexes, compact, need_all_logits);
+            py::dict result;
+            result["logits"]        = outputs.logits;
+            result["all_logits"]    = outputs.all_logits;
+            result["hidden_states"] = outputs.hidden_states;
+            return result;
+        },
+        py::arg("hidden"),
+        py::arg("indexes"),
+        py::arg("compact")         = false,
+        py::arg("need_all_logits") = false);
+}
+
 py::object
 runPyWrappedModelSpeculativeCommitBridge(py::object py_model, const std::string& action, bool is_speculative_target) {
     ensureRuntimeInitialized();
@@ -1643,9 +1710,9 @@ runPyWrappedModelSpeculativeCommitBridge(py::object py_model, const std::string&
                               /*cache_manager=*/nullptr,
                               /*mtp_cache_config_index=*/std::nullopt};
     PyWrappedModel     model(params,
-                             std::move(py_model),
-                             /*is_prefill_cuda_graph_mode=*/false,
-                             /*use_spec_decoding=*/is_speculative_target);
+                         std::move(py_model),
+                         /*is_prefill_cuda_graph_mode=*/false,
+                         /*use_spec_decoding=*/is_speculative_target);
 
     if (action == "reduce_true" || action == "reduce_false") {
         const auto result = model.reduceSpeculativeTargetPrepareStatus(action == "reduce_true");
@@ -1675,6 +1742,24 @@ runPyWrappedModelSpeculativeCommitBridge(py::object py_model, const std::string&
 PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     torch_ext::registerPyOpDefs(m);
     rtp_llm::registerExecCtxOps(m);
+    m.def("make_native_lm_head",
+          &rtp_llm::test::makeNativeLmHead,
+          py::arg("py_model"),
+          py::arg("kernel"),
+          py::arg("scales")     = torch::Tensor(),
+          py::arg("tp_size")    = 1,
+          py::arg("tp_rank")    = 0,
+          py::arg("vocab_size") = 0);
+    m.def(
+        "convert_native_lm_head",
+        [](torch::Tensor kernel, std::optional<torch::Tensor> scales, bool mixed_quantization) {
+            auto weights = rtp_llm::test::convertNativeLmHead(
+                std::move(kernel), scales.value_or(torch::Tensor()), mixed_quantization);
+            return py::make_tuple(weights->lm_head->kernel, weights->lm_head->scales);
+        },
+        py::arg("kernel"),
+        py::arg("scales")             = torch::Tensor(),
+        py::arg("mixed_quantization") = true);
     m.def("run_post_layers",
           &rtp_llm::test::runCustomOutput,
           py::arg("py_model"),

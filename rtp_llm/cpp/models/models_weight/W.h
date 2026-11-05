@@ -9,6 +9,7 @@ namespace W {
 static const std::string embedding            = "embedding";
 static const std::string token_type_embedding = "token_type_embedding.weight";
 static const std::string lm_head              = "lm_head";
+static const std::string lm_head_s            = "lm_head.weight_only_quant_scale";
 static const std::string prefix_w             = "transformer.prefix_encoder.embedding.weight";
 static const std::string pre_decoder_ln_beta  = "pre_decoder_layernorm.bias";
 static const std::string pre_decoder_ln_gamma = "pre_decoder_layernorm.gamma";

@@ -3888,68 +3888,37 @@ class CustomOutputPostLayersTest(unittest.TestCase):
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/ROCm")
-class ModelLogitsPostLayersTest(unittest.TestCase):
-    def run_case(self, processor, *, compact=False, graph=False):
-        model = ForwardModel()
-        if processor is not None:
-            model.compute_logits = processor
-        return _extension.run_post_layers(
-            model, None, torch.empty(0, dtype=torch.int64).pin_memory(), graph, compact
-        )
-
-    def test_model_logits_own_head_and_preserve_row_selection(self):
+class NativeLogitsBoundaryTest(unittest.TestCase):
+    def test_python_logits_hook_is_not_consulted(self):
         for compact, graph in ((False, False), (False, True), (True, False)):
             with self.subTest(compact=compact, graph=graph):
-                baseline = self.run_case(None, compact=compact, graph=graph)
-                seen = []
 
-                def processor(rows):
-                    seen.append(rows.clone())
-                    return (rows.to(torch.bfloat16).float() * 3).contiguous()
-
-                result = self.run_case(processor, compact=compact, graph=graph)
-                torch.testing.assert_close(result["logits"], baseline["logits"] * 3)
-                self.assertTrue(seen)
-                if graph:
-                    self.assertEqual(result["graph_status"], "replayed")
-                    torch.testing.assert_close(
-                        result["next_logits"], baseline["next_logits"] * 3
+                def run(model):
+                    return _extension.run_post_layers(
+                        model,
+                        None,
+                        torch.empty(0, dtype=torch.int64).pin_memory(),
+                        graph,
+                        compact,
                     )
 
-    def test_none_delegates_to_native_head(self):
-        for compact in (False, True):
-            baseline = self.run_case(None, compact=compact)
-            fallback = self.run_case(lambda _: None, compact=compact)
-            torch.testing.assert_close(
-                fallback["logits"], baseline["logits"], rtol=0, atol=0
-            )
+                baseline = run(ForwardModel())
+                model = ForwardModel()
 
-    def test_invalid_logits_fail_before_sampling(self):
-        for compact in (False, True):
-            for processor in (
-                lambda x: x.to(torch.bfloat16),
-                lambda x: x.float().cpu(),
-                lambda x: x.float()[:1],
-                lambda x: x.float()[:, :2],
-                lambda x: x.float().unsqueeze(0),
-                lambda x: x.float().t().contiguous().t(),
-            ):
-                with self.subTest(compact=compact, processor=processor):
-                    with self.assertRaisesRegex(
-                        RuntimeError, "compute_logits must return"
-                    ):
-                        self.run_case(processor, compact=compact)
+                def forbidden(_):
+                    raise AssertionError(
+                        "native post-layers delegated LM head ownership to Python"
+                    )
 
-    def test_processor_errors_propagate(self):
-        def processor(_):
-            raise ValueError("logits processor failed")
-
-        for compact in (False, True):
-            # The full forward wraps Python exceptions in its native status;
-            # the compact post-layer entry propagates the Python exception.
-            error_type = ValueError if compact else RuntimeError
-            with self.assertRaisesRegex(error_type, "logits processor failed"):
-                self.run_case(processor, compact=compact)
+                model.compute_logits = forbidden
+                result = run(model)
+                torch.testing.assert_close(
+                    result["logits"], baseline["logits"], rtol=0, atol=0
+                )
+                if graph:
+                    torch.testing.assert_close(
+                        result["next_logits"], baseline["next_logits"], rtol=0, atol=0
+                    )
 
 
 if __name__ == "__main__":

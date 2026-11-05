@@ -128,6 +128,54 @@ class FullFp8StorageTest(unittest.TestCase):
             atol=0.5,
         )
 
+    def test_lm_head_uses_native_weight_scale_after_tp_split(self):
+        class HeadSource(_Source):
+            def load_tensor(self, name, data_type=torch.float16):
+                return [torch.arange(256).reshape(32, 8).to(data_type) - 128]
+
+        database = HeadSource()
+        source = AtomicWeight(W.lm_head, [CkptWeightInfo("weight")])
+        descriptor = Fp8StorageWeight(source)
+        config = SimpleNamespace(
+            tp_size=2,
+            tp_rank=0,
+            lm_head_tp_size=2,
+            lm_head_tp_rank=0,
+            ep_rank=0,
+            dp_rank=0,
+            ffn_tp_rank=0,
+            ffn_tp_size=2,
+            hidden_size=8,
+            head_num=1,
+            head_num_kv=1,
+            size_per_head=8,
+            moe_pure_tp_mode=False,
+            bit=16,
+            dp_size=1,
+            ep_size=1,
+            merge_lora=False,
+            compute_dtype=torch.bfloat16,
+            exported_device=SimpleNamespace(
+                maybe_rewrite_weight_by_key=lambda key, value, **kw: value
+            ),
+            use_swizzleA=False,
+        )
+        for rank in (0, 1):
+            config.lm_head_tp_rank = rank
+            loaded = descriptor.load(database, None, "cpu", config)
+            self.assertIn(W.lm_head_s, descriptor.additional_output_names)
+            self.assertNotIn(W.lm_head + FP8_STORAGE_SCALE_SUFFIX, loaded)
+            self.assertEqual(loaded[W.lm_head].shape, (16, 8))
+            reference, scale = quantized(
+                database.load_tensor("weight", torch.bfloat16)[0][
+                    rank * 16 : (rank + 1) * 16
+                ]
+            )
+            torch.testing.assert_close(
+                loaded[W.lm_head].float(), reference.float(), rtol=0, atol=0
+            )
+            torch.testing.assert_close(loaded[W.lm_head_s], scale, rtol=0, atol=0)
+
     def test_custom_residual_consumers_keep_compute_copies_and_restart_markers(self):
         from torch import nn
 

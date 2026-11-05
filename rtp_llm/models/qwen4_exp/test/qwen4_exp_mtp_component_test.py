@@ -323,7 +323,7 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
                         W.embedding,
                         W.lm_head,
                         W.embedding + FP8_STORAGE_SCALE_SUFFIX,
-                        W.lm_head + FP8_STORAGE_SCALE_SUFFIX,
+                        W.lm_head_s,
                     ),
                 )
             target.model_config.hidden_size += 1

@@ -708,25 +708,7 @@ qwen4_test(
     ],
 )
 
-qwen4_test(
-    name = "target_head_graph_test",
-    src = "qsa/target_head_graph_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
-)
 
-qwen4_test(
-    name = "draft_head_graph_test",
-    src = "qsa/draft_head_graph_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
-)
 
 qwen4_test(
     name = "gdn_norm_quant_test",
@@ -748,28 +730,7 @@ qwen4_test(
     ],
 )
 
-qwen4_test(
-    name = "head_ipc_gather_test",
-    src = "distributed/head_ipc_gather_test.py",
-    args = ["HeadIpcGatherTest"],
-    gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
-)
 
-qwen4_test(
-    name = "head_ipc_gather_integration_test",
-    src = "distributed/head_ipc_gather_test.py",
-    args = ["HeadIpcGatherIntegrationTest"],
-    gpu = "RTX_5000_PRO_CU13",
-    gpus = 2,
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
-)
 
 qwen4_test(
     name = "draft_qsa_fused_test",
@@ -886,7 +847,6 @@ test_suite(
     tests = [
         ":decode_rope_stride_test",
         ":decode_snapshot_test",
-        ":draft_head_graph_test",
         ":draft_metadata_test",
         ":draft_paged_fmha_test",
         ":draft_prefill_graph_test",
@@ -926,7 +886,6 @@ test_suite(
         ":sparse_gqa_impl_test",
         ":sparse_paged_fmha_test",
         ":sparse_prefill_bitmap_test",
-        ":target_head_graph_test",
         ":target_metadata_test",
         ":target_writer_fusion_test",
     ],
@@ -959,8 +918,6 @@ test_suite(
     name = "qwen4_distributed",
     tests = [
         ":cpu_target_status_test",
-        ":head_ipc_gather_integration_test",
-        ":head_ipc_gather_test",
         ":tp_registered_input_test",
     ],
 )

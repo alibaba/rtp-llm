@@ -18,11 +18,11 @@ test_suite(
 test_suite(
     name = "qwen4_single_gpu",
     tests = [
+        "//rtp_llm/cpp/models/test:native_lm_head_test",
         "//rtp_llm/models/qwen4_exp/test:full_fp8_test",
         "//rtp_llm/models_py/model_desc/test/qwen4_exp:qwen4_runtime",
         "//rtp_llm/models_py/modules/qwen4_exp/test:decode_rope_stride_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:decode_snapshot_test",
-        "//rtp_llm/models_py/modules/qwen4_exp/test:draft_head_graph_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:draft_metadata_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:draft_paged_fmha_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:draft_prefill_graph_test",
@@ -32,7 +32,6 @@ test_suite(
         "//rtp_llm/models_py/modules/qwen4_exp/test:fp8_kv_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:gdn_upstream_parity_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:grouped_fp8_test",
-        "//rtp_llm/models_py/modules/qwen4_exp/test:head_ipc_gather_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:indexer_cuda_contract_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:indexer_decode_triton_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:indexer_norm_rope_test",
@@ -61,7 +60,6 @@ test_suite(
         "//rtp_llm/models_py/modules/qwen4_exp/test:sparse_gqa_impl_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:sparse_paged_fmha_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:sparse_prefill_bitmap_test",
-        "//rtp_llm/models_py/modules/qwen4_exp/test:target_head_graph_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:target_metadata_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:target_writer_fusion_test",
     ],
@@ -69,7 +67,7 @@ test_suite(
 
 test_suite(
     name = "qwen4_distributed",
-    tests = ["//rtp_llm/models_py/modules/qwen4_exp/test:head_ipc_gather_integration_test"],
+    tests = ["//rtp_llm/cpp/models/test:native_lm_head_tp_test"],
 )
 
 test_suite(

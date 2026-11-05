@@ -8,6 +8,11 @@ from rtp_llm.model_loader.weight_module import (
     WeightModule,
 )
 from rtp_llm.utils.fp8_constants import FP8_STORAGE_SCALE_SUFFIX
+from rtp_llm.utils.model_weight import W
+
+
+def _scale_name(name):
+    return W.lm_head_s if name == W.lm_head else name + FP8_STORAGE_SCALE_SUFFIX
 
 
 class Fp8StorageWeight(CompositeWeight, QuantWeight):
@@ -21,7 +26,7 @@ class Fp8StorageWeight(CompositeWeight, QuantWeight):
         self.resident_device = source.resident_device
         self.resident_output_devices = dict(source.resident_output_devices)
         self.additional_output_names = tuple(
-            c.name + FP8_STORAGE_SCALE_SUFFIX for c in source.get_components()
+            _scale_name(c.name) for c in source.get_components()
         )
 
     @classmethod
@@ -47,7 +52,7 @@ class Fp8StorageWeight(CompositeWeight, QuantWeight):
                     result[name] = (
                         (values / scale).clamp(-448, 448).to(torch.float8_e4m3fn)
                     )
-                    result[name + FP8_STORAGE_SCALE_SUFFIX] = scale
+                    result[_scale_name(name)] = scale
                 else:
                     result[name] = value
 

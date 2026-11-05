@@ -760,8 +760,6 @@ class Qwen4ExpModel(Qwen35Model):
         py_hw_kernel_config=None,
         device_resource_config=None,
     ):
-        from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
-
         config = model_config
         compute_weights = (
             prepare_compute_weights(weights)
@@ -778,19 +776,6 @@ class Qwen4ExpModel(Qwen35Model):
             py_hw_kernel_config,
             device_resource_config,
         )
-        if getattr(config, "_qwen4_full_fp8_nvfp4", False):
-            if compute_weights.global_weights[W.lm_head].dtype == torch.bfloat16:
-                head = compute_weights.global_weights[W.lm_head]
-                self._fp8_lm_head = nn.Linear(
-                    head.shape[1], head.shape[0], bias=False, device="meta"
-                )
-                self._fp8_lm_head.weight = nn.Parameter(head, requires_grad=False)
-                self._fp8_lm_head.weight._rtp_requires_restart_for_update = True
-            else:
-                self._fp8_lm_head = Fp8Linear(
-                    weights.global_weights[W.lm_head],
-                    weights.global_weights[W.lm_head + FP8_STORAGE_SCALE_SUFFIX],
-                )
         fp8_embedding = (
             getattr(self.config, "_qwen4_full_fp8_nvfp4", False)
             and self.embed_tokens.weight.dtype == torch.float8_e4m3fn
@@ -818,20 +803,6 @@ class Qwen4ExpModel(Qwen35Model):
         self._capture_mtp_target_hidden = bool(getattr(self.config, "is_mtp", False))
         if getattr(self.config, "enable_qwen4_ple", False):
             self._build_ple_layers()
-        from .qwen4_exp_runtime.target_head_graph import TargetHeadGraph
-
-        self._target_head_graph = TargetHeadGraph(
-            enabled=hasattr(self, "_fp8_lm_head")
-            and bool(self.ple_layers)
-            and not getattr(self.config, "is_mtp", False)
-        )
-        from rtp_llm.models_py.modules.qwen4_exp.head_ipc_gather import (
-            prepare_head_ipc_gather,
-        )
-
-        self._head_ipc_gather = prepare_head_ipc_gather(
-            config, parallelism_config, getattr(self, "_fp8_lm_head", None)
-        )
         from rtp_llm.models_py.modules.qwen4_exp.cpu_target_status import (
             prepare_cpu_target_status,
         )
@@ -928,13 +899,6 @@ class Qwen4ExpModel(Qwen35Model):
         for ple in self.ple_layers.values():
             ple.ple_embedding.close()
         self._ple_execution_runtime = None
-        head_graph = self.__dict__.get("_target_head_graph")
-        if head_graph is not None:
-            head_graph.clear_activation()
-            head_graph.outputs.clear()
-        head_ipc = self.__dict__.get("_head_ipc_gather")
-        if head_ipc is not None:
-            head_ipc.close()
         status = self.__dict__.get("_cpu_target_status")
         if status is not None:
             status.close()
@@ -945,27 +909,6 @@ class Qwen4ExpModel(Qwen35Model):
         if prefill_reduce is not None:
             prefill_reduce.close()
         self._closed = True
-
-    def compute_logits(self, hidden: torch.Tensor) -> Optional[torch.Tensor]:
-        if not hasattr(self, "_fp8_lm_head"):
-            return None
-        from rtp_llm.models_py.modules.base.common.vocab_parallel_logits import (
-            gather_vocab_parallel_logits,
-        )
-
-        workspace = self.__dict__.get("_head_ipc_gather")
-        return gather_vocab_parallel_logits(
-            self._compute_local_logits(hidden),
-            int(self.parallelism_config.tp_size),
-            try_gather=workspace.try_gather if workspace is not None else None,
-        )
-
-    def _compute_local_logits(self, hidden: torch.Tensor) -> torch.Tensor:
-        head_graph = self.__dict__.get("_target_head_graph")
-        logits = head_graph.take(hidden) if head_graph is not None else None
-        return (
-            self._fp8_lm_head(hidden.to(torch.bfloat16)) if logits is None else logits
-        )
 
     def initialize(self, init_resource) -> bool:
         initialized = super().initialize(init_resource)
@@ -1168,9 +1111,6 @@ class Qwen4ExpModel(Qwen35Model):
         if not get_primary_attention_inputs(inputs).is_target_verify:
             return
         self._ple_coordinator().activate_speculative_target_graph_replay(graph_key)
-        head_graph = self.__dict__.get("_target_head_graph")
-        if head_graph is not None:
-            head_graph.activate(graph_key)
 
     def requires_speculative_target_commit(self) -> bool:
         parallelism = getattr(self, "parallelism_config", None)
@@ -1373,30 +1313,11 @@ class Qwen4ExpModel(Qwen35Model):
             communicator.allow_ipc_capture = not bool(
                 getattr(self.config, "is_mtp", False)
             ) and any(bool(getattr(a, "is_target_verify", False)) for a in groups)
-        head_graph = self.__dict__.get("_target_head_graph")
-        if head_graph is not None:
-            head_graph.clear_activation()
         try:
             from .qwen4_exp_runtime.prefill_preflight import prefill_geometry_scope
 
             with prefill_geometry_scope(self, inputs, fmha_impl):
                 outputs = self._forward_with_ple_prefetch(inputs, fmha_impl)
-            transaction = (
-                self._ple_target_transaction
-                if head_graph is not None and head_graph.enabled
-                else None
-            )
-            if transaction is not None:
-                groups = get_attention_inputs_value(inputs)
-                values = (
-                    tuple(groups.values()) if isinstance(groups, Mapping) else (groups,)
-                )
-                if values and all(
-                    value.is_cuda_graph and value.is_target_verify for value in values
-                ):
-                    head_graph.stage(
-                        self._fp8_lm_head, outputs.hidden_states, transaction.batch_size
-                    )
             return outputs
         finally:
             if target_reduce is not None:

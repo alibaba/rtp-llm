@@ -8,15 +8,9 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.block_map import (
-    get_attention_inputs_value,
-    get_primary_attention_inputs,
-)
+from rtp_llm.models_py.model_desc.block_map import get_attention_inputs_value
 from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextMetadata
 from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpModel
-from rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_head_graph import (
-    DraftHeadGraph,
-)
 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     exact_head_rms_norm,
 )
@@ -299,34 +293,6 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
             hidden_size=model_config.hidden_size,
             norm_eps=model_config.layernorm_eps,
         )
-        self._draft_head_graph = DraftHeadGraph(enabled=hasattr(self, "_fp8_lm_head"))
-
-    def forward(self, inputs: PyModelInputs, fmha_impl=None):
-        self._draft_head_graph.clear_activation()
-        outputs = super().forward(inputs, fmha_impl)
-        groups = get_attention_inputs_value(inputs)
-        values = tuple(groups.values()) if isinstance(groups, Mapping) else (groups,)
-        if (
-            self._draft_head_graph.enabled
-            and values
-            and all(value.is_cuda_graph and not value.is_prefill for value in values)
-        ):
-            self._draft_head_graph.stage(self._fp8_lm_head, outputs.hidden_states)
-        return outputs
-
-    def on_cuda_graph_replay(self, graph_key: int, inputs: PyModelInputs) -> None:
-        super().on_cuda_graph_replay(graph_key, inputs)
-        if not get_primary_attention_inputs(inputs).is_prefill:
-            self._draft_head_graph.activate(graph_key)
-
-    def _compute_local_logits(self, hidden: torch.Tensor) -> torch.Tensor:
-        logits = self._draft_head_graph.take(hidden)
-        return super()._compute_local_logits(hidden) if logits is None else logits
-
-    def close(self) -> None:
-        self._draft_head_graph.clear_activation()
-        self._draft_head_graph.outputs.clear()
-        super().close()
 
     def word_embedding(self, inputs: PyModelInputs) -> torch.Tensor:
         input_hiddens: Optional[torch.Tensor] = getattr(inputs, "input_hiddens", None)

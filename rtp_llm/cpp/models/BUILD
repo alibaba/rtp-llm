@@ -193,6 +193,7 @@ cc_library(
     ] + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/kernels:attention_input_metadata",
+            "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
             "//rtp_llm/models_py/bindings/cuda:bf16_gemm_op",
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         ],
