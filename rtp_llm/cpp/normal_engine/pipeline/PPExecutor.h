@@ -117,7 +117,7 @@ private:
     };
 
     struct ResultTask {
-        StreamGroups                   stream_groups;
+        PPExecutionSnapshot            snapshot;
         int64_t                        schedule_time_us = 0;
         RtpLLMExecutorMetricsCollector executor_collector;
         TpsActiveGuard                 tps_active_guard;
@@ -132,7 +132,7 @@ private:
 
     void resultLoop();
 
-    void receiveAndProcessResult(const StreamGroups&             stream_groups,
+    void receiveAndProcessResult(const PPExecutionSnapshot&      snapshot,
                                  int64_t                         schedule_time_us,
                                  RtpLLMExecutorMetricsCollector& executor_collector);
 
@@ -146,6 +146,8 @@ private:
     static std::optional<ErrorInfo> validateStream(const GenerateStream& stream, SpeculativeType sp_type);
 
     void prepareStreams(const std::list<GenerateStreamPtr>& streams);
+
+    void commitSubmittedChunks(const PPExecutionSnapshot& snapshot) const;
 
     absl::StatusOr<PPExecutionPlan>
     buildPlan(const StreamGroups& stream_groups, const std::vector<RequestId>& finished_request_ids, bool shutdown);
@@ -209,16 +211,15 @@ private:
 
     void collectExecutorMetrics(const GptModelInputs&           model_input,
                                 bool                            is_decode,
-                                const torch::Tensor&            sequence_lengths,
+                                int64_t                         max_seq_len,
                                 RtpLLMExecutorMetricsCollector& collector) const;
 
-    void collectTokenCounts(const StreamGroups&                      stream_groups,
+    void collectTokenCounts(const PPExecutionSnapshot&               snapshot,
                             const PPExecutionResult&                 result,
                             StreamGroups::TokenCountsByPriority&     token_counts_by_priority,
                             RtpLLMSpeculativeEngineMetricsCollector& sp_collector) const;
 
-    void reportResultMetrics(const StreamGroups&                        stream_groups,
-                             int64_t                                    schedule_time_us,
+    void reportResultMetrics(int64_t                                    schedule_time_us,
                              RtpLLMExecutorMetricsCollector&            executor_collector,
                              const StreamGroups::TokenCountsByPriority& token_counts_by_priority,
                              RtpLLMSpeculativeEngineMetricsCollector&   sp_collector);

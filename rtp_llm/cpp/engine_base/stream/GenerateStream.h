@@ -257,7 +257,8 @@ public:
     int64_t prefillMemoryReuseLen() const;
 
     // ---- chunked prefill (PREFILL / PDFUSION roles) ----
-    // reuse_length_ is the current chunk start, and advances after each middle chunk.
+    // reuse_length_ is the current chunk start. Ordinary result handling advances middle chunks;
+    // PP advances every submitted context chunk, including the final chunk, before the next schedule.
     // When useChunkWindow() is true, contextLength() returns the current chunk length.
     // initial_reuse_length_ stays frozen for cache-hit metrics.
     void setChunkSize(int chunk_size) {
@@ -274,9 +275,10 @@ public:
         warmup_chunk_window_ = true;
     }
     bool useChunkWindow() const;   // enabled + RUNNING/warmup + context -> window funcs return chunk view
-    int  currentChunkLen() const;  // tokens to compute in the current chunk
+    int  currentChunkLen() const;  // current chunk length, or all remaining prefill tokens when chunking is disabled
     bool isLastChunk() const;      // current chunk reaches seqLength()
     bool isMiddleChunk() const;    // chunked + context + !last → no sample / no output row
+    bool hasPendingChunk() const;  // remaining context window, read consistently with result updates
     void advanceChunk();           // reuse_length_ += currentChunkLen()
     int  cacheStorePublishStartToken() const {
         return chunk_advanced_ ? prefixLength() : 0;
@@ -370,8 +372,8 @@ public:
     }
     StreamState moveToNext();
 
-    /** A PP stream stays inflight until dispatch has committed or discarded its returned result.
-     * The release/acquire pair publishes that update before the stream can be rescheduled. */
+    /** Each submitted PP execution holds one inflight reference until result dispatch commits or discards it.
+     * The release/acquire pair publishes that update before terminal cleanup can reclaim the stream. */
     void setPPInflight();
     void clearPPInflight();
     bool isPPInflight() const;
@@ -911,7 +913,7 @@ protected:
     uint64_t                              stream_magic_ = STREAM_MAGIC;
     std::shared_ptr<GenerateInput>        generate_input_;
     std::shared_ptr<GenerateStateMachine> generate_status_;
-    std::atomic<bool>                     pp_inflight_{false};
+    std::atomic<size_t>                   pp_inflight_{0};
     std::vector<StreamState>              sub_generate_status_;
     int                                   max_seq_len_;
     int64_t                               vocab_size_;

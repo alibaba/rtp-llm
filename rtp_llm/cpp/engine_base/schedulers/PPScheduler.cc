@@ -43,6 +43,118 @@ PPScheduler::~PPScheduler() {
     RTP_LLM_LOG_INFO("destroy PPScheduler");
 }
 
+void PPScheduler::cancelStreams(std::list<GenerateStreamPtr>& streams) {
+    for (auto it = streams.begin(); it != streams.end();) {
+        auto& stream = *it;
+        stream->reportError(ErrorCode::CANCELLED, "scheduler stopped");
+        if (stream->moveToNext() == StreamState::FINISHED) {
+            it = streams.erase(it);
+        } else {
+            // Retain unfinished requests for finalization after PP execution drains.
+            ++it;
+        }
+    }
+}
+
+bool PPScheduler::refreshAndReapTerminalStreams(std::list<GenerateStreamPtr>& streams) {
+    bool reaped = false;
+    for (auto it = streams.begin(); it != streams.end();) {
+        auto& stream = *it;
+        if (!stream->isFinished()) {
+            stream->checkTimeoutAndHasError();
+            if (stream->isPPInflight()
+                || (!stream->hasError() && !stream->hasEvent(StreamEvents::GenerateDone))) {
+                ++it;
+                continue;
+            }
+            const auto new_state = stream->moveToNext();
+            if (new_state != StreamState::FINISHED) {
+                RTP_LLM_LOG_ERROR("Unexpected state %d when reaping terminal stream [%ld]",
+                                  static_cast<int>(new_state),
+                                  stream->streamId());
+                ++it;
+                continue;
+            }
+        }
+        addStreamToNewState(stream, StreamState::FINISHED);
+        it     = streams.erase(it);
+        reaped = true;
+    }
+    return reaped;
+}
+
+void PPScheduler::finalizeCancelledStreams() {
+    lock_guard<mutex> lock(lock_);
+    refreshAndReapTerminalStreams(waiting_streams_);
+    refreshAndReapTerminalStreams(loading_cache_streams_);
+    refreshAndReapTerminalStreams(running_streams_);
+    refreshAndReapTerminalStreams(pending_decode_streams_);
+}
+
+void PPScheduler::cancelExtraStreams() {
+    cancelStreams(pending_decode_streams_);
+}
+
+int64_t PPScheduler::extraOnflightStreams() const {
+    return pending_decode_streams_.size();
+}
+
+void PPScheduler::fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const {
+    collector.pending_decode_stream_size = pending_decode_streams_.size();
+}
+
+void PPScheduler::appendExtraRunningTaskList(std::vector<EngineScheduleInfo::TaskInfo>& task_list) const {
+    appendTaskInfos(task_list, pending_decode_streams_);
+}
+
+size_t PPScheduler::countInitedKVCacheStreams() const {
+    return FIFOSchedulerBase::countInitedKVCacheStreams()
+           + std::count_if(pending_decode_streams_.begin(), pending_decode_streams_.end(), [](const auto& stream) {
+                 return stream->curBlocksNum() > 0;
+             });
+}
+
+bool PPScheduler::canSchedule(const GenerateStreamPtr& stream) const {
+    if (!stream->isPPInflight()) {
+        return true;
+    }
+    return !stream->hasError() && !stream->isFinished() && !stream->hasEvent(StreamEvents::GenerateDone)
+           && stream->hasPendingChunk();
+}
+
+bool PPScheduler::grantChunk(const GenerateStreamPtr& stream, int64_t& budget) {
+    const int64_t rows      = stream->currentBatchSize();
+    const int64_t begin     = stream->reuseLength();
+    const int64_t remaining = stream->seqLength() - begin;
+    const int64_t block     = stream->seqSizePerBlock();
+    if (remaining <= 0 || block <= 0 || begin < 0 || begin % block != 0) {
+        stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "invalid PP chunk window");
+        return false;
+    }
+    const auto grant = computeChunkGrant(budget, rows, remaining, block);
+    if (grant <= 0) {
+        if (computeChunkGrant(prefill_chunk_size_, rows, remaining, block) <= 0) {
+            stream->reportError(ErrorCode::INVALID_PARAMS,
+                                "full prefill budget cannot produce a positive aligned grant");
+        }
+        return false;
+    }
+    stream->setChunkSize(static_cast<int>(grant));
+    budget -= rows * grant;
+    return true;
+}
+
+void PPScheduler::moveMiddleChunksToBack(std::list<GenerateStreamPtr>& streams) const {
+    std::list<GenerateStreamPtr> middle;
+    for (auto it = streams.begin(); it != streams.end();) {
+        auto current = it++;
+        if ((*current)->isMiddleChunk()) {
+            middle.splice(middle.end(), streams, current);
+        }
+    }
+    streams.splice(streams.end(), middle);
+}
+
 /** PP separates prefill and decode batches, so legacy batch_with_prefill_* metrics are not updated. */
 void PPScheduler::onRunningStream(const GenerateStreamPtr& stream) {
     if (pd_sep_config_.role_type != RoleType::DECODE || sp_config_.type == SP_TYPE_NONE) {
@@ -86,22 +198,48 @@ void PPScheduler::addStreamToNewState(const GenerateStreamPtr& stream, StreamSta
 }
 
 list<GenerateStreamPtr> PPScheduler::evaluateRunningStreams() {
+    bool has_context = false;
+    if (chunkedPrefillConfigured() && pd_sep_config_.role_type == RoleType::PDFUSION) {
+        refreshAndReapTerminalStreams(pending_decode_streams_);
+        refreshAndReapTerminalStreams(running_streams_);
+        has_context = std::any_of(
+            running_streams_.begin(), running_streams_.end(), [](const auto& stream) { return stream->isContextStream(); });
+
+        // Finish the current context cohort before resuming its local decode streams.
+        if (!has_context) {
+            running_streams_.splice(running_streams_.begin(), pending_decode_streams_);
+        }
+    }
+
     list<GenerateStreamPtr> scheduled_streams;
+    int64_t chunk_budget = prefill_chunk_size_;
     for (auto it = running_streams_.begin(); it != running_streams_.end();) {
         auto stream = *it;
-        if (stream->isPPInflight()) {
+        if (!canSchedule(stream)) {
             ++it;
             continue;
         }
 
+        // A final result may have changed this stream to decode after the context scan.
+        if (has_context && !stream->isContextStream()) {
+            auto current = it++;
+            pending_decode_streams_.splice(pending_decode_streams_.end(), running_streams_, current);
+            continue;
+        }
         const auto new_state = stream->moveToNext();
-        if (new_state == StreamState::RUNNING) {
-            scheduled_streams.push_back(stream);
-            ++it;
-        } else {
+        if (new_state != StreamState::RUNNING) {
             addStreamToNewState(stream, new_state);
             it = running_streams_.erase(it);
+            continue;
         }
+
+        if (stream->useChunkWindow() && !grantChunk(stream, chunk_budget)) {
+            ++it;
+            continue;
+        }
+
+        scheduled_streams.push_back(stream);
+        ++it;
     }
     return scheduled_streams;
 }
@@ -156,6 +294,7 @@ void PPScheduler::maintainWaitingStreams() {
 void PPScheduler::admitWaitingStreams(list<GenerateStreamPtr>& scheduled_streams) {
     ScheduleRuntime schedule_runtime;
     initScheduleRuntime(scheduled_streams, schedule_runtime);
+    int64_t chunk_budget = prefill_chunk_size_;
 
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         auto current = it++;
@@ -190,14 +329,18 @@ void PPScheduler::admitWaitingStreams(list<GenerateStreamPtr>& scheduled_streams
 
         /** Failed allocations must leave capacity and token budgets available to later waiters. */
         if (admission_progressed) {
+            // KV admission finalizes cache reuse. Grant the executable chunk using that final reuse length.
+            if (new_state == StreamState::RUNNING
+                && (!stream->useChunkWindow() || grantChunk(stream, chunk_budget))) {
+                scheduled_streams.push_back(stream);
+            }
+            // Admission limits also cover streams whose execution is deferred by the chunk budget.
+            // TODO: As in FIFO, these streams retain allocated KV until a later round has chunk budget.
             updateScheduleRuntime(schedule_runtime, stream, true, new_inited_kv);
 
             if (stream->isContextStream()) {
                 ++last_admitted_context_batch_size_;
                 last_admitted_context_token_size_ += stream->contextLength();
-            }
-            if (new_state == StreamState::RUNNING) {
-                scheduled_streams.push_back(stream);
             }
         }
 
@@ -210,7 +353,7 @@ void PPScheduler::admitWaitingStreams(list<GenerateStreamPtr>& scheduled_streams
 
 bool PPScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) {
     ScheduleRuntime schedule_runtime;
-    schedule_runtime.concurrency_stream_count = running_streams_.size();
+    schedule_runtime.concurrency_stream_count = running_streams_.size() + pending_decode_streams_.size();
     for (const auto& stream : streams) {
         updateScheduleRuntime(schedule_runtime, stream, true, false);
     }
@@ -220,7 +363,7 @@ bool PPScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams, 
 void PPScheduler::initScheduleRuntime(const std::list<GenerateStreamPtr>& scheduled_streams,
                                       ScheduleRuntime&                    schedule_runtime) const {
     /** Inflight requests still occupy concurrency slots, so the cap must include every running request. */
-    schedule_runtime.concurrency_stream_count = running_streams_.size();
+    schedule_runtime.concurrency_stream_count = running_streams_.size() + pending_decode_streams_.size();
     schedule_runtime.inited_kv_stream_count   = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
     for (const auto& stream : scheduled_streams) {
         updateScheduleRuntime(schedule_runtime, stream, false, false);
@@ -330,7 +473,7 @@ size_t PPScheduler::prefillTokenCostWithoutCache(const GenerateStreamPtr& stream
 
 bool PPScheduler::waitPredicate() {
     // Inflight streams advance PP; waiting and loading streams use timed polling.
-    return stop_ || schedule_trigger_ || !running_streams_.empty();
+    return stop_ || schedule_trigger_ || !running_streams_.empty() || !pending_decode_streams_.empty();
 }
 
 absl::StatusOr<ScheduleOutput> PPScheduler::schedule() {
@@ -359,13 +502,13 @@ absl::StatusOr<ScheduleOutput> PPScheduler::schedule() {
     maintainWaitingStreams();
     switch (pd_sep_config_.role_type) {
         case RoleType::PDFUSION:
-            /** Ready decode streams take priority over waiting prefill streams. */
-            if (scheduled_streams.empty()) {
+            /** Do not extend the context cohort while decode streams are waiting. */
+            if (scheduled_streams.empty() && pending_decode_streams_.empty()) {
                 admitWaitingStreams(scheduled_streams);
             }
             break;
         case RoleType::PREFILL:
-            /** Do not mix a ready fallback stream with a new prefill batch. */
+            /** Keep the original PP admission boundary; PREFILL has no local decode fallback. */
             if (scheduled_streams.empty()) {
                 admitWaitingStreams(scheduled_streams);
             }
@@ -381,6 +524,9 @@ absl::StatusOr<ScheduleOutput> PPScheduler::schedule() {
     /** 4. update the running_streams. */
     running_streams_.splice(running_streams_.end(), new_streams_);
 
+    if (chunkedPrefillConfigured()) {
+        moveMiddleChunksToBack(scheduled_streams);
+    }
     for (const auto& stream : scheduled_streams) {
         stream->setPPInflight();
     }

@@ -56,6 +56,12 @@ private:
     bool observed_idle_ = false;
 };
 
+class MockNormalGenerateStream: public NormalGenerateStream {
+public:
+    using NormalGenerateStream::NormalGenerateStream;
+    MOCK_METHOD(bool, hasError, (), (const, override));
+};
+
 std::shared_ptr<LoadAsyncContext> makeControlledAllocatorContext() {
     auto coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
@@ -97,7 +103,9 @@ protected:
     std::shared_ptr<Scheduler> createScheduler(size_t          max_generate_batch_size = 100,
                                                RoleType        role                    = RoleType::PDFUSION,
                                                SpeculativeType type                    = SP_TYPE_NONE,
-                                               bool            cp_enabled              = false) {
+                                               bool            cp_enabled              = false,
+                                               int             chunk_size              = 0,
+                                               int64_t         max_batch_tokens_without_cache = 0) {
         ModelConfig model_config;
         model_config.max_seq_len                 = model_max_seq_len_;
         model_config.vocab_size                  = 128;
@@ -105,6 +113,8 @@ protected:
         RuntimeConfig runtime_config;
         runtime_config.max_generate_batch_size                     = max_generate_batch_size;
         runtime_config.fifo_scheduler_config.max_batch_tokens_size = model_max_seq_len_;
+        runtime_config.fifo_scheduler_config.prefill_chunk_size    = chunk_size;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = max_batch_tokens_without_cache;
         PDSepConfig pd_sep_config;
         pd_sep_config.role_type = role;
         ParallelismConfig parallelism_config;
@@ -125,12 +135,14 @@ protected:
                                            cache_manager_);
     }
 
-    GenerateStreamPtr createStream(const std::vector<int>& input_tokens        = {1, 2, 3},
+    template<typename Stream = NormalGenerateStream>
+    std::shared_ptr<Stream> createStream(const std::vector<int>& input_tokens        = {1, 2, 3},
                                    bool                    reuse_cache         = false,
                                    bool                    enable_memory_cache = false,
                                    int                     max_new_tokens      = 1,
                                    const std::vector<int>& variable_num_beams  = {},
-                                   RoleType                role_type           = RoleType::PDFUSION) {
+                                   RoleType                role_type           = RoleType::PDFUSION,
+                                   int                     chunk_size          = 0) {
         ResourceContext resource_context;
         resource_context.cache_manager       = cache_manager_;
         resource_context.reuse_cache         = reuse_cache;
@@ -143,6 +155,8 @@ protected:
         model_config.special_tokens.eos_token_id = -1;
         RuntimeConfig runtime_config;
 
+        runtime_config.fifo_scheduler_config.prefill_chunk_size = chunk_size;
+
         auto query                           = std::make_shared<GenerateInput>();
         auto generate_config                 = std::make_shared<GenerateConfig>();
         query->request_id                    = next_request_id_++;
@@ -153,7 +167,7 @@ protected:
         query->input_ids                     = torch::tensor(input_tokens, torch::kInt32);
         query->generate_config               = generate_config;
         auto stream =
-            std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+            std::make_shared<Stream>(query, model_config, runtime_config, resource_context, nullptr);
         return stream;
     }
 
@@ -882,49 +896,469 @@ TEST_F(PPSchedulerTest, DecodeContinuesReadyStreamsWhenContextIsRejected) {
 
 TEST_F(PPSchedulerTest, PdDecodeInitializesCandidatesOnceAndKeepsTailProposal) {
     for (const auto type : {SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_DSPARK}) {
-        auto scheduler = createScheduler(1, RoleType::DECODE, type);
-        auto stream    = createStream({1, 2, 3}, false, false, 8, {}, RoleType::DECODE);
-        ASSERT_TRUE(stream->initKVBlock().ok());
-        stream->update({torch::tensor({{4}}, torch::kInt32), 1});
-        if (type != SP_TYPE_DSPARK) {
-            stream->setProposeToken({4, 5});
-            /** RPC already installed the anchor and draft slots before scheduler admission. */
-            auto buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
-            buffer->propose_step = 3;
-            buffer->tokens = torch::zeros({1, 2}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
-            buffer->tokens.copy_(torch::tensor({{4, 5}}, torch::kInt32));
-            stream->setSPOutputBuffer(buffer);
-        } else {
-            /** DSpARK P publishes features only; D has no proposal before scheduler admission. */
-            EXPECT_TRUE(stream->getProposeToken().empty());
-            ASSERT_EQ(stream->getSPOutputBuffer(), nullptr);
+        for (const int chunk_size : {0, 4}) {
+            SCOPED_TRACE(testing::Message() << "type=" << type << " chunk_size=" << chunk_size);
+            auto scheduler = createScheduler(1, RoleType::DECODE, type, false, chunk_size);
+            auto stream    = createStream({1, 2, 3}, false, false, 8, {}, RoleType::DECODE, chunk_size);
+            EXPECT_FALSE(stream->chunkedPrefillEnabled());
+            ASSERT_TRUE(stream->initKVBlock().ok());
+            stream->update({torch::tensor({{4}}, torch::kInt32), 1});
+            if (type != SP_TYPE_DSPARK) {
+                stream->setProposeToken({4, 5});
+                /** RPC already installed the anchor and draft slots before scheduler admission. */
+                auto buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
+                buffer->propose_step = 3;
+                buffer->tokens = torch::zeros({1, 2}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+                buffer->tokens.copy_(torch::tensor({{4, 5}}, torch::kInt32));
+                stream->setSPOutputBuffer(buffer);
+            } else {
+                /** DSpARK P publishes features only; D has no proposal before scheduler admission. */
+                EXPECT_TRUE(stream->getProposeToken().empty());
+                ASSERT_EQ(stream->getSPOutputBuffer(), nullptr);
+            }
+            stream->reportEvent(StreamEvents::LoadInitiated);
+            ASSERT_TRUE(scheduler->enqueue(stream).ok());
+            auto first = scheduler->schedule();
+            ASSERT_TRUE(first.ok());
+            ASSERT_EQ(first->streams.size(), 1u);
+            EXPECT_EQ(stream->getProposeToken(),
+                      (type == SP_TYPE_DSPARK ? std::vector<int>{4, 0, 0, 0} : std::vector<int>{4, 5, 0, 0}));
+            ASSERT_NE(stream->getSPOutputBuffer(), nullptr);
+            EXPECT_EQ(stream->getSPOutputBuffer()->propose_step, 3);
+            EXPECT_FALSE(stream->getSPOutputBuffer()->all_probs.defined());
+            const auto& tokens = stream->getSPOutputBuffer()->tokens;
+            ASSERT_TRUE(tokens.defined());
+            EXPECT_EQ(tokens.sizes().vec(), (std::vector<int64_t>{1, 4}));
+            EXPECT_TRUE(torch::equal(tokens, torch::tensor(stream->getProposeToken(), torch::kInt32).reshape({1, 4})));
+            stream->specUpdate({torch::tensor({{5}}, torch::kInt32),
+                                1,
+                                torch::tensor({6, 7, 8}, torch::kInt32),
+                                torch::Tensor(),
+                                torch::Tensor()},
+                               false);
+            stream->clearPPInflight();
+            auto next = scheduler->schedule();
+            ASSERT_TRUE(next.ok());
+            ASSERT_EQ(next->streams.size(), 1u);
+            EXPECT_EQ(stream->getProposeToken(), (std::vector<int>{5, 6, 7, 8}));
         }
-        stream->reportEvent(StreamEvents::LoadInitiated);
-        ASSERT_TRUE(scheduler->enqueue(stream).ok());
-        auto first = scheduler->schedule();
-        ASSERT_TRUE(first.ok());
-        ASSERT_EQ(first->streams.size(), 1u);
-        EXPECT_EQ(stream->getProposeToken(),
-                  (type == SP_TYPE_DSPARK ? std::vector<int>{4, 0, 0, 0} : std::vector<int>{4, 5, 0, 0}));
-        ASSERT_NE(stream->getSPOutputBuffer(), nullptr);
-        EXPECT_EQ(stream->getSPOutputBuffer()->propose_step, 3);
-        EXPECT_FALSE(stream->getSPOutputBuffer()->all_probs.defined());
-        const auto& tokens = stream->getSPOutputBuffer()->tokens;
-        ASSERT_TRUE(tokens.defined());
-        EXPECT_EQ(tokens.sizes().vec(), (std::vector<int64_t>{1, 4}));
-        EXPECT_TRUE(torch::equal(tokens, torch::tensor(stream->getProposeToken(), torch::kInt32).reshape({1, 4})));
-        stream->specUpdate({torch::tensor({{5}}, torch::kInt32),
-                            1,
-                            torch::tensor({6, 7, 8}, torch::kInt32),
-                            torch::Tensor(),
-                            torch::Tensor()},
-                           false);
-        stream->clearPPInflight();
+    }
+}
+
+TEST_F(PPSchedulerTest, ChunkPipelineParksDecodeCompletedDuringSelection) {
+    std::vector<int64_t> allocation_bounds;
+    installReadinessAllocator([&](const MallocInfo& info) {
+        allocation_bounds.push_back(info.max_chunk_tokens);
+        return std::shared_ptr<AsyncContext>{};
+    });
+    auto scheduler    = createScheduler(100, RoleType::PDFUSION, SP_TYPE_NONE, false, 3);
+    auto short_stream = createStream({1}, false, false, 8, {}, RoleType::PDFUSION, 3);
+    auto long_stream  = createStream<testing::NiceMock<MockNormalGenerateStream>>(
+        std::vector<int>(8, 3), false, false, 8, {}, RoleType::PDFUSION, 3);
+    ON_CALL(*long_stream, hasError()).WillByDefault(testing::Invoke([stream = long_stream.get()] {
+        return stream->NormalGenerateStream::hasError();
+    }));
+    ASSERT_TRUE(scheduler->enqueue(long_stream).ok());
+    ASSERT_TRUE(scheduler->enqueue(short_stream).ok());
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(first->streams.size(), 2u);
+    EXPECT_EQ(first->streams.front(), short_stream);
+    EXPECT_EQ(long_stream->contextLength(), 2);
+    EXPECT_EQ(long_stream->maxChunkSize(), 3);
+    EXPECT_EQ(allocation_bounds, (std::vector<int64_t>{3, 3}));
+    short_stream->advanceChunk();
+    long_stream->advanceChunk();
+    EXPECT_TRUE(scheduler->canSchedule(long_stream));
+    auto second = scheduler->schedule();
+    ASSERT_TRUE(second.ok());
+    ASSERT_EQ(second->streams, (std::list<GenerateStreamPtr>{long_stream}));
+    long_stream->advanceChunk();
+    EXPECT_EQ(long_stream->pp_inflight_.load(), 2u);
+    // The aligned long chunk leaves one token for the short final, so running order is long then short.
+    // Dispatch that earlier batch when canSchedule visits the long stream, after choosing the context phase.
+    EXPECT_CALL(*long_stream, hasError())
+        .WillOnce(testing::Invoke([&] {
+            EXPECT_TRUE(short_stream->isContextStream());
+            EXPECT_TRUE(scheduler->pending_decode_streams_.empty());
+            short_stream->update({torch::tensor({{4}}, torch::kInt32), 1}, false);
+            short_stream->clearPPInflight();
+            long_stream->clearPPInflight();
+            return long_stream->NormalGenerateStream::hasError();
+        }))
+        .WillRepeatedly(testing::DoDefault());
+    EXPECT_EQ(long_stream->reuseLength(), 4);
+    EXPECT_CALL(*mock_allocator_, incrMalloc(testing::_)).Times(0);
+    auto continuation = scheduler->schedule();
+    ASSERT_TRUE(continuation.ok());
+    EXPECT_EQ(continuation->streams, (std::list<GenerateStreamPtr>{long_stream}));
+    EXPECT_TRUE(testing::Mock::VerifyAndClearExpectations(long_stream.get()));
+    EXPECT_TRUE(testing::Mock::VerifyAndClearExpectations(mock_allocator_.get()));
+    EXPECT_EQ(scheduler->pending_decode_streams_, (std::list<GenerateStreamPtr>{short_stream}));
+    long_stream->advanceChunk();
+    EXPECT_EQ(long_stream->pp_inflight_.load(), 2u);
+
+    // Results are dispatched FIFO: retire the older middle chunk before submitting the final chunk.
+    long_stream->clearPPInflight();
+    auto final = scheduler->schedule();
+    ASSERT_TRUE(final.ok());
+    EXPECT_EQ(final->streams, (std::list<GenerateStreamPtr>{long_stream}));
+    long_stream->advanceChunk();
+    EXPECT_EQ(long_stream->reuseLength(), long_stream->seqLength());
+    EXPECT_EQ(long_stream->pp_inflight_.load(), 2u);
+
+    // Spare capacity must not let a new prefill extend the parked decode's wait.
+    auto waiting = createStream({5}, false, false, 1, {}, RoleType::PDFUSION, 3);
+    ASSERT_TRUE(scheduler->enqueue(waiting).ok());
+    auto blocked = scheduler->schedule();
+    ASSERT_TRUE(blocked.ok());
+    EXPECT_TRUE(blocked->streams.empty());
+    EXPECT_EQ(waiting->getStatus(), StreamState::WAITING);
+    EXPECT_FALSE(waiting->hasEvent(StreamEvents::CanRun));
+    EXPECT_EQ(waiting->curBlocksNum(), 0u);
+
+    long_stream->clearPPInflight();
+    long_stream->update({torch::tensor({{4}}, torch::kInt32), 1}, false);
+    long_stream->clearPPInflight();
+
+    auto decode = scheduler->schedule();
+    ASSERT_TRUE(decode.ok());
+    EXPECT_EQ(decode->streams, (std::list<GenerateStreamPtr>{short_stream, long_stream}));
+    EXPECT_TRUE(scheduler->pending_decode_streams_.empty());
+    EXPECT_EQ(waiting->getStatus(), StreamState::WAITING);
+
+    // Once decode has resumed, its in-flight round can admit the waiting prefill.
+    auto admitted = scheduler->schedule();
+    ASSERT_TRUE(admitted.ok());
+    EXPECT_EQ(admitted->streams, (std::list<GenerateStreamPtr>{waiting}));
+}
+
+TEST_F(PPSchedulerTest, PdPrefillFinalChunkIsReapedWithoutEnteringPendingDecode) {
+    auto scheduler = createScheduler(100, RoleType::PREFILL, SP_TYPE_NONE, false, 4);
+    auto stream    = createStream({1, 2}, false, false, 8, {}, RoleType::PREFILL, 4);
+    stream->generateConfig()->pd_separation = true;
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+
+    auto prefill = scheduler->schedule();
+    ASSERT_TRUE(prefill.ok());
+    EXPECT_EQ(prefill->streams, (std::list<GenerateStreamPtr>{stream}));
+    stream->advanceChunk();
+
+    StreamUpdateInfo update_info{torch::tensor({{3}}, torch::kInt32), 1};
+    update_info.update_remote_generate = true;
+    stream->update(update_info, false);
+    stream->clearPPInflight();
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::NeedRemoteGenerate));
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+
+    auto retired = scheduler->schedule();
+    ASSERT_TRUE(retired.ok());
+    EXPECT_TRUE(retired->streams.empty());
+    EXPECT_EQ(retired->finished_request_ids, (std::vector<int64_t>{stream->streamId()}));
+    EXPECT_TRUE(scheduler->pending_decode_streams_.empty());
+    EXPECT_EQ(stream->getStatus(), StreamState::FINISHED);
+}
+
+TEST_F(PPSchedulerTest, PendingDecodeIsReapedWithoutGrowingKvOrBeingSelected) {
+    installReadinessAllocator([](const MallocInfo&) { return std::shared_ptr<AsyncContext>{}; });
+    auto scheduler = createScheduler(2, RoleType::PDFUSION, SP_TYPE_NONE, false, 4);
+    auto decode    = createStream({1, 2}, false, false, 8, {}, RoleType::PDFUSION, 4);
+    auto context   = createStream(std::vector<int>(10, 3), false, false, 8, {}, RoleType::PDFUSION, 4);
+    ASSERT_TRUE(scheduler->enqueue(decode).ok());
+    ASSERT_TRUE(scheduler->enqueue(context).ok());
+    ASSERT_TRUE(scheduler->schedule().ok());
+    decode->advanceChunk();
+    context->advanceChunk();
+    decode->update({torch::tensor({{3}}, torch::kInt32), 1}, false);
+    const auto blocks = decode->curBlocksNum();
+    auto inflight = scheduler->schedule();
+    ASSERT_TRUE(inflight.ok());
+    EXPECT_EQ(inflight->streams, (std::list<GenerateStreamPtr>{context}));
+    context->advanceChunk();
+    EXPECT_TRUE(scheduler->pending_decode_streams_.empty());
+    EXPECT_EQ(scheduler->running_streams_, (std::list<GenerateStreamPtr>{decode, context}));
+    EXPECT_EQ(decode->curBlocksNum(), blocks);
+    decode->clearPPInflight();
+    auto parked = scheduler->schedule();
+    ASSERT_TRUE(parked.ok());
+    EXPECT_EQ(parked->streams, (std::list<GenerateStreamPtr>{context}));
+    context->advanceChunk();
+    EXPECT_EQ(decode->curBlocksNum(), blocks);
+    EXPECT_EQ(decode->pp_inflight_.load(), 0u);
+    EXPECT_EQ(scheduler->pending_decode_streams_, (std::list<GenerateStreamPtr>{decode}));
+    EXPECT_EQ(scheduler->countInitedKVCacheStreams(), 2u);
+    EXPECT_EQ(scheduler->runningTaskList().size(), 2u);
+    auto waiting = createStream({4, 5}, false, false, 8, {}, RoleType::PDFUSION, 4);
+    ASSERT_TRUE(scheduler->enqueue(waiting).ok());
+    auto blocked = scheduler->schedule();
+    ASSERT_TRUE(blocked.ok());
+    EXPECT_TRUE(blocked->streams.empty());
+    EXPECT_EQ(waiting->getStatus(), StreamState::WAITING);
+    EXPECT_FALSE(waiting->hasEvent(StreamEvents::CanRun));
+    EXPECT_EQ(waiting->curBlocksNum(), 0u);
+    decode->reportError(ErrorCode::CANCELLED, "cancel parked decode");
+    auto cancelled = scheduler->schedule();
+    ASSERT_TRUE(cancelled.ok());
+    EXPECT_EQ(cancelled->streams, (std::list<GenerateStreamPtr>{waiting}));
+    EXPECT_EQ(cancelled->finished_request_ids, (std::vector<int64_t>{decode->streamId()}));
+    EXPECT_EQ(decode->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(decode->curBlocksNum(), 0u);
+    EXPECT_FALSE(scheduler->empty());
+    scheduler->finished_request_ids_.clear();
+    scheduler->refreshAndReapTerminalStreams(scheduler->pending_decode_streams_);
+    EXPECT_TRUE(scheduler->finished_request_ids_.empty());
+}
+
+TEST_F(PPSchedulerTest, StopReleasesPendingDecodeAndRetainsInflightChunksUntilFinalization) {
+    auto scheduler = createScheduler(100, RoleType::PDFUSION, SP_TYPE_NONE, false, 4);
+    auto decode    = createStream({1, 2}, false, false, 8, {}, RoleType::PDFUSION, 4);
+    auto context   = createStream(std::vector<int>(10, 3), false, false, 8, {}, RoleType::PDFUSION, 4);
+    ASSERT_TRUE(scheduler->enqueue(decode).ok());
+    ASSERT_TRUE(scheduler->enqueue(context).ok());
+    ASSERT_TRUE(scheduler->schedule().ok());
+    decode->advanceChunk();
+    context->advanceChunk();
+    decode->update({torch::tensor({{3}}, torch::kInt32), 1}, false);
+    decode->clearPPInflight();
+    ASSERT_TRUE(scheduler->schedule().ok());
+    ASSERT_EQ(scheduler->pending_decode_streams_, (std::list<GenerateStreamPtr>{decode}));
+    ASSERT_FALSE(decode->isPPInflight());
+    ASSERT_GT(decode->curBlocksNum(), 0u);
+    ASSERT_EQ(context->pp_inflight_.load(), 2u);
+    const auto context_blocks = context->curBlocksNum();
+    ASSERT_GT(context_blocks, 0u);
+    ASSERT_TRUE(scheduler->stop().ok());
+    EXPECT_EQ(decode->statusInfo().code(), ErrorCode::CANCELLED);
+    EXPECT_EQ(decode->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(decode->curBlocksNum(), 0u);
+    EXPECT_EQ(context->statusInfo().code(), ErrorCode::CANCELLED);
+    EXPECT_EQ(context->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(context->curBlocksNum(), context_blocks);
+    EXPECT_FALSE(scheduler->empty());
+
+    context->clearPPInflight();
+    context->clearPPInflight();
+    scheduler->finalizeCancelledStreams();
+    EXPECT_EQ(context->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(context->curBlocksNum(), 0u);
+    EXPECT_TRUE(scheduler->empty());
+}
+
+TEST_F(PPSchedulerTest, ChunkAdmissionRetainsTheCommonCacheCompatibilityCheck) {
+    cache_config_ = test::makeSimpleHybridMhaCacheConfig(4, 21, 64, DataType::TYPE_FP16);
+    cache_config_.reuse_cache_tail_blocks = 2;
+    cache_manager_            = std::make_shared<KVCacheManager>(cache_config_);
+    ASSERT_TRUE(cache_manager_->init());
+    auto scheduler = createScheduler(100, RoleType::PDFUSION, SP_TYPE_NONE, false, 128);
+    auto stream    = createStream(std::vector<int>(193, 1), true, false, 8, {}, RoleType::PDFUSION, 128);
+    ASSERT_FALSE(scheduler->enqueue(stream).ok());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(stream->statusInfo().ToString().find("reuse_cache_tail_blocks"), std::string::npos);
+    EXPECT_EQ(stream->curBlocksNum(), 0u);
+    EXPECT_TRUE(scheduler->empty());
+}
+
+TEST_F(PPSchedulerTest, FinalChunkBlocksFurtherSubmissionUntilItsResult) {
+    auto scheduler = createScheduler(100, RoleType::PDFUSION, SP_TYPE_NONE, false, 4);
+    auto stream    = createStream(std::vector<int>(5, 1), false, false, 8, {}, RoleType::PDFUSION, 4);
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    ASSERT_TRUE(scheduler->schedule().ok());
+    stream->advanceChunk();
+    auto final = scheduler->schedule();
+    ASSERT_TRUE(final.ok());
+    ASSERT_EQ(final->streams.size(), 1u);
+    EXPECT_EQ(stream->contextLength(), 1);
+    EXPECT_EQ(stream->maxChunkSize(), 4);
+    stream->advanceChunk();
+    EXPECT_EQ(stream->reuseLength(), stream->seqLength());
+    EXPECT_FALSE(scheduler->canSchedule(stream));
+    const auto blocks = stream->curBlocksNum();
+    EXPECT_EQ(stream->pp_inflight_.load(), 2u);
+    EXPECT_TRUE(scheduler->schedule()->streams.empty());
+    // Completing an earlier middle chunk must not reopen the submitted final window.
+    stream->clearPPInflight();
+    EXPECT_EQ(stream->pp_inflight_.load(), 1u);
+    EXPECT_FALSE(scheduler->canSchedule(stream));
+    EXPECT_TRUE(scheduler->schedule()->streams.empty());
+    EXPECT_EQ(stream->curBlocksNum(), blocks);
+    stream->update({torch::tensor({{2}}, torch::kInt32), 1}, false);
+    EXPECT_FALSE(scheduler->canSchedule(stream));
+    stream->clearPPInflight();
+    EXPECT_FALSE(stream->isContextStream());
+    EXPECT_EQ(stream->pp_inflight_.load(), 0u);
+    EXPECT_TRUE(scheduler->canSchedule(stream));
+}
+
+TEST_F(PPSchedulerTest, LoadedStreamWaitsForTheNextAdmissionBoundary) {
+    auto       context    = makeControlledAllocatorContext();
+    const auto loading_id = next_request_id_;
+    installReadinessAllocator([&](const MallocInfo& info) {
+        return info.request_id == loading_id ? context : std::shared_ptr<LoadAsyncContext>{};
+    });
+    auto scheduler = createScheduler(100, RoleType::PDFUSION, SP_TYPE_NONE, false, 4);
+    auto loaded    = createStream(std::vector<int>(14, 2), false, false, 8, {}, RoleType::PDFUSION, 4);
+    ASSERT_TRUE(scheduler->enqueue(loaded).ok());
+    ASSERT_TRUE(scheduler->schedule().ok());
+    ASSERT_EQ(loaded->getStatus(), StreamState::LOADING_CACHE);
+    auto active = createStream(std::vector<int>(10, 1), false, false, 8, {}, RoleType::PDFUSION, 4);
+    // Its allocation is already ready; the other request still owns its asynchronous load.
+    ASSERT_TRUE(active->initKVBlock().ok());
+    active->reportEvent(StreamEvents::LoadInitiated);
+    active->generate_status_->status = StreamState::RUNNING;
+    scheduler->running_streams_.push_back(active);
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(first->streams, (std::list<GenerateStreamPtr>{active}));
+    active->advanceChunk();
+    ASSERT_TRUE(context->completeTransfers(1, true));
+    auto second = scheduler->schedule();
+    ASSERT_TRUE(second.ok());
+    EXPECT_EQ(second->streams, (std::list<GenerateStreamPtr>{active}));
+    EXPECT_EQ(loaded->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(loaded->pp_inflight_.load(), 0u);
+    EXPECT_FALSE(loaded->hasEvent(StreamEvents::CanRun));
+    active->advanceChunk();
+    // Model a finalized four-token prefix from the completed cache load.
+    loaded->setReuseLength(4);
+    active->clearPPInflight();
+    auto final = scheduler->schedule();
+    ASSERT_TRUE(final.ok());
+    EXPECT_EQ(final->streams, (std::list<GenerateStreamPtr>{active}));
+    EXPECT_TRUE(active->isLastChunk());
+    EXPECT_EQ(loaded->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(loaded->pp_inflight_.load(), 0u);
+    active->advanceChunk();
+
+    auto admitted = scheduler->schedule();
+    ASSERT_TRUE(admitted.ok());
+    EXPECT_EQ(admitted->streams, (std::list<GenerateStreamPtr>{loaded}));
+    EXPECT_EQ(loaded->reuseLength(), 4);
+    EXPECT_EQ(loaded->contextLength(), 4);
+    EXPECT_EQ(loaded->maxChunkSize(), 4);
+    EXPECT_EQ(loaded->pp_inflight_.load(), 1u);
+}
+
+TEST_F(PPSchedulerTest, TerminalReaperReportsAnAlreadyFinishedRequestOnce) {
+    auto scheduler = createScheduler(100, RoleType::PDFUSION, SP_TYPE_NONE, false, 4);
+    auto stream    = createStream({1, 2}, false, false, 8, {}, RoleType::PDFUSION, 4);
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    stream->reportError(ErrorCode::CANCELLED, "finished before scheduler maintenance");
+    ASSERT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    EXPECT_TRUE(scheduler->refreshAndReapTerminalStreams(scheduler->waiting_streams_));
+    EXPECT_EQ(scheduler->finished_request_ids_, (std::vector<int64_t>{stream->streamId()}));
+    EXPECT_FALSE(scheduler->refreshAndReapTerminalStreams(scheduler->waiting_streams_));
+    EXPECT_EQ(scheduler->finished_request_ids_.size(), 1u);
+    EXPECT_TRUE(scheduler->empty());
+}
+
+TEST_F(PPSchedulerTest, BudgetDeferredChunksStillConsumeAdmissionLimits) {
+    installReadinessAllocator([](const MallocInfo&) { return std::shared_ptr<AsyncContext>{}; });
+    for (const bool token_limit : {false, true}) {
+        SCOPED_TRACE(token_limit);
+        auto scheduler =
+            createScheduler(token_limit ? 100 : 2, RoleType::PDFUSION, SP_TYPE_NONE, false, 4, token_limit ? 5 : 0);
+        auto first    = createStream({1, 2, 3, 4}, false, false, 8, {}, RoleType::PDFUSION, 4);
+        auto deferred = createStream({5}, false, false, 8, {}, RoleType::PDFUSION, 4);
+        ASSERT_TRUE(scheduler->enqueue(first).ok());
+        ASSERT_TRUE(scheduler->enqueue(deferred).ok());
+        std::list<GenerateStreamPtr> waiting;
+        for (int i = 0; i < 3; ++i) {
+            auto stream = createStream({6}, false, false, 8, {}, RoleType::PDFUSION, 4);
+            ASSERT_TRUE(scheduler->enqueue(stream).ok());
+            waiting.push_back(stream);
+        }
+
+        auto output = scheduler->schedule();
+        ASSERT_TRUE(output.ok());
+        EXPECT_EQ(output->streams, (std::list<GenerateStreamPtr>{first}));
+        EXPECT_EQ(scheduler->running_streams_, (std::list<GenerateStreamPtr>{first, deferred}));
+        EXPECT_EQ(deferred->getStatus(), StreamState::RUNNING);
+        EXPECT_GT(deferred->curBlocksNum(), 0u);
+        EXPECT_FALSE(deferred->isPPInflight());
+        EXPECT_EQ(scheduler->waiting_streams_, waiting);
+        for (const auto& stream : waiting) {
+            EXPECT_EQ(stream->curBlocksNum(), 0u);
+        }
+
+        first->advanceChunk();
         auto next = scheduler->schedule();
         ASSERT_TRUE(next.ok());
-        ASSERT_EQ(next->streams.size(), 1u);
-        EXPECT_EQ(stream->getProposeToken(), (std::vector<int>{5, 6, 7, 8}));
+        EXPECT_EQ(next->streams, (std::list<GenerateStreamPtr>{deferred}));
+        EXPECT_EQ(scheduler->waiting_streams_, waiting);
+        first->clearPPInflight();
+        deferred->clearPPInflight();
+        ASSERT_TRUE(scheduler->stop().ok());
     }
+}
+
+TEST_F(PPSchedulerTest, ChunkGrantDefersRemainderButRejectsAnImpossibleFullBudget) {
+    auto    scheduler = createScheduler(100, RoleType::PDFUSION, SP_TYPE_NONE, false, 4);
+    auto    stream    = createStream(std::vector<int>(9, 1), false, false, 8, {}, RoleType::PDFUSION, 4);
+    int64_t remainder = 1;
+    EXPECT_FALSE(scheduler->grantChunk(stream, remainder));
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_EQ(remainder, 1);
+    EXPECT_EQ(stream->currentChunkLen(), 4);
+    scheduler->prefill_chunk_size_ = 1;
+    EXPECT_FALSE(scheduler->grantChunk(stream, remainder));
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ(remainder, 1);
+}
+
+TEST_F(PPSchedulerTest, WaitingChunkIsGrantedAfterCacheReuseFinalizes) {
+    installReadinessAllocator([&](const MallocInfo&) { return std::shared_ptr<LoadAsyncContext>{}; });
+    ON_CALL(*mock_allocator_, initMallocForCommonLen(testing::_))
+        .WillByDefault(testing::Invoke([this](const MallocInfo& info) {
+            ++initial_malloc_calls_;
+            auto result = real_allocator_->initMallocForCommonLen(info);
+            if (result.success) {
+                // Model an eight-token device-cache match published by initKVBlock().
+                result.reuse_len = 8;
+            }
+            return result;
+        }));
+
+    auto scheduler = createScheduler(100, RoleType::PDFUSION, SP_TYPE_NONE, false, 1);
+    auto stream    = createStream(std::vector<int>(9, 1), true, false, 8, {}, RoleType::PDFUSION, 1);
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+
+    auto output = scheduler->schedule();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output->streams, (std::list<GenerateStreamPtr>{stream}));
+    EXPECT_EQ(initial_malloc_calls_, 1u);
+    EXPECT_EQ(stream->reuseLength(), 8);
+    EXPECT_EQ(stream->currentChunkLen(), 1);
+    EXPECT_FALSE(stream->hasError());
+}
+
+TEST_F(PPSchedulerTest, RejectedChunkRequestIsRetiredBeforeKvAdmission) {
+    auto scheduler         = createScheduler(100, RoleType::PDFUSION, SP_TYPE_NONE, false, 4);
+    auto input             = std::make_shared<GenerateInput>();
+    input->request_id      = next_request_id_++;
+    input->input_ids       = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->generate_config->max_new_tokens = 8;
+    input->generate_config->return_logits = true;
+    ModelConfig model;
+    model.max_seq_len = 64;
+    model.vocab_size  = 128;
+    RuntimeConfig runtime;
+    runtime.fifo_scheduler_config.prefill_chunk_size = 4;
+    ResourceContext resources;
+    resources.cache_manager = cache_manager_;
+    resources.role_type     = RoleType::PDFUSION;
+    auto stream             = std::make_shared<NormalGenerateStream>(input, model, runtime, resources, nullptr);
+    ASSERT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(stream->curBlocksNum(), 0u);
+    // Direct scheduler callers must retire a constructor-rejected request without execution or KV.
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    auto output = scheduler->schedule();
+    ASSERT_TRUE(output.ok());
+    EXPECT_TRUE(output->streams.empty());
+    EXPECT_EQ(output->finished_request_ids, (std::vector<int64_t>{stream->streamId()}));
+    EXPECT_EQ(stream->curBlocksNum(), 0u);
+    EXPECT_TRUE(scheduler->empty());
 }
 
 }  // namespace rtp_llm

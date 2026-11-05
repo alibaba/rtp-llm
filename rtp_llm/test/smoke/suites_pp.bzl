@@ -11,6 +11,7 @@ load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test")
 _COMMON_ARGS = "--act_type BF16 --warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10"
 # Qwen3.5 keeps recurrent state per 2048-token block; attention kernels use 64-token pages.
 _DENSE_ARGS = " --model_warm_up 0 --ssm_state_dtype fp32 --kv_cache_mem_mb 8192 --kernel_seq_size_per_block 64"
+_CHUNK_ARGS = " --warm_up 1 --model_warm_up 0 --max_context_batch_size 8 --max_batch_tokens_size 65536 --kv_cache_mem_mb 8192 --ffn_sp_size 1 --prefill_chunk_size "
 
 def _pp_test(name, gpus, cases = [], dense = False, max_seq_len = 4096, extra_args = "", gpu_type = []):
     custom_smoke_test(
@@ -50,6 +51,28 @@ def pp_suites(gpu_type):
     _pp_test("qwen35_pd_mtp_pp_test", 4, ["sym_mtp1", "sym_mtp3", "pp2_pp1_mtp3"], dense = True, gpu_type = gpu_type)
     _pp_test("qwen3_pd_pp_alltoall_test", 6, ["cp_full_alltoall"], extra_args = " --use_ub_comm 0", gpu_type = gpu_type)
     _pp_test("qwen3_multi_task_prompt_pp2_cp2_test", 8, ["multi_task_prompt_pp2_cp2"], gpu_type = gpu_type)
+    _pp_test("qwen3_pp_chunk_prefill_test", 2, ["chunk_pp2"], max_seq_len = 2048, extra_args = _CHUNK_ARGS + "32", gpu_type = gpu_type)
+    _pp_test("qwen3_pp_chunk_prefill_runtime_test", 2, ["chunk_pp2_runtime", "chunk_pp2_reuse"], max_seq_len = 8192, extra_args = _CHUNK_ARGS + "32", gpu_type = gpu_type)
+    _pp_test("qwen3_pp_chunk_prefill_tp_dp_test", 4, ["chunk_pp2_tp2", "chunk_pp2_dp2"], max_seq_len = 2048, extra_args = _CHUNK_ARGS + "32", gpu_type = gpu_type)
+    _pp_test("qwen3_pd_pp_chunk_prefill_test", 4, ["chunk_pd_pp2"], max_seq_len = 2048, extra_args = _CHUNK_ARGS + "32", gpu_type = gpu_type)
+    _pp_test("qwen35_pp_chunk_prefill_mtp_test", 2, ["chunk_pp2_mtp"], dense = True, max_seq_len = 8192, extra_args = _CHUNK_ARGS + "2048", gpu_type = gpu_type)
+    # Two KV blocks of budget leave room for a middle chunk beside a short final chunk.
+    _pp_test("qwen35_pp_chunk_prefill_dp_mtp_test", 4, ["chunk_pp2_dp2_mtp"], dense = True, max_seq_len = 16384, extra_args = _CHUNK_ARGS + "4096", gpu_type = gpu_type)
+    _pp_test("qwen35_pd_pp_chunk_prefill_mtp_test", 4, ["chunk_pd_pp2_mtp"], dense = True, max_seq_len = 8192, extra_args = _CHUNK_ARGS + "2048", gpu_type = gpu_type)
+
+    native.test_suite(
+        name = "smoke_pp_chunk_prefill",
+        tests = [
+            ":qwen3_pp_chunk_prefill_test",
+            ":qwen3_pp_chunk_prefill_runtime_test",
+            ":qwen3_pp_chunk_prefill_tp_dp_test",
+            ":qwen3_pd_pp_chunk_prefill_test",
+            ":qwen35_pp_chunk_prefill_mtp_test",
+            ":qwen35_pp_chunk_prefill_dp_mtp_test",
+            ":qwen35_pd_pp_chunk_prefill_mtp_test",
+        ],
+        tags = ["manual"],
+    )
 
     native.test_suite(
         name = "smoke_pp_topology",
@@ -78,7 +101,7 @@ def pp_suites(gpu_type):
 
     native.test_suite(
         name = "smoke_pp",
-        tests = [":smoke_pp_topology", ":smoke_pp_features"],
+        tests = [":smoke_pp_topology", ":smoke_pp_features", ":smoke_pp_chunk_prefill"],
         tags = ["manual"],
     )
 

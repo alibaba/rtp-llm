@@ -23,6 +23,8 @@ public:
 
     absl::StatusOr<ScheduleOutput> schedule() override;
 
+    void finalizeCancelledStreams() override;
+
 private:
     /** Per-round scheduling and admission accounting. */
     struct ScheduleRuntime {
@@ -52,7 +54,23 @@ private:
 
     void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state) override;
 
+    void cancelStreams(std::list<GenerateStreamPtr>& streams) override;
+
+    bool refreshAndReapTerminalStreams(std::list<GenerateStreamPtr>& streams) override;
+
+    bool chunkedPrefillConfigured() const {
+        return prefill_chunk_size_ > 0;
+    }
+
     std::list<GenerateStreamPtr> evaluateRunningStreams();
+    bool                         canSchedule(const GenerateStreamPtr& stream) const;
+    bool                         grantChunk(const GenerateStreamPtr& stream, int64_t& budget);
+    void                         moveMiddleChunksToBack(std::list<GenerateStreamPtr>& streams) const;
+    size_t                       countInitedKVCacheStreams() const;
+    void                         cancelExtraStreams() override;
+    int64_t                      extraOnflightStreams() const override;
+    void                         fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const override;
+    void appendExtraRunningTaskList(std::vector<EngineScheduleInfo::TaskInfo>& task_list) const override;
 
     void resetAdmissionMetrics();
 
@@ -83,6 +101,7 @@ private:
     const size_t                     prefill_cp_size_;
     const SpeculativeExecutionConfig sp_config_;
     std::vector<int64_t>             finished_request_ids_;
+    std::list<GenerateStreamPtr>     pending_decode_streams_;
 };
 
 }  // namespace rtp_llm

@@ -182,6 +182,7 @@ enum GptModelInputControlFlag : uint32_t {
     kControlDecodeEntrance      = 1u << 8,
     kControlOpaqueKvCacheStore  = 1u << 9,
     kControlShutdown            = 1u << 10,
+    kControlMiddleChunkOnly     = 1u << 11,
 };
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);

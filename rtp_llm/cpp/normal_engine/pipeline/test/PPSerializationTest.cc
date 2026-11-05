@@ -89,7 +89,8 @@ TEST_F(PPSerializationTest, PlanDecodingCopiesTensorsToPinnedCpuWithoutAliasingP
     plan.model_input.multimodal_features =
         std::vector<torch::Tensor>{torch::arange(8, torch::kFloat32).reshape({2, 4}).to(torch::kFloat16).cuda()};
     plan.model_input.mm_extra_input  = std::vector<torch::Tensor>{torch::arange(6, torch::kFloat32).cuda()};
-    plan.sampling_plan.request_ids   = torch::tensor({101, 202}, torch::kInt64);
+    plan.request_ids                 = torch::tensor({101, 202, 303}, torch::kInt64);
+    plan.sampling_plan.request_ids   = plan.request_ids.narrow(0, 0, 2);
     plan.sampling_plan.token_ids     = torch::tensor({1, 2, 3, 4}, torch::kInt32).cuda();
     plan.sampling_plan.token_offsets = torch::tensor({0, 2, 4}, torch::kInt64);
     plan.draft_next_position_ids     = torch::tensor({5, 8}, torch::kInt32).cuda();
@@ -118,6 +119,7 @@ TEST_F(PPSerializationTest, PlanDecodingCopiesTensorsToPinnedCpuWithoutAliasingP
     ASSERT_TRUE(received.model_input.mm_extra_input.has_value());
     ASSERT_EQ(received.model_input.mm_extra_input->size(), 1u);
     expect_host_copy(received.model_input.mm_extra_input->front(), plan.model_input.mm_extra_input->front());
+    expect_host_copy(received.request_ids, plan.request_ids);
     expect_host_copy(received.sampling_plan.request_ids, plan.sampling_plan.request_ids);
     expect_host_copy(received.sampling_plan.token_ids, plan.sampling_plan.token_ids);
     expect_host_copy(received.sampling_plan.token_offsets, plan.sampling_plan.token_offsets);
@@ -579,7 +581,8 @@ TEST_F(PPSerializationTest, MixedReturnSequencesPlanAndResultRoundTrip) {
     auto&           sampling_plan      = plan.sampling_plan;
     sampling_plan.random_seeds         = {std::nullopt, -7};
     sampling_plan.num_return_sequences = {2, 1};
-    sampling_plan.request_ids          = torch::tensor({101, 202}, torch::kInt64);
+    plan.request_ids                  = torch::tensor({101, 202, 303}, torch::kInt64);
+    sampling_plan.request_ids          = plan.request_ids.narrow(0, 0, 2);
     sampling_plan.token_ids            = torch::tensor({1, 2, 1, 2, 3, 4, 5}, torch::kInt32);
     sampling_plan.token_offsets        = torch::tensor({0, 2, 4, 7}, torch::kInt64);
     sampling_plan.top_k                = torch::tensor({7, 7, 3}, torch::kInt32);
@@ -595,6 +598,8 @@ TEST_F(PPSerializationTest, MixedReturnSequencesPlanAndResultRoundTrip) {
 
     const auto  round_trip_plan   = pp_serialization::deserializePlan(pp_serialization::serializePlan(plan));
     const auto& received_sampling = round_trip_plan.sampling_plan;
+    EXPECT_TRUE(torch::equal(round_trip_plan.request_ids, plan.request_ids));
+    EXPECT_FALSE(round_trip_plan.model_input.is_middle_chunk_only);
     EXPECT_EQ(received_sampling.random_seeds, sampling_plan.random_seeds);
     EXPECT_EQ(received_sampling.num_return_sequences, sampling_plan.num_return_sequences);
     EXPECT_TRUE(torch::equal(received_sampling.request_ids, sampling_plan.request_ids));
@@ -613,11 +618,11 @@ TEST_F(PPSerializationTest, MixedReturnSequencesPlanAndResultRoundTrip) {
 
     PPExecutionResult result;
     result.sample_input_us   = 1234567890123;
-    result.request_ids       = sampling_plan.request_ids;
+    result.request_ids       = plan.request_ids;
     result.new_token_ids     = torch::tensor({{10}, {11}, {12}}, torch::kInt32);
     result.new_token_lengths = torch::ones({3}, torch::kInt32);
-    result.request_errors.resize(2);
-    result.request_outputs.resize(2);
+    result.request_errors.resize(3);
+    result.request_outputs.resize(3);
 
     const auto round_trip_result =
         pp_serialization::deserializeExecutionResult(pp_serialization::serializeExecutionResult(result));
@@ -628,7 +633,7 @@ TEST_F(PPSerializationTest, MixedReturnSequencesPlanAndResultRoundTrip) {
     EXPECT_FALSE(round_trip_result.propose_token_ids.defined());
     EXPECT_FALSE(round_trip_result.propose_all_probs.defined());
     EXPECT_FALSE(round_trip_result.propose_hidden_states.defined());
-    ASSERT_EQ(round_trip_result.request_errors.size(), 2u);
+    ASSERT_EQ(round_trip_result.request_errors.size(), 3u);
     EXPECT_TRUE(round_trip_result.request_errors[0].ok());
     EXPECT_TRUE(round_trip_result.request_errors[1].ok());
 }
@@ -792,4 +797,40 @@ TEST_F(PPSerializationTest, RequestViewsSerializeOnlySelectedElementsAndKeepEmpt
     const auto compact_payload = pp_serialization::serializeExecutionResult(result);
     EXPECT_TRUE(torch::equal(sparse_payload, compact_payload));
 }
+TEST_F(PPSerializationTest, ChunkPlanRoundTripPreservesFinalRequestBoundaryAndTokens) {
+    for (const int64_t final_requests : {0, 1, 3}) {
+        PPExecutionPlan plan;
+        plan.model_input.is_middle_chunk_only = final_requests == 0;
+        plan.request_ids = torch::tensor({101, 202, 303}, torch::kInt64);
+        plan.sampling_plan.request_ids = plan.request_ids.narrow(0, 0, final_requests);
+        plan.sampling_plan.sequence_lengths = torch::full({final_requests}, 7, torch::kInt32);
+        plan.middle_chunk_boundary_tokens = torch::tensor({{7}, {8}}, torch::kInt32);
+        plan.draft_next_position_ids = torch::tensor({2, 4, 6}, torch::kInt32);
+        const auto decoded           = pp_serialization::deserializePlan(pp_serialization::serializePlan(plan));
+        EXPECT_EQ(decoded.model_input.is_middle_chunk_only, final_requests == 0);
+        EXPECT_TRUE(torch::equal(decoded.request_ids, plan.request_ids));
+        EXPECT_TRUE(torch::equal(decoded.sampling_plan.request_ids, plan.sampling_plan.request_ids));
+        EXPECT_TRUE(torch::equal(decoded.sampling_plan.sequence_lengths, plan.sampling_plan.sequence_lengths));
+        EXPECT_TRUE(torch::equal(decoded.middle_chunk_boundary_tokens, plan.middle_chunk_boundary_tokens));
+        EXPECT_TRUE(torch::equal(decoded.draft_next_position_ids, plan.draft_next_position_ids));
+    }
+}
+
+TEST_F(PPSerializationTest, ChunkResultKeepsFullRequestSlotsAndFinalTokenPrefix) {
+    PPExecutionResult result;
+    result.request_ids    = torch::tensor({101, 202}, torch::kInt64);
+    result.request_errors = {ErrorInfo::OkStatus(), ErrorInfo(ErrorCode::CANCELLED, "middle cancelled")};
+    result.request_outputs.resize(2);
+    result.new_token_ids     = torch::tensor({{7}}, torch::kInt32);
+    result.new_token_lengths = torch::tensor({1}, torch::kInt32);
+    result.propose_token_ids = torch::tensor({{8, 9}}, torch::kInt32);
+    const auto decoded =
+        pp_serialization::deserializeExecutionResult(pp_serialization::serializeExecutionResult(result));
+    EXPECT_TRUE(torch::equal(decoded.request_ids, result.request_ids));
+    EXPECT_TRUE(torch::equal(decoded.new_token_lengths, result.new_token_lengths));
+    EXPECT_EQ(decoded.request_errors[1].code(), ErrorCode::CANCELLED);
+    EXPECT_EQ(decoded.request_outputs.size(), 2u);
+    EXPECT_EQ(decoded.propose_token_ids.size(0), 1);
+}
+
 }  // namespace rtp_llm

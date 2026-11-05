@@ -69,8 +69,8 @@ protected:
     bool                                checkInputLength(const GenerateStreamPtr& stream);
     absl::Status                        checkChunkedPrefillRequest(const GenerateStreamPtr& stream);
     std::list<GenerateStreamPtr>        selectPrefillPrefix(std::list<GenerateStreamPtr>& active_streams);
-    void                                cancelStreams(std::list<GenerateStreamPtr>& streams);
-    bool                                refreshAndReapTerminalStreams(std::list<GenerateStreamPtr>& streams);
+    virtual void                        cancelStreams(std::list<GenerateStreamPtr>& streams);
+    virtual bool                        refreshAndReapTerminalStreams(std::list<GenerateStreamPtr>& streams);
     size_t                              evaluateAndUpdateStreams(std::list<GenerateStreamPtr>&              streams,
                                                                  const std::unordered_set<GenerateStream*>* admitted_streams = nullptr);
     std::unordered_set<GenerateStream*> evaluateWaitingStreams(std::list<GenerateStreamPtr>& waiting_streams,

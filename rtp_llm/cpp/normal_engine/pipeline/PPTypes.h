@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -13,6 +14,24 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
+
+class GenerateStream;
+
+/** First-stage completion metadata. No mutable execution geometry is read at result time. */
+struct PPStreamExecution {
+    std::shared_ptr<GenerateStream> stream;
+    bool                            is_context      = false;
+    bool                            is_middle_chunk = false;
+    int                             prefix_length   = 0;
+    int                             batch_size      = 0;
+    int                             execute_tokens  = 0;
+    int32_t                         priority        = 0;
+};
+
+struct PPExecutionSnapshot {
+    bool                           is_fake = false;
+    std::vector<PPStreamExecution> streams;
+};
 
 /** Internal numeric request identity, exposed by GenerateStream::streamId(). */
 using RequestId = int64_t;
@@ -28,6 +47,10 @@ struct RequestLogitsProcessorConfig {
     int                           cross_seq_diverge_start_combo = 0;      // scalar per stream
 };
 
+/**
+ * Sampling metadata for the non-middle request prefix, including fake/prefill-only placeholders.
+ * stream_count and total_batch_size below count selected requests and their sequence rows, respectively.
+ */
 struct PPSamplingPlan {
     std::vector<std::optional<int>>           random_seeds;              // [stream_count]
     std::vector<RequestLogitsProcessorConfig> logits_processor_configs;  // [stream_count]
@@ -96,6 +119,7 @@ struct PPOutputConfig {
 };
 
 struct PPExecutionPlan {
+    torch::Tensor          request_ids;  // [stream_count], including middle chunks
     GptModelInputs         model_input;
     PPSamplingPlan         sampling_plan;
     PPOutputConfig         output_config;
@@ -103,6 +127,8 @@ struct PPExecutionPlan {
 
     bool          is_decode = false;        // Request phase; verify may use a prefill input shape
     torch::Tensor draft_next_position_ids;  // [stream_count * position_id_len_factor], MTP prefill
+    /** CPU int32 [middle_chunk_rows, 1]; prompt boundary tokens for the middle-chunk suffix. */
+    torch::Tensor middle_chunk_boundary_tokens;
 };
 
 /** CPU outputs for one request; unrequested fields remain undefined. */
@@ -124,15 +150,15 @@ struct PPExecutionResult {
     int64_t sample_input_us = 0;
 
     torch::Tensor request_ids;  // [stream_count]
-    /** New tokens to append: CPU int32 [B, 1], or [B, K+1] for verify. */
+    /** New tokens for the sampled request prefix: CPU int32 [sample_rows, 1], or [B, K+1] for verify. */
     torch::Tensor new_token_ids;
-    /** Committed prefix length per row in new_token_ids, before applying the request length limit: CPU int32 [B].*/
+    /** Committed length per sampled row; both token tensors are undefined when the batch is entirely middle chunks. */
     torch::Tensor new_token_lengths;
 
     /** One slot per request_id, including requests with no optional output or with errors. */
     std::vector<PPRequestOutput> request_outputs;
 
-    /** First error per request; failed-row placeholders are not committed. */
+    /** First error per request; failed-row outputs are not committed. */
     std::vector<ErrorInfo> request_errors;
 
     /**

@@ -454,6 +454,10 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
     ScheduleOutput schedule_output{{stream}};
     if (parallelism_config.pp_size > 1) {
         auto* pp_executor = static_cast<PPExecutor*>(executor_.get());
+        if (mode == preRunMode::build_system_prompt) {
+            /** This direct execution bypasses PPScheduler, so it owns the corresponding PP inflight reference. */
+            stream->setPPInflight();
+        }
         THROW_IF_STATUS_ERROR(pp_executor->process(schedule_output));
         if (mode == preRunMode::build_system_prompt) {
             pp_executor->drainPendingResults();
@@ -612,7 +616,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 #else
     const int64_t token_budget = runtime_config.fifo_scheduler_config.prefill_chunk_size;
     const bool    use_global_budget_warmup =
-        token_budget > 0 && !runtime_config.warm_up_with_loss && parallelism_config.pp_size == 1;
+        token_budget > 0 && !runtime_config.warm_up_with_loss;
     const int64_t token_heavy_seq_len = std::max<int64_t>(1, static_cast<int64_t>(getWarmUpInputLength()));
 
     auto fake_input = makeFakeInput(static_cast<size_t>(token_heavy_seq_len));
@@ -704,7 +708,11 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         // Create it before tracing and destroy it before sampling production cache capacity.
         rtp_llm::setTraceMemory(true);
         auto memory_tracker = std::make_unique<WarmupMemoryTracker>();
-        executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0, mla_ops_type_));
+        if (parallelism_config.pp_size > 1) {
+            executor_.reset(new PPExecutor(params, warmup_cache_manager, true, mla_ops_type_));
+        } else {
+            executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0, mla_ops_type_));
+        }
         auto token_heavy_result = runPrefillWarmupShape(fake_input, warmup_resource_context, 0, token_budget);
         THROW_IF_STATUSOR_ERROR(token_heavy_result);
         max_consumed = memory_tracker->maxConsumedBytes();
@@ -932,6 +940,7 @@ absl::Status NormalEngine::stop() {
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
+    scheduler_->finalizeCancelledStreams();
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
     resource_context_.cache_manager->stopMetricsReporter();

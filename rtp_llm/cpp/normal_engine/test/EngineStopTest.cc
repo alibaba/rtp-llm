@@ -56,6 +56,7 @@ struct FinishState {
     std::atomic<bool>             completed{false};
     std::atomic<bool>             destroyed{false};
     std::atomic<bool>             destroyed_after_finish{false};
+    GenerateStreamPtr            inflight_stream;
 };
 
 class GatedFinishExecutor: public Executor {
@@ -72,6 +73,9 @@ public:
         ++state_->calls;
         state_->started.set_value(std::this_thread::get_id());
         state_->release.wait();
+        if (state_->inflight_stream) {
+            state_->inflight_stream->clearPPInflight();
+        }
         state_->completed = true;
         return absl::OkStatus();
     }
@@ -99,7 +103,19 @@ TEST_F(EngineFinishTest, StopJoinsLoopFinishBeforeDestroyingExecutor) {
         auto started                       = state->started.get_future();
         engine->executor_                  = std::make_unique<GatedFinishExecutor>(state, engine->running_);
         engine->parallelism_config.pp_size = pp_size;
-        /** Keep the scheduler stopped: this test observes loop teardown without admitting new requests. */
+        const auto free_blocks = engine->resourceContext().cache_manager->freeBlocksNum();
+        if (pp_size > 1) {
+            engine->initScheduler();
+            auto input                            = std::make_shared<GenerateInput>();
+            input->input_ids                       = torch::tensor({1, 2}, torch::kInt32);
+            input->generate_config                 = std::make_shared<GenerateConfig>();
+            input->generate_config->max_new_tokens = 8;
+            state->inflight_stream                 = engine->enqueue(input);
+            auto scheduled                        = engine->scheduler_->schedule();
+            ASSERT_TRUE(scheduled.ok());
+            ASSERT_EQ(scheduled->streams, (std::list<GenerateStreamPtr>{state->inflight_stream}));
+            ASSERT_GT(state->inflight_stream->curBlocksNum(), 0u);
+        }
         ASSERT_TRUE(engine->startLoop().ok());
         std::thread::id stop_thread;
         auto            stopped = std::async(std::launch::async, [&] {
@@ -115,6 +131,11 @@ TEST_F(EngineFinishTest, StopJoinsLoopFinishBeforeDestroyingExecutor) {
         }
         EXPECT_EQ(stopped.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
         EXPECT_FALSE(state->destroyed.load());
+        if (state->inflight_stream) {
+            EXPECT_EQ(state->inflight_stream->getStatus(), StreamState::RUNNING);
+            EXPECT_TRUE(state->inflight_stream->isPPInflight());
+            EXPECT_GT(state->inflight_stream->curBlocksNum(), 0u);
+        }
         release.set_value();
         EXPECT_EQ(stopped.wait_for(std::chrono::seconds(30)), std::future_status::ready);
         EXPECT_TRUE(stopped.get().ok());
@@ -122,6 +143,14 @@ TEST_F(EngineFinishTest, StopJoinsLoopFinishBeforeDestroyingExecutor) {
         EXPECT_TRUE(state->completed.load());
         EXPECT_TRUE(state->destroyed_after_finish.load());
         EXPECT_EQ(engine->executor_, nullptr);
+        if (state->inflight_stream) {
+            EXPECT_EQ(state->inflight_stream->statusInfo().code(), ErrorCode::CANCELLED);
+            EXPECT_EQ(state->inflight_stream->getStatus(), StreamState::FINISHED);
+            EXPECT_FALSE(state->inflight_stream->isPPInflight());
+            EXPECT_EQ(state->inflight_stream->curBlocksNum(), 0u);
+            EXPECT_EQ(engine->resourceContext().cache_manager->freeBlocksNum(), free_blocks);
+            EXPECT_TRUE(engine->scheduler_->empty());
+        }
         EXPECT_TRUE(engine->stop().ok());
         EXPECT_EQ(state->calls.load(), 1);
     }

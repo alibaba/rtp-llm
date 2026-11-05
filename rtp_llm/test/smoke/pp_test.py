@@ -271,6 +271,42 @@ VARIANTS = {
         "test_block_num": 12,
         "cache_settle_seconds": 2,
     },
+    # Chunk-prefill cases compare tokens only; prompt logits/hidden outputs are unsupported.
+    "chunk_pp2": {"pp": 2, "tp": 1, "dp": 1, "ep": 1, "sp": 0},
+    "chunk_pp2_runtime": {"pp": 2, "tp": 1, "dp": 1, "ep": 1, "sp": 0, "runtime_checks": True},
+    "chunk_pp2_reuse": {"pp": 2, "tp": 1, "dp": 1, "ep": 1, "sp": 0, "runtime_checks": True},
+    "chunk_pp2_tp2": {"pp": 2, "tp": 2, "dp": 1, "ep": 1, "sp": 0},
+    "chunk_pp2_dp2": {"pp": 2, "tp": 1, "dp": 2, "ep": 2, "sp": 0},
+    "chunk_pp2_dp2_mtp": {
+        "pp": 2,
+        "tp": 1,
+        "dp": 2,
+        "ep": 2,
+        "sp": 3,
+        "block_size": 2048,
+    },
+    "chunk_pp2_mtp": {
+        "pp": 2,
+        "tp": 1,
+        "dp": 1,
+        "ep": 1,
+        "sp": 3,
+        "block_size": 2048,
+    },
+    "chunk_pd_pp2": {
+        "prefill_pp": 2,
+        "prefill_tp": 1,
+        "decode_pp": 2,
+        "decode_tp": 1,
+        "sp": 0,
+    },
+    "chunk_pd_pp2_mtp": {
+        "prefill_pp": 2,
+        "prefill_tp": 1,
+        "decode_pp": 2,
+        "decode_tp": 1,
+        "sp": 3,
+    },
 }
 
 
@@ -1099,6 +1135,209 @@ class PPFeatureTest(PPExecutionTest):
             raise
         finally:
             self.save_report(report)
+
+
+class PPChunkPrefillTest(PPFeatureTest):
+    def setUp(self):
+        super().setUp()
+        parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+        parser.add_argument("--prefill_chunk_size", type=int, default=0)
+        options, _ = parser.parse_known_args(shlex.split(os.environ["SMOKE_ARGS"]))
+        self.chunk_size = options.prefill_chunk_size
+        self.assertGreater(self.chunk_size, 0, "Pass --prefill_chunk_size > 0")
+
+    def cases(self):
+        long_prompt = "apple " * (self.chunk_size * 3) + "Continue: apple"
+        medium_tokens = self.chunk_size * 3 // 2
+        if VARIANTS[self.case_name]["sp"] and VARIANTS[self.case_name].get("dp", 1) > 1:
+            # Leave one KV block of budget beside this request's final chunk,
+            # regardless of whether the medium or long request is admitted first.
+            medium_tokens -= 4
+        medium_prompt = "apple " * medium_tokens + "Continue: apple"
+        return [
+            (long_prompt, 8),
+            ("The capital of France is", 8),
+            (medium_prompt, 8),
+            (long_prompt, 0),
+        ]
+
+    def run_pdfusion_requests(self, server, variant, label, cache_settle_seconds=0):
+        tp, dp = variant["tp"], variant["dp"]
+        if dp > 1:
+            self.wait_frontends(
+                [
+                    int(server.port) + rank * tp * MIN_WORKER_INFO_PORT_NUM
+                    for rank in range(dp)
+                ]
+            )
+        outputs = []
+        # Mix long/short and prefill-only requests. With DP, keep the other replica
+        # idle first, then send it real work to exercise fake-batch recovery.
+        for rank in range(dp):
+            role_addrs = self.dp_role_addrs(server.port, tp, rank) if dp > 1 else None
+            with ThreadPoolExecutor(max_workers=len(self.cases())) as pool:
+                futures = [
+                    pool.submit(
+                        self.generate,
+                        server.port,
+                        prompt,
+                        tokens,
+                        f"{label},dp={rank},request={index}",
+                        role_addrs,
+                    )
+                    for index, (prompt, tokens) in enumerate(self.cases())
+                ]
+                outputs.extend(future.result() for future in futures)
+        return outputs
+
+    def test_pp_chunk_prefill_matches_pp1(self):
+        variant = VARIANTS[self.case_name]
+        is_pd = "prefill_pp" in variant
+        baseline_variant = (
+            dict(variant, prefill_pp=1, decode_pp=1)
+            if is_pd
+            else dict(variant, pp=1, sp=0)
+        )
+        report = {
+            "case": self.case_name,
+            "model_type": self.model_type,
+            "checkpoint": self.checkpoint,
+            "chunk_size": self.chunk_size,
+            "baseline_topology": baseline_variant,
+            "actual_topology": variant,
+            "smoke_args": os.environ["SMOKE_ARGS"],
+            "outputs": self.outputs,
+            "passed": False,
+        }
+        try:
+            gpu_ids = [str(x) for x in get_gpu_ids()]
+            if is_pd:
+                baseline, actual = self.run_pd_pair(
+                    self.checkpoint, gpu_ids, baseline_variant, variant
+                )
+            else:
+                baseline = self.run_pdfusion(
+                    self.checkpoint, gpu_ids, baseline_variant, label="baseline"
+                )
+                actual = self.run_pdfusion(self.checkpoint, gpu_ids, variant)
+            request_count = len(self.cases())
+            self.assertEqual(len(actual), request_count * variant.get("dp", 1))
+            self.assertEqual(
+                [item["output_ids"] for item in actual],
+                [item["output_ids"] for item in baseline],
+                self.case_name,
+            )
+            for outputs in (baseline, actual):
+                for start in range(0, len(outputs), request_count):
+                    lengths = [
+                        item["aux_info"]["input_len"]
+                        for item in outputs[start : start + request_count]
+                    ]
+                    self.assertGreater(lengths[0], self.chunk_size * 2)
+                    self.assertLessEqual(lengths[1], self.chunk_size)
+                    self.assertGreater(lengths[2], self.chunk_size)
+                    self.assertGreater(lengths[3], self.chunk_size * 2)
+            if variant["sp"]:
+                self.assert_draft_accepted(actual, self.case_name, variant["sp"])
+            report["passed"] = True
+        except Exception as error:
+            report["error"] = str(error)
+            raise
+        finally:
+            self.save_report(report)
+
+
+class PPChunkRuntimeTest(PPChunkPrefillTest):
+    """Check request outcomes; PPChunkLifecycleTest controls inflight/pending cancellation and KV release."""
+
+    def run_pdfusion_requests(self, server, variant, label, cache_settle_seconds=0):
+        if self.case_name.endswith("reuse"):
+            # A 129-token prompt leaves one token after a 128-token block-aligned hit.
+            prompt = "apple " * 128 + "apple"
+            cold = self.generate(server.port, prompt, 8, "cold")
+            # Result delivery can precede cache publication; wait for an observable cache hit.
+            deadline = time.monotonic() + 10
+            while True:
+                warm = self.generate(server.port, prompt, 8, "reuse")
+                self.assertEqual(cold["output_ids"], warm["output_ids"])
+                aux = warm["aux_info"]
+                if aux["reuse_len"] > 0:
+                    break
+                self.assertLess(time.monotonic(), deadline, f"cache reuse was not observed: {aux}")
+                time.sleep(0.02)
+            self.assertEqual(aux["input_len"] - aux["reuse_len"], 1, aux)
+            self.runtime_report["reuse"] = aux
+        else:
+            self.check_abort(server, timeout=False)
+            self.check_abort(server, timeout=True)
+            self.check_abort(server, timeout=False, with_context=True)
+        self.generate(server.port, "The capital of France is", 8, "after-runtime-checks")
+        return []
+
+    def check_abort(self, server, timeout, with_context=False):
+        if timeout:
+            config = {"max_new_tokens": 128, "min_new_tokens": 128, "top_k": 1,
+                      "is_streaming": False, "timeout_ms": 100}
+            response = requests.post(f"http://127.0.0.1:{server.port}/",
+                                     json={"prompt": "apple " * 6000, "generate_config": config},
+                                     timeout=REQUEST_TIMEOUT)
+            self.assertNotEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["error_code"], 603, response.text)
+            self.runtime_report["timeout"] = response.json()
+        else:
+            import grpc
+            from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import GenerateInputPB
+            from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
+
+            request = GenerateInputPB(request_id=time.time_ns() // 1000,
+                                      token_ids=[123] * (5 if with_context else 6000))
+            request.generate_config.max_new_tokens = 128
+            request.generate_config.min_new_tokens = 128
+            request.generate_config.num_beams = 1
+            request.generate_config.num_return_sequences = 1
+            request.generate_config.top_k = 1
+            request.generate_config.top_p = 1.0
+            request.generate_config.temperature = 1.0
+            request.generate_config.repetition_penalty = 1.0
+            request.generate_config.is_streaming = True
+            request.generate_config.timeout_ms = -1
+            backend = self.dp_role_addrs(server.port, 1, 0)[0]
+            with grpc.insecure_channel(f"127.0.0.1:{backend['grpc_port']}") as channel:
+                stub = RpcServiceStub(channel)
+                call = stub.GenerateStreamCall(request, timeout=30)
+                companion = None
+                try:
+                    if with_context:
+                        long_request = GenerateInputPB()
+                        long_request.CopyFrom(request)
+                        long_request.request_id += 1
+                        del long_request.token_ids[:]
+                        long_request.token_ids.extend([123] * 6000)
+                        companion = stub.GenerateStreamCall(long_request, timeout=30)
+                    # This checks cancellation after prefill. PPChunkLifecycleTest cancels with middle replies withheld.
+                    response = next(call)
+                    self.assertTrue(response.flatten_output.finished, response)
+                    self.assertFalse(any(response.flatten_output.finished), response)
+                    self.assertTrue(call.cancel())
+                    self.assertEqual(call.code(), grpc.StatusCode.CANCELLED)
+                    self.runtime_report["cancel_with_context" if with_context else "cancel"] = call.code().name
+                finally:
+                    call.cancel()
+                    if companion is not None:
+                        companion.cancel()
+        self.generate(server.port, "The capital of France is", 8, "after-abort")
+
+    def test_pp_chunk_runtime(self):
+        self.runtime_report = {"case": self.case_name, "outputs": self.outputs, "passed": False}
+        try:
+            self.run_pdfusion(self.checkpoint, [str(x) for x in get_gpu_ids()], VARIANTS[self.case_name],
+                              reuse_cache=self.case_name.endswith("reuse"))
+            self.runtime_report["passed"] = True
+        except Exception as error:
+            self.runtime_report["error"] = str(error)
+            raise
+        finally:
+            self.save_report(self.runtime_report)
 
 
 class PPDPRecoveryTest(PPFeatureTest):
@@ -2001,6 +2240,12 @@ def load_tests(loader, tests, pattern):
         variant = VARIANTS[name]
         if name == "pdfusion_mtp_regression":
             case = MtpPPTest("test_pdfusion_mtp_matches_target_generation")
+        elif variant.get("runtime_checks"):
+            case = PPChunkRuntimeTest("test_pp_chunk_runtime")
+            case.case_name = name
+        elif name.startswith("chunk_"):
+            case = PPChunkPrefillTest("test_pp_chunk_prefill_matches_pp1")
+            case.case_name = name
         elif name in (
             "multi_task_prompt_pp2_tp2",
             "multi_task_prompt_pp2_dp2",

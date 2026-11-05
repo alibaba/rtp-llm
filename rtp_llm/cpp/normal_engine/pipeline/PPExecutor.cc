@@ -265,10 +265,6 @@ void PPExecutor::validateConfig(const EngineInitParams& params) const {
     RTP_LLM_CHECK_WITH_INFO(!params.runtime_config.use_batch_decode_scheduler,
                             "pipeline parallelism does not support use_batch_decode_scheduler; "
                             "disable USE_BATCH_DECODE_SCHEDULER or set PP_SIZE=1");
-    RTP_LLM_CHECK_WITH_INFO(params.runtime_config.fifo_scheduler_config.prefill_chunk_size <= 0,
-                            "pipeline parallelism does not support chunked prefill yet; "
-                            "set prefill_chunk_size=0 (got %ld)",
-                            params.runtime_config.fifo_scheduler_config.prefill_chunk_size);
     RTP_LLM_CHECK_WITH_INFO(params.model_config_.hidden_state_capture_layer_ids.empty(),
                             "pipeline parallelism does not support TorchSpec hidden-state capture "
                             "(hidden_state_capture_layer_ids)");
@@ -657,7 +653,7 @@ void PPExecutor::validateAndFilterStreams(std::list<GenerateStreamPtr>& streams,
         const auto& stream = *it;
         if (auto error = validateStream(*stream, sp_type); error.has_value()) {
             stream->reportError(error->code(), error->ToString());
-            /** The scheduler marked this request in flight, but no plan will carry it. */
+            /** No plan will carry this submission, so release its inflight reference. */
             stream->clearPPInflight();
             it = streams.erase(it);
             continue;
@@ -697,6 +693,16 @@ void PPExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams) {
     }
 }
 
+void PPExecutor::commitSubmittedChunks(const PPExecutionSnapshot& snapshot) const {
+    for (const auto& execution : snapshot.streams) {
+        if (execution.stream->useChunkWindow()) {
+            // The result task is enqueued only after this loop, and the engine cannot schedule the next window
+            // before process() returns. The live window is therefore still exactly the submitted chunk.
+            execution.stream->advanceChunk();
+        }
+    }
+}
+
 absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const StreamGroups&           stream_groups,
                                                       const std::vector<RequestId>& finished_request_ids,
                                                       bool                          shutdown) {
@@ -713,7 +719,7 @@ absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const StreamGroups&       
 
 void PPExecutor::advanceSamplingStates(const PPSamplingPlan& sampling_plan, PPExecutionResult& result) {
     RTP_LLM_PROFILE_SCOPE("executor.pp.update_sampling_states");
-    const auto stream_count = sampling_plan.request_ids.size(0);
+    const auto stream_count = sampling_plan.request_ids.numel();
 
     const auto* request_ids      = sampling_plan.request_ids.data_ptr<RequestId>();
     const auto* input_lengths    = sampling_plan.input_lengths.data_ptr<int32_t>();
@@ -856,15 +862,19 @@ PPSamplingOutput PPExecutor::sampleTokens(const PPExecutionPlan&  plan,
                                           GrammarPrefetchContext* grammar_prefetch) {
     RTP_LLM_PROFILE_SCOPE("executor.pp.target_sample");
     PPSamplingOutput output;
-    const auto       stream_count = plan.sampling_plan.request_ids.size(0);
+    const auto       stream_count = plan.request_ids.numel();
     output.request_errors.assign(stream_count, ErrorInfo::OkStatus());
+    if (plan.model_input.is_middle_chunk_only) {
+        return output;
+    }
     if (plan.model_input.is_fake_stream || plan.model_input.skip_lm_head) {
+        const auto sample_rows = plan.sampling_plan.sequence_lengths.numel();
         /** Placeholders let fake and prefill-only batches join draft collectives without creating sampling state. */
         if (sp_enabled_ && plan.is_decode) {
-            output.verify_output.accept_tokens = torch::zeros({stream_count, propose_step_ + 1}, torch::kInt32);
-            output.verify_output.accept_len    = torch::full({stream_count}, propose_step_ + 1, torch::kInt32);
+            output.verify_output.accept_tokens = torch::zeros({sample_rows, propose_step_ + 1}, torch::kInt32);
+            output.verify_output.accept_len    = torch::full({sample_rows}, propose_step_ + 1, torch::kInt32);
         } else {
-            output.sampler_output.token_ids = torch::zeros({stream_count, 1}, torch::kInt32);
+            output.sampler_output.token_ids = torch::zeros({sample_rows, 1}, torch::kInt32);
         }
         return output;
     }
@@ -928,6 +938,7 @@ PPDraftOutput PPExecutor::runDraftStep(const PPExecutionPlan&  plan,
     const bool is_verify                = plan.model_input.is_target_verify;
     const bool should_cache_draft_probs = !plan.model_input.is_fake_stream && !plan.model_input.skip_lm_head;
     const auto request_batch_size       = plan.model_input.input_lengths.numel();
+    const bool middle_only              = plan.model_input.is_middle_chunk_only;
 
     const auto& sampling_plan           = plan.sampling_plan;
     const auto& draft_next_position_ids = plan.draft_next_position_ids;
@@ -937,8 +948,8 @@ PPDraftOutput PPExecutor::runDraftStep(const PPExecutionPlan&  plan,
     const bool  cp_enabled              = parallelism_config_.prefill_cp_config.is_enabled();
 
     /** Sampler outputs and synchronized draft tokens are already on CUDA. */
-    auto to_i32_flat = [request_batch_size](const torch::Tensor& tokens) {
-        return tokens.to(torch::kInt32, /*non_blocking=*/true).reshape({request_batch_size}).contiguous();
+    auto to_i32_flat = [](const torch::Tensor& tokens) {
+        return tokens.to(torch::kInt32, /*non_blocking=*/true).reshape({-1}).contiguous();
     };
 
     PPDraftOutput  output;
@@ -963,7 +974,8 @@ PPDraftOutput PPExecutor::runDraftStep(const PPExecutionPlan&  plan,
                                                                         buffer_holder_);
             } else {
                 batch_stream_processor_->prepareDraftPrefillAfterTargetPrefill(
-                    draft_input, target_hidden_states, sampler_output.token_ids, draft_next_position_ids, buffer_holder_);
+                    draft_input, target_hidden_states, sampler_output.token_ids, draft_next_position_ids, buffer_holder_,
+                    plan.middle_chunk_boundary_tokens);
             }
         }
 
@@ -990,33 +1002,41 @@ PPDraftOutput PPExecutor::runDraftStep(const PPExecutionPlan&  plan,
                                 "PP %s model is not initialized",
                                 is_dspark_ ? "DSpARK commit" : "draft prefill");
         auto draft_prefill_output = forwardDraftModel(*draft_prefill_model, draft_input);
+        if (middle_only && (role_type_ == RoleType::PREFILL || parallelism_config_.dp_size <= 1)) {
+            return output;
+        }
         /** DSpARK handles CP inside the KV commit; proposals use committed KV, so no last-hidden gathering is needed. */
         if (!is_dspark_ && isStageRoot()) {
-            auto draft_sample  = fast_topk_sampler_->forward(draft_prefill_output.logits, 1);
+            // With no final rows, use the first middle request for DP alignment and discard its proposals.
+            const auto proposal_rows = std::max<int64_t>(sampling_plan.sequence_lengths.numel(), 1);
+            auto draft_logits = PPBatchStreamProcessor::gatherMtpProposalLogits(draft_prefill_output.logits, proposal_rows);
+            auto draft_sample  = fast_topk_sampler_->forward(draft_logits, 1);
             auto draft_tokens  = to_i32_flat(draft_sample.token_ids);
-            proposed_token_ids = draft_tokens.unsqueeze(1);
+            if (!middle_only) {
+                proposed_token_ids = draft_tokens.unsqueeze(1);
+            }
 
             if (role_type_ == RoleType::PREFILL || propose_step_ > 1) {
                 /** Draft continuation needs each request's last MTP hidden row (pre-hc_head for DeepSeek V4).
                  * Without CP, the override replaces all_hidden_states with all-token MTP hidden states when available;
                  * lm_output_indexes selects each request's last row from all_hidden_states.
                  * With CP, the MTP buffer is rank-local; the MTP last-hidden buffer holds gathered per-request rows. */
-                torch::Tensor draft_last_hidden_states;
+                torch::Tensor hidden_states;
                 if (cp_enabled) {
-                    draft_last_hidden_states = draft_model_->getMtpLastHiddenStates(request_batch_size);
-                    RTP_LLM_CHECK_WITH_INFO(draft_last_hidden_states.defined()
-                                                && draft_last_hidden_states.dim() == 2
-                                                && draft_last_hidden_states.size(0) == draft_tokens.size(0),
+                    hidden_states = draft_model_->getMtpLastHiddenStates(request_batch_size);
+                    RTP_LLM_CHECK_WITH_INFO(hidden_states.defined()
+                                                && hidden_states.dim() == 2
+                                                && hidden_states.size(0) == request_batch_size,
                                             "PP CP draft last hidden states must be a 2-D tensor with %ld rows "
                                             "(one per request)",
                                             request_batch_size);
                 } else {
                     mtp::maybeOverrideLastHiddenWithMtpBuffer(
                         draft_prefill_output, *draft_model_, draft_input.combo_tokens.numel());
-                    const auto& hidden_states = draft_prefill_output.all_hidden_states;
-                    const auto  indexes = draft_input.lm_output_indexes.to(hidden_states.device(), torch::kLong);
-                    draft_last_hidden_states = hidden_states.index_select(0, indexes);
+                    hidden_states = draft_prefill_output.all_hidden_states;
                 }
+                auto draft_last_hidden_states = PPBatchStreamProcessor::gatherMtpLastHiddenStates(
+                    draft_input, hidden_states, proposal_rows, cp_enabled);
 
                 if (role_type_ == RoleType::PREFILL) {
                     output.proposals.all_probs = draft_sample.all_probs.unsqueeze(1);
@@ -1040,12 +1060,12 @@ PPDraftOutput PPExecutor::runDraftStep(const PPExecutionPlan&  plan,
         if (is_dspark_) {
             mtp::DSparkRoundState round_state;
             if (isStageRoot()) {
-                round_state = batch_stream_processor_->buildDSparkRoundState(plan, sampling_output, buffer_holder_);
-                batch_stream_processor_->prepareDSparkProposeModelInput(round_state, draft_input, buffer_holder_);
+                round_state = batch_stream_processor_->prepareDSparkProposeRound(
+                    draft_input, plan, sampling_output, buffer_holder_);
             }
             tpSyncModelInputs(draft_input, parallelism_config_);
             auto draft_output = forwardDraftModel(*draft_model_, draft_input);
-            if (isStageRoot()) {
+            if (isStageRoot() && !middle_only) {
                 const auto batch_size        = draft_input.input_lengths.numel();
                 auto       draft_temperature = batch_stream_processor_->prepareDSparkDraftTemperature(
                     sampling_plan, draft_output.logits.device(), buffer_holder_);
@@ -1088,7 +1108,7 @@ PPDraftOutput PPExecutor::runDraftStep(const PPExecutionPlan&  plan,
                                            buffer_holder_);
                 }
             }
-            if (isStageRoot()) {
+            if (isStageRoot() && !middle_only) {
                 proposed_token_ids = torch::stack(draft_token_columns, 1);
             }
         }
@@ -1164,15 +1184,18 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
     /** 1. Build or receive the plan and retain its CPU payload for forwarding. */
     PPExecutionPlan plan;
     torch::Tensor   plan_payload;
-    StreamGroups    scheduled_stream_groups;
+    PPExecutionSnapshot execution_snapshot;
     if (isFirstStage()) {
-        scheduled_stream_groups = StreamGroups(streams);
+        const StreamGroups stream_groups(streams);
         /** PP input preparation covers the complete execution plan. */
         const auto start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto       plan_status   = buildPlan(scheduled_stream_groups, schedule_output.finished_request_ids, shutdown);
+        auto       plan_status   = buildPlan(stream_groups, schedule_output.finished_request_ids, shutdown);
         RETURN_IF_STATUS_OR_ERROR(plan_status);
         plan                                     = std::move(plan_status.value());
         executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (!plan.model_input.skip_run) {
+            collectExecutorMetrics(plan.model_input, plan.is_decode, stream_groups.maxSeqLen(), executor_collector);
+        }
         {
             /** Each lane carries the inputs its first-stage rank will execute, including empty/terminal controls. */
             RTP_LLM_PROFILE_SCOPE("executor.pp.tp_sync_input");
@@ -1181,6 +1204,9 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
             executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         }
         plan_payload = pp_serialization::serializePlan(plan);
+        if (isStageRoot()) {
+            execution_snapshot = PPBatchStreamProcessor::captureExecution(stream_groups);
+        }
     } else {
         const auto start_time_us        = autil::TimeUtility::currentTimeInMicroSeconds();
         plan                            = receivePlan(plan_payload);
@@ -1204,9 +1230,10 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
 
     std::optional<GrammarPrefetchContext> grammar_prefetch;
     if (isLastStage() && isStageRoot() && !model_input.skip_run && !model_input.skip_lm_head
-        && !model_input.is_fake_stream) {
+        && !model_input.is_fake_stream && !model_input.is_middle_chunk_only) {
         RTP_LLM_PROFILE_SCOPE("executor.pp.grammar_prefetch");
-        grammar_prefetch = batch_stream_processor_->prepareLogitsProcessorsAsync(plan.sampling_plan, sampling_states_);
+        grammar_prefetch = batch_stream_processor_->prepareLogitsProcessorsAsync(
+            plan.sampling_plan, sampling_states_);
     }
 
     const bool prefill_only = model_input.skip_lm_head;
@@ -1233,8 +1260,6 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
         if (profile_step_start_) {
             profile_step_start_();
         }
-
-        collectExecutorMetrics(model_input, plan.is_decode, plan.sampling_plan.sequence_lengths, executor_collector);
 
         PPIntermediateTensors input_tensors;
         if (!isFirstStage()) {
@@ -1350,7 +1375,8 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
     }
 
     if (isFirstStage() && isStageRoot() && !model_input.skip_run) {
-        enqueueResultTask({std::move(scheduled_stream_groups),
+        commitSubmittedChunks(execution_snapshot);
+        enqueueResultTask({std::move(execution_snapshot),
                            schedule_time_us,
                            std::move(executor_collector),
                            std::move(tps_active_guard),
@@ -1393,7 +1419,7 @@ void PPExecutor::resultLoop() {
                 result_tasks_.pop_front();
                 result_processing_ = true;
             }
-            receiveAndProcessResult(task.stream_groups, task.schedule_time_us, task.executor_collector);
+            receiveAndProcessResult(task.snapshot, task.schedule_time_us, task.executor_collector);
             /** Drain must include stream and guard cleanup; destroy the task before marking it idle. */
         }
         {
@@ -1404,7 +1430,7 @@ void PPExecutor::resultLoop() {
     }
 }
 
-void PPExecutor::receiveAndProcessResult(const StreamGroups&             stream_groups,
+void PPExecutor::receiveAndProcessResult(const PPExecutionSnapshot&      snapshot,
                                          int64_t                         schedule_time_us,
                                          RtpLLMExecutorMetricsCollector& executor_collector) {
     /** Fake batches still complete the PP round trip before their result is discarded. */
@@ -1413,27 +1439,27 @@ void PPExecutor::receiveAndProcessResult(const StreamGroups&             stream_
         RTP_LLM_PROFILE_SCOPE("executor.pp.recv_result");
         result = pp_serialization::deserializeExecutionResult(receiveObject(kPPResultGroupName));
     }
-    if (stream_groups.isFakeStream()) {
+    if (snapshot.is_fake) {
         RTP_LLM_LOG_DEBUG("PP fake batch completed: dp_rank=%ld", parallelism_config_.dp_rank);
         return;
     }
 
-    batch_stream_processor_->validateExecutionResult(stream_groups, result);
+    batch_stream_processor_->validateExecutionResult(snapshot, result);
 
     /** Count input work and returned tokens before dispatch changes stream state. */
     StreamGroups::TokenCountsByPriority     token_counts_by_priority;
     RtpLLMSpeculativeEngineMetricsCollector sp_collector;
-    collectTokenCounts(stream_groups, result, token_counts_by_priority, sp_collector);
+    collectTokenCounts(snapshot, result, token_counts_by_priority, sp_collector);
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.pp.dispatch_result");
         const auto start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        batch_stream_processor_->dispatchExecutionResult(stream_groups, result);
+        batch_stream_processor_->dispatchExecutionResult(snapshot, result);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
     executor_collector.sample_input_us = result.sample_input_us;
-    reportResultMetrics(stream_groups, schedule_time_us, executor_collector, token_counts_by_priority, sp_collector);
+    reportResultMetrics(schedule_time_us, executor_collector, token_counts_by_priority, sp_collector);
 }
 
 void PPExecutor::drainPendingResults() {
@@ -1458,7 +1484,7 @@ bool PPExecutor::updateEplbConfig(const EPLBConfig& config) {
 
 void PPExecutor::collectExecutorMetrics(const GptModelInputs&           model_input,
                                         bool                            is_decode,
-                                        const torch::Tensor&            sequence_lengths,
+                                        int64_t                         max_seq_len,
                                         RtpLLMExecutorMetricsCollector& collector) const {
     if (!metrics_reporter_ || !isFirstStage() || !isStageRoot() || model_input.is_fake_stream) {
         return;
@@ -1469,8 +1495,7 @@ void PPExecutor::collectExecutorMetrics(const GptModelInputs&           model_in
     collector.context_batch_size = model_input.input_lengths.numel() - collector.generate_batch_size;
     collector.execute_token_size = model_input.combo_tokens.numel();
     /** Capture global batch dimensions before CP mutates model inputs. */
-    const auto* length_data = sequence_lengths.data_ptr<int32_t>();
-    collector.max_seq_len   = *std::max_element(length_data, length_data + sequence_lengths.numel());
+    collector.max_seq_len = max_seq_len;
     if (collector.context_batch_size != 0) {
         collector.context_batch_size_when_has_context  = collector.context_batch_size;
         collector.generate_batch_size_when_has_context = collector.generate_batch_size;
@@ -1479,7 +1504,7 @@ void PPExecutor::collectExecutorMetrics(const GptModelInputs&           model_in
     }
 }
 
-void PPExecutor::collectTokenCounts(const StreamGroups&                      stream_groups,
+void PPExecutor::collectTokenCounts(const PPExecutionSnapshot&               snapshot,
                                     const PPExecutionResult&                 result,
                                     StreamGroups::TokenCountsByPriority&     token_counts_by_priority,
                                     RtpLLMSpeculativeEngineMetricsCollector& sp_collector) const {
@@ -1488,23 +1513,23 @@ void PPExecutor::collectTokenCounts(const StreamGroups&                      str
     }
 
     sp_collector.spec_steps = propose_step_;
-    /** Result rows were validated against allStreams before collecting metrics. */
+    /** Result rows were validated against the execution snapshot before collecting metrics. */
     int64_t row = 0;
-    for (const auto& stream : stream_groups.allStreams()) {
-        if (stream->isContextStream()) {
+    for (const auto& execution : snapshot.streams) {
+        if (execution.is_context) {
             /** Sampling errors do not undo the prefill input work already executed. */
-            auto&      counts         = token_counts_by_priority[stream->priority()];
-            const auto execute_tokens = stream->currentExecuteTokenSize();
+            auto&      counts         = token_counts_by_priority[execution.priority];
+            const auto execute_tokens = execution.execute_tokens;
             counts.context += execute_tokens;
             counts.context_with_cache += execute_tokens;
             counts.total += execute_tokens;
-            if (stream->reuseLength() > 0) {
-                counts.context_with_cache += static_cast<int64_t>(stream->reuseLength()) * stream->currentBatchSize();
+            if (execution.prefix_length > 0) {
+                counts.context_with_cache += static_cast<int64_t>(execution.prefix_length) * execution.batch_size;
             }
         } else if (!result.request_errors[row].hasError()) {
-            auto&         counts = token_counts_by_priority[stream->priority()];
+            auto&         counts = token_counts_by_priority[execution.priority];
             const int64_t generate_tokens =
-                sp_enabled_ ? result.new_token_lengths[row].item<int32_t>() : stream->currentBatchSize();
+                sp_enabled_ ? result.new_token_lengths[row].item<int32_t>() : execution.batch_size;
             counts.generate += generate_tokens;
             counts.total += generate_tokens;
             if (sp_enabled_) {
@@ -1518,8 +1543,7 @@ void PPExecutor::collectTokenCounts(const StreamGroups&                      str
     }
 }
 
-void PPExecutor::reportResultMetrics(const StreamGroups&                        stream_groups,
-                                     int64_t                                    schedule_time_us,
+void PPExecutor::reportResultMetrics(int64_t                                    schedule_time_us,
                                      RtpLLMExecutorMetricsCollector&            executor_collector,
                                      const StreamGroups::TokenCountsByPriority& token_counts_by_priority,
                                      RtpLLMSpeculativeEngineMetricsCollector&   sp_collector) {
@@ -1535,15 +1559,19 @@ void PPExecutor::reportResultMetrics(const StreamGroups&                        
      * This deferred report also carries the result-time dispatch and the returned last-stage sampling. */
     metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(nullptr, &executor_collector);
 
+    int64_t context_tokens = 0;
+    int64_t context_tokens_with_cache = 0;
     int64_t generate_tokens = 0;
     int64_t total_tokens    = 0;
     for (const auto& entry : token_counts_by_priority) {
+        context_tokens += entry.second.context;
+        context_tokens_with_cache += entry.second.context_with_cache;
         generate_tokens += entry.second.generate;
         total_tokens += entry.second.total;
     }
     RtpLLMTokenPSMetricsCollector tps_collector;
-    tps_collector.addTokenSize(stream_groups.contextExecuteTokenSize(),
-                               stream_groups.contextExecuteTokenSizeWithCache(),
+    tps_collector.addTokenSize(context_tokens,
+                               context_tokens_with_cache,
                                generate_tokens,
                                total_tokens,
                                batch_latency_us);
