@@ -84,6 +84,16 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("rows_per_page", &OffloadStorage::rows_per_page)
         .def_readonly("max_selected_rows", &OffloadStorage::max_selected_rows)
         .def_readonly("generations", &OffloadStorage::generations)
+        .def_readonly("active_hot_rows", &OffloadStorage::active_hot_rows)
+        .def_readonly("hot_cache_epoch", &OffloadStorage::hot_cache_epoch)
+        .def("resize_hot_rows", [](const OffloadStorage& storage, uint32_t rows) {
+            RTP_LLM_CHECK_WITH_INFO(storage.hot_cache != nullptr, "static hot cache cannot be resized");
+            storage.hot_cache->resize(rows);
+        })
+        .def_property_readonly("committed_device_bytes", [](const OffloadStorage& storage) {
+            return storage.hot_cache ? storage.hot_cache->committedBytes() :
+                       storage.resident_planes.front().storage().nbytes();
+        })
         .def_property_readonly(
             "host_planes", [planes_tuple](const OffloadStorage& storage) { return planes_tuple(storage.host_planes); })
         .def_property_readonly("resident_planes", [planes_tuple](const OffloadStorage& storage) {

@@ -115,6 +115,9 @@ TEST(TieredCacheConfigTest, OffloadPolicyParticipatesInGroupIdentity) {
     changed                           = baseline;
     changed.offload.max_selected_rows = 8;
     EXPECT_FALSE(CacheConfig::samePolicy(baseline, changed));
+    changed = baseline;
+    changed.offload.max_requests = 8;
+    EXPECT_FALSE(CacheConfig::samePolicy(baseline, changed));
 }
 
 TEST(TieredCacheConfigTest, MhaEntryViewsPreserveNativeHeadAndScaleStrides) {

@@ -19,6 +19,8 @@ from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
 class Glm5MtpOffloadTest(unittest.TestCase):
     def test_native_pd(self):
+        hot_cache_mode = os.getenv("RTP_TEST_SPARSE_KV_OFFLOAD_HOT_CACHE_MODE", "static")
+        self.assertIn(hot_cache_mode, ("static", "dynamic"))
         role_size = int(os.getenv("RTP_GLM_MTP_ROLE_SIZE", "1"))
         layers = int(os.getenv("RTP_GLM_MTP_LAYERS", "4"))
         stable = os.getenv("RTP_GLM_MTP_STABLE_TOPK", "0") == "1"
@@ -172,6 +174,7 @@ class Glm5MtpOffloadTest(unittest.TestCase):
                 )
             if offload:
                 cli += " --enable_sparse_kv_offload 1 --sparse_kv_offload_host_mb 1024 --sparse_kv_offload_test_hbm_blocks 2"
+                cli += f" --sparse_kv_offload_hot_cache_mode {hot_cache_mode}"
             manager = MagaServerManager(
                 env_args=env,
                 device_ids=devices[role * role_size : (role + 1) * role_size],
@@ -262,6 +265,7 @@ class Glm5MtpOffloadTest(unittest.TestCase):
             decode = make_manager(1, mtp, graph, offload, label)
             try:
                 start(pending + [decode])
+                runtime_log_offset = len(Path(decode.log_file_path).read_text(errors="replace"))
 
                 def generate(item):
                     index, prompt = item
@@ -358,6 +362,17 @@ class Glm5MtpOffloadTest(unittest.TestCase):
                 if offload:
                     self.assertIn("decode warmup runtime=", log)
                     self.assertRegex(log, r"sparse KV offload tag=default H=2 P=[1-9]")
+                    self.assertIn(f"hot_cache_mode={hot_cache_mode}", log)
+                if offload and hot_cache_mode == "dynamic":
+                    capacities = [
+                        (int(active), int(maximum))
+                        for active, maximum in re.findall(
+                            r"sparse KV hot cache active_rows=(\d+) max_rows=(\d+)",
+                            log[runtime_log_offset:],
+                        )
+                    ]
+                    self.assertTrue(any(0 < active < maximum for active, maximum in capacities), capacities)
+                    self.assertTrue(any(active == 0 for active, _ in capacities), capacities)
                 if graph:
                     self.assertTrue(
                         "capture success for batch size" in log, decode.log_file_path

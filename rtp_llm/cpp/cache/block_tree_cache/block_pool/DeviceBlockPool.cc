@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/OffloadDeviceBuffer.h"
 
 #include <algorithm>
 #include <cctype>
@@ -567,7 +568,22 @@ void DeviceBlockPool::initializeOffloadStorage() {
     cfg.offload_layout.validate(layout.kv_block_stride_bytes / pages, layout.kv_scale_stride_bytes / pages);
     const size_t gpu_bytes  = checked_product(checked_product(gpu_pages, bytes_per_page), total_layers);
     const size_t host_bytes = checked_product(checked_product(host_pages, bytes_per_page), total_layers);
-    if (cfg.use_device_malloc_backing) {
+    std::shared_ptr<OffloadDeviceBuffer> device_buffer;
+    if (tiered.dynamic_hot_cache) {
+        std::vector<OffloadDeviceSegment> segments;
+        for (size_t layer = 0; layer < total_layers; ++layer) {
+            const size_t layer_offset = layer * gpu_pages * bytes_per_page;
+            const size_t kv_page_bytes = layout.kv_block_stride_bytes / pages;
+            segments.push_back({layer_offset, tiered.hbm_blocks * layout.kv_block_stride_bytes, kv_page_bytes});
+            if (layout.kv_scale_stride_bytes) {
+                segments.push_back({layer_offset + gpu_pages * kv_page_bytes,
+                                    tiered.hbm_blocks * layout.kv_scale_stride_bytes,
+                                    layout.kv_scale_stride_bytes / pages});
+            }
+        }
+        device_buffer = std::make_shared<OffloadDeviceBuffer>(gpu_bytes, resident, page_rows, std::move(segments));
+        cache_aligned_buffer_ = device_buffer->tensor();
+    } else if (cfg.use_device_malloc_backing) {
         initializeDeviceMallocBuffer(gpu_bytes);
     } else {
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(gpu_bytes)},
@@ -616,6 +632,11 @@ void DeviceBlockPool::initializeOffloadStorage() {
         storage->rows_per_page     = page_rows;
         storage->max_selected_rows = tiered.max_selected_rows;
         storage->generations       = generations;
+        if (device_buffer) {
+            storage->active_hot_rows = device_buffer->activeRows();
+            storage->hot_cache_epoch = device_buffer->epoch();
+            storage->hot_cache       = device_buffer;
+        }
         for (const auto& view : cfg.offload_layout.planes) {
             storage->resident_planes.push_back(plane(cache_aligned_buffer_, gpu_offset, gpu_pages, view));
             storage->host_planes.push_back(plane(offload_host_buffer_, host_offset, host_pages, view));
@@ -626,13 +647,13 @@ void DeviceBlockPool::initializeOffloadStorage() {
         offload_storages_.push_back(std::move(storage));
     }
     RTP_LLM_CHECK(gpu_offset == gpu_bytes && host_offset == host_bytes);
-    RTP_LLM_LOG_INFO("offload backing pool=%s H=%u P=%u device_bytes=%zu host_bytes=%zu logical_block_bytes=%zu",
+    RTP_LLM_LOG_INFO("offload backing pool=%s H=%u P=%u device_bytes=%zu host_bytes=%zu logical_block_bytes=%zu hot_cache_mode=%s",
                      cfg.pool_name.c_str(),
                      tiered.hbm_blocks,
                      tiered.total_blocks - tiered.hbm_blocks,
                      offloadDeviceSizeBytes(),
                      offloadHostSizeBytes(),
-                     blockSizeBytes());
+                     blockSizeBytes(), tiered.dynamic_hot_cache ? "dynamic" : "static");
 #endif
 }
 
@@ -1043,10 +1064,33 @@ size_t DeviceBlockPool::offloadHostSizeBytes() const {
 }
 
 size_t DeviceBlockPool::offloadDeviceSizeBytes() const {
-    return cache_aligned_buffer_.defined() ?
-               cache_aligned_buffer_.nbytes()
-                   + (offload_storages_.empty() ? 0 : offload_storages_.front()->generations.nbytes()) :
-               0;
+    if (!cache_aligned_buffer_.defined()) {
+        return 0;
+    }
+    if (offload_storages_.empty()) {
+        return cache_aligned_buffer_.nbytes();
+    }
+    const auto& storage = *offload_storages_.front();
+    if (!storage.hot_cache) {
+        return cache_aligned_buffer_.nbytes() + storage.generations.nbytes();
+    }
+    return storage.hot_cache->committedBytes() + storage.generations.nbytes()
+           + storage.active_hot_rows.nbytes() + storage.hot_cache_epoch.nbytes();
+}
+
+void DeviceBlockPool::resizeOffloadHotCache(size_t requests, bool grow_only) {
+    if (!isOffload() || offload_storages_.empty() || !offload_storages_.front()->hot_cache) {
+        return;
+    }
+    const auto& tiered = *config().offload;
+    RTP_LLM_CHECK_WITH_INFO(tiered.max_requests == 0 || (requests <= tiered.max_requests
+                                && tiered.max_selected_rows % tiered.max_requests == 0),
+                            "offload requests=%zu exceed configured maximum=%u", requests, tiered.max_requests);
+    const uint32_t rows = tiered.max_requests == 0 ? (requests ? tiered.max_selected_rows : 0) :
+                            requests * (tiered.max_selected_rows / tiered.max_requests);
+    // grow_only is used by speculative sub-forwards; they must not release the
+    // target batch's quota merely because rejection compacts the draft batch.
+    offload_storages_.front()->hot_cache->resize(rows, grow_only);
 }
 
 size_t DeviceBlockPool::blockSizeBytes() const {

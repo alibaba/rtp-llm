@@ -1003,6 +1003,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
     } flag_guard{prepared_attention_inputs_};
 
+    if (cache_manager_ && cache_manager_->hasSparseKvOffload() && !inputs.is_fake_stream) {
+        // Covers warmup and direct draft forwards as well as normal execution.
+        // Sub-forwards can grow, while the executor owns batch-level shrink.
+        cache_manager_->resizeOffloadHotCache(inputs.input_lengths.size(0), /*grow_only=*/true);
+    }
+
     if (hidden_state_capture_publisher_) {
         hidden_state_capture_publisher_->beginForward();
     }

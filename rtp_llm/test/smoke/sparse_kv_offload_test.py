@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -19,6 +20,8 @@ class SparseKVOffloadModelTest(unittest.TestCase):
     def _compare_model(
         self, checkpoint, model_type, fp8, layer_count=None, accuracy=False
     ):
+        hot_cache_mode = os.getenv("RTP_TEST_SPARSE_KV_OFFLOAD_HOT_CACHE_MODE", "static")
+        self.assertIn(hot_cache_mode, ("static", "dynamic"))
         indexshare = checkpoint.startswith("GLM-5.3")
         role_size = 1
         devices = list(get_gpu_ids())
@@ -134,6 +137,7 @@ class SparseKVOffloadModelTest(unittest.TestCase):
                 args += (
                     " --enable_sparse_kv_offload 1 --sparse_kv_offload_host_mb 32"
                     " --sparse_kv_offload_test_hbm_blocks 2"
+                    f" --sparse_kv_offload_hot_cache_mode {hot_cache_mode}"
                 )
             decode = manager(1, args, label, drain_before_moe)
             try:
@@ -311,6 +315,22 @@ class SparseKVOffloadModelTest(unittest.TestCase):
                         log_path.read_text(errors="replace")[offset:],
                         r"batch size used in replay: 1 \(graph key [12]\)",
                     )
+                if offload:
+                    self.assertIn(
+                        f"hot_cache_mode={hot_cache_mode}",
+                        log_path.read_text(errors="replace"),
+                    )
+                if offload and hot_cache_mode == "dynamic":
+                    runtime_log = log_path.read_text(errors="replace")[offset:]
+                    capacities = [
+                        (int(active), int(maximum))
+                        for active, maximum in re.findall(
+                            r"sparse KV hot cache active_rows=(\d+) max_rows=(\d+)",
+                            runtime_log,
+                        )
+                    ]
+                    self.assertTrue(any(0 < active < maximum for active, maximum in capacities), capacities)
+                    self.assertTrue(any(active == 0 for active, _ in capacities), capacities)
                 (output_dir / f"{checkpoint}_{label}.json").write_text(
                     json.dumps(outputs)
                 )

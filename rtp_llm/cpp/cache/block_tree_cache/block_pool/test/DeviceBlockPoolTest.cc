@@ -267,6 +267,79 @@ TEST(DeviceBlockPoolTest, OffloadLengthAwareRoutingCanBeDisabledAndValidatesSett
     }
 }
 
+TEST(DeviceBlockPoolTest, OffloadHotCacheCommitsAndReleasesPhysicalPagesForActiveRequests) {
+    auto config = makeOffloadConfig();
+    config->offload->max_selected_rows = 65536;
+    config->offload->max_requests = 8;
+    config->offload->dynamic_hot_cache = true;
+    DeviceBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+    const auto& storages = pool.allLayerOffloadStorage();
+    const auto* address = storages[0]->resident_planes[0].data_ptr();
+    const auto shape = storages[0]->resident_planes[0].sizes().vec();
+    const auto baseline = pool.offloadDeviceSizeBytes();
+    EXPECT_EQ(storages[0]->active_hot_rows.item<int>(), 0);
+    for (const auto& storage : storages) {
+        storage->resident_planes[0].narrow(0, 0, 4).fill_(17);
+    }
+    pool.resizeOffloadHotCache(1);
+    const auto one = pool.offloadDeviceSizeBytes();
+    EXPECT_GT(one, baseline);
+    EXPECT_EQ(storages[0]->active_hot_rows.item<int>(), 8192);
+    pool.resizeOffloadHotCache(8);
+    const auto eight = pool.offloadDeviceSizeBytes();
+    RecordProperty("idle_device_bytes", std::to_string(baseline));
+    RecordProperty("one_request_device_bytes", std::to_string(one));
+    RecordProperty("eight_request_device_bytes", std::to_string(eight));
+    EXPECT_GT(eight, one);
+    EXPECT_EQ(storages[0]->active_hot_rows.item<int>(), 65536);
+    pool.resizeOffloadHotCache(1, /*grow_only=*/true);
+    EXPECT_EQ(pool.offloadDeviceSizeBytes(), eight);
+    pool.resizeOffloadHotCache(1);
+    EXPECT_EQ(pool.offloadDeviceSizeBytes(), one);
+    EXPECT_EQ(storages[0]->hot_cache_epoch[0].item<int64_t>(), 0);
+    EXPECT_GT(storages[0]->hot_cache_epoch[8192].item<int64_t>(), 0);
+    pool.resizeOffloadHotCache(0);
+    EXPECT_EQ(pool.offloadDeviceSizeBytes(), baseline);
+    EXPECT_EQ(storages[0]->active_hot_rows.item<int>(), 0);
+    pool.resizeOffloadHotCache(1);
+    EXPECT_EQ(pool.offloadDeviceSizeBytes(), one);
+    EXPECT_EQ(storages[0]->resident_planes[0].data_ptr(), address);
+    EXPECT_EQ(storages[0]->resident_planes[0].sizes().vec(), shape);
+    for (const auto& storage : storages) {
+        EXPECT_TRUE(storage->resident_planes[0].narrow(0, 0, 4).eq(17).all().item<bool>());
+    }
+    EXPECT_ANY_THROW(pool.resizeOffloadHotCache(9));
+    EXPECT_EQ(pool.offloadDeviceSizeBytes(), one);
+}
+
+TEST(DeviceBlockPoolTest, StaticOffloadHotCacheKeepsPreallocatedCapacityAcrossRequestCounts) {
+    for (bool device_malloc : {false, true}) {
+        auto config = makeOffloadConfig();
+        config->use_device_malloc_backing = device_malloc;
+        config->offload->max_selected_rows = 65536;
+        config->offload->max_requests = 8;
+        DeviceBlockPool pool(config);
+        ASSERT_TRUE(pool.init());
+        const auto& storages = pool.allLayerOffloadStorage();
+        const auto bytes = pool.offloadDeviceSizeBytes();
+        ASSERT_GT(bytes, 0u);
+        for (const auto& storage : storages) {
+            EXPECT_EQ(storage->hot_cache, nullptr);
+            EXPECT_FALSE(storage->active_hot_rows.defined());
+            EXPECT_FALSE(storage->hot_cache_epoch.defined());
+            storage->resident_planes[0].fill_(17);
+        }
+        for (size_t requests : {0, 1, 8, 2, 0}) {
+            pool.resizeOffloadHotCache(requests);
+            EXPECT_EQ(pool.offloadDeviceSizeBytes(), bytes);
+            for (const auto& storage : storages) {
+                EXPECT_TRUE(storage->resident_planes[0].eq(17).all().item<bool>());
+            }
+        }
+    }
+}
+
 TEST(DeviceBlockPoolTest, OffloadNativePlanesAndSegmentBoundaries) {
     for (const bool raw_device : {false, true}) {
         auto config                       = makeOffloadConfig();
@@ -363,6 +436,7 @@ TEST(DeviceBlockPoolTest, OffloadMhaPlanesPreserveNativeTransferBuffers) {
             DeviceBlockPoolConfigHelper::createConfigForGroup(cache, cache.group(spec->tag)));
         DeviceBlockPool pool(config);
         ASSERT_TRUE(pool.init());
+        pool.resizeOffloadHotCache(1);
         for (int layer = 0; layer < 2; ++layer) {
             const auto& storage = *pool.allLayerOffloadStorage()[layer];
             ASSERT_EQ(storage.resident_planes.size(), 4u);
@@ -435,6 +509,7 @@ TEST(DeviceBlockPoolTest, OffloadViewsRetainBackingAndSupportNoHostBlocks) {
         EXPECT_TRUE(storage->host_planes[0].is_pinned());
         EXPECT_TRUE(pool.takeOffloadVersionUpdates().empty());
     }
+    EXPECT_EQ(storage->hot_cache, nullptr);
     storage->resident_planes[0].fill_(17);
     EXPECT_TRUE(storage->resident_planes[0].eq(17).all().item<bool>());
 }

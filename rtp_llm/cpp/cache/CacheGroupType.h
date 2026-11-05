@@ -51,6 +51,8 @@ enum class CpBlockSliceMode : int8_t {
 struct CacheOffloadPolicy {
     bool     enabled           = false;
     uint32_t max_selected_rows = 0;
+    // Zero preserves the full-batch quota of legacy serialized descriptors.
+    uint32_t max_requests      = 0;
 };
 
 struct CacheGroupPolicy {

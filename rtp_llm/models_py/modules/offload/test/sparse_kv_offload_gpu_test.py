@@ -630,6 +630,98 @@ class SparseOffloadRuntimeTest(_CudaStreamTestCase):
         self.assert_rows(runtime, refs, selection)
 
 
+class DynamicHotCacheTest(_CudaStreamTestCase):
+    def test_bf16_physical_resize_and_graph_replay(self):
+        self._check_dynamic_hot_cache(False)
+
+    def test_fp8_physical_resize_and_graph_replay(self):
+        self._check_dynamic_hot_cache(True)
+
+    def _check_dynamic_hot_cache(self, fp8):
+        cache = make_offload_test_cache(
+            fp8, 65536, initial_hot_rows=0, dynamic_hot_cache=True
+        )
+        storages = tuple(cache.get_offload_storage(i, "default") for i in range(2))
+        runtime = SparseOffloadRuntime(storages, PagedRowLayout())
+        storage = storages[0]
+        addresses = tuple(p.data_ptr() for s in storages for p in s.resident_planes)
+        shapes = tuple(p.shape for s in storages for p in s.resident_planes)
+        baseline = storage.committed_device_bytes
+        self.assertTrue(runtime.dynamic)
+        self.assertEqual(storage.active_hot_rows.item(), 0)
+        for layer, s in enumerate(storages):
+            for host, resident in zip(s.host_planes, s.resident_planes):
+                host.fill_(layer + 11)
+                resident[: runtime.hbm_rows // s.rows_per_page].fill_(layer + 3)
+
+        storage.resize_hot_rows(128)
+        ids = torch.full((128,), -1, dtype=torch.int32, device="cuda")
+        ids[:64] = torch.arange(64, device="cuda", dtype=torch.int32) + runtime.hbm_rows
+        runtime.begin(ids)
+        runtime.drain()
+        self.stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=self.stream):
+            runtime.begin(ids)
+            indices = runtime.acquire(0).indices.clone()
+            observed = []
+            for layer, s in enumerate(storages):
+                view = runtime.acquire(layer)
+                safe = view.indices.clamp_min(0).long()
+                observed.append(tuple(
+                    plane[safe // s.rows_per_page, safe % s.rows_per_page].clone()
+                    for plane in view.planes
+                ))
+            runtime.drain()
+
+        # Grow and shrink around the first 64 cached slots. Their
+        # physical pages survive, so the same graph must keep hitting.
+        for rows in (65536, 8192, 128):
+            storage.resize_hot_rows(rows)
+            graph.replay()
+            self.stream.synchronize()
+            self.assertEqual(runtime._miss_count.item(), 0)
+            for layer, planes in enumerate(observed):
+                for actual in planes:
+                    self.assertTrue(actual[:64].eq(layer + 11).all().item())
+            self.assertEqual(addresses, tuple(p.data_ptr() for s in storages for p in s.resident_planes))
+            self.assertEqual(shapes, tuple(p.shape for s in storages for p in s.resident_planes))
+
+        # Empty padded graph batches must work with no hot HBM pages.
+        storage.resize_hot_rows(0)
+        self.assertEqual(storage.committed_device_bytes, baseline)
+        ids.fill_(-1)
+        graph.replay()
+        self.stream.synchronize()
+        self.assertTrue(indices.eq(-1).all().item())
+        self.assertEqual(runtime._miss_count.item(), 0)
+
+        # Change Host bytes without changing formal block generations.
+        # Only allocation epochs can prevent a stale hit after regrow.
+        for layer, s in enumerate(storages):
+            for host in s.host_planes:
+                host.fill_(layer + 21)
+            write_ids = torch.tensor([runtime.hbm_rows], dtype=torch.int32, device="cuda")
+            values = tuple(torch.full((1, *p.shape[2:]), layer + 31,
+                                      dtype=p.dtype, device="cuda") for p in s.host_planes)
+            runtime.write(layer, KVWrite(write_ids, values))
+        storage.resize_hot_rows(128)
+        ids[:64] = torch.arange(64, device="cuda", dtype=torch.int32) + runtime.hbm_rows
+        graph.replay()
+        self.stream.synchronize()
+        self.assertEqual(runtime._miss_count.item(), 64)
+        for layer, planes in enumerate(observed):
+            for actual in planes:
+                self.assertTrue(actual[0].eq(layer + 31).all().item())
+                self.assertTrue(actual[1:64].eq(layer + 21).all().item())
+        with self.assertRaises(RuntimeError):
+            storage.resize_hot_rows(65537)
+        self.assertEqual(storage.active_hot_rows.item(), 128)
+        storage.resize_hot_rows(0)
+        self.assertEqual(storage.committed_device_bytes, baseline)
+        del graph, runtime, storages, storage, cache
+
+
 class SparseMlaOffloadTest(_CudaStreamTestCase):
     seed = 93
 
@@ -690,6 +782,10 @@ class SparseMlaOffloadTest(_CudaStreamTestCase):
             plans[1, "default"].runtime.generations.data_ptr(),
         )
         for plan in plans.values():
+            self.assertFalse(plan.runtime.dynamic)
+            self.assertIsNone(plan.storage.active_hot_rows)
+            self.assertIsNone(plan.storage.hot_cache_epoch)
+            self.assertEqual(plan.runtime.slot_epochs.data_ptr(), plan.runtime.versions.data_ptr())
             self.assertEqual(
                 (plan.storage_index, plan.begin, plan.drain),
                 (0, True, True),

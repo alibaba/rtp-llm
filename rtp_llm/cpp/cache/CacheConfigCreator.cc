@@ -18,6 +18,13 @@ namespace rtp_llm {
 
 namespace {
 
+bool dynamicOffloadHotCache(const KVCacheConfig& config) {
+    const auto& mode = config.sparse_kv_offload_hot_cache_mode;
+    RTP_LLM_CHECK_WITH_INFO(mode == "static" || mode == "dynamic",
+                            "sparse_kv_offload_hot_cache_mode must be static or dynamic, got '%s'", mode.c_str());
+    return mode == "dynamic";
+}
+
 // Kernel blocks feeding a compressed (OpaqueKV) pool must be a whole number of
 // 128-token units: 128 is the HCA compression unit and also FlashMLA's block
 // quantum. Divisibility alone (the generic check) is not enough -- a 64-token
@@ -416,7 +423,8 @@ CacheConfig CacheConfigCreator::createWarmupConfig(const ModelConfig&       mode
                                     "offload warmup requires a positive selection for tag=%s",
                                     group.tag.c_str());
             config.tiered_cache_configs.emplace(
-                group.tag, TieredCacheConfig{blocks, 2, group.policy.offload.max_selected_rows});
+                group.tag, TieredCacheConfig{blocks, 2, group.policy.offload.max_selected_rows,
+                                            group.policy.offload.max_requests, dynamicOffloadHotCache(kv_cache_config)});
         }
     }
     RTP_LLM_CHECK_WITH_INFO(!kv_cache_config.enable_sparse_kv_offload || !config.tiered_cache_configs.empty(),
@@ -501,6 +509,7 @@ TieredCacheCapacity CacheConfigCreator::configureOffloadCapacity(CacheConfig&   
                                                                  size_t               gpu_bytes,
                                                                  size_t               max_write_rows) {
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config.enable_sparse_kv_offload, "tiered cache capacity requires sparse offload");
+    const bool dynamic_hot_cache = dynamicOffloadHotCache(kv_cache_config);
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config.sparse_kv_offload_host_mb >= 0
                                 && kv_cache_config.sparse_kv_offload_test_hbm_blocks >= 0,
                             "sparse KV offload capacities must be non-negative");
@@ -539,7 +548,9 @@ TieredCacheCapacity CacheConfigCreator::configureOffloadCapacity(CacheConfig&   
         RTP_LLM_CHECK_WITH_INFO(pages <= UINT32_MAX / page_rows, "offload entry count overflow");
         const uint32_t          rows     = page_rows * pages;
         const uint32_t          selected = policy.offload.max_selected_rows;
-        const TieredCacheConfig capacity{0, 0, selected};
+        RTP_LLM_CHECK_WITH_INFO(policy.offload.max_requests == 0 || selected % policy.offload.max_requests == 0,
+                                "offload selection capacity must contain a whole hot-cache quota per request");
+        const TieredCacheConfig capacity{0, 0, selected, policy.offload.max_requests, dynamic_hot_cache};
         const uint64_t          resident = capacity.residentRows(page_rows);
         RTP_LLM_CHECK_WITH_INFO(
             selected > 0 && resident < static_cast<uint64_t>(std::numeric_limits<int32_t>::max()),
@@ -561,11 +572,16 @@ TieredCacheCapacity CacheConfigCreator::configureOffloadCapacity(CacheConfig&   
         RTP_LLM_CHECK_WITH_INFO(
             block_bytes % pages == 0, "offload tag=%s has a partial page stride", group.tag.c_str());
         addBudgetBytes(budget.fixed_gpu_bytes, block_bytes / pages, resident / page_rows);
+        if (dynamic_hot_cache) {
+            addBudgetBytes(budget.fixed_gpu_bytes, sizeof(int64_t), resident);  // allocation epochs shared by tag
+            addBudgetBytes(budget.fixed_gpu_bytes, sizeof(int32_t));  // active hot rows
+            addBudgetBytes(budget.fixed_gpu_bytes, kOffloadAllocationChunkBytes);  // VMM tail rounding
+        }
         // Shared selection state is per runtime; native KV and pack staging are per storage.
         addBudgetBytes(budget.metadata_block_bytes, 8 * static_cast<size_t>(rows), runtimes);
         addBudgetBytes(budget.metadata_block_bytes, sizeof(int64_t));  // generations shared by tag
         size_t runtime_fixed = 0;
-        addBudgetBytes(runtime_fixed, 20, resident);
+        addBudgetBytes(runtime_fixed, dynamic_hot_cache ? 28 : 20, resident);
         addBudgetBytes(runtime_fixed, 12, selected);
         addBudgetBytes(runtime_fixed, 32);
         addBudgetBytes(budget.fixed_gpu_bytes, runtime_fixed, runtimes);

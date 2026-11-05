@@ -22,10 +22,16 @@
 
 namespace rtp_llm {
 
+// CUDA VMM backing uses bounded chunks so one request does not issue a
+// driver allocation for every minimum-size page. Include tail rounding in the budget.
+inline constexpr size_t kOffloadAllocationChunkBytes = 2 * 1024 * 1024;
+
 struct TieredCacheConfig {
     uint32_t total_blocks      = 0;
     uint32_t hbm_blocks        = 0;
     uint32_t max_selected_rows = 0;
+    uint32_t max_requests      = 0;
+    bool     dynamic_hot_cache = false;
 
     uint64_t residentRows(uint32_t rows_per_page) const {
         return (static_cast<uint64_t>(max_selected_rows) + rows_per_page - 1) / rows_per_page * rows_per_page;

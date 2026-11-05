@@ -2929,10 +2929,12 @@ TEST_F(KVCacheManagerTest, OffloadCapacityChargesEveryPhysicalOwner) {
     setTestGroupPolicies(config, {policy});
     KVCacheConfig options;
     options.enable_sparse_kv_offload          = true;
+    options.sparse_kv_offload_hot_cache_mode = "dynamic";
     options.sparse_kv_offload_host_mb         = 1;
     options.sparse_kv_offload_test_hbm_blocks = 2;
     options.test_block_num                    = 6;
-    const auto result                         = CacheConfigCreator::configureOffloadCapacity(config, options, 4096, 1);
+    const auto result = CacheConfigCreator::configureOffloadCapacity(
+        config, options, kOffloadAllocationChunkBytes + 4096, 1);
     ASSERT_EQ(config.tiered_cache_configs.size(), 1u);
     const auto& capacity = config.tiered_cache_configs.at("default");
     EXPECT_EQ(capacity.total_blocks, 6u);
@@ -2940,8 +2942,29 @@ TEST_F(KVCacheManagerTest, OffloadCapacityChargesEveryPhysicalOwner) {
     EXPECT_EQ(result.host_bytes, 1536u);
     EXPECT_EQ(result.hbm_bytes, 768u);
     EXPECT_EQ(result.metadata_bytes, 432u);
+    EXPECT_EQ(result.fixed_bytes, kOffloadAllocationChunkBytes + 1948u);
+    EXPECT_EQ(result.gpu_bytes, kOffloadAllocationChunkBytes + 3148u);
+}
+
+
+TEST_F(KVCacheManagerTest, StaticOffloadCapacityOmitsDynamicMetadataAndRejectsInvalidMode) {
+    auto config =
+        makeSingleGroupCacheConfig(makeResolvedMlaSpec(TYPE_BF16, 16, 8, 4, "default"), CacheGroupType::FULL, 2, 6);
+    auto policy = config.group("default").policy;
+    policy.offload = {true, 8};
+    setTestGroupPolicies(config, {policy});
+    KVCacheConfig options;
+    options.enable_sparse_kv_offload = true;
+    options.sparse_kv_offload_host_mb = 1;
+    options.sparse_kv_offload_test_hbm_blocks = 2;
+    options.test_block_num = 6;
+    const auto result = CacheConfigCreator::configureOffloadCapacity(config, options, 4096, 1);
+    EXPECT_FALSE(config.tiered_cache_configs.at("default").dynamic_hot_cache);
     EXPECT_EQ(result.fixed_bytes, 1752u);
     EXPECT_EQ(result.gpu_bytes, 2952u);
+    EXPECT_EQ(result.metadata_bytes, 432u);
+    options.sparse_kv_offload_hot_cache_mode = "invalid";
+    EXPECT_ANY_THROW(CacheConfigCreator::configureOffloadCapacity(config, options, 4096, 1));
 }
 
 TEST_F(KVCacheManagerTest, DisabledOffloadKeepsLegacyCapacityAndNoTieredStorage) {
@@ -2973,27 +2996,30 @@ TEST_F(KVCacheManagerTest, OffloadCapacityChargesSharedRuntimeOnceButKeepsBothSt
     model.kv_cache_spec_descs = {{desc}, {desc}};
     KVCacheConfig options;
     options.enable_sparse_kv_offload          = true;
+    options.sparse_kv_offload_hot_cache_mode = "dynamic";
     options.sparse_kv_offload_host_mb         = 1;
     options.sparse_kv_offload_test_hbm_blocks = 2;
     options.test_block_num                    = 6;
     auto separate                             = CacheConfigCreator::createConfig(model, {}, options);
     EXPECT_EQ(separate.offload_runtime_counts.at("default"), 2u);
-    const auto baseline = CacheConfigCreator::configureOffloadCapacity(separate, options, 4096, 1);
+    const auto baseline = CacheConfigCreator::configureOffloadCapacity(
+        separate, options, kOffloadAllocationChunkBytes + 4096, 1);
     for (auto& layer : model.kv_cache_spec_descs) {
         layer.front().offload_runtime_group = 0;
     }
     auto shared = CacheConfigCreator::createConfig(model, {}, options);
     EXPECT_EQ(shared.offload_runtime_counts.at("default"), 1u);
-    const auto result = CacheConfigCreator::configureOffloadCapacity(shared, options, 2472, 1);
+    const size_t shared_budget = kOffloadAllocationChunkBytes + 2604;
+    const auto result = CacheConfigCreator::configureOffloadCapacity(shared, options, shared_budget, 1);
     EXPECT_EQ(result.config.total_blocks, 6u);
     EXPECT_EQ(result.hbm_bytes, baseline.hbm_bytes);
     EXPECT_EQ(result.host_bytes, baseline.host_bytes);
     EXPECT_EQ(result.metadata_bytes, 240u);
-    EXPECT_EQ(result.fixed_bytes, 1464u);  // Two hot KV buffers and two pack buffers remain.
-    EXPECT_EQ(result.gpu_bytes, 2472u);
+    EXPECT_EQ(result.fixed_bytes, kOffloadAllocationChunkBytes + 1596u);
+    EXPECT_EQ(result.gpu_bytes, shared_budget);
     EXPECT_EQ(baseline.metadata_bytes - result.metadata_bytes, 192u);
-    EXPECT_EQ(baseline.fixed_bytes - result.fixed_bytes, 288u);
-    EXPECT_ANY_THROW(CacheConfigCreator::configureOffloadCapacity(separate, options, 2472, 1));
+    EXPECT_EQ(baseline.fixed_bytes - result.fixed_bytes, 352u);
+    EXPECT_ANY_THROW(CacheConfigCreator::configureOffloadCapacity(separate, options, shared_budget, 1));
     model.kv_cache_spec_descs[0][0].offload_runtime_group.reset();
     EXPECT_EQ(CacheConfigCreator::createConfig(model, {}, options).offload_runtime_counts.at("default"), 2u);
 }
@@ -3018,20 +3044,25 @@ TEST_F(KVCacheManagerTest, WarmupOffloadPublishesRealStorageWithDeploymentSelect
     options.test_block_num = 10000;
     options.sparse_kv_offload_host_mb = 1024;
     options.sparse_kv_offload_test_hbm_blocks = 100;
-    const auto config = CacheConfigCreator::createWarmupConfig(model, {}, options, 3);
-    auto manager = std::make_shared<KVCacheManager>(config, true);
-    ASSERT_TRUE(manager->init());
-    const auto layout = manager->getMainModelGroupedCacheLayerLayout();
-    for (int layer = 0; layer < 2; ++layer) {
-        const auto storage = layout.at("default", layer).offload;
-        ASSERT_NE(storage, nullptr);
-        EXPECT_EQ(storage->total_blocks, 3u);
-        EXPECT_EQ(storage->hbm_blocks, 2u);
-        EXPECT_EQ(storage->max_selected_rows, 257u);
-        ASSERT_FALSE(storage->host_planes.empty());
-        EXPECT_TRUE(storage->host_planes.front().is_pinned());
-        EXPECT_EQ(storage->host_planes.front().size(0), 2);
-        EXPECT_EQ(storage->resident_planes.front().size(0), 4 + 65);
+    for (bool dynamic : {false, true}) {
+        options.sparse_kv_offload_hot_cache_mode = dynamic ? "dynamic" : "static";
+        const auto config = CacheConfigCreator::createWarmupConfig(model, {}, options, 3);
+        auto manager = std::make_shared<KVCacheManager>(config, true);
+        ASSERT_TRUE(manager->init());
+        const auto layout = manager->getMainModelGroupedCacheLayerLayout();
+        for (int layer = 0; layer < 2; ++layer) {
+            const auto storage = layout.at("default", layer).offload;
+            ASSERT_NE(storage, nullptr);
+            EXPECT_EQ(storage->hot_cache != nullptr, dynamic);
+            EXPECT_EQ(storage->active_hot_rows.defined(), dynamic);
+            EXPECT_EQ(storage->total_blocks, 3u);
+            EXPECT_EQ(storage->hbm_blocks, 2u);
+            EXPECT_EQ(storage->max_selected_rows, 257u);
+            ASSERT_FALSE(storage->host_planes.empty());
+            EXPECT_TRUE(storage->host_planes.front().is_pinned());
+            EXPECT_EQ(storage->host_planes.front().size(0), 2);
+            EXPECT_EQ(storage->resident_planes.front().size(0), 4 + 65);
+        }
     }
     options.enable_sparse_kv_offload = false;
     const auto legacy = CacheConfigCreator::createWarmupConfig(model, {}, options);
@@ -3058,6 +3089,7 @@ TEST_F(KVCacheManagerTest, OffloadMtpBudgetsDraftAndProjectsItsStorageToLocalLay
     draft.kv_cache_spec_descs  = {{desc}};
     KVCacheConfig options;
     options.enable_sparse_kv_offload          = true;
+    options.sparse_kv_offload_hot_cache_mode = "dynamic";
     options.sparse_kv_offload_host_mb         = 1;
     options.sparse_kv_offload_test_hbm_blocks = 2;
     options.test_block_num                    = 6;
@@ -3068,10 +3100,11 @@ TEST_F(KVCacheManagerTest, OffloadMtpBudgetsDraftAndProjectsItsStorageToLocalLay
     ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     EXPECT_EQ(config.offload_runtime_counts.at("default"), 2u);
     EXPECT_EQ(config.blockSizeBytesForGroup("default"), 576u);
-    const auto capacity = CacheConfigCreator::configureOffloadCapacity(config, options, 1 << 20, 8);
-    EXPECT_EQ(capacity.fixed_bytes, 4832u);
+    const auto capacity = CacheConfigCreator::configureOffloadCapacity(
+        config, options, kOffloadAllocationChunkBytes + (1 << 20), 8);
+    EXPECT_EQ(capacity.fixed_bytes, kOffloadAllocationChunkBytes + 5220u);
     EXPECT_EQ(capacity.metadata_bytes, 432u);
-    EXPECT_EQ(capacity.gpu_bytes, 6416u);
+    EXPECT_EQ(capacity.gpu_bytes, kOffloadAllocationChunkBytes + 6804u);
     const auto blocks = CacheConfigCreator::synchronizeOffloadConfig(config, {});
     config.finalizeBlockNums(blocks, {});
     EXPECT_EQ(config.mtp_sub_configs.front()->tiered_cache_configs.at("default").total_blocks, blocks);

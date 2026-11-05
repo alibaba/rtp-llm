@@ -274,6 +274,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         ensureModelInputsOnCuda(model_input, "process.before_tp_sync");
 
         tpSyncModelInputs(model_input, parallelism_config_);
+        if (cache_manager_ && cache_manager_->hasSparseKvOffload()) {
+            cache_manager_->resizeOffloadHotCache(
+                model_input.skip_run || model_input.is_fake_stream ? 0 : model_input.input_lengths.size(0));
+        }
         if (model_input.skip_run) {
             return absl::OkStatus();
         }

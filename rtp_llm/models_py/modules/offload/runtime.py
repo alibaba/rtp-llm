@@ -32,6 +32,10 @@ def _protect(
     Slots,
     Owners,
     Map,
+    Tags,
+    SlotEpochs,
+    HotEpoch,
+    ActiveRows,
     Protected,
     Epoch,
     MissCount,
@@ -41,6 +45,7 @@ def _protect(
     N: tl.constexpr,
     B: tl.constexpr,
     HBM_ROWS: tl.constexpr,
+    DYNAMIC: tl.constexpr,
 ):
     if tl.program_id(0) == 0:
         tl.store(MissCount, 0)
@@ -48,6 +53,14 @@ def _protect(
     token = tl.load(Ids + i, i < N, other=-1)
     valid = (i < N) & (token >= HBM_ROWS)
     slot = tl.load(Map + token, valid, other=-1)
+    if DYNAMIC:
+        mapped = valid & (slot >= 0) & (slot < tl.load(ActiveRows))
+        tag = tl.load(Tags + slot, mapped, other=-1)
+        allocation = tl.load(SlotEpochs + slot, mapped, other=-1)
+        expected = tl.load(HotEpoch + slot, mapped, other=-1)
+        mapped = mapped & (tag == token) & (allocation == expected)
+        tl.store(Map + token, -1, valid & ~mapped)
+        slot = tl.where(mapped, slot, -1)
     epoch = tl.load(Epoch)
     tl.atomic_xchg(Protected + slot, epoch, valid & (slot >= 0))
     generation = tl.load(
@@ -74,10 +87,14 @@ def _admit(
     MissCount,
     Generations,
     Versions,
+    SlotEpochs,
+    HotEpoch,
+    ActiveRows,
     BLOCK_ROWS: tl.constexpr,
     N: tl.constexpr,
-    CAPACITY: tl.constexpr,
     B: tl.constexpr,
+    CAPACITY: tl.constexpr,
+    DYNAMIC: tl.constexpr,
 ):
     i = tl.program_id(0) * B + tl.arange(0, B)
     refresh = tl.load(Slots + i, i < N, other=-1) == -2
@@ -100,12 +117,23 @@ def _admit(
         return
     tokens = tl.sort(tl.where(pending, token, 0x7FFFFFFF), descending=False)
     admitted = 0
-    scan: tl.constexpr = min(B, CAPACITY)
+    if DYNAMIC:
+        capacity = tl.load(ActiveRows)
+        scan = tl.minimum(B, capacity)
+    else:
+        scan: tl.constexpr = min(B, CAPACITY)
     first_ticket = tl.atomic_add(Clock, count, sem="relaxed")
     while admitted < count:
-        ticket = first_ticket + tl.arange(0, B)
-        candidate = (ticket % CAPACITY).to(tl.int32)
-        available = (tl.arange(0, B) < scan) & (tl.load(Protected + candidate) != epoch)
+        lane = tl.arange(0, B)
+        if DYNAMIC:
+            # Active lanes span at most one cache; only the scalar ticket divides.
+            base = first_ticket % capacity
+            candidate = base + tl.where(lane < scan, lane, 0)
+            candidate = tl.where(candidate >= capacity, candidate - capacity, candidate)
+            candidate = candidate.to(tl.int32)
+        else:
+            candidate = ((first_ticket + lane) % CAPACITY).to(tl.int32)
+        available = (lane < scan) & (tl.load(Protected + candidate) != epoch)
         rank = tl.cumsum(available.to(tl.int32), 0) - 1
         attempt = available & (rank < count - admitted)
         previous = tl.atomic_xchg(Protected + candidate, epoch, attempt)
@@ -114,7 +142,15 @@ def _admit(
         token = tl.gather(tokens, tl.where(claimed, admitted + rank, 0), 0)
         generation = tl.load(Generations + token // BLOCK_ROWS, claimed, other=-1)
         old = tl.load(Tags + candidate, claimed, other=-1)
-        tl.store(Map + old, -1, claimed & (old >= 0))
+        if DYNAMIC:
+            old_allocation = tl.load(SlotEpochs + candidate, claimed, other=-1)
+            allocation = tl.load(HotEpoch + candidate, claimed, other=-1)
+            # A released slot's stale tag no longer owns the mapping: that token
+            # may already have been admitted elsewhere in this same kernel.
+            tl.store(Map + old, -1, claimed & (old >= 0) & (old_allocation == allocation))
+            tl.store(SlotEpochs + candidate, allocation, claimed)
+        else:
+            tl.store(Map + old, -1, claimed & (old >= 0))
         tl.store(Tags + candidate, token, claimed)
         tl.store(Versions + candidate, generation, claimed)
         tl.store(Map + token, candidate, claimed)
@@ -153,18 +189,32 @@ def _write_resident_ids(
     Map,
     Generations,
     Versions,
+    Tags,
+    SlotEpochs,
+    HotEpoch,
+    ActiveRows,
     BLOCK_ROWS: tl.constexpr,
     HBM_ROWS: tl.constexpr,
     N: tl.constexpr,
     B: tl.constexpr,
+    DYNAMIC: tl.constexpr,
 ):
     i = tl.program_id(0) * B + tl.arange(0, B)
     token = tl.load(Ids + i, i < N, other=-1)
     host = (i < N) & (token >= HBM_ROWS)
     slot = tl.load(Map + token, host, other=-1)
-    version = tl.load(Versions + slot, host & (slot >= 0), other=-1)
+    mapped = host & (slot >= 0)
+    if DYNAMIC:
+        mapped = mapped & (slot < tl.load(ActiveRows))
+        tag = tl.load(Tags + slot, mapped, other=-1)
+        allocation = tl.load(SlotEpochs + slot, mapped, other=-1)
+        expected = tl.load(HotEpoch + slot, mapped, other=-1)
+    version = tl.load(Versions + slot, mapped, other=-1)
     generation = tl.load(Generations + token // BLOCK_ROWS, host, other=-1)
-    resident = tl.where((slot >= 0) & (version == generation), slot + HBM_ROWS, -1)
+    current = (slot >= 0) & (version == generation)
+    if DYNAMIC:
+        current = mapped & current & (tag == token) & (allocation == expected)
+    resident = tl.where(current, slot + HBM_ROWS, -1)
     tl.store(Out + i, tl.where(token < HBM_ROWS, token, resident), i < N)
 
 
@@ -219,6 +269,13 @@ class SparseOffloadRuntime:
                 raise ValueError(
                     "group storages must share geometry, tag and generations"
                 )
+            for name in ("active_hot_rows", "hot_cache_epoch"):
+                expected = getattr(first, name, None)
+                actual = getattr(storage, name, None)
+                if (expected is None) != (actual is None) or (
+                    expected is not None and expected.data_ptr() != actual.data_ptr()
+                ):
+                    raise ValueError("group storages must share hot-cache capacity and allocation epochs")
             if not storage.host_planes or len(storage.host_planes) != len(
                 storage.resident_planes
             ):
@@ -248,6 +305,16 @@ class SparseOffloadRuntime:
         self.hbm_rows = hbm * block
         self.block_rows = block
         self.generations = first.generations
+        self.active_rows = getattr(first, "active_hot_rows", None)
+        self.hot_epoch = getattr(first, "hot_cache_epoch", None)
+        self.dynamic = self.active_rows is not None
+        if not self.dynamic and self.hot_epoch is not None:
+            raise ValueError("allocation epochs require a dynamic hot cache")
+        if self.dynamic and (self.active_rows.device != self.device or self.active_rows.dtype != torch.int32
+                or self.active_rows.numel() != 1 or self.hot_epoch is None
+                or self.hot_epoch.device != self.device or self.hot_epoch.dtype != torch.int64
+                or self.hot_epoch.shape != (capacity,)):
+            raise ValueError("hot cache needs a CUDA int32 capacity and int64 allocation epochs")
         self.mapping = torch.full(
             (total * block,), -1, dtype=torch.int32, device=self.device
         )
@@ -257,12 +324,17 @@ class SparseOffloadRuntime:
             (capacity,), -1, dtype=torch.int64, device=self.device
         )
         self.protected = torch.zeros_like(self.versions)
+        # Static kernels compile out allocation checks and need no extra arrays.
+        self.slot_epochs = torch.full_like(self.versions, -1) if self.dynamic else self.versions
         self.epoch = torch.ones((), dtype=torch.int64, device=self.device)
         self.clock = torch.zeros_like(self.epoch)
         self._slots = torch.empty((maximum,), dtype=torch.int32, device=self.device)
         self._misses = torch.empty_like(self._slots)
         self._write_slots = torch.empty_like(self._slots)
         self._miss_count = torch.zeros((), dtype=torch.int32, device=self.device)
+        if not self.dynamic:
+            self.active_rows = self._miss_count
+            self.hot_epoch = self.versions
         self.transfer_stream = torch.cuda.Stream(device=self.device)
         self.ready = tuple(torch.cuda.Event() for _ in storages)
         self._kickoff = torch.cuda.Event()
@@ -324,6 +396,10 @@ class SparseOffloadRuntime:
                     indices,
                     self.owners,
                     self.mapping,
+                    self.tags,
+                    self.slot_epochs,
+                    self.hot_epoch,
+                    self.active_rows,
                     self.protected,
                     self.epoch,
                     self._miss_count,
@@ -333,6 +409,7 @@ class SparseOffloadRuntime:
                     n,
                     256,
                     self.hbm_rows,
+                    self.dynamic,
                 )
                 _admit[grid](
                     ids,
@@ -347,10 +424,14 @@ class SparseOffloadRuntime:
                     self._miss_count,
                     self.generations,
                     self.versions,
+                    self.slot_epochs,
+                    self.hot_epoch,
+                    self.active_rows,
                     self.block_rows,
                     n,
-                    self.capacity,
                     256,
+                    self.capacity,
+                    self.dynamic,
                 )
                 _finish_admission[grid](
                     ids,
@@ -405,10 +486,15 @@ class SparseOffloadRuntime:
                 self.mapping,
                 self.generations,
                 self.versions,
+                self.tags,
+                self.slot_epochs,
+                self.hot_epoch,
+                self.active_rows,
                 self.block_rows,
                 self.hbm_rows,
                 stop - start,
                 256,
+                self.dynamic,
             )
             self.layout.store(storage, chunk, slots)
 
@@ -432,6 +518,8 @@ class SparseOffloadRuntime:
         self.owners.fill_(0x7FFFFFFF)
         self.tags.fill_(-1)
         self.versions.fill_(-1)
+        if self.dynamic:
+            self.slot_epochs.fill_(-1)
         self.protected.zero_()
         self.epoch.fill_(1)
         self.clock.zero_()

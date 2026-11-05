@@ -823,6 +823,7 @@ class KVCacheConfig:
     enable_sparse_kv_offload: bool
     sparse_kv_offload_host_mb: int
     sparse_kv_offload_hot_rows: int
+    sparse_kv_offload_hot_cache_mode: str
     sparse_kv_offload_test_hbm_blocks: int
     use_block_cache: int
     def __getstate__(self) -> tuple:

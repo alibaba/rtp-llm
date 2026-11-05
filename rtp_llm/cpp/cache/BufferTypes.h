@@ -15,6 +15,14 @@
 
 namespace rtp_llm {
 
+// Owns a stable virtual address range; only the active hot prefix is backed by HBM.
+class OffloadHotCache {
+public:
+    virtual ~OffloadHotCache() = default;
+    virtual void resize(uint32_t rows, bool grow_only = false) = 0;
+    virtual size_t committedBytes() const = 0;
+};
+
 struct OffloadStorage {
     std::string                tag;
     int                        owner_layer       = -1;
@@ -26,6 +34,9 @@ struct OffloadStorage {
     std::vector<torch::Tensor> host_planes;
     std::vector<torch::Tensor> resident_planes;
     torch::Tensor              generations;
+    torch::Tensor              active_hot_rows;
+    torch::Tensor              hot_cache_epoch;
+    std::shared_ptr<OffloadHotCache> hot_cache;
 };
 
 using OffloadStoragePtr = std::shared_ptr<const OffloadStorage>;

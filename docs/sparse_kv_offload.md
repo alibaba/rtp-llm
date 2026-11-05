@@ -84,6 +84,7 @@ flowchart TD
 policy = CacheOffloadPolicy()
 policy.enabled = True
 policy.max_selected_rows = concurrency * max(1, gen_num_per_cycle + 1) * hot_rows
+policy.max_requests = concurrency
 desc.offload = policy
 desc.offload_runtime_group = runtime_groups[layer_id]
 ```
@@ -95,6 +96,23 @@ resident_rows = ceil(max_selected_rows / rows_per_page) * rows_per_page
 ```
 
 `OffloadStorage` 保存 `total_blocks`、`hbm_blocks`、`rows_per_block`、`rows_per_page`、`max_selected_rows`、`host_planes`、`resident_planes` 和 `generations`。C++ 持有正式 KV 和热缓存内存，Python 只持有同一块内存的 tensor view。
+
+热缓存支持两种启动模式，使用 `--sparse_kv_offload_hot_cache_mode static|dynamic` 或环境变量 `SPARSE_KV_OFFLOAD_HOT_CACHE_MODE` 选择，默认 `static`。两种模式都共享一个热槽池；各请求没有固定独享的槽位范围，GPU gather 直接读取 pinned Host 的路径相同。
+
+| 模式 | HBM 分配 | 开销与适用条件 |
+|---|---|---|
+| `static`（默认） | 启动时预分配最大并发对应的全部热槽，空闲也保留 | 容量固定，无扩缩容同步和物理分配版本检查；适合显存预算充足、重视延迟稳定性的部署 |
+| `dynamic` | 按实际执行的活跃请求数映射，空闲释放热缓存独占物理页 | 减少低并发时的物理占用；并发变化有同步和映射开销，查找还需检查槽位分配版本 |
+
+静态容量为 `resident_rows`；动态模式每个请求的容量为 `hot_rows × max(1, gen_num_per_cycle + 1)`，按 native page 对齐。请求减少时缩小，物理映射以 2 MiB 为单位；与正式 HBM KV 共用物理页的尾部空间会保留。静态模式不创建动态容量标量或物理分配版本数组，Triton 编译时去掉相关检查。两种模式的 HBM 预算都保留最大并发上限，防止活跃请求增加时显存不足。
+
+动态模式下，`OffloadDeviceBuffer` 通过 CUDA VMM 预留最大虚拟地址范围，仅为正式 HBM KV 和当前活跃热缓存前缀建立物理映射。因此 resident tensor 的最大 shape、stride 和地址不随扩缩容改变，同一张 CUDA Graph 可以继续重放。`active_hot_rows` 是 GPU 容量标量；`hot_cache_epoch` 为每个槽保存物理分配版本。释放的槽在重新映射后必须重新 fetch，保留槽的缓存命中继续有效。metadata 和 selection scratch 仍按配置上限分配；HBM 预算也保留最大并发的容量上限，防止活跃请求增加时没有显存可用。
+
+动态模式的扩缩容只在引擎的 forward 边界执行，先等待此前计算及 offload 搬运完成。并发不变时不做映射操作或 CPU 同步。并发变化时的驱动分配/释放有额外延迟，随需映射的物理页数增加。TP 各 rank 使用同步后的实际请求数，graph padding 和空闲 fake stream 不增加配额。MTP 内部 draft 子调用只能增加容量，target 调用负责按完整请求批次缩减，避免 rejection 后的紧凑 draft batch 提前归还仍在使用的配额。普通 decode 和 MTP 的空闲分支都会释放热缓存物理页。
+
+默认 warmup 仍开启。warmup 期间热缓存增长所占的 driver 显存从 runtime 峰值测量中扣除，由 offload 的峰值容量预算统一计费。
+
+模型构造器会填写 `max_requests`。动态模式下，旧版序列化 policy 缺少此字段时保留 `max_requests=0`：有请求就使用旧版完整 batch 配额，空闲时释放，以兼容无法推导单请求配额的旧描述。
 
 同一 tag 的层共享 `generations`，但每层仍有自己的 `OffloadStorage` 和正式 KV。共享的是 block 版本与 runtime 管理状态，不是 KV 数据。
 
@@ -199,6 +217,7 @@ reserve_blocks = ceil(reserve_step / seq_size_per_block)
 --enable_sparse_kv_offload 1
 --sparse_kv_offload_host_mb 53248
 --sparse_kv_offload_hot_rows 2048
+--sparse_kv_offload_hot_cache_mode static
 --kv_cache_mem_mb 0
 --reuse_cache 0
 ```
@@ -264,6 +283,8 @@ bazel test --config=cuda13 \
 普通 smoke 使用 GLM-5 和 DeepSeek V3.2 四层 checkpoint。MTP smoke 默认使用 `GLM-5-FP8-4layer` 作 target、`GLM-5-BF16-4layer` 中的真实 NextN 权重作 draft，通过正常加载器按 `FP8_PER_BLOCK` 量化 draft，使单卡 graph 的 FP8 MoE backend 同时适用于 target 和 draft。可通过 `RTP_GLM_MTP_CHECKPOINT` 和 `RTP_GLM_MTP_DRAFT_CHECKPOINT` 指定本地路径。裁剪 checkpoint 保留原始 NextN 层号时，测试生成独立的 draft 配置来匹配权重偏移。上述默认命令不加载 GLM-5.3。
 
 GLM/DSA 独立精度 smoke 同时比较完整 greedy token 序列和最后一步全词表 logits（`rtol=atol=1e-5`），覆盖超过 2048 token 的输入、重复请求导致的 block 复用、2 个 HBM block 之外的 Host KV、eager/graph 和 offload 开关。比较前先检查无 offload 基线自身可重复，避免把基线波动当成 offload 误差。该入口使用默认的 MoE drain 策略，不注入稳定 top-k 测试 hook。V4 DSpark API 返回接受后的 token IDs，V4 smoke 严格比较这些 IDs；attention tensor 的数值对照由 V4 GPU 测试覆盖。
+
+这三个精度入口默认验证 `static`；使用 `--test_env=RTP_TEST_SPARSE_KV_OFFLOAD_HOT_CACHE_MODE=dynamic` 可对动态模式运行相同用例和精度断言。动态模式的 GLM/DSA 和 MTP 用例还检查低于最大并发的配额以及空闲释放事件。
 
 ```bash
 bazel test --config=cuda13 \

@@ -518,6 +518,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_sparse_kv_offload", &KVCacheConfig::enable_sparse_kv_offload)
         .def_readwrite("sparse_kv_offload_host_mb", &KVCacheConfig::sparse_kv_offload_host_mb)
         .def_readwrite("sparse_kv_offload_hot_rows", &KVCacheConfig::sparse_kv_offload_hot_rows)
+        .def_readwrite("sparse_kv_offload_hot_cache_mode", &KVCacheConfig::sparse_kv_offload_hot_cache_mode)
         .def_readwrite("sparse_kv_offload_test_hbm_blocks", &KVCacheConfig::sparse_kv_offload_test_hbm_blocks)
         .def_readwrite("use_block_cache", &KVCacheConfig::use_block_cache)
         .def_readwrite("enable_memory_cache", &KVCacheConfig::enable_memory_cache)
@@ -581,7 +582,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      11,
+                                      12,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -655,9 +656,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_sparse_kv_offload,
                                       self.sparse_kv_offload_host_mb,
                                       self.sparse_kv_offload_test_hbm_blocks,
-                                      self.sparse_kv_offload_hot_rows);
+                                      self.sparse_kv_offload_hot_rows,
+                                      self.sparse_kv_offload_hot_cache_mode);
             },
             [](py::tuple t) {
+                const py::tuple mode_state = t;
+                const bool has_hot_cache_mode =
+                    t.size() == 77 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 12;
+                if (has_hot_cache_mode) {
+                    t    = t[py::slice(0, 76, 1)].cast<py::tuple>();
+                    t[1] = py::int_(11);
+                }
                 const py::tuple hot_rows_state = t;
                 const bool has_hot_rows =
                     t.size() == 76 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 11;
@@ -828,6 +837,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.sparse_kv_offload_hot_rows = hot_rows_state[75].cast<int64_t>();
                     if (c.sparse_kv_offload_hot_rows <= 0) {
                         throw std::runtime_error("sparse_kv_offload_hot_rows must be positive");
+                    }
+                }
+                if (has_hot_cache_mode) {
+                    c.sparse_kv_offload_hot_cache_mode = mode_state[76].cast<std::string>();
+                    if (c.sparse_kv_offload_hot_cache_mode != "static"
+                        && c.sparse_kv_offload_hot_cache_mode != "dynamic") {
+                        throw std::runtime_error("sparse_kv_offload_hot_cache_mode must be static or dynamic");
                     }
                 }
                 return c;
@@ -2056,13 +2072,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("enabled", &CacheOffloadPolicy::enabled)
         .def_readwrite("max_selected_rows", &CacheOffloadPolicy::max_selected_rows)
+        .def_readwrite("max_requests", &CacheOffloadPolicy::max_requests)
         .def(py::pickle(
-            [](const CacheOffloadPolicy& self) { return py::make_tuple(self.enabled, self.max_selected_rows); },
+            [](const CacheOffloadPolicy& self) {
+                return py::make_tuple(self.enabled, self.max_selected_rows, self.max_requests);
+            },
             [](py::tuple t) {
-                if (t.size() != 2) {
+                if (t.size() != 2 && t.size() != 3) {
                     throw std::runtime_error("Invalid CacheOffloadPolicy state!");
                 }
-                return CacheOffloadPolicy{t[0].cast<bool>(), t[1].cast<uint32_t>()};
+                return CacheOffloadPolicy{t[0].cast<bool>(), t[1].cast<uint32_t>(),
+                                          t.size() == 3 ? t[2].cast<uint32_t>() : 0};
             }));
 
     py::class_<KVCacheSpecDesc>(m, "KVCacheSpecDesc")

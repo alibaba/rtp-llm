@@ -71,6 +71,9 @@ GptModelOutputs MtpExecutor::forwardModel(ModelBase* model, GptModelInputs& inpu
             offload_inputs.kv_cache_generation_updates = cache_manager_->takeOffloadVersionUpdates();
         }
         tpSyncModelInputs(offload_inputs, parallelism_config_);
+        cache_manager_->resizeOffloadHotCache(
+            offload_inputs.is_fake_stream ? 0 : offload_inputs.input_lengths.size(0),
+            /*grow_only=*/role != ModelInputsModelRole::TARGET);
         if (offload_inputs.kv_cache_generation_updates.defined()) {
             buffer_holder_.hold_host(offload_inputs.kv_cache_generation_updates);
             cache_manager_->publishOffloadVersions(offload_inputs.kv_cache_generation_updates,
@@ -1154,6 +1157,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         tpSyncModelInputs(model_input, parallelism_config_);
         target_only = model_input.skip_lm_head;
         if (model_input.skip_run) {
+            if (cache_manager_) {
+                cache_manager_->resizeOffloadHotCache(0);
+            }
             return absl::OkStatus();
         }
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -1535,6 +1541,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         // tpSyncModelInputs so every TP rank enters and leaves the same collective.
         model_input.skip_run = shouldSkipEmptyDecode(streams.empty(), enable_ffn_disaggregate_);
         if (model_input.skip_run) {
+            if (cache_manager_) {
+                cache_manager_->resizeOffloadHotCache(0);
+            }
             tpSyncModelInputs(model_input, parallelism_config_);
             return absl::OkStatus();
         }
@@ -1547,6 +1556,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(alignment_only_tp_sync)");
         tpSyncModelInputs(model_input, parallelism_config_);
         if (model_input.skip_run) {
+            if (cache_manager_) {
+                cache_manager_->resizeOffloadHotCache(0);
+            }
             return absl::OkStatus();
         }
         releaseAllModelBuffers();
@@ -1617,6 +1629,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             }
             tpSyncModelInputs(model_input, parallelism_config_);
             if (model_input.skip_run) {
+                if (cache_manager_) {
+                    cache_manager_->resizeOffloadHotCache(0);
+                }
                 return absl::OkStatus();
             }
             ensureModelInputsOnCuda(model_input, "decode.after_tp_sync");

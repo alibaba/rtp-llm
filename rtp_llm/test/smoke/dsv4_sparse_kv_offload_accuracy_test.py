@@ -22,6 +22,8 @@ from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
 class Dsv4SparseKVOffloadAccuracyTest(unittest.TestCase):
     def test_full_model_dspark_pd(self):
+        hot_cache_mode = os.getenv("RTP_TEST_SPARSE_KV_OFFLOAD_HOT_CACHE_MODE", "static")
+        self.assertIn(hot_cache_mode, ("static", "dynamic"))
         output = Path(os.environ["TEST_UNDECLARED_OUTPUTS_DIR"])
         model = os.environ.get("RTP_DSV4_TEST_CHECKPOINT")
         self.assertTrue(
@@ -99,6 +101,7 @@ class Dsv4SparseKVOffloadAccuracyTest(unittest.TestCase):
                 )
                 if offload:
                     cli += " --enable_sparse_kv_offload 1 --sparse_kv_offload_host_mb 1024 --sparse_kv_offload_test_hbm_blocks 2"
+                    cli += f" --sparse_kv_offload_hot_cache_mode {hot_cache_mode}"
             result = MagaServerManager(
                 env_args=env,
                 device_ids=devices[2 * role : 2 * (role + 1)],
@@ -143,6 +146,7 @@ class Dsv4SparseKVOffloadAccuracyTest(unittest.TestCase):
                         self.assertTrue(future.result())
                 startup = Path(decode.log_file_path).read_text(errors="replace")
                 if offload:
+                    self.assertIn(f"hot_cache_mode={hot_cache_mode}", startup)
                     self.assertIn("decode warmup runtime=", startup)
                     self.assertRegex(
                         startup, r"sparse KV offload tag=csa_kv H=2 P=[1-9]"

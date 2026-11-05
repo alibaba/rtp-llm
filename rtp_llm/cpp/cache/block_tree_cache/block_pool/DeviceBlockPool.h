@@ -91,6 +91,7 @@ public:
     void                                          markOffloadOverwrite(const BlockIdList& blocks);
     size_t                                        offloadHostSizeBytes() const;
     size_t                                        offloadDeviceSizeBytes() const;
+    void                                          resizeOffloadHotCache(size_t requests, bool grow_only = false);
 
     void    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
     void    deregUserMr();

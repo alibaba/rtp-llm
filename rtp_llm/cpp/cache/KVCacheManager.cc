@@ -634,6 +634,27 @@ torch::Tensor KVCacheManager::takeOffloadVersionUpdates() {
     return snapshot;
 }
 
+size_t KVCacheManager::offloadDeviceSizeBytes() const {
+    size_t bytes = 0;
+    if (hasSparseKvOffload()) {
+        for (const auto& pool : coordinator_manager_->groupBlockPools()) {
+            if (pool->isOffload()) {
+                bytes += pool->offloadDeviceSizeBytes();
+            }
+        }
+    }
+    return bytes;
+}
+
+void KVCacheManager::resizeOffloadHotCache(size_t requests, bool grow_only) {
+    if (!hasSparseKvOffload()) {
+        return;
+    }
+    for (const auto& pool : coordinator_manager_->groupBlockPools()) {
+        pool->resizeOffloadHotCache(requests, grow_only);
+    }
+}
+
 void KVCacheManager::publishOffloadVersions(const torch::Tensor& updates, const std::vector<std::string>& group_tags) {
     if (!updates.defined()) {
         return;

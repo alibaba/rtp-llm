@@ -192,7 +192,8 @@ bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy
            && lhs.cp_mapping == rhs.cp_mapping && lhs.cp_slice == rhs.cp_slice
            && lhs.sliding_window_size == rhs.sliding_window_size && lhs.shared_chunk_state == rhs.shared_chunk_state
            && lhs.offload.enabled == rhs.offload.enabled
-           && lhs.offload.max_selected_rows == rhs.offload.max_selected_rows;
+           && lhs.offload.max_selected_rows == rhs.offload.max_selected_rows
+           && lhs.offload.max_requests == rhs.offload.max_requests;
 }
 
 void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers) {

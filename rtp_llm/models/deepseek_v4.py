@@ -663,6 +663,7 @@ class DeepSeekV4(DeepSeekV2):
                     policy = CacheOffloadPolicy()
                     policy.enabled = True
                     policy.max_selected_rows = selected
+                    policy.max_requests = self.max_generate_batch_size
                     desc.offload = policy
         self.model_config.kv_cache_spec_descs = descs
 

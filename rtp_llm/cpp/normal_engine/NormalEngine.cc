@@ -131,7 +131,7 @@ public:
         c10::cuda::CUDACachingAllocator::resetPeakStats(device_);
     }
 
-    size_t maxConsumedBytes() const {
+    size_t maxConsumedBytes(size_t separately_budgeted_driver_bytes = 0) const {
         at::cuda::CUDAGuard device_guard(device_);
         const size_t        current_free_bytes = getGpuExecStatus().device_memory_status.free_bytes;
         const auto          stats              = c10::cuda::CUDACachingAllocator::getDeviceStats(device_);
@@ -139,7 +139,8 @@ public:
         const auto positive_delta = [](int64_t peak, int64_t baseline) -> size_t {
             return peak > baseline ? static_cast<size_t>(peak - baseline) : 0;
         };
-        const size_t driver_consumed = baseline_free_bytes_ - std::min(baseline_free_bytes_, current_free_bytes);
+        const size_t driver_delta = baseline_free_bytes_ - std::min(baseline_free_bytes_, current_free_bytes);
+        const size_t driver_consumed = driver_delta - std::min(driver_delta, separately_budgeted_driver_bytes);
         const size_t allocated_peak  = positive_delta(stats.allocated_bytes[0].peak, baseline_allocated_);
         const size_t reserved_peak   = positive_delta(stats.reserved_bytes[0].peak, baseline_reserved_);
         return std::max({driver_consumed, allocated_peak, reserved_peak});
@@ -790,6 +791,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     WarmupMemoryTracker memory_tracker;
     size_t max_consumed = 0;
     size_t offload_fixed_bytes = 0;
+    const size_t offload_backing_before = cache_manager->offloadDeviceSizeBytes();
     try {
         executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, mla_ops_type_));
         {
@@ -797,7 +799,9 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
             THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
         }
         cudaDeviceSynchronize();
-        max_consumed = memory_tracker.maxConsumedBytes();
+        const size_t offload_backing_after = cache_manager->offloadDeviceSizeBytes();
+        const size_t hot_growth = offload_backing_after - std::min(offload_backing_after, offload_backing_before);
+        max_consumed = memory_tracker.maxConsumedBytes(hot_growth);
         // Drop graph wrappers first, then measure only released offload buffers.
         // Other cache-bound state (e.g. block tables) stays in the runtime peak.
         executor_.reset(nullptr);
@@ -1134,6 +1138,9 @@ absl::Status NormalEngine::step() try {
         // TP collectives and FFN-disaggregate alignment both require empty batches to enter process().
         if (shouldEarlyReturnEmptyBatch(
                 streams.empty(), parallelism_config.tp_size, ffn_disaggregate_config.enable_ffn_disaggregate)) {
+            if (resource_context_.cache_manager) {
+                resource_context_.cache_manager->resizeOffloadHotCache(0);
+            }
             return absl::OkStatus();
         }
     }
