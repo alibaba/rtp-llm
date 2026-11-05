@@ -374,6 +374,9 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     // pre-commit cudaSyncAndCheck preserves the cross-round drain contract.
     const bool no_round_sync_env =
         autil::EnvUtil::getEnv<int64_t>("DSV41_PP_NO_ROUND_SYNC", static_cast<int64_t>(0)) != 0;
+    // R31: value-based opt-in for event-wait drains. Default 1 since the
+    // R31 adoption (pairs -11.3 median, 2/3, byte-exact); escape: =0.
+    boundary_pack_ = autil::EnvUtil::getEnv<int64_t>("DSV41_BOUNDARY_PACK", static_cast<int64_t>(1)) != 0;
     if (!warm_up_ && params.model_config_.model_type == "deepseek_v41") {
         // Value-based selector: only a nonzero value enables the asynchronous
         // contract, so an explicitly-zeroed variable stays on the synchronous path.
@@ -1567,7 +1570,27 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             // Drain side-stream state/cache writes before scheduling the next chunk.
             // The explicit diagnostic opt-out does not prove cross-round safety.
             if (round_device_sync_) {
-                cudaDeviceSynchronize();
+                if (boundary_pack_) {
+                    // R31: the forward_done event sync above already ordered
+                    // the producing stream; the device-wide drain adds nothing
+                    // for the frame path (side/aux streams join before the
+                    // export). Keep the error-check half.
+                    if (!boundary_pack_announced_) {
+                        boundary_pack_announced_ = true;
+                        RTP_LLM_LOG_INFO("[BOUNDARYPACK] rank=%lld step=%ld event-wait drains engaged "
+                                         "(DSV41_BOUNDARY_PACK=1)",
+                                         static_cast<long long>(parallelism_config_.world_rank),
+                                         static_cast<long>(step));
+                    }
+                    if (!round_fwd_event_sync_) {
+                        auto drain = cuda_graph::makeGraphEvent();
+                        drain.record(cuda_graph::graphGetCurrentStream());
+                        drain.synchronize();
+                    }
+                    cudaCheckLastError();
+                } else {
+                    cudaDeviceSynchronize();
+                }
             }
         }
 
@@ -1587,7 +1610,18 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             }
             // CUDA ticket waits establish stream ordering; drain the actual
             // hardware before WORLD completion or cursor publication.
-            cudaSyncAndCheck();
+            if (boundary_pack_) {
+                // R31: event-wait on the producing stream instead of the
+                // device-wide drain — the ticketed sends are stream-ordered
+                // and all side/aux work joined the producing stream before
+                // the frame export, so the guarantee is unchanged.
+                auto commit_drain = cuda_graph::makeGraphEvent();
+                commit_drain.record(cuda_graph::graphGetCurrentStream());
+                commit_drain.synchronize();
+                cudaCheckLastError();
+            } else {
+                cudaSyncAndCheck();
+            }
             v41_pp_admission_->completeExecution(inflight.v41_cache_batch, true);
             v41_pp_admission_->commit(inflight.v41_cache_batch);
             for (const auto& binding : inflight.v41_cache_batch->bindings()) {

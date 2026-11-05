@@ -268,8 +268,15 @@ private:
     // cudaSyncAndCheck drain still orders cache writes and cursor publication;
     // the activation sends are stream-ordered after the worker stream's joined
     // side-stream work. Default false keeps the qualified drains everywhere.
-    bool no_round_sync_ = false;
+    bool no_round_sync_           = false;
     bool no_round_sync_announced_ = false;
+    // R31: replace the two per-round device-wide drains with an event wait on
+    // the frame's producing stream when DSV41_BOUNDARY_PACK is nonzero.
+    // Ordering-only change (byte-exact); all side/aux streams join the
+    // producing stream before the frame export, so the event wait carries the
+    // same guarantee without stalling unrelated engine streams.
+    bool boundary_pack_           = false;
+    bool boundary_pack_announced_ = false;
 };
 
 }  // namespace rtp_llm

@@ -25,6 +25,7 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.modules.dsv4._nvtx_phases import nvtx_phase
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DEFAULT_DSV4_CHUNK_TOKENS,
@@ -445,10 +446,11 @@ class MoE(nn.Module):
         with record_function_range("dsv4.moe.add_shared"):
             # E8: the fused combine tail (peer-sum dequant + shared add +
             # cast in one kernel) when the strategy deferred its peer sum.
-            if isinstance(routed, DeferredMXFP8PeerSum):
-                combined = run_deferred_combine(routed, shared, x.dtype, out)
-            else:
-                combined = combine_routed_and_shared(routed, shared, x.dtype, out=out)
+            with nvtx_phase("v41.moe.combine"):
+                if isinstance(routed, DeferredMXFP8PeerSum):
+                    combined = run_deferred_combine(routed, shared, x.dtype, out)
+                else:
+                    combined = combine_routed_and_shared(routed, shared, x.dtype, out=out)
             if combined.data_ptr() != out.data_ptr():
                 out.copy_(combined)
 
@@ -644,7 +646,31 @@ class MoE(nn.Module):
             if _dbg:
                 self.gate._dbg_prefix = f"L{self.layer_id:02d}_moe_gate"
             try:
-                weights, indices = self.gate(x, input_ids_flat)
+                if not hasattr(self, "_gate_probe"):
+                    # R27/C: lazy, flag-gated gate-graph probe (region B's
+                    # router GEMM + gate/top-k — fixed shapes, no NCCL).
+                    self._gate_probe = None
+                    from rtp_llm.models_py.modules.dsv4._v41_graph_probe import (
+                        GraphReplay,
+                        claim_one_layer,
+                        graph_probe_enabled,
+                    )
+
+                    if (
+                        graph_probe_enabled()
+                        and x.is_cuda
+                        and claim_one_layer(("gate", x.device))
+                    ):
+                        self._gate_probe = GraphReplay(
+                            f"v41.gate.l{self.layer_id:02d}"
+                        )
+                if self._gate_probe is None:
+                    weights, indices = self.gate(x, input_ids_flat)
+                else:
+                    (weights, indices), _kind = self._gate_probe.run(
+                        [x, input_ids_flat],
+                        lambda _staged: self.gate(_staged[0], _staged[1]),
+                    )
             finally:
                 if _dbg:
                     self.gate._dbg_prefix = None
@@ -758,7 +784,9 @@ class MoE(nn.Module):
             if isinstance(y, DeferredMXFP8PeerSum):
                 # E8 fused tail: peer-sum dequant + shared add + cast, one
                 # kernel, identical op order (bitwise-equal by construction).
-                y = run_deferred_combine(y, shared_y, x.dtype, out[:T])
+                with nvtx_phase("v41.moe.combine"):
+                    y = run_deferred_combine(y, shared_y, x.dtype, out[:T])
             else:
-                y = combine_routed_and_shared(y, shared_y, x.dtype, out=out[:T])
+                with nvtx_phase("v41.moe.combine"):
+                    y = combine_routed_and_shared(y, shared_y, x.dtype, out=out[:T])
             return y.view(shape)

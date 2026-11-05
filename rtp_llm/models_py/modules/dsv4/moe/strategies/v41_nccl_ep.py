@@ -7,13 +7,13 @@ from dataclasses import asdict, dataclass, replace
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4._nvtx_phases import nvtx_phase
 from rtp_llm.models_py.modules.dsv4._v41_n2_sparse import (
     _announce_n2,
     n2_sparse_dispatch_enabled,
     sparse_compaction_order,
     sparse_destination_mask,
 )
-
 from rtp_llm.models_py.modules.dsv4.moe._nccl_ep_combine_triton import fp32_peer_sum
 from rtp_llm.models_py.modules.dsv4.v41_dispatch import V41DispatchLayout, pack_dispatch
 from rtp_llm.models_py.modules.dsv4.v41_expert import V41_EXPERT_RECIPE
@@ -253,13 +253,12 @@ class V41NcclEpStrategy(NcclEpMxfp8Strategy):
         row's expert sum in a stable order), so outputs are bitwise
         identical to the dense dispatch.
         """
+
         def _dbg(stage):
             if os.environ.get("DSV41_N2_DEBUG") == "1":
                 import sys as _sys
 
-                print(
-                    f"[N2DBG] rank={rank} {stage}", file=_sys.stderr, flush=True
-                )
+                print(f"[N2DBG] rank={rank} {stage}", file=_sys.stderr, flush=True)
 
         local = self._local.local
         per = self.layout.experts // world
@@ -292,9 +291,7 @@ class V41NcclEpStrategy(NcclEpMxfp8Strategy):
         contrib = sparse_destination_mask(indices, world, per)
         send_counts = contrib.sum(0, dtype=torch.int64)
         _dbg("mask-done")
-        gathered = torch.empty(
-            world * world, dtype=torch.int64, device=payload.device
-        )
+        gathered = torch.empty(world * world, dtype=torch.int64, device=payload.device)
         torch.distributed.all_gather_into_tensor(gathered, send_counts, group=group)
         _dbg("count-gather-done")
         matrix = gathered.view(world, world)
@@ -322,14 +319,10 @@ class V41NcclEpStrategy(NcclEpMxfp8Strategy):
             group=group,
         )
         _dbg("dispatch-a2a-done")
-        layout = (
-            "masked" if dense_total <= local.masked_token_limit else "contiguous"
-        )
+        layout = "masked" if dense_total <= local.masked_token_limit else "contiguous"
         partial = local.forward_received(received, self.layout, layout=layout)
         _dbg("experts-done")
-        packed = pack_return(
-            partial, self.return_layout, fused=self._return_pack_fused
-        )
+        packed = pack_return(partial, self.return_layout, fused=self._return_pack_fused)
         ret_cols = self.return_layout.payload_bytes
         dense_returned = torch.zeros(
             (world * rows, ret_cols), dtype=torch.uint8, device=payload.device
@@ -379,7 +372,8 @@ class V41NcclEpStrategy(NcclEpMxfp8Strategy):
         try:
             group, world, rank = self._admit(x.device)
             rows = int(x.shape[0])
-            counts = self._counts_for_forward(rows, group, world, x.device, pending)
+            with nvtx_phase("v41.moe.counts_sync"):
+                counts = self._counts_for_forward(rows, group, world, x.device, pending)
             # Every rank sees the same vector, so bound failures precede payload
             # collectives on all peers, including empty ranks.
             if (
@@ -391,9 +385,15 @@ class V41NcclEpStrategy(NcclEpMxfp8Strategy):
                     "V4.1 EP received rows exceed the admitted per-rank bound"
                 )
             valid = torch.ones(rows, dtype=torch.bool, device=x.device)
-            payload = pack_dispatch(
-                x, weights, indices, valid, self.layout, fused=self._dispatch_pack_fused
-            )
+            with nvtx_phase("v41.moe.dispatch_prep"):
+                payload = pack_dispatch(
+                    x,
+                    weights,
+                    indices,
+                    valid,
+                    self.layout,
+                    fused=self._dispatch_pack_fused,
+                )
             from ...v41_dispatch import e3_dispatch_lean_enabled
 
             # N2 replaces the WHOLE exchange (dispatch + experts + return);
@@ -406,44 +406,71 @@ class V41NcclEpStrategy(NcclEpMxfp8Strategy):
                 and all(n == rows for n in counts)
                 and not torch.cuda.is_current_stream_capturing()
             ):
-                returned = self._sparse_dispatch_exchange(
-                    payload,
-                    indices,
-                    rows,
-                    world,
-                    rank,
-                    group,
-                    sum(counts),
-                )
-            if returned is None:
-                if e3_dispatch_lean_enabled() and all(n == rows for n in counts):
-                    # E3: dense dispatch sends the SAME rows to every rank; the
-                    # list-form all_to_all issues grouped NCCL sends straight from
-                    # `payload` — identical wire bytes, no world-x repeat
-                    # materialization (~22MB alloc+copy per layer at 4k chunks).
-                    received = self._all_to_all_dense_send(
-                        payload, counts, self.layout.payload_bytes, group
-                    )
-                else:
-                    received = self._all_to_all(
-                        payload.repeat(world, 1),
-                        [rows] * world,
-                        counts,
-                        self.layout.payload_bytes,
+                with nvtx_phase("v41.moe.exchange_sparse"):
+                    returned = self._sparse_dispatch_exchange(
+                        payload,
+                        indices,
+                        rows,
+                        world,
+                        rank,
                         group,
+                        sum(counts),
                     )
+            if returned is None:
+                with nvtx_phase("v41.moe.dispatch"):
+                    if e3_dispatch_lean_enabled() and all(n == rows for n in counts):
+                        # E3: dense dispatch sends the SAME rows to every rank; the
+                        # list-form all_to_all issues grouped NCCL sends straight from
+                        # `payload` — identical wire bytes, no world-x repeat
+                        # materialization (~22MB alloc+copy per layer at 4k chunks).
+                        received = self._all_to_all_dense_send(
+                            payload, counts, self.layout.payload_bytes, group
+                        )
+                    else:
+                        received = self._all_to_all(
+                            payload.repeat(world, 1),
+                            [rows] * world,
+                            counts,
+                            self.layout.payload_bytes,
+                            group,
+                        )
                 local = self._local.local
                 layout = (
-                    "masked" if sum(counts) <= local.masked_token_limit else "contiguous"
+                    "masked"
+                    if sum(counts) <= local.masked_token_limit
+                    else "contiguous"
                 )
-                partial = local.forward_received(received, self.layout, layout=layout)
-                returned = self._all_to_all(
-                    pack_return(partial, self.return_layout, fused=self._return_pack_fused),
-                    counts,
-                    [rows] * world,
-                    self.return_layout.payload_bytes,
-                    group,
-                )
+                # R25/F1: offer the return layout so the local body can fuse
+                # combine+pack into one pass (flag-gated; guards fall back to
+                # the legacy path). A packet result skips pack_return — wire
+                # bytes are bitwise-identical (synthetic compare + sha gate).
+                return_hint = None
+                if self.return_layout.mode == "mxfp8":
+                    from ..._v41_combine_return_triton import (
+                        combine_return_fused_enabled as _combret_enabled,
+                    )
+
+                    if _combret_enabled():
+                        return_hint = self.return_layout
+                with nvtx_phase("v41.moe.experts"):
+                    partial = local.forward_received(
+                        received, self.layout, layout=layout, return_layout=return_hint
+                    )
+                with nvtx_phase("v41.moe.return"):
+                    if partial.dtype == torch.uint8:
+                        # R25/F1 fused packet (the legacy partial is always FP32).
+                        wire = partial
+                    else:
+                        wire = pack_return(
+                            partial, self.return_layout, fused=self._return_pack_fused
+                        )
+                    returned = self._all_to_all(
+                        wire,
+                        counts,
+                        [rows] * world,
+                        self.return_layout.payload_bytes,
+                        group,
+                    )
             _eptail_debug_once(
                 f"strategy-tail: cls={type(self).__name__} mode={self.return_layout.mode} "
                 f"flag={_fused_combine_tail_enabled()} "

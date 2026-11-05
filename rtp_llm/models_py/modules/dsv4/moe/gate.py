@@ -37,8 +37,14 @@ except Exception:  # pragma: no cover
 
 from rtp_llm.models_py.modules.dsv4._v41_router_tc import (
     router_linear as _router_linear,
+)
+from rtp_llm.models_py.modules.dsv4._v41_router_tc import (
     router_tc_mode as _router_tc_mode,
+)
+from rtp_llm.models_py.modules.dsv4._v41_router_tc import (
     router_verify_enabled as _router_verify_enabled,
+)
+from rtp_llm.models_py.modules.dsv4._v41_router_tc import (
     verify_router_parity as _verify_router_parity,
 )
 
@@ -202,24 +208,27 @@ class Gate(nn.Module):
     def forward(
         self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if self._v41_cp_ctx is not None:
-            from rtp_llm.models_py.modules.dsv4._v41_cp_local_router import (
-                cp_local_padded_routes,
-                cp_local_router_enabled,
-            )
+        from rtp_llm.models_py.modules.dsv4._nvtx_phases import nvtx_phase
 
-            if cp_local_router_enabled():
-                # D1: route rank-local rows (zero-padded to the canonical
-                # full M for bitwise-equal FP32 GEMM results) instead of
-                # all-gathering the whole batch every layer. Default ON (R8);
-                # DSV41_CP_LOCAL_ROUTER=0 restores the canonical gather.
-                return cp_local_padded_routes(self, x, self._v41_cp_ctx)
-            from rtp_llm.models_py.modules.dsv4.v41_cp_router import (
-                canonical_v41_cp_routes,
-            )
+        with nvtx_phase("v41.moe.router"):
+            if self._v41_cp_ctx is not None:
+                from rtp_llm.models_py.modules.dsv4._v41_cp_local_router import (
+                    cp_local_padded_routes,
+                    cp_local_router_enabled,
+                )
 
-            return canonical_v41_cp_routes(self, x, self._v41_cp_ctx)
-        return self._forward_local(x, input_ids)
+                if cp_local_router_enabled():
+                    # D1: route rank-local rows (zero-padded to the canonical
+                    # full M for bitwise-equal FP32 GEMM results) instead of
+                    # all-gathering the whole batch every layer. Default ON (R8);
+                    # DSV41_CP_LOCAL_ROUTER=0 restores the canonical gather.
+                    return cp_local_padded_routes(self, x, self._v41_cp_ctx)
+                from rtp_llm.models_py.modules.dsv4.v41_cp_router import (
+                    canonical_v41_cp_routes,
+                )
+
+                return canonical_v41_cp_routes(self, x, self._v41_cp_ctx)
+            return self._forward_local(x, input_ids)
 
     def _forward_local(
         self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None

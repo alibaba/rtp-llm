@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules import RMSNorm
+from rtp_llm.models_py.modules.dsv4._nvtx_phases import nvtx_phase, nvtx_pop, nvtx_push
 from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     AttentionFP8,
     CommitOnlyAttentionFP8,
@@ -496,39 +497,116 @@ class Block(nn.Module):
             ffn_hc_post,
         ) = self._prefill_fast_hc_impls()
 
-        residual = x
-        x_pre, post, comb = attn_hc_pre(x)
-        if self.attn.can_fuse_prefill_attn_norm_input_quant(
-            x_pre, self.attn_norm.weight.data
-        ):
-            x_pre, shared_input_quant = self.attn.prefill_fused_attn_norm_input_quant(
+        if not hasattr(self, "_ffn_boundary_probe"):
+            # R27/C: lazy, flag-gated probe creation (first forward knows the
+            # device). Scope "one": only the first block per device probes.
+            self._ffn_boundary_probe = None
+            from rtp_llm.models_py.modules.dsv4._v41_graph_probe import (
+                GraphReplay,
+                claim_one_layer,
+                graph_probe_enabled,
+            )
+
+            if (
+                graph_probe_enabled()
+                and x.is_cuda
+                and claim_one_layer(("boundary", x.device))
+            ):
+                self._ffn_boundary_probe = GraphReplay(
+                    f"v41.boundary.l{getattr(self, 'layer_id', -1)}"
+                )
+
+        with nvtx_phase("v41.attn"):
+            residual = x
+            x_pre, post, comb = attn_hc_pre(x)
+            if self.attn.can_fuse_prefill_attn_norm_input_quant(
+                x_pre, self.attn_norm.weight.data
+            ):
+                x_pre, shared_input_quant = (
+                    self.attn.prefill_fused_attn_norm_input_quant(
+                        x_pre,
+                        self.attn_norm.weight.data,
+                        self.attn_norm.variance_epsilon,
+                    )
+                )
+                attn_out = self.attn.forward_with_shared_input_quant(
+                    x_pre,
+                    positions,
+                    shared_input_quant,
+                    kv_cache=kv_cache,
+                    block_tables_by_type=block_tables_by_type,
+                )
+            else:
+                x_pre = _prefill_fast_norm(self.attn_norm, x_pre)
+                attn_out = self.attn(
+                    x_pre,
+                    positions,
+                    kv_cache=kv_cache,
+                    block_tables_by_type=block_tables_by_type,
+                )
+            x = attn_hc_post(attn_out, residual, post, comb)
+        self._sync_after_first_cp_prefill_attention()
+
+        with nvtx_phase("v41.moe"):
+            residual = x
+            if self._ffn_boundary_probe is None:
+                x_pre, post, comb = ffn_hc_pre(x)
+                x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
+            else:
+                # R27/C probe: replay the FFN mHC boundary + norm as one
+                # captured graph when the input addresses are stable.
+                def _boundary(_staged):
+                    xp, po, co = ffn_hc_pre(_staged[0])
+                    return _prefill_fast_norm(self.ffn_norm, xp), po, co
+
+                (x_pre, post, comb), _kind = self._ffn_boundary_probe.run(
+                    [x],
+                    _boundary,
+                    side_get=lambda: self.ffn_hc.pre_mix_out,
+                    side_set=lambda v: setattr(self.ffn_hc, "pre_mix_out", v),
+                )
+            ffn_out = self.ffn(x_pre, input_ids)
+            return ffn_hc_post(ffn_out, residual, post, comb)
+
+    def _attn_boundary_norm(self, x_pre):
+        """The attention-side norm step: R29/B crumb 2 (DSV41_ATTN_NORM_QUANT_FUSE)
+        replaces the plain RMSNorm with the fused norm+shared-quant kernel when
+        the layout holds (the SM100-only ``can_fuse`` gate is bypassed on SM120
+        under the flag — the kernel gate itself is flag-scoped). Returns
+        (x_pre, shared_input_quant|None)."""
+        from rtp_llm.models_py.modules.dsv4.fp8._v41_norm_quant import (
+            attn_norm_quant_fuse_enabled as _attn_nq_fuse,
+        )
+        from rtp_llm.models_py.modules.dsv4.fp8._v41_norm_quant import (
+            rmsnorm_group32_quant,
+        )
+
+        if _attn_nq_fuse() and isinstance(self.attn, AttentionFP8):
+            result = rmsnorm_group32_quant(
                 x_pre,
                 self.attn_norm.weight.data,
                 self.attn_norm.variance_epsilon,
+                out_norm=x_pre,
             )
-            attn_out = self.attn.forward_with_shared_input_quant(
-                x_pre,
-                positions,
-                shared_input_quant,
-                kv_cache=kv_cache,
-                block_tables_by_type=block_tables_by_type,
-            )
-        else:
-            x_pre = _prefill_fast_norm(self.attn_norm, x_pre)
-            attn_out = self.attn(
-                x_pre,
-                positions,
-                kv_cache=kv_cache,
-                block_tables_by_type=block_tables_by_type,
-            )
-        x = attn_hc_post(attn_out, residual, post, comb)
-        self._sync_after_first_cp_prefill_attention()
+            if result is not None:
+                norm, quantized, scales = result
+                return norm, (quantized, scales)
+        return self.attn_norm(x_pre), None
 
-        residual = x
-        x_pre, post, comb = ffn_hc_pre(x)
-        x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
-        ffn_out = self.ffn(x_pre, input_ids)
-        return ffn_hc_post(ffn_out, residual, post, comb)
+    def _attn_boundary_fn(self, x):
+        """The probe-captured attn boundary: attn_hc.pre + the norm step.
+
+        Returns (x_pre, post, comb, shared_input_quant|None) — the fourth
+        output is the fused-quant payload when crumb 2 engaged at capture
+        time (flags are static per run, so each graph's content matches).
+        """
+
+        def _boundary(_staged):
+            xp, po, co = self.attn_hc.pre(_staged[0], dbg_tag=None)
+            xpn, sq = self._attn_boundary_norm(xp)
+            return xpn, po, co, sq
+
+        return _boundary
 
     def forward(
         self,
@@ -572,14 +650,46 @@ class Block(nn.Module):
             dbg_pos_mask = dbg_positions.to(torch.long) == int(dbg_pos)
             dbg_pos_name = f"pos{dbg_pos}"
         # Engram updates every residual stream before delayed mHC projection.
+        nvtx_push("v41.attn")
         x = self._inject_engram(x)
         # Attention path
         residual = x
-        x_pre, post, comb = self.attn_hc.pre(
-            x,
-            dbg_tag=f"L{self.layer_id:02d}_attn_hc_pre" if _dbg_layer else None,
-        )  # [T, dim], [T, hc, 1], [T, hc, hc]
-        x_pre = self.attn_norm(x_pre)  # [T, dim]
+        if not hasattr(self, "_attn_boundary_probe"):
+            # R29/A: lazy, flag-gated attn-boundary probe (attn_hc.pre +
+            # attn_norm — positions-free, NCCL-free; same capture-legal
+            # shape as the adopted FFN boundary).
+            self._attn_boundary_probe = None
+            from rtp_llm.models_py.modules.dsv4._v41_graph_probe import (
+                GraphReplay,
+                claim_one_layer,
+                graph_attn_enabled,
+                graph_attn_parts,
+            )
+
+            if (
+                graph_attn_enabled()
+                and "boundary" in graph_attn_parts()
+                and x.is_cuda
+                and claim_one_layer(("attn_boundary", x.device))
+            ):
+                self._attn_boundary_probe = GraphReplay(
+                    f"v41.attn_boundary.l{getattr(self, 'layer_id', -1)}"
+                )
+        if self._attn_boundary_probe is None:
+            x_pre, post, comb = self.attn_hc.pre(
+                x,
+                dbg_tag=f"L{self.layer_id:02d}_attn_hc_pre" if _dbg_layer else None,
+            )  # [T, dim], [T, hc, 1], [T, hc, hc]
+            x_pre, shared_input_quant = self._attn_boundary_norm(x_pre)
+        else:
+            (x_pre, post, comb, shared_input_quant), _kind = (
+                self._attn_boundary_probe.run(
+                    [x],
+                    self._attn_boundary_fn(x),
+                    side_get=lambda: self.attn_hc.pre_mix_out,
+                    side_set=lambda v: setattr(self.attn_hc, "pre_mix_out", v),
+                )
+            )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_in", x_pre)
             if dbg_pos_mask is not None:
@@ -594,12 +704,23 @@ class Block(nn.Module):
         # be false while this branch still constructs AttentionFP8, so dispatch
         # on the module type instead of only the cache config.
         if isinstance(self.attn, AttentionFP8):
-            attn_out = self.attn(
-                x_pre,  # [T, dim]
-                positions,  # [T] int64 absolute positions
-                kv_cache=kv_cache,
-                block_tables_by_type=block_tables_by_type,
-            )  # [T, dim]
+            if shared_input_quant is not None:
+                # R29/B crumb 2: attention consumes the fused norm+quant
+                # output directly (fast-path contract on the normal path).
+                attn_out = self.attn.forward_with_shared_input_quant(
+                    x_pre,
+                    positions,
+                    shared_input_quant,
+                    kv_cache=kv_cache,
+                    block_tables_by_type=block_tables_by_type,
+                )
+            else:
+                attn_out = self.attn(
+                    x_pre,  # [T, dim]
+                    positions,  # [T] int64 absolute positions
+                    kv_cache=kv_cache,
+                    block_tables_by_type=block_tables_by_type,
+                )  # [T, dim]
         else:
             # Present flat [T, dim] as [B, S, dim] for Attention.  The common
             # prefill layouts (single request, or dense equal-length batch) are
@@ -662,6 +783,7 @@ class Block(nn.Module):
                 )
         x = self.attn_hc.post(attn_out, residual, post, comb)  # [T, hc, dim]
         self._sync_after_first_cp_prefill_attention()
+        nvtx_pop()
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_residual", x)
             if dbg_pos_mask is not None:
@@ -672,12 +794,48 @@ class Block(nn.Module):
                 )
 
         # FFN path
+        nvtx_push("v41.moe")
         residual = x
-        x_pre, post, comb = self.ffn_hc.pre(
-            x,
-            dbg_tag=f"L{self.layer_id:02d}_ffn_hc_pre" if _dbg_layer else None,
-        )  # [T, dim], ...
-        x_pre = self.ffn_norm(x_pre)  # [T, dim]
+        if not hasattr(self, "_ffn_boundary_probe"):
+            # R27/C: lazy, flag-gated probe creation on the NORMAL prefill
+            # path (V4.1 blocks carry engram on L1/L14, so the FP8 fast
+            # layer-call cache is never used here — this forward is the
+            # production one). Scope "one": first block per device probes.
+            self._ffn_boundary_probe = None
+            from rtp_llm.models_py.modules.dsv4._v41_graph_probe import (
+                GraphReplay,
+                claim_one_layer,
+                graph_probe_enabled,
+            )
+
+            if (
+                graph_probe_enabled()
+                and x.is_cuda
+                and claim_one_layer(("boundary", x.device))
+            ):
+                self._ffn_boundary_probe = GraphReplay(
+                    f"v41.boundary.l{getattr(self, 'layer_id', -1)}"
+                )
+        if self._ffn_boundary_probe is None:
+            x_pre, post, comb = self.ffn_hc.pre(
+                x,
+                dbg_tag=f"L{self.layer_id:02d}_ffn_hc_pre" if _dbg_layer else None,
+            )  # [T, dim], ...
+            x_pre = self.ffn_norm(x_pre)  # [T, dim]
+        else:
+            # R27/C probe: replay the FFN mHC boundary + norm as one captured
+            # graph when the input addresses are stable (dbg off => the
+            # captured fn is byte-identical to the eager call).
+            def _boundary(_staged):
+                xp, po, co = self.ffn_hc.pre(_staged[0], dbg_tag=None)
+                return self.ffn_norm(xp), po, co
+
+            (x_pre, post, comb), _kind = self._ffn_boundary_probe.run(
+                [x],
+                _boundary,
+                side_get=lambda: self.ffn_hc.pre_mix_out,
+                side_set=lambda v: setattr(self.ffn_hc, "pre_mix_out", v),
+            )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_in", x_pre)
             if dbg_pos_mask is not None:
@@ -707,6 +865,7 @@ class Block(nn.Module):
                     ffn_out[dbg_pos_mask].contiguous(),
                 )
         x = self.ffn_hc.post(ffn_out, residual, post, comb)  # [T, hc, dim]
+        nvtx_pop()
         if _dbg_layer and dbg_pos_mask is not None:
             _rt.record_if_level(
                 2,

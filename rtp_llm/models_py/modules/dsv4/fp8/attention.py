@@ -32,6 +32,7 @@ import torch.nn.functional as F
 from deep_gemm.utils.layout import (  # noqa: E402
     get_mn_major_tma_aligned_packed_ue8m0_tensor,
 )
+
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
@@ -3980,6 +3981,7 @@ class AttentionFP8(nn.Module):
             qkv.q is not None
         ), "_attn_via_workspace_cp_raw_q_merge: prefill Q not materialized"
         from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
+
         from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
 
@@ -5466,17 +5468,17 @@ class AttentionFP8(nn.Module):
             cache_compaction=cache_compaction,
         )
 
-    def _prefill_compute_qkv(
+    def _prefill_compute_qkv_prefix(
         self,
         x: torch.Tensor,
         common: PrefillMeta,
         shared_input_quant: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> PrefillQKV:
-        """Q/KV path — RMSNorm + LoRA Q + KV linears + fused RMSNorm-RoPE.
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """R29/A split point: the NCCL-free, capture-legal QKV prefix.
 
-        Internally uses ``[1, T, ...]`` so ``fused_rmsnorm_rope`` sees the
-        ``(B, S, …)`` layout it expects. Returned tensors keep the 3D
-        shape because downstream pool/compressor helpers rely on it.
+        Quant + wq_a/q_norm + wkv/fused_rmsnorm_rope — everything before
+        the CP all-gather (which is not graph-capturable on this branch).
+        Returns (qr, kv); the gather tail stays in _prefill_compute_qkv.
         """
         x_3d = x.unsqueeze(0)
         rd = common.rd
@@ -5485,19 +5487,14 @@ class AttentionFP8(nn.Module):
                 with record_function_range("dsv4.fp8.attn.qkv.shared_input_quant"):
                     x_2d = x_3d.reshape(-1, x_3d.shape[-1])
                     shared_input_quant = self.wq_a.quantize_input(x_2d)
-        elif (
-            shared_input_quant is None
-            and self._can_share_sm12x_qkv_quant()
-        ):
+        elif shared_input_quant is None and self._can_share_sm12x_qkv_quant():
             # E6 (DSV41_E6_SHARED_QKV_QUANT): the DeepGEMM gate above is
             # closed on consumer SM12x, but both projections are the same
             # V41MXFP8Linear class whose forward IS
             # forward_quantized(*_quantize_input(x)) — quantize the normed
             # rows once and feed both. Same quantizer, same input bytes,
             # deterministic kernel → byte-exact.
-            from rtp_llm.models_py.modules.dsv4._v41_shared_qkv_quant import (
-                announce_e6,
-            )
+            from rtp_llm.models_py.modules.dsv4._v41_shared_qkv_quant import announce_e6
 
             with record_function_range("dsv4.fp8.attn.qkv.shared_input_quant"):
                 x_2d = x_3d.reshape(-1, x_3d.shape[-1])
@@ -5543,6 +5540,57 @@ class AttentionFP8(nn.Module):
 
         qr = compute_qr()
         kv = compute_kv()
+        return qr, kv
+
+    def _prefill_compute_qkv(
+        self,
+        x: torch.Tensor,
+        common: PrefillMeta,
+        shared_input_quant: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> PrefillQKV:
+        """Q/KV path — RMSNorm + LoRA Q + KV linears + fused RMSNorm-RoPE.
+
+        Internally uses ``[1, T, ...]`` so ``fused_rmsnorm_rope`` sees the
+        ``(B, S, …)`` layout it expects. Returned tensors keep the 3D
+        shape because downstream pool/compressor helpers rely on it.
+
+        R29/A (DSV41_GRAPH_ATTN): the prefix runs as a multi-graph replay
+        when the (x, freqs_cis) addresses are stable; the CP gather tail
+        is never captured (NCCL, not graph-legal here).
+        """
+        if not hasattr(self, "_qkv_prefix_probe"):
+            self._qkv_prefix_probe = None
+            from rtp_llm.models_py.modules.dsv4._v41_graph_probe import (
+                GraphReplay,
+                claim_one_layer,
+                graph_attn_enabled,
+                graph_attn_parts,
+            )
+
+            if (
+                graph_attn_enabled()
+                and "qkv" in graph_attn_parts()
+                and x.is_cuda
+                and common.freqs_cis is not None
+                and claim_one_layer(("qkv_prefix", x.device))
+            ):
+                self._qkv_prefix_probe = GraphReplay(
+                    f"v41.qkv_prefix.l{getattr(self, 'layer_id', -1)}"
+                )
+        if self._qkv_prefix_probe is None:
+            qr, kv = self._prefill_compute_qkv_prefix(
+                x, common, shared_input_quant=shared_input_quant
+            )
+        else:
+            (qr, kv), _kind = self._qkv_prefix_probe.run(
+                [x, common.freqs_cis],
+                lambda _staged: self._prefill_compute_qkv_prefix(
+                    _staged[0],
+                    common._replace(freqs_cis=_staged[1]),
+                    shared_input_quant=shared_input_quant,
+                ),
+                copy_in=(1,),
+            )
         kv_full_handle = None
         if common.cp_on:
             kv_flat = kv.reshape(kv.size(0) * kv.size(1), *kv.shape[2:])

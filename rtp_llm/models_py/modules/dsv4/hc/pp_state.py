@@ -8,8 +8,14 @@ from rtp_llm.models_py.modules.dsv4.hc.delayed import DelayedHCUnit
 
 
 class _ImportedPredecessor:
-    def __init__(self, pre_mix):
-        self.pre_mix_out = pre_mix.clone()
+    def __init__(self, pre_mix, pin_buffer=None):
+        if pin_buffer is not None:
+            # R29/A: pin the imported clone to the receiving unit's static
+            # buffer — the stage-entry boundary may be graph-captured, and
+            # a per-chunk clone's address cycles (stale-read hazard).
+            self.pre_mix_out = pin_buffer.copy_(pre_mix)
+        else:
+            self.pre_mix_out = pre_mix.clone()
 
 
 @contextmanager
@@ -53,7 +59,17 @@ def imported_delayed_pre_mix(unit, residual, pre_mix):
         )
     if not bool(torch.isfinite(pre_mix).all()):
         raise ValueError("Imported delayed-HC coefficients must be finite")
-    predecessor = _ImportedPredecessor(pre_mix)
+    from rtp_llm.models_py.modules.dsv4._v41_graph_probe import (
+        premix_pin_enabled as _premix_pin_enabled,
+    )
+
+    pin_buffer = None
+    if _premix_pin_enabled():
+        pin_buffer = getattr(unit, "_imported_premix_static", None)
+        if pin_buffer is None or pin_buffer.shape != pre_mix.shape:
+            pin_buffer = torch.empty_like(pre_mix)
+            unit._imported_premix_static = pin_buffer
+    predecessor = _ImportedPredecessor(pre_mix, pin_buffer=pin_buffer)
     unit.set_previous(predecessor)
     try:
         yield

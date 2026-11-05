@@ -36,8 +36,10 @@ import triton.language as tl
 
 SPARSE_PREFILL_V2_FLAG = "DSV41_SPARSE_PREFILL_V2"
 SPARSE_PREFILL_V2_VERIFY_FLAG = "DSV41_SPARSE_PREFILL_V2_VERIFY"
+INV_ROPE_FOLD_FLAG = "DSV41_INV_ROPE_FOLD"
 _MODES = ("0", "s2", "qt", "qt64", "h32")
 _SPV2_ANNOUNCED = False
+_INV_ROPE_FOLD_ANNOUNCED = [False]
 # R23: op-level numerics for the flip-class modes (qt/qt64/h32) — cumulative
 # comparison of the mode output against the s2 launch (which is bitwise the
 # legacy output). Verify-only (DSV41_SPARSE_PREFILL_V2_VERIFY=1); timed arms
@@ -64,6 +66,23 @@ def _spv2_verify_enabled() -> bool:
     return os.environ.get(SPARSE_PREFILL_V2_VERIFY_FLAG, "0") == "1"
 
 
+def inv_rope_fold_enabled() -> bool:
+    """R29/B crumb 1 (F4): fold the output inverse-RoPE into the qt-family
+    epilogue. Default off; the s2/legacy kernels never fold."""
+    if os.environ.get(INV_ROPE_FOLD_FLAG, "0") == "1":
+        if not _INV_ROPE_FOLD_ANNOUNCED[0]:
+            _INV_ROPE_FOLD_ANNOUNCED[0] = True
+            import sys
+
+            print(
+                f"[INVROPEFOLD] engaged ({INV_ROPE_FOLD_FLAG}=1)",
+                file=sys.stderr,
+                flush=True,
+            )
+        return True
+    return False
+
+
 def _spv2_announce(mode: str) -> None:
     """R21/A: one-shot engagement proof per process (stderr -> native-rank*.log)."""
     global _SPV2_ANNOUNCED
@@ -87,10 +106,12 @@ def _sparse_prefill_qt(
     SINK,
     OUT,
     COUNT,
+    FREQS,
     HEADS: tl.constexpr,
     WIDTH: tl.constexpr,
     TILE: tl.constexpr,
     HB: tl.constexpr,
+    ROPE_RD: tl.constexpr = 0,
     DIRECT_SINK_DIV_RN: tl.constexpr = False,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -139,11 +160,37 @@ def _sparse_prefill_qt(
         alpha = tl.exp(maximum - next_max)
         denominator = total * alpha + tl.exp(sink - next_max)
         result = acc * (alpha / denominator)[:, None]
+    if ROPE_RD > 0:
+        # R29/B crumb 1 (F4, DSV41_INV_ROPE_FOLD): fold the inverse RoPE of
+        # the output tail into the store epilogue. Byte-exactness contract
+        # vs the eager chain (store bf16 -> complex64 conj-multiply ->
+        # copy back bf16): round the fp32 accumulator to BF16 FIRST, then
+        # conjugate-multiply in fp32, then let the store re-round.
+        rb = result.to(tl.bfloat16).to(tl.float32)
+        pairs = tl.reshape(rb, (HB, 256, 2))
+        re, im = tl.split(pairs)  # [HB, 256] each
+        pair = tl.arange(0, 256)
+        TAIL0: tl.constexpr = 256 - ROPE_RD // 2
+        tail = pair >= TAIL0
+        fp = pair - TAIL0
+        fre = tl.load(FREQS + row * ROPE_RD + fp * 2, mask=tail, other=0.0)
+        fim = tl.load(FREQS + row * ROPE_RD + fp * 2 + 1, mask=tail, other=0.0)
+        # (re + i*im) x conj(fre + i*fim): re*fre + im*fim, im*fre - re*fim
+        nre = re * fre + im * fim
+        nim = im * fre - re * fim
+        re = tl.where(tail[None, :], nre, re)
+        im = tl.where(tail[None, :], nim, im)
+        result = tl.reshape(tl.join(re, im), (HB, 512))
     tl.store(OUT + address, result, heads[:, None] < HEADS)
 
 
-def sparse_prefill_attention_v2(query, kv, indices, lengths, sinks, mode):
-    """Drop-in replacement for sparse_prefill_attention under the V2 flag."""
+def sparse_prefill_attention_v2(query, kv, indices, lengths, sinks, mode, freqs=None, rope_dim=0):
+    """Drop-in replacement for sparse_prefill_attention under the V2 flag.
+
+    R29/B: ``freqs`` (complex64 [rows, rope_dim//2]) + ``rope_dim`` fold the
+    output inverse-RoPE into the qt-family epilogue when
+    DSV41_INV_ROPE_FOLD=1; the s2/legacy modes ignore them (eager rope kept).
+    """
     from ._v41_prefill_attention_sm120 import _sparse_prefill
 
     _spv2_announce(mode)
@@ -201,6 +248,20 @@ def sparse_prefill_attention_v2(query, kv, indices, lengths, sinks, mode):
     else:
         tile, hb, warps = 32, 16, 4
     grid = (query.shape[0], triton.cdiv(query.shape[1], hb))
+    fold = (
+        freqs is not None
+        and rope_dim > 0
+        and inv_rope_fold_enabled()
+        and freqs.is_complex()
+        and freqs.dtype == torch.complex64
+        and freqs.shape == (query.shape[0], rope_dim // 2)
+        and freqs.is_contiguous()
+    )
+    if fold:
+        freqs_f32 = torch.view_as_real(freqs).reshape(query.shape[0], rope_dim)
+    else:
+        freqs_f32 = output  # dummy pointer; ROPE_RD=0 never reads it
+        rope_dim = 0
     _sparse_prefill_qt[grid](
         query,
         kv,
@@ -209,10 +270,12 @@ def sparse_prefill_attention_v2(query, kv, indices, lengths, sinks, mode):
         sinks,
         output,
         kv.shape[0],
+        freqs_f32,
         HEADS=query.shape[1],
         WIDTH=indices.shape[-1],
         TILE=tile,
         HB=hb,
+        ROPE_RD=rope_dim,
         num_warps=warps,
         num_stages=2,
     )

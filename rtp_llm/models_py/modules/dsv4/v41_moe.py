@@ -1,20 +1,30 @@
 """Bounded local routing and FP32 combination for V4.1 FP4 expert shards."""
 
+import os
+
 import torch
 from torch import nn
 
 from rtp_llm.models_py.modules.dsv4._v41_deferred_checks import (
     add_check as _add_deferred_check,
-    grouped_asserts_enabled as _grouped_asserts_enabled,
 )
-from rtp_llm.models_py.modules.dsv4._v41_moe_count_dump import (
-    count_dump_record as _count_dump_record,
+from rtp_llm.models_py.modules.dsv4._v41_deferred_checks import (
+    grouped_asserts_enabled as _grouped_asserts_enabled,
 )
 from rtp_llm.models_py.modules.dsv4._v41_device_segments import (
     announce_device_segments as _ds_announce,
+)
+from rtp_llm.models_py.modules.dsv4._v41_device_segments import (
     capacity_for as _ds_capacity_for,
+)
+from rtp_llm.models_py.modules.dsv4._v41_device_segments import (
     device_segment_plan as _ds_plan,
+)
+from rtp_llm.models_py.modules.dsv4._v41_device_segments import (
     device_segments_enabled as _ds_enabled,
+)
+from rtp_llm.models_py.modules.dsv4._v41_moe_count_dump import (
+    count_dump_record as _count_dump_record,
 )
 from rtp_llm.models_py.modules.dsv4.v41_dispatch import V41DispatchLayout
 from rtp_llm.models_py.modules.dsv4.v41_expert import V41_EXPERT_RECIPE
@@ -24,16 +34,75 @@ from rtp_llm.models_py.modules.dsv4.v41_routed import (
     _validate_input_scales,
 )
 
+_MOE_COUNTS_OVERLAP_FLAG = "DSV41_MOE_COUNTS_OVERLAP"
+_COUNTS_READ_CACHE = {}
+_COUNTS_READ_ANNOUNCED = [False]
+
+
+def _moe_counts_overlap_enabled() -> bool:
+    # R28: default flipped to "1" (adopted; R27/B evidence: -35.3 ms median,
+    # 2/3 pairs, byte-exact). Escape: DSV41_MOE_COUNTS_OVERLAP=0.
+    return os.environ.get(_MOE_COUNTS_OVERLAP_FLAG, "1") == "1"
+
+
+def _issue_counts_read(counts, experts):
+    """Async D2H of the per-expert counts into a cached pinned buffer.
+
+    Returns (pinned_cpu_tensor, event); the consumer event.synchronize()s
+    and reads the pinned tensor. Per-device buffer reuse is safe because
+    the host consumes the previous read before enqueuing the next copy
+    (host program order serializes both).
+    """
+    device = counts.device
+    key = (device.type, device.index, experts)
+    entry = _COUNTS_READ_CACHE.get(key)
+    if entry is None:
+        pinned = torch.empty((experts,), dtype=torch.int64, pin_memory=True)
+        entry = (pinned, torch.cuda.Event())
+        _COUNTS_READ_CACHE[key] = entry
+    pinned, event = entry
+    pinned.copy_(counts[:experts], non_blocking=True)
+    event.record()
+    if not _COUNTS_READ_ANNOUNCED[0]:
+        _COUNTS_READ_ANNOUNCED[0] = True
+        import sys
+
+        print(
+            f"[MOECOUNTSOV] engaged ({_MOE_COUNTS_OVERLAP_FLAG}=1): early pinned "
+            "counts read + event-join",
+            file=sys.stderr,
+            flush=True,
+        )
+    return pinned, event
+
+
+_H2D_STAGING_CACHE = {}
+
+
+def _stage_h2d_int64(values, device):
+    """Pinned-staged async H2D for a host int64 list (segment_starts).
+
+    The plain ``torch.tensor(list, device=cuda)`` path pays a synchronous
+    pageable H2D copy (host blocks ~10-20 us); staging through a cached
+    pinned buffer makes the copy non-blocking. Reuse is safe: the host
+    rewrites the staging buffer only after the next layer's counts-event
+    sync, which is stream-ordered after this copy.
+    """
+    key = (device.type, device.index, len(values))
+    pinned = _H2D_STAGING_CACHE.get(key)
+    if pinned is None:
+        pinned = torch.empty((len(values),), dtype=torch.int64, pin_memory=True)
+        _H2D_STAGING_CACHE[key] = pinned
+    pinned.copy_(torch.tensor(values, dtype=torch.int64))
+    return pinned.to(device, non_blocking=True)
+
 
 def _assert_values(condition, message):
     if condition.device.type == "cpu":
         if not bool(condition):
             raise ValueError(message)
     else:
-        if (
-            _grouped_asserts_enabled()
-            and not torch.cuda.is_current_stream_capturing()
-        ):
+        if _grouped_asserts_enabled() and not torch.cuda.is_current_stream_capturing():
             _add_deferred_check(condition, message)
         else:
             torch._assert_async(condition, message)
@@ -57,7 +126,7 @@ class V41LocalMoE(nn.Module):
         expert_start_id=0,
         max_tokens=4096,
         masked_token_limit=128,
-        max_topk=6
+        max_topk=6,
     ):
         super().__init__()
         if not isinstance(experts, V41RoutedExperts):
@@ -83,8 +152,16 @@ class V41LocalMoE(nn.Module):
         self.max_tokens, self.masked_token_limit = max_tokens, masked_token_limit
         self.max_topk = max_topk
 
-    def forward_received(self, payload, dispatch_layout, *, layout="contiguous"):
-        """Return FP32 local contributions from an already-admitted EP payload."""
+    def forward_received(
+        self, payload, dispatch_layout, *, layout="contiguous", return_layout=None
+    ):
+        """Return FP32 local contributions from an already-admitted EP payload.
+
+        R25/F1: with ``return_layout`` (mxfp8) and DSV41_COMBINE_RETURN_FUSED=1
+        the result is instead the wire-ready uint8 MXFP8 packet
+        [rows, payload_bytes] from the fused combine+pack pass. The legacy
+        partial is always FP32, so dtype disambiguates for callers.
+        """
         if (
             type(dispatch_layout) is not V41DispatchLayout
             or dispatch_layout.recipe != self.recipe
@@ -106,7 +183,14 @@ class V41LocalMoE(nn.Module):
                 "V4.1 received payload exceeds device, layout or token bounds"
             )
         values, scales, weights, indices = dispatch_layout.unpack(payload)
-        return self(values, weights, indices, layout=layout, input_scales=scales)
+        return self(
+            values,
+            weights,
+            indices,
+            layout=layout,
+            input_scales=scales,
+            return_layout=return_layout,
+        )
 
     def forward(
         self,
@@ -116,7 +200,8 @@ class V41LocalMoE(nn.Module):
         *,
         valid_rows=None,
         layout="contiguous",
-        input_scales=None
+        input_scales=None,
+        return_layout=None,
     ):
         """Route BF16 or explicit received E4M3/linear UE8M0 rows without reweighting."""
         dtype = torch.bfloat16 if input_scales is None else torch.float8_e4m3fn
@@ -151,9 +236,7 @@ class V41LocalMoE(nn.Module):
         if x.is_cuda and layout == "contiguous":
             # G5: the device-segment plan keeps every count on the GPU, so the
             # fixed-capacity contiguous path is capture-safe.
-            device_segments = (
-                _ds_enabled() and self.experts.backend == "deepgemm"
-            )
+            device_segments = _ds_enabled() and self.experts.backend == "deepgemm"
             if not device_segments:
                 with torch.cuda.device(x.device):
                     if torch.cuda.is_current_stream_capturing():
@@ -214,6 +297,22 @@ class V41LocalMoE(nn.Module):
         sorted_experts = keys.flatten().index_select(0, order)
         counts = torch.zeros(experts + 1, dtype=torch.int64, device=x.device)
         counts.scatter_add_(0, keys.flatten(), torch.ones_like(keys.flatten()))
+        # R27/B (DSV41_MOE_COUNTS_OVERLAP): the contiguous layout branch reads
+        # the per-expert counts on the host to plan 128-aligned segments. The
+        # plain ``.cpu()`` there is stream-ordered BEHIND the intermediate
+        # planning kernels enqueued in between, so the host sits out the whole
+        # queue and the GPU drains (~180 us/layer measured, KDA-IDLE §1 row A).
+        # Issue the D2H immediately after production into a cached pinned
+        # buffer with an event; the consumption point then waits only on the
+        # copy itself. Same bytes (exact int64 copy) => byte-exact.
+        overlap_read = None
+        if (
+            layout == "contiguous"
+            and not device_segments
+            and x.is_cuda
+            and _moe_counts_overlap_enabled()
+        ):
+            overlap_read = _issue_counts_read(counts, experts)
         starts = counts.cumsum(0) - counts
         offsets = torch.arange(route_count, device=x.device) - starts.index_select(
             0, sorted_experts
@@ -238,12 +337,8 @@ class V41LocalMoE(nn.Module):
                 capacity,
                 sink,
             )
-            routed_x = torch.zeros(
-                (capacity, dim), device=x.device, dtype=source.dtype
-            )
-            routed_x.index_copy_(
-                0, destinations, source.index_select(0, order // topk)
-            )
+            routed_x = torch.zeros((capacity, dim), device=x.device, dtype=source.dtype)
+            routed_x.index_copy_(0, destinations, source.index_select(0, order // topk))
             routed_scales = None
             if input_scales is not None:
                 routed_scales = torch.zeros(
@@ -252,9 +347,7 @@ class V41LocalMoE(nn.Module):
                 routed_scales.index_copy_(
                     0, destinations, input_scales.index_select(0, order // topk)
                 )
-            routed_weights = torch.zeros(
-                capacity, device=x.device, dtype=torch.float32
-            )
+            routed_weights = torch.zeros(capacity, device=x.device, dtype=torch.float32)
             routed_weights.index_copy_(
                 0, destinations, weights.flatten().index_select(0, order)
             )
@@ -263,9 +356,7 @@ class V41LocalMoE(nn.Module):
             route_map.index_copy_(
                 0,
                 order,
-                torch.where(
-                    sorted_active, destinations, destinations.new_full((), -1)
-                ),
+                torch.where(sorted_active, destinations, destinations.new_full((), -1)),
             )
             down = self.experts.forward_contiguous_device(
                 routed_x.view(x.dtype),
@@ -279,7 +370,12 @@ class V41LocalMoE(nn.Module):
             )
             allocated = capacity
         elif layout == "contiguous":
-            actual_counts = tuple(counts[:experts].cpu().tolist())
+            if overlap_read is not None:
+                pinned, event = overlap_read
+                event.synchronize()
+                actual_counts = tuple(pinned.tolist())
+            else:
+                actual_counts = tuple(counts[:experts].cpu().tolist())
             _count_dump_record(self.expert_start_id, actual_counts)
             segments = tuple(
                 (n + GROUPED_ALIGNMENT - 1) // GROUPED_ALIGNMENT * GROUPED_ALIGNMENT
@@ -292,7 +388,10 @@ class V41LocalMoE(nn.Module):
             for size in segments:
                 segment_starts.append(cursor)
                 cursor += size
-            base = torch.tensor(segment_starts, dtype=torch.int64, device=x.device)
+            if overlap_read is not None:
+                base = _stage_h2d_int64(segment_starts, x.device)
+            else:
+                base = torch.tensor(segment_starts, dtype=torch.int64, device=x.device)
             order = order[:active_count]
             destinations = (
                 base.index_select(0, sorted_experts[:active_count])
@@ -392,6 +491,21 @@ class V41LocalMoE(nn.Module):
         # Accumulate in expert-ID order and FP32, as the checkpoint loop does.
         route_map = route_map.reshape(rows, topk)
         route_map = route_map.gather(1, keys.argsort(dim=-1, stable=True))
+        if return_layout is not None and x.is_cuda:
+            # R25/F1: fused ordered-combine + MXFP8 return pack (one pass,
+            # no FP32 partial roundtrip). Falls back to None on any guard
+            # mismatch, leaving the legacy two-kernel path untouched. The
+            # packet is returned BARE (uint8 tensor) so middleware that
+            # tensor-walks forward_received results (e.g. the harness MoE
+            # fixture capture) keeps working; the legacy partial is always
+            # FP32, so dtype disambiguates unambiguously at the strategy.
+            from ._v41_combine_return_triton import combine_return_fused
+
+            packed = combine_return_fused(
+                down, route_map, return_layout, _validated_map=True
+            )
+            if packed is not None:
+                return packed
         if x.is_cuda and (layout == "masked" or self.experts.prefill_local_fuse):
             from ._v41_moe_combine_triton import combine_ordered_rows
 

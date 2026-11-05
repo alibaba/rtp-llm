@@ -706,21 +706,27 @@ def register_pp_process_group(
         return global_peer
 
     def cpp_isend(tensor: torch.Tensor, global_peer: int, backend: int):
-        work = torch.distributed.isend(
-            tensor,
-            dst=_check_peer(global_peer),
-            group=_get_p2p_group(backend),
-        )
+        from rtp_llm.models_py.modules.dsv4._nvtx_phases import nvtx_phase
+
+        with nvtx_phase("v41.pp.send"):
+            work = torch.distributed.isend(
+                tensor,
+                dst=_check_peer(global_peer),
+                group=_get_p2p_group(backend),
+            )
         if work is None:
             raise RuntimeError("isend returned no work")
         return work
 
     def cpp_irecv(tensor: torch.Tensor, global_peer: int, backend: int):
-        work = torch.distributed.irecv(
-            tensor,
-            src=_check_peer(global_peer),
-            group=_get_p2p_group(backend),
-        )
+        from rtp_llm.models_py.modules.dsv4._nvtx_phases import nvtx_phase
+
+        with nvtx_phase("v41.pp.recv"):
+            work = torch.distributed.irecv(
+                tensor,
+                src=_check_peer(global_peer),
+                group=_get_p2p_group(backend),
+            )
         if work is None:
             raise RuntimeError("irecv returned no work")
         return work

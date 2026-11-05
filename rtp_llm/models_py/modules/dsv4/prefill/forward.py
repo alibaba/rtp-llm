@@ -105,6 +105,7 @@ import torch
 from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+from rtp_llm.models_py.modules.dsv4._nvtx_phases import nvtx_phase
 from rtp_llm.models_py.modules.dsv4.cp import (
     build_cp_context_for_forward,
     cp_gather_last_by_request,
@@ -703,14 +704,15 @@ def forward_layers(
                         max_seqlen_q=cp_ctx.chunk_length,
                         workspace=ws,
                     )
-                h = layer_call(
-                    h,  # [T, hc, dim]
-                    input_ids,  # [T]
-                    positions,  # [T]
-                    cu_seqlens,  # [B+1]
-                    kv_cache=kv_cache,
-                    block_tables_by_type=block_tables_by_type,
-                )  # [T, hc, dim]
+                with nvtx_phase("v41.layer"):
+                    h = layer_call(
+                        h,  # [T, hc, dim]
+                        input_ids,  # [T]
+                        positions,  # [T]
+                        cu_seqlens,  # [B+1]
+                        kv_cache=kv_cache,
+                        block_tables_by_type=block_tables_by_type,
+                    )  # [T, hc, dim]
                 # ``capture_ids`` are GLOBAL layer ids while ``layer_idx`` is
                 # this stage's local position, so translate before matching.
                 if capture_aux:

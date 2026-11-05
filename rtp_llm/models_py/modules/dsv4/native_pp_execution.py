@@ -151,90 +151,128 @@ def execute_native_pp_prefill(
     worker, dispatch, contract, transfer_round, *, receiver=None, tensors=None
 ):
     """Serialize at the worker; STAGE validates before either import or layers."""
+    from rtp_llm.models_py.modules.dsv4._nvtx_phases import nvtx_phase
+    from rtp_llm.models_py.modules.dsv4._v41_chunk_boundary import (
+        chunk_boundary_overlap_enabled as _chunk_boundary_overlap_enabled,
+    )
     from rtp_llm.models_py.modules.dsv4.fp8 import _v41_compact_cp_runtime as compact_cp
 
     current = frame = error = compact = None
     try:
-        try:
-            current, frame = _validate_execution(
-                worker, dispatch, contract, transfer_round, receiver, tensors
-            )
-            compact = compact_cp.prepare(worker, current, transfer_round)
-        except Exception as exc:
-            error = exc
-        try:
-            worker._agree_dp(
-                error,
-                (
-                    "native-pp-execution",
-                    transfer_round,
-                    None if current is None else current.schedule,
-                    None if compact is None else compact.signature,
-                ),
-                worker._weight_device(),
-                native_dispatch=True,
-            )
-        finally:
-            error = None
+        # R30/B: one-time per-device pre-warm (allocator pools + pinned
+        # staging) before the first chunk's admission work.
+        from rtp_llm.models_py.modules.dsv4._v41_staging_prewarm import (
+            prewarm_device,
+            staging_prewarm_enabled,
+        )
+
+        if staging_prewarm_enabled():
+            prewarm_device(worker._weight_device())
+        agree_wait = None
+        with nvtx_phase("v41.admission"):
+            try:
+                current, frame = _validate_execution(
+                    worker, dispatch, contract, transfer_round, receiver, tensors
+                )
+                compact = compact_cp.prepare(worker, current, transfer_round)
+            except Exception as exc:
+                error = exc
+            if _chunk_boundary_overlap_enabled():
+                # R28/C: issue the DP agreement now; wait+check right before
+                # the layers (still before any of this chunk's collectives).
+                agree_wait = worker._agree_dp_async(
+                    error,
+                    (
+                        "native-pp-execution",
+                        transfer_round,
+                        None if current is None else current.schedule,
+                        None if compact is None else compact.signature,
+                    ),
+                    worker._weight_device(),
+                    native_dispatch=True,
+                )
+                error = None
+            else:
+                try:
+                    worker._agree_dp(
+                        error,
+                        (
+                            "native-pp-execution",
+                            transfer_round,
+                            None if current is None else current.schedule,
+                            None if compact is None else compact.signature,
+                        ),
+                        worker._weight_device(),
+                        native_dispatch=True,
+                    )
+                finally:
+                    error = None
         inputs = current.native_inputs
         previous_intermediates = inputs.pp_intermediates
         payload = {}
 
         def export(hidden):
-            if dsv41_prefill_pp_cut() == 20:
-                payload.update(pack_v41_hidden_frame(
-                    worker.v4.layers[-1], hidden, contract, transfer_round,
-                    current.cp.cp_rank, current.spans, current.rows,
-                ))
-                return
-            state = snapshot_native_l20_frame(
-                worker.v4.layers[-1], hidden, current.spans, current.rows
-            )
-            delta = export_native_l20_delta(
-                worker._v4_args.v41_config,
-                worker.kv_cache,
-                contract,
-                current.cp.cp_rank,
-                transfer_round,
-                current.spans,
-                l20_tables(current),
-            )
-            payload.update(pack_v41_pp_frame(delta, state, current.spans, current.rows))
+            with nvtx_phase("v41.pp_export"):
+                if dsv41_prefill_pp_cut() == 20:
+                    payload.update(pack_v41_hidden_frame(
+                        worker.v4.layers[-1], hidden, contract, transfer_round,
+                        current.cp.cp_rank, current.spans, current.rows,
+                    ))
+                    return
+                state = snapshot_native_l20_frame(
+                    worker.v4.layers[-1], hidden, current.spans, current.rows
+                )
+                delta = export_native_l20_delta(
+                    worker._v4_args.v41_config,
+                    worker.kv_cache,
+                    contract,
+                    current.cp.cp_rank,
+                    transfer_round,
+                    current.spans,
+                    l20_tables(current),
+                )
+                payload.update(pack_v41_pp_frame(delta, state, current.spans, current.rows))
 
         try:
-            if frame is None:
-                source_scope = premix_scope = nullcontext()
-                worker._prepare_engram(inputs)
-            else:
-                if _CONSUMER_DELAY_MS:
-                    time.sleep(_CONSUMER_DELAY_MS / 1000)
-                source_scope = nullcontext()
-                if dsv41_prefill_pp_cut() == 21:
-                    receiver.apply(tensors, current.spans)
-                    source = prepare_native_l20_prefill_source(
-                        frame, receiver, current.spans, current.rows, cp_ctx=current.cp
+            with nvtx_phase("v41.chunk_setup"):
+                if frame is None:
+                    source_scope = premix_scope = nullcontext()
+                    worker._prepare_engram(inputs)
+                else:
+                    if _CONSUMER_DELAY_MS:
+                        time.sleep(_CONSUMER_DELAY_MS / 1000)
+                    source_scope = nullcontext()
+                    if dsv41_prefill_pp_cut() == 21:
+                        receiver.apply(tensors, current.spans)
+                        source = prepare_native_l20_prefill_source(
+                            frame, receiver, current.spans, current.rows, cp_ctx=current.cp
+                        )
+                        source_scope = imported_native_l20_prefill(worker.v4.layers[0].attn, source)
+                    entry = worker.v4.layers[0]
+                    # Maintained mHC post writes into its residual. The received
+                    # frame remains owned by transport until consumer completion.
+                    residual = frame.hidden_states.clone()
+                    premix_scope = imported_delayed_pre_mix(
+                        entry.attn_hc, residual, frame.prev_pre_mix
                     )
-                    source_scope = imported_native_l20_prefill(worker.v4.layers[0].attn, source)
-                entry = worker.v4.layers[0]
-                # Maintained mHC post writes into its residual. The received
-                # frame remains owned by transport until consumer completion.
-                residual = frame.hidden_states.clone()
-                premix_scope = imported_delayed_pre_mix(
-                    entry.attn_hc, residual, frame.prev_pre_mix
-                )
-                inputs.pp_intermediates = {"hidden_states": residual}
-            with source_scope, premix_scope, compact_cp.execution_scope(
-                worker, compact
-            ):
-                outputs = forward_prefill(
-                    worker.v4,
-                    worker.kv_cache,
-                    worker.parallelism_config,
-                    inputs,
-                    after_layers_fn=export if frame is None else None,
-                )
-            if frame is None:
-                outputs.pp_intermediates = payload
+                    inputs.pp_intermediates = {"hidden_states": residual}
+            if agree_wait is not None:
+                with nvtx_phase("v41.agree_wait"):
+                    agree_wait()
+            with nvtx_phase("v41.layers"):
+                with source_scope, premix_scope, compact_cp.execution_scope(
+                    worker, compact
+                ):
+                    outputs = forward_prefill(
+                        worker.v4,
+                        worker.kv_cache,
+                        worker.parallelism_config,
+                        inputs,
+                        after_layers_fn=export if frame is None else None,
+                    )
+            with nvtx_phase("v41.result"):
+                if frame is None:
+                    outputs.pp_intermediates = payload
             return outputs
         except BaseException:
             worker._worker_state = "failed"

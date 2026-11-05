@@ -21,6 +21,10 @@ import torch.nn.functional as F
 from torch import nn
 
 from rtp_llm.models_py.modules.dsv4.hc.base import HCUnitBase
+from rtp_llm.models_py.modules.dsv4._nvtx_phases import nvtx_phase
+from rtp_llm.models_py.modules.dsv4._v41_graph_probe import (
+    premix_pin_enabled as _premix_pin_enabled,
+)
 from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import _hc_split_sinkhorn
 from rtp_llm.models_py.modules.dsv4.hc.tilelang_impl import TileLangHCUnit
 
@@ -164,6 +168,10 @@ class DelayedHCUnit(HCUnitBase):
         self.scale = self.scale.reshape(3).contiguous()
         self._previous_ref: Optional[weakref.ReferenceType[DelayedHCPredecessor]] = None
         self.pre_mix_out: Optional[torch.Tensor] = None
+        # R25/O1: pending side-stream stats join (event recorded after the
+        # stats kernels on the side stream; consumers join via join_stats()).
+        self._stats_event: Optional[torch.cuda.Event] = None
+        self._stats_ev_in: Optional[torch.cuda.Event] = None
 
     @property
     def collapse_mode(self) -> Optional[str]:
@@ -185,6 +193,35 @@ class DelayedHCUnit(HCUnitBase):
     def set_previous(self, previous: Optional[DelayedHCPredecessor]) -> None:
         # Avoid registering predecessors as nested modules or creating cycles.
         self._previous_ref = weakref.ref(previous) if previous is not None else None
+
+    def join_stats(self) -> None:
+        """R25/O1: event-join pending side-stream stats into the CURRENT stream.
+
+        Must run before any consumer of this boundary's post/comb/pre_mix_out:
+        _post_impl, DelayedHCHead.head and the PP frame export. No-op (one
+        attribute read) when the side stream is off or already joined.
+        """
+        event = self._stats_event
+        if event is None:
+            return
+        ev_in = self._stats_ev_in
+        self._stats_event = None
+        self._stats_ev_in = None
+        already = None
+        if ev_in is not None:
+            from rtp_llm.models_py.modules.dsv4.hc import _v41_mhc_side_stream
+
+            if _v41_mhc_side_stream.mhc_side_stats_enabled():
+                already = event.query()
+        torch.cuda.current_stream().wait_event(event)
+        if already is not None:
+            from rtp_llm.models_py.modules.dsv4.hc import _v41_mhc_side_stream
+
+            # Diagnostics-only host wait: elapsed_time requires BOTH events
+            # complete; wait_event only enqueued the GPU-side join. Timed
+            # arms never take this branch (stats flag off => already None).
+            event.synchronize()
+            _v41_mhc_side_stream.mhc_side_note_join(already, ev_in.elapsed_time(event))
 
     def _pre_impl(self, x: torch.Tensor, dbg_tag=None):
         shape = x.shape
@@ -227,24 +264,99 @@ class DelayedHCUnit(HCUnitBase):
             residual = x.reshape(1, -1, self.hc_mult, self.dim)
             if self._collapse_mode == "ordered_fp32":
                 residual = residual.contiguous()
-            mixes = (
-                prenorm_fp32(residual, self.fn, self.norm_eps)
-                if self._prenorm_mode == "fp32"
-                else prenorm(residual, self.fn, self.norm_eps)
-            )
-            if mixes is None:
-                mixes = ops.mhc_pre_norm_fn(
-                    residual, self.fn, None, self.norm_eps, n_splits=1
+
+            def _stats():
+                # Kernels 3-6 of the boundary (fn_mul/norm, split_mixes,
+                # sinkhorn) + the pre_mix_out materialization. They read only
+                # the new residual and weights; consumers are this sublayer's
+                # post and the NEXT boundary's collapse/PP export.
+                from rtp_llm.models_py.modules.dsv4._v41_mhc_mega_fused import (
+                    mhc_delayed_stats_fused,
+                    mhc_mega_fused_enabled as _mega_on,
                 )
-            pre, post, comb = ops.mhc_pre_split_mixes(
-                mixes, self.scale, self.base, self.hc_mult, 2.0, self.hc_eps
-            )
-            comb = ops.sinkhorn_normalize(
-                comb, repeat=self.hc_sinkhorn_iters, eps=self.hc_eps
-            )
-            self.pre_mix_out = pre.reshape(*shape[:-1]).contiguous()
-            post = post.reshape(*shape[:-1], 1)
-            comb = comb.reshape(*shape[:-2], self.hc_mult, self.hc_mult)
+
+                if _mega_on():
+                    # R30/A: one fused kernel for the stats tail (shared GEMM
+                    # producer; vendored big_fuse epilogue verbatim + a pre_mix
+                    # global write; the collapse stays eager below).
+                    pre, post_out, comb_out = mhc_delayed_stats_fused(
+                        residual,
+                        self.fn,
+                        self.scale,
+                        self.base,
+                        norm_eps=self.norm_eps,
+                        pre_eps=self.hc_eps,
+                        sinkhorn_eps=self.hc_eps,
+                        post_mult_value=2.0,
+                        sinkhorn_repeat=self.hc_sinkhorn_iters,
+                    )
+                    return (
+                        pre.reshape(*shape[:-1]).contiguous(),
+                        post_out.reshape(*shape[:-1], 1),
+                        comb_out.reshape(*shape[:-2], self.hc_mult, self.hc_mult),
+                    )
+                mixes = (
+                    prenorm_fp32(residual, self.fn, self.norm_eps)
+                    if self._prenorm_mode == "fp32"
+                    else prenorm(residual, self.fn, self.norm_eps)
+                )
+                if mixes is None:
+                    mixes = ops.mhc_pre_norm_fn(
+                        residual, self.fn, None, self.norm_eps, n_splits=1
+                    )
+                pre, post_out, comb_out = ops.mhc_pre_split_mixes(
+                    mixes, self.scale, self.base, self.hc_mult, 2.0, self.hc_eps
+                )
+                comb_out = ops.sinkhorn_normalize(
+                    comb_out, repeat=self.hc_sinkhorn_iters, eps=self.hc_eps
+                )
+                return (
+                    pre.reshape(*shape[:-1]).contiguous(),
+                    post_out.reshape(*shape[:-1], 1),
+                    comb_out.reshape(*shape[:-2], self.hc_mult, self.hc_mult),
+                )
+
+            from rtp_llm.models_py.modules.dsv4.hc import _v41_mhc_side_stream
+
+            if (
+                _v41_mhc_side_stream.mhc_side_stream_enabled()
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                # R25/O1: issue the stats on the shared side stream so they
+                # overlap the sublayer's main-stream work (attention / MoE
+                # incl. the EP return wait); every consumer joins via
+                # join_stats() (post/head/PP export). Same kernels, inputs
+                # and order => byte-exact; only scheduling changes.
+                _v41_mhc_side_stream.mhc_side_announce()
+                main = torch.cuda.current_stream()
+                side = _v41_mhc_side_stream.mhc_side_stream(x.device)
+                ev_in = torch.cuda.Event(
+                    enable_timing=_v41_mhc_side_stream.mhc_side_stats_enabled()
+                )
+                ev_in.record(main)
+                side.wait_event(ev_in)
+                with torch.cuda.stream(side):
+                    with nvtx_phase("v41.hc.stats"):
+                        pre_out, post, comb = _stats()
+                # Both events need timing enabled for the diagnostics'
+                # elapsed_time; harmless for the pure-ordering use otherwise.
+                ev_out = torch.cuda.Event(
+                    enable_timing=_v41_mhc_side_stream.mhc_side_stats_enabled()
+                )
+                ev_out.record(side)
+                # Allocator edges: outputs are consumed on the main stream;
+                # the residual is read on the side stream. record_stream
+                # defers block reuse until the recorded stream's work done.
+                pre_out.record_stream(main)
+                post.record_stream(main)
+                comb.record_stream(main)
+                x.record_stream(side)
+                self.pre_mix_out = pre_out
+                self._stats_event = ev_out
+                self._stats_ev_in = ev_in
+            else:
+                with nvtx_phase("v41.hc.stats"):
+                    self.pre_mix_out, post, comb = _stats()
         else:
             if self._prenorm_mode == "fp32":
                 mixes = prenorm_fp32(x, self.fn, self.norm_eps)
@@ -279,9 +391,24 @@ class DelayedHCUnit(HCUnitBase):
         return y, post, comb
 
     def _post_impl(self, x, residual, post, comb):
-        if self._post_mode == "ordered_fp32":
-            return post_ordered_fp32(x, residual, post, comb)
-        return post_delayed(self, x, residual, post, comb)
+        # R25/O1: post consumes this boundary's side-stream stats outputs.
+        self.join_stats()
+        with nvtx_phase("v41.hc.post"):
+            if self._post_mode == "ordered_fp32":
+                out = post_ordered_fp32(x, residual, post, comb)
+            else:
+                out = post_delayed(self, x, residual, post, comb)
+        # R29/A: pin pre_mix_out to a per-unit static buffer so any graph
+        # capturing a SUCCESSOR boundary reads a permanently stable address
+        # with always-current content (the observed stale-read fix).
+        if self.pre_mix_out is not None and _premix_pin_enabled():
+            buf = getattr(self, "_premix_static", None)
+            if buf is None or buf.shape != self.pre_mix_out.shape:
+                buf = torch.empty_like(self.pre_mix_out)
+                self._premix_static = buf
+            buf.copy_(self.pre_mix_out)
+            self.pre_mix_out = buf
+        return out
 
 
 class DelayedHCHead(nn.Module):
@@ -293,6 +420,7 @@ class DelayedHCHead(nn.Module):
         unit = self._last_ffn_ref()
         if unit is None or unit.pre_mix_out is None:
             raise RuntimeError("V4.1 final FFN pre-mix is unavailable")
+        unit.join_stats()  # R25/O1: head consumes the last boundary's pre_mix
         return unit.collapse(hidden, unit.pre_mix_out)
 
 

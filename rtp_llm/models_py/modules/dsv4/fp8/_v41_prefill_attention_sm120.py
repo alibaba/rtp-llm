@@ -72,7 +72,9 @@ def _sparse_prefill(
     tl.store(OUT + address, result, heads[:, None] < HEADS)
 
 
-def sparse_prefill_attention(query, kv, indices, lengths, sinks):
+def sparse_prefill_attention(
+    query, kv, indices, lengths, sinks, freqs=None, rope_dim=0
+):
     """Consume upstream BF16 [K,1,512] and bounded [Q,1,TopK] index plans."""
     from ._v41_prefill_attention_v2 import (
         sparse_prefill_attention_v2,
@@ -82,7 +84,7 @@ def sparse_prefill_attention(query, kv, indices, lengths, sinks):
     _v2_mode = sparse_prefill_v2_mode()
     if _v2_mode != "0":
         return sparse_prefill_attention_v2(
-            query, kv, indices, lengths, sinks, _v2_mode
+            query, kv, indices, lengths, sinks, _v2_mode, freqs=freqs, rope_dim=rope_dim
         )
     if not (
         query.is_cuda

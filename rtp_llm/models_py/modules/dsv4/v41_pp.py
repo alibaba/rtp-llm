@@ -359,8 +359,15 @@ def _hidden_header(contract, transfer_round, cp_rank, spans, rows):
     if type(transfer_round) is not int or transfer_round < 0:
         raise ValueError("V4.1 hidden frame requires a nonnegative transfer round")
     return [
-        2, 20, transfer_round, cp_rank, rows.shape[0], 4, 5120,
-        *contract.fingerprint, len(spans),
+        2,
+        20,
+        transfer_round,
+        cp_rank,
+        rows.shape[0],
+        4,
+        5120,
+        *contract.fingerprint,
+        len(spans),
         *(value for span in spans for value in span.wire_values()),
     ]
 
@@ -372,34 +379,60 @@ def _validate_hidden_frame(frame, expected_rows, device):
     _tensor(frame.row_map, "row map", (count, 3), torch.int64, cpu)
     if not torch.equal(frame.row_map, expected_rows):
         raise ValueError("V4.1 hidden frame disagrees with CP dispatch")
-    _tensor(frame.hidden_states, "hidden states", (count, 4, 5120), torch.bfloat16, device)
+    _tensor(
+        frame.hidden_states, "hidden states", (count, 4, 5120), torch.bfloat16, device
+    )
     _tensor(frame.prev_pre_mix, "previous pre-mix", (count, 4), torch.float32, device)
     active = expected_rows[:, 2].bool().to(device)
-    torch._assert_async(_masked_all_finite(frame.hidden_states, active),
-                        "V4.1 active residual must be finite")
-    torch._assert_async(_masked_all_finite(frame.prev_pre_mix, active),
-                        "V4.1 active pre-mix must be finite")
+    torch._assert_async(
+        _masked_all_finite(frame.hidden_states, active),
+        "V4.1 active residual must be finite",
+    )
+    torch._assert_async(
+        _masked_all_finite(frame.prev_pre_mix, active),
+        "V4.1 active pre-mix must be finite",
+    )
 
 
-def pack_v41_hidden_frame(block, hidden, contract, transfer_round, cp_rank, spans, rows):
+def pack_v41_hidden_frame(
+    block, hidden, contract, transfer_round, cp_rank, spans, rows
+):
     """Snapshot the maintained L19 residual before forward cleanup."""
     if getattr(block, "layer_id", None) != 19:
         raise ValueError("V4.1 cut-20 export requires L19")
-    frame = V41PPHiddenFrame(hidden.clone(), block.ffn_hc.pre_mix_out.clone(), rows.clone())
+    # R25/O1: the pre_mix clone crosses the PP wire — join any pending
+    # side-stream stats first (normally already joined by ffn_hc_post;
+    # belt-and-braces no-op otherwise).
+    join = getattr(block.ffn_hc, "join_stats", None)
+    if join is not None:
+        join()
+    frame = V41PPHiddenFrame(
+        hidden.clone(), block.ffn_hc.pre_mix_out.clone(), rows.clone()
+    )
     _validate_hidden_frame(frame, rows, hidden.device)
     header = _hidden_header(contract, transfer_round, cp_rank, spans, rows)
     result = {_HEADER: torch.tensor(header, dtype=torch.int64)}
     if rows.shape[0]:
-        result.update(hidden_states=frame.hidden_states,
-                      v41_prev_pre_mix=frame.prev_pre_mix, v41_row_map=frame.row_map)
+        result.update(
+            hidden_states=frame.hidden_states,
+            v41_prev_pre_mix=frame.prev_pre_mix,
+            v41_row_map=frame.row_map,
+        )
     return result
 
 
-def validate_v41_hidden_frame(tensors, contract, transfer_round, cp_rank, spans, rows, device):
+def validate_v41_hidden_frame(
+    tensors, contract, transfer_round, cp_rank, spans, rows, device
+):
     """Reject wrong cuts, stale identities, rounds and row maps before layers run."""
     want = _hidden_header(contract, transfer_round, cp_rank, spans, rows)
-    header = _tensor(tensors.get(_HEADER), "hidden header", (len(want),),
-                     torch.int64, torch.device("cpu"))
+    header = _tensor(
+        tensors.get(_HEADER),
+        "hidden header",
+        (len(want),),
+        torch.int64,
+        torch.device("cpu"),
+    )
     if header.tolist() != want:
         raise ValueError("V4.1 hidden frame identity or dispatch mismatch")
     count = rows.shape[0]
@@ -407,8 +440,16 @@ def validate_v41_hidden_frame(tensors, contract, transfer_round, cp_rank, spans,
     if set(tensors) != ({_HEADER} | fields if count else {_HEADER}):
         raise ValueError("V4.1 hidden frame has missing or unexpected tensors")
     frame = V41PPHiddenFrame(
-        tensors["hidden_states"] if count else torch.empty(0, 4, 5120, dtype=torch.bfloat16, device=device),
-        tensors[_PRE_MIX] if count else torch.empty(0, 4, dtype=torch.float32, device=device),
+        (
+            tensors["hidden_states"]
+            if count
+            else torch.empty(0, 4, 5120, dtype=torch.bfloat16, device=device)
+        ),
+        (
+            tensors[_PRE_MIX]
+            if count
+            else torch.empty(0, 4, dtype=torch.float32, device=device)
+        ),
         tensors[_ROW_MAP] if count else torch.empty(0, 3, dtype=torch.int64),
     )
     _validate_hidden_frame(frame, rows, device)

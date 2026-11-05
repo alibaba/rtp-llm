@@ -14,6 +14,27 @@ import torch
 import triton
 import triton.language as tl
 
+_ATTN_NORM_QUANT_FUSE_FLAG = "DSV41_ATTN_NORM_QUANT_FUSE"
+_ATTN_NORM_QUANT_FUSE_ANNOUNCED = [False]
+
+
+def attn_norm_quant_fuse_enabled() -> bool:
+    """R29/B crumb 2: fused attn-norm + wq_a/wkv input quant on the NORMAL
+    prefill path (the fast-path-only ``prefill_fused_attn_norm_input_quant``
+    contract, reused). Default off."""
+    if os.environ.get(_ATTN_NORM_QUANT_FUSE_FLAG, "0") == "1":
+        if not _ATTN_NORM_QUANT_FUSE_ANNOUNCED[0]:
+            _ATTN_NORM_QUANT_FUSE_ANNOUNCED[0] = True
+            import sys
+
+            print(
+                f"[ATTNNQFUSE] engaged ({_ATTN_NORM_QUANT_FUSE_FLAG}=1)",
+                file=sys.stderr,
+                flush=True,
+            )
+        return True
+    return False
+
 
 @triton.jit
 def _mul_ftz(a, b):
@@ -118,7 +139,13 @@ def is_supported(x: torch.Tensor, weight: torch.Tensor) -> bool:
     """Metadata gate for contiguous BF16 [M,5120] inference on SM100.
 
     Finiteness is a caller precondition, not a synchronizing device scan.
+    R29/B crumb 2: under DSV41_ATTN_NORM_QUANT_FUSE the same Triton kernel
+    is additionally admitted on SM120 — byte-exactness there is proven by
+    the r29_b_bitwise.py gate, not by the SM100 contract.
     """
+    cap = torch.cuda.get_device_capability(x.device) == (10, 0)
+    if not cap and attn_norm_quant_fuse_enabled():
+        cap = torch.cuda.get_device_capability(x.device) == (12, 0)
     return (
         x.ndim == 2
         and x.shape[1] == 5120
@@ -132,7 +159,7 @@ def is_supported(x: torch.Tensor, weight: torch.Tensor) -> bool:
         and weight.data_ptr() % 16 == 0
         and not x.requires_grad
         and not weight.requires_grad
-        and torch.cuda.get_device_capability(x.device) == (10, 0)
+        and cap
     )
 
 

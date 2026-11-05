@@ -918,12 +918,13 @@ class AttentionV41FP8(AttentionFP8):
         norm, quantized, scales = result
         return norm, (quantized, scales)
 
-    def _project_output(self, o, freqs, out=None):
+    def _project_output(self, o, freqs, out=None, rope_done=False):
         from rtp_llm.models_py.modules.dsv4.fp8 import _v41_output_projection
 
         o = o.reshape(-1, self.n_heads, self.head_dim)
         if self._wo_a_bf16_v41 is not None:
-            _e5b_apply(o[..., -self.rope_head_dim :], freqs)
+            if not rope_done:
+                _e5b_apply(o[..., -self.rope_head_dim :], freqs)
             grouped = o.reshape(o.shape[0], self.n_groups, -1)
             projected = _woa_fp8_project_or_bf16(
                 grouped,
@@ -962,7 +963,8 @@ class AttentionV41FP8(AttentionFP8):
                 o, freqs, self._wo_a_stk_w, self._wo_a_stk_s
             )
             return self.wo_b(projected, out=out)
-        _e5b_apply(o[..., -self.rope_head_dim :], freqs)
+        if not rope_done:
+            _e5b_apply(o[..., -self.rope_head_dim :], freqs)
         grouped = o.reshape(o.shape[0], self.n_groups, -1)
         projected = torch.stack(
             [
@@ -973,8 +975,8 @@ class AttentionV41FP8(AttentionFP8):
         )
         return self.wo_b(projected.flatten(1), out=out)
 
-    def _prefill_output_proj_into(self, o, freqs_cis, *, out):
-        self._project_output(o, freqs_cis, out=out)
+    def _prefill_output_proj_into(self, o, freqs_cis, *, out, rope_done=False):
+        self._project_output(o, freqs_cis, out=out, rope_done=rope_done)
 
     def _ensure_freqs_cis_bound(self):
         # V4.1 has no independent compressor module or nested index compressor.
@@ -1240,13 +1242,36 @@ class AttentionV41FP8(AttentionFP8):
                             global_rows=short_rows,
                         )
                     else:
+                        # R29/B crumb 1: fold the output inverse-RoPE into the
+                        # qt-family epilogue when the flag and the LIVE mode
+                        # allow (s2/legacy kernels never fold — the caller
+                        # must not skip the eager rope in those modes).
+                        from ._v41_prefill_attention_v2 import (
+                            inv_rope_fold_enabled as _rope_fold_on,
+                            sparse_prefill_v2_mode as _spv2_mode,
+                        )
+
+                        fold = _rope_fold_on() and _spv2_mode() in (
+                            "qt",
+                            "qt64",
+                            "h32",
+                        )
                         o = sparse_prefill_attention(
                             q,
                             kv,
                             indices[start:end],
                             topk_length[start:end],
                             self.attn_sink,
+                            freqs=freqs if fold else None,
+                            rope_dim=self.rope_head_dim if fold else 0,
                         )
+                        if fold:
+                            # The epilogue already applied the inverse rope.
+                            self._prefill_output_proj_into(
+                                o, freqs, out=out[start:end], rope_done=True
+                            )
+                            dispose_tensor(o)
+                            continue
                 else:
                     o, _, _ = flash_mla_sparse_fwd(
                         q=q,

@@ -326,7 +326,17 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 )
         return config
 
-    def _agree_dp(self, error, phase, device, *, native_dispatch=False):
+    def _agree_dp_async(self, error, phase, device, *, native_dispatch=False):
+        """R28/C (DSV41_CHUNK_BOUNDARY_OVERLAP): issue the DP agreement
+        without blocking; the returned closure waits + validates + raises
+        with identical semantics to the synchronous _agree_dp.
+
+        The signature gather is a coordination check, not a data
+        dependency: it only has to complete before the chunk's first
+        layer collective. Issuing it at admission start overlaps the
+        validate/compact-prepare/chunk-setup host work (~2.8 ms/chunk of
+        GPU-idle gap measured on t2e).
+        """
         if error is not None and os.environ.get("DSV41_N2_DEBUG") == "1":
             # Diagnostics only (R16): the DP mirror hides the originating
             # rank's exception behind "native preflight failed on a DP
@@ -344,6 +354,8 @@ class DeepSeekV41Model(DeepSeekV4Model):
         status = (
             1 if error is None else (0 if recoverable or not native_dispatch else 2)
         )
+        work = None
+        peers = None
         if self._dp_group is not None:
             # Bind the whole model schedule before any rank enters layer
             # collectives. Request lengths/IDs remain rank-local.
@@ -394,8 +406,8 @@ class DeepSeekV41Model(DeepSeekV4Model):
                         [status, *digest], dtype=torch.uint8
                     ).view(1, 33)
                     peers = torch.empty((group_size, 33), dtype=torch.uint8)
-                    torch.distributed.all_gather_into_tensor(
-                        peers, signature, group=lean_twin
+                    work = torch.distributed.all_gather_into_tensor(
+                        peers, signature, group=lean_twin, async_op=True
                     )
                     if not self._agree_lean_announced:
                         self._agree_lean_announced = True
@@ -413,40 +425,53 @@ class DeepSeekV41Model(DeepSeekV4Model):
                     peers = torch.empty(
                         (group_size, 33), dtype=torch.uint8, device=device
                     )
-                    torch.distributed.all_gather_into_tensor(
-                        peers, signature, group=self._dp_group
+                    work = torch.distributed.all_gather_into_tensor(
+                        peers, signature, group=self._dp_group, async_op=True
                     )
-                    peers = peers.cpu()
             except BaseException:
                 self._worker_state = "failed"
                 raise
-            rejected = not bool((peers[:, 0] == 1).all())
-            same_schedule = bool((peers[:, 1:] == peers[0, 1:]).all())
-            if native_dispatch:
-                if bool((peers[:, 0] == 2).any()):
+
+        def wait_and_check():
+            if self._dp_group is not None and work is not None:
+                try:
+                    work.wait()
+                    gathered = peers.cpu() if peers.is_cuda else peers
+                except BaseException:
                     self._worker_state = "failed"
-                    raise RuntimeError(
-                        "V4.1 native preflight failed on a DP peer"
-                    ) from error
-                if rejected:
-                    raise V41InputRejected(
-                        str(error)
-                        if error is not None
-                        else "V4.1 DP peer rejected request"
-                    ) from error
-                if not same_schedule:
+                    raise
+                rejected = not bool((gathered[:, 0] == 1).all())
+                same_schedule = bool((gathered[:, 1:] == gathered[0, 1:]).all())
+                if native_dispatch:
+                    if bool((gathered[:, 0] == 2).any()):
+                        self._worker_state = "failed"
+                        raise RuntimeError(
+                            "V4.1 native preflight failed on a DP peer"
+                        ) from error
+                    if rejected:
+                        raise V41InputRejected(
+                            str(error)
+                            if error is not None
+                            else "V4.1 DP peer rejected request"
+                        ) from error
+                    if not same_schedule:
+                        self._worker_state = "failed"
+                        raise RuntimeError("V4.1 native DP model schedules disagree")
+                if rejected or not same_schedule:
+                    if error is not None:
+                        raise error
+                    raise RuntimeError("V4.1 DP peer rejected request or model schedule")
+            if error is not None:
+                if native_dispatch:
+                    if recoverable:
+                        raise V41InputRejected(str(error)) from error
                     self._worker_state = "failed"
-                    raise RuntimeError("V4.1 native DP model schedules disagree")
-            if rejected or not same_schedule:
-                if error is not None:
-                    raise error
-                raise RuntimeError("V4.1 DP peer rejected request or model schedule")
-        if error is not None:
-            if native_dispatch:
-                if recoverable:
-                    raise V41InputRejected(str(error)) from error
-                self._worker_state = "failed"
-            raise error
+                raise error
+
+        return wait_and_check
+
+    def _agree_dp(self, error, phase, device, *, native_dispatch=False):
+        self._agree_dp_async(error, phase, device, native_dispatch=native_dispatch)()
 
     def _check_worker(self):
         if os.getpid() != self._worker_pid:
