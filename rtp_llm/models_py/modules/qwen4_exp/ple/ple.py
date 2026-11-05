@@ -1,4 +1,5 @@
 import math
+import os
 from contextlib import contextmanager
 from typing import List, Optional
 
@@ -619,6 +620,99 @@ class Qwen4ExpPLELayer(nn.Module):
         ]
         return output, state
 
+    def _try_bf16_prefill_page_snapshots(
+        self, hyper_states, embeddings, page_size, conv_buffer, add_residual
+    ):
+        """Opt-in eager SM120 route; all source-BF16 page GEMMs stay unchanged."""
+        if os.environ.get("RTP_QWEN4_BF16_PLE_BATCH", "0") != "1":
+            return None
+        if not (
+            hyper_states.is_cuda
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(hyper_states.device) == (12, 0)
+            and not torch.cuda.is_current_stream_capturing()
+            and hyper_states.shape == (1, 8192, 10240)
+            and embeddings.shape == (1, 8192, 2560)
+            and page_size == 128
+            and self.key_projection is None
+            and self.value_projection is None
+            and self.key_proj.shape == (10240, 2560)
+            and self.value_proj.shape == (2560, 2560)
+            and self.conv_weight.shape == (10240, 1, 4)
+            and self.conv_dilation == 3
+            and self.short_conv_state_len == 9
+            and all(
+                x.dtype == torch.bfloat16
+                and x.device == hyper_states.device
+                and x.is_contiguous()
+                and not x.requires_grad
+                for x in (
+                    hyper_states,
+                    embeddings,
+                    self.key_proj,
+                    self.value_proj,
+                    self.conv_weight,
+                    self.norm_key,
+                    self.norm_query,
+                    self.norm_conv,
+                )
+            )
+            and all(
+                g.shape == (10240,)
+                for g in (self.norm_key, self.norm_query, self.norm_conv)
+            )
+            and math.isfinite(self.norm_eps)
+            and self.norm_eps >= 0
+            and (
+                conv_buffer is None
+                or (conv_buffer.stride(-1) == 1 and not conv_buffer.requires_grad)
+            )
+        ):
+            return None
+        from .ple_conv_triton import try_ple_conv
+        from .ple_gate_triton import try_ple_gate
+
+        keys, values = [], []
+        for start in range(0, hyper_states.shape[1], page_size):
+            # Match _gated_values' source-BF16 input shape, stride and call order.
+            page = embeddings[:, start : start + page_size].contiguous()
+            keys.append(F.linear(page, self.key_proj))
+            values.append(F.linear(page, self.value_proj))
+        key = torch.cat(keys, 1)
+        del keys
+        value = torch.cat(values, 1)
+        del values
+        fused = try_ple_gate(
+            key,
+            value,
+            hyper_states,
+            self.norm_key,
+            self.norm_query,
+            self.norm_conv,
+            self.norm_eps,
+        )
+        if fused is None:
+            return None
+        gated, normed = fused
+        del fused, key, value
+        output = try_ple_conv(
+            gated,
+            normed,
+            conv_buffer,
+            self.conv_weight,
+            self.conv_dilation,
+            residual=hyper_states if add_residual else None,
+        )
+        if output is None:
+            return None
+        del gated
+        # Each view keeps normed alive until the existing runtime commits all pages.
+        snapshots = [
+            normed[:, end - self.short_conv_state_len : end]
+            for end in range(page_size, hyper_states.shape[1] + 1, page_size)
+        ]
+        return output, snapshots
+
     def prefill_page_snapshots(
         self,
         hyper_states: torch.Tensor,
@@ -631,8 +725,9 @@ class Qwen4ExpPLELayer(nn.Module):
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Gather once while retaining every page's resumable prefill state.
 
-        Projections and convolution keep their original page-sized shapes to
-        preserve BF16 accumulation and rounding. N-gram hashing, shard gather,
+        Projections keep their original page-sized shapes to preserve BF16
+        accumulation and rounding. The opt-in BF16 route batches only the
+        existing row-local gate and convolution consumers. N-gram hashing, shard gather,
         and its TP reduction run once per request, including a partial final
         page and a reused prefix's left context. With ``add_residual``, the
         convolution epilogue also adds the outer residual after rounding the
@@ -651,6 +746,11 @@ class Qwen4ExpPLELayer(nn.Module):
             raise ValueError("PLE snapshot prefill must contain at least one token")
         if embeddings is None:
             embeddings = self.ple_embedding(token_history, length)
+        batched_bf16 = self._try_bf16_prefill_page_snapshots(
+            hyper_states, embeddings, page_size, conv_buffer, add_residual
+        )
+        if batched_bf16 is not None:
+            return batched_bf16
         if (
             batch == 1
             and width == 10240
