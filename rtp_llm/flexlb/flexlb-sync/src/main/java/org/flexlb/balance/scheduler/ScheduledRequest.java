@@ -44,6 +44,7 @@ public final class ScheduledRequest implements Prioritized {
     private final long hitCache;
     private final int maxInflightBatchesPerPrefillWorker;
     private final boolean routeDelivery;
+    private final boolean externalPrefill;
 
     /**
      * Publish-time NON_BATCH ownership. It has exactly one downstream owner:
@@ -87,6 +88,53 @@ public final class ScheduledRequest implements Prioritized {
             DecodeEndpoint.ReservationHandle decodeReservation,
             long enqueuedAtMs,
             DecodeBinding frozenDecode) {
+        this(
+                ctx,
+                future,
+                routeResponse,
+                prefill,
+                decode,
+                prefillEp,
+                decodeEp,
+                decodeReservation,
+                enqueuedAtMs,
+                frozenDecode,
+                false);
+    }
+
+    static ScheduledRequest externalPrefill(
+            BalanceContext context,
+            CompletableFuture<Response> future,
+            Response response,
+            DecodeBinding decode,
+            long enqueuedAtMs) {
+        return new ScheduledRequest(
+                context,
+                future,
+                response,
+                null,
+                ServerStatus.copyOf(decode.status()),
+                null,
+                decode.endpoint(),
+                decode.reservation(),
+                enqueuedAtMs,
+                decode,
+                true);
+    }
+
+    private ScheduledRequest(
+            BalanceContext ctx,
+            CompletableFuture<Response> future,
+            Response routeResponse,
+            ServerStatus prefill,
+            ServerStatus decode,
+            PrefillEndpoint prefillEp,
+            DecodeEndpoint decodeEp,
+            DecodeEndpoint.ReservationHandle decodeReservation,
+            long enqueuedAtMs,
+            DecodeBinding frozenDecode,
+            boolean externalPrefill) {
+        this.externalPrefill = externalPrefill;
         this.ctx = Objects.requireNonNull(ctx, "ctx");
         this.future = future;
         this.routeResponse = routeResponse;
@@ -104,9 +152,11 @@ public final class ScheduledRequest implements Prioritized {
         FlexlbConfig schedulingConfig =
                 Objects.requireNonNull(ctx.getConfig(), "request scheduling config");
         this.routeDelivery =
-                schedulingConfig.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH;
+                !externalPrefill
+                        && schedulingConfig.getDispatcher().getType()
+                                == DispatcherConfig.Type.NON_BATCH;
         this.maxInflightBatchesPerPrefillWorker =
-                routeDelivery
+                externalPrefill || routeDelivery
                         ? 0
                         : schedulingConfig.getDispatcher().getMaxInflightPerPrefillWorker();
     }
@@ -152,6 +202,10 @@ public final class ScheduledRequest implements Prioritized {
 
     public ServerStatus decode() {
         return decodeBinding.status();
+    }
+
+    public boolean isExternalPrefill() {
+        return externalPrefill;
     }
 
     public PrefillEndpoint prefillEp() {

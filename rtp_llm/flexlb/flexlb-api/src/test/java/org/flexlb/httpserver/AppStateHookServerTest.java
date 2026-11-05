@@ -2,6 +2,7 @@ package org.flexlb.httpserver;
 
 import org.flexlb.service.grace.ApplicationLifecycle;
 import org.flexlb.service.grace.GracefulLifecycleReporter;
+import org.flexlb.service.grace.NaviSchedMasterRuntime;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -26,6 +27,7 @@ import static org.mockito.Mockito.when;
 class AppStateHookServerTest {
 
     @Mock private ApplicationLifecycle applicationLifecycle;
+    @Mock private NaviSchedMasterRuntime prefillMasterRuntime;
 
     @Mock private GracefulLifecycleReporter lifecycleReporter;
 
@@ -35,7 +37,9 @@ class AppStateHookServerTest {
 
     @BeforeEach
     void setUp() {
-        server = new AppStateHookServer(applicationLifecycle, lifecycleReporter);
+        server =
+                new AppStateHookServer(
+                        applicationLifecycle, lifecycleReporter, prefillMasterRuntime);
     }
 
     @Test
@@ -44,6 +48,7 @@ class AppStateHookServerTest {
         when(serverRequest.remoteAddress())
                 .thenReturn(Optional.of(new InetSocketAddress("127.0.0.1", 12345)));
 
+        org.mockito.Mockito.lenient().when(prefillMasterRuntime.isReady()).thenReturn(true);
         server.onApplicationReady();
 
         Mono<ServerResponse> result = server.handleProcessOk(serverRequest);
@@ -61,6 +66,7 @@ class AppStateHookServerTest {
                         Optional.of(
                                 new InetSocketAddress(InetAddress.getLoopbackAddress(), 12345)));
 
+        org.mockito.Mockito.lenient().when(prefillMasterRuntime.isReady()).thenReturn(true);
         server.onApplicationReady();
 
         Mono<ServerResponse> result = server.handleProcessOk(serverRequest);
@@ -89,6 +95,7 @@ class AppStateHookServerTest {
         when(serverRequest.remoteAddress())
                 .thenReturn(Optional.of(new InetSocketAddress("192.168.1.100", 12345)));
 
+        org.mockito.Mockito.lenient().when(prefillMasterRuntime.isReady()).thenReturn(true);
         server.onApplicationReady();
 
         Mono<ServerResponse> result = server.handleProcessOk(serverRequest);
@@ -103,6 +110,7 @@ class AppStateHookServerTest {
     void handleProcessOk_ShouldReturn403_WhenRemoteAddressEmpty() {
         when(serverRequest.remoteAddress()).thenReturn(Optional.empty());
 
+        org.mockito.Mockito.lenient().when(prefillMasterRuntime.isReady()).thenReturn(true);
         server.onApplicationReady();
 
         Mono<ServerResponse> result = server.handleProcessOk(serverRequest);
@@ -119,6 +127,7 @@ class AppStateHookServerTest {
         when(serverRequest.remoteAddress())
                 .thenReturn(Optional.of(new InetSocketAddress(InetAddress.getLocalHost(), 12345)));
 
+        org.mockito.Mockito.lenient().when(prefillMasterRuntime.isReady()).thenReturn(true);
         server.onApplicationReady();
 
         Mono<ServerResponse> result = server.handleProcessOk(serverRequest);
@@ -158,5 +167,16 @@ class AppStateHookServerTest {
                 .verifyComplete();
 
         verify(applicationLifecycle).offline();
+    }
+
+    @Test
+    void processReadyRequiresNaviSchedReadiness() {
+        when(serverRequest.remoteAddress())
+                .thenReturn(Optional.of(new InetSocketAddress("127.0.0.1", 12345)));
+        server.onApplicationReady();
+        when(prefillMasterRuntime.isReady()).thenReturn(false);
+        StepVerifier.create(server.handleProcessOk(serverRequest))
+                .expectNextMatches(response -> response.statusCode().value() == 503)
+                .verifyComplete();
     }
 }

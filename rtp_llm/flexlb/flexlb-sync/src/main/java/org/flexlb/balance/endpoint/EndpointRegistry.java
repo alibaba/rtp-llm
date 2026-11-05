@@ -690,7 +690,9 @@ public class EndpointRegistry {
             throw new IllegalArgumentException("Unsupported role: " + role);
         }
         boolean prefill = role == RoleType.PREFILL || role == RoleType.PDFUSION;
-        if (prefill && engineStatus.dpSize() > 1) {
+        if (prefill
+                && !configService.loadBalanceConfig().isNaviSchedPrefill()
+                && engineStatus.dpSize() > 1) {
             throw new UnsupportedOperationException(
                     role
                             + " DP group endpoint not yet supported: ipPort="

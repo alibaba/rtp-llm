@@ -729,6 +729,115 @@ class DefaultRouterTest {
         verify(prefillSelector).select(context, RoleType.PREFILL, null);
     }
 
+    @Test
+    void externalPrefillSelectsDecodeWithoutCallingPrefillSelector() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
+        BalanceContext context = context(801L);
+        SelectionFixture decode = selection(RoleType.DECODE, 801L, "decode", 8001, "g1");
+        when(decodeSelector.select(context, DecodeBinding.capture(context), null))
+                .thenReturn(PlacementResult.success(decode.selection));
+
+        var result = router().selectForExternalPrefill(context);
+
+        assertEquals(PlacementResult.Status.SUCCESS, result.status());
+        try (var route = result.value()) {
+            assertEquals(List.of(decode.selection), route.selections());
+            assertEquals(RoleType.DECODE, route.response().getServerStatus().getFirst().getRole());
+            assertEquals("decode", route.response().getServerStatus().getFirst().getServerIp());
+            assertFalse(route.response().isEnqueuedByMaster());
+            verify(decode.selection, never()).close();
+        }
+        verify(decode.selection).close();
+        verifyNoInteractions(prefillSelector, vitSelector, encoderSelector);
+    }
+
+    @Test
+    void externalPrefillPreservesVitSelectionAndGroupForDecode() {
+        when(modelMeta.requiredRoles())
+                .thenReturn(List.of(RoleType.VIT, RoleType.PREFILL, RoleType.DECODE));
+        BalanceContext context = context(802L);
+        SelectionFixture vit = selection(RoleType.VIT, 802L, "vit", 8001, "vision-group");
+        SelectionFixture decode = selection(RoleType.DECODE, 802L, "decode", 8003, "vision-group");
+        when(vitSelector.select(context, RoleType.VIT, null)).thenReturn(vit.selection);
+        when(decodeSelector.select(context, DecodeBinding.capture(context), "vision-group"))
+                .thenReturn(PlacementResult.success(decode.selection));
+
+        var result = router().selectForExternalPrefill(context);
+
+        assertEquals(PlacementResult.Status.SUCCESS, result.status());
+        try (var route = result.value()) {
+            assertEquals(
+                    List.of(RoleType.VIT, RoleType.DECODE),
+                    route.response().getServerStatus().stream()
+                            .map(ServerStatus::getRole)
+                            .toList());
+            assertEquals(List.of(vit.selection, decode.selection), route.selections());
+        }
+        verifyNoInteractions(prefillSelector);
+        verify(vit.selection).close();
+        verify(decode.selection).close();
+    }
+
+    @Test
+    void externalPrefillDecodeFailureClosesEarlierVitSelection() {
+        when(modelMeta.requiredRoles())
+                .thenReturn(List.of(RoleType.VIT, RoleType.PREFILL, RoleType.DECODE));
+        BalanceContext context = context(803L);
+        SelectionFixture vit = selection(RoleType.VIT, 803L, "vit", 8001, "g1");
+        when(vitSelector.select(context, RoleType.VIT, null)).thenReturn(vit.selection);
+        when(decodeSelector.select(context, DecodeBinding.capture(context), "g1"))
+                .thenReturn(PlacementResult.blocked(RoleType.DECODE));
+
+        var result = router().selectForExternalPrefill(context);
+
+        assertEquals(PlacementResult.Status.BLOCKED, result.status());
+        assertEquals(new PlacementKey(RoleType.DECODE, "g1"), result.blocker());
+        verify(vit.selection).close();
+        verifyNoInteractions(prefillSelector);
+    }
+
+    @Test
+    void externalPrefillSupportsFusionWithoutRunningFusionSelection() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
+        BalanceContext context = context(804L);
+
+        var result = router().selectForExternalPrefill(context);
+
+        assertEquals(PlacementResult.Status.SUCCESS, result.status());
+        try (var route = result.value()) {
+            assertTrue(route.response().getServerStatus().isEmpty());
+            assertTrue(route.selections().isEmpty());
+        }
+        verifyNoInteractions(prefillSelector, decodeSelector, vitSelector, encoderSelector);
+    }
+
+    @Test
+    void encoderOnlyRequestDoesNotEnterPrefillDelegation() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.ENCODER, RoleType.PREFILL));
+        BalanceContext context = context(805L);
+        context.setRequestedRoles(Set.of(RoleType.ENCODER));
+
+        var result = router().selectForExternalPrefill(context);
+
+        assertEquals(PlacementResult.Status.REJECTED, result.status());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), result.failure().getCode());
+        verifyNoInteractions(prefillSelector, decodeSelector, vitSelector, encoderSelector);
+    }
+
+    @Test
+    void externalPrefillRejectsAnotherRequestsSelectionAndClosesIt() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
+        BalanceContext context = context(806L);
+        SelectionFixture foreign = selection(RoleType.DECODE, 999L, "decode", 8001, "g1");
+        when(decodeSelector.select(context, DecodeBinding.capture(context), null))
+                .thenReturn(PlacementResult.success(foreign.selection));
+
+        assertThrows(IllegalStateException.class, () -> router().selectForExternalPrefill(context));
+
+        verify(foreign.selection).close();
+        verifyNoInteractions(prefillSelector);
+    }
+
     private RequestScheduler scheduler(DefaultRouter router, BalanceContext context) {
         when(configService.loadBalanceConfig()).thenReturn(context.getConfig());
         return new RequestScheduler(

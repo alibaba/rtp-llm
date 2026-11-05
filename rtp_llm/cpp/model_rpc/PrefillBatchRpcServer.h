@@ -150,6 +150,11 @@ public:
 
     void beginShutdown();
 
+protected:
+    static bool parseNaviSchedForwardPayload(uint64_t native_request_id,
+                                            const std::string& payload,
+                                            GenerateInputPB& input);
+
 private:
     PriorityCancelResult onCancelRequest(int64_t request_id) override;
     void finalizePriorityPreemption(int64_t request_id, std::shared_ptr<DeferredPrefillContext> deferred);

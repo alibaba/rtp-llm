@@ -19,6 +19,7 @@ NAVI_SCHED_CPP_0.1 {
             navi_sched::setRtpLLMForwardBatchHandler*;
             navi_sched::addRtpLLMBatchRequest*;
             navi_sched::retainRtpLLMReadyBatch*;
+            navi_sched::retainRtpLLMForwardBatchWithResult*;
             navi_sched::acquireRtpLLMRetainedBatchLease*;
             navi_sched::RtpLLMRetainedBatchLease::*;
             navi_sched::abortRetainedRtpLLMBatch*;

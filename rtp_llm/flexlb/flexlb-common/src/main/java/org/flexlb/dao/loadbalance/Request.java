@@ -32,6 +32,9 @@ public class Request {
     @JsonProperty("vit_route_only")
     private boolean vitRouteOnly;
 
+    @JsonProperty("skip_prefill")
+    private boolean skipPrefill;
+
     @JsonProperty("block_size")
     private long blockSize;
 

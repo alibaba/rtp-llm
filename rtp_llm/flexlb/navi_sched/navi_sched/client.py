@@ -13,6 +13,13 @@ from .util import (
 _navi_sched = naviSchedModule()
 
 
+class FlexlbScheduleRpcError(RuntimeError):
+    def __init__(self, status_code, details):
+        super().__init__(details)
+        self.status_code = int(status_code)
+        self.details = str(details)
+
+
 class NaviSchedClient(RoleFacade):
     def __init__(
         self,
@@ -54,6 +61,7 @@ class NaviSchedClient(RoleFacade):
         block_size: int = 256,
         collect_replay: bool = False,
         forward_payload: bytes = b"",
+        master_address: str = "",
     ) -> NaviSchedDecision:
         effective_master_biz_name = (
             str(master_biz_name) or self._master_biz_name
@@ -88,12 +96,20 @@ class NaviSchedClient(RoleFacade):
         native_request.block_hashes = request.block_hashes
         native_request.timeout_ms = int(timeout_ms)
         native_request.forward_payload = request.forward_payload
-        result = self._service.schedule(
-            native_request,
-            effective_master_biz_name,
-            bool(collect_replay),
-        )
+        arguments = (native_request, effective_master_biz_name, bool(collect_replay))
+        if master_address:
+            arguments += (str(master_address),)
+        result = self._service.schedule(*arguments)
         return decisionFromNative(result)
+
+    def schedule_flexlb(self, request_id: int, address: str, payload: bytes, timeout_ms: int,
+                        metadata=()):
+        status, response, details = self._service.schedule_flexlb(
+            int(request_id), str(address), bytes(payload), int(timeout_ms), list(metadata)
+        )
+        if status:
+            raise FlexlbScheduleRpcError(status, details)
+        return response
 
     def take_next_forward_response(self, timeout_ms: int = 0):
         return self._service.take_next_forward_response(int(timeout_ms))

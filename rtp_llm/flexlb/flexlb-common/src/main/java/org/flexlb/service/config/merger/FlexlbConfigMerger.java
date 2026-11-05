@@ -15,7 +15,12 @@ public final class FlexlbConfigMerger {
 
     private static final String FLEXLB_CONFIG = "FLEXLB_CONFIG";
     private static final Set<String> REPLACE_ON_TYPE_CHANGE_PATHS =
-            Set.of("cacheMatching", "consistency", "scheduler.ordering", "scheduler.decision");
+            Set.of(
+                    "cacheMatching",
+                    "consistency",
+                    "prefillScheduler",
+                    "scheduler.ordering",
+                    "scheduler.decision");
 
     private FlexlbConfigMerger() {}
 

@@ -19,7 +19,11 @@ py_library(
         "//rtp_llm:warmup",
         "//rtp_llm:vipserver",
         "//rtp_llm/cpp/model_rpc/proto:flexlb_schedule_service_py_proto",
-    ]
+    ],
+    visibility = [
+        "//rtp_llm:__subpackages__",
+        "//internal_source/rtp_llm/navi_sched:__pkg__",
+    ],
 )
 
 py_library(

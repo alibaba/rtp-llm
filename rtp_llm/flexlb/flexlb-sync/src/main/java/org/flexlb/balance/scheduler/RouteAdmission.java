@@ -33,12 +33,18 @@ public final class RouteAdmission implements AutoCloseable {
     private final String requestId;
     private final Response response;
     private final Selection selection;
+    private final boolean externalPrefill;
     private DecodeBinding decodeBinding;
     private WorkerEndpoint blockedEndpoint;
     private Ownership ownership = Ownership.PROVISIONAL;
 
     private RouteAdmission(
-            String requestId, Response response, Selection selection, DecodeBinding decodeRequest) {
+            String requestId,
+            Response response,
+            Selection selection,
+            DecodeBinding decodeRequest,
+            boolean externalPrefill) {
+        this.externalPrefill = externalPrefill;
         this.requestId = requestId;
         this.response = Objects.requireNonNull(response, "response");
         this.selection = Objects.requireNonNull(selection, "selection");
@@ -53,6 +59,23 @@ public final class RouteAdmission implements AutoCloseable {
             List<SelectedRole> selectedRoles,
             Response response,
             DecodeBinding decodeRequest) {
+        return prepare(context, selectedRoles, response, decodeRequest, false);
+    }
+
+    static RouteAdmission prepareExternalPrefill(
+            BalanceContext context,
+            List<SelectedRole> selectedRoles,
+            Response response,
+            DecodeBinding decodeRequest) {
+        return prepare(context, selectedRoles, response, decodeRequest, true);
+    }
+
+    private static RouteAdmission prepare(
+            BalanceContext context,
+            List<SelectedRole> selectedRoles,
+            Response response,
+            DecodeBinding decodeRequest,
+            boolean externalPrefill) {
         String requestId = context.getRequestId();
 
         PrefillEndpoint prefillEndpoint = null;
@@ -76,6 +99,11 @@ public final class RouteAdmission implements AutoCloseable {
                 WorkerEndpoint.GenerationPin pin = selected.takeGenerationPin();
                 WorkerEndpoint endpoint = pin.endpoint();
                 if (role != null && role.supportsPrefill()) {
+                    if (externalPrefill) {
+                        pin.close();
+                        throw new IllegalArgumentException(
+                                "delegated route must not select Prefill");
+                    }
                     if (prefillPin != null || !(endpoint instanceof PrefillEndpoint prefill)) {
                         pin.close();
                         throw new IllegalStateException(
@@ -104,7 +132,8 @@ public final class RouteAdmission implements AutoCloseable {
                 // has been frozen.
                 pin.close();
             }
-            if (prefillPin == null || prefillEndpoint == null || prefillStatus == null) {
+            if (!externalPrefill
+                    && (prefillPin == null || prefillEndpoint == null || prefillStatus == null)) {
                 throw new IllegalStateException("route has no Prefill endpoint generation");
             }
             return new RouteAdmission(
@@ -118,7 +147,8 @@ public final class RouteAdmission implements AutoCloseable {
                             prefillWorkMs,
                             decodePin,
                             decodePlacementVersion),
-                    decodeRequest.bind(decodeStatus, decodeEndpoint, null));
+                    decodeRequest.bind(decodeStatus, decodeEndpoint, null),
+                    externalPrefill);
         } catch (RuntimeException | Error failure) {
             WorkerEndpoint.GenerationPin ownedPrefillPin = prefillPin;
             WorkerEndpoint.GenerationPin ownedDecodePin = decodePin;
@@ -151,6 +181,7 @@ public final class RouteAdmission implements AutoCloseable {
     public PlacementResult<ScheduledRequest, PlacementKey> tryEnqueue(
             BalanceContext context, CompletableFuture<Response> future, RequestRegistry lifecycle) {
         requireProvisional();
+        requireNativePrefill();
         blockedEndpoint = null;
         if (!reserveDecode()) {
             blockedEndpoint = decodeEndpoint();
@@ -182,6 +213,14 @@ public final class RouteAdmission implements AutoCloseable {
 
     public boolean commitQueuedRequest(RequestRegistry lifecycle, ScheduledRequest item) {
         requireProvisional();
+        if (externalPrefill) {
+            var committed = commitExternalPrefillRequest(lifecycle, item);
+            if (committed.status() != PlacementResult.Status.SUCCESS) {
+                return false;
+            }
+            lifecycle.publishExternalPrefillRoute(committed.value());
+            return true;
+        }
         if (lifecycle.commitRoute(item, () -> prefillEndpoint().offerPinned(prefillPin(), item))
                 != PlacementResult.Status.SUCCESS) {
             return false;
@@ -192,6 +231,10 @@ public final class RouteAdmission implements AutoCloseable {
 
     Response response() {
         return response;
+    }
+
+    public boolean isExternalPrefill() {
+        return externalPrefill;
     }
 
     public PrefillEndpoint prefillEndpoint() {
@@ -234,6 +277,13 @@ public final class RouteAdmission implements AutoCloseable {
     public void setDecodePreemptRequestIds(List<String> requestIds) {
         requireProvisional();
         decodeStatus().setPreemptRequestIds(List.copyOf(requestIds));
+        if (externalPrefill) {
+            for (ServerStatus status : response.getServerStatus()) {
+                if (status.getRole() == RoleType.DECODE) {
+                    status.setPreemptRequestIds(List.copyOf(requestIds));
+                }
+            }
+        }
     }
 
     boolean reserveDecode() {
@@ -306,6 +356,10 @@ public final class RouteAdmission implements AutoCloseable {
         if (!Objects.equals(context.getRequestId(), requestId)) {
             throw new IllegalArgumentException("admission cannot build another request");
         }
+        if (externalPrefill) {
+            return ScheduledRequest.externalPrefill(
+                    context, future, response, decodeBinding, enqueuedAtMs);
+        }
         return new ScheduledRequest(
                 context,
                 future,
@@ -330,6 +384,7 @@ public final class RouteAdmission implements AutoCloseable {
     PlacementResult<RouteDelivery, PlacementKey> tryCommitDirectRoute(
             BalanceContext context, RequestRegistry lifecycle) {
         requireProvisional();
+        requireNativePrefill();
         try (AdmissionHandle handle =
                 lifecycle.claimAdmissionHandle(requestId, context.getFuture())) {
             if (handle == null) {
@@ -400,6 +455,75 @@ public final class RouteAdmission implements AutoCloseable {
             if (reservationAttempt.reservation() != null) {
                 reservationAttempt.reservation().close();
             }
+        }
+    }
+
+    PlacementResult<DeliveryClaim, PlacementKey> tryCommitExternalPrefillRoute(
+            BalanceContext context, RequestRegistry lifecycle) {
+        requireProvisional();
+        if (!externalPrefill) {
+            throw new IllegalStateException("route is not delegated Prefill");
+        }
+        blockedEndpoint = null;
+        try (AdmissionHandle handle =
+                lifecycle.claimAdmissionHandle(requestId, context.getFuture())) {
+            if (handle == null) {
+                return PlacementResult.closed();
+            }
+            if (!reserveDecode()) {
+                blockedEndpoint = decodeEndpoint();
+                return PlacementResult.blocked(decodePlacementKey());
+            }
+            ScheduledRequest item =
+                    createScheduledRequest(context, context.getFuture(), context.getEnqueueTime());
+            return commitExternalPrefillRequest(lifecycle, item);
+        }
+    }
+
+    private PlacementResult<DeliveryClaim, PlacementKey> commitExternalPrefillRequest(
+            RequestRegistry lifecycle, ScheduledRequest item) {
+        var attempt = PrefillAdmissionResources.prepareMember(item);
+        if (!attempt.accepted()) {
+            return switch (attempt.boundary().status()) {
+                case UNAVAILABLE -> {
+                    blockedEndpoint = decodeEndpoint();
+                    if (decodeBinding.reservation() != null) {
+                        decodeEndpoint()
+                                .release(
+                                        decodeBinding.reservation(),
+                                        DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+                        decodeBinding = decodeBinding.bind(decodeStatus(), decodeEndpoint(), null);
+                    }
+                    yield PlacementResult.blocked(decodePlacementKey());
+                }
+                case OWNERSHIP_LOST -> PlacementResult.closed();
+                case FAILED ->
+                        throw new IllegalStateException(
+                                "Decode admission failed", attempt.boundary().cause());
+            };
+        }
+        var member = attempt.value();
+        try {
+            if (lifecycle.commitRoute(item, () -> true) != PlacementResult.Status.SUCCESS) {
+                return PlacementResult.closed();
+            }
+            DeliveryClaim claim = lifecycle.claimExternalPrefillRouteDelivery(item, member);
+            if (claim == null) {
+                return PlacementResult.closed();
+            }
+            markCommitted();
+            return PlacementResult.success(claim);
+        } finally {
+            Throwable failure = PrefillAdmissionResources.rollbackMember(member, null);
+            if (failure != null) {
+                PrefillAdmissionResources.throwRollbackFailure(failure);
+            }
+        }
+    }
+
+    private void requireNativePrefill() {
+        if (externalPrefill) {
+            throw new IllegalStateException("delegated route cannot enter FlexLB Prefill delivery");
         }
     }
 

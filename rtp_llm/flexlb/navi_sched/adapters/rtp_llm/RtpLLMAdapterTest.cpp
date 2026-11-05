@@ -350,6 +350,69 @@ TEST_F(RtpLLMAdapterTest, testRetainedBatchFollowsExecutorLifecycle)
     agent->stop();
 }
 
+TEST_F(RtpLLMAdapterTest, testForwardBatchMapsEngineIdsToCanonicalIds)
+{
+    NaviSchedConfig config;
+    config.name = "rtp_llm_forward_id_mapping_test";
+    config.enableKmon = false;
+    config.gig.grpcPort = 0;
+    config.enableSnapshot = false;
+    config.latencyFitBatchSize = 100;
+    NaviSchedAgentConfig agentConfig;
+    agentConfig.runtime.bizName = "agent_biz";
+    agentConfig.runtime.threadNum = 1;
+    agentConfig.service = config;
+    auto agent = std::make_shared<NaviSchedAgent>(agentConfig);
+    ASSERT_TRUE(agent->init());
+    initializeCachePolicy(agent);
+
+    const uint64_t nativeId = (uint64_t{1} << 63) + 77;
+    NaviSchedBatchPtr batch;
+    auto callback = [&batch](const NaviSchedBatchPtr &ready) { batch = ready; };
+    ASSERT_TRUE(addRtpLLMBatchRequest(agent, makeBatchRequest(nativeId), 19, 2, callback));
+    ASSERT_TRUE(addRtpLLMBatchRequest(agent, makeBatchRequest(nativeId + 1), 19, 2, callback));
+    ASSERT_TRUE(batch);
+    ASSERT_EQ(RtpLLMReadyBatchRetainStatus::INVALID_BATCH,
+              retainRtpLLMForwardBatchWithResult(batch, {101}).status);
+    ASSERT_EQ(RtpLLMReadyBatchRetainStatus::ZERO_REQUEST_ID,
+              retainRtpLLMForwardBatchWithResult(batch, {101, 0}).status);
+    ASSERT_EQ(RtpLLMReadyBatchRetainStatus::DUPLICATE_REQUEST_ID,
+              retainRtpLLMForwardBatchWithResult(batch, {101, 101}).status);
+    ASSERT_FALSE(acquireRtpLLMRetainedBatchLease(101));
+    ASSERT_TRUE(retainRtpLLMForwardBatchWithResult(batch, {101, 102}));
+    ASSERT_FALSE(acquireRtpLLMRetainedBatchLease(nativeId));
+    auto lease = acquireRtpLLMRetainedBatchLease(101);
+    ASSERT_TRUE(lease);
+    ASSERT_EQ(RtpLLMReadyBatchRetainStatus::DUPLICATE_REQUEST_ID,
+              retainRtpLLMForwardBatchWithResult(batch, {101, 103}).status);
+    ASSERT_FALSE(acquireRtpLLMRetainedBatchLease(103));
+
+    std::vector<NaviSchedLatencyQuery> queries(2);
+    queries[0].requestId = 101;
+    queries[0].totalTokenCount = 16;
+    queries[1].requestId = 102;
+    queries[1].totalTokenCount = 32;
+    ASSERT_TRUE(startRetainedRtpLLMBatches(queries));
+    auto *impl = NaviSchedAgentImpl::getImpl(*agent);
+    ASSERT_NE(nullptr, impl);
+    ASSERT_EQ(2, impl->_agentBatchR->getGraphRecoveryState().runningRequests);
+    recordRtpLLMPrefillBatch(agent, queries, 8000, 100);
+    ASSERT_EQ(0, impl->_agentBatchR->getGraphRecoveryState().runningRequests);
+    ASSERT_TRUE(impl->_agentBatchR->getGraphRecoveryState().batches.empty());
+    ASSERT_FALSE(abortRetainedRtpLLMBatch(101));
+    ASSERT_FALSE(abortRetainedRtpLLMBatch(102));
+    lease.reset();
+
+    ASSERT_TRUE(addRtpLLMBatchRequest(agent, makeBatchRequest(nativeId + 2), 20, 1, callback));
+    ASSERT_TRUE(retainRtpLLMForwardBatchWithResult(batch, {103}));
+    auto canceledLease = acquireRtpLLMRetainedBatchLease(103);
+    ASSERT_TRUE(canceledLease);
+    canceledLease->abort();
+    ASSERT_FALSE(abortRetainedRtpLLMBatch(103));
+    ASSERT_TRUE(impl->_agentBatchR->getGraphRecoveryState().batches.empty());
+    agent->stop();
+}
+
 TEST_F(RtpLLMAdapterTest, testAbortRetainedBatchReleasesWholeBatch)
 {
     NaviSchedConfig config;

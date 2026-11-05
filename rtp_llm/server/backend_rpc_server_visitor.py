@@ -33,8 +33,9 @@ from rtp_llm.server.master_client import (
 from rtp_llm.server.misc import format_exception
 from rtp_llm.server.mm_cache_routing import multimodal_routing_tokens
 from rtp_llm.server.navi_sched_adapter import (
+    FlexlbScheduleError,
     apply_navi_sched_request_overrides,
-    create_auto_detect_master_client,
+    create_master_client,
     get_navi_sched_backend_roles,
 )
 from rtp_llm.server.recent_cache_key_window import RecentCacheKeyWindow
@@ -185,7 +186,7 @@ class BackendRPCServerVisitor:
             server_config=server_config,
             master_config=master_config,
         )
-        self.master_client = create_auto_detect_master_client(
+        self.master_client = create_master_client(
             flexlb_client, self.host_service
         )
         self.backend_role_list = get_navi_sched_backend_roles(
@@ -216,6 +217,8 @@ class BackendRPCServerVisitor:
         # Use an explicit allowlist. Numeric ranges are not stable retry
         # contracts: cancellation, validation, and execution errors also use
         # values in the 8000+ range and must not be resubmitted with a new id.
+        if isinstance(e, FlexlbScheduleError):
+            return False
         if isinstance(e, FtRuntimeException):
             try:
                 exception_type = e.exception_type
@@ -697,11 +700,16 @@ class BackendRPCServerVisitor:
                     route_error_type = "TrafficLimit"
                     raise exc
             with Timer() as route_timer:
-                role_addrs_specified = bool(input.generate_config.role_addrs)
+                requires_flexlb = (
+                    getattr(self.master_client, "requires_flexlb_route", False) is True
+                )
+                role_addrs_specified = (
+                    bool(input.generate_config.role_addrs) and not requires_flexlb
+                )
                 if role_addrs_specified:
                     route_source = "request"
                 master_addr = self.host_service.get_master_addr()
-                master_available = (
+                master_available = requires_flexlb or (
                     bool(self.host_service.master_vip.domain)
                     if self._using_navi_sched()
                     else bool(master_addr)
@@ -711,6 +719,12 @@ class BackendRPCServerVisitor:
                 input_token_batched = False
                 if len(input.token_ids.shape) == 2 and input.token_ids.size(0) != 1:
                     input_token_batched = True
+
+                if requires_flexlb and input_token_batched:
+                    raise FlexlbScheduleError(
+                        ExceptionType.MASTER_INVALID_REQUEST,
+                        "FlexLB module mode requires an individual scheduling request",
+                    )
 
                 master_route_result: Optional[FlexlbResponse] = None
                 master_route_succeeded = False
@@ -930,7 +944,11 @@ class BackendRPCServerVisitor:
             raise
 
         async def route_and_enqueue(attempt_input: GenerateInput):
-            if self._using_navi_sched() or self.host_service.service_available:
+            if (
+                self._using_navi_sched()
+                or self.host_service.service_available
+                or getattr(self.master_client, "requires_flexlb_route", False) is True
+            ):
                 await self.route_ips(attempt_input)
             return self.model_rpc_client.enqueue(attempt_input)
 

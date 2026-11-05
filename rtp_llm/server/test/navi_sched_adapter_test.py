@@ -52,6 +52,7 @@ generate_config_module.RoleAddr = RoleAddr
 generate_config_module.RoleType = RoleType
 exceptions_module = types.ModuleType("rtp_llm.config.exceptions")
 exceptions_module.ExceptionType = ExceptionType
+exceptions_module.FtRuntimeException = Exception
 master_client_module = types.ModuleType("rtp_llm.server.master_client")
 master_client_module.FlexlbResponse = FlexlbResponse
 sys.modules[generate_config_module.__name__] = generate_config_module

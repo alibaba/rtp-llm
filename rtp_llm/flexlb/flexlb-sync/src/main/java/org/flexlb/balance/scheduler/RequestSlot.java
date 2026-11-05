@@ -913,6 +913,36 @@ public final class RequestSlot {
         executeEngineObservationEffects(new EngineObservation(effect, obsolete));
     }
 
+    void publishExternalPrefillRoute(DeliveryClaim claim) {
+        RequestEffect effect;
+        synchronized (this) {
+            if (!ownsDeliveryClaimLocked(claim)) {
+                return;
+            }
+            if (claim.kind != DeliveryClaimKind.ROUTE_DECISION || !claim.item.isExternalPrefill()) {
+                throw new IllegalArgumentException(
+                        "publication requires a delegated Prefill route");
+            }
+            effect = acknowledgeDeliveryLocked(claim.correlationId, null);
+        }
+        execute(effect);
+        TerminalAction completed = null;
+        synchronized (this) {
+            if (ownsActiveItem(claim.item)
+                    && claim.item.decodeEp() == null
+                    && state == RequestState.Phase.ACKNOWLEDGED) {
+                completed =
+                        claimTerminalActionLocked(
+                                null,
+                                TerminalOutcome.complete(
+                                        "non-Prefill routing completed; request delegated to NaviSched"),
+                                null,
+                                false);
+            }
+        }
+        terminalCleanup.submitTerminal(completed);
+    }
+
     private void completeDelivery(DeliveryClaim claim, DeliveryResult result) {
         Objects.requireNonNull(result, "delivery result");
         SelectedPublication failureResponse = null;

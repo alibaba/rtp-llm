@@ -61,6 +61,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private final int plannerCount;
     private final double scanBudgetMultiplier;
     private final ConfigService configService;
+    private final Response.PrefillDelegation prefillDelegation;
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition changed = lock.newCondition();
     private final OrderedRequestQueue orderedQueue;
@@ -93,6 +94,11 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             PlacementAvailability availability) {
         ConfigService checkedConfig = Objects.requireNonNull(configService, "configService");
         this.configService = checkedConfig;
+        this.prefillDelegation =
+                checkedConfig.loadBalanceConfig().getPrefillScheduler()
+                                instanceof org.flexlb.config.NaviSchedPrefillSchedulerConfig navi
+                        ? new Response.PrefillDelegation(navi.getMasterBizName())
+                        : null;
         this.router = Objects.requireNonNull(router, "router");
         this.reporter = Objects.requireNonNull(reporter, "reporter");
         this.evictionManager = Objects.requireNonNull(evictionManager, "evictionManager");
@@ -388,8 +394,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         try {
             // A wakeup grants a fresh fleet-wide decision, not an obligation
             // to return to the endpoint which published the capacity event.
-            PlacementResult<RouteAdmission, PlacementKey> result =
-                    router.select(entry.context, entry.routingGroup);
+            PlacementResult<RouteAdmission, PlacementKey> result = selectRoute(entry);
             handle.recordDiagnostics(result.diagnostics());
             if (result.status() == PlacementResult.Status.SUCCESS) {
                 return Plan.success(entry, handle, result, availabilitySequence);
@@ -400,6 +405,26 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             handle.close();
             return Plan.failure(entry, failure, availabilitySequence);
         }
+    }
+
+    private PlacementResult<RouteAdmission, PlacementKey> selectRoute(GlobalQueueEntry entry) {
+        if (prefillDelegation == null) {
+            return router.select(entry.context, entry.routingGroup);
+        }
+        var selected = router.selectForExternalPrefill(entry.context, entry.routingGroup);
+        return switch (selected.status()) {
+            case SUCCESS -> {
+                try (var route = selected.value()) {
+                    route.response().setPrefillDelegation(prefillDelegation);
+                    yield PlacementResult.success(route.prepareAdmission(entry.context));
+                }
+            }
+            case BLOCKED ->
+                    PlacementResult.blocked(
+                            selected.blocker(), selected.failure(), selected.diagnostics());
+            case REJECTED -> PlacementResult.rejected(selected.failure(), selected.diagnostics());
+            case CLOSED -> PlacementResult.closed();
+        };
     }
 
     private Outcome commit(Plan plan) {
@@ -433,6 +458,9 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
         RouteAdmission admission = plan.admission();
         try {
+            if (admission.isExternalPrefill()) {
+                return commitExternalPrefill(plan, admission);
+            }
             PlacementResult<ScheduledRequest, PlacementKey> publication =
                     admission.tryEnqueue(entry.context, entry.future, lifecycle);
             if (publication.status() == PlacementResult.Status.SUCCESS) {
@@ -455,6 +483,34 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         } finally {
             plan.close();
         }
+    }
+
+    private Outcome commitExternalPrefill(Plan plan, RouteAdmission admission) {
+        GlobalQueueEntry entry = plan.entry;
+        plan.closeAdmissionHandle();
+        var publication = admission.tryCommitExternalPrefillRoute(entry.context, lifecycle);
+        if (publication.status() == PlacementResult.Status.SUCCESS) {
+            removeRequest(entry);
+            lifecycle.publishExternalPrefillRoute(publication.value());
+            return Outcome.DONE;
+        }
+        if (publication.status() == PlacementResult.Status.CLOSED
+                || publication.status() == PlacementResult.Status.REJECTED) {
+            removeRequest(entry);
+            completeDecisionResponse(
+                    entry,
+                    publication.failure() != null
+                            ? publication.failure()
+                            : Response.error(StrategyErrorType.REQUEST_CANCELLED));
+            return Outcome.DONE;
+        }
+        plan.blockedOn(publication.blocker());
+        boolean staleSelection = admission.blockedEndpointChanged();
+        if (!staleSelection && tryPriorityRescue(plan, admission.blockedEndpoint())) {
+            removeRequest(entry);
+            return Outcome.DONE;
+        }
+        return staleSelection ? Outcome.REPLAN : Outcome.BLOCKED;
     }
 
     private boolean tryPriorityRescue(Plan plan, WorkerEndpoint blockedEndpoint) {

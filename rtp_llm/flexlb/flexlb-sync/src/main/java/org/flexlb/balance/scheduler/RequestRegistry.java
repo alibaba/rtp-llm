@@ -812,6 +812,25 @@ public class RequestRegistry {
                         () -> admission.transferToEndpoint(item));
     }
 
+    DeliveryClaim claimExternalPrefillRouteDelivery(
+            ScheduledRequest item, PrefillAdmissionResources.Member member) {
+        if (!item.isExternalPrefill()) {
+            throw new IllegalArgumentException("route is not delegated Prefill");
+        }
+        RequestSlot slot = entryFor(item);
+        return slot == null
+                ? null
+                : slot.claimDelivery(
+                        item,
+                        DeliveryClaimKind.ROUTE_DECISION,
+                        0L,
+                        () -> PrefillAdmissionResources.transferToEndpoint(member));
+    }
+
+    void publishExternalPrefillRoute(DeliveryClaim claim) {
+        claim.slot.publishExternalPrefillRoute(claim);
+    }
+
     public void setDeliveryPrediction(
             DeliveryClaim claim, WorkSnapshot precedingWork, long predictedMs) {
         claim.slot.setDeliveryPrediction(claim, precedingWork, predictedMs);

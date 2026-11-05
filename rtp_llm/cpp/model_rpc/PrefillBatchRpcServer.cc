@@ -854,6 +854,12 @@ size_t DeferredPrefillContextMap::size() const {
     return contexts_.size();
 }
 
+bool PrefillBatchRpcServer::parseNaviSchedForwardPayload(uint64_t native_request_id,
+                                                       const std::string& payload,
+                                                       GenerateInputPB& input) {
+    return native_request_id != 0 && input.ParseFromString(payload) && input.request_id() > 0;
+}
+
 PrefillBatchRpcServer::PrefillBatchRpcServer() = default;
 
 PrefillBatchRpcServer::~PrefillBatchRpcServer() {
@@ -916,10 +922,12 @@ grpc::Status PrefillBatchRpcServer::init(const EngineInitParams&                
                 retained_batch->batchId        = batch_id;
                 retained_batch->finishReporter = finish_reporter;
                 retained_batch->requestIds.reserve(requests.size());
+                std::vector<uint64_t> engine_request_ids;
+                engine_request_ids.reserve(requests.size());
                 for (const auto& forwarded : requests) {
                     auto* input = group_request.add_requests()->mutable_input();
-                    if (!input->ParseFromString(forwarded.payload) || input->request_id() != forwarded.requestId) {
-                        RTP_LLM_LOG_WARNING("NaviSched forward batch payload rejected: batch_id=%ld request_id=%ld "
+                    if (!parseNaviSchedForwardPayload(forwarded.requestId, forwarded.payload, *input)) {
+                        RTP_LLM_LOG_WARNING("NaviSched forward batch payload rejected: batch_id=%ld native_request_id=%lu "
                                             "payload_size=%zu parsed_request_id=%ld",
                                             batch_id,
                                             forwarded.requestId,
@@ -928,9 +936,11 @@ grpc::Status PrefillBatchRpcServer::init(const EngineInitParams&                
                         return false;
                     }
                     retained_batch->requestIds.push_back(forwarded.requestId);
+                    engine_request_ids.push_back(static_cast<uint64_t>(input->request_id()));
                 }
                 const auto parse_done_time_us = currentTimeUs();
-                const auto retain_result      = navi_sched::retainRtpLLMReadyBatchWithResult(retained_batch);
+                const auto retain_result =
+                    navi_sched::retainRtpLLMForwardBatchWithResult(retained_batch, engine_request_ids);
                 if (!retain_result) {
                     RTP_LLM_LOG_WARNING("NaviSched forward batch retain failed: batch_id=%ld requests=%zu status=%d "
                                         "conflicting_request_id=%lu retained_requests=%zu first_request_id=%lu",
@@ -939,16 +949,16 @@ grpc::Status PrefillBatchRpcServer::init(const EngineInitParams&                
                                         static_cast<int>(retain_result.status),
                                         retain_result.requestId,
                                         retain_result.retainedRequestCount,
-                                        retained_batch->requestIds.front());
+                                        engine_request_ids.front());
                     return false;
                 }
-                auto enqueue_lease = navi_sched::acquireRtpLLMRetainedBatchLease(retained_batch->requestIds.front());
+                auto enqueue_lease = navi_sched::acquireRtpLLMRetainedBatchLease(engine_request_ids.front());
                 if (!enqueue_lease) {
-                    navi_sched::abortRetainedRtpLLMBatch(retained_batch->requestIds.front());
+                    navi_sched::abortRetainedRtpLLMBatch(engine_request_ids.front());
                     RTP_LLM_LOG_WARNING("NaviSched forward batch lease acquisition failed: batch_id=%ld "
                                         "first_request_id=%lu",
                                         batch_id,
-                                        retained_batch->requestIds.front());
+                                        engine_request_ids.front());
                     return false;
                 }
                 const auto retain_done_time_us = currentTimeUs();

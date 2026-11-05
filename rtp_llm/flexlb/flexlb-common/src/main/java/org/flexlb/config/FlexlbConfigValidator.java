@@ -143,6 +143,7 @@ public final class FlexlbConfigValidator {
         require(config.getScheduler().getType() != null, "scheduler.type", "is required");
         require(config.getDispatcher() != null, "dispatcher", "is required");
         require(config.getRouter() != null, "router", "is required");
+        validatePrefillScheduler(config.getPrefillScheduler());
         require(config.getWorkerRegistry() != null, "workerRegistry", "is required");
         require(config.getObservability() != null, "observability", "is required");
         require(config.getServiceDiscovery() != null, "serviceDiscovery", "is required");
@@ -173,6 +174,18 @@ public final class FlexlbConfigValidator {
                 grpc.getExecutorMaxSize() >= grpc.getExecutorCoreSize(),
                 "grpcServer.executorMaxSize",
                 "must be at least executorCoreSize");
+    }
+
+    private static void validatePrefillScheduler(PrefillSchedulerConfig scheduler) {
+        require(scheduler != null, "prefillScheduler", "is required");
+        if (scheduler instanceof NaviSchedPrefillSchedulerConfig navi) {
+            require(
+                    navi.getMasterBizName() != null && !navi.getMasterBizName().isBlank(),
+                    "prefillScheduler.masterBizName",
+                    "is required for NAVI_SCHED");
+            positive(navi.getStartupTimeoutMs(), "prefillScheduler.startupTimeoutMs");
+            positive(navi.getStopTimeoutMs(), "prefillScheduler.stopTimeoutMs");
+        }
     }
 
     private static void validateQueue(SchedulerConfig queue) {

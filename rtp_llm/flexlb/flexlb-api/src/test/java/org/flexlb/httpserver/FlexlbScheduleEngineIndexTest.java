@@ -33,6 +33,7 @@ class FlexlbScheduleEngineIndexTest {
 
     private RouteService routeService;
     private FlexlbServiceImpl service;
+    private FlexlbConfig routingConfig;
 
     @BeforeEach
     void setUp() {
@@ -41,7 +42,7 @@ class FlexlbScheduleEngineIndexTest {
         when(consistencyService.isNeedConsistency()).thenReturn(false);
 
         ConfigService configService = mock(ConfigService.class);
-        FlexlbConfig routingConfig = new FlexlbConfig();
+        routingConfig = new FlexlbConfig();
         routingConfig.setDispatcher(DispatcherConfig.nonBatch());
         when(configService.loadBalanceConfig()).thenReturn(routingConfig);
 
@@ -100,9 +101,108 @@ class FlexlbScheduleEngineIndexTest {
         assertTrue(response.getSuccess());
         assertEquals(1, response.getServerStatusCount());
         assertFalse(response.getServerStatus(0).hasEngineIndex());
+        assertFalse(response.hasPrefillDelegation());
+    }
+
+    @Test
+    void schedulePreservesDelegationAndDecodeMetadataWithoutReportingEnqueue() throws Exception {
+        Response route = response(serverStatus(1, 2));
+        route.getServerStatus().getFirst().setPreemptRequestIds(List.of("victim"));
+        route.setPrefillDelegation(new Response.PrefillDelegation("master_biz"));
+        when(routeService.route(any(BalanceContext.class)))
+                .thenReturn(
+                        CompletableFuture.completedFuture(
+                                Response.buildSuccessResponse(route, false)));
+        var wire =
+                FlexlbScheduleProtocol.FlexlbScheduleResponsePB.parseFrom(schedule().toByteArray());
+        assertTrue(wire.getSuccess());
+        assertTrue(wire.hasPrefillDelegation());
+        assertEquals("master_biz", wire.getPrefillDelegation().getMasterBizName());
+        assertFalse(wire.getEnqueuedByMaster());
+        assertEquals(1, wire.getServerStatus(0).getEngineIndex());
+        assertEquals(List.of("victim"), wire.getServerStatus(0).getPreemptRequestIdsList());
+        assertEquals("DECODE", wire.getServerStatus(0).getRole());
+    }
+
+    @Test
+    void httpJsonPreservesTheSameDelegationContract() throws Exception {
+        var route = response(serverStatus(0, 2));
+        route.setPrefillDelegation(new Response.PrefillDelegation("master_biz"));
+        String encoded = org.flexlb.util.JsonUtils.toString(Response.copyOf(route));
+        var restored = org.flexlb.util.JsonUtils.toObject(encoded, Response.class);
+        assertEquals(route.getPrefillDelegation(), restored.getPrefillDelegation());
+        assertFalse(restored.isEnqueuedByMaster());
+        assertEquals(0, restored.getServerStatus().getFirst().getEngineIndex());
+        assertFalse(
+                org.flexlb.util.JsonUtils.toString(response(serverStatus(0, 1)))
+                        .contains("prefill_delegation"));
+    }
+
+    @Test
+    void requestPreservesExplicitPrefillDelegationInGrpcAndHttp() throws Exception {
+        var contextCaptor = ArgumentCaptor.forClass(BalanceContext.class);
+        when(routeService.route(contextCaptor.capture()))
+                .thenReturn(CompletableFuture.completedFuture(response(serverStatus(0, 1))));
+        var observer = mock(StreamObserver.class);
+        var wire =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(5001)
+                        .setSeqLen(16)
+                        .setSkipPrefill(true)
+                        .build();
+        service.schedule(
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(wire.toByteArray()),
+                observer);
+        assertTrue(contextCaptor.getValue().getRequest().isSkipPrefill());
+        var http =
+                org.flexlb.util.JsonUtils.toObject(
+                        "{\"request_id\":\"5001\",\"skip_prefill\":true}",
+                        org.flexlb.dao.loadbalance.Request.class);
+        assertTrue(http.isSkipPrefill());
+        assertFalse(new org.flexlb.dao.loadbalance.Request().isSkipPrefill());
+        assertFalse(
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.getDefaultInstance()
+                        .getSkipPrefill());
+    }
+
+    @Test
+    void delegatedBatchDoesNotRequireAnEnginePayload() {
+        routingConfig.setDispatcher(new DispatcherConfig());
+        var navi = new org.flexlb.config.NaviSchedPrefillSchedulerConfig();
+        navi.setMasterBizName("master_biz");
+        routingConfig.setPrefillScheduler(navi);
+        var route = response(serverStatus(0, 1));
+        route.setPrefillDelegation(new Response.PrefillDelegation("master_biz"));
+        when(routeService.route(any(BalanceContext.class)))
+                .thenReturn(CompletableFuture.completedFuture(route));
+        assertTrue(schedule(true).getSuccess());
+        org.mockito.Mockito.verify(routeService).route(any(BalanceContext.class));
+    }
+
+    @Test
+    void localBatchStillRequiresAnEnginePayload() {
+        routingConfig.setDispatcher(new DispatcherConfig());
+        var response = schedule();
+        assertFalse(response.getSuccess());
+        assertTrue(response.getErrorMessage().contains("generate_input"));
+        org.mockito.Mockito.verifyNoInteractions(routeService);
+    }
+
+    @Test
+    void delegationModeDoesNotLetAnUnmarkedBatchBypassPayloadValidation() {
+        routingConfig.setDispatcher(new DispatcherConfig());
+        var navi = new org.flexlb.config.NaviSchedPrefillSchedulerConfig();
+        navi.setMasterBizName("master_biz");
+        routingConfig.setPrefillScheduler(navi);
+        assertFalse(schedule().getSuccess());
+        org.mockito.Mockito.verifyNoInteractions(routeService);
     }
 
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB schedule() {
+        return schedule(false);
+    }
+
+    private FlexlbScheduleProtocol.FlexlbScheduleResponsePB schedule(boolean skipPrefill) {
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 mock(StreamObserver.class);
         service.schedule(
@@ -110,6 +210,7 @@ class FlexlbScheduleEngineIndexTest {
                         .setRequestId(5001)
                         .setRequestIdStr("5001")
                         .setSeqLen(16)
+                        .setSkipPrefill(skipPrefill)
                         .build(),
                 observer);
 

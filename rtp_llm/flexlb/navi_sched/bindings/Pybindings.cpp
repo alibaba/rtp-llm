@@ -1197,12 +1197,30 @@ void bindNaviSchedData(py::module_ &m)
         .def(
             "schedule",
             [](NaviSchedClient &self, const NaviSchedScheduleRequest &request,
-               const std::string &masterBizName, bool collectReplay) {
+               const std::string &masterBizName, bool collectReplay,
+               const std::string &masterAddress) {
                 py::gil_scoped_release release;
-                return self.schedule(request, masterBizName, collectReplay);
+                return self.schedule(request, masterBizName, collectReplay, masterAddress);
             },
             py::arg("request"), py::arg("master_biz_name") = "",
-            py::arg("collect_replay") = false)
+            py::arg("collect_replay") = false, py::arg("master_address") = "")
+        .def(
+            "schedule_flexlb",
+            [](NaviSchedClient &self, uint64_t requestId, const std::string &address,
+               py::bytes payload, int64_t timeoutMs,
+               const std::vector<std::pair<std::string, std::string>> &metadata) {
+                std::string input = payload;
+                std::tuple<int32_t, std::string, std::string> output;
+                {
+                    py::gil_scoped_release release;
+                    output = self.scheduleFlexlb(requestId, address, input, timeoutMs, metadata);
+                }
+                return py::make_tuple(std::get<0>(output), py::bytes(std::get<1>(output)),
+                                      std::get<2>(output));
+            },
+            py::arg("request_id"), py::arg("address"), py::arg("payload"),
+            py::arg("timeout_ms"),
+            py::arg("metadata") = std::vector<std::pair<std::string, std::string>>{})
         .def("take_next_forward_response",
              &NaviSchedClient::takeNextForwardResponse,
              py::arg("timeout_ms") = 0,

@@ -315,13 +315,18 @@ public class EvictionManager {
             return admissionError(
                     StrategyErrorType.RESOURCE_EXHAUSTED,
                     AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                    "selected Prefill capacity changed before canonical placement");
+                    admission.isExternalPrefill()
+                            ? "selected Decode capacity changed before canonical placement"
+                            : "selected Prefill capacity changed before canonical placement");
         }
         reportPlacement(context, item, "Decode eviction");
         return null;
     }
 
     private void reportPlacement(BalanceContext context, ScheduledRequest item, String kind) {
+        if (item.isExternalPrefill()) {
+            return;
+        }
         try {
             deliveryReporter.reportRouteSubmitTimeMs(
                     item.prefill().getRole().name(),

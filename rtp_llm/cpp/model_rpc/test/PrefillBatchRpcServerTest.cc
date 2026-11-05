@@ -83,6 +83,7 @@ public:
 class TestPrefillBatchRpcServer: public PrefillBatchRpcServer {
 public:
     using LocalRpcServer::prepareInput;
+    using PrefillBatchRpcServer::parseNaviSchedForwardPayload;
 
     grpc::Status EnqueueGroup(grpc::ServerContext*,
                               const EnqueueGroupRequestPB* request,
@@ -367,6 +368,35 @@ void buildReadySlots(PrefillBatchRpcServer&                         server,
         slot.deferred->input    = slot.input;
         ready_slots.push_back(PrefillBatchRpcServer::ReadySlot{&slot, slot.deferred});
     }
+}
+
+TEST(NaviSchedForwardPayloadTest, PreservesEngineIdAndFullPayloadAcrossCanonicalId) {
+    GenerateInputPB original;
+    original.set_request_id(101);
+    original.set_flexlb_schedule_response(std::string(4096, '\0'));
+    original.add_token_ids(17);
+    original.add_token_ids(23);
+    GenerateInputPB parsed;
+    const uint64_t native_id = (uint64_t{1} << 63) + 77;
+    ASSERT_TRUE(TestPrefillBatchRpcServer::parseNaviSchedForwardPayload(
+        native_id, original.SerializeAsString(), parsed));
+    EXPECT_EQ(original.SerializeAsString(), parsed.SerializeAsString());
+    EXPECT_EQ(101, parsed.request_id());
+}
+
+TEST(NaviSchedForwardPayloadTest, RejectsInvalidEnvelopeWithoutRequiringEqualIds) {
+    GenerateInputPB input;
+    GenerateInputPB parsed;
+    input.set_request_id(101);
+    EXPECT_FALSE(TestPrefillBatchRpcServer::parseNaviSchedForwardPayload(
+        0, input.SerializeAsString(), parsed));
+    EXPECT_FALSE(TestPrefillBatchRpcServer::parseNaviSchedForwardPayload(99, "\xff", parsed));
+    input.set_request_id(0);
+    EXPECT_FALSE(TestPrefillBatchRpcServer::parseNaviSchedForwardPayload(
+        99, input.SerializeAsString(), parsed));
+    input.set_request_id(-1);
+    EXPECT_FALSE(TestPrefillBatchRpcServer::parseNaviSchedForwardPayload(
+        99, input.SerializeAsString(), parsed));
 }
 
 TEST(PrefillBatchRpcServerTest, FlattensLocalSlotsAndPropagatesFetchLease) {

@@ -1107,7 +1107,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             ctx.setRequestPhase(RequestPhase.ENCODER);
         }
 
-        if (config.isBatchDispatch() && ctx.getRequestPhase() != RequestPhase.ENCODER) {
+        if (config.isBatchDispatch()
+                && ctx.getRequestPhase() != RequestPhase.ENCODER
+                && !(config.isNaviSchedPrefill() && pb.getSkipPrefill())) {
             try {
                 RequestId.requireMatchingGenerateInput(requestId, pb.getGenerateInput());
             } catch (IllegalArgumentException error) {
@@ -1120,6 +1122,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setBlockCacheKeys(pb.getBlockCacheKeysList());
         request.setCacheAffinityKeys(pb.getCacheAffinityKeysList());
         request.setVitRouteOnly(pb.getVitRouteOnly());
+        request.setSkipPrefill(pb.getSkipPrefill());
         if (pb.hasSelectedVit()) {
             var selected = pb.getSelectedVit();
             ServerStatus vit = new ServerStatus();
@@ -1281,6 +1284,12 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
         builder.setQueueLength(response.getQueueLength() != null ? response.getQueueLength() : 0);
         builder.setEnqueuedByMaster(response.isEnqueuedByMaster());
+        if (response.getPrefillDelegation() != null) {
+            var delegation = response.getPrefillDelegation();
+            builder.setPrefillDelegation(
+                    FlexlbScheduleProtocol.PrefillDelegationPB.newBuilder()
+                            .setMasterBizName(delegation.masterBizName()));
+        }
         builder.setAdmissionRejectReason(
                 toProtoAdmissionRejectReason(response.getAdmissionRejectReason()));
 

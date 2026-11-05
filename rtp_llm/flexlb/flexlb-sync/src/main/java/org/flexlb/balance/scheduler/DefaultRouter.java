@@ -115,6 +115,75 @@ public class DefaultRouter {
         }
     }
 
+    public PlacementResult<PrefillDelegationRoute, PlacementKey> selectForExternalPrefill(
+            BalanceContext context) {
+        return selectForExternalPrefill(context, resolvePolicyGroup(context));
+    }
+
+    public PlacementResult<PrefillDelegationRoute, PlacementKey> selectForExternalPrefill(
+            BalanceContext context, String policyGroup) {
+        Response validationFailure = validateRequest(context);
+        if (validationFailure != null) {
+            return PlacementResult.rejected(validationFailure);
+        }
+        Set<RoleType> roles = requestedRoles(context);
+        if (roles.stream().noneMatch(RoleType::supportsPrefill)) {
+            return PlacementResult.rejected(Response.error(StrategyErrorType.INVALID_REQUEST));
+        }
+        Set<RoleType> remainingRoles =
+                roles.stream()
+                        .filter(role -> !role.supportsPrefill())
+                        .collect(Collectors.toCollection(LinkedHashSet::new));
+        DecodeBinding decodeRequest = DecodeBinding.capture(context);
+        PinnedRouting routing = selectAll(context, remainingRoles, policyGroup, decodeRequest);
+        if (routing.blocker() != null || routing.failure() != null) {
+            try (routing) {
+                return routing.blocker() != null
+                        ? PlacementResult.blocked(
+                                routing.blocker(), routing.failure(), routing.diagnostics)
+                        : PlacementResult.rejected(routing.failure(), routing.diagnostics);
+            }
+        }
+        try {
+            for (SelectedRole selected : routing.selections()) {
+                if (!Objects.equals(
+                        selected.serverStatus().getRequestId(), context.getRequestId())) {
+                    throw new IllegalStateException("selected role belongs to another request");
+                }
+            }
+            return PlacementResult.success(
+                    new PrefillDelegationRoute(
+                            buildSuccessResponse(routing.serverStatuses()),
+                            routing.selections(),
+                            decodeRequest));
+        } catch (RuntimeException | Error failure) {
+            throw propagate(closeSelections(routing.selections(), failure));
+        }
+    }
+
+    public record PrefillDelegationRoute(
+            Response response, List<SelectedRole> selections, DecodeBinding decodeRequest)
+            implements AutoCloseable {
+        public PrefillDelegationRoute {
+            response = Response.copyOf(Objects.requireNonNull(response, "response"));
+            selections = List.copyOf(selections);
+            Objects.requireNonNull(decodeRequest, "decodeRequest");
+        }
+
+        RouteAdmission prepareAdmission(BalanceContext context) {
+            return RouteAdmission.prepareExternalPrefill(
+                    context, selections, response, decodeRequest);
+        }
+
+        @Override
+        public void close() {
+            Throwable failure = closeSelections(selections, null);
+            if (failure != null) {
+                throw propagate(failure);
+            }
+        }
+    }
+
     public Response routeVit(BalanceContext context) {
         Response invalid = validateRequest(context);
         if (invalid != null) {

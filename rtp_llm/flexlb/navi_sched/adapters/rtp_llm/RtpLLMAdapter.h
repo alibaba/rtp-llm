@@ -76,6 +76,8 @@ NAVI_SCHED_API bool finishRtpLLMBatch(
 NAVI_SCHED_API bool retainRtpLLMReadyBatch(const NaviSchedBatchPtr &batch);
 NAVI_SCHED_API RtpLLMReadyBatchRetainResult
 retainRtpLLMReadyBatchWithResult(const NaviSchedBatchPtr &batch);
+NAVI_SCHED_API RtpLLMReadyBatchRetainResult retainRtpLLMForwardBatchWithResult(
+    const NaviSchedBatchPtr &batch, const std::vector<uint64_t> &engineRequestIds);
 NAVI_SCHED_API RtpLLMRetainedBatchLeasePtr
 acquireRtpLLMRetainedBatchLease(uint64_t requestId);
 NAVI_SCHED_API bool abortRetainedRtpLLMBatch(uint64_t requestId);

@@ -3,6 +3,7 @@ from importlib import import_module
 __all__ = [
     "NaviSchedAdapterConfig",
     "NaviSchedClient",
+    "FlexlbInfo",
     "create_navi_sched_client",
     "apply_frontend_request_overrides",
     "SwitchableMasterClient",
@@ -20,6 +21,7 @@ _EXPORTS = {
         "NaviSchedAdapterConfig",
     ),
     "NaviSchedClient": (".NaviSchedClient", "NaviSchedClient"),
+    "FlexlbInfo": (".flexlb_info", "FlexlbInfo"),
     "create_navi_sched_client": (
         ".NaviSchedClient",
         "create_navi_sched_client",

@@ -354,6 +354,54 @@ class ConfigServiceTest {
     }
 
     @Test
+    void runtimeUpdatesCannotSwitchPrefillOwnerOrMasterIdentity() {
+        FakeConfigSource source =
+                new FakeConfigSource(
+                        "Nacos",
+                        200,
+                        """
+                {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
+                 "prefillScheduler":{"type":"NAVI_SCHED",
+                   "masterBizName":"master_biz"}}
+                """);
+        ConfigService service = createService(List.of(environmentSource(Map.of()), source));
+        FlexlbConfig startup = service.loadBalanceConfig();
+        assertThat(startup.isNaviSchedPrefill()).isTrue();
+        for (String patch :
+                new String[] {
+                    "{\"schemaVersion\":3,\"prefillScheduler\":{\"type\":\"FLEXLB\"}}",
+                    "{\"schemaVersion\":3,\"prefillScheduler\":{\"masterAddress\":\"other-master:17003\"}}",
+                    "{\"schemaVersion\":3,\"prefillScheduler\":{\"masterBizName\":\"other_master\"}}"
+                }) {
+            source.emit(patch);
+            assertThat(service.loadBalanceConfig()).isSameAs(startup);
+        }
+        source.emit("{\"schemaVersion\":3,\"grpcServer\":{\"executorMaxSize\":2000}}");
+        assertThat(service.loadBalanceConfig()).isNotSameAs(startup);
+        assertThat(service.loadBalanceConfig().isNaviSchedPrefill()).isTrue();
+        assertThat(service.loadBalanceConfig().getGrpcServer().getExecutorMaxSize())
+                .isEqualTo(2000);
+    }
+
+    @Test
+    void runtimeUpdateCannotEnableDelegationWithoutRestartingTheContainer() {
+        FakeConfigSource source =
+                new FakeConfigSource(
+                        "Nacos",
+                        200,
+                        "{\"schemaVersion\":3,\"requestLifecycle\":{\"request\":{\"timeoutMs\":60000}}}");
+        ConfigService service = createService(List.of(environmentSource(Map.of()), source));
+        FlexlbConfig startup = service.loadBalanceConfig();
+        source.emit(
+                """
+                {"schemaVersion":3,"prefillScheduler":{"type":"NAVI_SCHED",
+                  "masterBizName":"master_biz"}}
+                """);
+        assertThat(service.loadBalanceConfig()).isSameAs(startup);
+        assertThat(startup.isNaviSchedPrefill()).isFalse();
+    }
+
+    @Test
     void runtimeUpdatesKeepStartupModesAndApplyNumericFields() {
         FakeConfigSource source =
                 new FakeConfigSource(
