@@ -16,14 +16,10 @@ public record PrefillBatchFeatures(List<Item> items) {
      * type.
      */
     public static <T> PrefillBatchFeatures from(
-            List<T> source,
-            ToLongFunction<? super T> seqLen,
-            ToLongFunction<? super T> hitCache) {
+            List<T> source, ToLongFunction<? super T> seqLen, ToLongFunction<? super T> hitCache) {
         List<Item> features = new ArrayList<>(source.size());
         for (T item : source) {
-            features.add(new Item(
-                    seqLen.applyAsLong(item),
-                    hitCache.applyAsLong(item)));
+            features.add(new Item(seqLen.applyAsLong(item), hitCache.applyAsLong(item)));
         }
         return new PrefillBatchFeatures(features);
     }
@@ -35,12 +31,10 @@ public record PrefillBatchFeatures(List<Item> items) {
     public record Item(long seqLen, long hitCache) {
         public Item {
             if (seqLen < 0L) {
-                throw new IllegalArgumentException(
-                        "seqLen must be non-negative");
+                throw new IllegalArgumentException("seqLen must be non-negative");
             }
             if (hitCache < 0L || hitCache > seqLen) {
-                throw new IllegalArgumentException(
-                        "hitCache must be in [0, seqLen]");
+                throw new IllegalArgumentException("hitCache must be in [0, seqLen]");
             }
         }
     }

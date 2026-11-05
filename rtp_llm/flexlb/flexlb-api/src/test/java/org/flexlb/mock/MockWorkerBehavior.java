@@ -107,10 +107,10 @@ public final class MockWorkerBehavior {
         private long totalKvCache = 2_000_000L;
         private String enqueueErrorMessage = "mock enqueue failure";
         private long enqueueErrorCode = 13;
-        private EngineRpcService.RoleTypePB roleType = EngineRpcService.RoleTypePB.ROLE_TYPE_PDFUSION;
+        private EngineRpcService.RoleTypePB roleType =
+                EngineRpcService.RoleTypePB.ROLE_TYPE_PDFUSION;
 
-        private Builder() {
-        }
+        private Builder() {}
 
         public Builder enqueueDelayMs(long ms) {
             this.enqueueDelayMs = ms;

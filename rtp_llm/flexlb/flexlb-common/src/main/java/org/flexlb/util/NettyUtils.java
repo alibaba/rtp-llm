@@ -46,7 +46,8 @@ public class NettyUtils {
         return mergedData;
     }
 
-    public static <T> void finishNettyWithException(HttpNettyChannelContext<T> nettyCtx, Throwable e) {
+    public static <T> void finishNettyWithException(
+            HttpNettyChannelContext<T> nettyCtx, Throwable e) {
         finish(nettyCtx);
         nettyCtx.getSink().error(e);
     }

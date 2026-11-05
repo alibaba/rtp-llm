@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import os
 import time
@@ -915,18 +916,37 @@ class BackendRPCServerVisitor:
                 yielded_output = False
                 try:
                     stream = await route_and_enqueue(attempt_input)
-                    if is_streaming:
-                        async for output in stream:
+                    try:
+                        if is_streaming:
+                            async for output in stream:
+                                yielded_output = True
+                                yield output
+                        else:
+                            buffered_outputs = []
+                            async for output in stream:
+                                buffered_outputs.append(output)
                             yielded_output = True
-                            yield output
-                    else:
-                        buffered_outputs = []
-                        async for output in stream:
-                            buffered_outputs.append(output)
-                        yielded_output = True
-                        for output in buffered_outputs:
-                            yield output
-                    return
+                            for output in buffered_outputs:
+                                yield output
+                        return
+                    finally:
+                        # Each attempt owns its inner stream. Closing this wrapper
+                        # must release it before retrying or returning to the caller;
+                        # ModelRpcClient still owns finished-RPC EOF settlement.
+                        try:
+                            close = getattr(stream, "aclose", None)
+                            if callable(close):
+                                result = close()
+                                if inspect.isawaitable(result):
+                                    await result
+                        except Exception as close_error:
+                            # Cleanup must not replace a business error or cause a
+                            # successful attempt to retry. Cancellation still escapes.
+                            route_logger.warning(
+                                "backend stream close failed, request_id=%s: %s",
+                                attempt_input.request_id,
+                                close_error,
+                            )
                 except (asyncio.CancelledError, GeneratorExit):
                     # Cancellation and generator teardown are control-flow signals,
                     # never route failures. Do not replace them with a prior retry

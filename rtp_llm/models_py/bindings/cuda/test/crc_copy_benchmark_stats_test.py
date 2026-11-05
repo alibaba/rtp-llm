@@ -17,7 +17,7 @@ from crc_copy_benchmark_stats import (
 )
 
 
-def fixture(exclude=False, correctness_only=False, repeat=80):
+def fixture(exclude=False, correctness_only=False, repeat=80, blocks=None):
     settings = dict(
         iterations=4,
         warmup=1,
@@ -25,6 +25,10 @@ def fixture(exclude=False, correctness_only=False, repeat=80):
         exclude_1d_h2d=exclude,
         correctness_only=correctness_only,
     )
+    measured = list(BLOCKS)
+    if blocks is not None:
+        settings["blocks"] = list(blocks)
+        measured = list(blocks)
     meta = dict(
         type="metadata",
         implementation="crc_copy_benchmark_v5",
@@ -32,7 +36,7 @@ def fixture(exclude=False, correctness_only=False, repeat=80):
         staged_host_payload_copy="direct_dma",
         main_staged_host_payload_copy="cpu_pack_unpack",
         variants=list(VARIANTS),
-        block_counts=list(BLOCKS),
+        block_counts=measured,
         repeat=repeat,
         seed=settings["seed"] + repeat,
         iterations=4,
@@ -116,7 +120,7 @@ def fixture(exclude=False, correctness_only=False, repeat=80):
                 for v in VARIANTS
                 if not (exclude and direction == "h2d" and v == "copy1d_batch")
             ]
-            for n in BLOCKS:
+            for n in measured:
                 for variant in VARIANTS:
                     record = dict(
                         direction=direction, layout=layout, blocks=n, variant=variant
@@ -133,6 +137,8 @@ def fixture(exclude=False, correctness_only=False, repeat=80):
                 if not correctness_only:
                     for round_id in range(4):
                         for position, variant in enumerate(active):
+                            # pool_blocks=129 leaves 128 rotatable blocks, so a
+                            # backing count >= 128 only admits source_plan 0.
                             records.append(
                                 dict(
                                     type="sample",
@@ -143,7 +149,7 @@ def fixture(exclude=False, correctness_only=False, repeat=80):
                                     repeat=repeat,
                                     round=round_id,
                                     position=position,
-                                    source_plan=round_id % 2,
+                                    source_plan=round_id % 2 if n < 128 else 0,
                                     timing="wall",
                                     regime="cold",
                                     us=100.0 + n + 10 * position + round_id,
@@ -160,7 +166,7 @@ def fixture(exclude=False, correctness_only=False, repeat=80):
                     cases=6,
                     corruption_cases=6,
                     success=True,
-                    all_targets_unchanged=True,
+                    ungated_scatter_verified=True,
                     recovery_success=True,
                     good_bad_good=True,
                     entire_pool_guards=True,
@@ -196,6 +202,27 @@ class BenchmarkStatsTest(unittest.TestCase):
                 self.assertEqual(cell["count"], 8)
                 self.assertEqual(cell["p50_us"], 102.5)
                 self.assertEqual(cell["p95_us"], 104.0)
+
+    def test_custom_block_list(self):
+        blocks = [64, 128, 256]
+        settings, first = fixture(blocks=blocks)
+        _, second = fixture(blocks=blocks, repeat=81)
+        result = analyze(
+            [self.write(first, "80.jsonl"), self.write(second, "81.jsonl")], settings
+        )
+        self.assertEqual(len(result["cases"]), 12)
+        self.assertEqual(result["paired_round_count"], 96)
+        self.assertEqual(result["sample_count"], 480)
+        self.assertEqual(
+            sorted({case["blocks"] for case in result["cases"]}), [64, 128, 256]
+        )
+        cell = result["cases"][0]["variants"]["integrated_crc"]
+        self.assertEqual(cell["count"], 8)
+        default_settings, default_records = fixture()
+        with self.assertRaises(ValueError):
+            read_run(self.write(first, "80.jsonl"), default_settings, 80)
+        with self.assertRaises(ValueError):
+            read_run(self.write(default_records, "default.jsonl"), settings, 80)
 
     def test_correctness_only_contains_no_timing(self):
         settings, first = fixture(correctness_only=True)
@@ -252,8 +279,8 @@ class BenchmarkStatsTest(unittest.TestCase):
             "zero_duration": lambda r: r[sample].update(us=0),
             "wrong_shape": lambda r: r[shape].update(payload_bytes=732673),
             "insufficient_eviction": lambda r: r[shape].update(evict_bytes=8191),
-            "corruption_wrote_target": lambda r: r[corruption].update(
-                all_targets_unchanged=False
+            "corruption_scatter_unverified": lambda r: r[corruption].update(
+                ungated_scatter_verified=False
             ),
             "silent_exclusion": lambda r: r[0].update(exclude_1d_h2d=True),
         }

@@ -40,6 +40,22 @@
             "result": {
                 "response": "\nI'm trying to`\n\nI'm trying to create a simple Kivy app with a ScreenManager and two screens. I'm getting a `NameError: name 'screen_manager' is not defined` error. I've tried to define `screen"
             }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:m1",
+                "generate_config": {
+                    "max_new_tokens": 8,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": " Thank you.\n\nOptimising inefficient admin",
+                "aux_info": {
+                    "iter_count": 9
+                }
+            }
         }
     ]
 }

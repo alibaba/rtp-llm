@@ -41,8 +41,7 @@ class DirectPrefillCoalescingTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BASE_PORT = 63200;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private ScheduledExecutorService scheduler;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
@@ -50,11 +49,14 @@ class DirectPrefillCoalescingTest {
 
     @BeforeEach
     void setUp() {
-        scheduler = Executors.newScheduledThreadPool(4, runnable -> {
-            Thread thread = new Thread(runnable, "direct-coalesce-test-scheduler");
-            thread.setDaemon(true);
-            return thread;
-        });
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        4,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "direct-coalesce-test-scheduler");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
         services = new ConcurrentHashMap<>();
         stats = new JavaMockEngineCluster.ClusterStats();
     }
@@ -72,8 +74,7 @@ class DirectPrefillCoalescingTest {
 
     @Test
     void queuedDirectRequestsCoalesceIntoOneBatch() throws Exception {
-        JavaMockEngineCluster.FastRpcService prefill =
-                startPrefill(model(0, 4));
+        JavaMockEngineCluster.FastRpcService prefill = startPrefill(model(0, 4));
 
         // Fire all 6 generate_stream calls up front (admission is synchronous,
         // responses arrive on the response executor): #1 takes the only slot,
@@ -84,7 +85,8 @@ class DirectPrefillCoalescingTest {
             futures.add(generateAsync(prefill, input(1000 + i, 10)));
         }
         for (int i = 0; i < futures.size(); i++) {
-            assertNull(futures.get(i).get(10, TimeUnit.SECONDS),
+            assertNull(
+                    futures.get(i).get(10, TimeUnit.SECONDS),
                     "request " + (i + 1) + " should be admitted");
         }
 
@@ -95,10 +97,11 @@ class DirectPrefillCoalescingTest {
 
         // Batch structure: [1] + [2,3,4,5] + [6] — coalescing is observable in
         // the per-engine prefill batch stats (java_mock_stats batch counters).
-        assertEquals(3, stats.prefillBatches.sum(),
-                "expected 1 + 4 + 1 batches after coalescing");
+        assertEquals(3, stats.prefillBatches.sum(), "expected 1 + 4 + 1 batches after coalescing");
         assertEquals(6, stats.prefillBatchRequests.sum());
-        assertEquals(4, stats.maxPrefillBatchSize.get(),
+        assertEquals(
+                4,
+                stats.maxPrefillBatchSize.get(),
                 "the coalesced batch should hold 4 requests (direct_batch_size_max)");
         assertFalse(prefill.isLeakDetected());
     }
@@ -107,8 +110,7 @@ class DirectPrefillCoalescingTest {
 
     @Test
     void maxOfOneRestoresSingleRequestBatches() throws Exception {
-        JavaMockEngineCluster.FastRpcService prefill =
-                startPrefill(model(0, 1));
+        JavaMockEngineCluster.FastRpcService prefill = startPrefill(model(0, 1));
 
         List<CompletableFuture<Throwable>> futures = new ArrayList<>();
         for (int i = 1; i <= 5; i++) {
@@ -120,7 +122,9 @@ class DirectPrefillCoalescingTest {
 
         awaitCompleted(prefill, 5, 5_000);
         assertEquals(5, prefill.getCompletedCount());
-        assertEquals(5, stats.prefillBatches.sum(),
+        assertEquals(
+                5,
+                stats.prefillBatches.sum(),
                 "legacy behaviour: every direct request runs as its own batch");
         assertEquals(5, stats.prefillBatchRequests.sum());
         assertEquals(1, stats.maxPrefillBatchSize.get());
@@ -133,8 +137,7 @@ class DirectPrefillCoalescingTest {
     void directWaitingCapRejectsInRequests() throws Exception {
         // max_waiting_batches=1 x direct_batch_size_max=2 -> cap of 2 queued
         // requests: #1 runs, #2-#3 queue, #4 must be rejected.
-        JavaMockEngineCluster.FastRpcService prefill =
-                startPrefill(model(1, 2));
+        JavaMockEngineCluster.FastRpcService prefill = startPrefill(model(1, 2));
 
         // #1 runs, #2-#3 fill the 2-request cap — all three admissions land
         // inside #1's 100 ms prefill window, so the 4th must be rejected.
@@ -143,12 +146,13 @@ class DirectPrefillCoalescingTest {
             admitted.add(generateAsync(prefill, input(requestId, 10)));
         }
 
-        Throwable rejected = generateAsync(prefill, input(3004, 10))
-                .get(5, TimeUnit.SECONDS);
+        Throwable rejected = generateAsync(prefill, input(3004, 10)).get(5, TimeUnit.SECONDS);
         assertNotNull(rejected, "4th request should hit the request-level cap");
-        assertTrue(rejected.getMessage().contains("prefill waiting queue full"),
+        assertTrue(
+                rejected.getMessage().contains("prefill waiting queue full"),
                 "rejection must carry the backpressure message, got: " + rejected);
-        assertTrue(rejected.getMessage().contains("cap=2"),
+        assertTrue(
+                rejected.getMessage().contains("cap=2"),
                 "rejection should report the request-level cap, got: " + rejected);
 
         for (CompletableFuture<Throwable> future : admitted) {
@@ -167,9 +171,16 @@ class DirectPrefillCoalescingTest {
     // ──────────── Harness ────────────
 
     private JavaMockEngineCluster.FastRpcService startPrefill(MockPerformanceModel model) {
-        JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                BASE_PORT, services, scheduler, model, 100, stats);
+        JavaMockEngineCluster.FastRpcService service =
+                new JavaMockEngineCluster.FastRpcService(
+                        "prefill",
+                        EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
+                        BASE_PORT,
+                        services,
+                        scheduler,
+                        model,
+                        100,
+                        stats);
         services.put(BASE_PORT, service);
         return service;
     }
@@ -178,21 +189,28 @@ class DirectPrefillCoalescingTest {
             throws Exception {
         Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
         Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
-        MAPPER.writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", 1.0,
-                "jitter_pct", 0.0,
-                "prefill", Map.of(
-                        "scale", 1.0,
-                        "max_waiting_batches", maxWaitingBatches,
-                        "direct_batch_size_max", directBatchSizeMax),
-                "decode", Map.of("scale", 1.0, "step_ms_by_batch", List.of(List.of(1, 1.0)))));
+        MAPPER.writeValue(
+                performance.toFile(),
+                Map.of(
+                        "block_size",
+                        1024,
+                        "sleep_scale",
+                        1.0,
+                        "jitter_pct",
+                        0.0,
+                        "prefill",
+                        Map.of(
+                                "scale", 1.0,
+                                "max_waiting_batches", maxWaitingBatches,
+                                "direct_batch_size_max", directBatchSizeMax),
+                        "decode",
+                        Map.of("scale", 1.0, "step_ms_by_batch", List.of(List.of(1, 1.0)))));
         MockMasterConfig.writeWithPrefillExpression(master, "100");
         return MockPerformanceModel.load(performance.toString(), master.toString());
     }
 
-    private static void awaitCompleted(JavaMockEngineCluster.FastRpcService service,
-                                       int expected, long timeoutMs)
+    private static void awaitCompleted(
+            JavaMockEngineCluster.FastRpcService service, int expected, long timeoutMs)
             throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         while (System.nanoTime() < deadline) {
@@ -201,17 +219,23 @@ class DirectPrefillCoalescingTest {
             }
             Thread.sleep(10);
         }
-        fail("not drained: completed=" + service.getCompletedCount()
-                + " inflight=" + service.getInflightCount()
-                + " waiting=" + service.getWaitingCount());
+        fail(
+                "not drained: completed="
+                        + service.getCompletedCount()
+                        + " inflight="
+                        + service.getInflightCount()
+                        + " waiting="
+                        + service.getWaitingCount());
     }
 
     private static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(1)
-                        .build());
+        EngineRpcService.GenerateInputPB.Builder input =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(requestId)
+                        .setGenerateConfig(
+                                EngineRpcService.GenerateConfigPB.newBuilder()
+                                        .setMaxNewTokens(1)
+                                        .build());
         for (int token = 0; token < inputTokens; token++) {
             input.addTokenIds(token);
         }
@@ -225,24 +249,24 @@ class DirectPrefillCoalescingTest {
      * executor, so callers can fire many requests before awaiting any.
      */
     private static CompletableFuture<Throwable> generateAsync(
-            JavaMockEngineCluster.FastRpcService service,
-            EngineRpcService.GenerateInputPB input) {
+            JavaMockEngineCluster.FastRpcService service, EngineRpcService.GenerateInputPB input) {
         CompletableFuture<Throwable> future = new CompletableFuture<>();
-        service.generateStreamCall(input, new StreamObserver<>() {
-            @Override
-            public void onNext(EngineRpcService.GenerateOutputsPB value) {
-            }
+        service.generateStreamCall(
+                input,
+                new StreamObserver<>() {
+                    @Override
+                    public void onNext(EngineRpcService.GenerateOutputsPB value) {}
 
-            @Override
-            public void onError(Throwable throwable) {
-                future.complete(throwable);
-            }
+                    @Override
+                    public void onError(Throwable throwable) {
+                        future.complete(throwable);
+                    }
 
-            @Override
-            public void onCompleted() {
-                future.complete(null);
-            }
-        });
+                    @Override
+                    public void onCompleted() {
+                        future.complete(null);
+                    }
+                });
         return future;
     }
 }

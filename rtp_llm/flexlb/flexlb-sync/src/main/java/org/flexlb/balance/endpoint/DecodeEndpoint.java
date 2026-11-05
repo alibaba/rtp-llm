@@ -18,7 +18,7 @@ import java.util.Map;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 
 /** Decode worker boundary: lifecycle pins, resource operations and lock-free notifications.
  * DecodeState owns the generation-local resource ledger and its single mutation lock.
@@ -36,32 +36,51 @@ public class DecodeEndpoint extends WorkerEndpoint {
         this(status, endpointEvents, new PlacementAvailability());
     }
 
-    DecodeEndpoint(WorkerStatus status, EndpointEventProjector endpointEvents,
-                   PlacementAvailability placementAvailability) {
+    DecodeEndpoint(
+            WorkerStatus status,
+            EndpointEventProjector endpointEvents,
+            PlacementAvailability placementAvailability) {
         super(status);
         this.state = new DecodeState(status);
         this.endpointEvents = java.util.Objects.requireNonNull(endpointEvents, "endpointEvents");
-        this.placementAvailability = java.util.Objects.requireNonNull(placementAvailability, "placementAvailability");
+        this.placementAvailability =
+                java.util.Objects.requireNonNull(placementAvailability, "placementAvailability");
     }
 
     // Reservation and release. Lifecycle pins remain valid for the entire handoff.
 
-    public ReservationHandle reserve(GenerationPin pin, long requestId, long hardKv,
-                                     long expectedKv, int priority) {
-        return reserve(pin, requestId, hardKv, expectedKv, priority, null);
+    public ReservationHandle reserve(
+            GenerationPin pin,
+            String requestId,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
+            int priority) {
+        return reserve(pin, requestId, inputKvTokens, inputAndMaxOutputKvTokens, priority, null);
     }
 
-    public ReservationHandle reserve(GenerationPin pin, long requestId, long hardKv,
-                                     long expectedKv, int priority, AdmissionCapacity capacity) {
+    public ReservationHandle reserve(
+            GenerationPin pin,
+            String requestId,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
+            int priority,
+            AdmissionCapacity capacity) {
         requirePinnedGeneration(pin);
-        return state.reserve(requestId, hardKv, expectedKv, priority, true, capacity);
+        return state.reserve(
+                requestId, inputKvTokens, inputAndMaxOutputKvTokens, priority, true, capacity);
     }
 
     /** An engine-facing shadow for work already outside the local queue. */
-    public ReservationHandle reserveUnqueued(GenerationPin pin, long requestId, long hardKv,
-                                             long expectedKv, int priority) {
+    public ReservationHandle reserveUnqueued(
+            GenerationPin pin,
+            String requestId,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
+            int priority) {
         requirePinnedGeneration(pin);
-        ReservationHandle reservation = state.reserve(requestId, hardKv, expectedKv, priority, false, null);
+        ReservationHandle reservation =
+                state.reserve(
+                        requestId, inputKvTokens, inputAndMaxOutputKvTokens, priority, false, null);
         if (reservation == null) {
             throw new IllegalStateException("Decode request id is already owned: " + requestId);
         }
@@ -71,41 +90,51 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /** LOCAL_ROLLBACK requires local ownership; other evidence may leave Engine/protocol ownership intact. */
     public ReservationReleaseResult release(ReservationHandle reservation, ReleaseReason reason) {
         ReservationReleaseResult result = state.release(reservation, reason);
-        if (result == ReservationReleaseResult.RELEASED) { publishCapacityRelease(); }
+        if (result == ReservationReleaseResult.RELEASED) {
+            publishCapacityRelease();
+        }
         return result;
     }
 
     /** Select no user outcome here: Prefill rejection alone cannot release Decode ownership. */
-    public boolean settleFailedRequest(ReservationHandle reservation, DeliveryResult.Status source) {
-        if (source != DeliveryResult.Status.NOT_SENT && source != DeliveryResult.Status.PREFILL_REJECTED) {
+    public boolean settleFailedRequest(
+            ReservationHandle reservation, DeliveryResult.Status source) {
+        if (source != DeliveryResult.Status.NOT_SENT
+                && source != DeliveryResult.Status.PREFILL_REJECTED) {
             throw new IllegalArgumentException("expected a definite request failure");
         }
-        if (reservation == null) { return true; }
-        if (source == DeliveryResult.Status.NOT_SENT) { release(reservation, ReleaseReason.NOT_SENT); }
+        if (reservation == null) {
+            return true;
+        }
+        if (source == DeliveryResult.Status.NOT_SENT) {
+            release(reservation, ReleaseReason.NOT_SENT);
+        }
         return !state.hasOwnedResources(reservation);
     }
 
-    public boolean isAcceptedByEngine(ReservationHandle reservation) { return state.isAcceptedByEngine(reservation); }
+    public boolean isAcceptedByEngine(ReservationHandle reservation) {
+        return state.isAcceptedByEngine(reservation);
+    }
 
-    public ReservationHandle reservationHandle(long requestId) {
+    public ReservationHandle reservationHandle(String requestId) {
         return isRetired() ? null : state.reservationHandle(requestId);
     }
 
     public record ReservationHandle(
-            long endpointGenerationId,
-            long requestId,
-            long reservationToken) {
+            long endpointGenerationId, String requestId, long reservationToken) {
 
         public ReservationHandle {
             if (endpointGenerationId <= 0L || reservationToken <= 0L) {
-                throw new IllegalArgumentException(
-                        "Decode reservation identity must be positive");
+                throw new IllegalArgumentException("Decode reservation identity must be positive");
             }
         }
     }
 
     public enum ReleaseReason {
-        LOCAL_ROLLBACK, COUNTERPART_FINISHED, NOT_SENT, EXPIRED
+        LOCAL_ROLLBACK,
+        COUNTERPART_FINISHED,
+        NOT_SENT,
+        EXPIRED
     }
 
     public enum ReservationReleaseResult {
@@ -115,7 +144,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         STALE,
         CONFLICT;
 
-        public boolean released() { return this == RELEASED; }
+        public boolean released() {
+            return this == RELEASED;
+        }
     }
 
     // Dispatch: acquire capacity, hand over ownership, or return the permit.
@@ -123,7 +154,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public boolean markQueued(GenerationPin pin, ReservationHandle reservation) {
         requirePinnedGeneration(pin);
         boolean changed = state.markQueued(reservation);
-        if (changed) { publishCapacityRelease(); }
+        if (changed) {
+            publishCapacityRelease();
+        }
         return changed;
     }
 
@@ -133,24 +166,34 @@ public class DecodeEndpoint extends WorkerEndpoint {
         java.util.Objects.requireNonNull(capacity, "capacity");
         GenerationPin pin = tryPinGeneration();
         if (pin == null) {
-            return new EngineDispatchPermitAcquisition(EngineDispatchPermitAcquireStatus.ENDPOINT_RETIRED, null);
+            return new EngineDispatchPermitAcquisition(
+                    EngineDispatchPermitAcquireStatus.ENDPOINT_RETIRED, null);
         }
         try (pin) {
-            DecodeState.DispatchAcquisition acquired = state.acquireDispatchPermit(reservation, capacity);
-            return new EngineDispatchPermitAcquisition(acquired.status(), acquired.permit() == null ? null
-                    : new EngineDispatchPermit(this, reservation.requestId(), acquired.permit()));
+            DecodeState.DispatchAcquisition acquired =
+                    state.acquireDispatchPermit(reservation, capacity);
+            return new EngineDispatchPermitAcquisition(
+                    acquired.status(),
+                    acquired.permit() == null
+                            ? null
+                            : new EngineDispatchPermit(
+                                    this, reservation.requestId(), acquired.permit()));
         }
     }
 
     /** Resolve a permit once. ENGINE_OWNED means handoff, not Worker acceptance. */
-    public EngineDispatchPermitTransferStatus dispatch(EngineDispatchPermit permit, DispatchOutcome outcome) {
+    public EngineDispatchPermitTransferStatus dispatch(
+            EngineDispatchPermit permit, DispatchOutcome outcome) {
         java.util.Objects.requireNonNull(permit, "permit");
         java.util.Objects.requireNonNull(outcome, "outcome");
-        if (permit.endpoint != this) { throw new IllegalArgumentException("Dispatch permit belongs to another endpoint"); }
+        if (permit.endpoint != this) {
+            throw new IllegalArgumentException("Dispatch permit belongs to another endpoint");
+        }
         return permit.resolve(outcome);
     }
 
-    private EngineDispatchPermitTransferStatus applyDispatch(EngineDispatchPermit permit, DispatchOutcome outcome) {
+    private EngineDispatchPermitTransferStatus applyDispatch(
+            EngineDispatchPermit permit, DispatchOutcome outcome) {
         GenerationPin pin = outcome == DispatchOutcome.ENGINE_OWNED ? tryPinGeneration() : null;
         if (outcome == DispatchOutcome.ENGINE_OWNED && pin == null) {
             return EngineDispatchPermitTransferStatus.ENDPOINT_RETIRED;
@@ -158,14 +201,18 @@ public class DecodeEndpoint extends WorkerEndpoint {
         try (pin) {
             DecodeState.DispatchResult result = state.dispatch(permit.lease, outcome);
             if (result.capacityReleased()) {
-                if (outcome == DispatchOutcome.ABANDONED) { publishCapacityRelease(); } else { notifyEngineDispatchCapacityListeners(); }
+                if (outcome == DispatchOutcome.ABANDONED) {
+                    publishCapacityRelease();
+                } else {
+                    notifyEngineDispatchCapacityListeners();
+                }
             }
             return result.status();
         }
     }
 
     /** Lock-free waiter hint, including retirement or lost ownership. Acquisition still rechecks capacity. */
-    public boolean shouldRetryDispatch(long requestId, AdmissionCapacity capacity) {
+    public boolean shouldRetryDispatch(String requestId, AdmissionCapacity capacity) {
         return isRetired() || state.shouldRetryDispatch(requestId, capacity);
     }
 
@@ -180,19 +227,18 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
 
         private final DecodeEndpoint endpoint;
-        private final long requestId;
+        private final String requestId;
         private final DecodeState.DispatchLease lease;
         private Resolution resolution = Resolution.ACQUIRED;
 
-        private EngineDispatchPermit(DecodeEndpoint endpoint,
-                                     long requestId,
-                                     DecodeState.DispatchLease lease) {
+        private EngineDispatchPermit(
+                DecodeEndpoint endpoint, String requestId, DecodeState.DispatchLease lease) {
             this.endpoint = endpoint;
             this.requestId = requestId;
             this.lease = lease;
         }
 
-        public long requestId() {
+        public String requestId() {
             return requestId;
         }
 
@@ -224,26 +270,29 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 return EngineDispatchPermitTransferStatus.OWNERSHIP_LOST;
             }
             EngineDispatchPermitTransferStatus result = endpoint.applyDispatch(this, outcome);
-            resolution = switch (result) {
-                case TRANSFERRED -> outcome == DispatchOutcome.ENGINE_OWNED
-                        ? Resolution.ENGINE_LIFECYCLE_OWNED : Resolution.RELEASED;
-                case ENDPOINT_RETIRED -> Resolution.ENDPOINT_RETIRED;
-                case OWNERSHIP_LOST -> Resolution.INVALIDATED;
-            };
+            resolution =
+                    switch (result) {
+                        case TRANSFERRED ->
+                                outcome == DispatchOutcome.ENGINE_OWNED
+                                        ? Resolution.ENGINE_LIFECYCLE_OWNED
+                                        : Resolution.RELEASED;
+                        case ENDPOINT_RETIRED -> Resolution.ENDPOINT_RETIRED;
+                        case OWNERSHIP_LOST -> Resolution.INVALIDATED;
+                    };
             return result;
         }
     }
 
     public record EngineDispatchPermitAcquisition(
-            EngineDispatchPermitAcquireStatus status,
-            EngineDispatchPermit permit) {
+            EngineDispatchPermitAcquireStatus status, EngineDispatchPermit permit) {
 
         public EngineDispatchPermitAcquisition {
             if (status == null) {
                 throw new IllegalArgumentException("permit acquisition status is required");
             }
-            boolean ownsHandoff = status == EngineDispatchPermitAcquireStatus.ACQUIRED
-                    || status == EngineDispatchPermitAcquireStatus.ALREADY_ACCEPTED;
+            boolean ownsHandoff =
+                    status == EngineDispatchPermitAcquireStatus.ACQUIRED
+                            || status == EngineDispatchPermitAcquireStatus.ALREADY_ACCEPTED;
             if (ownsHandoff != (permit != null)) {
                 throw new IllegalArgumentException(
                         "only ACQUIRED or ALREADY_ACCEPTED results carry an engine dispatch permit");
@@ -274,7 +323,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
         ENDPOINT_RETIRED
     }
 
-    public enum DispatchOutcome { ENGINE_OWNED, ABANDONED }
+    public enum DispatchOutcome {
+        ENGINE_OWNED,
+        ABANDONED
+    }
 
     public void addEngineDispatchCapacityListener(Runnable listener) {
         if (listener != null) {
@@ -290,39 +342,101 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     // Preemption: atomic local replacement or remote cancellation.
 
-    public boolean replaceQueuedRequests(List<ReservationHandle> victims, long incomingRequestId,
-                                         long hardKv, long expectedKv, int priority, AdmissionCapacity capacity) {
+    public boolean replaceQueuedRequests(
+            List<ReservationHandle> victims,
+            String incomingRequestId,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
+            int priority,
+            AdmissionCapacity capacity) {
         GenerationPin pin = tryPinGeneration();
-        if (pin == null) { return false; }
+        if (pin == null) {
+            return false;
+        }
         try (pin) {
-            boolean replaced = state.replaceQueuedRequests(victims, incomingRequestId, hardKv, expectedKv, priority, capacity);
-            if (replaced) { publishCapacityRelease(); }
+            boolean replaced =
+                    state.replaceQueuedRequests(
+                            victims,
+                            incomingRequestId,
+                            inputKvTokens,
+                            inputAndMaxOutputKvTokens,
+                            priority,
+                            capacity);
+            if (replaced) {
+                publishCapacityRelease();
+            }
             return replaced;
         }
     }
 
-    public PreemptionBeginResult beginPreemption(long attemptToken, List<ReservationHandle> victims,
-                                                 long incomingRequestId, long hardKv, long expectedKv,
-                                                 int priority, AdmissionCapacity capacity) {
+    public PreemptionBeginResult beginPreemption(
+            long attemptToken,
+            List<ReservationHandle> victims,
+            String incomingRequestId,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
+            int priority,
+            AdmissionCapacity capacity) {
         if (attemptToken <= 0 || victims == null || victims.isEmpty()) {
             throw new IllegalArgumentException("attempt token and victims are required");
         }
         GenerationPin pin = tryPinGeneration();
-        if (pin == null) { return PreemptionBeginResult.ENDPOINT_RETIRED; }
+        if (pin == null) {
+            return PreemptionBeginResult.ENDPOINT_RETIRED;
+        }
         try (pin) {
-            return state.beginPreemption(attemptToken, victims, incomingRequestId, hardKv, expectedKv, priority, capacity);
+            return state.beginPreemption(
+                    attemptToken,
+                    victims,
+                    incomingRequestId,
+                    inputKvTokens,
+                    inputAndMaxOutputKvTokens,
+                    priority,
+                    capacity);
+        }
+    }
+
+    /** Atomically reserve an instruction-bearing route without issuing Cancel RPCs. */
+    public PreemptionBeginResult beginReturnedPreemption(
+            long attemptToken,
+            List<ReservationHandle> victims,
+            String incomingRequestId,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
+            int priority,
+            AdmissionCapacity capacity) {
+        if (attemptToken <= 0 || victims == null || victims.isEmpty()) {
+            throw new IllegalArgumentException("attempt token and victims are required");
+        }
+        GenerationPin pin = tryPinGeneration();
+        if (pin == null) {
+            return PreemptionBeginResult.ENDPOINT_RETIRED;
+        }
+        try (pin) {
+            return state.beginReturnedPreemption(
+                    attemptToken,
+                    victims,
+                    incomingRequestId,
+                    inputKvTokens,
+                    inputAndMaxOutputKvTokens,
+                    priority,
+                    capacity);
         }
     }
 
     public boolean updatePreemption(long attemptToken, PreemptionUpdate update) {
         boolean changed = state.updatePreemption(attemptToken, update);
-        if (changed && update.releasesCapacity()) { publishCapacityRelease(); }
+        if (changed && update.releasesCapacity()) {
+            publishCapacityRelease();
+        }
         return changed;
     }
 
     public boolean finishPreemption(long attemptToken, PreemptionDecision decision) {
         boolean changed = state.finishPreemption(attemptToken, decision);
-        if (changed && decision == PreemptionDecision.ABORT) { publishCapacityRelease(); }
+        if (changed && decision == PreemptionDecision.ABORT) {
+            publishCapacityRelease();
+        }
         return changed;
     }
 
@@ -337,11 +451,24 @@ public class DecodeEndpoint extends WorkerEndpoint {
         ATTEMPT_ALREADY_EXISTS
     }
 
-    public enum PreemptionDecision { COMMIT, ABORT }
+    public enum PreemptionDecision {
+        COMMIT,
+        ABORT
+    }
 
-    public record PreemptionUpdate(Kind kind, long requestId, ReservationHandle reservation,
-                                   PreemptionCancelPhase phase) {
-        public enum Kind { CANCEL_SENDING, CANCEL_REPLY, CANCELED, REQUEST_FENCED, ACTIVE, FINISHED }
+    public record PreemptionUpdate(
+            Kind kind,
+            String requestId,
+            ReservationHandle reservation,
+            PreemptionCancelPhase phase) {
+        public enum Kind {
+            CANCEL_SENDING,
+            CANCEL_REPLY,
+            CANCELED,
+            REQUEST_FENCED,
+            ACTIVE,
+            FINISHED
+        }
 
         public PreemptionUpdate {
             java.util.Objects.requireNonNull(kind, "kind");
@@ -356,30 +483,54 @@ public class DecodeEndpoint extends WorkerEndpoint {
             }
             if (kind != Kind.CANCEL_REPLY && kind != Kind.CANCEL_SENDING) {
                 java.util.Objects.requireNonNull(reservation, "reservation");
-                if (requestId != reservation.requestId()) { throw new IllegalArgumentException("Victim identity mismatch"); }
+                if (!java.util.Objects.equals(requestId, reservation.requestId())) {
+                    throw new IllegalArgumentException("Victim identity mismatch");
+                }
             } else if (reservation != null) {
                 throw new IllegalArgumentException("Cancel progress does not carry a reservation");
             }
         }
-        public static PreemptionUpdate cancelSending() { return new PreemptionUpdate(Kind.CANCEL_SENDING, 0, null, null); }
-        public static PreemptionUpdate cancelReply(long requestId, PreemptionCancelPhase phase) {
+
+        public static PreemptionUpdate cancelSending() {
+            return new PreemptionUpdate(Kind.CANCEL_SENDING, null, null, null);
+        }
+
+        public static PreemptionUpdate cancelReply(String requestId, PreemptionCancelPhase phase) {
             return new PreemptionUpdate(Kind.CANCEL_REPLY, requestId, null, phase);
         }
-        public static PreemptionUpdate canceled(ReservationHandle victim) { return victim(Kind.CANCELED, victim); }
-        public static PreemptionUpdate fenced(ReservationHandle victim) { return victim(Kind.REQUEST_FENCED, victim); }
-        public static PreemptionUpdate active(ReservationHandle victim) { return victim(Kind.ACTIVE, victim); }
-        public static PreemptionUpdate finished(ReservationHandle victim) { return victim(Kind.FINISHED, victim); }
+
+        public static PreemptionUpdate canceled(ReservationHandle victim) {
+            return victim(Kind.CANCELED, victim);
+        }
+
+        public static PreemptionUpdate fenced(ReservationHandle victim) {
+            return victim(Kind.REQUEST_FENCED, victim);
+        }
+
+        public static PreemptionUpdate active(ReservationHandle victim) {
+            return victim(Kind.ACTIVE, victim);
+        }
+
+        public static PreemptionUpdate finished(ReservationHandle victim) {
+            return victim(Kind.FINISHED, victim);
+        }
+
         private static PreemptionUpdate victim(Kind kind, ReservationHandle victim) {
             return new PreemptionUpdate(kind, victim.requestId(), victim, null);
         }
-        boolean releasesCapacity() { return kind != Kind.CANCEL_SENDING && kind != Kind.CANCEL_REPLY; }
+
+        boolean releasesCapacity() {
+            return kind != Kind.CANCEL_SENDING && kind != Kind.CANCEL_REPLY;
+        }
     }
 
     // Calibration: publish facts only after the resource transaction returns.
 
     public Runnable applyPreparedStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(ws);
-        if (!prepared.observation().alive()) { beginRetirement(); }
+        if (!prepared.observation().alive()) {
+            beginRetirement();
+        }
         DecodeState.CalibrationResult result;
         try {
             result = state.calibrate(prepared);
@@ -388,26 +539,27 @@ public class DecodeEndpoint extends WorkerEndpoint {
             throw failure;
         }
         notifyEngineDispatchCapacityListeners();
-        if (result.capacityImproved()) { signalPlacementCapacityChanged(); }
+        if (result.capacityImproved()) {
+            signalPlacementCapacityChanged();
+        }
         return () -> endpointEvents.onDecodeStatus(this, result.facts());
     }
 
-    public Runnable initializeFromPreparedStatus(WorkerStatus ws, WorkerStatus.StatusObservation observation) {
+    public Runnable initializeFromPreparedStatus(
+            WorkerStatus ws, WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
         state.initialize(observation);
-        return () -> { };
+        return () -> {};
     }
 
-    public Runnable observeStatusHeartbeat(WorkerStatus ws, WorkerStatus.StatusObservation observation) {
+    public Runnable observeStatusHeartbeat(
+            WorkerStatus ws, WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
         List<WorkerStatusFact> facts = state.observeHeartbeat(observation);
         return () -> endpointEvents.onDecodeStatus(this, facts);
     }
 
-    public record WorkerStatusFact(
-            Kind kind,
-            ReservationHandle reservation,
-            long errorCode) {
+    public record WorkerStatusFact(Kind kind, ReservationHandle reservation, long errorCode) {
         public WorkerStatusFact {
             java.util.Objects.requireNonNull(kind, "kind");
             java.util.Objects.requireNonNull(reservation, "reservation");
@@ -425,8 +577,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return new WorkerStatusFact(Kind.ACCEPTED, reservation, 0L);
         }
 
-        public static WorkerStatusFact terminal(
-                ReservationHandle reservation, long errorCode) {
+        public static WorkerStatusFact terminal(ReservationHandle reservation, long errorCode) {
             return new WorkerStatusFact(Kind.TERMINAL, reservation, errorCode);
         }
 
@@ -443,25 +594,40 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return state.admissionSummary();
     }
 
-    public DecodeRoutingView routingView() { return state.routingView(); }
+    public DecodeRoutingView routingView() {
+        return state.routingView();
+    }
 
-    DecodeRoutingView routingViewSnapshot(String address) { return state.routingViewSnapshot(address); }
+    DecodeRoutingView routingViewSnapshot(String address) {
+        return state.routingViewSnapshot(address);
+    }
 
-    public LayeredAdmissionView resourceSnapshot() { return state.resourceSnapshot(); }
+    public LayeredAdmissionView resourceSnapshot() {
+        return state.resourceSnapshot();
+    }
 
-    public long placementVersion() { return state.placementVersion(); }
+    public long placementVersion() {
+        return state.placementVersion();
+    }
 
-    public long realKvAvailable() { return state.realKvAvailable(); }
+    public long realKvAvailable() {
+        return state.realKvAvailable();
+    }
 
-    public int getInflightCount() { return state.getInflightCount(); }
+    public int getInflightCount() {
+        return state.getInflightCount();
+    }
 
-    public OptionalLong getLoadMetric() { return OptionalLong.of(state.getTotalLoad()); }
+    public OptionalLong getLoadMetric() {
+        return OptionalLong.of(state.getTotalLoad());
+    }
 
-    public record LayeredAdmissionView(DecodeRoutingView routing,
-                                       Map<Long, DecodeRequestView> reserved,
-                                       List<DecodeRequestView> confirmed,
-                                       int queuedCount,
-                                       int activeDispatchPermits) {
+    public record LayeredAdmissionView(
+            DecodeRoutingView routing,
+            Map<String, DecodeRequestView> reserved,
+            List<DecodeRequestView> confirmed,
+            int queuedCount,
+            int activeDispatchPermits) {
 
         public long admissionVersion() {
             return routing.admissionVersion();
@@ -479,7 +645,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return routing.engineCapacityUsed();
         }
 
-        public boolean isQueued(long requestId) {
+        public boolean isQueued(String requestId) {
             DecodeRequestView request = reserved.get(requestId);
             return request != null && request.queued();
         }
@@ -505,15 +671,32 @@ public class DecodeEndpoint extends WorkerEndpoint {
             int engineLoad,
             CapacityUsage placementUsage,
             CapacityUsage dispatchUsage,
-            long inflightHardKv,
-            long inflightExpectedKv) {
+            long inputKvReserved,
+            long inputAndMaxOutputKvReserved) {
 
-        public int engineCapacityUsed() { return Math.toIntExact(dispatchUsage.occupiedRequests()); }
-        public long realKvUsed() { return placementUsage.expectedKvUsed(); }
-        public long realKvAvailable() { return placementUsage.hardKvAvailable(); }
-        public long engineFacingKvUsed() { return dispatchUsage.expectedKvUsed(); }
-        public long engineFacingKvAvailable() { return dispatchUsage.hardKvAvailable(); }
-        public long totalKv() { return placementUsage.totalKvTokens(); }
+        public int engineCapacityUsed() {
+            return Math.toIntExact(dispatchUsage.occupiedRequests());
+        }
+
+        public long realKvUsed() {
+            return placementUsage.kvBudgetUsedTokens();
+        }
+
+        public long realKvAvailable() {
+            return placementUsage.availableKvAfterReservations();
+        }
+
+        public long engineFacingKvUsed() {
+            return dispatchUsage.kvBudgetUsedTokens();
+        }
+
+        public long engineFacingKvAvailable() {
+            return dispatchUsage.availableKvAfterReservations();
+        }
+
+        public long totalKv() {
+            return placementUsage.totalKvTokens();
+        }
 
         public DecodeRoutingView {
             java.util.Objects.requireNonNull(address, "address");
@@ -526,17 +709,19 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    public record DecodeRequestView(long requestId,
-                                    int priority,
-                                    long kvTokens,
-                                    long expectedKvTokens,
-                                    DecodeTaskPhase phase,
-                                    boolean priorityKnown,
-                                    long reservationToken,
-                                    boolean queued,
-                                    boolean claimedForPreemption) {
+    public record DecodeRequestView(
+            String requestId,
+            int priority,
+            long kvTokens,
+            long kvBudgetTokens,
+            DecodeTaskPhase phase,
+            boolean priorityKnown,
+            long reservationToken,
+            boolean queued,
+            boolean claimedForPreemption) {
+
         public CapacityRelease placementRelease() {
-            return new CapacityRelease(1L, kvTokens, expectedKvTokens);
+            return new CapacityRelease(1L, kvTokens, kvBudgetTokens);
         }
     }
 
@@ -546,53 +731,79 @@ public class DecodeEndpoint extends WorkerEndpoint {
         private final CapacityRelease[] placementOccupancy;
         private final CapacityRelease[] engineOccupancy;
 
-        AdmissionSummary(DecodeRoutingView routing, CapacityRelease[] placementOccupancy,
-                         CapacityRelease[] engineOccupancy) {
+        AdmissionSummary(
+                DecodeRoutingView routing,
+                CapacityRelease[] placementOccupancy,
+                CapacityRelease[] engineOccupancy) {
             this.routing = routing;
             this.placementOccupancy = placementOccupancy;
             this.engineOccupancy = engineOccupancy;
         }
 
-        public DecodeRoutingView routing() { return routing; }
-        public CapacityRelease placementOccupancy(int priority) { return placementOccupancy[priority]; }
-        public CapacityRelease engineOccupancy(int priority) { return engineOccupancy[priority]; }
+        public DecodeRoutingView routing() {
+            return routing;
+        }
+
+        public CapacityRelease placementOccupancy(int priority) {
+            return placementOccupancy[priority];
+        }
+
+        public CapacityRelease engineOccupancy(int priority) {
+            return engineOccupancy[priority];
+        }
     }
 
-    public record AdmissionCapacity(
-            long maxEngineRequests,
-            long maxKvUsagePercent) {
+    public record AdmissionCapacity(long maxEngineRequests, long maxKvUsagePercent) {
 
         public AdmissionCapacity {
-            if (maxEngineRequests < 0L || maxKvUsagePercent <= 0L
+            if (maxEngineRequests < 0L
+                    || maxKvUsagePercent <= 0L
                     || maxKvUsagePercent > RoutingConfig.PERCENTAGE_SCALE) {
                 throw new IllegalArgumentException(
                         "Decode admission limits are outside their domain");
             }
         }
 
-        public CapacityDeficit evaluate(CapacityUsage usage, long hardKvTokens, long expectedKvTokens) {
-            return evaluate(usage, hardKvTokens, expectedKvTokens, CapacityRelease.NONE);
+        public CapacityDeficit evaluate(
+                CapacityUsage usage, long requiredKvTokens, long kvBudgetTokens) {
+            return evaluate(usage, requiredKvTokens, kvBudgetTokens, CapacityRelease.NONE);
         }
 
         /** Use the same occupancy scope for the observation and every exact victim release. */
-        public CapacityDeficit evaluate(CapacityUsage usage, long hardKvTokens, long expectedKvTokens,
-                                        CapacityRelease release) {
+        public CapacityDeficit evaluate(
+                CapacityUsage usage,
+                long requiredKvTokens,
+                long kvBudgetTokens,
+                CapacityRelease release) {
             java.util.Objects.requireNonNull(usage, "usage");
             java.util.Objects.requireNonNull(release, "release");
-            if (hardKvTokens < 0L || expectedKvTokens < hardKvTokens) {
-                throw new IllegalArgumentException("Decode demand must satisfy expected >= hard >= 0");
+            if (requiredKvTokens < 0L || kvBudgetTokens < requiredKvTokens) {
+                throw new IllegalArgumentException(
+                        "Decode demand must satisfy KV budget >= required KV >= 0");
             }
-            long requests = maxEngineRequests == 0L ? 0L
-                    : shortfall(Math.max(0L, usage.occupiedRequests - release.requests),
-                            1L, maxEngineRequests, 0L);
+            long requests =
+                    maxEngineRequests == 0L
+                            ? 0L
+                            : shortfall(
+                                    Math.max(0L, usage.occupiedRequests - release.requests),
+                                    1L,
+                                    maxEngineRequests,
+                                    0L);
             if (usage.totalKvTokens == 0L) {
                 return new CapacityDeficit(requests, 0L, 0L);
             }
-            return new CapacityDeficit(requests,
-                    shortfall(usage.hardReservedKvTokens, hardKvTokens,
-                            usage.availableKvTokens, release.hardKvTokens),
-                    shortfall(Math.max(0L, usage.expectedKvUsed - release.expectedKvTokens),
-                            expectedKvTokens, kvBudget(usage.totalKvTokens), 0L));
+            return new CapacityDeficit(
+                    requests,
+                    shortfall(
+                            usage.reservedKvTokens,
+                            requiredKvTokens,
+                            usage.availableKvTokens,
+                            release.requiredKvTokens),
+                    shortfall(
+                            Math.max(0L, usage.kvBudgetUsedTokens - release.kvBudgetTokens),
+                            kvBudgetTokens,
+                            kvBudget(usage.totalKvTokens),
+                            0L));
         }
 
         /** Integer arithmetic never rounds the configured KV budget up. */
@@ -605,62 +816,95 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
         private static long shortfall(long used, long incoming, long capacity, long released) {
             long remainingUsed = Math.max(0L, used - released);
-            long remainingCapacity = DecodeState.saturatedAddNonNegative(capacity, Math.max(0L, released - used));
+            long remainingCapacity =
+                    DecodeState.saturatedAddNonNegative(capacity, Math.max(0L, released - used));
             return remainingUsed > remainingCapacity
-                    ? DecodeState.saturatedAddNonNegative(remainingUsed - remainingCapacity, incoming)
+                    ? DecodeState.saturatedAddNonNegative(
+                            remainingUsed - remainingCapacity, incoming)
                     : Math.max(0L, incoming - (remainingCapacity - remainingUsed));
         }
     }
 
-    public record CapacityUsage(long occupiedRequests, long totalKvTokens, long availableKvTokens,
-                                long hardReservedKvTokens, long expectedKvUsed) {
+    public record CapacityUsage(
+            long occupiedRequests,
+            long totalKvTokens,
+            long availableKvTokens,
+            long reservedKvTokens,
+            long kvBudgetUsedTokens) {
         public CapacityUsage {
-            if (occupiedRequests < 0L || totalKvTokens < 0L || availableKvTokens < 0L
-                    || hardReservedKvTokens < 0L || expectedKvUsed < 0L) {
+            if (occupiedRequests < 0L
+                    || totalKvTokens < 0L
+                    || availableKvTokens < 0L
+                    || reservedKvTokens < 0L
+                    || kvBudgetUsedTokens < 0L) {
                 throw new IllegalArgumentException("Decode occupancy must be non-negative");
             }
         }
 
-        public long hardKvAvailable() {
-            return Math.max(0L, availableKvTokens - hardReservedKvTokens);
+        public long availableKvAfterReservations() {
+            return Math.max(0L, availableKvTokens - reservedKvTokens);
         }
     }
 
-    public record CapacityRelease(long requests, long hardKvTokens, long expectedKvTokens) {
+    /**
+     * Capacity released by removing a request: before confirmation, input KV
+     * and input plus max output; after confirmation, both use engine-reported KV.
+     */
+    public record CapacityRelease(long requests, long requiredKvTokens, long kvBudgetTokens) {
         public static final CapacityRelease NONE = new CapacityRelease(0L, 0L, 0L);
 
         public CapacityRelease {
-            if (requests < 0L || hardKvTokens < 0L || expectedKvTokens < hardKvTokens) {
+            if (requests < 0L || requiredKvTokens < 0L || kvBudgetTokens < requiredKvTokens) {
                 throw new IllegalArgumentException("invalid Decode capacity release");
             }
         }
 
         public CapacityRelease plus(CapacityRelease other) {
-            return new CapacityRelease(DecodeState.saturatedAddNonNegative(requests, other.requests),
-                    DecodeState.saturatedAddNonNegative(hardKvTokens, other.hardKvTokens),
-                    DecodeState.saturatedAddNonNegative(expectedKvTokens, other.expectedKvTokens));
+            return new CapacityRelease(
+                    DecodeState.saturatedAddNonNegative(requests, other.requests),
+                    DecodeState.saturatedAddNonNegative(requiredKvTokens, other.requiredKvTokens),
+                    DecodeState.saturatedAddNonNegative(kvBudgetTokens, other.kvBudgetTokens));
         }
     }
 
-    public record CapacityDeficit(long requests, long hardKvTokens, long expectedKvTokens) {
-        public boolean fits() { return requests == 0L && !needsKv(); }
-        public boolean needsKv() { return hardKvTokens > 0L || expectedKvTokens > 0L; }
-        public long kvTokens() { return Math.max(hardKvTokens, expectedKvTokens); }
+    /**
+     * Remaining shortages against available KV and the configured KV budget.
+     */
+    public record CapacityDeficit(long requests, long requiredKvTokens, long kvBudgetTokens) {
+        public boolean fits() {
+            return requests == 0L && !needsKv();
+        }
+
+        public boolean needsKv() {
+            return requiredKvTokens > 0L || kvBudgetTokens > 0L;
+        }
+
+        public long kvTokens() {
+            return Math.max(requiredKvTokens, kvBudgetTokens);
+        }
     }
 
     // Retirement and orphan cleanup.
 
-    public boolean isRetired() { return isGenerationRetiringOrRetired(); }
+    public boolean isRetired() {
+        return isGenerationRetiringOrRetired();
+    }
 
     protected void closeEndpoint() {
         List<ReservationHandle> reservations = state.retire();
-        try { endpointEvents.onDecodeGenerationRetired(this, reservations); }
-        finally { notifyEngineDispatchCapacityListeners(); }
+        try {
+            endpointEvents.onDecodeGenerationRetired(this, reservations);
+        } finally {
+            notifyEngineDispatchCapacityListeners();
+        }
     }
 
-    public int evictExpiredRequests(long ttlMs, LongPredicate retainForSchedulerCleanup) {
-        DecodeState.CleanupResult result = state.evictExpiredRequests(ttlMs, retainForSchedulerCleanup);
-        if (result.capacityReleased()) { publishCapacityRelease(); }
+    public int evictExpiredRequests(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
+        DecodeState.CleanupResult result =
+                state.evictExpiredRequests(ttlMs, retainForSchedulerCleanup);
+        if (result.capacityReleased()) {
+            publishCapacityRelease();
+        }
         return result.expiredReservations();
     }
 
@@ -668,22 +912,23 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
         DecodeState.Stats stats = state.stats();
-        reporter.reportInflightRequestCount(RoleType.DECODE.name(), getIp(), stats.inflight());
-        reporter.reportDecodeTotalLoad(getIp(), stats.totalLoad());
-        reporter.reportDecodeInflightKvReserved(getIp(), stats.expectedKv());
-        reporter.reportDecodeInflightHardKvReserved(getIp(), stats.hardKv());
-        reporter.reportInflightMaxAgeMs(RoleType.DECODE.name(), getIp(), stats.oldestAgeMs());
+        String engineIp = getStatus().getMetricIpPort();
+        reporter.reportInflightRequestCount(RoleType.DECODE.name(), engineIp, stats.inflight());
+        reporter.reportDecodeTotalLoad(engineIp, stats.totalLoad());
+        reporter.reportDecodeInputAndMaxOutputKvReserved(
+                engineIp, stats.inputAndMaxOutputKvTokens());
+        reporter.reportDecodeInputKvReserved(engineIp, stats.inputKvTokens());
+        reporter.reportInflightMaxAgeMs(RoleType.DECODE.name(), engineIp, stats.oldestAgeMs());
     }
 
     public void reportAdmissionMetrics(RequestSchedulerReporter reporter) {
-        LayeredAdmissionView view = resourceSnapshot();
-        String endpoint = ipPort();
-        reporter.reportDecodeReservedCount(endpoint, view.reserved().size());
-        reporter.reportDecodeShadowKvReserved(
-                endpoint, view.routing().inflightHardKv());
-        reporter.reportDecodeRunningCount(endpoint, view.runningCount());
-        reporter.reportDecodeAcceptedCount(endpoint, view.acceptedCount());
-        reporter.reportDecodeEngineLoad(endpoint, view.routing().engineLoad());
+        DecodeState.AdmissionStats stats = state.admissionStats();
+        String endpoint = getStatus().getMetricIpPort();
+        reporter.reportDecodeReservedCount(endpoint, stats.reserved());
+        reporter.reportDecodeShadowKvReserved(endpoint, stats.inputKvTokens());
+        reporter.reportDecodeRunningCount(endpoint, stats.running());
+        reporter.reportDecodeAcceptedCount(endpoint, stats.accepted());
+        reporter.reportDecodeEngineLoad(endpoint, stats.engineLoad());
     }
 
     private void publishCapacityRelease() {
@@ -702,9 +947,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     private void signalPlacementCapacityChanged() {
-        WorkerStatus.TopologySnapshot topology =
-                getStatus().topologySnapshot();
-        placementAvailability.capacityChanged(
-                RoleType.DECODE, topology.group(), ipPort());
+        WorkerStatus.TopologySnapshot topology = getStatus().topologySnapshot();
+        placementAvailability.capacityChanged(RoleType.DECODE, topology.group(), ipPort());
     }
 }

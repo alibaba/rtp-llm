@@ -5,12 +5,9 @@ single-master integration test, not a container-runtime or ZK handoff test.
 """
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 import hashlib
 import json
 import os
-from pathlib import Path
 import shlex
 import shutil
 import signal
@@ -18,15 +15,19 @@ import subprocess
 import sys
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from pathlib import Path
 
 CONFIG = Path(__file__).resolve().parents[1]
 FLEXLB = CONFIG.parents[1]
 sys.path.insert(0, str(FLEXLB / "tools/online_eval"))
 
+from flexlb_ft.engine_ops import EngineOps  # noqa: E402
 from flexlb_ft.harness import (  # noqa: E402
     API_JAR,
-    MOCK_JAR,
     JAVA_MODULE_OPTS,
+    MOCK_JAR,
     EnvManager,
     EnvSpec,
     flexlb_config_for_profile,
@@ -35,7 +36,6 @@ from flexlb_ft.harness import (  # noqa: E402
     resolve_java21,
     wait_for,
 )
-from flexlb_ft.engine_ops import EngineOps  # noqa: E402
 from google.protobuf.json_format import MessageToDict  # noqa: E402
 
 

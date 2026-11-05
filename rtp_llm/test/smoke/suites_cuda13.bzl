@@ -1,4 +1,4 @@
-load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
+load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test", "smoke_test")
 load("@arch_config//:arch_select.bzl", "cuda13_x86_test_gpu")
 
 def cuda13_suites():
@@ -49,6 +49,15 @@ def cuda13_suites():
         name = "smoke_cuda13_arm",
         tests = [
             ":deepseek_v41_flash_ced_dspark_pd_cp2_dp2_sm100_arm",
+            # CP computes on two ranks with replicated KV: chunked prefill does
+            # not yet support CP-sharded sparse cache groups. Reserve 2P + 2D.
+            custom_smoke_test(
+                name = "v4_flash_pd_batch_reuse_chunk_sm100",
+                main = "dsv4_pd_chunk_test.py",
+                smoke_args = "--world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --max_seq_len 8192 --max_context_batch_size 4 --concurrency_limit 4 --prefill_chunk_size 1024 --reuse_cache 1 --enable_device_cache 1 --enable_memory_cache 0 --enable_disk_cache 0 --enable_remote_cache 0 --prefill_cp_kv_cache_sharded 0 --load_method fastsafetensors --moe_strategy mega_moe_se --use_deepep_moe 1 --kv_cache_mem_mb 4096 --reserver_runtime_mem_mb 32768 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --enable_cuda_graph 0 --warm_up 0 --think_mode 0 --enable_detail_log 1",
+                gpu_type = ["SM100_ARM_CU13"],
+                data = ["//rtp_llm:sdk", ":smoke_framework_srcs"],
+            ),
             # DSpark speculative decode with CP page-RR. This is the blocking
             # regression for publishing both target and draft SWA_KV before decode
             # dispatch; missing draft publication fails with EC_FAILED_LOAD_BUFFER.
@@ -59,10 +68,10 @@ def cuda13_suites():
             smoke_test(
                 name="smoke_v4_flash_0731_pd_cp2ep2_dp2ep2_dspark_cprr_async_xgrammar_json_sm100",
                 task_info="data/model/deepseek_v4/q_r_v4_flash_0731_pd_cp2ep2_dp2ep2_dspark_async_xgrammar_json_sm100_arm.json",
-                sleep_time_qr=10,
+                sleep_time_qr=2,
                 smoke_args={
-                    "prefill": "--load_method fastsafetensors --max_seq_len 8192 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --memory_cache_size_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 1 --reserver_runtime_mem_mb 69632 --max_context_batch_size 1 --fp8_kv_cache 1 --sp_type dspark --gen_num_per_cycle 3 --sp_model_type deepseek_v4_dspark --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash-DSpark --sp_act_type bf16 --think_mode 1 --enable_fp32_lm_head 0",
-                    "decode": "--load_method fastsafetensors --max_seq_len 8192 --enable_cuda_graph 1 --decode_capture_config '1,2,4,8,16' --act_type BF16 --tp_size 1 --dp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --use_deepep_moe 1 --use_deepep_low_latency 1 --load_cache_timeout_ms 30000 --reserver_runtime_mem_mb 10240 --fp8_kv_cache 1 --sp_type dspark --gen_num_per_cycle 3 --sp_model_type deepseek_v4_dspark --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash-DSpark --sp_act_type bf16 --cp_rotate_method PREFILL_CP --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --think_mode 1 --enable_fp32_lm_head 0",
+                    "prefill": "--max_seq_len 8192 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --memory_cache_size_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 1 --reserver_runtime_mem_mb 69632 --max_context_batch_size 1 --fp8_kv_cache 1 --sp_type dspark --gen_num_per_cycle 3 --sp_model_type deepseek_v4_dspark --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash-DSpark --sp_act_type bf16 --think_mode 1 --enable_fp32_lm_head 0",
+                    "decode": "--max_seq_len 8192 --enable_cuda_graph 1 --decode_capture_config '1,2,4,8,16' --act_type BF16 --tp_size 1 --dp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --use_deepep_moe 1 --use_deepep_low_latency 1 --load_cache_timeout_ms 30000 --reserver_runtime_mem_mb 10240 --fp8_kv_cache 1 --sp_type dspark --gen_num_per_cycle 3 --sp_model_type deepseek_v4_dspark --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash-DSpark --sp_act_type bf16 --cp_rotate_method PREFILL_CP --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --think_mode 1 --enable_fp32_lm_head 0",
                 },
                 envs={
                     "prefill": [
@@ -88,7 +97,6 @@ def cuda13_suites():
                         "PREFILL_CP_KV_CACHE_SHARDED=1",
                         "RTP_LLM_DEVICE_INPUT=1",
                         "ENABLE_LAYER_MICRO_BATCH=0",
-                        "LINEAR_STEP=1",
                         "DG_JIT_CPP_STANDARD=20",
                         "DG_MEGA_MOE_NVLINK_BARRIER_TIMEOUT_SECS=300",
                         "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,large_segment_size_mb:1024",
@@ -115,9 +123,7 @@ def cuda13_suites():
                         "RTP_LLM_DEVICE_INPUT=1",
                         "RTP_LLM_MTP_ASYNC_PREPARE=0",
                         "ENABLE_LAYER_MICRO_BATCH=0",
-                        "LINEAR_STEP=1",
                         "DG_JIT_CPP_STANDARD=20",
-                        "DG_JIT_CACHE_DIR=__TEST_TMPDIR__/deep_gemm_pd_cache",
                         "THINK_MODE=1",
                         "THINK_START_TAG=<think>",
                         "THINK_END_TAG=</think>",
@@ -133,38 +139,25 @@ def cuda13_suites():
     native.test_suite(
         name = "smoke_cuda13_x86",
         tests = [
-            # CRC write/read regression with real HOST reuse; DEVICE/DISK/remote
-            # reuse are disabled so the second query must reload HOST blocks.
-            # A final multi-token request also exercises DSpark decode in this
-            # same CP page-RR, 2P + 2D server, without depending on grammar pins.
-            smoke_test(
-                name = "smoke_v4_flash_pd_cp2ep2_dp2ep2_dspark_cprr_crc_memory_sm103",
-                task_info = "data/model/deepseek_v4/q_r_v4_flash_pd_cp2ep2_dp2ep2_dspark_cprr_crc_memory_sm103.json",
-                smoke_args = {
-                    "prefill": "--load_method fastsafetensors --max_seq_len 8192 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --enable_disk_cache 0 --enable_remote_cache 0 --memory_cache_size_mb 1024 --memory_cache_sync_timeout_ms 120000 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 1 --reserver_runtime_mem_mb 65536 --max_context_batch_size 1 --fp8_kv_cache 1 --sp_type dspark --gen_num_per_cycle 3 --sp_model_type deepseek_v4_dspark --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash-DSpark --sp_act_type bf16 --think_mode 0 --enable_fp32_lm_head 0",
-                    "decode": "--load_method fastsafetensors --max_seq_len 8192 --enable_cuda_graph 1 --act_type BF16 --tp_size 1 --dp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 0 --enable_disk_cache 0 --enable_remote_cache 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 49152 --fp8_kv_cache 1 --sp_type dspark --gen_num_per_cycle 3 --sp_model_type deepseek_v4_dspark --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash-DSpark --sp_act_type bf16 --think_mode 0 --enable_fp32_lm_head 0 --cp_rotate_method PREFILL_CP --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2",
-                },
-                envs = {
-                    "prefill": [
-                        "DSV4_USE_FRAMEWORK_KV=1",
-                        "DSV4_PREFILL_CP_OVERLAP=1",
-                        "DG_JIT_CPP_STANDARD=20",
-                        "LOG_LEVEL=DEBUG",
-                    ],
-                    "decode": ["DSV4_USE_FRAMEWORK_KV=1", "DG_JIT_CPP_STANDARD=20", "LOG_LEVEL=DEBUG"],
-                },
-                gpu_type = [cuda13_x86_test_gpu()],
-                sleep_time_qr = 10,
-            ),
-
-            # Long HOST prefixes exercise large CRC transfer batches,
-            # alongside the short-prefix cases.
+            # CRC write/read regression with real HOST reuse in two prefix
+            # regimes; DEVICE/DISK/remote reuse are disabled so each second
+            # query must reload HOST blocks. The fixture carries the
+            # short-prefix store/load pair (asserts memory_reuse_len=512),
+            # the long segmented pair under
+            # --memory_cache_max_descriptors_per_transfer_batch 32 (asserts
+            # memory_reuse_len=8192), and a final multi-token request that
+            # exercises DSpark decode in this same CP page-RR, 2P + 2D server,
+            # without depending on grammar pins. The standalone crc_memory
+            # case was folded in here: its fixture was a strict prefix of this
+            # one and its server args a subset, so running both separately
+            # burned a full action and a 476GB checkpoint load per round for
+            # zero extra coverage.
             smoke_test(
                 name = "smoke_v4_flash_pd_cp2ep2_dp2ep2_dspark_cprr_large_batch_crc_memory_sm103",
                 task_info = "data/model/deepseek_v4/q_r_v4_flash_pd_cp2ep2_dp2ep2_dspark_cprr_large_batch_crc_memory_sm103.json",
                 smoke_args = {
-                    "prefill": "--memory_cache_max_descriptors_per_transfer_batch 32 --load_method fastsafetensors --max_seq_len 12288 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --enable_disk_cache 0 --enable_remote_cache 0 --memory_cache_size_mb 1024 --memory_cache_sync_timeout_ms 120000 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 1 --reserver_runtime_mem_mb 65536 --max_context_batch_size 1 --fp8_kv_cache 1 --sp_type dspark --gen_num_per_cycle 3 --sp_model_type deepseek_v4_dspark --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash-DSpark --sp_act_type bf16 --think_mode 0 --enable_fp32_lm_head 0",
-                    "decode": "--memory_cache_max_descriptors_per_transfer_batch 32 --load_method fastsafetensors --max_seq_len 12288 --enable_cuda_graph 1 --act_type BF16 --tp_size 1 --dp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 0 --enable_disk_cache 0 --enable_remote_cache 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 49152 --fp8_kv_cache 1 --sp_type dspark --gen_num_per_cycle 3 --sp_model_type deepseek_v4_dspark --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash-DSpark --sp_act_type bf16 --think_mode 0 --enable_fp32_lm_head 0 --cp_rotate_method PREFILL_CP --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2",
+                    "prefill": "--memory_cache_max_descriptors_per_transfer_batch 32 --max_seq_len 12288 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --enable_disk_cache 0 --enable_remote_cache 0 --memory_cache_size_mb 1024 --memory_cache_sync_timeout_ms 120000 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 1 --reserver_runtime_mem_mb 65536 --max_context_batch_size 1 --fp8_kv_cache 1 --sp_type dspark --gen_num_per_cycle 3 --sp_model_type deepseek_v4_dspark --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash-DSpark --sp_act_type bf16 --think_mode 0 --enable_fp32_lm_head 0",
+                    "decode": "--memory_cache_max_descriptors_per_transfer_batch 32 --max_seq_len 12288 --enable_cuda_graph 1 --act_type BF16 --tp_size 1 --dp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 0 --enable_disk_cache 0 --enable_remote_cache 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 49152 --fp8_kv_cache 1 --sp_type dspark --gen_num_per_cycle 3 --sp_model_type deepseek_v4_dspark --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V4-Flash-DSpark --sp_act_type bf16 --think_mode 0 --enable_fp32_lm_head 0 --cp_rotate_method PREFILL_CP --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2",
                 },
                 envs = {
                     "prefill": [
@@ -176,7 +169,7 @@ def cuda13_suites():
                     "decode": ["DSV4_USE_FRAMEWORK_KV=1", "DG_JIT_CPP_STANDARD=20", "LOG_LEVEL=DEBUG"],
                 },
                 gpu_type = [cuda13_x86_test_gpu()],
-                sleep_time_qr = 10,
+                sleep_time_qr = 2,
             ),
 
             # Only DeepSeek-V4-Pro case. Deliberately plain — no CUDA graph, no PD
@@ -191,8 +184,13 @@ def cuda13_suites():
             smoke_test(
                 name="v4_pro_cp4_ep4_basic_sm100",
                 task_info="data/model/deepseek_v4/q_r_v4_pro_cp4_sm100_arm.json",
-                smoke_args="--load_method scratch --max_seq_len 8192 --enable_cuda_graph 0 --act_type BF16 --tp_size 4 --dp_size 1 --ep_size 4 --moe_strategy mega_moe_se --world_size 4 --seq_size_per_block 256 --fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --concurrency_limit 1 --max_context_batch_size 1 --reserver_runtime_mem_mb 20480",
+                smoke_args="--max_seq_len 8192 --enable_cuda_graph 0 --act_type BF16 --tp_size 4 --dp_size 1 --ep_size 4 --moe_strategy mega_moe_se --world_size 4 --seq_size_per_block 256 --fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --concurrency_limit 1 --max_context_batch_size 1 --reserver_runtime_mem_mb 20480",
                 envs=["DG_JIT_CPP_STANDARD=20"],
+                # The ~865GB Pro checkpoint cold-reads from NAS/scratch at rates
+                # that swung this case's runtime 760s->2524s in two days. The
+                # default 1800s watchdog kills runs that are still making
+                # progress; give this case a 3600s cap.
+                test_envs={"RTP_TEST_WATCHDOG_SECONDS": "3600"},
                 gpu_type=[cuda13_x86_test_gpu()],
             ),
         ],

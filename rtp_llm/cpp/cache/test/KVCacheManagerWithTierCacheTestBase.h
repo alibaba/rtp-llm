@@ -359,10 +359,13 @@ inline void setGroupBlockNums(CacheConfig& config, uint32_t block_num) {
         config.groupTags(), std::move(block_nums), std::move(kv_strides), std::move(scale_strides));
 }
 
-inline CacheConfig makeCompactDsv4CacheConfig(uint32_t block_num) {
+inline CacheConfig makeCompactDsv4CacheConfig(uint32_t block_num, int cp_size = 1) {
     ParallelismConfig parallelism;
+    parallelism.role_type                          = RoleType::PREFILL;
+    parallelism.tp_size                            = cp_size;
+    parallelism.prefill_cp_config.kv_cache_sharded = cp_size > 1;
     auto              config = CacheConfigCreator::createWarmupConfig(makeCompactDsv4ModelConfig(), parallelism, 0);
-    config.linear_step       = 1;
+    config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
     config.finalizeBlockNums(block_num, RuntimeConfig{});
     return config;
 }
@@ -381,7 +384,7 @@ inline KVCacheConfig makeTierConfig(TierLayout layout, const std::string& disk_p
     config.disk_cache_buffered_io         = true;
     config.disk_cache_sync_timeout_ms     = 5000;
     config.disk_cache_staging_block_count = 2;
-    config.linear_step                    = 1;
+    config.reuse_cache_tail_blocks        = std::numeric_limits<int>::max();
     return config;
 }
 
@@ -613,7 +616,7 @@ expectDsv4TierTopology(const std::shared_ptr<KVCacheManager>& manager, const Cac
     ASSERT_EQ(config.groupNums(), kDsv4GroupCount);
     ASSERT_EQ(publishedGroupTags(config.topology()), kDsv4Tags);
     ASSERT_EQ(publishedGroupTypes(config.topology()), kDsv4Types);
-    ASSERT_EQ(config.linear_step, 1);
+    ASSERT_EQ(config.reuse_cache_tail_blocks, std::numeric_limits<int>::max());
 
     const auto coordinator_groups = manager->coordinator_manager_->cacheGroups();
     ASSERT_EQ(coordinator_groups.size(), static_cast<size_t>(kDsv4GroupCount));
@@ -1223,6 +1226,22 @@ inline std::optional<SeededPrefix> seedDevicePrefix(const std::shared_ptr<KVCach
         return std::nullopt;
     }
 
+    // Transfer tests seed a complete historical path independently of request retention.
+    for (const auto& group : manager->coordinator_manager_->cacheGroups()) {
+        if (!group->prefixReuseEnabled()) {
+            continue;
+        }
+        auto&             blocks = seed.resource->mutableBlockIds(0, group->tag());
+        RequiredPositions required;
+        for (size_t position = 0; position < blocks.blocksNum(); ++position) {
+            required.insert(position);
+        }
+        if (!group->malloc(blocks, seq_len, true, 0, nullptr, required)) {
+            manager->free(FreeInfo{seed.resource, seed.token_ids});
+            return std::nullopt;
+        }
+    }
+
     seed.full_cache_keys = seed.resource->cacheKeys();
     seed.cache_keys      = seed.full_cache_keys;
     seed.blocks_by_group.reserve(static_cast<size_t>(config.groupNums()));
@@ -1364,9 +1383,9 @@ protected:
         StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception_;
     }
 
-    void initManager(uint32_t device_blocks, int64_t lower_cache_size_mb = 8) {
+    void initManager(uint32_t device_blocks, int64_t lower_cache_size_mb = 8, int cp_size = 1) {
         ASSERT_FALSE(disk_dir_.path().empty());
-        cache_config_ = makeCompactDsv4CacheConfig(device_blocks);
+        cache_config_ = makeCompactDsv4CacheConfig(device_blocks, cp_size);
 
         manager_ = std::make_shared<KVCacheManager>(cache_config_,
                                                     /*warmup=*/false,

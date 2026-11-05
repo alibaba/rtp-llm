@@ -48,11 +48,11 @@
 
 ## 2. 三类 worker 不要混淆
 
-| 参数 | 所属组件 | 作用 | 测试原则 |
-|---|---|---|---|
-| `LOAD_CLIENT_WORKERS` | 发压端 | load client 进程数，影响 channel、timer 并行度和微突发形态 | 发压不足时增加；比较 Master 配置时固定 |
-| `SCHEDULE_WORKER_SIZE` | FlexLB Master | Master 内部 Schedule worker 数 | 本轮基线固定为 16 |
-| `JAVA_MOCK_EVENT_LOOP_THREADS` | Java mock engine | mock gRPC event loop 数 | 本轮基线固定为 32 |
+| 参数                           | 所属组件         | 作用                                                       | 测试原则                               |
+| ------------------------------ | ---------------- | ---------------------------------------------------------- | -------------------------------------- |
+| `LOAD_CLIENT_WORKERS`          | 发压端           | load client 进程数，影响 channel、timer 并行度和微突发形态 | 发压不足时增加；比较 Master 配置时固定 |
+| `SCHEDULE_WORKER_SIZE`         | FlexLB Master    | Master 内部 Schedule worker 数                             | 本轮基线固定为 16                      |
+| `JAVA_MOCK_EVENT_LOOP_THREADS` | Java mock engine | mock gRPC event loop 数                                    | 本轮基线固定为 32                      |
 
 报告中的“worker 数”如果没有特别说明，指 `LOAD_CLIENT_WORKERS`，不是 Master 内部 worker。
 
@@ -181,13 +181,13 @@ E2E UT 默认使用 fixed-window 10 ms、batch size 16，预热 64 条后测量 
 
 同一个 E2E 类还包含 engine scale 回归矩阵：
 
-| Prefill engine | Decode engine | 目标发送 QPS |
-|---:|---:|---:|
-| 1 | 2 | 1000 / 2000 / 5000 / 10000 |
-| 2 | 4 | 2000 |
-| 4 | 8 | 1000 / 2000 / 5000 / 10000 |
-| 8 | 16 | 2000 |
-| 16 | 32 | 1000 / 2000 / 5000 / 10000 |
+| Prefill engine | Decode engine |               目标发送 QPS |
+| -------------: | ------------: | -------------------------: |
+|              1 |             2 | 1000 / 2000 / 5000 / 10000 |
+|              2 |             4 |                       2000 |
+|              4 |             8 | 1000 / 2000 / 5000 / 10000 |
+|              8 |            16 |                       2000 |
+|             16 |            32 | 1000 / 2000 / 5000 / 10000 |
 
 2000 QPS 包含连续的机器数减半对照：`16/32 -> 8/16 -> 4/8 -> 2/4 -> 1/2`。矩阵中的请求按目标 QPS 均匀分布到纳秒时间点，不会在一秒开始时集中发送。每个 prefill 都是独立的 Netty mock server，Master 会建立真实 engine gRPC 连接；decode 只注册逻辑 endpoint，因为 schedule ACK 之前不会调用 decode RPC。每一格都校验成功率、实际 client/Master QPS、Master P99、Master batch wait 分位数、dispatch ACK、dispatch reason、所有 prefill 收到流量、prefill/decode 路由覆盖全部 endpoint，以及请求无丢失/重复。
 
@@ -255,16 +255,16 @@ next_speed = current_speed * target_master_qps / measured_server_arrival_qps
 当前 trace 可用的初始 speed 估值如下，最终以 `server_arrival_qps` 校准：
 
 | 目标 Master QPS | 初始 Replay speed | 建议 load client workers |
-|---:|---:|---:|
-| 100 | 14 | 1 |
-| 250 | 32 | 1 |
-| 500 | 64 | 1 |
-| 1000 | 125 至 130 | 1 |
-| 2000 | 250 | 1 或 2 |
-| 3000 | 375 | 2 |
-| 5000 | 650 | 4 |
-| 8000 | 1000 | 8 |
-| 10000 | 1400 | 8 |
+| --------------: | ----------------: | -----------------------: |
+|             100 |                14 |                        1 |
+|             250 |                32 |                        1 |
+|             500 |                64 |                        1 |
+|            1000 |        125 至 130 |                        1 |
+|            2000 |               250 |                   1 或 2 |
+|            3000 |               375 |                        2 |
+|            5000 |               650 |                        4 |
+|            8000 |              1000 |                        8 |
+|           10000 |              1400 |                        8 |
 
 load worker 变化会改变发压端微突发形态。要比较不同 Master 代码或 `SCHEDULE_WORKER_SIZE`，必须固定 `LOAD_CLIENT_WORKERS`；要证明发压端不是瓶颈，可以在相同目标 QPS 下补做不同 load worker 的对照组。
 
@@ -400,18 +400,18 @@ bash run_online_eval.sh
 
 每个 run 的关键文件（`run_online_eval.sh` 收尾时会把 run 目录收编成每个组件一份 JSON + 一份日志，见 `tools/online_eval/README.md` 的 Run output layout 一节）：
 
-| 文件 | 用途 |
-|---|---|
-| `load_client/summary.json` | 合并后的 QPS、错误数和 Master 服务端延迟（收编后原样保留） |
-| `load_client/server_latency.json` | Master arrival/completion 计数和各阶段延迟原始值（原样保留） |
-| `client.json` | summary.json 与 server_latency.json、每秒聚合时间线的合并视图 |
-| `master.json` | Master 计数时间序列、Prometheus 快照（含精确 dispatch reason counter）、master_info 前后快照 |
-| `master.log` | Master 日志（application.log 前缀 + `flexlb.log` 结构化行 + sync 日志）、拒绝执行、无可用 worker、GC/OOM 线索 |
-| `mock.json` / `mock.log` | mock 的 RPC 数、prefill pending 和 decode running 时间线（解析覆盖 26/28 字段，`decode_exec_p50`/`p95` 见 `mock.log` 原文行） |
-| `per_request.jsonl(.gz)` | 合并后的逐请求数据（run 根；10 MB 以下保持明文，更大的 run 为 gzip） |
-| `flexlb_profile.jfr` | FlexLB JVM profile（原样保留） |
-| `flexlb_env.txt` | 本次 engine endpoint 和启动环境（原样保留，同时快照进 `run_meta.json`） |
-| `run_meta.json` | 启动参数快照（含 `FLEXLB_CONFIG`）与环境 |
+| 文件                              | 用途                                                                                                                          |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `load_client/summary.json`        | 合并后的 QPS、错误数和 Master 服务端延迟（收编后原样保留）                                                                    |
+| `load_client/server_latency.json` | Master arrival/completion 计数和各阶段延迟原始值（原样保留）                                                                  |
+| `client.json`                     | summary.json 与 server_latency.json、每秒聚合时间线的合并视图                                                                 |
+| `master.json`                     | Master 计数时间序列、Prometheus 快照（含精确 dispatch reason counter）、master_info 前后快照                                  |
+| `master.log`                      | Master 日志（application.log 前缀 + `flexlb.log` 结构化行 + sync 日志）、拒绝执行、无可用 worker、GC/OOM 线索                 |
+| `mock.json` / `mock.log`          | mock 的 RPC 数、prefill pending 和 decode running 时间线（解析覆盖 26/28 字段，`decode_exec_p50`/`p95` 见 `mock.log` 原文行） |
+| `per_request.jsonl(.gz)`          | 合并后的逐请求数据（run 根；10 MB 以下保持明文，更大的 run 为 gzip）                                                          |
+| `flexlb_profile.jfr`              | FlexLB JVM profile（原样保留）                                                                                                |
+| `flexlb_env.txt`                  | 本次 engine endpoint 和启动环境（原样保留，同时快照进 `run_meta.json`）                                                       |
+| `run_meta.json`                   | 启动参数快照（含 `FLEXLB_CONFIG`）与环境                                                                                      |
 
 注：`load_client/shard_*/`、`master_prometheus_after.prom`、run 根 `flexlb.log`、`mock_engine.log` 等中间产物在成功收编后删除（内容已并入上表对应文件）；旧 run 残留的 `slo_batch_analysis.json` / `slo_batch_analysis.stdout`（批决策分析已并入 `aggregate.json` 的 `batch_decisions` 段）会被作为陈旧残留清扫删除。
 
@@ -455,13 +455,13 @@ PY
 
 `schedule_latency_ms` 是 RPC 到达 Master 到 Schedule 完成的总耗时。`server_stage_latency_ms` 包含：
 
-| 阶段 | 含义 | 上升时优先排查 |
-|---|---|---|
-| `grpc_queue_ms` | 请求进入 gRPC 后到业务处理开始 | gRPC executor、event loop、CPU 饱和、GC |
-| `route_submit_ms` | 路由计算和提交 batcher | 调度算法、cache index、锁竞争、对象分配 |
-| `batch_wait_ms` | fixed-window 等待和凑批 | batch window、batcher 队列和调度线程 |
+| 阶段              | 含义                                 | 上升时优先排查                              |
+| ----------------- | ------------------------------------ | ------------------------------------------- |
+| `grpc_queue_ms`   | 请求进入 gRPC 后到业务处理开始       | gRPC executor、event loop、CPU 饱和、GC     |
+| `route_submit_ms` | 路由计算和提交 batcher               | 调度算法、cache index、锁竞争、对象分配     |
+| `batch_wait_ms`   | fixed-window 等待和凑批              | batch window、batcher 队列和调度线程        |
 | `dispatch_ack_ms` | Master 发 EnqueueBatch 到 engine ACK | outbound gRPC executor、连接、mock ACK 能力 |
-| `ack_response_ms` | ACK 后完成 Schedule response | response executor、event loop、GC |
+| `ack_response_ms` | ACK 后完成 Schedule response         | response executor、event loop、GC           |
 
 可以直接读取或重置服务端采样：
 

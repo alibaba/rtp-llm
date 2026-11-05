@@ -1,5 +1,7 @@
 package org.flexlb.httpserver;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.DescriptorProtos;
 import com.google.protobuf.Descriptors;
@@ -16,9 +18,12 @@ import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Field;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -45,7 +50,7 @@ class FlexlbGrpcForwarderTest {
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
         FlexlbGrpcForwarder.MasterForwardResult result =
-                await(forwarder.forwardScheduleToMaster(request(1L)));
+                await(forwarder.forwardScheduleToMaster(request(1)));
 
         assertFalse(result.masterFound());
         assertNull(result.response());
@@ -62,7 +67,7 @@ class FlexlbGrpcForwarderTest {
         FlexlbScheduleProtocol.GetRequestStateResponsePB result =
                 forwarder.forwardGetRequestStateToMaster(
                         FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                                .setRequestId(2L)
+                                .setRequestIdStr(String.valueOf(2L))
                                 .build());
 
         assertNull(result);
@@ -72,8 +77,7 @@ class FlexlbGrpcForwarderTest {
     }
 
     @Test
-    void grpcFailureDoesNotSetIndependentDeadlineAndKeepsChannelUntilShutdown()
-            throws Exception {
+    void grpcFailureDoesNotSetIndependentDeadlineAndKeepsChannelUntilShutdown() throws Exception {
         LBStatusConsistencyService consistency = masterAt("10.0.0.2:7001");
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
@@ -84,11 +88,13 @@ class FlexlbGrpcForwarderTest {
         channels(forwarder).put("10.0.0.2:7003", channel);
 
         FlexlbGrpcForwarder.MasterForwardResult result =
-                await(forwarder.forwardScheduleToMaster(request(4L)));
+                await(forwarder.forwardScheduleToMaster(request(4)));
 
         assertTrue(result.masterFound());
         assertEquals("DEADLINE_EXCEEDED", result.failure());
-        assertNull(callOptions.getValue().getDeadline(), "the inbound Context owns the request deadline");
+        assertNull(
+                callOptions.getValue().getDeadline(),
+                "the inbound Context owns the request deadline");
         assertEquals(Status.Code.DEADLINE_EXCEEDED, Status.fromThrowable(result.error()).getCode());
         assertSame(channel, channels(forwarder).get("10.0.0.2:7003"));
         verify(channel, never()).shutdownNow();
@@ -100,18 +106,103 @@ class FlexlbGrpcForwarderTest {
     }
 
     @Test
+    void grpcFailureLogsStatusDescriptionAndThrowableForScheduleAndCancel() throws Exception {
+        LBStatusConsistencyService consistency = masterAt("10.0.0.2:7001");
+        EngineHealthReporter reporter = mock(EngineHealthReporter.class);
+        FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
+        ManagedChannel channel = mock(ManagedChannel.class);
+        String description = "stream reset\nfrom peer";
+        int expectedDescriptionLimit = 512;
+        description +=
+                "x".repeat(expectedDescriptionLimit - 1 - description.length())
+                        + "\uD83D\uDE00tail";
+        String expectedDescription =
+                description.replace('\n', ' ').substring(0, expectedDescriptionLimit - 1);
+        StatusRuntimeException failure =
+                Status.UNKNOWN
+                        .withDescription(description)
+                        .withCause(new IllegalStateException("transport closed"))
+                        .asRuntimeException();
+        when(channel.newCall(any(MethodDescriptor.class), any(CallOptions.class)))
+                .thenThrow(failure);
+        channels(forwarder).put("10.0.0.2:7003", channel);
+
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger)
+                        LoggerFactory.getLogger(org.flexlb.util.Logger.LOGGER_NAME);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            assertEquals(
+                    "UNKNOWN",
+                    await(
+                                    forwarder.forwardScheduleToMaster(
+                                            FlexlbScheduleProtocol.FlexlbScheduleRequestPB
+                                                    .newBuilder()
+                                                    .setRequestIdStr("41\r\n{}")
+                                                    .build()))
+                            .failure());
+            assertEquals(
+                    "UNKNOWN",
+                    forwarder
+                            .forwardCancelToMaster(
+                                    FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                                            .setRequestIdStr("42")
+                                            .build())
+                            .toCompletableFuture()
+                            .join()
+                            .failure());
+
+            List<ILoggingEvent> failures =
+                    appender.list.stream()
+                            .filter(
+                                    event ->
+                                            event.getFormattedMessage()
+                                                    .contains("event=flexlb_forward_failed"))
+                            .toList();
+            assertEquals(2, failures.size());
+            assertTrue(failures.get(0).getFormattedMessage().contains("operation=schedule"));
+            assertTrue(failures.get(0).getFormattedMessage().contains("request_id=41  {}"));
+            assertTrue(failures.get(1).getFormattedMessage().contains("operation=cancel"));
+            for (ILoggingEvent event : failures) {
+                assertTrue(event.getFormattedMessage().contains("status=UNKNOWN"));
+                assertEquals(
+                        expectedDescription,
+                        event.getFormattedMessage().split(" description=", 2)[1]);
+                assertFalse(event.getFormattedMessage().contains("\n"));
+                assertFalse(event.getFormattedMessage().contains("\r"));
+                assertFalse(event.getFormattedMessage().contains("\uD83D"));
+                assertFalse(event.getFormattedMessage().contains("\uDE00"));
+                assertEquals(
+                        StatusRuntimeException.class.getName(),
+                        event.getThrowableProxy().getClassName());
+                assertEquals(
+                        IllegalStateException.class.getName(),
+                        event.getThrowableProxy().getCause().getClassName());
+            }
+            verify(reporter, times(2)).reportForwardToMasterResult("10.0.0.2", "GRPC_FAILED");
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+            forwarder.shutdown();
+        }
+    }
+
+    @Test
     void forwardedRequestCannotBeForwardedAgain() throws Exception {
         LBStatusConsistencyService consistency = masterAt("10.0.0.2:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
-        FlexlbGrpcForwarder.MasterForwardResult result = await(
-                forwarder.forwardScheduleToMaster(
-                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                        .setRequestId(5L)
-                        .setForwardHop(1)
-                        .build()));
+        FlexlbGrpcForwarder.MasterForwardResult result =
+                await(
+                        forwarder.forwardScheduleToMaster(
+                                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                                        .setRequestIdStr(String.valueOf(5L))
+                                        .setForwardHop(1)
+                                        .build()));
 
         assertTrue(result.masterFound());
         assertEquals("FORWARD_HOP_LIMIT", result.failure());
@@ -127,9 +218,10 @@ class FlexlbGrpcForwarderTest {
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
         FlexlbGrpcForwarder.CancelForwardResult result =
-                forwarder.forwardCancelToMaster(
+                forwarder
+                        .forwardCancelToMaster(
                                 FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                                        .setRequestId(15L)
+                                        .setRequestIdStr(String.valueOf(15L))
                                         .setForwardHop(1)
                                         .build())
                         .toCompletableFuture()
@@ -149,7 +241,7 @@ class FlexlbGrpcForwarderTest {
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
         FlexlbGrpcForwarder.MasterForwardResult result =
-                await(forwarder.forwardScheduleToMaster(request(6L)));
+                await(forwarder.forwardScheduleToMaster(request(6)));
 
         assertTrue(result.masterFound());
         assertEquals("SELF_FORWARD_BLOCKED", result.failure());
@@ -158,8 +250,7 @@ class FlexlbGrpcForwarderTest {
     }
 
     @Test
-    void staleSelfLeaderNeverBlocksOnSynchronousRefreshOrOpensChannel()
-            throws Exception {
+    void staleSelfLeaderNeverBlocksOnSynchronousRefreshOrOpensChannel() throws Exception {
         LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
         when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.3:7001");
@@ -167,7 +258,7 @@ class FlexlbGrpcForwarderTest {
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
         FlexlbGrpcForwarder.MasterForwardResult result =
-                await(forwarder.forwardScheduleToMaster(request(7L)));
+                await(forwarder.forwardScheduleToMaster(request(7)));
 
         assertEquals("SELF_FORWARD_BLOCKED", result.failure());
         verify(consistency, never()).refreshMasterHost(true);
@@ -175,8 +266,7 @@ class FlexlbGrpcForwarderTest {
     }
 
     @Test
-    void shutdownRejectsNewForwardWithoutCreatingOrLeakingAChannel()
-            throws Exception {
+    void shutdownRejectsNewForwardWithoutCreatingOrLeakingAChannel() throws Exception {
         LBStatusConsistencyService consistency = masterAt("10.0.0.2:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
@@ -184,13 +274,12 @@ class FlexlbGrpcForwarderTest {
 
         forwarder.shutdown();
         FlexlbGrpcForwarder.MasterForwardResult result =
-                await(forwarder.forwardScheduleToMaster(request(14L)));
+                await(forwarder.forwardScheduleToMaster(request(14)));
 
         assertTrue(result.masterFound());
         assertEquals("UNAVAILABLE", result.failure());
         assertTrue(channels(forwarder).isEmpty());
-        verify(reporter, times(1))
-                .reportForwardToMasterResult("10.0.0.2", "GRPC_FAILED");
+        verify(reporter, times(1)).reportForwardToMasterResult("10.0.0.2", "GRPC_FAILED");
     }
 
     @Test
@@ -203,7 +292,7 @@ class FlexlbGrpcForwarderTest {
         FlexlbScheduleProtocol.GetRequestStateResponsePB result =
                 forwarder.forwardGetRequestStateToMaster(
                         FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                                .setRequestId(8L)
+                                .setRequestIdStr(String.valueOf(8L))
                                 .setForwardHop(1)
                                 .build());
 
@@ -222,7 +311,7 @@ class FlexlbGrpcForwarderTest {
         FlexlbScheduleProtocol.GetRequestStateResponsePB result =
                 forwarder.forwardGetRequestStateToMaster(
                         FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                                .setRequestId(9L)
+                                .setRequestIdStr(String.valueOf(9L))
                                 .build());
 
         assertNull(result);
@@ -238,15 +327,16 @@ class FlexlbGrpcForwarderTest {
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
         FlexlbGrpcForwarder.MasterForwardResult scheduleResult =
-                await(forwarder.forwardScheduleToMaster(
-                        FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                                .setRequestId(12L)
-                                .setForwardHop(1)
-                                .build()));
+                await(
+                        forwarder.forwardScheduleToMaster(
+                                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                                        .setRequestIdStr(String.valueOf(12L))
+                                        .setForwardHop(1)
+                                        .build()));
         FlexlbScheduleProtocol.GetRequestStateResponsePB stateResult =
                 forwarder.forwardGetRequestStateToMaster(
                         FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                                .setRequestId(13L)
+                                .setRequestIdStr(String.valueOf(13L))
                                 .setForwardHop(1)
                                 .build());
 
@@ -255,17 +345,15 @@ class FlexlbGrpcForwarderTest {
         assertTrue(channels(forwarder).isEmpty());
         verify(consistency, times(2)).getMasterHostIpPort();
         verify(consistency, times(2)).getLocalHostIp();
-        verify(reporter, times(2))
-                .reportForwardToMasterResult("10.0.0.3", "HOP_LIMIT");
-        verify(reporter, never())
-                .reportForwardToMasterResult(anyString(), eq("SELF_TARGET"));
+        verify(reporter, times(2)).reportForwardToMasterResult("10.0.0.3", "HOP_LIMIT");
+        verify(reporter, never()).reportForwardToMasterResult(anyString(), eq("SELF_TARGET"));
     }
 
     @Test
     void forwardHopSurvivesRelayByAnOlderProtobufSchema() throws Exception {
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB newRequest =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                        .setRequestId(10L)
+                        .setRequestIdStr(String.valueOf(10L))
                         .setSeqLen(4096)
                         .setForwardHop(1)
                         .build();
@@ -276,33 +364,44 @@ class FlexlbGrpcForwarderTest {
         DescriptorProtos.DescriptorProto oldMessage =
                 DescriptorProtos.DescriptorProto.newBuilder()
                         .setName("OldFlexlbScheduleRequestPB")
-                        .addField(DescriptorProtos.FieldDescriptorProto.newBuilder()
-                                .setName("request_id")
-                                .setNumber(1)
-                                .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64)
-                                .setLabel(DescriptorProtos.FieldDescriptorProto.Label.LABEL_OPTIONAL))
-                        .addField(DescriptorProtos.FieldDescriptorProto.newBuilder()
-                                .setName("seq_len")
-                                .setNumber(4)
-                                .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64)
-                                .setLabel(DescriptorProtos.FieldDescriptorProto.Label.LABEL_OPTIONAL))
+                        .addField(
+                                DescriptorProtos.FieldDescriptorProto.newBuilder()
+                                        .setName("request_id")
+                                        .setNumber(1)
+                                        .setType(
+                                                DescriptorProtos.FieldDescriptorProto.Type
+                                                        .TYPE_INT64)
+                                        .setLabel(
+                                                DescriptorProtos.FieldDescriptorProto.Label
+                                                        .LABEL_OPTIONAL))
+                        .addField(
+                                DescriptorProtos.FieldDescriptorProto.newBuilder()
+                                        .setName("seq_len")
+                                        .setNumber(4)
+                                        .setType(
+                                                DescriptorProtos.FieldDescriptorProto.Type
+                                                        .TYPE_INT64)
+                                        .setLabel(
+                                                DescriptorProtos.FieldDescriptorProto.Label
+                                                        .LABEL_OPTIONAL))
                         .build();
-        Descriptors.FileDescriptor oldFile = Descriptors.FileDescriptor.buildFrom(
-                DescriptorProtos.FileDescriptorProto.newBuilder()
-                        .setName("old_flexlb_schedule.proto")
-                        .setSyntax("proto3")
-                        .addMessageType(oldMessage)
-                        .build(),
-                new Descriptors.FileDescriptor[0]);
-        DynamicMessage oldRelay = DynamicMessage.parseFrom(
-                oldFile.findMessageTypeByName("OldFlexlbScheduleRequestPB"),
-                newRequest.toByteArray());
+        Descriptors.FileDescriptor oldFile =
+                Descriptors.FileDescriptor.buildFrom(
+                        DescriptorProtos.FileDescriptorProto.newBuilder()
+                                .setName("old_flexlb_schedule.proto")
+                                .setSyntax("proto3")
+                                .addMessageType(oldMessage)
+                                .build(),
+                        new Descriptors.FileDescriptor[0]);
+        DynamicMessage oldRelay =
+                DynamicMessage.parseFrom(
+                        oldFile.findMessageTypeByName("OldFlexlbScheduleRequestPB"),
+                        newRequest.toByteArray());
 
         assertTrue(oldRelay.getUnknownFields().hasField(15));
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB reparsed =
-                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(
-                        oldRelay.toByteArray());
-        assertEquals(10L, reparsed.getRequestId());
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(oldRelay.toByteArray());
+        assertEquals("10", reparsed.getRequestIdStr());
         assertEquals(4096L, reparsed.getSeqLen());
         assertEquals(1, reparsed.getForwardHop());
     }
@@ -311,40 +410,51 @@ class FlexlbGrpcForwarderTest {
     void stateQueryForwardHopSurvivesOlderProtobufRelay() throws Exception {
         FlexlbScheduleProtocol.GetRequestStateRequestPB newRequest =
                 FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                        .setRequestId(11L)
+                        .setRequestIdStr(String.valueOf(11L))
                         .setBatchId(12L)
                         .setForwardHop(1)
                         .build();
         DescriptorProtos.DescriptorProto oldMessage =
                 DescriptorProtos.DescriptorProto.newBuilder()
                         .setName("OldGetRequestStateRequestPB")
-                        .addField(DescriptorProtos.FieldDescriptorProto.newBuilder()
-                                .setName("request_id")
-                                .setNumber(1)
-                                .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64)
-                                .setLabel(DescriptorProtos.FieldDescriptorProto.Label.LABEL_OPTIONAL))
-                        .addField(DescriptorProtos.FieldDescriptorProto.newBuilder()
-                                .setName("batch_id")
-                                .setNumber(2)
-                                .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64)
-                                .setLabel(DescriptorProtos.FieldDescriptorProto.Label.LABEL_OPTIONAL))
+                        .addField(
+                                DescriptorProtos.FieldDescriptorProto.newBuilder()
+                                        .setName("request_id")
+                                        .setNumber(1)
+                                        .setType(
+                                                DescriptorProtos.FieldDescriptorProto.Type
+                                                        .TYPE_INT64)
+                                        .setLabel(
+                                                DescriptorProtos.FieldDescriptorProto.Label
+                                                        .LABEL_OPTIONAL))
+                        .addField(
+                                DescriptorProtos.FieldDescriptorProto.newBuilder()
+                                        .setName("batch_id")
+                                        .setNumber(2)
+                                        .setType(
+                                                DescriptorProtos.FieldDescriptorProto.Type
+                                                        .TYPE_INT64)
+                                        .setLabel(
+                                                DescriptorProtos.FieldDescriptorProto.Label
+                                                        .LABEL_OPTIONAL))
                         .build();
-        Descriptors.FileDescriptor oldFile = Descriptors.FileDescriptor.buildFrom(
-                DescriptorProtos.FileDescriptorProto.newBuilder()
-                        .setName("old_get_request_state.proto")
-                        .setSyntax("proto3")
-                        .addMessageType(oldMessage)
-                        .build(),
-                new Descriptors.FileDescriptor[0]);
-        DynamicMessage oldRelay = DynamicMessage.parseFrom(
-                oldFile.findMessageTypeByName("OldGetRequestStateRequestPB"),
-                newRequest.toByteArray());
+        Descriptors.FileDescriptor oldFile =
+                Descriptors.FileDescriptor.buildFrom(
+                        DescriptorProtos.FileDescriptorProto.newBuilder()
+                                .setName("old_get_request_state.proto")
+                                .setSyntax("proto3")
+                                .addMessageType(oldMessage)
+                                .build(),
+                        new Descriptors.FileDescriptor[0]);
+        DynamicMessage oldRelay =
+                DynamicMessage.parseFrom(
+                        oldFile.findMessageTypeByName("OldGetRequestStateRequestPB"),
+                        newRequest.toByteArray());
 
         assertTrue(oldRelay.getUnknownFields().hasField(3));
         FlexlbScheduleProtocol.GetRequestStateRequestPB reparsed =
-                FlexlbScheduleProtocol.GetRequestStateRequestPB.parseFrom(
-                        oldRelay.toByteArray());
-        assertEquals(11L, reparsed.getRequestId());
+                FlexlbScheduleProtocol.GetRequestStateRequestPB.parseFrom(oldRelay.toByteArray());
+        assertEquals("11", reparsed.getRequestIdStr());
         assertEquals(12L, reparsed.getBatchId());
         assertEquals(1, reparsed.getForwardHop());
     }
@@ -353,60 +463,79 @@ class FlexlbGrpcForwarderTest {
     void cancelForwardHopSurvivesOlderProtobufRelay() throws Exception {
         FlexlbScheduleProtocol.FlexlbCancelRequestPB newRequest =
                 FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                        .setRequestId(16L)
+                        .setRequestIdStr(String.valueOf(16L))
                         .setBatchId(17L)
-                        .setReason(FlexlbScheduleProtocol.CancelReasonPB
-                                .CANCEL_REASON_CLIENT_CANCELLED)
+                        .setReason(
+                                FlexlbScheduleProtocol.CancelReasonPB
+                                        .CANCEL_REASON_CLIENT_CANCELLED)
                         .setForwardHop(1)
                         .build();
         DescriptorProtos.DescriptorProto oldMessage =
                 DescriptorProtos.DescriptorProto.newBuilder()
                         .setName("OldFlexlbCancelRequestPB")
-                        .addField(DescriptorProtos.FieldDescriptorProto.newBuilder()
-                                .setName("request_id")
-                                .setNumber(1)
-                                .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64)
-                                .setLabel(DescriptorProtos.FieldDescriptorProto.Label.LABEL_OPTIONAL))
-                        .addField(DescriptorProtos.FieldDescriptorProto.newBuilder()
-                                .setName("batch_id")
-                                .setNumber(2)
-                                .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64)
-                                .setLabel(DescriptorProtos.FieldDescriptorProto.Label.LABEL_OPTIONAL))
-                        .addField(DescriptorProtos.FieldDescriptorProto.newBuilder()
-                                .setName("reason")
-                                .setNumber(3)
-                                .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_ENUM)
-                                .setTypeName(".old.CancelReasonPB")
-                                .setLabel(DescriptorProtos.FieldDescriptorProto.Label.LABEL_OPTIONAL))
+                        .addField(
+                                DescriptorProtos.FieldDescriptorProto.newBuilder()
+                                        .setName("request_id")
+                                        .setNumber(1)
+                                        .setType(
+                                                DescriptorProtos.FieldDescriptorProto.Type
+                                                        .TYPE_INT64)
+                                        .setLabel(
+                                                DescriptorProtos.FieldDescriptorProto.Label
+                                                        .LABEL_OPTIONAL))
+                        .addField(
+                                DescriptorProtos.FieldDescriptorProto.newBuilder()
+                                        .setName("batch_id")
+                                        .setNumber(2)
+                                        .setType(
+                                                DescriptorProtos.FieldDescriptorProto.Type
+                                                        .TYPE_INT64)
+                                        .setLabel(
+                                                DescriptorProtos.FieldDescriptorProto.Label
+                                                        .LABEL_OPTIONAL))
+                        .addField(
+                                DescriptorProtos.FieldDescriptorProto.newBuilder()
+                                        .setName("reason")
+                                        .setNumber(3)
+                                        .setType(
+                                                DescriptorProtos.FieldDescriptorProto.Type
+                                                        .TYPE_ENUM)
+                                        .setTypeName(".old.CancelReasonPB")
+                                        .setLabel(
+                                                DescriptorProtos.FieldDescriptorProto.Label
+                                                        .LABEL_OPTIONAL))
                         .build();
         DescriptorProtos.EnumDescriptorProto oldReason =
                 DescriptorProtos.EnumDescriptorProto.newBuilder()
                         .setName("CancelReasonPB")
-                        .addValue(DescriptorProtos.EnumValueDescriptorProto.newBuilder()
-                                .setName("CANCEL_REASON_UNSPECIFIED")
-                                .setNumber(0))
-                        .addValue(DescriptorProtos.EnumValueDescriptorProto.newBuilder()
-                                .setName("CANCEL_REASON_CLIENT_CANCELLED")
-                                .setNumber(1))
+                        .addValue(
+                                DescriptorProtos.EnumValueDescriptorProto.newBuilder()
+                                        .setName("CANCEL_REASON_UNSPECIFIED")
+                                        .setNumber(0))
+                        .addValue(
+                                DescriptorProtos.EnumValueDescriptorProto.newBuilder()
+                                        .setName("CANCEL_REASON_CLIENT_CANCELLED")
+                                        .setNumber(1))
                         .build();
-        Descriptors.FileDescriptor oldFile = Descriptors.FileDescriptor.buildFrom(
-                DescriptorProtos.FileDescriptorProto.newBuilder()
-                        .setName("old_flexlb_cancel.proto")
-                        .setPackage("old")
-                        .setSyntax("proto3")
-                        .addEnumType(oldReason)
-                        .addMessageType(oldMessage)
-                        .build(),
-                new Descriptors.FileDescriptor[0]);
-        DynamicMessage oldRelay = DynamicMessage.parseFrom(
-                oldFile.findMessageTypeByName("OldFlexlbCancelRequestPB"),
-                newRequest.toByteArray());
+        Descriptors.FileDescriptor oldFile =
+                Descriptors.FileDescriptor.buildFrom(
+                        DescriptorProtos.FileDescriptorProto.newBuilder()
+                                .setName("old_flexlb_cancel.proto")
+                                .setPackage("old")
+                                .setSyntax("proto3")
+                                .addEnumType(oldReason)
+                                .addMessageType(oldMessage)
+                                .build(),
+                        new Descriptors.FileDescriptor[0]);
+        DynamicMessage oldRelay =
+                DynamicMessage.parseFrom(
+                        oldFile.findMessageTypeByName("OldFlexlbCancelRequestPB"),
+                        newRequest.toByteArray());
 
         assertTrue(oldRelay.getUnknownFields().hasField(4));
         FlexlbScheduleProtocol.FlexlbCancelRequestPB reparsed =
-                FlexlbScheduleProtocol.FlexlbCancelRequestPB.parseFrom(
-                        oldRelay.toByteArray());
-        assertEquals(16L, reparsed.getRequestId());
+                FlexlbScheduleProtocol.FlexlbCancelRequestPB.parseFrom(oldRelay.toByteArray());
+        assertEquals("16", reparsed.getRequestIdStr());
         assertEquals(17L, reparsed.getBatchId());
         assertEquals(1, reparsed.getForwardHop());
     }
@@ -420,8 +549,7 @@ class FlexlbGrpcForwarderTest {
      * budget residue (charge fully released on every terminal path).
      */
     @Test
-    void forwardByteBudgetRejectsOversizeForwardBeforeRpcAndReleasesFully()
-            throws Exception {
+    void forwardByteBudgetRejectsOversizeForwardBeforeRpcAndReleasesFully() throws Exception {
         LBStatusConsistencyService consistency = masterAt("10.0.0.2:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
@@ -440,14 +568,16 @@ class FlexlbGrpcForwarderTest {
                         // any non-trivial payload larger than the 8-byte budget
                         .setGenerateInput(ByteString.copyFrom(new byte[32]))
                         .build();
-        assertTrue(big.getSerializedSize() > 8,
+        assertTrue(
+                big.getSerializedSize() > 8,
                 "request must exceed the shrunken budget; got " + big.getSerializedSize());
 
         FlexlbGrpcForwarder.MasterForwardResult rejected =
                 await(forwarder.forwardScheduleToMaster(big));
         assertTrue(rejected.masterFound());
         assertEquals("FORWARD_BUDGET_EXHAUSTED", rejected.failure());
-        assertTrue(channels(forwarder).isEmpty(),
+        assertTrue(
+                channels(forwarder).isEmpty(),
                 "no channel/RPC may be created for a budget-rejected forward");
         verify(reporter).reportForwardToMasterResult("10.0.0.2", "FORWARD_BUDGET_EXHAUSTED");
 
@@ -465,17 +595,22 @@ class FlexlbGrpcForwarderTest {
         java.lang.reflect.Field inflight =
                 FlexlbGrpcForwarder.class.getDeclaredField("forwardInflightBytes");
         inflight.setAccessible(true);
-        assertEquals(0L, ((java.util.concurrent.atomic.AtomicLong) inflight.get(forwarder)).get(),
+        assertEquals(
+                0L,
+                ((java.util.concurrent.atomic.AtomicLong) inflight.get(forwarder)).get(),
                 "budget must be fully released after terminal forward outcomes");
 
         forwarder.shutdown();
     }
 
     private static FlexlbGrpcForwarder forwarder(
-            LBStatusConsistencyService consistency,
-            EngineHealthReporter reporter) {
-        return new FlexlbGrpcForwarder(consistency, mock(ConfigService.class), reporter,
-                mock(EventLoopGroup.class), mock(Executor.class));
+            LBStatusConsistencyService consistency, EngineHealthReporter reporter) {
+        return new FlexlbGrpcForwarder(
+                consistency,
+                mock(ConfigService.class),
+                reporter,
+                mock(EventLoopGroup.class),
+                mock(Executor.class));
     }
 
     private static LBStatusConsistencyService masterAt(String address) {
@@ -486,18 +621,18 @@ class FlexlbGrpcForwarderTest {
 
     private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(long id) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(id)
+                .setRequestIdStr(String.valueOf(id))
                 .build();
     }
 
     private static FlexlbGrpcForwarder.MasterForwardResult await(
-            java.util.concurrent.CompletionStage<FlexlbGrpcForwarder.MasterForwardResult> result) {
+            CompletionStage<FlexlbGrpcForwarder.MasterForwardResult> result) {
         return result.toCompletableFuture().join();
     }
 
     @SuppressWarnings("unchecked")
-    private static Map<String, ManagedChannel> channels(
-            FlexlbGrpcForwarder forwarder) throws Exception {
+    private static Map<String, ManagedChannel> channels(FlexlbGrpcForwarder forwarder)
+            throws Exception {
         Field field = FlexlbGrpcForwarder.class.getDeclaredField("channels");
         field.setAccessible(true);
         return (Map<String, ManagedChannel>) field.get(forwarder);

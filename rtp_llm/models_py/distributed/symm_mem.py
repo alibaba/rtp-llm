@@ -48,6 +48,51 @@ _AGREE_TIMEOUT_S = 120
 # counter advances in lockstep and the keys stay aligned across ranks.
 _agree_epoch = 0
 
+# torch's symm_mem IpcChannel binds an AF_UNIX socket at
+# "<TMPDIR|TEMP|TEMPDIR, else /tmp>/symm_mem-<id>" and passes the full path
+# length to bind(), so a directory whose path plus torch's suffix would exceed
+# the kernel's 107-byte sun_path limit makes the kernel reject the sockaddr
+# with EINVAL ("Failed to bind socket: Invalid argument") and every rank dies
+# inside torch_symm_mem.rendezvous(). Remote-execution sandboxes (nativelink)
+# run with TMPDIR paths well over 150 bytes. "_symm_mem-" plus a uuid-sized
+# suffix is the slack we leave when deciding whether the inherited directory
+# fits.
+_SYMM_MEM_SOCK_SUFFIX_SLACK = 46
+
+
+def _symm_mem_short_socket_dir() -> Optional[str]:
+    """Redirect torch's symm_mem IPC socket dir when TMPDIR is too long.
+
+    Returns a short shared directory the caller should point TMPDIR/TEMP/
+    TEMPDIR at for the duration of the rendezvous, or None when the
+    inherited directory already fits. The directory is keyed on uid+ppid:
+    ranks of one group are siblings of the same parent (same ppid), so they
+    all compute the same directory and the group stays rendezvous-
+    consistent, while separate test actions on one worker land in separate
+    directories instead of fighting over the same socket.
+    """
+    inherited = (
+        os.environ.get("TMPDIR")
+        or os.environ.get("TEMP")
+        or os.environ.get("TEMPDIR")
+        or "/tmp"
+    )
+    if len(os.fsencode(inherited)) + _SYMM_MEM_SOCK_SUFFIX_SLACK <= 107:
+        return None
+    short_dir = f"/tmp/rtp_symm_{os.getuid()}_{os.getppid()}"
+    try:
+        os.makedirs(short_dir, mode=0o700, exist_ok=True)
+    except OSError as e:
+        logging.warning(
+            "TorchSymmMemCommunicator: cannot create short socket dir %s (%s); "
+            "trying torch rendezvous with the inherited TMPDIR %s",
+            short_dir,
+            e,
+            inherited,
+        )
+        return None
+    return short_dir
+
 
 def _agree_across_group(group: ProcessGroup, local_ok: bool, tag: str) -> bool:
     """AND-reduce `local_ok` across every rank of `group`.
@@ -196,7 +241,26 @@ class TorchSymmMemCommunicator:
             self.disabled = True
             return
 
-        handle = torch_symm_mem.rendezvous(self.buffer, group=self.group.group_name)
+        # Sandboxes with oversized TMPDIR paths kill the rendezvous's IPC
+        # socket bind with EINVAL before the exchange even starts (see
+        # _symm_mem_short_socket_dir). Scope the redirect to this call:
+        # torch probes the env when it builds the channel, all ranks run
+        # this same code, and restoring afterwards keeps the inherited
+        # TMPDIR for everything else the process does.
+        sock_dir = _symm_mem_short_socket_dir()
+        sock_env_vars = ("TMPDIR", "TEMP", "TEMPDIR")
+        sock_env_saved = {v: os.environ.get(v) for v in sock_env_vars}
+        try:
+            if sock_dir is not None:
+                for v in sock_env_vars:
+                    os.environ[v] = sock_dir
+            handle = torch_symm_mem.rendezvous(self.buffer, group=self.group.group_name)
+        finally:
+            for v, old in sock_env_saved.items():
+                if old is None:
+                    os.environ.pop(v, None)
+                else:
+                    os.environ[v] = old
 
         # The post-rendezvous checks are local verdicts too. If they split the
         # group, some ranks would call multimem_all_reduce_ while others fall

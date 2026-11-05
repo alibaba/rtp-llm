@@ -291,8 +291,13 @@ void BlockTransferRequestConverter::encodeTransferResult(MemoryOperationResponse
 TransferResult BlockTransferRequestConverter::decodeTransferResult(const MemoryOperationResponsePB& response,
                                                                    size_t                           block_count) {
     TransferResult result;
-    if (static_cast<size_t>(response.block_errors_size()) != block_count) {
-        result = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer response block count mismatch");
+    if (static_cast<size_t>(response.block_errors_size()) != block_count
+        || !MemoryOperationResponsePB::Code_IsValid(response.code())
+        || std::any_of(response.block_errors().begin(), response.block_errors().end(), [](int code) {
+               return !MemoryOperationResponsePB::Code_IsValid(code);
+           })) {
+        result = {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "invalid block transfer response"),
+                  CacheCopyError::RPC_FAILED};
         result.expandBlockErrors(block_count);
         return result;
     }

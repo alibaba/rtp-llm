@@ -18,9 +18,7 @@ public class MockPrefillWorker extends MockWorker {
      * Create a prefill mock worker with the given behavior.
      */
     public MockPrefillWorker(MockWorkerBehavior behavior) {
-        super(behavior.toBuilder()
-                .roleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
-                .build());
+        super(behavior.toBuilder().roleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL).build());
     }
 
     /**

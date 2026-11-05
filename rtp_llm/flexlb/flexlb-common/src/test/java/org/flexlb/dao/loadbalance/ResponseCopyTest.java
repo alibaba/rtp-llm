@@ -14,7 +14,9 @@ class ResponseCopyTest {
 
     @Test
     void copiesAllResponseDataWithoutSharingMutableObjects() throws Exception {
-        Response source = mapper.readValue("""
+        Response source =
+                mapper.readValue(
+                        """
                 {
                   "server_status": [{
                     "role": "PREFILL", "server_ip": "127.0.0.1",
@@ -36,17 +38,20 @@ class ResponseCopyTest {
                     "DECODE": null
                   }
                 }
-                """, Response.class);
+                """,
+                        Response.class);
 
         Response copy = Response.copyOf(source);
         assertEquals(mapper.valueToTree(source), mapper.valueToTree(copy));
         assertNotSame(source, copy);
         assertNotSame(source.getServerStatus(), copy.getServerStatus());
         assertNotSame(source.getServerStatus().get(0), copy.getServerStatus().get(0));
-        assertNotSame(source.getServerStatus().get(0).getDebugInfo(),
+        assertNotSame(
+                source.getServerStatus().get(0).getDebugInfo(),
                 copy.getServerStatus().get(0).getDebugInfo());
         assertNotSame(source.getWorkerSummary(), copy.getWorkerSummary());
-        assertNotSame(source.getWorkerSummary().get("PREFILL"), copy.getWorkerSummary().get("PREFILL"));
+        assertNotSame(
+                source.getWorkerSummary().get("PREFILL"), copy.getWorkerSummary().get("PREFILL"));
 
         copy.getServerStatus().get(0).getDebugInfo().setQueueSize(99);
         copy.getServerStatus().get(0).setServerIp("changed");
@@ -81,8 +86,25 @@ class ResponseCopyTest {
         assertEquals(type.getErrorCode(), failure.getCode());
         assertEquals(type.buildErrorMessage("delivery failed"), failure.getErrorMessage());
         assertEquals(AdmissionRejectReason.UNSPECIFIED, failure.getAdmissionRejectReason());
-        assertEquals(type.buildErrorMessage(null),
+        assertEquals(
+                type.buildErrorMessage(null),
                 Response.buildErrorResponse(type, null).getErrorMessage());
+    }
+
+    @Test
+    void copiesSelectedLogicalEngineIdentity() {
+        ServerStatus sourceStatus = new ServerStatus();
+        sourceStatus.setServerIp("10.0.0.8");
+        sourceStatus.setHttpPort(8080);
+        sourceStatus.setSelectedEngineIndex(1, 2);
+        Response source = new Response();
+        source.setServerStatus(java.util.List.of(sourceStatus));
+
+        ServerStatus copy = Response.copyOf(source).getServerStatus().getFirst();
+
+        assertEquals(1, copy.getEngineIndex());
+        assertEquals(2, copy.getRoutingMultiEngineNum());
+        assertEquals("10.0.0.8:8080@1", copy.getLogicalIpPort());
     }
 
     @Test

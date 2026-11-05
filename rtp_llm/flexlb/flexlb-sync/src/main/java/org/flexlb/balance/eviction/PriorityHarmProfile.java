@@ -17,8 +17,7 @@ import java.util.Arrays;
 public final class PriorityHarmProfile implements Comparable<PriorityHarmProfile> {
 
     private static final PriorityHarmProfile EMPTY =
-            new PriorityHarmProfile(
-                    new BigInteger[PriorityNormalizer.MAX_PRIORITY + 1]);
+            new PriorityHarmProfile(new BigInteger[PriorityNormalizer.MAX_PRIORITY + 1]);
 
     private final BigInteger[] harmByPriority;
 
@@ -36,8 +35,7 @@ public final class PriorityHarmProfile implements Comparable<PriorityHarmProfile
 
     /** Add two profiles without losing precision. */
     public PriorityHarmProfile plus(PriorityHarmProfile other) {
-        BigInteger[] sum = new BigInteger[
-                PriorityNormalizer.MAX_PRIORITY + 1];
+        BigInteger[] sum = new BigInteger[PriorityNormalizer.MAX_PRIORITY + 1];
         for (int priority = PriorityNormalizer.MIN_PRIORITY;
                 priority <= PriorityNormalizer.MAX_PRIORITY;
                 priority++) {
@@ -60,8 +58,9 @@ public final class PriorityHarmProfile implements Comparable<PriorityHarmProfile
         for (int priority = PriorityNormalizer.MAX_PRIORITY;
                 priority >= PriorityNormalizer.MIN_PRIORITY;
                 priority--) {
-            int comparison = valueOrZero(harmByPriority[priority])
-                    .compareTo(valueOrZero(other.harmByPriority[priority]));
+            int comparison =
+                    valueOrZero(harmByPriority[priority])
+                            .compareTo(valueOrZero(other.harmByPriority[priority]));
             if (comparison != 0) {
                 return comparison;
             }
@@ -99,11 +98,10 @@ public final class PriorityHarmProfile implements Comparable<PriorityHarmProfile
     /** Mutable accumulator used only while one immutable plan is built. */
     public static final class Builder {
 
-        private final BigInteger[] harmByPriority = new BigInteger[
-                PriorityNormalizer.MAX_PRIORITY + 1];
+        private final BigInteger[] harmByPriority =
+                new BigInteger[PriorityNormalizer.MAX_PRIORITY + 1];
 
-        private Builder() {
-        }
+        private Builder() {}
 
         public Builder add(int priority, BigInteger harm) {
             requireValidPriority(priority);

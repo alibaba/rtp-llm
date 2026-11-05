@@ -14,9 +14,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
     _MEGA_MOE_JIT_WARMED_KEYS,
     MegaMoeExecutor,
-    _activate_mega_moe_rank_nvcc_tmpdir,
     _mega_moe_rank_nvcc_tmpdir,
-    _restore_tmpdir,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
     MegaMoeSEExecutor,
@@ -51,6 +49,13 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
             self.assertEqual(scratch, _mega_moe_rank_nvcc_tmpdir(7))
             self.assertLess(len(os.fsencode(scratch)) + 40, 108)
             self.assertEqual(os.environ["DG_JIT_CACHE_DIR"], "/tmp/dg-cache")
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+            os.environ, {"MEGA_MOE_NVCC_TMPDIR": tmpdir}, clear=True
+        ):
+            self.assertEqual(
+                _mega_moe_rank_nvcc_tmpdir(3),
+                os.path.join(tmpdir, "rtp_llm_mega_moe_nvcc", "rank_3"),
+            )
 
     def test_tmpdir_is_restored_after_warmup_failure(self):
         executor = MegaMoeExecutor.__new__(MegaMoeExecutor)
@@ -68,6 +73,7 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
             max_tokens_per_rank=4096,
             moe_strategy="mega_moe",
         )
+        executor._mega_l1_w = torch.empty(1)
         executor._input_packer = FusedMegaMoEInputPacker()
         executor.warmup_jit = mock.Mock(side_effect=RuntimeError("compile failed"))
         fake_deep_gemm = types.SimpleNamespace(get_num_sms=lambda: 148)
@@ -120,7 +126,6 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
             os.environ,
             {
                 "MODEL_WARM_UP": "1",
-                "MEGA_MOE_INPUT_PACKER_IMPL": "optimized",
             },
             clear=True,
         ), mock.patch.object(executor, "forward") as forward, mock.patch.object(
@@ -236,6 +241,28 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
         ), self.assertLogs(level="WARNING") as logs:
             self.assertIsNone(parse_mega_moe_jit_warmup_tokens_override())
         self.assertIn("contains no positive token counts", "\n".join(logs.output))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_v41_block_kwargs_forward_moe_strategy(self):
+        import inspect
+
+        from rtp_llm.models_py.modules.dsv41.block import Block
+        from rtp_llm.models_py.modules.dsv41.transformer import V4Args, _block_kwargs
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+            ChunkedFp8Fp4MoeLayer,
+        )
+
+        self.assertIn("moe_strategy", inspect.signature(Block.__init__).parameters)
+        self.assertIn(
+            "strategy", inspect.signature(ChunkedFp8Fp4MoeLayer.__init__).parameters
+        )
+
+        args = V4Args()
+        self.assertEqual(args.moe_strategy, "auto")
+        self.assertEqual(_block_kwargs(0, args, None)["moe_strategy"], "auto")
+
+        args.moe_strategy = "mega_moe"
+        self.assertEqual(_block_kwargs(0, args, None)["moe_strategy"], "mega_moe")
 
     def test_generic_adapter_supports_default_warmup_for_both_executors(self):
         model_config = ModelConfig()

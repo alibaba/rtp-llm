@@ -11,15 +11,23 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.locks.ReentrantLock;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Real endpoint accounting used by delivery callback ordering tests. */
 public final class DeliverySettlementTestSupport {
     private final ReentrantLock lock = new ReentrantLock();
-    public final PrefillState prefill = new PrefillState(lock,
-            PrefillActiveIndex.ordered(4, Comparator.comparingLong(ScheduledRequest::requestId)),
-            System::currentTimeMillis, () -> { });
-    private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
+    public final PrefillState prefill =
+            new PrefillState(
+                    lock,
+                    PrefillActiveIndex.ordered(
+                            4, Comparator.comparing(ScheduledRequest::requestId)),
+                    System::currentTimeMillis,
+                    () -> {});
+    private final EndpointGenerationLifecycle generation =
+            new EndpointGenerationLifecycle(() -> {});
 
     public void enqueue(ScheduledRequest item) {
         lock.lock();
@@ -44,8 +52,9 @@ public final class DeliverySettlementTestSupport {
         } finally {
             lock.unlock();
         }
-        try (var reservation = prefill.reserveBatch(items.getFirst(), batchId, 2,
-                generation.tryAcquireHandoff()).reservation()) {
+        try (var reservation =
+                prefill.reserveBatch(items.getFirst(), batchId, 2, generation.tryAcquireHandoff())
+                        .reservation()) {
             assertNotNull(reservation);
             try (var handoff = reservation.commit(items, 100L)) {
                 assertNotNull(handoff);
@@ -60,15 +69,18 @@ public final class DeliverySettlementTestSupport {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
         response.setRunningTaskInfo(Map.of());
-        response.setFinishedTaskInfo(Map.of(Long.toString(item.requestId()), finished));
-        var observation = EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090)
-                .freezeStatusResponse(response);
-        var result = prefill.reconcileWorkerStatus(observation, ignored -> 100L, () -> { }, () -> { });
+        response.setFinishedTaskInfo(Map.of(item.requestId(), finished));
+        var observation =
+                EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090)
+                        .freezeStatusResponse(response);
+        var result =
+                prefill.reconcileWorkerStatus(observation, ignored -> 100L, () -> {}, () -> {});
         assertNull(result.publicationFailure());
         return result.schedulerFacts();
     }
 
-    public static void queueDecode(DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
+    public static void queueDecode(
+            DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRunningTaskInfo(Map.of());
         response.setFinishedTaskInfo(Map.of());
@@ -80,17 +92,21 @@ public final class DeliverySettlementTestSupport {
         }
     }
 
-    public static void dispatchDecode(DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
+    public static void dispatchDecode(
+            DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
         queueDecode(endpoint, reservation);
-        var permit = endpoint.acquireDispatchPermit(reservation, new DecodeEndpoint.AdmissionCapacity(0, 100L)).permit();
+        var permit =
+                endpoint.acquireDispatchPermit(
+                                reservation, new DecodeEndpoint.AdmissionCapacity(0, 100L))
+                        .permit();
         assertNotNull(permit);
-        assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
-                permit.dispatch());
+        assertEquals(
+                DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED, permit.dispatch());
     }
 
     public static void decodeStatus(DecodeEndpoint endpoint, long requestId, boolean finished) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(Long.toString(requestId));
         task.setPhase(finished ? null : TaskPhase.KV_ALLOCATED);
         WorkerStatusResponse response = new WorkerStatusResponse();
         var tasks = Map.of(Long.toString(requestId), task);

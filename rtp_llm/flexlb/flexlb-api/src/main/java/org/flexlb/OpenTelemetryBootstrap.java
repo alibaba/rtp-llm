@@ -27,6 +27,7 @@ final class OpenTelemetryBootstrap {
     static final String POD_IP_ATTRIBUTE = "rtp_llm.pod_ip";
     static final String INSTRUMENTATION_SDK_NAME_ATTRIBUTE = "gen_ai.instrumentation.sdk.name";
     static final String INSTRUMENTATION_SDK_NAME_VALUE = "loongsuite-genai-utils";
+
     /**
      * The current UTS namespace's kernel hostname, the only source this class
      * reads. Package-private and mutable purely as a test seam: the tests point it
@@ -35,8 +36,7 @@ final class OpenTelemetryBootstrap {
      */
     static Path hostnameFile = Path.of("/proc/sys/kernel/hostname");
 
-    private OpenTelemetryBootstrap() {
-    }
+    private OpenTelemetryBootstrap() {}
 
     /** Spring 启动前读取一次 JSON；只有完整构造成功才发布 enabled。 */
     static synchronized boolean configureFromEnvironment() {
@@ -63,28 +63,41 @@ final class OpenTelemetryBootstrap {
         BatchSpanProcessor processor = null;
         SdkTracerProvider candidate = null;
         try {
-            var builder = OtlpHttpSpanExporter.builder().setEndpoint(config.endpoint())
-                    .setTimeout(config.httpTimeoutMs(), TimeUnit.MILLISECONDS)
-                    .setCompression("none");
+            var builder =
+                    OtlpHttpSpanExporter.builder()
+                            .setEndpoint(config.endpoint())
+                            .setTimeout(config.httpTimeoutMs(), TimeUnit.MILLISECONDS)
+                            .setCompression("none");
             config.headers().forEach(builder::addHeader);
             if (!config.certificate().isEmpty()) {
                 builder.setTrustedCertificates(Files.readAllBytes(Path.of(config.certificate())));
             }
             exporter = builder.build();
-            processor = BatchSpanProcessor.builder(exporter)
-                    .setMaxQueueSize(config.maxQueueSize())
-                    .setMaxExportBatchSize(config.maxExportBatchSize())
-                    .setScheduleDelay(config.scheduleDelayMs(), TimeUnit.MILLISECONDS)
-                    .setExporterTimeout(config.httpTimeoutMs(), TimeUnit.MILLISECONDS).build();
-            candidate = SdkTracerProvider.builder().setResource(resource())
-                    .setSampler(Sampler.parentBased(Sampler.traceIdRatioBased(config.samplerRatio())))
-                    .addSpanProcessor(processor).build();
+            processor =
+                    BatchSpanProcessor.builder(exporter)
+                            .setMaxQueueSize(config.maxQueueSize())
+                            .setMaxExportBatchSize(config.maxExportBatchSize())
+                            .setScheduleDelay(config.scheduleDelayMs(), TimeUnit.MILLISECONDS)
+                            .setExporterTimeout(config.httpTimeoutMs(), TimeUnit.MILLISECONDS)
+                            .build();
+            candidate =
+                    SdkTracerProvider.builder()
+                            .setResource(resource())
+                            .setSampler(
+                                    Sampler.parentBased(
+                                            Sampler.traceIdRatioBased(config.samplerRatio())))
+                            .addSpanProcessor(processor)
+                            .build();
             OpenTelemetrySdk sdk = OpenTelemetrySdk.builder().setTracerProvider(candidate).build();
-            Runtime.getRuntime().addShutdownHook(new Thread(OpenTelemetryBootstrap::shutdown, "flexlb-trace-shutdown"));
+            Runtime.getRuntime()
+                    .addShutdownHook(
+                            new Thread(OpenTelemetryBootstrap::shutdown, "flexlb-trace-shutdown"));
             provider = candidate;
             FlexlbTrace.configure(sdk, "");
-            Logger.info("Trace 已启用 role=flexlb source={} root_ratio={} parent_based=true",
-                    config.source(), config.samplerRatio());
+            Logger.info(
+                    "Trace 已启用 role=flexlb source={} root_ratio={} parent_based=true",
+                    config.source(),
+                    config.samplerRatio());
             return true;
         } catch (Exception | LinkageError ignored) {
             FlexlbTrace.configure(null, "");
@@ -116,11 +129,15 @@ final class OpenTelemetryBootstrap {
     static Resource resource() {
         long pid = ProcessHandle.current().pid();
         String hostname = hostname();
-        AttributesBuilder attrs = Attributes.builder()
-                .put("service.name", "rtp_llm_flexlb")
-                .put("service.instance.id", (hostname.isEmpty() ? "unknown" : hostname) + "-" + pid)
-                .put("process.pid", pid).put("rtp_llm.role", "flexlb")
-                .put(INSTRUMENTATION_SDK_NAME_ATTRIBUTE, INSTRUMENTATION_SDK_NAME_VALUE);
+        AttributesBuilder attrs =
+                Attributes.builder()
+                        .put("service.name", "rtp_llm_flexlb")
+                        .put(
+                                "service.instance.id",
+                                (hostname.isEmpty() ? "unknown" : hostname) + "-" + pid)
+                        .put("process.pid", pid)
+                        .put("rtp_llm.role", "flexlb")
+                        .put(INSTRUMENTATION_SDK_NAME_ATTRIBUTE, INSTRUMENTATION_SDK_NAME_VALUE);
         if (hasText(hostname)) {
             attrs.put(HOST_NAME_ATTRIBUTE, hostname).put(HOST_IP_ATTRIBUTE, hostname + "-" + pid);
         }

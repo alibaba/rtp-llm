@@ -18,15 +18,15 @@ final class GlobalQueueEntry {
     GlobalQueueEntry next;
     boolean linked;
 
-    GlobalQueueEntry(
-            BalanceContext context,
-            CompletableFuture<Response> future,
-            int priority) {
+    GlobalQueueEntry(BalanceContext context, CompletableFuture<Response> future, int priority) {
         this(context, future, priority, null);
     }
 
-    GlobalQueueEntry(BalanceContext context, CompletableFuture<Response> future,
-            int priority, String routingGroup) {
+    GlobalQueueEntry(
+            BalanceContext context,
+            CompletableFuture<Response> future,
+            int priority,
+            String routingGroup) {
         this.context = context;
         this.future = future;
         this.priority = priority;

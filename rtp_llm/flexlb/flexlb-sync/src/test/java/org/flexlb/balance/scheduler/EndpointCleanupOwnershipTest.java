@@ -14,6 +14,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+
 import java.lang.management.ManagementFactory;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
@@ -21,26 +22,40 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.function.ToIntFunction;
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /** Cleanup uses current directory membership, including terminal records, rather than live Slot state. */
 class EndpointCleanupOwnershipTest {
     private FlexlbConfig config;
     private RequestRegistry registry;
 
-    @BeforeEach void setup() {
+    @BeforeEach
+    void setup() {
         config = SchedulingTestConfig.batchConfig();
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
-        registry = new RequestRegistry(service, mock(BatchSchedulerReporter.class),
-                mock(RequestSchedulerReporter.class));
+        registry =
+                new RequestRegistry(
+                        service,
+                        mock(BatchSchedulerReporter.class),
+                        mock(RequestSchedulerReporter.class));
     }
 
-    @AfterEach void close() {
+    @AfterEach
+    void close() {
         if (registry.closeAdmissionAndAwaitMutations()) {
             registry.closeOutstandingAndTerminalize();
             registry.closeExpiration();
@@ -48,13 +63,19 @@ class EndpointCleanupOwnershipTest {
         }
     }
 
-    @Test void currentDirectoryProtectsReservationButEarlierSnapshotCanEvictIt() {
-        Set<Long> beforeRegistration = registry.snapshotSlots().stream()
-                .map(RequestSlot::requestId).collect(java.util.stream.Collectors.toSet());
-        long id = 7001L;
+    @Test
+    void currentDirectoryProtectsReservationButEarlierSnapshotCanEvictIt() {
+        Set<String> beforeRegistration =
+                registry.snapshotSlots().stream()
+                        .map(RequestSlot::requestId)
+                        .collect(java.util.stream.Collectors.toSet());
+        String id = "7001";
         registry.register(RequestLifecycleTestSupport.context(config, id));
-        var endpoint = new DecodeEndpoint(WorkerStatus.createDiscovered(
-                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), mock(EndpointEventProjector.class));
+        var endpoint =
+                new DecodeEndpoint(
+                        WorkerStatus.createDiscovered(
+                                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
+                        mock(EndpointEventProjector.class));
         try (var pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
             assertNotNull(endpoint.reserveUnqueued(pin, id, 1L, 1L, 50));
@@ -64,16 +85,19 @@ class EndpointCleanupOwnershipTest {
         // Models moving the ownership scan outside the endpoint lock without revalidation.
         assertEquals(1, endpoint.evictExpiredRequests(-1L, beforeRegistration::contains));
         assertEquals(0, endpoint.getInflightCount());
-        assertTrue(registry.retainForSchedulerCleanup(id), "request is still registered despite premature eviction");
+        assertTrue(
+                registry.retainForSchedulerCleanup(id),
+                "request is still registered despite premature eviction");
     }
 
-    @Test void terminalRecordMembershipIsConservativeButNotEquivalentToLiveOwnership() throws Exception {
-        long id = 7002L;
+    @Test
+    void terminalRecordMembershipIsConservativeButNotEquivalentToLiveOwnership() throws Exception {
+        String id = "7002";
         var future = registry.register(RequestLifecycleTestSupport.context(config, id));
         RequestSlot original = registry.requestSlot(id);
         registry.cancelRequest(id, 0L, CancelReason.CLIENT_CANCELLED);
         future.get(5, java.util.concurrent.TimeUnit.SECONDS);
-        assertEquals(0, registry.liveRequestCount());
+        assertEquals(0, registry.trackedRequestCount());
         assertTrue(registry.retainForSchedulerCleanup(id));
         assertSame(original, registry.requestSlot(id), "terminal record remains indexed");
         assertTrue(registry.removeExactTerminalRecord(original, Long.MAX_VALUE));
@@ -82,32 +106,48 @@ class EndpointCleanupOwnershipTest {
         assertNotSame(original, registry.requestSlot(id));
         assertTrue(registry.retainForSchedulerCleanup(id));
         assertFalse(registry.removeExactTerminalRecord(original, Long.MAX_VALUE));
-        assertTrue(registry.retainForSchedulerCleanup(id), "old generation cleanup must preserve replacement");
+        assertTrue(
+                registry.retainForSchedulerCleanup(id),
+                "old generation cleanup must preserve replacement");
     }
 
     @ParameterizedTest(name = "Decode confirmed={0}: absent lookup cannot release the replacement")
     @ValueSource(booleans = {false, true})
     void registrationAfterAbsentCheckAcquiresFreshReservation(boolean confirmed) throws Exception {
-        long id = 7003L;
-        var endpoint = new DecodeEndpoint(WorkerStatus.createDiscovered(
-                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), mock(EndpointEventProjector.class));
+        String id = "7003";
+        var endpoint =
+                new DecodeEndpoint(
+                        WorkerStatus.createDiscovered(
+                                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
+                        mock(EndpointEventProjector.class));
         var oldReservation = reserve(endpoint, id, 100L, 150L);
         if (confirmed) {
             EndpointCleanupTestSupport.confirmDecode(endpoint, id);
         }
-        Runnable assertOldLedger = () -> {
-            assertDecodeLedger(endpoint, confirmed ? 0 : 1, confirmed ? 1 : 0,
-                    confirmed ? 0L : 100L, confirmed ? 0L : 150L);
-            assertEquals(confirmed, endpoint.isAcceptedByEngine(oldReservation));
-        };
+        Runnable assertOldLedger =
+                () -> {
+                    assertDecodeLedger(
+                            endpoint,
+                            confirmed ? 0 : 1,
+                            confirmed ? 1 : 0,
+                            confirmed ? 0L : 100L,
+                            confirmed ? 0L : 150L);
+                    assertEquals(confirmed, endpoint.isAcceptedByEngine(oldReservation));
+                };
         assertOldLedger.run();
 
         // Confirmed entries are queried once in the shadow loop, then again in
         // the confirmed-record loop. Force registration at the latter lookup.
-        var result = raceRegistrationAfterAbsentCheck(id, confirmed ? 1 : 0,
-                retain -> endpoint.evictExpiredRequests(-1L, retain),
-                () -> reserve(endpoint, id, 200L, 350L), assertOldLedger);
-        assertEquals(confirmed ? 0 : 1, result.evicted(),
+        var result =
+                raceRegistrationAfterAbsentCheck(
+                        id,
+                        confirmed ? 1 : 0,
+                        retain -> endpoint.evictExpiredRequests(-1L, retain),
+                        () -> reserve(endpoint, id, 200L, 350L),
+                        assertOldLedger);
+        assertEquals(
+                confirmed ? 0 : 1,
+                result.evicted(),
                 "the return value counts shadow evictions, not confirmed-record purges");
         var replacement = result.owner();
         assertNotEquals(oldReservation.reservationToken(), replacement.reservationToken());
@@ -132,12 +172,17 @@ class EndpointCleanupOwnershipTest {
     @ParameterizedTest(name = "Prefill batch={0}: absent lookup cannot release the replacement")
     @ValueSource(booleans = {false, true})
     void prefillRegistrationAfterAbsentCheckPreservesFreshWork(boolean batch) throws Exception {
-        long id = 7004L;
+        String id = "7004";
         var ledger = new PrefillLedger(batch);
         var old = ledger.commit(id, 1L, 20L);
         ledger.advanceBeyondTtl();
-        var result = raceRegistrationAfterAbsentCheck(id, 0, ledger::sweep,
-                () -> ledger.commit(id, 2L, 70L), () -> ledger.assertOwned(old, 20L));
+        var result =
+                raceRegistrationAfterAbsentCheck(
+                        id,
+                        0,
+                        ledger::sweep,
+                        () -> ledger.commit(id, 2L, 70L),
+                        () -> ledger.assertOwned(old, 20L));
         assertEquals(1, result.evicted());
         var replacement = result.owner();
         assertNotSame(old.item(), replacement.item());
@@ -177,7 +222,7 @@ class EndpointCleanupOwnershipTest {
     @ParameterizedTest(name = "Prefill batch={0}: replacement directory entry retains old work")
     @ValueSource(booleans = {false, true})
     void prefillReplacementDirectoryEntryConservativelyRetainsOldWork(boolean batch) {
-        long id = 7006L;
+        String id = "7006";
         registry.register(RequestLifecycleTestSupport.context(config, id));
         var ledger = new PrefillLedger(batch);
         var old = ledger.commit(id, 1L, 20L);
@@ -200,11 +245,15 @@ class EndpointCleanupOwnershipTest {
         ledger.assertEmpty();
     }
 
-    @Test void confirmedRecordIsRetainedUntilExactTerminalRecordRemoval() {
-        long id = 7005L;
+    @Test
+    void confirmedRecordIsRetainedUntilExactTerminalRecordRemoval() {
+        String id = "7005";
         registry.register(RequestLifecycleTestSupport.context(config, id));
-        var endpoint = new DecodeEndpoint(WorkerStatus.createDiscovered(
-                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), mock(EndpointEventProjector.class));
+        var endpoint =
+                new DecodeEndpoint(
+                        WorkerStatus.createDiscovered(
+                                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
+                        mock(EndpointEventProjector.class));
         var reservation = reserve(endpoint, id, 100L, 150L);
         EndpointCleanupTestSupport.confirmDecode(endpoint, id);
         assertEquals(0, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));
@@ -230,17 +279,17 @@ class EndpointCleanupOwnershipTest {
     }
 
     private static DecodeEndpoint.ReservationHandle reserve(
-            DecodeEndpoint endpoint, long id, long hardKv, long expectedKv) {
+            DecodeEndpoint endpoint, String id, long requiredKv, long kvBudget) {
         try (var pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
-            var reservation = endpoint.reserveUnqueued(pin, id, hardKv, expectedKv, 50);
+            var reservation = endpoint.reserveUnqueued(pin, id, requiredKv, kvBudget, 50);
             assertNotNull(reservation);
             return reservation;
         }
     }
 
-    private static void assertDecodeLedger(DecodeEndpoint endpoint, int reserved, int confirmed,
-                                          long hardKv, long expectedKv) {
+    private static void assertDecodeLedger(
+            DecodeEndpoint endpoint, int reserved, int confirmed, long requiredKv, long kvBudget) {
         var view = endpoint.resourceSnapshot();
         assertEquals(reserved, endpoint.getInflightCount());
         assertEquals(reserved, view.reserved().size());
@@ -249,55 +298,74 @@ class EndpointCleanupOwnershipTest {
         // These are immediate reservations, so both unqueued shadows and
         // confirmed Engine owners occupy dispatch capacity.
         assertEquals(reserved + confirmed, view.engineCapacityUsed());
-        assertEquals(hardKv, view.routing().inflightHardKv());
-        assertEquals(expectedKv, view.routing().inflightExpectedKv());
+        assertEquals(requiredKv, view.routing().inputKvReserved());
+        assertEquals(kvBudget, view.routing().inputAndMaxOutputKvReserved());
     }
 
-    private record CleanupRace<T>(int evicted, T owner) { }
+    private record CleanupRace<T>(int evicted, T owner) {}
 
     private <T> CleanupRace<T> raceRegistrationAfterAbsentCheck(
-            long id, int earlierQueries, ToIntFunction<LongPredicate> sweep,
-            Supplier<T> acquire, Runnable assertOldLedger) throws Exception {
+            String id,
+            int earlierQueries,
+            ToIntFunction<Predicate<String>> sweep,
+            Supplier<T> acquire,
+            Runnable assertOldLedger)
+            throws Exception {
         CountDownLatch checkedAbsent = new CountDownLatch(1);
         CountDownLatch registered = new CountDownLatch(1);
         AtomicReference<Thread> acquirer = new AtomicReference<>();
         AtomicInteger queries = new AtomicInteger();
-        var executor = Executors.newFixedThreadPool(2, task -> {
-            Thread thread = new Thread(task, "cleanup-registration-race");
-            thread.setDaemon(true);
-            return thread;
-        });
+        var executor =
+                Executors.newFixedThreadPool(
+                        2,
+                        task -> {
+                            Thread thread = new Thread(task, "cleanup-registration-race");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
         try {
-            var cleanup = executor.submit(() -> sweep.applyAsInt(requestId -> {
-                assertEquals(id, requestId);
-                boolean retain = registry.retainForSchedulerCleanup(requestId);
-                assertFalse(retain);
-                if (queries.getAndIncrement() < earlierQueries) {
-                    return retain;
-                }
-                assertOldLedger.run();
-                checkedAbsent.countDown();
-                await(registered);
-                // Do not unblock cleanup until the new generation has actually
-                // attempted resource acquisition and is waiting on this lock.
-                awaitEndpointLockWait(acquirer.get(), Thread.currentThread());
-                assertOldLedger.run();
-                return retain;
-            }));
-            var replacement = executor.submit(() -> {
-                await(checkedAbsent);
-                registry.register(RequestLifecycleTestSupport.context(config, id));
-                acquirer.set(Thread.currentThread());
-                registered.countDown();
-                return acquire.get();
-            });
+            var cleanup =
+                    executor.submit(
+                            () ->
+                                    sweep.applyAsInt(
+                                            requestId -> {
+                                                assertEquals(id, requestId);
+                                                boolean retain =
+                                                        registry.retainForSchedulerCleanup(
+                                                                requestId);
+                                                assertFalse(retain);
+                                                if (queries.getAndIncrement() < earlierQueries) {
+                                                    return retain;
+                                                }
+                                                assertOldLedger.run();
+                                                checkedAbsent.countDown();
+                                                await(registered);
+                                                // Do not unblock cleanup until the new generation
+                                                // has actually
+                                                // attempted resource acquisition and is waiting on
+                                                // this lock.
+                                                awaitEndpointLockWait(
+                                                        acquirer.get(), Thread.currentThread());
+                                                assertOldLedger.run();
+                                                return retain;
+                                            }));
+            var replacement =
+                    executor.submit(
+                            () -> {
+                                await(checkedAbsent);
+                                registry.register(RequestLifecycleTestSupport.context(config, id));
+                                acquirer.set(Thread.currentThread());
+                                registered.countDown();
+                                return acquire.get();
+                            });
             int evicted = cleanup.get(10, TimeUnit.SECONDS);
             T owner = replacement.get(10, TimeUnit.SECONDS);
             assertEquals(earlierQueries + 1, queries.get());
             return new CleanupRace<>(evicted, owner);
         } finally {
             executor.shutdownNow();
-            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS), "race threads did not finish");
+            assertTrue(
+                    executor.awaitTermination(5, TimeUnit.SECONDS), "race threads did not finish");
         }
     }
 

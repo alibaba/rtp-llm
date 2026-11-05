@@ -35,6 +35,7 @@ mergeCachePoolMetricsSnapshots(const std::vector<KVCachePoolMetricsSnapshot>&   
         report_snapshot.load_ref_blocks            = snapshot.load_ref_blocks;
         report_snapshot.eviction_target_ref_blocks = snapshot.eviction_target_ref_blocks;
         report_snapshot.store_ref_blocks           = snapshot.store_ref_blocks;
+        report_snapshot.frozen_ref_blocks          = snapshot.frozen_ref_blocks;
         report_snapshot.used_ratio                 = snapshot.used_ratio;
         report_snapshots.push_back(std::move(report_snapshot));
     }
@@ -56,10 +57,15 @@ mergeCachePoolMetricsSnapshots(const std::vector<KVCachePoolMetricsSnapshot>&   
         report_snapshot.load_ref_blocks            = snapshot.load_ref_blocks;
         report_snapshot.eviction_target_ref_blocks = snapshot.eviction_target_ref_blocks;
         report_snapshot.store_ref_blocks           = snapshot.store_ref_blocks;
+        report_snapshot.frozen_ref_blocks             = snapshot.frozen_ref_blocks;
         report_snapshot.active_blocks              = snapshot.active_blocks;
-        report_snapshot.used_ratio                 = snapshot.total_blocks == 0 ?
-                                                         0.0f :
-                                                         static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.free_blocks)
+        report_snapshot.read_bytes                    = snapshot.read_bytes;
+        report_snapshot.write_bytes                   = snapshot.write_bytes;
+        report_snapshot.read_bandwidth_bytes_per_sec  = snapshot.read_bandwidth_bytes_per_sec;
+        report_snapshot.write_bandwidth_bytes_per_sec = snapshot.write_bandwidth_bytes_per_sec;
+        report_snapshot.used_ratio                    = snapshot.total_blocks == 0 ?
+                                                            0.0f :
+                                                            static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
                                                             / static_cast<double>(snapshot.total_blocks));
         report_snapshots.push_back(std::move(report_snapshot));
     }

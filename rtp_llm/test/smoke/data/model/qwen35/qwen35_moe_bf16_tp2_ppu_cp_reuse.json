@@ -1,0 +1,60 @@
+// Test: qwen35/qwen35_moe_bf16_tp2_ppu_cp_reuse.json
+// Description: CP (all-gather) prefill + reuse-cache consistency. Mirrors
+//   pd_reuse_both: q0 cold populates the cache, q1 reuses via device cache,
+//   q2 reuses via memory cache. Device-reuse and memory-reuse must produce
+//   IDENTICAL output (q1 == q2) -- the meaningful, near-tie-independent check.
+//   (Same-prompt cold vs reuse is NOT required to match byte-exact: reuse is a
+//   different attention decomposition, so bf16 can diverge on near-tie prompts,
+//   which happens on the non-CP path too.)
+{
+  "model_type": "qwen35_moe",
+  "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B",
+  "query_result": [
+    {
+      "query": {
+        "prompt": "$prompt:ppu_qwen35_cp_reuse_x4",
+        "generate_config": {
+          "max_new_tokens": 20,
+          "top_k": 1,
+          "top_p": 0
+        }
+      },
+      "result": {
+        "response": "根据上述文本，在回答中不要提及文本来源，直接回答。\n\n<think>\nThinking Process",
+        "finished": true
+      }
+    },
+    {
+      "query": {
+        "prompt": "$prompt:ppu_qwen35_cp_reuse_x4",
+        "generate_config": {
+          "max_new_tokens": 20,
+          "top_k": 1,
+          "top_p": 0,
+          "enable_device_cache": true,
+          "enable_memory_cache": false
+        }
+      },
+      "result": {
+        "response": "根据上述文本，在回答中不要提及文本来源，直接回答。\n\n<think>\n\n</think>\n\n",
+        "finished": true
+      }
+    },
+    {
+      "query": {
+        "prompt": "$prompt:ppu_qwen35_cp_reuse_x4",
+        "generate_config": {
+          "max_new_tokens": 20,
+          "top_k": 1,
+          "top_p": 0,
+          "enable_device_cache": false,
+          "enable_memory_cache": true
+        }
+      },
+      "result": {
+        "response": "根据上述文本，在回答中不要提及文本来源，直接回答。\n\n<think>\n\n</think>\n\n",
+        "finished": true
+      }
+    }
+  ]
+}

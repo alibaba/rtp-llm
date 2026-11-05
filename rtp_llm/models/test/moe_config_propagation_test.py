@@ -20,7 +20,7 @@ from rtp_llm.models.qwen_v2_moe import Qwen2Moe
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
+from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig, RoleType
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import W
 
@@ -84,12 +84,15 @@ class MoeConfigPropagationTest(unittest.TestCase):
                 scheduler_config = SimpleNamespace(
                     max_context_batch_size=3,
                     max_batch_tokens_size=configured_cap,
+                    prefill_chunk_size=0,
                 )
                 engine_config = SimpleNamespace(
                     runtime_config=SimpleNamespace(
                         fifo_scheduler_config=scheduler_config,
                         model_name="",
-                    )
+                        use_batch_decode_scheduler=False,
+                    ),
+                    pd_sep_config=SimpleNamespace(role_type=RoleType.PREFILL),
                 )
 
                 ModelFactory.update_engine_config_from_model_config(

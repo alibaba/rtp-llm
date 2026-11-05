@@ -1,3 +1,4 @@
+import argparse
 import importlib
 import io
 import json
@@ -122,6 +123,41 @@ class CacheConfigArgumentsTest(TestCase):
         with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", argv):
             parser.parse_args(None if use_sys_argv else args)
         return config
+
+    def test_crc_default_and_environment(self):
+        for args in (None, []):
+            for env, expected in (
+                ({}, True),
+                ({"ENABLE_CRC": "0"}, False),
+                ({"ENABLE_CRC": "1"}, True),
+            ):
+                with self.subTest(args=args, env=env):
+                    config = self.parse_cache_config(args, env)
+                    self.assertIs(config.enable_crc, expected)
+
+    def test_crc_cli_overrides_environment(self):
+        for value, expected, env_value in (("0", False, "1"), ("1", True, "0")):
+            for args in (["--enable_crc", value], [f"--enable_crc={value}"]):
+                for use_sys_argv in (False, True):
+                    with self.subTest(args=args, use_sys_argv=use_sys_argv):
+                        config = self.parse_cache_config(
+                            args, {"ENABLE_CRC": env_value}, use_sys_argv
+                        )
+                        self.assertIs(config.enable_crc, expected)
+
+    def test_crc_rejects_invalid_boolean(self):
+        for args, env in (
+            (None, {"ENABLE_CRC": "invalid"}),
+            ([], {"ENABLE_CRC": "invalid"}),
+            (["--enable_crc", "invalid"], {}),
+        ):
+            with self.subTest(args=args, env=env), patch(
+                "sys.stderr", new_callable=io.StringIO
+            ) as stderr:
+                with self.assertRaises(SystemExit) as raised:
+                    self.parse_cache_config(args, env)
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn("Boolean value expected", stderr.getvalue())
 
     def test_canonical_env_and_cli_bind_all_fields(self):
         samples = self.startup_samples()
@@ -516,6 +552,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
         os.environ["MAX_BATCH_TOKENS_WITHOUT_CACHE"] = "2048"
         os.environ["CP_FORCE_SINGLE_PREFILL"] = "0"
+        os.environ["PREFILL_CHUNK_SIZE"] = "256"
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
         os.environ["REMOTE_JIT_DIR"] = "dfs://bucket/jit/cache"
@@ -577,6 +614,10 @@ class ServerArgsSetTest(TestCase):
             2048,
         )
         self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.prefill_chunk_size,
+            256,
+        )
+        self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.cp_force_single_prefill,
             False,
         )
@@ -584,6 +625,7 @@ class ServerArgsSetTest(TestCase):
             pickle.dumps(py_env_configs.runtime_config.fifo_scheduler_config)
         )
         self.assertEqual(restored_fifo_config.max_batch_tokens_without_cache, 2048)
+        self.assertEqual(restored_fifo_config.prefill_chunk_size, 256)
         # Old pickles carry only the two original slots; every field added later
         # must fall back to its default instead of raising.
         fifo_config_type = type(py_env_configs.runtime_config.fifo_scheduler_config)
@@ -593,6 +635,12 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(legacy_fifo_config.max_batch_tokens_size, 8192)
         self.assertEqual(legacy_fifo_config.max_inited_kv_cache_streams, 0)
         self.assertEqual(legacy_fifo_config.max_batch_tokens_without_cache, 0)
+        seven_slot_fifo_config = fifo_config_type.__new__(fifo_config_type)
+        seven_slot_fifo_config.__setstate__(
+            (32, 8192, "ratio", "2", False, 16, 2048)
+        )
+        self.assertEqual(seven_slot_fifo_config.max_batch_tokens_without_cache, 2048)
+        self.assertEqual(seven_slot_fifo_config.prefill_chunk_size, 0)
 
         # Verify frontend and DashSc pre-stop windows are configured independently.
         self.assertEqual(
@@ -674,6 +722,8 @@ class ServerArgsSetTest(TestCase):
             "64",
             "--max_batch_tokens_without_cache",
             "4096",
+            "--prefill_chunk_size",
+            "512",
             "--cp_force_single_prefill",
             "false",
             "--max_inited_kv_cache_streams",
@@ -734,6 +784,10 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache,
             4096,
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.prefill_chunk_size,
+            512,
         )
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.cp_force_single_prefill,
@@ -1751,6 +1805,28 @@ class ServerArgsGrammarConfigTest(TestCase):
                 sys.argv = ["prog", flag, "0"]
                 with self.assertRaises(SystemExit):
                     self._setup()
+
+
+class GenerateArgsFromEnvTest(TestCase):
+    def test_str2bool_environment_value_is_not_dropped(self):
+        from rtp_llm.server.server_args.generate_args_from_env_clean import (
+            format_argument_pair,
+            read_env_value,
+        )
+        from rtp_llm.server.server_args.util import str2bool
+
+        with patch.dict(os.environ, {"ENABLE_CRC": "0"}, clear=True):
+            value = read_env_value("ENABLE_CRC", True, str2bool)
+        self.assertIs(value, False)
+        self.assertEqual(format_argument_pair("--enable_crc", value), ["--enable_crc", "0"])
+
+    def test_invalid_str2bool_environment_value_is_rejected(self):
+        from rtp_llm.server.server_args.generate_args_from_env_clean import read_env_value
+        from rtp_llm.server.server_args.util import str2bool
+
+        with patch.dict(os.environ, {"ENABLE_CRC": "not-a-bool"}, clear=True):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                read_env_value("ENABLE_CRC", True, str2bool)
 
 
 if __name__ == "__main__":

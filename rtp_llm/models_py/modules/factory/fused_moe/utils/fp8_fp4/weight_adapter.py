@@ -52,6 +52,8 @@ def adapt_split_moe_weights(
         weights[W.moe_gate_bias] = weights.pop(weight_names["router_bias"])
     if weight_names.get("router_tid2eid") in weights:
         weights[W.moe_gate_tid2eid] = weights.pop(weight_names["router_tid2eid"])
+    if weight_names.get("router_bias_vl") in weights:
+        weights[W.moe_gate_bias_vl] = weights.pop(weight_names["router_bias_vl"])
 
     shared_gate_up_name = weight_names.get("shared_gate_up")
     if n_shared_experts > 0 and shared_gate_up_name and shared_gate_up_name in weights:

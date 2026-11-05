@@ -23,27 +23,28 @@ export PROCESS_CONFIG_FILE
 PORTS="7001,7002,55150,55151,55152,55153,55154,55155,55156,55157"
 
 cleanup_ports() {
-  lsof -ti:${PORTS} 2>/dev/null | xargs kill -9 2>/dev/null || true
-  sleep 5
+    lsof -ti:${PORTS} 2>/dev/null | xargs kill -9 2>/dev/null || true
+    sleep 5
 }
 
 run_experiment() {
-  local name="$1"
-  local max_inflight="$2"
-  local wait_ms="$3"
-  local speed="$4"
+    local name="$1"
+    local max_inflight="$2"
+    local wait_ms="$3"
+    local speed="$4"
 
-  echo ""
-  echo "=============================================="
-  echo "EXPERIMENT: ${name}"
-  echo "  MAX_INFLIGHT_BATCHES=${max_inflight}"
-  echo "  WAIT_MS=${wait_ms}"
-  echo "  REPLAY_SPEED=${speed}"
-  echo "=============================================="
-  echo ""
+    echo ""
+    echo "=============================================="
+    echo "EXPERIMENT: ${name}"
+    echo "  MAX_INFLIGHT_BATCHES=${max_inflight}"
+    echo "  WAIT_MS=${wait_ms}"
+    echo "  REPLAY_SPEED=${speed}"
+    echo "=============================================="
+    echo ""
 
-  export REPLAY_SPEED="${speed}"
-  FLEXLB_CONFIG="$(python3 - "${PROCESS_CONFIG_FILE}" "${max_inflight}" "${wait_ms}" <<'PY'
+    export REPLAY_SPEED="${speed}"
+    FLEXLB_CONFIG="$(
+        python3 - "${PROCESS_CONFIG_FILE}" "${max_inflight}" "${wait_ms}" <<'PY'
 import json
 import sys
 
@@ -56,18 +57,18 @@ config["dispatcher"]["maxInflightBatchesPerPrefillWorker"] = int(max_batches)
 config["scheduler"]["decision"]["maxCollectionWaitMs"] = int(wait_ms)
 print(json.dumps(config, separators=(",", ":")))
 PY
-)"
-  export FLEXLB_CONFIG
-  export RUN_ID="${name}"
+    )"
+    export FLEXLB_CONFIG
+    export RUN_ID="${name}"
 
-  /opt/homebrew/bin/bash run_online_eval.sh 2>&1 | tee "run/${name}.log"
+    /opt/homebrew/bin/bash run_online_eval.sh 2>&1 | tee "run/${name}.log"
 
-  echo ""
-  echo "EXPERIMENT ${name} COMPLETE"
-  echo "Summary at: run/${name}/load_client/summary.json"
-  echo ""
+    echo ""
+    echo "EXPERIMENT ${name} COMPLETE"
+    echo "Summary at: run/${name}/load_client/summary.json"
+    echo ""
 
-  cleanup_ports
+    cleanup_ports
 }
 
 # Group A: Batcher concurrency slot scan (REPLAY_SPEED=50, WAIT_MS=220)
@@ -76,7 +77,7 @@ run_experiment "exp_a2_b8_w220_s50" 8 220 50
 
 # Group B: Batch wait time scan (REPLAY_SPEED=50, MAX_INFLIGHT_BATCHES=2)
 run_experiment "exp_b1_b2_w100_s50" 2 100 50
-run_experiment "exp_b2_b2_w50_s50"  2 50  50
+run_experiment "exp_b2_b2_w50_s50" 2 50 50
 
 # Group C: Optimal combination (REPLAY_SPEED=50)
 run_experiment "exp_c1_b4_w100_s50" 4 100 50
@@ -99,9 +100,9 @@ echo ""
 # Collect all summary.json paths
 echo "Summary files:"
 for name in exp_a1_b4_w220_s50 exp_a2_b8_w220_s50 exp_b1_b2_w100_s50 exp_b2_b2_w50_s50 exp_c1_b4_w100_s50 exp_c2_b8_w100_s50 exp_d1_b4_w100_s10 exp_d2_b4_w100_s20; do
-  if [[ -f "run/${name}/load_client/summary.json" ]]; then
-    echo "  run/${name}/load_client/summary.json"
-  else
-    echo "  MISSING: run/${name}/load_client/summary.json"
-  fi
+    if [[ -f "run/${name}/load_client/summary.json" ]]; then
+        echo "  run/${name}/load_client/summary.json"
+    else
+        echo "  MISSING: run/${name}/load_client/summary.json"
+    fi
 done

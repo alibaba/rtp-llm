@@ -1,5 +1,6 @@
 import contextlib
 import json
+import logging
 import os
 import shutil
 import stat
@@ -264,6 +265,67 @@ class WrapperCacheSetupTest(JitCacheTestBase):
 
 
 class StoreTest(JitCacheTestBase):
+    def test_deep_gemm_read_events_do_not_rescan_entries(self):
+        component = replace(
+            next(item for item in jit.COMPONENTS if item.name == "deep_gemm"),
+            local_dir=self.root / "deep_gemm",
+        )
+        entry = component.local_dir / "cache" / "hash"
+        entry.mkdir(parents=True)
+        for name, payload in (
+            ("kernel.cu", b"source"),
+            ("kernel.cubin", b"binary"),
+            ("meta.json", b"{}"),
+            (".committed", b""),
+        ):
+            (entry / name).write_bytes(payload)
+        manager = jit.JitCacheManager(jit.Scope("test", self.root, (component,)), "")
+        read_processed = threading.Event()
+        handle_event = manager.on_any_event
+
+        def observe(event):
+            handle_event(event)
+            if event.event_type == "closed_no_write":
+                read_processed.set()
+
+        manager.on_any_event = observe
+        observer = jit.Observer()
+        observer.schedule(manager, str(component.local_dir), recursive=True)
+        with mock.patch.object(
+            jit, "deepjit_entry_files", wraps=jit.deepjit_entry_files
+        ) as validate:
+            observer.start()
+            try:
+                (entry / "meta.json").read_bytes()
+                self.assertTrue(read_processed.wait(5), "read event was not handled")
+            finally:
+                observer.stop()
+                observer.join(5)
+            self.assertFalse(observer.is_alive())
+            validate.assert_not_called()
+        self.assertFalse(manager._dirty.is_set())
+
+    def test_ppu_triton_binary_survives_snapshot_restore(self):
+        component = replace(
+            next(item for item in jit.COMPONENTS if item.name == "triton"),
+            local_dir=self.root / "local" / "triton",
+        )
+        manager = jit.JitCacheManager(
+            jit.Scope("test", component.local_dir.parent, (component,)), ""
+        )
+        expected = {
+            "triton/hash/kernel.json": b"{}",
+            "triton/hash/kernel.hgbin": b"ppu-binary",
+        }
+        for rel, payload in expected.items():
+            path = component.local_dir.parent / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+        snap_store = self.make_store()
+        snap_store.publish_snapshot(manager._snapshot_files())
+        restored = snap_store.prepare_restore(self.root / "restored")
+        self.assertEqual(contents(restored.staging), expected)
+
     def test_deep_gemm_completed_entry_survives_snapshot_restore(self):
         component = replace(
             next(item for item in jit.COMPONENTS if item.name == "deep_gemm"),
@@ -307,6 +369,48 @@ class StoreTest(JitCacheTestBase):
             (restored.staging / "deep_gemm/cache/hash/.committed").stat().st_mtime_ns,
             marker.stat().st_mtime_ns,
         )
+
+    def test_deep_gemm_read_events_never_reenter_the_watcher(self):
+        component = replace(
+            next(item for item in jit.COMPONENTS if item.name == "deep_gemm"),
+            local_dir=self.root / "local" / "deep_gemm",
+        )
+        manager = jit.JitCacheManager(
+            jit.Scope("test", component.local_dir.parent, (component,)), ""
+        )
+        for rel, payload in (
+            ("cache/hash/kernel.cu", b"source"),
+            ("cache/hash/kernel.cubin", b"binary"),
+            ("cache/hash/meta.json", b"{}"),
+            ("cache/hash/.committed", b""),
+        ):
+            path = component.local_dir / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+        meta = component.local_dir / "cache" / "hash" / "meta.json"
+        # A reader polling meta.json for compile completion must stay inert:
+        # answering read events re-entered the handler via deepjit_entry_files'
+        # own opens and self-excited the observer into a 23M-event/30min loop.
+        for event_type in ("opened", "closed_no_write"):
+            with self.subTest(event_type=event_type), mock.patch.object(
+                jit, "deepjit_entry_files"
+            ) as validate:
+                manager.on_any_event(
+                    types.SimpleNamespace(
+                        is_directory=False, event_type=event_type, src_path=str(meta)
+                    )
+                )
+                validate.assert_not_called()
+                self.assertFalse(manager._dirty.is_set())
+        # The write-side counterpart still validates and wakes the publisher.
+        with mock.patch.object(jit, "deepjit_entry_files") as validate:
+            manager.on_any_event(
+                types.SimpleNamespace(
+                    is_directory=False, event_type="closed", src_path=str(meta)
+                )
+            )
+            validate.assert_called_once()
+            self.assertTrue(manager._dirty.is_set())
 
     def test_publish_keeps_immutable_generations(self):
         snap_store, expected = self.make_store(), {}
@@ -634,6 +738,24 @@ class ScopeTest(JitCacheTestBase):
         self.assertNotIn("torch_extensions", names)  # no identity -> not managed
         self.assertIn("triton", names)
 
+    def test_ppu_triton_scope_skips_old_incomplete_snapshots(self):
+        with mock.patch("torch.__version__", "2.11.0"), mock.patch.dict(
+            os.environ, {"PPU_HOME": ""}
+        ), mock.patch("torch.cuda.is_available", side_effect=AssertionError) as probe:
+            old_scope = self.scope_id()
+            old_rocm = self.scope_id(hip="6.2.41133", arch="gfx942")
+            with mock.patch.dict(os.environ, {"PPU_HOME": "/usr/local/ppu"}):
+                self.assertNotEqual(old_scope, self.scope_id())
+                self.assertEqual(
+                    old_rocm, self.scope_id(hip="6.2.41133", arch="gfx942")
+                )
+            self.assertEqual(old_scope, self.scope_id())
+            os.environ["TRITON_CACHE_DIR"] = str(self.root / "explicit")
+            explicit_scope = self.scope_id()
+            with mock.patch.dict(os.environ, {"PPU_HOME": "/usr/local/ppu"}):
+                self.assertEqual(explicit_scope, self.scope_id())
+            probe.assert_not_called()
+
     def test_rocm_scope_and_component_selection(self):
         with _fake_probes(hip="6.2.41133", arch="gfx942"):
             scope = jit.resolve_scope(self.root)
@@ -722,7 +844,7 @@ class ScopeTest(JitCacheTestBase):
                 with _fake_probes(
                     hip="6.2.41133" if scenario == "rocm" else None
                 ), mock.patch.object(
-                    wrapper_cache.Path, "home", return_value=self.root / "home"
+                    cache_env.Path, "home", return_value=self.root / "home"
                 ):
                     wrapper_cache.setup_jit_cache(packages=[])
                     before = {
@@ -894,6 +1016,8 @@ class ScopeTest(JitCacheTestBase):
         triton = next(x for x in jit.COMPONENTS if x.name == "triton")
         self.assertTrue(triton.should_sync("hash/kernel.cubin"))
         self.assertTrue(triton.should_sync("hash/kernel.cubin", "closed"))
+        self.assertTrue(triton.should_sync("hash/kernel.hgbin"))
+        self.assertTrue(triton.should_sync("hash/kernel.hgbin", "closed"))
         self.assertFalse(triton.should_sync("hash/t.autotune.json"))
         self.assertFalse(triton.should_sync("hash/t.autotune.json", "closed"))
         self.assertFalse(triton.should_sync("../escape.cubin"))
@@ -935,6 +1059,35 @@ class ScopeTest(JitCacheTestBase):
         ) as logs:
             self.assertIsNone(jit._accelerator_scope("cuda", "12.8"))
         self.assertIn("mixed GPU architectures", "\n".join(logs.output))
+
+
+class WatchLoggingTest(JitCacheTestBase):
+    """The inotify flood logger pin, deliberately NOT behind the ACL gate:
+    it is a pure logging behavior with no filesystem capability need."""
+
+    def setUp(self):
+        super().setUp()
+        self.managers = []
+        self.addCleanup(lambda: [manager.stop() for manager in self.managers])
+
+    def make_scope(self):
+        with _fake_probes():
+            return jit.setup_jit_cache_env()
+
+    def make_manager(self, scope, remote="remote"):
+        (self.root / remote).mkdir(parents=True, exist_ok=True)
+        manager = jit.JitCacheManager(scope, str(self.root / remote))
+        self.managers.append(manager)
+        return manager
+
+    def test_start_watch_pins_the_watchdog_event_flood_logger(self):
+        noisy = logging.getLogger("watchdog.observers.inotify_buffer")
+        saved, noisy.level = noisy.level, logging.DEBUG
+        self.addCleanup(noisy.setLevel, saved)
+        scope = self.make_scope()
+        manager = self.make_manager(scope)
+        self.assertTrue(manager.bootstrap(timeout_s=30))
+        self.assertEqual(noisy.level, logging.WARNING)
 
 
 @requires_shared_acl
@@ -1137,6 +1290,44 @@ class ManagerTest(JitCacheTestBase):
         self.assertEqual((scope.root / "triton" / "local.cubin").read_bytes(), b"local")
         staging = scope.root.parent / jit.STAGING_DIR / scope.scope_id
         self.assertFalse(list(staging.glob("*")))
+
+    def test_deepjit_read_events_do_not_revalidate_metadata(self):
+        component = replace(
+            next(x for x in jit.COMPONENTS if x.name == "deep_gemm"),
+            local_dir=self.root / "deep_gemm",
+        )
+        manager = self.make_manager(jit.Scope("test", self.root, (component,)))
+        entry = component.local_dir / "cache" / "hash"
+        entry.mkdir(parents=True)
+        for name, data in {
+            "kernel.cu": "source",
+            "kernel.cubin": "binary",
+            "meta.json": "{}",
+            ".committed": "",
+        }.items():
+            (entry / name).write_text(data)
+        with mock.patch.object(
+            jit, "deepjit_entry_files", wraps=jit.deepjit_entry_files
+        ) as validate:
+            for event_type in ("opened", "closed_no_write"):
+                manager.on_any_event(
+                    types.SimpleNamespace(
+                        is_directory=False,
+                        event_type=event_type,
+                        src_path=str(entry / "meta.json"),
+                    )
+                )
+            validate.assert_not_called()
+            self.assertFalse(manager._dirty.is_set())
+            manager.on_any_event(
+                types.SimpleNamespace(
+                    is_directory=False,
+                    event_type="closed",
+                    src_path=str(entry / ".committed"),
+                )
+            )
+            validate.assert_called_once_with(entry)
+            self.assertTrue(manager._dirty.is_set())
 
     def test_event_handler_marks_dirty_only_for_trigger_files(self):
         triton = replace(

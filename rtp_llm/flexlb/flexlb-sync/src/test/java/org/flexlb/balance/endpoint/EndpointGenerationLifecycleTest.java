@@ -21,25 +21,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class EndpointGenerationLifecycleTest {
 
     @Test
-    void finalPermitReleaseRunsTheSingleCleanupContinuationExactlyOnce()
-            throws Exception {
+    void finalPermitReleaseRunsTheSingleCleanupContinuationExactlyOnce() throws Exception {
         AtomicInteger actionRuns = new AtomicInteger();
         AtomicReference<Thread> actionThread = new AtomicReference<>();
         CountDownLatch actionRan = new CountDownLatch(1);
-        AtomicReference<EndpointGenerationLifecycle> lifecycleRef =
-                new AtomicReference<>();
-        EndpointGenerationLifecycle lifecycle = new EndpointGenerationLifecycle(
-                () -> {
-                    EndpointGenerationLifecycle exact = lifecycleRef.get();
-                    exact.beginCleanup();
-                    actionThread.set(Thread.currentThread());
-                    actionRuns.incrementAndGet();
-                    exact.completeRetirement(null);
-                    actionRan.countDown();
-                });
+        AtomicReference<EndpointGenerationLifecycle> lifecycleRef = new AtomicReference<>();
+        EndpointGenerationLifecycle lifecycle =
+                new EndpointGenerationLifecycle(
+                        () -> {
+                            EndpointGenerationLifecycle exact = lifecycleRef.get();
+                            exact.beginCleanup();
+                            actionThread.set(Thread.currentThread());
+                            actionRuns.incrementAndGet();
+                            exact.completeRetirement(null);
+                            actionRan.countDown();
+                        });
         lifecycleRef.set(lifecycle);
-        EndpointGenerationLifecycle.HandoffPermit accepted =
-                lifecycle.tryAcquireHandoff();
+        EndpointGenerationLifecycle.HandoffPermit accepted = lifecycle.tryAcquireHandoff();
         assertNotNull(accepted);
         lifecycle.beginRetirement();
         assertTrue(lifecycle.tryClaimCleanup());
@@ -48,14 +46,15 @@ class EndpointGenerationLifecycleTest {
 
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            assertEquals(0, actionRuns.get(),
-                    "cleanup must wait for the accepted permit");
+            assertEquals(0, actionRuns.get(), "cleanup must wait for the accepted permit");
 
             CountDownLatch waiterStarted = new CountDownLatch(1);
-            Future<?> concurrentClose = executor.submit(() -> {
-                waiterStarted.countDown();
-                lifecycle.awaitRetirement();
-            });
+            Future<?> concurrentClose =
+                    executor.submit(
+                            () -> {
+                                waiterStarted.countDown();
+                                lifecycle.awaitRetirement();
+                            });
             assertTrue(waiterStarted.await(1, TimeUnit.SECONDS));
             assertFalse(concurrentClose.isDone());
 
@@ -66,7 +65,9 @@ class EndpointGenerationLifecycleTest {
             assertNotNull(actionThread.get());
 
             accepted.close();
-            assertEquals(1, actionRuns.get(),
+            assertEquals(
+                    1,
+                    actionRuns.get(),
                     "a permit and its retirement action are both exactly-once");
         } finally {
             executor.shutdownNow();
@@ -75,21 +76,23 @@ class EndpointGenerationLifecycleTest {
 
     @Test
     void emptyHandoffSetDoesNotMeanRetirementIsComplete() throws Exception {
-        EndpointGenerationLifecycle lifecycle =
-                new EndpointGenerationLifecycle(() -> { });
+        EndpointGenerationLifecycle lifecycle = new EndpointGenerationLifecycle(() -> {});
         lifecycle.beginRetirement();
         assertTrue(lifecycle.tryClaimCleanup());
 
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
             CountDownLatch waiterStarted = new CountDownLatch(1);
-            Future<?> concurrentClose = executor.submit(() -> {
-                waiterStarted.countDown();
-                lifecycle.awaitRetirement();
-            });
+            Future<?> concurrentClose =
+                    executor.submit(
+                            () -> {
+                                waiterStarted.countDown();
+                                lifecycle.awaitRetirement();
+                            });
 
             assertTrue(waiterStarted.await(1, TimeUnit.SECONDS));
-            assertFalse(concurrentClose.isDone(),
+            assertFalse(
+                    concurrentClose.isDone(),
                     "close must wait for generation cleanup after handoffs reach zero");
 
             lifecycle.beginCleanup();
@@ -102,12 +105,9 @@ class EndpointGenerationLifecycleTest {
     }
 
     @Test
-    void concurrentNonOwnerCloseWaitsAndObservesTheSameRetirementFailure()
-            throws Exception {
-        EndpointGenerationLifecycle lifecycle =
-                new EndpointGenerationLifecycle(() -> { });
-        EndpointGenerationLifecycle.HandoffPermit accepted =
-                lifecycle.tryAcquireHandoff();
+    void concurrentNonOwnerCloseWaitsAndObservesTheSameRetirementFailure() throws Exception {
+        EndpointGenerationLifecycle lifecycle = new EndpointGenerationLifecycle(() -> {});
+        EndpointGenerationLifecycle.HandoffPermit accepted = lifecycle.tryAcquireHandoff();
         assertNotNull(accepted);
         lifecycle.beginRetirement();
         assertTrue(lifecycle.tryClaimCleanup());
@@ -116,44 +116,45 @@ class EndpointGenerationLifecycleTest {
         CountDownLatch waiterStarted = new CountDownLatch(1);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            Future<?> concurrentClose = executor.submit(() -> {
-                waiterStarted.countDown();
-                lifecycle.awaitRetirement();
-            });
+            Future<?> concurrentClose =
+                    executor.submit(
+                            () -> {
+                                waiterStarted.countDown();
+                                lifecycle.awaitRetirement();
+                            });
             assertTrue(waiterStarted.await(1, TimeUnit.SECONDS));
-            assertFalse(concurrentClose.isDone(),
+            assertFalse(
+                    concurrentClose.isDone(),
                     "a non-owner close must wait while an accepted handoff is active");
 
             accepted.close();
             lifecycle.beginCleanup();
             lifecycle.completeRetirement(failure);
-            ExecutionException observed = assertThrows(
-                    ExecutionException.class,
-                    () -> concurrentClose.get(1, TimeUnit.SECONDS));
+            ExecutionException observed =
+                    assertThrows(
+                            ExecutionException.class,
+                            () -> concurrentClose.get(1, TimeUnit.SECONDS));
             assertSame(failure, observed.getCause());
         } finally {
             executor.shutdownNow();
         }
 
-        IllegalStateException repeatedObservation = assertThrows(
-                IllegalStateException.class, lifecycle::awaitRetirement);
+        IllegalStateException repeatedObservation =
+                assertThrows(IllegalStateException.class, lifecycle::awaitRetirement);
         assertSame(failure, repeatedObservation);
     }
 
     @Test
     void leakedHandoffProducesBoundedDiagnosticInsteadOfPermanentWait() {
-        EndpointGenerationLifecycle lifecycle =
-                new EndpointGenerationLifecycle(() -> { });
-        EndpointGenerationLifecycle.HandoffPermit leaked =
-                lifecycle.tryAcquireHandoff();
+        EndpointGenerationLifecycle lifecycle = new EndpointGenerationLifecycle(() -> {});
+        EndpointGenerationLifecycle.HandoffPermit leaked = lifecycle.tryAcquireHandoff();
         assertNotNull(leaked);
         lifecycle.beginRetirement();
         assertTrue(lifecycle.tryClaimCleanup());
         assertTrue(lifecycle.armDrainContinuation());
 
-        IllegalStateException timeout = assertThrows(
-                IllegalStateException.class,
-                () -> lifecycle.awaitRetirement(25L));
+        IllegalStateException timeout =
+                assertThrows(IllegalStateException.class, () -> lifecycle.awaitRetirement(25L));
 
         assertTrue(timeout.getMessage().contains("activeHandoffs=1"));
         leaked.close();

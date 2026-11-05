@@ -32,7 +32,6 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
 
@@ -207,12 +206,12 @@ static void expectDsv4SwaAllocatedBlocks(const CacheConfig&      config,
                                          const std::string&      tag,
                                          const std::string&      label,
                                          bool                    enable_reuse_cache = false) {
-    const int  active_tail_blocks = dsv4ActiveTailBlocks(config, tag);
-    const int  tail_begin         = std::max(static_cast<int>(blocks.size()) - active_tail_blocks, 0);
-    const int  linear_step        = std::max(1, config.linear_step);
-    const bool effective_reuse    = enable_reuse_cache && !isHcaStateGroup(config, tag);
+    const int tail_blocks = enable_reuse_cache && config.group(tag).policy.enable_prefix_reuse ?
+                                config.reuse_cache_tail_blocks :
+                                dsv4ActiveTailBlocks(config, tag);
+    const int tail_begin  = std::max(static_cast<int>(blocks.size()) - tail_blocks, 0);
     for (int i = 0; i < static_cast<int>(blocks.size()); ++i) {
-        const bool should_allocate = i >= tail_begin || (effective_reuse && ((i + 1) % linear_step == 0));
+        const bool should_allocate = i >= tail_begin;
         if (should_allocate) {
             EXPECT_FALSE(isNullBlockIdx(blocks[static_cast<size_t>(i)])) << label << " group " << tag << " pos " << i;
         } else {
@@ -316,90 +315,6 @@ static void assertDsv4RegionPatternEq(const std::shared_ptr<KVCacheManager>& man
         ASSERT_EQ(ptr[i], expected) << "mismatch at byte " << i << " layer=" << layer_id << " block=" << block_id
                                     << " group=" << tag;
     }
-}
-
-class CacheHitRateWindowTest: public KVCacheManagerTest {
-protected:
-    void SetUp() override {
-        KVCacheManagerTest::SetUp();
-        const CacheConfig config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
-        manager_                 = std::make_shared<KVCacheManager>(config, true);
-        ASSERT_TRUE(manager_->init());
-        start_ = manager_->cache_hit_window_start_;
-    }
-
-    std::shared_ptr<KVCacheManager>       manager_;
-    std::chrono::steady_clock::time_point start_;
-};
-
-TEST_F(CacheHitRateWindowTest, WeightsByInputTokensAndReportsOnce) {
-    RtpLLMCacheReuseMetricsCollector request;
-    request.kv_cache_reuse_length = 100;
-    request.device_reuse_length   = 50;
-    request.host_reuse_length     = 30;
-    request.disk_reuse_length     = 20;
-    manager_->recordCacheHitTokens(100, request);
-    manager_->recordCacheHitTokens(900, RtpLLMCacheReuseMetricsCollector{});
-
-    RtpLLMCacheReuseMetricsCollector window;
-    EXPECT_FALSE(manager_->collectCacheHitRates(start_ + std::chrono::seconds(59), window));
-    EXPECT_FALSE(window.report_hit_rates);
-    ASSERT_TRUE(manager_->collectCacheHitRates(start_ + std::chrono::seconds(60), window));
-    EXPECT_TRUE(window.report_hit_rates);
-    EXPECT_FALSE(window.report_reuse_metrics);
-    EXPECT_FLOAT_EQ(window.kv_cache_hit_rate, 10.0f);
-    EXPECT_FLOAT_EQ(window.device_hit_rate, 5.0f);
-    EXPECT_FLOAT_EQ(window.host_hit_rate, 3.0f);
-    EXPECT_FLOAT_EQ(window.disk_hit_rate, 2.0f);
-    EXPECT_FALSE(manager_->collectCacheHitRates(start_ + std::chrono::seconds(60), window));
-    EXPECT_FALSE(window.report_hit_rates);
-    EXPECT_FALSE(manager_->collectCacheHitRates(start_ + std::chrono::seconds(120), window));
-}
-
-TEST_F(CacheHitRateWindowTest, EmptyWindowsAreSkippedAndMissesReportZero) {
-    RtpLLMCacheReuseMetricsCollector window;
-    EXPECT_FALSE(manager_->collectCacheHitRates(start_ + std::chrono::seconds(60), window));
-    manager_->recordCacheHitTokens(100, RtpLLMCacheReuseMetricsCollector{});
-    ASSERT_TRUE(manager_->collectCacheHitRates(start_ + std::chrono::seconds(120), window));
-    EXPECT_FLOAT_EQ(window.kv_cache_hit_rate, 0.0f);
-    EXPECT_FLOAT_EQ(window.device_hit_rate, 0.0f);
-    EXPECT_FLOAT_EQ(window.host_hit_rate, 0.0f);
-    EXPECT_FLOAT_EQ(window.disk_hit_rate, 0.0f);
-
-    RtpLLMCacheReuseMetricsCollector request;
-    request.kv_cache_reuse_length = 100;
-    request.device_reuse_length   = 100;
-    manager_->recordCacheHitTokens(100, request);
-    ASSERT_TRUE(manager_->collectCacheHitRates(start_ + std::chrono::seconds(180), window));
-    EXPECT_FLOAT_EQ(window.kv_cache_hit_rate, 100.0f);
-    EXPECT_FLOAT_EQ(window.device_hit_rate, 100.0f);
-}
-
-TEST_F(CacheHitRateWindowTest, ConcurrentRequestsDoNotLoseTokens) {
-    std::vector<std::thread> workers;
-    for (int worker = 0; worker < 4; ++worker) {
-        workers.emplace_back([this]() {
-            RtpLLMCacheReuseMetricsCollector request;
-            request.kv_cache_reuse_length = 3;
-            request.device_reuse_length   = 2;
-            request.host_reuse_length     = 1;
-            for (int i = 0; i < 1000; ++i) {
-                manager_->recordCacheHitTokens(10, request);
-            }
-        });
-    }
-    for (std::thread& worker : workers) {
-        worker.join();
-    }
-    EXPECT_EQ(manager_->cache_hit_input_tokens_, 40000);
-    EXPECT_EQ(manager_->cache_hit_reuse_tokens_, 12000);
-    EXPECT_EQ(manager_->cache_hit_device_tokens_, 8000);
-    EXPECT_EQ(manager_->cache_hit_host_tokens_, 4000);
-    RtpLLMCacheReuseMetricsCollector window;
-    ASSERT_TRUE(manager_->collectCacheHitRates(start_ + std::chrono::seconds(60), window));
-    EXPECT_FLOAT_EQ(window.kv_cache_hit_rate, 30.0f);
-    EXPECT_FLOAT_EQ(window.device_hit_rate, 20.0f);
-    EXPECT_FLOAT_EQ(window.host_hit_rate, 10.0f);
 }
 
 TEST_F(KVCacheManagerTest, PublicationRejectsTailSparseReuseAcrossAllGroups) {
@@ -2723,9 +2638,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     auto result_c = manager->malloc(malloc_c);
     ASSERT_TRUE(result_c.success) << "3rd allocation must succeed via SWA eviction";
 
-    // SWA pressure selects the older request's tier leaf. Its exclusive,
-    // unmatchable single-child ancestor chain is pruned upward as one cascade.
-    EXPECT_TRUE(manager->blockTreeCache()->tree()->findNode(keys_a).empty());
+    // Older FULL-only ancestors can remain after the SWA tail is evicted.
 
     // Direct proof of the SWA eviction itself: at least one cached SWA slot was
     // evicted, the evicted set is exactly an LRU-first prefix (every evicted

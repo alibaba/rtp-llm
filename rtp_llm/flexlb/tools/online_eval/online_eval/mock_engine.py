@@ -546,9 +546,7 @@ class MockEngineState:
         for input_pb, shape in zip(inputs, shapes):
             control = self._owned_requests.get(shape.request_id)
             if control is None and self.role == "prefill":
-                control = self._register_prefill_owner(
-                    input_pb, batch_id=batch_id
-                )
+                control = self._register_prefill_owner(input_pb, batch_id=batch_id)
             elif control is not None:
                 control.batch_id = batch_id
                 if control.status_task is not None:
@@ -697,9 +695,7 @@ class MockEngineState:
             if control is not None:
                 if control.cancel_requested:
                     self._publish_prefill_canceled(control)
-                    await control.queue.put(
-                        TerminalError(8429, "priority preempted")
-                    )
+                    await control.queue.put(TerminalError(8429, "priority preempted"))
                     await control.queue.put(SENTINEL)
                 lifecycle = self._request_lifecycle.get(control.request_id)
                 if lifecycle is not None and control.cancel_requested:
@@ -707,9 +703,7 @@ class MockEngineState:
                     lifecycle["end_state"] = "cancelled"
                 self._owned_requests.pop(control.request_id, None)
 
-    def _publish_prefill_canceled(
-        self, control: PrefillRequestControl
-    ) -> None:
+    def _publish_prefill_canceled(self, control: PrefillRequestControl) -> None:
         if control.terminal_published:
             return
         terminal_task = replace(self._ensure_control_status_task(control))
@@ -719,9 +713,7 @@ class MockEngineState:
         terminal_task.terminal_error_code = 8429
         terminal_task.terminal_error_message = "priority preempted"
         if terminal_task.execution_time_ms <= 0:
-            terminal_task.execution_time_ms = max(
-                1, now_ms() - terminal_task.start_ms
-            )
+            terminal_task.execution_time_ms = max(1, now_ms() - terminal_task.start_ms)
         control.terminal_published = True
         self._finish_task(terminal_task)
         self._status_version += 1
@@ -807,9 +799,7 @@ class MockEngineState:
         lc = self._request_lifecycle.get(shape.request_id)
         if lc:
             lc["end_ms"] = end_ms_lc
-            lc["end_state"] = (
-                "cancelled" if cancelled else "completed"
-            )
+            lc["end_state"] = "cancelled" if cancelled else "completed"
         self._status_version += 1
 
         if self.inject_config.get("no_respond"):
@@ -906,6 +896,7 @@ class MockEngineState:
                     stub = self.cluster.pb2_grpc.RpcServiceStub(channel)
                     stream = stub.GenerateStreamCall(input_pb, timeout=120.0)
                     if priority_cancel_event is not None:
+
                         async def _cancel_stream_on_priority_preemption() -> None:
                             await priority_cancel_event.wait()
                             stream.cancel()
@@ -951,8 +942,7 @@ class MockEngineState:
                 cancel_watcher.cancel()
                 await asyncio.gather(cancel_watcher, return_exceptions=True)
             priority_cancelled = (
-                priority_cancel_event is not None
-                and priority_cancel_event.is_set()
+                priority_cancel_event is not None and priority_cancel_event.is_set()
             )
             if (
                 priority_cancelled
@@ -1490,9 +1480,7 @@ class MockEngineCluster:
         )
 
     @classmethod
-    def _resolve_process_mock_engine(
-        cls, target: str
-    ) -> Optional[MockEngineState]:
+    def _resolve_process_mock_engine(cls, target: str) -> Optional[MockEngineState]:
         """Resolve mock-internal ownership state, never request routing."""
 
         return cls._process_by_grpc_addr.get(target)

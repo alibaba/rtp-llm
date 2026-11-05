@@ -22,8 +22,9 @@ struct KVCacheBlockBudget {
 
 // Returns the largest global block count whose independent-pool backing fits
 // in total_budget_bytes:
-//   explicit reserve + N * paged bytes + ceil(N / linear_step) * SWA bytes.
-uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlockBudget& budget, int linear_step);
+//   explicit reserve + N * (paged bytes + SWA bytes).
+// Fully explicit layouts use a baseline of one when their reservation fits.
+uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlockBudget& budget);
 
 class CacheConfigCreator {
 public:

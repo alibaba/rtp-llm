@@ -15,9 +15,9 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from contextlib import suppress
 from pathlib import Path
-from urllib.parse import urlparse
 
 from filelock import FileLock, Timeout
 
@@ -88,10 +88,17 @@ def _build_variant(source_path):
 
 
 def _cache_key(package_name, version, source_path):
+    # The interpreter ABI is part of the build identity too: a host can serve
+    # jobs running different Python versions from the same pip variant (the
+    # 2026-10-23 ppu312 pool swap ran cp312 jobs alongside the cp310 bazel
+    # lane), and a cached copy materialized under one interpreter breaks the
+    # other (cp312-abi3 tvm_ffi core.abi3.so references Py_Version, undefined
+    # on 3.10). Key on it so each interpreter stages its own copy.
+    py_tag = "cp%d%d" % sys.version_info[:2]
     variant = _build_variant(source_path)
     if variant is None:
-        return "%s_python-%s" % (package_name, version)
-    return "%s_python-%s__%s" % (package_name, version, variant)
+        return "%s_python-%s-%s" % (package_name, version, py_tag)
+    return "%s_python-%s-%s__%s" % (package_name, version, py_tag, variant)
 
 
 def copy_package_with_lock(package_name, cache_dir):
@@ -246,29 +253,6 @@ def modify_bazel_wrapper_pythonpath(wrapper_path):
         return False
 
 
-def bootstrap_remote_jit_dir():
-    remote = os.environ.get("REMOTE_JIT_DIR", "").strip()
-    if not remote or urlparse(remote).scheme:
-        return
-    try:
-        root = Path(remote).expanduser()
-        if not root.is_absolute():
-            raise OSError(f"not an absolute path: {remote}")
-        if root.is_symlink() or root.parent.is_symlink():
-            raise OSError(f"symlinked path: {remote}")
-        try:
-            root.mkdir(parents=True)
-        except FileExistsError:
-            if not root.is_dir() or not os.access(root, os.R_OK | os.W_OK | os.X_OK):
-                raise OSError(f"unusable directory: {remote}")
-        else:
-            root.chmod(0o1777)  # protect direct children of a shared root
-        os.environ["REMOTE_JIT_DIR"] = str(root)
-    except (OSError, RuntimeError) as e:
-        os.environ.pop("REMOTE_JIT_DIR", None)  # child servers inherit the env
-        logging.warning(f"[JIT] REMOTE_JIT_DIR refused ({e}); cold start later")
-
-
 def _flashinfer_op_is_stale(op_dir: Path) -> bool:
     rules_path = op_dir / "build.ninja"
     try:
@@ -306,74 +290,143 @@ def _evict_dangling_flashinfer_ops(workspace: Path) -> None:
     ``cached_ops/tmp/<op_name>.lock``; eviction takes that same lock and re-judges
     staleness only inside it, so it cannot delete an op directory that a concurrent
     compile or load is using or has just refreshed.
+
+    The lock wait is deliberately near-non-blocking: a stale op left behind only
+    costs its consumer one rebuild, while blocking behind a long compile here
+    silently stalls test startup (observed as a 664s pre-test gap).
     """
+    started = time.monotonic()
     stale_candidates = []
-    for root, _dirs, files in os.walk(workspace, followlinks=False):
-        op_dir = Path(root)
-        # FlashInfer layout only: cached_ops/<op_name>/build.ninja (never trust an
-        # unrelated build.ninja deeper in the tree).
-        if op_dir.parent.name != "cached_ops" or "build.ninja" not in files:
-            continue
-        if _flashinfer_op_is_stale(op_dir):
-            stale_candidates.append(op_dir)
+    # FlashInfer layout only: cached_ops/<op_name>/build.ninja. Scan that one
+    # directory directly instead of walking the workspace tree: the workspace
+    # root must never be treated as enumerable (a HOME-sized root once dragged
+    # the whole FUSE-mounted model library into this scan).
+    # flashinfer >= 0.6.9 nests the ops dir as
+    # <workspace>/.cache/flashinfer/<version>/<arch>/cached_ops (jit/env.py),
+    # so scan both layouts: missing the nested one is how poisoned
+    # runfiles-anchored ops survived eviction in CI run 85083250.
+    cached_ops_roots = [workspace / "cached_ops"]
+    try:
+        cached_ops_roots += sorted(
+            (workspace / ".cache" / "flashinfer").glob("*/*/cached_ops")
+        )
+    except OSError:
+        pass  # neighbor scope vanished or is not listable
+    for cached_ops_root in cached_ops_roots:
+        try:
+            if not cached_ops_root.is_dir():
+                continue
+            op_dirs = sorted(cached_ops_root.iterdir())
+        except OSError:
+            continue  # cross-UID shared tree: neighbor scope not listable, or deleted mid-scan
+        for op_dir in op_dirs:
+            if (op_dir / "build.ninja").is_file() and _flashinfer_op_is_stale(op_dir):
+                stale_candidates.append(op_dir)
+    logging.info(
+        f"[Package Setup] FlashInfer eviction scan found "
+        f"{len(stale_candidates)} stale candidate(s) under {workspace}"
+    )
+    evicted = 0
+    skipped = 0
     for op_dir in sorted(stale_candidates):
         lock_dir = op_dir.parent / "tmp"
         try:
             lock_dir.mkdir(parents=True, exist_ok=True)
-            lock = FileLock(str(lock_dir / f"{op_dir.name}.lock"), timeout=300)
+            lock = FileLock(str(lock_dir / f"{op_dir.name}.lock"), timeout=3)
             with lock:
                 # Re-read the rules under the op's own lock: a compile that ran
                 # since the first pass may have replaced the stale rules already.
                 if _flashinfer_op_is_stale(op_dir):
                     shutil.rmtree(op_dir, ignore_errors=True)
+                    evicted += 1
                     logging.info(
                         f"[Package Setup] Evicted stale FlashInfer cache op: {op_dir}"
                     )
         except Timeout:
             # Somebody else owns the op (likely recompiling it); leave it alone.
+            skipped += 1
             logging.info(f"[Package Setup] Skipped eviction of {op_dir}: lock busy")
+        except OSError as error:
+            # Cross-UID shared tree: a neighbor scope with restrictive
+            # permissions, or the tree was deleted by a concurrent
+            # commit_restore. Skipping one candidate only costs a rebuild.
+            skipped += 1
+            logging.info(f"[Package Setup] Skipped eviction of {op_dir}: {error}")
+    logging.info(
+        f"[Package Setup] FlashInfer eviction done in "
+        f"{time.monotonic() - started:.1f}s: evicted={evicted} skipped={skipped} "
+        f"of {len(stale_candidates)} candidate(s)"
+    )
 
 
 def setup_jit_cache(cache_dir=None, packages=None):
-    bootstrap_remote_jit_dir()
+    logging.info("[Package Setup] setup_jit_cache starting")
+    # 缓存基根前置唯一确定：传入 cache_dir 直接用，未传回落 HOME。路径解析
+    # （auto 等）只在 server 参数解析（jit_group_args 的 --remote_jit_dir）
+    # 一处；本函数不做任何派生，组件目录一律简单 join。
+    base = Path(cache_dir) if cache_dir else Path.home()
+    base.mkdir(parents=True, exist_ok=True)
+
+    # workspace 必须是真实 FlashInfer 缓存目录，驱逐只扫其 cached_ops 子目录，
+    # 不会爬基根本体。
     cache_env.configure_writable_cache_env(
         "FLASHINFER_WORKSPACE_BASE",
-        Path.home(),
+        base / "flashinfer",
         "flashinfer",
-        cache_subpath=(".cache", "flashinfer"),
     )
     _evict_dangling_flashinfer_ops(Path(os.environ["FLASHINFER_WORKSPACE_BASE"]))
+    # server 侧 jit_cache_manager 会把 flashinfer op 重定向到受管 v2 scope 工
+    # 作区，上面的默认根扫描看不到它们：build.ninja 内嵌 per-action runfiles
+    # include 路径的陈旧 op 会存活并毒化下一个冷启动消费者（run 85063732：
+    # fused_moe_trtllm_sm100 从已销毁的 runfiles 树带出 include）。也扫每个
+    # scope 的 flashinfer 工作区。树是跨 UID 共享的：邻居 scope 可能不可读或
+    # 整树在扫描中被删，glob 有守卫。
+    try:
+        v2_scopes = sorted(
+            Path("/tmp/rtp-llm/.jit_cache/v2").glob("*/flashinfer")
+        )
+    except OSError:
+        v2_scopes = []
+    for scope_workspace in v2_scopes:
+        _evict_dangling_flashinfer_ops(scope_workspace)
+
+    # triton 自带内容寻址 key（kernel 源/constexpr/目标 arch），只需解释器 ABI
+    # tag 目录（launcher 嵌入 CPython ABI，同机 cp310/cp312 lane 并存）。
     cache_env.configure_writable_cache_env(
-        "TRITON_CACHE_DIR", Path.home() / ".triton" / "cache", "triton"
+        "TRITON_CACHE_DIR",
+        base / "triton_disk" / ("cp%d%d" % sys.version_info[:2]),
+        "triton",
     )
 
-    requested_cache_dir = cache_dir or Path.home() / ".cache"
-    cache_dir = cache_env.ensure_writable_directory(requested_cache_dir)
-    if cache_dir is None:
-        cache_dir = cache_env.ensure_writable_directory(
+    package_dir = cache_env.ensure_writable_directory(base / "python_packages")
+    if package_dir is None:
+        package_dir = cache_env.ensure_writable_directory(
             cache_env.local_jit_fallback("python_packages")
         )
-    if cache_dir is None:
+    if package_dir is None:
         raise OSError("no writable Python package cache directory")
 
-    # DeepGEMM's NVCC compiler changes into the JIT tmp directory before
-    # compiling. A relative cache path would then be resolved a second time
-    # and make the generated kernel.cu unreachable. Normalize both the default
-    # and caller-provided path before launching the actual test process.
+    # DeepGEMM 的 NVCC 编译前会 chdir 进 JIT tmp 目录：相对缓存路径会被二次
+    # 解析导致 kernel.cu 不可达。默认与传入路径都先归一化再启动测试进程。
     cache_env.configure_writable_cache_env(
-        "DG_JIT_CACHE_DIR", Path.home() / ".deep_gemm", "deep_gemm"
+        "DG_JIT_CACHE_DIR",
+        base / "deep_gemm",
+        "deep_gemm",
     )
     logging.info(
         f"[Package Setup] Set DG_JIT_CACHE_DIR: {os.environ['DG_JIT_CACHE_DIR']}"
     )
 
     if packages is None:
-        packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
+        # flashinfer_cubin carries the flashInferMetaInfo.h / csrc headers that
+        # fmha_gen ops embed as -I paths: without a stable package copy those
+        # anchors point into per-action runfiles and poison the shared cache.
+        packages = ["flashinfer", "flashinfer_cubin", "torch", "deep_gemm", "tvm_ffi"]
 
     # Copy packages to cache with file locking
     copied_paths = []
     for package_name in packages:
-        site_packages_path = copy_package_with_lock(package_name, cache_dir)
+        site_packages_path = copy_package_with_lock(package_name, package_dir)
         if site_packages_path:
             copied_paths.append(site_packages_path)
 

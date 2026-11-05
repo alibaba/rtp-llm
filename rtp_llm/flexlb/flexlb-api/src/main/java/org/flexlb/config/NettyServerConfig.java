@@ -15,19 +15,16 @@ public class NettyServerConfig {
         int processors = Runtime.getRuntime().availableProcessors();
         int selectCount = processors * runtime.getNettySelectThreadMultiplier();
         int workerCount = processors * runtime.getNettyWorkerThreadMultiplier();
-        return LoopResources.create(
-                "reactor-netty-server",
-                selectCount,
-                workerCount,
-                true
-        );
+        return LoopResources.create("reactor-netty-server", selectCount, workerCount, true);
     }
 
     @Bean
-    public NettyServerCustomizer nettyServerMetricsCustomizer(ConfigService configService, LoopResources loopResources) {
-        return httpServer -> httpServer
-                .runOn(loopResources)
-                .option(ChannelOption.SO_REUSEADDR, true)
-                .option(ChannelOption.TCP_NODELAY, true);
+    public NettyServerCustomizer nettyServerMetricsCustomizer(
+            ConfigService configService, LoopResources loopResources) {
+        return httpServer ->
+                httpServer
+                        .runOn(loopResources)
+                        .option(ChannelOption.SO_REUSEADDR, true)
+                        .option(ChannelOption.TCP_NODELAY, true);
     }
 }

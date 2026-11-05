@@ -6,7 +6,7 @@
       "resources": [
         {
           "slot_resources": [
-            {"name": "mem", "type": "SCALAR", "amount": 57344}
+            { "name": "mem", "type": "SCALAR", "amount": 57344 }
           ]
         }
       ],

@@ -402,6 +402,7 @@ class FIFOSchedulerConfig:
     max_context_batch_size: int
     max_inited_kv_cache_streams: int
     pdfusion_scheduler_mode: str
+    prefill_chunk_size: int
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -729,6 +730,7 @@ class HybridAttentionType:
     def value(self) -> int:
         ...
 class KVCacheConfig:
+    enable_crc: bool
     enable_device_cache: bool
     enable_memory_cache: bool
     enable_disk_cache: bool
@@ -751,7 +753,9 @@ class KVCacheConfig:
     block_tree_disk_evict_high_watermark_ratio: float
     fp8_kv_cache: int
     kv_cache_mem_mb: int
-    linear_step: int
+    reuse_cache_tail_blocks: int
+    linear_pool_blocks: int
+    swa_pool_blocks: int
     max_block_size_per_item: int
     memory_cache_size_mb: int
     memory_cache_sync_timeout_ms: int

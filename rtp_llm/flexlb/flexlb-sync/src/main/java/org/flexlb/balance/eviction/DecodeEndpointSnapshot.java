@@ -17,16 +17,19 @@ public record DecodeEndpointSnapshot(
         List<DecodeRequestView> accepted,
         List<DecodeRequestView> running) {
 
-    public static DecodeEndpointSnapshot capture(DecodeEndpoint endpoint, DecodeEndpoint.AdmissionCapacity policy) {
+    public static DecodeEndpointSnapshot capture(
+            DecodeEndpoint endpoint, DecodeEndpoint.AdmissionCapacity policy) {
         DecodeEndpoint.LayeredAdmissionView view = endpoint.resourceSnapshot();
         DecodeEndpoint.DecodeRoutingView routing = view.routing();
         List<DecodeRequestView> reserved = new ArrayList<>();
-        view.reserved().forEach((requestId, entry) -> {
-            if (entry.claimedForPreemption()) {
-                return;
-            }
-            reserved.add(entry);
-        });
+        view.reserved()
+                .forEach(
+                        (requestId, entry) -> {
+                            if (entry.claimedForPreemption()) {
+                                return;
+                            }
+                            reserved.add(entry);
+                        });
         List<DecodeRequestView> accepted = new ArrayList<>();
         List<DecodeRequestView> running = new ArrayList<>();
         for (DecodeRequestView task : view.confirmed()) {
@@ -50,5 +53,4 @@ public record DecodeEndpointSnapshot(
                 List.copyOf(accepted),
                 List.copyOf(running));
     }
-
 }

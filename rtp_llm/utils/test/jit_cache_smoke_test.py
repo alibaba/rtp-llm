@@ -364,6 +364,32 @@ class JitCacheSmokeTest(unittest.TestCase):
     def test_qwen3_rocm(self) -> None:
         self._run_lifecycle(ROCM_CONFIG)
 
+    def _stage_preseeded_snapshot(self, source: str, remote_scope: Path) -> State:
+        """Stage a CI-pre-seeded published snapshot and inventory it.
+
+        The snapshot must be produced by an earlier run of the same smoke
+        target with the same smoke_args (same test_block_num), so the
+        restore-phase no-recompile check stays meaningful. Staging copies it
+        into the remote scope exactly where the production publisher would
+        have placed it, keeping server-side restore discovery unchanged.
+        """
+        snapshot = Path(source)
+        self.assertTrue(
+            snapshot.is_file(), f"missing pre-seeded JIT snapshot: {snapshot}"
+        )
+        remote_scope.mkdir(parents=True, exist_ok=True)
+        staged = remote_scope / snapshot.name
+        if not staged.exists():
+            shutil.copy2(snapshot, staged)
+            logging.info("staged pre-seeded JIT snapshot %s", staged)
+        with tempfile.TemporaryDirectory() as tmp:
+            restored = Path(tmp) / "cache"
+            restored.mkdir()
+            store.extract_zstd_tar(staged, restored)
+            state = self._artifacts(restored)
+        self.assertTrue(state, "pre-seeded JIT snapshot is empty")
+        return state
+
     def _run_lifecycle(self, config: SmokeConfig) -> None:
         model_path, model_type = _model_config(config.task_info, config.model_path_env)
         self.assertTrue(Path(model_path).is_dir(), f"missing model: {model_path}")
@@ -372,8 +398,17 @@ class JitCacheSmokeTest(unittest.TestCase):
         # services use. Both phases share this path so restored artifacts keep
         # resolving the absolute build path baked into them.
         self.local_root = _runtime_dir(f"jit_local_{config.model_name}") / ".jit_cache"
+        # REMOTE_JIT_DIR 只有两种形态：auto（与 wrapper/server 参数解析同一规
+        # 则）或直接路径。测试做自己的 Path() 计算，须与 server 发布位置一致。
         remote = os.environ.get("REMOTE_JIT_DIR", "").strip()
-        if not remote:  # an environment gap, not a regression: keep the two apart
+        if remote == "auto":
+            workdir = os.environ.get("HIPPO_APP_WORKDIR", "").strip()
+            if not workdir:
+                raise unittest.SkipTest(
+                    "REMOTE_JIT_DIR=auto without HIPPO_APP_WORKDIR; wrapper missing?"
+                )
+            remote = str(Path(workdir) / "main" / "jit_cache")
+        if not remote:  # 环境缺失，非回归
             raise unittest.SkipTest("REMOTE_JIT_DIR unset; CI injects it")
         try:
             jit._prepare_shared_root(self.local_root)
@@ -384,18 +419,25 @@ class JitCacheSmokeTest(unittest.TestCase):
         remote_scope = Path(remote) / jit.RTP_JIT_VERSION / self.scope.scope_id
         previous = set(remote_scope.glob(f"*{store.SNAPSHOT_SUFFIX}"))
 
-        model = self._start_server(
-            config, model_path, model_type, remote, "publish", self.local_root
-        )
-        try:
-            self._exercise(config, model_path, model)
-            probe_name, probe_payload = self._create_probe(config)
-            remote_state = self._wait_for_snapshot(
-                remote_scope, previous, probe_name, probe_payload
+        # PR-lane fast path: CI stages a previously published snapshot so only
+        # the restore phase runs (the producer cold-compile half is skipped).
+        # Unset or missing path keeps the full two-pass lifecycle.
+        preseeded = os.environ.get("SMOKE_JIT_PRESEEDED_SNAPSHOT", "").strip()
+        if preseeded:
+            remote_state = self._stage_preseeded_snapshot(preseeded, remote_scope)
+        else:
+            model = self._start_server(
+                config, model_path, model_type, remote, "publish", self.local_root
             )
-        finally:
-            self._stop_server()
-        self.assertTrue(remote_state, "producer published an empty snapshot")
+            try:
+                self._exercise(config, model_path, model)
+                probe_name, probe_payload = self._create_probe(config)
+                remote_state = self._wait_for_snapshot(
+                    remote_scope, previous, probe_name, probe_payload
+                )
+            finally:
+                self._stop_server()
+            self.assertTrue(remote_state, "producer published an empty snapshot")
         remote_artifacts = {
             name: sig
             for name, sig in remote_state.items()
@@ -408,7 +450,7 @@ class JitCacheSmokeTest(unittest.TestCase):
             f"{sorted(config.required_components - components)}",
         )
 
-        shutil.rmtree(local_scope_root)
+        shutil.rmtree(local_scope_root, ignore_errors=True)
         self.assertFalse(local_scope_root.exists())
 
         model = self._start_server(

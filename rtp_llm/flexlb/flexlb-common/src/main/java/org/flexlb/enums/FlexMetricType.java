@@ -12,7 +12,9 @@ public enum FlexMetricType {
      * Represents instantaneous value at a specific point in time, such as CPU usage, memory usage, etc.
      * Characteristics: Value can change arbitrarily (increase or decrease)
      */
-    GAUGE("GAUGE", "Instantaneous value metric, representing immediate value at a specific point in time"),
+    GAUGE(
+            "GAUGE",
+            "Instantaneous value metric, representing immediate value at a specific point in time"),
     /**
      * COUNTER type - Cumulative counter
      * Represents cumulative count value, can only increase, such as total requests, total errors, etc.
@@ -47,9 +49,13 @@ public enum FlexMetricType {
 
     @Override
     public String toString() {
-        return "FlexMetricType{" +
-                "type='" + type + '\'' +
-                ", description='" + description + '\'' +
-                '}';
+        return "FlexMetricType{"
+                + "type='"
+                + type
+                + '\''
+                + ", description='"
+                + description
+                + '\''
+                + '}';
     }
 }

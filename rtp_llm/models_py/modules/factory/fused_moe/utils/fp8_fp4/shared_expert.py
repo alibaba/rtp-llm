@@ -22,12 +22,10 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config import (
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     cuda_graph_warmup_forward_enabled,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.utils.profiler import (
-    record_function_range,
-)
+from rtp_llm.models_py.utils.profiler import record_function_range
 
 from .expert import require_silu_mul_split
-from .quantized_linear import create_fp8_linear
+from .quantized_linear import Mxfp8Linear, create_fp8_linear
 
 
 @dataclass(frozen=True)
@@ -154,6 +152,8 @@ class W13SharedExpert(nn.Module):
     def forward(
         self, x: torch.Tensor, weights: torch.Tensor | None = None
     ) -> torch.Tensor:
+        if weights is None and self._can_run_mxfp8_fused_silu(x):
+            return self._forward_mxfp8_fused_silu(x)
         dtype = x.dtype
         with record_function_range("moe.shared_expert.w13"):
             gate_up = self._apply_layer(self.w13, x).float()
@@ -168,6 +168,36 @@ class W13SharedExpert(nn.Module):
             hidden = weights * hidden
         with record_function_range("moe.shared_expert.w2"):
             return self._apply_layer(self.w2, hidden.to(dtype))
+
+    def _can_run_mxfp8_fused_silu(self, x: torch.Tensor) -> bool:
+        """Fuse SwiGLU with the group-32 quantizer for MXFP8 linears.
+
+        The fused kernel reads the merged BF16 gate_up halves in place, so the
+        ``.float()`` cast, the two ``.contiguous()`` copies of the chunk halves
+        and the ``hidden.to(dtype)`` cast disappear while keeping the FP32
+        accumulate contract and the single FP32->BF16 rounding step.
+        """
+        return (
+            x.is_cuda
+            and x.dtype == torch.bfloat16
+            and x.dim() == 2
+            and isinstance(self.w13, Mxfp8Linear)
+            and isinstance(self.w2, Mxfp8Linear)
+        )
+
+    def _forward_mxfp8_fused_silu(self, x: torch.Tensor) -> torch.Tensor:
+        from rtp_llm.models_py.triton_kernels.moe.silu_mul_fp8_quant import (
+            silu_mul_fp8_quant_packed_g32,
+        )
+
+        with record_function_range("moe.shared_expert.w13"):
+            gate_up = self.w13(x)
+        with record_function_range("moe.shared_expert.silu_mul"):
+            hidden_q, hidden_s = silu_mul_fp8_quant_packed_g32(
+                gate_up, clamp_limit=self.swiglu_limit
+            )
+        with record_function_range("moe.shared_expert.w2"):
+            return self.w2.forward_quantized(hidden_q, hidden_s)
 
 
 class FusedSharedExpertFastPath:
@@ -209,7 +239,14 @@ class FusedSharedExpertFastPath:
     def can_run(shared_experts: nn.Module, x: torch.Tensor) -> bool:
         if not (x.is_cuda and x.dtype == torch.bfloat16 and x.dim() == 2):
             return False
-        return all(hasattr(shared_experts, name) for name in ("w13", "w2"))
+        if not all(hasattr(shared_experts, name) for name in ("w13", "w2")):
+            return False
+        # The workspace quantizes with block-128 scales; MXFP8 checkpoints need
+        # group-32 scales and run W13SharedExpert.forward's fused path instead.
+        return not any(
+            isinstance(layer, Mxfp8Linear)
+            for layer in (shared_experts.w13, shared_experts.w2)
+        )
 
     @classmethod
     def has_merged_w13(cls, shared_experts: nn.Module) -> bool:
@@ -482,6 +519,26 @@ class SequentialSharedExpertExecutor(SharedExpertExecutor):
         return out
 
 
+class MXFP8SharedExpertExecutor(SequentialSharedExpertExecutor):
+    """Native group-32 GEMMs through MXFP8 shared-expert linears.
+
+    This is a distinct supported quantization recipe: the shared expert owns
+    block-32 weights, so the block-128 workspace path does not apply. The BF16
+    return skips the standalone FP32 cast because the consumer
+    (``fused_moe_epilogue``) loads and adds in FP32, matching the old
+    ``.float()`` value bit-for-bit.
+    """
+
+    name = "mxfp8"
+
+    def start(self, shared_experts: nn.Module, x: torch.Tensor) -> None:
+        if x.shape[0] == 0:
+            self._out = torch.empty_like(x, dtype=torch.float32)
+            return
+        with record_function_range("moe.shared_expert"):
+            self._out = shared_experts(x)
+
+
 class OverlapSharedExpertExecutor(SharedExpertExecutor):
     """Run shared expert on an aux stream while routed MoE runs on current stream."""
 
@@ -586,7 +643,10 @@ def get_shared_expert_executor(
     dim: int | None = None,
     inter_dim: int | None = None,
     swiglu_limit: float = 0.0,
+    native_mxfp8: bool = False,
 ) -> SharedExpertExecutor:
+    if native_mxfp8:
+        return MXFP8SharedExpertExecutor()
     mode = shared_expert_mode()
     fast_path = FusedSharedExpertExecutor(
         max_tokens_per_rank=max_tokens_per_rank,

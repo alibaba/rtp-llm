@@ -1740,9 +1740,11 @@ class CedRouterProjectionTest(_SingleThreadTest):
         )
 
     @staticmethod
-    def _gate():
+    def _gate(fused_gate: bool = False):
         # Execute the production gate without importing native model bindings.
-        path = Path(_CED.__file__).parent.parent / "moe/gate.py"
+        path = (
+            Path(_CED.__file__).parents[2] / "factory/fused_moe/utils/fp8_fp4/gate.py"
+        )
         tree = ast.parse(path.read_text())
         nodes = [
             node
@@ -1751,7 +1753,14 @@ class CedRouterProjectionTest(_SingleThreadTest):
             and node.name in ("Gate", "_select_routes_with_nonfinite_fallback")
         ]
         ns = dict(
-            torch=torch, nn=torch.nn, F=F, os=os, _use_fused_gate=lambda *a: False
+            torch=torch,
+            nn=torch.nn,
+            F=F,
+            os=os,
+            _use_fused_gate=(lambda *a: True) if fused_gate else (lambda *a: False),
+            ExpertGatePayload=lambda **kw: types.SimpleNamespace(
+                norm_eps=1.0e-12, **kw
+            ),
         )
         prefix = ast.parse("from __future__ import annotations").body
         exec(
@@ -1769,7 +1778,6 @@ class CedRouterProjectionTest(_SingleThreadTest):
         gate.topk = 2
         gate.score_func = "softmax"
         gate.route_scale = 1.0
-        gate._dbg_prefix = None
         return gate
 
     def test_router_scope_restores_absent_none_and_nested_callbacks_on_exception(self):
@@ -1962,35 +1970,43 @@ class CedRouterProjectionTest(_SingleThreadTest):
                     self.assertEqual(observed, {stop - start for start, stop in spans})
 
     def test_router_scope_follows_actual_moe_chunk_policy(self):
-        path = Path(_CED.__file__).parent.parent / "moe/moe_layer.py"
+        path = (
+            Path(_CED.__file__).parents[2]
+            / "factory/fused_moe/utils/fp8_fp4/chunked_layer.py"
+        )
         cls = next(
             n
             for n in ast.parse(path.read_text()).body
-            if isinstance(n, ast.ClassDef) and n.name == "MoE"
+            if isinstance(n, ast.ClassDef) and n.name == "ChunkedFp8Fp4MoeLayer"
         )
         method = next(
             n
             for n in cls.body
             if isinstance(n, ast.FunctionDef) and n.name == "_should_chunk"
         )
-        enabled = mock.Mock(return_value=True)
-        ns = dict(torch=torch, chunked_moe_enabled=enabled)
+        ns = dict(torch=torch)
         exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), ns)
         plan, _ = _plan(
             131072, 0, torch.arange(130944, 131072), candidate_publication=True
         )
         gate = self._gate()
         ffn = types.SimpleNamespace(
-            gate=gate, max_tokens_per_rank=16384, _is_decode_role=False
+            gate=gate,
+            max_tokens_per_rank=16384,
+            chunking_enabled=True,
+            _is_decode_role=False,
         )
         ffn._should_chunk = types.MethodType(ns["_should_chunk"], ffn)
-        for policy, decode, capture, expect_chunk in (
-            (True, False, False, True),
-            (False, False, False, False),
-            (True, True, False, False),
-            (True, False, True, False),
+        # Decode and CUDA-graph capture cannot chunk, so their budgets must
+        # already cover the batch; capacity overflow is a hard error there.
+        for policy, decode, capture, max_tokens, expect_chunk in (
+            (True, False, False, 16384, True),
+            (False, False, False, 16384, False),
+            (True, True, False, 131072, False),
+            (True, False, True, 131072, False),
         ):
-            enabled.return_value = policy
+            ffn.chunking_enabled = policy
+            ffn.max_tokens_per_rank = max_tokens
             ffn._is_decode_role = decode
             with mock.patch.object(
                 torch.cuda, "is_available", return_value=True
@@ -2061,14 +2077,10 @@ class CedRouterProjectionTest(_SingleThreadTest):
         gate = self._gate()
         x = torch.ones(4, 5, dtype=torch.bfloat16)
         projected = torch.tensor([[1.0, 3.0, -1.0]]).expand(4, -1)
-        parent = types.ModuleType("rtp_llm.models_py.modules.dsv41")
-        parent._record_tensor = types.SimpleNamespace(ENABLED=False)
         for fp32 in ("0", "1"):
             callback = mock.Mock(side_effect=lambda x, w: projected.to(x.dtype))
             gate._ced_row_projection = callback
-            with mock.patch.dict(os.environ, DSV4_GATE_FP32=fp32), mock.patch.dict(
-                sys.modules, {parent.__name__: parent}
-            ):
+            with mock.patch.dict(os.environ, {"MOE_GATE_FP32": fp32}):
                 weights, indices = gate(x)
             callback.assert_called_once()
             dtype = torch.float32 if fp32 == "1" else torch.bfloat16
@@ -2080,10 +2092,10 @@ class CedRouterProjectionTest(_SingleThreadTest):
             self.assertTrue(torch.equal(indices, expected_indices))
 
     def test_mega_and_mega_se_gate_pack_consume_gate_projection(self):
-        root = Path(_CED.__file__).parent.parent / "moe/strategies"
-        for filename, classname, getter in (
-            ("mega.py", "MegaMoEStrategy", "_get_gate_pack_kernels"),
-            ("mega_se.py", "MegaMoEStrategySE", "_get_mega_se_gate_pack_kernels"),
+        root = Path(_CED.__file__).parents[2] / "factory/fused_moe/impl/cuda/executors"
+        for filename, classname in (
+            ("mega_moe.py", "MegaMoeExecutor"),
+            ("mega_moe_se.py", "MegaMoeSEExecutor"),
         ):
             path = root / filename
             cls = next(
@@ -2094,22 +2106,35 @@ class CedRouterProjectionTest(_SingleThreadTest):
             method = next(
                 n
                 for n in cls.body
-                if isinstance(n, ast.FunctionDef) and n.name == "forward_with_gate_pack"
+                if isinstance(n, ast.FunctionDef) and n.name == "forward_gate_pack"
             )
-            pack = mock.Mock()
-            ns = dict(
-                torch=torch,
-                record_function_range=lambda *a: nullcontext(),
-                sync_cuda_graph_warmup_ranks=lambda *a: None,
-                FP4_BLOCK=32,
-            )
-            ns[getter] = lambda: (pack, pack, None)
+            pack, stage = mock.Mock(), mock.Mock()
+            ns = dict(torch=torch, ExpertGatePayload=types.SimpleNamespace)
             exec(
                 compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"),
                 ns,
             )
+            packages = {}
+            for name in (
+                "rtp_llm",
+                "rtp_llm.models_py",
+                "rtp_llm.models_py.triton_kernels",
+                "rtp_llm.models_py.triton_kernels.moe",
+            ):
+                module = types.ModuleType(name)
+                module.__path__ = []
+                packages[name] = module
+            input_pack = types.ModuleType(
+                "rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack"
+            )
+            input_pack.fused_pack_mega_moe_gate_inputs = pack
+            packages[input_pack.__name__] = input_pack
+            se_pack = types.ModuleType(
+                "rtp_llm.models_py.triton_kernels.moe.mega_moe_se_input_pack"
+            )
+            se_pack.stage_mega_moe_se_shared_l1_scales = stage
+            packages[se_pack.__name__] = se_pack
             buf = types.SimpleNamespace(
-                num_max_tokens_per_rank=4,
                 x=torch.empty(4, 5),
                 x_sf=torch.empty(4, 1),
                 topk_idx=torch.empty(4, 2),
@@ -2117,38 +2142,37 @@ class CedRouterProjectionTest(_SingleThreadTest):
                 shared_l1_acts_sf=torch.empty(4, 1),
             )
             owner = types.SimpleNamespace(
+                supports_gate_pack=True,
                 _mega_buf=buf,
                 _mega_y=torch.zeros(4, 5),
-                _mega_l1_w=None,
-                _mega_l1_sf=None,
-                _mega_l2_w=None,
-                _mega_l2_sf=None,
-                cfg=types.SimpleNamespace(layer_id=20, swiglu_limit=0),
-                _maybe_pre_kernel_barrier=lambda *a: None,
                 _validate_capacity=lambda *a: None,
                 _block_m=lambda *a: 128,
                 _launch=mock.Mock(),
             )
-            gate = self._gate()
+            gate = self._gate(fused_gate=True)
             scores = torch.full((4, 3), 7, dtype=torch.bfloat16)
             gate._ced_row_projection = mock.Mock(return_value=scores)
-            dg = types.ModuleType("deep_gemm")
-            dg.fp8_fp4_mega_moe = mock.Mock()
+            x = torch.ones(4, 5, dtype=torch.bfloat16)
             for hash_gate in (False, True):
                 gate.hash = hash_gate
                 gate.tid2eid = torch.zeros(4, 2, dtype=torch.long)
                 gate._ced_row_projection.reset_mock()
                 pack.reset_mock()
-                with mock.patch.dict(sys.modules, deep_gemm=dg):
-                    ns["forward_with_gate_pack"](
-                        owner,
-                        torch.ones(4, 5, dtype=torch.bfloat16),
-                        gate,
-                        torch.arange(4),
-                    )
+                stage.reset_mock()
+                payload = gate.prepare_gate_payload(x, torch.arange(4))
+                with mock.patch.dict(sys.modules, packages):
+                    ns["forward_gate_pack"](owner, x, payload)
                 gate._ced_row_projection.assert_called_once()
+                self.assertIs(payload.scores, scores)
                 pack.assert_called_once()
                 self.assertIs(pack.call_args.args[1], scores)
+                self.assertEqual(
+                    pack.call_args.kwargs["input_ids"] is not None, hash_gate
+                )
+                if filename == "mega_moe_se.py":
+                    stage.assert_called_once()
+                else:
+                    stage.assert_not_called()
 
 
 class CedEncoderSplitTest(_SingleThreadTest):

@@ -139,7 +139,9 @@ std::string KVCacheConfig::to_string() const {
         << "block_tree_memory_evict_high_watermark_ratio: " << block_tree_memory_evict_high_watermark_ratio << "\n"
         << "block_tree_disk_evict_low_watermark_ratio: " << block_tree_disk_evict_low_watermark_ratio << "\n"
         << "block_tree_disk_evict_high_watermark_ratio: " << block_tree_disk_evict_high_watermark_ratio << "\n"
-        << "linear_step: " << linear_step << "\n"
+        << "reuse_cache_tail_blocks: " << reuse_cache_tail_blocks << "\n"
+        << "linear_pool_blocks: " << linear_pool_blocks << "\n"
+        << "swa_pool_blocks: " << swa_pool_blocks << "\n"
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
         << "ssm_state_dtype: " << ssm_state_dtype << "\n"
         << "kv_cache_mem_mb: " << kv_cache_mem_mb << "\n"
@@ -151,6 +153,7 @@ std::string KVCacheConfig::to_string() const {
         << "enable_memory_cache: " << enable_memory_cache << "\n"
         << "enable_disk_cache: " << enable_disk_cache << "\n"
         << "enable_remote_cache: " << enable_remote_cache << "\n"
+        << "enable_crc: " << enable_crc << "\n"
         << "device_eviction_policy: " << device_eviction_policy << "\n"
         << "memory_eviction_policy: " << memory_eviction_policy << "\n"
         << "disk_eviction_policy: " << disk_eviction_policy << "\n"
@@ -423,7 +426,8 @@ std::string FIFOSchedulerConfig::to_string() const {
         << "decode_prefill_ratio: " << decode_prefill_ratio << "\n"
         << "cp_force_single_prefill: " << cp_force_single_prefill << "\n"
         << "max_inited_kv_cache_streams: " << max_inited_kv_cache_streams << "\n"
-        << "max_batch_tokens_without_cache: " << max_batch_tokens_without_cache;
+        << "max_batch_tokens_without_cache: " << max_batch_tokens_without_cache << "\n"
+        << "prefill_chunk_size: " << prefill_chunk_size;
     return oss.str();
 }
 

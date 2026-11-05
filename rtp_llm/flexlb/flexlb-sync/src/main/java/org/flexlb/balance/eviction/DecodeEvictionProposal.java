@@ -34,7 +34,8 @@ public record DecodeEvictionProposal(
     public DecodeEvictionProposal {
         victims = List.copyOf(victims);
         boolean hasLocal = victims.stream().anyMatch(victim -> victim.phase().isMasterQueued());
-        boolean hasCancel = victims.stream().anyMatch(victim -> victim.phase().requiresEngineCancel());
+        boolean hasCancel =
+                victims.stream().anyMatch(victim -> victim.phase().requiresEngineCancel());
         if (hasLocal && hasCancel) {
             throw new IllegalArgumentException(
                     "decode proposal cannot mix Master-local and Engine-Cancel victims");
@@ -47,8 +48,10 @@ public record DecodeEvictionProposal(
 
     /** Concurrency slots exhausted (design doc 11). */
     public static final String CASE_SLOT = "decode_slot_full";
+
     /** Real KV available below the incoming hard demand (design doc 12). */
     public static final String CASE_KV = "decode_kv_full";
+
     /** Both deficits at once (design doc 13). */
     public static final String CASE_SLOT_AND_KV = "decode_slot_and_kv_full";
 
@@ -56,7 +59,7 @@ public record DecodeEvictionProposal(
      * Cross-endpoint plan preference (smaller = better): {@link PlanCost#ORDER}
      * then endpointId for determinism.
      */
-    public static final Comparator<DecodeEvictionProposal> ORDER = Comparator
-            .comparing(DecodeEvictionProposal::cost, PlanCost.ORDER)
-            .thenComparing(DecodeEvictionProposal::endpointId);
+    public static final Comparator<DecodeEvictionProposal> ORDER =
+            Comparator.comparing(DecodeEvictionProposal::cost, PlanCost.ORDER)
+                    .thenComparing(DecodeEvictionProposal::endpointId);
 }

@@ -71,11 +71,11 @@ class DecodeKvAllocationSemanticsTest {
     private static final int SPB = 1024;
     private static final int BASE_PORT = 64100;
 
-    private static final Pattern PER_ENGINE_METRIC_PATTERN = Pattern.compile(
-            "(\\w+)\\{engine_name=\"[^\"]+\",role=\"[^\"]+\",grpc_port=\"(\\d+)\",engine_ip=\"[^\"]+\"\\}\\s+(\\d+)");
+    private static final Pattern PER_ENGINE_METRIC_PATTERN =
+            Pattern.compile(
+                    "(\\w+)\\{engine_name=\"[^\"]+\",role=\"[^\"]+\",grpc_port=\"(\\d+)\",engine_ip=\"[^\"]+\"\\}\\s+(\\d+)");
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private ScheduledExecutorService scheduler;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
@@ -84,11 +84,14 @@ class DecodeKvAllocationSemanticsTest {
 
     @BeforeEach
     void setUp() {
-        scheduler = Executors.newScheduledThreadPool(4, runnable -> {
-            Thread thread = new Thread(runnable, "decode-kv-semantics-scheduler");
-            thread.setDaemon(true);
-            return thread;
-        });
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        4,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "decode-kv-semantics-scheduler");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
         services = new ConcurrentHashMap<>();
         nextPortOffset = 0;
     }
@@ -128,23 +131,27 @@ class DecodeKvAllocationSemanticsTest {
         int decodePort = decode.getGrpcPort();
 
         // A (rid 100): 9 blocks fit outright (avail 10, reserve 1).
-        assertEquals(1, enqueue(prefill, batch(1, slot(0,
-                        inputWithDecode(100L, 9 * SPB, decodePort, 1))))
-                .getSuccessesCount(),
+        assertEquals(
+                1,
+                enqueue(prefill, batch(1, slot(0, inputWithDecode(100L, 9 * SPB, decodePort, 1))))
+                        .getSuccessesCount(),
                 "A's reservation must succeed outright");
         assertEquals(9L, heldBlocks(decodePort), "A pins 9 of the 10 D blocks");
 
         // Widen the window for CI-load headroom (production 100/1/100 is
         // exercised by the exhaustion test below); the release lands at 50ms.
         decode.setDecodeAllocateRetryPolicy(500, 2, 2000);
-        Thread releaser = new Thread(() -> {
-            try {
-                Thread.sleep(50);
-                prefill.cancel(100L);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }, "kv-retry-window-releaser");
+        Thread releaser =
+                new Thread(
+                        () -> {
+                            try {
+                                Thread.sleep(50);
+                                prefill.cancel(100L);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                        },
+                        "kv-retry-window-releaser");
         releaser.start();
 
         long startNanos = System.nanoTime();
@@ -157,16 +164,18 @@ class DecodeKvAllocationSemanticsTest {
 
         assertEquals(0, ack.getErrorsCount(), "B must clear the window: " + ack);
         assertEquals(1, ack.getSuccessesCount(), "B is admitted after the flip");
-        assertTrue(elapsedMs >= 50,
+        assertTrue(
+                elapsedMs >= 50,
                 "B must have WAITED for the release inside the window, took " + elapsedMs + "ms");
-        assertEquals(9L, heldBlocks(decodePort),
-                "B now holds the 9 blocks (A's are released)");
+        assertEquals(9L, heldBlocks(decodePort), "B now holds the 9 blocks (A's are released)");
         Map<String, Map<Integer, Long>> metrics = perEngineMetrics();
-        assertEquals(0L, metrics.get("mock_engine_kv_admission_fails_total")
-                        .getOrDefault(decodePort, -1L),
+        assertEquals(
+                0L,
+                metrics.get("mock_engine_kv_admission_fails_total").getOrDefault(decodePort, -1L),
                 "a flipped verdict never counts");
-        assertEquals(0L, metrics.get("mock_engine_lack_mem_rejects_total")
-                        .getOrDefault(decodePort, -1L),
+        assertEquals(
+                0L,
+                metrics.get("mock_engine_lack_mem_rejects_total").getOrDefault(decodePort, -1L),
                 "a flipped verdict never counts (PERMANENT side)");
         assertFalse(prefill.isLeakDetected(), "no leak on P");
         assertFalse(decode.isLeakDetected(), "no leak on D");
@@ -188,9 +197,10 @@ class DecodeKvAllocationSemanticsTest {
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 10);
         int decodePort = decode.getGrpcPort();
 
-        assertEquals(1, enqueue(prefill, batch(1, slot(0,
-                        inputWithDecode(100L, 9 * SPB, decodePort, 1))))
-                .getSuccessesCount(),
+        assertEquals(
+                1,
+                enqueue(prefill, batch(1, slot(0, inputWithDecode(100L, 9 * SPB, decodePort, 1))))
+                        .getSuccessesCount(),
                 "A's reservation must succeed outright");
 
         long startNanos = System.nanoTime();
@@ -200,31 +210,37 @@ class DecodeKvAllocationSemanticsTest {
 
         assertEquals(1, ack.getErrorsCount(), "B must be rejected after the window");
         assertEquals(0, ack.getSuccessesCount(), "a rejected request is never admitted");
-        assertEquals(JavaMockEngineCluster.DECODE_LACK_MEM_ERROR_CODE,
+        assertEquals(
+                JavaMockEngineCluster.DECODE_LACK_MEM_ERROR_CODE,
                 ack.getErrors(0).getErrorInfo().getErrorCode(),
                 "the decode-side reject acks the master-surface 8211");
-        assertTrue(ack.getErrors(0).getErrorInfo().getErrorMessage().contains("602"),
+        assertTrue(
+                ack.getErrors(0).getErrorInfo().getErrorMessage().contains("602"),
                 "the raw 602 travels in the message text: "
                         + ack.getErrors(0).getErrorInfo().getErrorMessage());
-        assertTrue(ack.getErrors(0).getErrorInfo().getErrorMessage()
-                        .contains("ALLOCATE retry window"),
+        assertTrue(
+                ack.getErrors(0).getErrorInfo().getErrorMessage().contains("ALLOCATE retry window"),
                 "the message must name the exhausted window: "
                         + ack.getErrors(0).getErrorInfo().getErrorMessage());
-        assertTrue(elapsedMs >= 90,
+        assertTrue(
+                elapsedMs >= 90,
                 "the default 100ms window must actually be spun, took " + elapsedMs + "ms");
 
         Map<String, Map<Integer, Long>> metrics = perEngineMetrics();
-        assertEquals(1L, metrics.get("mock_engine_kv_admission_fails_total")
-                        .getOrDefault(decodePort, -1L),
+        assertEquals(
+                1L,
+                metrics.get("mock_engine_kv_admission_fails_total").getOrDefault(decodePort, -1L),
                 "the RETRYABLE exhaustion counts on the D engine");
-        assertEquals(0L, metrics.get("mock_engine_lack_mem_rejects_total")
-                        .getOrDefault(decodePort, -1L),
+        assertEquals(
+                0L,
+                metrics.get("mock_engine_lack_mem_rejects_total").getOrDefault(decodePort, -1L),
                 "9 + reserve fits the physical total — NOT PERMANENT");
-        assertEquals(0L, metrics.get("mock_engine_lack_mem_rejects_total")
+        assertEquals(
+                0L,
+                metrics.get("mock_engine_lack_mem_rejects_total")
                         .getOrDefault(prefill.getGrpcPort(), -1L),
                 "the P pool did not reject (100-block pool, 9-block demand)");
-        assertEquals(9L, heldBlocks(decodePort),
-                "A's pin survives the whole episode");
+        assertEquals(9L, heldBlocks(decodePort), "A's pin survives the whole episode");
         assertFalse(prefill.isLeakDetected(), "no leak on P");
         assertFalse(decode.isLeakDetected(), "no leak on D");
     }
@@ -242,14 +258,18 @@ class DecodeKvAllocationSemanticsTest {
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 10);
         int decodePort = decode.getGrpcPort();
 
-        httpPost(controlPort(), "/set_perf", String.format(
-                "{\"engine\":\"%s\",\"decode_retry_times\":0,"
-                        + "\"decode_retry_interval_ms\":1,\"decode_retry_timeout_ms\":100}",
-                decode.getEngineName()));
+        httpPost(
+                controlPort(),
+                "/set_perf",
+                String.format(
+                        "{\"engine\":\"%s\",\"decode_retry_times\":0,"
+                                + "\"decode_retry_interval_ms\":1,\"decode_retry_timeout_ms\":100}",
+                        decode.getEngineName()));
 
-        assertEquals(1, enqueue(prefill, batch(1, slot(0,
-                        inputWithDecode(100L, 9 * SPB, decodePort, 1))))
-                .getSuccessesCount(),
+        assertEquals(
+                1,
+                enqueue(prefill, batch(1, slot(0, inputWithDecode(100L, 9 * SPB, decodePort, 1))))
+                        .getSuccessesCount(),
                 "A's reservation must succeed outright");
 
         long startNanos = System.nanoTime();
@@ -258,19 +278,27 @@ class DecodeKvAllocationSemanticsTest {
         long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
 
         assertEquals(1, ack.getErrorsCount(), "B still fails — zero retries configured");
-        assertEquals(JavaMockEngineCluster.DECODE_LACK_MEM_ERROR_CODE,
+        assertEquals(
+                JavaMockEngineCluster.DECODE_LACK_MEM_ERROR_CODE,
                 ack.getErrors(0).getErrorInfo().getErrorCode());
-        assertTrue(elapsedMs < 90,
-                "zero retries must fail fast, took " + elapsedMs + "ms");
-        assertEquals(1L, perEngineMetrics().get("mock_engine_kv_admission_fails_total")
+        assertTrue(elapsedMs < 90, "zero retries must fail fast, took " + elapsedMs + "ms");
+        assertEquals(
+                1L,
+                perEngineMetrics()
+                        .get("mock_engine_kv_admission_fails_total")
                         .getOrDefault(decodePort, -1L),
                 "the RETRYABLE failure still counts on the D engine");
 
-        HttpResponse<String> rejected = httpPostResponse(controlPort(), "/set_perf", String.format(
-                "{\"engine\":\"%s\",\"decode_retry_times\":-1}", decode.getEngineName()));
+        HttpResponse<String> rejected =
+                httpPostResponse(
+                        controlPort(),
+                        "/set_perf",
+                        String.format(
+                                "{\"engine\":\"%s\",\"decode_retry_times\":-1}",
+                                decode.getEngineName()));
         assertEquals(400, rejected.statusCode(), "negative decode_retry_times must be a 400");
-        assertTrue(MAPPER.readTree(rejected.body()).get("error").asText()
-                        .contains("decode_retry"),
+        assertTrue(
+                MAPPER.readTree(rejected.body()).get("error").asText().contains("decode_retry"),
                 "the error should name the field, got: " + rejected.body());
     }
 
@@ -290,29 +318,36 @@ class DecodeKvAllocationSemanticsTest {
         MockLruBlockCache.BlockLease pin = cache.acquire(9, List.of());
         assertNotNull(pin, "9 blocks fit the empty 10-block pool (avail − need = reserve)");
 
-        assertEquals(MockLruBlockCache.AllocationFailure.RETRYABLE,
+        assertEquals(
+                MockLruBlockCache.AllocationFailure.RETRYABLE,
                 cache.acquireDetailed(9, List.of()).failure(),
                 "total sufficient, temporarily short → RETRYABLE");
-        assertEquals(MockLruBlockCache.AllocationFailure.RETRYABLE,
+        assertEquals(
+                MockLruBlockCache.AllocationFailure.RETRYABLE,
                 cache.acquireWithReuseDetailed(9, List.of()).failure(),
                 "the decode caliber classifies the same geometry identically");
-        assertEquals(MockLruBlockCache.AllocationFailure.PERMANENT,
+        assertEquals(
+                MockLruBlockCache.AllocationFailure.PERMANENT,
                 cache.acquireDetailed(11, List.of()).failure(),
                 "required + reserve > physical total → PERMANENT");
-        assertEquals(MockLruBlockCache.AllocationFailure.PERMANENT,
+        assertEquals(
+                MockLruBlockCache.AllocationFailure.PERMANENT,
                 cache.acquireWithReuseDetailed(11, List.of()).failure(),
                 "the decode caliber classifies PERMANENT identically");
-        assertNull(cache.acquireDetailed(9, List.of()).lease(),
-                "a failed attempt yields no lease");
+        assertNull(cache.acquireDetailed(9, List.of()).lease(), "a failed attempt yields no lease");
 
         cache.release(pin);
         assertTrue(cache.admit(List.of(1L, 2L, 3L, 4L, 5L)));
-        assertEquals(MockLruBlockCache.AllocationFailure.PERMANENT,
+        assertEquals(
+                MockLruBlockCache.AllocationFailure.PERMANENT,
                 cache.acquireWithReuseDetailed(11, List.of(1L, 2L, 3L, 4L, 5L)).failure(),
                 "reuse lowers current allocation but not the full-footprint permanent check");
-        assertEquals(0, cache.referencedKeyBlocks(),
+        assertEquals(
+                0,
+                cache.referencedKeyBlocks(),
                 "a rejected reused admission must roll back its pins");
-        assertEquals(MockLruBlockCache.AllocationFailure.PERMANENT,
+        assertEquals(
+                MockLruBlockCache.AllocationFailure.PERMANENT,
                 cache.acquireDetailed(11, List.of()).failure(),
                 "PERMANENT holds even on the recovered pool — the request never fits");
 
@@ -320,11 +355,11 @@ class DecodeKvAllocationSemanticsTest {
         // PERMANENT; growing toward 9 while 9 are already held is a no-op.
         MockLruBlockCache.BlockLease lease = cache.acquire(9, List.of());
         assertNotNull(lease);
-        assertEquals(MockLruBlockCache.AllocationFailure.PERMANENT,
+        assertEquals(
+                MockLruBlockCache.AllocationFailure.PERMANENT,
                 cache.growTo(lease, 11).failure(),
                 "growth past the physical total classifies PERMANENT");
-        assertTrue(cache.growTo(lease, 9).success(),
-                "already-satisfied growth is a no-op success");
+        assertTrue(cache.growTo(lease, 9).success(), "already-satisfied growth is a no-op success");
     }
 
     // ─────────────── Gap 3: the reserve_step front-load window ───────────────
@@ -340,38 +375,47 @@ class DecodeKvAllocationSemanticsTest {
      */
     @Test
     void reserveStepFrontLoadsDecodeDemand() throws Exception {
-        MockPerformanceModel speculative = performanceModel(
-                tempDir, "5000", 1.0, 1.0, Map.of(), Map.of("reserve_step", 1));
+        MockPerformanceModel speculative =
+                performanceModel(tempDir, "5000", 1.0, 1.0, Map.of(), Map.of("reserve_step", 1));
         JavaMockEngineCluster.FastRpcService prefill = newPrefillService(speculative, 100);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(speculative, 10);
         int decodePort = decode.getGrpcPort();
 
-        assertEquals(9, decode.decodeDemandBlocks(8 * SPB),
+        assertEquals(
+                9,
+                decode.decodeDemandBlocks(8 * SPB),
                 "step=1 front-loads ceil((8192 + 1)/1024) = 9 blocks");
-        assertEquals(8, decode.decodeDemandBlocks(8 * SPB - 1),
+        assertEquals(
+                8,
+                decode.decodeDemandBlocks(8 * SPB - 1),
                 "the window only trips at the boundary (8191 + 1 still prices 8)");
-        assertEquals(9, decode.decodeDemandBlocks(8 * SPB + 1),
+        assertEquals(
+                9,
+                decode.decodeDemandBlocks(8 * SPB + 1),
                 "growth at 8193 consumes the SAME window (still 9, not 10)");
 
         // End to end: the speculative reservation holds the front-loaded 9.
-        assertEquals(1, enqueue(prefill, batch(1, slot(0,
-                        inputWithDecode(100L, 8 * SPB, decodePort, 1))))
-                .getSuccessesCount());
-        assertEquals(9L, heldBlocks(decodePort),
-                "the initial admission holds the front-loaded block");
+        assertEquals(
+                1,
+                enqueue(prefill, batch(1, slot(0, inputWithDecode(100L, 8 * SPB, decodePort, 1))))
+                        .getSuccessesCount());
+        assertEquals(
+                9L, heldBlocks(decodePort), "the initial admission holds the front-loaded block");
 
         // Control: the default (non-speculative) model keeps the exact fit.
         MockPerformanceModel plain = performanceModel(tempDir, "5000", 1.0, 1.0);
         JavaMockEngineCluster.FastRpcService prefill0 = newPrefillService(plain, 100);
         JavaMockEngineCluster.FastRpcService decode0 = newDecodeService(plain, 10);
         int decode0Port = decode0.getGrpcPort();
-        assertEquals(8, decode0.decodeDemandBlocks(8 * SPB),
+        assertEquals(
+                8,
+                decode0.decodeDemandBlocks(8 * SPB),
                 "step=0 (default) keeps ceil(8192/1024) = 8 exactly");
-        assertEquals(1, enqueue(prefill0, batch(1, slot(0,
-                        inputWithDecode(200L, 8 * SPB, decode0Port, 1))))
-                .getSuccessesCount());
-        assertEquals(8L, heldBlocks(decode0Port),
-                "no front-load without reserve_step");
+        assertEquals(
+                1,
+                enqueue(prefill0, batch(1, slot(0, inputWithDecode(200L, 8 * SPB, decode0Port, 1))))
+                        .getSuccessesCount());
+        assertEquals(8L, heldBlocks(decode0Port), "no front-load without reserve_step");
         assertFalse(decode.isLeakDetected(), "no leak on the speculative D");
         assertFalse(decode0.isLeakDetected(), "no leak on the plain D");
     }
@@ -421,8 +465,9 @@ class DecodeKvAllocationSemanticsTest {
     private void startControlServer() {
         if (controlServer == null) {
             try {
-                controlServer = new MockControlServer(
-                        services, new ConcurrentHashMap<>(), null, null, "127.0.0.1", 0);
+                controlServer =
+                        new MockControlServer(
+                                services, new ConcurrentHashMap<>(), null, null, "127.0.0.1", 0);
                 controlServer.start();
             } catch (IOException e) {
                 throw new IllegalStateException("control server failed to start", e);
@@ -438,8 +483,9 @@ class DecodeKvAllocationSemanticsTest {
     private Map<String, Map<Integer, Long>> perEngineMetrics()
             throws IOException, InterruptedException {
         Map<String, Map<Integer, Long>> result = new java.util.HashMap<>();
-        Matcher matcher = PER_ENGINE_METRIC_PATTERN.matcher(
-                httpGet(controlPort(), "/metrics?per_engine=true"));
+        Matcher matcher =
+                PER_ENGINE_METRIC_PATTERN.matcher(
+                        httpGet(controlPort(), "/metrics?per_engine=true"));
         while (matcher.find()) {
             result.computeIfAbsent(matcher.group(1), k -> new java.util.HashMap<>())
                     .put(Integer.parseInt(matcher.group(2)), Long.parseLong(matcher.group(3)));
@@ -448,7 +494,6 @@ class DecodeKvAllocationSemanticsTest {
     }
 
     private long heldBlocks(int port) throws IOException, InterruptedException {
-        return perEngineMetrics().get("mock_engine_held_blocks")
-                .getOrDefault(port, -1L);
+        return perEngineMetrics().get("mock_engine_held_blocks").getOrDefault(port, -1L);
     }
 }

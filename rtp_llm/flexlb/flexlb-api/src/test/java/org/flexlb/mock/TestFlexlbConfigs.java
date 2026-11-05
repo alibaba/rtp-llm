@@ -11,5 +11,5 @@ public final class TestFlexlbConfigs {
         return config;
     }
 
-    private TestFlexlbConfigs() { }
+    private TestFlexlbConfigs() {}
 }

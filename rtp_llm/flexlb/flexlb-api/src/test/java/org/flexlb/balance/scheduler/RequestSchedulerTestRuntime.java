@@ -9,6 +9,7 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
+import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
@@ -41,8 +42,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     private final RequestRegistry lifecycle;
     private final EndpointEventProjector endpointEvents;
-    private final PlacementAvailability placementAvailability =
-            new PlacementAvailability();
+    private final PlacementAvailability placementAvailability = new PlacementAvailability();
     private final EndpointRegistry registry;
     private final RequestScheduler scheduler;
     private final SchedulerRuntime runtime;
@@ -50,52 +50,64 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     public RequestSchedulerTestRuntime(
             ConfigService configService,
-            Supplier<CapacityBoundary.Attempt<
-                    BatchDeliveryStrategy.PreparedSubmission>>
+            Supplier<CapacityBoundary.Attempt<BatchDeliveryStrategy.PreparedSubmission>>
                     prepareBatchSubmission,
             BatchSchedulerReporter batchReporter,
             RequestSchedulerReporter requestReporter) {
-        this.lifecycle = new RequestRegistry(
-                configService, batchReporter, requestReporter);
+        this.lifecycle = new RequestRegistry(configService, batchReporter, requestReporter);
         this.endpointEvents = new EndpointEventProjector(lifecycle);
-        DispatcherConfig dispatcher = Objects.requireNonNull(
-                configService.loadBalanceConfig().getDispatcher(),
-                "dispatcher");
-        DeliveryStrategy deliveryStrategy = switch (dispatcher.getType()) {
-            case BATCH -> {
-                AtomicLong batchIds = new AtomicLong();
-                yield new BatchDeliveryStrategy(
-                        Objects.requireNonNull(
-                                prepareBatchSubmission,
-                                "prepareBatchSubmission"),
-                        batchIds::incrementAndGet,
+        DispatcherConfig dispatcher =
+                Objects.requireNonNull(
+                        configService.loadBalanceConfig().getDispatcher(), "dispatcher");
+        DeliveryStrategy deliveryStrategy =
+                switch (dispatcher.getType()) {
+                    case BATCH -> {
+                        AtomicLong batchIds = new AtomicLong();
+                        yield new BatchDeliveryStrategy(
+                                Objects.requireNonNull(
+                                        prepareBatchSubmission, "prepareBatchSubmission"),
+                                batchIds::incrementAndGet,
+                                lifecycle,
+                                new DeliveryMetrics(batchReporter));
+                    }
+                    case NON_BATCH ->
+                            new RouteDeliveryStrategy(
+                                    lifecycle, new DeliveryMetrics(batchReporter));
+                };
+        this.registry =
+                new EndpointRegistry(
+                        configService,
+                        endpointEvents,
+                        batchReporter,
+                        deliveryStrategy,
+                        placementAvailability);
+        this.router =
+                new BindingRouter(
+                        new org.flexlb.sync.status.WorkerDirectory(registry),
+                        configService,
+                        lifecycle);
+        var cancelChannel =
+                org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class);
+        var preemption =
+                new org.flexlb.balance.eviction.DecodePreemptionCoordinator(
+                        cancelChannel, lifecycle, requestReporter);
+        this.scheduler =
+                new RequestScheduler(
+                        configService,
+                        router,
+                        registry,
+                        batchReporter,
+                        new EvictionManager(
+                                requestReporter,
+                                cancelChannel,
+                                preemption,
+                                lifecycle,
+                                batchReporter),
                         lifecycle,
-                        new DeliveryMetrics(batchReporter));
-            }
-            case NON_BATCH ->
-                    new RouteDeliveryStrategy(
-                            lifecycle,
-                            new DeliveryMetrics(batchReporter));
-        };
-        this.registry = new EndpointRegistry(
-                configService,
-                endpointEvents,
-                batchReporter,
-                deliveryStrategy,
-                placementAvailability);
-        this.router = new BindingRouter(new org.flexlb.sync.status.WorkerDirectory(registry), configService, lifecycle);
-        var cancelChannel = org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class);
-        var preemption = new org.flexlb.balance.eviction.DecodePreemptionCoordinator(cancelChannel, lifecycle);
-        this.scheduler = new RequestScheduler(
-                configService,
-                router,
-                registry,
-                batchReporter,
-                new EvictionManager(requestReporter, cancelChannel, preemption, lifecycle, batchReporter),
-                lifecycle,
-                placementAvailability);
-        this.runtime = new SchedulerRuntime(
-                lifecycle, registry, batchReporter, requestReporter, scheduler);
+                        placementAvailability);
+        this.runtime =
+                new SchedulerRuntime(
+                        lifecycle, registry, batchReporter, requestReporter, scheduler);
     }
 
     public RequestRegistry requestRegistry() {
@@ -116,12 +128,20 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     /** Return the canonical request future retained by the exact test slot. */
     public CompletableFuture<Response> requestFuture(long requestId) {
+        return requestFuture(Long.toString(requestId));
+    }
+
+    public CompletableFuture<Response> requestFuture(String requestId) {
         RequestSlot slot = lifecycle.requestSlot(requestId);
         return slot == null ? null : slot.future();
     }
 
     /** Return the exact item currently owned by a fixture request slot. */
     public ScheduledRequest activeItem(long requestId) {
+        return activeItem(Long.toString(requestId));
+    }
+
+    public ScheduledRequest activeItem(String requestId) {
         RequestSlot slot = lifecycle.requestSlot(requestId);
         if (slot == null) {
             return null;
@@ -142,45 +162,43 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     }
 
     /** Apply and project one exact worker-status transaction. */
-    public void applyStatus(
-            WorkerStatus status, WorkerStatusResponse response) {
+    public void applyStatus(WorkerStatus status, WorkerStatusResponse response) {
         Objects.requireNonNull(status, "status");
         Objects.requireNonNull(response, "response");
         applyStatus(status, status.freezeStatusResponse(response));
     }
 
     /** Apply an immutable protocol observation without a mutable DTO hop. */
-    public void applyStatus(
-            WorkerStatus status,
-            WorkerStatus.StatusObservation observation) {
+    public void applyStatus(WorkerStatus status, WorkerStatus.StatusObservation observation) {
         Objects.requireNonNull(status, "status");
         Objects.requireNonNull(observation, "observation");
         RoleType role = observation.role();
-        WorkerEndpoint endpoint = registry.get(
-                role, status.getIpPort(), status);
+        WorkerEndpoint endpoint = registry.get(role, status.getLogicalIpPort(), status);
         if (endpoint == null) {
             throw new IllegalStateException(
                     "status generation has no published endpoint: "
-                            + status.getIpPort() + "#" + status.getGenerationId());
+                            + status.getLogicalIpPort()
+                            + "#"
+                            + status.getGenerationId());
         }
 
         Runnable projection;
         status.lock.lock();
         try {
-            long responseVersion = Objects.requireNonNull(
-                    observation.statusVersion(), "response status version");
+            long responseVersion =
+                    Objects.requireNonNull(observation.statusVersion(), "response status version");
             long committedVersion = status.appliedStatusCursor().statusVersion();
             if (responseVersion < committedVersion) {
                 throw new IllegalArgumentException(
                         "worker status version regressed: committed="
-                                + committedVersion + ", response=" + responseVersion);
+                                + committedVersion
+                                + ", response="
+                                + responseVersion);
             }
             if (responseVersion == committedVersion) {
-                projection = endpoint.observeStatusHeartbeat(
-                        status, observation);
+                projection = endpoint.observeStatusHeartbeat(status, observation);
             } else {
-                WorkerStatus.PreparedStatus prepared =
-                        status.prepareNewStatus(observation);
+                WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(observation);
                 projection = endpoint.applyPreparedStatus(status, prepared);
             }
         } finally {
@@ -208,19 +226,19 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 if (status == null) {
                     continue;
                 }
-                String address = status.getServerIp() + ":" + status.getHttpPort();
-                WorkerEndpoint.GenerationPin pin = registry.capture(
-                        status.getRole(), address);
+                String address = status.getLogicalIpPort();
+                WorkerEndpoint.GenerationPin pin = registry.capture(status.getRole(), address);
                 if (pin == null) {
                     throw new IllegalStateException(
                             "fixture route references an unpublished endpoint: "
-                                    + status.getRole() + " " + address);
+                                    + status.getRole()
+                                    + " "
+                                    + address);
                 }
                 SelectedRole selected = select(pin, status);
                 selections.add(selected);
             }
-            return PlacementResult.success(
-                    RouteAdmission.prepare(context, selections, response));
+            return PlacementResult.success(RouteAdmission.prepare(context, selections, response));
         } finally {
             for (SelectedRole selection : selections) {
                 selection.close();
@@ -228,16 +246,15 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         }
     }
 
-    private static SelectedRole select(
-            WorkerEndpoint.GenerationPin pin, ServerStatus status) {
+    private static SelectedRole select(WorkerEndpoint.GenerationPin pin, ServerStatus status) {
         try {
             return switch (status.getRole()) {
-                case PREFILL, PDFUSION -> SelectedRole.prefill(
-                        pin, status, Math.max(0L, status.getPrefillTime()));
+                case PREFILL, PDFUSION ->
+                        SelectedRole.prefill(pin, status, Math.max(0L, status.getPrefillTime()));
                 case DECODE -> SelectedRole.decode(pin, status);
-                case VIT -> SelectedRole.stateless(pin, status);
-                case FRONTEND -> throw new IllegalArgumentException(
-                        "FRONTEND cannot be a worker route");
+                case VIT, ENCODER -> SelectedRole.stateless(pin, status);
+                case FRONTEND ->
+                        throw new IllegalArgumentException("FRONTEND cannot be a worker route");
             };
         } catch (RuntimeException | Error failure) {
             pin.close();
@@ -253,14 +270,22 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     private static final class BindingRouter extends DefaultRouter {
         private DefaultRouter delegate;
 
-        private BindingRouter(org.flexlb.sync.status.WorkerDirectory workers, ConfigService configs, RequestRegistry lifecycle) {
+        private BindingRouter(
+                org.flexlb.sync.status.WorkerDirectory workers,
+                ConfigService configs,
+                RequestRegistry lifecycle) {
             // Real constructor dependencies keep Mockito instrumentation out of
             // the selector classes exercised by the bound production router.
-            super(new CostBasedPrefillStrategy(workers,
-                            org.mockito.Mockito.mock(org.flexlb.cache.service.CacheAwareService.class),
-                            org.mockito.Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class)),
+            super(
+                    new CostBasedPrefillStrategy(
+                            workers,
+                            org.mockito.Mockito.mock(
+                                    org.flexlb.cache.match.CacheAwareService.class),
+                            org.mockito.Mockito.mock(
+                                    org.flexlb.service.monitor.EngineHealthReporter.class)),
                     new DecodeSelector(workers),
                     new RandomStrategy(workers),
+                    org.mockito.Mockito.mock(EncoderStrategy.class),
                     configs,
                     emptyModelMeta());
         }

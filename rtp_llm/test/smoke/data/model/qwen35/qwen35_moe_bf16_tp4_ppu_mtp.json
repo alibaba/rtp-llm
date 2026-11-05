@@ -1,0 +1,50 @@
+// Test: qwen35/qwen35_moe_bf16_tp4_ppu_mtp.json
+// Model: qwen35_moe @ /mnt/nas1/hf/Qwen3.5-35B-A3B (built-in 1-layer MTP)
+// NOTE: the /batch_infer prompt_batch(3) request was removed on this branch.
+//       That endpoint packs several prompts into one request; under MTP target
+//       verify it traps in
+//       decode_add_fusedQKV_bias_transpose_with_rope_cache_kernel.
+//       This is specific to the /batch_infer input layout: production serves
+//       /v1/chat/completions with rtp_llm_query_batch_size=1 per stream and
+//       rtp_llm_generate_batch_size=10 (capture sizes up to 64) with no errors,
+//       so multi-stream decode batching is fine. Root cause on the
+//       /batch_infer path is not established yet.
+{
+    "model_type": "qwen35_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s1"
+                    }
+                ],
+                "max_tokens": 30,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Here's a thinking process that leads to the explanation of the CAP Theorem:\n\n1.  **Deconstruct the Request:**\n    *  ",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 16,
+                    "total_tokens": 46,
+                    "completion_tokens": 30
+                }
+            }
+        }
+    ]
+}

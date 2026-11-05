@@ -9,7 +9,7 @@ mkdir -p "$output_dir"
     git status --short
     uname -a
     java -version
-} > "$output_dir/environment.txt" 2>&1
+} >"$output_dir/environment.txt" 2>&1
 status=0
 for mode in BATCH NON_BATCH; do
     decision=FIXED_WINDOW
@@ -27,10 +27,10 @@ for mode in BATCH NON_BATCH; do
         "-Dflexlb.perf.engine-matrix-warmup-ms=${FLEXLB_PERF_WARMUP_MS:-10000}" \
         -Dflexlb.perf.engine-matrix-warmup-requests-per-prefill=16 \
         -Dflexlb.perf.engine-matrix-min-qps-ratio=0.98 \
-        test > "$output_dir/$mode.log" 2>&1; then
-        echo 0 > "$output_dir/$mode.exit"
+        test >"$output_dir/$mode.log" 2>&1; then
+        echo 0 >"$output_dir/$mode.exit"
     else
-        echo "$?" > "$output_dir/$mode.exit"
+        echo "$?" >"$output_dir/$mode.exit"
         status=1
     fi
     # Run the other mode even when one mode fails its throughput/latency gate.

@@ -73,6 +73,9 @@ struct MallocInfo {
     // Lets the state machine feed the publish-time value instead of racing with the async worker.
     int incr_seq_len_override = -1;
 
+    // Initial chunk admission reserves fixed sparse banks for this maximum grant.
+    int max_chunk_tokens = 0;
+
     int incrSeqLen() const;
 };
 
@@ -117,11 +120,11 @@ struct MallocResult {
 
     // Lower-tier reuse is published only after async_context completes.
 
-    int64_t match_end_time_us          = 0;
-    int64_t malloc_begin_time_us       = 0;
-    int64_t load_prepare_latency_us    = 0;
-    int64_t block_aligned_input_length = 0;
-    bool    load_attempted             = false;
+    int64_t match_end_time_us       = 0;
+    int64_t malloc_begin_time_us    = 0;
+    int64_t load_prepare_latency_us = 0;
+    int64_t device_input_length     = 0;
+    bool    load_attempted          = false;
 };
 
 struct FreeInfo {

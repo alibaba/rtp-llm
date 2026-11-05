@@ -55,8 +55,7 @@ class CacheEvictionControlTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BASE_PORT = 63900;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private ScheduledExecutorService scheduler;
     private MockControlServer controlServer;
@@ -123,8 +122,17 @@ class CacheEvictionControlTest {
         assertTrue(idle.get("cache_key_set").isArray(), "cache_key_set must always be present");
         assertEquals(0, idle.get("cache_key_set").size());
 
-        enqueue(prefill, batch(9600, slot(0, inputWithBlockKeys(
-                9601, 10, decode.getGrpcPort(), List.of(101L, 102L, 103L)))));
+        enqueue(
+                prefill,
+                batch(
+                        9600,
+                        slot(
+                                0,
+                                inputWithBlockKeys(
+                                        9601,
+                                        10,
+                                        decode.getGrpcPort(),
+                                        List.of(101L, 102L, 103L)))));
         awaitCompleted(decode, 1, 10_000);
         awaitEngineCacheKeys("prefill-0", 3, 10_000);
         awaitEngineCacheKeys("decode-0", 3, 10_000);
@@ -158,28 +166,42 @@ class CacheEvictionControlTest {
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
 
-        enqueue(prefill, batch(9610, slot(0, inputWithBlockKeys(
-                9611, 10, decode.getGrpcPort(), List.of(201L, 202L)))));
+        enqueue(
+                prefill,
+                batch(
+                        9610,
+                        slot(
+                                0,
+                                inputWithBlockKeys(
+                                        9611, 10, decode.getGrpcPort(), List.of(201L, 202L)))));
         awaitCompleted(decode, 1, 10_000);
         awaitEngineCacheKeys("prefill-0", 2, 10_000);
 
         long versionAfterAdmit = cacheStatus(prefill).getVersion();
         long evictionsBefore = engineByName("prefill-0").get("cache_evictions").asLong();
 
-        HttpResponse<String> response = httpPostResponse(controlServer.getPort(), "/cache_evict",
-                "{\"engine\":\"prefill-0\",\"keys\":[201]}");
+        HttpResponse<String> response =
+                httpPostResponse(
+                        controlServer.getPort(),
+                        "/cache_evict",
+                        "{\"engine\":\"prefill-0\",\"keys\":[201]}");
         assertEquals(200, response.statusCode());
         JsonNode body = MAPPER.readTree(response.body());
         assertEquals("ok", body.get("status").asText());
         assertEquals("prefill-0", body.get("engine").asText());
-        assertTrue(body.get("changed").asBoolean(), "evicting an admitted key must report changed=true");
+        assertTrue(
+                body.get("changed").asBoolean(),
+                "evicting an admitted key must report changed=true");
 
         // The version bump is the master-side sync premise: the next
         // getCacheStatus poll sees a NEW version and re-pulls the key set.
         EngineRpcService.CacheStatusPB status = cacheStatus(prefill);
-        assertEquals(versionAfterAdmit + 1, status.getVersion(),
+        assertEquals(
+                versionAfterAdmit + 1,
+                status.getVersion(),
                 "evict must bump cacheVersion exactly once");
-        assertFalse(status.getCacheKeysMap().containsKey(201L),
+        assertFalse(
+                status.getCacheKeysMap().containsKey(201L),
                 "evicted key must disappear from the master-facing cache status");
         assertTrue(status.getCacheKeysMap().containsKey(202L));
 
@@ -197,15 +219,24 @@ class CacheEvictionControlTest {
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
 
-        enqueue(prefill, batch(9620, slot(0, inputWithBlockKeys(
-                9621, 10, decode.getGrpcPort(), List.of(301L, 302L)))));
+        enqueue(
+                prefill,
+                batch(
+                        9620,
+                        slot(
+                                0,
+                                inputWithBlockKeys(
+                                        9621, 10, decode.getGrpcPort(), List.of(301L, 302L)))));
         awaitCompleted(decode, 1, 10_000);
         awaitEngineCacheKeys("prefill-0", 2, 10_000);
 
         // First evict: changed=true, version +1.
         long versionBefore = cacheStatus(prefill).getVersion();
-        HttpResponse<String> first = httpPostResponse(controlServer.getPort(), "/cache_evict",
-                "{\"engine\":\"prefill-0\",\"keys\":[301]}");
+        HttpResponse<String> first =
+                httpPostResponse(
+                        controlServer.getPort(),
+                        "/cache_evict",
+                        "{\"engine\":\"prefill-0\",\"keys\":[301]}");
         assertEquals(200, first.statusCode());
         assertTrue(MAPPER.readTree(first.body()).get("changed").asBoolean());
         long versionAfterFirst = cacheStatus(prefill).getVersion();
@@ -213,8 +244,11 @@ class CacheEvictionControlTest {
 
         // Re-evicting the same key: no-op — changed=false, NO version bump,
         // so the master's cache-status poll never re-syncs on a stale evict.
-        HttpResponse<String> second = httpPostResponse(controlServer.getPort(), "/cache_evict",
-                "{\"engine\":\"prefill-0\",\"keys\":[301]}");
+        HttpResponse<String> second =
+                httpPostResponse(
+                        controlServer.getPort(),
+                        "/cache_evict",
+                        "{\"engine\":\"prefill-0\",\"keys\":[301]}");
         assertEquals(200, second.statusCode());
         JsonNode secondBody = MAPPER.readTree(second.body());
         assertFalse(secondBody.get("changed").asBoolean());
@@ -222,13 +256,19 @@ class CacheEvictionControlTest {
         assertEquals(versionAfterFirst, cacheStatus(prefill).getVersion());
 
         // Unknown keys and the empty array are no-ops too.
-        HttpResponse<String> unknown = httpPostResponse(controlServer.getPort(), "/cache_evict",
-                "{\"engine\":\"prefill-0\",\"keys\":[999, 1000]}");
+        HttpResponse<String> unknown =
+                httpPostResponse(
+                        controlServer.getPort(),
+                        "/cache_evict",
+                        "{\"engine\":\"prefill-0\",\"keys\":[999, 1000]}");
         assertEquals(200, unknown.statusCode());
         assertFalse(MAPPER.readTree(unknown.body()).get("changed").asBoolean());
 
-        HttpResponse<String> empty = httpPostResponse(controlServer.getPort(), "/cache_evict",
-                "{\"engine\":\"prefill-0\",\"keys\":[]}");
+        HttpResponse<String> empty =
+                httpPostResponse(
+                        controlServer.getPort(),
+                        "/cache_evict",
+                        "{\"engine\":\"prefill-0\",\"keys\":[]}");
         assertEquals(200, empty.statusCode());
         assertFalse(MAPPER.readTree(empty.body()).get("changed").asBoolean());
         assertEquals(versionAfterFirst, cacheStatus(prefill).getVersion());
@@ -240,30 +280,61 @@ class CacheEvictionControlTest {
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
 
-        enqueue(prefill, batch(9630, slot(0, inputWithBlockKeys(
-                9631, 10, decode.getGrpcPort(), List.of(401L, 402L)))));
+        enqueue(
+                prefill,
+                batch(
+                        9630,
+                        slot(
+                                0,
+                                inputWithBlockKeys(
+                                        9631, 10, decode.getGrpcPort(), List.of(401L, 402L)))));
         awaitCompleted(decode, 1, 10_000);
         awaitEngineCacheKeys("prefill-0", 2, 10_000);
         awaitEngineCacheKeys("decode-0", 2, 10_000);
 
         // Missing 'keys' -> 400.
-        assertEquals(400, httpPostResponse(controlServer.getPort(), "/cache_evict",
-                "{\"engine\":\"prefill-0\"}").statusCode());
+        assertEquals(
+                400,
+                httpPostResponse(
+                                controlServer.getPort(),
+                                "/cache_evict",
+                                "{\"engine\":\"prefill-0\"}")
+                        .statusCode());
         // 'keys' not an array -> 400.
-        assertEquals(400, httpPostResponse(controlServer.getPort(), "/cache_evict",
-                "{\"engine\":\"prefill-0\",\"keys\":401}").statusCode());
+        assertEquals(
+                400,
+                httpPostResponse(
+                                controlServer.getPort(),
+                                "/cache_evict",
+                                "{\"engine\":\"prefill-0\",\"keys\":401}")
+                        .statusCode());
         // Non-integer entry -> 400 (Jackson would otherwise coerce to 0).
-        assertEquals(400, httpPostResponse(controlServer.getPort(), "/cache_evict",
-                "{\"engine\":\"prefill-0\",\"keys\":[401,\"abc\"]}").statusCode());
+        assertEquals(
+                400,
+                httpPostResponse(
+                                controlServer.getPort(),
+                                "/cache_evict",
+                                "{\"engine\":\"prefill-0\",\"keys\":[401,\"abc\"]}")
+                        .statusCode());
         // Unknown engine -> 404; no engine/port -> 400 (dual addressing).
-        assertEquals(404, httpPostResponse(controlServer.getPort(), "/cache_evict",
-                "{\"engine\":\"prefill-99\",\"keys\":[401]}").statusCode());
-        assertEquals(400, httpPostResponse(controlServer.getPort(), "/cache_evict",
-                "{\"keys\":[401]}").statusCode());
+        assertEquals(
+                404,
+                httpPostResponse(
+                                controlServer.getPort(),
+                                "/cache_evict",
+                                "{\"engine\":\"prefill-99\",\"keys\":[401]}")
+                        .statusCode());
+        assertEquals(
+                400,
+                httpPostResponse(controlServer.getPort(), "/cache_evict", "{\"keys\":[401]}")
+                        .statusCode());
 
         // Evicting on prefill-0 leaves decode-0's key set untouched.
-        HttpResponse<String> response = httpPostResponse(controlServer.getPort(), "/cache_evict",
-                "{\"engine\":\"prefill-0\",\"keys\":[401]}");
+        HttpResponse<String> response =
+                httpPostResponse(
+                        controlServer.getPort(),
+                        "/cache_evict",
+                        "{\"engine\":\"prefill-0\",\"keys\":[401]}");
         assertEquals(200, response.statusCode());
         assertTrue(MAPPER.readTree(response.body()).get("changed").asBoolean());
         assertEquals(1, engineByName("prefill-0").get("cache_key_set").size());
@@ -271,8 +342,11 @@ class CacheEvictionControlTest {
 
         // Port addressing (original Java scheme) hits the same engine, and
         // integral decimal strings parse as block keys (strict parsing).
-        HttpResponse<String> byPort = httpPostResponse(controlServer.getPort(), "/cache_evict",
-                "{\"port\":" + prefill.getGrpcPort() + ",\"keys\":[\"402\"]}");
+        HttpResponse<String> byPort =
+                httpPostResponse(
+                        controlServer.getPort(),
+                        "/cache_evict",
+                        "{\"port\":" + prefill.getGrpcPort() + ",\"keys\":[\"402\"]}");
         assertEquals(200, byPort.statusCode());
         assertTrue(MAPPER.readTree(byPort.body()).get("changed").asBoolean());
         assertEquals(0, engineByName("prefill-0").get("cache_key_set").size());
@@ -282,38 +356,56 @@ class CacheEvictionControlTest {
 
     private void startCluster() throws Exception {
         MockPerformanceModel model = MockEngineTestSupport.performanceModel(tempDir, "10", 0.1);
-        scheduler = Executors.newScheduledThreadPool(4, runnable -> {
-            Thread thread = new Thread(runnable, "mock-engine-scheduler");
-            thread.setDaemon(true);
-            return thread;
-        });
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        4,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "mock-engine-scheduler");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
         services = new ConcurrentHashMap<>();
         prefillServices = new ArrayList<>();
         decodeServices = new ArrayList<>();
 
         int port = BASE_PORT;
-        JavaMockEngineCluster.FastRpcService prefill = new JavaMockEngineCluster.FastRpcService(
-                "prefill-0", "127.0.0.1", "prefill",
-                EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                port, services, scheduler, model, 100,
-                new JavaMockEngineCluster.ClusterStats(),
-                JavaMockEngineCluster.DEFAULT_TOTAL_KV_TOKENS,
-                JavaMockEngineCluster.DEFAULT_DECODE_MAX_CONCURRENCY);
+        JavaMockEngineCluster.FastRpcService prefill =
+                new JavaMockEngineCluster.FastRpcService(
+                        "prefill-0",
+                        "127.0.0.1",
+                        "prefill",
+                        EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
+                        port,
+                        services,
+                        scheduler,
+                        model,
+                        100,
+                        new JavaMockEngineCluster.ClusterStats(),
+                        JavaMockEngineCluster.DEFAULT_TOTAL_KV_TOKENS,
+                        JavaMockEngineCluster.DEFAULT_DECODE_MAX_CONCURRENCY);
         services.put(port, prefill);
         prefillServices.add(prefill);
 
-        JavaMockEngineCluster.FastRpcService decode = new JavaMockEngineCluster.FastRpcService(
-                "decode-0", "127.0.0.1", "decode",
-                EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                port + 1, services, scheduler, model, 100,
-                new JavaMockEngineCluster.ClusterStats(),
-                JavaMockEngineCluster.DEFAULT_TOTAL_KV_TOKENS,
-                JavaMockEngineCluster.DEFAULT_DECODE_MAX_CONCURRENCY);
+        JavaMockEngineCluster.FastRpcService decode =
+                new JavaMockEngineCluster.FastRpcService(
+                        "decode-0",
+                        "127.0.0.1",
+                        "decode",
+                        EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
+                        port + 1,
+                        services,
+                        scheduler,
+                        model,
+                        100,
+                        new JavaMockEngineCluster.ClusterStats(),
+                        JavaMockEngineCluster.DEFAULT_TOTAL_KV_TOKENS,
+                        JavaMockEngineCluster.DEFAULT_DECODE_MAX_CONCURRENCY);
         services.put(port + 1, decode);
         decodeServices.add(decode);
 
-        controlServer = new MockControlServer(services, new ConcurrentHashMap<>(),
-                null, null, "127.0.0.1", 0);
+        controlServer =
+                new MockControlServer(
+                        services, new ConcurrentHashMap<>(), null, null, "127.0.0.1", 0);
         controlServer.start();
     }
 
@@ -326,17 +418,20 @@ class CacheEvictionControlTest {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
-        EngineRpcService.GenerateConfigPB.Builder config = EngineRpcService.GenerateConfigPB.newBuilder()
-                .setMaxNewTokens(1)
-                .setUniqueKey(uniqueKey)
-                .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
-                        .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE)
-                        .setRoleStr("DECODE")
-                        .setGrpcPort(decodePort)
-                        .build());
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(config.build());
+        EngineRpcService.GenerateConfigPB.Builder config =
+                EngineRpcService.GenerateConfigPB.newBuilder()
+                        .setMaxNewTokens(1)
+                        .setUniqueKey(uniqueKey)
+                        .addRoleAddrs(
+                                EngineRpcService.RoleAddrPB.newBuilder()
+                                        .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE)
+                                        .setRoleStr("DECODE")
+                                        .setGrpcPort(decodePort)
+                                        .build());
+        EngineRpcService.GenerateInputPB.Builder input =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(requestId)
+                        .setGenerateConfig(config.build());
         for (int token = 0; token < inputTokens; token++) {
             input.addTokenIds(token);
         }
@@ -344,14 +439,20 @@ class CacheEvictionControlTest {
     }
 
     /** gRPC getCacheStatus with needCacheKeys — the master-facing sync surface. */
-    private static EngineRpcService.CacheStatusPB cacheStatus(JavaMockEngineCluster.FastRpcService service) {
-        return unary(observer -> service.getCacheStatus(
-                EngineRpcService.CacheVersionPB.newBuilder().setNeedCacheKeys(true).build(),
-                observer));
+    private static EngineRpcService.CacheStatusPB cacheStatus(
+            JavaMockEngineCluster.FastRpcService service) {
+        return unary(
+                observer ->
+                        service.getCacheStatus(
+                                EngineRpcService.CacheVersionPB.newBuilder()
+                                        .setNeedCacheKeys(true)
+                                        .build(),
+                                observer));
     }
 
     private JsonNode engineByName(String name) throws Exception {
-        JsonNode engines = MAPPER.readTree(httpGet(controlServer.getPort(), "/snapshot")).get("engines");
+        JsonNode engines =
+                MAPPER.readTree(httpGet(controlServer.getPort(), "/snapshot")).get("engines");
         for (JsonNode engine : engines) {
             if (name.equals(engine.get("name").asText())) {
                 return engine;
@@ -362,7 +463,8 @@ class CacheEvictionControlTest {
     }
 
     /** Poll until the engine's cache_keys count reaches expected (admits are async). */
-    private void awaitEngineCacheKeys(String engineName, int expected, long timeoutMs) throws Exception {
+    private void awaitEngineCacheKeys(String engineName, int expected, long timeoutMs)
+            throws Exception {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         while (System.nanoTime() < deadline) {
             if (engineByName(engineName).get("cache_keys").asInt() >= expected) {
@@ -370,12 +472,18 @@ class CacheEvictionControlTest {
             }
             Thread.sleep(10);
         }
-        fail("timeout waiting for " + expected + " cache keys on " + engineName
-                + ", got " + engineByName(engineName).get("cache_keys").asInt());
+        fail(
+                "timeout waiting for "
+                        + expected
+                        + " cache keys on "
+                        + engineName
+                        + ", got "
+                        + engineByName(engineName).get("cache_keys").asInt());
     }
 
-    private void awaitCompleted(JavaMockEngineCluster.FastRpcService service,
-                                int expected, long timeoutMs) throws InterruptedException {
+    private void awaitCompleted(
+            JavaMockEngineCluster.FastRpcService service, int expected, long timeoutMs)
+            throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         while (System.nanoTime() < deadline) {
             if (service.getCompletedCount() >= expected) {
@@ -383,7 +491,12 @@ class CacheEvictionControlTest {
             }
             Thread.sleep(5);
         }
-        fail("timeout waiting for " + expected + " completions on port "
-                + service.getGrpcPort() + ", got " + service.getCompletedCount());
+        fail(
+                "timeout waiting for "
+                        + expected
+                        + " completions on port "
+                        + service.getGrpcPort()
+                        + ", got "
+                        + service.getCompletedCount());
     }
 }

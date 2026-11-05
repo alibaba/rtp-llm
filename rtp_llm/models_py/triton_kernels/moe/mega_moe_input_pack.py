@@ -8,8 +8,6 @@ directly into the final buffer instead of materializing temporary tensors.
 
 from __future__ import annotations
 
-import os
-
 import torch
 
 try:
@@ -552,12 +550,7 @@ def fused_pack_mega_moe_inputs_optimized(
         return
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
     block_k = triton.next_power_of_2(topk)
-    block_m_env = os.environ.get("MEGA_MOE_PACK_BLOCK_M")
-    block_m = int(block_m_env) if block_m_env is not None else (8 if T >= 2048 else 2)
-    if block_m not in (1, 2, 4, 8):
-        raise ValueError(
-            f"invalid MEGA_MOE_PACK_BLOCK_M={block_m}; expected 1, 2, 4, or 8"
-        )
+    block_m = 8 if T >= 2048 else 2
     grid = (triton.cdiv(T, block_m), triton.cdiv(D, 128))
     _pack_mega_moe_inputs_optimized_kernel[grid](
         x,
@@ -594,17 +587,8 @@ def fused_pack_mega_moe_inputs(
     out_indices: torch.Tensor,
     out_weights: torch.Tensor,
 ) -> None:
-    impl = os.environ.get("MEGA_MOE_INPUT_PACKER_IMPL", "optimized").lower()
-    if impl == "legacy":
-        return fused_pack_mega_moe_inputs_legacy(
-            x, weights, indices, out_fp8, out_sf, out_indices, out_weights
-        )
-    if impl == "optimized":
-        return fused_pack_mega_moe_inputs_optimized(
-            x, weights, indices, out_fp8, out_sf, out_indices, out_weights
-        )
-    raise ValueError(
-        f"invalid MEGA_MOE_INPUT_PACKER_IMPL={impl!r}; expected legacy|optimized"
+    return fused_pack_mega_moe_inputs_optimized(
+        x, weights, indices, out_fp8, out_sf, out_indices, out_weights
     )
 
 
@@ -663,17 +647,7 @@ def _validate_gate_pack_inputs(
 
 
 def _gate_pack_block_m(tokens: int) -> int:
-    value = os.environ.get("MEGA_MOE_PACK_BLOCK_M")
-    block_m = (
-        int(value)
-        if value is not None
-        else (8 if tokens >= 2048 else (4 if tokens >= 1024 else 2))
-    )
-    if block_m not in (1, 2, 4, 8):
-        raise ValueError(
-            f"invalid MEGA_MOE_PACK_BLOCK_M={block_m}; expected 1, 2, 4, or 8"
-        )
-    return block_m
+    return 8 if tokens >= 2048 else (4 if tokens >= 1024 else 2)
 
 
 def fused_pack_mega_moe_gate_inputs(

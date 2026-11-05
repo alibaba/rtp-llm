@@ -41,27 +41,33 @@ This project includes Maven Wrapper, so you don't need to install Maven separate
 #### Using Maven Wrapper (Recommended)
 
 **Unix/Linux/macOS:**
+
 ```bash
 ./mvnw clean package -DskipTests
 ```
 
 **Windows:**
+
 ```bash
 mvnw.cmd clean package -DskipTests
 ```
 
 #### Using System Maven
+
 ```bash
 mvn clean package -DskipTests
 ```
 
 #### Maven Wrapper Benefits
+
 - **Environment Consistency**: Ensures all developers use the same Maven version
 - **Simplified CI/CD**: No need to pre-install Maven in build environments
 - **Version Lock**: Project specifies the exact Maven version, avoiding compatibility issues
 
 #### Maven Wrapper Files
+
 The following Maven Wrapper files are included in the project (do not delete):
+
 ```
 ├── mvnw              # Unix/Linux/macOS script
 ├── mvnw.cmd          # Windows script
@@ -71,6 +77,43 @@ The following Maven Wrapper files are included in the project (do not delete):
         └── maven-wrapper.properties # Configuration file
 ```
 
+### Code Formatting
+
+FlexLB uses the repository-root [pre-commit](https://pre-commit.com/) configuration.
+Java is formatted with Spotless and google-java-format 1.28.0 (AOSP four-space style,
+preserving Javadoc layout); Python uses the repository's Black and isort versions.
+C/C++/CUDA files use the existing clang-format configuration; Protocol Buffers use
+clang-format's Google style. Shell scripts use shfmt. JavaScript, HTML, JSON, YAML,
+XML and Markdown use Prettier (with its official XML plugin).
+
+Enable the repository's Git hooks once per checkout (run from the repository root):
+
+```bash
+uv tool install pre-commit  # alternatively: pip install pre-commit
+git config --local core.hooksPath .githooks
+```
+
+Each `git commit` runs the formatters when matching files are staged. Java changes
+run `spotless:apply` across the FlexLB reactor; Spotless caches files that are already
+clean. The other formatters process staged files. If a formatter changes a file,
+review and stage the result, then commit again. Unstaged changes are preserved by pre-commit.
+Java formatting requires JDK 21; Maven is supplied by `mvnw`. The first run downloads
+the formatter dependencies. Compilation and tests remain separate build commands.
+
+To format all FlexLB code, run from the repository root:
+
+```bash
+git ls-files -z rtp_llm/flexlb | xargs -0 pre-commit run --files
+```
+
+To apply or check Java formatting across all Maven modules:
+
+```bash
+cd rtp_llm/flexlb
+./mvnw spotless:apply -Pspotless-check
+./mvnw spotless:check -Pspotless-check
+```
+
 ### Configuration
 
 `FLEXLB_CONFIG` is a required JSON environment variable. It configures scheduling,
@@ -78,21 +121,21 @@ delivery, routing, worker synchronization, and observability; file paths are not
 The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fields,
 `null`, scalar coercion, numeric enums, and trailing JSON fail startup.
 
-| Setting | Schema 3 behavior |
-| --- | --- |
-| `dispatcher.maxInflightPerPrefillWorker` | Positive integer, default 2 in every mode. BATCH counts batches; NON_BATCH / DIRECT count requests. |
-| `dispatcher.fetchAttachTimeoutMs` | Positive integer, default 3000 ms. BATCH sends this as Engine `fetch_attach_timeout_ms`, limiting the wait for `FetchResponse` attachment. Engine caps it by the remaining request timeout when present. Once attached, this timer does not limit generation duration. |
-| Prefill ownership | Work remains tracked until authoritative completion, safe rollback or retirement. PDFUSION has no distinct Prefill-completion signal, so its ownership lasts through request termination. |
-| `requestLifecycle.request.timeoutMs` | Required positive integer; maximum request inactivity in milliseconds, renewed by matching Engine request status. No default. |
-| `workerRegistry.health.cleanupIntervalMs` | Positive integer, default 3000 ms; scan interval for retiring workers whose status exceeds `statusStaleAfterMs`. |
-| `requestLifecycle.decision.lifetime` | Finite number ≥ 1, default 2.0. At delivery, remaining Prefill time (including waiting) × lifetime + 10000 ms sets the deadline. Only observed running predecessors consume elapsed time; unstarted work keeps its full estimate. Independent of request age. |
-| `scheduler.queueTimeoutMs` | QUEUE only, positive, default 3600000 ms; actual queue TTL. DIRECT has no queue timer and rejects this field. |
-| Removed capacity controls | `scheduler.capacity` and delivered-not-accepted count limits are removed. Per-Prefill concurrency uses the single dispatcher limit; lifetimes bound waiting. The old `maxUncachedTokens` field is rejected. |
-| Removed routing controls | Prefill candidate randomization/LRU and outlier filters, legacy Decode decay controls/outlier filters, and output-estimate truncation are rejected. |
-| `router.roles.decode.costEstimator.expression` | Default `kvcache_used_ratio`; smallest cost wins within the same availability tier. Using `max_running_size` requires a positive `availability.maxEngineRequests`. |
-| Transport timeout | `flexlb.engine-grpc.enqueue-timeout-ms`, default 5000; outside the scheduling JSON. |
-| `scheduler.ordering.preemption.timeoutMs` | Default 1000 ms, positive; Engine-owned Decode preemption only. Starts after the Cancel ACK phase and bounds the wait for the Engine terminal. ACK timeout stays internal, 50 ms. |
-| `scheduler.ordering.preemption.allowedVictimStages` | PRIORITY defaults to all three stages: `PREFILL_QUEUED`, `DECODE_RESERVED`, `DECODE_ENGINE_OWNED`, including when `preemption` is omitted. An explicit non-empty list replaces the defaults. |
+| Setting                                             | Schema 3 behavior                                                                                                                                                                                                                                                      |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dispatcher.maxInflightPerPrefillWorker`            | Positive integer, default 2 in every mode. BATCH counts batches; NON_BATCH / DIRECT count requests.                                                                                                                                                                    |
+| `dispatcher.fetchAttachTimeoutMs`                   | Positive integer, default 3000 ms. BATCH sends this as Engine `fetch_attach_timeout_ms`, limiting the wait for `FetchResponse` attachment. Engine caps it by the remaining request timeout when present. Once attached, this timer does not limit generation duration. |
+| Prefill ownership                                   | Work remains tracked until authoritative completion, safe rollback or retirement. PDFUSION has no distinct Prefill-completion signal, so its ownership lasts through request termination.                                                                              |
+| `requestLifecycle.request.timeoutMs`                | Required positive integer; maximum request inactivity in milliseconds, renewed by matching Engine request status. No default.                                                                                                                                          |
+| `workerRegistry.health.cleanupIntervalMs`           | Positive integer, default 3000 ms; scan interval for retiring workers whose status exceeds `statusStaleAfterMs`.                                                                                                                                                       |
+| `requestLifecycle.decision.lifetime`                | Finite number ≥ 1, default 2.0. At delivery, remaining Prefill time (including waiting) × lifetime + 10000 ms sets the deadline. Only observed running predecessors consume elapsed time; unstarted work keeps its full estimate. Independent of request age.          |
+| `scheduler.queueTimeoutMs`                          | QUEUE only, positive, default 3600000 ms; actual queue TTL. DIRECT has no queue timer and rejects this field.                                                                                                                                                          |
+| Removed capacity controls                           | `scheduler.capacity` and delivered-not-accepted count limits are removed. Per-Prefill concurrency uses the single dispatcher limit; lifetimes bound waiting. The old `maxUncachedTokens` field is rejected.                                                            |
+| Removed routing controls                            | Prefill candidate randomization/LRU and outlier filters, legacy Decode decay controls/outlier filters, and output-estimate truncation are rejected.                                                                                                                    |
+| `router.roles.decode.costEstimator.expression`      | Default `kvcache_used_ratio`; smallest cost wins within the same availability tier. Using `max_running_size` requires a positive `availability.maxEngineRequests`.                                                                                                     |
+| Transport timeout                                   | `flexlb.engine-grpc.enqueue-timeout-ms`, default 5000; outside the scheduling JSON.                                                                                                                                                                                    |
+| `scheduler.ordering.preemption.timeoutMs`           | Default 1000 ms, positive; Engine-owned Decode preemption only. Starts after the Cancel ACK phase and bounds the wait for the Engine terminal. ACK timeout stays internal, 50 ms.                                                                                      |
+| `scheduler.ordering.preemption.allowedVictimStages` | PRIORITY defaults to all three stages: `PREFILL_QUEUED`, `DECODE_RESERVED`, `DECODE_ENGINE_OWNED`, including when `preemption` is omitted. An explicit non-empty list replaces the defaults.                                                                           |
 
 The request timeout below is an explicit workload value; decision lifetime 2.0 is the default:
 
@@ -128,14 +171,14 @@ Omit `router.roles.decode.costEstimator` to balance by KV usage ratio. Set its
 ```json
 {
   "schemaVersion": 3,
-  "requestLifecycle": {"request": {"timeoutMs": 60000}},
+  "requestLifecycle": { "request": { "timeoutMs": 60000 } },
   "router": {
     "roles": {
       "decode": {
         "costEstimator": {
           "expression": "0.3 * running_size / max_running_size + 0.7 * kvcache_used_ratio"
         },
-        "availability": {"maxEngineRequests": 128}
+        "availability": { "maxEngineRequests": 128 }
       }
     }
   }
@@ -205,9 +248,12 @@ Local file discovery uses `MODEL_SERVICE_CONFIG.discovery_file`, pointing to a
 JSON mapping of service domains to HTTP host:port lists. Production discovery
 providers continue to resolve their service domains.
 
-Master configuration uses `FLEXLB_CONFIG`, `MODEL_SERVICE_CONFIG`,
-`FLEXLB_SYNC_CONSISTENCY_CONFIG`, and `LOG_LEVEL`. Spring does not bind environment
-variables. Configure ports, RPC transport and logging with their standard
+Master configuration uses `FLEXLB_CONFIG` and `MODEL_SERVICE_CONFIG`.
+Leader election and logging are configured through `FLEXLB_CONFIG.consistency`
+and `FLEXLB_CONFIG.observability.logging`; the separate `FLEXLB_SYNC_CONSISTENCY_CONFIG`
+and `LOG_LEVEL` environment variables are no longer consumed. Spring binds environment
+variables to infrastructure properties, including `SERVER_PORT` and
+`FLEXLB_MONITOR_PROVIDER`. Ports, RPC transport and logging also accept standard
 command-line properties, such as `--server.port` and
 `--flexlb.engine-grpc.enqueue-timeout-ms`.
 HA currently retains `HIPPO_ROLE` as its existing election group identifier.
@@ -235,13 +281,13 @@ are destroyed. Normal idle serving does not start an exit timer.
 Under `QUEUE`, ordering, decision formation, and delivery are three independent
 axes:
 
-| Scheduler | Queue ordering | Decision | Dispatcher | Behavior |
-| --- | --- | --- | --- | --- |
-| `DIRECT` | not applicable | not applicable | `NON_BATCH` | Route immediately; the frontend sends the request |
-| `QUEUE` | `FIFO` | `SINGLE` | `NON_BATCH` | Form singleton decisions; frontend sends |
-| `QUEUE` | `FIFO` | `SINGLE` | `BATCH` | Master sends singleton `EnqueueBatch` calls |
-| `QUEUE` | `FIFO` | `FIXED_WINDOW` | `NON_BATCH` | Form bounded groups; frontend sends each routed request |
-| `QUEUE` | `FIFO` | `FIXED_WINDOW` | `BATCH` | Form bounded groups; Master sends `EnqueueBatch` |
+| Scheduler | Queue ordering | Decision       | Dispatcher  | Behavior                                                |
+| --------- | -------------- | -------------- | ----------- | ------------------------------------------------------- |
+| `DIRECT`  | not applicable | not applicable | `NON_BATCH` | Route immediately; the frontend sends the request       |
+| `QUEUE`   | `FIFO`         | `SINGLE`       | `NON_BATCH` | Form singleton decisions; frontend sends                |
+| `QUEUE`   | `FIFO`         | `SINGLE`       | `BATCH`     | Master sends singleton `EnqueueBatch` calls             |
+| `QUEUE`   | `FIFO`         | `FIXED_WINDOW` | `NON_BATCH` | Form bounded groups; frontend sends each routed request |
+| `QUEUE`   | `FIFO`         | `FIXED_WINDOW` | `BATCH`     | Form bounded groups; Master sends `EnqueueBatch`        |
 
 `PRIORITY` can replace `FIFO` in all four QUEUE combinations. `DIRECT + BATCH`
 is invalid and DIRECT cannot configure `decision`. `FIFO`/`PRIORITY` choose which
@@ -294,13 +340,13 @@ which defaults to `kvcache_used_ratio`. Formulas support `+`, `-`, `*`, `/`, `^`
 parentheses and `sqrt`, `log`, `exp`, `abs`, `max`, `min`, `pow`, and `param(name, initialValue)` functions.
 Decode formulas do not use `sum`. Available variables are:
 
-| Variable | Meaning |
-| --- | --- |
-| `running_size` | Engine-owned requests, including accepted and running requests, plus local request reservations |
-| `max_running_size` | Fixed `router.roles.decode.availability.maxEngineRequests`; must be configured as a positive value when the expression uses this variable |
-| `kvcache_used` | Used KV tokens plus local predicted KV reservations |
-| `kvcache_capacity` | Total KV token capacity |
-| `kvcache_used_ratio` | `kvcache_used / kvcache_capacity`; zero for unknown capacity of zero, without capping ratios above one |
+| Variable             | Meaning                                                                                                                                   |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `running_size`       | Engine-owned requests, including accepted and running requests, plus local request reservations                                           |
+| `max_running_size`   | Fixed `router.roles.decode.availability.maxEngineRequests`; must be configured as a positive value when the expression uses this variable |
+| `kvcache_used`       | Used KV tokens plus local predicted KV reservations                                                                                       |
+| `kvcache_capacity`   | Total KV token capacity                                                                                                                   |
+| `kvcache_used_ratio` | `kvcache_used / kvcache_capacity`; zero for unknown capacity of zero, without capping ratios above one                                    |
 
 Request and KV measurements include queued reservations and ownership retained during preemption.
 Equal costs rotate. Workers with a non-finite formula result are excluded from the preferred
@@ -328,11 +374,13 @@ The service will start on port 7002 with management endpoints on port 8804.
 ## API Documentation
 
 ### Health Check
+
 ```
 GET /actuator/health
 ```
 
 ### Load Balance Status Sync
+
 ```
 POST /load-balance/prefill/consistency/syncStatus
 Content-Type: application/json
@@ -344,6 +392,7 @@ Authorization: Bearer <token>
 ```
 
 ### Master Notification
+
 ```
 POST /load-balance/prefill/consistency/notifyMaster
 Content-Type: application/json

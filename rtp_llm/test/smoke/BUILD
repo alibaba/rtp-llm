@@ -1,4 +1,4 @@
-load(":defs.bzl", "custom_smoke_test", "smoke_test")
+load(":defs.bzl", "SMOKE_FRAMEWORK_DEPS", "custom_smoke_test", "smoke_test")
 package(default_visibility = ["//visibility:public"])
 
 # Framework source files for cross-package smoke tests.
@@ -36,6 +36,15 @@ py_test(
         "//rtp_llm:tiktoken",
         "//rtp_llm:uvicorn",
     ],
+)
+
+py_test(
+    name = "remote_cache_cleanup_test",
+    srcs = glob(["*.py"], exclude = ["entry.py"]),
+    main = "remote_cache_cleanup_test.py",
+    imports = [".."],
+    env = {"GPU_COUNT": "0"},
+    deps = SMOKE_FRAMEWORK_DEPS,
 )
 
 py_test(
@@ -85,6 +94,7 @@ load("//rtp_llm/test/smoke:suites_sm100.bzl", "sm100_suites")
 load("//rtp_llm/test/smoke:suites_sm120.bzl", "sm120_suites")
 load("//rtp_llm/test/smoke:suites_rocm_oss.bzl", "rocm_oss_suites")
 load("//rtp_llm/test/smoke:suites_remote_cache.bzl", "remote_cache_suites")
+load("//rtp_llm/test/smoke:suites_ppu.bzl", "ppu_suites")
 
 h20_oss_suites()
 cuda13_suites()
@@ -93,10 +103,10 @@ sm100_suites()
 sm120_suites()
 rocm_oss_suites()
 remote_cache_suites()
+ppu_suites()
 
 # ============================================================================
-# Top-level CI suites (OSS tests only)
-# Internal-only tests live in //internal_source/rtp_llm/test/smoke:maga_model_smoke_internal{_light}
+# Top-level CI suites (OSS plus public PPU tests)
 # ============================================================================
 
 test_suite(
@@ -106,6 +116,7 @@ test_suite(
         ":smoke_h20_eagle",
         ":smoke_sm8x_basic",
         ":smoke_sm120_basic",
+        ":smoke_ppu_basic",
     ],
 )
 
@@ -131,6 +142,9 @@ test_suite(
         ":smoke_sm100_moe",
         ":smoke_sm120_dense",
         ":smoke_sm120_moe",
+        ":smoke_ppu_pd",
+        ":smoke_ppu_qwen35_basic",
+        ":smoke_ppu_qwen35_func",
     ],
 )
 
@@ -169,6 +183,7 @@ custom_smoke_test(
     smoke_args = "--tp_size 2 --ep_size 2 --dp_size 1 --world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --reuse_cache 1 --load_method fastsafetensors --reserver_runtime_mem_mb 24576 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --sp_type dspark --sp_model_type deepseek_v41_dspark --sp_act_type BF16 --gen_num_per_cycle 3",
     gpu_type = ["SM100_ARM_CU13"],
     tags = ["dsv41_cuda13", "model_contract", "pd_contract", "dspark_contract"],
+    test_envs = {"RTP_TEST_WATCHDOG_SECONDS": "3600"},
     data = [
         "//rtp_llm:sdk",
         "data/model/deepseek_v41/full_feature_cp2_dp2.json",

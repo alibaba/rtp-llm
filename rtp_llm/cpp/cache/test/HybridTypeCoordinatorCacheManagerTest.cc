@@ -55,7 +55,7 @@ public:
         return cv_.wait_for(lock, timeout, [this] { return entered_; });
     }
 
-    void release() {
+    void release(ErrorInfo error = ErrorInfo::OkStatus()) {
         std::vector<PendingSubmit> pending;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -64,6 +64,10 @@ public:
             cv_.notify_all();
         }
         for (auto& submit : pending) {
+            if (!error.ok()) {
+                submit.context->complete(error);
+                continue;
+            }
             auto context = PerRankBlockTransferEngine::execute(std::move(submit.task));
             context->waitDone();
             submit.context->complete(context->result());
@@ -1089,31 +1093,31 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, GetNeedBlocksUsesGroupGetNeedBlock
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/2, /*seq_length=*/12, /*seq_size_per_block=*/4);
     token_ids->setReserveStep(2);
 
-    // Reuse disabled: linear group keeps only tail for common blocks; reserve_step contributes extra blocks.
-    // full group contributes common=3, extra=1.
+    // Reuse disabled: linear group keeps only tail for common blocks; decode reserve does not affect the Linear prefill
+    // allocation. full group contributes common=3, extra=1.
     {
         auto       batch_res = makeBatchResource(/*batch_size=*/2, config, CacheKeysType{100, 101, 102, 103});
         MallocInfo info{batch_res, token_ids};
         info.enable_cache_lookup = false;
         info.reuse_cache         = false;
         // common_total = full(3) + linear(1) = 4
-        // extra_total  = full(1) + linear(reserve_step-1=1) = 2
-        // total = 4 + 2*2 = 8
-        EXPECT_EQ(allocator->getNeedBlocks(info), 8);
+        // extra_total  = full(1) + linear(0) = 1
+        // total = 4 + 2*1 = 6
+        EXPECT_EQ(allocator->getNeedBlocks(info), 6);
     }
 
-    // Reuse enabled but no existing blocks: linear group uses sparse counting from begin=0.
+    // Reuse enabled but no existing blocks: linear group uses configured last n.
     {
         auto       batch_res = makeBatchResource(/*batch_size=*/2, config, CacheKeysType{100, 101, 102, 103});
         MallocInfo info{batch_res, token_ids};
         info.enable_cache_lookup = true;
         info.reuse_cache         = true;
         // full: common=3 extra=1
-        // linear: common=count(0,3]=2, extra=reserve_step-1(=1)
+        // linear: common=2, extra=0
         // common_total = 3 + 2 = 5
-        // extra_total  = 1 + 1 = 2
-        // total = 5 + 2*2 = 9
-        EXPECT_EQ(allocator->getNeedBlocks(info), 9);
+        // extra_total  = 1 + 0 = 1
+        // total = 5 + 2*1 = 7
+        EXPECT_EQ(allocator->getNeedBlocks(info), 7);
     }
 }
 
@@ -1263,88 +1267,135 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, TieredJoinedLoadMapsTargetsAcrossF
 }
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, DeviceLoadSourceMatchRefBecomesRequestRef) {
-    auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    for (bool fail_load : {false, true}) {
+        SCOPED_TRACE(fail_load);
+        auto config      = makeTinyHybridConfig();
+        setGroupBlockCounts(config, 32, 32);
+        auto allocator   = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
 
-    KVCacheConfig tiered_config;
-    tiered_config.enable_memory_cache  = true;
-    tiered_config.memory_cache_size_mb = 1;
-    allocator->setBlockTreeCacheConfigForTest(std::move(tiered_config));
-    ASSERT_TRUE(allocator->init());
+        KVCacheConfig tiered_config;
+        tiered_config.enable_memory_cache  = true;
+        tiered_config.memory_cache_size_mb = 1;
+        allocator->setBlockTreeCacheConfigForTest(std::move(tiered_config));
+        ASSERT_TRUE(allocator->init());
 
-    const auto& cache = allocator->blockTreeCacheOwner();
-    ASSERT_NE(cache, nullptr);
-
-    const CacheKeysType                                                         cached_keys{100, 101};
-    std::vector<std::vector<GroupSetResource>>                                  slots(cached_keys.size(),
-                                                     std::vector<GroupSetResource>(cache->groupSets().size()));
-    std::vector<std::pair<GroupSetPtr, block_tree_cache_test::MultiNodeBlocks>> device_resources;
-    for (const GroupSetPtr& group_set : cache->groupSets()) {
-        const size_t group_set_id = group_set->groupSetId();
-        if (group_set->groupType() == CacheGroupType::FULL) {
-            auto blocks = block_tree_cache_test::allocateDeviceBlocksForTest(*group_set, cached_keys.size());
-            ASSERT_EQ(blocks.size(), cached_keys.size());
-            for (size_t path_index = 0; path_index < cached_keys.size(); ++path_index) {
-                slots[path_index][group_set_id].device_blocks = blocks[path_index];
+        const auto& cache = allocator->blockTreeCacheOwner();
+        ASSERT_NE(cache, nullptr);
+        const CacheKeysType                                                         cached_keys{100, 101};
+        std::vector<std::vector<GroupSetResource>>                                  slots(cached_keys.size(),
+                                                         std::vector<GroupSetResource>(cache->groupSets().size()));
+        std::vector<std::pair<GroupSetPtr, block_tree_cache_test::MultiNodeBlocks>> device_resources;
+        for (const GroupSetPtr& group_set : cache->groupSets()) {
+            const size_t group_set_id = group_set->groupSetId();
+            if (group_set->groupType() == CacheGroupType::FULL) {
+                auto blocks = block_tree_cache_test::allocateDeviceBlocksForTest(*group_set, cached_keys.size());
+                ASSERT_EQ(blocks.size(), cached_keys.size());
+                for (size_t path_index = 0; path_index < cached_keys.size(); ++path_index) {
+                    slots[path_index][group_set_id].device_blocks = blocks[path_index];
+                }
+                device_resources.emplace_back(group_set, std::move(blocks));
+            } else {
+                ASSERT_NE(group_set->hostPool(), nullptr);
+                for (size_t path_index = 0; path_index < cached_keys.size(); ++path_index) {
+                    const BlockIdxType source_block =
+                        group_set->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+                    ASSERT_FALSE(isNullBlockIdx(source_block));
+                    ASSERT_NO_FATAL_FAILURE(initializeHostBlock(*cache, *group_set, source_block));
+                    slots[path_index][group_set_id].host_block = source_block;
+                }
             }
-            device_resources.emplace_back(group_set, std::move(blocks));
+        }
+        ASSERT_EQ(device_resources.size(), 1u);
+        ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, cached_keys, slots));
+        for (const auto& [group_set, blocks] : device_resources) {
+            block_tree_cache_test::unreferenceDeviceBlocksForTest(*group_set, blocks);
+        }
+
+        auto transfer_engine = std::make_shared<PausableHybridPerRankBlockTransferEngine>(cache->groupSets());
+        cache->transfer_dispatcher_->per_rank_engine_ = transfer_engine;
+        ScopedHybridTransferRelease transfer_release(transfer_engine);
+
+        const CacheKeysType request_keys{100, 101, 102};
+        auto                request_resource = makeBatchResource(/*batch_size=*/1, config, request_keys);
+        auto       request_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/9, /*seq_size_per_block=*/4);
+        MallocInfo malloc_info{request_resource, request_tokens};
+        malloc_info.enable_cache_lookup = true;
+        malloc_info.reuse_cache         = true;
+
+        MallocResult malloc_result = allocator->malloc(malloc_info);
+        ASSERT_TRUE(malloc_result.success);
+        const auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(malloc_result.async_context);
+        ASSERT_NE(load_context, nullptr);
+        ASSERT_TRUE(transfer_engine->waitUntilEnteredFor(std::chrono::seconds(5)));
+
+        size_t device_source_descs = 0;
+        for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
+            const TransferDescriptor& desc = load_context->loadDescs()[desc_index];
+            if (desc.source_tier != Tier::DEVICE || load_context->joinedLoads()[desc_index]) {
+                continue;
+            }
+            ++device_source_descs;
+            const GroupSetPtr& group_set = cache->groupSets()[desc.group_set_id];
+            ASSERT_EQ(desc.source_blocks.size(), group_set->devicePools().size());
+            for (size_t member_group_id = 0; member_group_id < desc.source_blocks.size(); ++member_group_id) {
+                EXPECT_EQ(group_set->devicePools()[member_group_id]->refCount(desc.source_blocks[member_group_id]), 2u);
+            }
+        }
+        EXPECT_EQ(device_source_descs, cached_keys.size());
+
+        if (fail_load) {
+            // A second request joins the pending host load, sharing its device target.
+            auto       joined_resource = makeBatchResource(/*batch_size=*/1, config, request_keys);
+            MallocInfo joined_info{joined_resource, request_tokens};
+            joined_info.enable_cache_lookup = true;
+            joined_info.reuse_cache         = true;
+            auto joined_result              = allocator->malloc(joined_info);
+            ASSERT_TRUE(joined_result.success);
+            auto joined_context = std::dynamic_pointer_cast<LoadAsyncContext>(joined_result.async_context);
+            ASSERT_NE(joined_context, nullptr);
+            ASSERT_TRUE(std::any_of(joined_context->joinedLoads().begin(),
+                                    joined_context->joinedLoads().end(),
+                                    [](bool joined) { return joined; }));
+
+            // Model a recoverable TE queue timeout before any copy is submitted.
+            transfer_engine->release(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired in TE worker queue"));
+            load_context->waitDone();
+            joined_context->waitDone();
+            ASSERT_FALSE(load_context->success());
+            ASSERT_FALSE(joined_context->success());
+            ASSERT_EQ(malloc_result.reuse_len, 0);
+            ASSERT_TRUE(allocator->detachSharedBlocksForRecompute(request_resource, malloc_result.reuse_len));
+            ASSERT_TRUE(allocator->detachSharedBlocksForRecompute(joined_resource, joined_result.reuse_len));
+            for (const auto& group : config.groupTags()) {
+                const auto& blocks = request_resource->blocks(0, group);
+                for (size_t pos = 0; pos < blocks.size(); ++pos) {
+                    if (!isNullBlockIdx(blocks[pos])) {
+                        EXPECT_NE(blocks[pos], joined_resource->blocks(0, group)[pos]);
+                    }
+                }
+            }
+            // Neither recomputing request may still use the FULL group's cached suffix.
+            for (const auto& [group_set, blocks] : device_resources) {
+                for (const auto& node_blocks : blocks) {
+                    for (size_t member = 0; member < node_blocks.size(); ++member) {
+                        EXPECT_EQ(group_set->devicePools()[member]->refCount(node_blocks[member]), 1u);
+                    }
+                }
+            }
+            allocator->free(FreeInfo{joined_resource, request_tokens});
         } else {
-            ASSERT_NE(group_set->hostPool(), nullptr);
-            for (size_t path_index = 0; path_index < cached_keys.size(); ++path_index) {
-                const BlockIdxType source_block = group_set->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
-                ASSERT_FALSE(isNullBlockIdx(source_block));
-                ASSERT_NO_FATAL_FAILURE(initializeHostBlock(*cache, *group_set, source_block));
-                slots[path_index][group_set_id].host_block = source_block;
-            }
+            transfer_engine->release();
+            load_context->waitDone();
+            ASSERT_TRUE(load_context->success());
         }
-    }
-    ASSERT_EQ(device_resources.size(), 1u);
-    ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, cached_keys, slots));
-    for (const auto& [group_set, blocks] : device_resources) {
-        block_tree_cache_test::unreferenceDeviceBlocksForTest(*group_set, blocks);
-    }
+        allocator->free(FreeInfo{request_resource, request_tokens});
 
-    auto transfer_engine = std::make_shared<PausableHybridPerRankBlockTransferEngine>(cache->groupSets());
-    cache->transfer_dispatcher_->per_rank_engine_ = transfer_engine;
-    ScopedHybridTransferRelease transfer_release(transfer_engine);
-
-    const CacheKeysType request_keys{100, 101, 102};
-    auto                request_resource = makeBatchResource(/*batch_size=*/1, config, request_keys);
-    auto       request_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/9, /*seq_size_per_block=*/4);
-    MallocInfo malloc_info{request_resource, request_tokens};
-    malloc_info.enable_cache_lookup = true;
-    malloc_info.reuse_cache         = true;
-
-    MallocResult malloc_result = allocator->malloc(malloc_info);
-    ASSERT_TRUE(malloc_result.success);
-    const auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(malloc_result.async_context);
-    ASSERT_NE(load_context, nullptr);
-    ASSERT_TRUE(transfer_engine->waitUntilEnteredFor(std::chrono::seconds(5)));
-
-    size_t device_source_descs = 0;
-    for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
-        const TransferDescriptor& desc = load_context->loadDescs()[desc_index];
-        if (desc.source_tier != Tier::DEVICE || load_context->joinedLoads()[desc_index]) {
-            continue;
-        }
-        ++device_source_descs;
-        const GroupSetPtr& group_set = cache->groupSets()[desc.group_set_id];
-        ASSERT_EQ(desc.source_blocks.size(), group_set->devicePools().size());
-        for (size_t member_group_id = 0; member_group_id < desc.source_blocks.size(); ++member_group_id) {
-            EXPECT_EQ(group_set->devicePools()[member_group_id]->refCount(desc.source_blocks[member_group_id]), 2u);
-        }
-    }
-    EXPECT_EQ(device_source_descs, cached_keys.size());
-
-    transfer_engine->release();
-    load_context->waitDone();
-    ASSERT_TRUE(load_context->success());
-    allocator->free(FreeInfo{request_resource, request_tokens});
-
-    for (const auto& [group_set, blocks] : device_resources) {
-        for (size_t path_index = 0; path_index < blocks.size(); ++path_index) {
-            for (size_t member_group_id = 0; member_group_id < blocks[path_index].size(); ++member_group_id) {
-                EXPECT_EQ(group_set->devicePools()[member_group_id]->refCount(blocks[path_index][member_group_id]), 1u);
+        for (const auto& [group_set, blocks] : device_resources) {
+            for (size_t path_index = 0; path_index < blocks.size(); ++path_index) {
+                for (size_t member_group_id = 0; member_group_id < blocks[path_index].size(); ++member_group_id) {
+                    EXPECT_EQ(group_set->devicePools()[member_group_id]->refCount(blocks[path_index][member_group_id]),
+                              1u);
+                }
             }
         }
     }
@@ -1458,7 +1509,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, DisableReuseKeepsOnlyLinearTailOnI
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
-    // Linear group should keep only the tail block across common length resources.
+    // Linear group should keep the one active tail block across common length resources.
     const auto& linear_out = batch_res->blocks(0, "linear");
     ASSERT_EQ(linear_out.size(), 3u);
     EXPECT_TRUE(isNullBlockIdx(linear_out[0]));
@@ -1506,7 +1557,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, DisableDeviceCacheSkipsReuseMatchA
     EXPECT_NE(full_out[1], full_blocks[1]);
     EXPECT_NE(full_out[2], full_blocks[2]);
 
-    // Linear group keeps only tail block (others NULL) when reuse is disabled.
+    // Linear group keeps the one active tail block (others NULL) when reuse is disabled.
     const auto& linear_out = batch_res->blocks(0, "linear");
     ASSERT_EQ(linear_out.size(), 3u);
     EXPECT_TRUE(isNullBlockIdx(linear_out[0]));
@@ -2019,6 +2070,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, InsertIntoCacheInsertsOnlyFullBloc
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, InsertIntoCachePreservesLinearHoleAndPublishesLaterState) {
     auto config    = makeTinyHybridConfig();
+    config.reuse_cache_tail_blocks = 10000;
     auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
@@ -2051,6 +2103,13 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, InsertIntoCachePreservesLinearHole
     EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup("linear", match.matched_device_resources),
               (BlockIndicesType{blocks[1]}));
     block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), match.matched_device_resources);
+
+    auto shorter_match = allocator->blockTreeCacheOwner()->match(CacheKeysType{100, 101});
+    EXPECT_EQ(shorter_match.matched_device_blocks, 1u);
+    EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup("linear", shorter_match.matched_device_resources),
+              (BlockIndicesType{blocks[0]}));
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(),
+                                                     shorter_match.matched_device_resources);
 
     linear_pool->decRef(linear_blocks);
     full_pool->decRef(full_blocks);
@@ -2213,9 +2272,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, IncrMallocRollbackFreesPartiallyAl
 }
 
 // Prefill init path (StreamCacheResource::initKVBlock sets enable_remove_skipped_blocks=false).
-// With step=2 and reuse_blocks_len=3, the reused linear tail lands at pos 2, which is NOT
-// a step hit ((2+1)%2==1). Without sparse cleanup, that resource must survive so that
-// causal_conv1d can still read it by prefix_length.
+// The reused state must survive prefill even when it precedes the new tail window.
 TEST_F(HybridTypeCoordinatorCacheManagerTest, PrefillInitSkipsSparseCleanupAndPreservesReusedLinearTail) {
     auto config = makeTinyHybridConfig();
     setGroupBlockCounts(config, 16, 16);  // Enough capacity for cached and new blocks in each pool.
@@ -2232,7 +2289,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, PrefillInitSkipsSparseCleanupAndPr
     // Full matches the first 3 (103 is absent); linear joint backoff stops at pos=2 => reuse_blocks_len=3.
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102, 103, 104});
 
-    // seq_len=20 => 5 resources. block_size-3-reserve_step = 2, so removeSkippedBlocks would scan pos 2.
+    // seq_len=20 => 5 resources. the final two-block tail starts at pos 3.
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
 
     MallocInfo info{batch_res, token_ids};
@@ -2245,18 +2302,61 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, PrefillInitSkipsSparseCleanupAndPr
     const auto& linear_out = batch_res->blocks(0, "linear");
     ASSERT_EQ(linear_out.size(), 5u);
     EXPECT_TRUE(isNullBlockIdx(linear_out[0]));
-    EXPECT_FALSE(isNullBlockIdx(linear_out[1]));
+    EXPECT_TRUE(isNullBlockIdx(linear_out[1]));
     EXPECT_EQ(linear_out[2], cached_linear_blocks[2]) << "reused linear tail must survive prefill init";
     EXPECT_FALSE(isNullBlockIdx(linear_out[3]));
     EXPECT_FALSE(isNullBlockIdx(linear_out[4]));
 }
 
+TEST_F(HybridTypeCoordinatorCacheManagerTest, PrefillReuseTailAllocatesExactCapacityWithoutBackfill) {
+    for (const int tail : {3, std::numeric_limits<int>::max()}) {
+        for (const int reuse_slots : {2, 4, 5}) {
+            SCOPED_TRACE(::testing::Message() << "tail=" << tail << " reuse_slots=" << reuse_slots);
+            auto config                    = makeTinyHybridConfig();
+            config.reuse_cache_tail_blocks = tail;
+            const int new_blocks           = std::min(tail, 6 - reuse_slots);
+            setGroupBlockCounts(config, new_blocks + 2, 7);
+            auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+            ASSERT_TRUE(allocator->init());
+            auto          linear_pool   = poolForTag(*allocator, "linear");
+            auto          full_pool     = poolForTag(*allocator, "full1");
+            auto          linear_blocks = allocateReferencedBlocks(linear_pool, 1);
+            auto          full_blocks   = allocateReferencedBlocks(full_pool, reuse_slots);
+            CacheKeysType keys{100, 101, 102, 103, 104, 105};
+            CacheKeysType prefix(keys.begin(), keys.begin() + reuse_slots);
+            auto          seed = makeBatchResource(1, config, prefix);
+            seed->mutableBlockIds(0, "linear").resize(reuse_slots);
+            seed->mutableBlockIds(0, "linear").setAt(reuse_slots - 1, linear_blocks[0]);
+            seed->mutableBlockIds(0, "full1").assign(full_blocks);
+            size_t resident_prefix_length = 0;
+            allocator->insertIntoCache(InsertInfo{seed, nullptr, false}, resident_prefix_length);
+            allocator->free(FreeInfo{seed, nullptr});
+
+            auto       resource = makeBatchResource(1, config, keys);
+            auto       tokens   = makeCompleteTokenIds(1, 24, 4);
+            MallocInfo info{resource, tokens};
+            const auto result = allocator->malloc(info);
+            ASSERT_TRUE(result.success);
+            EXPECT_EQ(result.reuse_len, reuse_slots * 4);
+            const auto& blocks = resource->blocks(0, "linear");
+            ASSERT_EQ(blocks.size(), 6u);
+            EXPECT_EQ(blocks[reuse_slots - 1], linear_blocks[0]);
+            EXPECT_EQ(countValidBlocks(blocks), new_blocks + 1);
+            EXPECT_EQ(linear_pool->freeBlocksNum(), 0u);
+            for (int pos = 0; pos < 6; ++pos) {
+                EXPECT_EQ(!isNullBlockIdx(blocks[pos]), pos == reuse_slots - 1 || pos >= 6 - new_blocks);
+            }
+            allocator->free(FreeInfo{resource, tokens});
+        }
+    }
+}
+
 // Decode path (StreamCacheResource::incrKVBlock sets enable_remove_skipped_blocks=true).
 // The allocator is invoked on an already-populated resource, so malloc() dispatches directly
-// to incrMalloc(). Sparse cleanup must prune non-step blocks while preserving step hits and
-// the configured active tail resource.
+// to incrMalloc(). Cleanup retains the decode read state and current state independently of n.
 TEST_F(HybridTypeCoordinatorCacheManagerTest, DecodeIncrMallocAppliesSparseCleanupOnLinearGroups) {
     auto config = makeTinyHybridConfig();
+    config.reuse_cache_tail_blocks = 10000;
     setGroupBlockCounts(config, 7, 7);  // Six usable blocks per independent pool.
     auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
@@ -2286,14 +2386,13 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, DecodeIncrMallocAppliesSparseClean
     auto result                       = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
-    // active_tail_blocks=1 materializes the current tail, while decode cleanup retains at least two tails.
-    // For step=2 and size=6: keep pos 1, 3 (step hits) and pos 4, 5 (decode tails).
+    // Decode retains positions 4 and 5 even when the prefill tail is large.
     const auto& linear_out = batch_res->blocks(0, "linear");
     ASSERT_EQ(linear_out.size(), 6u);
     EXPECT_TRUE(isNullBlockIdx(linear_out[0]));
-    EXPECT_FALSE(isNullBlockIdx(linear_out[1]));
+    EXPECT_TRUE(isNullBlockIdx(linear_out[1]));
     EXPECT_TRUE(isNullBlockIdx(linear_out[2]));
-    EXPECT_FALSE(isNullBlockIdx(linear_out[3]));
+    EXPECT_TRUE(isNullBlockIdx(linear_out[3]));
     EXPECT_FALSE(isNullBlockIdx(linear_out[4]));
     EXPECT_FALSE(isNullBlockIdx(linear_out[5]));
 
@@ -2304,7 +2403,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, DecodeIncrMallocAppliesSparseClean
         EXPECT_EQ(full_out[i], full_alloc[i]);
         EXPECT_EQ(full_pool->refCount(full_alloc[i]), 1u);
     }
-    EXPECT_EQ(linear_pool->freeBlocksNum(), 2u);
+    EXPECT_EQ(linear_pool->freeBlocksNum(), 4u);
     EXPECT_EQ(full_pool->freeBlocksNum(), 0u);
     allocator->free(FreeInfo{batch_res, nullptr});
     EXPECT_EQ(linear_pool->freeBlocksNum(), 6u);
@@ -2324,12 +2423,11 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, EstimatePeakNeedBlocks) {
     auto new_res = makeBatchResource(1, config, {});
     EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, new_res, 8, 100, 0, /*enable_reuse_cache=*/false), 30);
 
-    // reuse enabled: linear keeps 14 blocks after cleanup and transiently holds a fifteenth tail block.
-    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, new_res, 8, 100, 0, /*enable_reuse_cache=*/true), 42);
+    // Reuse does not change the retention window.
+    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, new_res, 8, 100, 0, /*enable_reuse_cache=*/true), 30);
 
-    // With reserve_step=3: full=ceil(111/4)=28. linear: total_slots=29, tail=5,
-    // step-hits before tail=24/2=12 => linear=17. total=45.
-    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, new_res, 8, 100, 3, /*enable_reuse_cache=*/true), 45);
+    // Full peaks at 28. Decode retains two states plus three reserve slots, with one transient allocation.
+    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, new_res, 8, 100, 3, /*enable_reuse_cache=*/true), 34);
 
     // Allocate blocks to simulate running decode (seqLen=8 → 2 resources per group)
     auto       token_ids = makeCompleteTokenIds(1, /*seq_length=*/8, config.seq_size_per_block);
@@ -2349,44 +2447,37 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, EstimatePeakNeedBlocks) {
               std::max(expect_per_group - full_slots, 0) + std::max(expect_per_group - linear_slots, 0));
 
     // Large remaining from current_slots=2:
-    // reuse disabled: cleanup scans across the initial null resource. At the second boundary the running resource
-    // transiently holds three physical linear blocks before releasing the oldest tail, two more than its current tail.
+    // Linear transiently needs one block beyond its two retained blocks.
     int expect_full_large = (8 + 100 + blk - 1) / blk;  // 27
     EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, new_res, 8, 100, 0, /*enable_reuse_cache=*/false),
-              std::max(expect_full_large - full_slots, 0) + 2);
+              std::max(expect_full_large - full_slots, 0) + 1);
 
-    // reuse enabled: target linear keeps tail 2 + step-hit resources before tail 12;
-    // The fresh seq_len=8 allocation owns one physical linear block. Decode later peaks at 15 physical blocks.
-    int expect_linear_large = 14;
+    int expect_linear_large = 1;
     EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, new_res, 8, 100, 0, /*enable_reuse_cache=*/true),
               std::max(expect_full_large - full_slots, 0) + expect_linear_large);
 }
 
-TEST_F(HybridTypeCoordinatorCacheManagerTest, EstimatePeakNeedBlocksUsesLinearActiveTailPolicy) {
-    auto                          config = makeTinyHybridConfig();
-    std::vector<CacheGroupPolicy> policies;
-    for (const auto& group : config.topology().groups()) {
-        policies.push_back(group.policy);
-    }
-    ASSERT_EQ(policies.size(), 2u);
-    ASSERT_EQ(policies[0].group_type, CacheGroupType::LINEAR);
-    policies[0].active_tail_blocks = 4;
-    setTestGroupPolicies(config, policies);
+TEST_F(HybridTypeCoordinatorCacheManagerTest, EstimatePeakNeedBlocksUsesLinearTailConfiguration) {
+    auto config                    = makeTinyHybridConfig();
+    config.reuse_cache_tail_blocks = 4;
+    EXPECT_EQ(config.group("linear").policy.active_tail_blocks, 1u);
 
     auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto resource = makeBatchResource(/*batch_size=*/1, config, /*keys=*/{});
 
-    // At seq_len=24 the LINEAR group materializes four active tails and the FULL group owns six blocks.
+    // At seq_len=24 the LINEAR group materializes four prefill tails and the FULL group owns six blocks.
     EXPECT_EQ(estimateBatchPeakForSingleSequence(
-                  *allocator, resource, /*seq_len=*/24, /*remaining_tokens=*/0, /*reserve_step=*/0, false),
+                  *allocator, resource, /*seq_len=*/24, /*remaining_tokens=*/0, /*reserve_step=*/0, true),
               10);
 
     // One more block boundary adds a transient LINEAR tail and one permanent FULL block.
     EXPECT_EQ(estimateBatchPeakForSingleSequence(
-                  *allocator, resource, /*seq_len=*/24, /*remaining_tokens=*/4, /*reserve_step=*/0, false),
+                  *allocator, resource, /*seq_len=*/24, /*remaining_tokens=*/4, /*reserve_step=*/0, true),
               12);
+    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, resource, 24, 0, 0, false), 7);
+    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, resource, 24, 4, 0, false), 9);
 }
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, EstimateBatchPeakNeedBlocksAccountsForNonEmptyTargetWidth) {
@@ -2509,7 +2600,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, FreshUnalignedMultiSequencePeakMat
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, EstimatedPeakCoversDecodeMallocAndSparseCleanup) {
     auto config = makeTinyHybridConfig();
-    setGroupBlockCounts(config, 11, 18);  // LINEAR peak 10 + FULL peak 17 = 27 usable blocks.
+    setGroupBlockCounts(config, 4, 18);  // LINEAR peak 3 + FULL peak 17 = 20 usable blocks.
     auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
@@ -2523,16 +2614,16 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, EstimatedPeakCoversDecodeMallocAnd
     info.reuse_cache                  = true;
     info.enable_remove_skipped_blocks = false;
     ASSERT_TRUE(allocator->malloc(info).success);
-    ASSERT_EQ(allocator->freeBlocksNum(), 24);
+    ASSERT_EQ(allocator->freeBlocksNum(), 16);
 
-    // From seq_len=8 to 68: full needs 15 more blocks; linear grows from one physical block to a transient peak of 10.
+    // From seq_len=8 to 68: full needs 15 more blocks; Linear needs one temporary block beyond its two-block tail.
     ASSERT_EQ(estimateBatchPeakForSingleSequence(*allocator,
                                                  batch_res,
                                                  /*seq_len=*/8,
                                                  /*remaining_tokens=*/60,
                                                  /*reserve_step=*/0,
                                                  /*reuse_cache=*/true),
-              24);
+              16);
 
     info.enable_remove_skipped_blocks = true;
     size_t min_free_blocks            = allocator->freeBlocksNum();
@@ -2542,7 +2633,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, EstimatedPeakCoversDecodeMallocAnd
         min_free_blocks = std::min(min_free_blocks, allocator->freeBlocksNum());
     }
 
-    EXPECT_EQ(countValidBlocks(batch_res->blocks(0, "linear")), 9);
+    EXPECT_EQ(countValidBlocks(batch_res->blocks(0, "linear")), 2);
     EXPECT_EQ(countValidBlocks(batch_res->blocks(0, "full1")), 17);
     EXPECT_EQ(min_free_blocks, 1);
     EXPECT_EQ(allocator->freeBlocksNum(), 1);
@@ -2550,7 +2641,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, EstimatedPeakCoversDecodeMallocAnd
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, FreshReusePeakCoversThreeBoundaryDecodeAtExactCapacity) {
     auto config = makeTinyHybridConfig();
-    setGroupBlockCounts(config, 5, 6);  // LINEAR peak 4 + FULL peak 5 = 9 usable blocks.
+    setGroupBlockCounts(config, 4, 6);  // LINEAR peak 3 + FULL peak 5 = 8 usable blocks.
     auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
@@ -2559,15 +2650,15 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, FreshReusePeakCoversThreeBoundaryD
                                           /*seq_length=*/8,
                                           /*seq_size_per_block=*/config.seq_size_per_block);
 
-    // seq_len 8 -> 17 crosses the resource boundaries at 9, 13 and 17. Full peaks at 5 blocks and linear peaks at 4.
-    ASSERT_EQ(allocator->freeBlocksNum(), 9);
+    // seq_len 8 -> 17 crosses the resource boundaries at 9, 13 and 17. Full peaks at 5 blocks and linear peaks at 3.
+    ASSERT_EQ(allocator->freeBlocksNum(), 8);
     ASSERT_EQ(estimateBatchPeakForSingleSequence(*allocator,
                                                  batch_res,
                                                  /*seq_len=*/8,
                                                  /*remaining_tokens=*/9,
                                                  /*reserve_step=*/0,
                                                  /*reuse_cache=*/true),
-              9);
+              8);
 
     MallocInfo info{batch_res, token_ids};
     info.enable_cache_lookup          = false;
@@ -2581,7 +2672,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, FreshReusePeakCoversThreeBoundaryD
         ASSERT_TRUE(allocator->malloc(info).success) << "seq_len=" << seq_len;
     }
 
-    EXPECT_EQ(countValidBlocks(batch_res->blocks(0, "linear")), 3);
+    EXPECT_EQ(countValidBlocks(batch_res->blocks(0, "linear")), 2);
     EXPECT_EQ(countValidBlocks(batch_res->blocks(0, "full1")), 5);
     EXPECT_EQ(allocator->freeBlocksNum(), 1);
 }

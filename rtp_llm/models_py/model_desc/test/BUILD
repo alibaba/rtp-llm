@@ -51,6 +51,7 @@ py_test(
     srcs = ["hidden_state_capture_test.py"],
     deps = py_test_deps + [
         "//rtp_llm/models_py:models",
+        "//rtp_llm/models_py:modules",
         "//rtp_llm:config",
     ],
     env = {"GPU_COUNT": "1"},

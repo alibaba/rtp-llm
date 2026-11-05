@@ -57,8 +57,7 @@ class DecodeCancelRaceTest {
 
     private static final int BASE_PORT = 63200;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private ScheduledExecutorService scheduler;
     private ExecutorService workerPool;
@@ -67,16 +66,21 @@ class DecodeCancelRaceTest {
 
     @BeforeEach
     void setUp() {
-        scheduler = Executors.newScheduledThreadPool(8, runnable -> {
-            Thread thread = new Thread(runnable, "decode-cancel-race-scheduler");
-            thread.setDaemon(true);
-            return thread;
-        });
-        workerPool = Executors.newCachedThreadPool(r -> {
-            Thread thread = new Thread(r, "decode-cancel-race-worker");
-            thread.setDaemon(true);
-            return thread;
-        });
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        8,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "decode-cancel-race-scheduler");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
+        workerPool =
+                Executors.newCachedThreadPool(
+                        r -> {
+                            Thread thread = new Thread(r, "decode-cancel-race-worker");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
         services = new ConcurrentHashMap<>();
         nextPortOffset = 0;
     }
@@ -114,32 +118,39 @@ class DecodeCancelRaceTest {
             long requestId = 1_000L + i;
             MockPerformanceModel.RequestShape shape = requestShape(model, requestId, 16);
             CyclicBarrier barrier = new CyclicBarrier(2);
-            Future<?> scheduleFuture = workerPool.submit(() -> {
-                barrier.await();
-                scheduleDecodeCompletion(decode, shape, -1, null);
-                return null;
-            });
-            Future<?> cancelFuture = workerPool.submit(() -> {
-                barrier.await();
-                decode.cancel(requestId);
-                return null;
-            });
+            Future<?> scheduleFuture =
+                    workerPool.submit(
+                            () -> {
+                                barrier.await();
+                                scheduleDecodeCompletion(decode, shape, -1, null);
+                                return null;
+                            });
+            Future<?> cancelFuture =
+                    workerPool.submit(
+                            () -> {
+                                barrier.await();
+                                decode.cancel(requestId);
+                                return null;
+                            });
             scheduleFuture.get(5, TimeUnit.SECONDS);
             cancelFuture.get(5, TimeUnit.SECONDS);
         }
 
         awaitDecodeQuiescence(decode, 10_000);
 
-        assertEquals(0, activeDecodeRequests(decode),
+        assertEquals(
+                0,
+                activeDecodeRequests(decode),
                 "activeDecodeRequests must settle at 0 (no permanent slot leak)");
-        assertEquals(0, decode.getActiveKvTokens(),
+        assertEquals(
+                0,
+                decode.getActiveKvTokens(),
                 "activeKvTokens must settle at 0 (no permanent KV leak)");
-        assertEquals(0, decode.getInflightCount(),
-                "pendingRequests must settle at 0");
-        assertEquals(0, decode.getRunningCount(),
-                "runningTasks must be empty");
+        assertEquals(0, decode.getInflightCount(), "pendingRequests must settle at 0");
+        assertEquals(0, decode.getRunningCount(), "runningTasks must be empty");
         decode.checkLeakDrain(0L);
-        assertFalse(decode.isLeakDetected(),
+        assertFalse(
+                decode.isLeakDetected(),
                 "checkLeakDrain must not flag a LEAK after the cancel storm");
     }
 
@@ -162,12 +173,15 @@ class DecodeCancelRaceTest {
         AtomicInteger counter = activeDecodeRequestsRef(decode);
         AtomicInteger maxObserved = new AtomicInteger();
         AtomicBoolean sampling = new AtomicBoolean(true);
-        Thread sampler = new Thread(() -> {
-            while (sampling.get()) {
-                maxObserved.accumulateAndGet(counter.get(), Math::max);
-                Thread.onSpinWait();
-            }
-        }, "decode-cap-sampler");
+        Thread sampler =
+                new Thread(
+                        () -> {
+                            while (sampling.get()) {
+                                maxObserved.accumulateAndGet(counter.get(), Math::max);
+                                Thread.onSpinWait();
+                            }
+                        },
+                        "decode-cap-sampler");
         sampler.setDaemon(true);
         sampler.start();
 
@@ -177,50 +191,53 @@ class DecodeCancelRaceTest {
         for (int i = 0; i < nRequests; i++) {
             long requestId = 5_000L + i;
             MockPerformanceModel.RequestShape shape = requestShape(model, requestId, 8);
-            workerPool.submit(() -> {
-                try {
-                    startGate.await();
-                    scheduleDecodeCompletion(decode, shape, -1, null);
-                } catch (Throwable ignored) {
-                    // surfaced via the final counter asserts
-                } finally {
-                    allDone.countDown();
-                }
-            });
+            workerPool.submit(
+                    () -> {
+                        try {
+                            startGate.await();
+                            scheduleDecodeCompletion(decode, shape, -1, null);
+                        } catch (Throwable ignored) {
+                            // surfaced via the final counter asserts
+                        } finally {
+                            allDone.countDown();
+                        }
+                    });
             if (i % 2 == 0) {
-                workerPool.submit(() -> {
-                    try {
-                        startGate.await();
-                        decode.cancel(requestId);
-                    } catch (Throwable ignored) {
-                        // surfaced via the final counter asserts
-                    } finally {
-                        allDone.countDown();
-                    }
-                });
+                workerPool.submit(
+                        () -> {
+                            try {
+                                startGate.await();
+                                decode.cancel(requestId);
+                            } catch (Throwable ignored) {
+                                // surfaced via the final counter asserts
+                            } finally {
+                                allDone.countDown();
+                            }
+                        });
             }
         }
         startGate.countDown();
-        assertTrue(allDone.await(30, TimeUnit.SECONDS),
+        assertTrue(
+                allDone.await(30, TimeUnit.SECONDS),
                 "storm should finish within 30s, remaining: " + allDone.getCount());
 
         awaitDecodeQuiescence(decode, 20_000);
         sampling.set(false);
         sampler.join(1_000);
 
-        assertTrue(maxObserved.get() <= cap,
-                "activeDecodeRequests must never exceed cap " + cap
-                        + " — observed max " + maxObserved.get());
-        assertEquals(0, activeDecodeRequests(decode),
-                "activeDecodeRequests must settle at 0");
-        assertEquals(0, decode.getActiveKvTokens(),
-                "activeKvTokens must settle at 0");
-        assertEquals(0, decode.getInflightCount(),
-                "pendingRequests must settle at 0");
-        assertEquals(0, decode.getRunningCount(),
-                "runningTasks must be empty");
+        assertTrue(
+                maxObserved.get() <= cap,
+                "activeDecodeRequests must never exceed cap "
+                        + cap
+                        + " — observed max "
+                        + maxObserved.get());
+        assertEquals(0, activeDecodeRequests(decode), "activeDecodeRequests must settle at 0");
+        assertEquals(0, decode.getActiveKvTokens(), "activeKvTokens must settle at 0");
+        assertEquals(0, decode.getInflightCount(), "pendingRequests must settle at 0");
+        assertEquals(0, decode.getRunningCount(), "runningTasks must be empty");
         decode.checkLeakDrain(0L);
-        assertFalse(decode.isLeakDetected(),
+        assertFalse(
+                decode.isLeakDetected(),
                 "checkLeakDrain must not flag a LEAK after the cancel storm");
     }
 

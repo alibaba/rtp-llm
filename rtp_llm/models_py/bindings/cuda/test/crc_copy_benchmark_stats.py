@@ -19,6 +19,8 @@ VARIANTS = (
 )
 DIRECTIONS = ("d2h", "h2d")
 BLOCKS = tuple(range(1, 33))
+# Corruption checks stay pinned to these backing counts regardless of --blocks.
+CORRUPTION_BLOCKS = (1, 8, 16, 32)
 # Independent shape oracle for the pinned Flash-0731 configuration. The executable
 # obtains its tile geometry from CacheConfigCreator, not from this table.
 FLASH_RATIO4_LAYERS = list(range(2, 43, 2))
@@ -78,9 +80,9 @@ def exact(actual, expected):
     return actual == expected
 
 
-def case_key(record):
+def case_key(record, blocks):
     require(
-        type(record["blocks"]) is int and record["blocks"] in BLOCKS,
+        type(record["blocks"]) is int and record["blocks"] in blocks,
         "Invalid backing count",
     )
     return record["direction"], record["layout"], record["blocks"], record["variant"]
@@ -94,6 +96,17 @@ def active_variants(direction, exclude_1d_h2d):
     )
 
 
+def expected_blocks(settings):
+    blocks = settings.get("blocks")
+    if not blocks:
+        return BLOCKS
+    require(
+        isinstance(blocks, list) and all(type(n) is int and n >= 1 for n in blocks),
+        "Invalid blocks setting",
+    )
+    return tuple(blocks)
+
+
 def read_run(path, settings, repeat):
     records = [json.loads(line) for line in Path(path).read_text().splitlines()]
     require(
@@ -104,13 +117,14 @@ def read_run(path, settings, repeat):
     )
     meta = records[0]
     exclude = settings["exclude_1d_h2d"]
+    blocks = expected_blocks(settings)
     expected_meta = {
         "implementation": "crc_copy_benchmark_v5",
         "profiled": False,
         "staged_host_payload_copy": "direct_dma",
         "main_staged_host_payload_copy": "cpu_pack_unpack",
         "variants": list(VARIANTS),
-        "block_counts": list(BLOCKS),
+        "block_counts": list(blocks),
         "repeat": repeat,
         "seed": settings["seed"] + repeat,
         "iterations": settings["iterations"],
@@ -185,7 +199,7 @@ def read_run(path, settings, repeat):
         (d, layout, n, v)
         for d in DIRECTIONS
         for layout in TILES
-        for n in BLOCKS
+        for n in blocks
         for v in active_variants(d, exclude)
     }
     rounds = 0 if settings["correctness_only"] else settings["iterations"]
@@ -199,7 +213,7 @@ def read_run(path, settings, repeat):
         "complete": 1,
     }
     if exclude:
-        expected_counts["excluded_correctness"] = 64
+        expected_counts["excluded_correctness"] = len(TILES) * len(blocks)
     counts = collections.Counter(r["type"] for r in records)
     require(counts == collections.Counter(expected_counts), f"Record counts: {counts}")
     layouts = {r["layout"]: r for r in records if r["type"] == "layout"}
@@ -244,9 +258,9 @@ def read_run(path, settings, repeat):
             "Pool/eviction buffer smaller than 8x L2",
         )
     checks = [r for r in records if r["type"] == "correctness"]
-    key = case_key
     require(
-        collections.Counter(map(key, checks)) == collections.Counter(matrix),
+        collections.Counter(case_key(record, blocks) for record in checks)
+        == collections.Counter(matrix),
         "Correctness matrix",
     )
     for record in checks:
@@ -256,12 +270,13 @@ def read_run(path, settings, repeat):
         )
     excluded = [r for r in records if r["type"] == "excluded_correctness"]
     excluded_matrix = (
-        {("h2d", layout, n, "copy1d_batch") for layout in TILES for n in BLOCKS}
+        {("h2d", layout, n, "copy1d_batch") for layout in TILES for n in blocks}
         if exclude
         else set()
     )
     require(
-        collections.Counter(map(key, excluded)) == collections.Counter(excluded_matrix),
+        collections.Counter(case_key(record, blocks) for record in excluded)
+        == collections.Counter(excluded_matrix),
         "Exclusion matrix",
     )
     for record in excluded:
@@ -286,11 +301,11 @@ def read_run(path, settings, repeat):
     corruption = [r for r in records if r["type"] == "crc_corruption"]
     require(
         collections.Counter((r["layout"], r["blocks"]) for r in corruption)
-        == collections.Counter(itertools.product(TILES, (1, 8, 16, 32))),
+        == collections.Counter(itertools.product(TILES, CORRUPTION_BLOCKS)),
         "Corruption matrix",
     )
     for record in corruption:
-        case_key(record)
+        case_key(record, CORRUPTION_BLOCKS)
         require(
             record["variant"] == "integrated_crc"
             and record["direction"] == "h2d"
@@ -300,7 +315,7 @@ def read_run(path, settings, repeat):
         )
         for field in (
             "success",
-            "all_targets_unchanged",
+            "ungated_scatter_verified",
             "recovery_success",
             "good_bad_good",
             "entire_pool_guards",
@@ -311,7 +326,7 @@ def read_run(path, settings, repeat):
     for record in records:
         if record["type"] != "sample":
             continue
-        require(key(record) in matrix, "Unexpected or excluded sample")
+        require(case_key(record, blocks) in matrix, "Unexpected or excluded sample")
         require(
             type(record["repeat"]) is int and record["repeat"] == repeat,
             "Sample from wrong repeat",
@@ -354,7 +369,7 @@ def read_run(path, settings, repeat):
         require(record["variant"] not in pairs[pair], "Duplicate sample")
         pairs[pair][record["variant"]] = record
     require(
-        set(pairs) == set(itertools.product(DIRECTIONS, TILES, BLOCKS, range(rounds))),
+        set(pairs) == set(itertools.product(DIRECTIONS, TILES, blocks, range(rounds))),
         "Missing sample round",
     )
     for pair, values in pairs.items():

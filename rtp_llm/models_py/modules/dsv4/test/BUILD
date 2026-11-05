@@ -41,6 +41,18 @@ _MODEL_CONTRACT_TESTS = [
     "test_norm_predictor",
 ]
 
+# test_prefill_workspace and test_mtp_hidden_buffer hung silently in CI for
+# 1.5-2h+ while holding four cards each, starving the pool; their normal
+# runtimes are 11.5s and 16.6s. They stay in the lists above so the test_suites
+# keep covering them, but are generated outside the loops below so they can
+# carry an explicit "moderate" (300s) bound. The gpu_lock wrapper's runtime
+# watchdog is the independent enforcement, and it also reports the node and
+# cards and exits with a distinctive code.
+_KNOWN_HANG_TESTS = [
+    "test_prefill_workspace",
+    "test_mtp_hidden_buffer",
+]
+
 _GPU_TESTS = [
     "test_cp_metadata_triton",
     "test_indexer_topk_backend",
@@ -53,22 +65,54 @@ _GPU_TESTS = [
 [
     dsv4_py_test(name = name, deps = _DSV4_TEST_DEPS)
     for name in _CP_HELPER_TESTS
+    if name not in _KNOWN_HANG_TESTS
 ]
+
+dsv4_py_test(
+    name = "test_prefill_workspace",
+    deps = _DSV4_TEST_DEPS,
+    timeout = "moderate",
+    env = {"RTP_TEST_WATCHDOG_SECONDS": "300"},
+)
+
+# Cache-clear recompile coverage: clearing the Triton device caches forces
+# full JIT recompilation of all three CP metadata kernels, which dominates
+# wall-clock on the ARM lane. Kept out of the default/PR lanes via the
+# manual tag; run explicitly when touching the warmup/specialization
+# contract. `heavy` documents the reason for the exclusion.
+dsv4_py_test(
+    name = "test_cp_metadata_triton_recompile",
+    deps = _DSV4_TEST_DEPS,
+    tags = [
+        "heavy",
+        "manual",
+    ],
+)
 
 [
     dsv4_py_test(
         name = name,
         deps = _MODEL_TEST_DEPS + ([
             "//rtp_llm/models_py:tile_kernels_mhc",
-        ] if name == "test_hc_impl" else []),
+        ] if name == "test_hc_impl" else []) + ([
+            "//rtp_llm/models_py:models",
+        ] if name == "test_prefill_fast_path" else []),
     )
     for name in _MODEL_CONTRACT_TESTS + _GPU_TESTS
+    if name not in _KNOWN_HANG_TESTS
 ]
+
+dsv4_py_test(
+    name = "test_mtp_hidden_buffer",
+    deps = _MODEL_TEST_DEPS,
+    timeout = "moderate",
+    env = {"RTP_TEST_WATCHDOG_SECONDS": "300"},
+)
 
 dsv4_sm100_py_test(
     name = "test_prefill_fast_path_cuda",
     extra_srcs = ["test_prefill_fast_path.py"],
-    deps = _MODEL_TEST_DEPS,
+    deps = _MODEL_TEST_DEPS + ["//rtp_llm/models_py:models"],
 )
 
 _PERF_TESTS = [

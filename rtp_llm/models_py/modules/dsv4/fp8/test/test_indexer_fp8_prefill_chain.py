@@ -1,5 +1,12 @@
 """UT: IndexerFP8 prefill kernel chain — gather + score + top-K.
 
+Path coverage: the chain executes on any CUDA device with the vendored gather/
+topk ops. Stage 2 is served by DeepGEMM ``fp8_mqa_logits`` when the shared
+``supports_mqa_logits`` predicate accepts this device/wheel and by the Triton
+fallback otherwise (e.g. SM100 with DeepGEMM >= 2.8.1); a counter in
+``_run_chain`` pins which path ran, so this glue target can never pass by
+skipping every case.
+
 Glue test for the three-kernel chain ``IndexerFP8.forward`` invokes once
 the per-call meta is built:
 
@@ -30,10 +37,12 @@ Run:
 
 from __future__ import annotations
 
+import contextlib
 import unittest
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_score as _indexer_score_mod
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
     indexer_q_fp8_quant_fold,
 )
@@ -43,18 +52,80 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     fp8_mqa_indexer_score,
-    has_fp8_mqa_logits,
+    supports_mqa_logits,
+)
+from rtp_llm.models_py.triton_kernels import (
+    legacy_fp8_indexer_score as _legacy_fallback_mod,
 )
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
+class _CountingDeepGemm:
+    """Delegate to DeepGEMM while counting the non-paged entry point."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.mqa = 0
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def fp8_mqa_logits(self, *args, **kwargs):
+        self.mqa += 1
+        return self._inner.fp8_mqa_logits(*args, **kwargs)
+
+
+@contextlib.contextmanager
+def _count_mqa_dispatch():
+    """Count DeepGEMM vs Triton-fallback calls around one wrapper invocation."""
+    inner = _indexer_score_mod._deep_gemm
+    counted = _CountingDeepGemm(inner)
+    fallback = {"calls": 0}
+    original_fallback = _legacy_fallback_mod.legacy_fp8_mqa_logits
+
+    def _counted_fallback(*args, **kwargs):
+        fallback["calls"] += 1
+        return original_fallback(*args, **kwargs)
+
+    _indexer_score_mod._deep_gemm = counted
+    _legacy_fallback_mod.legacy_fp8_mqa_logits = _counted_fallback
+    try:
+        yield counted, fallback
+    finally:
+        _indexer_score_mod._deep_gemm = inner
+        _legacy_fallback_mod.legacy_fp8_mqa_logits = original_fallback
+
+
+def _assert_mqa_path(counted, fallback) -> None:
+    """The chain's score stage must run on exactly the path the predicate picks."""
+    expects_deepgemm = supports_mqa_logits(torch.device("cuda"))
+    expected_deepgemm = 1 if expects_deepgemm else 0
+    expected_fallback = 0 if expects_deepgemm else 1
+    assert counted.mqa == expected_deepgemm, (
+        f"expected {expected_deepgemm} deep_gemm.fp8_mqa_logits call(s) "
+        f"(predicate says DeepGEMM={expects_deepgemm}), got {counted.mqa} — "
+        "the capability predicate and the dispatch drifted"
+    )
+    assert fallback["calls"] == expected_fallback, (
+        f"expected {expected_fallback} Triton fallback call(s) "
+        f"(predicate says DeepGEMM={expects_deepgemm}), got {fallback['calls']} "
+        "— the chain's score stage did not run on either kernel path"
+    )
+
+
 def _have_chain_kernels() -> bool:
-    """All four pieces of the chain must be present:
-    indexer_k_quant_and_cache (writer), cp_gather_indexer_k_quant_cache
-    (reader), deep_gemm.fp8_mqa_logits, dsv4_top_k_per_row_prefill."""
+    """All pieces of the chain must be present: indexer_k_quant_and_cache
+    (writer), cp_gather_indexer_k_quant_cache (reader), the fp8_mqa_logits
+    path (DeepGEMM or the Triton fallback — see ``supports_mqa_logits``),
+    dsv4_top_k_per_row_prefill.
+
+    The score stage is deliberately *not* gated on the DeepGEMM predicate:
+    the wrapper degrades to Triton, so requiring DeepGEMM here would skip the
+    whole target on SM100 lanes with a group-128-rejecting wheel — and an
+    all-skipped target is a pytest-runner failure, not a pass.
+    """
     return (
         torch.cuda.is_available()
-        and has_fp8_mqa_logits()
         and hasattr(rtp_llm_ops, "cp_gather_indexer_k_quant_cache")
         and hasattr(rtp_llm_ops, "indexer_k_quant_and_cache")
         and hasattr(rtp_llm_ops, "dsv4_top_k_per_row_prefill")
@@ -149,16 +220,18 @@ class IndexerFP8PrefillChainTest(unittest.TestCase):
         self.assertEqual(q_fp8.shape, (1, N, H, D))
         self.assertEqual(w_fold.dtype, torch.float32)
 
-        # 3. Score via DeepGEMM.
-        logits = fp8_mqa_indexer_score(
-            q_fp8.view(N, H, D),
-            w_fold.view(N, H),
-            k_quant,
-            k_scale,
-            ks,
-            ke,
-            clean_logits=False,
-        )
+        # 3. Score via DeepGEMM (or the Triton fallback off-contract).
+        with _count_mqa_dispatch() as (counted, fallback):
+            logits = fp8_mqa_indexer_score(
+                q_fp8.view(N, H, D),
+                w_fold.view(N, H),
+                k_quant,
+                k_scale,
+                ks,
+                ke,
+                clean_logits=False,
+            )
+        _assert_mqa_path(counted, fallback)
         self.assertEqual(logits.shape, (N, num_kv_tokens))
         self.assertEqual(logits.dtype, torch.float32)
 

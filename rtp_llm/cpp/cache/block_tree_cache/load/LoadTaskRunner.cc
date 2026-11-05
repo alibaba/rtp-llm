@@ -45,49 +45,41 @@ void LoadTaskRunner::runTransfer(TaskPtr                        task,
                                  const BlockTransferDispatcher& transfer_dispatcher,
                                  BlockTreeCacheMetricsReporter& metrics_reporter,
                                  TransferDoneCallback           callback) {
-    try {
-        if (task->host_to_device_task.descriptors().empty()) {
-            startDiskTransfer(task, transfer_dispatcher, metrics_reporter, callback);
-            return;
-        }
-
-        task->phase = Task::Phase::HOST_TO_DEVICE;
-        const int64_t transfer_begin =
-            metrics_reporter.reportTransferStarted(CacheTransferOperation::LOAD, Tier::HOST, Tier::DEVICE);
-        transfer_dispatcher.runTransfer(
-            task->host_to_device_task,
-            [this, task, &transfer_dispatcher, &metrics_reporter, transfer_begin, callback = std::move(callback)](
-                TransferResult result) mutable {
-                task->host_result = result;
-                try {
-                    reportStageFinished(*task,
-                                        metrics_reporter,
-                                        Tier::HOST,
-                                        task->host_to_device_task.descriptors(),
-                                        transfer_begin,
-                                        result.ok());
-                    metrics_reporter.maybeReportCopyError(Tier::HOST, Tier::DEVICE, result);
-                    if (!result.ok()) {
-                        task->phase = Task::Phase::FINISHED;
-                        callback(std::move(result.status));
-                        return;
-                    }
-                    startDiskTransfer(task, transfer_dispatcher, metrics_reporter, callback);
-                } catch (const std::exception& exception) {
-                    task->phase = Task::Phase::FINISHED;
-                    callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what()));
-                } catch (...) {
-                    task->phase = Task::Phase::FINISHED;
-                    callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown host load completion exception"));
-                }
-            });
-    } catch (const std::exception& error) {
-        task->phase = Task::Phase::FINISHED;
-        callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
-    } catch (...) {
-        task->phase = Task::Phase::FINISHED;
-        callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown host load submission exception"));
+    if (task->host_to_device_task.descriptors().empty()) {
+        startDiskTransfer(task, transfer_dispatcher, metrics_reporter, callback);
+        return;
     }
+
+    task->phase = Task::Phase::HOST_TO_DEVICE;
+    const int64_t transfer_begin =
+        metrics_reporter.reportTransferStarted(CacheTransferOperation::LOAD, Tier::HOST, Tier::DEVICE);
+    transfer_dispatcher.runTransfer(
+        task->host_to_device_task,
+        [this, task, &transfer_dispatcher, &metrics_reporter, transfer_begin, callback = std::move(callback)](
+            TransferResult result) mutable {
+            task->host_result = result;
+            try {
+                reportStageFinished(*task,
+                                    metrics_reporter,
+                                    Tier::HOST,
+                                    task->host_to_device_task.descriptors(),
+                                    transfer_begin,
+                                    result.ok());
+                metrics_reporter.maybeReportCopyError(Tier::HOST, Tier::DEVICE, result);
+                if (!result.ok()) {
+                    task->phase = Task::Phase::FINISHED;
+                    callback(std::move(result.status));
+                    return;
+                }
+                startDiskTransfer(task, transfer_dispatcher, metrics_reporter, callback);
+            } catch (const std::exception& exception) {
+                task->phase = Task::Phase::FINISHED;
+                callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what()));
+            } catch (...) {
+                task->phase = Task::Phase::FINISHED;
+                callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown host load completion exception"));
+            }
+        });
 }
 
 void LoadTaskRunner::startDiskTransfer(TaskPtr                        task,

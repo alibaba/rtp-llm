@@ -40,8 +40,7 @@ class CancelTerminalBatchIdTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BASE_PORT = 63300;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private ScheduledExecutorService scheduler;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
@@ -50,11 +49,14 @@ class CancelTerminalBatchIdTest {
 
     @BeforeEach
     void setUp() {
-        scheduler = Executors.newScheduledThreadPool(4, runnable -> {
-            Thread thread = new Thread(runnable, "cancel-batch-id-scheduler");
-            thread.setDaemon(true);
-            return thread;
-        });
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        4,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "cancel-batch-id-scheduler");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
         services = new ConcurrentHashMap<>();
         stats = new JavaMockEngineCluster.ClusterStats();
     }
@@ -85,10 +87,13 @@ class CancelTerminalBatchIdTest {
 
         EngineRpcService.TaskInfoPB terminal = completionOf(requestId);
         assertNotNull(terminal, "a terminal for the cancelled request must be published");
-        assertEquals(EngineRpcService.ErrorCodePB.CANCELLED.getNumber(),
+        assertEquals(
+                EngineRpcService.ErrorCodePB.CANCELLED.getNumber(),
                 terminal.getErrorInfo().getErrorCode(),
                 "terminal must carry the CANCELLED error code");
-        assertEquals(batchId, terminal.getBatchId(),
+        assertEquals(
+                batchId,
+                terminal.getBatchId(),
                 "typed CANCELLED terminal must carry the exact EnqueueBatch "
                         + "identity (leak fix: master reconcile correlation)");
     }
@@ -102,8 +107,7 @@ class CancelTerminalBatchIdTest {
 
         // Unknown request: cancel for an id the engine never saw.
         prefill.cancelRequest(9_999L);
-        assertEquals(1L, stats.cancelCensusUnknown.sum(),
-                "unknown-branch cancel must be counted");
+        assertEquals(1L, stats.cancelCensusUnknown.sum(), "unknown-branch cancel must be counted");
 
         // Tracked request: cancelRequest while the batch is running. The
         // tracked branch routes through the priority-preemption cancel path,
@@ -112,21 +116,25 @@ class CancelTerminalBatchIdTest {
         enqueue(prefill, batch(88L, slot(0, input(requestId, 16))));
         JavaMockEngineCluster.CancelResult tracked = prefill.cancelRequest(requestId);
         assertTrue(tracked.found(), "cancelRequest must find the tracked request");
-        assertEquals(1L, stats.cancelCensusTracked.sum(),
-                "tracked-branch cancel must be counted");
+        assertEquals(1L, stats.cancelCensusTracked.sum(), "tracked-branch cancel must be counted");
 
         // Re-cancel of the same id hits the priority-cancel terminal record armed by
         // the tracked branch (the engine keeps its one-shot cancel semantics).
         JavaMockEngineCluster.CancelResult terminalRecord = prefill.cancelRequest(requestId);
-        assertTrue(terminalRecord.found() && terminalRecord.alreadyFinished(),
+        assertTrue(
+                terminalRecord.found() && terminalRecord.alreadyFinished(),
                 "terminal record re-cancel must report found + already-finished");
-        assertEquals(1L, stats.cancelCensusAlreadyCancelled.sum(),
+        assertEquals(
+                1L,
+                stats.cancelCensusAlreadyCancelled.sum(),
                 "terminal record-branch re-cancel must be counted");
 
         // And the typed terminal from the tracked branch carries the batch id.
         EngineRpcService.TaskInfoPB terminal = completionOf(requestId);
         assertNotNull(terminal);
-        assertEquals(88L, terminal.getBatchId(),
+        assertEquals(
+                88L,
+                terminal.getBatchId(),
                 "tracked-branch CANCELLED terminal must carry the batch identity");
 
         // Already-finished: a request that ran to its NATURAL completion, then
@@ -137,9 +145,11 @@ class CancelTerminalBatchIdTest {
         enqueue(prefill, batch(99L, slot(0, input(finishedId, 16))));
         awaitTerminal(finishedId);
         JavaMockEngineCluster.CancelResult finished = prefill.cancelRequest(finishedId);
-        assertTrue(finished.alreadyFinished(),
-                "late cancel must report the already-finished branch");
-        assertEquals(1L, stats.cancelCensusAlreadyFinished.sum(),
+        assertTrue(
+                finished.alreadyFinished(), "late cancel must report the already-finished branch");
+        assertEquals(
+                1L,
+                stats.cancelCensusAlreadyFinished.sum(),
                 "already-finished-branch cancel must be counted");
     }
 
@@ -157,25 +167,44 @@ class CancelTerminalBatchIdTest {
 
     private void newPrefillService(MockPerformanceModel model) {
         int port = BASE_PORT + services.size();
-        prefill = new JavaMockEngineCluster.FastRpcService(
-                "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                port, services, scheduler, model, 100, stats);
+        prefill =
+                new JavaMockEngineCluster.FastRpcService(
+                        "prefill",
+                        EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
+                        port,
+                        services,
+                        scheduler,
+                        model,
+                        100,
+                        stats);
         services.put(port, prefill);
     }
 
     private MockPerformanceModel model(String prefillExpression) throws Exception {
         Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
         Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
-        MAPPER.writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", 0.1,
-                "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0),
-                // Explicit decode timing (1 ms/token): decode latency is
-                // irrelevant to this cancel-census test, but the model now
-                // rejects a silent default decode curve.
-                "decode", Map.of("scale", 1.0, "tokens_per_step", 1.0,
-                        "step_ms_by_batch", List.of(List.of(1, 1.0)))));
+        MAPPER.writeValue(
+                performance.toFile(),
+                Map.of(
+                        "block_size",
+                        1024,
+                        "sleep_scale",
+                        0.1,
+                        "jitter_pct",
+                        0.0,
+                        "prefill",
+                        Map.of("scale", 1.0),
+                        // Explicit decode timing (1 ms/token): decode latency is
+                        // irrelevant to this cancel-census test, but the model now
+                        // rejects a silent default decode curve.
+                        "decode",
+                        Map.of(
+                                "scale",
+                                1.0,
+                                "tokens_per_step",
+                                1.0,
+                                "step_ms_by_batch",
+                                List.of(List.of(1, 1.0)))));
         MockMasterConfig.writeWithPrefillExpression(master, prefillExpression);
         return MockPerformanceModel.load(performance.toString(), master.toString());
     }
@@ -183,17 +212,14 @@ class CancelTerminalBatchIdTest {
     // ──────────── Terminal-frame access (reflection on completions queue) ────────────
 
     private EngineRpcService.TaskInfoPB completionOf(long requestId) throws Exception {
-        Field field = JavaMockEngineCluster.FastRpcService.class
-                .getDeclaredField("completions");
+        Field field = JavaMockEngineCluster.FastRpcService.class.getDeclaredField("completions");
         field.setAccessible(true);
-        ConcurrentLinkedQueue<?> queue =
-                (ConcurrentLinkedQueue<?>) field.get(prefill);
+        ConcurrentLinkedQueue<?> queue = (ConcurrentLinkedQueue<?>) field.get(prefill);
         Object latest = null;
         for (Object element : queue) {
             Field taskField = element.getClass().getDeclaredField("task");
             taskField.setAccessible(true);
-            EngineRpcService.TaskInfoPB task =
-                    (EngineRpcService.TaskInfoPB) taskField.get(element);
+            EngineRpcService.TaskInfoPB task = (EngineRpcService.TaskInfoPB) taskField.get(element);
             if (task.getRequestId() == requestId) {
                 latest = task;
             }
@@ -204,11 +230,13 @@ class CancelTerminalBatchIdTest {
     // ──────────── Protobuf / RPC helpers ────────────
 
     private static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(1)
-                        .build());
+        EngineRpcService.GenerateInputPB.Builder input =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(requestId)
+                        .setGenerateConfig(
+                                EngineRpcService.GenerateConfigPB.newBuilder()
+                                        .setMaxNewTokens(1)
+                                        .build());
         for (int token = 0; token < inputTokens; token++) {
             input.addTokenIds(token);
         }
@@ -220,9 +248,10 @@ class CancelTerminalBatchIdTest {
         EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
                 EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank(dpRank);
         for (EngineRpcService.GenerateInputPB input : inputs) {
-            slot.addRequests(EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
-                    .setInput(input)
-                    .build());
+            slot.addRequests(
+                    EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
+                            .setInput(input)
+                            .build());
         }
         return slot.build();
     }
@@ -235,20 +264,20 @@ class CancelTerminalBatchIdTest {
                 .build();
     }
 
-    private static void enqueue(JavaMockEngineCluster.FastRpcService service,
-                                EngineRpcService.EnqueueBatchRequestPB request) {
-        service.enqueueBatch(request, new io.grpc.stub.StreamObserver<EngineRpcService.EnqueueBatchResponsePB>() {
-            @Override
-            public void onNext(EngineRpcService.EnqueueBatchResponsePB value) {
-            }
+    private static void enqueue(
+            JavaMockEngineCluster.FastRpcService service,
+            EngineRpcService.EnqueueBatchRequestPB request) {
+        service.enqueueBatch(
+                request,
+                new io.grpc.stub.StreamObserver<EngineRpcService.EnqueueBatchResponsePB>() {
+                    @Override
+                    public void onNext(EngineRpcService.EnqueueBatchResponsePB value) {}
 
-            @Override
-            public void onError(Throwable t) {
-            }
+                    @Override
+                    public void onError(Throwable t) {}
 
-            @Override
-            public void onCompleted() {
-            }
-        });
+                    @Override
+                    public void onCompleted() {}
+                });
     }
 }

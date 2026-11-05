@@ -1,14 +1,21 @@
 
 def extract_data(envs):
     data = []
-    prefix = 'internal_source/rtp_llm/test/smoke/'
+    prefixes = [
+        'internal_source/rtp_llm/test/smoke/',
+        'rtp_llm/test/smoke/',
+    ]
     for env in envs:
         if env.startswith('MULTI_TASK_PROMPT='):
             # Use index('=')+1 instead of split('=')[1] so a value containing
             # '=' (e.g. a query-string or kv-style fragment) is preserved in
             # full. Starlark has no maxsplit, so split() would silently drop
             # everything after the first '='.
-            data.append(env[env.index('=') + 1 + len(prefix):])
+            value = env[env.index('=') + 1:]
+            for prefix in prefixes:
+                if value.startswith(prefix):
+                    data.append(value[len(prefix):])
+                    break
     return data
 
 def extract_multi_task_prompt_data(smoke_args):
@@ -29,10 +36,15 @@ def extract_multi_task_prompt_data(smoke_args):
             for i in range(len(tokens)):
                 if tokens[i] == '--multi_task_prompt' and i + 1 < len(tokens):
                     path = tokens[i + 1]
-                    if path.startswith('internal_source/rtp_llm/test/smoke/'):
-                        relative_path = path[len('internal_source/rtp_llm/test/smoke/'):]
-                        if relative_path not in data:
-                            data.append(relative_path)
+                    for prefix in [
+                        'internal_source/rtp_llm/test/smoke/',
+                        'rtp_llm/test/smoke/',
+                    ]:
+                        if path.startswith(prefix):
+                            relative_path = path[len(prefix):]
+                            if relative_path not in data:
+                                data.append(relative_path)
+                            break
                     break
     return data
 
@@ -112,7 +124,7 @@ def _require_single_gpu_type(macro_name, name, gpu_type):
         fail("%s %s: gpu_type must contain exactly one hardware tag, got %s" % (macro_name, name, gpu_type))
     return gpu_type[0]
 
-def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], data=[], deps=[]):
+def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], data=[], deps=[], test_envs={}):
     """Defines a smoke_case py_test with its own unittest main.
 
     Bypasses the entry.py framework while inheriting the framework deps, tags,
@@ -120,6 +132,13 @@ def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], 
     single source for GPU reservation, server arguments and WORLD_SIZE."""
     gpu = _require_single_gpu_type("custom_smoke_test", name, gpu_type)
     gpu_count = get_world_size_from_smoke_args(smoke_args)
+    case_env = {
+        "GPU_COUNT": str(gpu_count),
+        "SMOKE_ARGS": smoke_args,
+        "WORLD_SIZE": str(gpu_count),
+        "PYTHONNOUSERSITE": "1",
+    }
+    case_env.update(test_envs)
     native.py_test(
         name = name,
         main = main,
@@ -128,12 +147,7 @@ def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], 
         timeout = "eternal",
         deps = SMOKE_FRAMEWORK_DEPS + deps,
         data = data,
-        env = {
-            "GPU_COUNT": str(gpu_count),
-            "SMOKE_ARGS": smoke_args,
-            "WORLD_SIZE": str(gpu_count),
-            "PYTHONNOUSERSITE": "1",
-        },
+        env = case_env,
         # Local runs inherit the shared root from the shell; CI overrides it with
         # --test_env. Declared here only: these are the remote-cache smoke cases.
         env_inherit = ["REMOTE_JIT_DIR"],

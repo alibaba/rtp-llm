@@ -488,18 +488,26 @@ bool ClientWrapper::loadKvCachesForTag(const std::string&                       
                                        const kv_cache_manager::UriStrVec&                          uri_str_vec,
                                        kv_cache_manager::BlockBuffers&                             block_buffers,
                                        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
+    return loadKvCachesForTagWithStatus(tag, uri_str_vec, block_buffers, trace_info)
+           == kv_cache_manager::ClientErrorCode::ER_OK;
+}
+
+kv_cache_manager::ClientErrorCode
+ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                                          tag,
+                                            const kv_cache_manager::UriStrVec&                          uri_str_vec,
+                                            kv_cache_manager::BlockBuffers&                             block_buffers,
+                                            const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
     std::shared_lock read_guard(transfer_mutex_);
     const auto       slot = tag_to_index_.find(tag);
     if (slot == tag_to_index_.end()) {
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
-        return false;
+        return kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS;
     }
     auto ec = transfer_clients_[slot->second]->LoadKvCaches(uri_str_vec, block_buffers, trace_info);
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
         RTP_LLM_LOG_ERROR("kvcm client loadKvCaches fail, ec [%d]", ec);
-        return false;
     }
-    return true;
+    return ec;
 }
 
 std::pair<bool, kv_cache_manager::UriStrVec>
@@ -507,18 +515,29 @@ ClientWrapper::saveKvCachesForTag(const std::string&                            
                                   const kv_cache_manager::UriStrVec&                          uri_str_vec,
                                   const kv_cache_manager::BlockBuffers&                       block_buffers,
                                   const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
+    auto [ec, result] = saveKvCachesForTagWithStatus(tag, uri_str_vec, block_buffers, trace_info);
+    if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
+        return {false, {}};
+    }
+    return {true, std::move(result)};
+}
+
+std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
+ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                                          tag,
+                                            const kv_cache_manager::UriStrVec&                          uri_str_vec,
+                                            const kv_cache_manager::BlockBuffers&                       block_buffers,
+                                            const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
     std::shared_lock read_guard(transfer_mutex_);
     const auto       slot = tag_to_index_.find(tag);
     if (slot == tag_to_index_.end()) {
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
-        return {false, {}};
+        return {kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS, {}};
     }
     auto [ec, result] = transfer_clients_[slot->second]->SaveKvCaches(uri_str_vec, block_buffers, trace_info);
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
         RTP_LLM_LOG_ERROR("kvcm client saveKvCaches fail, ec [%d]", ec);
-        return {false, {}};
     }
-    return {true, std::move(result)};
+    return {ec, std::move(result)};
 }
 
 }  // namespace kvcm

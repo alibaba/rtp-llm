@@ -59,6 +59,13 @@ def deep_gemm_build_scope(runtime_scope: str | None) -> str | None:
 
 
 def deepjit_entry_files(entry: Path) -> tuple[Path, ...]:
+    """Validate one DeepJIT entry and return its complete file set.
+
+    Reads the entry's files, which an inotify observer may be watching, so
+    callers on the event path must be gated on write-side events (see
+    JitCacheManager.on_any_event): reacting to read events would feed the
+    watcher fresh events and self-excite.
+    """
     if entry.is_symlink() or not entry.is_dir():
         raise ValueError(f"invalid DeepJIT entry: {entry}")
     for name in _ENTRY_FILES:

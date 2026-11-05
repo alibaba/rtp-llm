@@ -282,6 +282,12 @@ protected:
         config.enabled = true;
         config.role    = "test";
         config.tp_rank = 0;
+        // Keep the BSP schedule delay far below the 5000ms shutdown deadline used
+        // below. With the 5000ms default, one lost worker wakeup (or a single
+        // scheduling stall on a loaded CI machine) burns the entire shutdown
+        // budget and flakes the test; at 200ms a lost wakeup is recovered at the
+        // next worker tick with 25x margin.
+        config.schedule_delay_ms = 200;
         ASSERT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), config));
     }
 

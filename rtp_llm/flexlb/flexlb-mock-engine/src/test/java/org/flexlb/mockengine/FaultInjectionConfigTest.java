@@ -25,18 +25,19 @@ class FaultInjectionConfigTest {
 
     @Test
     void builderSetsAllFields() {
-        FaultInjectionConfig config = FaultInjectionConfig.builder()
-                .failOnEnqueue(true)
-                .enqueueErrorCode(42)
-                .enqueueErrorMessage("custom error")
-                .enqueueDelayMs(500)
-                .generateError(true)
-                .fetchError(true)
-                .noRespond(true)
-                .kvPressureTokens(999_999)
-                .queueDepthLimit(20)
-                .crashAfterNRequests(7)
-                .build();
+        FaultInjectionConfig config =
+                FaultInjectionConfig.builder()
+                        .failOnEnqueue(true)
+                        .enqueueErrorCode(42)
+                        .enqueueErrorMessage("custom error")
+                        .enqueueDelayMs(500)
+                        .generateError(true)
+                        .fetchError(true)
+                        .noRespond(true)
+                        .kvPressureTokens(999_999)
+                        .queueDepthLimit(20)
+                        .crashAfterNRequests(7)
+                        .build();
 
         assertTrue(config.isFailOnEnqueue());
         assertEquals(42, config.getEnqueueErrorCode());
@@ -52,13 +53,14 @@ class FaultInjectionConfigTest {
 
     @Test
     void toBuilderPreservesAllFields() {
-        FaultInjectionConfig original = FaultInjectionConfig.builder()
-                .failOnEnqueue(true)
-                .enqueueDelayMs(200)
-                .generateError(true)
-                .kvPressureTokens(100_000)
-                .crashAfterNRequests(3)
-                .build();
+        FaultInjectionConfig original =
+                FaultInjectionConfig.builder()
+                        .failOnEnqueue(true)
+                        .enqueueDelayMs(200)
+                        .generateError(true)
+                        .kvPressureTokens(100_000)
+                        .crashAfterNRequests(3)
+                        .build();
 
         FaultInjectionConfig copy = original.toBuilder().build();
 
@@ -76,14 +78,10 @@ class FaultInjectionConfigTest {
 
     @Test
     void toBuilderAllowsPartialModification() {
-        FaultInjectionConfig original = FaultInjectionConfig.builder()
-                .failOnEnqueue(true)
-                .enqueueDelayMs(200)
-                .build();
+        FaultInjectionConfig original =
+                FaultInjectionConfig.builder().failOnEnqueue(true).enqueueDelayMs(200).build();
 
-        FaultInjectionConfig modified = original.toBuilder()
-                .failOnEnqueue(false)
-                .build();
+        FaultInjectionConfig modified = original.toBuilder().failOnEnqueue(false).build();
 
         assertFalse(modified.isFailOnEnqueue());
         assertEquals(200, modified.getEnqueueDelayMs(), "unchanged fields should be preserved");
@@ -91,10 +89,8 @@ class FaultInjectionConfigTest {
 
     @Test
     void toStringContainsKeyFields() {
-        FaultInjectionConfig config = FaultInjectionConfig.builder()
-                .failOnEnqueue(true)
-                .kvPressureTokens(500)
-                .build();
+        FaultInjectionConfig config =
+                FaultInjectionConfig.builder().failOnEnqueue(true).kvPressureTokens(500).build();
 
         String str = config.toString();
         assertTrue(str.contains("failOnEnqueue=true"));

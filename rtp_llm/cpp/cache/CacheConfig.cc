@@ -26,7 +26,7 @@ std::string cacheGroupPolicySummary(const CacheGroupPolicy& policy) {
        << ", reservable=" << policy.reservable << ", explicit_block_num=" << policy.explicit_block_num
        << ", charge_to_paged_budget=" << policy.charge_to_paged_budget
        << ", memory_placement=" << static_cast<int>(policy.memory_placement)
-       << ", active_tail_blocks=" << policy.active_tail_blocks
+       << ", active_tail_blocks=" << policy.active_tail_blocks << ", shared_chunk_state=" << policy.shared_chunk_state
        << ", validate_tail_blocks=" << policy.validate_tail_blocks
        << ", cp_mapping=" << static_cast<int>(policy.cp_mapping) << ", cp_slice=" << static_cast<int>(policy.cp_slice)
        << '}';
@@ -131,7 +131,7 @@ bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy
            && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget && lhs.memory_placement == rhs.memory_placement
            && lhs.active_tail_blocks == rhs.active_tail_blocks && lhs.validate_tail_blocks == rhs.validate_tail_blocks
            && lhs.cp_mapping == rhs.cp_mapping && lhs.cp_slice == rhs.cp_slice
-           && lhs.sliding_window_size == rhs.sliding_window_size;
+           && lhs.sliding_window_size == rhs.sliding_window_size && lhs.shared_chunk_state == rhs.shared_chunk_state;
 }
 
 void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers) {
@@ -475,15 +475,12 @@ void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConf
         return;
     }
 
-    const auto step   = static_cast<uint32_t>(std::max(1, linear_step));
-    auto       groups = topology().groups();
+    auto groups = topology().groups();
     for (auto& group : groups) {
         const auto explicit_independent_blocks = group.policy.explicit_block_num;
         uint32_t   rule_blocks                 = global_block_num;
         if (explicit_independent_blocks > 0) {
             rule_blocks = explicit_independent_blocks;
-        } else if (group.policy.group_type == CacheGroupType::SWA) {
-            rule_blocks = global_block_num / step + (global_block_num % step != 0 ? 1u : 0u);
         }
         group.block_num = rule_blocks;
     }
@@ -527,7 +524,7 @@ std::string CacheConfig::debugString(size_t indent) const {
     }
 
     os << indent1 << "# Attention Configuration:\n";
-    OUTPUT_FIELD(linear_step);
+    OUTPUT_FIELD(reuse_cache_tail_blocks);
     OUTPUT_FIELD_EXPR("full_group_num",
                       std::count_if(topology_groups.begin(), topology_groups.end(), [](const GroupBase& group) {
                           return group.policy.group_type == CacheGroupType::FULL;

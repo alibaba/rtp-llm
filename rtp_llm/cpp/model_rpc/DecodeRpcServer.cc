@@ -274,29 +274,6 @@ std::vector<size_t> DecodeRpcServer::completionQueueExpectedResponseCounts(size_
     return expected_response_counts;
 }
 
-int DecodeRpcServer::markLoadedCacheReuse(const std::shared_ptr<GenerateStream>& stream,
-                                          const LoadCacheResult&                 load_result,
-                                          int                                    seq_size_per_block,
-                                          size_t                                 group_num) {
-    if (!stream || group_num <= 1 || !load_result.ok() || load_result.loaded_cache_block_count == 0
-        || seq_size_per_block <= 0 || stream->inputLength() <= 1) {
-        return 0;
-    }
-
-    const size_t max_reusable_block_count =
-        static_cast<size_t>(stream->inputLength() - 1) / static_cast<size_t>(seq_size_per_block);
-    const size_t published_block_count = std::min(load_result.loaded_cache_block_count, max_reusable_block_count);
-    if (published_block_count == 0) {
-        return 0;
-    }
-
-    const int loaded_reuse_len = static_cast<int>(published_block_count) * seq_size_per_block;
-    stream->setInitialReuseLength(std::max(stream->initialReuseLength(), loaded_reuse_len));
-    stream->setReuseLength(std::max(stream->reuseLength(), loaded_reuse_len));
-    stream->setLocalReuseLength(std::max(stream->localReuseLength(), loaded_reuse_len));
-    return loaded_reuse_len;
-}
-
 void DecodeRpcServer::logReadFailures(int64_t                         request_id,
                                       const std::string&              peer_addr,
                                       ErrorCode                       error_code,
@@ -462,9 +439,13 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         }
 
         if (!absl::IsUnavailable(allocation_status)) {
-            const auto grpc_code = absl::IsResourceExhausted(allocation_status) ? grpc::StatusCode::RESOURCE_EXHAUSTED :
-                                                                                  grpc::StatusCode::INTERNAL;
-            finish_allocation_error(grpc_code, ErrorCode::MALLOC_FAILED, allocation_status.ToString());
+            const bool deadline_exceeded = absl::IsDeadlineExceeded(allocation_status);
+            const auto grpc_code         = deadline_exceeded ? grpc::StatusCode::DEADLINE_EXCEEDED :
+                                           absl::IsResourceExhausted(allocation_status) ? grpc::StatusCode::RESOURCE_EXHAUSTED :
+                                                                                          grpc::StatusCode::INTERNAL;
+            finish_allocation_error(grpc_code,
+                                    deadline_exceeded ? ErrorCode::LOAD_CACHE_TIMEOUT : ErrorCode::MALLOC_FAILED,
+                                    allocation_status.ToString());
             return;
         }
 
@@ -521,19 +502,9 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     decode_context.time_info.updateLoadBeginTime();
     auto load_result = loadCacheForAllRank(decode_context);
     decode_context.time_info.updateLoadEndTime();
-    const auto& error_info      = load_result.error_info;
-    auto&       generate_stream = decode_context.getStream();
-    const int   loaded_reuse_len =
-        markLoadedCacheReuse(generate_stream,
-                             load_result,
-                             generate_stream->seqSizePerBlock(),
-                             generate_stream->resourceContext().cache_manager->cacheConfig().groupNums());
-    if (loaded_reuse_len > 0) {
-        RTP_LLM_LOG_DEBUG("request [%s] marked completed P/D handoff reuse_len=%d blocks=%zu",
-                          decode_context.request_key.c_str(),
-                          loaded_reuse_len,
-                          load_result.loaded_cache_block_count);
-    }
+    // KV transferred for this request is not a historical prefix-cache hit.
+    // Keep transfer accounting separate from the stream's reuse lengths.
+    const auto& error_info   = load_result.error_info;
     const auto  error_reason = error_info.ok() ? std::string() : ErrorCodeToString(error_info.code());
     const auto* error_type =
         error_info.ok() ? nullptr :

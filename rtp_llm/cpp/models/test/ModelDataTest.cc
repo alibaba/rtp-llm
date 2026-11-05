@@ -144,6 +144,7 @@ TEST_F(ModelDataTest, testShapeHintsCarryExactPackedBroadcastPlacement) {
     inputs.input_lengths            = torch::zeros({1}, torch::kInt32).cuda();
     inputs.sequence_lengths         = torch::zeros({1}, torch::kInt32).cuda();
     inputs.prefix_lengths           = torch::zeros({1}, torch::kInt32).cuda();
+    inputs.cache_store_publish_start_tokens = torch::tensor({4}, torch::kInt32);
     inputs.kv_cache_kernel_block_id = torch::zeros({4, 1, 93}, torch::kInt32).cuda();
     inputs.kv_cache_block_id        = torch::zeros({4, 1, 93}, torch::kInt32);
     inputs.kv_cache_group_types     = torch::zeros({4}, torch::kInt32);
@@ -163,6 +164,7 @@ TEST_F(ModelDataTest, testShapeHintsCarryExactPackedBroadcastPlacement) {
     EXPECT_TRUE(is_device(GptModelInputDeviceBit::kDeviceBitInputLengths));
     EXPECT_TRUE(is_device(GptModelInputDeviceBit::kDeviceBitSequenceLengths));
     EXPECT_TRUE(is_device(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
+    EXPECT_EQ(hints[GptModelInputIndex::cacheStorePublishStartTokens], 1);
     EXPECT_TRUE(is_device(GptModelInputDeviceBit::kDeviceBitKernelBlockId));
     EXPECT_FALSE(is_device(GptModelInputDeviceBit::kDeviceBitBlockId));
     EXPECT_FALSE(is_device(GptModelInputDeviceBit::kDeviceBitCacheGroupTypes));
@@ -171,6 +173,9 @@ TEST_F(ModelDataTest, testShapeHintsCarryExactPackedBroadcastPlacement) {
     EXPECT_FALSE(is_device(GptModelInputDeviceBit::kDeviceBitRequestPdSeparation));
     EXPECT_TRUE(is_device(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
     EXPECT_TRUE(is_device(GptModelInputDeviceBit::kDeviceBitComboPositionIds));
+
+    inputs.cache_store_publish_start_tokens = inputs.cache_store_publish_start_tokens.cuda();
+    EXPECT_THROW((void)getModelInputShapeHints(inputs), RTPException);
 }
 
 TEST_F(ModelDataTest, testTpSyncBlockTableShapesPreserve2DAnd3D) {
@@ -294,6 +299,7 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
         inputs.kv_cache_kernel_block_id = kernel.clone();
         inputs.kv_cache_group_types     = types.clone();
         inputs.kv_cache_update_mapping  = copies.clone();
+        inputs.cache_store_publish_start_tokens = torch::tensor({0, 8}, torch::kInt32);
     }
     const auto        original_physical = inputs.kv_cache_block_id;
     const auto        original_kernel   = inputs.kv_cache_kernel_block_id;
@@ -329,6 +335,7 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
         expectIntTensor(inputs.kv_cache_update_mapping, expected_copies.to(inputs.kv_cache_update_mapping.device()));
     }
     expectIntTensor(inputs.combo_tokens, torch::tensor({7, 8}, torch::kInt32));
+    expectIntTensor(inputs.cache_store_publish_start_tokens, torch::tensor({0, 8}, torch::kInt32));
     if (rank == 0) {
         EXPECT_TRUE(inputs.kv_cache_block_id.is_same(original_physical));
         EXPECT_TRUE(inputs.kv_cache_kernel_block_id.is_same(original_kernel));

@@ -15,10 +15,13 @@ import java.util.Comparator;
  * </ol>
  *
  * <p>Callers that need a deterministic total order (e.g. the batcher queue
- * comparator) append a final {@code .thenComparingLong(...::requestId)} to
+ * comparator) append a final {@code .thenComparing(...::requestId)} to
  * {@link #strict()}.
  */
 public final class PriorityOrdering {
+
+    private static final Comparator<String> REQUEST_ID_ORDER =
+            Comparator.nullsFirst(Comparator.naturalOrder());
 
     /**
      * Strict priority-then-FIFO comparator for any {@link Prioritized} item.
@@ -27,36 +30,36 @@ public final class PriorityOrdering {
      * shared ordering primitive for the canonical per-worker scheduler
      * queues ({@code WorkerBatcher}).
      */
-    public static final Comparator<Prioritized> STRICT = (left, right) -> compare(
-            left.priority(), left.enqueueSeq(),
-            right.priority(), right.enqueueSeq());
+    public static final Comparator<Prioritized> STRICT =
+            (left, right) ->
+                    compare(
+                            left.priority(), left.enqueueSeq(),
+                            right.priority(), right.enqueueSeq());
 
     /**
      * Allocation-free STRICT comparison over primitive ordering keys.
      */
-    private static int compare(int leftPriority,
-                               long leftEnqueueSeq,
-                               int rightPriority,
-                               long rightEnqueueSeq) {
+    private static int compare(
+            int leftPriority, long leftEnqueueSeq, int rightPriority, long rightEnqueueSeq) {
         int priorityOrder = Integer.compare(rightPriority, leftPriority);
-        return priorityOrder != 0
-                ? priorityOrder : Long.compare(leftEnqueueSeq, rightEnqueueSeq);
+        return priorityOrder != 0 ? priorityOrder : Long.compare(leftEnqueueSeq, rightEnqueueSeq);
     }
 
     /**
      * Allocation-free deterministic total order used by worker queues and
      * admission probes. Request id is consulted only after STRICT ties.
      */
-    public static int compareWithRequestId(int leftPriority,
-                                           long leftEnqueueSeq,
-                                           long leftRequestId,
-                                           int rightPriority,
-                                           long rightEnqueueSeq,
-                                           long rightRequestId) {
-        int strictOrder = compare(leftPriority, leftEnqueueSeq,
-                rightPriority, rightEnqueueSeq);
+    public static int compareWithRequestId(
+            int leftPriority,
+            long leftEnqueueSeq,
+            String leftRequestId,
+            int rightPriority,
+            long rightEnqueueSeq,
+            String rightRequestId) {
+        int strictOrder = compare(leftPriority, leftEnqueueSeq, rightPriority, rightEnqueueSeq);
         return strictOrder != 0
-                ? strictOrder : Long.compare(leftRequestId, rightRequestId);
+                ? strictOrder
+                : REQUEST_ID_ORDER.compare(leftRequestId, rightRequestId);
     }
 
     /**

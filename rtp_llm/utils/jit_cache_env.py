@@ -82,7 +82,9 @@ def safe_local_path(path: str | Path) -> Path | None:
         return None
     remote = os.environ.get("REMOTE_JIT_DIR", "").strip()
     if remote and not urlparse(remote).scheme:
-        remote_path = Path(remote).expanduser().resolve()
+        # 与 --remote_jit_dir 的 $VAR 展开保持一致：守卫用展开后的真实路径做包含判断，
+        # 否则 REMOTE_JIT_DIR=$VAR 时守卫永远匹配不上，本地缓存可能落进远端目录。
+        remote_path = Path(os.path.expandvars(remote)).expanduser().resolve()
         if path == remote_path or remote_path in path.parents:
             return None
     return path

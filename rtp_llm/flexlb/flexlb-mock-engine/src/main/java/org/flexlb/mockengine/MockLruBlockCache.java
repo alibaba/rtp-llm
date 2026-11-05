@@ -50,6 +50,7 @@ final class MockLruBlockCache {
 
     private final int totalBlocks;
     private final double reserveRatio;
+
     /**
      * cache key → reference count. ref == 0: pure LRU block (evictable);
      * ref > 0: referenced by in-flight requests (matchable, NOT evictable).
@@ -57,8 +58,10 @@ final class MockLruBlockCache {
      * (production evicts the least-recently-used chain tail).
      */
     private final LinkedHashMap<Long, Integer> blocks;
+
     /** Blocks held by in-flight requests that carry no cache key (growth/empty-bh). */
     private int heldBlocks;
+
     private long evictions;
 
     MockLruBlockCache(int totalBlocks) {
@@ -231,7 +234,8 @@ final class MockLruBlockCache {
      * {@link #acquireWithReuse}, plus the failure family on the LACK_MEM
      * gate — see {@link AllocationFailure}). Failure changes no state.
      */
-    synchronized AllocationOutcome acquireWithReuseDetailed(int totalBlocksDemand, List<Long> keys) {
+    synchronized AllocationOutcome acquireWithReuseDetailed(
+            int totalBlocksDemand, List<Long> keys) {
         if (totalBlocksDemand <= 0) {
             return new AllocationOutcome(new BlockLease(List.of(), 0), null);
         }
@@ -258,7 +262,8 @@ final class MockLruBlockCache {
         // acquire: eviction trades prefix reuse for capacity).
         while (freeBlocks() < netNew) {
             if (!evictOne()) {
-                throw new IllegalStateException("capacity gate admitted without enough evictable blocks");
+                throw new IllegalStateException(
+                        "capacity gate admitted without enough evictable blocks");
             }
         }
         heldBlocks += netNew;

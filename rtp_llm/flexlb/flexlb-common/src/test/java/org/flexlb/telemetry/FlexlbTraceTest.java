@@ -46,15 +46,17 @@ class FlexlbTraceTest {
     void setUp() {
         GlobalOpenTelemetry.resetForTest();
         exporter = new RecordingExporter();
-        SdkTracerProvider provider = SdkTracerProvider.builder()
-                .setSampler(Sampler.alwaysOn())
-                .addSpanProcessor(SimpleSpanProcessor.create(exporter))
-                .build();
-        sdk = OpenTelemetrySdk.builder()
-                .setTracerProvider(provider)
-                .setPropagators(ContextPropagators.create(
-                        W3CTraceContextPropagator.getInstance()))
-                .build();
+        SdkTracerProvider provider =
+                SdkTracerProvider.builder()
+                        .setSampler(Sampler.alwaysOn())
+                        .addSpanProcessor(SimpleSpanProcessor.create(exporter))
+                        .build();
+        sdk =
+                OpenTelemetrySdk.builder()
+                        .setTracerProvider(provider)
+                        .setPropagators(
+                                ContextPropagators.create(W3CTraceContextPropagator.getInstance()))
+                        .build();
         GlobalOpenTelemetry.set(sdk);
         FlexlbTrace.configure(sdk, "");
     }
@@ -76,7 +78,7 @@ class FlexlbTraceTest {
             assertNull(FlexlbTrace.startClient("client", context));
             assertNull(FlexlbTrace.startInternal("internal", context));
             assertEquals(context, FlexlbTrace.withSpan(Span.getInvalid(), context));
-            FlexlbTrace.setRequestAttributes(owner, 42L);
+            FlexlbTrace.setRequestAttributes(owner, "42");
             FlexlbTrace.setScheduleAttribute(context, AttributeKey.stringKey("mode"), "BATCH");
             FlexlbTrace.setScheduleAttribute(context, AttributeKey.booleanKey("batch"), true);
             FlexlbTrace.markBusinessError(context, 500, "FLEXLB_INTERNAL_ERROR");
@@ -84,12 +86,23 @@ class FlexlbTraceTest {
             FlexlbTrace.finishWithGrpcStatus(owner, "INTERNAL", 13, false);
             assertTrue(owner.isRecording());
             assertTrue(exporter.spans.isEmpty());
-            Context parent = Context.root().with(Span.wrap(SpanContext.createFromRemoteParent(
-                    "11111111111111111111111111111111", "2222222222222222", TraceFlags.getSampled(),
-                    TraceState.builder().put("vendor", "one").build())));
+            Context parent =
+                    Context.root()
+                            .with(
+                                    Span.wrap(
+                                            SpanContext.createFromRemoteParent(
+                                                    "11111111111111111111111111111111",
+                                                    "2222222222222222",
+                                                    TraceFlags.getSampled(),
+                                                    TraceState.builder()
+                                                            .put("vendor", "one")
+                                                            .build())));
             Map<String, String> carrier = FlexlbTrace.inject(parent);
             assertEquals("vendor=one", carrier.get("tracestate"));
-            assertEquals(carrier, FlexlbTrace.inject(FlexlbTrace.extract(Context.root(), carrier, new MapGetter())));
+            assertEquals(
+                    carrier,
+                    FlexlbTrace.inject(
+                            FlexlbTrace.extract(Context.root(), carrier, new MapGetter())));
         } finally {
             owner.end();
         }
@@ -121,11 +134,12 @@ class FlexlbTraceTest {
             Map<String, String> carrier = FlexlbTrace.inject(rootContext);
             assertTrue(carrier.get("traceparent").startsWith("00-"));
 
-            Context extracted = FlexlbTrace.extract(
-                    Context.root(), carrier, new MapGetter());
-            assertEquals(root.getSpanContext().getTraceId(),
+            Context extracted = FlexlbTrace.extract(Context.root(), carrier, new MapGetter());
+            assertEquals(
+                    root.getSpanContext().getTraceId(),
                     Span.fromContext(extracted).getSpanContext().getTraceId());
-            assertEquals(root.getSpanContext().getSpanId(),
+            assertEquals(
+                    root.getSpanContext().getSpanId(),
                     Span.fromContext(extracted).getSpanContext().getSpanId());
         } finally {
             root.end();
@@ -141,8 +155,8 @@ class FlexlbTraceTest {
             FlexlbTrace.setScheduleAttribute(context, FlexlbTrace.SCHEDULE_MODE, "BATCH");
             FlexlbTrace.setScheduleAttribute(context, FlexlbTrace.BATCH_ID, 42L);
             FlexlbTrace.setScheduleAttribute(context, FlexlbTrace.ENQUEUED_BY_MASTER, true);
-            FlexlbTrace.setScheduleDuration(context, FlexlbTrace.BATCH_WAIT_MS,
-                    1_000_000L, 8_000_000L);
+            FlexlbTrace.setScheduleDuration(
+                    context, FlexlbTrace.BATCH_WAIT_MS, 1_000_000L, 8_000_000L);
         } finally {
             root.end();
         }
@@ -166,7 +180,7 @@ class FlexlbTraceTest {
         Tracer tracer = GlobalOpenTelemetry.getTracer("test");
         Span root = tracer.spanBuilder("root").setSpanKind(SpanKind.SERVER).startSpan();
         try {
-            FlexlbTrace.setRequestAttributes(root, 3540218608800727041L);
+            FlexlbTrace.setRequestAttributes(root, "3540218608800727041");
         } finally {
             root.end();
         }
@@ -175,8 +189,9 @@ class FlexlbTraceTest {
         SpanData span = exporter.spans.get(0);
         assertEquals("request_id", FlexlbTrace.REQUEST_ID.getKey());
         assertEquals("3540218608800727041", span.getAttributes().get(FlexlbTrace.REQUEST_ID));
-        assertFalse(span.getAttributes().asMap().keySet().stream()
-                .anyMatch(key -> key.getKey().equals("rtp_llm.request_id")));
+        assertFalse(
+                span.getAttributes().asMap().keySet().stream()
+                        .anyMatch(key -> key.getKey().equals("rtp_llm.request_id")));
     }
 
     /**
@@ -249,8 +264,11 @@ class FlexlbTraceTest {
 
         @Override
         public SpanContext getSpanContext() {
-            return SpanContext.create("11111111111111111111111111111111", "2222222222222222",
-                    TraceFlags.getSampled(), TraceState.getDefault());
+            return SpanContext.create(
+                    "11111111111111111111111111111111",
+                    "2222222222222222",
+                    TraceFlags.getSampled(),
+                    TraceState.getDefault());
         }
 
         @Override

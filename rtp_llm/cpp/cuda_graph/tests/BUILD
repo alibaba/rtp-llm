@@ -8,7 +8,7 @@ load("@rules_cc//cc:defs.bzl", cuda13_cc_test = "cc_test")
         timeout = "short",
         srcs = ["cuda_graph_replay_retry_integration_test.cc"],
         copts = copts(),
-        exec_properties = {"gpu": platform["gpu"]},
+        exec_properties = {"gpu": platform["gpu"], "gpu_count": "1"},
         tags = [platform["gpu"]],
         target_compatible_with = select({
             platform["config"]: [],

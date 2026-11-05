@@ -27,8 +27,25 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.after;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class DeliverySettlementTest {
     private FlexlbConfig config;
@@ -41,23 +58,34 @@ class DeliverySettlementTest {
         config = SchedulingTestConfig.batchConfig();
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
-        registry = new RequestRegistry(service, mock(BatchSchedulerReporter.class),
-                mock(RequestSchedulerReporter.class));
+        registry =
+                new RequestRegistry(
+                        service,
+                        mock(BatchSchedulerReporter.class),
+                        mock(RequestSchedulerReporter.class));
         ledger = new DeliverySettlementTestSupport();
         prefill = mock(PrefillEndpoint.class);
-        when(prefill.releaseCommittedItem(any())).thenAnswer(invocation -> {
-            ScheduledRequest item = invocation.getArgument(0);
-            RequestSlot slot = registry.requestSlot(item.requestId());
-            assertTrue(slot == null || !Thread.holdsLock(slot),
-                    "endpoint accounting must run outside the Slot monitor");
-            return ledger.prefill.terminalizeCommittedItem(item);
-        });
-        doAnswer(invocation -> {
-            prefill.releaseCommittedItem(invocation.getArgument(0));
-            return null;
-        }).when(prefill).settleFailedRequest(any());
-        when(prefill.expireCommittedItem(any())).thenAnswer(invocation ->
-                ledger.prefill.terminalizeCommittedItem(invocation.getArgument(0)));
+        when(prefill.releaseCommittedItem(any()))
+                .thenAnswer(
+                        invocation -> {
+                            ScheduledRequest item = invocation.getArgument(0);
+                            RequestSlot slot = registry.requestSlot(item.requestId());
+                            assertTrue(
+                                    slot == null || !Thread.holdsLock(slot),
+                                    "endpoint accounting must run outside the Slot monitor");
+                            return ledger.prefill.terminalizeCommittedItem(item);
+                        });
+        doAnswer(
+                        invocation -> {
+                            prefill.releaseCommittedItem(invocation.getArgument(0));
+                            return null;
+                        })
+                .when(prefill)
+                .settleFailedRequest(any());
+        when(prefill.expireCommittedItem(any()))
+                .thenAnswer(
+                        invocation ->
+                                ledger.prefill.terminalizeCommittedItem(invocation.getArgument(0)));
     }
 
     @AfterEach
@@ -74,26 +102,37 @@ class DeliverySettlementTest {
     void decodeActivityCannotTurnPrefillRejectionIntoAck(boolean accepted) throws Exception {
         Member member = member(1L, 11L);
         ledger.commit(11L, List.of(member.item()));
-        member.slot().processDecodeStatus(member.item().decodeEp(), accepted
-                ? DecodeEndpoint.WorkerStatusFact.accepted(member.item().decodeReservation())
-                : DecodeEndpoint.WorkerStatusFact.active(member.item().decodeReservation()));
+        member.slot()
+                .processDecodeStatus(
+                        member.item().decodeEp(),
+                        accepted
+                                ? DecodeEndpoint.WorkerStatusFact.accepted(
+                                        member.item().decodeReservation())
+                                : DecodeEndpoint.WorkerStatusFact.active(
+                                        member.item().decodeReservation()));
 
         reject(member);
 
         assertFalse(member.item().future().get(5, TimeUnit.SECONDS).isSuccess());
         assertEquals(RequestState.Phase.FAILED, member.slot().snapshot().state());
         assertOccupancy(0, 0);
-        verify(member.item().decodeEp(), never()).release(any(), eq(DecodeEndpoint.ReleaseReason.NOT_SENT));
+        verify(member.item().decodeEp(), never())
+                .release(any(), eq(DecodeEndpoint.ReleaseReason.NOT_SENT));
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void realDecodeReservationSurvivesRejectionUntilItsOwnFinished(boolean observed) throws Exception {
-        var decode = spy(new DecodeEndpoint(WorkerStatus.createDiscovered(
-                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), new EndpointEventProjector(registry)));
+    void realDecodeReservationSurvivesRejectionUntilItsOwnFinished(boolean observed)
+            throws Exception {
+        var decode =
+                spy(
+                        new DecodeEndpoint(
+                                WorkerStatus.createDiscovered(
+                                        RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
+                                new EndpointEventProjector(registry)));
         DecodeEndpoint.ReservationHandle reservation;
         try (var pin = decode.tryPinGeneration()) {
-            reservation = decode.reserveUnqueued(pin, 2L, 1L, 1L, 50);
+            reservation = decode.reserveUnqueued(pin, "2", 1L, 1L, 50);
         }
         assertNotNull(reservation);
         Member member = member(2L, 12L, decode, reservation);
@@ -118,7 +157,8 @@ class DeliverySettlementTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void lateRejectionSettlesOriginalMemberAfterDecodeTerminalOrSlotRemoval(boolean remove) throws Exception {
+    void lateRejectionSettlesOriginalMemberAfterDecodeTerminalOrSlotRemoval(boolean remove)
+            throws Exception {
         Member member = member(3L, 13L);
         ledger.commit(13L, List.of(member.item()));
         decodeFinished(member);
@@ -147,8 +187,8 @@ class DeliverySettlementTest {
             Member member = members.get(i);
             member.claim().complete(DeliveryResult.delivered());
             assertTrue(member.item().future().get(5, TimeUnit.SECONDS).isSuccess());
-            new EndpointEventProjector(registry).onPrefillStatus(prefill, RoleType.PREFILL,
-                    ledger.finish(20L, member.item()));
+            new EndpointEventProjector(registry)
+                    .onPrefillStatus(prefill, RoleType.PREFILL, ledger.finish(20L, member.item()));
             assertOccupancy(i == 15 ? 0 : 1, 15 - i);
         }
         assertTrue(ledger.prefill.batchAvailability(2).isAvailable());
@@ -173,8 +213,18 @@ class DeliverySettlementTest {
         ledger.commit(40L, List.of(member.item()));
         CountDownLatch start = new CountDownLatch(1);
         try (var threads = Executors.newFixedThreadPool(2)) {
-            var rejection = threads.submit(() -> { await(start); reject(member); });
-            var finished = threads.submit(() -> { await(start); ledger.finish(40L, member.item()); });
+            var rejection =
+                    threads.submit(
+                            () -> {
+                                await(start);
+                                reject(member);
+                            });
+            var finished =
+                    threads.submit(
+                            () -> {
+                                await(start);
+                                ledger.finish(40L, member.item());
+                            });
             start.countDown();
             rejection.get(5, TimeUnit.SECONDS);
             finished.get(5, TimeUnit.SECONDS);
@@ -202,7 +252,8 @@ class DeliverySettlementTest {
     }
 
     @Test
-    void prefillSettlementFailureReturnsFailureAndRetainsCleanupWithoutBackgroundRetry() throws Exception {
+    void prefillSettlementFailureReturnsFailureAndRetainsCleanupWithoutBackgroundRetry()
+            throws Exception {
         Member member = member(60L, 60L);
         ledger.commit(60L, List.of(member.item()));
         var failure = new IllegalStateException("injected endpoint failure");
@@ -213,8 +264,9 @@ class DeliverySettlementTest {
         assertOccupancy(1, 1);
         decodeFinished(member);
         assertFalse(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
-        verify(member.item().decodeEp()).settleFailedRequest(
-                member.item().decodeReservation(), DeliveryResult.Status.PREFILL_REJECTED);
+        verify(member.item().decodeEp())
+                .settleFailedRequest(
+                        member.item().decodeReservation(), DeliveryResult.Status.PREFILL_REJECTED);
 
         verify(prefill, after(1200).times(1)).releaseCommittedItem(member.item());
         assertOccupancy(1, 1);
@@ -225,32 +277,43 @@ class DeliverySettlementTest {
         Member member = member(61L, 61L);
         ledger.commit(61L, List.of(member.item()));
         doThrow(new IllegalStateException("injected expiry cleanup failure"))
-                .when(prefill).expireCommittedItem(member.item());
-        member.slot().expireInactiveRequest(System.currentTimeMillis()
-                + config.getRequestLifecycle().getRequest().getTimeoutMs() + 1L);
+                .when(prefill)
+                .expireCommittedItem(member.item());
+        member.slot()
+                .expireInactiveRequest(
+                        System.currentTimeMillis()
+                                + config.getRequestLifecycle().getRequest().getTimeoutMs()
+                                + 1L);
         assertFalse(member.item().future().get(5, TimeUnit.SECONDS).isSuccess());
         assertOccupancy(1, 1);
         assertTrue(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
 
         verify(prefill, after(1200).times(1)).expireCommittedItem(member.item());
-        verify(member.item().decodeEp()).release(member.item().decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
+        verify(member.item().decodeEp())
+                .release(member.item().decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
         assertOccupancy(1, 1);
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void prefillRetirementCompletesFailedCleanupRegardlessOfDecodeFinishOrder(boolean decodeFirst) throws Exception {
+    void prefillRetirementCompletesFailedCleanupRegardlessOfDecodeFinishOrder(boolean decodeFirst)
+            throws Exception {
         Member member = member(63L, 63L);
-        when(prefill.getStatus()).thenReturn(WorkerStatus.createDiscovered(
-                RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, null));
+        when(prefill.getStatus())
+                .thenReturn(
+                        WorkerStatus.createDiscovered(
+                                RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, null));
         ledger.commit(63L, List.of(member.item()));
         doThrow(new IllegalStateException("Prefill cleanup failed"))
-                .when(prefill).releaseCommittedItem(member.item());
+                .when(prefill)
+                .releaseCommittedItem(member.item());
         assertThrows(IllegalStateException.class, () -> reject(member));
         Response failure = member.item().future().get(5, TimeUnit.SECONDS);
         assertFalse(failure.isSuccess());
 
-        if (decodeFirst) { decodeFinished(member); }
+        if (decodeFirst) {
+            decodeFinished(member);
+        }
         // Retirement drains endpoint ownership before projecting its exact items.
         assertTrue(ledger.prefill.terminalizeCommittedItem(member.item()));
         registry.projectPrefillRetirementItem(prefill, member.item());
@@ -261,7 +324,8 @@ class DeliverySettlementTest {
 
         assertSame(failure, member.item().future().join());
         assertOccupancy(0, 0);
-        assertTrue(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE),
+        assertTrue(
+                registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE),
                 "retirement must reach a failed Slot that still owns cleanup");
     }
 
@@ -270,49 +334,71 @@ class DeliverySettlementTest {
         Member member = member(62L, 62L);
         ledger.commit(62L, List.of(member.item()));
         var failure = new IllegalStateException("injected Decode reservation release failure");
-        when(member.item().decodeEp().settleFailedRequest(
-                member.item().decodeReservation(), DeliveryResult.Status.NOT_SENT))
+        when(member.item()
+                        .decodeEp()
+                        .settleFailedRequest(
+                                member.item().decodeReservation(), DeliveryResult.Status.NOT_SENT))
                 .thenThrow(failure);
 
-        assertSame(failure, assertThrows(IllegalStateException.class, () ->
-                member.claim().complete(DeliveryResult.notSent(new IllegalStateException("local dispatch failed")))));
+        assertSame(
+                failure,
+                assertThrows(
+                        IllegalStateException.class,
+                        () ->
+                                member.claim()
+                                        .complete(
+                                                DeliveryResult.notSent(
+                                                        new IllegalStateException(
+                                                                "local dispatch failed")))));
         assertFalse(member.item().future().get(5, TimeUnit.SECONDS).isSuccess());
         assertFalse(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
         verify(member.item().decodeEp(), after(1200).times(1))
-                .settleFailedRequest(member.item().decodeReservation(), DeliveryResult.Status.NOT_SENT);
+                .settleFailedRequest(
+                        member.item().decodeReservation(), DeliveryResult.Status.NOT_SENT);
         assertOccupancy(0, 0);
     }
 
     @ParameterizedTest
-    @EnumSource(value = DeliveryResult.Status.class, names = {"TIMED_OUT", "UNCERTAIN"})
+    @EnumSource(
+            value = DeliveryResult.Status.class,
+            names = {"TIMED_OUT", "UNCERTAIN"})
     void unknownTransportOutcomeRetainsPrefill(DeliveryResult.Status status) {
         Member member = member(70L, 70L);
         ledger.commit(70L, List.of(member.item()));
-        member.claim().complete(new DeliveryResult(status, new IllegalStateException("lost response")));
+        member.claim()
+                .complete(new DeliveryResult(status, new IllegalStateException("lost response")));
         assertOccupancy(1, 1);
         assertFalse(member.item().future().isDone());
-        verify(member.item().decodeEp(), never()).release(any(), eq(DecodeEndpoint.ReleaseReason.NOT_SENT));
+        verify(member.item().decodeEp(), never())
+                .release(any(), eq(DecodeEndpoint.ReleaseReason.NOT_SENT));
     }
 
     @Test
     void unsentRequestReleasesDecodeReservationOutsideSlotLock() throws Exception {
         Member member = member(80L, 80L);
         ledger.commit(80L, List.of(member.item()));
-        when(member.item().decodeEp().settleFailedRequest(
-                member.item().decodeReservation(), DeliveryResult.Status.NOT_SENT))
-                .thenAnswer(invocation -> {
-                    assertFalse(Thread.holdsLock(member.slot()));
-                    return true;
-                });
-        member.claim().complete(DeliveryResult.notSent(new IllegalStateException("request build failed")));
+        when(member.item()
+                        .decodeEp()
+                        .settleFailedRequest(
+                                member.item().decodeReservation(), DeliveryResult.Status.NOT_SENT))
+                .thenAnswer(
+                        invocation -> {
+                            assertFalse(Thread.holdsLock(member.slot()));
+                            return true;
+                        });
+        member.claim()
+                .complete(
+                        DeliveryResult.notSent(new IllegalStateException("request build failed")));
         assertFalse(member.item().future().get(5, TimeUnit.SECONDS).isSuccess());
         assertOccupancy(0, 0);
-        verify(member.item().decodeEp()).settleFailedRequest(
-                member.item().decodeReservation(), DeliveryResult.Status.NOT_SENT);
+        verify(member.item().decodeEp())
+                .settleFailedRequest(
+                        member.item().decodeReservation(), DeliveryResult.Status.NOT_SENT);
     }
 
     @ParameterizedTest
-    @EnumSource(value = PreemptionCancelPhase.class,
+    @EnumSource(
+            value = PreemptionCancelPhase.class,
             names = {"CANCEL_IN_FLIGHT", "NOT_FOUND_STALE", "CANCEL_UNKNOWN"})
     void preemptionCannotUsePrefillRejectionAsDecodeCompletion(PreemptionCancelPhase phase) {
         Member member = member(90L, 90L);
@@ -321,7 +407,9 @@ class DeliverySettlementTest {
         synchronized (member.slot()) {
             preemption = member.slot().tryInstallPreemption(90L, 91L, "priority victim");
             assertNotNull(preemption);
-            assertTrue(member.slot().updatePreemption(preemption, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
+            assertTrue(
+                    member.slot()
+                            .updatePreemption(preemption, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
             if (phase != PreemptionCancelPhase.CANCEL_IN_FLIGHT) {
                 assertTrue(member.slot().updatePreemption(preemption, phase));
             }
@@ -329,9 +417,13 @@ class DeliverySettlementTest {
         reject(member);
         assertOccupancy(0, 0);
         assertFalse(preemption.terminalObservation().toCompletableFuture().isDone());
-        verify(member.item().decodeEp(), never()).updatePreemption(
-                anyLong(),
-                argThat(update -> update.kind() == DecodeEndpoint.PreemptionUpdate.Kind.FINISHED));
+        verify(member.item().decodeEp(), never())
+                .updatePreemption(
+                        anyLong(),
+                        argThat(
+                                update ->
+                                        update.kind()
+                                                == DecodeEndpoint.PreemptionUpdate.Kind.FINISHED));
         decodeFinished(member);
         assertTrue(preemption.terminalObservation().toCompletableFuture().isDone());
     }
@@ -343,7 +435,8 @@ class DeliverySettlementTest {
         PreemptionRegistration claim;
         synchronized (member.slot()) {
             claim = member.slot().tryInstallPreemption(101L, 102L, "priority victim");
-            assertTrue(member.slot().updatePreemption(claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
+            assertTrue(
+                    member.slot().updatePreemption(claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
             assertTrue(member.slot().updatePreemption(claim, PreemptionCancelPhase.CANCEL_UNKNOWN));
         }
 
@@ -354,8 +447,11 @@ class DeliverySettlementTest {
         assertEquals(RequestState.Phase.FAILED, member.slot().snapshot().state());
         assertFalse(claim.terminalObservation().toCompletableFuture().isDone());
         assertFalse(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
-        member.slot().processDecodeStatus(member.item().decodeEp(),
-                DecodeEndpoint.WorkerStatusFact.terminal(member.item().decodeReservation(), 0L));
+        member.slot()
+                .processDecodeStatus(
+                        member.item().decodeEp(),
+                        DecodeEndpoint.WorkerStatusFact.terminal(
+                                member.item().decodeReservation(), 0L));
         assertSame(failure, member.item().future().join());
         assertTrue(claim.terminalObservation().toCompletableFuture().isDone());
         assertTrue(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
@@ -368,45 +464,65 @@ class DeliverySettlementTest {
         ledger.commit(103L, List.of(member.item()));
         PreemptionRegistration claim;
         synchronized (member.slot()) {
-            claim = preempting ? member.slot().tryInstallPreemption(103L, 104L, "priority victim") : null;
-            if (claim != null) { claim.applyPhase(PreemptionCancelPhase.CANCEL_IN_FLIGHT); }
+            claim =
+                    preempting
+                            ? member.slot().tryInstallPreemption(103L, 104L, "priority victim")
+                            : null;
+            if (claim != null) {
+                claim.applyPhase(PreemptionCancelPhase.CANCEL_IN_FLIGHT);
+            }
         }
         CountDownLatch cleaning = new CountDownLatch(1);
         CountDownLatch resume = new CountDownLatch(1);
         var cleanupFailure = new IllegalStateException("Prefill cleanup failed");
-        doAnswer(invocation -> {
-            cleaning.countDown();
-            await(resume);
-            throw cleanupFailure;
-        }).when(prefill).releaseCommittedItem(member.item());
+        doAnswer(
+                        invocation -> {
+                            cleaning.countDown();
+                            await(resume);
+                            throw cleanupFailure;
+                        })
+                .when(prefill)
+                .releaseCommittedItem(member.item());
         try (var executor = Executors.newSingleThreadExecutor()) {
             var callback = executor.submit(() -> reject(member));
             try {
                 await(cleaning);
                 Response failure = member.item().future().get(1, TimeUnit.SECONDS);
                 assertFalse(failure.isSuccess());
-                member.slot().processDecodeStatus(member.item().decodeEp(),
-                        DecodeEndpoint.WorkerStatusFact.terminal(member.item().decodeReservation(), 0L));
+                member.slot()
+                        .processDecodeStatus(
+                                member.item().decodeEp(),
+                                DecodeEndpoint.WorkerStatusFact.terminal(
+                                        member.item().decodeReservation(), 0L));
                 assertFalse(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
             } finally {
                 resume.countDown();
             }
-            assertSame(cleanupFailure,
-                    assertThrows(java.util.concurrent.ExecutionException.class,
-                            () -> callback.get(5, TimeUnit.SECONDS)).getCause());
+            assertSame(
+                    cleanupFailure,
+                    assertThrows(
+                                    java.util.concurrent.ExecutionException.class,
+                                    () -> callback.get(5, TimeUnit.SECONDS))
+                            .getCause());
         }
         assertFalse(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
         assertOccupancy(1, 1);
         if (claim != null) {
             assertFalse(claim.terminalObservation().toCompletableFuture().isDone());
-            assertFalse(claim.applyPhase(PreemptionCancelPhase.NOT_FOUND_STALE),
+            assertFalse(
+                    claim.applyPhase(PreemptionCancelPhase.NOT_FOUND_STALE),
                     "Decode completion ends the protocol even while Prefill cleanup is pending");
         }
-        member.slot().expireInactiveRequest(System.currentTimeMillis()
-                + config.getRequestLifecycle().getRequest().getTimeoutMs() + 1L);
+        member.slot()
+                .expireInactiveRequest(
+                        System.currentTimeMillis()
+                                + config.getRequestLifecycle().getRequest().getTimeoutMs()
+                                + 1L);
         assertOccupancy(0, 0);
         assertEquals(RequestState.Phase.FAILED, member.slot().snapshot().state());
-        if (claim != null) { assertTrue(claim.terminalObservation().toCompletableFuture().isDone()); }
+        if (claim != null) {
+            assertTrue(claim.terminalObservation().toCompletableFuture().isDone());
+        }
         assertTrue(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
     }
 
@@ -418,19 +534,27 @@ class DeliverySettlementTest {
         synchronized (member.slot()) {
             claim = member.slot().tryInstallPreemption(108L, 109L, "priority victim");
         }
-        when(member.item().decodeEp().settleFailedRequest(
-                member.item().decodeReservation(), DeliveryResult.Status.PREFILL_REJECTED))
-                .thenAnswer(invocation -> {
-                    assertTrue(claim.release());
-                    assertFalse(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
-                    return false; // Ownership changed after this pass took its snapshot.
-                }).thenReturn(true);
+        when(member.item()
+                        .decodeEp()
+                        .settleFailedRequest(
+                                member.item().decodeReservation(),
+                                DeliveryResult.Status.PREFILL_REJECTED))
+                .thenAnswer(
+                        invocation -> {
+                            assertTrue(claim.release());
+                            assertFalse(
+                                    registry.removeExactTerminalRecord(
+                                            member.slot(), Long.MAX_VALUE));
+                            return false; // Ownership changed after this pass took its snapshot.
+                        })
+                .thenReturn(true);
 
         reject(member);
 
         assertFalse(member.item().future().get(1, TimeUnit.SECONDS).isSuccess());
-        verify(member.item().decodeEp(), times(2)).settleFailedRequest(
-                member.item().decodeReservation(), DeliveryResult.Status.PREFILL_REJECTED);
+        verify(member.item().decodeEp(), times(2))
+                .settleFailedRequest(
+                        member.item().decodeReservation(), DeliveryResult.Status.PREFILL_REJECTED);
         assertTrue(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
     }
 
@@ -438,25 +562,42 @@ class DeliverySettlementTest {
     void expiryDuringCleanupSurvivesALaterActiveObservation() throws Exception {
         Member member = member(109L, 109L);
         ledger.commit(109L, List.of(member.item()));
-        when(member.item().decodeEp().settleFailedRequest(
-                member.item().decodeReservation(), DeliveryResult.Status.PREFILL_REJECTED))
-                .thenAnswer(invocation -> {
-                    long expiredAt = System.currentTimeMillis()
-                            + config.getRequestLifecycle().getRequest().getTimeoutMs() + 1L;
-                    member.slot().expireInactiveRequest(expiredAt);
-                    synchronized (member.slot()) {
-                        org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(member.slot(), "applyDecodeStatusLocked", member.item().decodeEp(),
-                                DecodeEndpoint.WorkerStatusFact.active(member.item().decodeReservation()), expiredAt + 1L);
-                    }
-                    assertFalse(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
-                    return false;
-                });
+        when(member.item()
+                        .decodeEp()
+                        .settleFailedRequest(
+                                member.item().decodeReservation(),
+                                DeliveryResult.Status.PREFILL_REJECTED))
+                .thenAnswer(
+                        invocation -> {
+                            long expiredAt =
+                                    System.currentTimeMillis()
+                                            + config.getRequestLifecycle()
+                                                    .getRequest()
+                                                    .getTimeoutMs()
+                                            + 1L;
+                            member.slot().expireInactiveRequest(expiredAt);
+                            synchronized (member.slot()) {
+                                org.springframework.test.util.ReflectionTestUtils
+                                        .<RequestSlot.EngineObservation>invokeMethod(
+                                                member.slot(),
+                                                "applyDecodeStatusLocked",
+                                                member.item().decodeEp(),
+                                                DecodeEndpoint.WorkerStatusFact.active(
+                                                        member.item().decodeReservation()),
+                                                expiredAt + 1L);
+                            }
+                            assertFalse(
+                                    registry.removeExactTerminalRecord(
+                                            member.slot(), Long.MAX_VALUE));
+                            return false;
+                        });
 
         reject(member);
 
         assertFalse(member.item().future().get(1, TimeUnit.SECONDS).isSuccess());
         assertEquals(RequestState.Phase.FAILED, member.slot().snapshot().state());
-        verify(member.item().decodeEp()).release(member.item().decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
+        verify(member.item().decodeEp())
+                .release(member.item().decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
         assertTrue(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
     }
 
@@ -469,8 +610,8 @@ class DeliverySettlementTest {
             claim = member.slot().tryInstallPreemption(110L, 111L, "priority victim");
         }
         assertTrue(claim.applyPhase(PreemptionCancelPhase.CANCEL_IN_FLIGHT));
-        new EndpointEventProjector(registry).onPrefillStatus(prefill, RoleType.PDFUSION,
-                ledger.finish(110L, member.item()));
+        new EndpointEventProjector(registry)
+                .onPrefillStatus(prefill, RoleType.PDFUSION, ledger.finish(110L, member.item()));
         assertFalse(member.item().future().isDone());
         assertTrue(claim.applyPhase(PreemptionCancelPhase.CANCEL_UNKNOWN));
 
@@ -495,7 +636,8 @@ class DeliverySettlementTest {
         }
         assertTrue(claim.applyPhase(PreemptionCancelPhase.CANCEL_IN_FLIGHT));
         doThrow(new IllegalStateException("Prefill cleanup failed"))
-                .when(prefill).releaseCommittedItem(member.item());
+                .when(prefill)
+                .releaseCommittedItem(member.item());
         assertThrows(IllegalStateException.class, () -> reject(member));
         Response response = member.item().future().get(1, TimeUnit.SECONDS);
         decodeFinished(member);
@@ -503,9 +645,14 @@ class DeliverySettlementTest {
         assertFalse(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
 
         ledger.finish(111L, member.item());
-        member.slot().processPrefillStatus(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.terminal(
-                member.item(), PrefillState.WorkerStatusFact.Kind.PRIORITY_CANCELED,
-                StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode()));
+        member.slot()
+                .processPrefillStatus(
+                        prefill,
+                        RoleType.PREFILL,
+                        PrefillState.WorkerStatusFact.terminal(
+                                member.item(),
+                                PrefillState.WorkerStatusFact.Kind.PRIORITY_CANCELED,
+                                StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode()));
 
         assertSame(response, member.item().future().join());
         assertFalse(response.isSuccess());
@@ -521,17 +668,26 @@ class DeliverySettlementTest {
         PreemptionRegistration claim;
         synchronized (member.slot()) {
             claim = member.slot().tryInstallPreemption(104L, 105L, "priority victim");
-            assertTrue(member.slot().updatePreemption(claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
+            assertTrue(
+                    member.slot().updatePreemption(claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
         }
-        when(member.item().decodeEp().settleFailedRequest(
-                member.item().decodeReservation(), DeliveryResult.Status.PREFILL_REJECTED))
-                .thenAnswer(invocation -> {
-                    member.slot().processDecodeStatus(member.item().decodeEp(),
-                            DecodeEndpoint.WorkerStatusFact.terminal(member.item().decodeReservation(), 0L));
-                    assertFalse(claim.terminalObservation().toCompletableFuture().isDone(),
-                            "cleanup is still executing outside the Slot lock");
-                    return false; // Snapshot taken before the above completion.
-                });
+        when(member.item()
+                        .decodeEp()
+                        .settleFailedRequest(
+                                member.item().decodeReservation(),
+                                DeliveryResult.Status.PREFILL_REJECTED))
+                .thenAnswer(
+                        invocation -> {
+                            member.slot()
+                                    .processDecodeStatus(
+                                            member.item().decodeEp(),
+                                            DecodeEndpoint.WorkerStatusFact.terminal(
+                                                    member.item().decodeReservation(), 0L));
+                            assertFalse(
+                                    claim.terminalObservation().toCompletableFuture().isDone(),
+                                    "cleanup is still executing outside the Slot lock");
+                            return false; // Snapshot taken before the above completion.
+                        });
 
         reject(member);
 
@@ -548,10 +704,11 @@ class DeliverySettlementTest {
         reject(member);
         Response response = member.item().future().get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
-        RequestLifecycleTestSupport.awaitCondition(() -> registry.liveRequestCount() == 0);
+        RequestLifecycleTestSupport.awaitCondition(() -> registry.trackedRequestCount() == 0);
         assertSame(response, member.item().future().join());
         assertEquals(RequestState.Phase.FAILED, member.slot().snapshot().state());
-        verify(member.item().decodeEp()).release(member.item().decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
+        verify(member.item().decodeEp())
+                .release(member.item().decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
     }
 
     @Test
@@ -561,7 +718,8 @@ class DeliverySettlementTest {
         PreemptionRegistration claim;
         synchronized (member.slot()) {
             claim = member.slot().tryInstallPreemption(107L, 108L, "priority victim");
-            assertTrue(member.slot().updatePreemption(claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
+            assertTrue(
+                    member.slot().updatePreemption(claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
         }
         reject(member);
         Response response = member.item().future().get(1, TimeUnit.SECONDS);
@@ -575,27 +733,51 @@ class DeliverySettlementTest {
     }
 
     private Member member(long id, long batchId) {
-        return member(id, batchId, mock(DecodeEndpoint.class), new DecodeEndpoint.ReservationHandle(1L, id, id));
+        return member(
+                id,
+                batchId,
+                mock(DecodeEndpoint.class),
+                new DecodeEndpoint.ReservationHandle(1L, Long.toString(id), id));
     }
 
-    private Member member(long id, long batchId, DecodeEndpoint decode, DecodeEndpoint.ReservationHandle reservation) {
+    private Member member(
+            long id,
+            long batchId,
+            DecodeEndpoint decode,
+            DecodeEndpoint.ReservationHandle reservation) {
         var context = RequestLifecycleTestSupport.context(config, id);
         var future = registry.register(context);
-        var item = new ScheduledRequest(context, future, new Response(), null, null,
-                prefill, decode, reservation, System.currentTimeMillis());
-        RequestLifecycleTestSupport.bindRoute(registry, new RequestLifecycleTestSupport.Registered(item, future));
+        var item =
+                new ScheduledRequest(
+                        context,
+                        future,
+                        new Response(),
+                        null,
+                        null,
+                        prefill,
+                        decode,
+                        reservation,
+                        System.currentTimeMillis());
+        RequestLifecycleTestSupport.bindRoute(
+                registry, new RequestLifecycleTestSupport.Registered(item, future));
         var claim = RequestLifecycleTestSupport.claimBatch(registry, item, batchId, () -> true);
         assertNotNull(claim);
-        return new Member(item, registry.requestSlot(id), claim);
+        return new Member(item, registry.requestSlot(Long.toString(id)), claim);
     }
 
     private void reject(Member member) {
-        member.claim().complete(DeliveryResult.prefillRejected(new IllegalStateException("prepare rejected")));
+        member.claim()
+                .complete(
+                        DeliveryResult.prefillRejected(
+                                new IllegalStateException("prepare rejected")));
     }
 
     private void decodeFinished(Member member) {
-        member.slot().processDecodeStatus(member.item().decodeEp(),
-                DecodeEndpoint.WorkerStatusFact.terminal(member.item().decodeReservation(), 601L));
+        member.slot()
+                .processDecodeStatus(
+                        member.item().decodeEp(),
+                        DecodeEndpoint.WorkerStatusFact.terminal(
+                                member.item().decodeReservation(), 601L));
     }
 
     private void assertOccupancy(int batches, int members) {
@@ -612,5 +794,6 @@ class DeliverySettlementTest {
         }
     }
 
-    private record Member(ScheduledRequest item, RequestSlot slot, RequestSlot.DeliveryClaim claim) { }
+    private record Member(
+            ScheduledRequest item, RequestSlot slot, RequestSlot.DeliveryClaim claim) {}
 }

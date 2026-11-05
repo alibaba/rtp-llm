@@ -143,6 +143,19 @@ class NormalComparer(BaseComparer):
     def curl_response_to_json(self, query_info: QueryInfo, res: Any) -> Dict[str, Any]:
         if query_info.yield_generator:
             res = list(filter(None, res))
+            if len(res) < 2:
+                # The engine can close the stream after a single payload, e.g.
+                # ``data:{"error_code":8205,"message":"Socket closed",...}``.
+                # Report that payload instead of raising IndexError on res[-2]
+                # (or on an empty chunk list), which hides the engine error and
+                # surfaces as an unhelpful QueryStatus.OTHERS.
+                last_payload = (
+                    res[-1].decode("utf-8", errors="replace") if res else "<empty>"
+                )
+                raise SmokeException(
+                    QueryStatus.VISIT_FAILED,
+                    f"stream ended before the final record, last payload: {last_payload}",
+                )
             if query_info.generate_config.return_incremental:
                 chunks = [json.loads(chunk.decode("utf-8")[5:]) for chunk in res[:-1]]
                 res = {

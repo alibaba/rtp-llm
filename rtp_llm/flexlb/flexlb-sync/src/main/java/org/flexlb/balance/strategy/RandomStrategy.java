@@ -17,8 +17,7 @@ import java.util.concurrent.ThreadLocalRandom;
 /** Random selection for the stateless VIT role. */
 @Component
 public final class RandomStrategy {
-    private static final Logger LOGGER =
-            LoggerFactory.getLogger(RandomStrategy.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(RandomStrategy.class);
 
     private final WorkerDirectory workerDirectory;
 
@@ -26,14 +25,13 @@ public final class RandomStrategy {
         this.workerDirectory = workerDirectory;
     }
 
-    public SelectedRole select(
-            BalanceContext context, RoleType role, String group) {
+    public SelectedRole select(BalanceContext context, RoleType role, String group) {
+        context.beginRoutingAttempt(role);
         if (role != RoleType.VIT) {
             throw new IllegalArgumentException(
                     "RANDOM endpoint selection is supported only for VIT");
         }
-        List<String> addresses =
-                workerDirectory.endpointAddressSnapshot(RoleType.VIT);
+        List<String> addresses = workerDirectory.endpointAddressSnapshot(RoleType.VIT);
         if (addresses.isEmpty()) {
             return null;
         }
@@ -48,29 +46,22 @@ public final class RandomStrategy {
             }
             try {
                 WorkerStatus status = pin.endpoint().getStatus();
-                WorkerStatus.TopologySnapshot topology =
-                        status.topologySnapshot();
+                WorkerStatus.TopologySnapshot topology = status.topologySnapshot();
                 if (group != null && !group.equals(topology.group())) {
                     continue;
                 }
-                WorkerStatus.EngineObservation engine =
-                        status.committedEngineObservation();
+                WorkerStatus.EngineObservation engine = status.committedEngineObservation();
+                context.recordSelectionReason(role, "RANDOM");
                 WorkerEndpoint.GenerationPin selectedPin = pin;
                 pin = null;
-                return selected(
-                        selectedPin,
-                        topology,
-                        engine,
-                        context.getRequestId());
+                return selected(selectedPin, topology, engine, context.getRequestId());
             } finally {
                 if (pin != null) {
                     pin.close();
                 }
             }
         }
-        LOGGER.warn(
-                "No VIT worker available out of {} registered workers",
-                addresses.size());
+        LOGGER.warn("No VIT worker available out of {} registered workers", addresses.size());
         return null;
     }
 
@@ -78,7 +69,7 @@ public final class RandomStrategy {
             WorkerEndpoint.GenerationPin pin,
             WorkerStatus.TopologySnapshot topology,
             WorkerStatus.EngineObservation engine,
-            long requestId) {
+            String requestId) {
         try {
             ServerStatus result = new ServerStatus();
             result.setSuccess(true);
@@ -89,6 +80,7 @@ public final class RandomStrategy {
             result.setHttpPort(topology.port());
             result.setGrpcPort(CommonUtils.toGrpcPort(topology.port()));
             result.setDpRank(engine.dpRank());
+            result.setSelectedEngineIndex(topology.engineIndex(), topology.multiEngineNum());
 
             WorkerEndpoint.GenerationPin owned = pin;
             pin = null;

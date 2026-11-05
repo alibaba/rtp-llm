@@ -1,6 +1,8 @@
 package org.flexlb.util;
 
 import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.enums.LogLevel;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,7 +19,6 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -44,8 +45,8 @@ class LoggerTest {
         Logger.setLevel(null);
 
         assertEquals(LogLevel.INFO, Logger.getLevel());
-        assertEquals(Level.INFO, logbackLevel(),
-                "logback level should reset to INFO when passed null");
+        assertEquals(
+                Level.INFO, logbackLevel(), "logback level should reset to INFO when passed null");
     }
 
     @ParameterizedTest
@@ -55,7 +56,9 @@ class LoggerTest {
         Logger.setLevel(inputLevel);
 
         assertEquals(inputLevel, Logger.getLevel());
-        assertEquals(expectedLogbackLevel, logbackLevel(),
+        assertEquals(
+                expectedLogbackLevel,
+                logbackLevel(),
                 "logback level should match after setLevel(" + inputLevel + ")");
     }
 
@@ -65,8 +68,7 @@ class LoggerTest {
                 Arguments.of(LogLevel.DEBUG, Level.DEBUG),
                 Arguments.of(LogLevel.INFO, Level.INFO),
                 Arguments.of(LogLevel.WARN, Level.WARN),
-                Arguments.of(LogLevel.ERROR, Level.ERROR)
-        );
+                Arguments.of(LogLevel.ERROR, Level.ERROR));
     }
 
     @Test
@@ -85,21 +87,26 @@ class LoggerTest {
     }
 
     @Test
-    @DisplayName("Static block - reads LOG_LEVEL environment variable on class loading")
-    void staticBlock_readsEnvVar() {
-        String currentLogLevel = System.getenv("LOG_LEVEL");
-
-        if (currentLogLevel == null) {
-            assertTrue(true, "No LOG_LEVEL environment variable set");
-        } else {
-            try {
-                LogLevel expectedLevel = LogLevel.valueOf(currentLogLevel.toUpperCase().trim());
-                assertEquals(expectedLevel, Logger.getLevel(),
-                        "Static block should have processed LOG_LEVEL: " + currentLogLevel);
-            } catch (IllegalArgumentException e) {
-                assertNull(Logger.getLevel(),
-                        "Invalid LOG_LEVEL should result in null: " + currentLogLevel);
+    void expandsArrayArgumentsAtEveryLogLevel() {
+        var logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(Logger.LOGGER_NAME);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            Logger.setLevel(LogLevel.TRACE);
+            Object[] arguments = {"first", 2};
+            Logger.trace("{} {}", arguments);
+            Logger.debug("{} {}", arguments);
+            Logger.info("{} {}", arguments);
+            Logger.warn("{} {}", arguments);
+            Logger.error("{} {}", arguments);
+            assertEquals(5, appender.list.size());
+            for (ILoggingEvent event : appender.list) {
+                assertEquals("first 2", event.getFormattedMessage());
             }
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
         }
     }
 
@@ -114,11 +121,13 @@ class LoggerTest {
     @Test
     @DisplayName("LogLevel.valueOf throws IllegalArgumentException for invalid values")
     void logLevelValueOf_invalidValue() {
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(
+                IllegalArgumentException.class,
                 () -> LogLevel.valueOf("INVALID".toUpperCase().trim()),
                 "Should throw for invalid log level");
 
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(
+                IllegalArgumentException.class,
                 () -> LogLevel.valueOf("".toUpperCase().trim()),
                 "Should throw for empty string");
     }
@@ -126,13 +135,15 @@ class LoggerTest {
     @Test
     @DisplayName("Static method calls work without creating instances")
     void staticMethods_workWithoutInstances() {
-        assertDoesNotThrow(() -> {
-            Logger.info("Test info message");
-            Logger.debug("Test debug message");
-            Logger.warn("Test warn message");
-            Logger.error("Test error message");
-            Logger.trace("Test trace message");
-        }, "Static logging methods should work");
+        assertDoesNotThrow(
+                () -> {
+                    Logger.info("Test info message");
+                    Logger.debug("Test debug message");
+                    Logger.warn("Test warn message");
+                    Logger.error("Test error message");
+                    Logger.trace("Test trace message");
+                },
+                "Static logging methods should work");
 
         assertNotNull(Logger.class, "Logger class should be loaded");
         assertDoesNotThrow(Logger::getLevel, "getLevel should work");
@@ -165,10 +176,17 @@ class LoggerTest {
     }
 
     @Test
-    @DisplayName("Static block logic handles case-insensitive and whitespace correctly")
-    void staticBlock_logicVerification() {
+    @DisplayName("LogLevel accepts normalized case and whitespace")
+    void logLevelAcceptsNormalizedInput() {
         String[] testInputs = {"debug", "DEBUG", "Debug", "  INFO  ", "warn", "ERROR"};
-        LogLevel[] expectedOutputs = {LogLevel.DEBUG, LogLevel.DEBUG, LogLevel.DEBUG, LogLevel.INFO, LogLevel.WARN, LogLevel.ERROR};
+        LogLevel[] expectedOutputs = {
+            LogLevel.DEBUG,
+            LogLevel.DEBUG,
+            LogLevel.DEBUG,
+            LogLevel.INFO,
+            LogLevel.WARN,
+            LogLevel.ERROR
+        };
 
         for (int i = 0; i < testInputs.length; i++) {
             String input = testInputs[i];
@@ -185,31 +203,26 @@ class LoggerTest {
                 Arguments.of("Trace", LogLevel.TRACE),
                 Arguments.of("TrAcE", LogLevel.TRACE),
                 Arguments.of("  trace  ", LogLevel.TRACE),
-
                 Arguments.of("debug", LogLevel.DEBUG),
                 Arguments.of("DEBUG", LogLevel.DEBUG),
                 Arguments.of("Debug", LogLevel.DEBUG),
                 Arguments.of("DeBuG", LogLevel.DEBUG),
                 Arguments.of("  DEBUG  ", LogLevel.DEBUG),
-
                 Arguments.of("info", LogLevel.INFO),
                 Arguments.of("INFO", LogLevel.INFO),
                 Arguments.of("Info", LogLevel.INFO),
                 Arguments.of("InFo", LogLevel.INFO),
                 Arguments.of("  info  ", LogLevel.INFO),
-
                 Arguments.of("warn", LogLevel.WARN),
                 Arguments.of("WARN", LogLevel.WARN),
                 Arguments.of("Warn", LogLevel.WARN),
                 Arguments.of("WaRn", LogLevel.WARN),
                 Arguments.of("  WARN  ", LogLevel.WARN),
-
                 Arguments.of("error", LogLevel.ERROR),
                 Arguments.of("ERROR", LogLevel.ERROR),
                 Arguments.of("Error", LogLevel.ERROR),
                 Arguments.of("ErRoR", LogLevel.ERROR),
-                Arguments.of("  ERROR  ", LogLevel.ERROR)
-        );
+                Arguments.of("  ERROR  ", LogLevel.ERROR));
     }
 
     private static ch.qos.logback.classic.Level logbackLevel() {

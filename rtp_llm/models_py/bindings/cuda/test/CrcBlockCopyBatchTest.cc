@@ -21,10 +21,6 @@
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
-#ifdef RTP_LLM_CRC_INTERNAL_TESTS
-#include "rtp_llm/models_py/bindings/cuda/CrcBlockCopyInternal.cuh"
-#endif
-
 namespace rtp_llm {
 namespace {
 void cudaCheck(cudaError_t error) {
@@ -188,6 +184,17 @@ struct GuardedBlock {
         EXPECT_TRUE(std::all_of(
             actual.begin() + kDevicePrefix + bytes, actual.end(), [](uint8_t value) { return value == kDeviceGuard; }));
     }
+    // The ungated scatter lands the host payload even when the verdict fails;
+    // guards stay intact outside the tile spans.
+    void expectDeviceScattered() const {
+        std::vector<uint8_t> actual(device_allocation.bytes);
+        cudaCheck(cudaMemcpy(actual.data(), device_allocation.pointer, actual.size(), cudaMemcpyDeviceToHost));
+        EXPECT_TRUE(std::all_of(
+            actual.begin(), actual.begin() + kDevicePrefix, [](uint8_t value) { return value == kDeviceGuard; }));
+        EXPECT_EQ(std::memcmp(actual.data() + kDevicePrefix, host, bytes), 0);
+        EXPECT_TRUE(std::all_of(
+            actual.begin() + kDevicePrefix + bytes, actual.end(), [](uint8_t value) { return value == kDeviceGuard; }));
+    }
     void expectRecord(bool stored) const {
         EXPECT_EQ(std::memcmp(host, expected.data(), bytes), 0);
         uint32_t actual_crc = 0;
@@ -232,6 +239,7 @@ class CrcBatchTest: public ::testing::Test {
             std::filesystem::remove_all(dump_root_, ignored);
         }
     }
+
 protected:
     std::shared_ptr<CrcDumpWriter> makeDumpWriter(size_t backup_count = CrcDumpWriter::kBackupCount) {
         const char* temp    = std::getenv("TEST_TMPDIR");
@@ -254,7 +262,8 @@ protected:
         std::ifstream input(path, std::ios::binary);
         return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
     }
-    std::filesystem::path dump_root_;
+    std::filesystem::path       dump_root_;
+    std::vector<CrcCopyFailure> failures_;
 };
 
 TEST(CrcBlockCopyLayoutTest, EncodedSizeIsCheckedAndAligned) {
@@ -268,10 +277,33 @@ TEST_F(CrcBatchTest, KnownCastagnoliVector) {
     const char* input = "123456789";
     cudaCheck(cudaMemcpy(block.device, input, 9, cudaMemcpyHostToDevice));
     CrcBlockCopyBatch copy(0, 1, 9, 1);
-    ASSERT_EQ(copy.store({block.item()}), CrcCopyStatus::OK);
+    ASSERT_EQ(copy.store({block.item()}, failures_), CrcCopyStatus::OK);
     EXPECT_EQ(std::memcmp(block.host, input, 9), 0);
     EXPECT_EQ(block.footer(), 0xe3069283U);
     EXPECT_EQ(block.footer(), crc32c(block.host, 9));
+}
+
+TEST_F(CrcBatchTest, ColdFoldTablesAtExactPayloadCapacity) {
+    for (size_t bytes : {1u, 2u, 3u, 7u, 8u, 9u, 35u, 96u, 312u, 5256u, 8192u, 8193u, 16383u, 16384u, 16385u}) {
+        SCOPED_TRACE(bytes);
+        GuardedBlock block(bytes, static_cast<unsigned>(bytes));
+        {
+            CrcBlockCopyBatch copy(0, 1, bytes, 3);
+            ASSERT_EQ(copy.store({block.item()}, failures_), CrcCopyStatus::OK);
+            EXPECT_TRUE(failures_.empty());
+            block.expectRecord(true);
+        }
+        // Load with cold tables and a CPU-sealed record, independently of store.
+        block.writeCpuRecord();
+        block.resetDevice(false);
+        {
+            CrcBlockCopyBatch copy(0, 1, bytes, 3);
+            ASSERT_EQ(copy.load({block.item()}, failures_), CrcCopyStatus::OK);
+            EXPECT_TRUE(failures_.empty());
+            block.expectDevice(true);
+            block.expectRecord(false);
+        }
+    }
 }
 
 TEST_F(CrcBatchTest, MixedRaggedBatchRoundTripAndReuse) {
@@ -289,7 +321,7 @@ TEST_F(CrcBatchTest, MixedRaggedBatchRoundTripAndReuse) {
             const uint32_t wrong_crc = crc32c(block->expected.data(), block->bytes) ^ 0xffffffffU;
             std::memcpy(block->host + block->encoded - 4, &wrong_crc, sizeof(wrong_crc));
         }
-        ASSERT_EQ(copy.store(items), CrcCopyStatus::OK);
+        ASSERT_EQ(copy.store(items, failures_), CrcCopyStatus::OK);
         for (auto* block : {&a, &b, &c}) {
             EXPECT_EQ(std::memcmp(block->host, block->expected.data(), block->bytes), 0);
             EXPECT_EQ(block->footer(), crc32c(block->host, block->bytes));
@@ -301,28 +333,28 @@ TEST_F(CrcBatchTest, MixedRaggedBatchRoundTripAndReuse) {
                 value ^= 0xff;
             cudaCheck(cudaMemcpy(block->device, poison.data(), block->bytes, cudaMemcpyHostToDevice));
         }
-        ASSERT_EQ(copy.load(items), CrcCopyStatus::OK);
+        ASSERT_EQ(copy.load(items, failures_), CrcCopyStatus::OK);
         for (auto* block : {&a, &b, &c})
             EXPECT_EQ(block->readDevice(), block->expected);
         // Shrink the batch between full calls, exercising reused metadata slots.
-        ASSERT_EQ(copy.store({a.item()}), CrcCopyStatus::OK);
+        ASSERT_EQ(copy.store({a.item()}, failures_), CrcCopyStatus::OK);
     }
 }
 
-TEST_F(CrcBatchTest, LastItemCorruptionPreventsEveryScatter) {
+TEST_F(CrcBatchTest, LastItemCorruptionScattersAllItemsAndReports) {
     Block             a(35, 1), b(96, 2);
     CrcBlockCopyBatch copy(0, 2, 96, 6, makeDumpWriter(1));
     auto              items = std::vector<CrcCopyItem>{a.item(true), b.item(true)};
     for (bool footer : {false, true}) {
         for (auto* block : {&a, &b})
             cudaCheck(cudaMemcpy(block->device, block->expected.data(), block->bytes, cudaMemcpyHostToDevice));
-        ASSERT_EQ(copy.store(items), CrcCopyStatus::OK);
+        ASSERT_EQ(copy.store(items, failures_), CrcCopyStatus::OK);
         b.host[footer ? b.encoded - 4 : b.bytes / 2] ^= 1;
         for (auto* block : {&a, &b})
             cudaCheck(cudaMemset(block->device, 0xd3, block->bytes));
         cudaCheck(cudaStreamSynchronize(nullptr));
         std::vector<CrcCopyFailure> failures;
-        EXPECT_EQ(copy.load(items, &failures), CrcCopyStatus::CRC_MISMATCH);
+        EXPECT_EQ(copy.load(items, failures), CrcCopyStatus::CRC_MISMATCH);
         ASSERT_EQ(failures.size(), 1u);
         EXPECT_EQ(failures.front().item_index, 1u);
         EXPECT_NE(failures.front().expected, failures.front().actual);
@@ -334,8 +366,10 @@ TEST_F(CrcBatchTest, LastItemCorruptionPreventsEveryScatter) {
         EXPECT_EQ(readDump(paths[0] / "cpu.bin"), std::vector<uint8_t>(b.host, b.host + b.encoded));
         EXPECT_EQ(readDump(paths[0] / "gpu_staging.bin"), std::vector<uint8_t>(b.host, b.host + b.bytes));
         EXPECT_TRUE(failures.front().checked_footer_available);
+        // The ungated scatter lands every item, corrupted or not; the caller
+        // discards failures through the reported status.
         for (auto* block : {&a, &b})
-            EXPECT_EQ(block->readDevice(), std::vector<uint8_t>(block->bytes, 0xd3));
+            EXPECT_EQ(block->readDevice(), std::vector<uint8_t>(block->host, block->host + block->bytes));
     }
 }
 
@@ -343,7 +377,7 @@ TEST_F(CrcBatchTest, FailureSnapshotsKeepCheckedStagingEvenWhenHostChangesAfterV
     Block             block(35, 7);
     CrcBlockCopyBatch copy(0, 1, 35, 3, makeDumpWriter());
     auto              item = block.item(true);
-    ASSERT_EQ(copy.store({item}), CrcCopyStatus::OK);
+    ASSERT_EQ(copy.store({item}, failures_), CrcCopyStatus::OK);
     block.host[1] ^= 1;
     const std::vector<uint8_t> checked(block.host, block.host + block.encoded);
     item.dump_metadata = [&] {
@@ -353,7 +387,7 @@ TEST_F(CrcBatchTest, FailureSnapshotsKeepCheckedStagingEvenWhenHostChangesAfterV
         return CrcCopyMetadata{};
     };
     std::vector<CrcCopyFailure> failures;
-    ASSERT_EQ(copy.load({item}, &failures), CrcCopyStatus::CRC_MISMATCH);
+    ASSERT_EQ(copy.load({item}, failures), CrcCopyStatus::CRC_MISMATCH);
     ASSERT_EQ(failures.size(), 1u);
     const auto paths = dumps();
     ASSERT_EQ(paths.size(), 1u);
@@ -365,7 +399,7 @@ TEST_F(CrcBatchTest, FailureSnapshotsKeepCheckedStagingEvenWhenHostChangesAfterV
     std::memcpy(&checked_footer, checked.data() + block.encoded - 4, 4);
     EXPECT_EQ(failures[0].expected, checked_footer);
     EXPECT_EQ(failures[0].actual, crc32c(checked.data(), block.bytes));
-    ASSERT_EQ(copy.store({item}), CrcCopyStatus::OK);
+    ASSERT_EQ(copy.store({item}, failures_), CrcCopyStatus::OK);
     EXPECT_EQ(readDump(paths[0] / "gpu_staging.bin"), checked_payload);
 }
 
@@ -382,14 +416,14 @@ TEST_F(CrcBatchTest, DumpFailureDoesNotChangeVerdictAndSuccessNeverBuildsMetadat
         return CrcCopyMetadata{};
     };
     std::vector<CrcCopyFailure> failures;
-    ASSERT_EQ(copy.store({item}, &failures), CrcCopyStatus::OK);
-    ASSERT_EQ(copy.load({item}, &failures), CrcCopyStatus::OK);
+    ASSERT_EQ(copy.store({item}, failures), CrcCopyStatus::OK);
+    ASSERT_EQ(copy.load({item}, failures), CrcCopyStatus::OK);
     EXPECT_EQ(metadata_calls, 0u);
     EXPECT_TRUE(dumps().empty());
     block.host[1] ^= 1;
     for (bool throws : {false, true}) {
         fail_metadata = throws;
-        EXPECT_EQ(copy.load({item}, &failures), CrcCopyStatus::CRC_MISMATCH);
+        EXPECT_EQ(copy.load({item}, failures), CrcCopyStatus::CRC_MISMATCH);
         ASSERT_EQ(failures.size(), 1u);
         EXPECT_EQ(failures[0].status, CrcCopyStatus::CRC_MISMATCH);
         EXPECT_TRUE(failures[0].cpu_snapshot.empty());
@@ -400,22 +434,24 @@ TEST_F(CrcBatchTest, DumpFailureDoesNotChangeVerdictAndSuccessNeverBuildsMetadat
     EXPECT_EQ(dumps().size(), 1u);
 }
 
-TEST_F(CrcBatchTest, SlotWriterDumpsWithoutFailureOutput) {
+TEST_F(CrcBatchTest, SlotWriterDumpsAndReportsFailure) {
     Block             block(35, 7);
     CrcBlockCopyBatch copy(0, 1, 35, 3, makeDumpWriter());
-    ASSERT_EQ(copy.store({block.item()}), CrcCopyStatus::OK);
+    ASSERT_EQ(copy.store({block.item()}, failures_), CrcCopyStatus::OK);
     block.host[1] ^= 1;
-    EXPECT_EQ(copy.load({block.item()}), CrcCopyStatus::CRC_MISMATCH);
+    EXPECT_EQ(copy.load({block.item()}, failures_), CrcCopyStatus::CRC_MISMATCH);
+    ASSERT_EQ(failures_.size(), 1u);
+    EXPECT_EQ(failures_[0].item_index, 0u);
     const auto paths = dumps();
     ASSERT_EQ(paths.size(), 1u);
     EXPECT_EQ(readDump(paths[0] / "gpu_staging.bin"), std::vector<uint8_t>(block.host, block.host + block.bytes));
 }
 
-TEST_F(CrcBatchTest, DumpFailureDoesNotSkipLaterFailuresOrAllowScatter) {
+TEST_F(CrcBatchTest, DumpFailureDoesNotSkipLaterFailures) {
     Block             a(35, 1), b(96, 2);
     CrcBlockCopyBatch copy(0, 2, 96, 6, makeDumpWriter());
     auto              items = std::vector<CrcCopyItem>{a.item(true), b.item(true)};
-    ASSERT_EQ(copy.store(items), CrcCopyStatus::OK);
+    ASSERT_EQ(copy.store(items, failures_), CrcCopyStatus::OK);
     items[0].dump_metadata = []() -> CrcCopyMetadata { throw std::runtime_error("dump unavailable"); };
     for (auto* block : {&a, &b}) {
         block->host[1] ^= 1;
@@ -423,38 +459,307 @@ TEST_F(CrcBatchTest, DumpFailureDoesNotSkipLaterFailuresOrAllowScatter) {
     }
     cudaCheck(cudaStreamSynchronize(nullptr));
     std::vector<CrcCopyFailure> failures;
-    EXPECT_EQ(copy.load(items, &failures), CrcCopyStatus::CRC_MISMATCH);
+    EXPECT_EQ(copy.load(items, failures), CrcCopyStatus::CRC_MISMATCH);
     ASSERT_EQ(failures.size(), 2u);
     for (const auto& failure : failures)
         EXPECT_EQ(failure.status, CrcCopyStatus::CRC_MISMATCH);
     const auto paths = dumps();
     ASSERT_EQ(paths.size(), 1u);
     EXPECT_EQ(readDump(paths[0] / "cpu.bin"), std::vector<uint8_t>(b.host, b.host + b.encoded));
+    // The ungated scatter lands the (corrupted) payload; the reported status
+    // tells the caller to discard it.
     for (auto* block : {&a, &b})
-        EXPECT_EQ(block->readDevice(), std::vector<uint8_t>(block->bytes, 0xd3));
+        EXPECT_EQ(block->readDevice(), std::vector<uint8_t>(block->host, block->host + block->bytes));
 }
 
-TEST_F(CrcBatchTest, LoadIgnoresPaddingAndRejectsCorruptionBeforeScatter) {
+TEST_F(CrcBatchTest, LoadIgnoresPaddingAndReportsCorruption) {
     Block             block(35, 7);
     CrcBlockCopyBatch copy(0, 1, 35, 3);
-    ASSERT_EQ(copy.store({block.item(true)}), CrcCopyStatus::OK);
+    ASSERT_EQ(copy.store({block.item(true)}, failures_), CrcCopyStatus::OK);
     const auto                 item = block.item(true);
     const std::vector<uint8_t> untouched(block.bytes, 0xd3);
     upload(block.device, untouched.data(), untouched.size());
     block.host[block.bytes] ^= 1;
-    ASSERT_EQ(copy.load({item}), CrcCopyStatus::OK);
+    ASSERT_EQ(copy.load({item}, failures_), CrcCopyStatus::OK);
     EXPECT_EQ(block.readDevice(), block.expected);
     upload(block.device, untouched.data(), untouched.size());
     block.host[0] ^= 1;
     std::vector<CrcCopyFailure> failures;
-    ASSERT_EQ(copy.load({item}, &failures), CrcCopyStatus::CRC_MISMATCH);
+    ASSERT_EQ(copy.load({item}, failures), CrcCopyStatus::CRC_MISMATCH);
     ASSERT_EQ(failures.size(), 1u);
     EXPECT_TRUE(failures.front().checked_footer_available);
-    EXPECT_EQ(block.readDevice(), untouched);
+    // The scatter is not gated on the verdict: the corrupted bytes land in the
+    // tiles and the caller discards the item through the reported status.
+    EXPECT_EQ(block.readDevice(), std::vector<uint8_t>(block.host, block.host + block.bytes));
     block.host[0] ^= 1;
-    ASSERT_EQ(copy.load({item}, &failures), CrcCopyStatus::OK);
+    ASSERT_EQ(copy.load({item}, failures), CrcCopyStatus::OK);
     EXPECT_TRUE(failures.empty());
     EXPECT_EQ(block.readDevice(), block.expected);
+}
+
+TEST_F(CrcBatchTest, PlainHostRecordsRoundTripAndReportCorruption) {
+    Block             block(35, 7);
+    CrcBlockCopyBatch copy(0, 1, 35, 3);
+    // Pageable std::vector storage exercises the same load path as pinned
+    // storage; the observable contract stays the same.
+    std::vector<uint8_t> record(block.encoded, 0x6b);
+    auto                 item = block.item(true);
+    item.host                 = record.data();
+    ASSERT_EQ(copy.store({item}, failures_), CrcCopyStatus::OK);
+    EXPECT_EQ(std::vector<uint8_t>(record.begin(), record.begin() + block.bytes), block.expected);
+    uint32_t footer = 0;
+    std::memcpy(&footer, record.data() + block.encoded - 4, sizeof(footer));
+    EXPECT_EQ(footer, crc32c(record.data(), block.bytes));
+    record[block.bytes / 2] ^= 1;
+    cudaCheck(cudaMemset(block.device, 0xd3, block.bytes));
+    cudaCheck(cudaStreamSynchronize(nullptr));
+    std::vector<CrcCopyFailure> failures;
+    EXPECT_EQ(copy.load({item}, failures), CrcCopyStatus::CRC_MISMATCH);
+    ASSERT_EQ(failures.size(), 1u);
+    EXPECT_EQ(failures.front().item_index, 0u);
+    EXPECT_EQ(failures.front().status, CrcCopyStatus::CRC_MISMATCH);
+    EXPECT_NE(failures.front().expected, failures.front().actual);
+    // The ungated scatter lands the corrupted payload despite the verdict.
+    EXPECT_EQ(block.readDevice(), std::vector<uint8_t>(record.data(), record.data() + block.bytes));
+    record[block.bytes / 2] ^= 1;
+    cudaCheck(cudaMemset(block.device, 0xd3, block.bytes));
+    ASSERT_EQ(copy.load({item}, failures), CrcCopyStatus::OK);
+    EXPECT_TRUE(failures.empty());
+    EXPECT_EQ(block.readDevice(), block.expected);
+    record[block.encoded - 4] ^= 1;
+    cudaCheck(cudaMemset(block.device, 0xd3, block.bytes));
+    EXPECT_EQ(copy.load({item}, failures), CrcCopyStatus::CRC_MISMATCH);
+    ASSERT_EQ(failures.size(), 1u);
+    EXPECT_NE(failures.front().expected, failures.front().actual);
+    EXPECT_EQ(block.readDevice(), block.expected);
+}
+
+TEST_F(CrcBatchTest, MisalignedPinnedHostRecordVerifies) {
+    Block             block(35, 7);
+    CrcBlockCopyBatch copy(0, 1, 35, 3);
+    // Pinned storage whose record starts one byte past the allocation base;
+    // the declared capacity still covers the record.
+    TestAllocation backing(block.encoded + 16, true);
+    uint8_t*       host = backing.data() + 1;
+    auto           item = block.item(true);
+    item.host           = host;
+    item.capacity_bytes = block.encoded + 15;
+    ASSERT_EQ(copy.store({item}, failures_), CrcCopyStatus::OK);
+    EXPECT_EQ(std::vector<uint8_t>(host, host + block.bytes), block.expected);
+    cudaCheck(cudaMemset(block.device, 0xd3, block.bytes));
+    ASSERT_EQ(copy.load({item}, failures_), CrcCopyStatus::OK);
+    EXPECT_EQ(block.readDevice(), block.expected);
+    host[block.bytes / 2] ^= 1;
+    cudaCheck(cudaMemset(block.device, 0xd3, block.bytes));
+    cudaCheck(cudaStreamSynchronize(nullptr));
+    std::vector<CrcCopyFailure> failures;
+    EXPECT_EQ(copy.load({item}, failures), CrcCopyStatus::CRC_MISMATCH);
+    ASSERT_EQ(failures.size(), 1u);
+    EXPECT_NE(failures.front().expected, failures.front().actual);
+    // The ungated scatter lands the corrupted payload despite the verdict.
+    EXPECT_EQ(block.readDevice(), std::vector<uint8_t>(host, host + block.bytes));
+}
+
+TEST_F(CrcBatchTest, MixedPinnedAndPlainHostRecordsVerifyTogether) {
+    Block             pinned(35, 1), plain(96, 2);
+    CrcBlockCopyBatch copy(0, 2, 96, 6);
+    // Mixed host allocation kinds in one batch.
+    std::vector<uint8_t> plain_record(plain.encoded, 0x6b);
+    auto                 items = std::vector<CrcCopyItem>{pinned.item(true), plain.item(true)};
+    items[1].host              = plain_record.data();
+    ASSERT_EQ(copy.store(items, failures_), CrcCopyStatus::OK);
+    EXPECT_EQ(std::vector<uint8_t>(plain_record.begin(), plain_record.begin() + plain.bytes), plain.expected);
+    for (auto* block : {&pinned, &plain})
+        cudaCheck(cudaMemset(block->device, 0xd3, block->bytes));
+    ASSERT_EQ(copy.load(items, failures_), CrcCopyStatus::OK);
+    EXPECT_EQ(pinned.readDevice(), pinned.expected);
+    EXPECT_EQ(plain.readDevice(), plain.expected);
+    plain_record[plain.bytes / 2] ^= 1;
+    for (auto* block : {&pinned, &plain})
+        cudaCheck(cudaMemset(block->device, 0xd3, block->bytes));
+    cudaCheck(cudaStreamSynchronize(nullptr));
+    std::vector<CrcCopyFailure> failures;
+    EXPECT_EQ(copy.load(items, failures), CrcCopyStatus::CRC_MISMATCH);
+    ASSERT_EQ(failures.size(), 1u);
+    EXPECT_EQ(failures.front().item_index, 1u);
+    EXPECT_EQ(failures.front().status, CrcCopyStatus::CRC_MISMATCH);
+    EXPECT_NE(failures.front().expected, failures.front().actual);
+    // The pinned item still lands its payload; the corrupted plain record is
+    // scattered and discarded through the reported status.
+    EXPECT_EQ(pinned.readDevice(), pinned.expected);
+    EXPECT_EQ(plain.readDevice(), std::vector<uint8_t>(plain_record.data(), plain_record.data() + plain.bytes));
+}
+
+TEST_F(CrcBatchTest, LargeBatchLoadPipelinesWavesAndVerifies) {
+    // At least kH2dPipelineMinBytes with multiple records: load() splits the
+    // batch into record waves (6 records -> 2/2/1/1) and streams wave w+1 on
+    // the copy stream while the SMs CRC wave w. 6 * ~0.8MB crosses the 4MiB
+    // threshold.
+    auto              blocks = makeGuardedBlocks(6, {732672, 878160});
+    CrcBlockCopyBatch copy(0, 6, 878160, 6 * 3);
+    auto              items = itemsFor(blocks, 6);
+    for (auto& block : blocks)
+        block->resetDevice(true);
+    ASSERT_EQ(copy.store(items, failures_), CrcCopyStatus::OK);
+    for (auto& block : blocks)
+        block->expectRecord(true);
+    for (auto& block : blocks)
+        block->resetDevice(false);
+    ASSERT_EQ(copy.load(items, failures_), CrcCopyStatus::OK);
+    for (auto& block : blocks)
+        block->expectDevice(true);
+    // A corrupted payload in a late wave is still caught after its DMA.
+    blocks[4]->host[blocks[4]->bytes / 2] ^= 1;
+    for (auto& block : blocks)
+        block->resetDevice(false);
+    std::vector<CrcCopyFailure> failures;
+    EXPECT_EQ(copy.load(items, failures), CrcCopyStatus::CRC_MISMATCH);
+    ASSERT_EQ(failures.size(), 1u);
+    EXPECT_EQ(failures.front().item_index, 4u);
+    // Payload corruption: the stored footer is intact, the recomputed CRC is not.
+    EXPECT_EQ(failures.front().expected, blocks[4]->expected_crc);
+    EXPECT_NE(failures.front().actual, blocks[4]->expected_crc);
+    blocks[4]->expectDeviceScattered();
+    for (size_t i : {0u, 1u, 2u, 3u, 5u})
+        blocks[i]->expectDevice(true);
+    blocks[4]->host[blocks[4]->bytes / 2] ^= 1;
+    // A corrupted footer in the first wave fails only that item.
+    blocks[0]->host[blocks[0]->encoded - 4] ^= 1;
+    for (auto& block : blocks)
+        block->resetDevice(false);
+    EXPECT_EQ(copy.load(items, failures), CrcCopyStatus::CRC_MISMATCH);
+    ASSERT_EQ(failures.size(), 1u);
+    EXPECT_EQ(failures.front().item_index, 0u);
+    // Footer corruption: the corrupted footer is reported as expected, the
+    // recomputed CRC of the intact payload as actual.
+    EXPECT_EQ(failures.front().expected, blocks[0]->expected_crc ^ 1u);
+    EXPECT_EQ(failures.front().actual, blocks[0]->expected_crc);
+    for (size_t i = 0; i < 6; ++i)
+        blocks[i]->expectDevice(true);
+    blocks[0]->host[blocks[0]->encoded - 4] ^= 1;
+    ASSERT_EQ(copy.load(items, failures), CrcCopyStatus::OK);
+    EXPECT_TRUE(failures.empty());
+    for (auto& block : blocks)
+        block->expectDevice(true);
+}
+
+TEST_F(CrcBatchTest, H2dWaveThresholdAndCountBoundaries) {
+    // Two records just past the 4 MiB threshold split into two single-record
+    // waves (waves = min(4, count)); a lone record past the threshold stays on
+    // the serial path because a single wave buys no overlap.
+    {
+        auto              blocks = makeGuardedBlocks(2, {2195400});
+        CrcBlockCopyBatch copy(0, 2, 2195400, 2 * 3);
+        auto              items = itemsFor(blocks, 2);
+        for (auto& block : blocks)
+            block->resetDevice(true);
+        ASSERT_EQ(copy.store(items, failures_), CrcCopyStatus::OK);
+        for (auto& block : blocks)
+            block->expectRecord(true);
+        for (auto& block : blocks)
+            block->resetDevice(false);
+        ASSERT_EQ(copy.load(items, failures_), CrcCopyStatus::OK);
+        for (auto& block : blocks)
+            block->expectDevice(true);
+        blocks[1]->host[blocks[1]->bytes / 2] ^= 1;
+        for (auto& block : blocks)
+            block->resetDevice(false);
+        std::vector<CrcCopyFailure> failures;
+        EXPECT_EQ(copy.load(items, failures), CrcCopyStatus::CRC_MISMATCH);
+        ASSERT_EQ(failures.size(), 1u);
+        EXPECT_EQ(failures.front().item_index, 1u);
+        blocks[1]->expectDeviceScattered();
+        blocks[0]->expectDevice(true);
+    }
+    {
+        auto              blocks = makeGuardedBlocks(1, {4400000});
+        CrcBlockCopyBatch copy(0, 1, 4400000, 3);
+        auto              items = itemsFor(blocks, 1);
+        blocks[0]->resetDevice(true);
+        ASSERT_EQ(copy.store(items, failures_), CrcCopyStatus::OK);
+        blocks[0]->expectRecord(true);
+        blocks[0]->resetDevice(false);
+        ASSERT_EQ(copy.load(items, failures_), CrcCopyStatus::OK);
+        blocks[0]->expectDevice(true);
+    }
+}
+
+TEST_F(CrcBatchTest, ExactH2dThresholdAndThreeWaveBatchesReuseWorkspace) {
+    constexpr size_t threshold = size_t{4} << 20;
+    struct Case {
+        std::vector<size_t> payloads;
+        size_t              encoded_bytes;
+    };
+    // The threshold counts encoded records, including each footer and padding.
+    // Reuse the workspace across wave -> serial -> wave -> three-wave -> serial.
+    const std::vector<Case> cases = {
+        {{2097148, 2097164}, threshold + 16},
+        {{2097148, 2097132}, threshold - 16},
+        {{2097148, 2097148}, threshold},
+        {{1398108, 1398108, 1398108}, threshold + 32},
+        {{2097148, 2097132}, threshold - 16},
+    };
+    CrcBlockCopyBatch copy(0, 3, 2097164, 9);
+    for (const auto& test : cases) {
+        SCOPED_TRACE(::testing::Message() << "encoded=" << test.encoded_bytes << " count=" << test.payloads.size());
+        auto   blocks = makeGuardedBlocks(test.payloads.size(), test.payloads);
+        auto   items  = itemsFor(blocks, blocks.size());
+        size_t total  = 0;
+        for (const auto& block : blocks)
+            total += block->encoded;
+        ASSERT_EQ(total, test.encoded_bytes);
+        ASSERT_EQ(copy.store(items, failures_), CrcCopyStatus::OK);
+        for (auto& block : blocks) {
+            block->expectRecord(true);
+            block->resetDevice(false);
+        }
+        ASSERT_EQ(copy.load(items, failures_), CrcCopyStatus::OK);
+        for (const auto& block : blocks)
+            block->expectDevice(true);
+    }
+}
+
+TEST_F(CrcBatchTest, FailuresAcrossH2dWavesKeepIndicesAndRecover) {
+    auto              blocks = makeGuardedBlocks(6, {732672, 878160});
+    CrcBlockCopyBatch copy(0, 6, 878160, 18);
+    const auto        items = itemsFor(blocks, blocks.size());
+    ASSERT_EQ(copy.store(items, failures_), CrcCopyStatus::OK);
+    // Waves contain 2/2/1/1 records. Damage payloads and a footer in three
+    // different waves, including the final one, to check global result indices.
+    blocks[0]->host[0] ^= 1;
+    blocks[2]->host[blocks[2]->encoded - 4] ^= 1;
+    blocks[5]->host[blocks[5]->bytes - 1] ^= 1;
+    for (auto& block : blocks)
+        block->resetDevice(false);
+    std::vector<CrcCopyFailure> failures;
+    ASSERT_EQ(copy.load(items, failures), CrcCopyStatus::CRC_MISMATCH);
+    ASSERT_EQ(failures.size(), 3u);
+    const std::array<size_t, 3> failed_indices{0, 2, 5};
+    for (size_t i = 0; i < failures.size(); ++i) {
+        const auto& failure = failures[i];
+        const auto& block   = *blocks[failed_indices[i]];
+        uint32_t    footer  = 0;
+        std::memcpy(&footer, block.host + block.encoded - 4, sizeof(footer));
+        EXPECT_EQ(failure.item_index, failed_indices[i]);
+        EXPECT_EQ(failure.status, CrcCopyStatus::CRC_MISMATCH);
+        EXPECT_TRUE(failure.checked_footer_available);
+        EXPECT_EQ(failure.expected, footer);
+        EXPECT_EQ(failure.actual, crc32c(block.host, block.bytes));
+        EXPECT_NE(failure.expected, failure.actual);
+    }
+    for (const auto& block : blocks)
+        block->expectDeviceScattered();
+    blocks[0]->host[0] ^= 1;
+    blocks[2]->host[blocks[2]->encoded - 4] ^= 1;
+    blocks[5]->host[blocks[5]->bytes - 1] ^= 1;
+    // Shrink after a failed verdict, then restore the full batch. Every reused
+    // flag and arrival counter must be overwritten before collecting results.
+    ASSERT_EQ(copy.load({items.back()}, failures), CrcCopyStatus::OK);
+    EXPECT_TRUE(failures.empty());
+    ASSERT_EQ(copy.load(items, failures), CrcCopyStatus::OK);
+    EXPECT_TRUE(failures.empty());
+    for (const auto& block : blocks)
+        block->expectDevice(true);
 }
 
 TEST_F(CrcBatchTest, BatchedMixedRecordsInteroperateWithSingleRecordCopies) {
@@ -469,20 +774,20 @@ TEST_F(CrcBatchTest, BatchedMixedRecordsInteroperateWithSingleRecordCopies) {
             blocks[i]->resetDevice(true);
             blocks[i]->resetHost();
         }
-        ASSERT_EQ(batched.store(items), CrcCopyStatus::OK);
+        ASSERT_EQ(batched.store(items, failures_), CrcCopyStatus::OK);
         for (size_t i = 0; i < count; ++i) {
             SCOPED_TRACE(i);
             blocks[i]->expectRecord(true);  // Independent bitwise CPU CRC.
             blocks[i]->resetDevice(false);
-            ASSERT_EQ(single.load({items[i]}), CrcCopyStatus::OK);
+            ASSERT_EQ(single.load({items[i]}, failures_), CrcCopyStatus::OK);
             blocks[i]->expectDevice(true);
-            ASSERT_EQ(single.store({items[i]}), CrcCopyStatus::OK);
+            ASSERT_EQ(single.store({items[i]}, failures_), CrcCopyStatus::OK);
             blocks[i]->expectRecord(true);
             // Padding is outside the CRC domain; load must accept nonzero padding.
             std::memset(blocks[i]->host + blocks[i]->bytes, 0x7b, blocks[i]->encoded - 4 - blocks[i]->bytes);
             blocks[i]->resetDevice(false);
         }
-        ASSERT_EQ(batched.load(items), CrcCopyStatus::OK);
+        ASSERT_EQ(batched.load(items, failures_), CrcCopyStatus::OK);
         for (size_t i = 0; i < count; ++i) {
             blocks[i]->expectDevice(true);
             blocks[i]->expectRecord(false);
@@ -490,13 +795,13 @@ TEST_F(CrcBatchTest, BatchedMixedRecordsInteroperateWithSingleRecordCopies) {
     }
 }
 
-TEST_F(CrcBatchTest, LargeBatchCorruptionRejectsEveryScatterAndRecovers) {
+TEST_F(CrcBatchTest, LargeBatchCorruptionStillScattersAndRecovers) {
     auto              blocks = makeGuardedBlocks(32, {49157, 65535, 65536, 65537, 32769});
     CrcBlockCopyBatch copy(0, 32, 65537, 32 * 3);
-    const auto        items  = itemsFor(blocks, 32);
+    const auto        items = itemsFor(blocks, 32);
     for (auto& block : blocks)
         block->writeCpuRecord();
-    ASSERT_EQ(copy.load(items), CrcCopyStatus::OK);
+    ASSERT_EQ(copy.load(items, failures_), CrcCopyStatus::OK);
     for (size_t damaged_index : {0u, 1u, 16u, 31u}) {
         auto& damaged = *blocks[damaged_index];
         for (size_t offset : {size_t(0), size_t(16384 + 11), damaged.bytes - 1, damaged.encoded - 4}) {
@@ -505,12 +810,12 @@ TEST_F(CrcBatchTest, LargeBatchCorruptionRejectsEveryScatterAndRecovers) {
             const std::vector<uint8_t> before(damaged.host, damaged.host + damaged.encoded);
             for (auto& block : blocks)
                 block->resetDevice(false);
-            ASSERT_EQ(copy.load(items), CrcCopyStatus::CRC_MISMATCH);
+            ASSERT_EQ(copy.load(items, failures_), CrcCopyStatus::CRC_MISMATCH);
             for (const auto& block : blocks)
-                block->expectDevice(false);
+                block->expectDeviceScattered();
             EXPECT_EQ(std::memcmp(damaged.host, before.data(), before.size()), 0);
             damaged.host[offset] ^= 1;
-            ASSERT_EQ(copy.load(items), CrcCopyStatus::OK);
+            ASSERT_EQ(copy.load(items, failures_), CrcCopyStatus::OK);
             for (const auto& block : blocks) {
                 block->expectDevice(true);
                 block->expectRecord(false);
@@ -534,7 +839,7 @@ TEST_F(CrcBatchTest, WorkspaceReuseAcrossBatchSizesAndPayloadShapes) {
             block->writeCpuRecord();
             block->resetDevice(false);
         }
-        ASSERT_EQ(copy.load(items), CrcCopyStatus::OK);
+        ASSERT_EQ(copy.load(items, failures_), CrcCopyStatus::OK);
         for (size_t i = 0; i < blocks.size(); ++i) {
             const bool active = (i + blocks.size() - rotation) % blocks.size() < count;
             blocks[i]->expectDevice(active);
@@ -542,20 +847,25 @@ TEST_F(CrcBatchTest, WorkspaceReuseAcrossBatchSizesAndPayloadShapes) {
         }
         for (size_t i = 0; i < count; ++i)
             blocks[(i + rotation) % blocks.size()]->resetHost();
-        ASSERT_EQ(copy.store(items), CrcCopyStatus::OK);
+        ASSERT_EQ(copy.store(items, failures_), CrcCopyStatus::OK);
         for (size_t i = 0; i < count; ++i)
             blocks[(i + rotation) % blocks.size()]->expectRecord(true);
         auto& last = *blocks[(count - 1 + rotation) % blocks.size()];
         last.host[last.encoded - 4] ^= 1;
         for (auto& block : blocks)
             block->resetDevice(false);
-        ASSERT_EQ(copy.load(items), CrcCopyStatus::CRC_MISMATCH);
-        for (const auto& block : blocks)
-            block->expectDevice(false);
+        ASSERT_EQ(copy.load(items, failures_), CrcCopyStatus::CRC_MISMATCH);
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            const bool active = (i + blocks.size() - rotation) % blocks.size() < count;
+            if (active)
+                blocks[i]->expectDeviceScattered();
+            else
+                blocks[i]->expectDevice(false);
+        }
         last.host[last.encoded - 4] ^= 1;
         // The next call changes count/order/shape after a failed verdict.
         if (round == 9) {
-            ASSERT_EQ(copy.load(items), CrcCopyStatus::OK);
+            ASSERT_EQ(copy.load(items, failures_), CrcCopyStatus::OK);
             for (const auto& block : blocks)
                 block->expectDevice(true);
         }
@@ -574,13 +884,17 @@ TEST_F(CrcBatchTest, InvalidAndOverflowingCapacitiesAreRejectedBeforeAllocation)
     EXPECT_THROW(CrcBlockCopyBatch(0, 1, 35, int_maximum + 1), std::invalid_argument);
     EXPECT_THROW(CrcBlockCopyBatch(0, 1, maximum, 1), std::overflow_error);
     EXPECT_THROW(CrcBlockCopyBatch(0, 2, maximum - 19, 1), std::overflow_error);
+    const size_t above_uint32 = size_t(std::numeric_limits<uint32_t>::max()) + 1;
+    EXPECT_THROW(CrcBlockCopyBatch(0, 1, above_uint32, 1), std::invalid_argument);
 }
 
 TEST_F(CrcBatchTest, SharedWorkspaceSerializesConcurrentMixedShapeCalls) {
+    // Each 16-item batch exceeds the 4 MiB wave threshold, so the workers
+    // contend on the wave-pipelined load path, not only the serial one.
     std::vector<size_t> first_sizes, second_sizes;
     for (size_t i = 0; i < 16; ++i) {
-        first_sizes.push_back(32769 + i * 19);
-        second_sizes.push_back(49157 + i * 23);
+        first_sizes.push_back(300000 + i * 19);
+        second_sizes.push_back(350000 + i * 23);
     }
     std::array<GuardedBlocks, 2>      blocks{makeGuardedBlocks(16, first_sizes), makeGuardedBlocks(16, second_sizes)};
     CrcBlockCopyBatch                 copy(0, 16, second_sizes.back(), 16 * 3);
@@ -598,13 +912,14 @@ TEST_F(CrcBatchTest, SharedWorkspaceSerializesConcurrentMixedShapeCalls) {
         }
         try {
             cudaCheck(cudaSetDevice(0));
-            const auto items = itemsFor(blocks[index], 16);
+            std::vector<CrcCopyFailure> crc_failures;
+            const auto                  items = itemsFor(blocks[index], 16);
             for (int round = 0; round < 2; ++round) {
-                if (copy.store(items) != CrcCopyStatus::OK)
+                if (copy.store(items, crc_failures) != CrcCopyStatus::OK)
                     throw std::runtime_error("concurrent store failed");
                 for (auto& block : blocks[index])
                     block->resetDevice(false);
-                if (copy.load(items) != CrcCopyStatus::OK)
+                if (copy.load(items, crc_failures) != CrcCopyStatus::OK)
                     throw std::runtime_error("concurrent load failed");
             }
         } catch (...) {
@@ -630,123 +945,6 @@ TEST_F(CrcBatchTest, SharedWorkspaceSerializesConcurrentMixedShapeCalls) {
         }
     }
 }
-
-#ifdef RTP_LLM_CRC_INTERNAL_TESTS
-TEST_F(CrcBatchTest, ProductionFinishPreservesNvcompErrorsAndNeverResealsReads) {
-    namespace internal = crc_block_copy_internal;
-    const std::vector<size_t> sizes{732672, 878160};
-    const size_t              stride = CrcBlockCopyBatch::encodedBytes(sizes.back()) + 32;
-    std::vector<uint8_t>      record(sizes.size() * stride, 0x4e);
-    std::vector<uint32_t>     whole_crc;
-    for (size_t i = 0; i < sizes.size(); ++i) {
-        auto* payload = record.data() + i * stride;
-        for (size_t j = 0; j < sizes[i]; ++j)
-            payload[j] = uint8_t((j * 73 + (j >> 7) * 31 + i * 97) ^ (j >> 3));
-        whole_crc.push_back(crc32c(payload, sizes[i]));
-        const size_t encoded = CrcBlockCopyBatch::encodedBytes(sizes[i]);
-        std::memset(payload + sizes[i], 0x7b, encoded - 4 - sizes[i]);
-        std::memcpy(payload + encoded - 4, &whole_crc.back(), 4);
-    }
-    TestAllocation staging(record.size()), lengths(sizes.size() * sizeof(size_t)),
-        checksums(whole_crc.size() * sizeof(uint32_t)), statuses(sizes.size() * sizeof(nvcompStatus_t)),
-        results((sizes.size() + 1) * sizeof(internal::Result)),
-        failed((sizes.size() + 1) * sizeof(bool), true, cudaHostAllocMapped);
-    bool* device_failed = nullptr;
-    cudaCheck(cudaHostGetDevicePointer(reinterpret_cast<void**>(&device_failed), failed.pointer, 0));
-    auto* host_failed = static_cast<bool*>(failed.pointer);
-    std::fill(host_failed, host_failed + sizes.size() + 1, true);
-    upload(lengths.pointer, sizes.data(), lengths.bytes);
-    upload(checksums.pointer, whole_crc.data(), checksums.bytes);
-
-    auto run = [&](const std::vector<nvcompStatus_t>& injected, bool store, bool corrupt_footer = false) {
-        SCOPED_TRACE(::testing::Message() << "store=" << store << " corrupt_footer=" << corrupt_footer);
-        auto input = record;
-        if (store || corrupt_footer) {
-            // Reading must compare with this original footer, not overwrite it
-            // with the computed checksum and accidentally compare it to itself.
-            for (size_t i = 0; i < sizes.size(); ++i)
-                input[i * stride + CrcBlockCopyBatch::encodedBytes(sizes[i]) - 4] ^= 0x80;
-        }
-        upload(staging.pointer, input.data(), input.size());
-        upload(statuses.pointer, injected.data(), statuses.bytes);
-        std::vector<uint8_t> result_bytes(results.bytes, 0xac);
-        upload(results.pointer, result_bytes.data(), result_bytes.size());
-        cudaCheck(internal::launchFinishCrc(staging.data(),
-                                            stride,
-                                            static_cast<const size_t*>(lengths.pointer),
-                                            static_cast<const uint32_t*>(checksums.pointer),
-                                            static_cast<const nvcompStatus_t*>(statuses.pointer),
-                                            static_cast<internal::Result*>(results.pointer),
-                                            device_failed,
-                                            sizes.size(),
-                                            store,
-                                            nullptr));
-        cudaCheck(cudaStreamSynchronize(nullptr));
-        EXPECT_TRUE(host_failed[sizes.size()]);  // Capacity guard is never written.
-        std::vector<internal::Result> actual(sizes.size());
-        cudaCheck(cudaMemcpy(
-            actual.data(), results.pointer, actual.size() * sizeof(internal::Result), cudaMemcpyDeviceToHost));
-        cudaCheck(cudaMemcpy(result_bytes.data(), results.pointer, result_bytes.size(), cudaMemcpyDeviceToHost));
-        EXPECT_TRUE(std::all_of(result_bytes.begin() + actual.size() * sizeof(internal::Result),
-                                result_bytes.end(),
-                                [](uint8_t value) { return value == 0xac; }));
-        std::vector<uint8_t> output(record.size());
-        cudaCheck(cudaMemcpy(output.data(), staging.pointer, output.size(), cudaMemcpyDeviceToHost));
-        for (size_t i = 0; i < sizes.size(); ++i) {
-            SCOPED_TRACE(i);
-            const bool failure = injected[i] != nvcompSuccess || (!store && corrupt_footer);
-            EXPECT_EQ(host_failed[i], failure);
-            const size_t footer = i * stride + CrcBlockCopyBatch::encodedBytes(sizes[i]) - 4;
-            uint32_t original_footer = 0;
-            std::memcpy(&original_footer, input.data() + footer, 4);
-            if (failure) {
-                EXPECT_EQ(actual[i].status, injected[i]);
-                EXPECT_EQ(actual[i].actual, whole_crc[i]);
-                EXPECT_EQ(actual[i].expected, store ? whole_crc[i] : original_footer);
-            } else {
-                EXPECT_TRUE(std::all_of(result_bytes.begin() + i * sizeof(internal::Result),
-                                       result_bytes.begin() + (i + 1) * sizeof(internal::Result),
-                                       [](uint8_t value) { return value == 0xac; }));
-            }
-            if (store) {
-                uint32_t stored_footer = 0;
-                std::memcpy(&stored_footer, output.data() + footer, 4);
-                EXPECT_EQ(stored_footer, whole_crc[i]);
-            }
-            EXPECT_EQ(std::memcmp(output.data() + i * stride, input.data() + i * stride, sizes[i]), 0);
-            if (store) {
-                EXPECT_TRUE(std::all_of(output.begin() + i * stride + sizes[i],
-                                        output.begin() + footer,
-                                        [](uint8_t value) { return value == 0; }));
-            }
-            const size_t encoded_end = i * stride + CrcBlockCopyBatch::encodedBytes(sizes[i]);
-            EXPECT_TRUE(std::all_of(output.begin() + encoded_end, output.begin() + (i + 1) * stride, [](uint8_t value) {
-                return value == 0x4e;
-            }));
-        }
-        if (!store) {
-            EXPECT_EQ(output, input);  // Includes padding and even corrupt footers.
-        }
-    };
-
-    for (bool store : {false, true}) {
-        std::vector<nvcompStatus_t> injected(sizes.size(), nvcompSuccess);
-        run(injected, store);
-        for (size_t failed = 0; failed < injected.size(); ++failed) {
-            SCOPED_TRACE(failed);
-            injected[failed] = nvcompErrorInternal;
-            run(injected, store);
-            injected[failed] = nvcompSuccess;
-        }
-        injected.front() = nvcompErrorInvalidValue;
-        injected.back()  = nvcompErrorInternal;
-        run(injected, store);  // Keep each backing's own error status.
-        std::fill(injected.begin(), injected.end(), nvcompSuccess);
-        run(injected, store);  // Good -> every bad position -> good recovery.
-    }
-    run(std::vector<nvcompStatus_t>(sizes.size(), nvcompSuccess), false, true);
-}
-#endif
 
 TEST_F(CrcBatchTest, InvalidGeometryNeverWritesTargets) {
     Block                    block(35, 4);
@@ -785,18 +983,18 @@ TEST_F(CrcBatchTest, InvalidGeometryNeverWritesTargets) {
     cases.push_back(bad);
     for (const auto& item : cases) {
         std::memset(block.host, 0x6b, block.encoded);
-        EXPECT_EQ(copy.store({item}), CrcCopyStatus::INVALID_ARGS);
-        EXPECT_EQ(copy.load({item}), CrcCopyStatus::INVALID_ARGS);
+        EXPECT_EQ(copy.store({item}, failures_), CrcCopyStatus::INVALID_ARGS);
+        EXPECT_EQ(copy.load({item}, failures_), CrcCopyStatus::INVALID_ARGS);
         EXPECT_TRUE(std::all_of(block.host, block.host + block.encoded, [](uint8_t v) { return v == 0x6b; }));
         EXPECT_EQ(block.readDevice(), block.expected);
     }
-    EXPECT_EQ(copy.store({}), CrcCopyStatus::INVALID_ARGS);
-    EXPECT_EQ(copy.load({}), CrcCopyStatus::INVALID_ARGS);
-    EXPECT_EQ(copy.store({valid, valid}), CrcCopyStatus::INVALID_ARGS);
+    EXPECT_EQ(copy.store({}, failures_), CrcCopyStatus::INVALID_ARGS);
+    EXPECT_EQ(copy.load({}, failures_), CrcCopyStatus::INVALID_ARGS);
+    EXPECT_EQ(copy.store({valid, valid}, failures_), CrcCopyStatus::INVALID_ARGS);
     CrcBlockCopyBatch fewer_tiles(0, 1, 35, 2);
-    EXPECT_EQ(fewer_tiles.store({valid}), CrcCopyStatus::INVALID_ARGS);
+    EXPECT_EQ(fewer_tiles.store({valid}, failures_), CrcCopyStatus::INVALID_ARGS);
     CrcBlockCopyBatch two(0, 2, 35, 6);
-    EXPECT_EQ(two.store({valid, valid}), CrcCopyStatus::INVALID_ARGS);  // aliasing host backing
+    EXPECT_EQ(two.store({valid, valid}, failures_), CrcCopyStatus::INVALID_ARGS);  // aliasing host backing
 }
 }  // namespace
 }  // namespace rtp_llm

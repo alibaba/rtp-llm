@@ -5,8 +5,6 @@ import os
 import sys
 from typing import Any, Dict, Optional, Type, Union
 
-import torch
-
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
@@ -87,6 +85,12 @@ class ModelFactory:
         )
         model_type = model_config.model_type
         model_cls = ModelFactory.get_model_cls(model_type)
+        if model_type in ("deepseek_v4", "deepseek_v4_mtp"):
+            from rtp_llm.models.deepseek_v4 import configure_ppu_scheduler
+
+            configure_ppu_scheduler(
+                model_config, engine_config.runtime_config.fifo_scheduler_config
+            )
 
         # Get model_name from model_config (default to model class name if not set)
         model_name = model_config.model_name or model_cls.__name__
@@ -170,6 +174,13 @@ class ModelFactory:
             model_cls = ModelFactory.get_model_cls(propose_model_config.model_type)
             # propose model's max seq len must be equal to score model's max seq len
             propose_model_config.max_seq_len = model_config.max_seq_len
+            if propose_model_config.model_type in ("deepseek_v4", "deepseek_v4_mtp"):
+                from rtp_llm.models.deepseek_v4 import configure_ppu_scheduler
+
+                configure_ppu_scheduler(
+                    propose_model_config,
+                    engine_config.runtime_config.fifo_scheduler_config,
+                )
             propose_model_config.gen_num_per_cycle = model_config.gen_num_per_cycle
 
             alias_names = ()
@@ -416,6 +427,9 @@ class ModelFactory:
         finalize_scheduler_config(
             fifo_scheduler_config=engine_config.runtime_config.fifo_scheduler_config,
             max_seq_len=model_config.max_seq_len,
+            role_type=engine_config.pd_sep_config.role_type,
+            use_batch_decode_scheduler=engine_config.runtime_config.use_batch_decode_scheduler,
+            seq_size_per_block=model_config.attn_config.tokens_per_block,
         )
         scheduler_config = engine_config.runtime_config.fifo_scheduler_config
         # Generic MoE executors allocate their fixed-capacity communication

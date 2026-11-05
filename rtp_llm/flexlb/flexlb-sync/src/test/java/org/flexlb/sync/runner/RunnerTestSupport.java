@@ -21,8 +21,7 @@ public final class RunnerTestSupport {
     private static final EndpointEventProjector NOOP_EVENT_SINK =
             Mockito.mock(EndpointEventProjector.class);
 
-    private RunnerTestSupport() {
-    }
+    private RunnerTestSupport() {}
 
     public static EndpointEventProjector eventSink() {
         return NOOP_EVENT_SINK;
@@ -39,31 +38,18 @@ public final class RunnerTestSupport {
     }
 
     public static WorkerStatus discovered(
-            RoleType role,
-            String group,
-            String ip,
-            int port,
-            int grpcPort,
-            String site) {
-        return WorkerStatus.createDiscovered(
-                role, group, ip, port, grpcPort, site);
+            RoleType role, String group, String ip, int port, int grpcPort, String site) {
+        return WorkerStatus.createDiscovered(role, group, ip, port, grpcPort, site);
     }
 
     public static WorkerStatus alive(
-            RoleType role,
-            String group,
-            String ip,
-            int port,
-            int grpcPort,
-            String site) {
-        WorkerStatus status = discovered(
-                role, group, ip, port, grpcPort, site);
+            RoleType role, String group, String ip, int port, int grpcPort, String site) {
+        WorkerStatus status = discovered(role, group, ip, port, grpcPort, site);
         publish(status, response(status, true, 1L));
         return status;
     }
 
-    public static WorkerStatusResponse response(
-            WorkerStatus status, boolean alive, long version) {
+    public static WorkerStatusResponse response(WorkerStatus status, boolean alive, long version) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(status.getRole());
         response.setAlive(alive);
@@ -89,12 +75,11 @@ public final class RunnerTestSupport {
         return response;
     }
 
-    public static void publish(
-            WorkerStatus status, WorkerStatusResponse response) {
+    public static void publish(WorkerStatus status, WorkerStatusResponse response) {
         status.lock.lock();
         try {
-            WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
-                    status.freezeStatusResponse(response));
+            WorkerStatus.PreparedStatus prepared =
+                    status.prepareNewStatus(status.freezeStatusResponse(response));
             status.publishPreparedStatus(prepared);
             status.recordSuccessfulPoll(response.isAlive());
         } finally {
@@ -103,23 +88,18 @@ public final class RunnerTestSupport {
     }
 
     public static WorkerEndpoint publishEndpoint(
-            EndpointRegistry registry,
-            RoleType role,
-            String address,
-            WorkerStatus status) {
+            EndpointRegistry registry, RoleType role, String address, WorkerStatus status) {
         WorkerStatusResponse response = response(status, true, 1L);
         status.lock.lock();
         try {
-            WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
-                    status.freezeStatusResponse(response));
-            WorkerEndpoint endpoint = registry
-                    .publishPreparedEndpoint(address, status, prepared)
-                    .endpoint();
+            WorkerStatus.PreparedStatus prepared =
+                    status.prepareNewStatus(status.freezeStatusResponse(response));
+            WorkerEndpoint endpoint =
+                    registry.publishPreparedEndpoint(address, status, prepared).endpoint();
             status.recordSuccessfulPoll(true);
             return endpoint;
         } finally {
             status.lock.unlock();
         }
     }
-
 }

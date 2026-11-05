@@ -1,43 +1,55 @@
-package(default_visibility = ["//visibility:public"])
+load("@internal_impls//:impls.bzl", "extension_frontend_lib_deps", "extension_lib_deps", "extension_packages")
 load("@rules_python//python:packaging.bzl", "py_package")
 load("@rules_python//python:pip.bzl", "compile_pip_requirements")
 load(":pip.bzl", "PIP_EXTRA_ARGS")
+
+package(default_visibility = ["//visibility:public"])
 exports_files([
     "http.bzl",
     "requirements_base.txt",
+    "requirements_base_ppu.txt",
+    "requirements_lock_torch_ppu.txt",
+    "requirements_ppu.in",
+    "requirements_torch_ppu.txt",
     "requirements_lock_rocm.txt",
     "requirements_rocm.txt",
 ])
 
+# Closed-model seam: the @internal_impls stub swaps under the closed override.
 py_package(
     name = "extension_package",
-    deps = [
-    ],
-    packages = [
-        "rtp_llm"
-    ],
+    deps = [":extension_lib"],
+    packages = extension_packages(),
 )
-
 
 py_package(
     name = "extension_package_frontend",
-    deps = [
-    ],
-    packages = [
-        "rtp_llm"
-    ],
+    deps = [":extension_frontend_lib"],
+    packages = extension_packages(),
 )
 
 py_library(
     name = "extension_frontend_lib",
-    deps = [],
+    deps = extension_frontend_lib_deps(),
     visibility = ["//visibility:public"],
 )
 
 py_library(
     name = "extension_lib",
-    deps = [],
+    deps = extension_lib_deps(),
     visibility = ["//visibility:public"],
+)
+
+compile_pip_requirements(
+    name = "requirements_torch_ppu",
+    src = "requirements_ppu.in",
+    extra_args = PIP_EXTRA_ARGS,
+    extra_data = [
+        "//:requirements_base_ppu.txt",
+        "//:requirements_torch_ppu.txt",
+    ],
+    requirements_txt = "requirements_lock_torch_ppu.txt",
+    tags = ["manual"],
 )
 
 compile_pip_requirements(

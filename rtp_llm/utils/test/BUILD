@@ -82,7 +82,7 @@ _JIT_SMOKE_EXTRA_DEPS = [
 custom_smoke_test(
     name = "jit_cache_deepseek_v2_lite",
     main = "jit_cache_smoke_test.py",
-    smoke_args = "--warm_up 0 --hack_layer_num 2 --load_method scratch --test_block_num 100 --act_type BF16 --quantization FP8_PER_BLOCK --seq_size_per_block 64 --tp_size 2 --reuse_cache 1",
+    smoke_args = "--warm_up 0 --hack_layer_num 2 --load_method scratch --test_block_num 40 --act_type BF16 --quantization FP8_PER_BLOCK --seq_size_per_block 64 --tp_size 2 --reuse_cache 1",
     args = ["JitCacheSmokeTest.test_deepseek_v2_lite"],
     gpu_type = ["H20_CU13"],
     tags = ["multi_device"],
@@ -277,4 +277,12 @@ py_test(
     deps = [
         "//rtp_llm:utils",
     ],
+)
+
+py_test(
+    name = "ppu_entrypoint_test",
+    srcs = ["ppu_entrypoint_test.py"],
+    deps = ["//rtp_llm:utils"],
+    # Exercise the same lightweight entrypoint used by the PPU model target.
+    data = ["//rtp_llm/models_py:ppu_entrypoint"],
 )

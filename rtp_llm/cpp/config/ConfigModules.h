@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <sstream>
@@ -191,7 +192,9 @@ struct KVCacheConfig {
     double block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
     double block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
     double block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
-    int    linear_step                                  = 1;  // for linear attention cache reuse
+    int      reuse_cache_tail_blocks                      = std::numeric_limits<int>::max();
+    uint32_t linear_pool_blocks                           = 0;
+    uint32_t swa_pool_blocks                              = 0;
     // Fields merged from PyKvCacheConfig
     int fp8_kv_cache = 0;
     // "auto" preserves a model-declared recurrent-state dtype. Models
@@ -208,17 +211,18 @@ struct KVCacheConfig {
     bool        enable_memory_cache       = false;
     bool        enable_disk_cache         = false;
     bool        enable_remote_cache       = false;
+    bool        enable_crc                = true;
     std::string device_eviction_policy    = "lru";
     std::string memory_eviction_policy    = "lru";
     std::string disk_eviction_policy      = "fifo";
 
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
     // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
-    // linear-step-derived block count.
+    // automatically derived block count.
     uint32_t dsv4_fixed_pool_blocks = 0;
 
     // Optional DSV4 HCA_STATE pool block count override. 0 means HCA_STATE
-    // follows dsv4_fixed_pool_blocks or the normal linear-step-derived count.
+    // follows dsv4_fixed_pool_blocks or the normal automatically derived count.
     uint32_t dsv4_hca_state_pool_blocks = 0;
 
     // DSV4 fixed-pool residency switch. false = GPU BlockPool; true = pinned
@@ -465,6 +469,9 @@ struct FIFOSchedulerConfig {
     bool        cp_force_single_prefill        = true;
     int64_t     max_inited_kv_cache_streams    = 0;
     int64_t     max_batch_tokens_without_cache = 0;
+    // Global real-context token budget per chunked-prefill forward; <=0 disables, >0 enables.
+    // Config injection requires at least one seq_size_per_block and floor-aligns larger values.
+    int64_t     prefill_chunk_size = 0;
     std::string to_string() const;
 };
 

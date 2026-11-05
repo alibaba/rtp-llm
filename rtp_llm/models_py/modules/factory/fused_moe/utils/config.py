@@ -11,5 +11,10 @@ def shared_expert_mode() -> str:
     return os.environ.get("MOE_SHARED_EXPERT_MODE", "sequential").strip().lower()
 
 
-def mega_moe_input_packer_mode() -> str:
-    return os.environ.get("MEGA_MOE_INPUT_PACKER", "fused").strip().lower()
+def mega_shared_expert_block32_enabled() -> bool:
+    """Decode-only opt-in for a group-32 shared expert fused into MegaMoE.
+
+    The fused activation/combine rounds differently from the standalone BF16
+    shared expert, so this stays off unless explicitly requested.
+    """
+    return os.environ.get("MOE_MEGA_SHARED_EXPERT", "0") == "1"

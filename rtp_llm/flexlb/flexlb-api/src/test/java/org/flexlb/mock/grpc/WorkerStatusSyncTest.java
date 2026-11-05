@@ -1,7 +1,9 @@
 package org.flexlb.mock.grpc;
 
+import com.google.protobuf.ByteString;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.mock.FlexLBMockTestBase;
@@ -56,11 +58,16 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
 
     private static final long SYNC_TIMEOUT_MS = 5000;
 
+    @Test
+    void nonNumericRoutingIdDoesNotInventAnEngineInputId() {
+        var context = createBalanceContext("request-a");
+        assertEquals("request-a", context.getRequestId());
+        assertEquals(ByteString.EMPTY, context.getGenerateInputPb());
+    }
+
     @Override
     protected MockWorkerBehavior createPrefillBehavior() {
-        return MockWorkerBehavior.builder()
-                .availableConcurrency(10)
-                .build();
+        return MockWorkerBehavior.builder().availableConcurrency(10).build();
     }
 
     @Override
@@ -72,8 +79,8 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
     @Timeout(20)
     void workerStatusSync_masterPerceivesConcurrencyChange() throws Exception {
         // 1. Submit request — normal operation with concurrency=10
-        CompletableFuture<org.flexlb.dao.loadbalance.Response> future = submitRequest(30001);
-        org.flexlb.dao.loadbalance.Response ackResponse = future.get(5, TimeUnit.SECONDS);
+        CompletableFuture<Response> future = submitRequest("30001");
+        Response ackResponse = future.get(5, TimeUnit.SECONDS);
         assertTrue(ackResponse.isSuccess(), "Request should succeed with concurrency=10");
 
         // 2. Trigger status sync via gRPC — first call (concurrency=10)
@@ -82,8 +89,8 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
 
         // 3. Verify gRPC response has correct values
         assertTrue(pb1.getAlive(), "Worker should be alive");
-        assertEquals(10, pb1.getAvailableConcurrency(),
-                "Initial available_concurrency should be 10");
+        assertEquals(
+                10, pb1.getAvailableConcurrency(), "Initial available_concurrency should be 10");
 
         // 4. Apply status update (simulates GrpcWorkerStatusRunner flow)
         applyWorkerStatus(pb1);
@@ -92,39 +99,45 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
         PrefillEndpoint prefillEp = getPrefillEndpoint();
         WorkerStatus ws = prefillEp.getStatus();
         assertNotNull(ws, "PrefillEndpoint should have a WorkerStatus");
-        assertEquals(10L, ws.getAvailableConcurrency(),
+        assertEquals(
+                10L,
+                ws.getAvailableConcurrency(),
                 "WorkerStatus should reflect concurrency=10 after sync");
-        assertTrue(ws.isActiveGeneration(),
+        assertTrue(
+                ws.isActiveGeneration(),
                 "Worker generation should remain active after an alive status sync");
 
         // 6. Verify mock received the GetWorkerStatus gRPC call
-        assertEquals(statusCallCountBefore + 1, mockPrefillWorker.getWorkerStatusCallCount(),
+        assertEquals(
+                statusCallCountBefore + 1,
+                mockPrefillWorker.getWorkerStatusCallCount(),
                 "Mock should have received 1 additional GetWorkerStatus call");
 
         // 7. Change mock behavior: available_concurrency = 0 (worker full)
-        mockPrefillWorker.setBehavior(MockWorkerBehavior.builder()
-                .availableConcurrency(0)
-                .build());
+        mockPrefillWorker.setBehavior(MockWorkerBehavior.builder().availableConcurrency(0).build());
 
         // 9. Trigger second status sync via gRPC — concurrency=0
         long statusCallCountBefore2 = mockPrefillWorker.getWorkerStatusCallCount();
         EngineRpcService.WorkerStatusPB pb2 = fetchWorkerStatus();
 
         // 10. Verify gRPC response reflects the change
-        assertEquals(0, pb2.getAvailableConcurrency(),
-                "Updated available_concurrency should be 0");
+        assertEquals(0, pb2.getAvailableConcurrency(), "Updated available_concurrency should be 0");
 
         // 11. Apply status update
         applyWorkerStatus(pb2);
 
         // 12. Verify master perceives worker is full
         WorkerStatus ws2 = getPrefillEndpoint().getStatus();
-        assertEquals(0L, ws2.getAvailableConcurrency(),
+        assertEquals(
+                0L,
+                ws2.getAvailableConcurrency(),
                 "WorkerStatus should reflect concurrency=0 after sync — "
                         + "master should perceive worker is full");
 
         // 13. Verify mock received the second GetWorkerStatus call
-        assertEquals(statusCallCountBefore2 + 1, mockPrefillWorker.getWorkerStatusCallCount(),
+        assertEquals(
+                statusCallCountBefore2 + 1,
+                mockPrefillWorker.getWorkerStatusCallCount(),
                 "Mock should have received 1 more GetWorkerStatus call");
     }
 
@@ -135,12 +148,17 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
      * mock prefill worker via gRPC.
      */
     private EngineRpcService.WorkerStatusPB fetchWorkerStatus() throws Exception {
-        EngineRpcService.StatusVersionPB request = EngineRpcService.StatusVersionPB.newBuilder()
-                .setLatestCacheVersion(getPrefillEndpoint().getStatus()
-                        .appliedStatusCursor().statusVersion())
-                .setLatestFinishedVersion(0)
-                .build();
-        return grpcClient.getWorkerStatusAsync(prefillIp, prefillGrpcPort, request, SYNC_TIMEOUT_MS)
+        EngineRpcService.StatusVersionPB request =
+                EngineRpcService.StatusVersionPB.newBuilder()
+                        .setLatestCacheVersion(
+                                getPrefillEndpoint()
+                                        .getStatus()
+                                        .appliedStatusCursor()
+                                        .statusVersion())
+                        .setLatestFinishedVersion(0)
+                        .build();
+        return grpcClient
+                .getWorkerStatusAsync(prefillIp, prefillGrpcPort, request, SYNC_TIMEOUT_MS)
                 .get(SYNC_TIMEOUT_MS, TimeUnit.MILLISECONDS);
     }
 
@@ -155,14 +173,13 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
      * </ol>
      */
     private void applyWorkerStatus(EngineRpcService.WorkerStatusPB pb) {
-        EngineRpcService.WorkerStatusPB prefillStatus = pb.toBuilder()
-                .setRole("PREFILL")
-                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
-                .build();
+        EngineRpcService.WorkerStatusPB prefillStatus =
+                pb.toBuilder()
+                        .setRole("PREFILL")
+                        .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                        .build();
         WorkerStatus ws = getPrefillEndpoint().getStatus();
         applyWorkerStatusObservation(
-                ws,
-                EngineStatusConverter.convertToStatusObservation(
-                        ws, prefillStatus));
+                ws, EngineStatusConverter.convertToStatusObservation(ws, prefillStatus));
     }
 }

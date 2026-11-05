@@ -17,5 +17,4 @@ public class MasterChangeNotifyResp {
     private boolean success;
 
     private String msg;
-
 }

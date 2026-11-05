@@ -33,9 +33,11 @@ final class PrefillCandidateSet {
         maximumRoutingCacheMatchTokens = 0L;
     }
 
-    void addCandidate(String address, PrefillEndpoint endpoint,
-                      RouteProjection.CandidateView candidate,
-                      long ownershipVersion) {
+    void addCandidate(
+            String address,
+            PrefillEndpoint endpoint,
+            RouteProjection.CandidateView candidate,
+            long ownershipVersion) {
         if (!candidate.selectable() && !candidate.engineWorkUnmodeled()) {
             throw new IllegalArgumentException("candidate requires available capacity");
         }
@@ -50,27 +52,53 @@ final class PrefillCandidateSet {
         hasKnownTtft |= projectedTtftMs[size] >= 0L;
         minimumTtftRank = Math.min(minimumTtftRank, ttftRank(size));
         maximumCacheHit = Math.max(maximumCacheHit, cacheHitTokens[size]);
-        maximumRoutingCacheMatchTokens = Math.max(
-                maximumRoutingCacheMatchTokens, routingCacheMatchTokens[size]);
+        maximumRoutingCacheMatchTokens =
+                Math.max(maximumRoutingCacheMatchTokens, routingCacheMatchTokens[size]);
         size++;
     }
 
-    PrefillEndpoint endpoint(int index) { return endpoints[index]; }
-    String endpointAddress(int index) { return endpointAddresses[index]; }
-    long cacheHit(int index) { return cacheHitTokens[index]; }
-    long ttftRank(int index) { return projectedTtftMs[index] < 0L ? Long.MAX_VALUE : projectedTtftMs[index]; }
-    long projectedTtftMs(int index) { return projectedTtftMs[index]; }
-    long prefillMs(int index) { return incomingPrefillMs[index]; }
-    long routingCacheMatchTokens(int index) { return routingCacheMatchTokens[index]; }
-    long ownershipVersion(int index) { return ownershipVersions[index]; }
-    int size() { return size; }
+    PrefillEndpoint endpoint(int index) {
+        return endpoints[index];
+    }
+
+    String endpointAddress(int index) {
+        return endpointAddresses[index];
+    }
+
+    long cacheHit(int index) {
+        return cacheHitTokens[index];
+    }
+
+    long ttftRank(int index) {
+        return projectedTtftMs[index] < 0L ? Long.MAX_VALUE : projectedTtftMs[index];
+    }
+
+    long projectedTtftMs(int index) {
+        return projectedTtftMs[index];
+    }
+
+    long prefillMs(int index) {
+        return incomingPrefillMs[index];
+    }
+
+    long routingCacheMatchTokens(int index) {
+        return routingCacheMatchTokens[index];
+    }
+
+    long ownershipVersion(int index) {
+        return ownershipVersions[index];
+    }
+
+    int size() {
+        return size;
+    }
 
     private void ensureCapacity(int expectedCapacity) {
         if (endpoints.length >= expectedCapacity) {
             return;
         }
-        int capacity = Math.max(expectedCapacity,
-                Math.max(INITIAL_CAPACITY, endpoints.length << 1));
+        int capacity =
+                Math.max(expectedCapacity, Math.max(INITIAL_CAPACITY, endpoints.length << 1));
         endpointAddresses = Arrays.copyOf(endpointAddresses, capacity);
         endpoints = Arrays.copyOf(endpoints, capacity);
         projectedTtftMs = Arrays.copyOf(projectedTtftMs, capacity);
@@ -79,5 +107,4 @@ final class PrefillCandidateSet {
         routingCacheMatchTokens = Arrays.copyOf(routingCacheMatchTokens, capacity);
         ownershipVersions = Arrays.copyOf(ownershipVersions, capacity);
     }
-
 }

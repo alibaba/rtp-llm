@@ -4,8 +4,6 @@ package org.flexlb.balance.preemption;
 public record CancelTarget(String prefillIp, int prefillGrpcPort) {
 
     public boolean isRoutable() {
-        return prefillIp != null
-                && !prefillIp.isBlank()
-                && prefillGrpcPort > 0;
+        return prefillIp != null && !prefillIp.isBlank() && prefillGrpcPort > 0;
     }
 }
