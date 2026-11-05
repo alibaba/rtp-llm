@@ -84,6 +84,7 @@ cc_library(
         "util/ReadyBitMap.h",
         "util/BitMap.h",
         "util/EnvParam.h",
+        "pybind/NaviRuntimeConfig.h",
         "test_cluster/NaviTestCluster.h",
         "test_cluster/NaviFuncClosure.h",
     ]),
