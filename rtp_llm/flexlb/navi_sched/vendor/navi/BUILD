@@ -85,8 +85,6 @@ cc_library(
         "util/BitMap.h",
         "util/EnvParam.h",
         "pybind/NaviRuntimeConfig.h",
-        "test_cluster/NaviTestCluster.h",
-        "test_cluster/NaviFuncClosure.h",
     ]),
     include_prefix = "navi",
     visibility = ["//visibility:public"],
@@ -271,7 +269,6 @@ cc_library(
             "perf/*.cpp",
             "memleak/*.cpp",
             "rpc_server/*.cpp",
-            "test_cluster/*.cpp",
         ],
         exclude = [
             "test_cluster/NaviGraphRunner.cpp",
@@ -290,8 +287,6 @@ cc_library(
             "perf/*.h",
             "memleak/*.h",
             "rpc_server/*.h",
-            "test_cluster/*.h",
-            "test_cluster/*.h",
         ],
         exclude = [
             "test_cluster/NaviGraphRunner.h",
