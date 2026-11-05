@@ -1189,8 +1189,10 @@ bool RtpLLMRemoteCacheSDKMetrics::init(kmonitor::MetricsGroupManager* manager) {
 void RtpLLMRemoteCacheSDKMetrics::report(const kmonitor::MetricsTags*          tags,
                                          RtpLLMRemoteCacheSDKMetricsCollector* collector) {
     REPORT_QPS(remote_sdk_fail_qps);
-    REPORT_MUTABLE_METRIC(remote_sdk_block_num_metric, collector->remote_sdk_block_num);
-    REPORT_MUTABLE_METRIC(remote_sdk_cost_time_us_metric, collector->remote_sdk_cost_time_us);
+    if (collector->report_details) {
+        REPORT_MUTABLE_METRIC(remote_sdk_block_num_metric, collector->remote_sdk_block_num);
+        REPORT_MUTABLE_METRIC(remote_sdk_cost_time_us_metric, collector->remote_sdk_cost_time_us);
+    }
 }
 
 bool RtpLLMRemoteCacheQuarantineMetrics::init(kmonitor::MetricsGroupManager* manager) {

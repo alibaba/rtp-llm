@@ -991,6 +991,10 @@ message RemoteOperationResponsePB {
     // submitted payload I/O stopped accessing caller buffers. It does not prove
     // a metadata commit or remote target drain. Absent/false remains unknown.
     bool payload_buffer_safe = 6;
+    // Absent means unknown, not SDK success. This is not a buffer-safety proof.
+    oneof sdk_result {
+        bool sdk_failed = 7;
+    }
 }
 
 message FunctionResponsePB {

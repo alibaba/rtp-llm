@@ -129,7 +129,8 @@ See [KV cache event publisher](kv_cache_event_publisher.md) for HBM reporting.
 KVCM reuses the Remote KV Cache dashboard's `rtp_llm_remote_*` metrics.
 
 - **TP rank 0:** match/read/write QPS, failures, latency and counts; writes also time StartWrite, broadcast and FinishWrite.
-- **SDK:** per-rank/group call latency, failures and physical block counts, tagged `mode=read/write`.
+- **SDK failures:** TP rank 0 counts each failed read/write task with a confirmed SDK failure once, tagged `mode=read/write`, even when multiple ranks fail. Workers return an SDK failure flag in the existing RPC response. Missing flags are unknown; RPC failures and pre-SDK rejection are not counted as confirmed SDK failures.
+- **SDK latency/block counts:** retain the existing TP rank 0 local samples and `mode=read/write` tags.
 - Read tokens include CP via the canonical key stride. Committed write blocks count logical keys once, without TP/group duplication.
 - Write QPS includes replica-sufficient skips; these report zero blocks and broadcast time.
 - Latency is in microseconds, includes failures/timeouts and excludes executor queueing. FinishWrite includes session cleanup.

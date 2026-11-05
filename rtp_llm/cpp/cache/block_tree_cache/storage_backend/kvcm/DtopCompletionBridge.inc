@@ -323,19 +323,26 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
 std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<FunctionRequestPB>& requests,
                                                        const TransferTask& task,
                                                        bool& transfer_attempted,
-                                                       bool& source_may_be_touched) {
+                                                       bool& source_may_be_touched,
+                                                       bool& sdk_failed) {
     setCudaDevice();
     using Batch = CompletionResources::Operation;
     std::vector<std::shared_ptr<Batch>> batches;
     batches.reserve(requests.size());
     std::vector<FunctionResponsePB> responses(requests.size());
+    block_tree_cache_detail::ScopeRollback collect_sdk_failures([&] {
+        for (const auto& response : responses) {
+            if (response.has_remote_response() && response.remote_response().has_sdk_failed()
+                && response.remote_response().sdk_failed()) sdk_failed = true;
+        }
+    });
     // Prebuild error payloads and all source descriptors before the first SDK
     // operation. A failure after any peer begins is conservatively unknown.
     const auto unknown = completion_unknown_failure_;
     const auto timeout = completion_timeout_failure_;
     for (size_t peer = 0; peer < requests.size(); ++peer) {
         const auto& remote = requests[peer].remote_request();
-        (void)responses[peer].mutable_remote_response();
+        responses[peer].mutable_remote_response()->set_sdk_failed(false);
         auto operation = std::make_shared<Batch>();
         operation->client = client_wrapper_;
         for (const auto& pool : pools_by_tag_) operation->pools.push_back(pool.second);
@@ -389,5 +396,6 @@ std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<Functi
         std::rethrow_exception(source_may_be_touched ? unknown : buffer_safe_failure_);
     }
     source_may_be_touched = false;
+    collect_sdk_failures.run();
     return responses;
 }
