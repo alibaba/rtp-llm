@@ -44,6 +44,28 @@ CUDA Graph、DSpARK gamma=5 和 decode prefetch 开启。
 完整文件读取回归在 Linux 服务环境执行。本机 macOS 的完整 Torch 入口有两项 checkpoint 测试依赖 Linux
 `/proc/self/fd` 而失败；未修改该平台契约。CPU warmup 对 Triton 的无意依赖已在测试边界隔离，并在两端复验。
 
+## 2026-11-06 平台 gang 注解发现验证
+
+两台 prefill 各自使用 `WORLD_SIZE=4`、启动 `WORLD_RANK=0`、`LOCAL_WORLD_SIZE=4`、
+`TP_SIZE=4`、`PREFILL_CP_SIZE=4`、`DP_SIZE=1`、`EP_SIZE=4`，共享 `ENGRAM_SHARD_COUNT=2`。
+两台分别保持独立计算 world 和 TCPStore，不合并为 WORLD_SIZE=8。
+
+个人开发容器提供平台同格式的 `app.c2.io/biz-detail-ganginfo` 注解文件，由
+`GANG_ANNOCATION_PATH` 指定路径；移除显式 cohort、instance index、ranks per instance 和 ganginfo 目录配置。
+这是两台真实 GPU host 上的注解消费与交换验证，没有新建 C2 调度部署。
+
+- 八个 prefill worker 均记录 `source=annotation`、`single_gang=False`，两台自动匹配 index 0/1，
+  P=2 发布、跨 host 交换及导入成功。两台启动交换端口在 READY 后均无监听。
+- 新增集成测试使用两个真实 TCPStore、八个独立客户端和真实启动 HTTP 交换，覆盖注解发现、
+  两次分片发布、八个相同 package、Store 清理和监听关闭；分片 descriptor 使用测试替身。
+- Linux `test.sh --torch` 更新为 **232 项 + 20 项 standalone contract 全通过**。
+- 新跑 26 条矩阵请求和 8 条 top-5 logprob 请求，覆盖全部八个 decode 实例；完整 token 与原基线一致，
+  补充请求 token 和 logprobs 与此前 off/on/off 结果一致，差异数均为零。
+- 最终 10/10 服务端点健康。decode 未重启，保持表分片关闭、EP8、CUDA Graph、DSpARK gamma=5、
+  Engram prefetch 和原 scale shards 优化开启。
+
+该拓扑复用现有启动实现，本次只新增回归测试和配置说明。
+
 ## 2026-11-06 回归入口
 
 - `test.sh --cpu`：标准库存储、发布与启动合约。
