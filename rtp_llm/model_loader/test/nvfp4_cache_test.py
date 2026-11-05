@@ -1,4 +1,3 @@
-import hashlib
 import os
 import tempfile
 import unittest
@@ -64,11 +63,7 @@ class Nvfp4CacheTest(unittest.TestCase):
             self.assertTrue(
                 torch.equal(left.float().reshape(-1), right.float().reshape(-1))
             )
-        manifest = self.cache.manifest()
-        self.assertEqual(len(manifest["entries"]), 1)
-        entry = manifest["entries"][0]
-        data = (Path(self.temp.name) / entry["file"]).read_bytes()
-        self.assertEqual(entry["sha256"], hashlib.sha256(data).hexdigest())
+        self.assertEqual(len(list(Path(self.temp.name).glob("*.safetensors"))), 1)
 
     def test_disk_failures_preserve_quantized_weights_and_cleanup(self):
         expected = quantize_expert_to_nvfp4(self.weight, 16)
@@ -107,7 +102,7 @@ class Nvfp4CacheTest(unittest.TestCase):
         self.cache.get_or_quantize(
             self.weight, **{**self.args, "input_scale": 1 / 2688}
         )
-        self.assertEqual(len(self.cache.manifest()["entries"]), 3)
+        self.assertEqual(len(list(Path(self.temp.name).glob("*.safetensors"))), 3)
 
     def test_algorithm_revision_invalidates_cache(self):
         self.cache.get_or_quantize(self.weight, **self.args)
@@ -116,7 +111,7 @@ class Nvfp4CacheTest(unittest.TestCase):
             "revised-rounding-contract",
         ):
             self.cache.get_or_quantize(self.weight, **self.args)
-        self.assertEqual(len(self.cache.manifest()["entries"]), 2)
+        self.assertEqual(len(list(Path(self.temp.name).glob("*.safetensors"))), 2)
 
     def test_invalid_scale_or_block_size_is_rejected(self):
         for changes in (
@@ -156,7 +151,7 @@ class Nvfp4CacheTest(unittest.TestCase):
                         right.reshape(-1).view(torch.uint8),
                     )
                 )
-        self.assertEqual(len(self.cache.manifest()["entries"]), 1)
+        self.assertEqual(len(list(Path(self.temp.name).glob("*.safetensors"))), 1)
         self.assertFalse(list(Path(self.temp.name).glob(".nvfp4-*")))
 
     def test_corrupted_payload_is_rebuilt(self):

@@ -175,23 +175,3 @@ class Nvfp4ExpertCache:
             raise ValueError(
                 "NVFP4 cache scales must be finite and global scale positive"
             )
-
-    def manifest(self):
-        rows = []
-        for path in sorted(self.directory.glob("*.safetensors")):
-            with safe_open(str(path), framework="pt", device="cpu") as f:
-                contract = json.loads(f.metadata()["contract"])
-            rows.append(
-                dict(
-                    file=path.name,
-                    bytes=path.stat().st_size,
-                    sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-                    contract=contract,
-                )
-            )
-        return dict(
-            format=FORMAT,
-            algorithm_sha256=ALGORITHM_SHA,
-            entries=rows,
-            total_bytes=sum(row["bytes"] for row in rows),
-        )
