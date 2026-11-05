@@ -598,7 +598,10 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 self.write_cache_store_impl, self.attn_inputs, kv_cache
             )
             output = self._forward_ragged_paged(
-                qkv[:, : self.q_width], kv_cache, paged_plan
+                qkv[:, : self.q_width],
+                kv_cache,
+                paged_plan,
+                validate_selected=not trusted_selected,
             )
             if uses_stored_selection:
                 self._selected_indices = None
@@ -752,6 +755,8 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         q: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         plan: PagedInputs | IncrementalPrefillInputs,
+        *,
+        validate_selected: bool = True,
     ) -> torch.Tensor:
         """Run paged attention over packed incremental-prefill requests."""
         assert kv_cache is not None
@@ -837,6 +842,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 selected.contiguous(),
                 page_size=page_size,
                 kv_head_num=self.kv_head_num,
+                validate_selected=validate_selected,
                 **self._paged_kv_scale_args(kv_cache),
             )
             return (
@@ -859,6 +865,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 request.selected_indices,
                 page_size=page_size,
                 kv_head_num=self.kv_head_num,
+                validate_selected=validate_selected,
                 **self._paged_kv_scale_args(kv_cache),
             )
             outputs.append(

@@ -592,6 +592,7 @@ def sparse_paged_gqa_attn(
     output_gate: torch.Tensor | None = None,
     selected_has_count: bool = False,
     fp16_pv: bool = False,
+    validate_selected: bool = True,
 ) -> torch.Tensor:
     """Attend to request-local token indices in a paged main MHA cache.
 
@@ -609,6 +610,15 @@ def sparse_paged_gqa_attn(
             cannot be inferred from ``kv_cache.shape[1]``.
         graph_capture: capture only. The caller must validate the initial
             metadata before capture; replayed values are masked by the kernel.
+        validate_selected: run the per-selection fail-fast preflight. Internal
+            callers whose selections come from this model's causal QSA indexer
+            pass ``False`` and trust the in-kernel masking (invalid ids,
+            out-of-range counts, and unallocated blocks are masked by the
+            split/merge kernels on either path), matching the SM120 sparse
+            paths' trust-and-mask contract. Public and injected selections
+            retain the preflight. Strict validation
+            (``RTP_LLM_QSA_STRICT_VALIDATION=1``, tests and CI) restores the
+            full per-check validation regardless of this flag.
     """
     if q.dim() != 4 or q.dtype != torch.bfloat16 or not q.is_cuda:
         raise ValueError("q must be a rank-4 BF16 CUDA tensor")
@@ -712,7 +722,11 @@ def sparse_paged_gqa_attn(
             raise RuntimeError(
                 "qwen4 sparse paged GQA graph_capture requires an active capture or graph warmup"
             )
-    else:
+    elif validate_selected or qsa_strict_validation_enabled():
+        # Fail-fast preflight for public and injected selections. Trusted
+        # internal selections skip it: the split/merge kernels already mask
+        # invalid ids, out-of-range counts, and unallocated blocks, so a
+        # trusted caller pays zero per-selection launches.
         if selected_has_count:
             count = selected[..., -1]
             slots = torch.arange(2051, device=selected.device)
