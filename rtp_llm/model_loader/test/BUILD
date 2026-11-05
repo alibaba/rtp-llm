@@ -77,6 +77,13 @@ py_test(
 )
 
 py_test(
+    name = "test_pure_tp_expert_placement",
+    srcs = ["test_pure_tp_expert_placement.py"],
+    deps = ["//rtp_llm:utils"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "test_packed_moe_rl_stream",
     srcs = [
         "test_packed_moe_rl_stream.py",

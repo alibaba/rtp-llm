@@ -130,6 +130,12 @@ class LoadConfig(BaseModel):
         num_nodes: int,
         phy2log_path: Optional[str] = None,
     ):
+        if ep_size == 1 and num_nodes > 1:
+            from rtp_llm.utils.expert_placement import pure_tp_identity_placement
+
+            return pure_tp_identity_placement(
+                layer_num, expert_num, phy_exp_num, num_nodes, phy2log_path
+            )
         expert_num = expert_num
         redundant_expert = phy_exp_num - expert_num
         expert_num_per_ep = expert_num // ep_size
