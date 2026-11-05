@@ -31,7 +31,6 @@ class PromptScoringTest(TestCase):
             "DEVICE_RESERVE_MEMORY_BYTES": "-2048000000",
             "RESERVER_RUNTIME_MEM_MB": "2048",
             "NCCL_DISABLE_ABORT": "1",
-            "FT_DISABLE_CUSTOM_AR": "1",
         }
 
         cls.server_manager = MagaServerManager(env_args=env_args)
