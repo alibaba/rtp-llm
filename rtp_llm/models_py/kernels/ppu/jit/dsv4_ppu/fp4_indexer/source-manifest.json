@@ -58,7 +58,9 @@
       "sha256": "811b3c3ebe55566ed0c7ad255a698a481a0bd025089946b1ef8603c96f888a58"
     },
     "csrc/deepseek_v4/main_norm_rope.cuh": {
-      "sha256": "3250d52fbc6ed5f46353c3d3550fbbb8c8fdb7bbb5637047e24033d3ac32f193"
+      "sha256": "3250d52fbc6ed5f46353c3d3550fbbb8c8fdb7bbb5637047e24033d3ac32f193",
+      "runtime_path": "compat/main_norm_rope.cuh",
+      "patch": "patches/main_norm_rope.cuh.patch"
     },
     "csrc/deepseek_v4/topk_v1.cuh": {
       "sha256": "3e5a87c4aabb23c807a448d7e2760a6ec7609260e97befc5e3107fcb9f400362",
@@ -74,7 +76,7 @@
   },
   "sources": {
     "compat/c4_decode_v2.cuh": "e7f00b9572eebf789a2b5aa5b43436fb7d4a07f7c5f33656bfe306e9304ad7ca",
-    "compat/fused_norm_rope_v2.cuh": "5fa270749e01cae394a7731565ee97c90a2b5d344a5bdccaa6007d0fca6e6722",
+    "compat/fused_norm_rope_v2.cuh": "26f2bbb9d076e8f721ddd8c8c76e0220e58b0665b19baf8be829fdcb54a4b129",
     "compat/sgl_kernel/tensor.h": "f971fbc9e6740f4d066764e8c88a4d8bacada5a4c607dc1170bc847517f1fcb0",
     "compat/topk_decode_v1.cuh": "ef1a3f04ad16d206508f503c17f477afc1f78d8cca045f34bd6f6db9345677a1",
     "compat/topk_prefill_bf16.cuh": "0d79ac1a575a5edb075d46c11a4a15841b5805e69ea635c75ffd78b472401db1",
@@ -96,6 +98,19 @@
     "compat/topk_exact.cuh": "a2c857279818321bb466d3fc4733ddcd33ca79a13b9b4b4ed97c9659a0920134",
     "compat/c4_decode_store.cuh": "de2e14f5bb41ce8b247c79463b96b4cf3c107cb107f078d600e0df49ef24ccb9",
     "compat/c4_decode_queries_store.cuh": "966a122c48c345ebc8f96d3d8b0dcf60188a6fd678d9f96efba432be906e5519",
-    "compat/mtp_input_quant.cuh": "c0b28ed3cec65cc2aab2f40d7b7aa3e971408043fab98e8dcd10cf011a066412"
+    "compat/mtp_input_quant.cuh": "c0b28ed3cec65cc2aab2f40d7b7aa3e971408043fab98e8dcd10cf011a066412",
+    "compat/main_norm_rope.cuh": "d9efdafe9889c5f962b175b69bb24689d47b7a84edbec5be9c54c88890969429"
+  },
+  "local_patches": {
+    "compat/fused_norm_rope_v2.cuh": {
+      "base_sha256": "5fa270749e01cae394a7731565ee97c90a2b5d344a5bdccaa6007d0fca6e6722",
+      "patch": "patches/fused_norm_rope_fp4_rne.patch",
+      "followup_patches": [
+        {
+          "base_sha256": "a2e27992320663bc834e8a31a33d36e6da584b763367593fbf23859386bd7ca7",
+          "patch": "patches/fused_norm_rope_fp4_bf16_boundaries.patch"
+        }
+      ]
+    }
   }
 }

@@ -5,6 +5,44 @@ from rtp_llm.models_py.kernels.ppu.attention.ppu_bf16_radix_topk import bf16_rad
 
 @unittest.skipUnless(torch.cuda.is_available(), 'requires PPU/CUDA')
 class RadixTopKTest(unittest.TestCase):
+    def test_score_order_selection_and_changed_input_graph(self):
+        from rtp_llm.models_py.kernels.ppu.jit.ppu_fp4_indexer import topk_bf16, topk_decode
+
+        torch.manual_seed(1631)
+        for dtype in (torch.float32, torch.bfloat16):
+            for k in (512, 1024):
+                scores = torch.randn(4, 2048, device='cuda', dtype=dtype)
+                scores[1].fill_(1)
+                scores[2].fill_(0)
+                scores[2, ::2] = -0.0
+                lengths = torch.tensor([2048, 17, 32, 0], device='cuda', dtype=torch.int32)
+                starts = torch.zeros_like(lengths)
+                out = torch.empty((4, k), device='cuda', dtype=torch.int32)
+
+                def run():
+                    if dtype == torch.bfloat16:
+                        topk_bf16(scores, starts, lengths, out, score_order=True)
+                    else:
+                        topk_decode(scores, lengths, out, canonical_in_kernel=True, score_order=True)
+
+                run()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    run()
+                for change in range(3):
+                    if change:
+                        scores[0].neg_()
+                    out.fill_(-99)
+                    graph.replay()
+                    expected = torch.full_like(out, -1)
+                    for row, end in enumerate(lengths.tolist()):
+                        count = min(k, end)
+                        expected[row, :count] = torch.argsort(
+                            scores[row, :end], descending=True, stable=True
+                        )[:count].int()
+                    self.assertTrue(torch.equal(out, expected), (dtype, k, change))
+                graph.reset()
+
     def test_native_decode_order_is_repeatable_and_graph_safe(self):
         from rtp_llm.models_py.kernels.ppu.jit.ppu_fp4_indexer import topk_decode
 

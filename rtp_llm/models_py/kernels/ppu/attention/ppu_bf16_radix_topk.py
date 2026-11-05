@@ -30,6 +30,37 @@ def canonicalize_topk_indices(out):
 
 
 @triton.jit
+def _order_selected_scores(Scores, Out, ScoreStride, OutStride, N: tl.constexpr, K: tl.constexpr):
+    row = tl.program_id(0)
+    col = tl.arange(0, K)
+    ptr = Out + row.to(tl.int64) * OutStride + col
+    index = tl.load(ptr)
+    valid = (index >= 0) & (index < N)
+    score = tl.load(Scores + row.to(tl.int64) * ScoreStride + index, valid, 0).to(tl.float32)
+    score = tl.where(score == 0, 0.0, score)
+    bits = score.to(tl.uint32, bitcast=True)
+    key = tl.where((bits & 0x80000000) != 0, ~bits, bits ^ 0x80000000).to(tl.uint64)
+    packed = (key << 32) | (0xffffffff - index.to(tl.uint32)).to(tl.uint64)
+    ordered = tl.sort(tl.where(valid, packed, 0), descending=True)
+    result = (0xffffffff - (ordered & 0xffffffff).to(tl.uint32)).to(tl.int32)
+    tl.store(ptr, tl.where(ordered == 0, -1, result))
+
+
+def order_selected_by_score(scores, out):
+    """Preserve the selected set, descending scores and index-stable ties."""
+    if (scores.ndim != 2 or scores.dtype not in (torch.bfloat16, torch.float32)
+            or scores.stride(1) != 1 or out.ndim != 2 or out.dtype != torch.int32
+            or out.stride(1) != 1 or out.shape[0] != scores.shape[0]
+            or out.shape[1] not in (512, 1024) or out.device != scores.device):
+        raise ValueError("Score ordering requires matching BF16/FP32 score and int32 K=512/1024 rows")
+    if out.shape[0]:
+        _order_selected_scores[(out.shape[0],)](
+            scores, out, scores.stride(0), out.stride(0), scores.shape[1], out.shape[1]
+        )
+    return out
+
+
+@triton.jit
 def _keys(x):
     bits = x.to(tl.uint16, bitcast=True).to(tl.int32)
     bits = tl.where(x == 0, 0, bits)  # Treat signed zeros as the same score.
@@ -258,4 +289,58 @@ def bf16_radix_topk(scores, starts, ends, out, *, rows_to_compute=None):
     _selective_scatter[(rows, parts)](scores, starts, ends, thresholds, counts, out,
                           scores.stride(0), out.stride(0), width, parts,
                           padded, out.shape[1], block, active, selective, num_warps=8)
+    return out
+
+
+@triton.jit
+def _restore_short_order(S, L, O, WIDTH: tl.constexpr, SS: tl.constexpr, OS: tl.constexpr, K: tl.constexpr, STORE: tl.constexpr):
+    row = tl.program_id(0)
+    n = tl.load(L + row)
+    if (n >= 0) & (n <= 32) & (n <= WIDTH):
+        i = tl.arange(0, 32)
+        value = tl.load(S + row * SS + i, i < n, other=0)
+        bits = value.to(tl.uint16, bitcast=True).to(tl.int32)
+        # Ascending BF16 radix key distinguishes -0 from +0. The network
+        # below compares numbers, so signed zero ties there.
+        key = tl.where((bits & 0x8000) != 0, bits ^ 0xffff, bits ^ 0x8000)
+        floor = tl.min(tl.where(i < n, key, 0x10000), 0)
+        first = (i < n) & (key > floor)
+        last = (i < n) & (key == floor)
+        dst = tl.where(first, tl.cumsum(first.to(tl.int32)) - 1,
+                       tl.sum(first.to(tl.int32), 0) + tl.cumsum(last.to(tl.int32)) - 1)
+        # Invert the stable gather permutation. Mask invalid ranks explicitly.
+        ids = tl.min(tl.where((i[:, None] < n) & (dst[:, None] == i[None, :]),
+                              i[:, None], 32), axis=0)
+        vals = tl.gather(value.to(tl.float32), ids % 32, 0)
+        for log_stage in tl.static_range(1, 6):
+            for log_stride in tl.static_range(log_stage - 1, -1, -1):
+                stride = 1 << log_stride
+                other = i ^ stride
+                peer_ids = tl.gather(ids, other, 0)
+                peer_vals = tl.gather(vals, other, 0)
+                lower = (i & stride) == 0
+                a = tl.where(lower, ids, peer_ids)
+                b = tl.where(lower, peer_ids, ids)
+                av = tl.where(lower, vals, peer_vals)
+                bv = tl.where(lower, peer_vals, vals)
+                lane = ((i // (2 * stride)) * stride) + i % stride
+                desc = (b == 32) | ((a != 32) & (av > bv))
+                swap = desc == ((lane & (1 << (log_stage - 1))) != 0)
+                ids = tl.where(swap, peer_ids, ids)
+                vals = tl.where(swap, peer_vals, vals)
+        col = tl.arange(0, STORE)
+        tl.store(O + row * OS + col, -1, (col >= n) & (col < K))
+        tl.store(O + row * OS + i, ids, i < n)
+
+
+def restore_short_native_order(scores, lengths, out):
+    """Finite BF16 valid scores, device int32 lengths, contiguous last dimension."""
+    assert scores.ndim == out.ndim == 2 and lengths.shape == (scores.shape[0],)
+    assert scores.dtype == torch.bfloat16 and lengths.dtype == out.dtype == torch.int32
+    assert scores.device.type == 'cuda' and scores.device == lengths.device == out.device
+    assert scores.stride(1) == out.stride(1) == lengths.stride(0) == 1
+    assert scores.shape[0] == out.shape[0] and scores.shape[1] >= 32 and out.shape[1] >= 32
+    if scores.shape[0]:
+        _restore_short_order[(scores.shape[0],)](scores, lengths, out, scores.shape[1], scores.stride(0),
+                                   out.stride(0), out.shape[1], triton.next_power_of_2(out.shape[1]))
     return out

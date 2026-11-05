@@ -865,6 +865,7 @@ def _combine_topk_swa_indices_kernel(
     WINDOW_SIZE: tl.constexpr,
     PADDED_TOP_K: tl.constexpr,
     PADDED_WINDOW_SIZE: tl.constexpr,
+    SWA_FIRST: tl.constexpr,
 ):
     """Per-query layout of ``[combined_topk]`` row in the gathered workspace.
 
@@ -906,6 +907,9 @@ def _combine_topk_swa_indices_kernel(
         # to zero out the compressed contribution.
         topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
         swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
+        swa_width = tl.where(start_pos == 0, tl.minimum(seq_len, WINDOW_SIZE), WINDOW_SIZE)
+        cmp_offset = swa_width if SWA_FIRST else 0
+        swa_offset = 0 if SWA_FIRST else topk_len
 
         # Promote the row index once. Long-context HCA prefill of a 1.1M-token
         # query can reach token_idx ~ 274092 with strides 8565 / 9600, so the
@@ -921,8 +925,8 @@ def _combine_topk_swa_indices_kernel(
             mask=mask,
         )
         tl.store(
-            combined_indices_ptr + token_idx_i64 * combined_indices_stride + offset,
-            topk_indices + M * batch_idx,
+            combined_indices_ptr + token_idx_i64 * combined_indices_stride + cmp_offset + offset,
+            tl.where(topk_indices >= 0, topk_indices + M * batch_idx, -1) if SWA_FIRST else topk_indices + M * batch_idx,
             mask=mask,
         )
 
@@ -936,13 +940,13 @@ def _combine_topk_swa_indices_kernel(
         tl.store(
             combined_indices_ptr
             + token_idx_i64 * combined_indices_stride
-            + topk_len
+            + swa_offset
             + offset,
             M * batch_idx + N + offset + pos - swa_len + 1 - gather_start,
             mask=offset < swa_len,
         )
 
-        combined_len = topk_len + swa_len
+        combined_len = topk_len + (swa_width if SWA_FIRST else swa_len)
         tl.store(combined_lens_ptr + token_idx, combined_len)
 
 
@@ -958,8 +962,12 @@ def combine_topk_swa_indices(
     N: int,
     *,
     flash_mla_indices: bool = False,
+    swa_first: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Build ``(combined_indices, combined_lens)`` for ``flash_mla_sparse_fwd``.
+
+    ``swa_first`` preserves reference reduction order, including masked SWA
+    columns before compressed entries; lengths then bound columns, not nnz.
 
     Returns:
       combined_indices: ``[num_tokens, combined_topk]`` int32; ``combined_topk
@@ -1034,6 +1042,7 @@ def combine_topk_swa_indices(
         WINDOW_SIZE=window_size,
         PADDED_TOP_K=padded_top_k,
         PADDED_WINDOW_SIZE=padded_window_size,
+        SWA_FIRST=swa_first,
     )
     return combined_indices, combined_lens
 

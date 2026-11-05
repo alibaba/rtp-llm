@@ -159,6 +159,7 @@ class PpuTPSharedExpert(PpuSharedExpert):
         tp_rank,
         swiglu_limit=0.0,
         platform_provider,
+        a8=False,
     ):
         nn.Module.__init__(self)
         if tp_size <= 0 or not 0 <= tp_rank < tp_size:
@@ -179,6 +180,7 @@ class PpuTPSharedExpert(PpuSharedExpert):
                     weight,
                     scale,
                     scale_is_prepared=tp_size > 1,
+                    pow2_scales=platform_provider._bool("DSV4_PPU_DENSE_POW2_SCALE", False),
                     share_input_quantization=platform_provider._bool(
                         "DSV4_PPU_SHARED_QKV_QUANT", False
                     ),
@@ -187,3 +189,20 @@ class PpuTPSharedExpert(PpuSharedExpert):
         self.swiglu_limit = swiglu_limit
         self.preserve_output_dtype = True
         self.tp_size, self.tp_rank = tp_size, tp_rank
+        self._a8_experts = a8
+
+    def forward(self, x, weights=None, *, input_quantized=None):
+        if not self._a8_experts:
+            return super().forward(x, weights, input_quantized=input_quantized)
+        if weights is not None or input_quantized is not None or not self.w2.pow2_scales:
+            raise ValueError("A8 TP shared experts require unweighted input and pow2 scales")
+        from deep_gemm.jit_kernels.gemm_fp8_fp32 import gemm_fp8_fp8_fp32_nt
+        from rtp_llm.models_py.kernels.ppu.moe.ppu_shared_swiglu import silu_mul_merged_bf16
+        from rtp_llm.models_py.modules.dsv4.ppu.communication import reduce_tp_sum
+
+        hidden = silu_mul_merged_bf16(self.w13(x), self.swiglu_limit)
+        quantized = self.w2.quantize_input(hidden)
+        out = torch.empty((x.shape[0], self.w2.n), device=x.device, dtype=torch.float32)
+        gemm_fp8_fp8_fp32_nt(quantized, (self.w2.weight, self.w2.weight_scale), out)
+        reduce_tp_sum(out, tp_size=self.tp_size)
+        return out.to(x.dtype)

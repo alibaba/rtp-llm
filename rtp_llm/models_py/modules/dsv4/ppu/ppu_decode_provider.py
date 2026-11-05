@@ -31,6 +31,16 @@ class PpuDecodeProvider(PpuModuleProvider):
             strategy_type = PpuMegaMoEFP4Strategy
             strategy_kwargs["resources"] = self._mega_resources
             strategy_kwargs["module_name"] = self._mega_module_name
+        precision = self.execution_options.get("DSV4_PPU_EXPERT_PRECISION", "a4")
+        if precision not in ("a4", "a8"):
+            raise ValueError("DSV4_PPU_EXPERT_PRECISION must be a4 or a8")
+        if precision == "a8":
+            if self._moe_backend != "megamoe":
+                raise ValueError("PPU A8 Decode requires MegaMoE")
+            from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_mega_moe import PpuMegaMoEA8Strategy
+
+            strategy_type = PpuMegaMoEA8Strategy
+            strategy_kwargs.update(output_dtype=torch.float32, gemm_tile="auto")
         return PpuEPMoE(
             *args,
             platform_provider=self,
@@ -98,12 +108,16 @@ class PpuDecodeProvider(PpuModuleProvider):
         linear = super().build_wo_a_fp8_linear(
             default_factory, *args, quantization="v2_row", **kwargs
         )
-        linear.fuse_inverse_rope_quant = self._decode_fusions
+        linear.fuse_inverse_rope_quant = self._decode_fusions and not self._bool(
+            "DSV4_PPU_WO_A_BF16", False
+        )
         return linear
 
     def build_shared_expert(self, *args, **kwargs):
         shared = super().build_shared_expert(*args, **kwargs)
-        shared.fuse_activation_quant = self._decode_fusions
+        shared.fuse_activation_quant = self._decode_fusions and not self._bool(
+            "DSV4_PPU_DENSE_POW2_SCALE", False
+        )
         return shared
 
     def build_attention(self, default_factory, *args, **kwargs):
@@ -117,7 +131,9 @@ class PpuDecodeProvider(PpuModuleProvider):
             decode_mtp_batch_indexer=self._mtp_batch_indexer,
             **kwargs,
         )
-        attention._fuse_qkv_quant = self._decode_fusions
+        attention._fuse_qkv_quant = self._decode_fusions and not self._bool(
+            "DSV4_PPU_DENSE_POW2_SCALE", False
+        )
         self._decode_attention_refs.append(weakref.ref(attention))
         from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import PpuFp8Linear
         from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_wo_a import PpuWoAFp8Linear
@@ -149,12 +165,15 @@ class PpuDecodeProvider(PpuModuleProvider):
             fuse_prenorm=True,
             fuse_norm=True,
             fuse_moe_sum=self._decode_fusions,
-            fuse_pre_quant=self._decode_fusions,
+            fuse_pre_quant=self._decode_fusions and not self._bool(
+                "DSV4_PPU_DENSE_POW2_SCALE", False
+            ),
             **kwargs,
         )
 
     def build_hc_head(self, *args, **kwargs):
-        if not self._decode_fusions:
+        kwargs["rowwise"] = self._bool("DSV4_PPU_DECODE_HC_ROWWISE", False)
+        if not self._decode_fusions or self._bool("DSV4_PPU_DENSE_POW2_SCALE", False):
             return super().build_hc_head(*args, **kwargs)
         from rtp_llm.models_py.modules.dsv4.ppu.hc.ppu_hc_head import PpuDecodeHCHead
 

@@ -75,6 +75,7 @@ class TpPrefillWorkspaceDimsTest(unittest.TestCase):
         ):
             with self.subTest(configured=configured, actual=actual, cp_size=cp_size):
                 scope = {
+                    "ws": None,
                     "v4": SimpleNamespace(
                         fp8_kv_cache=True, _cp_info=object() if cp_size > 1 else None,
                         _cp_size=cp_size, _prefill_ws_q_rows=configured,

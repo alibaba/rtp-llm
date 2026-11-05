@@ -1,6 +1,8 @@
 """V4 Flash MXFP4 MegaMoE with model-owned symmetric workspace."""
 
 import os
+import importlib
+import math
 import torch
 
 from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_deepep_fp4 import PpuDeepEPFP4Strategy, take_raw_routed_mxfp4_weights
@@ -20,9 +22,13 @@ class PpuMegaMoEResources:
         self.buffer = None
         self.hierarchy = None
 
-    def bind(self, cfg, wrapper, module):
+    def bind(self, cfg, wrapper, module, *, mma_type="fp4xfp4"):
         import torch.distributed as dist
 
+        if mma_type not in ("fp4xfp4", "fp8xfp8"):
+            raise ValueError("Unsupported MegaMoE precision")
+        if mma_type == "fp8xfp8" and cfg.ep_size != 8:
+            raise ValueError("A8 MegaMoE currently requires EP8")
         group = dist.group.WORLD
         if (
             group is None
@@ -52,7 +58,7 @@ class PpuMegaMoEResources:
                 capacity = min(capacity, ((logical_capacity + 15) // 16) * 16)
         # The existing fused V4 gate pads six routes to eight. Keep its exact
         # order, scale bits and inactive -1/0 lanes through the MoE boundary.
-        key = (id(group), cfg.n_routed_experts, capacity, 8, cfg.dim, cfg.moe_inter_dim)
+        key = (id(group), cfg.n_routed_experts, capacity, 8, cfg.dim, cfg.moe_inter_dim, mma_type)
         if self.buffer is None:
             if torch.cuda.is_current_stream_capturing():
                 raise RuntimeError(
@@ -67,7 +73,8 @@ class PpuMegaMoEResources:
                 experts = self.hierarchy.experts
                 capacity *= self.hierarchy.nodes
             self.buffer = module.get_symm_buffer_for_mega_moe(
-                group, experts, capacity, 8, cfg.dim, cfg.moe_inter_dim
+                group, experts, capacity, 8, cfg.dim, cfg.moe_inter_dim,
+                **({"mma_type": mma_type} if mma_type == "fp8xfp8" else {}),
             )
             self._key = key
         elif self._key != key:
@@ -171,3 +178,56 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
             **scheduling,
         )
         return hierarchy.combine(y, token_count) if hierarchy is not None else y
+
+
+class PpuMegaMoEA8Strategy(PpuDeepEPFP4Strategy):
+    name = "ppu_mega_moe_a8"
+
+    @classmethod
+    def can_handle(cls, cfg):
+        return (PpuMegaMoEFP4Strategy.can_handle(cfg) and cfg.ep_size == 8
+                and math.isfinite(cfg.swiglu_limit) and cfg.swiglu_limit > 0)
+
+    def __init__(self, cfg, *, resources, module_name="deep_gemm_mega", **kwargs):
+        kwargs.setdefault("output_dtype", torch.float32)
+        if kwargs["output_dtype"] != torch.float32:
+            raise ValueError("A8 MegaMoE requires FP32 routed output")
+        super().__init__(cfg, **kwargs)
+        if module_name != "deep_gemm_mega":
+            raise ValueError("A8 MegaMoE package must be deep_gemm_mega")
+        self._mega = importlib.import_module(module_name)
+        required = ("get_symm_buffer_for_mega_moe", "mega_moe_pre_dispatch", "fp8_fp8_mega_moe")
+        if any(not callable(getattr(self._mega, name, None)) for name in required):
+            raise RuntimeError("A8 MegaMoE requires a package with the native A8 forward API")
+        self._resources = resources
+        self._sym = None
+
+    def setup_weights(self, layer_weights):
+        from rtp_llm.models_py.kernels.ppu.moe.ppu_a8_moe import repack_fp4_to_fp8
+
+        w13, s13, w2, s2 = take_raw_routed_mxfp4_weights(self.cfg, layer_weights)
+        pair13 = repack_fp4_to_fp8(w13, s13)
+        pair2 = repack_fp4_to_fp8(w2, s2)
+        for name, value in zip(("_w13", "_s13", "_w2", "_s2"), (*pair13, *pair2)):
+            self.register_buffer(name, value, persistent=False)
+
+    def forward(self, x, weights, indices, *, active_token_mask=None):
+        from rtp_llm.models_py.kernels.ppu.attention.ppu_topk_padding import pad_inactive_routes
+
+        if self._sym is None:
+            wrapper = self._bind_wrapper()
+            self._sym = self._resources.bind(self.cfg, wrapper, self._mega, mma_type="fp8xfp8")
+        if indices.shape[1] == 8:
+            route_ids, route_weights = indices.contiguous(), weights.contiguous()
+        else:
+            route_ids, route_weights = pad_inactive_routes(indices, weights, 8)
+        self._mega.mega_moe_pre_dispatch(
+            x.contiguous(), route_ids, route_weights, sym_buffer=self._sym,
+            active_token_mask=active_token_mask,
+        )
+        y = torch.empty_like(x, dtype=torch.float32)
+        self._mega.fp8_fp8_mega_moe(
+            y, (self._w13, self._s13), (self._w2, self._s2), self._sym,
+            activation_clamp=self.cfg.swiglu_limit,
+        )
+        return y

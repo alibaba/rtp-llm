@@ -130,6 +130,7 @@ def _fused_route_gather_kernel(
     TOPK: tl.constexpr,
     MAX_TOPK: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    KEEP_FP32: tl.constexpr = False,
 ):
     """Reduce one token's routes without materializing the FP32 products."""
 
@@ -174,10 +175,10 @@ def _fused_route_gather_kernel(
         remaining = remaining & ~selected
 
     if ADD_SHARED:
-        # Preserve the public TP-MoE numerical contract exactly: the routed
-        # partial is scaled and rounded to BF16 before the shared partial is
-        # added. The final store performs the second BF16 rounding.
-        routed = (accumulated * ROUTE_SCALE).to(tl.bfloat16).to(tl.float32)
+        # A4 preserves its routed BF16 boundary; A8 waits for TP reduction.
+        routed = accumulated * ROUTE_SCALE
+        if not KEEP_FP32:
+            routed = routed.to(tl.bfloat16).to(tl.float32)
         shared = tl.load(
             shared_ptr + token * dim + offsets_d,
             mask=dim_mask,
@@ -357,12 +358,15 @@ def gather_and_combine_local_loop_compatible(
     shared: torch.Tensor,
     output: torch.Tensor,
     route_scale: float,
+    *,
+    keep_fp32: bool = False,
 ) -> None:
     """Gather routed rows and combine the shared TP partial in one kernel.
 
     This is the fused equivalent of ``gather_local_loop_compatible`` followed
     by ``combine_tp_partials``. It exposes only the qualified fused gather path;
-    the caller owns the old two-kernel rollback.
+    the caller owns the old two-kernel rollback. A8 TP callers keep the local
+    sum in FP32 until the cross-rank reduction is complete.
     """
 
     tensors = {
@@ -402,13 +406,13 @@ def gather_and_combine_local_loop_compatible(
         raise ValueError("down must have exactly tokens * topk rows and positive dim")
     if (
         shared.dtype != torch.bfloat16
-        or output.dtype != torch.bfloat16
+        or output.dtype != (torch.float32 if keep_fp32 else torch.bfloat16)
         or shared.shape != (tokens, dim)
         or output.shape != shared.shape
         or not shared.is_contiguous()
         or not output.is_contiguous()
     ):
-        raise TypeError("shared and output must be contiguous BF16 [tokens, dim]")
+        raise TypeError("shared must be BF16 and output must match keep_fp32; both contiguous [tokens, dim]")
     if not math.isfinite(float(route_scale)):
         raise ValueError("MoE route scale must be finite")
     if not down.is_cuda or any(
@@ -434,6 +438,7 @@ def gather_and_combine_local_loop_compatible(
         dim,
         ROUTE_SCALE=float(route_scale),
         ADD_SHARED=True,
+        KEEP_FP32=keep_fp32,
         TOPK=topk,
         MAX_TOPK=fused_max_topk,
         BLOCK_D=fused_block_d,
