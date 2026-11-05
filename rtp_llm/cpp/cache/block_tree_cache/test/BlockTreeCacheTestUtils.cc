@@ -469,7 +469,8 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
         std::move(per_rank_engine), std::move(multi_rank_engine), config.max_descriptors_per_transfer_batch);
     auto task_pool =
         std::make_unique<BlockTreeTaskPool>(static_cast<size_t>(config.task_pool_size), 1000, "BlockTreeCacheTaskPool");
-    auto tree  = std::make_unique<BlockTree>(std::move(group_sets), reuse_unit_tokens);
+    auto tree =
+        std::make_unique<BlockTree>(std::move(group_sets), reuse_unit_tokens, config.enable_prefix_cache_observability);
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                   std::move(config),
                                                   std::move(storage_backend),

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
@@ -64,6 +65,7 @@ public:
 struct StorageMatchResult {
     size_t                                   matched_blocks_num{0};
     std::shared_ptr<StorageBackendMatchMeta> match_meta;
+    PrefixCacheRemoteQueryStatus             query_status{PrefixCacheRemoteQueryStatus::UNSET};
 };
 
 struct StorageRequest {
@@ -111,8 +113,10 @@ private:
 // before derived backend state starts destruction.
 class StorageBackend {
 public:
-    using MatchDone      = std::function<void(
-        size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success)>;
+    using MatchDone      = std::function<void(size_t                                   matched_blocks_num,
+                                         std::shared_ptr<StorageBackendMatchMeta> match_meta,
+                                         bool                                     success,
+                                         PrefixCacheRemoteQueryStatus             query_status)>;
     using Done           = std::function<void(ErrorInfo error)>;
     using PoolsByTag     = std::unordered_map<std::string, DeviceBlockPoolPtr>;
     using BufferResolver = std::function<std::vector<BlockInfo>(int layer_id, const std::string& tag, int block_id)>;

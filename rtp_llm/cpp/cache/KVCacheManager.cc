@@ -1,4 +1,6 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
 #include <algorithm>
@@ -339,6 +341,16 @@ bool KVCacheManager::init() {
         kv_cache_config_.enable_prefill_partial_tail_reuse && pd_sep_config_.role_type == RoleType::PREFILL;
     tree_kv_cache_config.enable_prefill_common_prefix_recovery =
         kv_cache_config_.enable_prefill_common_prefix_recovery && pd_sep_config_.role_type == RoleType::PREFILL;
+    tree_kv_cache_config.enable_prefix_cache_observability =
+        autil::EnvUtil::getEnv("RTP_LLM_PREFIX_CACHE_OBSERVABILITY", false)
+        && pd_sep_config_.role_type == RoleType::PREFILL && parallelism_config_.tp_rank == 0;
+    if (autil::EnvUtil::getEnv("RTP_LLM_PREFIX_CACHE_OBSERVABILITY", false)
+        && !tree_kv_cache_config.enable_prefix_cache_observability) {
+        RTP_LLM_LOG_INFO("RTP_LLM_PREFIX_CACHE_OBSERVABILITY requested but disabled: role=%s allocator_owner=%s",
+                         roleTypeToString(pd_sep_config_.role_type).c_str(),
+                         isAllocatorOwner() ? "true" : "false");
+    }
+
     block_tree_cache_ = createBlockTreeCache(config_,
                                              tree_kv_cache_config,
                                              coordinator_manager_,

@@ -1,12 +1,14 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 #include <memory>
 #include <mutex>
 #include <string_view>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadJoinRegistry.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
@@ -22,6 +24,7 @@ class BlockTreeTaskPool;
 
 struct BlockTreeMatchResult {
     std::optional<PrefixCachePlanPoint>                farthest_fork;
+    std::optional<PrefixCacheMatchObservation>          match_observation;
     size_t                                              matched_device_blocks{0};
     size_t                                              matched_device_endpoint{0};
     bool                                                precise_local{false};
@@ -85,6 +88,7 @@ public:
     // The caller must hold the shared BlockTreeCache mutex.
     BlockTreeMatchResult matchLocked(const CacheKeysType& cache_keys,
                                  const std::function<bool(size_t)>& valid_prefix,
+                                 const std::vector<int>* request_tokens,
                                  const ContentMatchContext* partial_tail = nullptr);
     BlockIndicesType     matchedBlocksForGroup(std::string_view                      group_tag,
                                                const std::vector<MultiNodeResource>& matched_resources) const;
@@ -105,6 +109,7 @@ private:
         const std::vector<size_t>&                 endpoints);
     bool                                                validMatch(std::vector<TreeNode*>&            path,
                                                                    std::vector<bool>&                 candidate_valid,
+                                                                   std::vector<std::vector<bool>>&    group_valid,
                                                                    const std::function<bool(size_t)>& valid_prefix) const;
     void                 collectReuseTimeSnapshots(TreeNode*                                            node,
                                                    size_t                                               group_set_id,
@@ -113,7 +118,8 @@ private:
                                                    std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>& snapshots);
     BlockTreeMatchResult                                createMatchResult(std::vector<TreeNode*>&            path,
                                                                           const CacheKeysType&               cache_keys,
-                                                                          const std::function<bool(size_t)>& valid_prefix);
+                                                                          const std::function<bool(size_t)>& valid_prefix,
+                                                                          const std::vector<int>*            request_tokens);
     StorageRequest makeStorageRequest(const CacheKeysType& cache_keys, size_t local_matched_blocks_num) const;
     bool           commitLoad(const std::shared_ptr<LoadAsyncContext>& context);
     void           abortLoadLocked(const std::vector<TransferDescriptor>& load_descs,

@@ -145,24 +145,34 @@ public:
 private:
     void         clearCacheReuseState();
     void         recordCacheReuseMallocResult(const MallocResult& result);
+    bool         prefixObservationEnabled() const;
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
     absl::Status finalizeAllocatorLoad();
+    std::string  prefixObservationSummaryPayload(const char* status) const;
+    const char*  prefixObservationStatus() const;
+    void         emitPrefixObservationSummary(const char* status);
+    void         emitPrefixPlanClosed(const char* reason);
 
     GenerateStream*                stream_;
     BatchKVCacheResourcePtr        batch_kv_cache_resource_;
     ResourceContext                resource_context_;
     std::vector<TaggedBlockIdPair> block_update_mapping_;
 
-    bool                                   need_release_resource_ = true;
-    bool                                   last_block_aligned_    = false;
-    int                                    malloc_failed_times_   = 0;
-    bool                                   fake_inited_           = false;
-    bool                                   resource_released_     = false;
-    std::shared_ptr<AsyncContext>          allocator_load_context_;
-    RtpLLMCacheReuseMetricsCollector       cache_reuse_metrics_;
-    std::optional<PrefixCacheRegistration> prefix_cache_registration_;
-    int64_t                                malloc_begin_time_us_    = 0;
-    int64_t                                load_wait_begin_time_us_ = 0;
+    bool                                       need_release_resource_ = true;
+    bool                                       last_block_aligned_    = false;
+    int                                        malloc_failed_times_   = 0;
+    bool                                       fake_inited_           = false;
+    bool                                       resource_released_     = false;
+    std::shared_ptr<AsyncContext>              allocator_load_context_;
+    RtpLLMCacheReuseMetricsCollector           cache_reuse_metrics_;
+    std::optional<PrefixCacheMatchObservation> prefix_match_observation_;
+    std::optional<PrefixCacheRegistration>     prefix_cache_registration_;
+    PrefixCacheRemoteObservation               remote_observation_;
+    bool                                       prefix_summary_emitted_{false};
+    PrefixCachePlanState                       prefix_plan_state_{PrefixCachePlanState::NOT_FORMED};
+    bool                                       prefix_plan_event_emitted_{false};
+    int64_t                                    malloc_begin_time_us_    = 0;
+    int64_t                                    load_wait_begin_time_us_ = 0;
 
     // Physical block pins held for PD separation.
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;

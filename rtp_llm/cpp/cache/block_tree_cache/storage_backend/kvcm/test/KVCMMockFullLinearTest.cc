@@ -149,6 +149,7 @@ TEST(KVCMMockFullLinearTest, MatchSdkFailureKeepsLocalBoundaryAndReportsQueryErr
     auto result  = match(*backend.backend, request);
     EXPECT_TRUE(result.success);
     EXPECT_EQ(result.matched_blocks_num, 0u);
+    EXPECT_EQ(result.query_status, PrefixCacheRemoteQueryStatus::ERROR);
 }
 
 TEST(KVCMMockFullLinearTest, LocalBoundaryIsNotReportedAsRemoteMiss) {
@@ -167,6 +168,7 @@ TEST(KVCMMockFullLinearTest, LocalBoundaryIsNotReportedAsRemoteMiss) {
     auto result  = match(*backend.backend, request);
     EXPECT_TRUE(result.success);
     EXPECT_EQ(result.matched_blocks_num, 1u);
+    EXPECT_EQ(result.query_status, PrefixCacheRemoteQueryStatus::NOT_QUERIED);
 }
 
 TEST(KVCMMockFullLinearTest, ReadsOnlyThroughNewestCompleteLinearStateAfterLocalReuse) {

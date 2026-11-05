@@ -36,7 +36,10 @@ class SWAMatchValidator: public MatchValidator {
 public:
     explicit SWAMatchValidator(size_t sliding_window_size, size_t canonical_size_per_block);
 
-    bool validate(const GroupSetResource& resource) override;
+    bool                            validate(const GroupSetResource& resource) override;
+    std::unique_ptr<MatchValidator> clone() const override {
+        return std::make_unique<SWAMatchValidator>(*this);
+    }
 
     bool connectedToRoot() const {
         return connected_to_root_;
