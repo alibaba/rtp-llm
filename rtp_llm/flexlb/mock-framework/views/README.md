@@ -6,7 +6,7 @@
 
 ## P / D 与 ViT
 
-Prefill 和 Decode 分开提供吞吐/延迟/负载、PD RPC、KV、KV 分池、Host Memory KV 和 Mock 模拟质量分区。Decode 展示按步耗时估算的 TPOT，Client 展示按请求实际到达时间计算的 TPOT。Prefill 的缓存复用、输入 TPS 不混入 Decode；Decode 的输出 TPS、生成 Batch、输出长度不混入 Prefill。每条 Engine 查询显式使用 `role="prefill"` 或 `role="decode"`，再叠加全局 Engine 地址筛选。Mock 专有指标单列，不能当作名字相近的 real 指标。
+Prefill 和 Decode 分开提供吞吐/延迟/负载、PD RPC、本地 KV、KV 分池指标和 Mock 模拟质量分区。Decode 展示按步耗时估算的 TPOT，Client 展示按请求实际到达时间计算的 TPOT。Prefill 的缓存复用、输入 TPS 不混入 Decode；Decode 的输出 TPS、生成 Batch、输出长度不混入 Prefill。每条 Engine 查询显式使用 `role="prefill"` 或 `role="decode"`，再叠加全局 Engine 地址筛选。Mock 专有指标单列，不能当作名字相近的 real 指标。
 
 线上 Engine 查询主要使用全局 `hippo_role`，并非每个面板都硬编码了 Prefill/Decode。源码语义、线上 PD 分离分区和局部业务过滤共同决定本地归属；Master 的 `role=PREFILL/DECODE/PDFUSION` 是被观察 Worker 的角色，不是 Master 自己的角色，保留原查询的具体限制，不能替换为 Engine 自报的小写 role。
 
