@@ -47,7 +47,21 @@ constexpr int kDraftCandidateCap = 1024;
 int dsparkForceTopK() {
     const char* value = std::getenv("RTP_LLM_DSPARK_FORCE_TOPK");
     if (value == nullptr) {
-        return 4096;
+        // DSpARK candidate cap for BOTH the target verify selection and the draft
+        // proposals. 1024 matches the width DeepInfer's benchmark/perf-test
+        // harness passes (--sampler_force_topk 1024); note their engine default is
+        // 0, i.e. "no cap", and their own test_kl.py warns that any non-zero cap
+        // makes full-vocabulary KL diverge, so 1024 is a deliberate truncation on
+        // both sides rather than a free win.
+        //
+        // Truncation cost measured on the served DeepSeek-V4.1 engine: the mass
+        // that ranks 1025..4096 carry inside the 4096-candidate set has a median
+        // of 1.5e-5 but reaches 8.7e-2 on high-temperature / high-top_p requests,
+        // which is why the target shares this cap only by explicit choice: the
+        // sampler then samples from p over 1024 candidates instead of 4096.
+        // DeepSelect instantiates exactly {512, 1024, 4096}; any other width falls
+        // back to ATen topk.
+        return 1024;
     }
     char* end = nullptr;
     errno     = 0;
