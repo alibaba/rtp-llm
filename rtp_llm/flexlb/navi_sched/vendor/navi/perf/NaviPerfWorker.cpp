@@ -2,19 +2,20 @@
 #include "navi/perf/NaviPerfThread.h"
 #include "navi/proto/GraphVis.pb.h"
 
-#define PERF_RECORD_MISC_SWITCH_OUT_PREEMPT       (1 << 14)
+#define PERF_RECORD_MISC_SWITCH_OUT_PREEMPT (1 << 14)
 
 namespace navi {
 
 constexpr uint32_t PAGE_SIZE = 4096;
 
-#ifdef  __aarch64__
-#define mb()    asm volatile("dmb ish":::"memory")
+#ifdef __aarch64__
+#define mb() asm volatile("dmb ish" ::: "memory")
 #else
-#define mb()    asm volatile("mfence":::"memory")
+#define mb() asm volatile("mfence" ::: "memory")
 #endif
 
-bool NaviPerfWorkerBase::init(const NaviLoggerPtr &logger) {
+bool NaviPerfWorkerBase::init(const NaviLoggerPtr &logger)
+{
     _logger.object = this;
     _logger.logger = logger;
     doInit();
@@ -27,16 +28,16 @@ bool NaviPerfWorkerBase::init(const NaviLoggerPtr &logger) {
     NAVI_LOG(INFO, "perf fd [%d] for pid [%d]", _fd, _pid);
     _mem = mmap(0, _mmapSize, PROT_READ | PROT_WRITE, MAP_SHARED, _fd, 0);
     if (MAP_FAILED == _mem) {
-        NAVI_LOG(ERROR,
-                 "mmap perf mem for pid [%d] failed, fd [%d], err [%s]", _pid,
-                 _fd, strerror(errno));
+        NAVI_LOG(ERROR, "mmap perf mem for pid [%d] failed, fd [%d], err [%s]", _pid, _fd,
+                 strerror(errno));
         return false;
     }
     ioctl(_fd, PERF_EVENT_IOC_RESET, 0);
     return true;
 }
 
-bool NaviPerfWorkerBase::doEnable() {
+bool NaviPerfWorkerBase::doEnable()
+{
     if (_enabled) {
         return true;
     }
@@ -44,7 +45,8 @@ bool NaviPerfWorkerBase::doEnable() {
     return _enabled;
 }
 
-bool NaviPerfWorkerBase::disable() {
+bool NaviPerfWorkerBase::disable()
+{
     if (!_enabled) {
         return true;
     }
@@ -53,7 +55,8 @@ bool NaviPerfWorkerBase::disable() {
 }
 
 #define NEW_SWITCH_SAMPLE (21 + 256)
-void NaviPerfWorkerBase::doSample(bool branchStack, int pageFaultType) {
+void NaviPerfWorkerBase::doSample(bool branchStack, int pageFaultType)
+{
     perf_event_mmap_page *header = (perf_event_mmap_page *)_mem;
     auto ptr = &header->data_head;
     uint64_t data_head = *(volatile uint64_t *)ptr;
@@ -67,8 +70,7 @@ void NaviPerfWorkerBase::doSample(bool branchStack, int pageFaultType) {
         auto sampleSize = sample->size;
         uint32_t naviEventSize = sampleSize - sizeof(perf_event_header);
         uint8_t *copyBase =
-            bufferStart +
-            ((data_tail + sizeof(perf_event_header)) & (_bufferSize - 1));
+            bufferStart + ((data_tail + sizeof(perf_event_header)) & (_bufferSize - 1));
         auto entryType = PET_UNKNOWN;
         if (sample->type == PERF_RECORD_SAMPLE) {
             if (pageFaultType == 1) {
@@ -82,25 +84,31 @@ void NaviPerfWorkerBase::doSample(bool branchStack, int pageFaultType) {
             entryType = PET_THROTTLE;
         } else if (sample->type == PERF_RECORD_UNTHROTTLE) {
             entryType = PET_UNTHROTTLE;
+#ifdef PERF_RECORD_SWITCH
         } else if (sample->type == PERF_RECORD_SWITCH) {
             if (sample->misc & PERF_RECORD_MISC_SWITCH_OUT) {
-                entryType = (sample->misc & PERF_RECORD_MISC_SWITCH_OUT_PREEMPT) ? PET_SWITCH_OUT_PREEMPT : PET_SWITCH_OUT;
+                entryType = (sample->misc & PERF_RECORD_MISC_SWITCH_OUT_PREEMPT)
+                                ? PET_SWITCH_OUT_PREEMPT
+                                : PET_SWITCH_OUT;
             } else {
                 entryType = PET_SWITCH_IN;
             }
         } else if (sample->type == NEW_SWITCH_SAMPLE) {
             if (sample->misc & PERF_RECORD_MISC_SWITCH_OUT) {
-                entryType = (sample->misc & PERF_RECORD_MISC_SWITCH_OUT_PREEMPT) ? PET_SWITCH_OUT_PREEMPT_NEW : PET_SWITCH_OUT_NEW;
+                entryType = (sample->misc & PERF_RECORD_MISC_SWITCH_OUT_PREEMPT)
+                                ? PET_SWITCH_OUT_PREEMPT_NEW
+                                : PET_SWITCH_OUT_NEW;
             } else {
                 entryType = PET_SWITCH_IN_NEW;
             }
+#endif
         } else {
             NAVI_LOG(ERROR, "unknown sample [%d]", sample->type);
             data_tail += sampleSize;
             continue;
         }
-        auto entry = (NaviPerfEventEntry *)malloc(
-            naviEventSize + offsetof(NaviPerfEventEntry, data));
+        auto entry = (NaviPerfEventEntry *)malloc(naviEventSize +
+                                                  offsetof(NaviPerfEventEntry, data));
         new (entry) NaviPerfEventEntry();
         entry->sampleType = entryType;
         uint8_t *dataStart = sampleBase + sizeof(perf_event_header);
@@ -117,16 +125,21 @@ void NaviPerfWorkerBase::doSample(bool branchStack, int pageFaultType) {
         if (sample->type == PERF_RECORD_SAMPLE) {
             size_t callchainSize = 0;
             if (_attr.sample_type & NaviPerfCallchainEntry::SAMPLE_TYPE) {
-                entry->callchainEntry = (NaviPerfCallchainEntry *)(((char *)&entry->data) + sizeof(NaviPerfEvent));
+                entry->callchainEntry =
+                    (NaviPerfCallchainEntry *)(((char *)&entry->data) +
+                                               sizeof(NaviPerfEvent));
                 callchainSize = 8 * (entry->callchainEntry->nr + 1);
             }
             if (branchStack) {
                 entry->branchEntry =
-                    (NaviPerfBranchEntry *)(((char *)&entry->data) + sizeof(NaviPerfEvent) + callchainSize);
+                    (NaviPerfBranchEntry *)(((char *)&entry->data) +
+                                            sizeof(NaviPerfEvent) + callchainSize);
             }
         } else if (sample->type == NEW_SWITCH_SAMPLE) {
             if (_attr.sample_type & NaviPerfCallchainEntry::SAMPLE_TYPE) {
-                entry->callchainEntry = (NaviPerfCallchainEntry *)(((char *)&entry->data) + sizeof(NaviPerfEventSwitchNew));
+                entry->callchainEntry =
+                    (NaviPerfCallchainEntry *)(((char *)&entry->data) +
+                                               sizeof(NaviPerfEventSwitchNew));
             }
         }
         _thread->collectResultEntry(entry);
@@ -142,7 +155,8 @@ NaviPerfWorker::NaviPerfWorker(pid_t pid, NaviPerfThread *thread)
 {
 }
 
-void NaviPerfWorker::doInit() {
+void NaviPerfWorker::doInit()
+{
     _logger.addPrefix("navi perf worker [%d]", _pid);
     constexpr uint32_t BUFFER_SIZE = 256 * PAGE_SIZE;
     static_assert(0 == (BUFFER_SIZE & (BUFFER_SIZE - 1)),
@@ -153,17 +167,21 @@ void NaviPerfWorker::doInit() {
     _attr.type = PERF_TYPE_HARDWARE;
     _attr.config = PERF_COUNT_HW_REF_CPU_CYCLES;
     _attr.sample_period = 60000;
-    _attr.sample_type = NaviPerfEvent::SAMPLE_TYPE |
-                        NaviPerfBranchEntry::SAMPLE_TYPE |
+    _attr.sample_type = NaviPerfEvent::SAMPLE_TYPE | NaviPerfBranchEntry::SAMPLE_TYPE |
                         NaviPerfCallchainEntry::SAMPLE_TYPE;
     _attr.branch_sample_type = NaviPerfBranchEntry::BRANCH_SAMPLE_TYPE;
+#ifdef PERF_RECORD_SWITCH
     _attr.context_switch = 0;
+#endif
 }
 
-int NaviPerfWorker::perf_event_open(int cpu, int groupFd, unsigned long flags) {
+int NaviPerfWorker::perf_event_open(int cpu, int groupFd, unsigned long flags)
+{
     auto fd = NaviPerfWorkerBase::perf_event_open(cpu, groupFd, flags);
     if (fd < 0) {
-        NAVI_LOG(ERROR, "open perf fd for pid [%d] failed, error [%s], retry with lbr disabled", _pid, strerror(errno));
+        NAVI_LOG(ERROR,
+                 "open perf fd for pid [%d] failed, error [%s], retry with lbr disabled",
+                 _pid, strerror(errno));
         _attr.sample_type &= ~(NaviPerfBranchEntry::SAMPLE_TYPE);
         fd = NaviPerfWorkerBase::perf_event_open(cpu, groupFd, flags);
     }
@@ -172,14 +190,16 @@ int NaviPerfWorker::perf_event_open(int cpu, int groupFd, unsigned long flags) {
     return fd;
 }
 
-void NaviPerfWorker::flushLBR(int32_t depth) {
+void NaviPerfWorker::flushLBR(int32_t depth)
+{
     if (++depth < 32) {
         flushLBR(depth);
     }
     NAVI_MEMORY_BARRIER();
 }
 
-bool NaviPerfWorker::enable() {
+bool NaviPerfWorker::enable()
+{
     if (doEnable()) {
         if (_lbrEnabled) {
             flushLBR(0);
@@ -191,16 +211,15 @@ bool NaviPerfWorker::enable() {
 }
 
 #define NEW_SWITCH_SAMPLE (21 + 256)
-void NaviPerfWorker::sample() {
-    doSample(_lbrEnabled, 0);
-}
+void NaviPerfWorker::sample() { doSample(_lbrEnabled, 0); }
 
 NaviContextSwitchWorker::NaviContextSwitchWorker(pid_t pid, NaviPerfThread *thread)
     : NaviPerfWorkerBase(pid, thread)
 {
 }
 
-void NaviContextSwitchWorker::doInit() {
+void NaviContextSwitchWorker::doInit()
+{
     _logger.addPrefix("navi perf context switch worker [%d]", _pid);
     constexpr uint32_t BUFFER_SIZE = 16 * PAGE_SIZE;
     static_assert(0 == (BUFFER_SIZE & (BUFFER_SIZE - 1)),
@@ -212,19 +231,20 @@ void NaviContextSwitchWorker::doInit() {
     _attr.config = PERF_COUNT_SW_CONTEXT_SWITCHES;
     _attr.sample_period = 1;
     _attr.sample_type = NaviPerfEvent::SAMPLE_TYPE | NaviPerfCallchainEntry::SAMPLE_TYPE;
+#ifdef PERF_RECORD_SWITCH
     _attr.context_switch = 1;
+#endif
 }
 
-void NaviContextSwitchWorker::sample() {
-    doSample(false, 0);
-}
+void NaviContextSwitchWorker::sample() { doSample(false, 0); }
 
 NaviMajorPageFaultWorker::NaviMajorPageFaultWorker(pid_t pid, NaviPerfThread *thread)
     : NaviPerfWorkerBase(pid, thread)
 {
 }
 
-void NaviMajorPageFaultWorker::doInit() {
+void NaviMajorPageFaultWorker::doInit()
+{
     _logger.addPrefix("navi perf major page fault worker [%d]", _pid);
     constexpr uint32_t BUFFER_SIZE = 16 * PAGE_SIZE;
     static_assert(0 == (BUFFER_SIZE & (BUFFER_SIZE - 1)),
@@ -238,16 +258,15 @@ void NaviMajorPageFaultWorker::doInit() {
     _attr.sample_type = NaviPerfEvent::SAMPLE_TYPE | NaviPerfCallchainEntry::SAMPLE_TYPE;
 }
 
-void NaviMajorPageFaultWorker::sample() {
-    doSample(false, 1);
-}
+void NaviMajorPageFaultWorker::sample() { doSample(false, 1); }
 
 NaviMinorPageFaultWorker::NaviMinorPageFaultWorker(pid_t pid, NaviPerfThread *thread)
     : NaviPerfWorkerBase(pid, thread)
 {
 }
 
-void NaviMinorPageFaultWorker::doInit() {
+void NaviMinorPageFaultWorker::doInit()
+{
     _logger.addPrefix("navi perf minor page fault worker [%d]", _pid);
     constexpr uint32_t BUFFER_SIZE = 16 * PAGE_SIZE;
     static_assert(0 == (BUFFER_SIZE & (BUFFER_SIZE - 1)),
@@ -261,8 +280,6 @@ void NaviMinorPageFaultWorker::doInit() {
     _attr.sample_type = NaviPerfEvent::SAMPLE_TYPE | NaviPerfCallchainEntry::SAMPLE_TYPE;
 }
 
-void NaviMinorPageFaultWorker::sample() {
-    doSample(false, 2);
-}
+void NaviMinorPageFaultWorker::sample() { doSample(false, 2); }
 
 }
