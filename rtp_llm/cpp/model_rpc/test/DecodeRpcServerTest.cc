@@ -141,6 +141,9 @@ public:
         const auto params = parameters();
         stream            = std::make_shared<NormalGenerateStream>(
             input, params.model_config_, params.runtime_config, resource_context_, nullptr);
+        if (admission_error.hasError()) {
+            stream->reportError(admission_error.code(), admission_error.ToString());
+        }
         return stream;
     }
     GenerateStreamPtr enqueue(const std::shared_ptr<GenerateInput>& input) override {
@@ -163,6 +166,7 @@ public:
     std::shared_ptr<KVCacheManager>              cache;
     std::shared_ptr<AllocationErrorCacheManager> allocator;
     GenerateStreamPtr                            stream;
+    ErrorInfo                                    admission_error;
 };
 
 GroupBase makeRpcGroup(std::string tag) {
@@ -679,6 +683,43 @@ TEST(DecodeRpcServerTest, NonCancelledGenerateRequestReadPreservesFailure) {
 }
 
 class PrefillCompletionRpcTest: public DeviceTestBase {};
+
+TEST_F(PrefillCompletionRpcTest, AdmissionRejectionDoesNotAllocateOrRetry) {
+    auto engine = std::make_shared<AllocationErrorEngine>(ErrorInfo{});
+    engine->admission_error = ErrorInfo(ErrorCode::INVALID_PARAMS, "sparse KV offload only supports single-sequence requests");
+    const auto initial_free_blocks = engine->cache->freeBlocksNum();
+    DecodeRpcServer server;
+    server.engine_ = engine;
+    DecodeRpcContext             rpc_context{nullptr};
+    kmonitor::MetricsReporterPtr reporter;
+    auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+    DecodeGenerateContext        context(rpc_context, 0, nullptr, reporter, meta);
+    context.request_id  = 46;
+    context.request_key = "admission-rejection";
+    auto* input         = context.allocate_request.mutable_input();
+    input->set_request_id(context.request_id);
+    input->add_token_ids(1);
+    input->add_token_ids(2);
+    input->mutable_generate_config()->set_max_new_tokens(2);
+    input->mutable_generate_config()->set_num_beams(1);
+    input->mutable_generate_config()->set_num_return_sequences(2);
+
+    server.allocateResource(context);
+
+    EXPECT_EQ(context.error_status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(context.error_info.code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(context.error_status.error_message().find("single-sequence"), std::string::npos);
+    ASSERT_NE(engine->stream, nullptr);
+    EXPECT_TRUE(engine->stream->isFinished());
+    EXPECT_TRUE(engine->stream->streamCacheResource().isResourceReleased());
+    EXPECT_EQ(engine->stream->curBlocksNum(), 0);
+    EXPECT_EQ(engine->allocator->allocated_blocks, 0u);
+    EXPECT_EQ(engine->allocator->released_blocks, 0u);
+    EXPECT_EQ(engine->cache->freeBlocksNum(), initial_free_blocks);
+    EXPECT_EQ(context.retry_times, 0);
+    EXPECT_FALSE(engine->stream->hasEvent(StreamEvents::LoadInitiated));
+    context.markRpcHandlingCompleted();
+}
 
 TEST_F(PrefillCompletionRpcTest, AllocationLoadTimeoutPreservesDeadlineAndReleasesResources) {
     for (bool timeout : {false, true}) {

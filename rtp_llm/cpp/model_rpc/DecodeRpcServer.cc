@@ -384,6 +384,17 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         RTP_LLM_LOG_ERROR("%s", error_msg.c_str());
     };
 
+    // makeStream performs engine admission checks before any destination KV is
+    // allocated. Rejected streams never reach the scheduler to finish themselves.
+    if (generate_stream->hasError()) {
+        const auto error = generate_stream->statusInfo();
+        finish_allocation_error(error.code() == ErrorCode::INVALID_PARAMS ? grpc::StatusCode::INVALID_ARGUMENT :
+                                                                          grpc::StatusCode::INTERNAL,
+                                error.code(),
+                                error.ToString());
+        return;
+    }
+
     int64_t allocation_attempts = 0;
     while (true) {
         const auto request_cost_ms = (currentTimeUs() - decode_context.request_begin_time_us) / 1000;

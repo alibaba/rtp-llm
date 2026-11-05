@@ -15,6 +15,8 @@ Sparse KV offload 的核心分工是：**cache group 描述 KV 怎么存，模�
 
 开启 offload 的 D 侧不支持普通 context prefill，也不支持 `multi_task_prompt`；配置和运行时会提前拒绝这些路径。Target verify 和 MTP draft extend 使用独立的轮次标志，仍可运行。异步 prepare 在 hidden states 尚未生成时也使用同一标志。
 
+真实请求只支持单序列：`num_return_sequences=1`、`num_beams=1`，且 `variable_num_beams` 为空。多返回序列和 beam search 会在调度、D 侧 KV 分配前返回请求级 `INVALID_PARAMS`（D 侧 RPC 为 `INVALID_ARGUMENT`），不会占用热缓存或进入 attention。此限制同时适用于 `static` 和 `dynamic` 热缓存模式；内部 batch warmup 不受影响。
+
 支持默认的 `--warm_up 1`。预热使用最小的真实 tiered cache（2 个 HBM block 和 1 个 Host block），selection 上限和写入 staging 仍按部署配置分配，并执行 offload attention 路径。预热完成后释放临时 cache、plan 和 staging，再根据峰值显存建立生产 cache、重新绑定并捕获 graph。临时 KV backing 不计入运行期峰值；由容量公式单独预留的 offload buffer 也从测量值中扣除，避免重复计费。
 
 P 侧 sparse MLA prefill warmup 使用最小的普通 GPU KV cache，使 indexer 和 sparse attention 都参与预热；预热完成后解除临时绑定，再创建生产 cache。P 侧不启用 offload。

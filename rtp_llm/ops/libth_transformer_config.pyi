@@ -1078,6 +1078,7 @@ class CacheCpPolicyDesc:
 class CacheOffloadPolicy:
     enabled: bool
     max_selected_rows: int
+    max_requests: int
     def __init__(self) -> None: ...
 
 class KVCacheSpecDesc:

@@ -155,7 +155,6 @@ private:
     int64_t                      baseline_allocated_  = 0;
     int64_t                      baseline_reserved_   = 0;
 };
-#endif
 
 size_t releasePythonKvCache(const pybind11::object& py_model, bool measure_offload = false) {
     if (!py_model || py_model.is_none()) {
@@ -163,7 +162,6 @@ size_t releasePythonKvCache(const pybind11::object& py_model, bool measure_offlo
     }
     pybind11::gil_scoped_acquire gil;
     size_t offload_fixed_bytes = 0;
-#if USING_CUDA
     if (measure_offload && pybind11::hasattr(py_model, "release_sparse_kv_offload")) {
         const auto device = at::cuda::current_device();
         const auto before = c10::cuda::CUDACachingAllocator::getDeviceStats(device).allocated_bytes[0].current;
@@ -174,7 +172,6 @@ size_t releasePythonKvCache(const pybind11::object& py_model, bool measure_offlo
             offload_fixed_bytes = static_cast<size_t>(before - after);
         }
     }
-#endif
     if (pybind11::hasattr(py_model, "release_kv_cache")) {
         py_model.attr("release_kv_cache")();
     } else {
@@ -182,6 +179,7 @@ size_t releasePythonKvCache(const pybind11::object& py_model, bool measure_offlo
     }
     return offload_fixed_bytes;
 }
+#endif
 }  // anonymous namespace
 
 void NormalEngine::validateSparseKvOffloadConfig(const EngineInitParams& params,
@@ -994,6 +992,17 @@ absl::Status NormalEngine::trySaveStepError() const {
 
 bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) const {
     if (stream->hasError()) {
+        return false;
+    }
+    const auto& config = *stream->generateConfig();
+    // Warmup uses one internal stream to simulate a full batch. Real requests
+    // must map to one sequence for both the P/D handoff and offload capacity.
+    if (kv_cache_config.enable_sparse_kv_offload && !stream->isFakeStream()
+        && !stream->generateInput()->fake_query
+        && (config.num_return_sequences > 1 || config.num_beams > 1 || !config.variable_num_beams.empty())) {
+        stream->reportError(ErrorCode::INVALID_PARAMS,
+                            "sparse KV offload only supports single-sequence requests: num_return_sequences and "
+                            "num_beams must be 1, and variable_num_beams must be empty");
         return false;
     }
     if (pd_sep_config.role_type != RoleType::DECODE || !stream->generateConfig()->isPrefillOnly()) {

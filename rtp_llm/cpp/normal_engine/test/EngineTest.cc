@@ -604,6 +604,97 @@ TEST_F(NormalEngineTest, testDecodeRoleRejectsPrefillOnlyBeforeScheduling) {
     EXPECT_EQ(positive_stream->curBlocksNum(), 0);
 }
 
+TEST_F(NormalEngineTest, testSparseOffloadRejectsMultiSequenceRequestsBeforeScheduling) {
+    auto make_query = [] {
+        auto query                             = make_shared<GenerateInput>();
+        query->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 2;
+        query->generate_config->timeout_ms     = 5000;
+        query->begin_time_us                   = autil::TimeUtility::currentTimeInMicroSeconds();
+        return query;
+    };
+
+    for (const std::string mode : {"static", "dynamic"}) {
+        SCOPED_TRACE(mode);
+        CustomConfig config;
+        config.role_type = RoleType::DECODE;
+        auto engine      = createMockEngine(config);
+        auto baseline    = make_query();
+        baseline->generate_config->num_return_sequences = 2;
+        EXPECT_FALSE(engine->makeStream(baseline)->hasError());
+
+        // Exercise admission on the real engine with a small mock model/cache;
+        // no offload storage or external model weights are needed for this gate.
+        engine->kv_cache_config.enable_sparse_kv_offload         = true;
+        engine->kv_cache_config.sparse_kv_offload_hot_cache_mode = mode;
+        const auto initial_free_blocks = engine->getCacheManager()->freeBlocksNum();
+        for (int variant = 0; variant < 4; ++variant) {
+            SCOPED_TRACE(variant);
+            auto query = make_query();
+            if (variant == 0) {
+                query->generate_config->num_return_sequences = 2;
+            } else if (variant == 1) {
+                query->generate_config->num_beams = 2;
+            } else {
+                // Even an all-one variable schedule uses the unsupported beam API.
+                query->generate_config->variable_num_beams = variant == 2 ? std::vector<int>{1, 2} :
+                                                                          std::vector<int>{1, 1};
+            }
+            auto check_rejected = [&](const GenerateStreamPtr& stream) {
+                ASSERT_NE(stream, nullptr);
+                EXPECT_TRUE(stream->hasError());
+                EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                EXPECT_NE(stream->stopReason().find("single-sequence"), std::string::npos);
+                EXPECT_EQ(stream->curBlocksNum(), 0);
+                EXPECT_FALSE(stream->hasEvent(StreamEvents::CanRun));
+            };
+            check_rejected(engine->makeStream(query));
+            check_rejected(engine->enqueue(query));
+            auto direct_stream = engine->createStream(query);
+            engine->enqueue(direct_stream);
+            check_rejected(direct_stream);
+            auto [successes, streams] = engine->enqueueMultiple({query, query});
+            EXPECT_EQ(successes, std::vector<bool>({false, false}));
+            ASSERT_EQ(streams.size(), 2);
+            for (const auto& stream : streams) {
+                check_rejected(stream);
+            }
+            EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
+            EXPECT_EQ(engine->getCacheManager()->freeBlocksNum(), initial_free_blocks);
+        }
+
+        auto warmup = make_query();
+        warmup->fake_query = true;
+        warmup->generate_config->num_return_sequences = 32;
+        EXPECT_FALSE(engine->makeStream(warmup)->hasError());
+
+        // Perform the single-token P/D handoff, then let the engine finish a
+        // normal single-sequence request after all rejected requests above.
+        auto valid = engine->makeStream(make_query());
+        ASSERT_FALSE(valid->hasError());
+        ASSERT_TRUE(valid->initKVBlock().ok());
+        valid->setIsContextStream(false);
+        valid->step();
+        valid->incLastOutputPos();
+        valid->update({torch::tensor({{5}}, torch::kInt32),
+                       1,
+                       torch::Tensor(),
+                       torch::Tensor(),
+                       torch::Tensor(),
+                       torch::Tensor(),
+                       torch::Tensor(),
+                       torch::Tensor(),
+                       torch::Tensor(),
+                       torch::Tensor()});
+        engine->enqueue(valid);
+        auto output = valid->nextOutput(5000);
+        ASSERT_TRUE(output.ok()) << output.status().ToString();
+        EXPECT_FALSE(valid->hasError());
+        EXPECT_EQ(valid->outputTokenLen(), 2);
+    }
+}
+
 TEST_F(NormalEngineTest, testDirectEngineEntriesConvertPrefillValidationErrorsToStreamErrors) {
     CustomConfig config;
     auto         engine = createMockEngine(config);

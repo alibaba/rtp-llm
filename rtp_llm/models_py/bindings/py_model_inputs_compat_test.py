@@ -12,7 +12,12 @@ from rtp_llm.models_py.model_desc.block_map import (
     select_fmha_impl_for_group,
 )
 from rtp_llm.models_py.utils.kvcache import SingleGroupKVCacheAdapter
-from rtp_llm.ops import HybridAttentionConfig, HybridAttentionType, KVCacheConfig
+from rtp_llm.ops import (
+    CacheOffloadPolicy,
+    HybridAttentionConfig,
+    HybridAttentionType,
+    KVCacheConfig,
+)
 from rtp_llm.ops.compute_ops import (
     CacheStoreWriter,
     KVCache,
@@ -121,18 +126,23 @@ class PyModelInputsCompatTest(unittest.TestCase):
             select_fmha_impl_for_group({"wrong": object()}, "indexer_kv")
 
     def test_cache_binding_stubs_match_runtime_members(self) -> None:
-        stub_path = (
-            Path(__file__).resolve().parents[2]
-            / "ops"
-            / "librtp_compute_ops"
-            / "__init__.pyi"
-        )
-        module = ast.parse(stub_path.read_text())
+        ops_path = Path(__file__).resolve().parents[2] / "ops"
+        module = ast.parse((ops_path / "librtp_compute_ops" / "__init__.pyi").read_text())
         stub_classes = {
             node.name: node for node in module.body if isinstance(node, ast.ClassDef)
         }
+        # The generated config stub also contains enum members named "None".
+        # Parse the policy class alone to avoid those unrelated keyword names.
+        config_stub = (ops_path / "libth_transformer_config.pyi").read_text()
+        policy_body = config_stub.split("\nclass CacheOffloadPolicy:\n", 1)[1].split(
+            "\nclass ", 1
+        )[0]
+        stub_classes["CacheOffloadPolicy"] = ast.parse(
+            "class CacheOffloadPolicy:\n" + policy_body
+        ).body[0]
 
         for class_name, runtime_class in (
+            ("CacheOffloadPolicy", CacheOffloadPolicy),
             ("CacheStoreWriter", CacheStoreWriter),
             ("KVCache", KVCache),
             ("LayerKVCache", LayerKVCache),
