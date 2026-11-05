@@ -64,6 +64,7 @@ def shutdown_native_parallel():
         torch.cuda.synchronize()
         dist.barrier(group=shutdown_group)
         logger.info("V4.1 native role device work drained")
+        PPUMoE.close_mega_resources()
         with PPUMoE._BUFFER_LOCK:
             PPUMoE._BUFFER_CACHE.clear()
         DeepEPWrapper.shutdown()

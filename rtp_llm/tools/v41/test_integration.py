@@ -327,8 +327,16 @@ class IntegrationTest(unittest.TestCase):
                 "details": {"version": 2},
             }
         )
-        left = {"checks": checks, "prerequisites_ok": True, "moe_precision": "w4a8"}
+        left = {
+            "checks": checks,
+            "prerequisites_ok": True,
+            "moe_precision": "w4a8",
+            "moe_backend": "grouped",
+        }
         right = copy.deepcopy(left)
+        right["moe_backend"] = "megamoe"
+        self.assertFalse(compare_reports(left, right)["identities_match"])
+        right["moe_backend"] = "grouped"
         right["checks"][2]["details"]["role"] = "DECODE"
         self.assertTrue(compare_reports(left, right)["identities_match"])
         right["moe_precision"] = "w4a4"

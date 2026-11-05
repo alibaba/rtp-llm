@@ -25,7 +25,9 @@ from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import (
 
 
 def _runner(precision="w4a8", hidden=128, inter=128):
-    with mock.patch.dict(os.environ, {MOE_PRECISION_ENV: precision}):
+    with mock.patch.dict(
+        os.environ, {MOE_PRECISION_ENV: precision, "RTP_V41_PPU_MOE_BACKEND": "grouped"}
+    ):
         return moe_module.PPUMoE(
             num_routed_experts=2,
             num_local_experts=2,

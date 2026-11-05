@@ -13,7 +13,7 @@ is incomplete (the model wiring dispatches on
 means the provider is not integrated on that host) or when the model/weight
 modules cannot import; both failures raise ``RuntimeError`` with
 "not integrated" in the message instead of registering a half-integrated
-backend. No CUDA/MegaMoE or CPU fallback.
+backend. No NVIDIA or CPU fallback; PPU890 MegaMoE is an explicit option.
 
 This module stays import-light: importing it never imports torch, the ops
 package, or an accelerator library, so the device-dispatch contract tests
@@ -25,6 +25,7 @@ from __future__ import annotations
 import importlib
 
 from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import (
+    moe_backend,
     moe_kernel_name,
     moe_precision,
 )
@@ -42,8 +43,15 @@ COMMON_KERNEL_SYMBOLS = (
 
 def kernel_symbols(env=None):
     precision = moe_precision(env)
-    functions = (moe_kernel_name(precision),)
-    if precision == "w4a8":
+    backend = moe_backend(env)
+    functions = (moe_kernel_name(precision, backend),)
+    if backend == "megamoe":
+        functions += (
+            "get_symm_buffer_for_mega_moe",
+            "transform_weights_for_mega_moe",
+            "mega_moe_pre_dispatch",
+        )
+    elif precision == "w4a8":
         functions += ("preprocess_weights_and_scales",)
     return (("deep_gemm", functions),) + COMMON_KERNEL_SYMBOLS
 
@@ -111,7 +119,7 @@ def _not_integrated(reason: str) -> RuntimeError:
         f"V4.1 ppu backend is not integrated on this host: {reason}. "
         "The L1 shared compute ops remain available via "
         "rtp_llm.models_py.modules.dsv41.ppu.backend.get_ops. "
-        "No CUDA/MegaMoE or CPU fallback."
+        "No NVIDIA or CPU fallback."
     )
 
 

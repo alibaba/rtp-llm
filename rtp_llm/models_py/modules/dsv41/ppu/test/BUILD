@@ -1,6 +1,14 @@
 package(default_visibility = ["//visibility:public"])
 
 py_test(
+    name = "test_moe_megamoe",
+    srcs = ["test_moe_megamoe.py"],
+    deps = ["//rtp_llm/models_py:v41_ppu_moe"],
+    env = {"GPU_COUNT": "0"},
+    tags = ["cpu"],
+)
+
+py_test(
     name = "test_moe_w4a8",
     srcs = ["test_moe_w4a8.py"],
     deps = ["//rtp_llm/models_py:v41_ppu_moe"],

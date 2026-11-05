@@ -47,6 +47,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import threading
+import weakref
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -57,6 +58,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.linear import (
     _ue8m0_scales_to_float,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import (
+    moe_backend,
     moe_kernel_name,
     moe_precision,
 )
@@ -1398,6 +1400,9 @@ class PPUMoE:
     hit by the current tokens).
 
     Execution paths:
+      * Explicit PPU890 MegaMoE W4A4: native symmetric dispatch, two GEMMs
+        and weighted combine in one complete call; all ranks participate,
+        including empty owners. This path owns a model-local workspace.
       * DeepEP normal dispatch/combine (``deep_ep`` importable / rtp
         ``DeepEPWrapper`` initialized): 8-slot padded dispatch with
         ``expert_alignment=1`` and rank-local received expert IDs. W4A8
@@ -1414,6 +1419,7 @@ class PPUMoE:
 
     _BUFFER_CACHE: Dict[Tuple[int, int], object] = {}
     _BUFFER_LOCK = threading.Lock()
+    _MEGA_ENGINES = weakref.WeakSet()
 
     def __init__(
         self,
@@ -1435,9 +1441,17 @@ class PPUMoE:
         self.inter_dim = int(inter_dim)
         self.swiglu_limit = float(swiglu_limit)
         # Freeze the selected precision for this instance and its weight cache.
-        self.precision = moe_precision()
+        selection = dict(os.environ)
+        self.backend = moe_backend(selection)
+        self.precision = moe_precision(selection)
         self.grouped_forward_calls = 0
         self.grouped_gemm_calls = 0
+        self.mega_moe_calls = 0
+        self._mega_module = None
+        self._mega_buffer = None
+        self._mega_capacity = 0
+        self._mega_device = None
+        self._mega_recv_stats = None
         self.group = group
         if self.num_routed_experts % self.num_local_experts != 0:
             raise ValueError(
@@ -1455,6 +1469,9 @@ class PPUMoE:
         self._processed: Dict[Tuple[int, torch.device], Tuple[torch.Tensor, ...]] = {}
         self._current_layer: Optional[int] = None
         self._grouped_path: Optional[bool] = None
+        if self.backend == "megamoe":
+            with self._BUFFER_LOCK:
+                self._MEGA_ENGINES.add(self)
 
     # -- weight binding ---------------------------------------------------
 
@@ -1520,10 +1537,18 @@ class PPUMoE:
     def execution_stats(self) -> dict:
         """Actual device-path counters for functional bring-up evidence."""
         return {
+            "backend": self.backend,
             "precision": self.precision,
-            "kernel": moe_kernel_name(self.precision),
+            "kernel": moe_kernel_name(self.precision, self.backend),
             "grouped_forward_calls": self.grouped_forward_calls,
             "grouped_gemm_calls": self.grouped_gemm_calls,
+            "mega_moe_calls": self.mega_moe_calls,
+            "mega_workspace_capacity": self._mega_capacity,
+            "mega_received_assignments": (
+                0
+                if self._mega_recv_stats is None
+                else int(self._mega_recv_stats.sum().item())
+            ),
             "route_weight_stage": (
                 "before_gemm2_activation_quantization"
                 if self.precision == "w4a8"
@@ -1546,7 +1571,7 @@ class PPUMoE:
     def _processed_weights(
         self, layer_id: int, device: torch.device
     ) -> Tuple[torch.Tensor, ...]:
-        """Prepare and cache the selected grouped GEMM's weight/scale ABI."""
+        """Prepare and cache the selected backend's weight/scale ABI."""
         layer_id = self._resolve_layer_id(layer_id)
         key = (layer_id, device)
         cached = self._processed.get(key)
@@ -1555,7 +1580,15 @@ class PPUMoE:
         w13_w, w13_s, w2_w, w2_s = self._layer_weights(layer_id)
         w13_u = _packed_weight_uint8(w13_w)
         w2_u = _packed_weight_uint8(w2_w)
-        if self.precision == "w4a8":
+        if self.backend == "megamoe":
+            mega = self._get_mega_module()
+            (w13_u, w13_sp), (w2_u, w2_sp) = mega.transform_weights_for_mega_moe(
+                (w13_u, _ue8m0_scale_bytes(w13_s).contiguous().view(torch.uint8)),
+                (w2_u, _ue8m0_scale_bytes(w2_s).contiguous().view(torch.uint8)),
+                activation="swiglu",
+            )
+            inv13 = inv2 = 1.0
+        elif self.precision == "w4a8":
             import deep_gemm
 
             mode = deep_gemm.PreprocessMode.W4A8_MXFP4_MMA
@@ -1595,6 +1628,9 @@ class PPUMoE:
         plus ``-1`` padding); ``expert_weights`` is the matching fp32
         ``[T, 8]`` slot weights (zero on padding slots).
         """
+        if self.backend == "megamoe":
+            # Empty owners must still enter MegaMoE's cross-rank protocol.
+            return self._forward_megamoe(x, expert_ids, expert_weights, layer_id)
         if x.size(0) == 0:
             if self._use_deepep_dispatch():
                 # Collective participation: dispatch + combine still run.
@@ -1610,6 +1646,135 @@ class PPUMoE:
         )
 
     __call__ = forward
+
+    def _get_mega_module(self):
+        if self._mega_module is None:
+            try:
+                module = importlib.import_module("deep_gemm")
+            except Exception as error:
+                raise RuntimeError(
+                    "PPU890 MegaMoE requires a compatible DeepGEMM-for-sail build"
+                ) from error
+            required = (
+                "get_symm_buffer_for_mega_moe",
+                "transform_weights_for_mega_moe",
+                "mega_moe_pre_dispatch",
+                "fp4_fp4_mega_moe",
+            )
+            missing = [
+                name for name in required if not callable(getattr(module, name, None))
+            ]
+            if missing:
+                raise RuntimeError(
+                    "PPU890 MegaMoE requires DeepGEMM APIs: " + ", ".join(missing)
+                )
+            self._mega_module = module
+        return self._mega_module
+
+    def _validate_megamoe_input(self, x):
+        if not x.is_cuda or "M890" not in torch.cuda.get_device_name(x.device).upper():
+            raise RuntimeError("MegaMoE W4A4 requires a PPU890 device")
+        if x.dtype != torch.bfloat16 or x.ndim != 2 or x.shape[1] != self.hidden_size:
+            raise ValueError("MegaMoE input must be BF16 [tokens, hidden_size]")
+        if self.hidden_size % 512 or self.inter_dim % 128:
+            raise ValueError(
+                "MegaMoE requires hidden divisible by 512 and intermediate by 128"
+            )
+        if self._mega_device is not None and self._mega_device != x.device:
+            raise RuntimeError("a MegaMoE workspace cannot move between devices")
+
+    def _ensure_mega_buffer(self, x):
+        import torch.distributed as dist
+
+        group = self.group
+        if group is None:
+            if not dist.is_initialized():
+                raise RuntimeError("MegaMoE requires an initialized EP process group")
+            group = dist.group.WORLD
+        if group.size() != self.ep_size or group.rank() != self.ep_rank:
+            raise RuntimeError("MegaMoE group must match this model's EP size and rank")
+        capturing = torch.cuda.is_current_stream_capturing()
+        if capturing:
+            if self._mega_buffer is None or x.shape[0] > self._mega_capacity:
+                raise RuntimeError(
+                    "MegaMoE requires eager warmup with sufficient capacity before capture"
+                )
+            return self._mega_buffer
+        # All ranks enter, even when their own rows fit the existing allocation.
+        # A rank-local overflow check would deadlock CP/DP peers on growth.
+        rows = torch.tensor([x.shape[0]], dtype=torch.int64, device=x.device)
+        if self.ep_size > 1:
+            dist.all_reduce(rows, op=dist.ReduceOp.MAX, group=group)
+        required = max(128, 1 << (max(1, int(rows.item())) - 1).bit_length())
+        if self._mega_buffer is None or required > self._mega_capacity:
+            # The preceding collective orders all peers after the old complete
+            # call; drain local work before dropping its symmetric allocation.
+            self.close()
+            self._mega_device = x.device
+            self._mega_buffer = self._get_mega_module().get_symm_buffer_for_mega_moe(
+                group,
+                self.num_routed_experts,
+                required,
+                COMM_SLOTS,
+                self.hidden_size,
+                self.inter_dim,
+                num_shared_experts=0,
+                mma_type="fp4xfp4",
+                activation="swiglu",
+            )
+            self._mega_capacity = required
+            if self._mega_recv_stats is None:
+                self._mega_recv_stats = torch.zeros(
+                    self.num_local_experts, dtype=torch.int32, device=x.device
+                )
+        return self._mega_buffer
+
+    def _forward_megamoe(self, x, expert_ids, expert_weights, layer_id):
+        self._validate_megamoe_input(x)
+        layer_id = self._resolve_layer_id(layer_id)
+        w13, s13, w2, s2, _, _ = self._processed_weights(layer_id, x.device)
+        ids, weights = pad_topk_for_dispatch(
+            expert_ids.to(torch.int64),
+            expert_weights.to(torch.float32),
+            slots=COMM_SLOTS,
+        )
+        buffer = self._ensure_mega_buffer(x)
+        mega = self._get_mega_module()
+        mega.mega_moe_pre_dispatch(
+            x.contiguous(), ids.contiguous(), weights.contiguous(), buffer
+        )
+        y = torch.empty_like(x, dtype=torch.bfloat16)
+        # Complete native pipeline includes dispatch, both GEMMs and weighted
+        # combine. Do not run DeepEP or apply split-W4A8's pre-quant weighting.
+        mega.fp4_fp4_mega_moe(
+            y,
+            (w13, s13),
+            (w2, s2),
+            buffer,
+            cumulative_local_expert_recv_stats=self._mega_recv_stats,
+            recipe=(1, 1, 32),
+            activation="swiglu",
+            activation_clamp=self.swiglu_limit if self.swiglu_limit > 0 else None,
+            fast_math=True,
+        )
+        self.mega_moe_calls += 1
+        return y
+
+    def close(self):
+        """Release this model's workspace after coordinated rank drain."""
+        if self._mega_buffer is not None:
+            torch.cuda.synchronize(device=self._mega_device)
+            self._mega_buffer.destroy()
+            self._mega_buffer = None
+            self._mega_capacity = 0
+
+    @classmethod
+    def close_mega_resources(cls):
+        """Native shutdown calls this before destroying process groups."""
+        with cls._BUFFER_LOCK:
+            engines = list(cls._MEGA_ENGINES)
+        for engine in engines:
+            engine.close()
 
     def _offline_single_process(self) -> bool:
         """True when no process group is available: the offline driver mode.

@@ -65,7 +65,7 @@ def _parse_args(argv=None):
     parser.add_argument("--device", default="cuda", choices=("cpu", "cuda"))
     parser.add_argument(
         "--ep-backend",
-        choices=("deepep", "sim"),
+        choices=("deepep", "sim", "megamoe"),
         default=None,
         help="routed MoE backend: real DeepEP dispatch/combine, or the "
         "simulated EP8 over the CP group (all-gather + local experts + "
@@ -191,7 +191,21 @@ def worker_main(args: argparse.Namespace) -> int:
 
     if args.device == "cuda":
         torch.cuda.reset_peak_memory_stats()
-    ep_backend = args.ep_backend or ("sim" if args.device == "cpu" else "deepep")
+    from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import moe_backend
+
+    selected_moe = moe_backend()
+    if selected_moe == "megamoe":
+        if args.device != "cuda" or args.ep_backend not in (None, "megamoe"):
+            raise ValueError(
+                "MegaMoE requires cuda and a matching --ep-backend selection"
+            )
+        ep_backend = "megamoe"
+    else:
+        if args.ep_backend == "megamoe":
+            raise ValueError(
+                "--ep-backend megamoe requires RTP_V41_PPU_MOE_BACKEND=megamoe"
+            )
+        ep_backend = args.ep_backend or ("sim" if args.device == "cpu" else "deepep")
     load_start = time.time()
     enpm_group = _make_enpm_group(args)
     ops = PPUOps(
@@ -206,7 +220,7 @@ def worker_main(args: argparse.Namespace) -> int:
         sm_scale=geometry.sm_scale(),
         window=geometry.window,
         enpm_group=enpm_group,
-        deepep_group=dist.group.WORLD if ep_backend == "deepep" else None,
+        deepep_group=dist.group.WORLD if ep_backend in ("deepep", "megamoe") else None,
     )
     bundle = load_ppu_weights(
         config,
@@ -457,6 +471,7 @@ def worker_main(args: argparse.Namespace) -> int:
         print("[PD] all D owners acknowledged continuation", flush=True)
 
     dist.barrier()
+    ops.moe_engine.close()
     dist.destroy_process_group()
     if synthetic_dir is not None:
         import shutil
@@ -501,6 +516,15 @@ def _aggregate(args: argparse.Namespace, world_size: int) -> dict:
             "ranks_reported": len(payloads),
             "moe_precisions": sorted(
                 {p.get("moe", {}).get("precision", "unknown") for p in payloads}
+            ),
+            "moe_backends": sorted(
+                {p.get("moe", {}).get("backend", "unknown") for p in payloads}
+            ),
+            "moe_mega_calls": sum(
+                p.get("moe", {}).get("mega_moe_calls", 0) for p in payloads
+            ),
+            "moe_mega_received_assignments": sum(
+                p.get("moe", {}).get("mega_received_assignments", 0) for p in payloads
             ),
             "moe_grouped_gemm_calls": sum(
                 p.get("moe", {}).get("grouped_gemm_calls", 0) for p in payloads

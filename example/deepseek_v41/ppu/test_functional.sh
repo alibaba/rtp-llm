@@ -27,7 +27,7 @@ v41_args=(
 if [[ "$v41_role" == prefill ]]; then
     v41_driver=driver_prefill_cp8.py
     v41_json="$v41_output/cp8.json"
-    v41_args+=(--tokens "${RTP_V41_TEST_TOKENS:-129}" --ep-backend deepep)
+    v41_args+=(--tokens "${RTP_V41_TEST_TOKENS:-129}")
     if [[ -n "${RTP_V41_TEST_PD_PEER:-}" ]]; then
         v41_args+=(--pd-peer "$RTP_V41_TEST_PD_PEER" --pd-run-id "${RTP_V41_TEST_PD_RUN_ID:?}"
             --fixture-dir "$v41_output/pd-fixtures")
@@ -45,19 +45,29 @@ fi
     "${v41_args[@]}" --output "$v41_json"
 "$v41_python" - "$v41_json" <<'PY'
 import json
-import os
 import sys
+from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import moe_backend, moe_precision
 
 with open(sys.argv[1]) as reader:
     result = json.load(reader)
 summary = result.get("summary", result)
-precision = os.environ.get("RTP_V41_PPU_MOE_PRECISION", "w4a8").strip().lower()
+precision = moe_precision()
+backend = moe_backend()
 assert summary["ranks_reported"] == 8, summary
 assert summary["moe_precisions"] == [precision], summary
-assert summary["moe_grouped_gemm_calls"] > 0, summary
+assert summary["moe_backends"] == [backend], summary
+if backend == "megamoe":
+    assert summary["moe_mega_calls"] > 0, summary
+    assert summary["moe_mega_received_assignments"] > 0, summary
+    assert summary["moe_grouped_gemm_calls"] == 0, summary
+else:
+    assert summary["moe_grouped_gemm_calls"] > 0, summary
+    assert summary["moe_mega_calls"] == 0, summary
 if "all_ranks_ok" in summary:
     assert summary["all_ranks_ok"], summary
 else:
     assert summary["all_finite"] and summary["checks_all_pass"], summary
-print("PPU functional check:", precision, summary["moe_grouped_gemm_calls"], "grouped GEMMs")
+print("PPU functional check:", backend, precision,
+      summary["moe_grouped_gemm_calls"], "grouped GEMMs;",
+      summary["moe_mega_calls"], "MegaMoE calls")
 PY

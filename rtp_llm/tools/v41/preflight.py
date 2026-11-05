@@ -25,7 +25,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.backend import (
     check_moe_preprocess,
     kernel_symbols,
 )
-from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import moe_precision
+from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import moe_backend, moe_precision
 from rtp_llm.models_py.modules.dsv41.ppu.native_protocol import native_cache_protocol
 
 GIB = 1024**3
@@ -204,6 +204,7 @@ def collect_report(env=None, *, probe_allocations=False, require_backend=False):
         "uid": os.getuid(),
         "cache_store_mode": "rdma" if rdma_required else "tcp",
         "moe_precision": moe_precision(env),
+        "moe_backend": moe_backend(env),
         "tool_source_sha256": sha256(__file__),
         "runtime_config_source_sha256": sha256(
             Path(__file__).parents[2] / "config/v41_runtime.py"
@@ -471,6 +472,15 @@ def compare_reports(left, right):
     ]
     by_name = [{c["name"]: c for c in report["checks"]} for report in (left, right)]
     differences = []
+    if not left.get("moe_backend") or left.get("moe_backend") != right.get(
+        "moe_backend"
+    ):
+        differences.append(
+            {
+                "name": "moe_backend",
+                "reason": "selected MoE backend unavailable or different",
+            }
+        )
     if not left.get("moe_precision") or left.get("moe_precision") != right.get(
         "moe_precision"
     ):

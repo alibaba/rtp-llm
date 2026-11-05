@@ -694,7 +694,11 @@ def _run_decode(
         "scenario": args.scenario,
         "tokens": args.tokens,
         "moe_mode": (
-            "deepep-dispatch"
+            (
+                "megamoe-w4a4"
+                if ops.moe_engine.backend == "megamoe"
+                else "deepep-dispatch"
+            )
             if device.type == "cuda"
             else "local-reference-cpu-smoke (deep_ep unavailable on CPU; only "
             "this rank's expert shard computes)"
@@ -735,6 +739,7 @@ def _run_decode(
             }
         )
     dist.barrier()
+    ops.moe_engine.close()
     dist.destroy_process_group()
     return 0 if payload["ok"] else 1
 
@@ -806,6 +811,15 @@ def _aggregate(output: str, world: int) -> Dict[str, Any]:
         "ranks_reported": len(payloads),
         "moe_precisions": sorted(
             {p.get("moe", {}).get("precision", "unknown") for p in payloads}
+        ),
+        "moe_backends": sorted(
+            {p.get("moe", {}).get("backend", "unknown") for p in payloads}
+        ),
+        "moe_mega_calls": sum(
+            p.get("moe", {}).get("mega_moe_calls", 0) for p in payloads
+        ),
+        "moe_mega_received_assignments": sum(
+            p.get("moe", {}).get("mega_received_assignments", 0) for p in payloads
         ),
         "moe_grouped_gemm_calls": sum(
             p.get("moe", {}).get("grouped_gemm_calls", 0) for p in payloads
