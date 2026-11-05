@@ -841,6 +841,11 @@ bool RtpLLMCacheEvictionMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(eviction_blocks_count_metric, "rtp_llm_kv_cache_eviction_blocks_count");
     REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_lifetime_ms_metric, "rtp_llm_kv_cache_evicted_block_lifetime_ms");
     REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_idletime_ms_metric, "rtp_llm_kv_cache_evicted_block_idletime_ms");
+    REGISTER_QPS_MUTABLE_METRIC(choose_victim_qps_metric, "rtp_llm_kv_cache_choose_victim_qps");
+    REGISTER_QPS_MUTABLE_METRIC(choose_victim_latency_sum_us_metric, "rtp_llm_kv_cache_choose_victim_latency_sum_us");
+    REGISTER_QPS_MUTABLE_METRIC(choose_victim_scanned_candidates_qps_metric,
+                                "rtp_llm_kv_cache_choose_victim_scanned_candidates_qps");
+    REGISTER_QPS_MUTABLE_METRIC(choose_victim_skip_qps_metric, "rtp_llm_kv_cache_choose_victim_skip_qps");
     return true;
 }
 
@@ -877,6 +882,25 @@ void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*         tag
         evicted_block_lifetime_ms_metric->Report(&eviction_tags, collector->block_lifetime_ms);
         evicted_block_idletime_ms_metric->Report(&eviction_tags, collector->block_idletime_ms);
     }
+}
+
+void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*                tags,
+                                        RtpLLMCacheVictimSelectionMetricsCollector* collector) {
+    kmonitor::MetricsTags selection_tags = tags ? *tags : kmonitor::MetricsTags{};
+    if (collector->skip_reason != nullptr) {
+        selection_tags.AddTag("reason", collector->skip_reason);
+        choose_victim_skip_qps_metric->Report(&selection_tags, collector->skipped);
+        return;
+    }
+    choose_victim_latency_sum_us_metric->Report(&selection_tags, collector->latency_sum_us);
+    choose_victim_scanned_candidates_qps_metric->Report(&selection_tags, collector->scanned_candidates);
+    // AddTag inserts without replacing an existing key. Keep the result tag sets separate.
+    auto selected_tags = selection_tags;
+    selected_tags.AddTag("selected", "true");
+    choose_victim_qps_metric->Report(&selected_tags, collector->selected);
+    auto not_selected_tags = selection_tags;
+    not_selected_tags.AddTag("selected", "false");
+    choose_victim_qps_metric->Report(&not_selected_tags, collector->calls - collector->selected);
 }
 
 bool RtpLLMCacheInsertMetrics::init(kmonitor::MetricsGroupManager* manager) {

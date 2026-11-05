@@ -1220,10 +1220,22 @@ public:
     bool        report_eviction           = false;
 };
 
+// Interval deltas; QPS metrics receive event counts/total work, never batch means.
+class RtpLLMCacheVictimSelectionMetricsCollector final {
+public:
+    uint64_t    calls{0};
+    uint64_t    selected{0};
+    double      latency_sum_us{0};
+    uint64_t    scanned_candidates{0};
+    const char* skip_reason{nullptr};
+    uint64_t    skipped{0};
+};
+
 class RtpLLMCacheEvictionMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheEvictionMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheVictimSelectionMetricsCollector* collector);
 
 public:
     kmonitor::MutableMetric* evictable_candidate_count_metric = nullptr;
@@ -1231,6 +1243,11 @@ public:
     kmonitor::MutableMetric* eviction_blocks_count_metric     = nullptr;
     kmonitor::MutableMetric* evicted_block_lifetime_ms_metric = nullptr;
     kmonitor::MutableMetric* evicted_block_idletime_ms_metric = nullptr;
+
+    kmonitor::MutableMetric* choose_victim_qps_metric                    = nullptr;
+    kmonitor::MutableMetric* choose_victim_latency_sum_us_metric         = nullptr;
+    kmonitor::MutableMetric* choose_victim_scanned_candidates_qps_metric = nullptr;
+    kmonitor::MutableMetric* choose_victim_skip_qps_metric               = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
