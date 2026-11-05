@@ -9,11 +9,7 @@
 #include <numeric>
 #include <vector>
 
-// Pure-CPU unit tests for the shared sampling-temperature policy
-// (SampleTemperature.h). No CUDA, no torch: the header is portable and is the
-// single source of truth for both the CUDA greedy sampler (CudaSampleOp.cc) and
-// the upstream "the sampler will not temper logits in place this round"
-// decisions.
+// CPU coverage for the sampler's temperature-folding policy.
 namespace rtp_llm {
 namespace {
 

@@ -21,41 +21,27 @@ void get_sampling_seed_offsets(const std::vector<at::Generator>& generators,
                                int64_t*                          seeds,
                                int64_t*                          offsets);
 
-// Fused softmax + top-p (nucleus) + CDF sampling, one kernel, parameterised so the
-// same implementation serves the DSpARK draft path and the compact target path.
-// Pinned to width 1024 (one block per row: 256 threads x 4 candidates).
-//   scaled_logits: [rows, 1024] FP32 (temperature-scaled below, see logit_scale).
-//   q_out:         [rows, 1024] FP32, top-p renormalised distribution, zero outside
-//                  the nucleus (identical support to TopPRenormProb).
-//   token_out:     [rows] int32 sampled candidate index; success_out [rows] bool
-//                  optional (reports whether a token was actually drawn).
-//   logit_scale:   per-row [rows] FP32 or scalar; probs = softmax(logits * scale).
-//   top_p:         per-row [rows] FP32 or scalar.
-//   seed/offset:   CUDA int64, [rows] when per_row_seeds (flashinfer array
-//                  semantics: philox subsequence 0, like sampleGreedy's target
-//                  path) or [1] when not (one range per launch, subsequence = row,
-//                  like the draft path).
-void dspark_fused_draft_sample(torch::Tensor                scaled_logits,
-                               torch::Tensor                q_out,
-                               torch::Tensor                token_out,
-                               std::optional<torch::Tensor> maybe_top_p_arr,
-                               double                       top_p_val,
-                               std::optional<torch::Tensor> maybe_logit_scale,
-                               double                       logit_scale_val,
-                               const torch::Tensor&         seed,
-                               const torch::Tensor&         offset,
-                               std::optional<torch::Tensor> maybe_success_out,
-                               bool                         per_row_seeds,
-                               int64_t                      cuda_stream);
-
-void sampling_from_probs_device_scalar_seed(torch::Tensor                probs,
-                                            torch::Tensor                output,
-                                            torch::Tensor                valid,
-                                            std::optional<torch::Tensor> maybe_indices,
-                                            bool                         deterministic,
-                                            const torch::Tensor&         seed_scalar,
-                                            const torch::Tensor&         offset_scalar,
-                                            int64_t                      cuda_stream);
+// Fused softmax + top-p filtering + sampling for target and draft.
+// Inputs/outputs are contiguous on the same CUDA device: FP32 logits/probs
+// [rows, 1024], int32 sampled candidate IDs [rows], optional bool success [rows].
+// top_p and logit_scale are FP32 [rows] arrays or scalars.
+// RNG follows sampling_from_probs: int64 [rows] arrays use subsequence 0;
+// scalar seed/offset values use subsequence=row. Output probabilities describe
+// the actual sampling distribution, including top-p filtering. Softmax reduction
+// order can change support at a floating-point top-p boundary relative to ATen.
+void fused_softmax_top_p_sampling(torch::Tensor                scaled_logits,
+                                  torch::Tensor                q_out,
+                                  torch::Tensor                token_out,
+                                  std::optional<torch::Tensor> maybe_top_p_arr,
+                                  double                       top_p_val,
+                                  std::optional<torch::Tensor> maybe_logit_scale,
+                                  double                       logit_scale_val,
+                                  std::optional<torch::Tensor> maybe_seed_arr,
+                                  uint64_t                     seed_val,
+                                  std::optional<torch::Tensor> maybe_offset_arr,
+                                  uint64_t                     offset_val,
+                                  std::optional<torch::Tensor> maybe_success_out,
+                                  int64_t                      cuda_stream);
 
 void sampling_from_probs(torch::Tensor                probs,
                          torch::Tensor                output,

@@ -782,17 +782,6 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
         auto top_p        = torch::full({batch}, kTopP, fp32);
         auto logits       = torch::randn({batch * kGamma, kVocab}, fp32);
 
-        // Capture the stochastic draft graph for this batch, exactly as
-        // MtpExecutor does at engine start: the served path replays one graph
-        // instead of submitting ~25 kernels per step, and the fixture's stable
-        // logits pointer + markov weights satisfy the replay gate. Without this
-        // the bench would keep timing the eager fallback.
-        sampler.prepareDSparkDraftGraphs(logits,
-                                         markov_w1,
-                                         markov_w2,
-                                         static_cast<size_t>(kVocab),
-                                         {static_cast<int>(batch)});
-
         auto run = [&]() {
             sampler.sampleDSparkDraft(logits,
                                       anchors,
@@ -1210,15 +1199,9 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
                    << ",\"width\":" << rejection_fixture.width << ",\"overlap_ids\":" << rejection_fixture.overlap_ids
                    << ",\"draft_only_ids\":" << (rejection_fixture.width - rejection_fixture.overlap_ids)
                    << ",\"target_only_ids\":" << (rejection_fixture.width - rejection_fixture.overlap_ids)
-                   << ",\"substituted_draft_tokens\":"
-                   << rejection_fixture.substituted_draft_tokens
-                   // remap_draft_topk uses linear-probing over 2W slots with W
-                   // entries, so the load factor is 0.5 and full-vocabulary ids
-                   // make hits and misses both cost several probes. The previous
-                   // contiguous-id fixture never collided (probe == 1).
-                   << ",\"hash_table_load\":0.5"
-                   << ",\"probe_expected\":\"full-vocab random ids (table load 0.5, hits+misses ~1.5-2.5 "
-                      "probes, not 1)\""
+                   << ",\"substituted_draft_tokens\":" << rejection_fixture.substituted_draft_tokens
+                   << ",\"hash_table_policy\":\"quarter-load; half-load when 64KiB opt-in is unavailable\""
+                   << ",\"probe_fixture\":\"full-vocabulary random IDs with hits and misses\""
                    << ",\"sampled_draft_tokens_in_target\":true}"
                    << "}";
 

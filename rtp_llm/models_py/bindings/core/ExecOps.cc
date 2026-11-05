@@ -42,9 +42,6 @@ using DeviceGuard = c10::hip::HIPGuardMasqueradingAsCUDA;
 namespace rtp_llm {
 GreedyOutput     sampleGreedy(const GreedyParams& params);
 torch::Tensor    sampleFromProbs(const torch::Tensor& probabilities);
-torch::Tensor    sampleFromProbsDeviceScalarSeed(const torch::Tensor& probabilities,
-                                                 const torch::Tensor& seed_scalar,
-                                                 const torch::Tensor& offset_scalar);
 BeamSearchOutput sampleBeamSearch(BeamSearchParams params);
 void             rejectionSampling(const RejectionSamplingParams& params);
 bool             rejectionSamplingSupportsFinalize();
@@ -637,18 +634,22 @@ void execMultiMergeCopy(const MultiMergeCopyParams& params) {
 // === Sample ops ===
 
 GreedyOutput execSampleGreedy(const GreedyParams& params) {
-    return sampleGreedy(params);
+    if (params.logits.is_contiguous()) {
+        return sampleGreedy(params);
+    }
+    // Cropping padded vocabulary can leave strided rows. Penalty kernels
+    // consume dense rows, so normalize layout at the sampling boundary.
+    auto contiguous_params   = params;
+    contiguous_params.logits = params.logits.contiguous();
+    auto output              = sampleGreedy(contiguous_params);
+    if (!params.skip_logits_probs_restore) {
+        params.logits.copy_(contiguous_params.logits);
+    }
+    return output;
 }
 
 torch::Tensor execSampleFromProbs(const torch::Tensor& probabilities) {
     return sampleFromProbs(probabilities);
-}
-
-torch::Tensor
-execSampleFromProbsDeviceScalarSeed(const torch::Tensor& probabilities,
-                                    const torch::Tensor& seed_scalar,
-                                    const torch::Tensor& offset_scalar) {
-    return sampleFromProbsDeviceScalarSeed(probabilities, seed_scalar, offset_scalar);
 }
 
 BeamSearchOutput execSampleBeamSearch(BeamSearchParams params) {

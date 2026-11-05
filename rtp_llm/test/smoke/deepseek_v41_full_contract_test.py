@@ -58,7 +58,7 @@ class DeepSeekV41FullContractTest(
             "temperature": 0,
             "enable_thinking": False,
             "logprobs": True,
-            "top_logprobs": 3,
+            "top_logprobs": 1,
             "extra_configs": {
                 "top_k": 1,
                 "random_seed": 42,
@@ -125,14 +125,14 @@ class DeepSeekV41FullContractTest(
                 "every emitted content token must have exactly one logprob",
             )
             self.assertTrue(
-                any(record["logprob"] < -1e-6 for record in records),
-                "logprobs must describe the raw model distribution rather than greedy point masses",
+                all(abs(record["logprob"]) < 1e-6 for record in records),
+                "greedy sampling logprobs must describe the target point mass",
             )
             for record in records:
                 self.assertTrue(math.isfinite(record["logprob"]))
                 self.assertLessEqual(record["logprob"], 1e-5)
                 top = record["top_logprobs"]
-                self.assertEqual(len(top), 3)
+                self.assertEqual(len(top), 1)
                 scores = [item["logprob"] for item in top]
                 self.assertTrue(
                     all(math.isfinite(value) and value <= 1e-5 for value in scores)

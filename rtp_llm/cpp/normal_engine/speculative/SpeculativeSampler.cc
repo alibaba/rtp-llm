@@ -28,39 +28,12 @@
 namespace rtp_llm {
 namespace speculative {
 
-// Shared DSpARK candidate width. This is the **target** cap: truncating the
-// target distribution changes what the model emits, and the served dsv4.1 model
-// measures the ranks-1025..4096 mass at up to 8.7e-2 for T=1.0 / high top_p
-// requests, so the target keeps the wide support.
-//
-// The DRAFT is capped separately and more aggressively (1024, see
-// MtpExecutor::sampleDSparkDraft): speculative rejection sampling is exact for
-// any proposal distribution q as long as the residual is computed from the
-// target p, so a narrower q only costs acceptance rate, never distribution
-// fidelity. DeepSelect instantiates exactly {512, 1024, 4096}; any other width
-// falls back to ATen topk.
-// Draft candidate cap. The target keeps the shared DSpARK cap (dsparkForceTopK):
-// truncating the target changes the emitted distribution, truncating the proposal
-// does not (rejection is exact for any q). Mirrors MtpExecutor::sampleDSparkDraft.
-constexpr int kDraftCandidateCap = 1024;
-
+// Fixed-width truncation changes target support; zero disables it.
 int dsparkForceTopK() {
     const char* value = std::getenv("RTP_LLM_DSPARK_FORCE_TOPK");
     if (value == nullptr) {
-        // DSpARK candidate cap for BOTH the target verify selection and the draft
-        // proposals. 1024 matches the width DeepInfer's benchmark/perf-test
-        // harness passes (--sampler_force_topk 1024); note their engine default is
-        // 0, i.e. "no cap", and their own test_kl.py warns that any non-zero cap
-        // makes full-vocabulary KL diverge, so 1024 is a deliberate truncation on
-        // both sides rather than a free win.
-        //
-        // Truncation cost measured on the served DeepSeek-V4.1 engine: the mass
-        // that ranks 1025..4096 carry inside the 4096-candidate set has a median
-        // of 1.5e-5 but reaches 8.7e-2 on high-temperature / high-top_p requests,
-        // which is why the target shares this cap only by explicit choice: the
-        // sampler then samples from p over 1024 candidates instead of 4096.
-        // DeepSelect instantiates exactly {512, 1024, 4096}; any other width falls
-        // back to ATen topk.
+        // Match the reference performance configuration. Use 4096 for the
+        // previous target cap, or zero for full-vocabulary sampling.
         return 1024;
     }
     char* end = nullptr;
@@ -99,12 +72,6 @@ struct DSparkSamplingGraphs {
         at::cuda::CUDAGraph graph;
         torch::Tensor       anchors;
         torch::Tensor       temperatures;
-        // Stochastic variant only: refreshable per-round inputs. `seeds`/`offsets`
-        // are [propose_step] device scalars; the captured sampling kernels read
-        // slot `step`, so replaying after an H2D refresh uses this round's RNG.
-        torch::Tensor top_p;
-        torch::Tensor seeds;
-        torch::Tensor offsets;
         SamplerOutput output;
     };
     torch::Tensor          logits, w1, w2, map;
@@ -114,13 +81,6 @@ struct DSparkSamplingGraphs {
     c10::cuda::CUDAStream  replay_stream  = at::cuda::getCurrentCUDAStream();
     c10::cuda::MempoolId_t pool           = at::cuda::graph_pool_handle();
     std::unordered_map<int64_t, std::unique_ptr<Entry>> entries;
-    // Stochastic (top_p<1) draft graphs live in their own memory pool: they are
-    // captured with different allocations than the greedy variant, and sharing a
-    // pool would make the two graphs alias each other's scratch.
-    c10::cuda::MempoolId_t                              stochastic_pool = at::cuda::graph_pool_handle();
-    std::unordered_map<int64_t, std::unique_ptr<Entry>> stochastic_entries;
-    int                                                 stochastic_width = 0;
-
     ~DSparkSamplingGraphs() {
         try {
             const c10::cuda::CUDAGuard guard(logits.device());
@@ -441,62 +401,6 @@ void SpeculativeSampler::prepareDSparkDraftGraphs(const torch::Tensor&    logits
         graphs->entries.emplace(batch, std::move(entry));
     }
 
-    // Stochastic variant: top_p defined, top_k absent, the production draft shape.
-    // Same batch sizes, its own pool, and the sampling kernels read the refreshed
-    // device scalar seeds instead of the host generator.
-    const int stochastic_width = std::min(kDraftCandidateCap, dsparkForceTopK());
-    if (stochastic_width > 0 && static_cast<int64_t>(stochastic_width) < static_cast<int64_t>(draft_vocab_size)
-        && torch_ext::deepselect_fp32_candidate_width_supported(stochastic_width)) {
-        const auto long_options = torch::TensorOptions().dtype(torch::kInt64).device(logits_buffer.device());
-        for (int batch : sizes) {
-            if (batch <= 0 || static_cast<int64_t>(batch) * propose_step_ > logits_buffer.size(0))
-                continue;
-            auto entry          = std::make_unique<DSparkSamplingGraphs::Entry>();
-            entry->anchors      = torch::zeros({batch}, logits_buffer.options().dtype(torch::kInt32));
-            entry->temperatures = torch::full({batch}, 1.0f, logits_buffer.options());
-            entry->top_p        = torch::full({batch}, 0.95f, logits_buffer.options());
-            entry->seeds        = torch::zeros({static_cast<int64_t>(propose_step_)}, long_options);
-            entry->offsets      = torch::zeros({static_cast<int64_t>(propose_step_)}, long_options);
-            auto input          = logits_buffer.narrow(0, 0, batch * propose_step_);
-            auto run            = [&]() {
-                return sampleDSparkDraftEager(input,
-                                              entry->anchors,
-                                              entry->temperatures,
-                                                         {},
-                                              entry->top_p,
-                                              markov_w1,
-                                              markov_w2,
-                                              draft_vocab_size,
-                                              /*batch_all_greedy=*/false,
-                                              stochastic_width,
-                                              /*joint_max_top_k=*/0,
-                                              entry->seeds,
-                                              entry->offsets);
-            };
-            try {
-                run();
-                run();
-                graphs->capture_stream.synchronize();
-                entry->graph.capture_begin(graphs->stochastic_pool);
-                entry->output = run();
-                entry->graph.capture_end();
-                entry->graph.replay();
-                graphs->capture_stream.synchronize();
-            } catch (const std::exception& error) {
-                // Capture is a capability, not a requirement: any op that cannot be
-                // captured (or a pool exhaustion) degrades this variant to eager.
-                RTP_LLM_LOG_WARNING(
-                    "DSpARK stochastic draft graph capture failed for batch %d: %s", batch, error.what());
-                graphs->stochastic_entries.clear();
-                graphs->stochastic_width = 0;
-                break;
-            }
-            graphs->stochastic_entries.emplace(batch, std::move(entry));
-        }
-        if (!graphs->stochastic_entries.empty()) {
-            graphs->stochastic_width = stochastic_width;
-        }
-    }
 #endif
 }
 
@@ -756,59 +660,6 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
             }
             return finish(std::move(output));
         }
-    } else if (graphs && draft_vocab_size == graphs->vocab && base_logits.defined()
-               && base_logits.device() == graphs->logits.device() && base_logits.scalar_type() == torch::kFloat32
-               && base_logits.dim() == 2 && base_logits.is_contiguous() && base_logits.data_ptr() == graphs->logits_ptr
-               && base_logits.size(1) == graphs->logits.size(1) && temperature.is_cuda()
-               && temperature.scalar_type() == torch::kFloat32 && temperature.dim() == 1 && temperature.is_contiguous()
-               && anchors.is_cuda() && anchors.scalar_type() == torch::kInt32 && anchors.is_contiguous()
-               && anchors.numel() == temperature.numel() && anchors.device() == base_logits.device()
-               && temperature.device() == base_logits.device()
-               && base_logits.size(0) == temperature.numel() * static_cast<int64_t>(propose_step_)
-               && sameGraphTensor(markov_w1, graphs->w1, graphs->w1_ptr)
-               && sameGraphTensor(markov_w2, graphs->w2, graphs->w2_ptr)
-               && sameGraphTensor(d2t_map_, graphs->map, graphs->map_ptr)
-               // Stochastic draft shape the captured graph was built for: pure top_p,
-               // no explicit top-k, no joint path, no confidence head, and the same
-               // candidate width.
-               && !top_k.defined() && top_p.defined() && joint_max_top_k == 0 && !compute_confidence
-               && force_topk == graphs->stochastic_width && top_p.is_cuda() && top_p.scalar_type() == torch::kFloat32
-               && top_p.is_contiguous() && top_p.device() == base_logits.device()
-               && top_p.numel() == temperature.numel()) {
-        const auto stochastic = graphs->stochastic_entries.find(temperature.numel());
-        if (stochastic != graphs->stochastic_entries.end()) {
-            const c10::cuda::CUDAGuard guard(base_logits.device());
-            const auto                 stream = at::cuda::getCurrentCUDAStream();
-            if (stream != graphs->replay_stream)
-                graphs->replay_stream.synchronize();
-            graphs->replay_stream = stream;
-            auto& entry           = *stochastic->second;
-            // Host RNG outside the graph, consuming the generator exactly like the
-            // eager path (one get_seed_and_offset(4) per Markov step, same order).
-            auto seeds_host   = torch::empty({static_cast<int64_t>(propose_step_)},
-                                           torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
-            auto offsets_host = torch::empty_like(seeds_host);
-            for (size_t step = 0; step < propose_step_; ++step) {
-                const auto [step_seed, step_offset]      = get_seed_and_offset(/*increment_size=*/4);
-                seeds_host[static_cast<int64_t>(step)]   = static_cast<int64_t>(step_seed);
-                offsets_host[static_cast<int64_t>(step)] = static_cast<int64_t>(step_offset);
-            }
-            buffer_holder_.hold_host(seeds_host);
-            buffer_holder_.hold_host(offsets_host);
-            entry.seeds.copy_(seeds_host, /*non_blocking=*/true);
-            entry.offsets.copy_(offsets_host, /*non_blocking=*/true);
-            FusedD2DCopyParams copies;
-            copies.add(anchors.data_ptr(), entry.anchors.data_ptr(), anchors.nbytes());
-            copies.add(temperature.data_ptr(), entry.temperatures.data_ptr(), temperature.nbytes());
-            copies.add(top_p.data_ptr(), entry.top_p.data_ptr(), top_p.nbytes());
-            fusedCopy(copies);
-            entry.graph.replay();
-            auto output = entry.output;
-            if (copy_token_ids) {
-                output.token_ids = output.token_ids.clone();
-            }
-            return finish(std::move(output));
-        }
     }
 #endif
     return finish(sampleDSparkDraftEager(base_logits,
@@ -834,9 +685,7 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
                                                          size_t               draft_vocab_size,
                                                          bool                 batch_all_greedy,
                                                          int                  force_topk,
-                                                         int                  joint_max_top_k,
-                                                         const torch::Tensor& step_seeds,
-                                                         const torch::Tensor& step_offsets) const {
+                                                         int                  joint_max_top_k) const {
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.sample_dspark_draft");
     RTP_LLM_CHECK_WITH_INFO(temperature.defined() && temperature.is_cuda() && temperature.is_contiguous()
                                 && temperature.scalar_type() == torch::kFloat32 && temperature.dim() == 1,
@@ -1027,19 +876,8 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
             }
             if (fuse_draft_sampling) {
 #if USING_CUDA
-                torch::Tensor seed_scalar, offset_scalar;
-                if (step_seeds.defined()) {
-                    seed_scalar   = step_seeds.narrow(0, static_cast<int64_t>(step), 1);
-                    offset_scalar = step_offsets.narrow(0, static_cast<int64_t>(step), 1);
-                } else {
-                    // Same host generator, same increment and same order as the
-                    // unfused path, so the RNG stream is unchanged.
-                    const auto [step_seed, step_offset] = get_seed_and_offset(/*increment_size=*/4);
-                    const auto long_options = torch::TensorOptions().dtype(torch::kInt64).device(base_logits.device());
-                    seed_scalar             = torch::full({1}, static_cast<int64_t>(step_seed), long_options);
-                    offset_scalar           = torch::full({1}, static_cast<int64_t>(step_offset), long_options);
-                }
-                dspark_fused_draft_sample(
+                const auto [step_seed, step_offset] = get_seed_and_offset(/*increment_size=*/4);
+                fused_softmax_top_p_sampling(
                     draft_q,
                     filtered_probabilities,
                     fused_tokens,
@@ -1047,10 +885,11 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
                     /*top_p_val=*/-1.0,
                     /*maybe_logit_scale=*/std::nullopt,
                     /*logit_scale_val=*/1.0f,
-                    seed_scalar,
-                    offset_scalar,
+                    std::nullopt,
+                    step_seed,
+                    std::nullopt,
+                    step_offset,
                     /*maybe_success_out=*/std::nullopt,
-                    /*per_row_seeds=*/false,
                     static_cast<int64_t>(reinterpret_cast<uintptr_t>(at::cuda::getCurrentCUDAStream().stream())));
                 draft_q              = filtered_probabilities;
                 sampled_draft_tokens = fused_tokens;
@@ -1092,18 +931,7 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
 #endif
                     draft_q = filtered_probabilities;
                 }
-                // Graph-captured runs take the seed/offset from a device scalar buffer
-                // (refreshed before each replay); the eager path keeps the host
-                // generator. Both consume the RNG identically, and the device-scalar
-                // kernel is a verbatim copy of the scalar-seed sampling kernel, so the
-                // sampled token is bit-identical.
-                sampled_draft_tokens =
-                    step_seeds.defined() ?
-                        execSampleFromProbsDeviceScalarSeed(draft_q,
-                                                            step_seeds.narrow(0, static_cast<int64_t>(step), 1),
-                                                            step_offsets.narrow(0, static_cast<int64_t>(step), 1))
-                            .to(torch::kInt32) :
-                        execSampleFromProbs(draft_q).to(torch::kInt32);
+                sampled_draft_tokens = execSampleFromProbs(draft_q).to(torch::kInt32);
             }
 #if USING_CUDA
             if (fused_sampled_output) {

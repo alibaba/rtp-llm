@@ -664,7 +664,7 @@ size_t remapTableSharedMemoryLimit() {
     constexpr size_t kWantedLimit  = 64 * 1024;
     constexpr int    kMaxDevices   = 16;
 
-    static size_t cached[kMaxDevices];  // zero == not probed yet
+    static thread_local size_t cached[kMaxDevices];  // zero == not probed yet
 
     int device = 0;
     if (cudaGetDevice(&device) != cudaSuccess || device < 0 || device >= kMaxDevices) {
@@ -710,8 +710,7 @@ cudaError_t invokeRemapDraftTopk(const int32_t* draft_candidate_ids,
     }
     // The hash table holds the *draft* candidates (the target ids are only looked
     // up in it), so it is sized from the draft width. With a mixed-width batch the
-    // draft width is the smaller one, which keeps the table at 2x the insertion
-    // count (load factor 0.5) and shrinks the shared-memory footprint.
+    // draft width is the smaller one, which keeps the shared-memory footprint proportional to draft support.
     const int table_width = draft_candidate_ids ? draft_compact_width : compact_width;
     int       half_table  = 1;
     while (half_table < 2 * table_width) {
@@ -725,7 +724,9 @@ cudaError_t invokeRemapDraftTopk(const int32_t* draft_candidate_ids,
     int table_size = half_table;
     if (draft_candidate_ids) {
         const int quarter_table = half_table * 2;
-        if (static_cast<size_t>(quarter_table) * sizeof(int) <= remapTableSharedMemoryLimit()) {
+        const size_t bytes         = static_cast<size_t>(quarter_table) * sizeof(int);
+        // K<=2048 needs no opt-in or device query; only K4096 may exceed 48 KiB.
+        if (bytes <= 48 * 1024 || bytes <= remapTableSharedMemoryLimit()) {
             table_size = quarter_table;
         }
     }

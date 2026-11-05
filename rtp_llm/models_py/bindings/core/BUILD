@@ -64,10 +64,7 @@ cc_library(
     name = "common_defines",
     hdrs = [
         "CommonDefines.h",
-        # Header-only sampling-temperature policy: the single source of truth
-        # for the "this round folds the temperature into the force_topk
-        # candidates" decision, shared by the CUDA greedy sampler and the
-        # upstream logits-ownership decision. Pure std, no utils dependency.
+        # Header-only policy used by the CUDA sampler and its CPU tests.
         "SampleTemperature.h",
     ],
     copts = copts(),

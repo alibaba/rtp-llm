@@ -130,12 +130,7 @@ RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSam
         if (params.draft_probs_indices_d.defined()) {
             checkRejectionSamplingTensor(params.draft_probs_indices_d, "draft_probs_indices_d", torch::kInt32, 3);
             checkSameDevice(params.draft_probs_indices_d, "draft_probs_indices_d", device);
-            // The draft may run a NARROWER candidate cap than the target: truncating
-            // the proposal q keeps rejection sampling exact (a target candidate
-            // outside q gets q = 0 and is recovered by the residual / bonus draw),
-            // while truncating the target p would change the emitted distribution.
-            // So the two widths are validated independently: only self-consistency
-            // and the remap hash-table bound (draft width <= 4096) are required.
+            // Draft and target may have different candidate widths; missing draft IDs have q=0.
             RTP_LLM_CHECK_WITH_INFO(params.draft_probs_indices_d.sizes() == params.draft_probs_d.sizes(),
                                     "draft candidate IDs must match compact draft probabilities");
             RTP_LLM_CHECK_WITH_INFO(params.draft_probs_d.size(2) >= 1 && params.draft_probs_d.size(2) <= 4096,
@@ -412,18 +407,10 @@ void fusedGreedyTop1Renorm(const torch::Tensor& logits,
                                             samples.stride(samples.dim() - 1)));
 }
 
-// Fixed candidate width of the DSpARK target-sampling path
-// (GreedyParams::force_topk). Moved verbatim out of flashinferSampleGreedy so
-// sampleGreedy can pose the same question *before* processLogits: the
-// full-vocabulary temperature pass may be skipped exactly when the force_topk
-// branch below will consume the temperature itself. Every gate returns 0
-// unless that branch runs and no other consumer needs the full-width
-// probability row, so the caller's decision and the branch's decision can only
-// agree (see greedyTemperatureInSelect).
-int64_t greedyForceTopk(const GreedyParams& params, int64_t batch_size, bool fused_greedy_top1) {
-    if (params.force_topk <= 0 || fused_greedy_top1 || !params.skip_logits_probs_restore
-        || params.return_original_all_probs || params.cum_log_probs.has_value()
-        || !params.output_all_probs.has_value()) {
+// Resolve the candidate width once, before processing logits.
+int64_t greedyForceTopk(const GreedyParams& params, int64_t batch_size) {
+    if (params.force_topk <= 0 || !params.skip_logits_probs_restore || params.return_original_all_probs
+        || params.cum_log_probs.has_value() || !params.output_all_probs.has_value()) {
         return 0;
     }
     const bool compact_output = params.output_all_probs_indices.has_value();
@@ -470,19 +457,10 @@ bool logitsPenaltyActive(const GreedyParams& params, int64_t batch_size) {
     return std::any_of(sizes, sizes + decoder_batch_size, [](int32_t s) { return s != 0; });
 }
 
-// Sampler-side query: will this round apply the temperature to the force_topk
-// candidates instead of the full [batch, vocab] logits row? The shared rules
-// (temperature rules + output contract + penalty ordering) live in
-// SampleTemperature.h so upstream callers reach the same answer; this wrapper
-// only contributes the sampler-specific facts (the effective force_topk width
-// and whether a logits penalty is active). See greedyTemperatureFoldedForRequest
-// for the monotonicity argument and the full list of disqualifiers.
-//
-// There is no environment switch: every condition feeding this decision is what
-// makes the fold numerically correct, and a round that fails any of them simply
-// keeps the full-vocabulary pass in processLogits.
-bool greedyTemperatureInSelect(const GreedyParams& params, int64_t batch_size, bool has_do_sample_false_row) {
-    const int64_t force_topk = greedyForceTopk(params, batch_size, /*fused_greedy_top1=*/false);
+bool greedyTemperatureInSelect(const GreedyParams& params,
+                               int64_t             batch_size,
+                               bool                has_do_sample_false_row,
+                               int64_t             force_topk) {
     return greedyTemperatureFoldedForRequest(batch_size,
                                              params.temperature.data_ptr<float>(),
                                              static_cast<int>(force_topk),
@@ -516,8 +494,10 @@ torch::Tensor greedyTemperatureScale(const GreedyParams& params, int64_t batch_s
 
 }  // anonymous namespace
 
-static GreedyOutput
-flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transposed_tokens, bool temperature_folded) {
+static GreedyOutput flashinferSampleGreedy(const GreedyParams&  params,
+                                           const torch::Tensor& transposed_tokens,
+                                           bool                 temperature_folded,
+                                           int64_t              force_topk) {
     const auto batch_size = params.logits.size(0);
     auto       cur_stream = at::cuda::getCurrentCUDAStream().stream();
 
@@ -571,14 +551,7 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
     // The fused greedy top-1 path skips both: its caller declared the logits
     // buffer private (skip_logits_probs_restore) and the one-hot(argmax)
     // output does not depend on softmax values.
-    const auto force_topk = greedyForceTopk(params, batch_size, fused_greedy_top1);
-    // sampleGreedy folded the temperature into the candidate scaling below
-    // instead of tempering the whole [batch, vocab] row (see
-    // greedyTemperatureInSelect). force_topk == 0 here contradicts that
-    // decision only if greedyForceTopk's gates ever drift; the fallback branch
-    // then pays for the full-row temperature pass so correctness never depends
-    // on the proof.
-    const bool    scale_temperature = temperature_folded && force_topk > 0;
+    const bool scale_temperature = temperature_folded;
     // Host-side mode predicates, evaluated before the candidate softmax so the fused
     // path below can skip it entirely (they only read the CPU top_k/top_p arrays).
     const int32_t* top_k_host = params.top_k.data_ptr<int32_t>();
@@ -591,21 +564,10 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
         return std::abs(p - 1.0f) < 1e-7f;
     });
     // Fused softmax + top-p + sampling for the compact target path. This is the same
-    // kernel the DSpARK draft uses (see dspark_fused_draft_sample), so the target and
+    // kernel the DSpARK draft uses (see fused_softmax_top_p_sampling), so the target and
     // the draft share one implementation. Capability gate only -- every other shape
     // (explicit top-k, unrestricted top_p, force masks, point mass, any candidate
     // width other than 1024) keeps the three reference kernels.
-    // TODO(dspark): re-enable once the target instantiation stops hanging. The
-    // kernel is parameterised and unit-tested for this shape (see
-    // DSparkFusedDraftSampleTest and the ProbeTarget* cases in
-    // SpeculativeSamplerTest.cc), but SEED_PER_ROW=true + per-row logit scale + a
-    // non-null success_out + 256 rows hangs, and the failure is not yet diagnosed
-    // (the top-p ternary search provably converges in <=20 rounds, no barrier sits
-    // in a divergent branch, and every access is in range). The DSpARK draft path
-    // uses the same kernel and is enabled.
-    // Verified against the softmax -> top_p_renorm -> sampling_from_probs chain:
-    // matched supports agree to 1e-6 and the only permitted divergence is a top-p
-    // boundary tie (nucleus mass within 1e-4 of top_p, at most one candidate).
     constexpr bool kEnableFusedTargetSampling = true;
     const bool     fuse_target_sampling       = kEnableFusedTargetSampling && !fused_greedy_top1
                                           && force_topk == 1024 && batch_top_k_unlimited && !batch_top_p_unrestricted
@@ -625,28 +587,14 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
                 auto selected = torch_ext::deepselect_fp32_topk(params.logits, force_topk);
                 topk_indices  = std::get<1>(selected);
                 fused_candidates = fuse_target_sampling ? std::get<0>(selected) : torch::Tensor();
-                // Monotonicity argument: for T > 0 the scale is positive, so
-                // x -> x * inv(T) preserves the ordering and the selected
-                // indices are exactly the ones the legacy tempered-logits pass
-                // selected; only the values need the temperature before their
-                // softmax. inv(T) is the kernel's own 1/(T + 1e-6), so the
-                // scaled candidates are the tempered values bit-for-bit.
-                // The fused kernel performs the softmax itself (with the folded
-                // temperature applied to the candidates first).
+                // Scale only selected values; FP rounding may change near-ties.
                 probs_t = fuse_target_sampling ?
                               torch::Tensor() :
                               (scale_temperature ?
                                    torch::softmax(std::get<0>(selected) * greedyTemperatureScale(params, batch_size), -1) :
                                    torch::softmax(std::get<0>(selected), -1));
             } else {
-                // temperature_folded with force_topk == 0 is unreachable while
-                // greedyForceTopk's gates stay as they are (a folded decision
-                // requires a non-fused force_topk result), but degrade to a
-                // correct full-row pass instead of silently dropping the
-                // temperature if they ever diverge.
-                probs_t = temperature_folded ?
-                              torch::softmax(params.logits * greedyTemperatureScale(params, batch_size), -1) :
-                              torch::softmax(params.logits, -1);
+                probs_t = torch::softmax(params.logits, -1);
                 params.logits.copy_(probs_t, true);
             }
         }
@@ -680,13 +628,18 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
         need_full_sampling_probs ? torch::zeros_like(params.logits) :
                                    output_all_probs_t;
 
+    if (params.return_sampling_probs && (!sampling_probs_t.defined() || params.return_original_all_probs)) {
+        sampling_probs_t = torch::empty_like(params.logits);
+    }
+
     // top_k/top_p are CPU tensors with int32/float32 dtype
     auto top_k_ptr = top_k_t.data_ptr<int32_t>();
     auto top_p_ptr = params.top_p.data_ptr<float>();
 
     std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t; });
 
-    const bool need_renorm_probs  = sampling_probs_t.defined() && !params.return_original_all_probs;
+    const bool need_renorm_probs =
+        sampling_probs_t.defined() && (!params.return_original_all_probs || params.return_sampling_probs);
     const bool all_top_k_one      = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t == 1; });
     const bool all_top_k_no_limit = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t <= 0; });
     const bool all_top_p_one =
@@ -726,7 +679,7 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
             // strictly monotonic); k=1 renorm == one-hot at that argmax.
             // sampling_probs_t is the full-width all_probs output here (the
             // gate rejected narrower widths and cum_log_probs consumers).
-            all_probs_point_mass = params.all_probs_point_mass;
+            all_probs_point_mass = params.all_probs_point_mass && !params.return_sampling_probs;
             const auto samples_out =
                 transposed_tokens.defined() ? samples_t : params.token_ids.select(1, params.token_ids.size(1) - 1);
             fusedGreedyTop1Renorm(params.logits, sampling_probs_t, samples_out, /*write_onehot=*/!all_probs_point_mass);
@@ -762,19 +715,20 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
                                     "[rows] tokens/success and per-row seed/offset tensors");
             auto logit_scale = scale_temperature ? greedyTemperatureScale(params, batch_size).reshape({batch_size}) :
                                                    torch::Tensor();
-            rtp_llm::dspark_fused_draft_sample(fused_candidates,
-                                                 sampling_probs_t,
-                                                 samples_t.squeeze(0),
-                                                 top_p_t,
-                                                 /*top_p_val=*/1.0,
-                                                 logit_scale.defined() ? std::optional<torch::Tensor>(logit_scale) :
-                                                                         std::nullopt,
-                                                 /*logit_scale_val=*/1.0f,
-                                                 seed_t,
-                                                 offset_t,
-                                                 success_t,
-                                                 /*per_row_seeds=*/true,
-                                                 (int64_t)cur_stream);
+            rtp_llm::fused_softmax_top_p_sampling(fused_candidates,
+                                                  sampling_probs_t,
+                                                  samples_t.squeeze(0),
+                                                  top_p_t,
+                                                  /*top_p_val=*/1.0,
+                                                  logit_scale.defined() ? std::optional<torch::Tensor>(logit_scale) :
+                                                                          std::nullopt,
+                                                  /*logit_scale_val=*/1.0f,
+                                                  seed_t,
+                                                  0,
+                                                  offset_t,
+                                                  0,
+                                                  success_t,
+                                                  (int64_t)cur_stream);
         } else if (sample_from_renorm) {
             top_p_renorm_probs(probs_t, sampling_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
         }
@@ -883,25 +837,28 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
         }
     }
 
-    if (params.return_original_all_probs && sampling_probs_t.defined()) {
-        sampling_probs_t.copy_(probs_t);
+    if (params.return_original_all_probs && output_all_probs_t.defined()) {
+        output_all_probs_t.copy_(probs_t.narrow(1, 0, output_width));
     }
     if (force_topk > 0) {
         if (params.output_all_probs_indices.has_value()) {
             params.output_all_probs_indices->copy_(topk_indices);
         } else {
             output_all_probs_t.zero_().scatter_(1, topk_indices, sampling_probs_t);
+            sampling_probs_t = output_all_probs_t;
         }
         auto sampled_indices = samples_t.squeeze(0).to(torch::kLong).unsqueeze(1);
         samples_t.copy_(topk_indices.gather(1, sampled_indices).squeeze(1).view({1, batch_size}));
     }
-    if (need_full_sampling_probs) {
+    if (need_full_sampling_probs && !params.return_original_all_probs) {
         output_all_probs_t.copy_(sampling_probs_t.slice(1, 0, output_width));
     }
 
     if (params.cum_log_probs.has_value()) {
         auto cum_log_probs_t = params.cum_log_probs.value();
-        auto token_probs_t   = sampling_probs_t.gather(1, samples_t.transpose(1, 0).to(torch::kLong)).squeeze(1);
+        auto token_probs_t   = (params.return_original_all_probs ? probs_t : sampling_probs_t)
+                                 .gather(1, samples_t.transpose(1, 0).to(torch::kLong))
+                                 .squeeze(1);
         cum_log_probs_t.add_(token_probs_t.log().to(cum_log_probs_t.device()));
     }
 
@@ -918,7 +875,7 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
         params.token_ids.select(1, params.token_ids.size(1) - 1).copy_(direct_samples, true);
     }
     check_cuda_error();
-    return {success, all_probs_point_mass};
+    return {success, all_probs_point_mass, params.return_sampling_probs ? sampling_probs_t : torch::Tensor()};
 }
 
 GreedyOutput sampleGreedy(const GreedyParams& params) {
@@ -941,7 +898,8 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // TODO: Support output_all_probs and cum_log_probs in this fast path.
     auto       top_k_ptr       = params.top_k.data_ptr<int32_t>();
     const bool topk1_fast_path = std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })
-                                 && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value();
+                                 && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value()
+                                 && !params.return_sampling_probs;
 
     // [step + 1, batch_size] transposed history clone. Exactly two consumers:
     // the repetition/presence/frequency penalty kernel (step-major layout) and
@@ -972,6 +930,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // Batches with a do_sample == false row stay on the legacy path: those rows
     // are restored to untouched logits before sampling and never scored by
     // temperature.
+    const int64_t force_topk         = greedyForceTopk(params, batch_size);
     bool temperature_folded = false;
     if (need_do_sample) {
         torch::Tensor selected_logits;
@@ -981,7 +940,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
             mask_tensor        = do_sample_gpu.reshape({(int64_t)batch_size, 1}).logical_not();
             selected_logits    = params.logits.masked_select(mask_tensor);
         }
-        temperature_folded = greedyTemperatureInSelect(params, batch_size, has_not_do_sample);
+        temperature_folded = greedyTemperatureInSelect(params, batch_size, has_not_do_sample, force_topk);
         RTP_LLM_PROFILE_SCOPE("sampler.greedy(process_logits)");
         processLogits(params, device_tokens, transposed_tokens, /*apply_temperature=*/!temperature_folded);
         if (has_not_do_sample) {
@@ -1003,7 +962,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     }
 
     RTP_LLM_PROFILE_SCOPE("sampler.greedy(flashinfer)");
-    return flashinferSampleGreedy(params, transposed_tokens, temperature_folded);
+    return flashinferSampleGreedy(params, transposed_tokens, temperature_folded, force_topk);
 }
 
 torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
@@ -1030,35 +989,6 @@ torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
     return token_ids;
 }
 
-// Graph-replayable variant: the seed/offset come from one-element device tensors
-// instead of the host generator, so a captured CUDA graph can be replayed with a
-// refreshed RNG state. The kernel is a verbatim copy of flashinfer's scalar-seed
-// sampling path (same Philox subsequence = row), so the token is bit-identical to
-// the eager call for the same (seed, offset).
-torch::Tensor sampleFromProbsDeviceScalarSeed(const torch::Tensor& probabilities,
-                                              const torch::Tensor& seed_scalar,
-                                              const torch::Tensor& offset_scalar) {
-    RTP_LLM_CHECK_WITH_INFO(probabilities.defined() && probabilities.is_cuda() && probabilities.dim() == 2
-                                && probabilities.scalar_type() == torch::kFloat32 && probabilities.stride(1) == 1
-                                && probabilities.stride(0) >= probabilities.size(1),
-                            "probability sampling expects row-major CUDA FP32 [batch,vocab] probabilities");
-    const auto batch_size = probabilities.size(0);
-    at::cuda::CUDAGuard device_guard(probabilities.device());
-
-    auto token_ids =
-        torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(probabilities.device()));
-    auto valid = torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kBool).device(probabilities.device()));
-    sampling_from_probs_device_scalar_seed(probabilities,
-                                           token_ids,
-                                           valid,
-                                           std::nullopt,
-                                           /*deterministic=*/true,
-                                           seed_scalar,
-                                           offset_scalar,
-                                           reinterpret_cast<intptr_t>(at::cuda::getCurrentCUDAStream().stream()));
-    return token_ids;
-}
-
 void rejectionSampling(const RejectionSamplingParams& params) {
     auto config = validateRejectionSamplingParams(params);
     auto stream = at::cuda::getCurrentCUDAStream().stream();
@@ -1073,11 +1003,6 @@ void rejectionSampling(const RejectionSamplingParams& params) {
         auto accept_shape   = std::vector<int64_t>{config.batch_size, config.num_speculative_tokens};
         accept_target_probs = torch::empty(accept_shape, params.target_probs_d.options());
         accept_draft_probs  = torch::empty(accept_shape, params.target_probs_d.options());
-        // Target width covers target_candidate_ids/target_probs and the aligned
-        // draft output; the draft keeps its own (possibly narrower) candidate cap.
-        // Both tensors are [batch, speculative_steps, K], so the candidate width is
-        // the LAST dimension (using dim 1 would silently pass the step count and
-        // truncate the draft table to `num_speculative_tokens` entries).
         const int draft_compact_width = params.draft_probs_indices_d.defined() ?
                                             static_cast<int>(params.draft_probs_indices_d.size(2)) :
                                             0;
@@ -1491,6 +1416,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     auto       top_k_ptr     = params.top_k.data_ptr<int32_t>();
     const bool all_top_k_one = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t == 1; });
     if (all_top_k_one && !params.cum_log_probs.has_value() && !params.return_original_all_probs
+        && !params.return_sampling_probs
         && (!params.output_all_probs.has_value() || params.output_all_probs->size(1) == vocab_size_padded)) {
         torch::Tensor samples_t =
             transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).squeeze(0);
@@ -1527,9 +1453,13 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                             "output probability width must be in (0, padded vocab size]");
     const bool need_full_sampling_probs = output_all_probs_t.defined() && output_width < probs_t.size(1);
     auto       sampling_probs_t         = need_full_sampling_probs ? torch::zeros_like(probs_t) : output_all_probs_t;
-    const bool need_renorm_probs        = sampling_probs_t.defined() && !params.return_original_all_probs;
-    if (params.return_original_all_probs && sampling_probs_t.defined()) {
-        sampling_probs_t.copy_(probs_t);
+    if (params.return_sampling_probs && (!sampling_probs_t.defined() || params.return_original_all_probs)) {
+        sampling_probs_t = torch::empty_like(probs_t);
+    }
+    const bool need_renorm_probs =
+        sampling_probs_t.defined() && (!params.return_original_all_probs || params.return_sampling_probs);
+    if (params.return_original_all_probs && output_all_probs_t.defined()) {
+        output_all_probs_t.copy_(probs_t.narrow(1, 0, output_width));
     }
 
     std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t; });
@@ -1639,7 +1569,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
 
     torch::Tensor selected_log_probs;
     if (success.defined() && sampling_probs_t.defined()) {
-        if (params.cum_log_probs.has_value()) {
+        if (params.cum_log_probs.has_value() && !params.return_original_all_probs) {
             selected_log_probs = torch::empty({(int64_t)batch_size}, probs_t.options());
         }
         // Healthy rows skip the vocabulary entirely unless a selected log probability
@@ -1651,15 +1581,24 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                                 reinterpret_cast<uintptr_t>(cur_stream));
     }
 
-    if (need_full_sampling_probs) {
+    if (need_full_sampling_probs && !params.return_original_all_probs) {
         output_all_probs_t.copy_(sampling_probs_t.slice(1, 0, output_width));
+    }
+
+    if (params.return_original_all_probs && output_all_probs_t.defined() && success.defined()) {
+        output_all_probs_t.masked_fill_(~success.unsqueeze(1), 0);
     }
 
     // 7. Update cum_log_probs
     if (params.cum_log_probs.has_value()) {
         auto cum_log_probs_t = params.cum_log_probs.value();
         if (!selected_log_probs.defined()) {
-            selected_log_probs = sampling_probs_t.gather(1, samples_t.to(torch::kLong).unsqueeze(1)).squeeze(1).log();
+            const auto& score_probs = params.return_original_all_probs ? probs_t : sampling_probs_t;
+            selected_log_probs =
+                score_probs.gather(1, samples_t.clamp_min(0).to(torch::kLong).unsqueeze(1)).squeeze(1).log();
+            if (success.defined()) {
+                selected_log_probs.masked_fill_(~success, -std::numeric_limits<float>::infinity());
+            }
         }
         cum_log_probs_t.add_(selected_log_probs.to(cum_log_probs_t.device()));
     }
@@ -1667,7 +1606,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // 8. Copy results back
     auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
     params.token_ids.copy_(output_tokens);
-    return {success};
+    return {success, false, params.return_sampling_probs ? sampling_probs_t : torch::Tensor()};
 }
 
 torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
@@ -1679,19 +1618,6 @@ torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
     // process-local default generator. The regular ROCm sampler above uses the
     // same fallback because FlashInfer sampling is not stable for TP > 1.
     return torch::multinomial(probabilities, 1, /*replacement=*/false).squeeze(-1).to(torch::kInt32);
-}
-
-torch::Tensor sampleFromProbsDeviceScalarSeed(const torch::Tensor& probabilities,
-                                              const torch::Tensor& seed_scalar,
-                                              const torch::Tensor& offset_scalar) {
-    // Only the CUDA stochastic-draft CUDA graph uses this entry point.
-    RTP_LLM_CHECK_WITH_INFO(false,
-                            "device-scalar-seed probability sampling requires the CUDA backend "
-                            "(seed numel=%ld, offset numel=%ld, probs numel=%ld)",
-                            seed_scalar.numel(),
-                            offset_scalar.numel(),
-                            probabilities.numel());
-    return torch::Tensor();
 }
 
 }  // namespace rtp_llm
@@ -1958,7 +1884,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     auto top_k_ptr = params.top_k.data_ptr<int32_t>();
     // TODO: Support output_all_probs and cum_log_probs in this top-k=1 fast path.
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto top_k) { return top_k == 1; })
-        && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value()) {
+        && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value() && !params.return_sampling_probs) {
         auto samples = transposed_tokens.select(0, transposed_tokens.size(0) - 1);
         samples.copy_(torch::argmax(params.logits, -1, /*keepdim=*/false));
         params.token_ids.copy_(transposed_tokens.transpose(0, 1).contiguous());
@@ -2045,7 +1971,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     }
 
     params.token_ids.copy_(transposed_tokens.transpose(0, 1).contiguous());
-    return GreedyOutput{};
+    return {torch::Tensor(), false, params.return_sampling_probs ? filtered_probs : torch::Tensor()};
 }
 
 void rejectionSampling(const RejectionSamplingParams& params) {
