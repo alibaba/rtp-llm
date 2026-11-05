@@ -89,7 +89,8 @@ py_test(
     data = [":th_pywrapped_model_lm_head_test"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
     env = {"TEST_USING_DEVICE": "CUDA"},
-    exec_properties = {"gpu": "H20"},
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
 )
 
 cc_library(
