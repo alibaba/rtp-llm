@@ -215,16 +215,11 @@ printf '%s\n' \
 cleanup_sdk_consumer
 trap - EXIT
 
-g++ -std=c++17 \
+g++ -std=c++17 -c \
     -I"${PACKAGE_DIR}/include" \
     "${NAVI_SCHED_DIR}/test/package/NaviSchedPackageLinkTest.cpp" \
-    -L"${PACKAGE_DIR}/lib" \
-    -Wl,-rpath,"${PACKAGE_DIR}/lib" \
-    -Wl,-rpath-link,"${PACKAGE_DIR}/lib" \
-    -lnavi_sched \
-    -o "${PACKAGE_DIR}/navi_sched_package_link_test"
-"${PACKAGE_DIR}/navi_sched_package_link_test"
-rm "${PACKAGE_DIR}/navi_sched_package_link_test"
+    -o "${PACKAGE_DIR}/navi_sched_package_link_test.o"
+rm "${PACKAGE_DIR}/navi_sched_package_link_test.o"
 
 if [[ $(find "${PACKAGE_DIR}/lib" -maxdepth 1 -type f \
     -name 'libnavi_sched.so*' | wc -l) -ne 1 ]]; then
