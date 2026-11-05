@@ -5,66 +5,22 @@ import triton
 import triton.language as tl
 from triton.experimental import gluon as g
 from triton.experimental.gluon import language as gl
-from triton.experimental.gluon.language import BlockedLayout, NVMMASharedLayout
+from triton.experimental.gluon.language import NVMMASharedLayout
 from triton.experimental.gluon.nvidia.hopper import TensorDescriptor
 
+from .membership import _find_request, _write_membership
+from .ragged_metadata import _locate
 from .tma_paged_pipeline import _execute_prefill
 
 
 @triton.jit(do_not_specialize=["B", "WORDS"])
 def _build_paged_membership(Ids, Mask, Cu, Prefixes, B, WORDS, MAX_WORDS: tl.constexpr):
     row = tl.program_id(0).to(tl.int64)
-    low = 0
-    high = B
-    while low < high:
-        mid = (low + high) // 2
-        if row >= tl.load(Cu + mid + 1):
-            low = mid + 1
-        else:
-            high = mid
-    local_s = tl.load(Prefixes + low) + tl.load(Cu + low + 1) - tl.load(Cu + low)
-    word = tl.arange(0, MAX_WORDS)
-    tl.store(Mask + row * WORDS + word, 0, word < WORDS)
-    tl.debug_barrier()
-    block = tl.arange(0, 512)
-    start = tl.load(Ids + row * 2051 + block * 4)
-    bits = tl.full((512,), 15, tl.uint32) << (start % 32)
-    tl.atomic_or(
-        Mask + row * WORDS + start // 32,
-        bits,
-        (start >= 0) & (start + 3 < local_s),
-        sem="relaxed",
+    request = _find_request(Cu, row, B)
+    local_s = (
+        tl.load(Prefixes + request) + tl.load(Cu + request + 1) - tl.load(Cu + request)
     )
-    tail = tl.arange(0, 4)
-    index = tl.load(Ids + row * 2051 + 2048 + tail, tail < 3, other=-1)
-    tl.atomic_or(
-        Mask + row * WORDS + index // 32,
-        tl.full((4,), 1, tl.uint32) << (index % 32),
-        (tail < 3) & (index >= 0) & (index < local_s),
-        sem="relaxed",
-    )
-
-
-@g.jit
-def _add(a, b):
-    return a + b
-
-
-@g.jit
-def _locate(Cu, B, POSITIONS: gl.constexpr, G: gl.constexpr):
-    layout: gl.constexpr = BlockedLayout([1], [32], [4], [0])
-    b = gl.arange(0, 32, layout=layout)
-    starts = gl.load(Cu + b, b < B, other=0)
-    ends = gl.load(Cu + b + 1, b < B, other=0)
-    lengths = ends - starts
-    counts = gl.cdiv(lengths, POSITIONS)
-    cumulative = gl.associative_scan(counts, 0, _add)
-    work = gl.num_programs(1 if G == 4 else 0) - 1 - gl.program_id(1 if G == 4 else 0)
-    request = gl.sum(((work >= cumulative) & (b < B)).to(gl.int32), 0)
-    base = gl.sum(gl.where(b == request, starts, 0), 0)
-    length = gl.sum(gl.where(b == request, lengths, 0), 0)
-    first = gl.sum(gl.where(b == request, cumulative - counts, 0), 0)
-    return request, base, length, work - first
+    _write_membership(Ids, Mask, row, local_s, WORDS, MAX_WORDS)
 
 
 @g.jit(do_not_specialize=["B", "WORDS", "WIDTH", "PAGES", "TABLE_ROW"])

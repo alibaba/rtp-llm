@@ -4,6 +4,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .membership import _find_request, _write_membership
+
 
 @triton.jit(
     do_not_specialize=[
@@ -48,37 +50,13 @@ def _prepare_paged_kv(
     if MAKE_MASK and row < NQ:
         local_s = TOTAL
         if BATCHED:
-            low = 0
-            high = B
-            while low < high:
-                mid = (low + high) // 2
-                if row >= tl.load(Cu + mid + 1):
-                    low = mid + 1
-                else:
-                    high = mid
+            request = _find_request(Cu, row, B)
             local_s = (
-                tl.load(Prefixes + low) + tl.load(Cu + low + 1) - tl.load(Cu + low)
+                tl.load(Prefixes + request)
+                + tl.load(Cu + request + 1)
+                - tl.load(Cu + request)
             )
-        word = tl.arange(0, 128)
-        tl.store(Mask + row * WORDS + word, 0, word < WORDS)
-        tl.debug_barrier()
-        selection_block = tl.arange(0, 512)
-        start = tl.load(Ids + row * 2051 + selection_block * 4)
-        bits = tl.full((512,), 15, tl.uint32) << (start % 32)
-        tl.atomic_or(
-            Mask + row * WORDS + start // 32,
-            bits,
-            (start >= 0) & (start + 3 < local_s),
-            sem="relaxed",
-        )
-        tail = tl.arange(0, 4)
-        index = tl.load(Ids + row * 2051 + 2048 + tail, tail < 3, other=-1)
-        tl.atomic_or(
-            Mask + row * WORDS + index // 32,
-            tl.full((4,), 1, tl.uint32) << (index % 32),
-            (tail < 3) & (index >= 0) & (index < local_s),
-            sem="relaxed",
-        )
+        _write_membership(Ids, Mask, row, local_s, WORDS, 128)
     else:
         # Page zero remains a safe zero-filled destination for missing pages.
         work = tl.program_id(0) - NQ
