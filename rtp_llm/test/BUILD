@@ -192,6 +192,15 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k31_jit_warmup_test",
+    srcs = ["kimi_k31_jit_warmup_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+    tags = ["SM103_CU13"],
+)
+
+py_test(
     name = "kimi_k3_rope_cpu_test",
     srcs = ["kimi_k3_rope_test.py"],
     main = "kimi_k3_rope_test.py",

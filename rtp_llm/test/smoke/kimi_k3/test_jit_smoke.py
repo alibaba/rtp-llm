@@ -7,11 +7,59 @@ import tarfile
 import tempfile
 import time
 import unittest
+from hashlib import sha256
 
+from rtp_llm.test.smoke.kimi_k3 import jit_smoke
 from rtp_llm.test.smoke.kimi_k3.jit_smoke import check_publication
 
 
 class JitSmokeChecksTest(unittest.TestCase):
+    def test_compilation_keys_cover_only_private_native_and_triton_binaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            for name, payload in {
+                "deep-gemm/cache/sm100_mqa_logits.one/kernel.cubin": b"dense",
+                "triton/two/kernel.cubin": b"triton",
+                "deep-gemm/cache/sm100_mqa_logits.one/kernel.cu": b"source",
+                "flashinfer/three/kernel.cubin": b"other",
+            }.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
+            keys = jit_smoke.compilation_keys(root)
+            self.assertEqual(keys, {
+                "deep-gemm/cache/sm100_mqa_logits.one/kernel.cubin": sha256(b"dense").hexdigest(),
+                "triton/two/kernel.cubin": sha256(b"triton").hexdigest(),
+            })
+
+    def test_compilation_changes_detect_new_and_rewritten_binaries(self):
+        self.assertEqual(jit_smoke.compilation_changes(
+            {"native.cubin": "a", "gone.cubin": "b"},
+            {"native.cubin": "c", "new.cubin": "d"}),
+            {"added": ["new.cubin"], "rewritten": ["native.cubin"], "removed": ["gone.cubin"]})
+        self.assertEqual(jit_smoke.compilation_changes({"same": "a"}, {"same": "a"}),
+                         {"added": [], "rewritten": [], "removed": []})
+
+    def test_compilation_keys_reject_missing_or_linked_cache_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "deep-gemm").mkdir()
+            with self.assertRaises(FileNotFoundError):
+                jit_smoke.compilation_keys(root)
+            (root / "triton").symlink_to(root / "deep-gemm", target_is_directory=True)
+            with self.assertRaises(ValueError):
+                jit_smoke.compilation_keys(root)
+
+    def test_compilation_keys_reject_linked_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "deep-gemm").mkdir()
+            (root / "triton").mkdir()
+            (root / "outside.cubin").write_bytes(b"foreign")
+            (root / "triton" / "foreign.cubin").symlink_to(root / "outside.cubin")
+            with self.assertRaises(ValueError):
+                jit_smoke.compilation_keys(root)
+
     def snapshot(self, root, names, label="sample", version="v2"):
         import zstandard
 

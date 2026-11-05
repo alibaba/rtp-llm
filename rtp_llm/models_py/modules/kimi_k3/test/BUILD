@@ -24,6 +24,14 @@ py_test(
 )
 
 py_test(
+    name = "dsa_jit_warmup_test",
+    srcs = ["test_dsa_jit_warmup.py"],
+    main = "test_dsa_jit_warmup.py",
+    data = ["//rtp_llm/models_py:dsa_jit_warmup_test_sources"],
+    deps = ["//rtp_llm:torch"],
+)
+
+py_test(
     name = "flash_mla_prefill_api_test",
     srcs = ["flash_mla_prefill_api_test.py"],
     data = ["//rtp_llm/models_py:flash_mla_prefill_api_test_sources"],

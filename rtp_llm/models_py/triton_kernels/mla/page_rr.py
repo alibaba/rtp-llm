@@ -71,31 +71,32 @@ def _request_for_index(Offsets, index, REQUESTS):
     return lo
 
 
-@triton.jit
+# Request sizes and pool bounds must reuse the kernels prepared by warmup.
+@triton.jit(do_not_specialize=["REQUESTS", "CACHE_BLOCKS", "TABLE_WIDTH", "TABLE_REQUEST_STRIDE"])
 def _pack_prefix_kernel(
     Cache,
     Table,
     Metadata,
     Output,
-    REQUESTS: tl.constexpr,
+    REQUESTS,
     PAGE_TOKENS: tl.constexpr,
     KERNEL_PAGE_TOKENS: tl.constexpr,
     SHARDS: tl.constexpr,
     RANK: tl.constexpr,
     FEATURES: tl.constexpr,
-    CACHE_BLOCKS: tl.constexpr,
+    CACHE_BLOCKS,
     CACHE_BLOCK_STRIDE: tl.constexpr,
     CACHE_TOKEN_STRIDE: tl.constexpr,
     CACHE_FEATURE_STRIDE: tl.constexpr,
     INDEXER_FP8: tl.constexpr,
     ALLOW_RESERVED_ZERO: tl.constexpr,
-    TABLE_WIDTH: tl.constexpr,
-    TABLE_REQUEST_STRIDE: tl.constexpr,
+    TABLE_WIDTH,
+    TABLE_REQUEST_STRIDE,
     TABLE_PAGE_STRIDE: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     packed_page = tl.program_id(0).to(tl.int64)
-    row_width: tl.constexpr = REQUESTS + 1
+    row_width = REQUESTS + 1
     request_indices = Metadata
     global_page_starts = Metadata + row_width
     prefix_lens = Metadata + 2 * row_width
@@ -160,22 +161,22 @@ def _pack_prefix_kernel(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["REQUESTS", "LOCAL_PAGES", "TOTAL_TOKENS"])
 def _restore_prefix_kernel(
     Gathered,
     Metadata,
     Output,
-    REQUESTS: tl.constexpr,
+    REQUESTS,
     PAGE_TOKENS: tl.constexpr,
     SHARDS: tl.constexpr,
-    LOCAL_PAGES: tl.constexpr,
+    LOCAL_PAGES,
     FEATURES: tl.constexpr,
     INDEXER_FP8: tl.constexpr,
-    TOTAL_TOKENS: tl.constexpr,
+    TOTAL_TOKENS,
     BLOCK: tl.constexpr,
 ):
     tile = tl.program_id(0).to(tl.int64)
-    row_width: tl.constexpr = REQUESTS + 1
+    row_width = REQUESTS + 1
     global_page_starts = Metadata + row_width
     prefix_lens = Metadata + 2 * row_width
     local_page_offsets = Metadata + 3 * row_width
@@ -202,7 +203,7 @@ def _restore_prefix_kernel(
         # Canonical workspace has contiguous K[N,128], then FP32 scales[N].
         # The gather payload remains interleaved bytes for the common reader.
         destination = tl.where(feature < 128, output_token * 128 + feature,
-                               TOTAL_TOKENS * 128 + output_token * 4 + feature - 128)
+                               TOTAL_TOKENS.to(tl.int64) * 128 + output_token * 4 + feature - 128)
     else:
         destination = output_token * FEATURES + feature
     tl.store(Output + destination, values, mask=live)

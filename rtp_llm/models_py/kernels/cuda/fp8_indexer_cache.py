@@ -20,11 +20,11 @@ def canonical_indexer_views(raw):
             flat[tokens * 128:].view(torch.float32))
 
 
-@triton.jit
-def _pack_native64(Cache, Table, Output, START: tl.constexpr,
-                   KERNEL_PAGE: tl.constexpr, CACHE_BLOCKS: tl.constexpr,
-                   TABLE_WIDTH: tl.constexpr, TABLE_STRIDE: tl.constexpr,
-                   PAGES: tl.constexpr, BLOCK: tl.constexpr):
+@triton.jit(do_not_specialize=["START", "CACHE_BLOCKS", "TABLE_WIDTH", "TABLE_STRIDE", "PAGES"])
+def _pack_native64(Cache, Table, Output, START,
+                   KERNEL_PAGE: tl.constexpr, CACHE_BLOCKS,
+                   TABLE_WIDTH, TABLE_STRIDE,
+                   PAGES, BLOCK: tl.constexpr):
     page = tl.program_id(0).to(tl.int64)
     request = page // PAGES
     local_page = page % PAGES

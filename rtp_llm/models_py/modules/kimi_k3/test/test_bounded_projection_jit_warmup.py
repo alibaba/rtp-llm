@@ -26,6 +26,7 @@ DEPENDENCIES = dict(
     kda=PREFIX + "factory.attention.cuda_kda_impl",
     fla="fla.modules.l2norm",
     mla=PREFIX + "kimi_k3.mla_jit_warmup",
+    dsa=PREFIX + "kimi_k3.dsa_jit_warmup",
     directed=PREFIX + "kimi_k3.bounded_projection_jit_warmup",
 )
 WEIGHT_KEYS = NS(mla_kv_b_w="kv_up", mla_kv_b_s="kv_scale")
@@ -406,6 +407,7 @@ class BoundedProjectionWarmupTest(unittest.TestCase):
         noop = lambda *_: None
         with dependencies(
             mla=NS(warmup_kimi_k3_mla_jit=noop),
+            dsa=NS(warmup_kimi_k31_dsa_jit=noop),
             directed=NS(warmup_kimi_k3_projection_jit=fail),
         ):
             startup = source_module(

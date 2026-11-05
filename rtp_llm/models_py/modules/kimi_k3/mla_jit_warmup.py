@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import torch
 
@@ -30,9 +31,7 @@ def _mla_warmup_specs(model):
     """Extract compile geometry, never retain a tensor from the live KV pool."""
     prepared = set()
     parallelism = model.parallelism_config
-    if not (
-        parallelism.tp_size > 1 and parallelism.prefill_cp_config.kv_cache_sharded
-    ):
+    if not (parallelism.tp_size > 1 and parallelism.prefill_cp_config.kv_cache_sharded):
         return
     for layer in model.layers:
         attention = layer.attention
@@ -146,6 +145,50 @@ def _warmup_tokenspeed(spec: _MlaWarmupSpec) -> None:
         )
 
 
+def _warmup_decode_metadata(
+    page, physical_page, shards, rank, device, max_queries, *, draft=False
+):
+    if shards <= 1:
+        return
+    from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.page_rr_mla_metadata import (
+        PageRRMlaMetadata,
+    )
+
+    # These kernels do not access KV payloads. One private rectangular request
+    # covers other batch sizes/widths because their sizes are runtime scalars.
+    columns = (max_queries + page - 1) // page + 1
+    table = torch.ones((1, columns), device=device, dtype=torch.int32)
+    prefix = torch.full(
+        (1,), rank * physical_page + 1, device=device, dtype=torch.int32
+    )
+    modes = [(1, False, False, False, False, graph) for graph in (False, True)]
+    if max_queries > 1:
+        modes.extend(
+            (max_queries, not draft, draft, mask, compact, False)
+            for mask in ((False, True) if draft else (False,))
+            for compact in (False, True)
+        )
+    for queries, verify, update, mask, compact, graph in modes:
+        inputs = SimpleNamespace(
+            input_lengths=torch.ones(1, device=device, dtype=torch.int32),
+            physical_token_count=queries,
+            is_target_verify=verify,
+            is_mtp_draft_update=update,
+            is_cuda_graph=graph,
+            prefix_lengths_device=prefix,
+            sequence_lengths_plus_1_device=prefix + 1,
+            kv_cache_kernel_block_id_device=table,
+            cu_seqlens_device=torch.tensor(
+                (0, queries), device=device, dtype=torch.int32
+            ),
+            valid_token_mask=(
+                torch.ones(queries, device=device, dtype=torch.bool) if mask else None
+            ),
+        )
+        metadata = PageRRMlaMetadata(physical_page, page, shards, rank)
+        metadata.prepare_decode(inputs, compact_queries=compact)
+
+
 @torch.inference_mode()
 def _warmup_spec(spec: _MlaWarmupSpec) -> None:
     with torch.cuda.device(spec.device):
@@ -156,13 +199,26 @@ def _warmup_spec(spec: _MlaWarmupSpec) -> None:
 
 
 def warmup_kimi_k3_mla_jit(model, init_resource) -> None:
-    if init_resource.is_decode_role or model.kv_cache is None:
+    if model.kv_cache is None:
         return
     for spec in _mla_warmup_specs(model):
         started = time.perf_counter()
-        _warmup_spec(spec)
+        if init_resource.is_decode_role:
+            _warmup_decode_metadata(
+                spec.page_tokens,
+                spec.physical_page_tokens,
+                spec.shards,
+                spec.rank,
+                spec.device,
+                max(1, int(model.config.gen_num_per_cycle) + 1),
+                draft=bool(model.config.is_mtp),
+            )
+            torch.cuda.synchronize(spec.device)
+        else:
+            _warmup_spec(spec)
         logging.info(
-            "K3 MLA Page-RR prefix JIT prepared: dtype=%s page=%d heads=%d cost=%.3fs",
+            "K3 MLA Page-RR %s JIT prepared: dtype=%s page=%d heads=%d cost=%.3fs",
+            "decode metadata" if init_resource.is_decode_role else "prefix",
             spec.cache_dtype,
             spec.page_tokens,
             spec.heads,

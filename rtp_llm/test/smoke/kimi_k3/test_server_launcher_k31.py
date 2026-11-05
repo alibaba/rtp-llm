@@ -96,6 +96,29 @@ class K31LaunchContract(unittest.TestCase):
             self.assertEqual(env['SP_MODEL_TYPE'],'')
             self.assertEqual(env['GEN_NUM_PER_CIRCLE'],'0')
 
+    def test_graph_and_mtp_modes_can_be_selected_independently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args=self.fixture(Path(tmp),93)
+            args.role='DECODE';args.tp_size=4;args.dp_size=2
+            for target_only in (False,True):
+                for graph in (False,True):
+                    args.target_only=target_only;args.enable_cuda_graph=graph
+                    with self.subTest(target_only=target_only,graph=graph):
+                        with patch.object(launch.socket,'socket') as route:
+                            route.return_value.getsockname.return_value=('127.0.0.1',0)
+                            env,argv=launch.launch_config(args)
+                        options=dict(zip(argv[1::2],argv[2::2]))
+                        self.assertEqual(env['SP_TYPE'],'none' if target_only else 'mtp')
+                        self.assertEqual(options['--enable_cuda_graph'],str(int(graph)))
+
+    def test_graph_override_rejects_non_boolean_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args=self.fixture(Path(tmp),93)
+            for invalid in ('false',0,1):
+                args.enable_cuda_graph=invalid
+                with self.subTest(value=invalid),self.assertRaisesRegex(ValueError,'boolean'):
+                    launch.launch_config(args)
+
     def test_bounded_acceptance_capacity_keeps_topology_and_precision(self):
         with tempfile.TemporaryDirectory() as tmp:
             args=self.fixture(Path(tmp),93)

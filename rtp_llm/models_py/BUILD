@@ -68,6 +68,17 @@ filegroup(
 
 
 filegroup(
+    name = "dsa_jit_warmup_test_sources",
+    srcs = [
+        "modules/kimi_k3/dsa_jit_warmup.py",
+        "modules/base/cuda/fp8_indexer_op.py",
+        "modules/base/cuda/bf16_indexer_op.py",
+    ],
+    visibility = ["//rtp_llm/models_py/modules/kimi_k3/test:__pkg__"],
+)
+
+
+filegroup(
     name = "flash_mla_prefill_api_test_sources",
     srcs = ["modules/kimi_k3/mla.py"],
     visibility = ["//rtp_llm/models_py/modules/kimi_k3/test:__pkg__"],

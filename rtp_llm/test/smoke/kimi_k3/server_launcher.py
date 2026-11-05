@@ -40,6 +40,9 @@ def launch_config(args):
     fp8_kv_cache = model_type == "kimi_k31" if fp8_kv_cache is None else bool(fp8_kv_cache)
     warm_up = bool(getattr(args, "warm_up", False))
     model_warm_up = bool(getattr(args, "model_warm_up", False))
+    enable_cuda_graph = getattr(args, "enable_cuda_graph", None)
+    if enable_cuda_graph is not None and type(enable_cuda_graph) is not bool:
+        raise ValueError("enable_cuda_graph must be a boolean")
     if model_warm_up and not warm_up:
         raise ValueError("model warmup requires --warm-up")
     checkpoint = Path(args.checkpoint).resolve(strict=True)
@@ -287,7 +290,7 @@ def launch_config(args):
         "enable_memory_cache": int(orthogonal_smoke and args.role == "PREFILL"),
         "moe_strategy": getattr(args, "moe_strategy", None)
         or ("mega_moe" if args.role == "PREFILL" else "mega_moe_se"),
-        "enable_cuda_graph": int(args.role == "DECODE"),
+        "enable_cuda_graph": int(args.role == "DECODE" if enable_cuda_graph is None else enable_cuda_graph),
         "cache_store_rdma_mode": 1,
         "cache_store_rdma_connect_timeout_ms": 30000,
         # Formal smoke must expose the first failure, including PD retries.

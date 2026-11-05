@@ -82,8 +82,10 @@ class StartupRealWarmupTest(unittest.TestCase):
         for model_type, expected in (
             ("deepseek_v4", True),
             ("kimi_k3", True),
+            ("kimi_k31", True),
             ("deepseek_v4_mtp", False),
             ("kimi_k3_mtp", False),
+            ("kimi_k31_mtp", False),
             ("custom_model", False),
             ("", False),
         ):

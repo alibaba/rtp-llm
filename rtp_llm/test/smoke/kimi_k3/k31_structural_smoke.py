@@ -217,6 +217,8 @@ def main():
     parser.add_argument('--batch-output-tokens', type=int, default=128)
     parser.add_argument('--timeout', type=int, default=300)
     parser.add_argument('--first-request-only', action='store_true')
+    parser.add_argument('--target-only', action='store_true',
+                        help='Validate ordinary Decode with no speculative draft rounds')
     parser.add_argument('--history-tokens', type=int, default=65536,
                         help='Long-history fixture extent; lower values are explicit reduced-context validation')
     parser.add_argument('--case-group', choices=('all', 'batch32', 'mtp', 'mtp-fixture', 'owners'), default='all')

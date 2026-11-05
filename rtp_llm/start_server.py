@@ -578,6 +578,7 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
     return getattr(py_env_configs.model_args, "model_type", "") in (
         "deepseek_v4",
         "kimi_k3",
+        "kimi_k31",
     )
 
 

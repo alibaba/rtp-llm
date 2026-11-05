@@ -2,8 +2,40 @@
 
 import tarfile
 import time
+from hashlib import sha256
+from pathlib import Path
 
 from request_smoke import require
+
+
+def compilation_keys(root):
+    """Fingerprint native/Triton cubins in one run's private cache only."""
+    root = Path(root)
+    if root.is_symlink():
+        raise ValueError(f"JIT cache must not be a symlink: {root}")
+    keys = {}
+    for name in ("deep-gemm", "triton"):
+        component = root / name
+        if component.is_symlink():
+            raise ValueError(f"JIT component must not be a symlink: {component}")
+        if not component.is_dir():
+            raise FileNotFoundError(f"Missing private JIT component: {component}")
+        for path in sorted(component.rglob("*")):
+            if path.is_symlink():
+                raise ValueError(f"JIT entry must not be a symlink: {path}")
+            if path.suffix == ".cubin":
+                if not path.is_file() or not path.stat().st_size:
+                    raise ValueError(f"Incomplete JIT binary: {path}")
+                keys[path.relative_to(root).as_posix()] = sha256(path.read_bytes()).hexdigest()
+    return keys
+
+
+def compilation_changes(before, after):
+    return {
+        "added": sorted(after.keys() - before.keys()),
+        "rewritten": sorted(key for key in before.keys() & after.keys() if before[key] != after[key]),
+        "removed": sorted(before.keys() - after.keys()),
+    }
 
 
 def check_publication(root, started_ns, timeout=180):

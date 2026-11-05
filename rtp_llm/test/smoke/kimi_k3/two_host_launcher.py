@@ -30,6 +30,10 @@ ROLES = ("prefill", "decode")
 SCRIPT = "rtp_llm/test/smoke/kimi_k3/two_host_launcher.py"
 
 
+def checkpoint_fields(config):
+    return ("checkpoint",) if config.get("target_only", False) else ("checkpoint", "draft_checkpoint")
+
+
 def validate(config):
     if type(decode_dp_size(config)) is not int or decode_dp_size(config) not in (1, 2):
         raise ValueError("The smoke supports Decode DP1 or DP2")
@@ -41,6 +45,8 @@ def validate(config):
     user = config.get("container_user", "luohaocheng.lhc")
     if not user or user.split(":")[0] in ("root", "0") or user.startswith("-"):
         raise ValueError("A non-root container user is required")
+    if type(config.get("target_only", False)) is not bool:
+        raise ValueError("target_only must be a boolean")
     for role in ROLES:
         host = config[role]
         if not re.fullmatch(r"[A-Za-z0-9_.@-]+", host["ssh_target"]) or host["ssh_target"].startswith("-"):
@@ -53,9 +59,14 @@ def validate(config):
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", host["container"]) or host["container"].startswith("-"):
             raise ValueError("Invalid container")
         ipaddress.IPv4Address(host["ip"])
-        for key in ("repo_root", "artifact_root", "checkpoint", "draft_checkpoint"):
+        for key in ("repo_root", "artifact_root", *checkpoint_fields(config)):
             if not Path(host[key]).is_absolute():
                 raise ValueError(f"{role}.{key} must be absolute")
+        if "enable_cuda_graph" in host:
+            if type(host["enable_cuda_graph"]) is not bool:
+                raise ValueError("enable_cuda_graph must be a boolean")
+            if role != "decode":
+                raise ValueError("enable_cuda_graph override is available only for Decode")
         if type(host["port"]) is not int or not 1024 <= host["port"] <= 65535 - 72:
             raise ValueError("Invalid eight-rank port block")
     if config["prefill"]["ip"] == config["decode"]["ip"]:
@@ -66,11 +77,24 @@ def validate(config):
     if requests is not None and (not isinstance(requests, list) or not requests
                                 or any(not isinstance(x, str) for x in requests)):
         raise ValueError("request_argv must be a nonempty argv list")
+    if type(config.get("check_jit_warmup", False)) is not bool:
+        raise ValueError("check_jit_warmup must be a boolean")
+    if config.get("check_jit_warmup") and requests is None:
+        raise ValueError("check_jit_warmup requires an existing request_argv")
     return config
 
 
 def run_dir(config, role):
     return Path(config[role]["artifact_root"]) / config["run_id"] / role
+
+
+def prepare_jit_cache(config, role):
+    checking = config.get("check_jit_warmup", False)
+    cache = run_dir(config, role) / "jit" if checking else Path(config[role]["artifact_root"]) / "jit"
+    cache.mkdir(exist_ok=not checking)
+    for leaf in ("triton", "deep-gemm", "flashinfer", "hf-modules", "torch-extensions"):
+        (cache / leaf).mkdir(exist_ok=not checking)
+    return cache
 
 
 def ssh(config, role, argv, **kwargs):
@@ -203,7 +227,7 @@ def serve(config, role):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         locks.append(lock)
     require_gpu_capacity(directory, host.get("allow_shared_accuracy", False), host.get("min_free_gib", 250), 8)
-    for name in ("checkpoint", "draft_checkpoint"):
+    for name in checkpoint_fields(config):
         storage = host.get(name + "_storage_policy", host.get("storage_policy", "3fs"))
         if storage not in ("3fs", "ssd", "published"):
             raise ValueError("storage_policy must be 3fs, ssd or published")
@@ -255,11 +279,13 @@ def serve(config, role):
     binary = (source / host.get("server", "bazel-bin/rtp_llm/rtp_llm_server")).resolve(strict=True)
     dp = 1 if role == "prefill" else decode_dp_size(config)
     args = argparse.Namespace(role=role.upper(), server=str(binary), checkpoint=host["checkpoint"],
-        draft_checkpoint=host["draft_checkpoint"], model_type="kimi_k31", expected_target_layers=93,
+        draft_checkpoint=host.get("draft_checkpoint"), target_only=config.get("target_only", False),
+        enable_cuda_graph=host.get("enable_cuda_graph"), model_type="kimi_k31", expected_target_layers=93,
         tp_size=8 // dp, dp_size=dp, ep_size=8,
         fp8_gemm=config.get("fp8_gemm"), fp8_kv_cache=config.get("fp8_kv_cache"),
         prefill_source_tp_size=8, peer_ip=peer["ip"], peer_port=peer["port"], start_port=host["port"],
-        orthogonal_smoke=True, warm_up=False, model_warm_up=False,
+        orthogonal_smoke=True, warm_up=config.get("check_jit_warmup", False),
+        model_warm_up=config.get("check_jit_warmup", False),
         execution_evidence=True, reserve_runtime_mem_mb=host.get("reserve_runtime_mem_mb",14336),
         kv_cache_mem_mb=host.get("kv_cache_mem_mb"), memory_cache_size_mb=host.get("memory_cache_size_mb",32768),
         test_block_num=host.get("test_block_num"),
@@ -273,8 +299,7 @@ def serve(config, role):
     explicit["MODEL_SERVICE_CONFIG"] = json.dumps(service)
     uds = tempfile.TemporaryDirectory(prefix=f"k3pd-{os.getuid()}-", dir="/tmp")
     temporary = tempfile.TemporaryDirectory(prefix=f"k3tmp-{os.getuid()}-", dir="/tmp")
-    cache = Path(host["artifact_root"]) / "jit"
-    cache.mkdir(exist_ok=True)
+    cache = prepare_jit_cache(config, role)
     explicit.update(RTP_LLM_CPU_TP_BROADCASTER_DIR=uds.name,
         RTP_LLM_CPU_TP_BROADCASTER_ID=config["run_id"], TMPDIR=temporary.name,
         TMP=temporary.name, TEMP=temporary.name, ACCL_USE_NICS=hcas,
@@ -282,7 +307,7 @@ def serve(config, role):
     for key, leaf in {"TRITON_CACHE_DIR":"triton", "DG_JIT_CACHE_DIR":"deep-gemm",
                       "FLASHINFER_WORKSPACE_BASE":"flashinfer", "HF_MODULES_CACHE":"hf-modules",
                       "TORCH_EXTENSIONS_DIR":"torch-extensions"}.items():
-        (cache / leaf).mkdir(exist_ok=True); explicit[key] = str(cache / leaf)
+        explicit[key] = str(cache / leaf)
     (directory / "logs").mkdir()
     explicit["LOG_PATH"] = str(directory / "logs")
     env = runtime_environment(source, binary); env.update(explicit)
@@ -395,6 +420,22 @@ def status(config, role):
     atomic(directory/"readiness.json",result);return result
 
 
+def jit_keys(config, role):
+    if not config.get("check_jit_warmup"):
+        raise ValueError("JIT snapshots require check_jit_warmup")
+    sys.path.insert(0, str(Path(config[role]["repo_root"]) / Path(SCRIPT).parent))
+    from jit_smoke import compilation_keys
+    identity = json.loads((run_dir(config, role) / "instance.json").read_text())
+    cache = run_dir(config, role) / "jit"
+    if identity["uid"] != os.getuid() or identity["run_id"] != config["run_id"]:
+        raise ValueError("JIT cache receipt belongs to another user or run")
+    for env, leaf in (("DG_JIT_CACHE_DIR", "deep-gemm"), ("TRITON_CACHE_DIR", "triton")):
+        if identity["environment"].get(env) != str(cache / leaf):
+            raise ValueError("JIT cache receipt does not match this role's private cache")
+    return dict(role=role, hostname=socket.gethostname(), cache_root=str(cache),
+                time_ns=time.time_ns(), keys=compilation_keys(cache))
+
+
 def stop_role(config, role):
     path=run_dir(config,role)/"instance.json"
     if not path.exists(): return {"stopped":False,"reason":"no process receipt"}
@@ -447,13 +488,38 @@ def controller(args, config):
             if time.monotonic()>=deadline: raise TimeoutError("PD startup exceeded deadline")
             time.sleep(5)
         for role in ROLES: print(f"{role}: READY",flush=True)
+        before = None
+        if config.get("check_jit_warmup"):
+            before = {role: remote(config, role, "jit-keys") for role in ROLES}
+            atomic(root/"jit-warmup-before.json", before)
+            missing = {role: [component for component in ("deep-gemm/", "triton/")
+                             if not any(key.startswith(component) for key in snapshot["keys"])]
+                       for role, snapshot in before.items()}
+            if any(missing.values()):
+                atomic(root/"jit-warmup.json", dict(passed=False, before=before, missing_components=missing))
+                raise RuntimeError("JIT warmup did not produce observable native and Triton binaries on both peers")
         # The launcher never invents or expands a case list.
         passed=None
         if config.get("request_argv"):
             result=remote(config,"prefill","requests");atomic(root/"requests.json",result)
             passed=result["exit_code"]==0
+            if before is not None:
+                # Query each peer in its own container; Prefill's local cache cannot prove Decode coverage.
+                if __package__:
+                    from .jit_smoke import compilation_changes
+                else:
+                    from jit_smoke import compilation_changes
+                after = {role: remote(config, role, "jit-keys") for role in ROLES}
+                changes = {role: compilation_changes(before[role]["keys"], after[role]["keys"])
+                           for role in ROLES}
+                jit_passed = not any(items for change in changes.values() for items in change.values())
+                atomic(root/"jit-warmup.json", dict(passed=jit_passed, before=before,
+                                                  after=after, changes=changes))
+                if not jit_passed:
+                    raise RuntimeError("Request runner introduced new or changed JIT binaries; inspect jit-warmup.json")
             if not passed: raise RuntimeError("Existing request runner failed; inspect requests.log")
         atomic(root/"summary.json",dict(ready=True,request_runner_passed=passed,
+               jit_warmup_checked=before is not None,
                complete_smoke_passed=None,performance_validated=False,services_retained=args.keep_services))
         print("READY; no requests run" if passed is None else "Request runner passed; artifacts: "+str(root))
         return 0
@@ -464,7 +530,7 @@ def controller(args, config):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation",choices=("launch","stop","prepare","serve","status","stop-role","requests"))
+    parser.add_argument("operation",choices=("launch","stop","prepare","serve","status","stop-role","requests","jit-keys"))
     parser.add_argument("--config",required=True,type=Path)
     parser.add_argument("--role",choices=ROLES)
     parser.add_argument("--output",type=Path)
@@ -486,7 +552,9 @@ def main():
         # The runfiles package contains generated protobufs absent from source.
         env["PYTHONPATH"]=":".join(map(str,[runfiles/"rtp_llm",source,run_dir(config,args.role),*sites]))
         env["HF_HUB_OFFLINE"]="1"
-        env["HF_MODULES_CACHE"]=str(Path(config[args.role]["artifact_root"])/"jit/hf-modules")
+        cache = (run_dir(config, args.role) / "jit" if config.get("check_jit_warmup")
+                 else Path(config[args.role]["artifact_root"]) / "jit")
+        env["HF_MODULES_CACHE"]=str(cache/"hf-modules")
         env["NO_PROXY"]=env["no_proxy"]="localhost,127.0.0.1,"+",".join(config[r]["ip"] for r in ROLES)
         with (run_dir(config,args.role)/"requests.log").open("x") as log:
             code=subprocess.run(config["request_argv"],cwd=source,env=env,stdout=log,stderr=subprocess.STDOUT).returncode
@@ -499,7 +567,7 @@ def main():
                 atomic(run_dir(config,args.role)/"exit.json",dict(exit_code=1,error=f"{type(exc).__name__}: {exc}"))
                 raise
             finally: sys.stdout=sys.__stdout__;sys.stderr=sys.__stderr__
-    else: result={"prepare":prepare,"status":status,"stop-role":stop_role}[args.operation](config,args.role)
+    else: result={"prepare":prepare,"status":status,"stop-role":stop_role,"jit-keys":jit_keys}[args.operation](config,args.role)
     print(json.dumps(result))
     return (0 if result["stop_requested"] else result["exit_code"]) if args.operation=="serve" else 0
 

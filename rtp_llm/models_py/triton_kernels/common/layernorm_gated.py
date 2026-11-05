@@ -559,7 +559,7 @@ def _validate_q_kv_norm(q, kv, q_weight, kv_weight):
             raise ValueError("K3 MLA norm weight shape does not match input")
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N"])
 def _grouped_q_kv_rmsnorm_kernel(
     Q,
     KV,
@@ -568,7 +568,7 @@ def _grouped_q_kv_rmsnorm_kernel(
     QO,
     KVO,
     SUFFIX,
-    N: tl.constexpr,
+    N,
     QS: tl.constexpr,
     KVS: tl.constexpr,
     KVOS: tl.constexpr,

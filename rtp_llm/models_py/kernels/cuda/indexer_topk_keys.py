@@ -5,9 +5,9 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
-def _sanitize(S, P, START, END, ROWS: tl.constexpr, COLS: tl.constexpr,
-              S_ROW: tl.constexpr, P_ROW: tl.constexpr,
+@triton.jit(do_not_specialize=["ROWS", "COLS", "S_ROW", "P_ROW"])
+def _sanitize(S, P, START, END, ROWS, COLS,
+              S_ROW, P_ROW,
               BOUNDED: tl.constexpr, HAS_START: tl.constexpr, BLOCK: tl.constexpr):
     offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     row, col = offset // COLS, offset % COLS
