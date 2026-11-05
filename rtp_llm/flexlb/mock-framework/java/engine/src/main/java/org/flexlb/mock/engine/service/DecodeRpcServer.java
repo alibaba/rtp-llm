@@ -18,11 +18,14 @@ final class DecodeRpcServer implements AutoCloseable {
     private final Object executionLock;
     private final Runnable recordCancellation;
     private final ExecutorService transport = Executors.newVirtualThreadPerTaskExecutor();
+    private final ScheduledThreadPoolExecutor deadlines = new ScheduledThreadPoolExecutor(1,
+        Thread.ofPlatform().daemon().name("rtp-decode-output-deadline").factory());
     private final SimulatedKvLoad transfer = new SimulatedKvLoad();
     private enum Stage { ALLOCATING, ALLOCATED, LOADING, LOADED, GENERATING, FINISHING }
     private boolean closed;
 
     DecodeRpcServer(RtpRpcService.Config config, Object executionLock, RtpEngineLoop engine, Runnable recordCancellation) {
+        deadlines.setRemoveOnCancelPolicy(true);
         this.config = config;
         this.executionLock = executionLock;
         this.engine = engine;
@@ -50,7 +53,7 @@ final class DecodeRpcServer implements AutoCloseable {
             this.response = response;
             rpcDeadline = context.getDeadline() == null ? Long.MAX_VALUE
                 : RpcMessages.after(started, context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
-            delivery = new GeneratedOutput(transport, TimeUnit.MINUTES.toMillis(10));
+            delivery = new GeneratedOutput(transport, deadlines, TimeUnit.MINUTES.toMillis(10), ignored -> {});
             delivery.attach(response, () -> {
                 boolean expired = context.getDeadline() != null && context.getDeadline().isExpired();
                 disconnected(this, expired ? Status.DEADLINE_EXCEEDED.withDescription("Decode RPC deadline expired")
@@ -230,6 +233,7 @@ final class DecodeRpcServer implements AutoCloseable {
             engine.close();
         }
         transfer.close();
+        deadlines.shutdownNow();
         transport.shutdown();
     }
 }

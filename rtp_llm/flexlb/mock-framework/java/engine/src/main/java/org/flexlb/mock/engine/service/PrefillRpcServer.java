@@ -350,6 +350,13 @@ final class PrefillRpcServer implements AutoCloseable {
         }
     }
 
+    private GeneratedOutput newOutput(long id, long attachMillis) {
+        // Retain only the registry key, never the Call or its input token data.
+        return new GeneratedOutput(workers, deadlines, attachMillis > 0 ? attachMillis : TimeUnit.MINUTES.toMillis(10), expired -> {
+            synchronized (this) { outputs.remove(id, expired); }
+        });
+    }
+
     void fetch(long id, StreamObserver<GenerateOutputsPB> observer) {
         var response = (ServerCallStreamObserver<GenerateOutputsPB>) observer;
         GeneratedOutput output; Fence fence;
@@ -422,7 +429,7 @@ final class PrefillRpcServer implements AutoCloseable {
         Call(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, String target, long attachMillis, boolean grouped) {
             this.input = input; this.target = target; this.deferred = response == null;
             batchSource = grouped ? new CompletableFuture<>() : null;
-            output = new GeneratedOutput(workers, attachMillis > 0 ? attachMillis : TimeUnit.MINUTES.toMillis(10));
+            output = newOutput(input.getRequestId(), attachMillis);
             context = (deferred ? Context.ROOT : Context.current()).withCancellation();
             started = System.nanoTime();
             deadline = RpcMessages.deadline(input, started, deferred ? Long.MAX_VALUE : rpcDeadline());

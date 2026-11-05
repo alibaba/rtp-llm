@@ -441,3 +441,5 @@ KvCache 投递类型化的 match/read/write 完成事件，由 RTP 指标层映�
 RPC GeneratedOutput 每请求只保存生成长度、发送游标、合成 token ID、固定大小的 AuxInfo、握手和终态标记。没有响应列表或逐轮 token 数组。可写时按两游标的差值即时构造增量 protobuf，单帧最多 4096 token，最后一份数据交付后再 onCompleted。未附着 Fetch、慢消费者和阻塞的 onNext 均不反向暂停计算；RPC 自身和网络栈的在途帧不计入这份固定大小状态。合并后的帧不保留原 Forward 边界，Client TTFT/TPOT 反映实际交付，计算侧指标仍按每轮原始事件统计。
 
 P/D 输出链路假定健康，不用链路拥塞或发送失败模拟 D 性能。ALLOCATE/LOAD 未完成时仍必须满足协议与 KV 就绪；GENERATE 接受后，P 断连或取消该输出流不撤销 D 的计算，D 继续到 EOS、长度上限、自身 deadline 或节点关闭。输出不可达可能丢响应；不新增重传、落盘或故障恢复流程。Scheduler 的显式 finish/cancel 仍可终止请求。
+
+计算结束后，RPC 为剩余输出保留固定十分钟交付期限（独立于 Fetch 接入期限）。到期移除输出注册记录，并通过串行发送路径以 DEADLINE_EXCEEDED 结束连接；不调用计算取消。正常交付或连接取消时撤销计时器。若底层 onNext 尚未返回，注册清理仍执行，错误通知等该调用返回后发送，不并发调用 observer。

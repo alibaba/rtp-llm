@@ -4,7 +4,10 @@ import io.grpc.Status;
 import io.grpc.stub.ServerCallStreamObserver;
 import java.nio.ByteOrder;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 
 /** Constant-size synthetic output progress. Only the sender materializes a bounded token frame. */
@@ -12,6 +15,9 @@ final class GeneratedOutput {
     static final int MAX_FRAME_TOKENS = 4096;
     private final Executor executor;
     private final long expires;
+    private final ScheduledExecutorService deadlines;
+    private final Consumer<GeneratedOutput> onExpired;
+    private ScheduledFuture<?> deliveryTimeout;
     private ServerCallStreamObserver<GenerateOutputsPB> response;
     private long requestId;
     private int tokenId, generated, sent;
@@ -20,8 +26,10 @@ final class GeneratedOutput {
     private boolean attached, draining, terminal, delivered, cancelled;
     private Throwable failure;
 
-    GeneratedOutput(Executor executor, long retainMillis) {
+    GeneratedOutput(Executor executor, ScheduledExecutorService deadlines, long retainMillis, Consumer<GeneratedOutput> onExpired) {
         this.executor = executor;
+        this.deadlines = deadlines;
+        this.onExpired = onExpired;
         expires = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(retainMillis);
     }
     synchronized boolean expired() { return !attached && System.nanoTime() >= expires; }
@@ -35,7 +43,7 @@ final class GeneratedOutput {
             attached = true; response = observer;
         }
         Runnable cancel = () -> {
-            synchronized (this) { cancelled = true; }
+            synchronized (this) { cancelled = true; cancelTimeout(); }
             onCancel.run();
         };
         observer.setOnCancelHandler(cancel);
@@ -81,8 +89,28 @@ final class GeneratedOutput {
         synchronized (this) {
             if (terminal) return;
             terminal = true; failure = error;
+            if (!delivered && !cancelled) {
+                try { deliveryTimeout = deadlines.schedule(this::expireDelivery, 10, TimeUnit.MINUTES); }
+                catch (java.util.concurrent.RejectedExecutionException closing) {
+                    if (failure == null) failure = Status.UNAVAILABLE.withDescription("Output transport closing").asRuntimeException();
+                }
+            }
         }
         schedule();
+    }
+
+    private void expireDelivery() {
+        synchronized (this) {
+            if (delivered || cancelled) return;
+            failure = Status.DEADLINE_EXCEEDED.withDescription("Output delivery expired after computation completed").asRuntimeException();
+        }
+        // Registry cleanup is independent of a blocked transport writer. Do not cancel computation.
+        onExpired.accept(this);
+        schedule();
+    }
+
+    private void cancelTimeout() {
+        if (deliveryTimeout != null) { deliveryTimeout.cancel(false); deliveryTimeout = null; }
     }
 
     private void schedule() {
@@ -106,15 +134,15 @@ final class GeneratedOutput {
                 boolean last = false, complete = false;
                 Throwable error = null;
                 synchronized (this) {
-                    if (cancelled || response.isCancelled()) { cancelled = true; draining = false; return; }
-                    if (failure != null) { error = failure; delivered = true; }
+                    if (cancelled || response.isCancelled()) { cancelled = true; draining = false; cancelTimeout(); return; }
+                    if (failure != null) { error = failure; delivered = true; cancelTimeout(); }
                     else if (allocateReady && !allocateSent) control = 1;
                     else if (loadReady && !loadSent) { control = 2; id = requestId; }
                     else if (sent < generated || generationFinished && !finalSent) {
                         width = Math.min(MAX_FRAME_TOKENS, generated - sent);
                         end = sent + width; token = tokenId; id = requestId; info = metadata;
                         last = generationFinished && end == generated;
-                    } else if (terminal) { complete = true; delivered = true; }
+                    } else if (terminal) { complete = true; delivered = true; cancelTimeout(); }
                     else { draining = false; return; }
                     if (error == null && !complete && !response.isReady()) { draining = false; return; }
                 }
@@ -133,7 +161,7 @@ final class GeneratedOutput {
                 }
             }
         } catch (RuntimeException disconnected) {
-            synchronized (this) { cancelled = true; draining = false; }
+            synchronized (this) { cancelled = true; draining = false; cancelTimeout(); }
         }
     }
 }
