@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/store/BlockTreeStorer.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cassert>
 #include <exception>
@@ -45,7 +46,9 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                                               bool                                              is_resident,
                                               size_t& resident_prefix_length,
                                               const std::vector<std::vector<int>>* token_segments,
-                                              const std::vector<size_t>* token_ends) {
+                                              const std::vector<size_t>* token_ends,
+                                              bool internal_fork,
+                                              bool* ready_after_insert) {
     resident_prefix_length = 0;
     assert(!is_resident || target_tier == Tier::DEVICE);
     RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE || target_tier == Tier::HOST || target_tier == Tier::DISK,
@@ -57,12 +60,15 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                             is_resident,
                             resident_prefix_length,
                             token_segments,
-                            token_ends);
+                            token_ends,
+                            internal_fork,
+                            ready_after_insert);
     } else {
         submitLowerTierLocked(cache_keys, resources, target_tier);
         return {};
     }
-    return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources, token_ends)) :
+    return storage_backend_ && !internal_fork ?
+               storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources, token_ends)) :
                               StorageWriteTask{};
 }
 
@@ -71,9 +77,23 @@ void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                  
                                           bool                                              is_resident,
                                           size_t&                                           resident_prefix_length,
                                           const std::vector<std::vector<int>>*              token_segments,
-                                          const std::vector<size_t>*                         token_ends) {
+                                          const std::vector<size_t>*                         token_ends,
+                                          bool internal_fork,
+                                          bool* ready_after_insert) {
     const BlockTreeInsertResult insert_result =
         tree_->insertNode(cache_keys, resources, false, is_resident, token_segments, token_ends);
+    std::optional<bool> fork_ready;
+    if (internal_fork) {
+        const auto path = tree_->findNode(cache_keys);
+        fork_ready = token_ends != nullptr && path.size() == cache_keys.size()
+                     && path.back()->token_end == token_ends->back()
+                     && std::all_of(tree_->groupSets().begin(), tree_->groupSets().end(), [&](const auto& group) {
+                            return group->hasDeviceCoverage(path, token_ends->back());
+                        });
+        if (ready_after_insert != nullptr) {
+            *ready_after_insert = *fork_ready;
+        }
+    }
     const bool tree_data_mutated = !insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty();
     if (tree_data_mutated || !insert_result.newly_resident_nodes.empty()) {
         evictor_.onInserted(insert_result);

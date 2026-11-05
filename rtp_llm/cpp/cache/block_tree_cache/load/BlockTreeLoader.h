@@ -21,6 +21,7 @@ class BlockTransferDispatcher;
 class BlockTreeTaskPool;
 
 struct BlockTreeMatchResult {
+    std::optional<PrefixCachePlanPoint>                farthest_fork;
     size_t                                              matched_device_blocks{0};
     size_t                                              matched_device_endpoint{0};
     bool                                                precise_local{false};

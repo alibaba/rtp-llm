@@ -4,6 +4,7 @@ import torch
 
 from rtp_llm.models_py.model_desc.kimi_linear import KimiLinearMetadata
 from rtp_llm.models_py.model_desc.test._linear_sparse_save_common import (
+    _exercise_internal_f_last_same_slot,
     _exercise_mixed_prefix_batch,
     _exercise_sparse_save_restore,
     _exercise_tail_boundaries,
@@ -32,6 +33,14 @@ class LinearSparseSaveKdaTest(unittest.TestCase):
         )
 
         _exercise_sparse_save_restore(
+            module,
+            _kda_forward,
+            lambda conv_metadata: KimiLinearMetadata(prefill_conv1d_meta=conv_metadata),
+            full_tokens,
+            aux,
+            device,
+        )
+        _exercise_internal_f_last_same_slot(
             module,
             _kda_forward,
             lambda conv_metadata: KimiLinearMetadata(prefill_conv1d_meta=conv_metadata),

@@ -75,15 +75,17 @@ public:
     virtual void insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
     // Optional save destinations are request-owned until the writer has completed
     // and the request either publishes or abandons them.
-    void
-    prepareRegisteredSave(PrefixCacheRegistration& registration, BatchKVCacheResource& runtime, size_t resume_endpoint);
+    void         prepareRegisteredSave(PrefixCacheRegistration& registration,
+                                       BatchKVCacheResource&    runtime,
+                                       size_t                   resume_endpoint,
+                                       const CompleteTokenIds*  original_ids = nullptr);
     MallocStatus prepareRequiredContinuation(PrefixCacheRegistration& registration,
                                              BatchKVCacheResource&    runtime,
                                              size_t                   resume_endpoint);
     void         releaseRegisteredSave(PrefixCacheRegistration& registration);
     // Called only after the owner has synchronized every registered copy and writer.
-    void                           releaseRegisteredSourcePins(PrefixCacheRegistration& registration);
-    bool                           relinquishOptionalRegisteredSave(PrefixCacheRegistration& registration);
+    void releaseRegisteredSourcePins(PrefixCacheRegistration& registration);
+    bool relinquishOptionalRegisteredSave(PrefixCacheRegistration& registration, bool internal_only_only = false);
     virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const;
     virtual std::vector<BlockInfo>
@@ -241,6 +243,7 @@ protected:
     std::mutex malloc_mutex_;
 
     struct PreparedKVCache {
+        std::optional<PrefixCachePlanPoint>  farthest_fork;
         size_t                               matched_device_blocks   = 0;
         size_t                               matched_device_endpoint = 0;
         bool                                 precise_local           = false;
@@ -306,6 +309,17 @@ protected:
 
 private:
     size_t groupIdForTag(std::string_view tag) const;
+
+    // insertIntoCache splits into the registration-driven publication (the
+    // canonical spine plus at most one internal-only fork branch) and the
+    // legacy per-batch publication used when no registration record exists.
+    void publishRegisteredSpineAndFork(const InsertInfo&              insert_info,
+                                       BatchKVCacheResource&          kv_cache_resource,
+                                       const PrefixCacheRegistration& registration,
+                                       size_t&                        resident_prefix_length);
+    void publishLegacyBatches(const InsertInfo&     insert_info,
+                              BatchKVCacheResource& kv_cache_resource,
+                              size_t&               resident_prefix_length);
 };
 
 using CoordinatorCacheManagerPtr = std::shared_ptr<CoordinatorCacheManager>;

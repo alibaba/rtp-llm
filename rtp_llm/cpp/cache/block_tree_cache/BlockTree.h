@@ -66,7 +66,12 @@ public:
     std::vector<BlockTreeContentRange>
     contentMatchRanges(const std::vector<int>&                                                   request_tokens,
                        const std::function<CacheKeyType(size_t)>&                                endpoint_key,
-                       const std::function<bool(size_t, const std::vector<int>&, CacheKeyType)>& source_identity) const;
+                       const std::function<bool(size_t, const std::vector<int>&, CacheKeyType)>& source_identity,
+                       std::optional<PrefixCachePlanPoint>* farthest_fork = nullptr) const;
+    // Resolve one group's physical source for a shared exact endpoint. The
+    // borrowed nodes are valid only while the owning cache lock is held.
+    std::optional<std::vector<TreeNode*>> coveredDeviceGroupPath(
+        const std::vector<BlockTreeContentRange>& ranges, size_t endpoint, size_t group_id) const;
 
     bool isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tier) const;
 

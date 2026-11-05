@@ -341,6 +341,75 @@ def _exercise_sparse_save_restore(
     )
 
 
+def _exercise_internal_f_last_same_slot(
+    module,
+    forward: ForwardFn,
+    metadata_factory,
+    full_tokens: torch.Tensor,
+    aux_full: AuxTensors,
+    device: torch.device,
+):
+    """Keep an interior F1320 state independent of N1340 in one physical slot."""
+    cache = _make_cache(module, 16, device)
+
+    def run(start: int, end: int, block_id: int, positions=None, destinations=None):
+        block_map = torch.tensor([[0, 1, 2, 3, 4, block_id, -1, -1]], dtype=torch.int32)
+        inputs = _attention_inputs(
+            start,
+            end - start,
+            block_map,
+            device,
+            positions=positions,
+            block_ids=destinations,
+        )
+        metadata = metadata_factory(
+            prepare_causal_conv1d_metadata(inputs.cu_seqlens_device, device=device)
+        )
+        return forward(
+            module,
+            full_tokens[start:end],
+            tuple(tensor[start:end] for tensor in aux_full),
+            inputs,
+            cache,
+            metadata,
+        )
+
+    run(0, 1300, 5)
+    source = cache.kv_cache_base[5].clone()
+    _copy_linear_block(module, cache, 5, 8)
+    # The registration keeps N first. F is appended last, even though its
+    # absolute endpoint is earlier; selected columns keep their own IDs.
+    positions = torch.tensor([[1340, 1320]], dtype=torch.int64, device=device)
+    destinations = torch.tensor([[9, 10]], dtype=torch.int32, device=device)
+    run(1300, 1340, 8, positions, destinations)
+    saved_f = cache.kv_cache_base[10].clone()
+    saved_n = cache.kv_cache_base[9].clone()
+    torch.testing.assert_close(cache.kv_cache_base[5], source, rtol=0, atol=0)
+
+    _copy_linear_block(module, cache, 5, 11)
+    run(1300, 1320, 11)  # Independent no-save state at the actual F.
+    torch.testing.assert_close(
+        cache.kv_cache_base[10], cache.kv_cache_base[11], rtol=0, atol=0
+    )
+    _copy_linear_block(module, cache, 5, 12)
+    run(1300, 1340, 12)
+    torch.testing.assert_close(
+        cache.kv_cache_base[9], cache.kv_cache_base[12], rtol=0, atol=0
+    )
+    torch.testing.assert_close(cache.kv_cache_base[10], saved_f, rtol=0, atol=0)
+    torch.testing.assert_close(cache.kv_cache_base[9], saved_n, rtol=0, atol=0)
+
+    _copy_linear_block(module, cache, 10, 13)
+    reused = run(1320, 1340, 13)
+    _copy_linear_block(module, cache, 11, 14)
+    reference = run(1320, 1340, 14)
+    torch.testing.assert_close(reused, reference, rtol=0, atol=0)
+    torch.testing.assert_close(
+        cache.kv_cache_base[13], cache.kv_cache_base[14], rtol=0, atol=0
+    )
+    torch.testing.assert_close(cache.kv_cache_base[5], source, rtol=0, atol=0)
+
+
 def _exercise_tail_boundaries(
     module,
     forward: ForwardFn,

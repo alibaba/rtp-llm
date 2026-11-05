@@ -41,7 +41,9 @@ public:
                                  bool                                              is_resident,
                                  size_t&                                           resident_prefix_length,
                                  const std::vector<std::vector<int>>*              token_segments = nullptr,
-                                 const std::vector<size_t>*                         token_ends = nullptr);
+                                 const std::vector<size_t>*                         token_ends = nullptr,
+                  bool internal_fork = false,
+                  bool* ready_after_insert = nullptr);
     void             stopAdmissionLocked();
 
 private:
@@ -53,7 +55,9 @@ private:
                                          bool                                              is_resident,
                                          size_t&                                           resident_prefix_length,
                                          const std::vector<std::vector<int>>*              token_segments,
-                                         const std::vector<size_t>*                         token_ends);
+                                         const std::vector<size_t>*                         token_ends,
+                                         bool internal_fork,
+                                         bool* ready_after_insert);
     StorageRequest   makeStorageRequest(const CacheKeysType&                              cache_keys,
                                         const std::vector<std::vector<GroupSetResource>>& resources,
                                         const std::vector<size_t>*                         token_ends = nullptr) const;

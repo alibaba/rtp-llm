@@ -83,6 +83,11 @@ class DeepSeekV4TailReuseFourLayerCP2Test(DeepSeekV4TailReuseFourLayerTest):
             " --enable_disk_cache 0 --enable_remote_cache 0"
             " --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2"
         )
+        internal_fork = self._testMethodName.startswith("test_cp2_internal_")
+        if internal_fork:
+            common_args = common_args.replace(
+                "--kv_cache_mem_mb 4096", "--kv_cache_mem_mb 2048"
+            )
         decode_args = (
             common_args
             + " --role_type DECODE --enable_cuda_graph 0 --cp_rotate_method PREFILL_CP"
@@ -132,6 +137,11 @@ class DeepSeekV4TailReuseFourLayerCP2Test(DeepSeekV4TailReuseFourLayerTest):
                 "RTP_HOT_HOOK_DUMP_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_ROLE": "prefill",
+                "T10_PRIVATE_FORK_REFERENCE": (
+                    "1"
+                    if self._testMethodName == "test_cp2_internal_f800_numerical"
+                    else "0"
+                ),
             },
             device_ids=cards[:2],
             port=prefill_port,
@@ -140,6 +150,11 @@ class DeepSeekV4TailReuseFourLayerCP2Test(DeepSeekV4TailReuseFourLayerTest):
                 common_args
                 + " --role_type PREFILL --enable_cuda_graph 0"
                 + " --cp_rotate_method ALL_GATHER --enable_prefill_partial_tail_reuse 1"
+                + (
+                    " --enable_prefill_common_prefix_recovery 1"
+                    if internal_fork
+                    else ""
+                )
             ),
         )
         self.decode = MagaServerManager(
@@ -454,6 +469,144 @@ class DeepSeekV4TailReuseFourLayerCP2Test(DeepSeekV4TailReuseFourLayerTest):
 
     def test_cp2_g1025_to_1026(self):
         self._run_cp_case("cp2_1025_1026", 1025, 1026)
+
+    def _run_cp2_internal_f800(self):
+        label = "cp2_internal_f800"
+        fork_at = 800
+        prompt_a, prompt_b, tokens_a, tokens_b = self._fork_prompts(label, fork_at)
+        prefix = self._extend_prompt(f"Tail reuse {label} branch:", fork_at)
+        prompt_c = None
+        for third in (" green", " amber", " violet", " silver"):
+            candidate = self.tokenizer.encode(prefix + third)
+            if (
+                len(candidate) == fork_at + 1
+                and candidate[:fork_at] == tokens_a[:fork_at]
+                and candidate[fork_at] not in (tokens_a[fork_at], tokens_b[fork_at])
+            ):
+                prompt_c = self._extend_prompt(prefix + third, 2000)
+                break
+        self.assertIsNotNone(prompt_c, "no third CP2 one-token branch at F800")
+
+        source = self._request_cp(f"{label}_source_1300", prompt_a)
+        reused_b = self._request_cp(f"{label}_b_2000", prompt_b)
+        self.assertEqual(reused_b[0]["aux_info"].get("prefill_total_reuse_len"), 512)
+        self.assertEqual(set(reused_b[1]), {0, 1})
+        for rank in (0, 1):
+            self.assertEqual(int(reused_b[2][rank]["extra"]["seq_len_full"]), 1488)
+            self.assertEqual(int(reused_b[2][rank]["extra"]["seq_len_total"]), 2000)
+            for key, after in reused_b[1][rank]["rows"].items():
+                before = source[1][rank]["rows"][key]
+                for suffix in ("ids", "values", "scales"):
+                    name = f"source_{suffix}"
+                    if name in before:
+                        self.assertTrue(
+                            torch.equal(before[name], after[name]),
+                            f"rank{rank} {key}: A source changed after B",
+                        )
+                if key[1] in DSV4_KERNEL_ROW_TAGS:
+                    self.assertFalse((after["current_save_block_ids"] >= 0).any())
+                    continue
+                positions = after["current_save_positions"].reshape(-1)
+                blocks = after["current_save_block_ids"].reshape(-1)
+                for endpoint in (800, 2000):
+                    selected = blocks[positions == endpoint]
+                    self.assertEqual(selected.numel(), 1, f"rank{rank} {key}: F/N")
+                    self.assertGreater(int(selected[0]), 0)
+                self.assertNotEqual(
+                    int(blocks[positions == 800][0]),
+                    int(blocks[positions == 2000][0]),
+                    f"rank{rank} {key}: F and N must be distinct",
+                )
+
+        reused_c = self._request_cp(f"{label}_c_2000", prompt_c)
+        self.assertEqual(reused_c[0]["aux_info"].get("prefill_total_reuse_len"), 800)
+        for rank in (0, 1):
+            self.assertEqual(int(reused_c[2][rank]["extra"]["seq_len_full"]), 1200)
+            self.assertEqual(int(reused_c[2][rank]["extra"]["seq_len_total"]), 2000)
+            for key, after in reused_c[1][rank]["rows"].items():
+                before = source[1][rank]["rows"][key]
+                for suffix in ("ids", "values", "scales"):
+                    name = f"source_{suffix}"
+                    if name in before:
+                        self.assertTrue(
+                            torch.equal(before[name], after[name]),
+                            f"rank{rank} {key}: A source changed after C",
+                        )
+        return source, reused_b, reused_c
+
+    def test_cp2_internal_f800_later_request(self):
+        self._run_cp2_internal_f800()
+
+    def test_cp2_internal_f800_numerical(self):
+        _, reused_b, reused_c = self._run_cp2_internal_f800()
+        numeric = {}
+        owner_ranks = []
+        for rank in (0, 1):
+            private_a = torch.load(
+                self.probe_dir / f"private_reference_rank{rank}_1300_g0.pt",
+                weights_only=False,
+            )
+            self.assertEqual(private_a["production_cache_bytes_copied"], 0)
+            self.assertEqual(private_a["selected_save_slots"], 1)
+            private_f = torch.load(
+                self.probe_dir / f"private_f800_runtime_rank{rank}.pt",
+                weights_only=False,
+            )
+            self.assertEqual(private_f["production_cache_bytes_copied"], 0)
+            for key, row in reused_b[1][rank]["rows"].items():
+                if key[1] in DSV4_KERNEL_ROW_TAGS:
+                    continue
+                selected = row.get("selected_f800_values")
+                self.assertIsNotNone(selected, f"rank{rank} {key}: missing F row")
+                self.assertTrue(
+                    torch.equal(selected, private_f["rows"][key]["values"]),
+                    f"rank{rank} {key}: private F state differs",
+                )
+            private_b = torch.load(
+                self.probe_dir / f"private_reference_rank{rank}_2000_g512.pt",
+                weights_only=False,
+            )
+            self.assertEqual(private_b["production_cache_bytes_copied"], 0)
+            self.assertEqual(private_b["selected_save_slots"], 1)
+            direct = torch.load(
+                self.probe_dir / f"direct_reference_rank{rank}_2000_g800.pt",
+                weights_only=False,
+            )
+            self.assertEqual(direct["production_cache_bytes_copied"], 0)
+            self.assertEqual(direct["selected_save_slots"], 0)
+            self.assertEqual(
+                direct["provenance"],
+                "private_no_store_A0_to_1300_B512_to_2000_then_C800_to_2000",
+            )
+            if direct["final_last"].numel():
+                owner_ranks.append(rank)
+            trace = reused_c[2][rank]
+            comparisons = [
+                (f"layer{layer:02d}_tail128", direct["layers"][layer].float())
+                for layer in range(4)
+            ]
+            comparisons.extend(
+                (
+                    ("lm_last_hidden", direct["final_last"].float()),
+                    ("lm_logits_last", direct["logits_last"].float()),
+                )
+            )
+            for name, reference in comparisons:
+                resumed = trace["tensors"][name]
+                self.assertEqual(resumed.shape, reference.shape, f"rank{rank} {name}")
+                self.assertTrue(torch.isfinite(resumed).all(), f"rank{rank} {name}")
+                difference = (resumed - reference).abs()
+                numeric[f"rank{rank}_{name}"] = (
+                    float(difference.max()) if difference.numel() else 0.0
+                )
+                with self.subTest(rank=rank, tensor=name):
+                    torch.testing.assert_close(
+                        resumed, reference, rtol=0.002, atol=0.002
+                    )
+        self.assertEqual(len(owner_ranks), 1, "one CP rank owns the last prompt token")
+        (self.output_dir / "cp2_f800_numeric_diffs.json").write_text(
+            json.dumps(numeric, indent=2) + "\n"
+        )
 
 
 if __name__ == "__main__":
