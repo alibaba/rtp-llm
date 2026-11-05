@@ -14,6 +14,8 @@ def standard_actions():
     from .engine_prefill_tps_with_cache import EnginePrefillTpsWithCache
     from .engine_decode_tps import EngineDecodeTps
     from .client_qps import ClientQps
+    from .client_ttft import ClientTtft
+    from .client_tpot import ClientTpot
     from .client_success_rate import ClientSuccessRate
     from .client_start import ClientStart
     from .client_stop import ClientStop
@@ -32,6 +34,8 @@ def standard_actions():
         EnginePrefillTpsWithCache,
         EngineDecodeTps,
         ClientQps,
+        ClientTtft,
+        ClientTpot,
         ClientSuccessRate,
         ClientStart,
         ClientStop,

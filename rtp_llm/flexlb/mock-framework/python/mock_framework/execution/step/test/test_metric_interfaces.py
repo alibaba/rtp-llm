@@ -92,11 +92,11 @@ def test_missing_insufficient_or_duplicate_instance_history_fails_before_aggrega
     assert len(calls) == 1
 
 
-def test_explicit_target_scope_does_not_broadcast_and_latest_is_instant_rate():
+def test_explicit_target_scope_and_default_sixty_second_interval():
     ctx = context()
     selector, targets = metrics.scope(ctx, metrics.MetricArgs(targets=['127.0.0.1:1002']), 'prefill')
     assert targets == ['127.0.0.1:1002'] and '1001' not in selector
-    assert metrics.window(ctx, metrics.MetricArgs()) == (metrics.epoch(ctx.query_time), 60000, 'irate')
+    assert metrics.window(ctx, metrics.MetricArgs()) == (metrics.epoch(ctx.query_time), 60000, 'increase')
     with pytest.raises(ExecutionError):
         metrics.scope(ctx, metrics.MetricArgs(targets=['old:1']), 'prefill')
     with pytest.raises(ValueError):
@@ -148,7 +148,7 @@ def test_success_rate_rejects_zero_terminal_nan_and_invalid_ratios(monkeypatch, 
             return [metrics.QuerySample({'instance': f'127.0.0.1:{port}'}, 2, at) for port in (1001, 1002)]
         return [metrics.QuerySample({}, value, at)]
     monkeypatch.setattr(metrics, 'instant', instant)
-    with pytest.raises(ExecutionError, match='terminal observations'):
+    with pytest.raises(ExecutionError, match='terminal observations|finite sample'):
         asyncio.run(ClientSuccessRate.execute(ctx, SuccessRateArgs(range=['-20s', '0s'])))
 
 
@@ -193,15 +193,67 @@ def test_success_rate_window_keeps_selected_clients_and_fixed_end(monkeypatch):
     assert '[20000ms]' in calls[-1][0] and 'irate' not in calls[-1][0]
 
 
-@pytest.mark.parametrize('method,denominator', [
-    (EnginePrefillTps.execute, 'rtp_llm_context_forward_seconds_total'),
-    (EnginePrefillTpsWithCache.execute, 'rtp_llm_context_forward_with_cache_seconds_total'),
+@pytest.mark.parametrize('method,name', [
+    (EnginePrefillTps.execute, 'rtp_llm_context_tps'),
+    (EnginePrefillTpsWithCache.execute, 'rtp_llm_context_tps_with_cache'),
 ])
-def test_prefill_throughput_uses_the_matching_nonempty_forward_duration(monkeypatch, method, denominator):
+def test_prefill_throughput_reads_the_real_named_gauge(monkeypatch, method, name):
     calls = []
-    async def metric(ctx, args, role, numerator, duration, **labels):
-        calls.append((role, numerator, duration, labels))
+    async def gauge(ctx, args, role, metric_name):
+        calls.append((role, metric_name))
         return 42
-    monkeypatch.setattr(metrics, 'metric', metric)
+    monkeypatch.setattr(metrics, 'gauge', gauge)
     assert asyncio.run(method(context(), metrics.MetricArgs())) == 42
-    assert calls[0][1:3] == ('rtp_llm_forward_tokens_total', denominator)
+    assert calls == [('prefill', name)]
+
+
+def test_series_rejects_missing_points_and_nonfinite_samples(prometheus):
+    prometheus['body']['data'] = {'resultType': 'matrix', 'result': [
+        {'metric': {}, 'values': [[100, '0.8'], [101, '0.9'], [102, '1']]}]}
+    samples = metrics.fetch_series(prometheus['url'], 'ratio', 100, 102, 1, 2)
+    assert [s.value for s in samples[0]] == [.8, .9, 1]
+    assert prometheus['requests'][0]['step'] == ['1']
+    prometheus['body']['data']['result'][0]['values'].pop(1)
+    with pytest.raises(ExecutionError, match='coverage'):
+        metrics.fetch_series(prometheus['url'], 'ratio', 100, 102, 1, 2)
+    prometheus['body']['data']['result'][0]['values'] = [[100, 'NaN'], [101, '1'], [102, '1']]
+    with pytest.raises(ExecutionError, match='Nonfinite'):
+        metrics.fetch_series(prometheus['url'], 'ratio', 100, 102, 1, 2)
+
+
+def test_series_checks_every_point_and_each_instances_history(monkeypatch):
+    from mock_framework.execution.step.assertions import matches_expectation
+    ctx = context()
+    ctx.runtime.monitoring = SimpleNamespace(interval=1)
+    async def instant(ctx, expression, at):
+        return [metrics.QuerySample({'instance': f'127.0.0.1:{p}'}, 4, at) for p in (1001, 1002)]
+    async def series(ctx, expression, start, end, step):
+        if expression.startswith('count_over_time'):
+            return [[metrics.QuerySample({'instance': f'127.0.0.1:{p}'}, 4, t) for t in (end - 1, end)] for p in (1001, 1002)]
+        return [[metrics.QuerySample({}, v, t) for v, t in zip((.9, .7), (end - 1, end))]]
+    monkeypatch.setattr(metrics, 'instant', instant)
+    monkeypatch.setattr(metrics, 'series_query', series)
+    values = asyncio.run(EngineCacheHitRate.execute(ctx, metrics.MetricArgs(range=['-2s', '0s'], mode='series')))
+    assert values == [.9, .7]
+    assert not matches_expectation(values, {'gte': .8})
+    assert matches_expectation(values, {'gte': .6, 'lte': 1})
+    assert not matches_expectation([], {'gte': 0})
+
+
+def test_latency_interval_uses_request_weights_and_merges_histogram_buckets(monkeypatch):
+    from mock_framework.execution.step.client_ttft import ClientTtft, LatencyArgs
+    ctx = context()
+    for node in ctx.nodes:
+        node['role'] = 'client'
+    expressions = []
+    async def instant(ctx, expression, at):
+        expressions.append(expression)
+        if expression.startswith('count_over_time'):
+            return [metrics.QuerySample({'instance': f'127.0.0.1:{p}'}, 4, at) for p in (1001, 1002)]
+        return [metrics.QuerySample({}, .25, at)]
+    monkeypatch.setattr(metrics, 'instant', instant)
+    assert asyncio.run(ClientTtft.execute(ctx, LatencyArgs(range=['-30s', '0s']))) == .25
+    assert 'sum(increase(mock_client_ttft_seconds_sum' in expressions[-1]
+    assert ' / sum(increase(mock_client_ttft_seconds_count' in expressions[-1]
+    asyncio.run(ClientTtft.execute(ctx, LatencyArgs(range=['-30s', '0s'], statistic='p95')))
+    assert 'histogram_quantile(0.95, sum by(le)(increase(' in expressions[-1]
