@@ -1,0 +1,7 @@
+--- aios/autil/autil/legacy/astream.cpp
++++ aios/autil/autil/legacy/astream.cpp
+@@ -84,3 +84,3 @@
+ #define PUTVARINT32_AND_RETURN                                                                                         \
+-    if (bufSize - buffered > 5) {                                                                                      \
++    if (buffered >= 0 && bufSize - buffered > 5) {                                                                                      \
+         if (udata <= 0x7f) {                                                                                           \
