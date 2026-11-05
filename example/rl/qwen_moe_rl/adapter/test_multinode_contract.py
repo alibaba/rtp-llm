@@ -10,6 +10,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
 import uuid
 
 HERE=Path(__file__).resolve().parent
@@ -273,7 +274,10 @@ class IpcAndCleanupTests(unittest.TestCase):
                 ray_actor=dict(name=f'owner{index}',namespace='owned')) for index in range(4)]
             identity=dict(pid=1,create_time=1.0,node_owner_count=4,node_owners=owners,
                 ray_actor=dict(name='controller',namespace='owned'))
-            result=cleanup._cleanup_multinode(identity,root)
+            # This regression isolates the live-owner fallback. Completed
+            # shutdown verification has its own positive/negative CPU suite.
+            with patch('rtp_cleanup_completed.verify_completed_multinode_shutdown', return_value=None):
+                result=cleanup._cleanup_multinode(identity,root)
             self.assertEqual(result['method'],'owned_multinode_owner_rpc')
             self.assertEqual(sorted(stopped),[0,1,2,3])
             ray.is_initialized=lambda:False

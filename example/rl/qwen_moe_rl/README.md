@@ -121,3 +121,18 @@ claim Qwen3.8-2.4T training support; that model requires its own architecture,
 weight mapping, distributed execution and end-to-end numerical validation.
 `SOURCE_PROVENANCE.json` records the frozen input-source fingerprints before
 portable path/bootstrap changes.
+
+## Idempotent cleanup after actor lifetime ends
+
+The outer cleanup now accepts a completed native shutdown only after binding
+its canonical receipt, latest committed weight version, deployment and boot
+identity to fresh CPU inspectors on each exact allocated Ray node. Inspectors
+check original PID/creation-time pairs, process groups and physical GPU UUIDs,
+and require owned native GPU contexts to be absent. Missing, stale, mismatched
+or unverifiable evidence still fails closed. The fallback retains live-owner
+shutdown RPCs; this is not an unconditional actor-not-found success.
+
+The four cleanup sources were tested with 35 CPU unit cases and an actual
+ARM/Ray read-only post-run regression on both closed TP16 replicas. That
+regression sent no native control RPC or process signal and left original
+failed-exit evidence unchanged. It is separate from a fresh full RL run.

@@ -91,18 +91,42 @@ def _terminate_identity(identity):
             'pgid': identity['pgid'], 'finished_at_unix': time.time()}
 
 
+def _missing_named_actor(error, name):
+    # Ray's specific lookup failure; no timeout/permission exception is missing.
+    return (isinstance(error, ValueError) and
+            str(error).startswith(f"Failed to look up actor with name {name!r}."))
+
+
+def _dead_named_actor(error):
+    from ray.exceptions import ActorDiedError
+    return isinstance(error, ActorDiedError)
+
+
 def _cleanup_multinode(identity, root):
-    """Remote PIDs are verified and signalled only by their local owner actor."""
+    """Reuse a positively reverified completed shutdown, or stop owned live actors."""
     import ray
     if not ray.is_initialized():
         raise RuntimeError('A live Ray cluster is required to verify cross-node native cleanup')
     timeout=float(os.environ.get('RLLM_RTP_CLEANUP_RPC_TIMEOUT','90'))
+    from rtp_cleanup_completed import verify_completed_multinode_shutdown
+    completed=verify_completed_multinode_shutdown(identity,root,timeout)
+    if completed is not None:
+        return dict(method='verified_completed_multinode_shutdown',rpc_receipt=completed)
     actor=identity['ray_actor']
     controller_error=None
+    controller_gone=False
     try:
-        handle=ray.get_actor(actor['name'],namespace=actor['namespace'])
-        result=ray.get(handle.shutdown_if_owned.remote(int(identity['pid']),
-            float(identity['create_time']),str(root)),timeout=timeout)
+        try:
+            handle=ray.get_actor(actor['name'],namespace=actor['namespace'])
+        except Exception as error:
+            controller_gone=_missing_named_actor(error,actor['name'])
+            raise
+        try:
+            result=ray.get(handle.shutdown_if_owned.remote(int(identity['pid']),
+                float(identity['create_time']),str(root)),timeout=timeout)
+        except Exception as error:
+            controller_gone=_dead_named_actor(error)
+            raise
         if (not result.get('process_tree_terminated') or len(result.get('nodes',[]))!=identity['node_owner_count']
                 or any(not node.get('process_tree_terminated') or node.get('owned_gpu_processes_after')
                        for node in result['nodes'])):
@@ -115,23 +139,46 @@ def _cleanup_multinode(identity, root):
         raise RuntimeError('Cluster controller is unavailable and local owner identities are incomplete: '+controller_error)
     pending=[]
     errors=[]
+    missing=[]
     for owner in owners:
         try:
             if Path(owner['audit_dir']).resolve()!=root:
                 raise ValueError('Native owner belongs to another audit directory')
             actor=owner['ray_actor']
-            handle=ray.get_actor(actor['name'],namespace=actor['namespace'])
-            pending.append(handle.stop_if_owned.remote(int(owner['pid']),float(owner['create_time']),str(root)))
+            try:
+                handle=ray.get_actor(actor['name'],namespace=actor['namespace'])
+            except Exception as error:
+                if _missing_named_actor(error,actor['name']):
+                    missing.append(dict(name=actor['name'],error=repr(error)))
+                    continue
+                raise
+            pending.append((actor['name'],handle.stop_if_owned.remote(int(owner['pid']),float(owner['create_time']),str(root))))
         except Exception as error:
-            errors.append(repr(error))
+            if _dead_named_actor(error):
+                missing.append(dict(name=owner['ray_actor']['name'],error=repr(error)))
+            else:
+                errors.append(repr(error))
     results=[]
-    for future in pending:
+    for name,future in pending:
         try:
             results.append(ray.get(future,timeout=timeout))
         except Exception as error:
-            errors.append(repr(error))
+            if _dead_named_actor(error):
+                missing.append(dict(name=name,error=repr(error)))
+            else:
+                errors.append(repr(error))
     if errors:
         raise RuntimeError('Native node cleanup failed after attempting every owner: '+str(errors))
+    if missing:
+        if not controller_gone:
+            raise RuntimeError('Native controller failed without an actor-not-found/death race: '+str(controller_error))
+        if any(not item.get('process_tree_terminated') or item.get('owned_gpu_processes_after') for item in results):
+            raise RuntimeError('A live owner did not acknowledge native cleanup')
+        completed=verify_completed_multinode_shutdown(identity,root,timeout)
+        if completed is None:
+            raise RuntimeError('Missing/dead native actors have no complete canonical shutdown proof')
+        return dict(method='verified_completed_multinode_shutdown',controller_error=controller_error,
+                    missing_owner_lookups=missing,live_owner_rpc_receipts=results,rpc_receipt=completed)
     if (len({item['node_index'] for item in results})!=len(owners)
             or any(not item.get('process_tree_terminated') or item.get('owned_gpu_processes_after') for item in results)):
         raise RuntimeError('Individual owners did not acknowledge complete cross-node cleanup')

@@ -11,7 +11,7 @@
     },
     {
       "path": "README.md",
-      "ported_sha256": "26611ad5df676c4e2e4cf29156d777a0ce3aaa02cd1c867732563248184b9a8d",
+      "ported_sha256": "4fe878f865353a995c105bb41fd979bda9bb94fccd421933fb8632f4b1448e3f",
       "source_sha256": "f3c6b449eb16c4d764952010fb435dd3bdb6b748ed8827079cecc3ff837f1493",
       "changed_during_port": true
     },
@@ -41,9 +41,14 @@
     },
     {
       "path": "adapter/rtp_cleanup.py",
-      "ported_sha256": "add5d46c001eb870915e5e193cd58ca5c070324313ea19ebcedff35488894d61",
+      "ported_sha256": "d76da440b6806efa8de73a60f442730aac594f369cfc21f4bb0fe928c2af4d2f",
       "source_sha256": "add5d46c001eb870915e5e193cd58ca5c070324313ea19ebcedff35488894d61",
-      "changed_during_port": false
+      "changed_during_port": true
+    },
+    {
+      "path": "adapter/rtp_cleanup_completed.py",
+      "new_integration_file": true,
+      "ported_sha256": "3fa81596687bf4f5c2824015106b3b10389be495cc6ce6777d29206d593498cd"
     },
     {
       "path": "adapter/rtp_cold_long_decode.py",
@@ -101,7 +106,7 @@
     },
     {
       "path": "adapter/test_multinode_contract.py",
-      "ported_sha256": "40e7eabacc7f155bfc66d16d88f8d1a8e1014ebf936dc14e3942d3d723acca49",
+      "ported_sha256": "033aececb03a68b668959e70aebe5fe5ee3eaee4497680e9b32c06c54e6e7229",
       "source_sha256": "53231ec677d598659fd266605793c0d9e405e950cf9992df18298d88dc8657a4",
       "changed_during_port": true
     },
@@ -328,6 +333,11 @@
       "changed_during_port": false
     },
     {
+      "path": "validation/q397_cleanup_idempotence_cpu.py",
+      "new_integration_file": true,
+      "ported_sha256": "0eea31385403a634f34320f26641d0ab8e1d07d0cf6872ecc1c91880380ea409"
+    },
+    {
       "path": "validation/q397_evidence_contracts.py",
       "ported_sha256": "b818e61e27fb5c93d963a8f9a12fbe788463dbd66c101b0649b7cf510011f81a",
       "source_sha256": "b818e61e27fb5c93d963a8f9a12fbe788463dbd66c101b0649b7cf510011f81a",
@@ -338,6 +348,11 @@
       "ported_sha256": "218338854def0569e5cf38a4eb0000583fdd1bc1f73841ce5dcd55ea0e9c9f63",
       "source_sha256": "2543903576480664df9581697c93970be138ddbbb5102fe088aa7be045c51406",
       "changed_during_port": true
+    },
+    {
+      "path": "validation/q397_padding_reference/.gitattributes",
+      "ported_sha256": "05dc05b9f05d589b9b8201d2aa058c533a3fcbedbb217c216005483553cd1db7",
+      "new_integration_file": true
     },
     {
       "path": "validation/q397_padding_reference/LICENSE.txt",
@@ -394,6 +409,11 @@
       "changed_during_port": false
     },
     {
+      "path": "validation/test_rtp_cleanup_completed_cpu.py",
+      "new_integration_file": true,
+      "ported_sha256": "5b33698facb309c0950de5924cda066f48ea636fe08142d5647621be02dca79c"
+    },
+    {
       "path": "validation/test_rtp_request_journal_cpu.py",
       "ported_sha256": "36bdf6717698ee825315ed6bcaf68d7605d9e460320f93b89bae8e11f3a06021",
       "source_sha256": "36bdf6717698ee825315ed6bcaf68d7605d9e460320f93b89bae8e11f3a06021",
@@ -410,11 +430,6 @@
       "ported_sha256": "d175fa0c543b935f0cec8a39a931102ef74e7f360eb79ae798bacb9a27bbc443",
       "source_sha256": "ec0c50df6ada55c50c5a8b00a0cdd956932282c3aba7c14c9bf05eba4e419b7a",
       "changed_during_port": true
-    },
-    {
-      "path": "validation/q397_padding_reference/.gitattributes",
-      "ported_sha256": "05dc05b9f05d589b9b8201d2aa058c533a3fcbedbb217c216005483553cd1db7",
-      "new_integration_file": true
     }
   ],
   "integration_changes": [
@@ -422,5 +437,17 @@
     "Require explicit deployment model/runtime paths and allocated gateway address.",
     "Training dataset and captured run evidence are excluded."
   ],
-  "historical_run_status": "Two genuine 32-rank updates completed; original driver exit=1, final acceptance=17/19. This packaging is not a new GPU validation."
+  "historical_run_status": "Two genuine 32-rank updates completed; original driver exit=1, final acceptance=17/19. This packaging is not a new GPU validation.",
+  "cleanup_candidate": {
+    "scope": "teardown only; original failed run is unchanged",
+    "source_sha256": {
+      "adapter/rtp_cleanup.py": "d76da440b6806efa8de73a60f442730aac594f369cfc21f4bb0fe928c2af4d2f",
+      "adapter/rtp_cleanup_completed.py": "3fa81596687bf4f5c2824015106b3b10389be495cc6ce6777d29206d593498cd",
+      "validation/q397_cleanup_idempotence_cpu.py": "0eea31385403a634f34320f26641d0ab8e1d07d0cf6872ecc1c91880380ea409",
+      "validation/test_rtp_cleanup_completed_cpu.py": "5b33698facb309c0950de5924cda066f48ea636fe08142d5647621be02dca79c"
+    },
+    "cpu_unit_cases": 35,
+    "arm_ray_read_only_regression_passed": true,
+    "fresh_rl_rerun_performed": false
+  }
 }
