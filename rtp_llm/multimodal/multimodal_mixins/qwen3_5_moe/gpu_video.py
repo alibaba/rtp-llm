@@ -432,7 +432,64 @@ def decode_video_cuda(data: GpuVideoInput, device):
             _decode_state.device = device
         stream = _decode_state.stream
         with torch.cuda.stream(stream):
-            return _decode_on_stream(data, device, nvc, stream, consumer_stream)
+            try:
+                return _decode_on_stream(data, device, nvc, stream, consumer_stream)
+            except Exception as exc:
+                if not _is_nvdec_decoder_creation_error(exc):
+                    raise
+                # Some streams that PyAV can decode are rejected by
+                # cuvidCreateDecoder (unsupported profile or an exhausted
+                # decoder session). Decode this input on the CPU instead of
+                # failing the request.
+                logging.warning(
+                    "NVDEC decoder creation failed (%s); falling back to CPU "
+                    "decode for this video",
+                    exc,
+                )
+                return _decode_video_cpu(data, device)
+
+
+def _is_nvdec_decoder_creation_error(exc):
+    """Only fall back when cuvid could not open a decoder, not on data errors."""
+    name = type(exc).__name__
+    text = str(exc)
+    return (
+        "PyNvVCException" in name
+        or "HandleVideoSequence" in text
+        or "cuvidCreateDecoder" in text
+    )
+
+
+def _decode_video_cpu(data: GpuVideoInput, device):
+    """Decode the sampled frames with PyAV when NVDEC cannot open the stream."""
+    import av
+    import numpy as np
+
+    if not data.frame_indices:
+        raise ValueError("video sampling produced no frame indices")
+    wanted = set(data.frame_indices)
+    last = max(data.frame_indices)
+    decoded = {}
+    with av.open(io.BytesIO(data.encoded)) as container:
+        if not container.streams.video:
+            raise ValueError("video input has no video stream")
+        stream = container.streams.video[0]
+        # Single-threaded decode keeps frame order deterministic for sampling.
+        stream.thread_type = "NONE"
+        stream.codec_context.thread_count = 1
+        for index, frame in enumerate(container.decode(stream)):
+            if index in wanted:
+                decoded[index] = frame.to_ndarray(format="rgb24")
+            if index >= last:
+                break
+    if not decoded:
+        raise ValueError("CPU fallback decoded no frames")
+    # nb_frames is an estimate; repeat the last decoded frame for sampled
+    # indices past the end so the patch grid matches the sampling plan.
+    last_frame = decoded[max(decoded)]
+    frames = [decoded.get(index, last_frame) for index in data.frame_indices]
+    video = torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2)
+    return video.to(device=device)
 
 
 def _get_video_decoder(data, device, nvc, stream, codec):
@@ -537,11 +594,30 @@ def _decode_on_stream(data, device, nvc, stream, consumer_stream):
                 count,
                 data.total_frames,
             )
-        if selected != wanted:
-            raise ValueError(
-                "NVDEC did not produce all sampled frames: "
-                f"decoded={count}, container={data.total_frames}, "
-                f"selected={len(selected)}, wanted={len(wanted)}"
+        missing = wanted - selected
+        if missing:
+            # The container promised more frames than the stream contains
+            # (nb_frames is an estimate). Repeat the last decoded frame for
+            # the sampled indices past the end so the patch grid stays
+            # consistent instead of failing the whole request.
+            if not selected or any(index < count for index in missing):
+                raise ValueError(
+                    "NVDEC did not produce all sampled frames: "
+                    f"decoded={count}, container={data.total_frames}, "
+                    f"selected={len(selected)}, wanted={len(wanted)}, "
+                    f"missing={sorted(missing)[:8]}"
+                )
+            last_source = sampled[positions[max(selected)][0]]
+            for index in missing:
+                for slot in positions[index]:
+                    sampled[slot].copy_(last_source)
+                selected.add(index)
+            logging.warning(
+                "NVDEC stream ended before sampled frames: decoded=%d "
+                "container=%d padded=%d",
+                count,
+                data.total_frames,
+                len(missing),
             )
         # Surface copies are already complete at the lifetime waits above.
         # Measure completed demux/NVDEC/copy wall time separately from the RGB

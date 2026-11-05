@@ -7,6 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+import numpy as np
 import torch
 from transformers import Qwen3VLVideoProcessor
 
@@ -32,10 +33,13 @@ class GpuVideoMetricTest(unittest.TestCase):
     def test_cuda_timer_defers_event_waits_until_metric_reporting(self):
         start, end, stream = mock.Mock(), mock.Mock(), mock.Mock()
         start.elapsed_time.return_value = 1.25
-        with mock.patch("torch.cuda.Event", side_effect=[start, end]), mock.patch(
-            "torch.cuda.current_stream", return_value=stream
-        ), mock.patch.object(gpu_video, "_submit_video_metric") as submit, mock.patch(
-            "torch.cuda.synchronize", side_effect=AssertionError("global CUDA sync")
+        with (
+            mock.patch("torch.cuda.Event", side_effect=[start, end]),
+            mock.patch("torch.cuda.current_stream", return_value=stream),
+            mock.patch.object(gpu_video, "_submit_video_metric") as submit,
+            mock.patch(
+                "torch.cuda.synchronize", side_effect=AssertionError("global CUDA sync")
+            ),
         ):
             with gpu_video._cuda_video_timer(
                 GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC,
@@ -61,9 +65,11 @@ class GpuVideoMetricTest(unittest.TestCase):
         )
 
     def test_failed_stage_does_not_submit_successful_sample(self):
-        with mock.patch("torch.cuda.Event"), mock.patch(
-            "torch.cuda.current_stream"
-        ), mock.patch.object(gpu_video, "_submit_video_metric") as submit:
+        with (
+            mock.patch("torch.cuda.Event"),
+            mock.patch("torch.cuda.current_stream"),
+            mock.patch.object(gpu_video, "_submit_video_metric") as submit,
+        ):
             with self.assertRaisesRegex(ValueError, "decode failed"):
                 with gpu_video._cuda_video_timer(
                     GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC,
@@ -90,9 +96,10 @@ class GpuVideoMetricTest(unittest.TestCase):
         failed.report.side_effect = RuntimeError("CUDA event failed")
         final = mock.Mock(stage="processor")
         final.report.side_effect = reported.set
-        with mock.patch.object(
-            gpu_video.kmonitor, "report"
-        ) as report, mock.patch.object(gpu_video.logging, "warning"):
+        with (
+            mock.patch.object(gpu_video.kmonitor, "report") as report,
+            mock.patch.object(gpu_video.logging, "warning"),
+        ):
             reporter = gpu_video._CudaVideoMetricReporter(capacity=2)
             reporter.submit(failed)
             reporter.submit(final)
@@ -104,9 +111,10 @@ class GpuVideoMetricTest(unittest.TestCase):
         with mock.patch.object(threading.Thread, "start"):
             reporter = gpu_video._CudaVideoMetricReporter(capacity=1)
         first, second = mock.Mock(stage="resize"), mock.Mock(stage="processor")
-        with mock.patch.object(
-            gpu_video.kmonitor, "report"
-        ) as report, mock.patch.object(gpu_video.logging, "warning") as warning:
+        with (
+            mock.patch.object(gpu_video.kmonitor, "report") as report,
+            mock.patch.object(gpu_video.logging, "warning") as warning,
+        ):
             reporter.submit(first)
             reporter.submit(second)
             report.assert_not_called()
@@ -119,13 +127,11 @@ class GpuVideoMetricTest(unittest.TestCase):
     def test_drop_logs_are_limited_and_counts_are_aggregated(self):
         with mock.patch.object(threading.Thread, "start"):
             reporter = gpu_video._CudaVideoMetricReporter(capacity=1)
-        with mock.patch.object(
-            gpu_video.time, "monotonic", side_effect=[10, 11, 70]
-        ), mock.patch.object(
-            gpu_video.logging, "warning"
-        ) as warning, mock.patch.object(
-            gpu_video.kmonitor, "report"
-        ) as report:
+        with (
+            mock.patch.object(gpu_video.time, "monotonic", side_effect=[10, 11, 70]),
+            mock.patch.object(gpu_video.logging, "warning") as warning,
+            mock.patch.object(gpu_video.kmonitor, "report") as report,
+        ):
             for count in (3, 1, 1):
                 for _ in range(count):
                     reporter.record_drop("resize", "queue_full")
@@ -158,9 +164,10 @@ class GpuVideoMetricTest(unittest.TestCase):
         )
         first.start.elapsed_time.return_value = 1.0
         queued, dropped = mock.Mock(stage="processor"), mock.Mock(stage="decode")
-        with mock.patch.object(
-            gpu_video.kmonitor, "report", side_effect=backend
-        ), mock.patch.object(gpu_video.logging, "warning"):
+        with (
+            mock.patch.object(gpu_video.kmonitor, "report", side_effect=backend),
+            mock.patch.object(gpu_video.logging, "warning"),
+        ):
             reporter = gpu_video._CudaVideoMetricReporter(capacity=1)
             reporter.submit(first)
             try:
@@ -181,14 +188,16 @@ class GpuVideoMetricTest(unittest.TestCase):
 
     def test_final_event_init_failure_flushes_without_another_request(self):
         reported = threading.Event()
-        with mock.patch.object(
-            gpu_video, "_cuda_video_metric_reporter", None
-        ), mock.patch("torch.cuda.current_stream"), mock.patch(
-            "torch.cuda.Event", side_effect=RuntimeError("event init failed")
-        ), mock.patch.object(
-            gpu_video.kmonitor, "report", side_effect=lambda *args: reported.set()
-        ) as report, mock.patch.object(
-            gpu_video.logging, "warning"
+        with (
+            mock.patch.object(gpu_video, "_cuda_video_metric_reporter", None),
+            mock.patch("torch.cuda.current_stream"),
+            mock.patch(
+                "torch.cuda.Event", side_effect=RuntimeError("event init failed")
+            ),
+            mock.patch.object(
+                gpu_video.kmonitor, "report", side_effect=lambda *args: reported.set()
+            ) as report,
+            mock.patch.object(gpu_video.logging, "warning"),
         ):
             with gpu_video._cuda_video_timer(
                 GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC, "resize", "cuda:0"
@@ -201,9 +210,12 @@ class GpuVideoMetricTest(unittest.TestCase):
         with mock.patch.object(threading.Thread, "start"):
             reporter = gpu_video._CudaVideoMetricReporter(capacity=1)
         reporter.record_drop("decode", "report_error")
-        with mock.patch.object(
-            gpu_video.kmonitor, "report", side_effect=RuntimeError("backend failed")
-        ), mock.patch.object(gpu_video.logging, "warning"):
+        with (
+            mock.patch.object(
+                gpu_video.kmonitor, "report", side_effect=RuntimeError("backend failed")
+            ),
+            mock.patch.object(gpu_video.logging, "warning"),
+        ):
             reporter._flush_drops()
         self.assertEqual(reporter._drops, {})
         self.assertEqual(reporter._drop_total, 1)
@@ -211,9 +223,11 @@ class GpuVideoMetricTest(unittest.TestCase):
     def test_resize_pixel_count_uses_sampled_frames_without_temporal_padding(self):
         start, end = mock.Mock(), mock.Mock()
         start.elapsed_time.return_value = 0.5
-        with mock.patch("torch.cuda.Event", side_effect=[start, end]), mock.patch(
-            "torch.cuda.current_stream"
-        ), mock.patch.object(gpu_video, "_submit_video_metric") as submit:
+        with (
+            mock.patch("torch.cuda.Event", side_effect=[start, end]),
+            mock.patch("torch.cuda.current_stream"),
+            mock.patch.object(gpu_video, "_submit_video_metric") as submit,
+        ):
             with gpu_video._cuda_video_timer(
                 GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC,
                 "resize",
@@ -233,11 +247,14 @@ class GpuVideoMetricTest(unittest.TestCase):
         metadata = SimpleNamespace(frames_indices=[0, 20, 40, 59, 79], fps=30)
         pixels = torch.empty(48, 1536)
         item = SimpleNamespace(mm_type=MMUrlType.VIDEO)
-        with mock.patch.object(
-            qwen35.Qwen3_VLImageEmbedding,
-            "preprocess_input",
-            return_value=(pixels, grid, metadata),
-        ), mock.patch.object(qwen35, "video_timestamp_tokens", return_value=[[1]] * 3):
+        with (
+            mock.patch.object(
+                qwen35.Qwen3_VLImageEmbedding,
+                "preprocess_input",
+                return_value=(pixels, grid, metadata),
+            ),
+            mock.patch.object(qwen35, "video_timestamp_tokens", return_value=[[1]] * 3),
+        ):
             with collect_vit_preprocess_metrics() as metrics:
                 qwen35.Qwen3_5MoeImageEmbedding.preprocess_input(
                     [item], VitConfig(), object(), video_backend="cpu"
@@ -273,14 +290,14 @@ class GpuVideoTest(unittest.TestCase):
         producer, consumer = mock.Mock(), mock.Mock()
         data = GpuVideoInput(b"test", 3, (2, 0, 2), 32, 32, 32, 32, 16, 2)
         gpu_video._decode_state.key = None
-        with mock.patch(
-            "torch.cuda.stream", side_effect=lambda stream: nullcontext()
-        ), mock.patch.object(torch.Tensor, "record_stream"), mock.patch(
-            "torch.stack", side_effect=AssertionError("sample stack")
-        ), mock.patch.object(
-            torch.Tensor, "clone", side_effect=AssertionError("sample clone")
-        ), mock.patch.object(
-            gpu_video, "nv12_to_rgb", side_effect=lambda x, *args: x
+        with (
+            mock.patch("torch.cuda.stream", side_effect=lambda stream: nullcontext()),
+            mock.patch.object(torch.Tensor, "record_stream"),
+            mock.patch("torch.stack", side_effect=AssertionError("sample stack")),
+            mock.patch.object(
+                torch.Tensor, "clone", side_effect=AssertionError("sample clone")
+            ),
+            mock.patch.object(gpu_video, "nv12_to_rgb", side_effect=lambda x, *args: x),
         ):
             result = gpu_video._decode_on_stream(
                 data, device, codec, producer, consumer
@@ -411,9 +428,10 @@ class GpuVideoTest(unittest.TestCase):
                 second_done.set()
             return result
 
-        with mock.patch.object(
-            gpu_video, "_decode_video_ready", side_effect=decode
-        ), mock.patch("torch.cuda.current_stream", return_value=mock.sentinel.stream):
+        with (
+            mock.patch.object(gpu_video, "_decode_video_ready", side_effect=decode),
+            mock.patch("torch.cuda.current_stream", return_value=mock.sentinel.stream),
+        ):
             pool = gpu_video.VideoDecodePool(2)
             try:
                 with pool.decode(range(6), "cuda:0") as results:
@@ -443,9 +461,10 @@ class GpuVideoTest(unittest.TestCase):
             drained.set()
             return SimpleNamespace(record_stream=mock.Mock())
 
-        with mock.patch.object(
-            gpu_video, "_decode_video_ready", side_effect=decode
-        ), mock.patch("torch.cuda.current_stream", return_value=mock.sentinel.stream):
+        with (
+            mock.patch.object(gpu_video, "_decode_video_ready", side_effect=decode),
+            mock.patch("torch.cuda.current_stream", return_value=mock.sentinel.stream),
+        ):
             pool = gpu_video.VideoDecodePool(2)
             try:
                 with self.assertRaisesRegex(ValueError, "broken video"):
@@ -632,14 +651,20 @@ class GpuVideoTest(unittest.TestCase):
         )
         tokenizer = mock.Mock()
         tokenizer.encode.return_value = [10, 20]
-        with mock.patch("av.open", return_value=container), mock.patch.object(
-            qwen35, "get_bytes_io_from_url", return_value=io.BytesIO(b"video")
-        ), mock.patch.object(
-            qwen35.Qwen3_VLImageEmbedding,
-            "load_video",
-            side_effect=AssertionError("video used the inherited CPU decoder"),
-        ), mock.patch(
-            "torch.cuda.init", side_effect=AssertionError("CPU worker initialized CUDA")
+        with (
+            mock.patch("av.open", return_value=container),
+            mock.patch.object(
+                qwen35, "get_bytes_io_from_url", return_value=io.BytesIO(b"video")
+            ),
+            mock.patch.object(
+                qwen35.Qwen3_VLImageEmbedding,
+                "load_video",
+                side_effect=AssertionError("video used the inherited CPU decoder"),
+            ),
+            mock.patch(
+                "torch.cuda.init",
+                side_effect=AssertionError("CPU worker initialized CUDA"),
+            ),
         ):
             gpu_input, grid, timestamps = (
                 qwen35.Qwen3_5MoeImageEmbedding.preprocess_input(
@@ -736,12 +761,15 @@ class GpuVideoTest(unittest.TestCase):
                     do_resize=False,
                     do_sample_frames=False,
                 )["pixel_values_videos"]
-                with mock.patch.object(
-                    gpu_video, "decode_video_cuda", return_value=frames
-                ), mock.patch.object(
-                    torch.Tensor,
-                    "cpu",
-                    side_effect=AssertionError("GPU video left CUDA"),
+                with (
+                    mock.patch.object(
+                        gpu_video, "decode_video_cuda", return_value=frames
+                    ),
+                    mock.patch.object(
+                        torch.Tensor,
+                        "cpu",
+                        side_effect=AssertionError("GPU video left CUDA"),
+                    ),
                 ):
                     actual = preprocess_video_cuda(data, processor, "cuda:0")
                 self.assertTrue(actual.is_cuda)
@@ -808,6 +836,56 @@ class GpuVideoTest(unittest.TestCase):
                 gpu_video.decode_video_cuda(data, device)
             self.assertIsNone(state.decoder)
             self.assertIsNone(state.key)
+
+    def test_nvdec_decoder_creation_failure_falls_back_to_cpu(self):
+        device = torch.device("cuda", torch.cuda.current_device())
+        expected = torch.zeros((2, 3, 32, 32), device=device, dtype=torch.uint8)
+        data = GpuVideoInput(b"video", 2, (0, 1), 32, 32, 32, 32, 16, 2)
+        error = type("PyNvVCException", (Exception,), {})("HandleVideoSequence")
+        with (
+            mock.patch.object(gpu_video, "_load_nvcodec", return_value=object()),
+            mock.patch.object(gpu_video, "_decode_on_stream", side_effect=error),
+            mock.patch.object(
+                gpu_video, "_decode_video_cpu", return_value=expected
+            ) as cpu,
+        ):
+            actual = gpu_video.decode_video_cuda(data, device)
+        self.assertIs(actual, expected)
+        cpu.assert_called_once_with(data, device)
+
+    def test_nvdec_non_decoder_error_is_not_swallowed(self):
+        device = torch.device("cuda", torch.cuda.current_device())
+        data = GpuVideoInput(b"video", 2, (0, 1), 32, 32, 32, 32, 16, 2)
+        with (
+            mock.patch.object(gpu_video, "_load_nvcodec", return_value=object()),
+            mock.patch.object(
+                gpu_video, "_decode_on_stream", side_effect=RuntimeError("broken")
+            ),
+            mock.patch.object(gpu_video, "_decode_video_cpu") as cpu,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "broken"):
+                gpu_video.decode_video_cuda(data, device)
+        cpu.assert_not_called()
+
+    def test_cpu_fallback_repeats_last_frame_for_estimated_indices(self):
+        device = torch.device("cuda", torch.cuda.current_device())
+        frames = [
+            SimpleNamespace(
+                to_ndarray=lambda format, value=value: np.full(
+                    (2, 2, 3), value, dtype=np.uint8
+                )
+            )
+            for value in (10, 20)
+        ]
+        container = mock.MagicMock()
+        container.__enter__.return_value.streams.video = [mock.MagicMock()]
+        container.__enter__.return_value.decode.return_value = iter(frames)
+        data = GpuVideoInput(b"video", 4, (0, 1, 3), 2, 2, 2, 2, 2, 2)
+        with mock.patch("av.open", return_value=container):
+            video = gpu_video._decode_video_cpu(data, device)
+        self.assertEqual(tuple(video.shape), (3, 3, 2, 2))
+        # Index 3 is past the decoded stream; it repeats the last frame.
+        self.assertEqual(video[:, 0, 0, 0].tolist(), [10, 20, 20])
 
 
 class DecoderReconfigurationTest(unittest.TestCase):
