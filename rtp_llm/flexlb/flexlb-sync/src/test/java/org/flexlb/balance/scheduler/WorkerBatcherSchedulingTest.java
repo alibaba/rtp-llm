@@ -257,12 +257,15 @@ class WorkerBatcherSchedulingTest {
         assertTrue(WorkerBatcherTestSupport.capture(runtime).items().isEmpty());
     }
 
-    @Test
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    void stopDrainsQueueAndUnlocksAfterListenerRemovalFails() throws Exception {
+    void stopDrainsQueueAndUnlocksAfterListenerRemovalFails(boolean stopDuringSubscription) throws Exception {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock();
+        var subscriptionExit = new CompletableFuture<Void>();
+        if (stopDuringSubscription) { delivery.firstCapacity.afterSubscribe = subscriptionExit::join; }
         WorkerBatcher runtime = boundaryRuntime("stop-failure", endpoint, config, delivery,
                 mock(AbstractRequestScheduler.class));
         runtime.start();
@@ -272,7 +275,13 @@ class WorkerBatcherSchedulingTest {
             RuntimeException failure = new IllegalStateException("listener removal failed during stop");
             delivery.firstCapacity.removeFailure = failure;
 
-            assertSame(failure, runtime.stopAndAwait());
+            var stopping = CompletableFuture.supplyAsync(runtime::stopAndAwait);
+            if (stopDuringSubscription) {
+                RequestProtocolTestSupport.awaitCondition(() -> Boolean.TRUE.equals(
+                        org.springframework.test.util.ReflectionTestUtils.getField(runtime, "drainClaimed")));
+                subscriptionExit.complete(null);
+            }
+            assertSame(failure, stopping.get(3, TimeUnit.SECONDS));
             assertTrue(delivery.firstCapacity.listeners.isEmpty());
             assertTrue(CompletableFuture.supplyAsync(() -> WorkerBatcherTestSupport.capture(runtime))
                     .get(2, TimeUnit.SECONDS).items().isEmpty(), "stop must drain and release the queue lock");
@@ -280,6 +289,7 @@ class WorkerBatcherSchedulingTest {
                     "successful stop callbacks must acknowledge every detached owner");
             assertSame(failure, runtime.stopAndAwait(), "later callers share the completed cleanup result");
         } finally {
+            subscriptionExit.complete(null);
             runtime.stopAndAwait();
         }
     }
@@ -912,6 +922,7 @@ class WorkerBatcherSchedulingTest {
         private final CountDownLatch removed = new CountDownLatch(1);
 
         private volatile RuntimeException removeFailure;
+        private Runnable afterSubscribe = () -> {};
 
         public boolean isAvailable() {
             return available.get();
@@ -920,6 +931,7 @@ class WorkerBatcherSchedulingTest {
         public void addListener(Runnable listener) {
             listeners.add(listener);
             subscribed.countDown();
+            afterSubscribe.run();
         }
 
         public void removeListener(Runnable listener) {
