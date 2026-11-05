@@ -931,14 +931,6 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 ),
             )
 
-            import rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang as mhc_tilelang
-
-            old_enabled = mhc_tilelang.tk_mhc_head_fused_enabled
-            mhc_tilelang.tk_mhc_head_fused_enabled = lambda: True
-            self.addCleanup(
-                lambda: setattr(mhc_tilelang, "tk_mhc_head_fused_enabled", old_enabled)
-            )
-
             warmup_module._MHC_HEAD_FUSED_JIT_WARMED_KEYS.clear()
             warmup_module.warmup_mhc_head_fused_jit(
                 shapes,

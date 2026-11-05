@@ -4,9 +4,7 @@ The DSV4 indexer score kernel already fuses score generation; the remaining
 hot path is the row-wise ``torch.topk`` plus mask/copy post-processing.  vLLM
 and SGLang avoid this for DeepSeek sparse attention with custom row-wise TopK
 kernels.  Production dispatch always uses the auto backend; the explicit
-backend classes below stay importable as references, including the
-experimental TileLang HISA variant, which is an algorithmic replacement for the
-indexer, not an exact TopK kernel.
+backend classes below stay importable as references.
 """
 
 from __future__ import annotations
@@ -190,29 +188,6 @@ class PersistentIndexerTopKBackend(IndexerTopKBackend):
         )
         out = _apply_offset(out, offset)
         return _reshape_indices(out, shape)
-
-
-class HisaIndexerTopKBackend(IndexerTopKBackend):
-    """Experimental TileLang HISA branch.
-
-    HISA changes the indexer algorithm by hierarchical sparse selection; it is
-    not an exact replacement for DSV4 ``score.topk``.  Keep it explicit so no
-    production path silently changes sparse attention recall.
-    """
-
-    name = "hisa"
-
-    def select(
-        self,
-        score: torch.Tensor,
-        topk: int,
-        *,
-        lengths: Optional[torch.Tensor] = None,
-        offset: int | torch.Tensor = 0,
-    ) -> torch.Tensor:
-        raise NotImplementedError(
-            "the HISA indexer topk backend is experimental and not implemented"
-        )
 
 
 class AutoIndexerTopKBackend(IndexerTopKBackend):

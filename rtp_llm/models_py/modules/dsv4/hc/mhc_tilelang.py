@@ -61,12 +61,6 @@ def _import_tk():
     return _tk_mhc_pre, _tk_mhc_post, _tk_mhc_head_fused
 
 
-def tk_mhc_head_fused_enabled() -> bool:
-    # The fused mHC head is the only head composition; constant seam kept for
-    # warmup callers and tests that patch this selector.
-    return True
-
-
 def _shape_ctx(t: torch.Tensor, *, hc_mult: int, extra: str = "") -> str:
     base = (
         f"shape={tuple(t.shape)}, stride={tuple(t.stride())}, "
