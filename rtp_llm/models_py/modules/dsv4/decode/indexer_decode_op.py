@@ -44,7 +44,7 @@ from rtp_llm.models_py.modules.dsv4.indexer_topk import (
 )
 
 try:
-    import deep_gemm
+    from rtp_llm.models_py.kernels.cuda import fp8_mqa as deep_gemm
 except Exception:  # pragma: no cover - non-cuda env
     deep_gemm = None  # type: ignore[assignment]
 
@@ -53,6 +53,7 @@ def _fast_path_available() -> bool:
     return (
         torch.cuda.is_available()
         and deep_gemm is not None
+        and deep_gemm.available()
         and hasattr(deep_gemm, "fp8_paged_mqa_logits")
         and hasattr(deep_gemm, "get_paged_mqa_logits_metadata")
     )
@@ -70,6 +71,8 @@ def _fast_path_unavailable_reason(q_indexer: torch.Tensor) -> str:
         return "torch.cuda.is_available() is False"
     if deep_gemm is None:
         return "deep_gemm import failed"
+    if not deep_gemm.available():
+        return "isolated FP8 MQA backend is unavailable"
     missing = [
         name
         for name in ("fp8_paged_mqa_logits", "get_paged_mqa_logits_metadata")

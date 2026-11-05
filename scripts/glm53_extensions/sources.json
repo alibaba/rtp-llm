@@ -40,5 +40,12 @@
     "url": "https://codeload.github.com/fmtlib/fmt/tar.gz/553ec11ec06fbe0beebfbb45f9dc3c9eabd83d28",
     "sha256": "c314292789d28c3c3b420e75a7b2d1706f685f7fb63289128d46aeaea2c6be71",
     "bytes": 707710
+  },
+  "deep_gemm_mqa": {
+    "repository": "deepseek-ai/DeepGEMM",
+    "commit": "559d79fb6994a58b8a15b4b93bf13ccc16edf247",
+    "url": "https://codeload.github.com/deepseek-ai/DeepGEMM/tar.gz/559d79fb6994a58b8a15b4b93bf13ccc16edf247",
+    "sha256": "8a6c67b6f74d4a3a242c4dad7714d147797b2ecc5d55c52925bbdf6155207d2c",
+    "bytes": 235641
   }
 }

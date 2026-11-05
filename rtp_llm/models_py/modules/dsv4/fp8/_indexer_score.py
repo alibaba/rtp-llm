@@ -47,12 +47,10 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
 )
 
 try:
-    import deep_gemm as _deep_gemm
+    from rtp_llm.models_py.kernels.cuda import fp8_mqa as _deep_gemm
 
-    _HAS_DEEP_GEMM = hasattr(_deep_gemm, "fp8_paged_mqa_logits") and hasattr(
-        _deep_gemm, "get_paged_mqa_logits_metadata"
-    )
-    _HAS_DEEP_GEMM_MQA = hasattr(_deep_gemm, "fp8_mqa_logits")
+    _HAS_DEEP_GEMM = _deep_gemm.available()
+    _HAS_DEEP_GEMM_MQA = _HAS_DEEP_GEMM
 except ImportError:
     _deep_gemm = None
     _HAS_DEEP_GEMM = False

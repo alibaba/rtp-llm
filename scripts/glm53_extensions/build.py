@@ -282,6 +282,100 @@ def build_sparse(sources, output, work, cuda):
     )
 
 
+def build_mqa(sources, output, cuda):
+    """Build only the legacy FP8 indexer ABI, with private symbols and headers."""
+    import torch
+    from torch.utils.cpp_extension import include_paths, library_paths
+
+    source = sources["deep_gemm_mqa"]
+    root = output / "fp8_mqa_isolated"
+    root.mkdir()
+    shutil.copytree(source / "csrc", root / "csrc")
+    includes = root / "include"
+    includes.mkdir()
+    for src, relative in [
+        (source, "deep_gemm/include/deep_gemm"),
+        (sources["cutlass_mhc"], "include/cute"),
+        (sources["cutlass_mhc"], "include/cutlass"),
+        (sources["fmt"], "include/fmt"),
+    ]:
+        shutil.copytree(src / relative, includes / Path(relative).name)
+    shutil.copyfile(source / "LICENSE", root / "LICENSE")
+    shutil.copyfile(HERE / "mqa_binding.cpp", root / "binding.cpp")
+    # Never share cubins with another DeepGEMM version, even when the caller
+    # supplies the same DG_JIT_CACHE_DIR. Do not mutate the process environment.
+    compiler_header = root / "csrc/jit/compiler.hpp"
+    text = compiler_header.read_text()
+    marker = "cache_dir_path = env_cache_dir_path;"
+    if text.count(marker) != 1:
+        raise ValueError("Unexpected pinned FP8 MQA compiler cache implementation")
+    compiler_header.write_text(
+        text.replace(
+            marker, marker + '\n        cache_dir_path /= "rtp_fp8_mqa_559d79fb_v1";'
+        )
+    )
+    # CUDA Runtime distinguishes SM103 from SM100 on the development pool.
+    # Both select the sm100 kernel family, with their own compiler target.
+    device_header = root / "csrc/jit/device_runtime.hpp"
+    text = device_header.read_text()
+    marker = "if (major == 10 and minor != 1) {"
+    if text.count(marker) != 1:
+        raise ValueError("Unexpected pinned FP8 MQA architecture dispatch")
+    device_header.write_text(
+        text.replace(
+            marker,
+            """if (major == 10 and minor == 3) {
+            if (number_only) return "100";
+            return support_arch_family ? "103f" : "103a";
+        }
+        """
+            + marker,
+        )
+    )
+    binary = root / ("_rtp_llm_fp8_mqa" + sysconfig.get_config_var("EXT_SUFFIX"))
+    args = [
+        configure_compiler(),
+        "-shared",
+        "-std=c++17",
+        "-O2",
+        "-fPIC",
+        "-fvisibility=hidden",
+        "-fno-gnu-unique",
+        "-Wno-deprecated-declarations",
+        "-Wno-psabi",
+        "-Ddeep_gemm=deep_gemm_mqa_isolated",
+        "-Dfmt=fmt_mqa_isolated",
+        "-D_GLIBCXX_USE_CXX11_ABI=" + str(int(torch.compiled_with_cxx11_abi())),
+    ]
+    for path in [
+        root,
+        includes,
+        cuda / "include",
+        cuda / "include/cccl",
+        sysconfig.get_paths()["include"],
+        *include_paths(),
+    ]:
+        args.append("-I" + str(path))
+    args.extend([root / "binding.cpp", "-o", binary])
+    for path in [*library_paths(), str(cuda / "lib64")]:
+        args.append("-L" + path)
+    args.extend(
+        [
+            "-Wl,-Bsymbolic",
+            "-Wl,-rpath,$ORIGIN/../../../torch/lib",
+            "-ltorch",
+            "-ltorch_python",
+            "-ltorch_cuda",
+            "-lc10",
+            "-lc10_cuda",
+            "-lcudart",
+            "-lcublasLt",
+            "-lnvrtc",
+        ]
+    )
+    run(args)
+
+
 def stage_licenses(sources, output):
     root = output / "mega_mhc_isolated/licenses"
     root.mkdir()
@@ -302,6 +396,9 @@ def check_payload(files):
         PREFIX + "mega_mhc_isolated/include/deep_jit/utils/parser.hpp",
         PREFIX + "mega_mhc_isolated/include/cute/tensor.hpp",
         PREFIX + "mega_mhc_isolated/include/cutlass/cutlass.h",
+        PREFIX + "fp8_mqa_isolated/include/deep_gemm/impls/sm100_mqa_logits.cuh",
+        PREFIX + "fp8_mqa_isolated/csrc/jit/compiler.hpp",
+        PREFIX + "fp8_mqa_isolated/LICENSE",
     ]
     mhc = [
         name
@@ -311,7 +408,15 @@ def check_payload(files):
     ]
     if len(mhc) != 1:
         raise ValueError("Expected exactly one isolated MegaMHC binary")
-    for name in required + mhc:
+    mqa = [
+        name
+        for name in expected
+        if name.startswith(PREFIX + "fp8_mqa_isolated/_rtp_llm_fp8_mqa")
+        and name.endswith(".so")
+    ]
+    if len(mqa) != 1:
+        raise ValueError("Expected exactly one isolated FP8 MQA binary")
+    for name in required + mhc + mqa:
         if name not in expected or name not in files:
             raise ValueError(f"Missing extension asset: {name}")
     for name, info in expected.items():
@@ -360,6 +465,7 @@ def extend_wheel(wheel, output):
                     name == record
                     or name in additions
                     or name.startswith(PREFIX + "mega_mhc_isolated/")
+                    or name.startswith(PREFIX + "fp8_mqa_isolated/")
                 ):
                     continue
                 digest = hashlib.sha256()
@@ -457,6 +563,7 @@ def main():
     cuda = Path(CUDA_HOME)
     build_mhc(sources, output, cuda)
     build_sparse(sources, output, work, cuda)
+    build_mqa(sources, output, cuda)
     stage_licenses(sources, output)
     shutil.copyfile(HERE / "check.py", output / "glm53_extension_check.py")
     meta = {

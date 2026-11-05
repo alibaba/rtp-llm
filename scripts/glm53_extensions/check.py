@@ -45,8 +45,24 @@ def check(root, allow_cuda_stub=False):
     torch.ops.load_library(str(root / "flash_mla_glm53_22.abi3.so"))
     if not callable(torch.ops.flash_mla_glm53_22.sparse_decode_fwd):
         raise ValueError("Missing native sparse MLA operator")
+    binaries = list((root / "fp8_mqa_isolated").glob("_rtp_llm_fp8_mqa*.so"))
+    if len(binaries) != 1:
+        raise ValueError("Expected exactly one isolated FP8 MQA binary")
+    spec = importlib.util.spec_from_file_location("_rtp_llm_fp8_mqa", binaries[0])
+    mqa = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mqa)
+    for name in (
+        "init",
+        "get_num_sms",
+        "set_num_sms",
+        "get_paged_mqa_logits_metadata",
+        "fp8_mqa_logits",
+        "fp8_paged_mqa_logits",
+    ):
+        if not callable(getattr(mqa, name, None)):
+            raise ValueError(f"Missing isolated FP8 MQA binding: {name}")
     print(
-        "GLM53 MegaMHC and native sparse MLA assets/CPU ABI verified",
+        "GLM53 MegaMHC, native sparse MLA and isolated FP8 MQA assets/CPU ABI verified",
         len(meta["files"]),
     )
 

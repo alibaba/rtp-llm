@@ -1206,9 +1206,9 @@ def _generate_mhc_prenorm_warmup_specs(
 
 def _fp8_mqa_logits_available() -> bool:
     try:
-        import deep_gemm
+        from rtp_llm.models_py.kernels.cuda import fp8_mqa
 
-        return hasattr(deep_gemm, "fp8_mqa_logits")
+        return fp8_mqa.available()
     except Exception:
         return False
 
@@ -1663,7 +1663,7 @@ def _launch_dummy_fp8_mqa_logits(
     key: tuple[int, int],
     device: torch.device,
 ) -> None:
-    import deep_gemm
+    from rtp_llm.models_py.kernels.cuda import fp8_mqa as deep_gemm
 
     num_heads, head_dim = key
     block_q = max(1, 128 // int(num_heads))

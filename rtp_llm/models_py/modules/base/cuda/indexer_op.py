@@ -15,7 +15,7 @@ from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
 
 # Try to import CUDA dependencies, but don't fail if running on CPU
 try:
-    import deep_gemm
+    from rtp_llm.models_py.kernels.cuda import fp8_mqa as deep_gemm
 except Exception as e:
     print(f"Warning: Failed to import deep_gemm (likely running on CPU): {e}")
     deep_gemm = None

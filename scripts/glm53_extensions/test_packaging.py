@@ -26,6 +26,10 @@ class PackagingTest(unittest.TestCase):
             "mega_mhc_isolated/include/cute/tensor.hpp": b"cute source",
             "mega_mhc_isolated/include/cutlass/cutlass.h": b"cutlass source",
             "mega_mhc_isolated/licenses/deep_gemm.txt": b"upstream license",
+            "fp8_mqa_isolated/_rtp_llm_fp8_mqa.cpython-310-x86_64-linux-gnu.so": b"\x7fELF-mqa-fixture",
+            "fp8_mqa_isolated/include/deep_gemm/impls/sm100_mqa_logits.cuh": b"mqa kernel",
+            "fp8_mqa_isolated/csrc/jit/compiler.hpp": b"private compiler",
+            "fp8_mqa_isolated/LICENSE": b"upstream license",
         }
         for name, data in self.files.items():
             path = self.payload / name

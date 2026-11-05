@@ -915,10 +915,10 @@ class SparseMlaImpl(MlaImplBase):
         ):
             return
         try:
-            import deep_gemm
+            from rtp_llm.models_py.kernels.cuda import fp8_mqa as deep_gemm
         except Exception:
             return
-        if not hasattr(deep_gemm, "get_paged_mqa_logits_metadata"):
+        if not deep_gemm.available():
             return
 
         if _is_multi_token_decode(attn_inputs):
