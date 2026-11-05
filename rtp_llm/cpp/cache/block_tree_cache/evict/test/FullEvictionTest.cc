@@ -410,6 +410,30 @@ TEST(FullPruneTest, PrunesDependentFullSubtreeAcrossTiers) {
     EXPECT_FALSE(environment.disk_pool->isAllocated(disk_block));
 }
 
+TEST(FullPruneTest, FullForceDropKeepsRequestHeldDescendantPhysicallyAlive) {
+    TieredFullCache environment = makeTieredFullCache();
+    const auto path = insertFullSandwich(environment);
+    ASSERT_EQ(path.size(), 5u);
+    environment.device_pool->incRef(12);
+    const size_t initial_free = environment.device_pool->freeBlocksNum();
+    // FULL checks the primary block (11), not the complete prune closure.
+    // The held descendant loses its CACHE reference but retains physical storage.
+    EXPECT_EQ(environment.cache->evictForGroup("group0", 1), 1);
+    EXPECT_EQ(environment.cache->getStats().tree_node_count, 1u);
+    EXPECT_EQ(environment.cache->getStats().device_heap_total_size, 1u);
+    EXPECT_EQ(environment.device_pool->freeBlocksNum(), initial_free + 1);
+    EXPECT_FALSE(environment.device_pool->isAllocated(11));
+    EXPECT_TRUE(environment.device_pool->isAllocated(12));
+    EXPECT_EQ(environment.device_pool->refCount(12), 1u);
+    EXPECT_EQ(environment.device_pool->treeRefCount(12), 0u);
+
+    environment.device_pool->decRef(12);
+    EXPECT_EQ(environment.device_pool->freeBlocksNum(), initial_free + 2);
+    EXPECT_FALSE(environment.device_pool->isAllocated(12));
+    EXPECT_EQ(environment.cache->evictForGroup("group0", 1), 1);
+    EXPECT_EQ(environment.cache->getStats().tree_node_count, 0u);
+}
+
 TEST(FullPruneTest, PrunesBranchedFullSubtreeBottomUp) {
     TieredFullCache    environment      = makeTieredFullCache();
     const size_t       host_free_before = environment.host_pool->freeBlocksNum();

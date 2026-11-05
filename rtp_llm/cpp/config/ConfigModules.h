@@ -192,6 +192,13 @@ struct KVCacheConfig {
     double block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
     double block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
     double block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
+    // FULL-only per-tier overrides: -1/-1 inherits the shared watermarks.
+    double   block_tree_full_device_evict_low_watermark_ratio  = -1.0;
+    double   block_tree_full_device_evict_high_watermark_ratio = -1.0;
+    double   block_tree_full_memory_evict_low_watermark_ratio  = -1.0;
+    double   block_tree_full_memory_evict_high_watermark_ratio = -1.0;
+    double   block_tree_full_disk_evict_low_watermark_ratio    = -1.0;
+    double block_tree_full_disk_evict_high_watermark_ratio   = -1.0;
     int      reuse_cache_tail_blocks                      = std::numeric_limits<int>::max();
     uint32_t linear_pool_blocks                           = 0;
     uint32_t swa_pool_blocks                              = 0;
@@ -214,12 +221,18 @@ struct KVCacheConfig {
     bool        enable_crc                = true;
     std::string device_eviction_policy    = "lru";
     std::string memory_eviction_policy    = "lru";
-    std::string disk_eviction_policy      = "fifo";
+    std::string disk_eviction_policy      = "lru";
 
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
     // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
     // automatically derived block count.
     uint32_t dsv4_fixed_pool_blocks = 0;
+
+    // Optional V4.1 decoder-only SWA override, including reserved block zero.
+    uint32_t dsv41_decoder_swa_pool_blocks = 0;
+
+    // Usable HOST SWA blocks per FULL block; does not change checkpoint spacing.
+    double memory_cache_swa_block_ratio = 1.0;
 
     // Optional DSV4 HCA_STATE pool block count override. 0 means HCA_STATE
     // follows dsv4_fixed_pool_blocks or the normal automatically derived count.
@@ -230,20 +243,25 @@ struct KVCacheConfig {
     bool dsv4_fixed_pool_use_memory = false;
 
     // HBM cache event publishing. Only tp_rank=0 with pp_size=1 creates an active publisher for each DP replica.
-    std::string kv_cache_event_publisher_type   = "none";  // none | kvcm
-    std::string kv_cache_event_manager_endpoint = "";      // KVCM Meta HTTP endpoint
-    std::string kv_cache_event_instance_group   = "";
-    std::string kv_cache_event_instance_id      = "";
-    std::string kv_cache_event_host_ip_port     = "";
-    // BlockTreeCache FULL prefix invariant scanner; interval 0 disables the scanner thread.
+    std::string kv_cache_event_publisher_type       = "none";  // none | kvcm
+    std::string kv_cache_event_manager_endpoint     = "";      // KVCM Meta HTTP endpoint
+    std::string kv_cache_event_instance_group       = "";
+    std::string kv_cache_event_instance_id          = "";
+    std::string kv_cache_event_host_ip_port         = "";
+    int         kv_cache_event_snapshot_interval_ms = 600000;
+    // BlockTreeCache FULL prefix invariant scanner; defaults to 30 seconds.
+    // An interval of 0 disables the scanner thread.
     // Batch size and detail cap are scanner-internal constants, not user-tunable.
-    int64_t block_tree_full_prefix_scan_interval_ms = 0;
+    int64_t block_tree_full_prefix_scan_interval_ms = 30000;
 
     // KVCM storage backend configuration fields
     bool        kvcm_enable_vipserver                = false;
     std::string kvcm_vipserver_domain                = "";
     std::string kvcm_server_address                  = "";
     std::string kvcm_instance_group                  = "default";
+    int         kvcm_task_timeout_ms                 = 20000;
+    int32_t     kvcm_read_backend_type               = 0;  // 0 uses MatchLocation
+    int32_t     kvcm_min_replica_count               = 0;  // server interprets 0 as 1
     uint32_t    kvcm_meta_channel_retry_time         = 3;
     uint32_t    kvcm_meta_channel_connection_timeout = 6000;
     uint32_t    kvcm_meta_channel_call_timeout       = 1500;
@@ -257,6 +275,7 @@ struct KVCacheConfig {
     std::string kvcm_instance_id_salt                = "";
     size_t      kvcm_asyncwrapper_thread_num         = 16;
     size_t      kvcm_asyncwrapper_queue_size         = 1000;
+    // Retained for parsing compatibility; BTC remote broadcasts inherit the task deadline.
     int         kvcm_get_broadcast_timeout           = 15000;
     int         kvcm_put_broadcast_timeout           = 15000;
     std::string kvcm_client_config                   = "";

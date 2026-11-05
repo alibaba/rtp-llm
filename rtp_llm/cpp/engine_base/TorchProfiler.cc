@@ -1,7 +1,10 @@
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/AsyncProfileTrace.h"
 #include "autil/TimeUtility.h"
+#include <c10/core/impl/VirtualGuardImpl.h>
 #include <algorithm>
 #include <cctype>
 #include <string>
@@ -15,6 +18,29 @@ namespace {
 // through StepWindowProfiler::configure, so enforcing them here covers all callers.
 constexpr size_t kMaxTraceNameLen = 64;
 constexpr int    kMaxNumSteps     = 1000;
+
+int currentProfileDevice() {
+#if USING_CUDA || USING_ROCM
+    // PyTorch's ROCm backend also registers the CUDA device type.
+    c10::impl::VirtualGuardImpl guard(c10::DeviceType::CUDA);
+    if (guard.deviceCount() > 0) {
+        return guard.getDevice().index();
+    }
+#endif
+    return -1;
+}
+
+void drainProfileDevice(int device) {
+#if USING_CUDA || USING_ROCM
+    if (device >= 0) {
+        // Drain all streams on the device recorded at profiler start, including
+        // asynchronous draft/commit work. A stream-only wait can miss its tail.
+        c10::impl::VirtualGuardImpl(c10::DeviceType::CUDA).synchronizeDevice(device);
+    }
+#else
+    (void)device;
+#endif
+}
 
 std::string sanitizeTraceName(const std::string& trace_name) {
     std::string out;
@@ -32,9 +58,28 @@ std::string sanitizeTraceName(const std::string& trace_name) {
 }  // namespace
 namespace detail {
 
-std::unique_ptr<tap::ProfilerResult> tryDisableProfiler(DisableProfilerFn disable_profiler) {
+std::unique_ptr<tap::ProfilerResult> tryDisableProfiler(DisableProfilerFn            disable_profiler,
+                                                        const std::function<void()>& drain_device) {
+    bool drained = true;
+    if (drain_device) {
+        try {
+            // This scope must end before disableProfiler finalizes its events.
+            // It is profiling teardown, not part of the measured forward.
+            RTP_LLM_PROFILE_SCOPE("profiler.teardown(device_drain)");
+            drain_device();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("failed to drain profiling device; dropping incomplete trace: %s", e.what());
+            drained = false;
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("failed to drain profiling device with unknown exception; dropping incomplete trace");
+            drained = false;
+        }
+    }
+    // Even a failed drain must pop the active Kineto state exactly once. In
+    // particular, unwinding a device failure must not retry from the destructor.
     try {
-        return disable_profiler();
+        auto result = disable_profiler();
+        return drained ? std::move(result) : nullptr;
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("failed to disable torch profiler; dropping trace and continuing inference: %s", e.what());
     } catch (...) {
@@ -48,6 +93,18 @@ std::unique_ptr<tap::ProfilerResult> tryDisableProfiler(DisableProfilerFn disabl
 
 // ---- TorchProfile ----
 
+void CollectedProfile::save(const std::string& path) {
+    kineto->save(path);
+    try {
+        appendAsyncProfileTrace(path, async_events);
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR(
+            "failed to append cache transfer events; native trace retained at %s: %s", path.c_str(), e.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("failed to append cache transfer events; native trace retained at %s", path.c_str());
+    }
+}
+
 std::atomic<size_t> TorchProfile::count_{0};
 
 TorchProfile::TorchProfile(const std::string& prefix, std::string output_dir):
@@ -55,18 +112,26 @@ TorchProfile::TorchProfile(const std::string& prefix, std::string output_dir):
 
 TorchProfile::~TorchProfile() {
     if (!stopped_) {
-        stop();
+        try {
+            stop();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("failed to save torch profiler trace during destruction: %s", e.what());
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("failed to save torch profiler trace during destruction with unknown exception");
+        }
     }
 }
 
 void TorchProfile::start() {
+    profile_device_ = activities_.count(tpi::ActivityType::CUDA) ? currentProfileDevice() : -1;
     count_ += 1;
     stopped_ = false;
     tap::prepareProfiler(config_, activities_);
     tap::enableProfiler(config_, activities_);
+    async_profile_ = AsyncProfileSession::start();
 }
 
-std::pair<std::unique_ptr<tap::ProfilerResult>, std::string> TorchProfile::stopAndCollect() {
+std::pair<std::unique_ptr<CollectedProfile>, std::string> TorchProfile::stopAndCollect() {
     if (stopped_) {
         return {nullptr, ""};
     }
@@ -74,12 +139,37 @@ std::pair<std::unique_ptr<tap::ProfilerResult>, std::string> TorchProfile::stopA
     // trace. Mark this wrapper stopped first so an exception is never retried
     // from the destructor.
     stopped_ = true;
-    auto res = detail::tryDisableProfiler(&tap::disableProfiler);
+    std::vector<AsyncProfileEvent> async_events;
+    auto res = detail::tryDisableProfiler(&tap::disableProfiler, [this, &async_events] {
+        try {
+            drainProfileDevice(profile_device_);
+        } catch (...) {
+            if (async_profile_) {
+                async_profile_->finish();
+                async_profile_.reset();
+            }
+            throw;
+        }
+        if (async_profile_) {
+            auto session = std::move(async_profile_);
+            try {
+                async_events = session->finish();
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_ERROR("failed to collect cache transfer events; retaining native capture: %s", e.what());
+            } catch (...) {
+                RTP_LLM_LOG_ERROR(
+                    "failed to collect cache transfer events; retaining native capture");
+            }
+        }
+    });
     if (!res) {
         return {nullptr, ""};
     }
     std::string file_name = output_dir_ + "/" + prefix_ + std::to_string(count_) + ".json";
-    return {std::move(res), std::move(file_name)};
+    auto        collected   = std::make_unique<CollectedProfile>();
+    collected->kineto       = std::move(res);
+    collected->async_events = std::move(async_events);
+    return {std::move(collected), std::move(file_name)};
 }
 
 void TorchProfile::stop() {
@@ -102,7 +192,7 @@ ProfilerSaveWorker::~ProfilerSaveWorker() {
     thread_.join();
 }
 
-void ProfilerSaveWorker::enqueue(std::unique_ptr<tap::ProfilerResult> result, std::string file_name) {
+void ProfilerSaveWorker::enqueue(std::unique_ptr<CollectedProfile> result, std::string file_name) {
     {
         std::lock_guard<std::mutex> lock(mu_);
         tasks_.push({std::move(result), std::move(file_name)});

@@ -109,7 +109,12 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
         return false;
     }
     request.set_timeout_ms(remaining->count());
-    const auto&                             descriptors = task.descriptors();
+    request.set_transfer_trace_id(task.traceId());
+    request.set_transfer_workflow_id(task.workflowId());
+    request.set_transfer_parent_id(task.parentTraceId());
+    request.set_has_transfer_request_id(task.requestId().has_value());
+    request.set_transfer_request_id(task.requestId().value_or(0));
+    const auto& descriptors = task.descriptors();
     if (descriptors.empty()) {
         return false;
     }

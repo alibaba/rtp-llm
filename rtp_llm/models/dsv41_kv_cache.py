@@ -5,7 +5,11 @@ producer layer id and the same cache tag; no duplicate physical pools or native
 model-specific allocator are needed.
 """
 
+import logging
+
 from rtp_llm.models.dsv4_kv_cache import (
+    CSA_KV_TAG,
+    HCA_KV_TAG,
     _make_dsv4_desc,
     _use_host_pinned_memory,
     apply_dsv4_explicit_pool_blocks,
@@ -38,10 +42,8 @@ def build_v41_kv_cache_spec_descs(
     and placement are delegated to the descriptor's generic policies.
     """
     global_pools = {
-        ratio: _make_dsv4_desc(
-            f"global_kv_{ratio}", "compressed_kv", 288, DataType.TYPE_UINT8, ratio
-        )
-        for ratio in (1, 2)
+        ratio: _make_dsv4_desc(tag, "compressed_kv", 288, DataType.TYPE_UINT8, ratio)
+        for ratio, tag in ((1, HCA_KV_TAG), (2, CSA_KV_TAG))
     }
     for desc in global_pools.values():
         desc.block_stride_bytes_alignment = 4608  # lcm(512, 288)
@@ -89,6 +91,11 @@ def build_v41_kv_cache_spec_descs(
 def configure_v41_kv_cache(model_config, kv_cache_config=None):
     from rtp_llm.models_py.modules.dsv41.bounded_replay import enabled
 
+    # The inherited legacy hook runs after parsed settings have been applied.
+    # Explicit settings may rebuild earlier defaults; the fallback must not.
+    if kv_cache_config is None and model_config.kv_cache_spec_descs:
+        return
+
     attn = model_config.attn_config
     promoted = resolve_dsv4_tokens_per_block(int(attn.tokens_per_block))
     if promoted is not None:
@@ -117,6 +124,24 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
     if fixed_blocks > 0:
         for tag in ("csa_state", "swa_kv", "decoder_swa_kv"):
             apply_dsv4_explicit_pool_blocks(descs, tag, fixed_blocks)
+    decoder_blocks = (
+        int(kv_cache_config.dsv41_decoder_swa_pool_blocks) if kv_cache_config else 0
+    )
+    if decoder_blocks:
+        if not 2 <= decoder_blocks <= 2**31 - 1:
+            raise ValueError(
+                "decoder SWA pool needs block zero and usable blocks within the int32 index range"
+            )
+        if not bounded:
+            raise ValueError("DSV41_DECODER_SWA_POOL_BLOCKS requires bounded replay")
+        apply_dsv4_explicit_pool_blocks(descs, "decoder_swa_kv", decoder_blocks)
+    logging.info(
+        "V4.1 KV pool policy: draft=%s fixed_pool_blocks=%d "
+        "decoder_swa_pool_blocks=%d (single-pool override wins; zero uses fallback)",
+        draft,
+        fixed_blocks,
+        decoder_blocks,
+    )
     model_config.kv_cache_spec_descs = descs
     model_config.cache_min_replay_tokens = 128 if bounded else 1
     # Token-interleaved FlashMLA bytes must never alias the old planar format.

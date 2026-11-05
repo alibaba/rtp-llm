@@ -1,10 +1,12 @@
 #include "ClientWrapper.h"
+#include "kvcm_client/HostCacheStateCompat.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/Subscriber.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include <algorithm>
 #include <exception>
 #include <numeric>
+#include <pthread.h>
 #include <thread>
 #include <random>
 #include <chrono>
@@ -13,6 +15,25 @@ namespace rtp_llm {
 namespace kvcm {
 
 namespace {
+
+thread_local const ClientWrapper* transfer_deadline_owner = nullptr;
+thread_local std::optional<std::chrono::steady_clock::time_point> transfer_deadline;
+
+class TransferDeadlineScope {
+public:
+    TransferDeadlineScope(const ClientWrapper* owner, std::optional<std::chrono::steady_clock::time_point> deadline):
+        previous_owner_(transfer_deadline_owner), previous_deadline_(transfer_deadline) {
+        transfer_deadline_owner = owner;
+        transfer_deadline = deadline;
+    }
+    ~TransferDeadlineScope() {
+        transfer_deadline_owner = previous_owner_;
+        transfer_deadline = previous_deadline_;
+    }
+private:
+    const ClientWrapper* previous_owner_;
+    std::optional<std::chrono::steady_clock::time_point> previous_deadline_;
+};
 
 class ReinitPolicy {
 public:
@@ -135,6 +156,33 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
             init_params_.role_type = kv_cache_manager::RoleType::WORKER;
         }
         const auto config_json = autil::legacy::ToJsonString(config_map_.begin()->second);
+        kv_cache_manager::ClientMemoryRegistrations memory_registrations;
+        for (auto& registration : pool_registrations_) {
+            if (!registration.memory_registrations) {
+                continue;
+            }
+            for (const auto& gpu : registration.memory_registrations->gpu) {
+                const auto duplicate = std::find_if(memory_registrations.gpu.begin(),
+                                                    memory_registrations.gpu.end(),
+                                                    [&](const auto& other) {
+                                                        return gpu.base == other.base && gpu.size == other.size
+                                                               && gpu.device_id == other.device_id;
+                                                    });
+                if (duplicate == memory_registrations.gpu.end()) {
+                    memory_registrations.gpu.push_back(gpu);
+                }
+            }
+            registration.memory_registrations->gpu.clear();
+        }
+        if (!memory_registrations.gpu.empty()) {
+            // PACE seals the process's MR registrations during the first client Init.
+            // Retain every GPU span in that client's descriptor before creating any client.
+            auto& first = pool_registrations_.front().memory_registrations;
+            if (!first) {
+                first.emplace();
+            }
+            first->gpu = std::move(memory_registrations.gpu);
+        }
         std::vector<std::unique_ptr<kv_cache_manager::TransferClient>> clients;
         clients.reserve(pool_registrations_.size());
         for (size_t index = 0; index < pool_registrations_.size(); ++index) {
@@ -144,7 +192,10 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
                 params.regist_span             = &pool_registrations_[index].span;
                 params.self_location_spec_name = pool_registrations_[index].location_spec_name;
             }
-            auto client = client_factory_->createTransferClient(config_json, params);
+            auto client = pool_registrations_[index].memory_registrations.has_value()
+                              ? client_factory_->createTransferClientWithMemory(
+                                    config_json, params, *pool_registrations_[index].memory_registrations)
+                              : client_factory_->createTransferClient(config_json, params);
             if (!client) {
                 RTP_LLM_LOG_ERROR("init KVCM transfer client failed for pool %zu", index);
                 return false;
@@ -374,9 +425,41 @@ ClientWrapper::getWriteLocation(const std::string&              unique_id,
                                 const std::vector<int64_t>&     keys,
                                 const std::vector<int64_t>&     tokens,
                                 const std::vector<std::string>& location_spec_group_names,
-                                int64_t                         write_timeout_seconds) {
+                                int64_t                         write_timeout_seconds,
+                                int32_t                         min_replica_count) {
     CHECK_INIT2(unique_id);
-    CALL_CLIENT2(StartWrite, trace_id, keys, tokens, location_spec_group_names, write_timeout_seconds);
+    CALL_CLIENT2(StartWrite, trace_id, keys, tokens, location_spec_group_names, write_timeout_seconds, min_replica_count);
+}
+
+bool ClientWrapper::removeCache(const std::string& unique_id, const std::string& trace_id,
+                                const std::vector<int64_t>& keys, const std::vector<int64_t>& tokens,
+                                const kv_cache_manager::BlockMask& block_mask) {
+    CHECK_INIT1(unique_id);
+    return checkError(client->RemoveCache(trace_id, keys, tokens, block_mask));
+}
+
+std::pair<bool, kv_cache_manager::BackendLocations>
+ClientWrapper::getCacheLocationsByBackend(const std::string& unique_id, const std::string& trace_id,
+                                          const std::vector<int64_t>& keys, const std::vector<int64_t>& tokens,
+                                          const kv_cache_manager::BlockMask& block_mask,
+                                          const std::vector<std::string>& location_spec_names,
+                                          kv_cache_manager::StorageType backend_type) {
+    CHECK_INIT2(unique_id);
+    CALL_CLIENT2(GetCacheLocationsByBackend, trace_id, keys, tokens, block_mask, location_spec_names,
+                 backend_type, kv_cache_manager::BackendSelectStrategy::LSS_WEIGHTED_RANDOM);
+}
+
+std::pair<bool, kv_cache_manager::HostCacheState>
+ClientWrapper::getHostCacheState(const std::string& unique_id, const std::string& trace_id,
+                                 kv_cache_manager::QueryType query_type, const std::vector<int64_t>& keys,
+                                 const std::vector<std::string>& medium, int32_t p2p_host_count) {
+    CHECK_INIT2(unique_id);
+    auto [ec, result] = getSdkHostCacheState(*client, trace_id, query_type, keys, medium, p2p_host_count);
+    if (!checkError(ec)) {
+        RTP_LLM_LOG_WARNING("GetHostCacheState fail, ec [%d]", ec);
+        return {false, {}};
+    }
+    return {true, std::move(result)};
 }
 
 bool ClientWrapper::finishWrite(const std::string&                 unique_id,
@@ -391,6 +474,43 @@ bool ClientWrapper::finishWrite(const std::string&                 unique_id,
         return false;
     }
     return true;
+}
+
+bool ClientWrapper::abortWrite(const std::string& unique_id, const std::string& trace_id,
+                               const std::string& write_session_id) {
+    if (write_session_id.empty()) {
+        return false;
+    }
+    // SDK retries do not cover CHECK_INIT rejecting an unsent request.
+    constexpr int max_attempts = 3;
+    auto attempt_abort = [&]() -> std::optional<kv_cache_manager::ClientErrorCode> {
+        CHECK_INIT_BASE(unique_id, std::nullopt);
+        const auto ec = client->FinishWrite(trace_id, write_session_id, kv_cache_manager::BlockMaskOffset{0}, {});
+        checkError(ec);
+        return ec;
+    };
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+        std::optional<kv_cache_manager::ClientErrorCode> ec;
+        try {
+            ec = attempt_abort();
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("KVCM abort attempt threw, session=%s", write_session_id.c_str());
+        }
+        if (ec && *ec == kv_cache_manager::ClientErrorCode::ER_OK) {
+            return true;
+        }
+        RTP_LLM_LOG_WARNING("KVCM abort unconfirmed, session=%s attempt=%d code=%d",
+                            write_session_id.c_str(), attempt + 1, ec ? static_cast<int>(*ec) : -1);
+        if (ec && *ec != kv_cache_manager::ClientErrorCode::ER_INVALID_GRPCSTATUS
+            && *ec != kv_cache_manager::ClientErrorCode::ER_INVALID_STUB
+            && *ec != kv_cache_manager::ClientErrorCode::ER_CONNECT_FAIL) {
+            return false;
+        }
+        if (attempt + 1 < max_attempts && !waitForRetry(/*sleep_time_ms=*/20)) {
+            return false;
+        }
+    }
+    return false;
 }
 
 bool ClientWrapper::checkError(kv_cache_manager::ClientErrorCode ec) {
@@ -420,6 +540,7 @@ void ClientWrapper::requestReinit() {
 }
 
 void ClientWrapper::reinitWorkerLoop() noexcept {
+    pthread_setname_np(pthread_self(), "kvcm_reinit");
     while (true) {
         {
             std::unique_lock<std::mutex> lock(reinit_worker_mutex_);
@@ -497,7 +618,11 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
                                             const kv_cache_manager::UriStrVec&                          uri_str_vec,
                                             kv_cache_manager::BlockBuffers&                             block_buffers,
                                             const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
+    const auto deadline = transfer_deadline_owner == this ? transfer_deadline : std::nullopt;
     std::shared_lock read_guard(transfer_mutex_);
+    if (deadline && std::chrono::steady_clock::now() >= *deadline) {
+        return kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT;
+    }
     const auto       slot = tag_to_index_.find(tag);
     if (slot == tag_to_index_.end()) {
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
@@ -527,7 +652,11 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
                                             const kv_cache_manager::UriStrVec&                          uri_str_vec,
                                             const kv_cache_manager::BlockBuffers&                       block_buffers,
                                             const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
+    const auto deadline = transfer_deadline_owner == this ? transfer_deadline : std::nullopt;
     std::shared_lock read_guard(transfer_mutex_);
+    if (deadline && std::chrono::steady_clock::now() >= *deadline) {
+        return {kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT, {}};
+    }
     const auto       slot = tag_to_index_.find(tag);
     if (slot == tag_to_index_.end()) {
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
@@ -540,5 +669,26 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
     return {ec, std::move(result)};
 }
 
+
+
+kv_cache_manager::ClientErrorCode ClientWrapper::loadKvCachesForTagWithStatus(
+    const std::string& tag, const kv_cache_manager::UriStrVec& uris,
+    kv_cache_manager::BlockBuffers& buffers,
+    const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace,
+    std::optional<std::chrono::steady_clock::time_point> deadline) {
+    if (deadline && std::chrono::steady_clock::now() >= *deadline) return kv_cache_manager::ER_SDK_TIMEOUT;
+    TransferDeadlineScope scope(this, deadline);
+    return loadKvCachesForTagWithStatus(tag, uris, buffers, trace);
+}
+
+std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec> ClientWrapper::saveKvCachesForTagWithStatus(
+    const std::string& tag, const kv_cache_manager::UriStrVec& uris,
+    const kv_cache_manager::BlockBuffers& buffers,
+    const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace,
+    std::optional<std::chrono::steady_clock::time_point> deadline) {
+    if (deadline && std::chrono::steady_clock::now() >= *deadline) return {kv_cache_manager::ER_SDK_TIMEOUT, {}};
+    TransferDeadlineScope scope(this, deadline);
+    return saveKvCachesForTagWithStatus(tag, uris, buffers, trace);
+}
 }  // namespace kvcm
 }  // namespace rtp_llm

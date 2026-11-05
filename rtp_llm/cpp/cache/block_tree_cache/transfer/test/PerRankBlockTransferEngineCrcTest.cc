@@ -741,7 +741,7 @@ TEST_F(PerRankBlockTransferEngineCrcTest, HostDiskPreservesCorruptRecordUntilDev
     ASSERT_NO_FATAL_FAILURE(
         expectDump(dumps,
                    corrupt,
-                   {"\"cpu_backing\": \"memory_pool\"", "\"operation\": \"load\"", "\"direction\": \"HOST->DEVICE\""}));
+                   {"\"cpu_backing\": \"host_pool\"", "\"operation\": \"load\"", "\"direction\": \"HOST->DEVICE\""}));
 }
 
 TEST_F(PerRankBlockTransferEngineCrcTest, DiskCorruptionIsRejectedAfterDeviceScatter) {
@@ -761,7 +761,7 @@ TEST_F(PerRankBlockTransferEngineCrcTest, DiskCorruptionIsRejectedAfterDeviceSca
     ASSERT_NO_FATAL_FAILURE(
         expectDump(host_dumps,
                    raw,
-                   {"\"cpu_backing\": \"memory_pool\"", "\"operation\": \"load\"", "\"direction\": \"HOST->DEVICE\""}));
+                   {"\"cpu_backing\": \"host_pool\"", "\"operation\": \"load\"", "\"direction\": \"HOST->DEVICE\""}));
     const auto device_dumps      = captureDumps("disk_to_device_dump");
     const auto read_bytes_before = disk_->readBytes();
     const auto failed            = execute(Tier::DISK, Tier::DEVICE);

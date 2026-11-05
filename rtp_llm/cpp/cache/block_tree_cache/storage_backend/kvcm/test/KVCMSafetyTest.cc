@@ -245,7 +245,9 @@ TEST(KVCMSafetyTest, BroadcastWaitClassifiesDeadlineAndRpcFailureBeforeFreezing)
         ASSERT_TRUE(matched.success);
 
         try {
-            backend->readImpl(makeStorageRequest(environment), matched.match_meta);
+            auto request = makeStorageRequest(environment);
+            request.transfer_task.emplace(std::vector<TransferDescriptor>{}, std::chrono::seconds(1));
+            backend->readImpl(request, matched.match_meta);
             FAIL() << "expected broadcast failure";
         } catch (const StorageOperationTimeout& exception) {
             EXPECT_TRUE(timeout);
@@ -317,7 +319,7 @@ TEST(KVCMSafetyTest, TimedOutReadAndWriteStayProtectedUntilLateWorkerFinishes) {
         if (is_write) {
             auto write_location      = singleWriteLocation();
             write_location.locations = tp2Locations();
-            EXPECT_CALL(*wrapper, getWriteLocation(_, _, _, _, _, _))
+            EXPECT_CALL(*wrapper, getWriteLocation(_, _, _, _, _, _, 0))
                 .WillOnce(Return(std::make_pair(true, write_location)));
             EXPECT_CALL(*wrapper, finishWrite(_, _, "safety_session", _, _)).WillOnce(Return(true));
             EXPECT_TRUE(backend->write(backend->prepareWrite(makeStorageRequest(environment))));
@@ -382,7 +384,7 @@ TEST(KVCMSafetyTest, UnknownWriteCompensationFailurePreservesFrozenProtection) {
         EXPECT_CALL(*wrapper, shutdown()).Times(1);
         auto backend = makeBackend(environment, singleRankConfig(), wrapper);
         ASSERT_TRUE(initSingleRank(*backend.backend, environment));
-        EXPECT_CALL(*wrapper, getWriteLocation(_, _, _, _, _, _))
+        EXPECT_CALL(*wrapper, getWriteLocation(_, _, _, _, _, _, 0))
             .WillOnce(Return(std::make_pair(true, singleWriteLocation())));
         EXPECT_CALL(*wrapper, saveKvCachesForTagWithStatus("default", _, _, _))
             .WillOnce(Return(std::make_pair(kv_cache_manager::ER_SDK_TIMEOUT, kv_cache_manager::UriStrVec{})));
@@ -445,7 +447,7 @@ TEST(KVCMSafetyTest, AttemptedNormalFinishWriteIsNeverCompensatedAfterThrow) {
     EXPECT_CALL(*wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
-    EXPECT_CALL(*wrapper, getWriteLocation(_, _, _, _, _, _))
+    EXPECT_CALL(*wrapper, getWriteLocation(_, _, _, _, _, _, 0))
         .WillOnce(Return(std::make_pair(true, singleWriteLocation())));
     EXPECT_CALL(*wrapper, saveKvCachesForTagWithStatus("default", _, _, _))
         .WillOnce(Return(std::make_pair(kv_cache_manager::ER_OK, kv_cache_manager::UriStrVec{})));
@@ -460,7 +462,7 @@ TEST(KVCMSafetyTest, AttemptedNormalFinishWriteIsNeverCompensatedAfterThrow) {
 }
 
 TEST(KVCMSafetyTest, QuarantineThresholdIsDisabledByDefaultAndUsesStrictGreaterComparison) {
-    for (const auto* value : {"0", "1"}) {
+    for (const auto* value : {"0", "0.125"}) {
         autil::EnvGuard guard("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO", value);
         auto            environment = makeBackendEnvironment("kvcm_safety_abort_threshold");
         auto            wrapper     = std::make_shared<MockClientWrapper>();
@@ -470,11 +472,17 @@ TEST(KVCMSafetyTest, QuarantineThresholdIsDisabledByDefaultAndUsesStrictGreaterC
         ASSERT_TRUE(initSingleRank(*backend.backend, environment));
         const size_t total = environment.device_pool->totalBlocksNum();
         if (std::string(value) == "0") {
-            backend->onQuarantineChanged(1, 1, total * 2);
+            backend->onQuarantineChanged(1, 1, total * 2, {});
         } else {
-            const size_t boundary = total;
-            backend->onQuarantineChanged(1, 1, boundary);
-            EXPECT_DEATH(backend->onQuarantineChanged(2, 2, boundary + 1), "");
+            environment.device_pool->freezeBlock(environment.block_id);
+            // Logical task pins can exceed capacity while one physical block is frozen.
+            backend->onQuarantineChanged(1, 1, total * 2, {});
+            EXPECT_DEATH({
+                const auto next = environment.device_pool->malloc().value();
+                environment.device_pool->incRef(next);
+                environment.device_pool->freezeBlock(next);
+                backend->onQuarantineChanged(2, 2, total * 2, {});
+            }, "");
         }
     }
     autil::EnvGuard guard("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO", "0.01");
@@ -486,7 +494,7 @@ TEST(KVCMSafetyTest, QuarantineThresholdIsDisabledByDefaultAndUsesStrictGreaterC
     rank1.tp_rank = 1;
     auto backend  = makeBackend(environment, rank1, wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
-    backend->onQuarantineChanged(1, 1, environment.device_pool->totalBlocksNum() * 2);
+    backend->onQuarantineChanged(1, 1, environment.device_pool->totalBlocksNum() * 2, {});
 }
 
 }  // namespace

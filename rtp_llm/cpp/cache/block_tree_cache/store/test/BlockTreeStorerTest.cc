@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
 namespace rtp_llm {
 namespace {
@@ -105,7 +106,7 @@ public:
     bool start() override {
         return true;
     }
-    bool submit(Task task) override {
+    bool submit(Task task, BlockTreeTaskClass = BlockTreeTaskClass::BACKGROUND) override {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             tasks_.push_back(std::move(task));
@@ -400,15 +401,14 @@ protected:
             EXPECT_EQ(node->group_set_resources[0].getTopTier(), succeeded ? Tier::DEVICE : GetParam());
         }
 
-        const size_t resident_prefix_length =
-            env_->cache->insert(keys_, resources_, Tier::DEVICE, /*is_resident=*/true);
-        EXPECT_EQ(resident_prefix_length, succeeded ? keys_.size() : 0u);
         if (succeeded) {
+            const size_t resident_prefix_length =
+                env_->cache->insert(keys_, resources_, Tier::DEVICE, /*is_resident=*/true);
+            EXPECT_EQ(resident_prefix_length, keys_.size());
             expectResidentPrefix(target_blocks);
             EXPECT_EQ(env_->poolFor(GetParam()).referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
         } else {
-            // A failed load retains the only source; resident insertion must not
-            // publish a second serving tier or mark an unpromoted prefix resident.
+            // Before any replacement insert, a failed load retains its source for retry.
             for (const TreeNode* node : settled_path) {
                 EXPECT_FALSE(node->is_resident);
                 EXPECT_EQ(node->group_set_resources[0].getTopTier(), GetParam());
@@ -433,23 +433,25 @@ protected:
     std::vector<BlockIndicesType>                         request_holds_;
 };
 
-TEST_P(ResidentTieredCacheTest, ResidentInsertDoesNotDuplicateExistingLowerTier) {
+TEST_P(ResidentTieredCacheTest, ResidentInsertReplacesIdleLowerTierWithoutCopy) {
     EXPECT_EQ(candidateCountForTier(*env_->cache, GetParam()), 1u);
+    const auto   original_path    = env_->cache->tree()->findNode(keys_);
+    const size_t submitted_before = engine_->submittedBatchCount();
     {
         const size_t resident_prefix_length =
             env_->cache->insert(keys_, resources_, Tier::DEVICE, /*is_resident=*/true);
-        EXPECT_EQ(resident_prefix_length, 0u);
+        EXPECT_EQ(resident_prefix_length, keys_.size());
     }
     const auto path = env_->cache->tree()->findNode(keys_);
-    ASSERT_EQ(path.size(), keys_.size());
-    for (const TreeNode* node : path) {
-        EXPECT_FALSE(node->is_resident);
-        EXPECT_EQ(node->group_set_resources[0].getTopTier(), GetParam());
-        EXPECT_EQ(node->group_set_resources[0].servingTierCount(), 1u);
+    EXPECT_EQ(path, original_path);
+    EXPECT_EQ(engine_->submittedBatchCount(), submitted_before);
+    BlockIndicesType expected_blocks;
+    for (const auto& resource : resources_) {
+        expected_blocks.push_back(resource[0].device_blocks.front());
     }
-    EXPECT_EQ(env_->poolFor(GetParam()).referencedBlocksNum(BlockTreeRefType::CACHE), keys_.size());
-    EXPECT_EQ(candidateCountForTier(*env_->cache, GetParam()), 1u);
-    EXPECT_EQ(candidateCountForTier(*env_->cache, Tier::DEVICE), 0u);
+    expectResidentPrefix(expected_blocks);
+    EXPECT_EQ(env_->poolFor(GetParam()).referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
+    EXPECT_EQ(env_->poolFor(GetParam()).freeBlocksNum(), env_->poolFor(GetParam()).totalBlocksNum());
 }
 
 TEST_P(ResidentTieredCacheTest, SuccessfulAsyncLoadCanBePromotedToResidentAfterSettlement) {
@@ -523,8 +525,33 @@ TEST(BlockTreeStorerTest, StorePublishesTargetTierOnlyWithoutDeviceResidency) {
 
         MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
         ASSERT_EQ(request_holder.size(), 1u);
+        auto session = AsyncProfileSession::start();
         env.cache->insert({100}, deviceSourceResources({request_holder[0]}), target_tier);
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
+        const auto        events           = session->finish();
+        const std::string direction        = target_tier == Tier::HOST ? "device_to_host" : "device_to_disk";
+        const auto        completion_event = [&](const char* stage) -> const AsyncProfileEvent* {
+            const auto name = "cache.transfer." + direction + "." + stage + "(";
+            for (const auto& event : events)
+                if (event.name.find(name) == 0 && event.name.find("operation=store") != std::string::npos)
+                    return &event;
+            return nullptr;
+        };
+        const auto* total   = completion_event("completion_total");
+        const auto* queue   = completion_event("completion_queue_wait");
+        const auto* execute = completion_event("completion_execute");
+        ASSERT_NE(total, nullptr);
+        ASSERT_NE(queue, nullptr);
+        ASSERT_NE(execute, nullptr);
+        EXPECT_LE(total->start_us, queue->start_us);
+        EXPECT_LE(queue->end_us, execute->start_us);
+        EXPECT_GE(total->end_us, execute->end_us);
+        for (const char* stage : {"callback_total",
+                                  "completion_lock_wait",
+                                  "completion_publish_tree",
+                                  "completion_release_refs",
+                                  "completion_watermark"})
+            EXPECT_NE(completion_event(stage), nullptr) << stage;
 
         auto find = env.cache->tree()->findNode({100});
         ASSERT_EQ(find.size(), 1u);
@@ -605,6 +632,47 @@ TEST(BlockTreeStorerTest, DeviceInsertSubmitsAllBlocksOutsideTreeLockAndPinsUnti
     releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[1]);
 }
 
+TEST(BlockTreeStorerTest, RemoteReuseIntervalFiltersWritesBeforePinningAndKeepsTheLocalTreeComplete) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    auto backend = std::make_shared<PendingWriteBackend>();
+    auto env = makeStoreEnvironment("remote_reuse_interval", true, false, false, {2}, 4, backend);
+    backend->setCache(env.cache.get());
+    auto holder = allocateDeviceBlocksForTest(*env.groups[0], 3);
+    ASSERT_EQ(holder.size(), 3u);
+    const CacheKeysType keys{100, 101, 102};
+    std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(1));
+    for (size_t i = 0; i < holder.size(); ++i) {
+        resources[i][0].device_blocks = holder[i];
+    }
+
+    env.cache->insert(keys, resources, Tier::DEVICE, false, {}, 0, keys.size());
+    EXPECT_EQ(backend->submittedCount(), 0u);
+    EXPECT_EQ(env.cache->getKeySnapshot().keys, keys);
+    for (const auto& blocks : holder) {
+        EXPECT_EQ(env.device_pools[0]->refCount(blocks[0]), 2u);  // Request + tree, no remote pin.
+    }
+
+    env.cache->insert(keys, resources, Tier::DEVICE, false, {}, 1, 2);
+    EXPECT_EQ(backend->submittedCount(), 1u);
+    EXPECT_EQ(env.device_pools[0]->refCount(holder[0][0]), 3u);
+    EXPECT_EQ(env.device_pools[0]->refCount(holder[1][0]), 2u);
+    EXPECT_EQ(env.device_pools[0]->refCount(holder[2][0]), 3u);
+    backend->finishWrite();
+    EXPECT_EQ(backend->keys(), (CacheKeysType{100, 102}));
+    EXPECT_EQ(backend->blocks(), (BlockIndicesType{holder[0][0], holder[2][0]}));
+
+    // Without an adopted remote interval, all keys take the original write path.
+    env.cache->insert(keys, resources, Tier::DEVICE);
+    EXPECT_EQ(backend->submittedCount(), 2u);
+    backend->finishWrite();
+    EXPECT_EQ(backend->keys(), (CacheKeysType{100, 102, 100, 101, 102}));
+    for (const auto& blocks : holder) {
+        releaseDeviceBlocks(*env.cache, env.device_pools[0], blocks);
+    }
+}
+
 TEST(BlockTreeStorerTest, UnsupportedInsertTargetsRejectWithoutPublishingOrPinning) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
@@ -643,7 +711,7 @@ TEST(BlockTreeStorerTest, UnsupportedInsertTargetsRejectWithoutPublishingOrPinni
     releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[1]);
 }
 
-TEST(BlockTreeStorerTest, WatermarkDropKeepsPendingRemoteWritePayloadAlive) {
+TEST(BlockTreeStorerTest, WatermarkPreservesPendingRemoteWriteUntilReferencesRelease) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -662,6 +730,7 @@ TEST(BlockTreeStorerTest, WatermarkDropKeepsPendingRemoteWritePayloadAlive) {
     }
     std::vector<int> uploaded_bytes;
     backend->inspect_write = [&](const StorageRequest& request) {
+        EXPECT_EQ(request.request_id, 214);
         for (const auto& handles : request.handles) {
             ASSERT_EQ(handles.size(), 1u);
             const auto buffers = pool->convertIndexToBuffer(0, handles[0].block);
@@ -673,21 +742,32 @@ TEST(BlockTreeStorerTest, WatermarkDropKeepsPendingRemoteWritePayloadAlive) {
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = holders[0];
     resources[1][0].device_blocks = holders[1];
-    env.cache->insert({100, 101}, resources, Tier::DEVICE);
+    env.cache->insert({100, 101}, resources, Tier::DEVICE, false, 214);
     EXPECT_EQ(backend->submittedCount(), 1u);
-    EXPECT_EQ(env.cache->getStats().tree_node_count, 0u);
-    EXPECT_EQ(env.cache->match({100, 101}).matched_device_blocks, 0u);
+    EXPECT_EQ(env.cache->getStats().tree_node_count, 2u);
+    BlockTreeMatchResult match = env.cache->match({100, 101});
+    EXPECT_EQ(match.matched_device_blocks, 2u);
+    block_tree_cache_test::releaseRequestRefsForTest(*env.cache, match.matched_device_resources);
+    match.matched_device_resources.clear();
     for (const auto& holder : holders) {
-        EXPECT_EQ(pool->treeRefCount(holder[0]), 0u);
-        EXPECT_EQ(pool->refCount(holder[0]), 2u);  // REQUEST and pending storage write.
+        EXPECT_EQ(pool->treeRefCount(holder[0]), 1u);
+        EXPECT_EQ(pool->refCount(holder[0]), 3u);  // CACHE, REQUEST and pending storage write.
         unreferenceDeviceBlocksForTest(*env.groups[0], {holder});
         EXPECT_TRUE(pool->isAllocated(holder[0]));
-        EXPECT_EQ(pool->refCount(holder[0]), 1u);
+        EXPECT_EQ(pool->refCount(holder[0]), 2u);
     }
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*env.cache);
+    EXPECT_EQ(env.cache->getStats().tree_node_count, 2u);
     backend->finishWrite();
     EXPECT_EQ(uploaded_bytes, (std::vector<int>{17, 18}));
     EXPECT_EQ(backend->keys(), (CacheKeysType{100, 101}));
     EXPECT_TRUE(backend->submittedOutsideTreeLock());
+    for (const auto& holder : holders) {
+        EXPECT_EQ(pool->refCount(holder[0]), 1u);
+        EXPECT_EQ(pool->treeRefCount(holder[0]), 1u);
+    }
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*env.cache);
+    EXPECT_EQ(env.cache->getStats().tree_node_count, 0u);
     for (const auto& holder : holders) {
         EXPECT_FALSE(pool->isAllocated(holder[0]));
     }
@@ -950,9 +1030,12 @@ TEST(BlockTreeStorerTest, StoreKeepsDeviceSourceAliveAfterRequestRelease) {
         EXPECT_EQ(env.device_pools[0]->refCount(device_block), 1u);
         EXPECT_EQ(env.device_pools[0]->treeRefCount(device_block), device_cache_on ? 2u : 1u);
         EXPECT_EQ(candidateCountForTier(*env.cache, Tier::DEVICE), device_cache_on ? 1u : 0u)
-            << "a store hold must not make a cached source ineligible for eviction";
+            << "a store hold must preserve candidate membership";
         if (device_cache_on) {
-            EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*env.cache, 1, Tier::DEVICE), 1);
+            EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*env.cache, 1, Tier::DEVICE), 0);
+            EXPECT_EQ(env.device_pools[0]->treeRefCount(device_block), 2u);
+            EXPECT_EQ(candidateCountForTier(*env.cache, Tier::DEVICE), 1u);
+            EXPECT_EQ(env.cache->tree()->findNode({100}).size(), 1u);
         }
 
         barrier->release();
@@ -960,19 +1043,20 @@ TEST(BlockTreeStorerTest, StoreKeepsDeviceSourceAliveAfterRequestRelease) {
 
         EXPECT_EQ(env.storeRefCount(), 0u);
         if (device_cache_on) {
+            EXPECT_TRUE(env.device_pools[0]->isAllocated(device_block));
+            EXPECT_EQ(env.device_pools[0]->treeRefCount(device_block), 1u);
+            EXPECT_EQ(env.device_pools[0]->freeBlocksNum(), device_free_before - 1);
+            const std::vector<TreeNode*> path = env.cache->tree()->findNode({100});
+            ASSERT_EQ(path.size(), 1u);
+            EXPECT_TRUE(path.back()->group_set_resources[0].hasTier(Tier::DEVICE));
+            EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before)
+                << "STORE must not replace the existing DEVICE cache entry";
+
+            EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*env.cache, 1, Tier::DEVICE), 1);
             EXPECT_FALSE(env.device_pools[0]->isAllocated(device_block));
             EXPECT_EQ(env.device_pools[0]->freeBlocksNum(), device_free_before);
-            const std::vector<TreeNode*> path = env.cache->tree()->findNode({100});
-            if (path.empty()) {
-                EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before)
-                    << "eviction settled before STORE publication";
-            } else {
-                const GroupSetResource& resource = path.back()->group_set_resources[0];
-                EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
-                EXPECT_TRUE(resource.hasTier(Tier::HOST));
-                EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before - 1)
-                    << "STORE publication won the settlement race";
-            }
+            EXPECT_TRUE(env.cache->tree()->findNode({100}).empty());
+            EXPECT_EQ(candidateCountForTier(*env.cache, Tier::DEVICE), 0u);
         } else {
             ASSERT_EQ(env.cache->tree()->findNode({100}).size(), 1u);
             EXPECT_FALSE(env.device_pools[0]->isAllocated(device_block));

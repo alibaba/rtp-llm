@@ -22,6 +22,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
+#include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
 namespace rtp_llm::block_tree_cache_test {
 class LoadShutdownTestPeer {
@@ -553,15 +554,11 @@ void runSingleMaintenance(FullSWAEnvironment& environment, Tier tier, double rat
 }
 
 void demoteSwaSuffixKeepingFullDevice(FullSWAEnvironment& environment) {
-    // REQUEST references no longer mask candidates. Temporarily make the FULL
-    // resources non-evictable so two targeted SWA demotions create the partial
-    // ready boundary exercised by these load tests.
+    // Keep FULL request ownership and the caller's matched SWA prefix, but release
+    // the original SWA request so only its unheld suffix can migrate.
+    environment.releaseRequestRefsForGroup(1);
     const std::vector<TreeNode*> path = environment.cache->tree()->findNode(environment.keys);
     EXPECT_EQ(path.size(), kPathLength);
-    for (TreeNode* node : path) {
-        node->group_set_resources[0].transfer_state = GroupSetTransferState::LOADING;
-        BlockTreeCacheTestPeer::refreshCandidateForTest(*environment.cache, node, /*group_set_id=*/0);
-    }
     const bool first_demoted =
         BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment.cache, /*group_set_id=*/1, Tier::DEVICE);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment.cache);
@@ -569,8 +566,8 @@ void demoteSwaSuffixKeepingFullDevice(FullSWAEnvironment& environment) {
         BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment.cache, /*group_set_id=*/1, Tier::DEVICE);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment.cache);
     for (TreeNode* node : path) {
-        node->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
-        BlockTreeCacheTestPeer::refreshCandidateForTest(*environment.cache, node, /*group_set_id=*/0);
+        EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
+        EXPECT_TRUE(node->group_set_resources[0].hasTier(Tier::DEVICE));
     }
     EXPECT_TRUE(first_demoted);
     EXPECT_TRUE(second_demoted);
@@ -1353,7 +1350,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsI
     EXPECT_EQ(host_pool->freeBlocksNum(), host_free_before);
 }
 
-TEST_F(BlockTreeCacheIntegrationTest, EvictorDemotesRequestReferencedBlock) {
+TEST_F(BlockTreeCacheIntegrationTest, EvictorPreservesRequestReferencedBlocksUntilRelease) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -1366,12 +1363,17 @@ TEST_F(BlockTreeCacheIntegrationTest, EvictorDemotesRequestReferencedBlock) {
 
     environment->scripted_per_rank_transfer_engine->clear();
     environment->demoteAll(Tier::DEVICE);
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
+    EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
+    environment->expectPayloads();
+    environment->expectPoolFreeCounts({12, 12, 12}, {16, 16}, {16, 16});
+
+    environment->releaseRequestRefs();
+    environment->expectPoolFreeCounts({12, 12, 12}, {16, 16}, {16, 16});
+    environment->demoteAll(Tier::DEVICE);
     EXPECT_GT(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::HOST));
     environment->expectPayloads();
-    environment->expectPoolFreeCounts({12, 12, 12}, {12, 12}, {16, 16});
-
-    environment->releaseRequestRefs();
     environment->expectPoolFreeCounts({16, 16, 16}, {12, 12}, {16, 16});
     environment->reclaimAll();
     environment->expectFullyReclaimed();
@@ -1384,7 +1386,9 @@ TEST_P(BlockTreeCacheDemotionFailureTest, Evictor_DemotionFailure_RestoresSource
         GTEST_SKIP() << "CUDA not available";
     }
 
-    auto environment = FullSWAEnvironment::create();
+    FullSWAEnvironmentOptions options;
+    options.usable_swa_host_blocks = 8;
+    auto environment               = FullSWAEnvironment::create(options);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
 
@@ -1427,10 +1431,10 @@ TEST_P(BlockTreeCacheDemotionFailureTest, Evictor_DemotionFailure_RestoresSource
     }
     environment->expectPayloads();
     if (source_tier == Tier::DEVICE) {
-        environment->expectPoolFreeCounts({12, 12, 12}, {16, 16}, {16, 16});
+        environment->expectPoolFreeCounts({12, 12, 12}, {16, 8}, {16, 16});
         EXPECT_GT(environment->cache->getStats().device_heap_total_size, 0u);
     } else {
-        environment->expectPoolFreeCounts({16, 16, 16}, {12, 12}, {16, 16});
+        environment->expectPoolFreeCounts({16, 16, 16}, {12, 4}, {16, 16});
         EXPECT_GT(environment->cache->getStats().host_heap_total_size, 0u);
     }
 
@@ -1456,9 +1460,9 @@ TEST_P(BlockTreeCacheDemotionFailureTest, Evictor_DemotionFailure_RestoresSource
               retry_descriptors.end());
     environment->expectPayloads();
     if (target_tier == Tier::HOST) {
-        environment->expectPoolFreeCounts({16, 16, 16}, {12, 12}, {16, 16});
+        environment->expectPoolFreeCounts({16, 16, 16}, {12, 4}, {16, 16});
     } else {
-        environment->expectPoolFreeCounts({16, 16, 16}, {16, 16}, {12, 12});
+        environment->expectPoolFreeCounts({16, 16, 16}, {16, 8}, {12, 12});
     }
     environment->reclaimAll();
     environment->expectFullyReclaimed();
@@ -1819,9 +1823,10 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     }
 
     FullSWAEnvironmentOptions options;
-    options.path_length = 1;
-    options.enable_disk = true;
-    auto environment    = FullSWAEnvironment::create(options);
+    options.path_length            = 1;
+    options.usable_swa_host_blocks = 32;
+    options.enable_disk            = true;
+    auto environment               = FullSWAEnvironment::create(options);
     ASSERT_NE(environment, nullptr);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
@@ -2843,8 +2848,24 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskFailureInstallsNoTargets) {
     }
     environment->scripted_per_rank_transfer_engine->enqueue(false);
 
+    const size_t descriptor_count = context->loadDescs().size();
+    ASSERT_NE(host_load_descs.size(), descriptor_count - host_load_descs.size());
+    auto completion_profile = AsyncProfileSession::start();
     ASSERT_TRUE(context->commit());
     context->waitDone();
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
+    const auto completion_events         = completion_profile->finish();
+    size_t     logical_completion_stages = 0;
+    for (const auto& event : completion_events) {
+        if (event.name.find("scope=business_completion,operation=load") == std::string::npos)
+            continue;
+        ++logical_completion_stages;
+        EXPECT_NE(event.name.find("mixed_to_device"), std::string::npos);
+        EXPECT_NE(event.name.find("batch=0:" + std::to_string(descriptor_count) + ","), std::string::npos)
+            << event.name;
+        EXPECT_EQ(event.name.find("incomplete=1"), std::string::npos);
+    }
+    EXPECT_GE(logical_completion_stages, 10u);
     ASSERT_TRUE(context->done());
     EXPECT_FALSE(context->success());
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedBatchCount(),
@@ -3170,7 +3191,22 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadAsyncCompletionKeepsRequestSourc
     for (const auto& [pool, block] : device_sources) {
         EXPECT_EQ(pool->refCount(block), 1u);
     }
+    // FULL only checks its primary blocks. Freshly loaded SWA targets lose their
+    // CACHE references during the cascade but stay allocated for the request.
+    const auto version_before_reclaim = environment->cache->getKeySnapshot().version;
     EXPECT_EQ(environment->cache->evictForGroup("group0", 2), 2);
+    EXPECT_GT(environment->cache->getKeySnapshot().version, version_before_reclaim);
+    EXPECT_EQ(environment->cache->getStats().tree_node_count, tree_nodes_before - 2);
+    for (const auto& [pool, block] : request_target_blocks) {
+        EXPECT_TRUE(pool->isAllocated(block));
+        EXPECT_EQ(pool->refCount(block), 1u);
+        EXPECT_EQ(pool->treeRefCount(block), 0u);
+        releaseDeviceBlocks(*environment->cache, pool, {block});
+        EXPECT_FALSE(pool->isAllocated(block));
+    }
+    // The ready prefix still has two cached FULL blocks after dropping the suffix.
+    EXPECT_EQ(environment->cache->evictForGroup("group0", 2), 2);
+    EXPECT_EQ(environment->cache->getStats().tree_node_count, 0u);
     for (const auto& [pool, block] : device_sources) {
         EXPECT_FALSE(pool->isAllocated(block));
     }
@@ -3179,9 +3215,6 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadAsyncCompletionKeepsRequestSourc
     EXPECT_TRUE(context->success());
     context.reset();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
-    for (const auto& [pool, block] : request_target_blocks) {
-        releaseDeviceBlocks(*environment->cache, pool, {block});
-    }
     environment->reclaimAll();
     environment->expectFullyReclaimed();
 }

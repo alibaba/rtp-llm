@@ -751,6 +751,12 @@ class KVCacheConfig:
     block_tree_memory_evict_high_watermark_ratio: float
     block_tree_disk_evict_low_watermark_ratio: float
     block_tree_disk_evict_high_watermark_ratio: float
+    block_tree_full_device_evict_low_watermark_ratio: float
+    block_tree_full_device_evict_high_watermark_ratio: float
+    block_tree_full_memory_evict_low_watermark_ratio: float
+    block_tree_full_memory_evict_high_watermark_ratio: float
+    block_tree_full_disk_evict_low_watermark_ratio: float
+    block_tree_full_disk_evict_high_watermark_ratio: float
     fp8_kv_cache: int
     kv_cache_mem_mb: int
     reuse_cache_tail_blocks: int
@@ -758,6 +764,8 @@ class KVCacheConfig:
     swa_pool_blocks: int
     max_block_size_per_item: int
     memory_cache_size_mb: int
+    memory_cache_swa_block_ratio: float
+    dsv41_decoder_swa_pool_blocks: int
     memory_cache_sync_timeout_ms: int
     disk_cache_paths: str
     disk_cache_size_mb: int
@@ -771,6 +779,8 @@ class KVCacheConfig:
     kvcm_asyncwrapper_queue_size: int
     kvcm_asyncwrapper_thread_num: int
     kvcm_client_config: str
+    kvcm_read_backend_type: int
+    kvcm_min_replica_count: int
     kvcm_enable_vipserver: bool
     kvcm_get_broadcast_timeout: int
     kvcm_get_timeout_ms: int
@@ -787,6 +797,7 @@ class KVCacheConfig:
     kvcm_server_address: str
     kvcm_storage_queue_size: int
     kvcm_storage_thread_num: int
+    kvcm_task_timeout_ms: int
     kvcm_vipserver_domain: str
     # Legacy aliases of the canonical KVCM members.
     reco_asyncwrapper_queue_size: int
@@ -818,6 +829,7 @@ class KVCacheConfig:
     kv_cache_event_instance_group: str
     kv_cache_event_instance_id: str
     kv_cache_event_host_ip_port: str
+    kv_cache_event_snapshot_interval_ms: int
     ssm_state_dtype: str
     test_block_num: int
     use_block_cache: int

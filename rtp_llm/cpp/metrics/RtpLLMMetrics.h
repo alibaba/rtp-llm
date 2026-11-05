@@ -19,6 +19,20 @@ class MutableMetric;
 
 namespace rtp_llm {
 
+struct RtpLLMGrpcConnectFailureMetricsCollector {
+    std::string direction;
+};
+
+class RtpLLMGrpcConnectFailureMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMGrpcConnectFailureMetricsCollector* collector);
+    kmonitor::MutableMetric* connect_failed_qps_metric{nullptr};
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RpcMetricsCollector final {
 public:
     // rpc server metrics
@@ -996,6 +1010,22 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class RtpLLMCacheEventDropMetricsCollector final {
+public:
+    uint64_t queue_full_count    = 0;
+    uint64_t report_failed_count = 0;
+};
+
+class RtpLLMCacheEventDropMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheEventDropMetricsCollector* collector);
+
+private:
+    kmonitor::MutableMetric* drop_qps_metric = nullptr;
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMCacheOperationMetricsCollector final {
 public:
     enum class OpType : int8_t {
@@ -1038,6 +1068,8 @@ public:
     int64_t total_blocks                      = 0;
     int64_t reserve_blocks                    = 0;
     int64_t request_ref_blocks                = 0;
+    int64_t remote_connector_ref_blocks       = 0;
+    int64_t pd_connector_ref_blocks           = 0;
     int64_t block_cache_ref_blocks            = 0;
     int64_t load_ref_blocks                   = 0;
     int64_t eviction_target_ref_blocks        = 0;
@@ -1067,6 +1099,8 @@ public:
     kmonitor::MutableMetric* total_blocks_metric               = nullptr;
     kmonitor::MutableMetric* reserve_blocks_metric             = nullptr;
     kmonitor::MutableMetric* request_ref_blocks_metric         = nullptr;
+    kmonitor::MutableMetric* remote_connector_ref_blocks_metric = nullptr;
+    kmonitor::MutableMetric* pd_connector_ref_blocks_metric     = nullptr;
     kmonitor::MutableMetric* block_cache_ref_blocks_metric     = nullptr;
     kmonitor::MutableMetric* load_ref_blocks_metric            = nullptr;
     kmonitor::MutableMetric* eviction_target_ref_blocks_metric = nullptr;
@@ -1116,6 +1150,22 @@ public:
     std::string                     pool_type;
 };
 
+class RtpLLMCacheTransferStageMetricsCollector final {
+public:
+    std::string operation{"load"};
+    std::string source_tier{"DISK"};
+    std::string target_tier{"DEVICE"};
+    std::string stage;
+    std::string scope;
+    int64_t     rank       = -1;
+    double      latency_us     = 0;
+    bool        success    = true;
+    uint64_t    sample_count   = 1;
+    uint64_t    latency_sum_us = 0;
+    uint64_t    dropped_count  = 0;
+    bool        tags_prepared  = false;
+};
+
 class RtpLLMCacheCopyErrorMetricsCollector final {
 public:
     std::string error_type;
@@ -1127,12 +1177,13 @@ public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheTransferMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheCopyErrorMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheTransferStageMetricsCollector* collector);
 
 private:
-    kmonitor::MutableMetric* transfer_qps_metric             = nullptr;
-    kmonitor::MutableMetric* transfer_failed_qps_metric      = nullptr;
-    kmonitor::MutableMetric* memory_cache_copy_error_qps_metric = nullptr;
-    kmonitor::MutableMetric* descriptors_per_transfer_metric = nullptr;
+    kmonitor::MutableMetric* transfer_qps_metric                = nullptr;
+    kmonitor::MutableMetric* transfer_failed_qps_metric         = nullptr;
+    kmonitor::MutableMetric* host_cache_copy_error_qps_metric   = nullptr;
+    kmonitor::MutableMetric* descriptors_per_transfer_metric    = nullptr;
     // Compatibility alias retained while dashboards migrate to the clarified name.
     kmonitor::MutableMetric* transfer_descriptor_count_compat_metric    = nullptr;
     kmonitor::MutableMetric* transfer_latency_us_metric                 = nullptr;
@@ -1143,6 +1194,10 @@ private:
     kmonitor::MutableMetric* task_queue_backlog_metric                  = nullptr;
     kmonitor::MutableMetric* transfer_in_flight_metric                  = nullptr;
     kmonitor::MutableMetric* transfer_bytes_metric                      = nullptr;
+    kmonitor::MutableMetric* transfer_stage_latency_us_metric           = nullptr;
+    kmonitor::MutableMetric* transfer_stage_qps_metric                  = nullptr;
+    kmonitor::MutableMetric* transfer_stage_latency_sum_us_metric       = nullptr;
+    kmonitor::MutableMetric* transfer_stage_dropped_qps_metric          = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1165,10 +1220,22 @@ public:
     bool        report_eviction           = false;
 };
 
+// Interval deltas; QPS metrics receive event counts/total work, never batch means.
+class RtpLLMCacheVictimSelectionMetricsCollector final {
+public:
+    uint64_t    calls{0};
+    uint64_t    selected{0};
+    double      latency_sum_us{0};
+    uint64_t    scanned_candidates{0};
+    const char* skip_reason{nullptr};
+    uint64_t    skipped{0};
+};
+
 class RtpLLMCacheEvictionMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheEvictionMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheVictimSelectionMetricsCollector* collector);
 
 public:
     kmonitor::MutableMetric* evictable_candidate_count_metric = nullptr;
@@ -1177,7 +1244,28 @@ public:
     kmonitor::MutableMetric* evicted_block_lifetime_ms_metric = nullptr;
     kmonitor::MutableMetric* evicted_block_idletime_ms_metric = nullptr;
 
+    kmonitor::MutableMetric* choose_victim_qps_metric                    = nullptr;
+    kmonitor::MutableMetric* choose_victim_latency_sum_us_metric         = nullptr;
+    kmonitor::MutableMetric* choose_victim_scanned_candidates_qps_metric = nullptr;
+    kmonitor::MutableMetric* choose_victim_skip_qps_metric               = nullptr;
+
 private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMCacheInsertMetricsCollector final {
+public:
+    std::string tier;
+    std::string operation;
+};
+
+class RtpLLMCacheInsertMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheInsertMetricsCollector* collector);
+
+private:
+    kmonitor::MutableMetric* insert_hard_stop_qps_metric = nullptr;
     AUTIL_LOG_DECLARE();
 };
 
@@ -1566,5 +1654,40 @@ bool initKmonitorFactory();
 void stopKmonitorFactory();
 
 void setHippoTags(kmonitor::MetricsConfig& config);
+
+}  // namespace rtp_llm
+
+namespace rtp_llm {
+
+class RtpLLMRemoteCacheControlMetricsCollector final {
+public:
+    bool enabled{true};
+};
+
+class RtpLLMRemoteCacheControlMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMRemoteCacheControlMetricsCollector* collector);
+    kmonitor::MutableMetric* enabled_metric{nullptr};
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMRemoteCacheOutcomeMetricsCollector final {
+public:
+    const char* stage{"lookup"};
+    const char* outcome{"failed"};
+};
+
+class RtpLLMRemoteCacheOutcomeMetrics: public kmonitor::MetricsGroup {
+public:
+    bool                     init(kmonitor::MetricsGroupManager* manager) override;
+    void                     report(const kmonitor::MetricsTags*, RtpLLMRemoteCacheOutcomeMetricsCollector*);
+    kmonitor::MutableMetric* outcome_qps_metric{nullptr};
+
+private:
+    AUTIL_LOG_DECLARE();
+};
 
 }  // namespace rtp_llm

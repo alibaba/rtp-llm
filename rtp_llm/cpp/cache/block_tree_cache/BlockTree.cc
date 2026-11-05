@@ -1,9 +1,11 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <stdexcept>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -183,6 +185,18 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
 
     TreeNode* current                = root_.get();
     size_t    inserted_prefix_length = 0;
+    std::vector<std::array<BlockIdList, 2>> replaced_blocks;
+    block_tree_cache_detail::ScopeRollback  release_replaced([&]() {
+        for (size_t group_set_id = 0; group_set_id < replaced_blocks.size(); ++group_set_id) {
+            for (size_t tier_index = 0; tier_index < 2; ++tier_index) {
+                const auto& blocks = replaced_blocks[group_set_id][tier_index];
+                if (!blocks.empty()) {
+                    group_sets_[group_set_id]->releaseBlocks(
+                        tier_index == 0 ? Tier::HOST : Tier::DISK, blocks, BlockTreeRefType::CACHE);
+                }
+            }
+        }
+    });
 
     auto publishTier = [this](TreeNode* node, size_t group_set_id, const GroupSetResource& resource, Tier tier) {
         const MultiNodeResource published{group_set_id, tier, {{node, resource.getBlocks(tier)}}};
@@ -216,10 +230,9 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
                 if (!incoming.hasTier(Tier::DEVICE)) {
                     continue;
                 }
-                const GroupSetResource& existing  = child->group_set_resources[group_set_id];
-                const bool              can_reuse = existing.isValidSteadyState() && existing.hasCompleteDeviceValue();
-                const bool              can_adopt = existing.is_removable();
-                if (!can_reuse && !can_adopt) {
+                const GroupSetResource& existing = child->group_set_resources[group_set_id];
+                if (existing.transfer_state != GroupSetTransferState::IDLE) {
+                    result.hard_stop = BlockTreeInsertHardStopInfo{existing.getTopTier(), existing.transfer_state};
                     RTP_LLM_LOG_WARNING("event=block_tree_insert_hard_stop key_index=%zu key=%ld "
                                         "group_set_id=%zu existing_tier=%s transfer_state=%d serving_tiers=%zu",
                                         i,
@@ -255,14 +268,43 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
                 GroupSetResource&       existing      = current->group_set_resources[group_set_id];
                 const GroupSetResource& incoming      = incoming_resources[group_set_id];
                 const Tier              incoming_tier = incoming.getTopTier();
-                if (!existing.is_empty() || existing.transfer_state != GroupSetTransferState::IDLE
-                    || incoming_tier == Tier::NONE) {
+                if (incoming_tier == Tier::NONE) {
                     continue;
                 }
+                const Tier previous_tier = existing.getTopTier();
+                if (previous_tier == Tier::DEVICE) {
+                    continue;
+                }
+                const bool full_device =
+                    incoming_tier == Tier::DEVICE && group_sets_[group_set_id]->groupType() == CacheGroupType::FULL;
+                if (!full_device
+                    && (previous_tier != Tier::NONE || existing.transfer_state != GroupSetTransferState::IDLE)) {
+                    continue;
+                }
+                BlockIdList* old_blocks     = nullptr;
+                BlockIdxType previous_block = NULL_BLOCK_IDX;
+                if (previous_tier != Tier::NONE) {
+                    if (replaced_blocks.empty()) {
+                        replaced_blocks.resize(group_sets_.size());
+                    }
+                    old_blocks = &replaced_blocks[group_set_id][previous_tier == Tier::HOST ? 0 : 1];
+                    if (old_blocks->empty()) {
+                        old_blocks->reserve(cache_keys.size() - i);
+                    }
+                    previous_block = previous_tier == Tier::HOST ? existing.host_block : existing.disk_block;
+                    if (!is_resident && !current->is_resident) {
+                        result.replaced_candidates.push_back({current, group_set_id, previous_tier});
+                    }
+                }
+                // Incoming DEVICE data is already computed; replace ownership without a transfer.
+                publishTier(current, group_set_id, incoming, incoming_tier);
                 existing.setBlocks(incoming_tier, incoming.getBlocks(incoming_tier));
+                if (old_blocks != nullptr) {
+                    old_blocks->push_back(previous_block);
+                    existing.evictFromTier(previous_tier);
+                }
                 existing.transfer_state = GroupSetTransferState::IDLE;
                 existing.candidate_meta = {};
-                publishTier(current, group_set_id, existing, incoming_tier);
                 ++result.accepted_resource_count;
                 adopted_group_set_ids.push_back(group_set_id);
             }
@@ -300,6 +342,7 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
         inserted_prefix_length = i + 1;
     }
 
+    release_replaced.run();
     RTP_LLM_LOG_DEBUG("keys=%zu created=%zu adopted=%zu tree_nodes=%zu",
                       inserted_prefix_length,
                       result.inserted_nodes.size(),
@@ -381,9 +424,9 @@ void BlockTree::setEventPublisher(KVCacheEventPublisherPtr        publisher,
     }
     event_publisher_    = std::move(publisher);
     publication_groups_ = std::move(locations);
-    published_keys_.clear();
+    published_groups_.clear();
     // Initialization only. Normal mutations update a single affected key.
-    // The publisher starts after attachment and reconciles this initial snapshot.
+    // The publisher starts after attachment and captures this initial state.
     for (const auto& node : node_pool_) {
         refreshPublishedState(node.get());
     }
@@ -392,15 +435,18 @@ void BlockTree::setEventPublisher(KVCacheEventPublisherPtr        publisher,
 KVCacheSnapshot BlockTree::logicalCacheSnapshot() const {
     KVCacheSnapshot snapshot;
     snapshot.version = publication_version_;
-    snapshot.block_keys.assign(published_keys_.begin(), published_keys_.end());
-    std::sort(snapshot.block_keys.begin(), snapshot.block_keys.end());
+    snapshot.block_groups.insert(published_groups_.begin(), published_groups_.end());
     return snapshot;
 }
 
 void BlockTree::removePublishedKey(CacheKeyType key) {
-    if (event_publisher_ && published_keys_.erase(key)) {
-        ++publication_version_;
-        (void)event_publisher_->tryPublish({KVCacheEventType::BLOCK_DELETE, static_cast<int64_t>(key), 0});
+    const auto it = published_groups_.find(key);
+    if (event_publisher_ && it != published_groups_.end()) {
+        for (const auto group_index : it->second) {
+            ++publication_version_;
+            (void)event_publisher_->tryPublish({KVCacheEventType::BLOCK_DELETE, key, group_index});
+        }
+        published_groups_.erase(it);
     }
 }
 
@@ -408,18 +454,30 @@ void BlockTree::refreshPublishedState(const TreeNode* node) {
     if (!event_publisher_ || node->parent == nullptr) {
         return;
     }
-    for (const auto& location : publication_groups_) {
+    const auto it = published_groups_.find(node->cache_key);
+    std::vector<size_t> resident_groups;
+    for (size_t group_index = 0; group_index < publication_groups_.size(); ++group_index) {
+        const auto& location = publication_groups_[group_index];
         const auto& resource = node->group_set_resources.at(location.group_set_id);
-        if (resource.transfer_detached || resource.transfer_state != GroupSetTransferState::IDLE
-            || resource.device_blocks.size() != group_sets_[location.group_set_id]->groupTags().size()
-            || !resource.hasCompleteDeviceValue()) {
-            removePublishedKey(node->cache_key);
-            return;
+        const bool resident = !resource.transfer_detached && resource.transfer_state == GroupSetTransferState::IDLE
+                              && resource.device_blocks.size() == group_sets_[location.group_set_id]->groupTags().size()
+                              && resource.hasCompleteDeviceValue();
+        if (resident) {
+            resident_groups.push_back(group_index);
+        }
+        const bool was_resident = it != published_groups_.end()
+                                  && std::binary_search(it->second.begin(), it->second.end(), group_index);
+        if (resident != was_resident) {
+            ++publication_version_;
+            (void)event_publisher_->tryPublish({resident ? KVCacheEventType::BLOCK_ADD : KVCacheEventType::BLOCK_DELETE,
+                                               node->cache_key,
+                                               group_index});
         }
     }
-    if (published_keys_.insert(node->cache_key).second) {
-        ++publication_version_;
-        (void)event_publisher_->tryPublish({KVCacheEventType::BLOCK_ADD, static_cast<int64_t>(node->cache_key), 0});
+    if (!resident_groups.empty()) {
+        published_groups_[node->cache_key] = std::move(resident_groups);
+    } else if (it != published_groups_.end()) {
+        published_groups_.erase(it);
     }
 }
 

@@ -11,6 +11,7 @@ py_test(
         "server_config_setup_test.py",
     ],
     data = [
+        "//:th_transformer_config",
         "//rtp_llm:ops/libth_transformer_config.pyi",
         "//rtp_llm:sdk",
         "//rtp_llm/test/model_test/fake_test/testdata",

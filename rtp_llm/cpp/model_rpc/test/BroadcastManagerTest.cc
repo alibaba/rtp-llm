@@ -14,6 +14,108 @@
 
 namespace rtp_llm::test {
 
+TEST(BroadcastDiagnosticsTest, ConnectFailureKeepsQueryDirectionAndReportsEachRankOnce) {
+    using Result = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    std::vector<std::shared_ptr<Result::WorkerRpcContext>> contexts;
+    for (size_t rank = 0; rank < 2; ++rank) {
+        auto context         = std::make_shared<Result::WorkerRpcContext>();
+        context->server_addr = "worker-" + std::to_string(rank);
+        context->timeout_ms  = 1000;
+        context->status      = grpc::Status(grpc::StatusCode::UNAVAILABLE, "Connect Failed");
+        contexts.push_back(std::move(context));
+    }
+    std::vector<std::string> directions;
+    Result result(contexts, 42, "H2D", [&](const auto& direction) { directions.push_back(direction); });
+    result.finishRank(0, true);
+    result.finishRank(0, true);
+    result.finishRank(1, true);
+    EXPECT_EQ(directions, (std::vector<std::string>{"H2D", "H2D"}));
+    EXPECT_NE(result.failureSummary().find("request_id=42"), std::string::npos);
+    EXPECT_NE(result.failureSummary().find("direction=H2D"), std::string::npos);
+    EXPECT_FALSE(result.success());
+    EXPECT_NO_THROW(result.waitDone());
+}
+
+TEST(BroadcastDiagnosticsTest, CompletionTimesAreRecordedOncePerRankAndOnlyWhenFinished) {
+    using Result  = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    auto   first  = std::make_shared<Result::WorkerRpcContext>();
+    auto   second = std::make_shared<Result::WorkerRpcContext>();
+    Result result({first, second});
+    EXPECT_EQ(result.completionTimesUs(), (std::vector<int64_t>{0, 0}));
+    result.finishRank(1, true);
+    auto times = result.completionTimesUs();
+    EXPECT_EQ(times[0], 0);
+    EXPECT_GT(times[1], 0);
+    const auto walls = result.completionWallTimesUs();
+    EXPECT_GT(walls[1], 0);
+    result.finishRank(1, true);
+    EXPECT_EQ(result.completionTimesUs(), times);
+    result.finishRank(0, true);
+    EXPECT_GE(result.completionTimesUs()[0], times[1]);
+    EXPECT_TRUE(result.done());
+}
+
+TEST(BroadcastDiagnosticsTest, OtherRpcFailuresAreNotConnectFailures) {
+    for (const auto& status : {grpc::Status(grpc::StatusCode::UNAVAILABLE, "server temporarily busy"),
+                               grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "Connect Failed"),
+                               grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled"),
+                               grpc::Status(grpc::StatusCode::INTERNAL, "Connect Failed")}) {
+        EXPECT_FALSE(isGrpcConnectFailure(status));
+    }
+    EXPECT_TRUE(isGrpcConnectFailure(grpc::Status(grpc::StatusCode::UNAVAILABLE, "Connect Failed")));
+    EXPECT_TRUE(isGrpcConnectFailure(
+        grpc::Status(grpc::StatusCode::UNAVAILABLE, "failed to connect to all addresses; connection refused")));
+}
+
+TEST(BroadcastDiagnosticsTest, MixedFailuresKeepConnectFailureAndTimeoutPriority) {
+    using Result = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    for (const bool with_timeout : {false, true}) {
+        auto first          = std::make_shared<Result::WorkerRpcContext>();
+        auto second         = std::make_shared<Result::WorkerRpcContext>();
+        first->server_addr  = "worker-0";
+        second->server_addr = "worker-1";
+        first->status  = grpc::Status(grpc::StatusCode::UNAVAILABLE, with_timeout ? "Connect Failed" : "server busy");
+        second->status = with_timeout ? grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "deadline exceeded") :
+                                        grpc::Status(grpc::StatusCode::UNAVAILABLE, "Connect Failed");
+        Result result({first, second}, 73, "H2D");
+        result.finishRank(0, true);
+        result.finishRank(1, true);
+        const auto summary = result.failureSummary();
+        EXPECT_NE(summary.find("Connect Failed"), std::string::npos);
+        EXPECT_NE(summary.find(with_timeout ? "target_rank=0" : "target_rank=1"), std::string::npos);
+        EXPECT_NE(summary.find("request_id=73"), std::string::npos);
+        EXPECT_EQ(result.deadlineExceeded(), with_timeout);
+        if (with_timeout) {
+            EXPECT_NE(summary.find("broadcast rpc timeout"), std::string::npos);
+        }
+    }
+}
+
+TEST(BroadcastDiagnosticsTest, ThrowingObserverDoesNotPreventCompletion) {
+    using Result         = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    auto context         = std::make_shared<Result::WorkerRpcContext>();
+    context->status      = grpc::Status(grpc::StatusCode::UNAVAILABLE, "Connect Failed");
+    context->timeout_ms  = 1000;
+    bool   callback_done = false;
+    Result result({context}, std::nullopt, "H2D", [](const auto&) { throw std::runtime_error("observer failure"); });
+    result.onDone([&] { callback_done = true; });
+    EXPECT_NO_THROW(result.finishRank(0, true));
+    EXPECT_TRUE(result.done());
+    EXPECT_TRUE(callback_done);
+}
+
+TEST(BroadcastDiagnosticsTest, NonConnectFailureDoesNotReportAndBackgroundHasNoQuery) {
+    using Result    = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    auto context    = std::make_shared<Result::WorkerRpcContext>();
+    context->status = grpc::Status(grpc::StatusCode::UNAVAILABLE, "server busy");
+    size_t reports  = 0;
+    Result result({context}, std::nullopt, "D2H", [&](const auto&) { ++reports; });
+    result.finishRank(0, true);
+    EXPECT_EQ(reports, 0u);
+    EXPECT_NE(result.failureSummary().find("request_id=none"), std::string::npos);
+    EXPECT_NE(result.failureSummary().find("direction=D2H"), std::string::npos);
+}
+
 // 测试用RpcService，用于模拟RPC服务
 class TestRpcService final: public RpcService::Service {
 public:
@@ -221,6 +323,35 @@ TEST_F(BroadcastManagerTest, Broadcast_OnDoneCompletesWithoutWaitDone) {
     EXPECT_TRUE(result->success());
 }
 
+TEST_F(BroadcastManagerTest, CachePartialSubmissionFailureSettlesSubmittedRankWithoutFatal) {
+    auto server = std::make_unique<TestRpcServer>(std::make_unique<TestRpcService>());
+    ASSERT_TRUE(server->start());
+    BroadcastManager manager(std::vector<std::string>(
+        3, "127.0.0.1:" + std::to_string(server->listenPort())));
+    ASSERT_TRUE(manager.init());
+    std::vector<FunctionRequestPB> requests(manager.workerNum());
+    size_t submitted = 0;
+    auto rpc_call = [&](const std::shared_ptr<RpcService::Stub>& stub,
+                        const std::shared_ptr<grpc::ClientContext>& context,
+                        const FunctionRequestPB& request,
+                        grpc::CompletionQueue* queue) {
+        if (++submitted == 2) {
+            throw std::runtime_error("injected partial dispatch failure");
+        }
+        return stub->AsyncExecuteFunction(context.get(), request, queue);
+    };
+    auto result = manager.broadcast<FunctionRequestPB, FunctionResponsePB>(
+        requests, 1000, rpc_call, 42, "REMOTE2D", /*fatal_on_error=*/false);
+    ASSERT_NE(result, nullptr);
+    ASSERT_TRUE(result->waitDone(2000, /*fatal_on_error=*/false));
+    EXPECT_EQ(submitted, 2u);
+    EXPECT_TRUE(result->rpcSucceeded(0));
+    EXPECT_FALSE(result->rpcSucceeded(1));
+    EXPECT_FALSE(result->rpcSucceeded(2));
+    EXPECT_FALSE(result->success());
+    EXPECT_NE(result->failureSummary().find("request_id=42"), std::string::npos);
+}
+
 TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsTimeout) {
     std::vector<std::unique_ptr<TestRpcServer>> servers;
     std::vector<std::string>                    server_addrs;
@@ -248,6 +379,7 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsTimeout) {
     ASSERT_NE(result, nullptr);
 
     EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+    EXPECT_TRUE(result->deadlineExceeded());
 }
 
 TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialRequestsTimeout) {
@@ -279,6 +411,7 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialRequestsTimeout) {
     ASSERT_NE(result, nullptr);
 
     EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+    EXPECT_TRUE(result->deadlineExceeded());
 }
 
 TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialResponseRpcStatusFailed) {
@@ -565,6 +698,7 @@ TEST_F(BroadcastManagerTest, WaitDone_Fatal_CqEventNotOk) {
     result->finishRank(/*rank=*/0, /*cq_event_ok=*/false);
 
     EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+    EXPECT_FALSE(result->deadlineExceeded());
 }
 
 TEST_F(BroadcastManagerTest, CqFailureStillPublishesCompletionCallback) {

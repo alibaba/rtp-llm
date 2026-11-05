@@ -2395,6 +2395,8 @@ TEST(CacheConfigTest, DSV4MtpJointBudgetIncludesScoreAndProposeSwaBacking) {
     }
 }
 
+
+
 TEST(CacheConfigCreatorTest, MtpGenNum2RingEntriesMatch) {
     // gen_num_per_cycle=2 -> CSA/INDEXER R=10, HCA R=130, SWA R=130.
     // Formula: R = ceil_even((1 + overlap) * ratio + gen_num_per_cycle).

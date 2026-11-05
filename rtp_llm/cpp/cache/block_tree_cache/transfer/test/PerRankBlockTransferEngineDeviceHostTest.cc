@@ -29,8 +29,16 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
+#include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
 
 namespace rtp_llm {
+class TransferStageTimerTestPeer {
+public:
+    static void setAllocationProbe(void (*probe)(const char*)) {
+        TransferStageTimer::allocation_probe_ = probe;
+    }
+};
 namespace {
 
 using block_tree_cache_test::BoundedThread;
@@ -431,9 +439,34 @@ TEST_F(CopyBoundsTest, RejectsInvalidBatchDimensionsAndHostCapacity) {
     std::vector<uint8_t>       data(host_block_size_);
     HostBufferView             host{data.data(), data.size(), data.size()};
     auto                       descriptor = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, 1);
-    EXPECT_THROW(executor.generatePlan({}, {}, {}), std::exception);
+    EXPECT_THROW(
+        {
+            try {
+                executor.generatePlan({}, {}, {});
+            } catch (const RTPException& error) {
+                const std::string message = error.what();
+                EXPECT_NE(message.find("invalid device-host batch dimensions"), std::string::npos);
+                EXPECT_NE(message.find("DeviceHostTransferExecutor.cc"), std::string::npos);
+                EXPECT_FALSE(error.getTrace().empty());
+                throw;
+            }
+        },
+        RTPException);
     host.capacity_bytes = host.payload_bytes - 1;
     EXPECT_EQ(executor.generatePlan({host}, {descriptor}, {group_set_.get()}).first, TransferStatus::INVALID_ARGS);
+}
+
+TEST_F(CopyBoundsTest, RejectsDeviceAddressOutsidePool) {
+    BlockTreeTaskPool          task_pool(1, 8, "CopyBoundsTest");
+    DeviceHostTransferExecutor executor(task_pool, 8);
+    std::vector<uint8_t>       data(host_block_size_, 0x6b);
+    HostBufferView             host{data.data(), data.size(), data.size()};
+    const auto                 descriptor    = TransferDescriptor::deviceToHost(0, device_blocks_, 1);
+    auto*                      original_base = device_pool_->cache_base_ptr_;
+    device_pool_->cache_base_ptr_            = static_cast<uint8_t*>(original_base) + device_pool_->getTotalSizeBytes();
+    EXPECT_THROW(executor.generatePlan({host}, {descriptor}, {group_set_.get()}), RTPException);
+    device_pool_->cache_base_ptr_ = original_base;
+    EXPECT_TRUE(std::all_of(data.begin(), data.end(), [](uint8_t value) { return value == 0x6b; }));
 }
 
 TEST_F(CopyBoundsTest, RejectsWidthMismatchButAllowsEqualWidthAndHostPadding) {
@@ -1272,6 +1305,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceHostDiskHostDeviceRoundTri
     auto engine = makeEngine({group}, {}, true);
     fillDeviceLayer(device_pool, 0, device_block, {0x6A, 0xD3});
     const auto expected = readDeviceLayer(device_pool, 0, device_block);
+    auto       profiling = AsyncProfileSession::start();
 
     expectStatus(engine,
                  makeDescriptor(Tier::DEVICE, Tier::HOST, {device_block}, host_block, NULL_BLOCK_IDX, 0),
@@ -1291,6 +1325,18 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceHostDiskHostDeviceRoundTri
                  makeDescriptor(Tier::HOST, Tier::DEVICE, {device_block}, host_block, NULL_BLOCK_IDX, 0),
                  TransferStatus::OK);
     EXPECT_EQ(readDeviceLayer(device_pool, 0, device_block), expected);
+    const auto events = profiling->finish();
+    EXPECT_EQ(events.size(), 12u);
+    for (const auto* path :
+         {"device_to_host.d2h", "host_to_disk.disk_write", "disk_to_host.disk_read", "host_to_device.h2d"}) {
+        EXPECT_EQ(std::count_if(events.begin(),
+                                events.end(),
+                                [path](const auto& event) {
+                                    return event.name.find(std::string("cache.transfer.") + path + "(") == 0;
+                                }),
+                  1)
+            << path;
+    }
 }
 
 class RecordingReadBatchDiskBlockIO: public StatusDiskBlockIO {
@@ -1436,6 +1482,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskDirectRoundTripWithout
 
     fillDeviceLayer(device_pool, 0, device_block, {0x6A, 0xD3});
     const auto expected = readDeviceLayer(device_pool, 0, device_block);
+    auto       profiling = AsyncProfileSession::start();
 
     expectStatus(engine,
                  makeDescriptor(Tier::DEVICE, Tier::DISK, {device_block}, NULL_BLOCK_IDX, disk_block, 0),
@@ -1448,6 +1495,18 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskDirectRoundTripWithout
                  TransferStatus::OK);
     EXPECT_EQ(readDeviceLayer(device_pool, 0, device_block), expected);
     EXPECT_EQ(direct_io->lastReadBytes(), disk_pool->strideBytes());
+    const auto events = profiling->finish();
+    EXPECT_EQ(events.size(), 10u);
+    for (const auto* stage : {"staging_wait", "transfer_queue_wait", "d2h", "disk_write", "worker_batch_total"}) {
+        EXPECT_EQ(std::count_if(events.begin(),
+                                events.end(),
+                                [stage](const auto& event) {
+                                    return event.name.find(std::string("cache.transfer.device_to_disk.") + stage + "(")
+                                           == 0;
+                                }),
+                  1)
+            << stage;
+    }
 }
 
 TEST(PerRankBlockTransferEngineIntegrationTest, DeviceToDiskRejectsMultipleDescriptors) {
@@ -1673,7 +1732,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceStageTwoFailureRelease
     EXPECT_TRUE(retry->success());
 }
 
-TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceWaitingForStagingDoesNotOccupyTransferWorker) {
+static void checkStagingAdmission(bool fail_observer) {
     ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
     TempDirGuard     temp_dir("per_rank_staging_admission");
     constexpr size_t payload_bytes = 80;
@@ -1694,8 +1753,12 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceWaitingForStagingDoesN
     engine->device_host_executor_->strategies_.clear();
     engine->device_host_executor_->strategies_.push_back(std::move(blocking_strategy));
 
-    auto disk_to_device = engine->execute(makeTransferTask({makeDescriptor(
-        Tier::DISK, Tier::DEVICE, {poolMalloc(*device_pool)}, NULL_BLOCK_IDX, poolMalloc(*disk_pool), 0)}));
+    auto profiling_session = AsyncProfileSession::start();
+    auto disk_to_device = engine->execute(TransferTask(
+        {makeDescriptor(
+            Tier::DISK, Tier::DEVICE, {poolMalloc(*device_pool)}, NULL_BLOCK_IDX, poolMalloc(*disk_pool), 0)},
+        std::chrono::seconds(10),
+        42));
     auto host_to_device = engine->execute(makeTransferTask({makeDescriptor(
         Tier::HOST, Tier::DEVICE, {poolMalloc(*device_pool)}, poolMalloc(*host_pool), NULL_BLOCK_IDX, 0)}));
 
@@ -1705,9 +1768,47 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceWaitingForStagingDoesN
     host_to_device->waitDone();
     EXPECT_TRUE(host_to_device->success());
 
+    if (fail_observer)
+        TransferStageTimerTestPeer::setAllocationProbe([](const char* stage) {
+            if (std::string_view(stage) == "transfer_queue_wait")
+                throw std::bad_alloc();
+        });
+    // Releasing the lease invokes the queued admission callback inline. Observer
+    // allocation failure here must neither escape a destructor nor strand work.
     held_staging.reset();
+    TransferStageTimerTestPeer::setAllocationProbe(nullptr);
     disk_to_device->waitDone();
     EXPECT_TRUE(disk_to_device->success());
+    const auto events = profiling_session->finish();
+    for (const auto* stage : {"staging_wait", "transfer_queue_wait", "disk_read", "h2d", "worker_batch_total"}) {
+        EXPECT_EQ(std::count_if(events.begin(),
+                                events.end(),
+                                [stage](const auto& e) {
+                                    return e.name.find(std::string("disk_to_device.") + stage + "(request_id=42,")
+                                           != std::string::npos;
+                                }),
+                  fail_observer && std::string_view(stage) == "transfer_queue_wait" ? 0 : 1)
+            << stage;
+    }
+}
+
+TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceWaitingForStagingDoesNotOccupyTransferWorker) {
+    checkStagingAdmission(false);
+}
+
+TEST(PerRankBlockTransferEngineIntegrationTest, ObserverAllocationFailureDuringLeaseReleaseStillCompletesDiskLoad) {
+    checkStagingAdmission(true);
+}
+
+TEST(TransferStageTimerTest, DisabledObserverDoesNotAttemptSharedAllocation) {
+    EXPECT_FALSE(AsyncProfileSession::enabled());
+    TransferStageTimerTestPeer::setAllocationProbe(
+        [](const char*) { ADD_FAILURE() << "disabled observer attempted shared allocation"; });
+    auto timer = TransferStageTimer::create(nullptr, "probe", 1, 0, 1);
+    EXPECT_FALSE(timer);
+    timer.finish(true);
+    timer.finish(false);
+    TransferStageTimerTestPeer::setAllocationProbe(nullptr);
 }
 
 TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskWaitingForStagingDoesNotOccupyTransferWorker) {

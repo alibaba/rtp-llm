@@ -23,7 +23,8 @@ public:
                                std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
                                std::shared_ptr<CrcTransferService>            crc_service      = nullptr,
                                BlockTreeTaskPool*                             load_task_pool   = nullptr,
-                               const std::vector<GroupSetPtr>&                group_sets       = {});
+                               const std::vector<GroupSetPtr>&                group_sets       = {},
+                               int64_t world_rank = -1);
     ~DeviceHostTransferExecutor() = default;
 
 private:

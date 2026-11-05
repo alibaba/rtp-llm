@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <future>
@@ -571,7 +572,7 @@ public:
     bool start() override {
         return true;
     }
-    bool submit(Task task) override {
+    bool submit(Task task, BlockTreeTaskClass = BlockTreeTaskClass::BACKGROUND) override {
         task();
         return true;
     }
@@ -703,6 +704,59 @@ TEST(BlockTreeCacheFactoryUtilityTest, TierBlockCountsRejectUnusableCapacityAndO
 TEST(BlockTreeCacheFactoryUtilityTest, TierBlockCountsUseWideIntermediateProduct) {
     EXPECT_EQ(computeTierBlockCounts(size_t{1} << 63, {size_t{1} << 30}, {size_t{1} << 33}),
               (std::vector<size_t>{size_t{1} << 30}));
+}
+
+TEST(BlockTreeCacheFactoryUtilityTest, HostRatioFitsPhysicalBudgetAndKeepsLegacyAndNonHybridCounts) {
+    const std::vector<size_t>         strides{128, 512};
+    const std::vector<CacheGroupType> types{CacheGroupType::FULL, CacheGroupType::SWA};
+    EXPECT_EQ(computeHostUsableBlockCounts(4096, strides, types, 1.0), (std::vector<size_t>{5, 5}));
+    EXPECT_EQ(computeHostUsableBlockCounts(4096, strides, types, 0.5), (std::vector<size_t>{8, 4}));
+    EXPECT_EQ(computeHostUsableBlockCounts(4096, strides, types, 2.0), (std::vector<size_t>{3, 6}));
+    EXPECT_EQ(computeHostUsableBlockCounts(4096, {128}, {CacheGroupType::FULL}, 0.5), (std::vector<size_t>{31}));
+    EXPECT_EQ(computeHostUsableBlockCounts(4096, {512}, {CacheGroupType::SWA}, 0.5), (std::vector<size_t>{7}));
+    EXPECT_EQ(computeHostUsableBlockCounts(4096, {128, 512}, {CacheGroupType::FULL, CacheGroupType::LINEAR}, 0.5),
+              (std::vector<size_t>{5, 5}));
+    EXPECT_EQ(computeHostUsableBlockCounts(
+                  4096, {128, 512, 128}, {CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::LINEAR}, 0.5),
+              (std::vector<size_t>{6, 3, 6}));
+    // Ratios are applied to usable slots. Both sentinel blocks must still fit.
+    EXPECT_EQ(computeHostUsableBlockCounts(1279, strides, types, 0.5), (std::vector<size_t>{0, 0}));
+    EXPECT_EQ(computeHostUsableBlockCounts(1280, strides, types, 0.5), (std::vector<size_t>{1, 1}));
+    EXPECT_EQ(computeHostUsableBlockCounts(1408, strides, types, 0.5), (std::vector<size_t>{2, 1}));
+}
+
+TEST(BlockTreeCacheFactoryUtilityTest, HostRatioPlannerIsMaximalWithOddStridesAndRejectsInvalidInput) {
+    const std::vector<size_t>         strides{17, 67};
+    const std::vector<CacheGroupType> types{CacheGroupType::FULL, CacheGroupType::SWA};
+    for (const double ratio : {0.125, 0.3, 0.5, 1.0, 1.75, 4.0}) {
+        for (size_t budget = 0; budget < 4096; budget += 13) {
+            const auto result   = computeHostUsableBlockCounts(budget, strides, types, ratio);
+            size_t     expected = 0;
+            for (size_t n = 1; n <= budget / 17; ++n) {
+                const auto swa = static_cast<size_t>(std::ceil(static_cast<long double>(n) * ratio));
+                if ((n + 1) * 17 + (swa + 1) * 67 <= budget) {
+                    expected = n;
+                }
+            }
+            ASSERT_EQ(result[0], expected) << budget << ":" << ratio;
+            if (expected > 0) {
+                EXPECT_EQ(result[1], static_cast<size_t>(std::ceil(static_cast<long double>(expected) * ratio)));
+            }
+        }
+    }
+    const size_t maximum = std::numeric_limits<size_t>::max();
+    EXPECT_EQ(computeHostUsableBlockCounts(maximum, {1}, {CacheGroupType::FULL}, 1.0),
+              (std::vector<size_t>{static_cast<size_t>(std::numeric_limits<BlockIdxType>::max()) - 1}));
+    EXPECT_EQ(computeHostUsableBlockCounts(maximum, {maximum, maximum}, types, 1.0), (std::vector<size_t>{0, 0}));
+    EXPECT_EQ(computeHostUsableBlockCounts(4096, strides, types, std::numeric_limits<double>::max()),
+              (std::vector<size_t>{0, 0}));
+    CoreDumpGuard guard;
+    for (double invalid :
+         {0.0, -1.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+        EXPECT_ANY_THROW(computeHostUsableBlockCounts(4096, strides, types, invalid));
+    }
+    EXPECT_ANY_THROW(computeHostUsableBlockCounts(4096, {0}, {CacheGroupType::FULL}, 1.0));
+    EXPECT_ANY_THROW(computeHostUsableBlockCounts(4096, strides, {}, 1.0));
 }
 
 TEST(BlockTreeCacheFactoryUtilityTest, ResolveDiskMountPathUsesLocalRankAndRejectsInvalidShape) {
@@ -1417,7 +1471,7 @@ TEST_F(BlockTreeCacheFactoryTest, UnsupportedProductionEvictionPolicyFailsClosed
     using PolicyField = std::string                        KVCacheConfig::*;
     const std::vector<std::pair<const char*, PolicyField>> policy_fields = {
         {"device", &KVCacheConfig::device_eviction_policy},
-        {"memory", &KVCacheConfig::memory_eviction_policy},
+        {"host", &KVCacheConfig::memory_eviction_policy},
         {"disk", &KVCacheConfig::disk_eviction_policy},
     };
 
@@ -1611,6 +1665,7 @@ TEST_F(BlockTreeCacheFactoryTest, IndependentPoolsWatermarkTracksEachGroupSet) {
         releaseInsertedRequestBlocks(allocator, blocks);
     }
 
+    block_tree_cache_test::BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     // Each independent pool releases two cached blocks to reach its own low watermark.
@@ -2164,7 +2219,7 @@ TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidat
         EXPECT_EQ(cache->config().business_queue_max_size, 0u);
         EXPECT_EQ(cache->config().transfer_queue_max_size, 0u);
     }
-    for (const auto invalid_field : {std::string("worker"), std::string("business"), std::string("transfer")}) {
+    for (const auto& invalid_field : {std::string("worker"), std::string("business"), std::string("transfer")}) {
         auto          allocator = initAllocator<CoordinatorCacheManager>(config);
         KVCacheConfig kv_cache_config;
         if (invalid_field == "worker") {
@@ -2260,14 +2315,88 @@ TEST_F(BlockTreeCacheFactoryTest, TierWatermarksPropagateAndInvalidCombinationsA
     }
 }
 
+TEST_F(BlockTreeCacheFactoryTest, FullWatermarksPropagateAndRejectPartialOrInvalidOverrides) {
+    const auto                               config = makeSingleConfig();
+    block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_full_watermarks");
+    KVCacheConfig                            runtime;
+    runtime.enable_memory_cache  = true;
+    runtime.memory_cache_size_mb = 1;
+    runtime.enable_disk_cache    = true;
+    runtime.disk_cache_size_mb   = 1;
+    runtime.disk_cache_paths     = disk_dir.path;
+    {
+        auto allocator = initAllocator<CoordinatorCacheManager>(config);
+        auto cache     = createBlockTreeCache(config, runtime, allocator);
+        ASSERT_NE(cache, nullptr);
+        for (const auto tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
+            EXPECT_FALSE(cache->config().fullWatermarkForTier(tier).has_value());
+        }
+    }
+    runtime.block_tree_full_device_evict_low_watermark_ratio  = 0.90;
+    runtime.block_tree_full_device_evict_high_watermark_ratio = 0.95;
+    runtime.block_tree_full_memory_evict_low_watermark_ratio  = 0.94;
+    runtime.block_tree_full_memory_evict_high_watermark_ratio = 0.97;
+    runtime.block_tree_full_disk_evict_low_watermark_ratio    = 0.96;
+    runtime.block_tree_full_disk_evict_high_watermark_ratio   = 0.98;
+    {
+        auto allocator = initAllocator<CoordinatorCacheManager>(config);
+        auto cache     = createBlockTreeCache(config, runtime, allocator);
+        ASSERT_NE(cache, nullptr);
+        for (const auto& [tier, expected] : {std::pair<Tier, TierWatermark>{Tier::DEVICE, {0.90, 0.95}},
+                                             std::pair<Tier, TierWatermark>{Tier::HOST, {0.94, 0.97}},
+                                             std::pair<Tier, TierWatermark>{Tier::DISK, {0.96, 0.98}}}) {
+            const auto actual = cache->config().fullWatermarkForTier(tier);
+            ASSERT_TRUE(actual.has_value());
+            EXPECT_DOUBLE_EQ(actual->low_ratio, expected.low_ratio);
+            EXPECT_DOUBLE_EQ(actual->high_ratio, expected.high_ratio);
+        }
+        EXPECT_DOUBLE_EQ(cache->config().watermark_device.low_ratio, 0.82);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_device.high_ratio, 0.90);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_host.low_ratio, 0.90);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_host.high_ratio, 0.94);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_disk.low_ratio, 0.92);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_disk.high_ratio, 0.97);
+    }
+    using Field = double KVCacheConfig::*;
+    for (const auto& [low, high] :
+         {std::pair<Field, Field>{&KVCacheConfig::block_tree_full_device_evict_low_watermark_ratio,
+                                  &KVCacheConfig::block_tree_full_device_evict_high_watermark_ratio},
+          std::pair<Field, Field>{&KVCacheConfig::block_tree_full_memory_evict_low_watermark_ratio,
+                                  &KVCacheConfig::block_tree_full_memory_evict_high_watermark_ratio},
+          std::pair<Field, Field>{&KVCacheConfig::block_tree_full_disk_evict_low_watermark_ratio,
+                                  &KVCacheConfig::block_tree_full_disk_evict_high_watermark_ratio}}) {
+        for (const auto& [low_value, high_value] : {std::pair<double, double>{-1.0, 0.95},
+                                                    std::pair<double, double>{0.90, -1.0},
+                                                    std::pair<double, double>{0.95, 0.90},
+                                                    std::pair<double, double>{0.90, 1.01}}) {
+            auto invalid   = runtime;
+            invalid.*low   = low_value;
+            invalid.*high  = high_value;
+            auto allocator = initAllocator<CoordinatorCacheManager>(config);
+            expectFactoryRejects(config, allocator, invalid);
+        }
+    }
+}
+
 TEST_F(BlockTreeCacheFactoryTest, FullPrefixScanConfigPropagatesAndValidates) {
     const auto config = makeSingleConfig();
+    EXPECT_EQ(BlockTreeCacheConfig{}.full_prefix_scan_interval_ms, 30000);
     {
         auto          allocator = initAllocator<CoordinatorCacheManager>(config);
         KVCacheConfig kv_cache_config;
         auto          cache = createBlockTreeCache(config, kv_cache_config, allocator);
         ASSERT_NE(cache, nullptr);
+        EXPECT_EQ(cache->config().full_prefix_scan_interval_ms, 30000);
+        EXPECT_NE(cache->full_prefix_scanner_.get(), nullptr);
+    }
+    {
+        auto          allocator = initAllocator<CoordinatorCacheManager>(config);
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.block_tree_full_prefix_scan_interval_ms = 0;
+        auto cache = createBlockTreeCache(config, kv_cache_config, allocator);
+        ASSERT_NE(cache, nullptr);
         EXPECT_EQ(cache->config().full_prefix_scan_interval_ms, 0);
+        EXPECT_EQ(cache->full_prefix_scanner_.get(), nullptr);
     }
 
     KVCacheConfig scan_enabled;
@@ -2301,6 +2430,7 @@ TEST_F(BlockTreeCacheFactoryTest, FullPrefixScanConfigPropagatesAndValidates) {
         auto cache     = createBlockTreeCache(config, scan_enabled, allocator, follower);
         ASSERT_NE(cache, nullptr);
         EXPECT_EQ(cache->config().full_prefix_scan_interval_ms, 0);
+        EXPECT_EQ(cache->full_prefix_scanner_.get(), nullptr);
     }
     // FFN service: it does not schedule normal requests, so it owns no mutable tree.
     {
@@ -2313,6 +2443,7 @@ TEST_F(BlockTreeCacheFactoryTest, FullPrefixScanConfigPropagatesAndValidates) {
         auto cache     = createBlockTreeCache(config, scan_enabled, allocator, ffn);
         ASSERT_NE(cache, nullptr);
         EXPECT_EQ(cache->config().full_prefix_scan_interval_ms, 0);
+        EXPECT_EQ(cache->full_prefix_scanner_.get(), nullptr);
     }
 
     for (const int64_t invalid_interval : {int64_t{-1}, int64_t{999}, std::numeric_limits<int64_t>::max()}) {
@@ -2371,11 +2502,11 @@ TEST_F(BlockTreeCacheFactoryTest, RejectsOverflowingTierBudgetsBeforeAllocating)
     const auto config = makeSingleConfig();
     // This previously wrapped to exactly 1 MiB and could create a tiny pool.
     const int64_t overflowing_mb = static_cast<int64_t>(std::numeric_limits<size_t>::max() / (1024UL * 1024UL)) + 2;
-    for (bool memory : {true, false}) {
+    for (bool host : {true, false}) {
         auto          allocator = initAllocator<CoordinatorCacheManager>(config);
         KVCacheConfig kv_cache_config;
-        kv_cache_config.enable_memory_cache  = memory;
-        kv_cache_config.enable_disk_cache    = !memory;
+        kv_cache_config.enable_memory_cache  = host;
+        kv_cache_config.enable_disk_cache    = !host;
         kv_cache_config.memory_cache_size_mb = overflowing_mb;
         kv_cache_config.disk_cache_size_mb   = overflowing_mb;
         block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_budget_overflow");
@@ -2415,7 +2546,11 @@ TEST_F(BlockTreeCacheFactoryTest, RejectsTierEnabledWithoutItsOwnCapacity) {
     }
 }
 
-TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
+class BlockTreeCacheFactoryRatioTest: public BlockTreeCacheFactoryTest, public ::testing::WithParamInterface<double> {};
+
+INSTANTIATE_TEST_SUITE_P(HostBlockRatios, BlockTreeCacheFactoryRatioTest, ::testing::Values(0.5, 1.0, 2.0));
+
+TEST_P(BlockTreeCacheFactoryRatioTest, IndependentHostCapacitiesPreserveTransfersAndDiskBudget) {
     if (!block_tree_cache_test::cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -2450,13 +2585,14 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
 
     block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_full_swa");
     KVCacheConfig                            kv_cache_config;
-    kv_cache_config.enable_device_cache    = true;
-    kv_cache_config.enable_memory_cache    = true;
-    kv_cache_config.memory_cache_size_mb   = 1;
-    kv_cache_config.enable_disk_cache      = true;
-    kv_cache_config.disk_cache_size_mb     = 1;
-    kv_cache_config.disk_cache_paths       = disk_dir.path;
-    kv_cache_config.disk_cache_buffered_io = true;
+    kv_cache_config.enable_device_cache          = true;
+    kv_cache_config.enable_memory_cache          = true;
+    kv_cache_config.memory_cache_size_mb         = 1;
+    kv_cache_config.memory_cache_swa_block_ratio = GetParam();
+    kv_cache_config.enable_disk_cache            = true;
+    kv_cache_config.disk_cache_size_mb           = 1;
+    kv_cache_config.disk_cache_paths             = disk_dir.path;
+    kv_cache_config.disk_cache_buffered_io       = true;
 
     BlockTreeCachePtr factory_cache =
         createBlockTreeCache(cache_config, kv_cache_config, allocator, ParallelismConfig{});
@@ -2473,6 +2609,29 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
     EXPECT_EQ(factory_cache->groupSets()[0]->diskPool()->poolName(), "block_tree_disk_full");
     EXPECT_EQ(factory_cache->groupSets()[1]->hostPool()->poolName(), "block_tree_host_swa");
     EXPECT_EQ(factory_cache->groupSets()[1]->diskPool()->poolName(), "block_tree_disk_swa");
+
+    const auto full_host = factory_cache->groupSets()[0]->hostPool();
+    const auto swa_host  = factory_cache->groupSets()[1]->hostPool();
+    EXPECT_EQ(swa_host->totalBlocksNum(),
+              static_cast<size_t>(std::ceil(static_cast<long double>(full_host->totalBlocksNum()) * GetParam())));
+    const size_t allocated_bytes = (full_host->totalBlocksNum() + 1) * full_host->strideBytes()
+                                   + (swa_host->totalBlocksNum() + 1) * swa_host->strideBytes();
+    EXPECT_LE(allocated_bytes, 1024u * 1024u);
+    EXPECT_EQ(factory_cache->groupSets()[0]->diskPool()->totalBlocksNum(),
+              factory_cache->groupSets()[1]->diskPool()->totalBlocksNum());
+    // Each HOST pool can exhaust independently; freeing it must not affect the other.
+    for (size_t exhausted = 0; exhausted < 2; ++exhausted) {
+        const auto   pool       = factory_cache->groupSets()[exhausted]->hostPool();
+        const auto   other      = factory_cache->groupSets()[1 - exhausted]->hostPool();
+        const size_t other_free = other->availableBlocksNum();
+        const auto   all        = pool->malloc(pool->totalBlocksNum());
+        ASSERT_TRUE(all.has_value());
+        pool->incTreeRef(*all, BlockTreeRefType::STORE);
+        EXPECT_FALSE(pool->malloc().has_value());
+        EXPECT_EQ(other->availableBlocksNum(), other_free);
+        pool->decTreeRef(*all, BlockTreeRefType::STORE);
+        EXPECT_EQ(pool->availableBlocksNum(), pool->totalBlocksNum());
+    }
 
     const std::vector<BlockTreePoolMetricsSnapshot> pool_snapshots = factory_cache->poolMetricsSnapshots();
     std::unordered_set<std::string>                 lower_pool_names;
@@ -2524,10 +2683,32 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
         const BlockIdxType host_block = *host_block_result;
         const BlockIdxType disk_block = *disk_block_result;
 
+        const auto pattern       = static_cast<uint8_t>(0x31 + group->groupSetId());
+        const auto visit_buffers = [&](uint8_t value, bool verify) {
+            for (size_t member = 0; member < group->groupTags().size(); ++member) {
+                const auto& tag = group->groupTags()[member];
+                for (const int layer : cache_config.layerIdsForGroup(tag)) {
+                    for (const auto& buffer : allocator->convertIndexToBuffer(layer, tag, device_blocks[0][member])) {
+                        if (verify) {
+                            expectDevicePattern(buffer.addr, buffer.size_bytes, value);
+                        } else {
+                            writeDevicePattern(buffer.addr, buffer.size_bytes, value);
+                        }
+                    }
+                }
+            }
+        };
+        visit_buffers(pattern, false);
         EXPECT_TRUE(factory_cache
                         ->executeTransfer(block_transfer_engine_test::makeTransferTask(
                             {TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks[0], host_block)}))
                         .ok());
+        visit_buffers(0, false);
+        EXPECT_TRUE(factory_cache
+                        ->executeTransfer(block_transfer_engine_test::makeTransferTask(
+                            {TransferDescriptor::hostToDevice(group->groupSetId(), host_block, device_blocks[0])}))
+                        .ok());
+        visit_buffers(pattern, true);
         EXPECT_TRUE(factory_cache
                         ->executeTransfer(block_transfer_engine_test::makeTransferTask(
                             {TransferDescriptor::hostToDisk(group->groupSetId(), host_block, disk_block)}))

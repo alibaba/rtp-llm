@@ -63,9 +63,17 @@ void KVCacheEventQueue::waitForStop(std::chrono::milliseconds timeout) {
     cv_.wait_for(lock, timeout, [this] { return stopped_.load(std::memory_order_acquire); });
 }
 
+void KVCacheEventQueue::waitForStopOrInterrupt(std::chrono::milliseconds timeout,
+                                             const std::function<bool()>& interrupted) {
+    std::unique_lock<std::mutex> lock(wait_mu_);
+    cv_.wait_for(lock, timeout, [this, &interrupted] {
+        return stopped_.load(std::memory_order_acquire) || interrupted();
+    });
+}
+
 void KVCacheEventQueue::discardPending() {
     // Drain only items fully published at this boundary. Concurrently
-    // published events remain queued and are applied after the snapshot ACK.
+    // published events remain queued for the consumer.
     const size_t target = published_size_.load(std::memory_order_acquire);
     KVCacheEvent event;
     for (size_t i = 0; i < target && tryDequeue(event); ++i) {}
