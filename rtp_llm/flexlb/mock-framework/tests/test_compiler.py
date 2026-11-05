@@ -15,7 +15,7 @@ def test_shipped_cases_compile_and_reference_existing_inputs(path, registry):
     for phase in case.phases:
         for step in phase.steps:
             if step.interface == 'client/start':
-                assert (case.directory / step.args['requests_file']).is_file()
+                assert (case.shared_root / step.args['requests_file']).is_file()
 
 
 def test_compiles_without_java_catalog_and_read_can_have_no_assertion(case_data, compile_data):
@@ -256,3 +256,23 @@ def test_metric_series_gates_accept_scalar_bounds_but_references_keep_list_type(
     case = compile_data(case_data)
     assert case.phases[0].steps[2].args['mode'] == 'series'
     assert case.phases[0].steps[2].expect.comparisons == {'gte': 0}
+
+
+def test_shipped_cases_keep_configs_local_and_traffic_shared():
+    from mock_framework.config import load_yaml
+    root = Path(__file__).resolve().parents[1]
+    for path in (root / 'cases').glob('*/case.yaml'):
+        raw = load_yaml(path)
+        for component in raw['environment'].values():
+            config = component.get('config', {})
+            if isinstance(config, str):
+                assert config.startswith('configs/')
+                assert (path.parent / config).resolve().is_relative_to(path.parent)
+        assert 'view' not in raw
+        case = compile_case(path)
+        assert case.shared_root == root
+        for phase in case.phases:
+            for step in phase.steps:
+                if step.interface == 'client/start':
+                    assert step.args['requests_file'].startswith('data/traffic/')
+                    assert (case.shared_root / step.args['requests_file']).is_file()

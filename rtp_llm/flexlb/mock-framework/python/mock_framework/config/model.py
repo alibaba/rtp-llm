@@ -43,3 +43,4 @@ class CompiledCase:
     phases: tuple[Phase, ...]
     view: Path | None
     source: Path
+    shared_root: Path = Path(__file__).resolve().parents[3]

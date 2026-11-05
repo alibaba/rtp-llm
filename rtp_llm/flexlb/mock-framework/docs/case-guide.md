@@ -14,6 +14,8 @@ uv run --locked mock-case compile <case目录>/case.yaml \
 
 每个 Case 独立目录组织自己的配置，数据集可共享。私有相对路径基于 Case 目录；显式提供共享根时，`data/`、`datasets/`、`views/` 基于共享根。编译不启动进程、不查询指标，也不检查数据内容。Client 只接受 start 参数 requests_file 指向的标准 Protobuf＋Zstd 文件，不提供运行时旧格式兼容。
 
+角色配置由 Case 自己维护，文件放在 `configs/`，例如 `config: configs/master.yaml`；不跨 Case 引用配置。回放数据统一放在共享 `data/traffic/`，例如 `requests_file: data/traffic/basic.binpb.zst`。共享路径默认从框架目录解析，可用 `--shared-root` 指定根；其他相对输入仍从 Case 目录解析。main 的输入格式保持 MCKINP01 Protobuf+Zstd。使用默认大盘时省略 `view`，只有自定义大盘才显式配置。
+
 顶层为 `id`、可选 `name`、`describe`、`environment`、`phases` 和可选 `view`。phase 和 step 完全顺序执行；每个 step 直接写 `interface` 与 `args`，可选 `expect`、`within` 和 `wait_after`；不再使用 call/check 外壳或 run 字段。phase 必须有正的 `timeout`。ID 全局唯一，引用必须来自前置步骤或允许的全局发现字段。
 
 固定等待写成 step 的 `wait_after: 5s`，默认 `0s`，必须是非负的带单位时长。执行顺序为“调用接口 → 检查 expect → wait_after → 下一步”；最后一个 step 也执行等待。等待计入该 step 的 within 和 phase 的 timeout，期间继续监视组件退出并响应取消；调用或断言失败不执行等待。返回值和 ref 仍是原调用结果，等待不会刷新结果或查询时间；等待后的检查需要下一次接口调用。

@@ -270,7 +270,7 @@ RTP 后端的 RtpMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独
 | rtp_llm_model_forward_us | Prometheus Summary / KMonitor 事件 Gauge | Prefill 每次完成 Forward 的微秒样本，均值按 sum/count 增量计算。Decode 缺席。 |
 | rtp_llm_step_latency_us | Prometheus Summary / KMonitor 事件 Gauge | P/D 完成的非空执行步耗时，微秒，从调度返回到处理完本轮输出。 |
 | rtp_llm_{context,generate,total}_tps | Gauge | 有效执行时间内的 token/s。P 的 context 计未命中计算量，with_cache 计输入；D 的 draft 模型计停止条件截断前的验收量（含 bonus）。 |
-| rtp_llm_sp_* | Gauge | 仅 D 的 draft 模型记录步耗时、提议/验收、每流验收、接受率及估计 TPOT。估计 TPOT 为步耗时除以每流平均验收量。 |
+| rtp_llm_sp_* | Prometheus Summary / KMonitor 事件 Gauge | D 的 draft 提议/验收、每流验收与接受率保持原模型；估计 TPOT 对所有 Decode 模型上报，使用截断前验收量。 |
 | mock_model_forward_actual_us | Gauge | P/D 最近一次完成 Forward 的模拟实际耗时，微秒，用于与计划值对照。 |
 | mock_model_forward_planned_us | Gauge | 同一个完成 Forward 的计划耗时，微秒，包含公式和可选噪声。 |
 | rtp_llm_model_forward_seconds | Histogram | 完成 Forward 实际耗时秒，含 bucket/sum/count，排除排队，不是 TTFT。 |
@@ -293,8 +293,8 @@ ViT 使用相同的物理元数据与 Prometheus instance 发现；QPS、Embeddi
 | 接口 | 口径 |
 | --- | --- |
 | engine/cache/hit_rate | P 历史命中 token 增量／输入 token 增量，token 加权；可选 targets。 |
-| engine/prefill/tps | P 实际计算 token 增量／含实际计算的 Forward 耗时增量。 |
-| engine/prefill/tps_with_cache | P 输入 token 增量／有输入的 Forward 耗时增量，输入含命中。 |
+| engine/prefill/tps | 原生 rtp_llm_context_tps Gauge 按实例取区间采样均值，再跨实例求和。 |
+| engine/prefill/tps_with_cache | 原生 rtp_llm_context_tps_with_cache Gauge 按实例取区间采样均值，再跨实例求和，输入含命中。 |
 | engine/decode/tps | D 完成 Forward 输出 token 增量／墙钟时间。 |
 | client/ttft / client/tpot | Client 延迟 mean/p95/p99，合并全部选中实例的直方图；单位秒。TPOT 只统计成功且输出多于一个 token 的请求。 |
 | client/success_rate | 必填 range 区间内成功终态计数增量／全部终态计数增量，先对各 Client 算增量再聚合；可选 targets。 |
@@ -372,3 +372,5 @@ KVCM 心跳与串行数据上报独立执行；回复会扫描全部 item 的重
 WorkerStatus/CacheStatus 的 RPC QPS、耗时和取消由 RpcService 上报；Scheduler 上报 streaming 请求终态、本地缓存条目数、匹配耗时、淘汰块寿命和 Mock batch 准备耗时。`rtp_llm_kv_cache_reuse_length` 在请求终态上报，与输入长度同口径。Prefill 最近 30 分钟 cache key 命中是理论重叠统计，不表示缓存仍驻留；实际复用按成功准入时的本地命中统计。
 
 事件耗时和长度不再导出同名窗口均值 Gauge。Prometheus 使用 Summary 的累计 `_sum` / `_count`，均值用区间增量汇总后相除，保留事件权重；无事件和抓取不会清空累计量。KMonitor 接收原名的原始样本，SDK 负责次数、总和和极值。事件 QPS 在 KMonitor 提交原始计数，Prometheus 按实际窗口换算；状态和已计算的 TPS/QPS 保持 Gauge。Prometheus 的跨实例最大均值不等同于单次事件最大值。
+
+Decode TPOT 在完成计算时以本轮所有 stream 的验收候选数计算，包含完成计算但交付前取消的成员；EOS、最大输出长度和序列长度只影响交付，不改变验收分母。draft 提议/验收采样模型保留；同一 Decode 步只上报一次 `rtp_llm_sp_estimate_tpot_us`。TPOT 计时从输入组装开始到 Compute 完成；`rtp_llm_gather_model_input_us` 只计输入组装。计算未完成的取消不产生这两者中的完成步 TPOT 样本。

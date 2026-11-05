@@ -26,7 +26,7 @@ def context():
 
 
 def args():
-    return {'masters': ['master:1'], 'requests_file': str(Path(__file__).resolve().parents[1] / 'cases/basic/requests.binpb.zst'),
+    return {'masters': ['master:1'], 'requests_file': str(Path(__file__).resolve().parents[1] / 'data/traffic/basic.binpb.zst'),
             'qps': 10, 'concurrency': 2}
 
 
@@ -299,3 +299,20 @@ def test_playback_requires_exactly_one_finite_positive_rate(rate):
     values = args(); values.pop('qps'); values.update(rate)
     with pytest.raises(ConfigError):
         Registry.standard().get('client/start').arguments(values)
+
+
+def test_shared_traffic_uses_the_compiled_shared_root(tmp_path, monkeypatch):
+    shared = tmp_path / 'shared'
+    source = shared / 'data/traffic/input.binpb.zst'
+    source.parent.mkdir(parents=True)
+    write_inputs(source, [pb.Request(token_ids=[1], max_new_tokens=2)])
+    ctx = context()
+    ctx.runtime.case = SimpleNamespace(directory=tmp_path / 'case', shared_root=shared)
+    calls = []
+    async def post(url, body):
+        calls.append(body['args'])
+        return {'accepted': True}
+    monkeypatch.setattr(client_runtime, 'post', post)
+    value = args() | {'requests_file': 'data/traffic/input.binpb.zst'}
+    assert asyncio.run(Registry.standard().get('client/start').invoke(ctx, value))
+    assert calls[0]['requests_file'] == str(source)

@@ -154,4 +154,5 @@ def compile_case(path: str | Path, registry: Registry | None = None, *, shared_r
     if 'view' in raw:
         view = _view_path(raw['view'], path.parent, shared_root)
     return CompiledCase(id=case_id, describe=description, name=name, directory=path.parent,
-                        environment=environment, phases=tuple(phases), view=view, source=path)
+                        environment=environment, phases=tuple(phases), view=view, source=path,
+                        shared_root=Path(shared_root).resolve() if shared_root is not None else Path(__file__).resolve().parents[3])

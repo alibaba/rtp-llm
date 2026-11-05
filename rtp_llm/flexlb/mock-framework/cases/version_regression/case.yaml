@@ -6,7 +6,7 @@ environment:
   master:
     deployment:
       replicas: 2
-    config: ../master_ha_failover/configs/master.yaml
+    config: configs/master.yaml
   prefill:
     engine: rtp
     deployment:
@@ -42,7 +42,7 @@ phases:
     describe: 两 Client 按总 0.1 倍速回放 DeepSeek，启用请求级缓存复用。等待 180 秒，前 120 秒用于预热。
     interface: client/start
     args:
-      requests_file: ../master_ha_failover/deepseek.binpb.zst
+      requests_file: data/traffic/deepseek.binpb.zst
       reuse_cache: true
       replay_speed: 0.1
       concurrency: 4096

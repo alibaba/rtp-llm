@@ -4,7 +4,7 @@
 
 参考 HA Case 的两个 Master、48 Prefill、192 Decode 和计算模型，启用 P/D 及请求级缓存复用。使用同一个 Case 配合不同版本的 launch 配方分别运行，各次独立使用绝对阈值。
 
-Master 引用 HA Case 配置，Prefill、Decode 配置由本 Case 的 `configs/` 维护；DeepSeek 流量引用共享的 `../master_ha_failover/deepseek.binpb.zst`。省略 view，使用框架默认大盘。
+Master、Prefill、Decode 配置由本 Case 的 `configs/` 独立维护；DeepSeek 流量引用共享的 `data/traffic/deepseek.binpb.zst`。省略 view，使用框架默认大盘。
 
 前 120 秒预热，180 秒后依次查询各指标最近 60 秒的汇总值，结束点留出 5 秒采集余量。随后停止回放并排空，所有已发请求必须有终态。此 Case 使用 launch 中默认的 1 秒 Prometheus 采集周期；排空后再等待 5 秒，收集最终终态计数，然后检查本次运行全程成功率。每个查询相对自己的 Step 时间，不要求跨接口冻结查询时刻。
 

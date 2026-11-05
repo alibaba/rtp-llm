@@ -48,7 +48,9 @@ class Empty:
 async def start(ctx, args: Start) -> bool:
     """Start the same finite plan on all Clients; rate and concurrency are global budgets."""
     body = {key: value for key, value in asdict(args).items() if value is not None}
-    path = (ctx.runtime.case.directory / Path(args.requests_file)).resolve()
+    source = Path(args.requests_file)
+    base = ctx.runtime.case.shared_root if source.parts[0] == 'data' else ctx.runtime.case.directory
+    path = (base / source).resolve()
     if not path.is_file():
         raise ExecutionError(f'Client requests_file is not a regular file: {path}')
     body['requests_file'] = str(path)

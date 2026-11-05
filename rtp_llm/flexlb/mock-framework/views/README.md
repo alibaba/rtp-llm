@@ -12,7 +12,7 @@ Prefill 和 Decode 分开提供吞吐/延迟/负载、PD RPC、KV、KV 分池、
 
 ViT 已接入共享 vision engine：QPS、成功/错误、图片数、Embedding 长度/请求等待耗时、队列深度/等待时间、Forward/合批大小和缓存命中/未命中/合并等待/淘汰/驻留 Tokens/Bytes。使用 real 的 `py_rtp_vit_*` 名称，耗时单位为毫秒。Forward、就绪排队加 Forward（py_rtp_vit_embedding_rt）和请求总耗时（py_rtp_vit_request_rt）分别记录；缓存命中不制造 Embedding/Forward 样本。真实 URL 图片准备提供总耗时、下载及非下载耗时（ms），成功读取另提供 fetch 耗时（μs）。非下载部分测量读尺寸、内容摘要和几何计算。跳过读取时这些面板无样本。预处理子进程、CUDA Graph、GreenNet 尚未模拟。py_rtp_vit_request_rt 覆盖阻塞媒体处理调用的成功或失败，包括下载和共享结果等待，不含异步提交 ACK、RPC 传输及输出编码。py_rtp_vit_preprocess_queue_size 统计准备尚未完成的媒体（排队＋执行中），不包含等待计算或发布的任务；没有独立 CPU 子进程，因此 dispatch/return 指标保持缺失。
 
-Client 的 `mock_client_tpot_seconds` 按成功请求首尾 token 的到达间隔除以首 token 后的 token 数。Decode 的 `mock_decode_estimate_tpot_us` 按执行步耗时除以该步每个产出请求平均提交的 token 数。两个指标分别展示，原有 draft 估算指标继续用于投机模型。
+Client 的 `mock_client_tpot_seconds` 按成功请求首尾 token 的到达间隔除以首 token 后的 token 数。Decode 的 `rtp_llm_sp_estimate_tpot_us` 按从输入组装到计算完成的耗时除以本步每流平均验收候选数；不使用截断后的交付 token 数。Client TPOT 与该执行步估计分开展示。
 
 ## 已实现与缺口
 
@@ -64,7 +64,7 @@ View 的 `annotation_steps` 只配置默认选择，省略则全部显示，空�
 |---|---|---|
 | Forward 组装 | `rtp_llm_context_batch_size` / `generate_batch_size`，`execute_token_size`，`max_seq_len`；含 Context 的条件系列只在 P 上产生 | 普通 Decode 执行量取本步 verify token，显式 draft 模型取本步验收量；批大小取实际执行成员数 |
 | 执行步 | P/D `rtp_llm_step_latency_us` | 完成的非空执行步，从调度返回到处理完输出，微秒；包含 Mock 执行和输出处理 |
-| 投机验收 | D `rtp_llm_sp_*` 的步耗时、提议/验收、接受率和估计 TPOT | 仅 draft 模型。real 生产 MTP（`5f026a038`）的验收数据跨步流水，Mock 同步记录本步验收，保留统计分子和分母；没有独立 propose/score/sampler 耗时 |
+| 投机验收 | D `rtp_llm_sp_*` 的步耗时、提议/验收、接受率和估计 TPOT | 提议/验收和接受率仅 draft 模型，估计 TPOT 对所有 Decode 模型记录。real 生产 MTP（`5f026a038`）的验收数据跨步流水，Mock 同步记录本步验收，保留统计分子和分母；没有独立 propose/score/sampler 耗时 |
 | 请求终态 | `rtp_llm_latency_us`、`wait_latency_us`、`first_token_latency_us`、`input_token_length`、`output_token_length`、`iterate_count`、`query_batch_size` | 如 real，仅 success/cancel/timeout 产生流统计；无首 Token 则不报首 Token 耗时；query batch 是 beam 数，当前为 1 |
 | Cache Loading | `rtp_llm_stream_loading_cache_latency_us` | 当前同步缓存模型不发布；PD 传输不属于此指标，不用其耗时冒充 |
 | ViT 调度 | `py_rtp_vit_embedding_queue_size` / `queue_wait_rt` / `batch_size` / `forward_rt` | 就绪队列按去重后的图片工作计数；运行图片数另为 Mock 辅助项 |
@@ -77,3 +77,7 @@ P/D KV 仅模拟本地 Full-KV 池和 LRU。大盘删除 Host 容量、Memory KV
 Worker 新增 Status/Cache RPC 请求率与处理耗时、本地缓存条目/匹配/淘汰寿命、streaming 请求终态和 ForwardBatch 输入准备耗时。Prefill 的 30 分钟理论 cache key 重叠与实际复用分开展示，理论重叠不代表本地仍持有 KV。查询继续使用 P/D/V 独立选择器与默认聚合。
 
 事件耗时和长度不再导出同名窗口均值 Gauge。Prometheus 使用 Summary 的累计 `_sum` / `_count`，均值用区间增量汇总后相除，保留事件权重；无事件和抓取不会清空累计量。KMonitor 接收原名的原始样本，SDK 负责次数、总和和极值。事件 QPS 在 KMonitor 提交原始计数，Prometheus 按实际窗口换算；状态和已计算的 TPS/QPS 保持 Gauge。Prometheus 的跨实例最大均值不等同于单次事件最大值。
+
+Decode TPOT 在完成计算时以本轮所有 stream 的验收候选数计算，包含完成计算但交付前取消的成员；EOS、最大输出长度和序列长度只影响交付，不改变验收分母。draft 提议/验收采样模型保留；同一 Decode 步只上报一次 `rtp_llm_sp_estimate_tpot_us`。TPOT 计时从输入组装开始到 Compute 完成；`rtp_llm_gather_model_input_us` 只计输入组装。计算未完成的取消不产生这两者中的完成步 TPOT 样本。
+
+零值按 real 的上报点处理：请求类 REPORT_GAUGE 的零耗时、零输出/迭代/reuse_length 不采样；KV 直接 Report 的 reuse 长度仍包含零命中样本。

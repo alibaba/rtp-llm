@@ -188,18 +188,22 @@ def test_success_rate_window_keeps_selected_clients_and_fixed_end(monkeypatch):
     assert '[20000ms]' in calls[-1][0] and 'irate' not in calls[-1][0]
 
 
-@pytest.mark.parametrize('method,denominator', [
-    (metrics.prefill_tps, 'rtp_llm_context_forward_seconds_total'),
-    (metrics.cached_tps, 'rtp_llm_context_forward_with_cache_seconds_total'),
+@pytest.mark.parametrize('method,name', [
+    (metrics.prefill_tps, 'rtp_llm_context_tps'),
+    (metrics.cached_tps, 'rtp_llm_context_tps_with_cache'),
 ])
-def test_prefill_throughput_uses_the_matching_nonempty_forward_duration(monkeypatch, method, denominator):
+def test_prefill_throughput_sums_instance_means_of_the_native_gauge(monkeypatch, method, name):
     calls = []
-    async def metric(ctx, args, role, numerator, duration, **labels):
-        calls.append((role, numerator, duration, labels))
-        return 42
-    monkeypatch.setattr(metrics, 'metric', metric)
+    async def instant(ctx, expression, at):
+        calls.append(expression)
+        if expression.startswith('count_over_time'):
+            return [metrics.QuerySample({'instance': f'127.0.0.1:{port}'}, 4, at) for port in (1001, 1002)]
+        return [metrics.QuerySample({}, 42, at)]
+    monkeypatch.setattr(metrics, 'instant', instant)
     assert asyncio.run(method(context(), metrics.MetricArgs())) == 42
-    assert calls[0][1:3] == ('rtp_llm_forward_tokens_total', denominator)
+    assert calls[-1].startswith('sum(avg_over_time(' + name + '{')
+    assert '[60000ms]' in calls[-1]
+    assert not any('context_forward_seconds' in expression for expression in calls)
 
 
 def test_latency_quantiles_merge_buckets_and_require_each_instance(monkeypatch):

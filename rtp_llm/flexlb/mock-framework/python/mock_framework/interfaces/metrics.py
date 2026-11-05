@@ -221,6 +221,15 @@ async def evaluate(ctx, args, expression, histories=()):
     return [p.value for p in points]
 
 
+async def gauge(ctx, args, role, name):
+    at, millis, _ = window(ctx, args)
+    labels, targets = scope(ctx, args, role)
+    await counter_history(ctx, name, labels, targets, at, millis)
+    expression = (f'sum(avg_over_time({name}{{{labels}}}[{millis}ms]))'
+                  if args.mode == 'interval' else f'sum({name}{{{labels}}})')
+    return await evaluate(ctx, args, expression, [(name, labels, targets)])
+
+
 async def latency(ctx, args, name):
     at, millis, operation = evaluation_window(ctx, args)
     labels, targets = scope(ctx, args, 'client')
@@ -250,12 +259,12 @@ async def hit_rate(ctx, args: MetricArgs) -> float | list[float]:
 
 @case_interface('engine/prefill/tps', effect='read', unit='tokens/s')
 async def prefill_tps(ctx, args: MetricArgs) -> float | list[float]:
-    return await metric(ctx, args, 'prefill', 'rtp_llm_forward_tokens_total', 'rtp_llm_context_forward_seconds_total', kind='compute')
+    return await gauge(ctx, args, 'prefill', 'rtp_llm_context_tps')
 
 
 @case_interface('engine/prefill/tps_with_cache', effect='read', unit='tokens/s')
 async def cached_tps(ctx, args: MetricArgs) -> float | list[float]:
-    return await metric(ctx, args, 'prefill', 'rtp_llm_forward_tokens_total', 'rtp_llm_context_forward_with_cache_seconds_total', kind='input')
+    return await gauge(ctx, args, 'prefill', 'rtp_llm_context_tps_with_cache')
 
 
 @case_interface('engine/decode/tps', effect='read', unit='tokens/s')

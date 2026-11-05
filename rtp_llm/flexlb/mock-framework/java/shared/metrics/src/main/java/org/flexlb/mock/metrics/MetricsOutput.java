@@ -5,7 +5,9 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
 
-/** Selects the event backend once; state and precomputed rate snapshots retain one periodic reader. */
+/**
+ * Selects the event backend once; state and precomputed rate snapshots retain one periodic reader.
+ */
 public final class MetricsOutput implements AutoCloseable {
     private static final System.Logger LOG = System.getLogger(MetricsOutput.class.getName());
     private static final class Provider {

@@ -4,7 +4,9 @@ import io.prometheus.client.*;
 import java.util.*;
 import java.util.function.LongSupplier;
 
-/** One event API: Prometheus retains sum/count; an installed SDK receives original observations. */
+/**
+ * One event API: Prometheus retains sum/count; an installed SDK receives original observations.
+ */
 public final class EventMetrics extends Collector {
     private static final System.Logger LOG = System.getLogger(EventMetrics.class.getName());
     private record Series(String name, Map<String, String> tags) {}
