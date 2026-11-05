@@ -1,0 +1,5 @@
+--- src/third_party/fiat/curve25519.c
++++ src/third_party/fiat/curve25519.c
+@@ -1905 +1905 @@
+-void x25519_ge_scalarmult_base(ge_p3 *h, const uint8_t *a) {
++void x25519_ge_scalarmult_base(ge_p3 *h, const uint8_t a[32]) {
