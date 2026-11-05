@@ -53,6 +53,7 @@ public final class KvCache implements AutoCloseable {
         if (requiredTokens > maxRequestTokens()) return rejected(Failure.PERMANENT);
         int demand = (int) blockDemand;
         long matchStarted = System.nanoTime();
+        // Real refreshes LRU at lookup. A later allocation rejection only releases request references.
         var matched = tree.match(keys);
         long matchNanos = System.nanoTime() - matchStarted;
         var slots = new ArrayList<Slot>();

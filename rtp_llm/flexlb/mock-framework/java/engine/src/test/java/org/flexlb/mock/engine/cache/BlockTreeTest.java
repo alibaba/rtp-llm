@@ -54,6 +54,22 @@ class BlockTreeTest {
             }
         }
     }
+    @Test void failedAllocationKeepsMatchRecencyWithoutKeepingThePin() {
+        try (var cache = new KvCache(1, 4, 1)) {
+            seed(cache, 1L);
+            seed(cache, 2L);
+            try (var held = cache.acquire(2, List.of()).lease()) {
+                assertNotNull(held);
+                assertEquals(KvCache.Failure.RETRYABLE, cache.acquire(3, List.of(1L)).failure());
+                assertEquals(0, cache.snapshot(-1, false).referencedBlocks());
+            }
+            try (var pressure = cache.acquire(3, List.of()).lease()) {
+                assertNotNull(pressure);
+                assertEquals(Set.of(1L), cache.snapshot(-1, true).keys());
+            }
+        }
+    }
+
     @Test void failedReuseBelowReserveLeavesNoNewPin() {
         try (var cache = new KvCache(1, 10, 1)) {
             seed(cache, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L);
