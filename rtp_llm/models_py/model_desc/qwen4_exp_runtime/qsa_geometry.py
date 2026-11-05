@@ -121,8 +121,7 @@ def _draft_incremental_prefill_geometry(
     expected_cu = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
     expected_cu[1:] = torch.tensor(lengths, dtype=torch.int32, device=device).cumsum(0)
     if (
-        cu_seqlens.dim() != 1
-        or tuple(cu_seqlens.shape) != (batch_size + 1,)
+        tuple(cu_seqlens.shape) != (batch_size + 1,)
         or cu_seqlens.dtype != torch.int32
         or cu_seqlens.device != device
     ):
@@ -151,8 +150,7 @@ def _draft_incremental_prefill_geometry(
     expected_cu_kv[1:] = visible_ends.to(torch.int32).cumsum(0)
     cu_kv_seqlens = self.main_inputs.cu_kv_seqlens_device
     if (
-        cu_kv_seqlens.dim() != 1
-        or tuple(cu_kv_seqlens.shape) != (batch_size + 1,)
+        tuple(cu_kv_seqlens.shape) != (batch_size + 1,)
         or cu_kv_seqlens.dtype != torch.int32
         or cu_kv_seqlens.device != device
     ):

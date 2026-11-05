@@ -4,6 +4,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .paged_validation import raise_geometry_error
+
 
 @triton.jit(do_not_specialize=["B", "N", "K", "WIDTH", "PAGES", "TABLE_ROW"])
 def _validate_packed_inputs(
@@ -137,18 +139,7 @@ def validate_prefill_inputs(
         raise ValueError(
             "qwen4_exp incremental prefill cu_seqlens do not match input lengths"
         )
-    if flags & 8:
-        raise RuntimeError(
-            "qwen4_exp QSA paged main block table contains an out-of-range physical block"
-        )
-    if flags & 16:
-        raise RuntimeError(
-            "qwen4_exp QSA paged main block table does not cover the visible KV"
-        )
-    if flags & 32:
-        raise RuntimeError(
-            "qwen4_exp QSA paged visible KV resolves to an unallocated or out-of-range physical block"
-        )
+    raise_geometry_error(flags & (8 | 16 | 32))
     if flags & 2:
         raise ValueError("selected indices may only use -1 as padding")
     if flags & 4:

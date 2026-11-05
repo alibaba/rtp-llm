@@ -281,7 +281,6 @@ def _prepare_incremental_prefill_inputs(
     cu_seqlens = self.attn_inputs.cu_seqlens_device
     if (
         cu_seqlens is None
-        or cu_seqlens.dim() != 1
         or tuple(cu_seqlens.shape) != (batch + 1,)
         or cu_seqlens.dtype != torch.int32
         or cu_seqlens.device != qkv.device

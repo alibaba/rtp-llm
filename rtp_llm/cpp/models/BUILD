@@ -176,6 +176,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/core:tensor_holder",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/metrics",

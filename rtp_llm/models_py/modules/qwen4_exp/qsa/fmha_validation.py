@@ -120,7 +120,6 @@ def _try_validate_main_paged_geometry(
     sequence_bases,
     query_lengths,
     device,
-    graph_capture,
     checks=None,
 ):
     batch_size = int(sequence_bases.numel())
@@ -134,7 +133,7 @@ def _try_validate_main_paged_geometry(
         and block_table.shape[1] <= 1024
         and sequence_bases.dtype in (torch.int32, torch.int64)
         and query_lengths.dtype in (torch.int32, torch.int64)
-        and batch_size <= (32 if graph_capture else 256)
+        and batch_size <= 256
         and torch.version.hip is None
         and torch.cuda.get_device_capability(device) == (12, 0)
     ):
@@ -142,22 +141,6 @@ def _try_validate_main_paged_geometry(
     page_size, cache_blocks = _validate_main_cache_layout(
         self, cache, block_table, batch_size, device
     )
-    if graph_capture:
-        bases = sequence_bases.tolist()
-        lengths = query_lengths.tolist()
-        if any(p < 0 or n <= 0 for p, n in zip(bases, lengths)):
-            raise RuntimeError(
-                "qwen4_exp QSA paged sequence bases must be non-negative and "
-                "query lengths positive"
-            )
-        if any(
-            p + n > int(block_table.shape[1]) * page_size
-            for p, n in zip(bases, lengths)
-        ):
-            raise RuntimeError(
-                "qwen4_exp QSA paged main block table does not cover the visible KV"
-            )
-        return page_size
     from .paged_validation import geometry_flags, validate_geometry
 
     # Preserve int64 metadata until validation; narrowing first can hide overflow.
@@ -207,14 +190,29 @@ def _validate_main_paged_geometry(
         or batch_size <= 0
     ):
         raise RuntimeError("qwen4_exp QSA paged sequence metadata has invalid geometry")
-    if graph_capture and (
-        sequence_bases.device.type != "cpu" or query_lengths.device.type != "cpu"
-    ):
-        raise RuntimeError("qwen4_exp sparse GQA Graph requires host lengths")
-    if not graph_capture:
-        for receipt in getattr(self, "_model_prefill_geometry", None) or ():
-            if receipt.matches(self, cache, block_table, sequence_bases, query_lengths):
-                return receipt.page_size
+    if graph_capture:
+        if sequence_bases.device.type != "cpu" or query_lengths.device.type != "cpu":
+            raise RuntimeError("qwen4_exp sparse GQA Graph requires host lengths")
+        bases, lengths = sequence_bases.tolist(), query_lengths.tolist()
+        if any(p < 0 or n <= 0 for p, n in zip(bases, lengths)):
+            raise RuntimeError(
+                "qwen4_exp QSA paged sequence bases must be non-negative and "
+                "query lengths positive"
+            )
+        page_size, _ = _validate_main_cache_layout(
+            self, cache, block_table, batch_size, device
+        )
+        if any(
+            p + n > int(block_table.shape[1]) * page_size
+            for p, n in zip(bases, lengths)
+        ):
+            raise RuntimeError(
+                "qwen4_exp QSA paged main block table does not cover the visible KV"
+            )
+        return page_size
+    for receipt in getattr(self, "_model_prefill_geometry", None) or ():
+        if receipt.matches(self, cache, block_table, sequence_bases, query_lengths):
+            return receipt.page_size
     page_size = _try_validate_main_paged_geometry(
         self,
         cache,
@@ -222,44 +220,26 @@ def _validate_main_paged_geometry(
         sequence_bases,
         query_lengths,
         device,
-        graph_capture,
         checks,
     )
     if page_size is not None:
         return page_size
-    if not graph_capture:
-        page_size, cache_blocks = _validate_main_cache_layout(
-            self, cache, block_table, batch_size, device
-        )
-        own_checks = checks is None
-        checks = DeviceChecks() if checks is None else checks
-        main_geometry_checks(
-            checks,
-            sequence_bases,
-            query_lengths,
-            block_table,
-            page_size,
-            cache_blocks,
-            bool(self.attn_inputs.is_s_padded),
-        )
-        if own_checks:
-            checks.verify()
-        return page_size
-    bases, lengths = sequence_bases.tolist(), query_lengths.tolist()
-    if any(p < 0 or n <= 0 for p, n in zip(bases, lengths)):
-        raise RuntimeError(
-            "qwen4_exp QSA paged sequence bases must be non-negative and "
-            "query lengths positive"
-        )
-    page_size, _ = _validate_main_cache_layout(
+    page_size, cache_blocks = _validate_main_cache_layout(
         self, cache, block_table, batch_size, device
     )
-    if any(
-        p + n > int(block_table.shape[1]) * page_size for p, n in zip(bases, lengths)
-    ):
-        raise RuntimeError(
-            "qwen4_exp QSA paged main block table does not cover the visible KV"
-        )
+    own_checks = checks is None
+    checks = DeviceChecks() if checks is None else checks
+    main_geometry_checks(
+        checks,
+        sequence_bases,
+        query_lengths,
+        block_table,
+        page_size,
+        cache_blocks,
+        bool(self.attn_inputs.is_s_padded),
+    )
+    if own_checks:
+        checks.verify()
     return page_size
 
 

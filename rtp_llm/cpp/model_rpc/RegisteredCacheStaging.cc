@@ -77,7 +77,6 @@ void reassembleCacheTransfers(const std::vector<PendingCacheCopy>& copies, int d
             || copy.source->source_bytes != copy.plan.source_bytes) {
             throw std::invalid_argument("typed TP cache destination or source has changed");
         }
-        copy.plan.validateSlices();
         groups[copy.destination.addr].push_back(index);
         scratch_bytes = std::max(scratch_bytes, copy.destination.size_bytes);
     }

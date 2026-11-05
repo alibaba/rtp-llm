@@ -146,6 +146,16 @@ TEST(RegisteredCacheStagingTest, SliceGapFailsBeforeAnyDestinationUpload) {
     EXPECT_TRUE(torch::all(destination == 127).item<bool>());
 }
 
+TEST(RegisteredCacheStagingTest, SourceSliceOverflowFailsBeforeAnyDestinationUpload) {
+    auto memory           = std::make_shared<TestMemoryUtil>();
+    memory->rdma          = false;
+    auto      destination = torch::full({32}, 127, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    BlockInfo info{true, static_cast<int32_t>(destination.device().index()), 0, destination.data_ptr(), 32};
+    auto      copies = makeTwoPartCopies(memory, info, {{8, 16, 16}});
+    EXPECT_THROW(reassembleCacheTransfers(copies, info.device_index), std::invalid_argument);
+    EXPECT_TRUE(torch::all(destination == 127).item<bool>());
+}
+
 TEST(RegisteredCacheStagingTest, SliceOverlapFailsBeforeAnyDestinationUpload) {
     auto memory           = std::make_shared<TestMemoryUtil>();
     memory->rdma          = false;

@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <limits>
 #include <optional>
@@ -441,13 +442,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.max_seq_len                  = params.max_seq_len;
         graph_params.hidden_size                  = params.hidden_size;
         // Match eager MTP's hyper-connection input width.
-        RTP_LLM_CHECK_WITH_INFO(params.hidden_size > 0 && params.hc_mult > 0,
-                                "invalid MTP input width: hidden_size=%ld hc_mult=%ld",
-                                params.hidden_size,
-                                params.hc_mult);
-        RTP_LLM_CHECK_WITH_INFO(params.hidden_size <= std::numeric_limits<int64_t>::max() / params.hc_mult,
-                                "MTP input hidden width overflows int64_t");
-        graph_params.input_hidden_size      = static_cast<size_t>(params.hidden_size * params.hc_mult);
+        graph_params.input_hidden_size =
+            static_cast<size_t>(resolveMtpInputHiddenSize(params.hidden_size, params.hc_mult));
         graph_params.input_embedding_scalar = description_.input_embedding_scalar;
         if (weights_.position_encoding) {
             graph_params.position_encoding = weights_.position_encoding->kernel.cuda();

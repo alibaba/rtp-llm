@@ -20,6 +20,8 @@ namespace rtp_llm {
 
 using LayerKVCacheSpecDescs = std::vector<std::vector<KVCacheSpecDesc>>;
 
+int64_t resolveMtpInputHiddenSize(int64_t hidden_size, int64_t hc_mult);
+
 enum TaskType {
     DENSE_EMBEDDING    = 0,
     ALL_EMBEDDING      = 1,
