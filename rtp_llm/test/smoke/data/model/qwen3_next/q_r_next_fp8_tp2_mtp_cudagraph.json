@@ -23,7 +23,7 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "Here's a thinking process that leads to the suggested questions about English listening methods:\n\n1.  **Analyze the Request:**\n    *   **Topic:** English Listening Methods (英语听力方法).\n    *   **Task:** Propose several questions (提出几个问题).\n    *   **Language:** The user asked in Chinese, so the output should be in Chinese (with English terms where appropriate).\n    *   **Goal:** The questions should be thought-provoking,",
+                            "content": "关于“英语听力方法”这一主题，为了帮助你深入思考或用于教学讨论，我为你设计了几个不同维度的问题。这些问题涵盖了从**基础策略**、**常见误区**到**进阶技巧**的各个方面：\n\n### 1. 关于核心策略与心态\n*   **精听与泛听的平衡**：在英语听力训练中，如何科学地分配“精听”（Intensive Listening，如听写、逐句分析）与“泛听",
                             "name": null,
                             "reasoning_content": null,
                             "function_call": null,
@@ -36,8 +36,8 @@
                     }
                 ],
                 "usage": {
-                    "prompt_tokens": 18,
-                    "total_tokens": 118,
+                    "prompt_tokens": 20,
+                    "total_tokens": 120,
                     "completion_tokens": 100,
                     "completion_tokens_details": null,
                     "prompt_tokens_details": null
