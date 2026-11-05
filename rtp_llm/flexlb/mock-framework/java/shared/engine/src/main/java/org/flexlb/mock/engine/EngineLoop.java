@@ -47,7 +47,7 @@ public final class EngineLoop implements AutoCloseable {
         this.model = Objects.requireNonNull(model);
         this.role = Objects.requireNonNull(role);
         this.identity = Objects.requireNonNull(identity);
-        cache.onCapacityChange(this::wake);
+        cache.onChange(this::wake);
         Thread.ofVirtual().name("mock-engine-" + identity).start(this::run);
     }
 
@@ -192,7 +192,7 @@ public final class EngineLoop implements AutoCloseable {
     private void stop() {
         if (closed) return;
         closed = true;
-        cache.onCapacityChange(() -> {});
+        cache.onChange(() -> {});
         scheduler.close();
         if (pending != null) {
             var current = pending;

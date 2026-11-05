@@ -5,21 +5,8 @@ dp_size: 1
 seq_size_per_block: 512
 reuse_cache: false
 enable_device_cache: true
-# 本 Case 关闭 Host cache。
-enable_memory_cache: false
-enable_disk_cache: false
 reserve_block_ratio: 1
 enable_remote_cache: false
-device_eviction_policy: lru
-memory_eviction_policy: lru
-# 异步队列背压未模拟，以下 real 参数忽略。
-block_tree_business_queue_max_size: 10000
-block_tree_transfer_queue_max_size: 10000
-memory_cache_sync_timeout_ms: 10000
-block_tree_device_evict_low_watermark_ratio: 0.82
-block_tree_device_evict_high_watermark_ratio: 0.9
-block_tree_memory_evict_low_watermark_ratio: 0.9
-block_tree_memory_evict_high_watermark_ratio: 0.94
 concurrency_limit: 64
 max_batch_tokens_size: 512000
 # P 普通队列的未缓存 token 配额和初始化 KV 数量上限。
@@ -29,8 +16,6 @@ prefill_retry_times: 0
 prefill_max_wait_timeout_ms: 600000
 max_rpc_timeout_ms: 7200000
 test_block_num: 21554
-# Host 逻辑块预算，仅 enable_memory_cache=true 时使用。
-mock.cache.memory.blocks: 52295
 # 原 DSv4 legacy_unverified 校准公式；DeepSeek preset 的 1.23 倍率直接乘入公式，不启用噪声。
 mock.compute:
   forward:

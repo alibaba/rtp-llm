@@ -2,45 +2,35 @@ package org.flexlb.mock.cache;
 
 import java.util.*;
 
-/** RTP Full-KV prefix index. Every mutation runs under KvCache's monitor. */
+/**
+ * RTP Full-KV prefix index. Every mutation runs under KvCache's monitor.
+ */
 final class BlockTree {
     static final class Node {
-        final long key;
-        long admission;
+        final long key, admission;
         final Node parent;
-        BlockPool.Reference cache;
-        boolean host;
+        final BlockPool.Reference cache;
         final Map<Long, Node> children = new HashMap<>();
-        long access, hits;
-        int pins, deviceChildren;
-        Node(long key, Node parent, BlockPool.Reference cache, boolean host, long sequence) {
-            this.key = key; this.parent = parent; this.cache = cache; this.host = host;
+        long access;
+
+        Node(long key, Node parent, BlockPool.Reference cache, long sequence) {
+            this.key = key;
+            this.parent = parent;
+            this.cache = cache;
             admission = access = sequence;
         }
     }
+
     private final Map<Long, Node> nodes = new HashMap<>(), roots = new HashMap<>();
-    private final NavigableSet<Node> deviceLeaves, hostLeaves;
+    private final NavigableSet<Node> leaves = new TreeSet<>(Comparator
+        .comparingLong((Node node) -> node.access).thenComparingLong(node -> node.admission));
     private long sequence, version;
     private java.util.function.Consumer<CacheMetadata.Change> observer = change -> {};
     void observe(java.util.function.Consumer<CacheMetadata.Change> observer) { this.observer = observer; }
-    private static CacheMetadata.Medium medium(boolean host) {
-        return host ? CacheMetadata.Medium.HOST : CacheMetadata.Medium.HBM;
-    }
-    private void changed(long key, CacheMetadata.Medium before, CacheMetadata.Medium after) {
-        observer.accept(new CacheMetadata.Change(++version, key, before, after));
+    private void changed(long key, boolean added) {
+        observer.accept(new CacheMetadata.Change(++version, key, added));
     }
 
-    BlockTree(KvCache.EvictionPolicy devicePolicy, KvCache.EvictionPolicy hostPolicy) {
-        deviceLeaves = new TreeSet<>(order(devicePolicy)); hostLeaves = new TreeSet<>(order(hostPolicy));
-    }
-    private static Comparator<Node> order(KvCache.EvictionPolicy policy) {
-        Comparator<Node> order = switch (policy) {
-            case LRU -> Comparator.comparingLong((Node n) -> n.access).thenComparingLong(n -> n.admission);
-            case LFU -> Comparator.comparingLong((Node n) -> n.hits).thenComparingLong(n -> n.access);
-            case FIFO -> Comparator.comparingLong((Node n) -> n.admission);
-        };
-        return order.thenComparingLong(n -> n.key);
-    }
     List<Node> match(List<Long> keys) {
         var result = new ArrayList<Node>();
         var children = roots;
@@ -48,7 +38,8 @@ final class BlockTree {
         for (long key : keys) {
             var node = children.get(key);
             if (node == null) break;
-            removeCandidate(node); node.access = access; node.hits++; refresh(node);
+            if (leaves.remove(node)) { node.access = access; leaves.add(node); }
+            else node.access = access;
             result.add(node); children = node.children;
         }
         return result;
@@ -63,70 +54,40 @@ final class BlockTree {
         }
     }
     Node find(long key) { return nodes.get(key); }
-    Node insert(long key, Node parent, BlockPool.Reference cache, boolean host) {
-        if (parent != null) { removeCandidate(parent); if (!host) parent.deviceChildren++; }
-        var node = new Node(key, parent, cache, host, ++sequence);
-        nodes.put(key, node); (parent == null ? roots : parent.children).put(key, node);
-        refresh(node); if (parent != null) refresh(parent);
-        changed(key, CacheMetadata.Medium.NONE, medium(host)); return node;
+    Node insert(long key, Node parent, BlockPool.Reference cache) {
+        if (parent != null) leaves.remove(parent);
+        var node = new Node(key, parent, cache, ++sequence);
+        nodes.put(key, node);
+        (parent == null ? roots : parent.children).put(key, node);
+        leaves.add(node);
+        changed(key, true);
+        return node;
     }
-    // Transactions pin the complete matched/published prefix, including every ancestor.
-    void pin(Node node) { removeCandidate(node); node.pins++; }
-    void unpin(Node node) {
-        if (node.pins <= 0) throw new IllegalStateException("Unbalanced tree pin");
-        node.pins--; refresh(node);
-    }
-    Node movableDevice() { return deviceLeaves.isEmpty() ? null : deviceLeaves.first(); }
-    void relocate(Node node, BlockPool.Reference target, boolean host) {
-        removeCandidate(node);
-        if (node.parent != null) {
-            removeCandidate(node.parent); node.parent.deviceChildren += host ? -1 : 1;
+
+    boolean evict() {
+        for (var iterator = leaves.iterator(); iterator.hasNext();) {
+            var node = iterator.next();
+            if (node.cache.inUse()) continue;
+            iterator.remove();
+            nodes.remove(node.key);
+            (node.parent == null ? roots : node.parent.children).remove(node.key);
+            node.cache.close();
+            if (node.parent != null && node.parent.children.isEmpty()) leaves.add(node.parent);
+            changed(node.key, false);
+            return true;
         }
-        var previous = medium(node.host);
-        node.cache.close(); node.cache = target; node.host = host; node.admission = ++sequence;
-        refresh(node); if (node.parent != null) refresh(node.parent);
-        changed(node.key, previous, medium(host));
+        return false;
     }
-    boolean evict(boolean host) {
-        var candidates = host ? hostLeaves : deviceLeaves;
-        if (candidates.isEmpty()) return false;
-        var node = candidates.first();
-        if (node.parent != null) removeCandidate(node.parent);
-        (node.parent == null ? roots : node.parent.children).remove(node.key);
-        if (node.parent != null && !node.host) node.parent.deviceChildren--;
-        // Full KV descendants cannot match once their prefix is removed, even across tiers.
-        var pending = new ArrayDeque<Node>(); pending.add(node);
-        while (!pending.isEmpty()) {
-            var removed = pending.removeFirst(); pending.addAll(removed.children.values());
-            removeCandidate(removed); nodes.remove(removed.key); removed.cache.close();
-            changed(removed.key, medium(removed.host), CacheMetadata.Medium.NONE);
-        }
-        if (node.parent != null) refresh(node.parent);
-        return true;
-    }
+
     long version() { return version; }
-    CacheMetadata.Snapshot metadata() {
-        var blocks = new HashMap<Long, CacheMetadata.Medium>();
-        nodes.forEach((key, node) -> blocks.put(key, medium(node.host)));
-        return new CacheMetadata.Snapshot(version, blocks);
-    }
-    CacheMetadata.SnapshotKeys metadataKeys(CacheMetadata.Medium medium) {
-        long[] keys = nodes.values().stream().filter(node -> medium(node.host) == medium)
-            .mapToLong(node -> node.key).toArray();
-        return new CacheMetadata.SnapshotKeys(version, keys);
+    CacheMetadata.SnapshotKeys metadataKeys() {
+        return new CacheMetadata.SnapshotKeys(version, nodes.keySet().stream().mapToLong(Long::longValue).toArray());
     }
     Set<Long> keys() { return Set.copyOf(nodes.keySet()); }
     void clear() {
-        if (nodes.values().stream().anyMatch(n -> n.pins != 0)) throw new IllegalStateException("Cannot clear a pinned tree");
         for (var node : nodes.values()) {
-            node.cache.close(); changed(node.key, medium(node.host), CacheMetadata.Medium.NONE);
+            node.cache.close(); changed(node.key, false);
         }
-        nodes.clear(); roots.clear(); deviceLeaves.clear(); hostLeaves.clear();
-    }
-    private void removeCandidate(Node node) { deviceLeaves.remove(node); hostLeaves.remove(node); }
-    private void refresh(Node node) {
-        if (node.pins != 0) return;
-        int sameTierChildren = node.host ? node.children.size() - node.deviceChildren : node.deviceChildren;
-        if (sameTierChildren == 0) (node.host ? hostLeaves : deviceLeaves).add(node);
+        nodes.clear(); roots.clear(); leaves.clear();
     }
 }

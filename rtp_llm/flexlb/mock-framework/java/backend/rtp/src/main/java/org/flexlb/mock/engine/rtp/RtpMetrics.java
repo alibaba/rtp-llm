@@ -8,7 +8,9 @@ import java.util.*;
 import java.util.function.Supplier;
 import java.util.function.LongSupplier;
 
-/** RTP metric names and statistics; the scheduler supplies events and state snapshots. */
+/**
+ * RTP metric names and statistics; the scheduler supplies events and state snapshots.
+ */
 final class RtpMetrics {
     public static final String CACHE_LOOKUPS = "rtp_llm_cache_lookup_tokens_total";
     public static final String CACHE_HITS = "rtp_llm_cache_hit_tokens_total";
@@ -24,13 +26,12 @@ final class RtpMetrics {
                      long proposed, long accepted, long speculativeStreams, long outputStreams) {}
 
     public record State(long waiting, long running, long loading, long ready, long totalTokens, long availableTokens,
-                        long freeTokens, long heldTokens, long hostTotalTokens, long hostFreeTokens, int blockSize) {
+                        long freeTokens, long heldTokens, int blockSize) {
         public State {
             if (blockSize <= 0 || waiting < 0 || running < 0 || loading < 0 || ready < 0 || totalTokens < 0 || availableTokens < 0 || freeTokens < 0
-                    || heldTokens < 0 || hostTotalTokens < 0 || hostFreeTokens < 0 || hostFreeTokens > hostTotalTokens || availableTokens > totalTokens || freeTokens > availableTokens || heldTokens > totalTokens)
+                    || heldTokens < 0 || availableTokens > totalTokens || freeTokens > availableTokens || heldTokens > totalTokens)
                 throw new IllegalArgumentException("Invalid engine state");
-            if (totalTokens % blockSize != 0 || availableTokens % blockSize != 0 || freeTokens % blockSize != 0
-                    || hostTotalTokens % blockSize != 0 || hostFreeTokens % blockSize != 0)
+            if (totalTokens % blockSize != 0 || availableTokens % blockSize != 0 || freeTokens % blockSize != 0)
                 throw new IllegalArgumentException("KV capacity must contain whole blocks");
         }
     }
@@ -95,11 +96,8 @@ final class RtpMetrics {
                 kv.addMetric(List.of(role, "available"), value.availableTokens());
                 kv.addMetric(List.of(role, "free"), value.freeTokens());
                 kv.addMetric(List.of(role, "held"), value.heldTokens());
-                var host = new GaugeMetricFamily("rtp_llm_host_kv_tokens", "Local Host KV capacity in tokens.", List.of("role", "state"));
-                host.addMetric(List.of(role, "total"), value.hostTotalTokens());
-                host.addMetric(List.of(role, "free"), value.hostFreeTokens());
                 var result = new ArrayList<MetricFamilySamples>();
-                result.addAll(List.of(tasks, kv, host));
+                result.addAll(List.of(tasks, kv));
                 result.add(gauge("rtp_llm_wait_stream_size", "Waiting scheduler requests.", role, value.waiting()));
                 result.add(gauge("rtp_llm_running_stream_size", "Running scheduler requests.", role, value.running()));
                 result.add(gauge("rtp_llm_kv_cache_left_seq", "Available Device KV token capacity.", role, value.availableTokens()));
@@ -111,12 +109,6 @@ final class RtpMetrics {
                         case "available" -> value.availableTokens(); case "active" -> value.totalTokens() - value.availableTokens(); default -> value.totalTokens() - value.freeTokens();
                     };
                     blocks.addMetric(List.of(role, "device", "DEVICE"), device / value.blockSize());
-                    // Host available includes evictable entries; free alone cannot represent it.
-                    if (value.hostTotalTokens() > 0 && !name.equals("available") && !name.equals("active")) {
-                        long hostValue = name.equals("total") ? value.hostTotalTokens() : name.equals("free")
-                            ? value.hostFreeTokens() : value.hostTotalTokens() - value.hostFreeTokens();
-                        blocks.addMetric(List.of(role, "host", "HOST"), hostValue / value.blockSize());
-                    }
                     result.add(blocks);
                 }
                 var used = new GaugeMetricFamily("rtp_llm_kv_cache_used_ratio", "Unavailable Device KV capacity, percent.",
@@ -197,11 +189,10 @@ final class RtpMetrics {
         if (input < 0 || reused < 0 || reused > input) throw new IllegalArgumentException("Invalid cache observation");
         cacheInputs.inc(input); cacheHits.inc(reused);
     }
-    void cacheReuse(long input, long reused, long memoryReused) {
+    void cacheReuse(long input, long reused) {
         events.observe("rtp_llm_device_input_length", input);
         events.observe("rtp_llm_kv_cache_reuse_length", reused);
-        events.observe("rtp_llm_stream_cache_device_reuse_length", reused - memoryReused);
-        events.observe("rtp_llm_stream_cache_memory_reuse_length", memoryReused);
+        events.observe("rtp_llm_stream_cache_device_reuse_length", reused);
     }
     private void recordBatch(int context, int generate, long tokens, long maxSequence) {
         observePositive("rtp_llm_context_batch_size", context);

@@ -423,7 +423,7 @@ abstract class RtpSchedulerBase implements Scheduler {
         if (entry.lease != null) return null;
         long generation = cache.allocationGeneration();
         if (entry.attemptedGeneration == generation) return KvCache.Failure.RETRYABLE;
-        boolean reuse = config.reuseCache() && (config.deviceCache() || config.hostBlocks() > 0) && entry.input.reuse()
+        boolean reuse = config.reuseCache() && config.deviceCache() && entry.input.reuse()
             && (prefill() || !config.disableDecodeFirstReuse());
         var keys = entry.input.keys();
         int matched = Math.min(keys.size(), (entry.input.tokens() - 1) / config.blockSize());
@@ -440,14 +440,14 @@ abstract class RtpSchedulerBase implements Scheduler {
         entry.state.attach(entry.lease, () -> {
             // The final sampled token has not entered a Forward and owns no computed KV.
             int computedOutput = !prefill() && entry.generating ? Math.max(0, entry.state.snapshot().generated() - 1) : 0;
-            boolean publish = config.reuseCache() && (config.deviceCache() || config.hostBlocks() > 0) && entry.input.reuse();
+            boolean publish = config.reuseCache() && config.deviceCache() && entry.input.reuse();
             entry.lease.publish(publish ? entry.input.cacheSequence().keys(computedOutput, entry.outputToken) : List.of(),
                 (long) entry.input.tokens() + computedOutput);
         });
         metrics.cacheLookup(entry.input.tokens(), entry.reused);
         if (config.reuseCache() && entry.input.reuse())
             metrics.cacheReuse((long) (entry.input.tokens() / config.blockSize()) * config.blockSize(),
-                entry.reused, entry.lease.memoryReusedTokens());
+                entry.reused);
         return null;
     }
     @Override public List<Request> requests() { return new ArrayList<>(active.values()); }
@@ -491,10 +491,9 @@ abstract class RtpSchedulerBase implements Scheduler {
         synchronized (lock) {
             var counts = queues();
             var kv = cache.snapshot(0, false);
-            var host = cache.hostSnapshot();
             long block = config.blockSize();
             return new RtpMetrics.State(counts.waiting(), counts.running(), counts.loading(), counts.ready(), kv.totalBlocks() * block,
-                kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, host.total() * block, host.free() * block, config.blockSize());
+                kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, config.blockSize());
         }
     }
     RtpMetrics metrics() { return metrics; }

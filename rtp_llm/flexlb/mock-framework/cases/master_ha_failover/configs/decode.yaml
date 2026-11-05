@@ -4,16 +4,8 @@ dp_size: 1
 seq_size_per_block: 128
 reuse_cache: false
 enable_device_cache: true
-enable_memory_cache: false
-enable_disk_cache: false
 reserve_block_ratio: 8
 enable_remote_cache: false
-device_eviction_policy: lru
-# 异步队列背压未模拟，以下 real 参数忽略。
-block_tree_business_queue_max_size: 10000
-block_tree_transfer_queue_max_size: 10000
-block_tree_device_evict_low_watermark_ratio: 0.82
-block_tree_device_evict_high_watermark_ratio: 0.9
 concurrency_limit: 128
 max_batch_tokens_size: 1048576
 load_cache_timeout_ms: 5000

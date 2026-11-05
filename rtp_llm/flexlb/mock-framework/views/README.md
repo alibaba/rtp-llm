@@ -16,7 +16,7 @@ Client 的 `mock_client_tpot_seconds` 按成功请求首尾 token 的到达间�
 
 ## 已实现与缺口
 
-Engine 的 waiting/running、Device 可用 Tokens、Device/Host 容量 Blocks、Device 不可用比例，以及 P/D TPS、终态 QPS 已接入原 RTP 指标名称及对应原面板。使用率为 0–100；used Blocks=total-free，不可用比例=(total-available)/total，不能混淆。Host 暂缺 available 与其引用分类，相关缺口保留。
+Engine 的 waiting/running、Device 可用 Tokens、Device 容量 Blocks、Device 不可用比例，以及 P/D TPS、终态 QPS 已接入原 RTP 指标名称及对应原面板。使用率为 0–100；used Blocks=total-free，不可用比例=(total-available)/total，不能混淆。P/D 不再模拟或展示 Host 层。
 
 真实事件的辅助 Counter/Histogram 使用 rtp_llm_*，包括接纳/终态、缓存查找/命中、Forward Tokens 和实际耗时分布；这些是本地 Prometheus 增补，不声称 real 已有完全相同的 Counter/Histogram 名称。Python 接口同步消费新名字。计划 Forward、ViT 模拟运行图片数及 hash 预算保留 mock_ 前缀。实际观测归回 P/D 的 RTP row，Mock 模拟质量各保留实际/理论、偏差、模拟执行时间占比三个面板，不将最后一项当作 GPU 利用率。
 
@@ -24,7 +24,7 @@ Engine 的 waiting/running、Device 可用 Tokens、Device/Host 容量 Blocks、
 
 旧实验没有新导出，需使用其保存的原始大盘；本次不改写旧 TSDB，也不生成旧名字别名来伪造新实验结果。
 
-已补逐请求等待/首 Token/总耗时、输入/输出长度与迭代数、逐批 context/generate Batch、执行 Tokens、最长序列。main 的本地 KV 加载同步完成，异步加载面板没有样本。仍缺完整 PD 传输延迟/字节/失败、KV 分池引用/淘汰/Host 命中读写等细分埋点。大盘保留线上相应关键指标的入口，但不拿 running 请求数冒充 batch size，不拿 Device 命中冒充 Host 命中，不拿 Fetch 等待冒充 compute 或传输耗时。实际/理论 Forward 最近值和 Histogram 是不同口径，分开展示。
+已补逐请求等待/首 Token/总耗时、输入/输出长度与迭代数、逐批 context/generate Batch、执行 Tokens、最长序列。main 的本地 KV 加载同步完成，异步加载面板没有样本。仍缺完整 PD 传输延迟/字节/失败、KV 引用/淘汰等细分埋点。大盘保留当前模拟能力对应的关键指标入口，但不拿 running 请求数冒充 batch size，不拿 Device 命中冒充 Host 命中，不拿 Fetch 等待冒充 compute 或传输耗时。实际/理论 Forward 最近值和 Histogram 是不同口径，分开展示。
 
 Master 的已有 Reporter 比 Engine 完整，所以可用曲线多。线上 RTP-LLM 大盘还包含本分支尚未导出的 Master 新指标、Frontend 和 Pod 监控，这些明确标为待埋点；原生 Micrometer JVM 资源另外补充，不能把 KMonitor 的不同指标名当成本地已导出。
 
@@ -72,3 +72,5 @@ View 的 `annotation_steps` 只配置默认选择，省略则全部显示，空�
 | ViT 缓存 | `py_rtp_vit_embedding_cache_{hit,miss,inflight,eviction}_qps`、`tokens` / `bytes` | GPU+CPU 逻辑驻留合计，不能作为真实 GPU/JVM 物理占用 |
 
 新增事件 Gauge 用采集窗口均值而非只保留最后一个事件；无事件时不发耗时样本。`_sum` / `_count` 为本地累计查询辅助量。QPS 按实际窗口秒数换算，空闲为零。它们与 KMonitor 的固定上报周期并非逐点相同；共享 JVM 不能导出可信的单 Engine CPU/堆/GPU 利用率，资源面板继续留空。
+
+P/D KV 仅模拟本地 Full-KV 池和 LRU。大盘删除 Host 容量、Memory KVCache、Disk/Remote 复用和远程 connector 引用面板；保留本地容量、请求引用和前缀复用观测。ViT 的 CPU/GPU embedding 缓存不属于 P/D KV，保留原有面板。

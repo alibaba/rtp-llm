@@ -65,7 +65,7 @@ class RtpSchedulerTest {
 
     @Test void retainedPrefillKeepsKvThroughReadUntilTransferAcknowledgement() throws Exception {
         var config = config("prefill", "1", 2); var listener = new Listener();
-        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(config.blockSize(), 8, 0);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             var request = scheduler.input(input(1, true), listener);
             complete(scheduler, scheduler.schedule(), config); drain(scheduler);
@@ -83,7 +83,7 @@ class RtpSchedulerTest {
 
     @Test void decodeBatchRetainsRunningAndCancellationCannotDamageAnotherMember() throws Exception {
         var config = config("decode", "1", 2); var first = new Listener(); var second = new Listener();
-        try (var cache = new KvCache(config.blockSize(), 12, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(config.blockSize(), 12, 0);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             var a = scheduler.input(input(1, false), first); var b = scheduler.input(input(2, false), second);
             scheduler.maintain(); drain(scheduler); generate(scheduler, a); generate(scheduler, b);
@@ -116,7 +116,7 @@ class RtpSchedulerTest {
 
     @Test void closingEngineDefersCleanupUntilOutstandingReadReturns() throws Exception {
         Object lock = new Object(); var config = config("prefill", "1", 1); var listener = new Listener();
-        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(config.blockSize(), 8, 0);
              var engine = new EngineLoop(lock, RtpScheduler.factory(config), new TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             var request = engine.input(input(1, true), listener);
             listener.output.get(2, TimeUnit.SECONDS);
@@ -132,7 +132,7 @@ class RtpSchedulerTest {
 
     @Test void transferAndGenerationAreIndependentRequirementsAndOldHandlesCannotStopNewRequests() throws Exception {
         var config = config("decode", "1", 2); var listener = new Listener();
-        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(config.blockSize(), 8, 0);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             var old = scheduler.input(input(1, false), listener);
             scheduler.maintain(); drain(scheduler);
@@ -150,7 +150,7 @@ class RtpSchedulerTest {
 
     @Test void prefillAdmissionWaitsForCapacityAndBatchesAccordingToConfiguredLimit() throws Exception {
         var config = config("prefill", "1", 2, 100);
-        try (var cache = new KvCache(config.blockSize(), 12, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(config.blockSize(), 12, 0);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             var held = cache.acquire(12L * config.blockSize(), List.of()).lease();
             var first = new Listener(); scheduler.input(input(1, false), first); scheduler.input(input(2, false), new Listener());
@@ -173,7 +173,7 @@ class RtpSchedulerTest {
                 super.output(request, output);
             }
         };
-        try (var cache = new KvCache(config.blockSize(), 12, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(config.blockSize(), 12, 0);
              var engine = new EngineLoop(lock, RtpScheduler.factory(config), new TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             engine.input(input(1, false), slow);
             assertTrue(blocked.await(2, TimeUnit.SECONDS));
@@ -187,7 +187,7 @@ class RtpSchedulerTest {
         var config = config("decode", "1", 1); var listener = new Listener() {
             @Override public void output(Scheduler.Request request, Scheduler.Output output) { throw new IllegalStateException("closed"); }
         };
-        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(config.blockSize(), 8, 0);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             var request = scheduler.input(input(1, false), listener);
             scheduler.maintain(); drain(scheduler); generate(scheduler, request);
@@ -199,7 +199,7 @@ class RtpSchedulerTest {
 
     @Test void tokenBudgetDoesNotReserveKvForUnselectedRequests() throws Exception {
         var config = config("prefill", "1", 2, 5);
-        try (var cache = new KvCache(config.blockSize(), 12, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(config.blockSize(), 12, 0);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             scheduler.input(input(1, false), new Listener());
             var waiting = scheduler.input(input(2, false), new Listener());
@@ -229,7 +229,7 @@ class RtpSchedulerTest {
                 throw new IllegalStateException("Transport closed while sending");
             }
         };
-        try (var cache = new KvCache(config.blockSize(), 12, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(config.blockSize(), 12, 0);
              var engine = new EngineLoop(lock, RtpScheduler.factory(config), new TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             var request = engine.input(input(1, false), listener);
             assertTrue(blocked.await(2, TimeUnit.SECONDS));
@@ -253,7 +253,7 @@ class RtpSchedulerTest {
             }
         };
         var lock = new Object();
-        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(config.blockSize(), 8, 0);
              var loop = new EngineLoop(lock, RtpScheduler.factory(config), new TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             loop.input(input(1, false), listener);
             assertTrue(entered.await(2, TimeUnit.SECONDS));
@@ -267,7 +267,7 @@ class RtpSchedulerTest {
 
     @Test void liveStatusKeepsNativeTimingSentinelsUntilDequeue() throws Exception {
         var config = config("prefill", "1", 1);
-        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(config.blockSize(), 8, 0);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             scheduler.input(input(1, true), new Listener());
             var before = scheduler.tasks();
@@ -294,7 +294,7 @@ class RtpSchedulerTest {
             ((ObjectNode) settings.path("mock.compute")).putObject("decode").put("draft.tokens", 4).put("acceptance.rate", 0);
             var path = directory.resolve("spec-" + capacity + ".json"); json.writeValue(path.toFile(), root);
             var config = RtpConfig.load(path);
-            try (var cache = new KvCache(config.blockSize(), capacity, 0, KvCache.EvictionPolicy.LRU)) {
+            try (var cache = new KvCache(config.blockSize(), capacity, 0)) {
                 var scheduler = new RtpScheduler(new Object(), config, cache); var listener = new Listener();
                 try {
                     var request = scheduler.input(new Scheduler.Input("r", 1, 0, 123, 10, 0, System.nanoTime(),
@@ -322,7 +322,7 @@ class RtpSchedulerTest {
     @Test void decodeGrowthFailureReleasesOnlyItsLeaseAndUnblocksWaitingAdmission() throws Exception {
         var config = config("decode", "1", 2);
         var finishedLog = new TaskHistory();
-        try (var cache = new KvCache(config.blockSize(), 7, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(config.blockSize(), 7, 0);
              var scheduler = new RtpScheduler(new Object(), config, cache, finishedLog)) {
             var first = new Listener(); var second = new Listener(); var waiting = new Listener();
             var a = scheduler.input(input(1, false), first);
@@ -362,7 +362,7 @@ class RtpSchedulerTest {
 
     @Test void prefillCapacityWaitExpiresOrCancelsWithoutRevivingAfterRelease() throws Exception {
         var config = config("prefill", "1", 2); var lock = new Object();
-        try (var cache = new KvCache(config.blockSize(), 3, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(config.blockSize(), 3, 0);
              var owner = cache.acquire(6, List.of()).lease();
              var engine = new EngineLoop(lock, RtpScheduler.factory(config), new TaskHistory(), cache, config.compute(), config.role(), config.id())) {
             var expired = new Listener(); var cancelled = new Listener();
@@ -387,7 +387,7 @@ class RtpSchedulerTest {
 
     @Test void oversizedPrefillDoesNotPreventSmallerRequestFromRunning() throws Exception {
         var config = config("prefill", "1", 2);
-        try (var cache = new KvCache(config.blockSize(), 2, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(config.blockSize(), 2, 0);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             var oversized = new Listener(); var small = new Listener();
             assertEquals(RequestFailure.Reason.CAPACITY,
@@ -423,7 +423,7 @@ class RtpSchedulerTest {
     }
     @Test void ordinarySchedulerIgnoresGroupMetadataAndRejectsExplicitGroupsWithoutAdmission() throws Exception {
         var config = config("prefill", "1", 4, 100);
-        try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(2, 20, 0);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             assertThrows(RequestFailure.class, () -> scheduler.input(batch(sized(9, 5))));
             assertTrue(scheduler.requests().isEmpty());
@@ -440,7 +440,7 @@ class RtpSchedulerTest {
 
     @Test void explicitBatchesWithTheSameReportedIdNeverMergeEvenWhenSingleton() throws Exception {
         var config = config("prefill", "1", 4, 100);
-        try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(2, 20, 0);
              var scheduler = new RtpGroupScheduler(new Object(), config, cache, new TaskHistory())) {
             assertEquals(2, scheduler.input(batch(sized(1, 5), sized(2, 5))).size());
             scheduler.input(batch(sized(3, 5)));
@@ -453,7 +453,7 @@ class RtpSchedulerTest {
     }
     @Test void groupCapacityScanKeepsResidualMembersAndCanAdmitLaterSmallerMembers() throws Exception {
         var config = config("prefill", "1", 4, 100);
-        try (var cache = new KvCache(2, 4, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(2, 4, 0);
              var scheduler = new RtpGroupScheduler(new Object(), config, cache, new TaskHistory())) {
             scheduler.input(batch(sized(1, 5), sized(2, 5), sized(3, 1)));
             var first = scheduler.schedule(); assertEquals(List.of(1L, 3L), ids(first));
@@ -466,7 +466,7 @@ class RtpSchedulerTest {
     }
     @Test void ordinaryAndGroupWorkAlternateAtEmptyForwardBoundariesWithoutMixing() throws Exception {
         var config = config("prefill", "1", 4, 100);
-        try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(2, 20, 0);
              var scheduler = new RtpGroupScheduler(new Object(), config, cache, new TaskHistory())) {
             scheduler.input(batch(sized(1, 5), sized(2, 5)));
             scheduler.input(sized(3, 5), new Listener());
@@ -481,7 +481,7 @@ class RtpSchedulerTest {
     }
     @Test void oversizedGroupFallsBackToOrdinaryAdmissionAndCanMergeWithSingles() throws Exception {
         var config = config("prefill", "1", 2, 100);
-        try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(2, 20, 0);
              var scheduler = new RtpGroupScheduler(new Object(), config, cache, new TaskHistory())) {
             scheduler.input(batch(sized(1, 5), sized(2, 5), sized(3, 5)));
             scheduler.input(sized(4, 5), new Listener());
@@ -493,7 +493,7 @@ class RtpSchedulerTest {
     }
     @Test void initializedKvLimitProtectsRetainedSourcesAndCountsAsAnOversizedGroupLimit() throws Exception {
         var config = admissionLimits(config("prefill", "1", 4, 100), 1, 0);
-        try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(2, 20, 0);
              var scheduler = new RtpGroupScheduler(new Object(), config, cache, new TaskHistory())) {
             var held = scheduler.input(input(9, true), new Listener());
             var first = scheduler.schedule(); complete(scheduler, first, config); drain(scheduler);
@@ -508,7 +508,7 @@ class RtpSchedulerTest {
     }
     @Test void prefillRectangleLimitsGroupsAndUncachedQuotaAppliesToOrdinaryAdmission() throws Exception {
         var config = admissionLimits(config("prefill", "1", 4, 100), 0, 1);
-        try (var cache = new KvCache(2, 100, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(2, 100, 0);
              var scheduler = new RtpGroupScheduler(new Object(), config, cache, new TaskHistory())) {
             scheduler.input(batch(sized(1, 60), sized(2, 30)));
             var first = scheduler.schedule(); assertEquals(List.of(1L), ids(first));
@@ -526,7 +526,7 @@ class RtpSchedulerTest {
     }
     @Test void rejectedAndCancelledGroupMembersDoNotCancelOtherMembers() throws Exception {
         var config = config("prefill", "1", 4, 100);
-        try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(2, 20, 0);
              var scheduler = new RtpGroupScheduler(new Object(), config, cache, new TaskHistory())) {
             var admitted = scheduler.input(batch(sized(1, 5), sized(1, 5), sized(2, 5)));
             assertEquals(RequestFailure.Reason.DUPLICATE, admitted.get(1).failure().reason());
@@ -539,7 +539,7 @@ class RtpSchedulerTest {
 
     @Test void oneTokenGenerationCanShareAGroupWithMultiTokenGeneration() throws Exception {
         var config = config("prefill", "1", 4, 100);
-        try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(2, 20, 0);
              var scheduler = new RtpGroupScheduler(new Object(), config, cache, new TaskHistory())) {
             var one = new Scheduler.Input("1", 1, 81, 5, 1, 0, System.nanoTime(),
                 Long.MAX_VALUE, new CacheSequence(2, Collections.nCopies(5, 0), List.of()), false, false, 0, false);
@@ -558,7 +558,7 @@ class RtpSchedulerTest {
                 .put("cp_rotate_method", "ALL_GATHER").put("tp_size", 2)
                 .put("cp_force_single_prefill", single).put("mock.scheduler.mode", mode);
             var config = RtpConfig.load(root);
-            try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+            try (var cache = new KvCache(2, 20, 0);
                  var scheduler = RtpScheduler.factory(config).create(new Object(), cache, new TaskHistory())) {
                 if (mode.equals("group")) scheduler.input(batch(sized(1, 5), sized(2, 5)));
                 else { scheduler.input(sized(1, 5), new Listener()); scheduler.input(sized(2, 5), new Listener()); }
@@ -573,7 +573,7 @@ class RtpSchedulerTest {
             .put("seq_size_per_block", 2).put("max_batch_tokens_size", 100).put("max_batch_tokens_without_cache", 6)
             .put("cp_rotate_method", "ALL_GATHER").put("tp_size", 2).put("cp_force_single_prefill", false);
         var config = RtpConfig.load(root);
-        try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(2, 20, 0);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             scheduler.input(sized(1, 5), new Listener()); scheduler.input(sized(2, 5), new Listener());
             assertEquals(List.of(1L), ids(scheduler.schedule()));
@@ -582,7 +582,7 @@ class RtpSchedulerTest {
 
     @Test void automaticTokenBudgetDoesNotSilentlyDisableBatching() throws Exception {
         var config = config("prefill", "1", 2);
-        try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(2, 20, 0);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             scheduler.input(sized(1, 5), new Listener()); scheduler.input(sized(2, 5), new Listener());
             assertEquals(List.of(1L, 2L), ids(scheduler.schedule()));
@@ -601,7 +601,7 @@ class RtpSchedulerTest {
     @Test void decodeClampsRequestedLengthAndSpeculativeContextBeforeForward() throws Exception {
         for (int drafts : List.of(0, 2)) {
             var config = boundaryConfig("decode", 10, drafts); var listener = new Listener();
-            try (var cache = new KvCache(2, 16, 0, KvCache.EvictionPolicy.LRU);
+            try (var cache = new KvCache(2, 16, 0);
                  var scheduler = new RtpScheduler(new Object(), config, cache)) {
                 var request = scheduler.input(new Scheduler.Input("r", 1, 0, 4, 100, 0, System.nanoTime(), Long.MAX_VALUE,
                     new CacheSequence(2, Collections.nCopies(4, 0), List.of()), false, false, 20, true), listener);
@@ -630,7 +630,7 @@ class RtpSchedulerTest {
 
     @Test void speculativeReserveRejectsOverflowButAllowsExactContextBoundary() throws Exception {
         var config = boundaryConfig("decode", 10, 2); var listener = new Listener();
-        try (var cache = new KvCache(2, 16, 0, KvCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(2, 16, 0);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             var invalid = new Scheduler.Input("invalid", 1, 0, 8, 1, 0, System.nanoTime(), Long.MAX_VALUE,
                 new CacheSequence(2, Collections.nCopies(8, 0), List.of()), false, false, 0, true);
@@ -654,7 +654,7 @@ class RtpSchedulerTest {
         ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", 2)
             .put("max_inited_kv_cache_streams", 1);
         var config = RtpConfig.load(root);
-        for (boolean group : List.of(false, true)) try (var cache = new KvCache(2, 3, 0, KvCache.EvictionPolicy.LRU);
+        for (boolean group : List.of(false, true)) try (var cache = new KvCache(2, 3, 0);
                 var scheduler = group ? new RtpGroupScheduler(new Object(), config, cache, new TaskHistory()) : new RtpScheduler(new Object(), config, cache)) {
             scheduler.input(input(1, true), new Listener());
             complete(scheduler, scheduler.schedule(), config); drain(scheduler);

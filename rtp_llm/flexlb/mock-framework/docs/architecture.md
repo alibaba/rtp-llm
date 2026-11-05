@@ -436,7 +436,7 @@ Engine 的 HTTP 与原生健康检查读取现有 Loop/Scheduler 失败状态，
 
 CacheSequence 在 shared/cache 中维护不可变 token 序列并计算完整物理块的规范 key，不依赖 RPC。main 的接入层将当前协议准备后的 token 交给它，不引入 DSV4.1 的缓存区间 wire 字段。Decode 成功结束时发布 prompt 和已计算输出的完整块，排除最后一个尚未计算 KV 的采样 token；取消、失败及预留容量不发布。GENERATE 许可携带原生首 token，重复输出模型使用同一 token 推导输出前缀身份。
 
-KvCache/BlockTree 提供 CacheMetadata 快照与介质变更事件；仅有效缓存块进入元数据，工作租约和预留块不进入。注册、删除和 HBM/Host 迁移都推进版本。KvcmReporter 位于 shared/cache，只接收规范身份、配置和元数据；RTP 负责实例配置装配，调度锁内不执行网络。队列溢出退回完整快照，保持数据最终一致。仅实现 Meta HTTP 注册、心跳及 HBM 缓存事件，没有远端 payload 读写。
+KvCache/BlockTree 提供 CacheMetadata 快照与增删事件；仅有效缓存块进入元数据，工作租约和预留块不进入。有效前缀插入和删除推进版本。KvcmReporter 位于 shared/cache，只接收规范身份、配置和元数据；RTP 负责实例配置装配，调度锁内不执行网络。队列溢出退回完整快照，保持数据最终一致。仅实现 Meta HTTP 注册、心跳及 HBM 缓存事件，没有远端 payload 读写。
 
 ### 共享 ViT 的准备与计算边界
 
@@ -448,6 +448,6 @@ KvCache/BlockTree 提供 CacheMetadata 快照与介质变更事件；仅有效�
 
 ### main 的调度状态和缓存指标
 
-调度器指标按实际队列报告 waiting/running，PD 等待不计入 waiting；完成时发布最终阶段耗时，缓存加载延迟不使用 PD 传输时间代替。缓存复用区分 Device/Host 来源；main 保留同步缓存模型，不引入远端加载任务。具体字段及指标见 [组件参考](component-reference.md)。
+调度器指标按实际队列报告 waiting/running，PD 等待不计入 waiting；完成时发布最终阶段耗时，缓存加载延迟不使用 PD 传输时间代替。缓存固定为单本地 Full-KV 池和 LRU；不模拟 Host/Disk/Remote 层、迁移、水位或远程加载任务。具体字段及指标见 [组件参考](component-reference.md)。
 
 配置在装配前完成归一和派生；KVCM 心跳与串行元数据传输分别执行，快照 ACK 决定版本推进。下载模式的模拟特征身份来自文件内容与几何参数，main 的图片 span 协议保持原有规则。详见组件参考。

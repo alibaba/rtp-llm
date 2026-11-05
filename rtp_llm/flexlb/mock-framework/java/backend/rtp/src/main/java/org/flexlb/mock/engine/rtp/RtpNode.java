@@ -17,7 +17,9 @@ import org.flexlb.mock.cache.KvcmReporter;
 import org.flexlb.mock.engine.Scheduler;
 import org.flexlb.mock.runtime.ApiServer;
 
-/** One owned RTP P/D object with independent listeners and resources. Does not contain the case runner or a cluster controller. */
+/**
+ * One owned RTP P/D object with independent listeners and resources. Does not contain the case runner or a cluster controller.
+ */
 public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
     private final RtpConfig config;
     private final KvCache cache;
@@ -35,8 +37,7 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
     private RtpNode(RtpConfig config, Scheduler.Factory schedulers) {
         this.config = Objects.requireNonNull(config);
         Objects.requireNonNull(schedulers);
-        cache = new KvCache(config.blockSize(), config.deviceBlocks(), config.reserveBlocks(), config.evictionPolicy(),
-            config.deviceCache(), config.hostBlocks(), config.hostPolicy(), config.deviceWatermark(), config.hostWatermark());
+        cache = new KvCache(config.blockSize(), config.deviceBlocks(), config.reserveBlocks(), config.deviceCache());
         var lock = new Object();
         var finished = new TaskHistory();
         try {

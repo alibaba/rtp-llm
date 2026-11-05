@@ -7,7 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.flexlb.mock.engine.rtp.RtpMetrics.StepStats;
 
 class RtpMetricsTest {
-    private static final RtpMetrics.State IDLE = new RtpMetrics.State(0, 0, 0, 0, 100, 100, 100, 0, 0, 0, 1);
+    private static final RtpMetrics.State IDLE = new RtpMetrics.State(0, 0, 0, 0, 100, 100, 100, 0, 1);
 
     private static final RtpMetrics.RequestStats REQUEST =
         new RtpMetrics.RequestStats(20_000, 4_000, 2_000, 0, -1, 10, 3, 2, 4);
@@ -21,14 +21,12 @@ class RtpMetricsTest {
         var state = new AtomicReference<>(IDLE);
         var metrics = new RtpMetrics("prefill", state::get);
         assertEquals(0, sample(metrics.scrape(), "rtp_llm_requests_started_total", ""));
-        state.set(new RtpMetrics.State(2, 1, 3, 4, 100, 70, 50, 30, 200, 120, 5));
+        state.set(new RtpMetrics.State(2, 1, 3, 4, 100, 70, 50, 30, 5));
         var before = metrics.scrape();
         assertEquals(2, sample(before, "rtp_llm_scheduler_requests", "state=\"waiting\""));
         assertEquals(70, sample(before, "rtp_llm_kv_tokens", "state=\"available\""));
         assertEquals(3, sample(before, "rtp_llm_scheduler_requests", "state=\"loading\""));
         assertEquals(4, sample(before, "rtp_llm_scheduler_requests", "state=\"ready\""));
-        assertEquals(200, sample(before, "rtp_llm_host_kv_tokens", "state=\"total\""));
-        assertEquals(120, sample(before, "rtp_llm_host_kv_tokens", "state=\"free\""));
         assertEquals(70, sample(metrics.scrape(), "rtp_llm_kv_tokens", "state=\"available\""));
         state.set(IDLE);
         assertEquals(100, sample(metrics.scrape(), "rtp_llm_kv_tokens", "state=\"available\""));
@@ -38,7 +36,7 @@ class RtpMetricsTest {
         var metrics = new RtpMetrics("prefill", () -> IDLE);
         metrics.started(); metrics.started();
         metrics.cacheLookup(100, 60); metrics.cacheLookup(10, 0);
-        metrics.cacheReuse(100, 60, 20);
+        metrics.cacheReuse(100, 60);
         metrics.stepCompleted(new StepStats(0, 0, 0, 20_000_000, 20_000_000, 20_000_000, 1000, 100, 40, 1, 0, 0, 0, 0));
         metrics.stepCompleted(new StepStats(0, 0, 0, 10_000_000, 10_000_000, 10_000_000, 1000, 10, 10, 1, 0, 0, 0, 0));
         metrics.requestFinished(RtpMetrics.Outcome.success, REQUEST);
@@ -46,8 +44,7 @@ class RtpMetricsTest {
         var text = metrics.scrape();
         assertEquals(110, sample(text, "rtp_llm_cache_lookup_tokens_total", ""));
         assertEquals(60, sample(text, "rtp_llm_cache_hit_tokens_total", ""));
-        assertEquals(40, sample(text, "rtp_llm_stream_cache_device_reuse_length", ""));
-        assertEquals(20, sample(text, "rtp_llm_stream_cache_memory_reuse_length", ""));
+        assertEquals(60, sample(text, "rtp_llm_stream_cache_device_reuse_length", ""));
         assertEquals(50, sample(text, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
         assertEquals(110, sample(text, "rtp_llm_forward_tokens_total", "kind=\"input\""));
         assertEquals(2, sample(text, "rtp_llm_model_forward_seconds_count", ""));
@@ -106,7 +103,7 @@ class RtpMetricsTest {
     }
 
     @Test void nativeQueueAndKvMetricsKeepRealUnitsAndDoNotInventHostAvailability() {
-        var metrics = new RtpMetrics("prefill", () -> new RtpMetrics.State(2, 1, 3, 4, 100, 70, 50, 30, 200, 120, 5));
+        var metrics = new RtpMetrics("prefill", () -> new RtpMetrics.State(2, 1, 3, 4, 100, 70, 50, 30, 5));
         var text = metrics.scrape();
         assertEquals(2, sample(text, "rtp_llm_wait_stream_size", ""));
         assertEquals(1, sample(text, "rtp_llm_running_stream_size", ""));
@@ -115,12 +112,10 @@ class RtpMetricsTest {
         assertEquals(14, sample(text, "rtp_llm_kv_cache_available_blocks", "tier=\"DEVICE\""));
         assertEquals(10, sample(text, "rtp_llm_kv_cache_used_blocks", "tier=\"DEVICE\""));
         assertEquals(30, sample(text, "rtp_llm_kv_cache_used_ratio", "tier=\"DEVICE\""));
-        assertEquals(40, sample(text, "rtp_llm_kv_cache_total_blocks", "tier=\"HOST\""));
-        assertEquals(24, sample(text, "rtp_llm_kv_cache_free_blocks", "tier=\"HOST\""));
         assertFalse(text.lines().anyMatch(line -> line.startsWith("rtp_llm_kv_cache_available_blocks{") && line.contains("HOST")));
         assertFalse(text.contains("rtp_llm_loading_cache_stream_size"));
         assertFalse(text.contains("mock_engine_"));
-        assertThrows(IllegalArgumentException.class, () -> new RtpMetrics.State(0, 0, 0, 0, 100, 71, 50, 0, 0, 0, 5));
+        assertThrows(IllegalArgumentException.class, () -> new RtpMetrics.State(0, 0, 0, 0, 100, 71, 50, 0, 5));
     }
 
     @Test void nativeThroughputSeparatesActiveTimeWallTimeAndTerminalQpsAndClearsIdleWindows() {
@@ -204,7 +199,7 @@ class RtpMetricsTest {
         assertThrows(IllegalArgumentException.class, () -> metrics.cacheLookup(1, 2));
         assertThrows(IllegalArgumentException.class, () -> metrics.stepCompleted(new StepStats(0, 0, 0, -1, -1, -1, 1000, 1, 1, 1, 0, 0, 0, 0)));
         assertThrows(IllegalArgumentException.class, () -> metrics.stepCompleted(new StepStats(0, 0, 0, 1, 1, 1, 1000, 1, 2, 1, 0, 0, 0, 0)));
-        assertThrows(IllegalArgumentException.class, () -> new RtpMetrics.State(0, 0, 0, 0, 10, 11, 0, 0, 0, 0, 1));
+        assertThrows(IllegalArgumentException.class, () -> new RtpMetrics.State(0, 0, 0, 0, 10, 11, 0, 0, 1));
         assertEquals(0, sample(metrics.scrape(), "rtp_llm_cache_lookup_tokens_total", ""));
         assertEquals(0, sample(metrics.scrape(), "rtp_llm_model_forward_seconds_count", ""));
     }

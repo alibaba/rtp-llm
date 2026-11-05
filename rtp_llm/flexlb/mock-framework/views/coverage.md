@@ -4,7 +4,7 @@
 
 状态表示源码中是否有对应导出，不表示每次实验必有样本。待埋点项仅保留查询/说明，不增加虚假指标；资源项因共享 JVM 归属未接线，暂不绑定每 Engine 查询。
 
-P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指标只在模拟 draft 验收的执行步出现。KV 分池沿用 BlockTree 指标的块数、比例和 tier，未配置 Host 池时没有该池时序。PD 保留 Mock 已模拟的流状态。异步缓存加载与真实 CacheStore 传输耗时没有样本。ViT 的图片准备指标仅在成功完成实际 URL 路径时采样。
+P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指标只在模拟 draft 验收的执行步出现。KV 仅保留本地 Device Full-KV 池，沿用 BlockTree 指标的块数、比例和 tier；不再展示 Host/Disk/Remote 层面板。PD 保留 Mock 已模拟的流状态。异步缓存加载与真实 CacheStore 传输耗时没有样本。ViT 的图片准备指标仅在成功完成实际 URL 路径时采样。
 
 | 角色 | RTP-LLM panel | 标题 | 新框架导出 | 原指标 |
 |---|---:|---|---|---|
@@ -70,9 +70,6 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | prefill | 143 | kv cache item num | 待埋点 | rtp_llm_kv_cache_item_num |
 | prefill | 147 | 实际的总reuse len | 已上报 | rtp_llm_kv_cache_reuse_length |
 | prefill | 10636 | new device reuse length | 待埋点 | rtp_llm_stream_cache_device_reuse_length |
-| prefill | 491 | new memory reuse length | 待埋点 | rtp_llm_stream_cache_memory_reuse_length |
-| prefill | 10590 | new disk reuse length | 待埋点 | rtp_llm_stream_cache_disk_reuse_length |
-| prefill | 510 | new remote reuse length | 待埋点 | rtp_llm_stream_cache_remote_reuse_length |
 | prefill | 10094 | kv cache request ref blocks | 待埋点 | rtp_llm_kv_cache_request_ref_blocks |
 | prefill | 174 | kv cache free blocks | 已上报 | rtp_llm_kv_cache_free_blocks |
 | prefill | 173 | kv cache available blocks | 已上报 | rtp_llm_kv_cache_available_blocks |
@@ -87,7 +84,6 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | prefill | 552 | kv cache available blocks | 部分待埋点 | rtp_llm_kv_cache_pool_available_blocks,rtp_llm_kv_cache_available_blocks |
 | prefill | 553 | kv cache free blocks | 部分待埋点 | rtp_llm_kv_cache_pool_free_blocks,rtp_llm_kv_cache_free_blocks |
 | prefill | 554 | request_ref_blocks | 待埋点 | rtp_llm_kv_cache_pool_request_ref_blocks,rtp_llm_kv_cache_request_ref_blocks |
-| prefill | 10631 | remote_connector_ref_blocks | 待埋点 | rtp_llm_kv_cache_remote_connector_ref_blocks |
 | prefill | 10632 | pd_connector_ref_blocks | 待埋点 | rtp_llm_kv_cache_pd_connector_ref_blocks |
 | prefill | 556 | kv cache total blocks | 部分待埋点 | rtp_llm_kv_cache_pool_total_blocks,rtp_llm_kv_cache_total_blocks |
 | prefill | 557 | kv_cache_pool_used_ratio | 部分待埋点 | rtp_llm_kv_cache_pool_used_ratio,rtp_llm_kv_cache_used_ratio |
@@ -96,36 +92,6 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | prefill | 10594 | kv_cache_pool_store_ref_blocks | 待埋点 | rtp_llm_kv_cache_store_ref_blocks |
 | prefill | 10602 | kv_cache_pool_eviction_ref_blocks | 待埋点 | rtp_llm_kv_cache_eviction_target_ref_blocks |
 | prefill | 10635 | rtp_llm_kv_cache_frozen_ref_blocks | 待埋点 | rtp_llm_kv_cache_frozen_ref_blocks |
-| prefill | 420 | match qps | 待埋点 | rtp_llm_kv_cache_memory_cache_match_qps |
-| prefill | 423 | match latency | 待埋点 | rtp_llm_kv_cache_memory_cache_match_latency_us |
-| prefill | 422 | match miss qps | 待埋点 | rtp_llm_kv_cache_memory_cache_match_failed_qps |
-| prefill | 421 | match ignore qps | 待埋点 | rtp_llm_kv_cache_memory_cache_match_none_qps |
-| prefill | 424 | match input token | 待埋点 | rtp_llm_kv_cache_memory_cache_match_input_token |
-| prefill | 425 | real matched token | 待埋点 | rtp_llm_kv_cache_memory_cache_matched_token |
-| prefill | 426 | read qps | 待埋点 | rtp_llm_kv_cache_memory_cache_read_qps |
-| prefill | 487 | read failed qps | 待埋点 | rtp_llm_kv_cache_memory_cache_read_failed_qps |
-| prefill | 489 | read none qps | 待埋点 | rtp_llm_kv_cache_memory_cache_read_none_qps |
-| prefill | 488 | read latency | 待埋点 | rtp_llm_kv_cache_memory_cache_read_latency_us |
-| prefill | 486 | read input token | 待埋点 | rtp_llm_kv_cache_memory_cache_read_input_token |
-| prefill | 490 | real read token | 待埋点 | rtp_llm_kv_cache_memory_cache_read_token |
-| prefill | 485 | write qps | 待埋点 | rtp_llm_kv_cache_memory_cache_write_qps |
-| prefill | 427 | write failed qps | 待埋点 | rtp_llm_kv_cache_memory_cache_write_failed_qps |
-| prefill | 437 | write none qps | 待埋点 | rtp_llm_kv_cache_memory_cache_write_none_qps |
-| prefill | 428 | write cache latency | 待埋点 | rtp_llm_kv_cache_memory_cache_write_latency_us |
-| prefill | 429 | write input token | 待埋点 | rtp_llm_kv_cache_memory_cache_write_input_token |
-| prefill | 430 | real write token | 待埋点 | rtp_llm_kv_cache_memory_cache_write_token |
-| prefill | 431 | copy cache qps | 待埋点 | rtp_llm_kv_cache_memory_cache_copy_qps |
-| prefill | 432 | copy failed qps | 待埋点 | rtp_llm_kv_cache_memory_cache_copy_failed_qps |
-| prefill | 433 | memory copy latency | 待埋点 | rtp_llm_kv_cache_memory_cache_copy_latency_us |
-| prefill | 434 | memory total block num | 部分待埋点 | rtp_llm_kv_cache_memory_cache_status_total_block_num,rtp_llm_kv_cache_total_blocks |
-| prefill | 435 | memory allocated block num | 部分待埋点 | rtp_llm_kv_cache_memory_cache_status_allocated_block_num,rtp_llm_kv_cache_used_blocks |
-| prefill | 436 | memory available block num | 待埋点 | rtp_llm_kv_cache_memory_cache_status_available_block_num,rtp_llm_kv_cache_available_blocks |
-| prefill | 10087 | memory used ratio | 待埋点 | rtp_llm_kv_cache_memory_cache_status_used_ratio |
-| prefill | 10418 | Memory copy queue wait | 待埋点 | rtp_llm_kv_cache_memory_cache_copy_task_queue_wait_us |
-| prefill | 10422 | Memory copy pool submit failed QPS | 待埋点 | rtp_llm_kv_cache_memory_cache_copy_pool_submit_failed_qps |
-| prefill | 10420 | Memory copy pool active threads | 待埋点 | rtp_llm_kv_cache_memory_cache_copy_pool_active_threads |
-| prefill | 10421 | Memory copy pool pending tasks | 待埋点 | rtp_llm_kv_cache_memory_cache_copy_pool_pending_tasks |
-| prefill | 10424 | Memory copy throughput | 待埋点 | rtp_llm_kv_cache_memory_cache_copy_throughput_bytes_per_second |
 | decode | 10369 | decode tps | 已上报 | rtp_llm_generate_tps |
 | decode | 10383 | output wall tps | 已上报 | rate(rtp_llm_forward_tokens_total{kind="output"}) |
 | decode | 218 | timeout qps | 待埋点 | rtp_llm_framework_qps |
@@ -193,7 +159,6 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | decode | 552 | kv cache available blocks | 部分待埋点 | rtp_llm_kv_cache_pool_available_blocks,rtp_llm_kv_cache_available_blocks |
 | decode | 553 | kv cache free blocks | 部分待埋点 | rtp_llm_kv_cache_pool_free_blocks,rtp_llm_kv_cache_free_blocks |
 | decode | 554 | request_ref_blocks | 待埋点 | rtp_llm_kv_cache_pool_request_ref_blocks,rtp_llm_kv_cache_request_ref_blocks |
-| decode | 10631 | remote_connector_ref_blocks | 待埋点 | rtp_llm_kv_cache_remote_connector_ref_blocks |
 | decode | 10632 | pd_connector_ref_blocks | 待埋点 | rtp_llm_kv_cache_pd_connector_ref_blocks |
 | decode | 556 | kv cache total blocks | 部分待埋点 | rtp_llm_kv_cache_pool_total_blocks,rtp_llm_kv_cache_total_blocks |
 | decode | 557 | kv_cache_pool_used_ratio | 部分待埋点 | rtp_llm_kv_cache_pool_used_ratio,rtp_llm_kv_cache_used_ratio |
@@ -202,36 +167,6 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | decode | 10594 | kv_cache_pool_store_ref_blocks | 待埋点 | rtp_llm_kv_cache_store_ref_blocks |
 | decode | 10602 | kv_cache_pool_eviction_ref_blocks | 待埋点 | rtp_llm_kv_cache_eviction_target_ref_blocks |
 | decode | 10635 | rtp_llm_kv_cache_frozen_ref_blocks | 待埋点 | rtp_llm_kv_cache_frozen_ref_blocks |
-| decode | 420 | match qps | 待埋点 | rtp_llm_kv_cache_memory_cache_match_qps |
-| decode | 423 | match latency | 待埋点 | rtp_llm_kv_cache_memory_cache_match_latency_us |
-| decode | 422 | match miss qps | 待埋点 | rtp_llm_kv_cache_memory_cache_match_failed_qps |
-| decode | 421 | match ignore qps | 待埋点 | rtp_llm_kv_cache_memory_cache_match_none_qps |
-| decode | 424 | match input token | 待埋点 | rtp_llm_kv_cache_memory_cache_match_input_token |
-| decode | 425 | real matched token | 待埋点 | rtp_llm_kv_cache_memory_cache_matched_token |
-| decode | 426 | read qps | 待埋点 | rtp_llm_kv_cache_memory_cache_read_qps |
-| decode | 487 | read failed qps | 待埋点 | rtp_llm_kv_cache_memory_cache_read_failed_qps |
-| decode | 489 | read none qps | 待埋点 | rtp_llm_kv_cache_memory_cache_read_none_qps |
-| decode | 488 | read latency | 待埋点 | rtp_llm_kv_cache_memory_cache_read_latency_us |
-| decode | 486 | read input token | 待埋点 | rtp_llm_kv_cache_memory_cache_read_input_token |
-| decode | 490 | real read token | 待埋点 | rtp_llm_kv_cache_memory_cache_read_token |
-| decode | 485 | write qps | 待埋点 | rtp_llm_kv_cache_memory_cache_write_qps |
-| decode | 427 | write failed qps | 待埋点 | rtp_llm_kv_cache_memory_cache_write_failed_qps |
-| decode | 437 | write none qps | 待埋点 | rtp_llm_kv_cache_memory_cache_write_none_qps |
-| decode | 428 | write cache latency | 待埋点 | rtp_llm_kv_cache_memory_cache_write_latency_us |
-| decode | 429 | write input token | 待埋点 | rtp_llm_kv_cache_memory_cache_write_input_token |
-| decode | 430 | real write token | 待埋点 | rtp_llm_kv_cache_memory_cache_write_token |
-| decode | 431 | copy cache qps | 待埋点 | rtp_llm_kv_cache_memory_cache_copy_qps |
-| decode | 432 | copy failed qps | 待埋点 | rtp_llm_kv_cache_memory_cache_copy_failed_qps |
-| decode | 433 | memory copy latency | 待埋点 | rtp_llm_kv_cache_memory_cache_copy_latency_us |
-| decode | 434 | memory total block num | 部分待埋点 | rtp_llm_kv_cache_memory_cache_status_total_block_num,rtp_llm_kv_cache_total_blocks |
-| decode | 435 | memory allocated block num | 部分待埋点 | rtp_llm_kv_cache_memory_cache_status_allocated_block_num,rtp_llm_kv_cache_used_blocks |
-| decode | 436 | memory available block num | 待埋点 | rtp_llm_kv_cache_memory_cache_status_available_block_num,rtp_llm_kv_cache_available_blocks |
-| decode | 10087 | memory used ratio | 待埋点 | rtp_llm_kv_cache_memory_cache_status_used_ratio |
-| decode | 10418 | Memory copy queue wait | 待埋点 | rtp_llm_kv_cache_memory_cache_copy_task_queue_wait_us |
-| decode | 10422 | Memory copy pool submit failed QPS | 待埋点 | rtp_llm_kv_cache_memory_cache_copy_pool_submit_failed_qps |
-| decode | 10420 | Memory copy pool active threads | 待埋点 | rtp_llm_kv_cache_memory_cache_copy_pool_active_threads |
-| decode | 10421 | Memory copy pool pending tasks | 待埋点 | rtp_llm_kv_cache_memory_cache_copy_pool_pending_tasks |
-| decode | 10424 | Memory copy throughput | 待埋点 | rtp_llm_kv_cache_memory_cache_copy_throughput_bytes_per_second |
 | decode | 546 | TPOT(估计值) | 已上报（draft 模式） | rtp_llm_sp_estimate_tpot_us |
 | decode | 548 | 接受率 | 已上报（draft 模式） | rtp_llm_sp_avg_accept_rate |
 | decode | 549 | 接受率(不算入bonus) | 已上报（draft 模式） | rtp_llm_sp_avg_fix_accept_rate |

@@ -2,9 +2,11 @@ package org.flexlb.mock.cache;
 
 import java.util.*;
 
-/** Physical block accounting, independent of cache keys, engine, tier, or eviction policy. */
+/**
+ * Physical block accounting, independent of cache keys, engine, tier, or eviction policy.
+ */
 public final class BlockPool {
-    public enum Kind { REQUEST, CACHE, LOAD, STORE, EVICTION }
+    public enum Kind { REQUEST, CACHE }
     public record Snapshot(int total, int free, int available, int active) {}
     private final int capacity;
     private final int[] referenced = new int[Kind.values().length];
@@ -16,7 +18,9 @@ public final class BlockPool {
         this.capacity = capacity;
     }
 
-    /** All or nothing. Eviction is the caller's responsibility. */
+    /**
+     * All or nothing. Eviction is the caller's responsibility.
+     */
     public synchronized List<Reference> allocate(int count, Kind kind) {
         if (count < 0) throw new IllegalArgumentException("Negative block demand");
         Objects.requireNonNull(kind);
@@ -30,7 +34,9 @@ public final class BlockPool {
         return result;
     }
 
-    /** Each owner receives a distinct reference; closing it cannot release another owner's pin. */
+    /**
+     * Each owner receives a distinct reference; closing it cannot release another owner's pin.
+     */
     public synchronized Reference retain(Reference source, Kind kind) {
         requireOwned(source);
         return add(source.block, Objects.requireNonNull(kind));
@@ -85,6 +91,9 @@ public final class BlockPool {
         private boolean closed;
         private Reference(BlockPool owner, Block block, Kind kind) {
             this.owner = owner; this.block = block; this.kind = kind;
+        }
+        boolean inUse() {
+            synchronized (owner) { return block.activeRefs > 0; }
         }
         @Override public void close() { owner.release(this); }
     }

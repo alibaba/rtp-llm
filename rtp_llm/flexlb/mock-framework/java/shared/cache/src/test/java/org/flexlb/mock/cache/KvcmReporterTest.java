@@ -27,7 +27,7 @@ class KvcmReporterTest {
         var bodies = new CopyOnWriteArrayList<String>(); var times = new CopyOnWriteArrayList<Long>();
         var added = new AtomicBoolean();
         var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        try (var threads = Executors.newVirtualThreadPerTaskExecutor(); var cache = new KvCache(1, 8, 0, KvCache.EvictionPolicy.LRU)) {
+        try (var threads = Executors.newVirtualThreadPerTaskExecutor(); var cache = new KvCache(1, 8, 0)) {
             server.setExecutor(threads);
             server.createContext("/api/", exchange -> {
                 try (exchange) {
@@ -88,7 +88,7 @@ class KvcmReporterTest {
     void scansLaterRecoveryItemsEvenWhenAnEarlierStatusFailed(boolean headerFailure) throws Exception {
         var registrations = new AtomicInteger(); var inject = new AtomicBoolean(true);
         var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        try (var threads = Executors.newVirtualThreadPerTaskExecutor(); var cache = new KvCache(1, 8, 0, KvCache.EvictionPolicy.LRU)) {
+        try (var threads = Executors.newVirtualThreadPerTaskExecutor(); var cache = new KvCache(1, 8, 0)) {
             server.setExecutor(threads);
             server.createContext("/api/", exchange -> {
                 try (exchange) {

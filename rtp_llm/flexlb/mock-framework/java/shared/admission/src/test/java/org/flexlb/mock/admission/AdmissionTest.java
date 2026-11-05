@@ -56,7 +56,7 @@ class AdmissionTest {
             var lock = new Object();
             var finished = new TaskHistory();
             var scheduler = new RejectingScheduler(lock);
-            try (var cache = new KvCache(2, 8, 0, KvCache.EvictionPolicy.LRU);
+            try (var cache = new KvCache(2, 8, 0);
                  var engine = new EngineLoop(lock, scheduler, finished, cache, compute, role, "test");
                  var service = new RpcService(new AdmissionConfig("test", role, 2, 1, 1, 4096, 0, compute, 0),
                      cache, lock, finished, engine, true)) {
