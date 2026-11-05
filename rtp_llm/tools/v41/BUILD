@@ -11,6 +11,7 @@ py_library(
 py_test(
     name = "integration_test",
     srcs = ["test_integration.py"],
+    main = "test_integration.py",
     data = ["//rtp_llm/models_py:v41_dispatch_sources"],
     deps = [":tooling"],
     tags = ["cpu"],
