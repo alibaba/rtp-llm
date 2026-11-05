@@ -66,7 +66,7 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | prefill | 10106 | first block ready cost | 待埋点 | rtp_llm.cache_store.first_block_cost_us_ |
 | prefill | 10107 | all blocks ready cost | 待埋点 | rtp_llm.cache_store.load.server.all_block_ready_latency_us |
 | prefill | 197 | poll remote output rt | 待埋点 | rtp_llm_rpc_poll_remote_output_rt_us |
-| prefill | 10035 | Prefill 理论命中/总输入数量 | 待埋点 | rtp_llm_prefill_worker_recent_cache_key_hit_count,rtp_llm_prefill_worker_recent_cache_key_total_count |
+| prefill | 10035 | Prefill 理论命中/总输入数量 | 已上报 | rtp_llm_prefill_worker_recent_cache_key_hit_count,rtp_llm_prefill_worker_recent_cache_key_total_count |
 | prefill | 143 | kv cache item num | 待埋点 | rtp_llm_kv_cache_item_num |
 | prefill | 147 | 实际的总reuse len | 已上报 | rtp_llm_kv_cache_reuse_length |
 | prefill | 10636 | new device reuse length | 待埋点 | rtp_llm_stream_cache_device_reuse_length |
