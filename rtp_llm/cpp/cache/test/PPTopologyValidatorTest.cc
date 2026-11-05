@@ -84,6 +84,35 @@ TEST(PPTopologyValidatorTest, NonStage0OwnedTagFails) {
     EXPECT_NE(result.error.find("must own every cache group"), std::string::npos);
 }
 
+TEST(PPTopologyValidatorTest, StageLocalAllocationAllowsDownstreamOnlyGroup) {
+    auto stage0 = makeFullSnapshot(100, 4, 2);
+    auto stage1 = makeHybridSnapshot(80, 90);
+    // Both stages retain a FULL pool; the extra group's type is independent
+    // of ownership. The default allocator must still reject this topology.
+    EXPECT_FALSE(validatePPTopology({stage0, stage1}).ok);
+    auto result = validatePPTopology({stage0, stage1}, 1.5, false, true);
+    ASSERT_TRUE(result.ok) << result.error;
+    ASSERT_EQ(result.canonical_groups.size(), 2u);
+    EXPECT_EQ(result.canonical_groups[0].tag, "full");
+    EXPECT_EQ(result.canonical_groups[1].tag, "linear");
+    EXPECT_EQ(canonicalBlockNums(result), (std::vector<uint32_t>{80, 90}));
+    EXPECT_EQ(result.agreed.block_num_overrides.at("linear"), 90u);
+}
+
+TEST(PPTopologyValidatorTest, StageLocalAllocationPreservesGeometryPolicyAndCapacityChecks) {
+    const auto stage0            = makeFullSnapshot(100, 4, 2);
+    auto       stage1            = makeHybridSnapshot(80, 90);
+    stage1.seq_size_per_block[0] = 8;
+    EXPECT_FALSE(validatePPTopology({stage0, stage1}, 1.5, false, true).ok);
+    stage1                        = makeHybridSnapshot(80, 90);
+    stage1.policy_fingerprints[0] = "different";
+    EXPECT_FALSE(validatePPTopology({stage0, stage1}, 1.5, false, true).ok);
+    stage1 = makeHybridSnapshot(80, 0);
+    EXPECT_FALSE(validatePPTopology({stage0, stage1}, 1.5, false, true).ok);
+    stage1 = makeHybridSnapshot(10, 90);
+    EXPECT_FALSE(validatePPTopology({stage0, stage1}, 1.5, false, true).ok);
+}
+
 TEST(PPTopologyValidatorTest, LinearWithoutFullFails) {
     StageCacheSnapshot linear_only;
     linear_only.group_tags                = {"linear"};

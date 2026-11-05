@@ -22,6 +22,7 @@ import torch
 
 from rtp_llm.config.dsv41_config import (
     V41_MAX_CONTEXT_TOKENS,
+    dsv41_pp_partition,
     v41_mhc_collapse_mode,
     v41_mhc_post_mode,
     v41_mhc_prenorm_mode,
@@ -176,6 +177,11 @@ class DeepSeekV41Model(DeepSeekV4Model):
                         raise ValueError("V4.1 worker and mHC prenorm modes disagree")
 
     def _check_execution_config(self):
+        if self._v4_args.pp_size == 2 and list(
+            self.parallelism_config.pp_stage_layer_counts
+        ) != dsv41_pp_partition(40, 2):
+            raise ValueError("V4.1 PP cut changed; replace the worker")
+
         from rtp_llm.models_py.modules.dsv4.fp8._v41_compact_cp_plan import parse_mode
 
         if (
@@ -234,7 +240,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 or backend != BACKEND_FORK_NCCL_MXFP8
                 or not pcfg.pp_ep_enabled
                 or pcfg.pp_ep_backend != backend
-                or list(pcfg.pp_stage_layer_counts) != [21, 19]
+                or list(pcfg.pp_stage_layer_counts) != dsv41_pp_partition(40, 2)
                 or args.pp_rank != pcfg.pp_rank
                 or args.world_rank != pcfg.world_rank
                 or args.ep_rank != pcfg.ep_rank
@@ -320,6 +326,19 @@ class DeepSeekV41Model(DeepSeekV4Model):
         return config
 
     def _agree_dp(self, error, phase, device, *, native_dispatch=False):
+        if error is not None and os.environ.get("DSV41_N2_DEBUG") == "1":
+            # Diagnostics only (R16): the DP mirror hides the originating
+            # rank's exception behind "native preflight failed on a DP
+            # peer"; dump the real cause to the rank log. Default silent.
+            import sys as _sys
+            import traceback as _tb
+
+            print(
+                f"[DPERRDUMP] phase={phase[0] if isinstance(phase, tuple) else phase}",
+                file=_sys.stderr,
+                flush=True,
+            )
+            _tb.print_exception(type(error), error, error.__traceback__)
         recoverable = isinstance(error, (ValueError, NotImplementedError))
         status = (
             1 if error is None else (0 if recoverable or not native_dispatch else 2)
@@ -473,6 +492,17 @@ class DeepSeekV41Model(DeepSeekV4Model):
             self._check_worker()
             args = self._v4_args
             stage_prefill = args.pp_size == 2
+            dummy_pd_decode = (
+                os.environ.get("DSV41_PD_DUMMY_DECODE", "0") == "1"
+                and (
+                    args.pp_size,
+                    args.tp_size,
+                    args.dp_size,
+                    args.ep_size,
+                    args.world_size,
+                ) == (1, 1, 8, 8, 8)
+                and self._gen_num_per_cycle == 0
+            )
             if (
                 args.pp_size not in (1, 2)
                 or args.tp_size != 1
@@ -484,7 +514,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 or not args.fp8_kv_cache
                 or args.commit_only
                 or init_resource.is_speculative
-                or init_resource.is_decode_role
+                or (init_resource.is_decode_role and not dummy_pd_decode)
                 or self._gen_num_per_cycle not in (0, 1)
             ):
                 raise NotImplementedError(
@@ -737,7 +767,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 self._check_execution_config()
                 contract.require_attention_config(self._v4_args.v41_config)
                 self._native_pp_contract = contract
-                if self._v4_args.pp_rank == 1:
+                if self._v4_args.pp_rank == 1 and dsv41_pp_partition(40, 2)[0] == 21:
                     self._native_pp_receiver = NativeL20ReplicaReceiver(
                         self._v4_args.v41_config,
                         self.kv_cache,

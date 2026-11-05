@@ -188,8 +188,10 @@ StageCacheSnapshot StageCacheSnapshot::deserialize(const std::string& payload) {
     return snapshot;
 }
 
-PPValidationResult
-validatePPTopology(const std::vector<StageCacheSnapshot>& stages, double capacity_skew_threshold, bool allow_dsv4_swa) {
+PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& stages,
+                                      double                                 capacity_skew_threshold,
+                                      bool                                   allow_dsv4_swa,
+                                      bool                                   stage_local_allocations) {
     PPValidationResult result;
 
     if (stages.size() <= 1) {
@@ -263,7 +265,7 @@ validatePPTopology(const std::vector<StageCacheSnapshot>& stages, double capacit
                 }
             }
         }
-    } else {
+    } else if (!stage_local_allocations) {
         /* Pairing path: stages may legitimately hold different tag subsets,
            so groups match by tag name against stage 0. Superset gate: the
            leading stage issues every block id from its own physical pools,
@@ -313,6 +315,8 @@ validatePPTopology(const std::vector<StageCacheSnapshot>& stages, double capacit
     }
 
     // Canonical table: stage-0 order first, then first-seen; same-tag owners must agree on geometry.
+    // With stage-local allocation this is also the validation for downstream-only
+    // groups. Policy, positive capacity, owner minima and skew checks still apply.
     std::unordered_map<std::string, size_t> canonical_index;
     std::vector<uint32_t>                   canonical_max_blocks;
     for (size_t s = 0; s < stages.size(); ++s) {
@@ -380,9 +384,11 @@ validatePPTopology(const std::vector<StageCacheSnapshot>& stages, double capacit
     return result;
 }
 
-PPValidationResult
-initPPCacheGeometry(StageSnapshotCollector& collector, double capacity_skew_threshold, bool allow_dsv4_swa) {
-    return validatePPTopology(collector.collect(), capacity_skew_threshold, allow_dsv4_swa);
+PPValidationResult initPPCacheGeometry(StageSnapshotCollector& collector,
+                                       double                  capacity_skew_threshold,
+                                       bool                    allow_dsv4_swa,
+                                       bool                    stage_local_allocations) {
+    return validatePPTopology(collector.collect(), capacity_skew_threshold, allow_dsv4_swa, stage_local_allocations);
 }
 
 std::vector<StageCacheSnapshot> PPSnapshotCollector::collect() {
@@ -433,7 +439,8 @@ PPValidationResult PPCacheCapacityNegotiator::negotiate(const CacheConfig&   top
     sized.mtp_sub_configs.clear();
     sized.finalizeBlockNums(local_block_num, runtime_config);
     PPSnapshotCollector collector(StageCacheSnapshot::fromConfig(sized));
-    auto                validation = initPPCacheGeometry(collector, capacity_skew_threshold_, allow_dsv4_swa_);
+    auto                validation =
+        initPPCacheGeometry(collector, capacity_skew_threshold_, allow_dsv4_swa_, stage_local_allocations_);
     if (!validation.ok) {
         RTP_LLM_FAIL("PP cache topology validation failed: %s", validation.error.c_str());
     }

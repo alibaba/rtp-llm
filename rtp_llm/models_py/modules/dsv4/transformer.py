@@ -209,7 +209,10 @@ def _build_block(
 
 def _v41_prefill_stage_bindings(args: V4Args):
     """Admit the qualified target-prefill slice before consuming loader weights."""
-    expected = list(range(21)) if args.pp_rank == 0 else list(range(21, 40))
+    from rtp_llm.config.dsv41_config import dsv41_prefill_pp_cut
+
+    cut = dsv41_prefill_pp_cut()
+    expected = list(range(cut)) if args.pp_rank == 0 else list(range(cut, 40))
     if (
         type(args.pp_size) is not int
         or args.pp_size != 2
@@ -236,12 +239,12 @@ def _v41_prefill_stage_bindings(args: V4Args):
         != (5120, 4, 512, 128, 128)
         or args.compress_ratios != [0, 0] + [2] * 18 + [1] * 20
         or any(
-            type(i) is not int or not 0 <= i < 21
+            type(i) is not int or not 0 <= i < cut
             for i in args.v41_config.get("engram_layer_ids", ())
         )
     ):
         raise NotImplementedError(
-            "V4.1 transformer PP requires the qualified gen=0 21/19 prefill stages"
+            "V4.1 transformer PP requires the qualified gen=0 selected prefill stages"
         )
     from rtp_llm.models.dsv41_kv_cache import dsv41_cache_bindings
 

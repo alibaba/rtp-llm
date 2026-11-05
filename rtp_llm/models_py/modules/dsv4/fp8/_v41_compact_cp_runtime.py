@@ -5,10 +5,12 @@ from dataclasses import dataclass
 
 import torch
 
+from rtp_llm.config.dsv41_config import dsv41_prefill_pp_cut
+
 from ._v41_compact_cp_plan import (
-    PRODUCERS,
     WIRE_VERSION,
     CompactCPPlan,
+    producer_specs,
     resolve_geometry,
 )
 from ._v41_compact_cp_producer import produce_owner_rows, project_owner
@@ -33,7 +35,7 @@ class Producer:
     index_slots: torch.Tensor
     state_pool: torch.Tensor | None
     state_slots: torch.Tensor | None
-    validation: object = None
+    validation: tuple = ()
 
 
 @dataclass
@@ -88,11 +90,13 @@ class CompactCPForward:
         self.send_bytes = self.receive_bytes = 0
         if mode != "off":
             device = dispatch.input_ids.device
-            elements = (
-                1024 * 1024
-                if mode == "projected"
-                else max(p.plans[0].send_bytes for p in producers)
-            )
+            if mode == "projected":
+                local_rows = sum(plans[0][0].local_rows for plans in producers[0].plans)
+                elements = local_rows * 1024
+            else:
+                elements = max(
+                    sum(plans[0].send_bytes for plans in p.plans) for p in producers
+                )
             dtype = torch.float32 if mode == "projected" else torch.uint8
             self.send = torch.empty(elements, device=device, dtype=dtype)
             self.receive = torch.empty(4 * elements, device=device, dtype=dtype)
@@ -106,10 +110,12 @@ class CompactCPForward:
             self.reason,
             tuple(
                 (
-                    p.plans[0].layer,
-                    p.plans[0].ratio,
-                    p.plans[0].rows,
-                    p.plans[0].send_bytes,
+                    p.plans[0][0].layer,
+                    p.plans[0][0].ratio,
+                    p.plans[0][0].rows,
+                    p.plans[0][0].send_bytes,
+                    len(p.plans),
+                    p.plans[0][0].chunk_tokens,
                 )
                 for p in self.producers
             ),
@@ -127,41 +133,52 @@ class CompactCPForward:
         if producer.attention is not attention:
             raise RuntimeError("Compact CP producer order differs from admission")
         cp = self.dispatch.cp
-        plan = producer.plans[cp.cp_rank]
+        ratio = producer.plans[0][0].ratio
         owner = attention._owner()
-        values, scores = project_owner(self.projection, x, owner, plan.ratio)
+        values, scores = project_owner(self.projection, x, owner, ratio)
         if self.mode == "projected":
-            width = 512 * plan.ratio
-            send = self.send[: 1024 * width].view(1024, width)
+            local_rows = sum(plans[0].local_rows for plans in producer.plans)
+            width = 512 * ratio
+            send = self.send[: local_rows * width].view(local_rows, width)
             send[:, :512].copy_(values)
             if scores is not None:
                 send[:, 512:].copy_(scores)
-            received = self.receive[: 4096 * width].view(4096, width)
+            received = self.receive[: 4 * local_rows * width].view(
+                4 * local_rows, width
+            )
         else:
-            metadata = producer.metadata[cp.cp_rank]
-            frequencies = attention.freqs_cis[
-                (metadata.positions // plan.ratio) * plan.ratio
-            ]
-            produced = produce_owner_rows(
-                values,
-                scores,
-                owner,
-                attention.eps,
-                frequencies,
-                attention.rope_head_dim,
-                plan.ratio,
-                keep_tail=bool(plan.tail_count),
-            )
-            send = pack(
-                plan,
-                metadata,
-                produced.main,
-                produced.index_payload,
-                produced.index_scales,
-                produced.state_tail,
-                out=self.send[: plan.send_bytes],
-            )
-            received = self.receive[: 4 * plan.send_bytes]
+            offset = 0
+            for span_index, plans in enumerate(producer.plans):
+                plan = plans[cp.cp_rank]
+                metadata = producer.metadata[span_index][cp.cp_rank]
+                local = plan.local_rows
+                begin = span_index * local
+                frequencies = attention.freqs_cis[
+                    (metadata.positions // plan.ratio) * plan.ratio
+                ]
+                produced = produce_owner_rows(
+                    values[begin : begin + local],
+                    scores[begin : begin + local] if scores is not None else None,
+                    owner,
+                    attention.eps,
+                    frequencies,
+                    attention.rope_head_dim,
+                    plan.ratio,
+                    keep_tail=bool(plan.tail_count),
+                    local=local,
+                )
+                pack(
+                    plan,
+                    metadata,
+                    produced.main,
+                    produced.index_payload,
+                    produced.index_scales,
+                    produced.state_tail,
+                    out=self.send[offset : offset + plan.send_bytes],
+                )
+                offset += plan.send_bytes
+            send = self.send[:offset]
+            received = self.receive[: 4 * offset]
         self.active = PendingGather(producer, send, received)
         self.active.launch()
         self.send_bytes += send.numel() * send.element_size()
@@ -177,17 +194,37 @@ class CompactCPForward:
         if self.mode == "projected":
             result = _cp_restore_gathered_full_2d(received, self.dispatch.cp)
         else:
-            size = producer.plans[0].send_bytes
-            main, index, state = unpack(
-                producer.plans,
-                producer.metadata,
-                received.view(4, size),
-                producer.validation,
+            total = sum(plans[0].send_bytes for plans in producer.plans)
+            view4 = received.view(4, total)
+            mains, indexes, states = [], [], []
+            offset = 0
+            for span_index, plans in enumerate(producer.plans):
+                size = plans[0].send_bytes
+                main, index, state = unpack(
+                    plans,
+                    producer.metadata[span_index],
+                    view4[:, offset : offset + size].contiguous(),
+                    producer.validation[span_index],
+                )
+                mains.append(main)
+                indexes.append(index)
+                if state is not None:
+                    states.append(state)
+                offset += size
+            producer.main_cache.scatter(
+                torch.cat(mains) if len(mains) > 1 else mains[0],
+                producer.main_slots,
             )
-            producer.main_cache.scatter(main, producer.main_slots)
-            producer.index_cache.scatter(index, producer.index_slots)
-            if state is not None:
-                producer.state_pool.index_copy_(0, producer.state_slots, state)
+            producer.index_cache.scatter(
+                torch.cat(indexes) if len(indexes) > 1 else indexes[0],
+                producer.index_slots,
+            )
+            if states:
+                producer.state_pool.index_copy_(
+                    0,
+                    producer.state_slots,
+                    torch.cat(states) if len(states) > 1 else states[0],
+                )
             result = None
         self.active = None
         self.next_producer += 1
@@ -220,6 +257,7 @@ def prepare(worker, dispatch, execution_round):
         dispatch.cp,
         dispatch.spans,
         stage=worker._v4_args.pp_rank,
+        pp_cut=dsv41_prefill_pp_cut(),
         generation_count=worker._gen_num_per_cycle,
         device_type=device.type,
         capability=torch.cuda.get_device_capability(device),
@@ -235,41 +273,59 @@ def prepare(worker, dispatch, execution_round):
         torch.distributed.get_backend(group) != "nccl"
         or torch.distributed.get_world_size(group) != 4
         or torch.distributed.get_rank(group) != cp.cp_rank
-        or tuple(torch.distributed.get_process_group_ranks(group)) != (0, 1, 2, 3)
+        or tuple(torch.distributed.get_process_group_ranks(group))
+        != tuple(range(worker._v4_args.pp_rank * 4, (worker._v4_args.pp_rank + 1) * 4))
     ):
-        raise ValueError("Compact CP requires the registered stage-zero CP4 group")
+        raise ValueError("Compact CP requires the registered stage-local CP4 group")
     projection = getattr(worker, "_compact_cp_projection", None)
     if projection is None:
         projection = kind(device.index)
         worker._compact_cp_projection = projection
-    span = dispatch.spans[0]
-    identity = span.identity
+    spans = tuple(dispatch.spans)
+    count = spans[0].count
     layers = {layer.attn.layer_id: layer.attn for layer in worker.v4.layers}
+    specs = producer_specs(worker._v4_args.pp_rank, dsv41_prefill_pp_cut())
+    # plans[producer][span][rank]; metadata flattened producer→span→rank.
     plan_groups = tuple(
         tuple(
-            CompactCPPlan(
-                mode,
-                identity.request_id,
-                identity.generation,
-                identity.cache_incarnation,
-                execution_round,
-                span.chunk_id,
-                span.start,
-                rank,
-                layer_id,
-                ratio,
+            tuple(
+                CompactCPPlan(
+                    mode,
+                    span.identity.request_id,
+                    span.identity.generation,
+                    span.identity.cache_incarnation,
+                    execution_round,
+                    span.chunk_id,
+                    span.start,
+                    rank,
+                    layer_id,
+                    ratio,
+                    count,
+                )
+                for rank in range(4)
             )
-            for rank in range(4)
+            for span in spans
         )
-        for layer_id, ratio in PRODUCERS
+        for layer_id, ratio in specs
     )
     all_metadata = prepare_metadata_batch(
-        tuple(plan for group in plan_groups for plan in group), device
+        tuple(plan for by_span in plan_groups for group in by_span for plan in group),
+        device,
     )
-    all_validation = prepare_validation_stacks(plan_groups, device)
-    state_end = all_metadata[0].tail_identity[-1, :1] + 1
+    all_validation = prepare_validation_stacks(
+        tuple(group for by_span in plan_groups for group in by_span), device
+    )
+    tail_identity = all_metadata[0].tail_identity
+    if tail_identity is None:
+        # Cut-20 stage 1 owns only the ratio-1 L20 HCA producer: no CSA tail.
+        state_end = None
+    else:
+        state_end = tail_identity[-1, :1] + 1
+        for span_index in range(1, len(spans)):
+            candidate = all_metadata[span_index * 4].tail_identity[-1, :1] + 1
+            state_end = torch.maximum(state_end, candidate)
     producers = []
-    for index, ((layer_id, ratio), plans) in enumerate(zip(PRODUCERS, plan_groups)):
+    for index, ((layer_id, ratio), plans_by_span) in enumerate(zip(specs, plan_groups)):
         attention = layers[layer_id]
         owner = attention._owner()
         weights = (
@@ -290,10 +346,21 @@ def prepare(worker, dispatch, execution_round):
             )
         ):
             raise ValueError("Compact CP producer differs from the checkpoint contract")
-        metadata = all_metadata[index * 4 : (index + 1) * 4]
-        validation = all_validation[index]
-        positions = torch.cat([meta.positions for meta in metadata])
-        requests = torch.zeros_like(positions)
+        n_spans = len(plans_by_span)
+        metadata = tuple(
+            all_metadata[(index * n_spans + s) * 4 : (index * n_spans + s + 1) * 4]
+            for s in range(n_spans)
+        )
+        validation = all_validation[index * n_spans : (index + 1) * n_spans]
+        positions = torch.cat([meta.positions for group in metadata for meta in group])
+        requests = torch.cat(
+            [
+                torch.full_like(
+                    torch.cat([meta.positions for meta in group]), span_index
+                )
+                for span_index, group in enumerate(metadata)
+            ]
+        )
         with bind_attn_cache(attention, worker.kv_cache, dispatch.tables, cp_ctx=cp):
             main_tag = attention._global_region()
             main = V41PagedCache(
@@ -308,18 +375,26 @@ def prepare(worker, dispatch, execution_round):
             index_slots = attention._slots("indexer_kv", positions, requests)
             state_pool = state_slots = None
             if ratio == 2:
-                tail_positions = metadata[0].tail_identity[:, 0].contiguous()
+                tail_positions = torch.cat(
+                    [group[0].tail_identity[:, 0] for group in metadata]
+                ).contiguous()
                 state_pool = attention._source_pool("csa_state")
+                tail_requests = torch.cat(
+                    [
+                        torch.full_like(group[0].tail_identity[:, 0], span_index)
+                        for span_index, group in enumerate(metadata)
+                    ]
+                )
                 state_slots = attention._slots(
                     "csa_state",
                     tail_positions,
-                    torch.zeros_like(tail_positions),
+                    tail_requests,
                     state_end=state_end,
                 )
             producers.append(
                 Producer(
                     attention,
-                    plans,
+                    plans_by_span,
                     metadata,
                     main,
                     index,

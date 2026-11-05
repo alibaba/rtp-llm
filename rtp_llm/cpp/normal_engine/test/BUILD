@@ -236,6 +236,7 @@ cc_binary(
 cc_library(
     name = "v41_native_pp_transport_test_lib",
     srcs = ["V41NativePPTransportTest.cc"],
+    hdrs = ["V41PDDummyStore.h"],
     alwayslink = True,
     copts = test_copts,
     deps = [
@@ -243,6 +244,7 @@ cc_library(
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/normal_engine:v41_pp_local_cache",
         "//rtp_llm/cpp/normal_engine:v41_pp_admission",
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",

@@ -68,7 +68,7 @@ V41PPLocalCache::V41PPLocalCache(std::shared_ptr<KVCacheManager> manager,
         || parallelism.ep_rank != parallelism.tp_rank || parallelism.role_type != RoleType::PREFILL
         || !parallelism.local_cp_enabled() || parallelism.prefill_cp_config.kv_cache_sharded
         || !parallelism.pp_ep_enabled || parallelism.pp_ep_backend != "fork_nccl_mxfp8"
-        || parallelism.pp_stage_layer_counts != std::vector<int64_t>{21, 19} || max_initial_tokens_ < 1) {
+        || parallelism.pp_stage_layer_counts != dsv41PrefillPpLayerCounts() || max_initial_tokens_ < 1) {
         throw std::invalid_argument("V4.1 local PP cache requires gen=0 CEP4PP2 PREFILL");
     }
     // The main-model layout projects its topology; leases use the actual
@@ -76,10 +76,12 @@ V41PPLocalCache::V41PPLocalCache(std::shared_ptr<KVCacheManager> manager,
     topology_             = manager_->allLayerCacheBase().topologyPtr();
     const auto& config    = manager_->cacheConfig();
     const bool  stage_one = parallelism.pp_rank == 1;
-    if (!config.use_independent_block_pools || config.layer_num != (stage_one ? 19u : 21u)
-        || config.layer_all_num != config.layer_num || config.global_layer_begin != (stage_one ? 21u : 0u)
+    const auto  counts    = dsv41PrefillPpLayerCounts();
+    const auto  cut       = static_cast<uint32_t>(counts[0]);
+    if (!config.use_independent_block_pools || config.layer_num != static_cast<uint32_t>(counts[parallelism.pp_rank])
+        || config.layer_all_num != config.layer_num || config.global_layer_begin != (stage_one ? cut : 0u)
         || config.seq_size_per_block != 256 || config.kernel_seq_size_per_block != 256) {
-        throw std::invalid_argument("V4.1 local PP cache requires native 21/19 allocation layouts");
+        throw std::invalid_argument("V4.1 local PP cache requires native selected PP allocation layouts");
     }
     std::map<std::string, std::pair<size_t, std::vector<int>>> expected;
     std::vector<int>                                           all_layers(config.layer_num);
@@ -87,9 +89,14 @@ V41PPLocalCache::V41PPLocalCache(std::shared_ptr<KVCacheManager> manager,
         all_layers[layer] = static_cast<int>(layer);
     }
     expected.emplace("swa_kv", std::make_pair(67584, all_layers));
-    expected.emplace("hca_kv", std::make_pair(73728, std::vector<int>{stage_one ? 0 : 20}));
+    if (stage_one || cut == 21) {
+        expected.emplace("hca_kv", std::make_pair(73728, std::vector<int>{stage_one ? 0 : 20}));
+    }
     expected.emplace("indexer_kv",
-                     std::make_pair(17408, stage_one ? std::vector<int>{0} : std::vector<int>{2, 8, 14, 20}));
+                     std::make_pair(17408,
+                                    stage_one ?
+                                        std::vector<int>{0} :
+                                        (cut == 20 ? std::vector<int>{2, 8, 14} : std::vector<int>{2, 8, 14, 20})));
     if (!stage_one) {
         expected.emplace("csa_kv", std::make_pair(36864, std::vector<int>{2, 8, 14}));
         expected.emplace("csa_state", std::make_pair(8192, std::vector<int>{2, 8, 14}));
@@ -101,7 +108,7 @@ V41PPLocalCache::V41PPLocalCache(std::shared_ptr<KVCacheManager> manager,
     for (const auto& group : topology_->groups()) {
         const auto found   = expected.find(group.tag);
         const bool state   = group.tag == "swa_kv" || group.tag == "csa_state";
-        const auto replica = stage_one && !state ? std::optional<uint32_t>(20) : std::nullopt;
+        const auto replica = stage_one && cut == 21 && !state ? std::optional<uint32_t>(20) : std::nullopt;
         if (found == expected.end() || group.layer_ids != found->second.second
             || group.kv_block_stride_bytes != found->second.first || group.kv_scale_stride_bytes != 0
             || group.seq_size_per_block != 256 || group.kernel_seq_size_per_block != 256

@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/normal_engine/pipeline/PPExecutor.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/V41PPLocalCache.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/V41PPAdmission.h"
+#include "rtp_llm/cpp/normal_engine/test/V41PDDummyStore.h"
 #include "rtp_llm/cpp/models/V41InputRejected.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
@@ -819,6 +820,11 @@ private:
 
 PYBIND11_MODULE(libth_v41_native_pp_transport_test, m) {
     rtp_llm::registerExecCtxOps(m);
+    py::class_<rtp_llm::test::V41PDDummyStore>(m, "DummyPDStore")
+        .def(py::init<uint32_t>())
+        .def("publish", &rtp_llm::test::V41PDDummyStore::publish)
+        .def("load", &rtp_llm::test::V41PDDummyStore::load, py::call_guard<py::gil_scoped_release>())
+        .def("close", &rtp_llm::test::V41PDDummyStore::close, py::call_guard<py::gil_scoped_release>());
     py::register_exception<rtp_llm::V41InputRejected>(m, "NativeInputRejected", PyExc_RuntimeError);
     // Protocol constants the mocked-gather tests assert against. Bound, not re-declared in
     // Python, so the assertions follow the wire layout instead of hardcoding it (D2/D3).

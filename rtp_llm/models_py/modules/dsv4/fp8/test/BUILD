@@ -1077,6 +1077,14 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_d2_general_cpu",
+    srcs = ["test_v41_d2_general_cpu.py"],
+    data = ["//rtp_llm/models_py:prefill_optimization_source_data"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+    deps = [],
+)
+
+py_test(
     name = "test_v41_compact_cp_bytes_sm120",
     srcs = ["test_v41_compact_cp_bytes_sm120.py"],
     deps = _DSV4_FP8_TEST_DEPS,

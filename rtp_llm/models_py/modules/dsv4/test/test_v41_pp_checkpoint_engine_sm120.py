@@ -20,6 +20,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from rtp_llm.config.dsv41_config import dsv41_pp_partition
 from rtp_llm.cpp.normal_engine.test import libth_v41_native_engine_test as ops
 from rtp_llm.models.dsv41_kv_cache import dsv41_cache_bindings, dsv41_page_layouts
 from rtp_llm.models_py.distributed import collective_torch as collective
@@ -171,7 +172,9 @@ def run_rank(
     )
     os.environ.update(
         {
-            "NCCL_P2P_DISABLE": "1",
+            "NCCL_P2P_DISABLE": (
+                "0" if os.environ.get("DSV41_PD_DUMMY_DECODE", "0") == "1" else "1"
+            ),
             "DSV41_ENGRAM_HOST_BYTES": str(192 * 2**30 if full else 2**20),
             "DSV41_ENGRAM_CACHE_DIR": directory,
             "DSV4_PP_EP_ENABLE": "1",
@@ -265,7 +268,7 @@ def run_rank(
                     assert resource.kv_cache is not None and not worker._materialized
                     initialization_calls.append(worker._materialized)
                     assert initialize(resource)
-                    assert len(worker.v4.layers) == (21 if rank < 4 else 19)
+                    assert len(worker.v4.layers) == dsv41_pp_partition(40, 2)[rank // 4]
                     for layer in worker.v4.layers:
                         for unit in (layer.attn_hc, layer.ffn_hc):
                             for component in MHC_MODES:
@@ -349,9 +352,14 @@ def run_rank(
                                     }
                         if artifact_directory is not None:
                             frame = output.pp_intermediates if rank < 4 else tensors
-                            assert frame[
-                                "v41_cache_fingerprint"
-                            ].cpu().tolist() == list(contract.fingerprint)
+                            fingerprint = (
+                                frame["v41_pp_header"][7:39]
+                                if dsv41_pp_partition(40, 2)[0] == 20
+                                else frame["v41_cache_fingerprint"]
+                            )
+                            assert fingerprint.cpu().tolist() == list(
+                                contract.fingerprint
+                            )
                             snapshot = {
                                 "rank": rank,
                                 "stage": rank // 4,
@@ -371,7 +379,13 @@ def run_rank(
                             if rank >= 4:
                                 snapshot["logits"] = logits.cpu().clone()
                             if saved_handoff is not None:
-                                assert dispatch.worker_owner is worker
+                                expected_owner = (
+                                    worker._native_pp_owner
+                                    if os.environ.get("DSV41_PD_DUMMY_DECODE", "0")
+                                    == "1"
+                                    else worker
+                                )
+                                assert dispatch.worker_owner is expected_owner
                                 leases = worker.kv_cache.native_allocation_tables(
                                     dispatch.native_inputs
                                 )
@@ -457,7 +471,13 @@ def run_rank(
                     expected_outputs.clear()
                     dist.barrier(group=control)
                     ids = (
-                        engine.enqueue(selected_prompts, full_outputs=full_outputs)
+                        engine.enqueue(
+                            selected_prompts,
+                            full_outputs=full_outputs,
+                            pd_separation=(
+                                os.environ.get("DSV41_PD_DUMMY_DECODE", "0") == "1"
+                            ),
+                        )
                         if rank == 0
                         else None
                     )

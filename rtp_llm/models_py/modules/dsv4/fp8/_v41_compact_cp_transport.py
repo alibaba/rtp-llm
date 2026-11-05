@@ -33,7 +33,10 @@ def prepare_metadata(plan, device):
     if plan.ratio == 2:
         tail = torch.tensor(
             (
-                [[plan.start + 4094, 1], [plan.start + 4095, 1]]
+                [
+                    [plan.start + plan.chunk_tokens - 2, 1],
+                    [plan.start + plan.chunk_tokens - 1, 1],
+                ]
                 if plan.tail_count
                 else [[-1, 0], [-1, 0]]
             ),
@@ -56,7 +59,12 @@ def prepare_metadata_batch(plans, device):
         values.extend(plan.boundary_positions)
         if plan.ratio == 2:
             values.extend(
-                (plan.start + 4094, 1, plan.start + 4095, 1)
+                (
+                    plan.start + plan.chunk_tokens - 2,
+                    1,
+                    plan.start + plan.chunk_tokens - 1,
+                    1,
+                )
                 if plan.tail_count
                 else (-1, 0, -1, 0)
             )
@@ -100,7 +108,12 @@ def prepare_validation_stacks(plan_groups, device):
             tail_begin = len(values)
             for plan in plans:
                 values.extend(
-                    (plan.start + 4094, 1, plan.start + 4095, 1)
+                    (
+                        plan.start + plan.chunk_tokens - 2,
+                        1,
+                        plan.start + plan.chunk_tokens - 1,
+                        1,
+                    )
                     if plan.tail_count
                     else (-1, 0, -1, 0)
                 )

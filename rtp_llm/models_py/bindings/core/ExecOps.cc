@@ -437,15 +437,27 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         // policy owns the key/offset projection for both legacy and sharded cases.
         // Clamp by cache_keys_per_batch (global width) -- NOT max_blocks_per_batch,
         // which under CP shard is the local-compact width for FULL groups.
-        const auto block_plan = buildCacheStorePlan(
-            group.policy,
-            static_cast<size_t>(std::min<int>(canonical_total_blocks, static_cast<int>(cache_keys_per_batch))),
-            /*reuse_block_size=*/0,
-            use_group_cache_transfer_policy,
-            cp_rank,
-            cp_size);
-        for (const auto& pair : block_plan) {
-            addBlock(pair.key_index, pair.offset_index);
+        if (group.policy.single_block_per_request && cache_config.use_opaque_kv_cache_store
+            && (layer_kv.tag == "swa_kv" || layer_kv.tag == "csa_state")
+            && autil::EnvUtil::getEnv("DSV41_PD_DUMMY_DECODE", std::string("0")) == "1") {
+            // The dummy harness publishes one generation in a fresh request namespace.
+            RTP_LLM_CHECK_WITH_INFO(prefix_length == 0 && total_blocks == 1 && canonical_total_blocks == 1
+                                        && cache_keys_per_batch == 1 && !group.policy.enable_prefix_reuse
+                                        && group.policy.cp_mapping == CpBlockMappingMode::NONE
+                                        && group.policy.cp_slice == CpBlockSliceMode::NONE,
+                                    "dummy PD persistent transfer requires one fresh unsharded page");
+            addBlock(0, 0);
+        } else {
+            const auto block_plan = buildCacheStorePlan(
+                group.policy,
+                static_cast<size_t>(std::min<int>(canonical_total_blocks, static_cast<int>(cache_keys_per_batch))),
+                /*reuse_block_size=*/0,
+                use_group_cache_transfer_policy,
+                cp_rank,
+                cp_size);
+            for (const auto& pair : block_plan) {
+                addBlock(pair.key_index, pair.offset_index);
+            }
         }
 
         auto storeCallback = [layer_id = layer_kv.layer_id,

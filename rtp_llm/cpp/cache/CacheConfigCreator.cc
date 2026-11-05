@@ -221,10 +221,11 @@ void validateDsv41CacheDescs(const ModelConfig&       model_config,
     RTP_LLM_CHECK_WITH_INFO(model_config.hybrid_attention_config.enable_independent_kv_cache_pools,
                             "V4.1 exact cache requires independent pools");
     if (parallelism_config.pp_size > 1) {
-        const std::vector<int64_t> expected_counts{21, 19};
+        const auto expected_counts = parallelism_config.role_type == RoleType::PREFILL ? dsv41PrefillPpLayerCounts() :
+                                                                                         std::vector<int64_t>{21, 19};
         RTP_LLM_CHECK_WITH_INFO(parallelism_config.pp_size == 2
                                     && parallelism_config.pp_stage_layer_counts == expected_counts,
-                                "V4.1 prefill cache requires PP2 with layer counts [21, 19]");
+                                "V4.1 prefill cache requires PP2 with the selected layer counts");
     }
     for (size_t layer = 0; layer < 40; ++layer) {
         std::map<std::string, uint32_t> expected_ratios{{"swa_kv", 128}};
@@ -242,8 +243,8 @@ void validateDsv41CacheDescs(const ModelConfig&       model_config,
                                     "V4.1 layer=%zu has duplicate or unexpected tag=%s",
                                     layer,
                                     desc.tag.c_str());
-            const bool     state = desc.tag == "csa_state" || desc.tag == "swa_kv";
-            const auto     policy = SpecBuilder::groupPolicy(desc);
+            const bool state  = desc.tag == "csa_state" || desc.tag == "swa_kv";
+            const auto policy = SpecBuilder::groupPolicy(desc);
             RTP_LLM_CHECK_WITH_INFO(policy.single_block_per_request == state
                                         && policy.group_type == (state ? CacheGroupType::SWA : CacheGroupType::FULL)
                                         && (!state || !policy.enable_prefix_reuse),

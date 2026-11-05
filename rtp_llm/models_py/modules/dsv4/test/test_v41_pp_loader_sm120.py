@@ -11,6 +11,7 @@ from unittest.mock import patch
 import torch
 import torch.multiprocessing as mp
 
+from rtp_llm.config.dsv41_config import dsv41_pp_partition
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.models.deepseek_v41 import DeepSeekV41Weight
@@ -22,12 +23,8 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_loader_worker_sm120 import
 from rtp_llm.models_py.modules.dsv4.test.test_v41_cp_stage_worker_sm120 import (
     parallelism_for,
 )
-from rtp_llm.models_py.modules.dsv4.test.test_v41_native_pp_engine_sm120 import (
-    run_rank,
-)
-from rtp_llm.models_py.modules.dsv4.test.test_v41_stage_slices_sm120 import (
-    wide_fixture,
-)
+from rtp_llm.models_py.modules.dsv4.test.test_v41_native_pp_engine_sm120 import run_rank
+from rtp_llm.models_py.modules.dsv4.test.test_v41_stage_slices_sm120 import wide_fixture
 from rtp_llm.ops import HWKernelConfig
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import W
@@ -45,8 +42,9 @@ def make_pp_loader(config, kv_config, rank):
     assert loader.get_load_config().tp_size == 1
     assert loader.get_load_config().ffn_tp_size == 1
     assert loader.get_load_config().lm_head_tp_size == 4
+    cut = dsv41_pp_partition(40, 2)[0]
     assert list(loader._layer_ids) == (
-        list(range(21)) if rank < 4 else list(range(21, 40))
+        list(range(cut)) if rank < 4 else list(range(cut, 40))
     )
     return parallelism, hw, loader
 
@@ -55,7 +53,8 @@ def make_named_worker(rank, metadata):
     config, kv_config = load_configuration(Path(metadata["checkpoint_path"]))
     parallelism, hw, loader = make_pp_loader(config, kv_config, rank)
     names, _ = loader._generate_weight_info()
-    owned = set(range(21)) if rank < 4 else set(range(21, 40))
+    cut = dsv41_pp_partition(40, 2)[0]
+    owned = set(range(cut)) if rank < 4 else set(range(cut, 40))
     assert all("engram" not in name for name in names)
     assert ("embed.weight" in names) == (rank < 4)
     assert ("head.weight" in names) == (rank >= 4)

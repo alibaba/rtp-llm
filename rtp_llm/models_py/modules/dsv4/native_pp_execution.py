@@ -12,6 +12,8 @@ from contextlib import nullcontext
 
 import torch
 
+from rtp_llm.config.dsv41_config import dsv41_prefill_pp_cut
+
 from rtp_llm.models_py.modules.dsv4.hc.pp_state import imported_delayed_pre_mix
 from rtp_llm.models_py.modules.dsv4.native_l20_export import snapshot_native_l20_frame
 from rtp_llm.models_py.modules.dsv4.native_l20_prefill import (
@@ -30,6 +32,8 @@ from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.v41_cache_transfer import V41L20Contract
 from rtp_llm.models_py.modules.dsv4.v41_pp import (
     pack_v41_pp_frame,
+    pack_v41_hidden_frame,
+    validate_v41_hidden_frame,
     validate_v41_pp_frame,
 )
 
@@ -116,6 +120,14 @@ def _validate_execution(worker, dispatch, contract, transfer_round, receiver, te
         if receiver is not None or tensors is not None:
             raise ValueError("Native stage zero cannot import an upstream frame")
         return current, None
+    if dsv41_prefill_pp_cut() == 20:
+        if receiver is not None or not isinstance(tensors, Mapping):
+            raise ValueError("Native cut-20 stage one requires a hidden frame without a replica receiver")
+        frame = validate_v41_hidden_frame(
+            tensors, contract, transfer_round, current.cp.cp_rank,
+            current.spans, current.rows, worker._weight_device(),
+        )
+        return current, frame
     if (
         not isinstance(receiver, NativeL20ReplicaReceiver)
         or receiver._native_cache is not worker.kv_cache
@@ -169,6 +181,12 @@ def execute_native_pp_prefill(
         payload = {}
 
         def export(hidden):
+            if dsv41_prefill_pp_cut() == 20:
+                payload.update(pack_v41_hidden_frame(
+                    worker.v4.layers[-1], hidden, contract, transfer_round,
+                    current.cp.cp_rank, current.spans, current.rows,
+                ))
+                return
             state = snapshot_native_l20_frame(
                 worker.v4.layers[-1], hidden, current.spans, current.rows
             )
@@ -190,15 +208,17 @@ def execute_native_pp_prefill(
             else:
                 if _CONSUMER_DELAY_MS:
                     time.sleep(_CONSUMER_DELAY_MS / 1000)
-                receiver.apply(tensors, current.spans)
-                source = prepare_native_l20_prefill_source(
-                    frame, receiver, current.spans, current.rows, cp_ctx=current.cp
-                )
+                source_scope = nullcontext()
+                if dsv41_prefill_pp_cut() == 21:
+                    receiver.apply(tensors, current.spans)
+                    source = prepare_native_l20_prefill_source(
+                        frame, receiver, current.spans, current.rows, cp_ctx=current.cp
+                    )
+                    source_scope = imported_native_l20_prefill(worker.v4.layers[0].attn, source)
                 entry = worker.v4.layers[0]
                 # Maintained mHC post writes into its residual. The received
                 # frame remains owned by transport until consumer completion.
                 residual = frame.hidden_states.clone()
-                source_scope = imported_native_l20_prefill(entry.attn, source)
                 premix_scope = imported_delayed_pre_mix(
                     entry.attn_hc, residual, frame.prev_pre_mix
                 )

@@ -58,10 +58,13 @@ struct PPValidationResult {
    Every stage's groups must be a subset of stage 0's (the leading stage
    issues all block ids); same-tag owners must agree on type and geometry;
    logical_block_num is the min over owners; capacity skew is bounded by
-   capacity_skew_threshold. stages.size() <= 1 is trivially ok. */
+   capacity_skew_threshold. stage_local_allocations permits downstream-only
+   groups when each stage issues its own physical block ids; the default
+   leading-stage allocation contract is unchanged. stages.size() <= 1 is trivially ok. */
 PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& stages,
                                       double                                 capacity_skew_threshold = 1.5,
-                                      bool                                   allow_dsv4_swa          = false);
+                                      bool                                   allow_dsv4_swa          = false,
+                                      bool                                   stage_local_allocations = false);
 
 class StageSnapshotCollector {
 public:
@@ -96,7 +99,8 @@ private:
 // On failure the caller must abort startup.
 PPValidationResult initPPCacheGeometry(StageSnapshotCollector& collector,
                                        double                  capacity_skew_threshold = 1.5,
-                                       bool                    allow_dsv4_swa          = false);
+                                       bool                    allow_dsv4_swa          = false,
+                                       bool                    stage_local_allocations = false);
 
 // Fuse over the composed config: every local group must carry exactly its
 // agreed count. A mismatch means a tag fell back to the derivation rule, or
@@ -108,8 +112,12 @@ void validatePPComposedBlockNums(const CacheConfig& composed, const NegotiatedCa
 // Both hooks abort startup on failure.
 class PPCacheCapacityNegotiator: public CacheCapacityNegotiator {
 public:
-    explicit PPCacheCapacityNegotiator(double capacity_skew_threshold = 1.5, bool allow_dsv4_swa = false):
-        capacity_skew_threshold_(capacity_skew_threshold), allow_dsv4_swa_(allow_dsv4_swa) {}
+    explicit PPCacheCapacityNegotiator(double capacity_skew_threshold = 1.5,
+                                       bool   allow_dsv4_swa          = false,
+                                       bool   stage_local_allocations = false):
+        capacity_skew_threshold_(capacity_skew_threshold),
+        allow_dsv4_swa_(allow_dsv4_swa),
+        stage_local_allocations_(stage_local_allocations) {}
 
     PPValidationResult
     negotiate(const CacheConfig& topology, uint32_t local_block_num, const RuntimeConfig& runtime_config) override;
@@ -119,6 +127,7 @@ public:
 private:
     double capacity_skew_threshold_;
     bool   allow_dsv4_swa_;
+    bool   stage_local_allocations_;
 };
 
 // Fills each local group's canonical_idx by tag pairing, including MTP sub-configs;

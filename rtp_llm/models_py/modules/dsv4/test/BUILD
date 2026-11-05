@@ -1401,6 +1401,13 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_n2_sparse_cpu",
+    srcs = ["test_v41_n2_sparse_cpu.py"],
+    data = ["//rtp_llm/models_py:prefill_optimization_source_data"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "test_v41_shared_mxfp8_overlap_cpu",
     srcs = ["test_v41_shared_mxfp8_overlap_cpu.py"],
     deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],

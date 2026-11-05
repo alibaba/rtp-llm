@@ -1,4 +1,6 @@
 #pragma once
+#include <cstdlib>
+#include <stdexcept>
 #include <optional>
 #include <string>
 #include <sstream>
@@ -8,6 +10,18 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 
 namespace rtp_llm {
+
+// Consult only for the qualified V4.1 PP2 PREFILL profile. Decode is unchanged.
+inline std::vector<int64_t> dsv41PrefillPpLayerCounts() {
+    const char* raw = std::getenv("DSV41_PP_CUT");
+    const std::string value = raw ? raw : "21";
+    if (value != "20" && value != "21") {
+        throw std::invalid_argument("DSV41_PP_CUT must be 20 or 21");
+    }
+    const int64_t cut = value == "20" ? 20 : 21;
+    return {cut, 40 - cut};
+}
+
 
 /** NCCL communication config (ip + ports). Aligns with Python NcclCommConfig. */
 struct NcclCommConfig {
@@ -144,7 +158,7 @@ struct ParallelismConfig {
         const bool v41 = model_type == "deepseek_v41" && role_type == RoleType::PREFILL
                          && pp_size == 2 && tp_size == 4 && ep_size == 4 && dp_size == 1 && world_size == 8
                          && pp_ep_enabled && pp_ep_backend == "fork_nccl_mxfp8"
-                         && pp_stage_layer_counts == std::vector<int64_t>{21, 19} && !speculative
+                         && pp_stage_layer_counts == dsv41PrefillPpLayerCounts() && !speculative
                          && ffn_sp_size == 1;
         if ((model_type != "deepseek_v4" && !v41) || !dsv4_prefill_cp_profile_valid() || (speculative && !dspark_prefill)
             || cuda_graph || layer_micro_batch || enable_sp || use_ub_comm

@@ -493,8 +493,18 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
     const bool use_cuda_malloc_block_pool = shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config);
     std::shared_ptr<PPCacheCapacityNegotiator> pp_negotiator;
     if (parallelism_config.pp_size > 1) {
-        pp_negotiator = std::make_shared<PPCacheCapacityNegotiator>(
-            1.5, model_config_.model_type == "deepseek_v4" || model_config_.model_type == "deepseek_v41");
+        // V41PPAdmission allocates downstream physical pages through each stage's
+        // V41PPLocalCache. Cut 20 therefore needs no dummy HCA pool on stage 0.
+        const bool v41_stage_local = model_config_.model_type == "deepseek_v41" && model_config_.num_layers == 40
+                                     && model_config_.gen_num_per_cycle == 0
+                                     && parallelism_config.role_type == RoleType::PREFILL
+                                     && parallelism_config.local_cp_enabled() && parallelism_config.pp_size == 2
+                                     && parallelism_config.pp_stage_layer_counts == std::vector<int64_t>{20, 20}
+                                     && dsv41PrefillPpLayerCounts() == std::vector<int64_t>{20, 20};
+        pp_negotiator = std::make_shared<PPCacheCapacityNegotiator>(1.5,
+                                                                    model_config_.model_type == "deepseek_v4"
+                                                                        || model_config_.model_type == "deepseek_v41",
+                                                                    v41_stage_local);
     }
     if (propose_params_ && propose_params_->draftModel()) {
         auto config = CacheConfigCreator::createSpConfig(model_config_,

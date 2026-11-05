@@ -2,6 +2,7 @@
 
 import copy
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -296,8 +297,16 @@ class V41Config:
         return text
 
 
+def dsv41_prefill_pp_cut() -> int:
+    """Experimental PREFILL boundary; PP1/decode never consults this flag."""
+    value = os.environ.get("DSV41_PP_CUT", "21")
+    if value not in ("20", "21"):
+        raise ValueError("DSV41_PP_CUT must be 20 or 21")
+    return int(value)
+
+
 def dsv41_pp_partition(num_layers: int, pp_size: int, model_config=None) -> list[int]:
-    """Keep all GLOBAL producers and both Engram tables on prefill stage zero."""
+    """Partition target prefill, keeping both Engram tables on stage zero."""
     if num_layers <= 0:
         raise ValueError("V4.1 PP requires a positive layer count")
     if pp_size == 1:
@@ -306,15 +315,16 @@ def dsv41_pp_partition(num_layers: int, pp_size: int, model_config=None) -> list
         raise ValueError(
             "V4.1 prefill PP requires 40 layers and PP2 with counts [21, 19]"
         )
+    cut = dsv41_prefill_pp_cut()
     if model_config is not None:
         text = model_config.deepseek_v41_config
         if (
             text["kv_source_layer_ids"][-1:] != [20]
             or text.get("candidate_source_layer_id") != 20
-            or any(layer >= 21 for layer in text["engram_layer_ids"])
+            or any(layer >= cut for layer in text["engram_layer_ids"])
         ):
             raise ValueError(
                 "V4.1 PP2 requires the final KV/candidate source at L20 "
                 "and all Engram layers on stage zero"
             )
-    return [21, 19]
+    return [cut, 40 - cut]

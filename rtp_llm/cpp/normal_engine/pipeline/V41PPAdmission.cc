@@ -69,7 +69,8 @@ torch::Tensor hostInt32(const torch::Tensor& tensor, int64_t count, const char* 
 
 void validateGlobal(GptModelInputs& inputs, torch::Tensor& packet, int64_t vocab_size) {
     if (inputs.skip_run || inputs.shutdown || inputs.is_fake_stream || inputs.is_idle_decode || inputs.is_target_verify
-        || inputs.decode_entrance || inputs.warmup || inputs.pd_separation
+        || inputs.decode_entrance || inputs.warmup
+        || (inputs.pd_separation && autil::EnvUtil::getEnv("DSV41_PD_DUMMY_DECODE", std::string("0")) != "1")
         || inputs.dspark_call_phase != DSparkCallPhase::NONE
         || (inputs.attention_mask.defined() && inputs.attention_mask.numel())
         || (inputs.last_hidden_states.defined() && inputs.last_hidden_states.numel())

@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
+#include "autil/EnvUtil.h"
 #include <thread>
 #include <limits>
 #include <torch/extension.h>
@@ -828,7 +829,16 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
 }
 
 void StreamCacheResource::holdKVCacheForPDSep() {
-    auto&       resource   = batch_kv_cache_resource_->cacheResource(0);
+    auto& resource = batch_kv_cache_resource_->cacheResource(0);
+    if (autil::EnvUtil::getEnv("DSV41_PD_DUMMY_DECODE", std::string("0")) == "1") {
+        const auto& config = resource_context_.cache_manager->cacheConfig();
+        for (const auto& group : config.topology().groups()) {
+            if (config.use_opaque_kv_cache_store && group.tag == "csa_state" && group.policy.single_block_per_request) {
+                pd_allocation_lease_ = resource_context_.cache_manager->retainAllocation(resource);
+                return;
+            }
+        }
+    }
     const auto& cache_keys = resource.cacheKeys();
     auto        ref = resource_context_.cache_manager->incrKVCacheRef(resource, cache_keys, /*is_connector=*/true);
     if (ref) {
@@ -838,5 +848,6 @@ void StreamCacheResource::holdKVCacheForPDSep() {
 
 void StreamCacheResource::releaseKVCacheForPDSep() {
     pd_kvcache_ref_.reset();
+    pd_allocation_lease_.reset();
 }
 }  // namespace rtp_llm

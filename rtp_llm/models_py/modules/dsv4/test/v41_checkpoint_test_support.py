@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import torch
 
+from rtp_llm.config.dsv41_config import dsv41_pp_partition
 from rtp_llm.models_py.modules.dsv4.test import (
     test_v41_pp_checkpoint_engine_sm120 as producer,
 )
@@ -38,13 +39,16 @@ def save_json(path, value):
 def loader_oracles(args, weights):
     """Bind actual loader bytes to independent synthetic checkpoint slices."""
     result = {"source_loader": {}, "destination_loader": {}}
+    cut = dsv41_pp_partition(40, 2)[0]
     for role in result:
         for rank in range(8):
             pp = role == "source_loader"
             experts = 4 if pp else 2
             expert_begin = (rank % 4 if pp else rank) * experts
             owned = (
-                set(range(21) if rank < 4 else range(21, 40)) if pp else set(range(40))
+                set(range(cut) if rank < 4 else range(cut, 40))
+                if pp
+                else set(range(40))
             )
             layers = []
             for layer_id, mapping in enumerate(weights.weights):

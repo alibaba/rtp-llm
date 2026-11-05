@@ -15,6 +15,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from rtp_llm.config.dsv41_config import dsv41_pp_partition
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.ep_stage_context import EpStageContext
 from rtp_llm.models_py.distributed.rank_layout import Group
@@ -46,7 +47,7 @@ def parallelism_for(rank):
     config.pp_size, config.dp_size, config.tp_size, config.ep_size = 2, 1, 4, 4
     config.pp_rank, config.tp_rank, config.ep_rank = rank // 4, rank % 4, rank % 4
     config.ffn_tp_size, config.ffn_tp_rank = 4, rank % 4
-    config.pp_stage_layer_counts = [21, 19]
+    config.pp_stage_layer_counts = dsv41_pp_partition(40, 2)
     config.role_type = RoleType.PREFILL
     config.prefill_cp_config.method = CPRotateMethod.PREFILL_CP
     config.prefill_cp_config.prefill_cp_size = 4
@@ -61,7 +62,8 @@ def make_worker(rank, config):
     torch.manual_seed(41701)
     args, weights = wide_fixture()
     pp = rank // 4
-    owned = range(21) if pp == 0 else range(21, 40)
+    cut = dsv41_pp_partition(40, 2)[0]
+    owned = range(cut) if pp == 0 else range(cut, 40)
     globals_owned = {W.embedding} if pp == 0 else {W.final_ln_gamma, W.lm_head}
     shard = SimpleNamespace(
         global_weights={

@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include "autil/EnvUtil.h"
 #include <cstdint>
 #include <stdexcept>
 #include <mutex>
@@ -1256,9 +1257,10 @@ PreparedPPModelInputsPtr PyWrappedModel::prepareV41PP(const GptModelInputs&     
     wire[2]             = inputs.need_all_hidden_states;
     const auto& indexes = inputs.lm_output_indexes;
     if (pp_size_ != 2 || !batch || enable_cuda_graph_ || int(device_props_.enable_layer_micro_batch)
-        || !device_props_.enable_prefill_cp || inputs.pd_separation || inputs.warmup || !indexes.defined()
-        || !indexes.device().is_cpu() || indexes.scalar_type() != torch::kInt32 || indexes.dim() != 1
-        || !indexes.is_contiguous() || indexes.numel() < 1 || indexes.numel() > 2
+        || !device_props_.enable_prefill_cp
+        || (inputs.pd_separation && autil::EnvUtil::getEnv("DSV41_PD_DUMMY_DECODE", std::string("0")) != "1")
+        || inputs.warmup || !indexes.defined() || !indexes.device().is_cpu() || indexes.scalar_type() != torch::kInt32
+        || indexes.dim() != 1 || !indexes.is_contiguous() || indexes.numel() < 1 || indexes.numel() > 2
         || indexes.numel() != static_cast<int64_t>(batch ? batch->bindings().size() : 0)) {
         wire[0] = 0;
     } else {

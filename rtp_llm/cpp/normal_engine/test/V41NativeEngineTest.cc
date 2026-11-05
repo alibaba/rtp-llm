@@ -39,7 +39,7 @@ public:
             RTP_LLM_CHECK_WITH_INFO(!pdfusion && parallelism.pp_size == 2 && parallelism.tp_size == 4
                                         && parallelism.ep_size == 4 && parallelism.dp_size == 1
                                         && parallelism.world_size == 8 && parallelism.local_cp_enabled()
-                                        && (parallelism.pp_stage_layer_counts == std::vector<int64_t>{21, 19}),
+                                        && (parallelism.pp_stage_layer_counts == dsv41PrefillPpLayerCounts()),
                                     "cold V4.1 PP fixture requires the exact CEP4PP2 PREFILL profile");
         } else {
             RTP_LLM_CHECK(parallelism.pp_size == 1);
@@ -90,7 +90,12 @@ public:
     std::vector<int64_t> enqueue(const std::vector<std::vector<int32_t>>& requests,
                                  int                                      new_tokens         = 1,
                                  bool                                     full_outputs       = false,
-                                 bool                                     return_diagnostics = true) {
+                                 bool                                     return_diagnostics = true,
+                                 bool                                     pd_separation      = false) {
+        if (pd_separation) {
+            const auto flag = std::getenv("DSV41_PD_DUMMY_DECODE");
+            RTP_LLM_CHECK(flag && std::string(flag) == "1" && pipeline_);
+        }
         RTP_LLM_CHECK(new_tokens > 0 && new_tokens <= 16);
         RTP_LLM_CHECK(!pipeline_ || (new_tokens == 1 && engine_->parallelism_config.world_rank == 0));
         std::vector<std::shared_ptr<GenerateInput>> inputs;
@@ -107,6 +112,7 @@ public:
             input->generate_config->max_new_tokens = new_tokens;
             input->generate_config->top_k          = 1;
             input->generate_config->is_streaming   = false;
+            input->generate_config->pd_separation  = pd_separation;
             if ((pipeline_ && return_diagnostics) || full_outputs) {
                 input->generate_config->return_logits            = true;
                 input->generate_config->return_hidden_states     = true;
@@ -272,7 +278,8 @@ PYBIND11_MODULE(libth_v41_native_engine_test, m) {
              py::arg("requests"),
              py::arg("new_tokens")         = 1,
              py::arg("full_outputs")       = false,
-             py::arg("return_diagnostics") = true)
+             py::arg("return_diagnostics") = true,
+             py::arg("pd_separation")      = false)
         .def("outputs", &rtp_llm::test::V41NativeEngineTest::outputs, py::arg("timeout_ms") = 60000)
         .def("errors", &rtp_llm::test::V41NativeEngineTest::errors)
         .def("request_stop", &rtp_llm::test::V41NativeEngineTest::requestStop)

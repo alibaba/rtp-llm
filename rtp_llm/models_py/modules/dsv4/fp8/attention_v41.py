@@ -3145,12 +3145,14 @@ class AttentionV41FP8(AttentionFP8):
             if compact is not None:
                 compact_values = compact.finish(self)
                 if compact.mode == "packed":
-                    span = compact.dispatch.spans[0]
                     self._publish_global(
                         x.device,
                         starts,
                         lengths,
-                        [span.start + span.count],
+                        [
+                            span.start + span.count
+                            for span in compact.dispatch.spans
+                        ],
                         prefill=True,
                     )
                     return common, qkv, swa, swa_starts, swa_only_workspace

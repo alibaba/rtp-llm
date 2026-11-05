@@ -19,22 +19,54 @@ class OwnerRows:
 def project_owner(projection, x, owner, ratio):
     if ratio not in (1, 2):
         raise ValueError("Compact CP requires ratio one or two")
-    values = projection.forward(x, owner.global_wkv)
-    scores = projection.forward(x, owner.global_wgate) if ratio == 2 else None
+    rows = x.shape[0]
+    if rows == 1024:
+        values = projection.forward(x, owner.global_wkv)
+        scores = projection.forward(x, owner.global_wgate) if ratio == 2 else None
+        return values, scores
+    if rows != 2048:
+        raise ValueError("Compact CP projection requires 1024 or 2048 local rows")
+    # D2/8192: the qualified provider admits exactly [1024,5120] — its
+    # cuBLASLt layouts and split-K algorithm are constructor-fixed to that
+    # shape (Bf16GemmOp.cc, "Match the qualified 4096-row raw-X reduction
+    # using only the owner's 1024 rows"). Tile the 2048 local rows into two
+    # disjoint qualified calls; the row slices stay contiguous and
+    # 256-byte aligned (1024*5120*2 % 256 == 0). Per-row arithmetic is
+    # row-independent; the 8192 e2e sha gate arbitrates bitwise parity
+    # against the unpacked path.
+    halves = (0, 1024)
+    values = torch.cat(
+        [
+            projection.forward(x[first : first + 1024], owner.global_wkv)
+            for first in halves
+        ]
+    )
+    scores = (
+        torch.cat(
+            [
+                projection.forward(x[first : first + 1024], owner.global_wgate)
+                for first in halves
+            ]
+        )
+        if ratio == 2
+        else None
+    )
     return values, scores
 
 
 def produce_owner_rows(
-    values, scores, owner, eps, frequencies, rope_dim, ratio, *, keep_tail
+    values, scores, owner, eps, frequencies, rope_dim, ratio, *, keep_tail, local=1024
 ):
     from .attention_v41 import compress_pairs, rms_norm, rope_only
 
+    half = local // 2
     if (
         ratio not in (1, 2)
-        or values.shape != (1024, 512)
+        or local not in (1024, 2048)
+        or values.shape != (local, 512)
         or values.dtype != torch.float32
         or not values.is_cuda
-        or frequencies.shape != (1024 // ratio, rope_dim // 2)
+        or frequencies.shape != (local // ratio, rope_dim // 2)
         or frequencies.dtype != torch.complex64
         or frequencies.device != values.device
         or (ratio == 1 and (scores is not None or keep_tail))
@@ -50,15 +82,15 @@ def produce_owner_rows(
     ):
         raise ValueError("Invalid compact CP owner projection")
     main_parts, payload_parts, scale_parts = [], [], []
-    rows = 512 // ratio
-    main_entries = 256 // ratio
+    rows = half // ratio
+    main_entries = rows // 2
     slots = torch.arange(rows, device=values.device, dtype=torch.int64)
-    for first in (0, 512):
-        part = values[first : first + 512]
+    for first in (0, half):
+        part = values[first : first + half]
         if ratio == 2:
             latent = compress_pairs(
                 part.reshape(-1, 2, 512),
-                scores[first : first + 512].reshape(-1, 2, 512),
+                scores[first : first + half].reshape(-1, 2, 512),
                 owner.global_norm,
                 eps,
             )
@@ -66,13 +98,13 @@ def produce_owner_rows(
             latent = rms_norm(part, owner.global_norm, eps).bfloat16()
         # Preserve the separately qualified GEMM shape for each disjoint half.
         projected_index = F.linear(latent, owner.index_wk)
-        freqs = frequencies[first // ratio : (first + 512) // ratio]
+        freqs = frequencies[first // ratio : (first + half) // ratio]
         main = rope_only(latent.clone(), freqs, rope_dim)
         index = rope_only(
             rms_norm(projected_index, owner.index_k_norm, eps), freqs, rope_dim
         )
         main_pool = torch.empty(
-            (rows // main_entries, main_entries, 288),
+            (rows // main_entries, main_entries, 288),  # (2, rows/2, 288)
             device=values.device,
             dtype=torch.uint8,
         )
