@@ -817,6 +817,14 @@ py_test(
 )
 
 py_test(
+    name = "navi_sched_vllm_forward_protocol_test",
+    srcs = ["test/vllm/VLLMForwardProtocolTest.py"],
+    main = "test/vllm/VLLMForwardProtocolTest.py",
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
+)
+
+py_test(
     name = "navi_sched_vllm_image_cache_map_test",
     srcs = ["test/vllm/VLLMImageCacheMapTest.py"],
     main = "test/vllm/VLLMImageCacheMapTest.py",
