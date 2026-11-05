@@ -1513,7 +1513,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("model_name", &RuntimeConfig::model_name)
         .def_readwrite("worker_grpc_addrs", &RuntimeConfig::worker_grpc_addrs)
         .def_readwrite("worker_addrs", &RuntimeConfig::worker_addrs)
-        // Fields merged from PyDeviceResourceConfig
         .def_readwrite("specify_gpu_arch", &RuntimeConfig::specify_gpu_arch)
         // Add sub-configs as properties that return references
         .def_property_readonly(

@@ -481,7 +481,6 @@ struct RuntimeConfig {
     std::vector<std::string> worker_grpc_addrs;
     std::vector<std::string> worker_addrs;
 
-    // Fields merged from PyDeviceResourceConfig
     std::string specify_gpu_arch = "";
 
     std::string to_string() const;

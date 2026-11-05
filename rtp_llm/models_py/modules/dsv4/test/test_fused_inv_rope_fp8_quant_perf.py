@@ -31,7 +31,9 @@ _KERNEL_PATH = os.path.join(
     "..",
     "_fused_inv_rope_fp8_quant_triton.py",
 )
-_SPEC = importlib.util.spec_from_file_location("_fused_inv_rope_fp8_quant_triton", _KERNEL_PATH)
+_SPEC = importlib.util.spec_from_file_location(
+    "_fused_inv_rope_fp8_quant_triton", _KERNEL_PATH
+)
 _KERNEL = importlib.util.module_from_spec(_SPEC)
 assert _SPEC.loader is not None
 _SPEC.loader.exec_module(_KERNEL)
@@ -57,12 +59,8 @@ class BenchCase:
     input_shape: Tuple[int, ...]
 
 
-def _parse_heads_per_cta(default: Iterable[int] = (1, 2, 4, 8)) -> List[int]:
-    values = parse_int_list("DSV4_INV_ROPE_HEADS_PER_CTA_LIST", default)
-    invalid = [x for x in values if x not in (1, 2, 4, 8)]
-    if invalid:
-        raise ValueError(f"invalid HEADS_PER_CTA values: {invalid}")
-    return values
+def _heads_per_cta_values() -> List[int]:
+    return [1, 2, 4, 8]
 
 
 def _make_freqs(rows: int) -> torch.Tensor:
@@ -72,7 +70,9 @@ def _make_freqs(rows: int) -> torch.Tensor:
 
 def _make_case(case: BenchCase) -> Tuple[torch.Tensor, torch.Tensor]:
     torch.manual_seed(31 + case.M + len(case.name))
-    o = (torch.randn(*case.input_shape, dtype=torch.bfloat16, device="cuda") * 0.3).contiguous()
+    o = (
+        torch.randn(*case.input_shape, dtype=torch.bfloat16, device="cuda") * 0.3
+    ).contiguous()
     freqs = _make_freqs(case.M)
     if case.mode == "prefill":
         o = o.view(case.M, N_HEADS, HEAD_DIM)
@@ -189,7 +189,8 @@ def _bench_case(
                 "impl": "optimized",
                 "heads_per_cta": heads_per_cta,
                 "baseline_impl": "legacy",
-                "speedup_vs_baseline": legacy_measure.kernel_span_us / opt_measure.kernel_span_us,
+                "speedup_vs_baseline": legacy_measure.kernel_span_us
+                / opt_measure.kernel_span_us,
                 **measurement_payload(opt_measure),
             }
         )
@@ -198,7 +199,11 @@ def _bench_case(
 
 def _print_summary(rows: List[dict]) -> None:
     print("\n[fused_inv_rope_fp8_quant]")
-    print("  {:>8} {:>10} {:>10} {:>5} {:>12} {:>9}".format("M", "mode", "impl", "HPC", "span_us", "speedup"))
+    print(
+        "  {:>8} {:>10} {:>10} {:>5} {:>12} {:>9}".format(
+            "M", "mode", "impl", "HPC", "span_us", "speedup"
+        )
+    )
     for row in rows:
         print(
             "  {:8d} {:>10} {:>10} {:5d} {:12.2f} {:8.3f}x".format(
@@ -212,7 +217,9 @@ def _print_summary(rows: List[dict]) -> None:
         )
 
 
-def _default_hpc2_by_case(rows: List[dict]) -> Dict[Tuple[str, int], Tuple[float, float]]:
+def _default_hpc2_by_case(
+    rows: List[dict],
+) -> Dict[Tuple[str, int], Tuple[float, float]]:
     out: Dict[Tuple[str, int], List[float]] = {}
     for row in rows:
         key = (row["mode"], row["M"])
@@ -228,7 +235,7 @@ class FusedInvRopeFp8QuantPerfTest(unittest.TestCase):
     def test_perf_report(self):
         started = time.time()
         m_list = parse_int_list("DSV4_INV_ROPE_M_LIST", DEFAULT_M_SWEEP)
-        heads_per_cta_values = _parse_heads_per_cta()
+        heads_per_cta_values = _heads_per_cta_values()
         report_path = report_path_from_env(
             "DSV4_INV_ROPE_JSON", "dsv4_fused_inv_rope_fp8_quant_perf.json"
         )
@@ -240,7 +247,11 @@ class FusedInvRopeFp8QuantPerfTest(unittest.TestCase):
         for M in m_list:
             for case in _build_cases(M):
                 try:
-                    rows.extend(_bench_case(case, heads_per_cta_values, trace_dir, profile_enabled))
+                    rows.extend(
+                        _bench_case(
+                            case, heads_per_cta_values, trace_dir, profile_enabled
+                        )
+                    )
                 except torch.cuda.OutOfMemoryError as exc:
                     torch.cuda.empty_cache()
                     invalid.append({**asdict(case), "invalid_reason": f"OOM: {exc}"})

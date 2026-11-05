@@ -463,9 +463,9 @@ def silu_mul_fp8_quant_packed_g32(
     materializing ``hidden``, so the FP8 input and its group-32 scales match
     ``sgl_per_token_group_quant_fp8(..., group_size=32)`` bit-for-bit.
 
-    Quantization honors the repo-wide ``DSV4_FP8_QUANT_KERNEL`` policy; ``auto``
-    selects v2 at ``M*N >= 4Mi`` elements. Legacy's unused scale-pack bytes are
-    unspecified; this entry initializes them to zero, as v2 does.
+    Quantization always uses the v2 kernel; small shapes below ``M*N`` of
+    4Mi elements take the eager fallback. Unused scale-pack bytes are
+    initialized to zero.
 
     Returns:
       out_fp8: ``[M, N]`` torch.float8_e4m3fn.
