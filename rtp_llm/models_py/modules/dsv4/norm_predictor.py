@@ -127,6 +127,10 @@ class NormPredictor(nn.Module):
 
     def preload(self, device: torch.device | str) -> None:
         device = torch.device(device)
+        if device.type == "cuda" and device.index is None:
+            # Normalize so a later forward(x) on ``cuda:N`` does not trigger a
+            # redundant reload (which would fail during CUDA graph capture).
+            device = torch.device("cuda", torch.cuda.current_device())
         if self._weights is None or self._device != device:
             if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
                 raise RuntimeError(
