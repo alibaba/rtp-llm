@@ -38,7 +38,10 @@ from rtp_llm.test.perf_test.batch_decode_test import main
 
 sys.argv = ["batch_decode_test", "--model_type", "deepseek_v41",
             "--checkpoint_path", checkpoint, "--tokenizer_path", checkpoint,
-            "--input_len", "2048", "--batch_size",
+            # input_len includes the token consumed by the first decode.
+            # An even cached prefix has no missing half-pair in synthetic KV.
+            "--input_len", os.environ.get("RTP_V41_PERF_INPUT_LEN", "2049"),
+            "--batch_size",
             os.environ.get("RTP_V41_PERF_BATCHES", "1,8,16,32,64,128,256"),
             "--dp_size", "8", "--partial", "1", "--decode_test_length",
             os.environ.get("RTP_V41_PERF_STEPS", "129"),
