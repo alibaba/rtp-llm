@@ -487,7 +487,10 @@ void AscendGraphRunner::captureDecode() {
     for (int bs : capture_range_) {
         graph_instances_.try_emplace(bs);
     }
-    // Capture from large to small so mempool high-water mark is set first.
+    // Capture from large to small: every bucket's NPUGraph auto-creates its
+    // own mempool (pool handle {0,0}, no sharing across graphs today), and
+    // the largest bucket is captured first so the worst-case allocation
+    // surfaces immediately during startup instead of after smaller buckets.
     int capture_range_size = capture_range_.size();
     for (int i = capture_range_size - 1; i >= 0; i--) {
         int           bs = capture_range_[i];
@@ -542,6 +545,8 @@ void AscendGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             try {
                 auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
                 outputs             = py_outputs_obj.cast<PyModelOutputs>();
+                // Copy forward output into persistent buffer so replay-time readers have a stable address.
+                graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
             } catch (const py::error_already_set& e) {
                 RTP_LLM_LOG_ERROR("Ascend graph capture forward failed for %s %d: %s", key_type, key, e.what());
                 // Fail closed: end the capture session so the graph object is
@@ -559,8 +564,6 @@ void AscendGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 }
                 throw;
             }
-            // Copy forward output into persistent buffer so replay-time readers have a stable address.
-            graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
             ascend_graph::graphCaptureEnd(graph);
         }
         RTP_LLM_LOG_INFO("Ascend graph Capture for %s %d success, captured output shape: [%lld x %lld]",

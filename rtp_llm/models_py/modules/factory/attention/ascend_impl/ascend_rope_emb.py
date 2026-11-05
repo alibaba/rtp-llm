@@ -13,18 +13,32 @@ def _npu_available() -> bool:
     return torch_npu is not None and torch.npu.is_available()
 
 
+_HALVES_CACHE = {}
+
+
 def _gen_base_halves_cache(rope_dim: int, rope_theta: float, max_pos: int) -> torch.Tensor:
     """Python-side halves [cos|sin] cache, mirroring C++ genBaseCache
     (non-interleaved). MRoPE reuses the base rotary formula: the three-axis
-    positions index into this cache per frequency slot."""
+    positions index into this cache per frequency slot.
+
+    Cached per (dim, theta, max_pos, device): the attention impl is rebuilt
+    per batch on the eager path and once per capture bucket under aclgraph —
+    rebuilding the table each time would waste both startup and steady-state
+    latency, so every construction shares one resident tensor."""
     device = torch.device("npu") if _npu_available() else torch.device("cpu")
+    key = (rope_dim, rope_theta, max_pos, str(device))
+    cached = _HALVES_CACHE.get(key)
+    if cached is not None:
+        return cached
     inv_freq = 1.0 / (
         rope_theta
         ** (torch.arange(0, rope_dim, 2, device=device, dtype=torch.float32) / rope_dim)
     )
     t = torch.arange(max_pos, device=device, dtype=torch.float32)
     freqs = torch.outer(t, inv_freq)
-    return torch.cat([freqs.cos(), freqs.sin()], dim=-1).contiguous()
+    cache = torch.cat([freqs.cos(), freqs.sin()], dim=-1).contiguous()
+    _HALVES_CACHE[key] = cache
+    return cache
 
 
 def mrope_interleaved_axis_of_freq(mrope_section, rotary_pairs: int, device) -> torch.Tensor:
