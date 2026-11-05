@@ -13,7 +13,6 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
@@ -91,6 +90,7 @@ int slidingWindowSize(const GroupBase& group) {
 }
 
 GroupSetPtr createGroupSet(const GroupBase&                group,
+                           size_t                          canonical_size_per_block,
                            std::vector<DeviceBlockPoolPtr> device_pools,
                            std::shared_ptr<HostBlockPool>  host_pool,
                            BlockTreeDiskBlockPoolPtr       disk_pool) {
@@ -105,13 +105,8 @@ GroupSetPtr createGroupSet(const GroupBase&                group,
                 std::make_shared<LinearGroupSet>(std::move(device_pools), std::move(host_pool), std::move(disk_pool));
             break;
         case CacheGroupType::SWA: {
-            const auto seq_size = group.cacheKeyTokenStride();
-            RTP_LLM_CHECK_WITH_INFO(seq_size > 0 && seq_size <= static_cast<size_t>(std::numeric_limits<int>::max()),
-                                    "SWA tag=%s has invalid seq_size_per_block=%zu",
-                                    group.tag.c_str(),
-                                    seq_size);
             result = std::make_shared<SWAGroupSet>(slidingWindowSize(group),
-                                                   static_cast<int>(seq_size),
+                                                   canonical_size_per_block,
                                                    std::move(device_pools),
                                                    std::move(host_pool),
                                                    std::move(disk_pool));
@@ -456,9 +451,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             "CRC32C KV cache protection disabled by KVCacheConfig.enable_crc; host/disk transfers use plain copies");
     }
     if (kv_cache_config.enable_crc && (host_enabled || disk_enabled) && !CrcBlockCopyBatch::available()) {
-        RTP_LLM_LOG_WARNING(
-            "CRC32C requested by KVCacheConfig.enable_crc but the CRC backend is unavailable; "
-            "host/disk transfers use plain copies");
+        RTP_LLM_LOG_WARNING("CRC32C requested by KVCacheConfig.enable_crc but the CRC backend is unavailable; "
+                            "host/disk transfers use plain copies");
     }
     const bool crc_backend_available =
         kv_cache_config.enable_crc && CrcBlockCopyBatch::available() && (host_enabled || disk_enabled);
@@ -535,7 +529,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     if (disk_enabled && !group_members.empty()) {
         const size_t bytes        = static_cast<size_t>(kv_cache_config.disk_cache_size_mb) * 1024UL * 1024UL;
         const auto   block_counts = computeTierBlockCounts(bytes, device_block_counts, pool_strides);
-        auto guard =
+        auto         guard =
             createDiskMountGuard(kv_cache_config, parallelism_config.local_world_size, parallelism_config.local_rank);
         if (!guard) {
             return nullptr;
@@ -566,21 +560,9 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         }
     }
 
-    // Canonical CP keys cover a virtual token block. Keep the physical layout
-    // unchanged and publish the key stride only to cache matching/remote storage.
-    auto cache_topology = cache_config.topologyPtr();
-    if (const auto mapper = coordinator_manager->cpSlotMapper(); mapper && mapper->isSharded()) {
-        auto         groups  = cache_topology->groups();
-        const size_t cp_size = static_cast<size_t>(mapper->cpSize());
-        RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block <= std::numeric_limits<size_t>::max() / cp_size,
-                                "canonical CP cache key stride overflow");
-        for (auto& group : groups) {
-            auto spec                    = group.spec->clone();
-            spec->cache_key_token_stride = cache_config.seq_size_per_block * cp_size;
-            group.spec                   = std::move(spec);
-        }
-        cache_topology = CacheTopology::create(std::move(groups), cache_topology->layers());
-    }
+    // The upper layer has already resolved canonical key stride. Matching and
+    // remote storage consume that index fact without changing physical specs.
+    const auto& cache_topology = cache_config.topologyPtr();
     group_sets.reserve(group_members.size());
     for (size_t group_set_id = 0; group_set_id < group_members.size(); ++group_set_id) {
         const std::vector<std::string>& members = group_members[group_set_id];
@@ -590,8 +572,11 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             device_pools.push_back(poolForTag(cache_config.topology(), group_pools, tag));
         }
         const auto& first     = cache_topology->group(members.front());
-        auto        group_set = createGroupSet(
-            first, std::move(device_pools), std::move(host_pools[group_set_id]), std::move(disk_pools[group_set_id]));
+        auto        group_set = createGroupSet(first,
+                                        cache_config.canonicalSizePerBlock(),
+                                        std::move(device_pools),
+                                        std::move(host_pools[group_set_id]),
+                                        std::move(disk_pools[group_set_id]));
         group_set->initialize(group_set_id, cache_topology, members, backing_layouts[group_set_id]);
         RTP_LLM_LOG_INFO(
             "group_set[%zu] membership sealed: payload_bytes=%zu", group_set_id, group_set->payloadBytes());
@@ -728,7 +713,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                 resolver_pools,
                 [storage_config, resolver_pools](int layer_id, const std::string& tag, int block_id) {
                     return resolveStorageBuffers(storage_config, resolver_pools, layer_id, tag, block_id);
-                }),
+                },
+                cache_config.canonicalSizePerBlock()),
             "StorageBackend init failed");
     }
     if (!result->init()) {

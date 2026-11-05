@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
@@ -22,7 +23,6 @@
 
 namespace rtp_llm {
 
-class CPSlotMapper;
 class LoadAsyncContext;
 class BlockTreeCache;
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;
@@ -132,14 +132,6 @@ public:
         use_device_malloc_block_pool_ = use_device_malloc_block_pool;
     }
 
-    void setCPSlotMapper(std::shared_ptr<CPSlotMapper> cp_slot_mapper) {
-        cp_slot_mapper_ = std::move(cp_slot_mapper);
-    }
-
-    std::shared_ptr<CPSlotMapper> cpSlotMapper() const {
-        return cp_slot_mapper_;
-    }
-
     void setReserveBlocksNum(size_t reserve_block_num) {
         reserve_block_num_ = reserve_block_num;
     }
@@ -207,10 +199,7 @@ protected:
                                                      int  reserve_step,
                                                      bool enable_reuse_cache,
                                                      int  target_batch_size) const;
-    virtual void  checkCPShardedMallocResult(const MallocInfo&) const;
     virtual void  decrKVCacheRef(const KVCacheResource& kvcache_resource);
-    size_t        logicalSeqSizePerBlockForCapacity(const std::string& tag) const;
-    int           deviceCacheMetricTokensPerBlock() const;
     static size_t maxReusableMatchKeys(int seq_len, int reuse_unit_tokens) {
         if (seq_len <= 1 || reuse_unit_tokens <= 0) {
             return 0;
@@ -222,7 +211,6 @@ protected:
     const CacheConfig                  config_;
     AllocationType                     allocation_type_;
     BlockTreeCachePtr                  block_tree_cache_;
-    std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
     const kmonitor::MetricsReporterPtr metrics_reporter_             = nullptr;
     bool                               use_device_malloc_block_pool_ = false;
 
@@ -245,11 +233,10 @@ protected:
         MallocStatus                   materialize_status = MallocStatus::NONE;
     };
 
-    std::shared_ptr<LoadAsyncContext> prepareKVCache(const CacheKeysType&                 cache_keys,
-                                                     BatchKVCacheResource&                kv_resource,
-                                                     const std::shared_ptr<CPSlotMapper>& cp_mapper,
-                                                     PreparedKVCache&                     prepared,
-                                                     const std::function<bool(size_t)>&   valid_prefix = {});
+    std::shared_ptr<LoadAsyncContext> prepareKVCache(const CacheKeysType&               cache_keys,
+                                                     BatchKVCacheResource&              kv_resource,
+                                                     PreparedKVCache&                   prepared,
+                                                     const std::function<bool(size_t)>& valid_prefix = {});
     bool                              materializeInitialBlocks(const MallocInfo& malloc_info,
                                                                PreparedKVCache&  prepared,
                                                                LoadAsyncContext* context,
@@ -270,11 +257,7 @@ protected:
                                           int               failed_group,
                                           bool              incremental,
                                           int               failed_need_blocks) const;
-    size_t               loadTargetPosition(size_t                               path_index,
-                                            const std::string&                   tag,
-                                            const std::shared_ptr<CPSlotMapper>& mapper,
-                                            int                                  cp_scale) const;
-    bool                 cpCompactSwaGroup(const std::string& tag, const std::shared_ptr<CPSlotMapper>& mapper) const;
+    size_t               loadTargetPosition(size_t path_index, const std::string& tag) const;
     void                 rollbackBlockIdsToSize(int group_id, BlockIds& block_ids, size_t original_size);
     void                 rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
                                             const std::vector<BlockIndicesType>& referenced_blocks,
