@@ -36,6 +36,7 @@ void invokeBatchApplyRepetitionPenalty(T*           logits,
                                        const int    local_batch_size,
                                        const int    vocab_size,
                                        const int*   input_lengths,
+                                       const int*   prompt_lengths,
                                        const int    max_input_length,
                                        const int    step,
                                        cudaStream_t stream);

@@ -902,6 +902,78 @@ TEST_F(CudaSamplerTest, testBanRepeatNGram) {
     }
 }
 
+TEST_F(CudaSamplerTest, PresenceAndFrequencyPenaltyExcludePromptAndPadding) {
+    auto logits = cudaTensor({0.1, 0.8, 1.2, 0.6, -0.3, 0.1, 0.8, 1.2, 0.6, -0.3, 0.1, 0.8, 1.2, 0.6, -0.3}, {3, 5});
+    // Two decode rows and one prefill row. Token 2 occurs in both the first
+    // prompt and its completion; the second completion contains token 1 twice.
+    auto                       tokens = cudaIntTensor({1, 1, 2, 2, 3, 0, 1, 2, 1, 1, 3, 0, 1, 2, 2, 3, 4, 0}, {3, 6});
+    auto                       input_lengths    = cudaIntTensor({3, 2, 4}, {3});
+    auto                       sequence_lengths = cudaIntTensor({5, 4}, {2});
+    auto                       probs            = torch::zeros_like(logits);
+    std::vector<at::Generator> generators;
+    for (int i = 0; i < 3; ++i) {
+        generators.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+        generators.back().set_current_seed(i);
+    }
+    GreedyParams params({logits,
+                         input_lengths,
+                         sequence_lengths,
+                         tokens,
+                         5,
+                         pinnedIntTensor({0, 0, 0}),
+                         pinnedFloatTensor({1.0, 1.0, 1.0}),
+                         pinnedFloatTensor({1.0, 1.0, 1.0}),
+                         pinnedFloatTensor({1.0, 1.0, 1.0}),
+                         nullopt,
+                         nullopt,
+                         nullopt,
+                         false,
+                         probs,
+                         pinnedFloatTensor({0.4, 0.3, 0.7}),
+                         pinnedFloatTensor({0.2, 0.4, 0.5}),
+                         nullopt,
+                         generators});
+    execSampleGreedy(params);
+    check_cuda_error();
+    // Prompt-only tokens are untouched. Frequency counts only generated tokens,
+    // and the prefill row has no generated history to penalize.
+    auto expected = torch::softmax(
+        cudaTensor({0.1, 0.8, 0.6, 0.0, -0.3, 0.1, -0.3, 1.2, 0.6, -0.3, 0.1, 0.8, 1.2, 0.6, -0.3}, {3, 5}), -1);
+    ASSERT_VECTOR_NEAR(toHostFloat(probs), toHostFloat(expected), 1e-5);
+    ASSERT_EQ(toHostInt(input_lengths), std::vector<int32_t>({3, 2, 4}));
+}
+
+TEST_F(CudaSamplerTest, PresenceAndFrequencyPenaltyPrecedeTemperature) {
+    auto logits    = cudaTensor({4.0, 3.2, 2.0}, {1, 3});
+    auto tokens    = cudaIntTensor({0, -1}, {1, 2});
+    auto probs     = torch::zeros_like(logits);
+    auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
+    generator.set_current_seed(0);
+    GreedyParams params({logits,
+                         pinnedIntTensor({0}),
+                         pinnedIntTensor({1}),
+                         tokens,
+                         1,
+                         pinnedIntTensor({0}),
+                         pinnedFloatTensor({1.0}),
+                         pinnedFloatTensor({0.5}),
+                         pinnedFloatTensor({1.0}),
+                         nullopt,
+                         nullopt,
+                         nullopt,
+                         false,
+                         probs,
+                         pinnedFloatTensor({1.0}),
+                         pinnedFloatTensor({0.2}),
+                         nullopt,
+                         {generator}});
+    execSampleGreedy(params);
+    check_cuda_error();
+    // ((4 - 1 - 0.2), 3.2, 2) / 0.5; the penalty must scale with temperature.
+    auto expected = torch::softmax(cudaTensor({5.6, 6.4, 4.0}, {1, 3}), -1);
+    ASSERT_VECTOR_NEAR(toHostFloat(probs), toHostFloat(expected), 2e-5);
+}
+
 TEST_F(CudaSamplerTest, testPenalty) {
     size_t batch_size = 4;
     auto   logits_t   = cudaTensor(

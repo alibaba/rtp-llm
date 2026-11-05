@@ -184,19 +184,6 @@ void processLogits(const GreedyParams&  params,
     const auto step               = params.step;
     auto       cur_stream         = at::cuda::getCurrentCUDAStream().stream();
 
-    if (std::any_of(params.temperature.data_ptr<float>(),
-                    params.temperature.data_ptr<float>() + batch_size,
-                    [&](auto t) { return t != 1.0f; })) {
-        auto temperature_gpu = params.temperature.to(torch::kCUDA, true);
-        invokeBatchApplyTemperaturePenalty(params.logits.data_ptr<float>(),
-                                           (float*)nullptr,  // embedding_bias
-                                           temperature_gpu.data_ptr<float>(),
-                                           batch_size,
-                                           vocab_size_padded,
-                                           vocab_size_padded,
-                                           cur_stream);
-    }
-
     if (params.repetition_penalty.has_value()) {
         RTP_LLM_CHECK(params.presence_penalty.has_value() && params.frequency_penalty.has_value());
         const auto& repetition_penalty = params.repetition_penalty.value();
@@ -212,8 +199,10 @@ void processLogits(const GreedyParams&  params,
                            frequency_penalty.data_ptr<float>() + batch_size,
                            [&](auto t) { return t != 0.0f; })) {
             // Build sequence_lengths: clone input_lengths, then overwrite first decoder_batch_size entries
-            auto sequence_lengths_gpu = params.input_lengths.to(torch::kCUDA, true);
+            auto prompt_lengths_gpu   = params.input_lengths.to(torch::kCUDA, true);
+            auto sequence_lengths_gpu = prompt_lengths_gpu;
             if (decoder_batch_size > 0) {
+                sequence_lengths_gpu = prompt_lengths_gpu.clone();
                 auto dst_slice = sequence_lengths_gpu.slice(0, 0, decoder_batch_size);
                 dst_slice.copy_(params.sequence_lengths.to(torch::kCUDA, true), true);
             }
@@ -232,11 +221,26 @@ void processLogits(const GreedyParams&  params,
                                               batch_size,  // local_batch_size
                                               vocab_size_padded,
                                               sequence_lengths_gpu.data_ptr<int32_t>(),
+                                              prompt_lengths_gpu.data_ptr<int32_t>(),
                                               step + 1,  // max_input_length
                                               step + 1,  // step
                                               cur_stream);
             // NOTE: here step is max_len - 1
         }
+    }
+
+    // Scale the penalized logits so additive penalties follow the same temperature.
+    if (std::any_of(params.temperature.data_ptr<float>(),
+                    params.temperature.data_ptr<float>() + batch_size,
+                    [&](auto t) { return t != 1.0f; })) {
+        auto temperature_gpu = params.temperature.to(torch::kCUDA, true);
+        invokeBatchApplyTemperaturePenalty(params.logits.data_ptr<float>(),
+                                           (float*)nullptr,  // embedding_bias
+                                           temperature_gpu.data_ptr<float>(),
+                                           batch_size,
+                                           vocab_size_padded,
+                                           vocab_size_padded,
+                                           cur_stream);
     }
 
     if (decoder_batch_size && params.no_repeat_ngram_size.has_value()) {
@@ -595,6 +599,7 @@ void invokeBatchApplyRepetitionPenalty(T*           logits,
                                        int          local_batch_size,
                                        int          vocab_size,
                                        const int*   input_lengths,
+                                       const int*   prompt_lengths,
                                        int          max_input_length,
                                        int          step,
                                        hipStream_t  stream);
@@ -632,21 +637,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // [step + 1, batch_size]
     auto transposed_tokens = device_tokens.transpose(0, 1).contiguous();
 
-    // 1. Apply temperature penalty
-    if (std::any_of(params.temperature.data_ptr<float>(),
-                    params.temperature.data_ptr<float>() + batch_size,
-                    [&](auto t) { return t != 1.0f; })) {
-        auto temperature_gpu = to_device(params.temperature);
-        invokeBatchApplyTemperaturePenalty(params.logits.data_ptr<float>(),
-                                           (float*)nullptr,  // embedding_bias
-                                           temperature_gpu.data_ptr<float>(),
-                                           batch_size,
-                                           vocab_size_padded,
-                                           vocab_size_padded,
-                                           cur_stream);
-    }
-
-    // 2. Apply repetition/presence/frequency penalty
+    // 1. Apply repetition/presence/frequency penalty
     if (params.repetition_penalty.has_value()) {
         RTP_LLM_CHECK(params.presence_penalty.has_value() && params.frequency_penalty.has_value());
         const auto& repetition_penalty = params.repetition_penalty.value();
@@ -661,8 +652,10 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
             || std::any_of(frequency_penalty.data_ptr<float>(),
                            frequency_penalty.data_ptr<float>() + batch_size,
                            [&](auto t) { return t != 0.0f; })) {
-            auto sequence_lengths_gpu = to_device(params.input_lengths);
+            auto prompt_lengths_gpu   = to_device(params.input_lengths);
+            auto sequence_lengths_gpu = prompt_lengths_gpu;
             if (decoder_batch_size > 0) {
+                sequence_lengths_gpu = prompt_lengths_gpu.clone();
                 auto dst_slice = sequence_lengths_gpu.slice(0, 0, decoder_batch_size);
                 dst_slice.copy_(to_device(params.sequence_lengths));
             }
@@ -681,10 +674,25 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                                               batch_size,  // local_batch_size
                                               vocab_size_padded,
                                               sequence_lengths_gpu.data_ptr<int32_t>(),
+                                              prompt_lengths_gpu.data_ptr<int32_t>(),
                                               step + 1,  // max_input_length
                                               step + 1,  // step
                                               cur_stream);
         }
+    }
+
+    // 2. Scale penalized logits by temperature
+    if (std::any_of(params.temperature.data_ptr<float>(),
+                    params.temperature.data_ptr<float>() + batch_size,
+                    [&](auto t) { return t != 1.0f; })) {
+        auto temperature_gpu = to_device(params.temperature);
+        invokeBatchApplyTemperaturePenalty(params.logits.data_ptr<float>(),
+                                           (float*)nullptr,  // embedding_bias
+                                           temperature_gpu.data_ptr<float>(),
+                                           batch_size,
+                                           vocab_size_padded,
+                                           vocab_size_padded,
+                                           cur_stream);
     }
 
     // 3. Fast path for topk = 1
