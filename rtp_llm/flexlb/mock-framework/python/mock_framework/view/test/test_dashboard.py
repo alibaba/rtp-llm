@@ -176,7 +176,7 @@ def test_real_engine_observations_return_to_rtp_panels_and_mock_rows_only_compar
     for panel_id in (100160, 200160, 300452, 310351):
         assert '待埋点' not in items[panel_id]['title']
     assert 'py_rtp_vit_preprocess_rt{' in items[300452]['targets'][2]['expr']
-    assert 'mock_decode_estimate_tpot_us{' in items[210112]['targets'][0]['expr']
+    assert 'mock_decode_estimate_tpot_us_sum{' in items[210112]['targets'][0]['expr']
     assert any('mock_client_tpot_seconds' in t['expr'] for t in items[5]['targets'])
     assert not any('rtp_llm_sp_' in t['expr'] for p in panels() for t in p['targets'])
 

@@ -38,7 +38,7 @@ class PrefillAdmissionTest {
         var history = new org.flexlb.mock.engine.scheduler.TaskHistory();
         var engine = new org.flexlb.mock.engine.execution.RtpEngineLoop(lock, factory, history, cache,
             config.compute(), config.role(), config.id());
-        return new PrefillRpcServer(RtpRpcService.Config.from(config), lock, history, engine);
+        return new PrefillRpcServer(RtpRpcService.Config.from(config), lock, history, engine, () -> {});
     }
 
     @Test void singleAndBatchSubmissionRejectUnpreparedMediaWithoutAdmission() throws Exception {

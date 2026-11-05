@@ -129,7 +129,7 @@ final class LoadClient implements AutoCloseable {
                         var item = queue.remove();
                         var input = GenerateInputPB.newBuilder().setRequestId(item.request_id()).addAllTokenIds(item.input().getTokenIdsList())
                             .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(item.input().getMaxNewTokens())
-                                .setIgnoreEos(true).setCanUsePdSeparation(true).setReturnIncremental(true));
+                                .setIgnoreEos(true).setCanUsePdSeparation(true).setReturnIncremental(true).setIsStreaming(true));
                         for (var image : item.input().getImagesList()) {
                             input.setTokenIds(image.getOffset(), imageToken);
                             input.addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl(image.getUrl())

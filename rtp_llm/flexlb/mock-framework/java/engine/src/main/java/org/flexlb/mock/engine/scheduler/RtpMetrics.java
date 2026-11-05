@@ -55,6 +55,10 @@ final class RtpMetrics {
     public RtpMetrics(String role, Supplier<State> state) { this(role, state, System::nanoTime); }
 
     RtpMetrics(String role, Supplier<State> state, LongSupplier clock) {
+        this(role, state, clock, () -> 0);
+    }
+
+    RtpMetrics(String role, Supplier<State> state, LongSupplier clock, java.util.function.IntSupplier cacheItems) {
         if (role == null || role.isBlank()) throw new IllegalArgumentException("Metric role must not be blank");
         Objects.requireNonNull(state);
         this.clock = Objects.requireNonNull(clock);
@@ -99,6 +103,7 @@ final class RtpMetrics {
                 kv.addMetric(List.of(role, "held"), value.heldTokens());
                 var result = new ArrayList<MetricFamilySamples>();
                 result.addAll(List.of(tasks, kv));
+                result.add(gauge("rtp_llm_kv_cache_item_num", "Indexed KV blocks.", role, cacheItems.getAsInt()));
                 result.add(gauge("rtp_llm_wait_stream_size", "Waiting scheduler requests.", role, value.waiting()));
                 result.add(gauge("rtp_llm_running_stream_size", "Running scheduler requests.", role, value.running()));
                 result.add(gauge("rtp_llm_kv_cache_left_seq", "Available Device KV token capacity.", role, value.availableTokens()));
@@ -205,6 +210,19 @@ final class RtpMetrics {
         for (long key : keys) recentCacheKeys.putLast(key, now);
         events.observe("rtp_llm_prefill_worker_recent_cache_key_hit_count", Math.min(hitTokens, inputTokens));
         events.observe("rtp_llm_prefill_worker_recent_cache_key_total_count", inputTokens);
+    }
+
+    void cacheMatched(long nanos) { events.observe("rtp_llm_match_cost_time_us", nanos / 1000.0); }
+
+    void blockEvicted(long lifetimeNanos) {
+        events.observe("rtp_llm_kv_cache_evicted_block_lifetime_ms", lifetimeNanos / 1_000_000.0,
+            Map.of("tier", "DEVICE", "trigger_type", "capacity"));
+    }
+
+    void batchPrepared(long nanos) { events.observe("mock_forward_batch_prepare_us", nanos / 1000.0); }
+
+    void streamingFinished(boolean streaming) {
+        events.increment(streaming ? "rtp_llm_is_streaming_qps" : "rtp_llm_not_streaming_qps");
     }
 
     void prepared(long deviceInputTokens, long reused, long elapsedNanos) {

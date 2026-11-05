@@ -6,7 +6,7 @@ import static org.flexlb.mock.engine.cache.BlockPool.Kind.*;
 /** One local RTP Full-KV pool with synchronous LRU reclamation. */
 public final class KvCache implements AutoCloseable {
     public enum Failure { PERMANENT, RETRYABLE }
-    public record Admission(Lease lease, Failure failure, long generation) {}
+    public record Admission(Lease lease, Failure failure, long generation, long matchNanos) {}
     public record Snapshot(int totalBlocks, int availableBlocks, int freeBlocks, int heldBlocks,
                            int referencedBlocks, long version, Set<Long> keys) {}
     private final BlockPool device;
@@ -16,10 +16,17 @@ public final class KvCache implements AutoCloseable {
     private final Set<Lease> active = Collections.newSetFromMap(new IdentityHashMap<>());
     private boolean closed;
     private java.util.function.Consumer<CacheMetadata.Change> metadataObserver;
+    private java.util.function.LongConsumer evictionLifetime = nanos -> {};
     private Runnable changed = () -> {};
 
     /** The observer must only signal; it must never acquire an Engine scheduling lock. */
     public synchronized void onChange(Runnable observer) { changed = Objects.requireNonNull(observer); }
+
+    public synchronized void onEvictionLifetime(java.util.function.LongConsumer observer) {
+        evictionLifetime = Objects.requireNonNull(observer);
+    }
+
+    public synchronized int itemCount() { return tree.size(); }
 
     public KvCache(int blockSize, int blocks, int reserve) {
         this(blockSize, blocks, reserve, true);
@@ -45,7 +52,9 @@ public final class KvCache implements AutoCloseable {
         tree.validatePath(keys);
         if (requiredTokens > maxRequestTokens()) return rejected(Failure.PERMANENT);
         int demand = (int) blockDemand;
+        long matchStarted = System.nanoTime();
         var matched = tree.match(keys);
+        long matchNanos = System.nanoTime() - matchStarted;
         var slots = new ArrayList<Slot>();
         for (var node : matched) slots.add(new Slot(device.retain(node.cache, REQUEST), node));
         int need = demand - matched.size();
@@ -56,7 +65,7 @@ public final class KvCache implements AutoCloseable {
         for (var ref : Objects.requireNonNull(device.allocate(need, REQUEST))) slots.add(new Slot(ref, null));
         var lease = new Lease(slots, matched.size());
         active.add(lease);
-        return new Admission(lease, null, allocationGeneration());
+        return new Admission(lease, null, allocationGeneration(), matchNanos);
     }
 
     /** Snapshot and subscription share the cache monitor. Observers must only enqueue, never block. */
@@ -70,7 +79,7 @@ public final class KvCache implements AutoCloseable {
             if (metadataObserver == observer) { metadataObserver = null; tree.observe(change -> {}); }
         } };
     }
-    private Admission rejected(Failure failure) { return new Admission(null, failure, allocationGeneration()); }
+    private Admission rejected(Failure failure) { return new Admission(null, failure, allocationGeneration(), 0); }
     /** Both freed capacity and newly reusable prefixes can make a rejected request admissible. */
     public synchronized long allocationGeneration() { return device.generation() + tree.version(); }
     public synchronized Snapshot snapshot(long latestVersion, boolean needKeys) {
@@ -150,7 +159,9 @@ public final class KvCache implements AutoCloseable {
     }
     private boolean makeDeviceFree(int count) {
         while (device.snapshot().free() < count) {
-            if (!tree.evict()) return false;
+            var evicted = tree.evict();
+            if (evicted == null) return false;
+            evictionLifetime.accept(System.nanoTime() - evicted.insertedNanos);
         }
         return true;
     }
