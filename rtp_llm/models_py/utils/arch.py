@@ -1,8 +1,8 @@
 import functools
+import os
 from typing import Optional, Tuple, Union
 
 import torch
-
 from rtp_llm.device.device_type import (
     DeviceType,
     get_device_type,
@@ -10,6 +10,16 @@ from rtp_llm.device.device_type import (
     is_hip,
     is_ppu,
 )
+
+
+def sm120_fusion_enabled() -> bool:
+    """Opt in only on the CUDA 13 stack used to validate SM120 fusion."""
+    return (
+        os.getenv("RTP_LLM_SM120_FUSION", "0") == "1"
+        and torch.version.hip is None
+        and torch.version.cuda is not None
+        and torch.version.cuda.startswith("13.")
+    )
 
 
 def _canonical_cuda_device(device_id: Optional[Union[int, torch.device]]) -> int:

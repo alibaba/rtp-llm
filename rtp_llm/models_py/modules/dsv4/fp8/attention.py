@@ -317,6 +317,8 @@ def bind_attn_cache(attn, kv_cache=None, block_tables_by_type=None, cp_ctx=BIND_
         attn._kv_cache = prev_kv
         attn._block_tables_by_type = prev_bt
         attn._cp_ctx = prev_cp
+
+
 _DSV4_FP8_INDEXER_ENTRY_BYTES = 132
 
 # Process-wide fixed Q chunk for streaming FlashMLA prefill. Resolve and
@@ -1492,9 +1494,7 @@ class AttentionFP8(nn.Module):
         eb = self._pool_entries_per_block(SWA_KV)
         if pool_view is None or eb <= 0:
             return None
-        swa_tokens_per_block = _dsv4_pool_tokens_per_block(
-            self._kv_cache, tag=SWA_KV
-        )
+        swa_tokens_per_block = _dsv4_pool_tokens_per_block(self._kv_cache, tag=SWA_KV)
 
         win = self.window_size
         if win <= 0:
@@ -1576,9 +1576,7 @@ class AttentionFP8(nn.Module):
         eb = self._pool_entries_per_block(SWA_KV)
         if pool_view is None or eb <= 0 or dense_len <= 0:
             return None
-        swa_tokens_per_block = _dsv4_pool_tokens_per_block(
-            self._kv_cache, tag=SWA_KV
-        )
+        swa_tokens_per_block = _dsv4_pool_tokens_per_block(self._kv_cache, tag=SWA_KV)
 
         device = pool_view.device
         dtype = torch.bfloat16
@@ -1710,12 +1708,8 @@ class AttentionFP8(nn.Module):
             state_bt = bt_by_type.get(INDEXER_STATE) if bt_by_type is not None else None
             state_eb = self._pool_entries_per_block(INDEXER_STATE)
             kv_tpb = _dsv4_pool_tokens_per_block(self._kv_cache, tag=INDEXER_KV)
-            kv_owner_tpb = _dsv4_pool_owner_tokens_per_block(
-                self._kv_cache, INDEXER_KV
-            )
-            state_tpb = _dsv4_pool_tokens_per_block(
-                self._kv_cache, tag=INDEXER_STATE
-            )
+            kv_owner_tpb = _dsv4_pool_owner_tokens_per_block(self._kv_cache, INDEXER_KV)
+            state_tpb = _dsv4_pool_tokens_per_block(self._kv_cache, tag=INDEXER_STATE)
             self.indexer.set_pool_context(
                 kv_view,
                 kv_bt,
@@ -4325,9 +4319,7 @@ class AttentionFP8(nn.Module):
         cmp_eb = self._pool_entries_per_block(cmp_at)
         if swa_eb <= 0 or cmp_eb <= 0:
             return None
-        swa_tokens_per_block = _dsv4_pool_tokens_per_block(
-            self._kv_cache, tag=SWA_KV
-        )
+        swa_tokens_per_block = _dsv4_pool_tokens_per_block(self._kv_cache, tag=SWA_KV)
 
         win = self.window_size
         # ``use_varlen`` is required — set by ``_build_shared_prefill_meta``
@@ -4795,9 +4787,7 @@ class AttentionFP8(nn.Module):
                 slot_in_flat=None,
                 cache_slot_mapping=None,
             )
-        swa_tokens_per_block = _dsv4_pool_tokens_per_block(
-            self._kv_cache, tag=SWA_KV
-        )
+        swa_tokens_per_block = _dsv4_pool_tokens_per_block(self._kv_cache, tag=SWA_KV)
 
         # Group-1 (every pool-bound FP8 layer): SWA pool write meta.
         #
@@ -5471,7 +5461,7 @@ class AttentionFP8(nn.Module):
         from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 
         with record_function_range("dsv4.fp8.attn.out.tp_all_reduce"):
-            all_reduce(out, Group.TP)
+            all_reduce(out, Group.TP, inplace=True)
 
     def _prefill_output_proj(
         self,

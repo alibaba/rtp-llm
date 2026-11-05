@@ -12,6 +12,7 @@ py_library(
     ],
     deps = [
         "//rtp_llm:torch",
+        "//rtp_llm/models_py:kernels",
     ],
     visibility = ["//visibility:public"],
 )

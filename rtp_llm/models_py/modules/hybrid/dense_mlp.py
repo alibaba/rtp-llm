@@ -106,18 +106,66 @@ class DenseMLP(nn.Module):
                     "W4A16 FFN unavailable, falling back to the default path"
                 )
 
-    def forward(self, x: torch.Tensor, skip_allreduce: bool = False) -> torch.Tensor:
+    def forward_with_residual_norm(
+        self, x, residual, norm, communicator=None, *, skip_allreduce=False
+    ):
+        if self.w4a16 is not None or not self.is_gated:
+            return None
+        fused = getattr(self.up_proj, "forward_fused_mlp", None)
+        output = (
+            fused(
+                x,
+                self.down_proj,
+                residual=residual,
+                norm=norm,
+                communicator=communicator,
+            )
+            if fused is not None
+            else None
+        )
+        if output is not None:
+            if not skip_allreduce and self.parallelism_config.get_ffn_tp_size() > 1:
+                output = all_reduce(output, group=Group.TP)
+            return output, residual
+        project = getattr(self.up_proj, "forward_with_residual_norm", None)
+        up = project(x, residual, norm, communicator) if project is not None else None
+        if up is None:
+            return None
+        return self.forward(x, skip_allreduce=skip_allreduce, projected_up=up), residual
+
+    def forward(
+        self, x: torch.Tensor, skip_allreduce: bool = False, *, projected_up=None
+    ) -> torch.Tensor:
         if self.w4a16 is not None and 0 < x.shape[0] < 64:
             output = self.w4a16(x, self.act_fn)
         elif not self.is_gated and self.activation_type == ActivationType.Gelu:
             activated = self.up_proj.forward_with_bias_gelu(x)
             output = self.down_proj(activated)
         else:
-            up = self.up_proj(x)
-            activated = self.act_fn(up)
-            output = self.down_proj(activated)
+            fused = (
+                getattr(self.up_proj, "forward_fused_mlp", None)
+                if self.is_gated and projected_up is None
+                else None
+            )
+            output = fused(x, self.down_proj) if fused is not None else None
+            if output is None:
+                output = self._project_and_activate(x, projected_up)
 
         ffn_tp_size = self.parallelism_config.get_ffn_tp_size()
         if not skip_allreduce and ffn_tp_size > 1:
             output = all_reduce(output, group=Group.TP)
+        return output
+
+    def _project_and_activate(self, x, projected_up):
+        up = self.up_proj(x) if projected_up is None else projected_up
+        fused_silu = (
+            getattr(self.down_proj, "forward_with_silu", None)
+            if self.is_gated
+            else None
+        )
+        output = fused_silu(up) if fused_silu is not None else None
+        if output is None:
+            activated = self.act_fn(up)
+            output = self.down_proj(activated)
+
         return output
