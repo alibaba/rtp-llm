@@ -271,14 +271,13 @@ static void expectMlaPhysicalViewUsesExplicitStride(const torch::Tensor& kv_cach
 class ExecOpsTest: public ::testing::Test {
 protected:
     static void SetUpTestSuite() {
-        initRuntime(/*device_id=*/0,
-                    /*trace_memory=*/false);
+        initRuntime(/*device_id=*/0);
     }
 };
 
 TEST_F(ExecOpsTest, testInitRuntimeIdempotent) {
     // Second call should be a no-op (already initialized).
-    initRuntime(0, false);
+    initRuntime(0);
     ASSERT_TRUE(isRuntimeInitialized());
 }
 

@@ -189,7 +189,7 @@ void ZigZagProcessor::handleOutputsLastHidden(torch::Tensor&                    
     // accumulation error) over a small [num_lm, hidden] buffer instead of the
     // full [seq, hidden] all-gather.
     torch::Tensor local_buf = computeLocalLastHidden(hidden_states, inputs, cp_params);
-    auto          reduced   = execAllReduce({local_buf, ReduceOp::Sum, false, ParallelMode::TP});
+    auto          reduced   = execAllReduce({local_buf, ReduceOp::Sum, ParallelMode::TP});
     hidden_states           = reduced.buffer;
 #endif
 }

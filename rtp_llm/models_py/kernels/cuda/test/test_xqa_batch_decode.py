@@ -333,7 +333,6 @@ class TestXQABatchDecode(unittest.TestCase):
 
         init_exec_ctx(
             device_id=0,
-            trace_memory=False,
         )
 
     def _test_xqa_decode_impl(

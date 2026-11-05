@@ -29,7 +29,7 @@ void EngineBase::initRuntime(const EngineInitParams& params) {
     Logger::getEngineLogger().setRank(rank);
     Logger::getEngineLogger().flush();
     size_t device_id = params.parallelism_config.world_rank % params.parallelism_config.local_world_size;
-    rtp_llm::initRuntime(device_id, params.profiling_debug_logging_config.trace_memory);
+    rtp_llm::initRuntime(device_id);
     warmupNoBlockCopy();
 }
 

@@ -149,7 +149,6 @@ class CudaGraphTestModelBuilder:
         pc = engine_config.parallelism_config
         init_exec_ctx(
             device_id=pc.world_rank % pc.local_world_size,
-            trace_memory=engine_config.profiling_debug_logging_config.trace_memory,
         )
 
         result = ModelBuildResult(

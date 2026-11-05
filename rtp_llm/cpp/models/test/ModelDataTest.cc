@@ -635,7 +635,6 @@ TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRequiresSingleDeviceParallel
     expect_rejected([](auto& c) { c.dp_size = 2; });
     expect_rejected([](auto& c) { c.ep_size = 2; });
     expect_rejected([](auto& c) { c.pp_size = 2; });
-    expect_rejected([](auto& c) { c.ffn_sp_size = 2; });
     expect_rejected([](auto& c) { c.ffn_tp_size = 2; });
     expect_rejected([](auto& c) { c.prefill_cp_config.method = CPRotateMethod::ALL_GATHER; });
     expect_rejected([](auto& c) { c.prefill_cp_config.method = CPRotateMethod::PREFILL_CP; });

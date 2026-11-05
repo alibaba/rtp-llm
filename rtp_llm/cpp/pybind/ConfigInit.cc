@@ -770,9 +770,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register ProfilingDebugLoggingConfig
     py::class_<ProfilingDebugLoggingConfig>(m, "ProfilingDebugLoggingConfig")
         .def(py::init<>())
-        .def_readwrite("trace_memory", &ProfilingDebugLoggingConfig::trace_memory)
-        .def_readwrite("enable_device_perf", &ProfilingDebugLoggingConfig::enable_device_perf)
-        .def_readwrite("ft_core_dump_on_exception", &ProfilingDebugLoggingConfig::ft_core_dump_on_exception)
         .def_readwrite("ft_alog_conf_path", &ProfilingDebugLoggingConfig::ft_alog_conf_path)
         .def_readwrite("gen_timeline_sync", &ProfilingDebugLoggingConfig::gen_timeline_sync)
         .def_readwrite("timeline_start_step", &ProfilingDebugLoggingConfig::timeline_start_step)
@@ -789,9 +786,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("to_string", &ProfilingDebugLoggingConfig::to_string)
         .def(py::pickle(
             [](const ProfilingDebugLoggingConfig& self) {
-                return py::make_tuple(self.trace_memory,
-                                      self.enable_device_perf,
-                                      self.ft_core_dump_on_exception,
+                // The first three slots are reserved: trace_memory,
+                // enable_device_perf and ft_core_dump_on_exception were
+                // removed; literals keep the legacy pickle layout.
+                return py::make_tuple(false,
+                                      false,
+                                      false,
                                       self.ft_alog_conf_path,
                                       self.gen_timeline_sync,
                                       self.timeline_start_step,
@@ -812,9 +812,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
 
                 ProfilingDebugLoggingConfig c;
                 try {
-                    c.trace_memory              = t[0].cast<bool>();
-                    c.enable_device_perf        = t[1].cast<bool>();
-                    c.ft_core_dump_on_exception = t[2].cast<bool>();
+                    // Slots 0-2 are legacy reserved slots (removed fields).
+                    (void)t[0].cast<bool>();
+                    (void)t[1].cast<bool>();
+                    (void)t[2].cast<bool>();
                     c.ft_alog_conf_path         = t[3].cast<std::string>();
                     c.gen_timeline_sync         = t[4].cast<bool>();
                     if (t.size() == 12 || t.size() == 13) {
@@ -1132,21 +1133,23 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register MiscellaneousConfig
     py::class_<MiscellaneousConfig>(m, "MiscellaneousConfig")
         .def(py::init<>())
-        .def_readwrite("disable_pdl", &MiscellaneousConfig::disable_pdl)
         .def_property(
             "aux_string",
             [](const MiscellaneousConfig& self) { return self.aux_string; },
             [](MiscellaneousConfig& self, const std::string& value) { self.aux_string = value; })
         .def("to_string", &MiscellaneousConfig::to_string)
         .def(py::pickle(
-            [](const MiscellaneousConfig& self) { return py::make_tuple(self.disable_pdl, self.aux_string); },
+            // Slot 0 is reserved: disable_pdl (removed; PDL is now
+            // unconditionally enabled on SM>=9) — literal keeps the
+            // legacy pickle layout.
+            [](const MiscellaneousConfig& self) { return py::make_tuple(true, self.aux_string); },
             [](py::tuple t) {
                 if (t.size() != 2)
                     throw std::runtime_error("Invalid state!");
                 MiscellaneousConfig c;
                 try {
-                    c.disable_pdl = t[0].cast<bool>();
-                    c.aux_string  = t[1].cast<std::string>();
+                    (void)t[0].cast<bool>();  // reserved: removed disable_pdl
+                    c.aux_string = t[1].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("MiscellaneousConfig unpickle error: ") + e.what());
                 }
@@ -1283,7 +1286,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("world_rank", &ParallelismConfig::world_rank)
         .def_readwrite("local_world_size", &ParallelismConfig::local_world_size)
         .def_readwrite("local_rank", &ParallelismConfig::local_rank)
-        .def_readwrite("ffn_sp_size", &ParallelismConfig::ffn_sp_size)
         .def_readwrite("tp_rank", &ParallelismConfig::tp_rank)
         .def_readwrite("ep_rank", &ParallelismConfig::ep_rank)
         .def_readwrite("dp_rank", &ParallelismConfig::dp_rank)
@@ -1307,7 +1309,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.world_size,
                                       self.world_rank,
                                       self.local_world_size,
-                                      self.ffn_sp_size,
+                                      int64_t(1),  // reserved: removed ffn_sp_size
                                       self.tp_rank,
                                       self.ep_rank,
                                       self.dp_rank,
@@ -1330,7 +1332,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.world_size              = t[4].cast<int64_t>();
                     c.world_rank              = t[5].cast<int64_t>();
                     c.local_world_size        = t[6].cast<int64_t>();
-                    c.ffn_sp_size             = t[7].cast<int64_t>();
+                    (void)t[7].cast<int64_t>();  // reserved: removed ffn_sp_size
                     c.tp_rank                 = t[8].cast<int64_t>();
                     c.ep_rank                 = t[9].cast<int64_t>();
                     c.dp_rank                 = t[10].cast<int64_t>();
@@ -1526,7 +1528,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("model_name", &RuntimeConfig::model_name)
         .def_readwrite("worker_grpc_addrs", &RuntimeConfig::worker_grpc_addrs)
         .def_readwrite("worker_addrs", &RuntimeConfig::worker_addrs)
-        // Fields merged from PyDeviceResourceConfig
         .def_readwrite("specify_gpu_arch", &RuntimeConfig::specify_gpu_arch)
         // Add sub-configs as properties that return references
         .def_property_readonly(

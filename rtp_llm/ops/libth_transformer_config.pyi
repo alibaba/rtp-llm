@@ -923,7 +923,6 @@ class MMPreprocessConfig:
         ...
 class MiscellaneousConfig:
     aux_string: str
-    disable_pdl: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -1257,7 +1256,6 @@ class ParallelismConfig:
     ep_rank: int
     ep_size: int
     ffn_disaggregate_config: FfnDisAggregateConfig
-    ffn_sp_size: int
     ffn_tp_rank: int
     ffn_tp_size: int
     local_rank: int
@@ -1308,10 +1306,8 @@ class ProfilingDebugLoggingConfig:
     debug_load_server: bool
     debug_start_fake_process: bool
     enable_detail_log: bool
-    enable_device_perf: bool
     enable_model_inputs_log: bool
     ft_alog_conf_path: str
-    ft_core_dump_on_exception: bool
     gen_timeline_sync: bool
     hack_layer_num: int
     log_file_backup_count: int
@@ -1319,7 +1315,6 @@ class ProfilingDebugLoggingConfig:
     timeline_start_step: int
     timeline_trace_name: str
     torch_cuda_profiler_dir: str
-    trace_memory: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:

@@ -69,9 +69,7 @@ close_capture_publisher_without_gil = _extension.close_capture_publisher_without
 destroy_cpu_tp_broadcaster = _extension.destroy_cpu_tp_broadcaster
 flush_capture_publisher_without_close = _extension.flush_capture_publisher_without_close
 init_cpu_tp_broadcaster = _extension.init_cpu_tp_broadcaster
-initialize_capture_publisher_with_core_dump = (
-    _extension.initialize_capture_publisher_with_core_dump
-)
+initialize_capture_publisher = _extension.initialize_capture_publisher
 register_comm_ops = _extension.register_comm_ops
 run_tp_sync_model_inputs_scenario = _extension.run_tp_sync_model_inputs_scenario
 
@@ -2746,7 +2744,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         )
         del store
 
-    def test_capture_publisher_layout_with_core_dump(self) -> None:
+    def test_capture_publisher_layout(self) -> None:
         child_case_env = "RTP_TEST_CAPTURE_LAYOUT_CHILD"
         cases = {
             "hidden_dim": (
@@ -2783,7 +2781,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                         [
                             sys.executable,
                             os.path.abspath(__file__),
-                            f"{type(self).__name__}.test_capture_publisher_layout_with_core_dump",
+                            f"{type(self).__name__}.test_capture_publisher_layout",
                         ],
                         env=env,
                         capture_output=True,
@@ -2827,9 +2825,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         with missing_method_patch, patch.object(
             _FakeMooncakeConfig, "from_env", tracked_from_env
         ):
-            result = initialize_capture_publisher_with_core_dump()
-        self.assertTrue(result["core_dump_enabled"])
-        self.assertTrue(result["core_dump_restored"])
+            result = initialize_capture_publisher()
         self.assertCaptureMetricTypes(result)
         metrics = result["capture_metrics"]
         self.assertEqual(set(metrics), _CAPTURE_QPS_METRICS | _CAPTURE_STATUS_METRICS)

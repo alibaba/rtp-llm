@@ -480,7 +480,6 @@ def get_typemeta(arg0: torch.Tensor) -> TypeMeta:
 
 def init_exec_ctx(
     device_id: int,
-    trace_memory: bool,
 ) -> None: ...
 
 def register_comm_ops(broadcast_fn: typing.Callable, allreduce_fn: typing.Callable, allgather_fn: typing.Callable) -> None:

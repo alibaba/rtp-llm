@@ -560,11 +560,9 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
                                                    params.parallelism_config.role_type,
                                                    params.sp_config.type);
         if (!generation_prefill_cuda_graph_requested) {
-            rtp_llm::setTraceMemory(true);
             executor_.reset(new NormalExecutor(params, nullptr, true, false, 0));
             THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
             const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
-            rtp_llm::setTraceMemory(false);
             (void)executor_.reset(nullptr);
             cudaDeviceSynchronize();
             c10::cuda::CUDACachingAllocator::emptyCache();
@@ -584,7 +582,6 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         const auto baseline_allocated = cuda_graph::graphAllocatedBytes();
         const auto baseline_reserved  = cuda_graph::graphReservedBytes();
 
-        rtp_llm::setTraceMemory(true);
         executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0));
         {
             // NormalGenerateStream snapshots ResourceContext at construction. Bind
@@ -615,7 +612,6 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
                          positiveDelta(measured_reserved, baseline_reserved) / 1024 / 1024,
                          positiveDelta(baseline_status.available_bytes, measured_status.available_bytes) / 1024 / 1024);
 
-        rtp_llm::setTraceMemory(false);
         (void)executor_.reset(nullptr);
         warmup_cache_manager.reset();
         cudaDeviceSynchronize();
@@ -631,7 +627,6 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         warmup_resource_context.cache_manager   = warmup_cache_manager;
         // The temporary paged cache is warmup infrastructure, not runtime activation memory.
         // Create it before tracing and destroy it before sampling production cache capacity.
-        rtp_llm::setTraceMemory(true);
         auto memory_tracker = std::make_unique<WarmupMemoryTracker>();
         executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0));
         auto token_heavy_result = runPrefillWarmupShape(fake_input, warmup_resource_context, 0, token_budget);
@@ -674,7 +669,6 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
             params.py_model.attr("initialize")(torch_ext::PyModelInitResources{});
         }
         (void)executor_.reset(nullptr);
-        rtp_llm::setTraceMemory(false);
     }
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
@@ -690,7 +684,6 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     auto fake_input                                   = makeFakeInput(getWarmUpInputLength());
     fake_input->generate_config->num_return_sequences = runtime_config.max_generate_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
-    rtp_llm::setTraceMemory(true);
 
     auto cache_manager = createWarmupCacheManager();
     executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0));
@@ -700,8 +693,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
         ScopedWarmUpCacheManagerBinding cache_binding(resource_context_, cache_manager);
         THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     }
-    const auto max_consumed         = getGpuExecStatus().device_memory_status.max_consumed_bytes;
-    rtp_llm::setTraceMemory(false);
+    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     (void)executor_.reset(nullptr);
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();

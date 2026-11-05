@@ -295,7 +295,7 @@ def set_parallelism_config(
             == parallelism_config.tp_size * parallelism_config.dp_size
         ), f"ep_size must be equal to 1 or tp_size * dp_size, got ep_size={parallelism_config.ep_size}, tp_size={parallelism_config.tp_size}, dp_size={parallelism_config.dp_size}"
 
-    ffn_tp_size = parallelism_config.tp_size // parallelism_config.ffn_sp_size
+    ffn_tp_size = parallelism_config.tp_size
     parallelism_config.ffn_tp_size = ffn_tp_size
     if world_rank is not None:
         parallelism_config.world_rank = world_rank

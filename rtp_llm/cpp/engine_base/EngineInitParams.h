@@ -4,7 +4,6 @@
 
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -81,8 +80,6 @@ struct EngineInitParams {
         py_eplb(py_eplb),
         py_sp_model(py_sp_model),
         weight_manager(weight_manager) {
-        StaticConfig::user_ft_core_dump_on_exception = profiling_debug_logging_config.ft_core_dump_on_exception;
-        StaticConfig::user_disable_pdl               = misc_config.disable_pdl;
         // default 1 minute and 1000
         ParallelInfo& global_parallel_info = ParallelInfo::globalParallelInfo();
         global_parallel_info.setTpSize(parallelism_config.tp_size);

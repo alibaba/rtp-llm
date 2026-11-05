@@ -72,7 +72,7 @@ inline bool shouldCreateGenerationPrefillCudaGraph(const HWKernelConfig& hw_kern
 
 inline bool isSingleDeviceGenerationPrefillCudaGraphConfig(const ParallelismConfig& config) {
     return config.world_size == 1 && config.tp_size == 1 && config.dp_size == 1 && config.ep_size == 1
-           && config.pp_size == 1 && config.ffn_sp_size == 1 && config.ffn_tp_size == 1
+           && config.pp_size == 1 && config.ffn_tp_size == 1
            && !config.prefill_cp_config.is_enabled() && !config.prefill_cp_config.is_prefill_enabled()
            && !config.ffn_disaggregate_config.enable_ffn_disaggregate;
 }

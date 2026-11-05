@@ -39,7 +39,7 @@ using CacheStoreCompletionRegistrar = std::function<CacheStoreCompletionCallback
 // ===================================================================
 
 // Perform one-time runtime init: cudaSetDevice, global flags, etc.
-void initRuntime(size_t device_id, bool trace_memory);
+void initRuntime(size_t device_id);
 
 bool isRuntimeInitialized();
 
@@ -66,7 +66,6 @@ void cudaProfilerEnd();
 
 ExecStatus    getGpuExecStatus();
 torch::Device getTorchCudaDevice();
-void          setTraceMemory(bool trace_memory);
 
 // ===================================================================
 // Copy ops

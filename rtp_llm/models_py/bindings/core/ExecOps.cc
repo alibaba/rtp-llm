@@ -11,8 +11,6 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/ErrorCodeUtil.h"
-#include "autil/StackTracer.h"
-#include "autil/EnvUtil.h"
 #include <algorithm>
 #include <cstdint>
 #include <unistd.h>
@@ -591,14 +589,6 @@ torch::Device getTorchCudaDevice() {
     return torch::Device(torch::kCUDA);
 }
 
-namespace {
-static bool g_trace_memory = false;
-}
-
-void setTraceMemory(bool trace_memory) {
-    g_trace_memory = trace_memory;
-}
-
 // === Copy ops ===
 
 void execNoBlockCopy(const CopyParams& params) {
@@ -778,7 +768,7 @@ void execSyncCommunication(ParallelMode mode, bool timeout) {
 // initRuntime — one-time runtime init (side effects only)
 // ============================================================
 
-void initRuntime(size_t device_id, bool trace_memory) {
+void initRuntime(size_t device_id) {
     // Guard against double-init
     if (g_runtime_initialized.load(std::memory_order_acquire)) {
         RTP_LLM_LOG_WARNING("Runtime is already initialized! will do nothing.");
@@ -787,11 +777,6 @@ void initRuntime(size_t device_id, bool trace_memory) {
 
     std::call_once(g_init_flag, [&]() {
         setlinebuf(stdout);
-
-        if (trace_memory) {
-            autil::EnvUtil::setEnv("STACK_TRACER_LOG", "true");
-            DECLARE_STACK_TRACER_FILE("rtp_llm_stack.log");
-        }
 
 #if USING_CUDA
         RTP_LLM_LOG_INFO("Initialize runtime. device_id=%zu", device_id);
@@ -836,11 +821,10 @@ void registerExecCtxOps(pybind11::module& m) {
 
     m.def(
         "init_exec_ctx",
-        [](size_t device_id, bool trace_memory) {
-            initRuntime(device_id, trace_memory);
+        [](size_t device_id) {
+            initRuntime(device_id);
         },
-        py::arg("device_id"),
-        py::arg("trace_memory"));
+        py::arg("device_id"));
 
     m.def(
         "register_comm_ops",

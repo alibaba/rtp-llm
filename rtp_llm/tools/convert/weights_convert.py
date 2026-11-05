@@ -175,7 +175,6 @@ class WeightConverter:
         pc.world_rank = _env_int("WORLD_RANK", 0)
         pc.local_world_size = _env_int("LOCAL_WORLD_SIZE", 1)
         pc.ep_size = _env_int("EP_SIZE", 0)
-        pc.ffn_sp_size = _env_int("FFN_SP_SIZE", 1)
 
         if pc.world_size > 1 and pc.local_world_size == 1:
             n = (
@@ -204,7 +203,7 @@ class WeightConverter:
         pc.dp_rank = _env_int("DP_RANK", pc.world_rank // pc.tp_size)
         pc.ep_rank = pc.world_rank % pc.ep_size
         pc.local_rank = pc.world_rank % pc.local_world_size
-        pc.ffn_tp_size = pc.tp_size // pc.ffn_sp_size
+        pc.ffn_tp_size = pc.tp_size
         pc.ffn_tp_rank = pc.tp_rank % pc.ffn_tp_size if pc.ffn_tp_size else 0
         return pc
 

@@ -9,8 +9,7 @@ using namespace std;
 namespace rtp_llm {
 
 DeviceUtil::DeviceUtil() {
-    rtp_llm::initRuntime(/*device_id=*/0,
-                         /*trace_memory=*/false);
+    rtp_llm::initRuntime(/*device_id=*/0);
 }
 
 DeviceUtil::~DeviceUtil() {}

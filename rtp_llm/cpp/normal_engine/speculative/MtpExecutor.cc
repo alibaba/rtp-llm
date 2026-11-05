@@ -293,7 +293,7 @@ bool MtpExecutor::reduceDSparkCacheStoreStatus(bool local_ok) {
     RTP_LLM_CHECK_WITH_INFO(dspark_cache_store_status_.defined(),
                             "DSpARK cache-store TP status buffer is not initialized");
     dspark_cache_store_status_.fill_(local_ok ? 1 : 0);
-    auto global_status = execAllReduce({dspark_cache_store_status_, ReduceOp::Min, false, ParallelMode::TP}).buffer;
+    auto global_status = execAllReduce({dspark_cache_store_status_, ReduceOp::Min, ParallelMode::TP}).buffer;
     return global_status.item<int32_t>() != 0;
 }
 

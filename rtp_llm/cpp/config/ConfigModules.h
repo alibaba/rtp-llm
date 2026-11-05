@@ -75,7 +75,6 @@ struct ParallelismConfig {
     int64_t world_rank       = 0;
     int64_t local_world_size = 1;
     int64_t local_rank       = 0;
-    int64_t ffn_sp_size      = 1;
     int64_t tp_rank          = 0;
     int64_t ep_rank          = 0;
     int64_t dp_rank          = 0;
@@ -260,9 +259,6 @@ struct KVCacheConfig {
 };
 
 struct ProfilingDebugLoggingConfig {
-    bool        trace_memory              = false;
-    bool        enable_device_perf        = false;
-    bool        ft_core_dump_on_exception = false;
     std::string ft_alog_conf_path         = "";
     bool        gen_timeline_sync         = false;
     int         timeline_start_step       = 0;
@@ -484,7 +480,6 @@ struct RuntimeConfig {
     std::vector<std::string> worker_grpc_addrs;
     std::vector<std::string> worker_addrs;
 
-    // Fields merged from PyDeviceResourceConfig
     std::string specify_gpu_arch = "";
 
     std::string to_string() const;
@@ -520,8 +515,7 @@ struct PDSepConfig {
 };
 
 struct MiscellaneousConfig {
-    bool        disable_pdl = true;
-    std::string aux_string  = "";
+    std::string aux_string = "";
     std::string to_string() const;
 };
 

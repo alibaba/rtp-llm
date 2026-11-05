@@ -18,7 +18,6 @@
 #include <cstring>
 #include <iostream>
 #include <numeric>
-#include "rtp_llm/cpp/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #if USING_CUDA
 #include <c10/cuda/CUDAStream.h>
@@ -220,7 +219,6 @@ std::optional<std::string> PyWrappedModel::takeDeferredHiddenStateCaptureError()
 // Helper function to build PyAttentionInputs from GptModelInputs
 torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs");
-    DevicePerfWrapper            wrapper(enable_device_perf_, "py model buildPyAttentionInputs");
     torch_ext::PyAttentionInputs py_attn_inputs;
 
     auto normalize_i32 = [this](const torch::Tensor& tensor) -> torch::Tensor {
@@ -419,7 +417,6 @@ torch_ext::AttentionInputsByTag
 PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                const GptModelInputs&         inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.setupKVCacheForAttentionInputs");
-    DevicePerfWrapper wrapper(enable_device_perf_, "py model setupKVCacheForAttentionInputs");
     if (!inputs.kv_cache_kernel_block_id.defined()) {
         return {};
     }
@@ -520,7 +517,6 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
 // Helper function to build BertEmbeddingInputs from GptModelInputs
 torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.buildBertEmbeddingInputs");
-    DevicePerfWrapper              wrapper(enable_device_perf_, "py model buildBertEmbeddingInputs");
     torch_ext::BertEmbeddingInputs bert_embedding_inputs;
 
     // Convert combo_position_ids from Buffer to torch::Tensor
@@ -530,21 +526,16 @@ torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const Gp
 
     // Convert combo_tokens_type_ids from Buffer to torch::Tensor
     if (inputs.combo_tokens_type_ids.defined()) {
-        {
-            DevicePerfWrapper wrapper(enable_device_perf_, "py model combo_tokens.cuda()");
-            bert_embedding_inputs.combo_tokens_type_ids = inputs.combo_tokens_type_ids.cuda();
-        }
+        bert_embedding_inputs.combo_tokens_type_ids = inputs.combo_tokens_type_ids.cuda();
     }
 
     // Get position_encoding from model weights (no clone needed for weights)
     if (weights_.position_encoding) {
-        DevicePerfWrapper wrapper(enable_device_perf_, "py model weights_.position_encoding->kernel");
         bert_embedding_inputs.position_encoding = weights_.position_encoding->kernel;
     }
 
     // Get token_type_embedding from model weights (no clone needed for weights)
     if (weights_.token_type_embedding) {
-        DevicePerfWrapper wrapper(enable_device_perf_, "py model weights_.token_type_embedding->kernel");
         bert_embedding_inputs.token_type_embedding = weights_.token_type_embedding->kernel;
     }
 
@@ -652,7 +643,6 @@ std::string PyWrappedModel::waitCacheStorePublication() {
 }
 
 torch_ext::PyEmbeddingInputs PyWrappedModel::buildPyEmbeddingInputs(const GptModelInputs& inputs) {
-    DevicePerfWrapper            wrapper(enable_device_perf_, "py model buildPyEmbeddingInputs");
     torch_ext::PyEmbeddingInputs embedding_inputs;
     if (inputs.combo_tokens_type_ids.defined()) {
         embedding_inputs.combo_tokens_type_ids = inputs.combo_tokens_type_ids.cuda();
@@ -664,7 +654,6 @@ torch_ext::PyEmbeddingInputs PyWrappedModel::buildPyEmbeddingInputs(const GptMod
 }
 
 torch_ext::PyMultimodalInputs PyWrappedModel::buildPyMultimodalInputs(const GptModelInputs& inputs) {
-    DevicePerfWrapper             wrapper(enable_device_perf_, "py model buildPyMultimodalInputs");
     torch_ext::PyMultimodalInputs multimodal_input;
     if (inputs.multimodal_features && !inputs.multimodal_features.value().empty()) {
         std::vector<torch::Tensor> multimodal_features;
@@ -702,7 +691,6 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
         --pinned_check_remaining_;
     }
 
-    DevicePerfWrapper            wrapper(enable_device_perf_, "py model prepareAttentionInputs");
     torch_ext::PyAttentionInputs attention_inputs;
     {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(build)");
@@ -807,7 +795,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     if (hidden_state_capture_publisher_) {
         hidden_state_capture_publisher_->beginForward();
     }
-    DevicePerfWrapper wrapper(enable_device_perf_, "py model forward");
     holdInputsHostBuffers(inputs);
     const bool capture_hidden_states = shouldCaptureHiddenStates(inputs);
     const auto capture_input_ids     = capture_hidden_states ? inputs.combo_tokens : torch::Tensor();
@@ -916,7 +903,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (can_run_graph) {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
-            DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");
             RTP_LLM_LOG_DEBUG(
                 "[PyWrappedModel] using CUDA graph forward, is_target_verify=%d, is_prefill=%d, graph_bs=%d",
                 py_model_inputs.attention_inputs.is_target_verify,
@@ -931,7 +917,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         } else {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
-            DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);
@@ -993,7 +978,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                     torch::tensor({local_layout_error.empty() ? int32_t{1} : int32_t{0}},
                                   torch::TensorOptions().dtype(torch::kInt32).device(token_ids.device()));
                 if (device_props_.tp_size > 1) {
-                    layout_status = execAllReduce({layout_status, ReduceOp::Min, false, ParallelMode::TP}).buffer;
+                    layout_status = execAllReduce({layout_status, ReduceOp::Min, ParallelMode::TP}).buffer;
                 }
                 if (!local_layout_error.empty() || layout_status.item<int32_t>() == 0) {
                     if (local_layout_error.empty()) {
@@ -1082,7 +1067,6 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                                                   const GptModelInputs& inputs,
                                                   torch::Tensor         merged_eagle3_hidden,
                                                   bool                  skip_final_layernorm) {
-    DevicePerfWrapper wrapper(enable_device_perf_, "forwardPostLayers");
     if (weights_.final_layernorm && !skip_final_layernorm) {
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(final_layernorm)");
         const auto& norm_w = *weights_.final_layernorm;
@@ -1207,7 +1191,6 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     // exit's existing tail: skip the final layernorm (the CP path passes
     // skip_final_layernorm=true) and the lm_output_indexes index_select (already
     // applied during the gather), then run lm_head and TP-sync the logits.
-    DevicePerfWrapper wrapper(enable_device_perf_, "forwardPostLayersLastHidden");
     if (inputs.skip_lm_head) {
         return {torch::Tensor(), torch::Tensor(), hidden};
     }

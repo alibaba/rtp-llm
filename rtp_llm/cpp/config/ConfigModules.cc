@@ -62,7 +62,6 @@ std::string ParallelismConfig::to_string() const {
         << "pp_size: " << pp_size << "\n"
         << "local_world_size: " << local_world_size << "\n"
         << "local_rank: " << local_rank << "\n"
-        << "ffn_sp_size: " << ffn_sp_size << "\n"
         << "tp_rank: " << tp_rank << "\n"
         << "ep_rank: " << ep_rank << "\n"
         << "dp_rank: " << dp_rank << "\n"
@@ -168,10 +167,7 @@ std::string KVCacheConfig::to_string() const {
 // ProfilingDebugLoggingConfig
 std::string ProfilingDebugLoggingConfig::to_string() const {
     std::ostringstream oss;
-    oss << "trace_memory: " << trace_memory << "\n"
-        << "enable_device_perf: " << enable_device_perf << "\n"
-        << "ft_core_dump_on_exception: " << ft_core_dump_on_exception << "\n"
-        << "ft_alog_conf_path: " << ft_alog_conf_path << "\n"
+    oss << "ft_alog_conf_path: " << ft_alog_conf_path << "\n"
         << "gen_timeline_sync: " << gen_timeline_sync << "\n"
         << "timeline_start_step: " << timeline_start_step << "\n"
         << "timeline_num_steps: " << timeline_num_steps << "\n"
@@ -360,8 +356,7 @@ std::string CacheStoreConfig::to_string() const {
 // MiscellaneousConfig
 std::string MiscellaneousConfig::to_string() const {
     std::ostringstream oss;
-    oss << "disable_pdl: " << disable_pdl << "\n"
-        << "aux_string: " << aux_string << "\n";
+    oss << "aux_string: " << aux_string << "\n";
     return oss.str();
 }
 

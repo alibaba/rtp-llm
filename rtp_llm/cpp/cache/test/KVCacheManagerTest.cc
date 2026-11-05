@@ -28,7 +28,6 @@
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -48,18 +47,14 @@ const std::vector<std::string> kDsv4Tags    = {
 class KVCacheManagerTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        old_core_dump_on_exception_                  = StaticConfig::user_ft_core_dump_on_exception;
-        StaticConfig::user_ft_core_dump_on_exception = false;
         rtp_llm::initLogger();
         createDevice();
     }
 
     void TearDown() override {
-        StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception_;
     }
 
 private:
-    bool old_core_dump_on_exception_{false};
 };
 
 static void assertBlockBytesEq(const std::shared_ptr<rtp_llm::KVCacheManager>& cache_manager,

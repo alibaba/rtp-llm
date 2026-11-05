@@ -172,7 +172,6 @@ The following legacy options and environment variables were removed and must no 
 | `--load-balance` | Enables dynamic load balancing | False |
 | `--step-records-time-range` | Performance record retention time window (microseconds) | 60000000 |
 | `--step-records-max-size` | Maximum performance record count | 1000 |
-| `--disable-pdl` | Disables PDL feature | False |
 
 ## 3FS Configuration
 

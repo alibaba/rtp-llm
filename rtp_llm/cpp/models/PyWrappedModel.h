@@ -167,7 +167,6 @@ private:
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     bool use_spec_decoding_{false};
     bool has_mtp_hidden_buffer_{false};
-    bool enable_device_perf_{false};
     bool check_nan_{false};
 
     std::unique_ptr<HiddenStateCapturePublisher> hidden_state_capture_publisher_;
@@ -222,7 +221,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                                    GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE :
                                                    GenerationPrefillCudaGraphStatus::NOT_REQUESTED),
     use_spec_decoding_(use_spec_decoding),
-    enable_device_perf_(params.profile_debug_logging_config.enable_device_perf),
     check_nan_(params.profile_debug_logging_config.check_nan) {
 
     c10::InferenceMode inference_guard(true);
@@ -235,14 +233,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         const auto& parallelism = params.parallelism_config;
         RTP_LLM_CHECK_WITH_INFO(isSingleDeviceGenerationPrefillCudaGraphConfig(parallelism),
                                 "Generation prefill CUDA graph currently supports only single-device execution: "
-                                "world_size=%ld tp_size=%ld dp_size=%ld ep_size=%ld pp_size=%ld ffn_sp_size=%ld "
+                                "world_size=%ld tp_size=%ld dp_size=%ld ep_size=%ld pp_size=%ld "
                                 "ffn_tp_size=%ld prefill_cp=%d ffn_disaggregate=%d",
                                 parallelism.world_size,
                                 parallelism.tp_size,
                                 parallelism.dp_size,
                                 parallelism.ep_size,
                                 parallelism.pp_size,
-                                parallelism.ffn_sp_size,
                                 parallelism.ffn_tp_size,
                                 static_cast<int>(parallelism.prefill_cp_config.is_enabled()
                                                  || parallelism.prefill_cp_config.is_prefill_enabled()),

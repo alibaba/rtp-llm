@@ -64,8 +64,7 @@ static KeyBlockInfoMap makeBlocks(int64_t cache_key, void* addr, size_t size) {
 class TcpSenderOnlyTest: public ::testing::Test {
 public:
     static void SetUpTestSuite() {
-        initRuntime(/*device_id=*/0,
-                    /*trace_memory=*/false);
+        initRuntime(/*device_id=*/0);
         device_initialized_ = isRuntimeInitialized();
     }
 
@@ -90,8 +89,7 @@ bool TcpSenderOnlyTest::device_initialized_ = false;
 class TcpSenderReceiverTest: public ::testing::Test {
 public:
     static void SetUpTestSuite() {
-        initRuntime(/*device_id=*/0,
-                    /*trace_memory=*/false);
+        initRuntime(/*device_id=*/0);
         device_initialized_ = isRuntimeInitialized();
     }
 

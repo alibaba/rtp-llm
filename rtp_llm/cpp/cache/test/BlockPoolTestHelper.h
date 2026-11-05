@@ -99,8 +99,7 @@ inline DeviceBlockPoolConfig createTestConfig(size_t   k_block_stride_bytes = 51
 
 inline void createDevice() {
     torch::manual_seed(114514);
-    rtp_llm::initRuntime(/*device_id=*/0,
-                         /*trace_memory=*/false);
+    rtp_llm::initRuntime(/*device_id=*/0);
 }
 
 // Build the DeviceBlockPool from the same test config, for the SingleTypeCacheManager / allocator

@@ -110,8 +110,7 @@ configure_env() {
   # Configure fixed environment variables
   export PYTHONPATH="./";
   export PYTHON_BIN="/opt/conda310/bin/python";
-  export FT_CORE_DUMP_ON_EXCEPTION=1;
-  export NCCL_TOPO_DUMP_FILE="/tmp/nccl_topo.xml";
+    export NCCL_TOPO_DUMP_FILE="/tmp/nccl_topo.xml";
   export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/lib64:/usr/local/nvidia/lib64/:/usr/local/cuda/lib64/:/usr/local/cuda/extras/CUPTI/lib64/";
   # Set CUDA_VISIBLE_DEVICES based on LOCAL_WORLD_SIZE if not already set
   if [ -z "$CUDA_VISIBLE_DEVICES" ] && [ -n "$LOCAL_WORLD_SIZE" ]; then

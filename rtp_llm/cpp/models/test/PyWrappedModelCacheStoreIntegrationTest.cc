@@ -19,7 +19,6 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "kmonitor/client/MetricType.h"
 #include "kmonitor/client/core/MetricsRecord.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/HiddenStateCapturePublisher.h"
@@ -886,22 +885,11 @@ py::dict closeCapturePublisherWithoutGil() {
     return result;
 }
 
-py::dict initializeCapturePublisherWithCoreDump() {
-    struct ScopedCoreDump {
-        ScopedCoreDump(): previous(std::exchange(StaticConfig::user_ft_core_dump_on_exception, true)) {}
-        ~ScopedCoreDump() {
-            StaticConfig::user_ft_core_dump_on_exception = previous;
-        }
-        const bool previous;
-    };
-
-    const bool          previous_core_dump = StaticConfig::user_ft_core_dump_on_exception;
+py::dict initializeCapturePublisher() {
     FakeMetricsReporter fake_metrics_reporter;
     py::dict            result;
     result["error"] = "";
     try {
-        ScopedCoreDump core_dump;
-        result["core_dump_enabled"] = StaticConfig::user_ft_core_dump_on_exception;
         HiddenStateCapturePublisher publisher(/*layer_count=*/2,
                                               /*hidden_size=*/1,
                                               HiddenStateCaptureDtype::BF16,
@@ -913,7 +901,6 @@ py::dict initializeCapturePublisherWithCoreDump() {
     } catch (const std::exception& error) {
         result["error"] = error.what();
     }
-    result["core_dump_restored"]   = StaticConfig::user_ft_core_dump_on_exception == previous_core_dump;
     auto metrics                   = fake_metrics_reporter.snapshotHiddenStateCaptureMetrics();
     result["capture_metrics"]      = metrics[0];
     result["capture_metric_types"] = metrics[1];
@@ -995,8 +982,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                                              bool               skip_first_deferred_error_take) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() {
-        initRuntime(/*device_id=*/0,
-                    /*trace_memory=*/false);
+        initRuntime(/*device_id=*/0);
     });
 
     RTP_LLM_CHECK_WITH_INFO(forward_count > 0, "forward_count must be positive");
@@ -1133,8 +1119,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
 py::dict runDirtyGenerationPrefillCaptureScenario(py::object py_model) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() {
-        initRuntime(/*device_id=*/0,
-                    /*trace_memory=*/false);
+        initRuntime(/*device_id=*/0);
     });
 
     bool                          saw_dirty_capture_error = false;
@@ -1206,8 +1191,7 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
                                              const std::vector<std::pair<bool, bool>>& forward_flags) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() {
-        initRuntime(/*device_id=*/0,
-                    /*trace_memory=*/false);
+        initRuntime(/*device_id=*/0);
     });
 
     auto config  = makeCacheConfig({{"full", 4, 64}});
@@ -1421,7 +1405,7 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     m.def("run_post_layers", &rtp_llm::test::runCustomOutput);
     m.def("flush_capture_publisher_without_close", &rtp_llm::test::flushCapturePublisherWithoutClose);
     m.def("close_capture_publisher_without_gil", &rtp_llm::test::closeCapturePublisherWithoutGil);
-    m.def("initialize_capture_publisher_with_core_dump", &rtp_llm::test::initializeCapturePublisherWithCoreDump);
+    m.def("initialize_capture_publisher", &rtp_llm::test::initializeCapturePublisher);
     m.def("run_tp_sync_model_inputs_scenario",
           &rtp_llm::test::runTpSyncModelInputsScenario,
           py::arg("tp_rank"),
