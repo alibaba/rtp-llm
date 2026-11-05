@@ -529,8 +529,20 @@ def _decode_on_stream(data, device, nvc, stream, consumer_stream):
             if copied:
                 # The next Decode may recycle its external surfaces.
                 stream.synchronize()
-        if count != data.total_frames or selected != wanted:
-            raise ValueError("NVDEC and container frame counts disagree")
+        if count != data.total_frames:
+            # Container frame counts are estimates for some codecs; the decoded
+            # count is authoritative and extra frames are simply ignored.
+            logging.warning(
+                "NVDEC frame count differs from container: decoded=%d container=%d",
+                count,
+                data.total_frames,
+            )
+        if selected != wanted:
+            raise ValueError(
+                "NVDEC did not produce all sampled frames: "
+                f"decoded={count}, container={data.total_frames}, "
+                f"selected={len(selected)}, wanted={len(wanted)}"
+            )
         # Surface copies are already complete at the lifetime waits above.
         # Measure completed demux/NVDEC/copy wall time separately from the RGB
         # conversion enqueued on the consumer stream.
