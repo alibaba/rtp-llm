@@ -409,10 +409,9 @@ def _run_prefill(
 ) -> None:
     """Prefill grid run.
 
-    Defaults to BS=1 (prefill measures single-request TTFT); prepare_config()
-    pins config.batch_size_list to [1] for --partial 2 as well.  DSv4 prefill
-    targets (e.g. v4_flash_cp4_ep4_prefill_64k_perf) sweep prefill at
-    batch_size > 1, so main() forwards an explicitly requested --batch_size.
+    Defaults to BS=1 for single-request TTFT. An explicit --batch_size is
+    forwarded by main() and also sizes admission in prepare_config(), so
+    multi-request prefill grids can actually admit the requested batch.
     """
     if not config.input_len_list:
         return

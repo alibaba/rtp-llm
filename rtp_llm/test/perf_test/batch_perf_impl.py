@@ -169,7 +169,7 @@ def _curl_server_single_worker(
     if "top_k" not in req:
         req["top_k"] = 1
 
-    detailed = is_decode and os.environ.get("PERF_DETAILED_LATENCIES") == "1"
+    detailed = os.environ.get("PERF_DETAILED_LATENCIES") == "1"
     if detailed:
         req["yield_generator"] = True
         gen_config["is_streaming"] = True
@@ -202,7 +202,9 @@ def _curl_server_single_worker(
             return ResponseInfo({}, False)
         if detailed:
             try:
-                result = _read_token_stream(response, decode_test_length)
+                result = _read_token_stream(
+                    response, decode_test_length if is_decode else 1
+                )
                 result.raw_measurement.update(owner_rank=owner, http_port=request_port)
                 return result
             finally:
@@ -393,6 +395,7 @@ class BatchPerfImpl(object):
                 (directory / f"{label}.json").write_text(
                     json.dumps(
                         {
+                            "phase": "decode" if self.is_decode else "prefill",
                             "global_batch_size": self.batch_size,
                             "dp_size": self.dp_size,
                             "decode_test_length": self.decode_test_length,

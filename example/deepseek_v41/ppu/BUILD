@@ -2,6 +2,26 @@ package(default_visibility = ["//visibility:public"])
 
 exports_files(["test_functional.sh"])
 
+[
+    sh_test(
+        name = name,
+        srcs = ["test_perf.sh"],
+        args = [phase],
+        env = {"GPU_COUNT": "8"},
+        tags = ["manual", "PPU-ZW890P"],
+        timeout = "eternal",
+        target_compatible_with = select({
+            "@//:using_ppu": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+    for name, phase in [
+        ("cp8_prefill_perf_test", "prefill"),
+        ("dp8_decode_perf_test", "decode"),
+        ("dsv41_flash_perf_test", "all"),
+    ]
+]
+
 sh_test(
     name = "megamoe_decode_perf_test",
     srcs = ["test_perf.sh"],

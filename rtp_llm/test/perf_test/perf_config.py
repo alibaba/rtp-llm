@@ -292,8 +292,9 @@ def prepare_config(args: argparse.Namespace, remaining: List[str]) -> PerfTestCo
     # Grid mode
     input_len_list = [int(x) for x in args.input_len.split(",")]
 
-    # Prefill mode (partial=2): always BS=1, no need for large BS list
-    if args.partial == 2:
+    # Keep the historical single-request prefill default, but size admission
+    # for an explicit prefill batch just as for decode.
+    if args.partial == 2 and not batch_size_explicit:
         batch_size_list = [1]
     elif batch_size_explicit:
         batch_size_list = [int(x) for x in args.batch_size.split(",")]
@@ -302,8 +303,8 @@ def prepare_config(args: argparse.Namespace, remaining: List[str]) -> PerfTestCo
 
     effective_max_concurrency = max(batch_size_list)
     if os.environ.get("PERF_GLOBAL_BATCH") == "1":
-        if args.target_tpot > 0 or args.partial != 1:
-            raise ValueError("PERF_GLOBAL_BATCH supports decode grid enumeration only")
+        if args.target_tpot > 0 or args.partial not in (1, 2):
+            raise ValueError("PERF_GLOBAL_BATCH supports grid enumeration only")
         effective_max_concurrency = (
             effective_max_concurrency + args.dp_size - 1
         ) // args.dp_size

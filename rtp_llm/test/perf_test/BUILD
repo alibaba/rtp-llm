@@ -47,6 +47,24 @@ py_test(
     ],
 )
 
+py_library(
+    name = "dsv41_ppu_perf_lib",
+    srcs = ["dsv41_ppu_perf.py"],
+    deps = ["//rtp_llm/tools/v41:tooling"],
+)
+
+py_test(
+    name = "test_dsv41_ppu_perf",
+    srcs = ["test_dsv41_ppu_perf.py"],
+    data = [
+        "batch_perf_impl.py",
+        "dataclass.py",
+        "perf_config.py",
+    ],
+    deps = [":dsv41_ppu_perf_lib"],
+    tags = ["cpu"],
+)
+
 py_test(
     name = "test_perf_config_and_runners",
     srcs = ["test_perf_config_and_runners.py"],
