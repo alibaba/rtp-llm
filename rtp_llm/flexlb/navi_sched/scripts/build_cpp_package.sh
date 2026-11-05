@@ -34,7 +34,7 @@ BUILD_COMMAND=(
 if ((${#BAZEL_STARTUP_ARGS[@]})); then
     BUILD_COMMAND=("${BAZEL_BIN}" "${BAZEL_STARTUP_ARGS[@]}" --batch build "${BUILD_ARGS[@]}")
 fi
-if (( ${#BUILD_PROFILE_ARGS[@]} )); then
+if ((${#BUILD_PROFILE_ARGS[@]})); then
     BUILD_COMMAND+=("${BUILD_PROFILE_ARGS[@]}")
 fi
 BUILD_COMMAND+=(
@@ -62,7 +62,7 @@ cp "${NAVI_SCHED_DIR}/cpp_package/adapters/rtp_llm/BUILD.tpl" \
     "${PACKAGE_DIR}/adapters/rtp_llm/BUILD"
 printf '%s\n' "${VERSION}" >"${PACKAGE_DIR}/VERSION"
 printf '%s\n' "cxx11" >"${PACKAGE_DIR}/CXX_ABI"
-cp "${OUTPUT_BIN}/aios/navi_sched/libnavi_sched.so" \
+cp "${OUTPUT_BIN}/rtp_llm/flexlb/navi_sched/libnavi_sched.so" \
     "${PACKAGE_DIR}/lib/libnavi_sched.so"
 chmod u+w "${PACKAGE_DIR}/lib/libnavi_sched.so"
 strip --strip-unneeded "${PACKAGE_DIR}/lib/libnavi_sched.so"
@@ -134,7 +134,7 @@ sed -i "s/libpython3\\.10\\.so\\.1\\.0/${PYTHON_LIBRARY_NAME}/g" \
 patchelf --set-rpath '$ORIGIN' "${PACKAGE_DIR}/lib/libnavi_sched.so"
 
 PUBLIC_API_DEPFILE=$(find \
-    "${OUTPUT_BIN}/aios/navi_sched/_objs" \
+    "${OUTPUT_BIN}/rtp_llm/flexlb/navi_sched/_objs" \
     -path '*/NaviSchedPublicApiCompileTest.pic.d' -print -quit)
 if [[ -z "${PUBLIC_API_DEPFILE}" ]]; then
     echo "missing NaviSched public API dependency file" >&2
