@@ -6,6 +6,18 @@ import java.util.concurrent.*;
 import org.junit.jupiter.api.Test;
 
 class KvCacheTest {
+    @Test void retryablePreparationWaitsForCapacityChange() {
+        try (var cache = new KvCache(2, 2, 0)) {
+            var held = cache.acquire(4, List.of()).lease();
+            var failed = assertInstanceOf(KvCache.Failed.class, cache.prepare(3, List.of()));
+            assertEquals(KvCache.Failure.RETRYABLE, failed.failure());
+            assertSame(failed, failed.retry());
+            held.close();
+            var ready = assertInstanceOf(KvCache.Ready.class, failed.retry());
+            ready.lease().close();
+        }
+    }
+
     @Test void preparationFallsBackToLocalPrefixAfterRemoteFailure() {
         var remote = new CompletableFuture<Integer>();
         try (var cache = new KvCache(2, 8, 0, true, keys -> {
@@ -15,7 +27,7 @@ class KvCacheTest {
             try (var seed = cache.acquire(2, List.of()).lease()) {
                 assertTrue(seed.publish(List.of(1L), 2));
             }
-            var loading = assertInstanceOf(KvCache.Loading.class, cache.prepare(5, List.of(1L, 2L), true));
+            var loading = assertInstanceOf(KvCache.Loading.class, cache.prepare(5, List.of(1L, 2L)));
             assertSame(loading, loading.poll());
             remote.completeExceptionally(new IllegalStateException("remote read failed"));
             var ready = assertInstanceOf(KvCache.Ready.class, loading.poll());
