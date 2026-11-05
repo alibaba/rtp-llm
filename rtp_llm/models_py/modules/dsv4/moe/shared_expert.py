@@ -35,6 +35,16 @@ def _mode() -> str:
     return os.environ.get("DSV4_SHARED_EXPERT_MODE", "sequential").strip().lower()
 
 
+def _mxfp8_overlap_enabled() -> bool:
+    """DSV41_SHARED_MXFP8_OVERLAP: run the V4.1 native MXFP8 shared expert
+    on the aux stream across the routed dispatch/local/return work (R10-b;
+    SGLang-style overlap the sequential MXFP8 executor never had).
+    Default ON since R11 (decision 2): byte-exact (parity +
+    A/B all matching the parity build), median −16.4 ms, 3/3 sign.
+    ``=0`` (or any non-1 value) restores the sequential main-stream path."""
+    return os.environ.get("DSV41_SHARED_MXFP8_OVERLAP", "1") == "1"
+
+
 def strict_fused_moe_enabled() -> bool:
     return os.environ.get("DSV4_MOE_STRICT_FUSED", "1") != "0"
 
@@ -569,6 +579,85 @@ class MXFP8SharedExpertExecutor(SequentialSharedExpertExecutor):
             self._out = shared_experts(x)
 
 
+_MXFP8_OVERLAP_ANNOUNCED = False
+
+
+class MXFP8OverlapSharedExpertExecutor(MXFP8SharedExpertExecutor):
+    """V4.1 native MXFP8 shared expert on the aux stream (R10-b).
+
+    Mirrors the proven OverlapSharedExpertExecutor stream protocol
+    (record_stream + wait_stream both ways, capture/graph-warmup/MOEDBG
+    guards) around the sequential MXFP8 body. The routed a2a + local expert
+    compute (~2.4ms/layer stage0) hide the shared GEMMs; the N3 return
+    straggler wait (median 1.1ms/layer) runs concurrently with the aux
+    work instead of idling. Falls back to the sequential body when overlap
+    is unavailable; byte-exact either way (same kernels/inputs/combine
+    order). DSV41_SHARED_MXFP8_OVERLAP=1 selects this executor.
+    """
+
+    name = "mxfp8_overlap"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._active_stream: torch.cuda.Stream | None = None
+
+    def prepare(self, shared_experts: nn.Module) -> None:
+        super().prepare(shared_experts)
+        device = _find_module_cuda_device(shared_experts)
+        if device is not None:
+            _ensure_shared_expert_stream(device)
+
+    def _can_overlap(self, x: torch.Tensor) -> bool:
+        if not (x.is_cuda and torch.cuda.is_available()):
+            return False
+        if x.shape[0] == 0:
+            return False
+        if torch.cuda.is_current_stream_capturing():
+            return False
+        if cuda_graph_warmup_forward_enabled():
+            return False
+        if os.environ.get("MOEDBG", "0") != "0":
+            return False
+        threshold = int(
+            os.environ.get("DSV4_SHARED_EXPERT_STREAM_TOKEN_THRESHOLD", "4096")
+        )
+        return x.shape[0] <= threshold
+
+    def start(self, shared_experts: nn.Module, x: torch.Tensor) -> None:
+        global _MXFP8_OVERLAP_ANNOUNCED
+        if not self._can_overlap(x):
+            self._active_stream = None
+            super().start(shared_experts, x)
+            return
+        capturing = torch.cuda.is_current_stream_capturing()
+        stream = _get_shared_expert_stream(x.device, allow_create=not capturing)
+        if not _MXFP8_OVERLAP_ANNOUNCED:
+            _MXFP8_OVERLAP_ANNOUNCED = True
+            import sys
+
+            print(
+                "[MXFP8-OVERLAP] aux-stream shared expert engaged "
+                f"(rows={int(x.shape[0])}, stream={stream.cuda_stream})",
+                file=sys.stderr,
+                flush=True,
+            )
+        x.record_stream(stream)
+        stream.wait_stream(torch.cuda.current_stream(x.device))
+        with torch.cuda.stream(stream):
+            with record_function_range("dsv41.moe.shared_expert"):
+                self._out = shared_experts(x)
+        self._active_stream = stream
+
+    def finish(self) -> torch.Tensor:
+        assert self._out is not None
+        if self._active_stream is not None:
+            torch.cuda.current_stream(self._out.device).wait_stream(self._active_stream)
+        out = self._out
+        self._out = None
+        self._active_stream = None
+        return out
+
+
 class OverlapSharedExpertExecutor(SharedExpertExecutor):
     """Run shared expert on an aux stream while routed MoE runs on current stream."""
 
@@ -672,6 +761,8 @@ def get_shared_expert_executor(
     native_mxfp8: bool = False,
 ) -> SharedExpertExecutor:
     if native_mxfp8:
+        if _mxfp8_overlap_enabled():
+            return MXFP8OverlapSharedExpertExecutor()
         return MXFP8SharedExpertExecutor()
     mode = _mode()
     fast_path = FusedSharedExpertExecutor(

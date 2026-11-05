@@ -13,6 +13,18 @@ from typing import Any, Sequence
 import torch
 
 from rtp_llm.config.dsv41_config import V41_MAX_CP_PREFILL_TOKENS
+from rtp_llm.models_py.modules.dsv4._v41_l20_owner_once import (
+    l20_owner_once_enabled as _l20_owner_once_enabled,
+)
+from rtp_llm.models_py.modules.dsv4._v41_l20_owner_once import (
+    owner_fingerprint as _l20_owner_fingerprint,
+)
+from rtp_llm.models_py.modules.dsv4._v41_l20_owner_once import (
+    owner_mark as _l20_owner_mark,
+)
+from rtp_llm.models_py.modules.dsv4._v41_l20_owner_once import (
+    owner_seen as _l20_owner_seen,
+)
 from rtp_llm.models_py.modules.dsv4.native_l20_transfer import (
     NativeL20ReplicaReceiver,
     _require_eager,
@@ -158,8 +170,25 @@ class NativeL20PrefillSource:
                 "Native L20 publication requires its current forward scope"
             )
         current_cp = getattr(attention, "_cp_ctx", None)
+        # R9 (DSV41_L20_OWNER_ONCE): the device-value comparisons below
+        # (_cp_dispatch rebuild = 5 blocking tolist + 2 table tolist) are
+        # chunk-invariant given (source, CP context, bound table tensors);
+        # hoist them to once per chunk on the CP context (G2/D4 pattern).
+        # Every host identity/layout check still runs on every call.
+        _oo_fp = None
+        _oo_cached = False
+        if (
+            _l20_owner_once_enabled()
+            and current_cp is not None
+            and current_cp.cp_size > 1
+        ):
+            _oo_fp = _l20_owner_fingerprint(self, attention)
+            _oo_cached = _oo_fp is not None and _l20_owner_seen(current_cp, _oo_fp)
         if self.cp is not None:
-            if _cp_dispatch(current_cp, self.receiver, self.spans) != self.cp:
+            if (
+                not _oo_cached
+                and _cp_dispatch(current_cp, self.receiver, self.spans) != self.cp
+            ):
                 raise ValueError("Native L20 CP source requires its current dispatch")
         elif current_cp is not None and current_cp.cp_size > 1:
             raise NotImplementedError("Native L20 CP1 source cannot serve CP queries")
@@ -178,10 +207,15 @@ class NativeL20PrefillSource:
                 or value.dtype != torch.int32
                 or value.device != self.topk.device
                 or not value.is_contiguous()
-                or value.tolist()
-                != [list(t) + [0] * (value.shape[1] - len(t)) for t in tables]
+                or (
+                    not _oo_cached
+                    and value.tolist()
+                    != [list(t) + [0] * (value.shape[1] - len(t)) for t in tables]
+                )
             ):
                 raise ValueError(f"Native L20 dispatch disagrees with {tag} pages")
+        if _oo_fp is not None and not _oo_cached:
+            _l20_owner_mark(current_cp, _oo_fp)
 
     def publish(self, attention: Any, common: Any) -> None:
         """Publish only at L21, after the entry owner's forward reset."""

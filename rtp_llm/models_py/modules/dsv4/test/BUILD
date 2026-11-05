@@ -197,6 +197,15 @@ py_test(
 )
 
 py_test(
+    name = "test_cp_sync_varlen_scratch",
+    srcs = ["test_cp_sync_varlen_scratch.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "test_prefill_workspace",
     srcs = ["test_prefill_workspace.py"],
     deps = [
@@ -1346,6 +1355,41 @@ py_test(
     name = "test_prefill_diagnostics_cpu",
     srcs = ["test_prefill_diagnostics_cpu.py"],
     data = ["//rtp_llm/models_py:prefill_optimization_source_data"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_v41_cp_local_router_cpu",
+    srcs = ["test_v41_cp_local_router_cpu.py"],
+    data = ["//rtp_llm/models_py:prefill_optimization_source_data"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_v41_qualify_once_cpu",
+    srcs = ["test_v41_qualify_once_cpu.py"],
+    data = ["//rtp_llm/models_py:prefill_optimization_source_data"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_v41_l20_owner_once_cpu",
+    srcs = ["test_v41_l20_owner_once_cpu.py"],
+    data = ["//rtp_llm/models_py:prefill_optimization_source_data"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_v41_pp_lean_cpu",
+    srcs = ["test_v41_pp_lean_cpu.py"],
+    data = ["//rtp_llm/models_py:prefill_optimization_source_data"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_v41_shared_mxfp8_overlap_cpu",
+    srcs = ["test_v41_shared_mxfp8_overlap_cpu.py"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
     env = {"CUDA_VISIBLE_DEVICES": ""},
 )
 

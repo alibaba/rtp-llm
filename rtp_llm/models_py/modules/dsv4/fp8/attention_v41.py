@@ -27,6 +27,15 @@ from rtp_llm.models_py.modules.dsv4._v41_deferred_checks import (
 from rtp_llm.models_py.modules.dsv4._v41_expected_lengths import (
     expected_chunk_lengths as _expected_chunk_lengths,
 )
+from rtp_llm.models_py.modules.dsv4._v41_qualify_once import (
+    hoist_active as _qp_hoist_active,
+    lookup_meta as _qp_lookup_meta,
+    meta_key as _qp_meta_key,
+    store_meta as _qp_store_meta,
+    tables_key as _qp_tables_key,
+    tables_mark as _qp_tables_mark,
+    tables_seen as _qp_tables_seen,
+)
 from rtp_llm.models_py.modules.dsv4._rope_only_triton import rope_only_inplace
 from rtp_llm.models_py.modules.dsv4.bounded_replay import (
     enabled as bounded_replay_enabled,
@@ -2616,10 +2625,22 @@ class AttentionV41FP8(AttentionFP8):
                 input_lengths,
                 prefix_lengths,
             )
-        self._require_prefill_values(
-            ((checked_input_lengths > 0) & (checked_prefix_lengths >= 0)).all(),
-            "V4.1 prefill requires nonempty requests and valid prefixes",
-        )
+        # D4 (DSV41_QUALIFY_PREFILL_ONCE): chunk-invariant predicate checks
+        # hoist to once per chunk on the CP context; host-only checks below
+        # always run, and the deferred asserts still gate every chunk (first
+        # caller's flush group). Flag off or any miss => eager body verbatim.
+        qp_hoist = _qp_hoist_active(self._cp_ctx, cp_on, is_decode)
+        qp_meta_hit = None
+        if qp_hoist:
+            qp_meta_hit = _qp_lookup_meta(
+                self._cp_ctx,
+                _qp_meta_key(input_lengths, prefix_lengths, self._rope_max_seq_len),
+            )
+        if qp_meta_hit is None:
+            self._require_prefill_values(
+                ((checked_input_lengths > 0) & (checked_prefix_lengths >= 0)).all(),
+                "V4.1 prefill requires nonempty requests and valid prefixes",
+            )
         if self._sparse_attention_mode is not None and (
             cp_on
             or input_lengths.numel() != 1
@@ -2642,34 +2663,46 @@ class AttentionV41FP8(AttentionFP8):
             raise NotImplementedError(
                 "V4.1 short sparse mode requires one initial prefill or first-ring decode"
             )
-        lengths = (
-            self._require_qualified_cp_prefill(input_lengths, prefix_lengths)
-            if cp_on
-            else input_lengths
-        )
-        # Validate all live columns on the host without per-region GPU
-        # selection, sorting and scalar reads. Long CP is qualified for an
-        # initial prefill; continuations retain the existing short bound.
-        if is_decode and not cp_on:
-            ends = checked_prefix_lengths + checked_input_lengths
-        else:
-            ends = prefix_lengths.long() + lengths.long()
-            if not self._async_prefill_checks:
-                ends = ends.cpu()
-        context_limit = V41_MAX_CONTEXT_TOKENS
-        if cp_on:
-            from rtp_llm.config.dsv41_config import V41_MAX_CP_PREFILL_TOKENS
+        if qp_meta_hit is None:
+            lengths = (
+                self._require_qualified_cp_prefill(input_lengths, prefix_lengths)
+                if cp_on
+                else input_lengths
+            )
+            # Validate all live columns on the host without per-region GPU
+            # selection, sorting and scalar reads. Long CP is qualified for an
+            # initial prefill; continuations retain the existing short bound.
+            if is_decode and not cp_on:
+                ends = checked_prefix_lengths + checked_input_lengths
+            else:
+                ends = prefix_lengths.long() + lengths.long()
+                if not self._async_prefill_checks:
+                    ends = ends.cpu()
+            context_limit = V41_MAX_CONTEXT_TOKENS
+            if cp_on:
+                from rtp_llm.config.dsv41_config import V41_MAX_CP_PREFILL_TOKENS
 
-            # Chunked (fast-gen) prefill continuations carry prefix>0 while
-            # remaining context chunks, so the CP prefill bound applies to
-            # every chunk rather than only the first.
-            context_limit = V41_MAX_CP_PREFILL_TOKENS
-        limit = min(context_limit, self._rope_max_seq_len)
-        self._require_prefill_values(
-            (ends <= limit).all(),
-            f"V4.1 attention beyond the {limit}-token context is not integrated",
-            NotImplementedError,
-        )
+                # Chunked (fast-gen) prefill continuations carry prefix>0 while
+                # remaining context chunks, so the CP prefill bound applies to
+                # every chunk rather than only the first.
+                context_limit = V41_MAX_CP_PREFILL_TOKENS
+            limit = min(context_limit, self._rope_max_seq_len)
+            self._require_prefill_values(
+                (ends <= limit).all(),
+                f"V4.1 attention beyond the {limit}-token context is not integrated",
+                NotImplementedError,
+            )
+            if qp_hoist:
+                _qp_store_meta(
+                    self._cp_ctx,
+                    _qp_meta_key(
+                        input_lengths, prefix_lengths, self._rope_max_seq_len
+                    ),
+                    lengths,
+                    ends,
+                )
+        else:
+            lengths, ends = qp_meta_hit
         if (
             self.compress_ratio
             and self.kv_source_layer_id not in self._shared_attention["layers"]
@@ -2709,6 +2742,17 @@ class AttentionV41FP8(AttentionFP8):
                 ):
                     raise ValueError(f"Invalid V4.1 {region} block table layout")
                 single_block = region in (SWA_KV, CSA_STATE)
+                # D4 tables level: identical (region, table identity, base
+                # page count, ends, shape class) fingerprints produce
+                # identical predicates; the host layout checks above still
+                # run on every call. Async branch only (production path).
+                fingerprint = None
+                if qp_hoist and self._async_prefill_checks and table.is_cuda:
+                    fingerprint = _qp_tables_key(
+                        region, table, base.shape[0], ends, single_block
+                    )
+                    if _qp_tables_seen(self._cp_ctx, fingerprint):
+                        continue
                 required = (
                     torch.ones_like(ends) if single_block else (ends + 255) // 256
                 )
@@ -2732,6 +2776,8 @@ class AttentionV41FP8(AttentionFP8):
                         ((pages[1:] != pages[:-1]) | (pages[1:] == 0)).all(),
                         f"Aliased V4.1 {region} block table pages",
                     )
+                    if fingerprint is not None:
+                        _qp_tables_mark(self._cp_ctx, fingerprint)
                     continue
                 if (single_block and table.shape[1] != 1) or bool(
                     (required > table.shape[1]).any()

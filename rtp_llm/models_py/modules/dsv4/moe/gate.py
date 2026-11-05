@@ -186,6 +186,17 @@ class Gate(nn.Module):
         self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if self._v41_cp_ctx is not None:
+            from rtp_llm.models_py.modules.dsv4._v41_cp_local_router import (
+                cp_local_padded_routes,
+                cp_local_router_enabled,
+            )
+
+            if cp_local_router_enabled():
+                # D1: route rank-local rows (zero-padded to the canonical
+                # full M for bitwise-equal FP32 GEMM results) instead of
+                # all-gathering the whole batch every layer. Default ON (R8);
+                # DSV41_CP_LOCAL_ROUTER=0 restores the canonical gather.
+                return cp_local_padded_routes(self, x, self._v41_cp_ctx)
             from rtp_llm.models_py.modules.dsv4.v41_cp_router import (
                 canonical_v41_cp_routes,
             )

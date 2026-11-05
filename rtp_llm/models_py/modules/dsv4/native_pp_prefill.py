@@ -9,6 +9,18 @@ import torch
 
 from rtp_llm.config.dsv41_config import V41_MAX_CP_PREFILL_TOKENS
 from rtp_llm.models.dsv41_kv_cache import dsv41_cache_bindings, dsv41_page_layouts
+from rtp_llm.models_py.modules.dsv4._v41_pp_lean import (
+    check_wire_field as _pp_check_wire_field,
+)
+from rtp_llm.models_py.modules.dsv4._v41_pp_lean import (
+    deferred_check as _pp_deferred_check,
+)
+from rtp_llm.models_py.modules.dsv4._v41_pp_lean import (
+    flush_preflight_checks as _pp_flush_preflight_checks,
+)
+from rtp_llm.models_py.modules.dsv4._v41_pp_lean import (
+    pp_async_preflight_enabled as _pp_async,
+)
 from rtp_llm.models_py.modules.dsv4.cp import build_cp_context_for_forward
 from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
@@ -50,13 +62,22 @@ def _same_common(value, other, name):
     if value is None or other is None:
         if value is not other:
             raise ValueError(f"V4.1 tagged {name} metadata is incomplete")
-    elif (
+        return
+    if (
         not isinstance(value, torch.Tensor)
         or not isinstance(other, torch.Tensor)
         or value.dtype != other.dtype
         or value.shape != other.shape
-        or not torch.equal(value.cpu(), other.cpu())
     ):
+        raise ValueError(f"V4.1 tagged {name} metadata disagrees")
+    # Batch-3 A1: content comparison as a device predicate (deferred assert)
+    # instead of two blocking .cpu() reads; host structural checks above
+    # still raise synchronously.
+    if _pp_async() and value.is_cuda and other.is_cuda:
+        _pp_deferred_check(
+            (value == other).all(), f"V4.1 tagged {name} metadata disagrees"
+        )
+    elif not torch.equal(value.cpu(), other.cpu()):
         raise ValueError(f"V4.1 tagged {name} metadata disagrees")
 
 
@@ -96,12 +117,19 @@ def _require_cp_wire(fields, spans, rank):
             or value.dtype != torch.int32
             or value.ndim != 1
             or not value.is_contiguous()
-            or value.cpu().tolist() != values
             or (
                 name == "prefill_actual_input_lengths_cpu"
                 and value.device.type != "cpu"
             )
         ):
+            raise ValueError(
+                f"V4.1 native CP {name} disagrees with the zigzag dispatch"
+            )
+        # Batch-3 A1: cached expected-tensor device compare replaces the
+        # blocking .cpu().tolist() + up-to-4096-element Python list compare.
+        if _pp_async() and value.is_cuda:
+            _pp_check_wire_field(name, value, values)
+        elif value.cpu().tolist() != values:
             raise ValueError(
                 f"V4.1 native CP {name} disagrees with the zigzag dispatch"
             )
@@ -206,7 +234,17 @@ def prepare_native_pp_prefill_dispatch(
         or cp.chunk_lengths_per_req != tuple(2 * ((s.count + 7) // 8) for s in spans)
     ):
         raise ValueError("V4.1 PP CP geometry disagrees with native dispatch spans")
-    cu = torch.cat((torch.zeros(1, dtype=torch.int64), lengths.cpu().long().cumsum(0)))
+    if _pp_async():
+        cu = torch.cat(
+            (
+                torch.zeros(1, dtype=torch.int64, device=lengths.device),
+                lengths.long().cumsum(0),
+            )
+        )
+    else:
+        cu = torch.cat(
+            (torch.zeros(1, dtype=torch.int64), lengths.cpu().long().cumsum(0))
+        )
     for tag, value in tagged.items():
         if not value.is_prefill or value.is_cuda_graph or value.is_target_verify:
             raise NotImplementedError(
@@ -231,39 +269,82 @@ def prepare_native_pp_prefill_dispatch(
         cumulative = [host_cu] if host_cu is not None and host_cu.numel() else []
         if device_cu is not None:
             cumulative.append(device_cu)
-        valid_cu = bool(cumulative) and all(
-            boundary.dtype in (torch.int32, torch.int64)
-            and boundary.ndim == 1
-            and boundary.is_contiguous()
-            and torch.equal(boundary.cpu().long(), cu)
-            for boundary in cumulative
-        )
+        if _pp_async():
+            valid_cu = bool(cumulative) and all(
+                boundary.dtype in (torch.int32, torch.int64)
+                and boundary.ndim == 1
+                and boundary.is_contiguous()
+                for boundary in cumulative
+            )
+            if valid_cu:
+                for boundary in cumulative:
+                    _pp_deferred_check(
+                        (boundary.to(cu.device).long() == cu).all(),
+                        f"V4.1 {tag} CP request boundaries disagree",
+                    )
+        else:
+            valid_cu = bool(cumulative) and all(
+                boundary.dtype in (torch.int32, torch.int64)
+                and boundary.ndim == 1
+                and boundary.is_contiguous()
+                and torch.equal(boundary.cpu().long(), cu)
+                for boundary in cumulative
+            )
         if (
             value.input_lengths is None
             or value.input_lengths.dtype not in (torch.int32, torch.int64)
             or value.prefix_lengths is None
             or value.prefix_lengths.dtype not in (torch.int32, torch.int64)
-            or not torch.equal(value.input_lengths.cpu().long(), lengths.cpu().long())
-            or not torch.equal(value.prefix_lengths.cpu().long(), prefixes.cpu().long())
+            or (
+                not _pp_async()
+                and not torch.equal(
+                    value.input_lengths.cpu().long(), lengths.cpu().long()
+                )
+            )
+            or (
+                not _pp_async()
+                and not torch.equal(
+                    value.prefix_lengths.cpu().long(), prefixes.cpu().long()
+                )
+            )
             or (value.sequence_lengths is not None and value.sequence_lengths.numel())
             or not valid_cu
             or (device_cu is not None and device_cu.device != device)
         ):
             raise ValueError(f"V4.1 {tag} CP request boundaries disagree")
-        positions = value.combo_position_ids
-        if (
-            positions is not None
-            and positions.numel()
-            and (
-                positions.shape != (ids.numel(),)
-                or positions.dtype not in (torch.int32, torch.int64)
-                or not torch.equal(
-                    positions.to(device).long()[cp.local_is_real],
-                    cp.global_positions[cp.local_is_real],
-                )
+        if _pp_async():
+            _pp_deferred_check(
+                (value.input_lengths.to(lengths.device).long() == lengths.long()).all(),
+                f"V4.1 {tag} CP request boundaries disagree",
             )
-        ):
-            raise ValueError(f"V4.1 {tag} CP token positions disagree")
+            _pp_deferred_check(
+                (
+                    value.prefix_lengths.to(prefixes.device).long() == prefixes.long()
+                ).all(),
+                f"V4.1 {tag} CP request boundaries disagree",
+            )
+        positions = value.combo_position_ids
+        if positions is not None and positions.numel():
+            if positions.shape != (ids.numel(),) or positions.dtype not in (
+                torch.int32,
+                torch.int64,
+            ):
+                raise ValueError(f"V4.1 {tag} CP token positions disagree")
+            if _pp_async():
+                # Mask-free predicate: the masked torch.equal runs an implicit
+                # nonzero() sync plus a blocking compare.
+                _pp_deferred_check(
+                    (
+                        (~cp.local_is_real)
+                        | (positions.to(device).long() == cp.global_positions)
+                    ).all(),
+                    f"V4.1 {tag} CP token positions disagree",
+                )
+            elif not torch.equal(
+                positions.to(device).long()[cp.local_is_real],
+                cp.global_positions[cp.local_is_real],
+            ):
+                raise ValueError(f"V4.1 {tag} CP token positions disagree")
     tables = build_block_tables_batched(cache, tagged)
     if set(tables) != expected_tags:
         raise ValueError("V4.1 PP block tables have the wrong native tag roster")
@@ -315,13 +396,21 @@ def prepare_native_pp_prefill_dispatch(
             )
     if cache.layer_count != len(worker.v4.layers):
         raise ValueError("V4.1 PP native cache and maintained stage roster disagree")
+    # Batch-3 A1: the CP qualification below is layer-invariant (same cp
+    # context object, same cache, same lengths/prefixes under the same bind
+    # context) — under the flag it runs ONCE for the first layer instead of
+    # once per layer (19 identical predicate sets per stage-1 chunk).
+    _pp_cp_qualified = False
     for index, layer in enumerate(worker.v4.layers):
         if {g.tag for g in cache.get_layer_cache_groups(index)} != expected_layers[
             index
         ]:
             raise ValueError("V4.1 PP native storage layer has an invalid tag roster")
+        if _pp_async() and _pp_cp_qualified:
+            continue
         with bind_attn_cache(layer.attn, cache, tables, cp_ctx=cp):
             layer.attn._require_qualified_cp_prefill(lengths, prefixes)
+        _pp_cp_qualified = True
     windows = inputs.engram_token_windows
     if windows is None:
         if worker._engram_layers:
@@ -332,17 +421,37 @@ def prepare_native_pp_prefill_dispatch(
         windows.shape != (ids.numel(), 4)
         or windows.dtype != torch.int32
         or not windows.is_contiguous()
-        or bool(((windows < -1) | (windows >= args.vocab_size)).any())
+        or (
+            not _pp_async()
+            and bool(((windows < -1) | (windows >= args.vocab_size)).any())
+        )
     ):
         raise ValueError("V4.1 PP Engram history has an invalid layout or token ID")
     else:
         windows = windows.to(device)
-        if bool((windows[~cp.local_is_real] != -1).any()) or not torch.equal(
+        if _pp_async():
+            _pp_deferred_check(
+                ((windows >= -1) & (windows < args.vocab_size)).all(),
+                "V4.1 PP Engram history has an invalid layout or token ID",
+            )
+            _pp_deferred_check(
+                (cp.local_is_real.unsqueeze(-1) | (windows == -1)).all(),
+                "V4.1 PP Engram history disagrees with CP real/padded rows",
+            )
+            _pp_deferred_check(
+                ((~cp.local_is_real) | (windows[:, 0].long() == ids.long())).all(),
+                "V4.1 PP Engram history disagrees with CP real/padded rows",
+            )
+        elif bool((windows[~cp.local_is_real] != -1).any()) or not torch.equal(
             windows[cp.local_is_real, 0].long(), ids[cp.local_is_real].long()
         ):
             raise ValueError(
                 "V4.1 PP Engram history disagrees with CP real/padded rows"
             )
+    # Batch-3 A1: tighten the deferred gating window — one stacked assert
+    # covering every preflight predicate, ordered before the rows DtoH so a
+    # violation aborts before the dispatch struct is built.
+    _pp_flush_preflight_checks()
     rows = torch.stack(
         (cp.req_id_per_token.long(), cp.global_positions, cp.local_is_real.long()), -1
     ).cpu()

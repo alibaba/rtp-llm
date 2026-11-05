@@ -13,6 +13,12 @@ from dataclasses import dataclass, replace
 import torch
 
 from rtp_llm.config.dsv41_config import V41LayerSources
+from rtp_llm.models_py.modules.dsv4._v41_pp_lean import (
+    build_row_map as _pp_build_row_map,
+)
+from rtp_llm.models_py.modules.dsv4._v41_pp_lean import (
+    pp_device_rowmap_enabled as _pp_device_rowmap_enabled,
+)
 from rtp_llm.models_py.modules.dsv4.v41_block import V41ResidualState
 from rtp_llm.models_py.modules.dsv4.v41_cache_transfer import (
     V41L20Span,
@@ -276,17 +282,28 @@ def _run_cp_pp(stage, tensors, receiver, dispatch, plans, forward):
         indices = {
             span.identity.request_id: index for index, span in enumerate(dispatch.spans)
         }
-        row_map = torch.tensor(
-            [
-                [indices[request], position, 1] if valid else [-1, -1, 0]
-                for request, position, valid in zip(
-                    forward.rows.request_ids.cpu().tolist(),
-                    forward.rows.positions.cpu().tolist(),
-                    forward.rows.valid_rows.cpu().tolist(),
-                )
-            ],
-            dtype=torch.int64,
-        ).reshape(-1, 3)
+        if _pp_device_rowmap_enabled():
+            # Batch-3 A2: device-built row_map (lookup-gather + where)
+            # replaces 3 blocking .cpu().tolist() reads, a per-row Python
+            # loop and the 24KB H2D build. Identical int64 values.
+            row_map = _pp_build_row_map(
+                forward.rows.request_ids,
+                forward.rows.positions,
+                forward.rows.valid_rows,
+                indices,
+            )
+        else:
+            row_map = torch.tensor(
+                [
+                    [indices[request], position, 1] if valid else [-1, -1, 0]
+                    for request, position, valid in zip(
+                        forward.rows.request_ids.cpu().tolist(),
+                        forward.rows.positions.cpu().tolist(),
+                        forward.rows.valid_rows.cpu().tolist(),
+                    )
+                ],
+                dtype=torch.int64,
+            ).reshape(-1, 3)
         complete = replace(dispatch, row_map=row_map).snapshot(receiver.contract)
         tables = {
             span.identity: receiver.block_tables(span.identity)
