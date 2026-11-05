@@ -78,7 +78,10 @@ def _small_qk_rmsnorm_kernel(
     QKV,
     QG,
     KG,
-    ROWS: tl.constexpr,
+    # ROWS stays a runtime argument: it varies with every request length and
+    # a constexpr key would recompile the kernel (and stall prefill) per new
+    # length. It only feeds the runtime wide/narrow reduction-lane choice.
+    ROWS,
     STRIDE: tl.constexpr,
     Q_HEADS: tl.constexpr,
     KV_HEADS: tl.constexpr,

@@ -117,6 +117,41 @@ class Sm90RmsNormGateTest(unittest.TestCase):
         self.assertIsNotNone(result, "prefill QK RMSNorm Triton path rejected SM90")
         torch.testing.assert_close(result, expected, rtol=0, atol=0)
 
+    def test_prefill_norm_kernel_compiles_once_across_request_lengths(self):
+        """ROWS must stay a runtime argument.
+
+        A constexpr ROWS recompiles the kernel for every new request length
+        (~150ms of host-side jitter per first-seen length, measured on H20).
+        With a runtime ROWS only Triton's integer divisibility classes can
+        produce extra compilations.
+        """
+        from rtp_llm.models_py.triton_kernels.common.zero_centered_rms_norm import (
+            _small_qk_rmsnorm_kernel,
+        )
+
+        def compile_count():
+            total = 0
+            for entry in _small_qk_rmsnorm_kernel.device_caches.values():
+                total += len(entry[0]) if isinstance(entry, tuple) else len(entry)
+            return total
+
+        torch.manual_seed(104)
+        qg = torch.randn(256, device=_DEVICE, dtype=torch.bfloat16) * 0.07
+        kg = torch.randn_like(qg) * 0.11
+        before = compile_count()
+        for rows in (33, 97, 1024, 4095):
+            x = torch.randn(rows, 14 * 256, device=_DEVICE, dtype=torch.bfloat16)
+            self.assertIsNotNone(
+                try_prefill_qk_rmsnorm_(x, qg, kg, 12, 1, 256, 1e-6)
+            )
+        delta = compile_count() - before
+        self.assertLessEqual(
+            delta,
+            2,
+            f"per-length recompilation: 4 request lengths produced {delta} "
+            "kernel compilations",
+        )
+
 
 @unittest.skipUnless(_SM90, "SM90 required")
 class FusedOutputGateTest(unittest.TestCase):
