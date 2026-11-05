@@ -1,7 +1,6 @@
 #include "rtp_llm/flexlb/navi_sched/service/NaviSchedRole.h"
 #include "rtp_llm/flexlb/navi_sched/service/NaviSchedRoleRuntimeAccess.h"
 #include "rtp_llm/flexlb/navi_sched/service/NaviSchedRoleSummary.h"
-#include "rtp_llm/flexlb/navi_sched/vendor/network/gig/multi_call/subscribe/VIPSubscribeService.h"
 #include "autil/EnvUtil.h"
 #include "autil/FileRecorder.h"
 #include "autil/StringUtil.h"
@@ -41,7 +40,6 @@ KmonLifecycleState &getKmonLifecycleState()
 
 void shutdownKmonAtExit()
 {
-    multi_call::VIPSubscribeService::destroy();
     auto &state = getKmonLifecycleState();
     std::lock_guard<std::mutex> lock(state.mutex);
     if (state.startedByNaviSched && kmonitor::KMonitorFactory::IsStarted()) {
@@ -87,10 +85,8 @@ std::string makeEffectiveServiceConfig(const NaviSchedConfig &config, int32_t gr
     value["latency_fit_batch_size"] = config.latencyFitBatchSize;
     value["latency_fit_interval"] = config.latencyFitInterval;
     value["latency_learning_rate"] = config.latencyLearningRate;
-    value["latency_online_learning_rate_scale"] =
-        config.latencyOnlineLearningRateScale;
-    value["latency_current_sample_weight"] =
-        config.latencyCurrentSampleWeight;
+    value["latency_online_learning_rate_scale"] = config.latencyOnlineLearningRateScale;
+    value["latency_current_sample_weight"] = config.latencyCurrentSampleWeight;
     autil::legacy::json::JsonArray parameterLearningRateScales;
     for (const auto scale : config.latencyParameterLearningRateScales) {
         parameterLearningRateScales.emplace_back(scale);
@@ -102,22 +98,18 @@ std::string makeEffectiveServiceConfig(const NaviSchedConfig &config, int32_t gr
     value["latency_check_gradient"] = config.latencyCheckGradient;
     value["latency_cold_start_fit_epochs"] = config.latencyColdStartFitEpochs;
     value["latency_history_limit"] = config.latencyHistoryLimit;
-    value["latency_history_bucket_capacity"] =
-        config.latencyHistoryBucketCapacity;
+    value["latency_history_bucket_capacity"] = config.latencyHistoryBucketCapacity;
     value["latency_persist_interval"] = config.latencyPersistInterval;
     value["latency_persist_interval_ms"] = config.latencyPersistIntervalMs;
     value["latency_warmup_sample_count"] = config.latencyWarmupSampleCount;
     value["latency_model_trust_min_revision"] = config.latencyModelTrustMinRevision;
     value["latency_zero_anchor_max_ms"] = config.latencyZeroAnchorMaxMs;
-    value["latency_zero_anchor_min_samples"] =
-        config.latencyZeroAnchorMinSamples;
+    value["latency_zero_anchor_min_samples"] = config.latencyZeroAnchorMinSamples;
     value["latency_validation_enabled"] = config.latencyValidationEnabled;
     value["residual_learning_rate"] = config.residualLearningRate;
-    value["residual_update_error_floor_ms"] =
-        config.residualUpdateErrorFloorMs;
+    value["residual_update_error_floor_ms"] = config.residualUpdateErrorFloorMs;
     value["residual_update_error_ratio"] = config.residualUpdateErrorRatio;
-    value["residual_idle_decay_start_ms"] =
-        config.residualIdleDecayStartMs;
+    value["residual_idle_decay_start_ms"] = config.residualIdleDecayStartMs;
     value["residual_idle_decay_end_ms"] = config.residualIdleDecayEndMs;
     value["latency_model_state_file"] = config.latencyModelStateFile;
     value["enable_snapshot"] = config.enableSnapshot;
@@ -335,28 +327,25 @@ void NaviSchedRole::reportSampleMetric(const std::string &name, double value,
 uint64_t NaviSchedRole::reportCounterQpsMetric(const std::string &name,
                                                uint64_t total) const
 {
-    return reportCounterQpsMetricAt(
-        name, total, autil::TimeUtility::monotonicTimeUs());
+    return reportCounterQpsMetricAt(name, total, autil::TimeUtility::monotonicTimeUs());
 }
 
-uint64_t NaviSchedRole::reportCounterQpsMetricAt(
-    const std::string &name, uint64_t total, int64_t reportTimeUs) const
+uint64_t NaviSchedRole::reportCounterQpsMetricAt(const std::string &name, uint64_t total,
+                                                 int64_t reportTimeUs) const
 {
-    auto [it, inserted] = _lastQpsCounters.emplace(
-        name, QpsCounterState{total, reportTimeUs});
+    auto [it, inserted] =
+        _lastQpsCounters.emplace(name, QpsCounterState{total, reportTimeUs});
     if (inserted) {
         return 0;
     }
-    const auto delta = total >= it->second.total
-                           ? total - it->second.total
-                           : total;
+    const auto delta = total >= it->second.total ? total - it->second.total : total;
     const auto elapsedUs = reportTimeUs - it->second.reportTimeUs;
     it->second = {total, reportTimeUs};
     // QPS represents newly observed events.  Do not publish a zero sample when
     // the interval is idle; KMon should show a gap instead of a forced line.
     if (_metricsReporter && delta > 0 && elapsedUs > 0) {
-        const auto qps = static_cast<double>(delta) * 1000000.0 /
-                         static_cast<double>(elapsedUs);
+        const auto qps =
+            static_cast<double>(delta) * 1000000.0 / static_cast<double>(elapsedUs);
         _metricsReporter->report(qps, name, kmonitor::MetricType::GAUGE, nullptr,
                                  kmonitor::MetricLevel::FATAL);
     }
