@@ -5,28 +5,28 @@ import io.grpc.Status;
 import java.nio.*;
 import java.util.concurrent.TimeUnit;
 import org.flexlb.engine.grpc.EngineRpcService.*;
-import org.flexlb.mock.engine.scheduler.Scheduler;
+import org.flexlb.mock.engine.scheduler.EngineScheduler;
 
 /** Translation at the native RTP boundary; scheduling state contains no protobuf objects. */
 final class RpcMessages {
     private RpcMessages() {}
 
-    static Scheduler.Input input(org.flexlb.mock.protocol.MediaInput.Prepared prepared, String identity, long started, long rpcDeadline,
+    static EngineScheduler.Input input(org.flexlb.mock.protocol.MediaInput.Prepared prepared, String identity, long started, long rpcDeadline,
                                  boolean retained, int blockSize, long seed) {
         var input = prepared.input();
-        return new Scheduler.Input(identity, input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,
+        return new EngineScheduler.Input(identity, input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,
             input.getTokenIdsCount(), input.getGenerateConfig().getMaxNewTokens(), input.getPriority(), started, rpcDeadline,
             org.flexlb.mock.protocol.MediaInput.sequence(prepared, blockSize, seed), input.getGenerateConfig().getReuseCache(), retained, input.getGenerateConfig().getMinNewTokens(), input.getGenerateConfig().getIgnoreEos());
     }
-    static Scheduler.Task pending(GenerateInputPB input) {
-        return new Scheduler.Task(input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,
-            input.getTokenIdsCount(), 0, input.getPriority(), Scheduler.ReportedPhase.PENDING, 0, 0, -1, -1, null);
+    static EngineScheduler.Task pending(GenerateInputPB input) {
+        return new EngineScheduler.Task(input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,
+            input.getTokenIdsCount(), 0, input.getPriority(), EngineScheduler.ReportedPhase.PENDING, 0, 0, -1, -1, null);
     }
     static long deadline(GenerateInputPB input, long started, long rpcDeadline) {
         int timeout = input.getGenerateConfig().getTimeoutMs();
         return Math.min(rpcDeadline, timeout <= 0 ? Long.MAX_VALUE : after(started, TimeUnit.MILLISECONDS.toNanos(timeout)));
     }
-    static TaskInfoPB task(Scheduler.Task task) {
+    static TaskInfoPB task(EngineScheduler.Task task) {
         var result = TaskInfoPB.newBuilder().setRequestId(task.requestId()).setBatchId(task.batchId())
             .setInputLength(task.inputLength()).setPrefixLength(task.prefixLength()).setPriority(task.priority())
             .setDpRank(0).setPhase(switch (task.phase()) {
@@ -34,7 +34,7 @@ final class RpcMessages {
                 case RECEIVED -> TaskPhase.TASK_PHASE_RECEIVED;
                 case KV_ALLOCATED -> TaskPhase.TASK_PHASE_KV_ALLOCATED;
                 case RUNNING -> TaskPhase.TASK_PHASE_RUNNING;
-            }).setIsWaiting(task.phase() != Scheduler.ReportedPhase.RUNNING)
+            }).setIsWaiting(task.phase() != EngineScheduler.ReportedPhase.RUNNING)
             .setIterateCount(task.iterations()).setWaitingTimeMs(task.waitingMillis())
             .setExecutionTimeMs(task.executionMillis()).setEndTimeMs(task.endTimeMillis());
         if (task.failure() != null) {

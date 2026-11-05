@@ -15,17 +15,17 @@ import org.flexlb.mock.engine.*;
 import org.flexlb.mock.engine.cache.KvCache;
 import org.flexlb.mock.engine.forward.ComputeModel;
 import org.flexlb.mock.engine.forward.SimulatedCompute;
-import org.flexlb.mock.engine.scheduler.QueueSnapshot;
-import org.flexlb.mock.engine.scheduler.RequestFailure;
+import org.flexlb.mock.engine.scheduler.EngineScheduler.QueueSnapshot;
+import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
 import org.flexlb.mock.engine.scheduler.RequestState;
-import org.flexlb.mock.engine.scheduler.Scheduler;
+import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 /** Compiles and runs without any dependency on an Engine backend. */
 class AdmissionTest {
     /** Independent test policy: reject at admission so neither adapter can silently construct RTP's policy. */
-    private static final class RejectingScheduler implements Scheduler {
+    private static final class RejectingScheduler implements EngineScheduler {
         final Object lock;
         boolean submitted, closed;
         RejectingScheduler(Object lock) { this.lock = lock; }

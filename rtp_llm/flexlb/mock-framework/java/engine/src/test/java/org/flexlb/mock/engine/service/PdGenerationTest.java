@@ -15,7 +15,6 @@ import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.execution.RtpNode;
 import org.flexlb.mock.engine.scheduler.RtpNodeTest;
-import org.flexlb.mock.engine.scheduler.RtpScheduler;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;

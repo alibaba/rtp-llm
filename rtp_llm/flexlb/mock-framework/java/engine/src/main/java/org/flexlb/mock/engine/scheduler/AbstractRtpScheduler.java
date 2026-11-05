@@ -1,16 +1,38 @@
 package org.flexlb.mock.engine.scheduler;
 
+import io.prometheus.client.Collector;
 import java.util.*;
+import java.util.function.Supplier;
 import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.engine.cache.KvCache;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.forward.*;
-import static org.flexlb.mock.engine.scheduler.RequestFailure.Reason.*;
-import static org.flexlb.mock.engine.scheduler.RtpSchedulerBase.Phase.*;
+import static org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure.Reason.*;
+import static org.flexlb.mock.engine.scheduler.AbstractRtpScheduler.Phase.*;
 
 /** Shared RTP request, KV, PD and Forward lifecycle; admission policies own their queues. */
-abstract class RtpSchedulerBase implements Scheduler {
+public abstract class AbstractRtpScheduler implements EngineScheduler {
+    public static Supplier<List<Collector.MetricFamilySamples>> metricsFor(EngineScheduler scheduler) {
+        return scheduler instanceof AbstractRtpScheduler rtp ? rtp.metrics()::collect : null;
+    }
+
+    public static EngineScheduler.Factory factory(RtpConfig config) {
+        Objects.requireNonNull(config);
+        return (lock, cache, finished) -> config.groupScheduling()
+            ? new RtpPrefillGroupScheduler(lock, config, cache, finished) : new RtpFifoScheduler(lock, config, cache, finished);
+    }
+
+    /** Native P/D handoff events carried across the engine loop. */
+    public enum RtpControl implements Control {
+        TRANSFER_ACKNOWLEDGED, PREFILL_COMPLETE;
+
+        /** The first sampled token is also the repeated synthetic Decode output. */
+        public record Generate(int tokenId) implements Control {}
+    }
+    public record RtpTransferResult(boolean prefillFinished, RequestFailure failure) implements TransferResult {}
+
+
     enum Phase { QUEUED, CAPACITY, LOADING, TRANSFERRING, TRANSFERRED, RUNNING, OUTPUT, FORWARD, READY }
     private final TaskHistory history;
     private final Object lock;
@@ -50,7 +72,7 @@ abstract class RtpSchedulerBase implements Scheduler {
             this.listener = listener;
             this.state = new RequestState(input.deadline(), failure -> terminal(this, failure));
         }
-        RtpSchedulerBase owner() { return RtpSchedulerBase.this; }
+        AbstractRtpScheduler owner() { return AbstractRtpScheduler.this; }
         @Override public Input input() { return input; }
         @Override public RequestState.Snapshot snapshot() { synchronized (lock) { return state.snapshot(); } }
         @Override public int reused() { synchronized (lock) { return reused; } }
@@ -60,7 +82,7 @@ abstract class RtpSchedulerBase implements Scheduler {
     private record Batch(List<Member> members, long scheduleStarted, long stepStarted) {}
     private record Notice(Runnable action, boolean terminal) {}
 
-    RtpSchedulerBase(Object lock, RtpConfig config, KvCache cache, TaskHistory history) {
+    AbstractRtpScheduler(Object lock, RtpConfig config, KvCache cache, TaskHistory history) {
         this.history = Objects.requireNonNull(history);
         this.lock = Objects.requireNonNull(lock);
         this.config = Objects.requireNonNull(config);
@@ -88,7 +110,7 @@ abstract class RtpSchedulerBase implements Scheduler {
         var entry = entry(handle);
         if (entry.state.terminating()) return;
         if (entry.state.expired()) { finish(entry, new RequestFailure(TIMEOUT, "Control arrived after deadline")); return; }
-        if (control instanceof RtpEvents.Control.Generate generate) {
+        if (control instanceof RtpControl.Generate generate) {
             if (prefill() || !entry.loaded || entry.generating || entry.prefillFinished || generate.tokenId() < 0)
                 throw new RequestFailure(INVALID, "Generation requires loaded KV and a new generation permit");
             entry.timingStarted = System.nanoTime();
@@ -101,7 +123,7 @@ abstract class RtpSchedulerBase implements Scheduler {
             entry.phase = QUEUED; entry.enqueuedAt = entry.timingStarted; waiting.addLast(entry);
             return;
         }
-        if (!(control instanceof RtpEvents.Control event)) throw new RequestFailure(INVALID, "Foreign RTP control");
+        if (!(control instanceof RtpControl event)) throw new RequestFailure(INVALID, "Foreign RTP control");
         switch (event) {
             case PREFILL_COMPLETE -> {
                 if (prefill() || !entry.loaded || entry.generating)
@@ -333,7 +355,7 @@ abstract class RtpSchedulerBase implements Scheduler {
     @Override public void transferCompleted(Request request, TransferResult result) {
         var entry = entry(request);
         if (!live(entry)) return;
-        if (!(result instanceof RtpEvents.TransferResult transferred)) throw new RequestFailure(INVALID, "Foreign RTP transfer result");
+        if (!(result instanceof RtpTransferResult transferred)) throw new RequestFailure(INVALID, "Foreign RTP transfer result");
         if (transferred.failure() != null) { finish(entry, transferred.failure()); return; }
         if (!entry.transferBegun || entry.phase != TRANSFERRING)
             throw new RequestFailure(INVALID, "Stale or duplicate transfer completion");
@@ -416,7 +438,7 @@ abstract class RtpSchedulerBase implements Scheduler {
         return !entry.state.terminating();
     }
     private Entry entry(Request request) {
-        if (!(request instanceof RtpSchedulerBase.Entry entry) || entry.owner() != this)
+        if (!(request instanceof AbstractRtpScheduler.Entry entry) || entry.owner() != this)
             throw new IllegalArgumentException("Foreign request handle");
         return entry;
     }

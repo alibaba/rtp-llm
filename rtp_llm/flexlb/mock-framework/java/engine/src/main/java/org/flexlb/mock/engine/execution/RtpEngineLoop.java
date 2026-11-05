@@ -7,9 +7,9 @@ import java.util.function.Supplier;
 import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.cache.KvCache;
 import org.flexlb.mock.engine.forward.*;
-import org.flexlb.mock.engine.scheduler.RequestFailure;
+import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
 import org.flexlb.mock.engine.scheduler.RequestState;
-import org.flexlb.mock.engine.scheduler.Scheduler;
+import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
 
 /** Event/deadline driven execution. Only short state transitions hold the scheduling lock. */
@@ -17,7 +17,7 @@ public final class RtpEngineLoop implements AutoCloseable {
     private final Object lock;
     private final java.util.concurrent.locks.ReentrantLock signal = new java.util.concurrent.locks.ReentrantLock();
     private final java.util.concurrent.locks.Condition changed = signal.newCondition();
-    private final Scheduler scheduler;
+    private final EngineScheduler scheduler;
     private final TaskHistory finished;
     private final KvCache cache;
     private final ComputeModel model;
@@ -32,16 +32,16 @@ public final class RtpEngineLoop implements AutoCloseable {
     private RuntimeException failure;
 
     private static final class Pending {
-        final Scheduler.Work work;
+        final EngineScheduler.Work work;
         SimulatedCompute.Execution execution;
-        Pending(Scheduler.Work work) { this.work = work; }
+        Pending(EngineScheduler.Work work) { this.work = work; }
     }
 
-    public RtpEngineLoop(Object lock, Scheduler.Factory schedulers, TaskHistory finished, KvCache cache, ComputeModel model, Role role, String identity) {
+    public RtpEngineLoop(Object lock, EngineScheduler.Factory schedulers, TaskHistory finished, KvCache cache, ComputeModel model, Role role, String identity) {
         this(lock, schedulers.create(lock, cache, finished), finished, cache, model, role, identity);
     }
 
-    public RtpEngineLoop(Object lock, Scheduler scheduler, TaskHistory finished, KvCache cache,
+    public RtpEngineLoop(Object lock, EngineScheduler scheduler, TaskHistory finished, KvCache cache,
                          ComputeModel model, Role role, String identity) {
         this.lock = Objects.requireNonNull(lock);
         this.finished = Objects.requireNonNull(finished);
@@ -54,26 +54,26 @@ public final class RtpEngineLoop implements AutoCloseable {
         Thread.ofVirtual().name("mock-engine-" + identity).start(this::run);
     }
 
-    public Scheduler.Request input(Scheduler.Input input, Scheduler.Listener listener) {
+    public EngineScheduler.Request input(EngineScheduler.Input input, EngineScheduler.Listener listener) {
         return change(() -> { ensureOpen(); return scheduler.input(input, listener); });
     }
-    public List<Scheduler.InputResult> input(List<Scheduler.InputItem> batch) {
+    public List<EngineScheduler.InputResult> input(List<EngineScheduler.InputItem> batch) {
         return change(() -> { ensureOpen(); return scheduler.input(List.copyOf(batch)); });
     }
-    public void control(Scheduler.Request request, Scheduler.Control event) {
+    public void control(EngineScheduler.Request request, EngineScheduler.Control event) {
         change(() -> { scheduler.control(request, event); return null; });
     }
-    public void transferCompleted(Scheduler.Request request, Scheduler.TransferResult result) {
+    public void transferCompleted(EngineScheduler.Request request, EngineScheduler.TransferResult result) {
         change(() -> { scheduler.transferCompleted(request, result); return null; });
     }
-    public void finish(Scheduler.Request request, RequestFailure failure) {
+    public void finish(EngineScheduler.Request request, RequestFailure failure) {
         change(() -> { scheduler.finish(request, failure); return null; });
     }
-    public RequestState.Use beginTransfer(Scheduler.Request request) {
+    public RequestState.Use beginTransfer(EngineScheduler.Request request) {
         var use = change(() -> { ensureOpen(); return scheduler.beginTransfer(request); });
         return () -> change(() -> { use.close(); return null; });
     }
-    public Scheduler.Status status(long latestFinishedVersion) {
+    public EngineScheduler.Status status(long latestFinishedVersion) {
         synchronized (lock) {
             checkFailure();
             var counts = scheduler.queues();

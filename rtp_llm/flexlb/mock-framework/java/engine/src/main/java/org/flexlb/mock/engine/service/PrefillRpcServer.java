@@ -7,17 +7,18 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler.RtpControl;
+import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler.RtpTransferResult;
 import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.engine.execution.RtpEngineLoop;
-import org.flexlb.mock.engine.scheduler.RequestFailure;
-import org.flexlb.mock.engine.scheduler.RtpEvents;
+import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
 import org.flexlb.mock.engine.scheduler.RequestState;
-import org.flexlb.mock.engine.scheduler.Scheduler;
+import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
 import org.flexlb.mock.protocol.MediaInput;
 
-/** P protocol sessions, input preparation and output delivery. Scheduler owns local execution and KV. */
+/** P protocol sessions, input preparation and output delivery. EngineScheduler owns local execution and KV. */
 final class PrefillRpcServer implements AutoCloseable {
     private final RtpRpcService.Config config;
     private final Object executionLock;
@@ -48,7 +49,7 @@ final class PrefillRpcServer implements AutoCloseable {
     }
 
     record Result(GenerateOutputsPB output, Status status, long engineCode) {}
-    final class Session implements Scheduler.Listener {
+    final class Session implements EngineScheduler.Listener {
         GenerateInputPB input;
         final long started, deadline;
         final long id;
@@ -56,7 +57,7 @@ final class PrefillRpcServer implements AutoCloseable {
         final boolean retained;
         final CompletableFuture<Result> result = new CompletableFuture<>();
         final CompletableFuture<Result> termination = new CompletableFuture<>();
-        Scheduler.Request request;
+        EngineScheduler.Request request;
 
         Session(GenerateInputPB input, boolean retained, long started, long deadline) {
             this.input = input; this.retained = retained; this.started = started; this.deadline = deadline;
@@ -79,20 +80,20 @@ final class PrefillRpcServer implements AutoCloseable {
                 if (ended) return;
                 if (request != null) { engine.finish(request, failure); return; }
                 var task = RpcMessages.pending(input);
-                finished.add(new Scheduler.Task(id, task.batchId(), task.inputLength(), 0, task.priority(),
-                    Scheduler.ReportedPhase.PENDING, 0, 0, 0, System.currentTimeMillis(), failure));
+                finished.add(new EngineScheduler.Task(id, task.batchId(), task.inputLength(), 0, task.priority(),
+                    EngineScheduler.ReportedPhase.PENDING, 0, 0, 0, System.currentTimeMillis(), failure));
                 ended = true;
                 sessions.remove(id, this);
             }
             complete(null, failure);
         }
-        private Result success(Scheduler.Request request, boolean finished) {
+        private Result success(EngineScheduler.Request request, boolean finished) {
             return new Result(RpcMessages.token(input, RpcMessages.sampledToken(input), 1, 1, request.reused(), System.nanoTime() - request.input().started(), finished, false), Status.OK, 0);
         }
-        @Override public void output(Scheduler.Request request, Scheduler.Output output) {
+        @Override public void output(EngineScheduler.Request request, EngineScheduler.Output output) {
             if (retained) result.complete(success(request, output.finished()));
         }
-        @Override public void terminal(Scheduler.Request request, RequestFailure failure) {
+        @Override public void terminal(EngineScheduler.Request request, RequestFailure failure) {
             synchronized (executionLock) {
                 if (ended) return;
                 ended = true;
@@ -100,7 +101,7 @@ final class PrefillRpcServer implements AutoCloseable {
             }
             complete(request, failure);
         }
-        private void complete(Scheduler.Request request, RequestFailure failure) {
+        private void complete(EngineScheduler.Request request, RequestFailure failure) {
             var ended = failure == null ? success(request, true) : new Result(null, RpcErrors.status(failure), RpcErrors.code(failure));
             result.complete(ended);
             termination.complete(ended);
@@ -146,7 +147,7 @@ final class PrefillRpcServer implements AutoCloseable {
     record Admission(Session session, RuntimeException failure) {}
 
     List<Admission> submit(List<Submission> batch) {
-        var items = new ArrayList<Scheduler.InputItem>();
+        var items = new ArrayList<EngineScheduler.InputItem>();
         var admittedSessions = new ArrayList<Session>();
         var positions = new ArrayList<Integer>();
         var results = new ArrayList<Admission>(Collections.nCopies(batch.size(), null));
@@ -164,7 +165,7 @@ final class PrefillRpcServer implements AutoCloseable {
                     var input = RpcMessages.input(item.prepared(), Long.toString(session.id),
                         session.started, session.deadline, true, config.blockSize(), config.cacheKeySeed());
                     session.input = item.input();
-                    admittedSessions.add(session); positions.add(i); items.add(new Scheduler.InputItem(input, session));
+                    admittedSessions.add(session); positions.add(i); items.add(new EngineScheduler.InputItem(input, session));
                 } catch (RuntimeException error) {
                     var failure = error instanceof RequestFailure f ? rpcFailure(f) : error;
                     if (session != null) session.fail(failure);
@@ -172,7 +173,7 @@ final class PrefillRpcServer implements AutoCloseable {
                 }
             }
             if (!items.isEmpty()) {
-                List<Scheduler.InputResult> admitted;
+                List<EngineScheduler.InputResult> admitted;
                 try { admitted = engine.input(items); }
                 catch (RuntimeException error) {
                     admittedSessions.forEach(session -> session.fail(error));
@@ -206,7 +207,7 @@ final class PrefillRpcServer implements AutoCloseable {
 
     private static void requirePrepared(GenerateInputPB input) {
         if (org.flexlb.mock.protocol.MediaInput.present(input))
-            throw Status.INVALID_ARGUMENT.withDescription("Prepare multimodal input before Scheduler submission").asRuntimeException();
+            throw Status.INVALID_ARGUMENT.withDescription("Prepare multimodal input before EngineScheduler submission").asRuntimeException();
     }
 
     void validate(GenerateInputPB input, boolean retained) {
@@ -224,21 +225,21 @@ final class PrefillRpcServer implements AutoCloseable {
         try { return engine.beginTransfer(session.request); }
         catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
     }
-    void transferCompleted(Session session, RtpEvents.TransferResult result) {
+    void transferCompleted(Session session, RtpTransferResult result) {
         try { engine.transferCompleted(session.request, result); }
         catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
     }
     void transferred(Session session) {
-        try { engine.control(session.request, RtpEvents.Control.TRANSFER_ACKNOWLEDGED); }
+        try { engine.control(session.request, RtpControl.TRANSFER_ACKNOWLEDGED); }
         catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
     }
-    Scheduler.Status snapshot(long latestFinished) {
+    EngineScheduler.Status snapshot(long latestFinished) {
         synchronized (executionLock) {
             var execution = engine.status(latestFinished);
             var tasks = new ArrayList<>(execution.tasks());
             sessions.values().stream().filter(session -> session.request == null)
                 .forEach(session -> tasks.add(RpcMessages.pending(session.input)));
-            return new Scheduler.Status(tasks, execution.finished(), execution.finishedVersion(), execution.waiting(), execution.running());
+            return new EngineScheduler.Status(tasks, execution.finished(), execution.finishedVersion(), execution.waiting(), execution.running());
         }
     }
     void checkHealthy() { engine.checkHealthy(); }
@@ -482,7 +483,7 @@ final class PrefillRpcServer implements AutoCloseable {
                     throw Status.DATA_LOSS.withDescription("Invalid LOAD acknowledgement").asRuntimeException();
                 synchronized (this) {
                     if (terminal) return;
-                    transferCompleted(source, new RtpEvents.TransferResult(prefillFinished, null));
+                    transferCompleted(source, new RtpTransferResult(prefillFinished, null));
                     transferred(source);
                     transferUse.close(); transferUse = null;
                 }
