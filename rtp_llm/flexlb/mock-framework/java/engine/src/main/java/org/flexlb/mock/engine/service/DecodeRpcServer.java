@@ -16,15 +16,17 @@ final class DecodeRpcServer implements AutoCloseable {
     private final RtpRpcService.Config config;
     private final RtpEngineLoop engine;
     private final Object executionLock;
+    private final Runnable recordCancellation;
     private final ExecutorService transport = Executors.newVirtualThreadPerTaskExecutor();
     private final SimulatedKvLoad transfer = new SimulatedKvLoad();
     private enum Stage { ALLOCATING, ALLOCATED, LOADING, LOADED, GENERATING, FINISHING }
     private boolean closed;
 
-    DecodeRpcServer(RtpRpcService.Config config, Object executionLock, RtpEngineLoop engine) {
+    DecodeRpcServer(RtpRpcService.Config config, Object executionLock, RtpEngineLoop engine, Runnable recordCancellation) {
         this.config = config;
         this.executionLock = executionLock;
         this.engine = engine;
+        this.recordCancellation = recordCancellation;
     }
 
     StreamObserver<GenerateRequestPB> open(StreamObserver<GenerateOutputsPB> observer) {
@@ -201,6 +203,7 @@ final class DecodeRpcServer implements AutoCloseable {
         synchronized (executionLock) {
             if (call.terminal) return;
             call.terminal = true;
+            if (status.getCode() == Status.Code.CANCELLED) recordCancellation.run();
             if (call.transfer != null) call.transfer.cancel();
             call.delivery.finish(status.isOk() ? null : RpcErrors.failure(status, code));
         }

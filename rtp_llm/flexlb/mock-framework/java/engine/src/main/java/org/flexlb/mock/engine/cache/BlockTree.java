@@ -5,7 +5,7 @@ import java.util.*;
 /** RTP Full-KV prefix index. Every mutation runs under KvCache's monitor. */
 final class BlockTree {
     static final class Node {
-        final long key, admission;
+        final long key, admission, insertedNanos = System.nanoTime();
         final Node parent;
         final BlockPool.Reference cache;
         final Map<Long, Node> children = new HashMap<>();
@@ -62,7 +62,7 @@ final class BlockTree {
         return node;
     }
 
-    boolean evict() {
+    Node evict() {
         for (var iterator = leaves.iterator(); iterator.hasNext();) {
             var node = iterator.next();
             if (node.cache.inUse()) continue;
@@ -72,11 +72,12 @@ final class BlockTree {
             node.cache.close();
             if (node.parent != null && node.parent.children.isEmpty()) leaves.add(node.parent);
             changed(node.key, false);
-            return true;
+            return node;
         }
-        return false;
+        return null;
     }
 
+    int size() { return nodes.size(); }
     long version() { return version; }
     CacheMetadata.SnapshotKeys metadataKeys() {
         return new CacheMetadata.SnapshotKeys(version, nodes.keySet().stream().mapToLong(Long::longValue).toArray());

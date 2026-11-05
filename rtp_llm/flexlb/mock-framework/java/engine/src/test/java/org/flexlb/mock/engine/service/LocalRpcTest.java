@@ -56,7 +56,13 @@ class LocalRpcTest {
                 var reused = rpc.generateStreamCall(PrefillAdmissionTest.input(2, 0, true)).next();
                 assertEquals(4, reused.getFlattenOutput().getAuxInfo(0).getTotalReuseLen());
                 assertEquals(16, rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
+                rpc.getCacheStatus(CacheVersionPB.getDefaultInstance());
                 var text = metrics(node);
+                for (String kind : List.of("worker_status", "cache_status")) {
+                    assertTrue(sample(text, "rtp_llm_rpc_" + kind + "_qps", "role=\"prefill\"") > 0);
+                    assertEquals(1, sample(text, "rtp_llm_rpc_" + kind + "_total_rt_us_count", "role=\"prefill\""));
+                }
+                assertEquals(2, sample(text, "rtp_llm_kv_cache_item_num", "role=\"prefill\""));
                 assertEquals(2, sample(text, "rtp_llm_framework_requests_total", "outcome=\"success\""));
                 assertEquals(10, sample(text, "rtp_llm_cache_lookup_tokens_total", ""));
                 assertEquals(4, sample(text, "rtp_llm_cache_hit_tokens_total", ""));

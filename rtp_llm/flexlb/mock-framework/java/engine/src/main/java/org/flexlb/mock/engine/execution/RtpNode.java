@@ -86,10 +86,12 @@ public final class RtpNode implements AutoCloseable {
     }
 
     private List<MetricFamilySamples> collectMetrics() {
-        if (metricSource == null) return List.of();
+        if (metricSource == null) return service.collectMetrics();
         synchronized (metricSource.lock()) {
             service.checkHealthy();
-            return metricSource.metrics().get();
+            var samples = new java.util.ArrayList<>(metricSource.metrics().get());
+            samples.addAll(service.collectMetrics());
+            return samples;
         }
     }
 

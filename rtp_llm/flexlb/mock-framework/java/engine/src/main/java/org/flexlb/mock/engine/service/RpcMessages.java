@@ -16,7 +16,8 @@ final class RpcMessages {
         var input = prepared.input();
         return new EngineScheduler.Input(identity, input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,
             input.getTokenIdsCount(), input.getGenerateConfig().getMaxNewTokens(), input.getPriority(), started, rpcDeadline,
-            org.flexlb.mock.protocol.MediaInput.sequence(prepared, blockSize, seed), input.getGenerateConfig().getReuseCache(), retained, input.getGenerateConfig().getMinNewTokens(), input.getGenerateConfig().getIgnoreEos());
+            org.flexlb.mock.protocol.MediaInput.sequence(prepared, blockSize, seed), input.getGenerateConfig().getReuseCache(), retained, input.getGenerateConfig().getMinNewTokens(), input.getGenerateConfig().getIgnoreEos(),
+            input.getGenerateConfig().getIsStreaming());
     }
     static EngineScheduler.Task pending(GenerateInputPB input) {
         return new EngineScheduler.Task(input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,

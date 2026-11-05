@@ -87,7 +87,8 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         this.lock = Objects.requireNonNull(lock);
         this.config = Objects.requireNonNull(config);
         this.cache = Objects.requireNonNull(cache);
-        this.metrics = new RtpMetrics(config.role().name(), this::metricState);
+        this.metrics = new RtpMetrics(config.role().name(), this::metricState, System::nanoTime, cache::itemCount);
+        cache.onEvictionLifetime(metrics::blockEvicted);
     }
 
     @Override public Request input(Input input, Listener listener) {
@@ -180,6 +181,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
             }
         }
         if (selected.isEmpty()) return null;
+        long prepareStarted = System.nanoTime();
         var members = new ArrayList<Member>();
         var items = new ArrayList<ForwardBatch.Request>();
         for (var entry : selected) {
@@ -197,6 +199,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         }
         var batch = new ForwardBatch(config.id() + "/" + ++batchSequence, List.of(new ForwardBatch.Partition(0, items)));
         executing = new Work(new Batch(List.copyOf(members), scheduleStarted, System.nanoTime()), batch);
+        metrics.batchPrepared(System.nanoTime() - prepareStarted);
         return executing;
     }
 
@@ -392,6 +395,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
             entry.firstToken == 0 ? -1 : entry.firstToken - entry.begun,
             entry.input.tokens(), progress.generated(), progress.iterations(), entry.reused),
             prefill() || canReuseLocalKv(entry));
+        metrics.streamingFinished(entry.input.streaming());
         active.remove(entry.input.identity(), entry);
         enqueue(entry, () -> {
             try { entry.listener.terminal(entry, failure); }
@@ -471,6 +475,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
                 (long) entry.input.tokens() + computedOutput);
         });
         metrics.cacheLookup(entry.input.tokens(), entry.reused);
+        if (reuse && matched > 0) metrics.cacheMatched(admission.matchNanos());
         if (config.reuseCache() && entry.input.reuse())
             metrics.prepared((long) (entry.input.tokens() / config.blockSize()) * config.blockSize(),
                 entry.reused, System.nanoTime() - started);

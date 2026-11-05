@@ -8,6 +8,13 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 
 | 角色 | RTP-LLM panel | 标题 | 新框架导出 | 原指标 |
 |---|---:|---|---|---|
+| prefill | 10033 | Prefill 30min 理论命中率 | 已上报 | recent_cache_key_hit_count_sum / recent_cache_key_total_count_sum 的窗口增量 |
+| prefill | 10149 | Worker 实际缓存命中率（token 加权） | 已上报 | kv_cache_reuse_length_sum / input_token_length_sum 的窗口增量 |
+| prefill | 10150 | Worker 实际/近30分钟理论命中率 | 已上报 | Prefill 实际命中率 / Worker 近期理论命中率 |
+| prefill | 10619 | Worker 实际/近30分钟 Global 理论命中率 | Master 历史就绪后上报 | flexlb_app_cache_cluster_recent_hit_tokens_total,flexlb_app_cache_cluster_recent_input_tokens_total |
+| prefill | 10430 | Prefill TPS（1 分钟平均） | 本地计数器 | rtp_llm_forward_tokens_total{kind="compute"} |
+| decode | 10431 | Output TPS（1 分钟平均） | 本地计数器 | rtp_llm_forward_tokens_total{kind="output"} |
+| prefill / decode | 225 / 236 | streaming / not streaming qps | 已上报 | rtp_llm_is_streaming_qps,rtp_llm_not_streaming_qps |
 | prefill | 10379 | prefill tps | 已上报 | rtp_llm_context_tps |
 | prefill | 10368 | prefill wall tps | 已上报 | rtp_llm_context_wall_tps |
 | prefill | 10381 | input wall tps | 已上报 | rtp_llm_context_wall_tps |
@@ -18,11 +25,11 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | prefill | 10382 | input wall tps with catch | 已上报 | rtp_llm_context_wall_tps_with_cache |
 | prefill | 231 | model forward rt | 已上报 | rtp_llm_model_forward_us |
 | prefill | 10081 | wall tps report interval | 已上报 | rtp_llm_wall_tps_report_interval_us |
-| prefill | 159 | gather model input rt | 待埋点 | rtp_llm_gather_model_input_us |
+| prefill | 159 | gather model input rt | Mock 批输入准备耗时 | mock_forward_batch_prepare_us |
 | prefill | 215 | 请求队列排队延迟 | 已上报 | rtp_llm_wait_latency_us |
 | prefill | 234 | first token latency | 已上报 | rtp_llm_first_token_latency_us |
 | prefill | 121 | framework qps | 已上报 | rtp_llm_framework_qps |
-| prefill | 162 | framework cancel qps | 待埋点 | rtp_llm_rpc_cancel_qps |
+| prefill | 162 | framework cancel qps | 已上报 | rtp_llm_rpc_cancel_qps |
 | prefill | 130 | total latency | 已上报 | rtp_llm_latency_us |
 | prefill | 131 | pause latency | 待埋点 | rtp_llm_pause_latency_us |
 | prefill | 233 | dispatch output rt | 待埋点 | rtp_llm_dispatch_output_us_metric |
@@ -49,8 +56,8 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | prefill | 125 | input token length | 已上报 | rtp_llm_input_token_length |
 | prefill | 10099 | context batch size / max agg | 已上报 | rtp_llm_context_batch_size |
 | prefill | 10163 | waiting stream size max/agg | 已上报 | rtp_llm_wait_stream_size |
-| prefill | 228 | batch with prefill times | 待埋点 | rtp_llm_batch_with_prefill_times |
-| prefill | 229 | batch with prefill lens | 待埋点 | rtp_llm_batch_with_prefill_len |
+| prefill | 228 | batch with prefill times | Mock P/D 分离，不适用 | rtp_llm_batch_with_prefill_times |
+| prefill | 229 | batch with prefill lens | Mock P/D 分离，不适用 | rtp_llm_batch_with_prefill_len |
 | prefill | 227 | execute token size when has context | 已上报 | rtp_llm_execute_token_size_when_has_context |
 | prefill | 146 | execute token size | 已上报 | rtp_llm_execute_token_size |
 | prefill | 170 | get rpc connection rt | 待埋点 | rtp_llm_rpc_get_rpc_connection_rt_us |
@@ -67,7 +74,7 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | prefill | 10107 | all blocks ready cost | 待埋点 | rtp_llm.cache_store.load.server.all_block_ready_latency_us |
 | prefill | 197 | poll remote output rt | 待埋点 | rtp_llm_rpc_poll_remote_output_rt_us |
 | prefill | 10035 | Prefill 理论命中/总输入数量 | 已上报 | rtp_llm_prefill_worker_recent_cache_key_hit_count,rtp_llm_prefill_worker_recent_cache_key_total_count |
-| prefill | 143 | kv cache item num | 待埋点 | rtp_llm_kv_cache_item_num |
+| prefill | 143 | kv cache item num | 已上报 | rtp_llm_kv_cache_item_num |
 | prefill | 147 | 实际的总reuse len | 已上报 | rtp_llm_kv_cache_reuse_length |
 | prefill | 10636 | new device reuse length | 待埋点 | rtp_llm_stream_cache_device_reuse_length |
 | prefill | 491 | new memory reuse length | 待埋点 | rtp_llm_stream_cache_memory_reuse_length |
@@ -80,10 +87,10 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | prefill | 558 | kv_cache_pool_used_ratio分池最大值 | 部分待埋点 | rtp_llm_kv_cache_pool_used_ratio,rtp_llm_kv_cache_used_ratio |
 | prefill | 142 | kv cache available token num | 已上报 | rtp_llm_kv_cache_left_seq |
 | prefill | 10095 | kv cache connector ref blocks | 待埋点 | rtp_llm_kv_cache_connector_ref_blocks |
-| prefill | 222 | match_cost_time | 待埋点 | rtp_llm_match_cost_time_us |
+| prefill | 222 | match_cost_time | 已上报 | rtp_llm_match_cost_time_us |
 | prefill | 235 | mr cost time | 待埋点 | rtp_llm_mr_cost_time_ms |
 | prefill | 10600 | eviction ref blocks | 待埋点 | rtp_llm_kv_cache_eviction_target_ref_blocks |
-| prefill | 10086 | evicted block lifetime | 待埋点 | rtp_llm_kv_cache_evicted_block_lifetime_ms |
+| prefill | 10086 | evicted block lifetime | 已上报 | rtp_llm_kv_cache_evicted_block_lifetime_ms |
 | prefill | 552 | kv cache available blocks | 部分待埋点 | rtp_llm_kv_cache_pool_available_blocks,rtp_llm_kv_cache_available_blocks |
 | prefill | 553 | kv cache free blocks | 部分待埋点 | rtp_llm_kv_cache_pool_free_blocks,rtp_llm_kv_cache_free_blocks |
 | prefill | 554 | request_ref_blocks | 待埋点 | rtp_llm_kv_cache_pool_request_ref_blocks,rtp_llm_kv_cache_request_ref_blocks |
@@ -132,11 +139,11 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | decode | 10373 | total tps | 已上报 | rtp_llm_total_tps |
 | decode | 231 | model forward rt | 生产基线缺席，Mock 诊断独立展示 | rtp_llm_model_forward_us |
 | decode | 10081 | wall tps report interval | 已上报 | rtp_llm_wall_tps_report_interval_us |
-| decode | 159 | gather model input rt | 待埋点 | rtp_llm_gather_model_input_us |
+| decode | 159 | gather model input rt | Mock 批输入准备耗时 | mock_forward_batch_prepare_us |
 | decode | 215 | 请求队列排队延迟 | 已上报 | rtp_llm_wait_latency_us |
 | decode | 234 | first token latency | 已上报 | rtp_llm_first_token_latency_us |
 | decode | 121 | framework qps | 已上报 | rtp_llm_framework_qps |
-| decode | 162 | framework cancel qps | 待埋点 | rtp_llm_rpc_cancel_qps |
+| decode | 162 | framework cancel qps | 已上报 | rtp_llm_rpc_cancel_qps |
 | decode | 130 | total latency | 已上报 | rtp_llm_latency_us |
 | decode | 131 | pause latency | 待埋点 | rtp_llm_pause_latency_us |
 | decode | 233 | dispatch output rt | 待埋点 | rtp_llm_dispatch_output_us_metric |
@@ -178,7 +185,7 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | decode | 193 | local generate rt | 待埋点 | rtp_llm_rpc_local_generate_rt_us |
 | decode | 10114 | load block count | 待埋点 | rtp_llm.cache_store.load.client.block_count |
 | decode | 10115 | load block size | 待埋点 | rtp_llm.cache_store.load.client.total_block_size |
-| decode | 143 | kv cache item num | 待埋点 | rtp_llm_kv_cache_item_num |
+| decode | 143 | kv cache item num | 已上报 | rtp_llm_kv_cache_item_num |
 | decode | 10094 | kv cache request ref blocks | 待埋点 | rtp_llm_kv_cache_request_ref_blocks |
 | decode | 174 | kv cache free blocks | 已上报 | rtp_llm_kv_cache_free_blocks |
 | decode | 173 | kv cache available blocks | 已上报 | rtp_llm_kv_cache_available_blocks |
@@ -186,10 +193,10 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | decode | 558 | kv_cache_pool_used_ratio分池最大值 | 部分待埋点 | rtp_llm_kv_cache_pool_used_ratio,rtp_llm_kv_cache_used_ratio |
 | decode | 142 | kv cache available token num | 已上报 | rtp_llm_kv_cache_left_seq |
 | decode | 10095 | kv cache connector ref blocks | 待埋点 | rtp_llm_kv_cache_connector_ref_blocks |
-| decode | 222 | match_cost_time | 待埋点 | rtp_llm_match_cost_time_us |
+| decode | 222 | match_cost_time | 已上报 | rtp_llm_match_cost_time_us |
 | decode | 235 | mr cost time | 待埋点 | rtp_llm_mr_cost_time_ms |
 | decode | 10600 | eviction ref blocks | 待埋点 | rtp_llm_kv_cache_eviction_target_ref_blocks |
-| decode | 10086 | evicted block lifetime | 待埋点 | rtp_llm_kv_cache_evicted_block_lifetime_ms |
+| decode | 10086 | evicted block lifetime | 已上报 | rtp_llm_kv_cache_evicted_block_lifetime_ms |
 | decode | 552 | kv cache available blocks | 部分待埋点 | rtp_llm_kv_cache_pool_available_blocks,rtp_llm_kv_cache_available_blocks |
 | decode | 553 | kv cache free blocks | 部分待埋点 | rtp_llm_kv_cache_pool_free_blocks,rtp_llm_kv_cache_free_blocks |
 | decode | 554 | request_ref_blocks | 待埋点 | rtp_llm_kv_cache_pool_request_ref_blocks,rtp_llm_kv_cache_request_ref_blocks |
@@ -321,8 +328,8 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | master | 10526 | Cache 回包在 Master 成功处理：QPS | 已上报 | whale-lb.app.cache.status.check.visitor.success.qps |
 | master | 10455 | 恢复成功时：距上次成功已经多久 | 已上报 | whale-lb.app.cache.status.check.success.period,whale-lb.app.engine.health.check.success.period |
 | master | 10276 | Master 一轮同步多久完成：Status / Cache | 已上报 | whale-lb.app.engine.health.check.visitor.rt,whale-lb.app.cache.status.check.visitor.rt |
-| master | 9201 | Worker 实际收到多少 Status / Cache 查询 | 待埋点 | rtp_llm_rpc_worker_status_qps,rtp_llm_rpc_cache_status_qps |
-| master | 9202 | Worker 服务端处理查询多久：平均 / 最大 | 待埋点 | rtp_llm_rpc_worker_status_total_rt_us,rtp_llm_rpc_cache_status_total_rt_us |
+| master | 9201 | Worker 实际收到多少 Status / Cache 查询 | 已上报 | rtp_llm_rpc_worker_status_qps,rtp_llm_rpc_cache_status_qps |
+| master | 9202 | Worker 服务端处理查询多久：平均 / 最大 | 已上报 | rtp_llm_rpc_worker_status_total_rt_us,rtp_llm_rpc_cache_status_total_rt_us |
 | master | 10446 | Status RPC 发起线程池：执行 / 排队 / 线程数 | 已上报 | whale-lb.app.engine.balancing.thread.pool.info |
 | master | 10447 | Status 回包本地提交线程池：执行 / 排队 / 线程数 | 已上报 | whale-lb.app.engine.balancing.thread.pool.info |
 | master | 10448 | Cache 轮询与处理线程池：执行 / 排队 / 线程数 | 已上报 | whale-lb.app.engine.balancing.thread.pool.info |

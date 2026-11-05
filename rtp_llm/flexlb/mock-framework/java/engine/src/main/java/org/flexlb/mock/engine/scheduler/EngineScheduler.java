@@ -17,7 +17,14 @@ public interface EngineScheduler extends AutoCloseable {
     }
 
     record Input(String identity, long requestId, long groupId, int tokens, int maxNewTokens, int priority,
-                 long started, long deadline, CacheSequence cacheSequence, boolean reuse, boolean retained, int minNewTokens, boolean ignoreEos) {
+                 long started, long deadline, CacheSequence cacheSequence, boolean reuse, boolean retained, int minNewTokens, boolean ignoreEos,
+                 boolean streaming) {
+        public Input(String identity, long requestId, long groupId, int tokens, int maxNewTokens, int priority,
+                     long started, long deadline, CacheSequence cacheSequence, boolean reuse, boolean retained,
+                     int minNewTokens, boolean ignoreEos) {
+            this(identity, requestId, groupId, tokens, maxNewTokens, priority, started, deadline, cacheSequence,
+                reuse, retained, minNewTokens, ignoreEos, false);
+        }
         public Input {
             if (identity == null || identity.isBlank() || tokens < 1 || maxNewTokens < 1 || minNewTokens < 0 || minNewTokens > maxNewTokens)
                 throw new IllegalArgumentException("Invalid scheduling input");

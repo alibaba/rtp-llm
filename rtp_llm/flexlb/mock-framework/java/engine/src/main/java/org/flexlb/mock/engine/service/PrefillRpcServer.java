@@ -21,6 +21,7 @@ import org.flexlb.mock.protocol.MediaInput;
 final class PrefillRpcServer implements AutoCloseable {
     private final RtpRpcService.Config config;
     private final Object executionLock;
+    private final Runnable recordCancellation;
     private final RtpEngineLoop engine;
     private final TaskHistory finished;
     // Local request lifetime; output/Fetch sessions may outlive these entries. Guarded by executionLock.
@@ -38,11 +39,12 @@ final class PrefillRpcServer implements AutoCloseable {
     private long nextOutputSweep;
     private volatile boolean closed;
 
-    PrefillRpcServer(RtpRpcService.Config config, Object executionLock, TaskHistory finished, RtpEngineLoop engine) {
+    PrefillRpcServer(RtpRpcService.Config config, Object executionLock, TaskHistory finished, RtpEngineLoop engine, Runnable recordCancellation) {
         this.config = config;
         this.executionLock = executionLock;
         this.finished = finished;
         this.engine = engine;
+        this.recordCancellation = recordCancellation;
         vision = new org.flexlb.mock.protocol.VitClient(config.imageToken());
         deadlines.setRemoveOnCancelPolicy(true);
     }
@@ -518,6 +520,8 @@ final class PrefillRpcServer implements AutoCloseable {
         synchronized void finish(Throwable error) {
             if (terminal) return;
             terminal = true;
+            if (error != null && Status.fromThrowable(error).getCode() == Status.Code.CANCELLED)
+                recordCancellation.run();
             if (timeout != null) timeout.cancel(false);
             Throwable failure = error == null ? Status.CANCELLED.asRuntimeException() : error;
             prepared.completeExceptionally(failure);
