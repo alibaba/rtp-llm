@@ -554,19 +554,6 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
 
             self.mlp.select_topk = Qwen4ExpMoeTopk(self.mlp.select_topk)
             self.mlp.prepare_shared_expert_overlap()
-        if self.layer_type != HybridAttentionType.LINEAR and getattr(
-            config, "enable_qwen4_qsa", False
-        ):
-            self.self_attn = Qwen4ExpAttention(
-                config.getAttentionConfigs(parallelism_config.get_attn_tp_size()),
-                parallelism_config,
-                weights,
-                config.layernorm_eps,
-                config,
-                self._attention_quant_config(config, weights),
-                hw_kernel_config=hw_kernel_config,
-                layer_idx=layer_idx,
-            )
         from rtp_llm.models_py.modules.qwen4_exp.tp_reduce import (
             install_target_graph_all_reduce,
         )
@@ -585,6 +572,33 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
 
             return Fp8BlockWiseQuantConfig(is_quanted=False)
         return super()._attention_quant_config(config, weights)
+
+    def _build_full_attention(
+        self,
+        config,
+        parallelism_config,
+        weights,
+        attention_quant_config,
+        hw_kernel_config,
+    ):
+        if not getattr(config, "enable_qwen4_qsa", False):
+            return super()._build_full_attention(
+                config,
+                parallelism_config,
+                weights,
+                attention_quant_config,
+                hw_kernel_config,
+            )
+        return Qwen4ExpAttention(
+            config.getAttentionConfigs(parallelism_config.get_attn_tp_size()),
+            parallelism_config,
+            weights,
+            config.layernorm_eps,
+            config,
+            attention_quant_config,
+            hw_kernel_config=hw_kernel_config,
+            layer_idx=self.layer_idx,
+        )
 
     def _build_residual_modules(
         self, config: ModelConfig, weights: Dict[str, torch.Tensor]
@@ -1130,10 +1144,17 @@ class Qwen4ExpModel(Qwen35Model):
     def finalize_speculative_target_commit(self) -> None:
         return self._ple_coordinator().finalize_speculative_target_commit()
 
-    def _start_eager_ple_prefetch(self, inputs: PyModelInputs, attention_inputs):
+    def _start_eager_ple_prefetch(
+        self,
+        inputs: PyModelInputs,
+        attention_inputs,
+        ple_ids: torch.Tensor | None = None,
+    ):
         if not self.ple_layers:
             return {}
-        return self._ple_execution()._start_eager_ple_prefetch(inputs, attention_inputs)
+        return self._ple_execution()._start_eager_ple_prefetch(
+            inputs, attention_inputs, ple_ids
+        )
 
     def _apply_ple(
         self,
@@ -1380,17 +1401,25 @@ class Qwen4ExpModel(Qwen35Model):
             prefetch_after_embedding = bool(
                 ple_context_inputs.is_prefill and not ple_context_inputs.is_cuda_graph
             )
+        ple_input_ids = (
+            self._ple_input_ids(inputs)
+            if self.ple_layers and not prefetch_after_embedding
+            else inputs.input_ids
+        )
         ple_prefetch = (
             {}
             if prefetch_after_embedding
-            else self._start_eager_ple_prefetch(inputs, attention_inputs)
+            else self._start_eager_ple_prefetch(inputs, attention_inputs, ple_input_ids)
         )
         prepared_hyper = self._try_fp8_hyper_embedding(inputs)
         hidden_states = (
             self.word_embedding(inputs) if prepared_hyper is None else prepared_hyper
         )
         if prefetch_after_embedding:
-            ple_prefetch = self._start_eager_ple_prefetch(inputs, attention_inputs)
+            ple_input_ids = self._ple_input_ids(inputs)
+            ple_prefetch = self._start_eager_ple_prefetch(
+                inputs, attention_inputs, ple_input_ids
+            )
 
         is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
         attn_meta = self._build_attn_meta(inputs, hidden_states.device, is_cuda_graph)
@@ -1407,9 +1436,6 @@ class Qwen4ExpModel(Qwen35Model):
             else prepared_hyper
         )
 
-        ple_input_ids = inputs.input_ids
-        if self.ple_layers:
-            ple_input_ids = self._ple_input_ids(inputs)
         pending_injection = None
         defer_residual = (
             not is_cuda_graph

@@ -1,6 +1,6 @@
 import unittest
 from collections.abc import Mapping
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -23,6 +23,7 @@ class PrefetchOrderTest(unittest.TestCase):
         value = PyAttentionInputs()
         value.is_prefill = prefill
         value.is_cuda_graph = graph
+        value.kv_cache_kernel_block_id_device = torch.zeros((1, 4), dtype=torch.int32)
         return value
 
     def check_order(
@@ -35,7 +36,10 @@ class PrefetchOrderTest(unittest.TestCase):
         model.ple_layers = torch.nn.ModuleDict(
             {"0": torch.nn.Identity()} if has_ple else {}
         )
-        model.kv_cache = object()
+        model.kv_cache = SimpleNamespace(
+            get_seq_size_per_block=lambda tag: 128,
+            get_kernel_seq_size_per_block=lambda tag: 32,
+        )
         order = []
         hidden = torch.zeros(1, 4)
 
@@ -46,7 +50,8 @@ class PrefetchOrderTest(unittest.TestCase):
         def packed_embedding(_):
             return embedding(_) if packed else None
 
-        def prefetch(_, actual_attention):
+        def prefetch(_, actual_attention, ple_ids):
+            self.assertIs(ple_ids, inputs.input_ids)
             # PyModelInputs converts native value structs and copies the
             # outer mapping; object identity is not its public contract.
             if isinstance(attention, Mapping):
@@ -57,7 +62,9 @@ class PrefetchOrderTest(unittest.TestCase):
             else:
                 pairs = [(actual_attention, attention)]
             for actual, expected in pairs:
-                self.assertIsInstance(actual, PyAttentionInputs)
+                self.assertIsInstance(
+                    getattr(actual, "_inputs", actual), PyAttentionInputs
+                )
                 self.assertEqual(actual.is_prefill, expected.is_prefill)
                 self.assertEqual(actual.is_cuda_graph, expected.is_cuda_graph)
             order.append("prefetch")
@@ -71,6 +78,7 @@ class PrefetchOrderTest(unittest.TestCase):
         model._start_eager_ple_prefetch = prefetch
         model._build_attn_meta = stop
         inputs = PyModelInputs()
+        inputs.input_ids = torch.zeros(1, dtype=torch.long)
         inputs.attention_inputs = attention
         # Keep the native input adapter and tag selection real. Only the
         # downstream CUDA work is replaced, to observe forward call ordering.

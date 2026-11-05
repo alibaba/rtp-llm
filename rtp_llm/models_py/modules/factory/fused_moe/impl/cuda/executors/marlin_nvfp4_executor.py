@@ -182,10 +182,8 @@ class Qwen4MarlinExecutor(Qwen4DecodeMarlinExecutor):
         checker.check(not config.model_config.eplb_config.enable_eplb())
 
     def __init__(self, config, quant_config, weights):
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_nvfp4_executor import (
-            CutlassNvfp4Executor,
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.nvfp4_weights import (
+            Nvfp4WeightViews,
         )
 
-        # Reuse the prepared scale views and in-place repacking contract. The
-        # CUTLASS executor is only a weight adapter here; its kernel is not run.
-        super().__init__(CutlassNvfp4Executor(config, quant_config, weights))
+        super().__init__(Nvfp4WeightViews(config, quant_config, weights))

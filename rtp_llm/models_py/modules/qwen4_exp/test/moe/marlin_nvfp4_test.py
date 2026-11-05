@@ -334,7 +334,13 @@ class MarlinNvfp4Test(unittest.TestCase):
                 W.moe_w2_i_s: torch.ones(self.experts, device="cuda"),
             }
         )
-        executor = factory.create_fused_moe(config, weights).fused_experts
+        with patch(
+            "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors."
+            "cutlass_nvfp4_executor.CutlassNvfp4Executor.__init__",
+            side_effect=AssertionError("Marlin must not initialize a CUTLASS executor"),
+        ):
+            executor = factory.create_fused_moe(config, weights).fused_experts
+        self.assertIs(executor.weights, weights)
         for rows in (1, 64, 256):
             args = self.inputs(rows)
             payload = ExpertForwardPayload(

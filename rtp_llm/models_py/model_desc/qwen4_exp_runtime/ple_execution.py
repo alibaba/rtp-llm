@@ -58,7 +58,12 @@ class PLEExecution:
             raise RuntimeError("qwen4_exp PLE does not support prefill CP yet")
         validate_pd_cache_inputs((attention_inputs,))
 
-    def _start_eager_ple_prefetch(self, inputs: PyModelInputs, attention_inputs):
+    def _start_eager_ple_prefetch(
+        self,
+        inputs: PyModelInputs,
+        attention_inputs,
+        ple_ids: torch.Tensor | None = None,
+    ):
         """Read PLE contexts early; leave persistent state untouched."""
         enabled = [
             (int(key), ple)
@@ -72,7 +77,9 @@ class PLEExecution:
         )
         if bool(ctx_inputs.is_cuda_graph):
             return {}
-        ids = self._ple_input_ids(inputs).reshape(-1).long()
+        if ple_ids is None:
+            ple_ids = self._ple_input_ids(inputs)
+        ids = ple_ids.reshape(-1).long()
         self._validate_ple_mode(ctx_inputs, allow_target_verify=True)
         if ctx_inputs.is_prefill:
             lengths = [int(x) for x in ctx_inputs.input_lengths.tolist()]

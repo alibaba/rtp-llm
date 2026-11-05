@@ -1,9 +1,12 @@
 from types import SimpleNamespace
 from unittest import TestCase, main
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
+from torch import nn
 
+from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import PLE_NGRAM_CTX_TAG
+from rtp_llm.models_py.model_desc import qwen4_exp
 from rtp_llm.models_py.model_desc.test.qwen4_exp.fixtures import (
     _HC,
     _HIDDEN,
@@ -12,6 +15,74 @@ from rtp_llm.models_py.model_desc.test.qwen4_exp.fixtures import (
 from rtp_llm.models_py.model_desc.test.qwen4_exp.ple_page_reference import (
     _apply_ple as reference_apply_ple,
 )
+
+
+class Qwen4ExpPLEForwardPreparationTest(TestCase):
+    def test_each_forward_shares_fresh_text_ids_between_prefetch_and_ple(self):
+        model = qwen4_exp.Qwen4ExpModel.__new__(qwen4_exp.Qwen4ExpModel)
+        nn.Module.__init__(model)
+        model.config = SimpleNamespace(special_tokens=SimpleNamespace(eos_token_id=7))
+        model.ple_layers = {"0": object()}
+        model.layers = [lambda hidden, *args, **kwargs: hidden]
+        model.kv_cache = SimpleNamespace(get_layer_cache=lambda *args: object())
+        model._try_fp8_hyper_embedding = lambda inputs: None
+        model._initial_hyper_states = lambda hidden: hidden
+        model._build_attn_meta = lambda *args: None
+        model._attention_tag = lambda i: PLE_NGRAM_CTX_TAG
+        model._layer_fmha_impl = lambda *args: None
+        model.hyper_connection_mixer = lambda hidden: (hidden, None, None)
+        model._start_eager_ple_prefetch = Mock(return_value={})
+        model._apply_ple = Mock(side_effect=lambda i, hidden, *args: hidden)
+        events = []
+        model.word_embedding = lambda frame: (
+            events.append("embedding") or torch.zeros(frame.input_ids.numel(), _HIDDEN)
+        )
+        normalize = model._ple_input_ids
+
+        def prepare_ids(frame):
+            events.append("ids")
+            return normalize(frame)
+
+        with (
+            patch.object(model, "_ple_input_ids", side_effect=prepare_ids) as prepare,
+            patch.object(
+                qwen4_exp, "prepare_state_cache_inputs", side_effect=lambda a, k: a
+            ),
+            patch.object(
+                qwen4_exp, "prepare_side_cache_store_writers", return_value={}
+            ),
+            patch.object(qwen4_exp, "publish_layer_side_caches"),
+            patch.object(qwen4_exp, "_is_cuda_graph_forward", return_value=False),
+        ):
+            for prefill in (False, True):
+                previous = None
+                for tokens in ([1, 2], [3, 4]):
+                    with self.subTest(prefill=prefill, tokens=tokens):
+                        events.clear()
+                        prepare.reset_mock()
+                        frame = SimpleNamespace(
+                            input_ids=torch.tensor(tokens),
+                            embedding_inputs=SimpleNamespace(
+                                text_tokens_mask=torch.tensor([True, False])
+                            ),
+                            attention_inputs={
+                                PLE_NGRAM_CTX_TAG: SimpleNamespace(
+                                    is_prefill=prefill, is_cuda_graph=False
+                                )
+                            },
+                        )
+                        model._forward_with_ple_prefetch(frame, object())
+                        prepare.assert_called_once_with(frame)
+                        prepared = model._start_eager_ple_prefetch.call_args.args[2]
+                        self.assertIs(model._apply_ple.call_args.args[2], prepared)
+                        self.assertIsNot(prepared, previous)
+                        self.assertEqual(prepared.tolist(), [tokens[0], 7])
+                        self.assertEqual(frame.input_ids.tolist(), tokens)
+                        self.assertEqual(
+                            events,
+                            ["embedding", "ids"] if prefill else ["ids", "embedding"],
+                        )
+                        previous = prepared
 
 
 class Qwen4ExpPLEPrefetchTest(PLERuntimeFixture, TestCase):

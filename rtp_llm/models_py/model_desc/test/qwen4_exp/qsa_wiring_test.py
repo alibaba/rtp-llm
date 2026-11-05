@@ -5,15 +5,60 @@ from unittest.mock import patch
 import torch
 from torch import nn
 
+from rtp_llm.config.qwen4_exp_config import Qwen4ModelConfig
 from rtp_llm.models_py.model_desc import qwen3_next, qwen4_exp
 from rtp_llm.models_py.model_desc.test.qwen4_exp.fixtures import (
     _EPS,
     _QsaMainCachePhase,
 )
+from rtp_llm.ops import HybridAttentionType, MoeConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
 
 class Qwen4ExpQSAConstructionTest(TestCase):
+    def test_decoder_constructs_only_the_selected_attention_backend(self):
+        config = Qwen4ModelConfig()
+        config.num_layers = 4
+        config.moe_style = 1
+        config.hybrid_attention_config.hybrid_attention_types = [
+            HybridAttentionType.NONE
+        ] * 4
+        weights = {}
+        for enabled in (False, True):
+            with self.subTest(qsa=enabled):
+                config._qwen4_indexer_head_dim = 8 if enabled else 0
+                attention = nn.Identity()
+                with (
+                    patch.object(
+                        qwen3_next, "Qwen3NextAttention", return_value=attention
+                    ) as generic,
+                    patch.object(
+                        qwen4_exp, "Qwen4ExpAttention", return_value=attention
+                    ) as qsa,
+                    patch.object(
+                        qwen4_exp.Qwen4ExpDecoderLayer,
+                        "_moe_layer_cls",
+                        return_value=nn.Identity(),
+                    ),
+                    patch.object(
+                        qwen4_exp.Qwen4ExpDecoderLayer, "_build_residual_modules"
+                    ),
+                    patch(
+                        "rtp_llm.models_py.modules.qwen4_exp.tp_reduce.install_target_graph_all_reduce"
+                    ),
+                ):
+                    layer = qwen4_exp.Qwen4ExpDecoderLayer(
+                        config, ParallelismConfig(), weights, 3, MoeConfig()
+                    )
+                selected, unused = (qsa, generic) if enabled else (generic, qsa)
+                selected.assert_called_once()
+                unused.assert_not_called()
+                self.assertIs(layer.self_attn, attention)
+                self.assertIs(selected.call_args.args[2], weights)
+                if enabled:
+                    self.assertIs(selected.call_args.args[4], config)
+                    self.assertEqual(selected.call_args.kwargs["layer_idx"], 3)
+
     @staticmethod
     def _fake_base_init(module, *args, **kwargs):
         nn.Module.__init__(module)

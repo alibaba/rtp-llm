@@ -15,7 +15,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 from rtp_llm.models_py.modules.factory.fused_moe.utils.nvfp4_parallelism import (
     use_nvfp4_tensor_parallel,
 )
-from rtp_llm.utils.model_weight import W
+from rtp_llm.models_py.modules.factory.fused_moe.utils.nvfp4_weights import (
+    Nvfp4WeightViews,
+)
 
 
 def _prefill_library(config):
@@ -61,32 +63,11 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
 
     def __init__(self, config, quant_config, weights):
         super().__init__(config, quant_config, weights)
-        # RTP's stacked MoE descriptor already emits [up, gate].
-        self.w1 = weights[W.moe_w1].contiguous().view(torch.int64)
-        self.w2 = weights[W.moe_w2].contiguous().view(torch.int64)
-        for name in (W.moe_w1_i_s, W.moe_w2_i_s):
-            scale = weights[name]
-            if (
-                not bool(torch.isfinite(scale).all())
-                or not bool((scale > 0).all())
-                or not bool((scale == scale.flatten()[0]).all())
-            ):
-                raise ValueError(
-                    "CUTLASS online NVFP4 requires uniform finite positive activation scales"
-                )
-        self.quant_scales = [
-            weights[W.moe_w1_i_s].reciprocal().min(),
-            weights[W.moe_s1].view(torch.int32),
-            weights[W.moe_w1_i_s] * weights[W.moe_w1_s2],
-            weights[W.moe_w2_i_s].reciprocal().min(),
-            weights[W.moe_s2].view(torch.int32),
-            weights[W.moe_w2_i_s] * weights[W.moe_w2_s2],
-        ]
-        self.ep_size = config.ep_size
-        self.ep_rank = config.ep_rank
-        pc = getattr(config, "parallelism_config", None)
-        self.tp_size = pc.get_ffn_tp_size() if pc is not None else 1
-        self.tp_rank = pc.get_ffn_tp_rank() if pc is not None else 0
+        prepared = Nvfp4WeightViews(config, quant_config, weights)
+        self.w1, self.w2 = prepared.w1, prepared.w2
+        self.quant_scales = prepared.quant_scales
+        self.ep_size, self.ep_rank = prepared.ep_size, prepared.ep_rank
+        self.tp_size, self.tp_rank = prepared.tp_size, prepared.tp_rank
         self.sm120_prefill = None
         backend_config = getattr(config.model_config, "quant_config", None)
         library, library_sha256 = _prefill_library(backend_config)

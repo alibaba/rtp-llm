@@ -1431,17 +1431,12 @@ class Qwen3NextDecoderLayer(nn.Module):
                 norm_activation=getattr(config, "linear_attn_norm_activation", None),
             )
         else:
-            attn_configs = config.getAttentionConfigs(
-                parallelism_config.get_attn_tp_size()
-            )
-            self.self_attn = Qwen3NextAttention(
-                attn_configs,
+            self.self_attn = self._build_full_attention(
+                config,
                 parallelism_config,
                 weights,
-                config.layernorm_eps,
                 attention_quant_config,
-                hw_kernel_config=hw_kernel_config,
-                linear_factory=self._linear_factory,
+                hw_kernel_config,
             )
 
         if config.moe_style in (1, 2):
@@ -1469,6 +1464,24 @@ class Qwen3NextDecoderLayer(nn.Module):
 
     def _attention_quant_config(self, config, weights):
         return config.quant_config
+
+    def _build_full_attention(
+        self,
+        config,
+        parallelism_config,
+        weights,
+        attention_quant_config,
+        hw_kernel_config,
+    ):
+        return Qwen3NextAttention(
+            config.getAttentionConfigs(parallelism_config.get_attn_tp_size()),
+            parallelism_config,
+            weights,
+            config.layernorm_eps,
+            attention_quant_config,
+            hw_kernel_config=hw_kernel_config,
+            linear_factory=self._linear_factory,
+        )
 
     def _build_residual_modules(
         self, config: ModelConfig, weights: Dict[str, torch.Tensor]
