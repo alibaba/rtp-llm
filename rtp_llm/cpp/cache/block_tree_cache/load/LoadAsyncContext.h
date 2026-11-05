@@ -68,6 +68,10 @@ public:
     size_t localMatchedBlocks() const;
     size_t matchedBlocks() const;
     size_t matchedBlocks(Tier tier) const;
+    size_t matchedBlocks(Tier tier, size_t prefix) const;
+    void   setLocalMatchLengths(size_t device_blocks, size_t device_host_blocks);
+    size_t deviceReadyBlocks() const;
+    bool   hostTransfersSucceeded() const;
     bool   needBackendMatch() const;
 
     void setValidPrefix(std::function<bool(size_t)> valid_prefix) {
@@ -85,42 +89,46 @@ public:
 
     bool commit();
 
-    bool         abortPending();
-    void         startJoinWait(int64_t start_time_us);
-    bool         completeJoinedOne(bool success, bool& join_completed, int64_t& join_wait_latency_us);
-    bool         completeTransfers(size_t count, bool success);
-    void         cancelUnsubmittedTransfers();
-    bool         aggregateSuccess() const;
-    bool         localTransfersSucceeded() const;
-    bool         localLoadSucceeded() const;
-    bool         backendTimedOut() const;
-    bool         deadlineExceeded() const {
+    bool abortPending();
+    void startJoinWait(int64_t start_time_us);
+    bool
+    completeJoinedOne(bool success, bool& join_completed, int64_t& join_wait_latency_us, Tier source_tier = Tier::NONE);
+    bool completeTransfers(size_t count, bool success, Tier source_tier = Tier::NONE);
+    void cancelUnsubmittedTransfers();
+    bool aggregateSuccess() const;
+    bool localTransfersSucceeded() const;
+    bool localLoadSucceeded() const;
+    bool backendTimedOut() const;
+    bool deadlineExceeded() const {
         return backend_deadline_state_.load() == State::FAILED;
     }
     std::optional<RemoteRestoreTiming> remoteRestoreTiming() const;
-    void                               setLocalDecodeSources(DecodeReuseSourcesPtr sources);
-    DecodeReuseSourcesPtr              decodeSources(bool local_only = false) const;
-    bool         settle(bool success);
-    bool         onTaskFail();
-    void         waitDone() override;
-    void         onDone(DoneCallback callback) override;
-    bool         done() const override;
-    bool         success() const override;
-    ErrorInfo    errorInfo() const override;
-    void         deferRelease(std::shared_ptr<BatchKVCacheResource> resource);
-    MallocStatus mallocStatus() const;
+    void                               setLocalDecodeSources(DecodeReuseSourcesPtr sources,
+                                                             DecodeReuseSourcesPtr device_sources      = {},
+                                                             DecodeReuseSourcesPtr device_host_sources = {});
+    // Local-only sources are validated against the actual ready prefix's group windows.
+    DecodeReuseSourcesPtr decodeSources(bool local_only = false) const;
+    bool                  settle(bool success, bool host_success = false);
+    bool                  onTaskFail();
+    void                  waitDone() override;
+    void                  onDone(DoneCallback callback) override;
+    bool                  done() const override;
+    bool                  success() const override;
+    ErrorInfo             errorInfo() const override;
+    void                  deferRelease(std::shared_ptr<BatchKVCacheResource> resource);
+    MallocStatus          mallocStatus() const;
 
 private:
     void markAborted();
     void rebuildMatchedBlocksByTier();
     void onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success);
-    void      onBackendRead(ErrorInfo error, DecodeReuseSourcesPtr sources = {});
+    void onBackendRead(ErrorInfo error, DecodeReuseSourcesPtr sources = {});
     void failBeforeCommit();
     void failCommit();
     void finishIfReadyLocked(bool& notify, SettlementReadyCallback& settlement_ready_callback);
     void dispatchCompletion(bool notify, SettlementReadyCallback settlement_ready_callback);
     ErrorInfo completionErrorLocked() const;
-    void notifyCompletion();
+    void      notifyCompletion();
 
     std::shared_ptr<LoadContextCoordinator> coordinator_;
     const uint64_t                          context_id_;
@@ -130,6 +138,9 @@ private:
     size_t                                  matched_blocks_{0};
     size_t                                  backend_matched_blocks_{0};
     std::array<size_t, 3>                   matched_blocks_by_tier_{};
+    std::unordered_map<size_t, Tier>        reuse_tier_by_path_;
+    size_t                                  matched_device_host_blocks_{0};
+    size_t                                  device_ready_blocks_{0};
 
     std::shared_ptr<StorageBackend> storage_backend_;
     const std::optional<int64_t>    request_id_;
@@ -141,31 +152,34 @@ private:
     bool                            backend_started_{false};
     bool                            backend_pending_{false};
     // SUCCEEDED closes the remote business budget; FAILED latches its expiry.
-    mutable std::atomic<State>      backend_deadline_state_{State::SUCCEEDED};
-    std::atomic<bool>               commit_started_{false};
-    bool                            committed_{false};
+    mutable std::atomic<State> backend_deadline_state_{State::SUCCEEDED};
+    std::atomic<bool>          commit_started_{false};
+    bool                       committed_{false};
 
     std::mutex backend_match_mutex_;
 
-    std::atomic<State>        state_{State::PENDING};
-    std::atomic<MallocStatus> malloc_status_{MallocStatus::NONE};
-    mutable std::mutex        mutex_;
-    std::condition_variable   cv_;
-    size_t                    remaining_transfer_count_{0};
-    std::atomic<size_t>       remaining_join_count_{0};
-    int64_t                   join_start_time_us_{0};
-    bool                      has_local_failure_{false};
-    bool                      local_load_succeeded_{false};
-    ErrorInfo                 backend_error_{ErrorInfo::OkStatus()};
-    ErrorInfo                 error_info_{ErrorInfo::OkStatus()};
-    bool                      settlement_ready_{false};
+    std::atomic<State>                                    state_{State::PENDING};
+    std::atomic<MallocStatus>                             malloc_status_{MallocStatus::NONE};
+    mutable std::mutex                                    mutex_;
+    std::condition_variable                               cv_;
+    size_t                                                remaining_transfer_count_{0};
+    std::atomic<size_t>                                   remaining_join_count_{0};
+    int64_t                                               join_start_time_us_{0};
+    bool                                                  has_local_failure_{false};
+    bool                                                  has_host_failure_{false};
+    bool                                                  local_load_succeeded_{false};
+    ErrorInfo                                             backend_error_{ErrorInfo::OkStatus()};
+    ErrorInfo                                             error_info_{ErrorInfo::OkStatus()};
+    bool                                                  settlement_ready_{false};
     const bool                                            track_remote_restore_{false};
     std::optional<RemoteRestoreTiming::Clock::time_point> remote_read_started_at_;
     std::optional<RemoteRestoreTiming::Clock::time_point> remote_gpu_ready_at_;
     DecodeReuseSourcesPtr                                 local_decode_sources_;
+    DecodeReuseSourcesPtr                                 device_decode_sources_;
+    DecodeReuseSourcesPtr                                 device_host_decode_sources_;
     DecodeReuseSourcesPtr                                 remote_decode_sources_;
-    SettlementReadyCallback   settlement_ready_callback_;
-    std::vector<DoneCallback> callbacks_;
+    SettlementReadyCallback                               settlement_ready_callback_;
+    std::vector<DoneCallback>                             callbacks_;
 
     AsyncProfileSpan  workflow_span_, join_span_;
     std::atomic<bool> workflow_trace_finished_{false}, join_trace_finished_{false};
@@ -199,16 +213,16 @@ private:
 
     friend class LoadAsyncContext;
 
-    std::mutex              mutex_;
-    std::condition_variable cv_;
-    bool                    accepting_{true};
-    uint64_t                next_context_id_{1};
-    size_t                  active_callbacks_{0};
-    PendingContextMap       pending_contexts_;
-    CommitCallback          commit_callback_;
-    AbortCallback           abort_callback_;
+    std::mutex                                 mutex_;
+    std::condition_variable                    cv_;
+    bool                                       accepting_{true};
+    uint64_t                                   next_context_id_{1};
+    size_t                                     active_callbacks_{0};
+    PendingContextMap                          pending_contexts_;
+    CommitCallback                             commit_callback_;
+    AbortCallback                              abort_callback_;
     std::function<bool(std::function<void()>)> defer_cleanup_;
-    std::function<void()>   shutdown_wait_observer_for_test_;
+    std::function<void()>                      shutdown_wait_observer_for_test_;
 };
 
 }  // namespace rtp_llm

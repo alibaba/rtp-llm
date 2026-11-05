@@ -135,7 +135,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
             if (target_tier != Tier::NONE) {
                 InsertInfo insert_info{
                     batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier, stream_->streamId()};
-                size_t     resident_prefix_length = 0;
+                size_t resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
             }
         } else {
@@ -330,10 +330,10 @@ void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& resul
 }
 
 void StreamCacheResource::publishAllocatorReuse(const LoadAsyncContext& context, bool local_only) {
-    const size_t total = local_only ? context.localMatchedBlocks() : context.matchedBlocks();
-    const size_t local = context.localMatchedBlocks();
-    const size_t host  = context.matchedBlocks(Tier::HOST);
-    const size_t disk  = context.matchedBlocks(Tier::DISK);
+    const size_t local = local_only ? context.deviceReadyBlocks() : context.localMatchedBlocks();
+    const size_t total = local_only ? local : context.matchedBlocks();
+    const size_t host  = context.matchedBlocks(Tier::HOST, local);
+    const size_t disk  = context.matchedBlocks(Tier::DISK, local);
     RTP_LLM_CHECK_WITH_INFO(total >= local && host <= local && disk <= local - host,
                             "invalid allocator reuse counts: total=%zu local=%zu host=%zu disk=%zu",
                             total,
@@ -362,7 +362,7 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     const auto error         = allocator_load_context_->errorInfo();
     const auto load_context  = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
     auto       malloc_status = load_context == nullptr ? MallocStatus::NONE : load_context->mallocStatus();
-    const bool timed_out = load_context && load_context->deadlineExceeded();
+    const bool timed_out     = load_context && load_context->deadlineExceeded();
     if (timed_out) {
         deferAllocatorLoadRelease();
     }
@@ -387,10 +387,11 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     } else if (!timed_out && resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
         const bool backend_timeout = load_context && load_context->backendTimedOut();
         skip_remote_cache_         = skip_remote_cache_ || backend_timeout;
-        const bool reuse_local     = load_context && load_context->localLoadSucceeded();
-        const int  reuse_length    = reuse_local ?
-                                         static_cast<int>(load_context->localMatchedBlocks()) * reuseBlockTokens() :
-                                         stream_->reuseLength();
+        const int ready_length =
+            load_context ? static_cast<int>(load_context->deviceReadyBlocks()) * reuseBlockTokens() : 0;
+        const bool reuse_local =
+            load_context && (load_context->localLoadSucceeded() || ready_length > stream_->reuseLength());
+        const int reuse_length = reuse_local ? ready_length : stream_->reuseLength();
         if (!resource_context_.cache_manager->detachSharedBlocksForRecompute(batch_kv_cache_resource_, reuse_length)) {
             // Re-enter admission with no request refs if detaching the writable
             // suffix cannot fit. Never compute into cache/other-request blocks.
