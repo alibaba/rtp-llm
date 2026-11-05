@@ -1,22 +1,13 @@
 import os
 import socket
 import tempfile
-import time
 import unittest
 from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest import mock
 
 from navi_sched import NaviSchedMaster
-from navi_sched.adapters.dashserving import (
-    DashServingRoutingError,
-    NaviSchedDashServingRouter,
-)
-from navi_sched.adapters.vllm import (
-    NaviSchedAdapterConfig,
-    calculate_vllm_block_hashes,
-    stable_request_id,
-)
+from navi_sched.adapters.vllm import calculate_vllm_block_hashes
 from navi_sched.adapters.vllm.VLLMEngineObserver import VLLMEngineObserver
 
 
@@ -25,7 +16,7 @@ class FullAttentionSpec:
         self.block_size = block_size
 
 
-class VLLMAdapterEndToEndTest(unittest.TestCase):
+class VLLMAdapterEndToEndTestBase(unittest.TestCase):
     MASTER_BIZ = "vllm_adapter_master"
     AGENT_BIZ = "vllm_adapter_prefill"
     BLOCK_SIZE = 16
@@ -60,47 +51,6 @@ class VLLMAdapterEndToEndTest(unittest.TestCase):
         finally:
             os.chdir(self._original_dir)
             self._runtime_dir.cleanup()
-
-    def test_router_agent_cache_batch_and_master_reconnect(self):
-        model_ports = self._ports[:2]
-        agent_ports = self._ports[2:]
-        first = self._make_observer(model_ports[0], agent_ports[0])
-        second = self._make_observer(model_ports[1], agent_ports[1])
-        token_ids = list(range(32))
-        full_hashes = self._full_hashes(token_ids)
-
-        self._report_cache(first, full_hashes, inserted=True)
-        self._start_master()
-        self._start_router()
-        route, request_id = self._wait_for_target(token_ids, model_ports[0])
-        self.assertEqual(
-            f"127.0.0.1:{model_ports[0]}",
-            route.target_address,
-        )
-        self._run_batch(first, request_id, full_hashes)
-
-        self._report_cache(first, full_hashes, inserted=False)
-        self._report_cache(second, full_hashes, inserted=True)
-        route, request_id = self._wait_for_target(
-            token_ids,
-            model_ports[1],
-        )
-        self.assertEqual(
-            stable_request_id(request_id),
-            route.scheduler_request_id,
-        )
-        self._run_batch(second, request_id, full_hashes)
-
-        self._restart_master_and_router()
-        route, request_id = self._wait_for_target(
-            token_ids,
-            model_ports[1],
-        )
-        self.assertEqual(
-            f"127.0.0.1:{model_ports[1]}",
-            route.target_address,
-        )
-        self._run_batch(second, request_id, full_hashes)
 
     def _make_observer(self, model_port, agent_port):
         os.environ.update(
@@ -147,17 +97,6 @@ class VLLMAdapterEndToEndTest(unittest.TestCase):
             wait_no_query=False,
         ).init()
 
-    def _start_router(self):
-        config = NaviSchedAdapterConfig(
-            master_biz_name=self.MASTER_BIZ,
-            target_biz_name=self.AGENT_BIZ,
-            client_biz_name="vllm_adapter_router",
-            master_addresses=(f"127.0.0.1:{self._master.grpc_port}",),
-            timeout_ms=1000,
-            block_size=self.BLOCK_SIZE,
-        )
-        self._router = NaviSchedDashServingRouter(config)
-
     def _restart_master_and_router(self):
         self._router.close()
         self._router = None
@@ -165,30 +104,6 @@ class VLLMAdapterEndToEndTest(unittest.TestCase):
         self._master = None
         self._start_master()
         self._start_router()
-
-    def _wait_for_target(self, token_ids, expected_port):
-        deadline = time.monotonic() + 15.0
-        attempt = 0
-        while time.monotonic() < deadline:
-            attempt += 1
-            request_id = f"adapter-request-{attempt}-{expected_port}"
-            try:
-                route = self._router.route_sync(
-                    request_id=request_id,
-                    prompt={"prompt_token_ids": token_ids},
-                )
-            except DashServingRoutingError:
-                time.sleep(0.02)
-                continue
-            if route.target_port == expected_port:
-                return route, request_id
-            self._run_batch(
-                self._observers_by_model_port[route.target_port],
-                request_id,
-                self._full_hashes(token_ids),
-            )
-            time.sleep(0.02)
-        raise TimeoutError(f"NaviSched did not select Prefill port {expected_port}")
 
     @classmethod
     def _full_hashes(cls, token_ids):
@@ -259,7 +174,3 @@ class VLLMAdapterEndToEndTest(unittest.TestCase):
         finally:
             for sock in sockets:
                 sock.close()
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -873,8 +873,11 @@ py_test(
 
 py_test(
     name = "navi_sched_vllm_adapter_end_to_end_test",
-    srcs = ["test/vllm/VLLMAdapterEndToEndTest.py"],
-    main = "test/vllm/VLLMAdapterEndToEndTest.py",
+    srcs = [
+        "test/vllm/DashServingAdapterEndToEndTest.py",
+        "test/vllm/VLLMAdapterEndToEndTest.py",
+    ],
+    main = "test/vllm/DashServingAdapterEndToEndTest.py",
     python_version = "PY3",
     env = {
         "LD_LIBRARY_PATH": "/opt/conda310/lib",
