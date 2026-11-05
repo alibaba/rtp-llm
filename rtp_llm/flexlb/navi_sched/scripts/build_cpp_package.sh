@@ -166,6 +166,7 @@ done < <(sed ':next; /\\$/ { N; s/\\\n/ /; b next; }' \
     grep -Ev '(^|/)(test|testdata)/|Test(Kernel|Resource)|Simulated' |
     sort -u)
 copy_header "rtp_llm/flexlb/navi_sched/adapters/rtp_llm/RtpLLMAdapter.h"
+copy_header "rtp_llm/flexlb/navi_sched/common/NaviSchedCommon.h"
 
 FORBIDDEN_HEADER=$(find "${PACKAGE_DIR}/include" -type f |
     grep -E '/(test|testdata)/|Test(Kernel|Resource)|Simulated' | head -n 1 || true)
