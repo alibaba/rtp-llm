@@ -2666,7 +2666,18 @@ TEST(DSparkFusedDraftSampleTest, MatchesReferencePipeline) {
             auto fused_tok = torch::empty({batch}, ints);
             auto seed      = torch::tensor({int64_t{12345}}, longs);
             auto offset    = torch::tensor({int64_t{777}}, longs);
-            rtp_llm::dspark_fused_draft_sample(logits, fused_q, fused_tok, top_p_t, -1.0, seed, offset, stream);
+            rtp_llm::dspark_fused_draft_sample(logits,
+                                               fused_q,
+                                               fused_tok,
+                                               top_p_t,
+                                               -1.0,
+                                               /*maybe_logit_scale=*/std::nullopt,
+                                               /*logit_scale_val=*/1.0f,
+                                               seed,
+                                               offset,
+                                               /*maybe_success_out=*/std::nullopt,
+                                               /*per_row_seeds=*/false,
+                                               stream);
 
             // 1) identical support set (elementwise).
             EXPECT_TRUE(torch::equal(ref_q.gt(0), fused_q.gt(0))) << "fused top-p support differs from TopPRenormProb";
@@ -2730,7 +2741,18 @@ TEST(DSparkFusedDraftSampleTest, WideProbabilityGapKeepsTokensIdentical) {
         auto offset    = torch::tensor({int64_t{trial * 4}}, longs);
         auto fused_q   = torch::empty_like(logits);
         auto fused_tok = torch::empty({batch}, ints);
-        rtp_llm::dspark_fused_draft_sample(logits, fused_q, fused_tok, top_p_t, -1.0, seed, offset, stream);
+        rtp_llm::dspark_fused_draft_sample(logits,
+                                           fused_q,
+                                           fused_tok,
+                                           top_p_t,
+                                           -1.0,
+                                           /*maybe_logit_scale=*/std::nullopt,
+                                           /*logit_scale_val=*/1.0f,
+                                           seed,
+                                           offset,
+                                           /*maybe_success_out=*/std::nullopt,
+                                           /*per_row_seeds=*/false,
+                                           stream);
         auto ref_tok   = torch::empty({batch}, ints);
         auto ref_valid = torch::empty({batch}, bools);
         rtp_llm::sampling_from_probs_device_scalar_seed(
@@ -2772,7 +2794,18 @@ TEST(DSparkFusedDraftSampleTest, SingleSurvivingCandidateIsDeterministic) {
     for (int64_t trial = 0; trial < 4; ++trial) {
         auto seed   = torch::tensor({int64_t{9000 + trial}}, longs);
         auto offset = torch::tensor({int64_t{trial}}, longs);
-        rtp_llm::dspark_fused_draft_sample(logits, fused_q, fused_tok, top_p_t, -1.0, seed, offset, stream);
+        rtp_llm::dspark_fused_draft_sample(logits,
+                                           fused_q,
+                                           fused_tok,
+                                           top_p_t,
+                                           -1.0,
+                                           /*maybe_logit_scale=*/std::nullopt,
+                                           /*logit_scale_val=*/1.0f,
+                                           seed,
+                                           offset,
+                                           /*maybe_success_out=*/std::nullopt,
+                                           /*per_row_seeds=*/false,
+                                           stream);
         // Degenerate nucleus: one candidate carrying the full mass, and the sample
         // must be that candidate no matter the RNG state.
         const auto support = fused_q.gt(0).sum(-1);
@@ -2814,7 +2847,18 @@ TEST(DSparkFusedDraftSampleTest, RowLevelDiagnostics) {
 
     auto fused_q   = torch::empty_like(logits);
     auto fused_tok = torch::empty({batch}, ints);
-    rtp_llm::dspark_fused_draft_sample(logits, fused_q, fused_tok, top_p_t, -1.0, seed, offset, stream);
+    rtp_llm::dspark_fused_draft_sample(logits,
+                                       fused_q,
+                                       fused_tok,
+                                       top_p_t,
+                                       -1.0,
+                                       /*maybe_logit_scale=*/std::nullopt,
+                                       /*logit_scale_val=*/1.0f,
+                                       seed,
+                                       offset,
+                                       /*maybe_success_out=*/std::nullopt,
+                                       /*per_row_seeds=*/false,
+                                       stream);
 
     const auto ref_support   = ref_q.gt(0).sum(-1);
     const auto fused_support = fused_q.gt(0).sum(-1);
@@ -2837,6 +2881,110 @@ TEST(DSparkFusedDraftSampleTest, RowLevelDiagnostics) {
 #else
     GTEST_SKIP() << "CUDA only";
 #endif
+}
+
+// The compact TARGET path runs the same fused kernel as the draft, with three extra
+// pieces of state: a per-row logit scale, PER-ROW seed arrays (flashinfer's array
+// semantics: philox subsequence 0, which is what sampling_from_probs consumes
+// there), and a non-null success_out.
+//
+// These are split into one TEST per configuration on purpose: a hang inside the
+// target instantiation is reproduced by the test NAME that stops printing, which
+// bisects rows / success_out / scale without another debugging round. They are
+// DISABLED_ so the default suite stays green while the target gate is off; run them
+// explicitly to bisect:
+//   --gtest_also_run_disabled_tests --gtest_filter='*DSparkFusedDraftSampleTest.DISABLED_*'
+namespace {
+
+struct TargetProbeFixture {
+    int64_t            rows;
+    bool               with_success;
+    bool               with_scale;
+    std::vector<float> top_p_values;
+};
+
+void runTargetProbe(const TargetProbeFixture& probe) {
+#if USING_CUDA
+    const c10::cuda::CUDAGuard guard(0);
+    const auto                 floats = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const auto                 ints   = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    const auto                 longs  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt64);
+    const auto                 bools  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kBool);
+    const auto stream = static_cast<int64_t>(reinterpret_cast<uintptr_t>(at::cuda::getCurrentCUDAStream().stream()));
+    constexpr int64_t width = 1024;
+    const auto        rows  = probe.rows;
+    torch::manual_seed(20261114 + rows);
+
+    for (const float top_p : probe.top_p_values) {
+        SCOPED_TRACE("rows=" + std::to_string(rows) + " top_p=" + std::to_string(top_p));
+        auto candidates = torch::randn({rows, width}, floats) * 1.5f;
+        auto scale      = probe.with_scale ? torch::full({rows}, 1.0f / (0.3f + 1e-6f), floats) : torch::Tensor();
+        auto top_p_t    = torch::full({rows}, top_p, floats);
+        auto seed_arr   = torch::arange(int64_t{1000}, int64_t{1000} + rows, longs);
+        auto offset_arr = torch::arange(int64_t{0}, rows * 4, int64_t{4}, longs);
+
+        // reference: softmax(x*scale) -> top_p_renorm -> sampling_from_probs
+        auto ref_input = scale.defined() ? candidates * scale.unsqueeze(1) : candidates;
+        auto ref_probs = torch::softmax(ref_input, -1);
+        auto ref_q     = torch::empty_like(ref_probs);
+        top_p_renorm_probs(ref_probs, ref_q, top_p_t, 1.0, stream);
+        auto ref_tok   = torch::empty({rows}, ints);
+        auto ref_valid = torch::empty({rows}, bools);
+        rtp_llm::sampling_from_probs(ref_q,
+                                     ref_tok,
+                                     ref_valid,
+                                     std::nullopt,
+                                     /*deterministic=*/true,
+                                     seed_arr,
+                                     uint64_t{0},
+                                     offset_arr,
+                                     uint64_t{0},
+                                     stream);
+
+        auto fused_q     = torch::empty_like(candidates);
+        auto fused_tok   = torch::empty({rows}, ints);
+        auto fused_valid = torch::empty({rows}, bools);
+        rtp_llm::dspark_fused_draft_sample(candidates,
+                                           fused_q,
+                                           fused_tok,
+                                           top_p_t,
+                                           /*top_p_val=*/1.0,
+                                           scale.defined() ? std::optional<torch::Tensor>(scale) : std::nullopt,
+                                           /*logit_scale_val=*/1.0f,
+                                           seed_arr,
+                                           offset_arr,
+                                           probe.with_success ? std::optional<torch::Tensor>(fused_valid) :
+                                                                std::nullopt,
+                                           /*per_row_seeds=*/true,
+                                           stream);
+        // Same invariants as the full-shape test, on a shape small enough to bisect.
+        EXPECT_TRUE(torch::equal(ref_q.gt(0), fused_q.gt(0))) << "support differs";
+        EXPECT_LE((fused_q - ref_q).abs().max().item<float>(), 1e-6f);
+        EXPECT_EQ(ref_tok.ne(fused_tok).sum().item<int64_t>(), 0) << "same seeds, same q -> same token";
+    }
+#endif
+}
+
+}  // namespace
+
+TEST(DSparkFusedDraftSampleTest, DISABLED_ProbeTargetRows1NoSuccess) {
+    runTargetProbe({/*rows=*/1, /*with_success=*/false, /*with_scale=*/false, {0.95f}});
+}
+
+TEST(DSparkFusedDraftSampleTest, DISABLED_ProbeTargetRows1WithSuccess) {
+    runTargetProbe({/*rows=*/1, /*with_success=*/true, /*with_scale=*/false, {0.95f}});
+}
+
+TEST(DSparkFusedDraftSampleTest, DISABLED_ProbeTargetRows1WithScale) {
+    runTargetProbe({/*rows=*/1, /*with_success=*/true, /*with_scale=*/true, {0.5f, 0.95f}});
+}
+
+TEST(DSparkFusedDraftSampleTest, DISABLED_ProbeTargetRows64WithScaleAndSuccess) {
+    runTargetProbe({/*rows=*/64, /*with_success=*/true, /*with_scale=*/true, {0.5f, 0.95f}});
+}
+
+TEST(DSparkFusedDraftSampleTest, DISABLED_ProbeTargetRows256WithScaleAndSuccess) {
+    runTargetProbe({/*rows=*/256, /*with_success=*/true, /*with_scale=*/true, {0.5f, 0.95f}});
 }
 
 }  // namespace

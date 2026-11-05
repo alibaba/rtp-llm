@@ -579,23 +579,62 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
     // then pays for the full-row temperature pass so correctness never depends
     // on the proof.
     const bool    scale_temperature = temperature_folded && force_topk > 0;
+    // Host-side mode predicates, evaluated before the candidate softmax so the fused
+    // path below can skip it entirely (they only read the CPU top_k/top_p arrays).
+    const int32_t* top_k_host = params.top_k.data_ptr<int32_t>();
+    const float*   top_p_host = params.top_p.data_ptr<float>();
+    const bool     batch_top_k_unlimited =
+        std::all_of(top_k_host, top_k_host + batch_size, [](auto k) { return k <= 0; });
+    const bool batch_top_p_unrestricted = std::all_of(top_p_host, top_p_host + batch_size, [](auto raw_p) {
+        // processLogits normalises |p| < 1e-7 to 1.0 before sampling.
+        const float p = std::abs(raw_p) < 1e-7 ? 1.0f : raw_p;
+        return std::abs(p - 1.0f) < 1e-7f;
+    });
+    // Fused softmax + top-p + sampling for the compact target path. This is the same
+    // kernel the DSpARK draft uses (see dspark_fused_draft_sample), so the target and
+    // the draft share one implementation. Capability gate only -- every other shape
+    // (explicit top-k, unrestricted top_p, force masks, point mass, any candidate
+    // width other than 1024) keeps the three reference kernels.
+    // TODO(dspark): re-enable once the target instantiation stops hanging. The
+    // kernel is parameterised and unit-tested for this shape (see
+    // DSparkFusedDraftSampleTest and the ProbeTarget* cases in
+    // SpeculativeSamplerTest.cc), but SEED_PER_ROW=true + per-row logit scale + a
+    // non-null success_out + 256 rows hangs, and the failure is not yet diagnosed
+    // (the top-p ternary search provably converges in <=20 rounds, no barrier sits
+    // in a divergent branch, and every access is in range). The DSpARK draft path
+    // uses the same kernel and is enabled.
+    constexpr bool kEnableFusedTargetSampling = false;
+    const bool     fuse_target_sampling       = kEnableFusedTargetSampling && !fused_greedy_top1
+                                          && force_topk == 1024 && batch_top_k_unlimited && !batch_top_p_unrestricted
+        && params.skip_logits_probs_restore && params.output_all_probs_indices.has_value()
+        && params.output_all_probs.has_value() && !params.return_original_all_probs
+        && !params.cum_log_probs.has_value() && !params.all_probs_point_mass
+        && params.logits.is_contiguous() && params.logits.scalar_type() == torch::kFloat32
+        && params.logits.size(0) == batch_size;
     torch::Tensor topk_indices;
     torch::Tensor probs_t;
+    // Candidate values the fused kernel scales and softmaxes (kept only when fusing).
+    torch::Tensor fused_candidates;
     {
         RTP_LLM_PROFILE_SCOPE("sampler.greedy(probabilities)");
         if (!fused_greedy_top1) {
             if (force_topk > 0) {
                 auto selected = torch_ext::deepselect_fp32_topk(params.logits, force_topk);
                 topk_indices  = std::get<1>(selected);
+                fused_candidates = fuse_target_sampling ? std::get<0>(selected) : torch::Tensor();
                 // Monotonicity argument: for T > 0 the scale is positive, so
                 // x -> x * inv(T) preserves the ordering and the selected
                 // indices are exactly the ones the legacy tempered-logits pass
                 // selected; only the values need the temperature before their
                 // softmax. inv(T) is the kernel's own 1/(T + 1e-6), so the
                 // scaled candidates are the tempered values bit-for-bit.
-                probs_t = scale_temperature ?
-                              torch::softmax(std::get<0>(selected) * greedyTemperatureScale(params, batch_size), -1) :
-                              torch::softmax(std::get<0>(selected), -1);
+                // The fused kernel performs the softmax itself (with the folded
+                // temperature applied to the candidates first).
+                probs_t = fuse_target_sampling ?
+                              torch::Tensor() :
+                              (scale_temperature ?
+                                   torch::softmax(std::get<0>(selected) * greedyTemperatureScale(params, batch_size), -1) :
+                                   torch::softmax(std::get<0>(selected), -1));
             } else {
                 // temperature_folded with force_topk == 0 is unreachable while
                 // greedyForceTopk's gates stay as they are (a folded decision
@@ -704,10 +743,41 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
         const bool sample_from_renorm = force_topk > 0 && params.skip_logits_probs_restore
                                         && params.output_all_probs_indices.has_value() && need_renorm_probs
                                         && !all_top_p_unrestricted;
-        if (sample_from_renorm) {
+        const bool fused_sample_done = sample_from_renorm && fuse_target_sampling;
+        if (fused_sample_done) {
+            // One kernel: softmax(candidates * scale) -> top-p nucleus -> CDF sample.
+            // Writes q into the compact all_probs buffer and the token into samples_t,
+            // exactly like top_p_renorm_probs + sampling_from_probs did. The seed/offset
+            // tensors keep their per-row (array) semantics, which is what
+            // sampling_from_probs consumed on this path.
+            RTP_LLM_CHECK_WITH_INFO(fused_candidates.defined() && fused_candidates.is_contiguous()
+                                        && fused_candidates.size(1) == 1024 && sampling_probs_t.is_contiguous()
+                                        && sampling_probs_t.size(1) == 1024 && samples_t.is_contiguous()
+                                        && success_t.is_contiguous() && seed_t.defined() && offset_t.defined()
+                                        && seed_t.numel() == batch_size && offset_t.numel() == batch_size,
+                                    "fused target sampling requires [rows, 1024] candidates/q, "
+                                    "[rows] tokens/success and per-row seed/offset tensors");
+            auto logit_scale = scale_temperature ? greedyTemperatureScale(params, batch_size).reshape({batch_size}) :
+                                                   torch::Tensor();
+            rtp_llm::dspark_fused_draft_sample(fused_candidates,
+                                                 sampling_probs_t,
+                                                 samples_t.squeeze(0),
+                                                 top_p_t,
+                                                 /*top_p_val=*/1.0,
+                                                 logit_scale.defined() ? std::optional<torch::Tensor>(logit_scale) :
+                                                                         std::nullopt,
+                                                 /*logit_scale_val=*/1.0f,
+                                                 seed_t,
+                                                 offset_t,
+                                                 success_t,
+                                                 /*per_row_seeds=*/true,
+                                                 (int64_t)cur_stream);
+        } else if (sample_from_renorm) {
             top_p_renorm_probs(probs_t, sampling_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
         }
-        if (all_top_p_unrestricted || sample_from_renorm) {
+        if (fused_sample_done) {
+            // Sampled above; the nucleus search and the CDF draw already ran.
+        } else if (all_top_p_unrestricted || sample_from_renorm) {
             sampling_from_probs(sample_from_renorm ? sampling_probs_t : probs_t,
                                 samples_t.squeeze(0),
                                 success_t,

@@ -40,14 +40,17 @@ namespace sampling {
 //                     the first candidate whose inclusive CDF exceeds `u`, in
 //                     candidate order, with the same "last positive index" fallback.
 // ---------------------------------------------------------------------------
-template<uint32_t BLOCK_THREADS, uint32_t WIDTH>
+template<uint32_t BLOCK_THREADS, uint32_t WIDTH, bool SEED_PER_ROW>
 __global__ void DSparkFusedDraftSampleKernel(const float* __restrict__ scaled_logits,
                                              float* __restrict__ q_out,
                                              int32_t* __restrict__ token_out,
+                                             bool* __restrict__ success_out,
                                              const float* __restrict__ top_p_arr,
                                              float top_p_val,
-                                             const uint64_t* __restrict__ seed_scalar,
-                                             const uint64_t* __restrict__ offset_scalar) {
+                                             const float* __restrict__ logit_scale_arr,
+                                             float logit_scale_val,
+                                             const uint64_t* __restrict__ seed_in,
+                                             const uint64_t* __restrict__ offset_in) {
     constexpr uint32_t ITEMS = WIDTH / BLOCK_THREADS;
     static_assert(WIDTH % BLOCK_THREADS == 0, "width must be a multiple of the block size");
     using FloatReduce = cub::BlockReduce<float, BLOCK_THREADS>;
@@ -61,17 +64,21 @@ __global__ void DSparkFusedDraftSampleKernel(const float* __restrict__ scaled_lo
     __shared__ __align__(16) float               smem_probs[WIDTH];
     __shared__ SampleStorage                     sample_storage;
 
-    const uint32_t row     = blockIdx.x, lane = threadIdx.x;
-    const float    top_p   = top_p_arr == nullptr ? top_p_val : top_p_arr[row];
-    const float*   logits  = scaled_logits + static_cast<size_t>(row) * WIDTH;
-    float*         q_row   = q_out + static_cast<size_t>(row) * WIDTH;
+    const uint32_t row   = blockIdx.x, lane = threadIdx.x;
+    const float    top_p = top_p_arr == nullptr ? top_p_val : top_p_arr[row];
+    // Target rows fold the temperature into a per-row scale; the draft path passes
+    // no scale (its logits are already divided by the temperature).
+    const float  logit_scale = logit_scale_arr == nullptr ? logit_scale_val : logit_scale_arr[row];
+    const float* logits      = scaled_logits + static_cast<size_t>(row) * WIDTH;
+    float*       q_row       = q_out + static_cast<size_t>(row) * WIDTH;
 
     // ---- softmax -----------------------------------------------------------
     float values[ITEMS];
     float local_max = -cuda::std::numeric_limits<float>::infinity();
 #pragma unroll
     for (uint32_t i = 0; i < ITEMS; ++i) {
-        values[i] = logits[i * BLOCK_THREADS + lane];
+        // softmax(x * scale): scale first, then subtract the max of the scaled row.
+        values[i] = logits[i * BLOCK_THREADS + lane] * logit_scale;
         local_max = fmaxf(local_max, values[i]);
     }
     float row_max = FloatReduce(reduce_storage).Reduce(local_max, MaxReduceOp{});
@@ -98,6 +105,9 @@ __global__ void DSparkFusedDraftSampleKernel(const float* __restrict__ scaled_lo
         // Degenerate row: emit zeros and token 0 rather than NaN.
         if (lane == 0) {
             token_out[row] = 0;
+            if (success_out != nullptr) {
+                success_out[row] = false;
+            }
         }
         for (uint32_t i = 0; i < ITEMS; ++i) {
             q_row[i * BLOCK_THREADS + lane] = 0.0f;
@@ -151,6 +161,10 @@ __global__ void DSparkFusedDraftSampleKernel(const float* __restrict__ scaled_lo
         float low = 0.0f, high = max_prob;
         float min_gt_low = 0.0f, max_le_high = 0.0f;
         float sum_low = 1.0f;
+        // Defensive bound only: the reference search converges in <32 rounds for
+        // these widths (measured <=20 over 1536 rows), but a non-converging input
+        // must never spin a production stream forever.
+        int search_rounds = 0;
         do {
             // Same pivots and the same IEEE-754 helpers as the reference so the
             // search visits identical thresholds (fast-math cannot flush them).
@@ -219,7 +233,7 @@ __global__ void DSparkFusedDraftSampleKernel(const float* __restrict__ scaled_lo
                 high = fminf(pivot_0, max_le_high);
             }
             __syncthreads();
-        } while (min_gt_low != max_le_high);
+        } while (min_gt_low != max_le_high && ++search_rounds < 64);
 
         normalizer = math::ptx_rcp(fmaxf(sum_low, 1e-8f));
 #pragma unroll
@@ -237,7 +251,13 @@ __global__ void DSparkFusedDraftSampleKernel(const float* __restrict__ scaled_lo
     // scan, and the whole row fits in one call (WIDTH == BLOCK_THREADS * VEC_SIZE),
     // exactly like the production sampler's single iteration.
     curandStatePhilox4_32_10_t state;
-    curand_init(*seed_scalar, static_cast<uint64_t>(row), *offset_scalar, &state);
+    // SEED_PER_ROW = false: one generator range per launch and the Philox
+    // subsequence is the row (the draft / eager scalar-seed semantics).
+    // SEED_PER_ROW = true: each row owns its (seed, offset) and the subsequence is
+    // 0 -- exactly flashinfer's array path (SamplingPhiloxSubsequence with arrays).
+    const uint64_t philox_seed   = SEED_PER_ROW ? seed_in[row] : seed_in[0];
+    const uint64_t philox_offset = SEED_PER_ROW ? offset_in[row] : offset_in[0];
+    curand_init(philox_seed, SEED_PER_ROW ? 0ull : static_cast<uint64_t>(row), philox_offset, &state);
     sample_storage.sampled_id    = WIDTH;
     sample_storage.last_valid_id = -1;
     __syncthreads();
@@ -251,12 +271,17 @@ __global__ void DSparkFusedDraftSampleKernel(const float* __restrict__ scaled_lo
     __syncthreads();
     if (lane == 0) {
         int sampled_id = sample_storage.sampled_id;
+        bool valid     = true;
         if (sampled_id == static_cast<int>(WIDTH)) {
             // u landed past the row total through rounding: fall back to the last
             // positive candidate, exactly like the reference kernel.
-            sampled_id = sample_storage.last_valid_id == -1 ? 0 : sample_storage.last_valid_id;
+            valid      = sample_storage.last_valid_id != -1;
+            sampled_id = valid ? sample_storage.last_valid_id : 0;
         }
         token_out[row] = sampled_id;
+        if (success_out != nullptr) {
+            success_out[row] = valid;
+        }
     }
     __syncthreads();
 
@@ -507,8 +532,12 @@ void dspark_fused_draft_sample(torch::Tensor                scaled_logits,
                                torch::Tensor                token_out,
                                std::optional<torch::Tensor> maybe_top_p_arr,
                                double                       top_p_val,
-                               const torch::Tensor&         seed_scalar,
-                               const torch::Tensor&         offset_scalar,
+                               std::optional<torch::Tensor> maybe_logit_scale,
+                               double                       logit_scale_val,
+                               const torch::Tensor&         seed,
+                               const torch::Tensor&         offset,
+                               std::optional<torch::Tensor> maybe_success_out,
+                               bool                         per_row_seeds,
                                int64_t                      cuda_stream) {
     constexpr int      width   = 1024;
     constexpr uint32_t threads = 256;
@@ -523,33 +552,56 @@ void dspark_fused_draft_sample(torch::Tensor                scaled_logits,
     TORCH_CHECK(token_out.is_cuda() && token_out.scalar_type() == torch::kInt32 && token_out.dim() == 1
                     && token_out.numel() == rows && token_out.is_contiguous(),
                 "token_out must be a contiguous CUDA int32 tensor with one entry per row");
-    const auto scalar_ok = [](const torch::Tensor& tensor, const char* name) {
-        TORCH_CHECK(tensor.defined() && tensor.is_cuda() && tensor.scalar_type() == at::kLong && tensor.numel() == 1
-                        && tensor.is_contiguous(),
+    const auto device_scalar = [&](const torch::Tensor& tensor, int64_t expected, const char* name) {
+        TORCH_CHECK(tensor.defined() && tensor.is_cuda() && tensor.scalar_type() == at::kLong
+                        && tensor.is_contiguous() && tensor.numel() == expected,
                     name,
-                    " must be a one-element contiguous CUDA int64 tensor");
+                    " must be a contiguous CUDA int64 tensor with ",
+                    expected,
+                    " element(s)");
+        TORCH_CHECK(tensor.device() == scaled_logits.device(), name, " must live on the logits device");
     };
-    scalar_ok(seed_scalar, "seed_scalar");
-    scalar_ok(offset_scalar, "offset_scalar");
-    TORCH_CHECK(seed_scalar.device() == scaled_logits.device() && offset_scalar.device() == scaled_logits.device(),
-                "seed_scalar/offset_scalar must live on the logits device");
+    device_scalar(seed, per_row_seeds ? rows : 1, "seed");
+    device_scalar(offset, per_row_seeds ? rows : 1, "offset");
 
     at::cuda::CUDAGuard device_guard(scaled_logits.device());
     auto               stream = resolve_stream(cuda_stream);
-    const auto         top_p  = prepare_optional_param(maybe_top_p_arr, rows, scaled_logits.device(), at::kFloat, "top_p");
 
-    const float*   logits_ptr = scaled_logits.data_ptr<float>();
-    float*         q_ptr      = q_out.data_ptr<float>();
-    int32_t*       token_ptr  = token_out.data_ptr<int32_t>();
-    const float*   top_p_ptr  = top_p.defined() ? top_p.data_ptr<float>() : nullptr;
-    float          top_p_v    = static_cast<float>(top_p_val);
-    const uint64_t* seed_ptr  = reinterpret_cast<const uint64_t*>(seed_scalar.data_ptr<int64_t>());
-    const uint64_t* offset_ptr = reinterpret_cast<const uint64_t*>(offset_scalar.data_ptr<int64_t>());
+    auto top_p = prepare_optional_param(maybe_top_p_arr, rows, scaled_logits.device(), at::kFloat, "top_p");
+    auto scale =
+        prepare_optional_param(maybe_logit_scale, rows, scaled_logits.device(), at::kFloat, "logit_scale");
+    TORCH_CHECK(!maybe_success_out.has_value()
+                    || (maybe_success_out->is_cuda() && maybe_success_out->scalar_type() == at::kBool
+                        && maybe_success_out->dim() == 1 && maybe_success_out->numel() == rows
+                        && maybe_success_out->is_contiguous()),
+                "success_out must be a contiguous CUDA bool tensor with one entry per row");
 
-    auto kernel = flashinfer::sampling::DSparkFusedDraftSampleKernel<threads, width>;
-    void* args[] = {&logits_ptr, &q_ptr, &token_ptr, &top_p_ptr, &top_p_v, &seed_ptr, &offset_ptr};
+    const float*   logits_ptr  = scaled_logits.data_ptr<float>();
+    float*         q_ptr       = q_out.data_ptr<float>();
+    int32_t*       token_ptr   = token_out.data_ptr<int32_t>();
+    bool*          success_ptr = maybe_success_out.has_value() ? maybe_success_out->data_ptr<bool>() : nullptr;
+    const float*   top_p_ptr   = top_p.defined() ? top_p.data_ptr<float>() : nullptr;
+    float          top_p_v     = static_cast<float>(top_p_val);
+    const float*   scale_ptr   = scale.defined() ? scale.data_ptr<float>() : nullptr;
+    float          scale_v     = static_cast<float>(logit_scale_val);
+    const uint64_t* seed_ptr   = reinterpret_cast<const uint64_t*>(seed.data_ptr<int64_t>());
+    const uint64_t* offset_ptr = reinterpret_cast<const uint64_t*>(offset.data_ptr<int64_t>());
+
+    void* kernel = per_row_seeds ?
+                       reinterpret_cast<void*>(flashinfer::sampling::DSparkFusedDraftSampleKernel<threads, width, true>) :
+                       reinterpret_cast<void*>(flashinfer::sampling::DSparkFusedDraftSampleKernel<threads, width, false>);
+    void* args[] = {&logits_ptr,
+                    &q_ptr,
+                    &token_ptr,
+                    &success_ptr,
+                    &top_p_ptr,
+                    &top_p_v,
+                    &scale_ptr,
+                    &scale_v,
+                    &seed_ptr,
+                    &offset_ptr};
     const cudaError_t status =
-        cudaLaunchKernel((void*)kernel, dim3(static_cast<uint32_t>(rows)), dim3(threads), args, 0, stream);
+        cudaLaunchKernel(kernel, dim3(static_cast<uint32_t>(rows)), dim3(threads), args, 0, stream);
     TORCH_CHECK(status == cudaSuccess, "dspark fused draft sample launch failed: ", cudaGetErrorString(status));
 }
 

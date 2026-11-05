@@ -1045,8 +1045,12 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
                     fused_tokens,
                     top_p,
                     /*top_p_val=*/-1.0,
+                    /*maybe_logit_scale=*/std::nullopt,
+                    /*logit_scale_val=*/1.0f,
                     seed_scalar,
                     offset_scalar,
+                    /*maybe_success_out=*/std::nullopt,
+                    /*per_row_seeds=*/false,
                     static_cast<int64_t>(reinterpret_cast<uintptr_t>(at::cuda::getCurrentCUDAStream().stream())));
                 draft_q              = filtered_probabilities;
                 sampled_draft_tokens = fused_tokens;
