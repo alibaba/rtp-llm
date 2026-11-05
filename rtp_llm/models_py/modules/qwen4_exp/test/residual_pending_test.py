@@ -55,6 +55,38 @@ class ResidualPendingTest(unittest.TestCase):
                 inject_into_residual(base, output, gate), expected, rtol=0, atol=0
             )
 
+    @unittest.skipUnless(
+        torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0),
+        "SM90 is required",
+    )
+    def test_small_m_graph_replay_changes_inputs(self):
+        torch.manual_seed(7383)
+        first, second = self.layer(), self.layer()
+        for rows in (1, 4, 16, 32):
+            static_x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
+            side_stream = torch.cuda.Stream()
+            side_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side_stream):
+                for _ in range(3):
+                    base, output, gate = first.forward_deferred(static_x, None)
+                    base, output, gate = second.forward_deferred(
+                        base, None, pending_injection=(output, gate)
+                    )
+                    inject_into_residual(base, output, gate)
+            torch.cuda.current_stream().wait_stream(side_stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                base, output, gate = first.forward_deferred(static_x, None)
+                base, output, gate = second.forward_deferred(
+                    base, None, pending_injection=(output, gate)
+                )
+                actual = inject_into_residual(base, output, gate)
+            for _ in range(3):
+                static_x.copy_(torch.randn_like(static_x))
+                expected = second(first(static_x, None), None)
+                graph.replay()
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
 
 if __name__ == "__main__":
     unittest.main()

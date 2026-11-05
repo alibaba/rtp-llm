@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import weakref
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
@@ -27,6 +28,9 @@ from rtp_llm.models_py.model_desc.qwen3_next import (
     Qwen3NextMetadata,
     Qwen35Model,
     _is_cuda_graph_forward,
+)
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.hc_defer import (
+    should_defer_hc_residual,
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.pd_publication import (
     prepare_side_cache_store_writers,
@@ -1571,15 +1575,28 @@ class Qwen4ExpModel(Qwen35Model):
         if self.ple_layers:
             ple_input_ids = self._ple_input_ids(inputs)
         pending_injection = None
-        defer_residual = (
-            not is_cuda_graph
-            and hyper_states.is_cuda
-            and torch.version.hip is None
-            and hyper_states.ndim == 2
+        hc_defer_sm90 = os.environ.get("RTP_LLM_QWEN4_HC_DEFER_SM90", "0") == "1"
+        hc_defer_shape = (
+            hyper_states.ndim == 2
             and hyper_states.shape[1] == 10240
-            and 4093 <= hyper_states.shape[0] <= 12288
             and hyper_states.dtype == torch.bfloat16
-            and torch.cuda.get_device_capability(hyper_states.device) == (12, 0)
+            and (
+                (not is_cuda_graph and 4093 <= hyper_states.shape[0] <= 12288)
+                or (hc_defer_sm90 and 1 <= hyper_states.shape[0] <= 32)
+            )
+        )
+        defer_residual = should_defer_hc_residual(
+            enabled=hc_defer_sm90,
+            cuda=hyper_states.is_cuda,
+            hip=torch.version.hip is not None,
+            shape=hyper_states.shape,
+            bf16=hyper_states.dtype == torch.bfloat16,
+            sm=(
+                torch.cuda.get_device_capability(hyper_states.device)
+                if hc_defer_shape and hyper_states.is_cuda and torch.version.hip is None
+                else None
+            ),
+            graph=is_cuda_graph,
         )
         layer_forward_range = make_layer_forward_range()
         for i, decoder_layer in enumerate(self.layers):
