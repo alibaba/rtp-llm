@@ -4,6 +4,15 @@ import gc
 import json
 import os
 import socket
+
+# This suite validates the L20 PP-replica transfer protocol
+# (export_native_l20_delta / NativeL20ReplicaReceiver / 21-owned L20
+# tables), which the 20/20 cut BYPASSES by design (stage 1 produces L20
+# natively). Since the R18 default flip (absent DSV41_PP_CUT = 20), pin
+# the escape hatch so the fixture-derived cache topology
+# (v41_checkpoint_test_support uses dsv41_pp_partition) keeps matching the
+# protocol expectations. Spawned workers inherit this at fork/spawn time.
+os.environ.setdefault("DSV41_PP_CUT", "21")
 import sys
 import tempfile
 import traceback

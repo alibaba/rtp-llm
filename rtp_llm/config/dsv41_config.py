@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-
 # One additional cache page permits generation after a 32K prompt.
 V41_MAX_CONTEXT_TOKENS = 32768 + 256
 V41_MAX_CP_PREFILL_TOKENS = 32768
@@ -298,8 +297,14 @@ class V41Config:
 
 
 def dsv41_prefill_pp_cut() -> int:
-    """Experimental PREFILL boundary; PP1/decode never consults this flag."""
-    value = os.environ.get("DSV41_PP_CUT", "21")
+    """PREFILL PP2 boundary; PP1/decode never consults this flag.
+
+    Default 20 (20/20) since the R18 adoption: byte-exact at both cut 20
+    and cut 21 on the parity build, with interleaved A/B medians
+    −329.0 ms and −371.4 ms (3/3 sign). ``DSV41_PP_CUT=21`` restores
+    the legacy 21/19 boundary; any other value is rejected.
+    """
+    value = os.environ.get("DSV41_PP_CUT", "20")
     if value not in ("20", "21"):
         raise ValueError("DSV41_PP_CUT must be 20 or 21")
     return int(value)
@@ -313,7 +318,7 @@ def dsv41_pp_partition(num_layers: int, pp_size: int, model_config=None) -> list
         return [num_layers]
     if pp_size != 2 or num_layers != 40:
         raise ValueError(
-            "V4.1 prefill PP requires 40 layers and PP2 with counts [21, 19]"
+            "V4.1 prefill PP requires 40 layers and PP2 with counts [cut, 40-cut]"
         )
     cut = dsv41_prefill_pp_cut()
     if model_config is not None:
