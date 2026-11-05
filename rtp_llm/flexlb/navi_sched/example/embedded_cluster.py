@@ -137,7 +137,7 @@ def main() -> None:
             args.agent_biz_name,
             args.timeout_ms,
         )
-        if decision.reason != "random_selected":
+        if decision.reason != "cold_start_inflight_selected":
             raise RuntimeError(
                 f"unexpected scheduling result: {decision.reason}"
             )
