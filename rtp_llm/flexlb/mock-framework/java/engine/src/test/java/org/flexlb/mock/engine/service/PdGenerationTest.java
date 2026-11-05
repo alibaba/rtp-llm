@@ -624,7 +624,9 @@ class PdGenerationTest {
             assertEquals(3, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
             assertEquals(3, metric(d, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
             assertEquals(7, metric(d, "rtp_llm_forward_tokens_total", "kind=\"output\""));
-            assertTrue(metric(d, "mock_decode_estimate_tpot_us_sum", "") > 0);
+            assertTrue(metric(d, "rtp_llm_sp_estimate_tpot_us_sum", "") > 0);
+            assertTrue(metric(p, "rtp_llm_gather_model_input_us_sum", "") > 0);
+            assertTrue(metric(d, "rtp_llm_gather_model_input_us_sum", "") > 0);
         }
     }
 

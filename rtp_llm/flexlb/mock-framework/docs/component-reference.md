@@ -299,13 +299,16 @@ RTP 后端的 RtpMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独
 | rtp_llm_model_forward_us | Gauge | Prefill 完成 Forward 的采集窗口均值，微秒。当前生产 MTP 兼容口径下 Decode 缺席。 |
 | rtp_llm_step_latency_us | Gauge | P/D 完成的非空执行步耗时，微秒，从调度返回到处理完本轮输出。 |
 | rtp_llm_{context,generate,total}_tps | Gauge | 有效执行时间内的 token/s。P 的 context 计未命中计算量，with_cache 计输入；D 计实际提交的输出量。 |
-| mock_decode_estimate_tpot_us | Gauge | Decode 步耗时除以该步每条产出请求提交的平均 token 数，单位微秒。 |
+| rtp_llm_sp_estimate_tpot_us | Gauge | Decode 本轮执行耗时 ÷（模拟验收 token 总数 / 本轮参与 stream 数），微秒；不使用停止截断后的交付量。 |
+| rtp_llm_gather_model_input_us | Gauge | P/D 构造批输入的耗时，微秒；不含选批、KV 准备和模拟 Forward。 |
 | mock_client_tpot_seconds | Histogram | 成功请求收到首尾 token 的时间差，除以首 token 后的 token 数。单 token 请求不采样。 |
 | mock_model_forward_actual_us | Gauge | P/D 最近一次完成 Forward 的模拟实际耗时，微秒，用于与计划值对照。 |
 | mock_model_forward_planned_us | Gauge | 同一个完成 Forward 的计划耗时，微秒，包含公式和可选噪声。 |
 | rtp_llm_model_forward_seconds | Histogram | 完成 Forward 实际耗时秒，含 bucket/sum/count，排除排队，不是 TTFT。 |
 | rtp_llm_scheduler_requests | Gauge，state=waiting/running/loading/ready | 调度器报告的四类互斥请求数。 |
 | rtp_llm_kv_tokens | Gauge，state=total/available/free/held | token 容量，available 含可驱逐缓存，不等于 free。 |
+
+TPOT 的计时从选批和 KV 准备完成后、开始构造批输入时开始，到模拟计算完成回调进入输出处理前结束。它独立于原有 `rtp_llm_step_latency_us` 的“调度返回到处理完输出”边界。分母使用现有简化 Decode 模型给出的本轮验收 token 数，对应 Real 验证阶段 `accept_len` 的采样位置，不新增 draft、verify 或 acceptance 内部指标。EOS、max_new_tokens、max_seq_len 限制只截断交付量，不回写本轮验收统计。选批前已取消的 stream 不参与；入批后取消但计算已完成的 stream 仍参与该批统计，其 token 不交付；整轮计算中止而无完成结果时不产生 TPOT 样本。Prefill 不产生该 Decode 指标。
 
 RTP 原生观测直接导出：`rtp_llm_wait_stream_size`、`rtp_llm_running_stream_size`、`rtp_llm_kv_cache_left_seq`（Tokens）、`rtp_llm_kv_cache_{total,free,available,used}_blocks`（Blocks）和 `rtp_llm_kv_cache_used_ratio`（0–100，不可用比例）。Host 暂只上报 total/free/used Blocks，不用 free 冒充 available。loading/ready 仍是调度器阶段辅助观测，不冒充 real 的加载缓存队列。
 
