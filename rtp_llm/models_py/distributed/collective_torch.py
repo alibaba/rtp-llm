@@ -36,6 +36,8 @@ _initialized: bool = False  # Track if we've initialized (to prevent double init
 _cpu_tp_broadcaster_base_path: Optional[str] = None
 _rocm_rccl = None
 _symm_mem = None
+_p2p_ar = None
+_P2P_AR_ENABLED = os.environ.get("RTP_LLM_P2P_AR", "0") == "1"
 
 
 def _get_rocm_rccl():
@@ -60,6 +62,22 @@ def _get_symm_mem():
 
         _symm_mem = symm_mem
     return _symm_mem
+
+
+def _get_p2p_ar():
+    """Load the opt-in P2P all-reduce path only when RTP_LLM_P2P_AR=1.
+
+    Importing p2p_ar lazily keeps the default (flag-off) TP path working even
+    if p2p_ar.py is missing from a packaged wheel.
+    """
+    global _p2p_ar
+    if not _P2P_AR_ENABLED:
+        return None
+    if _p2p_ar is None:
+        from rtp_llm.models_py.distributed import p2p_ar
+
+        _p2p_ar = p2p_ar
+    return _p2p_ar.get_p2p_ar()
 
 
 def _make_cpu_tp_broadcaster_base_path(
@@ -715,6 +733,11 @@ def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> 
         ):
             return symm_mem_comm.all_reduce(tensor, out=tensor if inplace else None)
 
+    if group == Group.TP:
+        p2p = _get_p2p_ar()
+        if p2p is not None and p2p.can_handle(tensor):
+            return p2p.all_reduce(tensor)
+
     process_group = _get_group(group)
     torch.distributed.all_reduce(
         tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
@@ -751,6 +774,13 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
                 return gathered.view(
                     [world_size * tensor.shape[0]] + list(tensor.shape)[1:]
                 )
+
+    if group == Group.TP:
+        p2p = _get_p2p_ar()
+        if p2p is not None:
+            gathered = p2p.all_gather(tensor)
+            if gathered is not None:
+                return gathered
 
     process_group = _get_group(group)
     world_size = torch.distributed.get_world_size(process_group)
