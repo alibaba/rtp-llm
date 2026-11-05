@@ -33,10 +33,10 @@ public final class RtpNode implements AutoCloseable {
 
     private record MetricSource(Object lock, java.util.function.Supplier<List<MetricFamilySamples>> metrics) {}
 
-    private RtpNode(RtpConfig config, EngineScheduler.Factory schedulers) {
+    private RtpNode(RtpConfig config, EngineScheduler.Factory schedulers, KvCache.RemotePrefixLoader remote) {
         this.config = Objects.requireNonNull(config);
         Objects.requireNonNull(schedulers);
-        cache = new KvCache(config.blockSize(), config.deviceBlocks(), config.reserveBlocks(), config.deviceCache());
+        cache = new KvCache(config.blockSize(), config.deviceBlocks(), config.reserveBlocks(), config.deviceCache(), remote);
         var lock = new Object();
         var finished = new TaskHistory();
         try {
@@ -69,7 +69,12 @@ public final class RtpNode implements AutoCloseable {
     }
 
     public static RtpNode start(RtpConfig config, int rpcPort, int controlPort, EngineScheduler.Factory schedulers) throws IOException {
-        var node = new RtpNode(config, schedulers);
+        return start(config, rpcPort, controlPort, schedulers, null);
+    }
+
+    public static RtpNode start(RtpConfig config, int rpcPort, int controlPort, EngineScheduler.Factory schedulers,
+                                KvCache.RemotePrefixLoader remote) throws IOException {
+        var node = new RtpNode(config, schedulers, remote);
         try {
             var builder = NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service);
             node.rpc = builder.build().start();

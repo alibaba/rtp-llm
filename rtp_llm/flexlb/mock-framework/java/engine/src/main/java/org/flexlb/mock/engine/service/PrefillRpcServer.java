@@ -89,7 +89,7 @@ final class PrefillRpcServer implements AutoCloseable {
             complete(null, failure);
         }
         private Result success(EngineScheduler.Request request, boolean finished) {
-            return new Result(RpcMessages.token(input, RpcMessages.sampledToken(input), 1, 1, request.reused(), System.nanoTime() - request.input().started(), finished, false), Status.OK, 0);
+            return new Result(RpcMessages.token(input, RpcMessages.sampledToken(input), 1, 1, request.reused(), request.remoteReused(), System.nanoTime() - request.input().started(), finished, false), Status.OK, 0);
         }
         @Override public void output(EngineScheduler.Request request, EngineScheduler.Output output) {
             if (retained) result.complete(success(request, output.finished()));
@@ -473,8 +473,11 @@ final class PrefillRpcServer implements AutoCloseable {
                 stream.onNext(frame(RemoteStage.LOAD));
                 long ttft = System.nanoTime() - started;
                 boolean prefillFinished = first.output().getFlattenOutput().getFinished(0);
-                int prefillReuse = first.output().getFlattenOutput().getAuxInfo(0).getTotalReuseLen();
-                send(RpcMessages.token(input, RpcMessages.sampledToken(input), 1, 1, prefillReuse, ttft, prefillFinished, true));
+                var prefillAux = first.output().getFlattenOutput().getAuxInfo(0);
+                int prefillReuse = prefillAux.getTotalReuseLen();
+                int prefillRemoteReuse = prefillAux.getRemoteReuseLen();
+                send(RpcMessages.token(input, RpcMessages.sampledToken(input), 1, 1,
+                    prefillReuse, prefillRemoteReuse, ttft, prefillFinished, true));
                 var loaded = inbox.next();
                 if (loaded == null || !loaded.hasErrorInfo() || loaded.getErrorInfo().getErrorCodeValue() != 0)
                     throw Status.DATA_LOSS.withDescription("Invalid LOAD acknowledgement").asRuntimeException();
@@ -493,8 +496,11 @@ final class PrefillRpcServer implements AutoCloseable {
                     var merged = output.toBuilder();
                     for (var aux : merged.getFlattenOutputBuilder().getAuxInfoBuilderList()) {
                         aux.setDecodeTotalReuseLen(aux.getTotalReuseLen()).setDecodeLocalReuseLen(aux.getLocalReuseLen())
-                            .setPrefillTotalReuseLen(prefillReuse).setPrefillLocalReuseLen(prefillReuse)
-                            .setTotalReuseLen(prefillReuse).setLocalReuseLen(prefillReuse).setPrefixLen(prefillReuse)
+                            .setDecodeRemoteReuseLen(aux.getRemoteReuseLen())
+                            .setPrefillTotalReuseLen(prefillReuse).setPrefillLocalReuseLen(prefillAux.getLocalReuseLen())
+                            .setPrefillRemoteReuseLen(prefillRemoteReuse)
+                            .setTotalReuseLen(prefillReuse).setLocalReuseLen(prefillAux.getLocalReuseLen())
+                            .setRemoteReuseLen(prefillRemoteReuse).setPrefixLen(prefillReuse)
                             .setFirstTokenCostTimeUs((int) Math.min(Integer.MAX_VALUE, ttft / 1000)).setPdSep(true);
                     }
                     finished = output.getFlattenOutput().getFinished(0); send(merged.build());

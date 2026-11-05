@@ -68,14 +68,14 @@ final class RpcMessages {
         // Media markers are input semantics, never generated vocabulary tokens.
         return last >= 0 ? last : 42;
     }
-    static GenerateOutputsPB token(GenerateInputPB input, int tokenId, int generated, int stepTokens, int reused, long elapsedNanos, boolean finished, boolean pd) {
+    static GenerateOutputsPB token(GenerateInputPB input, int tokenId, int generated, int stepTokens, int reused, int remoteReused, long elapsedNanos, boolean finished, boolean pd) {
         // Native Engine RPC always emits newly produced tokens. Frontend owns
         // cumulative responses and applies return_incremental at its boundary.
         int width = stepTokens;
         var tokens = ByteBuffer.allocate(Math.multiplyExact(4, width)).order(ByteOrder.LITTLE_ENDIAN);
         for (int i = 0; i < width; i++) tokens.putInt(tokenId);
         var aux = AuxInfoPB.newBuilder().setInputLen(input.getTokenIdsCount()).setOutputLen(generated).setStepOutputLen(stepTokens)
-            .setIterCount(generated).setPrefixLen(reused).setTotalReuseLen(reused).setLocalReuseLen(reused).setPdSep(pd)
+            .setIterCount(generated).setPrefixLen(reused).setTotalReuseLen(reused).setLocalReuseLen(reused - remoteReused).setRemoteReuseLen(remoteReused).setPdSep(pd)
             .setCostTimeUs((int) Math.min(Integer.MAX_VALUE, elapsedNanos / 1000))
             .setFirstTokenCostTimeUs((int) Math.min(Integer.MAX_VALUE, elapsedNanos / 1000));
         var output = FlattenOutputPB.newBuilder().addFinished(finished).addAuxInfo(aux).setOutputIds(TensorPB.newBuilder()

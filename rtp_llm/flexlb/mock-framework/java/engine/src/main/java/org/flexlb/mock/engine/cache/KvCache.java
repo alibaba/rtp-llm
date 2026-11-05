@@ -1,11 +1,68 @@
 package org.flexlb.mock.engine.cache;
 
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CancellationException;
 import static org.flexlb.mock.engine.cache.BlockPool.Kind.*;
 
 /** One local RTP Full-KV pool with synchronous LRU reclamation. */
 public final class KvCache implements AutoCloseable {
     public enum Failure { PERMANENT, RETRYABLE }
+    /** A Mock restore source reports the number of consecutive suffix blocks read successfully.
+     * The future must be returned without blocking and never owns local block references. */
+    @FunctionalInterface
+    public interface RemotePrefixLoader {
+        CompletableFuture<Integer> load(List<Long> suffixKeys);
+    }
+
+    public sealed interface Preparation permits Ready, Loading, Failed {}
+    public record Ready(Lease lease, long matchNanos, int remoteReusedTokens) implements Preparation {}
+    public record Failed(Failure failure, long generation) implements Preparation {}
+
+    public final class Loading implements Preparation, AutoCloseable {
+        private final Ready local;
+        private final CompletableFuture<Integer> restore;
+        private final int suffixSize;
+        private boolean settled;
+
+        private Loading(Ready local, CompletableFuture<Integer> restore, int suffixSize) {
+            this.local = local;
+            this.restore = restore;
+            this.suffixSize = suffixSize;
+        }
+
+        /** Returns this handle while pending, or transfers ownership of the ready lease once. */
+        public Preparation poll() {
+            synchronized (KvCache.this) {
+                if (settled) throw new IllegalStateException("KV preparation already settled");
+                if (!restore.isDone()) return this;
+                settled = true;
+                pending.remove(this);
+                try {
+                    Integer restored = restore.join();
+                    if (restored != null && restored > 0 && restored <= suffixSize) {
+                        local.lease().reused += restored;
+                        return new Ready(local.lease(), local.matchNanos(), restored * blockSize);
+                    }
+                } catch (CompletionException | CancellationException failure) {
+                    // The original allocation still holds a valid local prefix and writable suffix.
+                }
+                return local;
+            }
+        }
+
+        @Override public void close() {
+            synchronized (KvCache.this) {
+                if (settled) return;
+                settled = true;
+                pending.remove(this);
+                local.lease().close();
+                restore.cancel(false);
+            }
+        }
+    }
+
     public record Admission(Lease lease, Failure failure, long generation, long matchNanos) {}
     public record Snapshot(int totalBlocks, int availableBlocks, int freeBlocks, int heldBlocks,
                            int referencedBlocks, long version, Set<Long> keys) {}
@@ -13,6 +70,8 @@ public final class KvCache implements AutoCloseable {
     private final BlockTree tree = new BlockTree();
     private final int blockSize, reserve;
     private final boolean deviceCache;
+    private final RemotePrefixLoader remote;
+    private final Set<Loading> pending = new HashSet<>();
     private final Set<Lease> active = Collections.newSetFromMap(new IdentityHashMap<>());
     private boolean closed;
     private java.util.function.Consumer<CacheMetadata.Change> metadataObserver;
@@ -33,16 +92,42 @@ public final class KvCache implements AutoCloseable {
     }
 
     public KvCache(int blockSize, int blocks, int reserve, boolean deviceCache) {
+        this(blockSize, blocks, reserve, deviceCache, null);
+    }
+
+    public KvCache(int blockSize, int blocks, int reserve, boolean deviceCache, RemotePrefixLoader remote) {
         if (blockSize < 1 || blocks <= 0 || reserve < 0 || reserve > blocks)
             throw new IllegalArgumentException("Invalid block capacity/reserve");
         device = new BlockPool(blocks);
         this.blockSize = blockSize;
         this.reserve = reserve;
         this.deviceCache = deviceCache;
+        this.remote = remote;
     }
 
     /** Maximum size of one request, independent of current leases and evictable cache entries. */
     public synchronized long maxRequestTokens() { return (long) (device.snapshot().total() - reserve) * blockSize; }
+
+    public synchronized Preparation prepare(long requiredTokens, List<Long> keys, boolean allowRemote) {
+        var admission = acquire(requiredTokens, keys);
+        if (admission.failure() != null) return new Failed(admission.failure(), admission.generation());
+        var ready = new Ready(admission.lease(), admission.matchNanos(), 0);
+        int localBlocks = ready.lease().reused;
+        if (!allowRemote || remote == null || localBlocks >= keys.size()) return ready;
+
+        var suffix = List.copyOf(keys.subList(localBlocks, keys.size()));
+        CompletableFuture<Integer> restore;
+        try {
+            restore = Objects.requireNonNull(remote.load(suffix));
+        } catch (RuntimeException failure) {
+            return ready;
+        }
+        var loading = new Loading(ready, restore, suffix.size());
+        pending.add(loading);
+        Runnable wake = changed;
+        restore.whenComplete((blocks, failure) -> wake.run());
+        return loading.poll();
+    }
 
     public synchronized Admission acquire(long requiredTokens, List<Long> keys) {
         if (closed) throw new IllegalStateException("Cache is closed");
@@ -92,7 +177,7 @@ public final class KvCache implements AutoCloseable {
 
     public final class Lease implements AutoCloseable {
         private final List<Slot> slots;
-        private final int reused;
+        private int reused;
         private boolean terminal;
         private Lease(List<Slot> slots, int reused) {
             this.slots = slots; this.reused = reused;
@@ -154,6 +239,7 @@ public final class KvCache implements AutoCloseable {
         synchronized (this) {
             if (closed) return;
             closed = true;
+            for (var load : List.copyOf(pending)) load.close();
             for (var lease : List.copyOf(active)) lease.close();
             tree.clear();
         }

@@ -33,7 +33,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
     public record RtpTransferResult(boolean prefillFinished, RequestFailure failure) implements TransferResult {}
 
 
-    enum Phase { QUEUED, CAPACITY, LOADING, TRANSFERRING, TRANSFERRED, RUNNING, OUTPUT, FORWARD, READY }
+    enum Phase { QUEUED, CAPACITY, KV_PREPARING, WAITING_LOAD, TRANSFERRING, TRANSFERRED, RUNNING, OUTPUT, FORWARD, READY }
     private final TaskHistory history;
     private final Object lock;
     protected final RtpConfig config;
@@ -54,8 +54,11 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         final RequestState state;
         final ArrayDeque<Notice> notices = new ArrayDeque<>();
         KvCache.Lease lease;
+        KvCache.Loading preparation;
+        long preparationStarted;
+        boolean cacheMatchRequested;
 
-        int reused, outputToken;
+        int reused, remoteReused, outputToken;
         boolean prefillFinished;
         final long begun = System.nanoTime();
         long enqueuedAt = begun, waitNanos, firstToken;
@@ -76,6 +79,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         @Override public Input input() { return input; }
         @Override public RequestState.Snapshot snapshot() { synchronized (lock) { return state.snapshot(); } }
         @Override public int reused() { synchronized (lock) { return reused; } }
+        @Override public int remoteReused() { synchronized (lock) { return remoteReused; } }
 
     }
     private record Member(Entry request, RequestState.Use use, ComputeModel.Plan step) {}
@@ -144,14 +148,14 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
     @Override public void maintain() {
         for (var entry : List.copyOf(active.values())) {
             if (!live(entry)) continue;
-            if (!prefill() && entry.lease == null) {
-                var failure = acquire(entry);
-                if (failure == null) {
-                    entry.phase = LOADING;
-                    enqueue(entry, () -> { if (liveForDelivery(entry)) entry.listener.allocated(entry); }, false);
-                } else if (failure == KvCache.Failure.PERMANENT) {
-                    finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Decode allocation exceeds capacity"));
-                }
+            if (entry.preparation != null) {
+                var result = entry.preparation.poll();
+                if (result instanceof KvCache.Loading) continue;
+                entry.preparation = null;
+                entry.phase = prefill() ? QUEUED : Phase.CAPACITY;
+                completePreparation(entry, result);
+            } else if (!prefill() && entry.lease == null) {
+                prepare(entry);
             }
         }
     }
@@ -209,11 +213,11 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         long uncached = 0;
         var admitted = new ArrayList<Entry>();
         for (var entry : List.copyOf(queue)) {
-            if (!live(entry)) continue;
+            if (!live(entry) || entry.preparation != null) continue;
             if (admitted.size() >= config.maxGenerateBatchSize() || config.forceSinglePrefill() && !admitted.isEmpty()) break;
             if (uncachedLimit > 0 && uncached >= uncachedLimit) continue;
             if (entry.lease == null && config.maxInitedKvStreams() > 0
-                    && active.values().stream().filter(e -> e.lease != null).count() >= config.maxInitedKvStreams()) continue;
+                    && active.values().stream().filter(e -> e.lease != null || e.preparation != null).count() >= config.maxInitedKvStreams()) continue;
             if (workTokens(entry) <= 0 || !fitsPrefill(admitted, entry)) continue;
             if (!reserve(entry)) continue;
             admitted.add(entry);
@@ -263,11 +267,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
     private boolean reserve(Entry entry) {
         if (entry.canRun == 0) entry.canRun = System.nanoTime();
         if (prefill()) {
-            var failure = acquire(entry);
-            if (failure == KvCache.Failure.PERMANENT)
-                finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Prefill allocation exceeds capacity"));
-            if (failure != null) return false;
-            return true;
+            return prepare(entry);
         }
         long tokens = (long) entry.input.tokens() + entry.state.snapshot().generated() + entry.nextStep.additionalKvTokens();
         var failure = entry.lease.ensureCapacity(tokens);
@@ -349,7 +349,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
 
     @Override public RequestState.Use beginTransfer(Request request) {
         var entry = entry(request);
-        if (!live(entry) || entry.transferBegun || (prefill() ? entry.phase != READY : entry.phase != LOADING))
+        if (!live(entry) || entry.transferBegun || (prefill() ? entry.phase != READY : entry.phase != WAITING_LOAD))
             throw new RequestFailure(INVALID, "Request is not ready for a new KV transfer");
         entry.transferBegun = true;
         entry.phase = TRANSFERRING;
@@ -377,6 +377,10 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
             entry.waitNanos = Math.max(0, now - entry.timingStarted);
         removeWaiting(entry);
         running.remove(entry);
+        if (entry.preparation != null) {
+            entry.preparation.close();
+            entry.preparation = null;
+        }
         entry.state.finish(failure);
     }
     private void terminal(Entry entry, RequestFailure failure) {
@@ -451,22 +455,38 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
             && (prefill() || !config.disableDecodeFirstReuse());
     }
 
-    private KvCache.Failure acquire(Entry entry) {
-        if (entry.lease != null) return null;
-        long generation = cache.allocationGeneration();
-        if (entry.attemptedGeneration == generation) return KvCache.Failure.RETRYABLE;
+    private boolean prepare(Entry entry) {
+        if (entry.lease != null) return true;
+        if (entry.attemptedGeneration == cache.allocationGeneration()) return false;
         boolean reuse = canReuseLocalKv(entry);
         var keys = entry.input.keys();
         if (prefill() && entry.attemptedGeneration == Long.MIN_VALUE)
             metrics.recordPrefillCacheKeys(keys, entry.input.tokens(), config.blockSize());
         int matched = Math.min(keys.size(), (entry.input.tokens() - 1) / config.blockSize());
-        long started = System.nanoTime();
-        var admission = cache.acquire(entry.input.tokens(), reuse ? keys.subList(0, matched) : List.of());
-        entry.attemptedGeneration = admission.generation();
-        if (admission.lease() == null) return admission.failure();
+        entry.preparationStarted = System.nanoTime();
+        entry.cacheMatchRequested = reuse && matched > 0;
+        return completePreparation(entry,
+            cache.prepare(entry.input.tokens(), reuse ? keys.subList(0, matched) : List.of(), prefill()));
+    }
+
+    private boolean completePreparation(Entry entry, KvCache.Preparation result) {
+        if (result instanceof KvCache.Loading loading) {
+            entry.preparation = loading;
+            entry.phase = KV_PREPARING;
+            entry.canRun = 0;
+            return false;
+        }
+        if (result instanceof KvCache.Failed failed) {
+            entry.attemptedGeneration = failed.generation();
+            if (failed.failure() == KvCache.Failure.PERMANENT)
+                finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "KV allocation exceeds capacity"));
+            return false;
+        }
+        var ready = (KvCache.Ready) result;
         entry.waitNanos = Math.max(0, System.nanoTime() - entry.timingStarted);
-        entry.lease = admission.lease();
+        entry.lease = ready.lease();
         entry.reused = Math.toIntExact(entry.lease.reusedTokens());
+        entry.remoteReused = ready.remoteReusedTokens();
         entry.state.attach(entry.lease, () -> {
             if (!config.reuseCache() || !config.deviceCache() || !entry.input.reuse()) return;
             // The final sampled token has not entered a Forward and owns no computed KV.
@@ -475,11 +495,15 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
                 (long) entry.input.tokens() + computedOutput);
         });
         metrics.cacheLookup(entry.input.tokens(), entry.reused);
-        if (reuse && matched > 0) metrics.cacheMatched(admission.matchNanos());
+        if (entry.cacheMatchRequested) metrics.cacheMatched(ready.matchNanos());
         if (config.reuseCache() && entry.input.reuse())
             metrics.prepared((long) (entry.input.tokens() / config.blockSize()) * config.blockSize(),
-                entry.reused, System.nanoTime() - started);
-        return null;
+                entry.reused - entry.remoteReused, System.nanoTime() - entry.preparationStarted);
+        if (!prefill()) {
+            entry.phase = WAITING_LOAD;
+            enqueue(entry, () -> { if (liveForDelivery(entry)) entry.listener.allocated(entry); }, false);
+        }
+        return true;
     }
     @Override public List<Request> requests() { return new ArrayList<>(active.values()); }
     @Override public QueueSnapshot queues() {
@@ -488,6 +512,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         for (var entry : active.values()) {
             if (entry.state.terminating()) continue;
             if (running.contains(entry)) executing++;
+            else if (entry.phase == KV_PREPARING) loading++;
             else if (waitingMembers.contains(entry) || entry.phase == Phase.CAPACITY) queued++;
             else if (entry.phase == READY || entry.phase == TRANSFERRING || entry.phase == TRANSFERRED) ready++;
             else loading++;
