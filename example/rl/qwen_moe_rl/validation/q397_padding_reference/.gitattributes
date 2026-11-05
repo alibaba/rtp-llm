@@ -1,0 +1,2 @@
+# Preserve the byte-exact upstream reference, including its whitespace.
+bert_padding.py -whitespace

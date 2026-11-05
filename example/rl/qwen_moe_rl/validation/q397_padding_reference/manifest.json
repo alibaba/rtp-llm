@@ -1,0 +1,14 @@
+[
+  {
+    "path": "bert_padding.py",
+    "url": "https://raw.githubusercontent.com/Dao-AILab/flash-attention/v2.8.3/flash_attn/bert_padding.py",
+    "bytes": 9930,
+    "sha256": "805d449ac749f87a50f3a3114385710f0f926ff45521275000b74d9e80721e5c"
+  },
+  {
+    "path": "LICENSE",
+    "url": "https://raw.githubusercontent.com/Dao-AILab/flash-attention/v2.8.3/LICENSE",
+    "bytes": 1558,
+    "sha256": "8c9ccb96c065e706135b6cbad279b721da6156e51f3a5f27c6b3329af9416d73"
+  }
+]
