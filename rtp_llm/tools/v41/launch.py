@@ -1,4 +1,4 @@
-"""Fixed P/D presets; validate prerequisites before exec of the existing server."""
+"""CP8 or DP8 Prefill / DP8 Decode presets for the existing native server."""
 
 from __future__ import annotations
 
@@ -22,9 +22,13 @@ def preset_env(
     prefill_address=None,
     decode_address=None,
     start_port=None,
+    prefill_parallel="cp",
 ):
     if role not in ("prefill", "decode"):
         raise ValueError("role must be prefill or decode")
+    if prefill_parallel not in ("cp", "dp"):
+        raise ValueError("prefill_parallel must be cp or dp")
+    cp_prefill = prefill_parallel == "cp"
     env = dict(os.environ if parent is None else parent)
     env.update(
         {
@@ -40,11 +44,15 @@ def preset_env(
             "LOCAL_WORLD_SIZE": "8",
             "WORLD_RANK": "0",
             "WORKER_INFO_PORT_NUM": "9",
-            "TP_SIZE": "8" if role == "prefill" else "1",
-            "DP_SIZE": "1" if role == "prefill" else "8",
+            "TP_SIZE": "8" if role == "prefill" and cp_prefill else "1",
+            "DP_SIZE": "1" if role == "prefill" and cp_prefill else "8",
             "EP_SIZE": "8",
-            "CP_ROTATE_METHOD": "ALL_GATHER" if role == "prefill" else "PREFILL_CP",
-            "PREFILL_CP_SIZE": "8",
+            "CP_ROTATE_METHOD": (
+                ("ALL_GATHER" if role == "prefill" else "PREFILL_CP")
+                if cp_prefill
+                else "DISABLED"
+            ),
+            "PREFILL_CP_SIZE": "8" if cp_prefill else "1",
             "PREFILL_CP_KV_CACHE_SHARDED": "0",
             "MAX_SEQ_LEN": "32768",
             "LOAD_PYTHON_MODEL": "1",
@@ -112,10 +120,12 @@ def preset_env(
         env["REMOTE_RPC_SERVER_IP"] = parsed[peer][0]
         env["REMOTE_SERVER_PORT"] = str(parsed[peer][1])
         route_addresses = dict(addresses)
-        host, base_port = parsed["decode"]
-        route_addresses["decode"] = ",".join(
-            f"{host}:{base_port + rank * 9}" for rank in range(8)
-        )
+        for name in ("prefill", "decode"):
+            host, base_port = parsed[name]
+            owners = 1 if name == "prefill" and cp_prefill else 8
+            route_addresses[name] = ",".join(
+                f"{host}:{base_port + rank * 9}" for rank in range(owners)
+            )
         env["MODEL_SERVICE_CONFIG"] = json.dumps(
             {
                 "service_id": "v41_ppu_pd",
@@ -153,6 +163,12 @@ def main():
     )
     parser.add_argument("--start-port", type=int)
     parser.add_argument(
+        "--prefill-parallel",
+        choices=("cp", "dp"),
+        default="cp",
+        help="P attention topology: CP8 (default) or DP8; set identically on P and D",
+    )
+    parser.add_argument(
         "--token-map-cache",
         type=Path,
         help="shared tokenizer cache under the run evidence directory",
@@ -171,6 +187,7 @@ def main():
         prefill_address=args.prefill_address,
         decode_address=args.decode_address,
         start_port=args.start_port,
+        prefill_parallel=args.prefill_parallel,
     )
     env = preset_env(args.role, args.checkpoint_path, **options)
     if args.token_map_cache:

@@ -1,6 +1,15 @@
 package(default_visibility = ["//visibility:public"])
 
 py_test(
+    name = "test_prefill_dp8",
+    srcs = ["test_prefill_dp8.py", "test_native_cache.py"],
+    main = "test_prefill_dp8.py",
+    deps = ["//rtp_llm/models_py:modules"],
+    env = {"GPU_COUNT": "0"},
+    tags = ["cpu"],
+)
+
+py_test(
     name = "test_moe_megamoe",
     srcs = ["test_moe_megamoe.py"],
     deps = ["//rtp_llm/models_py:v41_ppu_moe"],

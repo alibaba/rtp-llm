@@ -178,12 +178,78 @@ class IntegrationTest(unittest.TestCase):
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 dataclasses.replace(runtime, **mutation).validate()
 
+    def test_dp8_prefill_and_decode_use_unsharded_cp1_source(self):
+        for role in ("prefill", "decode"):
+            with self.subTest(role=role):
+                env = preset_env(role, "/weights", parent={}, prefill_parallel="dp")
+                runtime = V41RuntimeConfig.from_env(env)
+                self.assertEqual(
+                    (runtime.physical_tp, runtime.attention_dp, runtime.attention_cp),
+                    (1, 8, 1),
+                )
+                self.assertEqual(
+                    (runtime.ep, runtime.enp, runtime.source_cp), (8, 8, 1)
+                )
+                self.assertEqual(runtime.cp_method, "DISABLED")
+                self.assertFalse(runtime.kv_sharded)
+                with self.assertRaises(ValueError):
+                    dataclasses.replace(runtime, source_cp=8).validate()
+        with self.assertRaisesRegex(ValueError, "prefill_parallel"):
+            preset_env("prefill", "/weights", prefill_parallel="typo")
+
+    def test_dp8_prefill_routes_to_every_p_and_d_owner(self):
+        for role in ("prefill", "decode"):
+            env = preset_env(
+                role,
+                "/weights",
+                prefill_parallel="dp",
+                prefill_address="192.0.2.10:18090",
+                decode_address="192.0.2.20:19090",
+                parent={},
+            )
+            endpoints = json.loads(env["MODEL_SERVICE_CONFIG"])["role_endpoints"][0]
+            for name, host, port in (
+                ("prefill", "192.0.2.10", 18090),
+                ("decode", "192.0.2.20", 19090),
+            ):
+                self.assertEqual(
+                    endpoints[f"{name}_endpoint"]["address"].split(","),
+                    [f"{host}:{port + rank * 9}" for rank in range(8)],
+                )
+
+    def test_parsed_dp_prefill_topology_uses_actual_server_values(self):
+        config = NS(
+            parallelism_config=NS(
+                world_size=8,
+                local_world_size=8,
+                tp_size=1,
+                dp_size=8,
+                ep_size=8,
+                prefill_cp_config=NS(
+                    method="DISABLED", prefill_cp_size=1, kv_cache_sharded=False
+                ),
+            ),
+            role_config=NS(role_type="PREFILL"),
+            model_args=NS(max_seq_len=32768),
+            py_hw_kernel_config=NS(enable_cuda_graph=False),
+            sp_config=NS(type="NONE"),
+            eplb_config=NS(eplb_mode="NONE", redundant_expert=0),
+            moe_config=NS(
+                use_deepep_low_latency=False, use_deepep_moe=True, use_all_gather=False
+            ),
+        )
+        with patch.dict(os.environ, {"TP_SIZE": "8", "DP_SIZE": "1"}, clear=True):
+            runtime = V41RuntimeConfig.from_server(config)
+        self.assertEqual((runtime.attention_dp, runtime.attention_cp), (8, 1))
+
     def test_decode_graph_requires_explicit_megamoe_w4a4(self):
         env = preset_env("decode", "/weights", parent={})
         env.update(ENABLE_CUDA_GRAPH="1", RTP_V41_PPU_MOE_BACKEND="megamoe")
         runtime = V41RuntimeConfig.from_env(env)
         self.assertTrue(runtime.cuda_graph)
-        self.assertEqual((runtime.moe_backend, runtime.moe_precision), ("megamoe", "w4a4"))
+        self.assertEqual(
+            (runtime.moe_backend, runtime.moe_precision), ("megamoe", "w4a4")
+        )
         with self.assertRaisesRegex(ValueError, "PPU Graph"):
             dataclasses.replace(runtime, moe_backend="grouped").validate()
         with self.assertRaisesRegex(ValueError, "PPU Graph"):

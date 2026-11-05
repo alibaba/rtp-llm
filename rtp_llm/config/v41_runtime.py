@@ -85,7 +85,7 @@ class V41RuntimeConfig:
 
     @property
     def attention_cp(self):
-        return 8 if self.role == "PREFILL" else 1
+        return self.physical_tp if self.role == "PREFILL" else 1
 
     @property
     def attention_tp(self):
@@ -93,28 +93,27 @@ class V41RuntimeConfig:
 
     def validate(self):
         expected = {
-            "PREFILL": (8, 1, "ALL_GATHER"),
-            "DECODE": (1, 8, "PREFILL_CP"),
+            "PREFILL": ((8, 1, "ALL_GATHER", 8), (1, 8, "DISABLED", 1)),
+            "DECODE": ((1, 8, "PREFILL_CP", 8), (1, 8, "DISABLED", 1)),
         }
         errors = []
         if self.role not in expected:
             errors.append("role must be PREFILL or DECODE")
-        elif (self.physical_tp, self.attention_dp, self.cp_method) != expected[
-            self.role
-        ]:
+        elif (
+            self.physical_tp,
+            self.attention_dp,
+            self.cp_method,
+            self.source_cp,
+        ) not in expected[self.role]:
             errors.append(
-                f"{self.role} requires (tp, dp, cp_method)={expected[self.role]}"
+                f"{self.role} requires (tp, dp, cp_method, source_cp) in "
+                f"{expected[self.role]}"
             )
-        if (self.world_size, self.ep, self.enp, self.source_cp) != (8, 8, 8, 8):
-            errors.append("world_size=EP=ENP=source CP=8 (separate P/D worlds)")
+        if (self.world_size, self.ep, self.enp) != (8, 8, 8):
+            errors.append("world_size=EP=ENP=8 (separate P/D worlds)")
         if not 0 < self.max_seq_len <= 32768:
             errors.append("input + output must fit max_seq_len in [1, 32768]")
-        if (
-            self.kv_sharded
-            or self.low_latency
-            or self.ced
-            or self.bounded_replay
-        ):
+        if self.kv_sharded or self.low_latency or self.ced or self.bounded_replay:
             errors.append(
                 "KV sharding, low-latency EP, CED and bounded replay must be disabled"
             )
