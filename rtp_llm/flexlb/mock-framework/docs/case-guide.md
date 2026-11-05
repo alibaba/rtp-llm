@@ -77,7 +77,7 @@ phases:
 
 数值指标的 `mode` 默认为 `interval`，Case 中省略 `mode: interval`，只有逐点检查时才写 `mode: series`：
 
-- `interval` 返回区间汇总数值。Gauge 按实例取区间采样均值再求和；吞吐 counter 用区间增量除以时长；命中率、成功率分别汇总分子与分母的增量后相除，不平均比率采样点；延迟均值使用 sum/count 的增量比值，P95/P99 合并 histogram bucket 增量后计算。
+- `interval` 返回区间汇总数值。Gauge 每个采样点先合并同实例 priority，再按实例取区间采样均值并求和；吞吐 counter 用区间增量除以时长；命中率、成功率分别汇总分子与分母的增量后相除，不平均比率采样点；延迟均值使用 sum/count 的增量比值，P95/P99 合并 histogram bucket 增量后计算。
 - `series` 返回按采集周期排列的数值列表，gte/lte 要求每一个点都满足。Counter 派生指标每点使用四个采集周期的滚动统计长度，由实现确定，不另配置 lookback 或 step。
 
 执行器固定每个 Step 的 `query_time`，指标实现记录实际查询点、表达式和时间范围，不重新取墙钟。缺点、缺实例、非有限数值或零分母均报错。`expect` 支持 eq、列表 count 或数值 gte/lte。eq 是结构相等，列表顺序参与比较；实例查询返回排序后的地址列表。普通数值返回 float，series 返回数值列表，不包装为 `{value, unit}`；单位在接口定义里。逐 Master 状态返回 `{master服务地址: [engine服务地址, ...]}`。
@@ -101,7 +101,7 @@ phases:
 | `client/ttft` | 调用开始到收到首 token 的延迟，包含所有收到首 token 的请求。 |
 | `client/tpot` | 首末 token 间隔 / 首 token 之后的 token 数，只统计成功且输出多于一个 token 的请求。 |
 
-TTFT、TPOT 查询支持 `statistic: mean`（默认）、`p95`、`p99`，返回单位为秒，断言可以写 `lte: 200ms`。吞吐单位为 tokens/s，QPS 为 requests/s，比率为 0–1。`client/stop` 收集全部已发请求的终态；区间成功率不能替代这项完整性检查。
+TTFT、TPOT 查询支持 `statistic: mean`（默认）、`p95`、`p99`，返回单位为秒，断言可以写 `lte: 200ms`。Prefill TPS 接口读取有效执行速率，Decode TPS 接口读取已提交输出的墙钟速率，两者分母不同；均不读取原生 generate/total 窗口计数。吞吐单位为 tokens/s，QPS 为 requests/s，比率为 0–1。`client/stop` 收集全部已发请求的终态；区间成功率不能替代这项完整性检查。
 
 ## 本地运行与生命周期
 

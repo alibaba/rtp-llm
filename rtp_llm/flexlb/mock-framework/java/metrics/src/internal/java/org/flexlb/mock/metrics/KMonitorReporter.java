@@ -62,7 +62,7 @@ public final class KMonitorReporter implements MetricReporter {
 
     @Override public synchronized void observe(String name, Map<String, String> tags, double value) {
         if (monitor == null) throw new IllegalStateException("KMonitor reporter is not initialized");
-        register(name, name.endsWith("_qps") ? MetricType.QPS : MetricType.GAUGE);
+        register(name, EventMetrics.isRate(name) ? MetricType.QPS : MetricType.GAUGE);
         monitor.report(name, new ImmutableMetricTags(tags), value);
     }
 

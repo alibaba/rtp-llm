@@ -35,11 +35,15 @@ public class FixtureReporter implements MetricReporter {
     private Path destination;
     public void initialize(Map<String,String> env) { destination = Path.of(env.get("REPORT_CAPTURE")); }
     public long intervalMillis() { return 50; }
+    public void observe(String name, Map<String,String> tags, double value) {
+        try { Files.writeString(destination, name + tags + "=" + value + "\\n", StandardOpenOption.CREATE, StandardOpenOption.APPEND); }
+        catch (java.io.IOException error) { throw new java.io.UncheckedIOException(error); }
+    }
     public void report(List<MetricFamilySamples> snapshot) {
         var text = new StringBuilder();
         for (var family : snapshot) for (var sample : family.samples)
             text.append(sample.name).append(sample.labelNames).append(sample.labelValues).append("\\n");
-        try { Files.writeString(destination, text); }
+        try { Files.writeString(destination, text, StandardOpenOption.CREATE, StandardOpenOption.APPEND); }
         catch (java.io.IOException error) { throw new java.io.UncheckedIOException(error); }
     }
 }

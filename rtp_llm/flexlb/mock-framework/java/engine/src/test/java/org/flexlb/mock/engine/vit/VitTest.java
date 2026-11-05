@@ -176,6 +176,22 @@ class VitTest {
         }
     }
 
+    @Test void embeddingTpsCountsComputedRowsAndExcludesExpiredWork() throws Exception {
+        var clock = new java.util.concurrent.atomic.AtomicLong();
+        var metrics = new VitMetrics(clock::get);
+        try(var scheduler = new VitScheduler(config("1", 1024, 1024, 1024, 0), metrics)) {
+            var expired = scheduler.submit(new VitGeometry.Image("expired", 28, 28, 100), System.nanoTime() - 1);
+            assertThrows(ExecutionException.class, () -> expired.result().get(2, TimeUnit.SECONDS));
+            var first = scheduler.submit(new VitGeometry.Image("first", 28, 28, 10));
+            var second = scheduler.submit(new VitGeometry.Image("second", 28, 28, 22));
+            first.result().get(2, TimeUnit.SECONDS); second.result().get(2, TimeUnit.SECONDS);
+            clock.set(2_000_000_000L);
+            assertEquals(16, sample(org.flexlb.mock.metrics.MetricTags.scrape(metrics.registry, Map.of()), "py_rtp_vit_embedding_tps"));
+            clock.set(3_000_000_000L);
+            assertEquals(0, sample(org.flexlb.mock.metrics.MetricTags.scrape(metrics.registry, Map.of()), "py_rtp_vit_embedding_tps"));
+        }
+    }
+
     @Test void hashHitDoesNotRequireEmbeddingResidencyOrAnotherForward() throws Exception {
         try(var node=VitNode.start(config("1",0,0,1024,0),0,0)) {
             var channel=channel(node);

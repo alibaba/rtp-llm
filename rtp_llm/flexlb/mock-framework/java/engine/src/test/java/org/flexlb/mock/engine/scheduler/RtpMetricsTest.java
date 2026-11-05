@@ -1,6 +1,7 @@
 package org.flexlb.mock.engine.scheduler;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -178,7 +179,7 @@ class RtpMetricsTest {
         text = metrics.scrape();
         assertEquals(0, sample(text, "rtp_llm_context_tps", ""));
         assertEquals(0, sample(text, "rtp_llm_framework_qps", ""));
-        metrics.stepCompleted(new StepStats(0, 0, 0, 40_000_000, 40_000_000, 40_000_000, 1000, 100, 0, 1, 0, 40_000_000));
+        metrics.stepCompleted(new StepStats(0, 0, 0, 40_000_000, 40_000_000, 10_000_000, 1000, 100, 0, 1, 0, 40_000_000));
         clock.set(3_000_000_000L);
         text = metrics.scrape();
         assertFalse(text.contains("rtp_llm_context_tps{"));
@@ -219,23 +220,75 @@ class RtpMetricsTest {
         assertEquals(1, sample(text, "rtp_llm_kv_cache_reuse_length_count", ""));
     }
 
-    @Test void decodeThroughputUsesActiveTimeAndPreservesCommittedOutputCounter() {
+    @Test void decodeNativeWindowCountsUseAcceptedTokensAndPreserveCommittedOutputCounter() {
         var clock = new java.util.concurrent.atomic.AtomicLong();
         var metrics = new RtpMetrics("decode", () -> IDLE, clock::get);
-        metrics.stepCompleted(new StepStats(0, 1, 12, 8_000_000, 8_000_000, 5_000_000, 1000, 6, 6, 3, 3, 8_000_000));
+        metrics.stepCompleted(new StepStats(0, 1, 12, 8_000_000, 8_000_000, 5_000_000, 1000, 6, 6, 3, 6, 8_000_000));
         metrics.stepCompleted(new StepStats(0, 0, 0, 50_000_000, 50_000_000, 40_000_000, 1000, 4, 4, 0, 0, 50_000_000));
         clock.set(2_000_000_000);
         var text = metrics.scrape();
-        assertEquals(375, sample(text, "rtp_llm_generate_tps", ""));
-        assertEquals(375, sample(text, "rtp_llm_total_tps", ""));
+        assertEquals(6, sample(text, "rtp_llm_generate_tps", "priority=\"0\""));
+        assertEquals(6, sample(text, "rtp_llm_total_tps", ""));
         assertEquals(3, sample(text, "rtp_llm_forward_tokens_total", "kind=\"output\""));
         assertFalse(text.contains("rtp_llm_context_tps"));
 
         clock.set(3_000_000_000L);
         assertEquals(0, sample(metrics.scrape(), "rtp_llm_generate_tps", ""));
-        metrics.stepCompleted(new StepStats(0, 0, 0, 10_000_000, 10_000_000, 10_000_000, 1000, 4, 4, 2, 0, 10_000_000));
+        metrics.stepCompleted(new StepStats(0, 0, 0, 10_000_000, 10_000_000, 10_000_000, 1000, 4, 4, 2, 5, 10_000_000));
         clock.set(4_000_000_000L);
-        assertEquals(200, sample(metrics.scrape(), "rtp_llm_generate_tps", ""));
+        assertEquals(5, sample(metrics.scrape(), "rtp_llm_generate_tps", ""));
+    }
+
+    @Test void longForwardKeepsTpsWindowWhileTerminalQpsContinuesAndFailuresReleaseIt() {
+        var clock = new AtomicLong();
+        var metrics = new RtpMetrics("prefill", () -> IDLE, clock::get);
+        metrics.computeStarted();
+        clock.set(1_000_000_000L);
+        metrics.requestFinished(RtpMetrics.Outcome.error, REQUEST, false);
+        var text = metrics.scrape();
+        assertFalse(text.contains("rtp_llm_context_wall_tps{"));
+        assertEquals(1, sample(text, "rtp_llm_framework_error_qps", ""));
+        clock.set(2_000_000_000L);
+        assertFalse(metrics.scrape().contains("rtp_llm_context_tps{"));
+        metrics.stepCompleted(new StepStats(1, 0, 100, 3_000_000_000L, 3_000_000_000L,
+            2_000_000_000L, 0, 90, 60, 1, 1, 3_000_000_000L));
+        metrics.computeFinished();
+        clock.set(3_000_000_000L); text = metrics.scrape();
+        assertEquals(60, sample(text, "rtp_llm_total_tps", ""));
+        assertEquals(20, sample(text, "rtp_llm_context_tps", ""));
+        assertEquals(20, sample(text, "rtp_llm_context_wall_tps", ""));
+        assertEquals(3_000_000, sample(text, "rtp_llm_wall_tps_report_interval_us", ""));
+        assertEquals(3, sample(text, "rtp_llm_context_forward_seconds_total", ""));
+        metrics.computeStarted(); clock.set(4_000_000_000L);
+        assertFalse(metrics.scrape().contains("rtp_llm_total_tps{"));
+        metrics.computeFinished(); clock.set(5_000_000_000L);
+        assertEquals(0, sample(metrics.scrape(), "rtp_llm_total_tps", "priority=\"0\""));
+    }
+
+    @Test void priorityBucketsUseSharedBatchTimeAndSumToWholeWorker() {
+        var clock = new AtomicLong();
+        var metrics = new RtpMetrics("prefill", () -> IDLE, clock::get);
+        metrics.stepCompleted(new StepStats(2, 0, 100, 100_000_000, 100_000_000, 50_000_000,
+            0, 150, 100, 2, 2, 100_000_000), Map.of(
+                0, new RtpMetrics.TokenCounts(40, 60, 0, 40),
+                7, new RtpMetrics.TokenCounts(60, 90, 0, 60)));
+        clock.set(2_000_000_000L);
+        var text = metrics.scrape();
+        assertEquals(400, sample(text, "rtp_llm_context_tps", "priority=\"0\""));
+        assertEquals(600, sample(text, "rtp_llm_context_tps", "priority=\"7\""));
+        assertEquals(45, sample(text, "rtp_llm_context_wall_tps_with_cache", "priority=\"7\""));
+        assertEquals(60, sample(text, "rtp_llm_total_tps", "priority=\"7\""));
+        assertEquals(40, sample(text, "rtp_llm_context_tokens", "priority=\"0\""));
+        assertEquals(1, text.lines().filter(l -> l.startsWith("# TYPE rtp_llm_context_tps ")).count());
+        assertEquals(.1, sample(text, "rtp_llm_context_forward_seconds_total", ""), 1e-9);
+
+        var decode = new RtpMetrics("decode", () -> IDLE, clock::get);
+        decode.stepCompleted(new StepStats(0, 2, 100, 0, 0, 0, 0, 2, 2, 3, 7, 0),
+            Map.of(0, new RtpMetrics.TokenCounts(0, 0, 3, 3), 7, new RtpMetrics.TokenCounts(0, 0, 4, 4)));
+        clock.set(3_000_000_000L); text = decode.scrape();
+        assertEquals(3, sample(text, "rtp_llm_generate_tps", "priority=\"0\""));
+        assertEquals(4, sample(text, "rtp_llm_generate_tps", "priority=\"7\""));
+        assertEquals(3, sample(text, "rtp_llm_forward_tokens_total", "kind=\"output\""));
     }
 
     @Test void independentRegistriesDoNotLeakEvenWithIdenticalIdentity() {

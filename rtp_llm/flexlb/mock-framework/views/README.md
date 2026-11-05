@@ -18,7 +18,7 @@ Engine 的 waiting/running、Device 可用 Tokens、Device/Host 容量 Blocks、
 
 真实事件的辅助 Counter/Histogram 使用 rtp_llm_*，包括接纳/终态、缓存查找/命中、Forward Tokens 和实际耗时分布；这些是本地 Prometheus 增补，不声称 real 已有完全相同的 Counter/Histogram 名称。Python 接口同步消费新名字。计划 Forward、ViT 模拟运行图片数及 hash 预算保留 mock_ 前缀。实际观测归回 P/D 的 RTP row，Mock 模拟质量各保留实际/理论、偏差、模拟执行时间占比三个面板，不将最后一项当作 GPU 利用率。
 
-执行 TPS 按窗口累计 token 除以有效执行时间。P 的 context TPS 区分实际计算和含缓存输入，D 的 MTP 采用停止条件截断前的验收 token（含 bonus）。只有 wall TPS 和 QPS 使用两次采集间的墙钟间隔；D 输出 wall TPS 来自已提交输出 token Counter。执行 TPS 空闲窗口归零；有活动的窗口仅上报有对应工作量的执行 TPS。门禁继续读取原有 Counter 和时间范围。
+TPS 保持 Real 的不同统计合同：P context TPS 是有效执行速率；P context wall TPS 是实际窗口墙钟速率；`generate_tps`、`total_tps` 是报告窗口 token 数，不是每秒速率。D 使用停止截断前、包含已计算取消成员的验收 token（含 bonus）。本地把这两项标题标为“报告窗口 token 数”；真实交付吞吐和一分钟墙钟 TPS 使用累计 Forward token Counter 的 rate。不同报告长度的原生窗口计数不能直接对比。各 priority 的分子共用整批执行时间；View 和 Prefill 门禁先合并同实例 priority，再取实例或时间均值。无完成结果的在途长 Forward 不报假零、不清空 TPS 窗口；终态 QPS 独立更新。ViT embedding TPS 按成功实际计算的 embedding token 累计，不重复统计缓存或 in-flight 消费者。
 
 旧实验没有新导出，需使用其保存的原始大盘；本次不改写旧 TSDB，也不生成旧名字别名来伪造新实验结果。
 
@@ -69,10 +69,12 @@ View 的 `annotation_steps` 只配置默认选择，省略则全部显示，空�
 | ViT 请求 | `py_rtp_vit_qps` / `success_qps` / `error_qps`，`image_count` / `embedding_length` / `embedding_rt` | 统计计算/等待调用；纯 metadata/hash 命中不产生新的计算请求；下载由异步准备执行器完成，没有 Tensor 数据搬运 |
 | ViT 缓存 | `py_rtp_vit_embedding_cache_{hit,miss,inflight,eviction}_qps`、`tokens` / `bytes` | GPU+CPU 逻辑驻留合计，不能作为真实 GPU/JVM 物理占用 |
 
-新增事件 Gauge 用采集窗口均值而非只保留最后一个事件；无事件时不发耗时样本。`_sum` / `_count` 为本地累计查询辅助量。QPS 按实际窗口秒数换算，空闲为零。它们与 KMonitor 的固定上报周期并非逐点相同；共享 JVM 不能导出可信的单 Engine CPU/堆/GPU 利用率，资源面板继续留空。
+事件耗时在 KMonitor 逐样本上报，Prometheus 由累计 `_sum` / `_count` 计算加权均值；无事件时不发新的耗时样本。QPS 按实际窗口秒数换算，空闲为零。它们与 KMonitor 的固定上报周期并非逐点相同；共享 JVM 不能导出可信的单 Engine CPU/堆/GPU 利用率，资源面板继续留空。
 
 ## 事件指标的权重
 
 事件类均值统一由每个实例的累计 `_sum`、`_count` 计算。All 时分别汇总各实例增量再相除；选择具体实例时保留 instance 分组，用同一公式。禁止先计算各实例均值再 avg，也不使用已经删除的裸事件 Gauge。需要 token 总量或命中率的面板使用 `_sum` 增量，不能把样本数当成 token 数。
 
 原来使用 max 聚合事件窗口均值的面板，明确标为“实例均值最大值”，展示各实例在查询区间内事件均值的最大值；这不是单个事件峰值或 P99。每请求图片数和 Embedding 长度改为请求加权均值，不再把各实例均值相加。状态 Gauge、周期 TPS/QPS、Client Histogram 保持各自口径。线上 KMonitor 大盘不修改。
+
+Forward 平均耗时、输入、计算和输出长度均先汇总各实例的耗时或 token 增量，再除以 Forward 次数增量之和，保留批次权重。原生周期 TPS 的实例均值、集群墙钟 TPS 合计和按批次加权长度是不同统计量，标题和说明必须写清，不能相互替代。

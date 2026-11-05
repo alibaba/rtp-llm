@@ -47,6 +47,19 @@ class EventMetricsTest {
         assertThrows(IllegalArgumentException.class, () -> metrics.observe("x", Double.NaN));
     }
 
+    @Test void embeddingTpsCountsTokensPerWallSecondAndClearsIdleRates() {
+        var clock = new AtomicLong(); var registry = new CollectorRegistry();
+        var metrics = prometheus("vit", clock, registry);
+        metrics.observe("py_rtp_vit_embedding_tps", 20);
+        metrics.observe("py_rtp_vit_embedding_tps", 40);
+        clock.set(2_000_000_000L);
+        var text = MetricTags.scrape(registry, Map.of());
+        assertEquals(30, sample(text, "py_rtp_vit_embedding_tps", ""));
+        assertFalse(text.contains("py_rtp_vit_embedding_tps_sum"));
+        clock.set(3_000_000_000L);
+        assertEquals(0, sample(MetricTags.scrape(registry, Map.of()), "py_rtp_vit_embedding_tps", ""));
+    }
+
     @Test void unequalInstancesAndUnequalScrapeWindowsPreserveAll101RequestWeights() {
         var clock = new AtomicLong();
         var firstRegistry = new CollectorRegistry(); var secondRegistry = new CollectorRegistry();

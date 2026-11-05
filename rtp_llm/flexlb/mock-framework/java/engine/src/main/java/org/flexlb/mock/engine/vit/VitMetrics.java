@@ -7,13 +7,15 @@ import org.flexlb.mock.metrics.*;
 /** Per-V instance telemetry; no simulated per-process CPU/GPU utilization. */
 final class VitMetrics {
     final CollectorRegistry registry = new CollectorRegistry();
-    final EventMetrics events = new EventMetrics("vit");
-    VitMetrics() {
+    final EventMetrics events;
+    VitMetrics() { this(System::nanoTime); }
+    VitMetrics(java.util.function.LongSupplier clock) {
+        events = new EventMetrics("vit", clock);
         events.register(registry);
         for (String name : List.of("py_rtp_vit_qps", "py_rtp_vit_success_qps", "py_rtp_vit_error_qps",
                 "py_rtp_vit_embedding_cache_hit_qps", "py_rtp_vit_embedding_cache_miss_qps",
                 "py_rtp_vit_embedding_cache_inflight_qps", "py_rtp_vit_embedding_cache_eviction_qps",
-                "py_rtp_vit_embedding_overload_qps")) events.observe(name, 0);
+                "py_rtp_vit_embedding_overload_qps", "py_rtp_vit_embedding_tps")) events.observe(name, 0);
     }
     List<Collector.MetricFamilySamples> collect(VitScheduler scheduler, VitCache cache, VitPreparation preparation) {
         var state = new TreeMap<>(scheduler.snapshot()); state.putAll(cache.snapshot());

@@ -63,10 +63,13 @@ class KMonitorReporterTest {
         var clock = new java.util.concurrent.atomic.AtomicLong();
         var events = new EventMetrics("vit", clock::get, sdk.reporter, Map.of());
         events.increment("vit_qps"); events.increment("vit_qps");
+        events.observe("py_rtp_vit_embedding_tps", 60);
         clock.set(2_000_000_000L);
         sdk.reporter.report(events.collect());
         assertEquals(List.of(1.0, 1.0), sdk.values.get("vit_qps"));
         assertEquals(MetricType.QPS, sdk.types.get("vit_qps"));
+        assertEquals(MetricType.QPS, sdk.types.get("py_rtp_vit_embedding_tps"));
+        assertEquals(List.of(60.0), sdk.values.get("py_rtp_vit_embedding_tps"));
         var state = new GaugeMetricFamily("context_tps", "Rate already computed by the engine.", List.of("role"));
         state.addMetric(List.of("prefill"), 123);
         var helper = new CounterMetricFamily("local_helper_total", "Prometheus cumulative helper.", List.of("role"));

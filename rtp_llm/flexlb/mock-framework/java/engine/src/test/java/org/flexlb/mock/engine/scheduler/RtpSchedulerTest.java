@@ -79,8 +79,11 @@ class RtpSchedulerTest {
         return RtpConfig.load(path);
     }
     private static EngineScheduler.Input metricInput(long id, int maxNewTokens) {
+        return metricInput(id, maxNewTokens, 0);
+    }
+    private static EngineScheduler.Input metricInput(long id, int maxNewTokens, int priority) {
         var base = input(id, false);
-        return new EngineScheduler.Input(base.identity(), id, 0, 5, maxNewTokens, 0, base.started(), base.deadline(),
+        return new EngineScheduler.Input(base.identity(), id, 0, 5, maxNewTokens, priority, base.started(), base.deadline(),
             base.cacheSequence(), false, false, 0, false);
     }
     private static String completeAndCheckTpot(RtpFifoScheduler scheduler, EngineScheduler.Work work, RtpConfig config,
@@ -123,6 +126,7 @@ class RtpSchedulerTest {
             var beforeMetrics = scheduler.metrics().scrape();
             long before = System.nanoTime(); var work = scheduler.schedule(); long after = System.nanoTime();
             var text = completeAndCheckTpot(scheduler, work, config, beforeMetrics, before, after, 4, 1);
+            assertEquals(4, RtpMetricsTest.sample(text, "rtp_llm_generate_tps", "priority=\"0\""));
             assertEquals(delivered, RtpMetricsTest.sample(text, "rtp_llm_forward_tokens_total", "kind=\"output\""));
             assertEquals(1 + delivered, request.snapshot().generated());
             assertNull(listener.terminal.get(1, TimeUnit.SECONDS));
@@ -137,13 +141,15 @@ class RtpSchedulerTest {
             scheduler.maintain(); drain(scheduler); generate(scheduler, first);
             complete(scheduler, scheduler.schedule(), config); drain(scheduler);
             complete(scheduler, scheduler.schedule(), config); drain(scheduler);
-            var second = scheduler.input(metricInput(2, 20), listener);
+            var second = scheduler.input(metricInput(2, 20, 7), listener);
             scheduler.maintain(); drain(scheduler); generate(scheduler, second);
             var beforeMetrics = scheduler.metrics().scrape();
             long before = System.nanoTime(); var work = scheduler.schedule(); long after = System.nanoTime();
             scheduler.finish(second, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel during forward"));
             // First stream is in Decode round 2 (two tokens), second in round 0 (three).
             var text = completeAndCheckTpot(scheduler, work, config, beforeMetrics, before, after, 5, 2);
+            assertEquals(2, RtpMetricsTest.sample(text, "rtp_llm_generate_tps", "priority=\"0\""));
+            assertEquals(3, RtpMetricsTest.sample(text, "rtp_llm_generate_tps", "priority=\"7\""));
             assertEquals(9, first.snapshot().generated());
             assertEquals(1, second.snapshot().generated());
             assertEquals(8, RtpMetricsTest.sample(text, "rtp_llm_forward_tokens_total", "kind=\"output\""));

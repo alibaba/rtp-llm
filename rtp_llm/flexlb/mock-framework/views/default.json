@@ -645,7 +645,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_context_tps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "avg by(${prefill_group})(sum without(priority)(rtp_llm_context_tps{instance=~\"${prefill_instance}\",role=\"prefill\"}))",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -694,7 +694,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10379。",
+          "description": "按 Real 口径：对应 token 数 / 有效执行时间。先合并 priority，再展示各实例执行速率的均值；不代表集群墙钟吞吐。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -720,7 +720,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_context_wall_tps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "avg by(${prefill_group})(sum without(priority)(rtp_llm_context_wall_tps{instance=~\"${prefill_instance}\",role=\"prefill\"}))",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -781,7 +781,7 @@
         {
           "id": 110381,
           "type": "timeseries",
-          "title": "input wall tps",
+          "title": "计算 token 墙钟 TPS（合计）",
           "gridPos": {
             "x": 0,
             "y": 47,
@@ -795,7 +795,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_context_wall_tps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "sum by(${prefill_group})(sum without(priority)(rtp_llm_context_wall_tps{instance=~\"${prefill_instance}\",role=\"prefill\"}))",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -931,7 +931,7 @@
         {
           "id": 110373,
           "type": "timeseries",
-          "title": "total tps",
+          "title": "执行 token 数（报告窗口）",
           "gridPos": {
             "x": 0,
             "y": 56,
@@ -945,7 +945,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_total_tps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "avg by(${prefill_group})(sum without(priority)(rtp_llm_total_tps{instance=~\"${prefill_instance}\",role=\"prefill\"}))",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -994,7 +994,7 @@
               ]
             }
           },
-          "description": "执行器 token 数除以有效执行时间。P 计实际执行 token，D 的 MTP 路径计含 bonus 的验收 token。",
+          "description": "对齐 Real 原生指标：每个报告窗口内的 token 数，不是 token/s；先合并同一实例的 priority，再展示实例均值。墙钟 TPS 使用独立累计 token 计数器的增量除以时间。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -1020,7 +1020,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_context_tps_with_cache{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "avg by(${prefill_group})(sum without(priority)(rtp_llm_context_tps_with_cache{instance=~\"${prefill_instance}\",role=\"prefill\"}))",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -1069,7 +1069,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10370。",
+          "description": "按 Real 口径：对应 token 数 / 有效执行时间。先合并 priority，再展示各实例执行速率的均值；不代表集群墙钟吞吐。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -1095,7 +1095,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_context_wall_tps_with_cache{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "avg by(${prefill_group})(sum without(priority)(rtp_llm_context_wall_tps_with_cache{instance=~\"${prefill_instance}\",role=\"prefill\"}))",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -1156,7 +1156,7 @@
         {
           "id": 110382,
           "type": "timeseries",
-          "title": "input wall tps with catch",
+          "title": "输入 token 墙钟 TPS（含缓存，合计）",
           "gridPos": {
             "x": 12,
             "y": 65,
@@ -1170,7 +1170,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${prefill_group})(rtp_llm_context_wall_tps_with_cache{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "sum by(${prefill_group})(sum without(priority)(rtp_llm_context_wall_tps_with_cache{instance=~\"${prefill_instance}\",role=\"prefill\"}))",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -4728,7 +4728,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "1000 * avg by(${prefill_group})(rate(rtp_llm_model_forward_seconds_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]) / rate(rtp_llm_model_forward_seconds_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))",
+              "expr": "1000 * (sum by(${prefill_group})(rate(rtp_llm_model_forward_seconds_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_model_forward_seconds_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "{{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -4778,7 +4778,7 @@
               ]
             }
           },
-          "description": "先算各实例已完成 Forward 的区间均值，再按角色平均；不含请求排队时间。"
+          "description": "累计 Forward 耗时增量之和 / 完成 Forward 次数增量之和，保留各实例批次数量权重；单位毫秒。"
         },
         {
           "id": 49,
@@ -4944,7 +4944,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rate(rtp_llm_forward_tokens_total{instance=~\"${prefill_instance}\",role=\"prefill\",kind=\"input\"}[$__rate_interval]) / ignoring(kind) rate(rtp_llm_model_forward_seconds_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_forward_tokens_total{instance=~\"${prefill_instance}\",role=\"prefill\",kind=\"input\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_model_forward_seconds_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "input · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -4953,7 +4953,7 @@
             },
             {
               "refId": "B",
-              "expr": "avg by(${prefill_group})(rate(rtp_llm_forward_tokens_total{instance=~\"${prefill_instance}\",role=\"prefill\",kind=\"compute\"}[$__rate_interval]) / ignoring(kind) rate(rtp_llm_model_forward_seconds_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_forward_tokens_total{instance=~\"${prefill_instance}\",role=\"prefill\",kind=\"compute\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_model_forward_seconds_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "compute · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -5022,7 +5022,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rate(rtp_llm_forward_tokens_total{instance=~\"${prefill_instance}\",role=\"prefill\",kind=\"output\"}[$__rate_interval]) / ignoring(kind) rate(rtp_llm_model_forward_seconds_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_forward_tokens_total{instance=~\"${prefill_instance}\",role=\"prefill\",kind=\"output\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_model_forward_seconds_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "{{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -5227,7 +5227,7 @@
         {
           "id": 110430,
           "type": "timeseries",
-          "title": "Prefill TPS（1 分钟平均）",
+          "title": "Prefill 计算墙钟 TPS（1 分钟，合计）",
           "gridPos": {
             "x": 0,
             "y": 317,
@@ -5290,7 +5290,7 @@
               ]
             }
           },
-          "description": "按已完成 Forward 的 token 计数器计算 1 分钟速率。Prefill 使用实际计算 token，Decode 使用已提交输出 token。",
+          "description": "累计 token 计数器的一分钟增量 / 墙钟时间。All 时为所选实例合计；不对原生窗口计数 Gauge 求 rate 或累加速率。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -8876,7 +8876,7 @@
         {
           "id": 210369,
           "type": "timeseries",
-          "title": "decode tps",
+          "title": "Decode 接受 token 数（报告窗口）",
           "gridPos": {
             "x": 0,
             "y": 710,
@@ -8890,7 +8890,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_generate_tps{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "avg by(${decode_group})(sum without(priority)(rtp_llm_generate_tps{instance=~\"${decode_instance}\",role=\"decode\"}))",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -8939,7 +8939,7 @@
               ]
             }
           },
-          "description": "有效执行时间内的 Decode TPS。MTP 使用停止条件截断前含 bonus 的验收 token。",
+          "description": "对齐 Real 原生指标：每个报告窗口内的 token 数，不是 token/s；先合并同一实例的 priority，再展示实例均值。墙钟 TPS 使用独立累计 token 计数器的增量除以时间。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -9101,7 +9101,7 @@
         {
           "id": 210373,
           "type": "timeseries",
-          "title": "total tps",
+          "title": "执行 token 数（报告窗口）",
           "gridPos": {
             "x": 12,
             "y": 719,
@@ -9115,7 +9115,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_total_tps{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "avg by(${decode_group})(sum without(priority)(rtp_llm_total_tps{instance=~\"${decode_instance}\",role=\"decode\"}))",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -9164,7 +9164,7 @@
               ]
             }
           },
-          "description": "执行器 token 数除以有效执行时间。P 计实际执行 token，D 的 MTP 路径计含 bonus 的验收 token。",
+          "description": "对齐 Real 原生指标：每个报告窗口内的 token 数，不是 token/s；先合并同一实例的 priority，再展示实例均值。墙钟 TPS 使用独立累计 token 计数器的增量除以时间。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -12307,7 +12307,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "1000 * avg by(${decode_group})(rate(rtp_llm_model_forward_seconds_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]) / rate(rtp_llm_model_forward_seconds_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))",
+              "expr": "1000 * (sum by(${decode_group})(rate(rtp_llm_model_forward_seconds_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_model_forward_seconds_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "{{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -12357,7 +12357,7 @@
               ]
             }
           },
-          "description": "先算各实例已完成 Forward 的区间均值，再按角色平均；不含请求排队时间。"
+          "description": "累计 Forward 耗时增量之和 / 完成 Forward 次数增量之和，保留各实例批次数量权重；单位毫秒。"
         },
         {
           "id": 600049,
@@ -12523,7 +12523,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rate(rtp_llm_forward_tokens_total{instance=~\"${decode_instance}\",role=\"decode\",kind=\"input\"}[$__rate_interval]) / ignoring(kind) rate(rtp_llm_model_forward_seconds_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_forward_tokens_total{instance=~\"${decode_instance}\",role=\"decode\",kind=\"input\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_model_forward_seconds_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "input · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -12532,7 +12532,7 @@
             },
             {
               "refId": "B",
-              "expr": "avg by(${decode_group})(rate(rtp_llm_forward_tokens_total{instance=~\"${decode_instance}\",role=\"decode\",kind=\"compute\"}[$__rate_interval]) / ignoring(kind) rate(rtp_llm_model_forward_seconds_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_forward_tokens_total{instance=~\"${decode_instance}\",role=\"decode\",kind=\"compute\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_model_forward_seconds_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "compute · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -12601,7 +12601,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rate(rtp_llm_forward_tokens_total{instance=~\"${decode_instance}\",role=\"decode\",kind=\"output\"}[$__rate_interval]) / ignoring(kind) rate(rtp_llm_model_forward_seconds_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_forward_tokens_total{instance=~\"${decode_instance}\",role=\"decode\",kind=\"output\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_model_forward_seconds_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "{{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -12806,7 +12806,7 @@
         {
           "id": 210431,
           "type": "timeseries",
-          "title": "Output TPS（1 分钟平均）",
+          "title": "已提交输出墙钟 TPS（1 分钟，合计）",
           "gridPos": {
             "x": 0,
             "y": 971,
@@ -12869,7 +12869,7 @@
               ]
             }
           },
-          "description": "按已完成 Forward 的 token 计数器计算 1 分钟速率。Prefill 使用实际计算 token，Decode 使用已提交输出 token。",
+          "description": "累计 token 计数器的一分钟增量 / 墙钟时间。All 时为所选实例合计；不对原生窗口计数 Gauge 求 rate 或累加速率。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -18009,6 +18009,81 @@
             }
           },
           "description": "来自 real 的 ViT scheduler/cache 观测边界；计划耗时仅为 Mock 模拟配置。缓存字节是逻辑预算，不是 JVM 实际内存或 GPU 显存。"
+        },
+        {
+          "id": 310691,
+          "type": "timeseries",
+          "title": "ViT embedding TPS",
+          "gridPos": {
+            "x": 0,
+            "y": 1473,
+            "w": 12,
+            "h": 9
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by(${vit_group})(py_rtp_vit_embedding_tps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "legendFormat": "embedding token/s · {{${vit_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ]
+            }
+          },
+          "description": "每秒实际计算并成功返回的 embedding token 数。缓存命中、in-flight 去重消费者不重复计数；过期和失败工作不计。",
+          "links": [
+            {
+              "title": "RTP-LLM 原面板",
+              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=10350",
+              "targetBlank": true
+            }
+          ]
         }
       ],
       "gridPos": {
@@ -18030,7 +18105,7 @@
           "title": "前端路由异常：每秒多少次、什么原因 · 待埋点",
           "gridPos": {
             "x": 0,
-            "y": 1474,
+            "y": 1483,
             "w": 12,
             "h": 9
           },
@@ -18105,7 +18180,7 @@
           "title": "前端路由成功：每秒多少次 · 待埋点",
           "gridPos": {
             "x": 12,
-            "y": 1474,
+            "y": 1483,
             "w": 12,
             "h": 9
           },
@@ -18180,7 +18255,7 @@
           "title": "前端取得 Master 路由要多久：平均 / P99 · 待埋点",
           "gridPos": {
             "x": 0,
-            "y": 1483,
+            "y": 1492,
             "w": 12,
             "h": 9
           },
@@ -18264,7 +18339,7 @@
           "title": "Master 还有多少请求待调度 · 待埋点",
           "gridPos": {
             "x": 12,
-            "y": 1483,
+            "y": 1492,
             "w": 12,
             "h": 9
           },
@@ -18339,7 +18414,7 @@
           "title": "缓存命中率：候选最高 / 选中估计 / Worker 实际 · 部分待埋点",
           "gridPos": {
             "x": 0,
-            "y": 1492,
+            "y": 1501,
             "w": 12,
             "h": 9
           },
@@ -18423,7 +18498,7 @@
           "title": "服务发现返回多少地址（不等于可接单机器）",
           "gridPos": {
             "x": 12,
-            "y": 1492,
+            "y": 1501,
             "w": 12,
             "h": 9
           },
@@ -18498,7 +18573,7 @@
           "title": "同步卡在哪个线程池：待执行任务数",
           "gridPos": {
             "x": 0,
-            "y": 1501,
+            "y": 1510,
             "w": 12,
             "h": 9
           },
@@ -18597,7 +18672,7 @@
       ],
       "gridPos": {
         "x": 0,
-        "y": 1473,
+        "y": 1482,
         "w": 24,
         "h": 1
       }
@@ -18614,7 +18689,7 @@
           "title": "每台 Master 收到多少选机调用（非 ViT）",
           "gridPos": {
             "x": 0,
-            "y": 1511,
+            "y": 1520,
             "w": 12,
             "h": 9
           },
@@ -18689,7 +18764,7 @@
           "title": "取得路由慢在哪一段：各阶段平均耗时",
           "gridPos": {
             "x": 12,
-            "y": 1511,
+            "y": 1520,
             "w": 12,
             "h": 9
           },
@@ -18809,7 +18884,7 @@
           "title": "请求到达 Master 前后耗时：平均 / 最大",
           "gridPos": {
             "x": 0,
-            "y": 1520,
+            "y": 1529,
             "w": 12,
             "h": 9
           },
@@ -18911,7 +18986,7 @@
           "title": "Master 从接入到选机完成：平均 / 最大",
           "gridPos": {
             "x": 12,
-            "y": 1520,
+            "y": 1529,
             "w": 12,
             "h": 9
           },
@@ -18995,7 +19070,7 @@
           "title": "选机后凑批等了多久：平均 / 最大",
           "gridPos": {
             "x": 0,
-            "y": 1529,
+            "y": 1538,
             "w": 12,
             "h": 9
           },
@@ -19079,7 +19154,7 @@
           "title": "下发后多久收到 Worker 确认：平均 / 最大",
           "gridPos": {
             "x": 12,
-            "y": 1529,
+            "y": 1538,
             "w": 12,
             "h": 9
           },
@@ -19163,7 +19238,7 @@
           "title": "各 Worker 还有多少批次未完成对账",
           "gridPos": {
             "x": 0,
-            "y": 1538,
+            "y": 1547,
             "w": 12,
             "h": 9
           },
@@ -19238,7 +19313,7 @@
           "title": "最老在途记录已经多久未结算",
           "gridPos": {
             "x": 12,
-            "y": 1538,
+            "y": 1547,
             "w": 12,
             "h": 9
           },
@@ -19322,7 +19397,7 @@
           "title": "每秒清理多少条超 TTL 的在途记录",
           "gridPos": {
             "x": 0,
-            "y": 1547,
+            "y": 1556,
             "w": 12,
             "h": 9
           },
@@ -19397,7 +19472,7 @@
           "title": "备 Master 转发到主 Master：结果 QPS",
           "gridPos": {
             "x": 12,
-            "y": 1547,
+            "y": 1556,
             "w": 12,
             "h": 9
           },
@@ -19472,7 +19547,7 @@
           "title": "每个派发批次包含多少输入 Tokens",
           "gridPos": {
             "x": 0,
-            "y": 1556,
+            "y": 1565,
             "w": 12,
             "h": 9
           },
@@ -19547,7 +19622,7 @@
           "title": "为什么开始派发批次：各原因 QPS",
           "gridPos": {
             "x": 12,
-            "y": 1556,
+            "y": 1565,
             "w": 12,
             "h": 9
           },
@@ -19622,7 +19697,7 @@
           "title": "各派发原因下：平均每批多少请求",
           "gridPos": {
             "x": 0,
-            "y": 1565,
+            "y": 1574,
             "w": 12,
             "h": 9
           },
@@ -19697,7 +19772,7 @@
           "title": "Prefill 批次执行多久：预测 / Worker 实际",
           "gridPos": {
             "x": 12,
-            "y": 1565,
+            "y": 1574,
             "w": 12,
             "h": 9
           },
@@ -19781,7 +19856,7 @@
           "title": "批次执行预测偏差：实际减预测",
           "gridPos": {
             "x": 0,
-            "y": 1574,
+            "y": 1583,
             "w": 12,
             "h": 9
           },
@@ -19874,7 +19949,7 @@
           "title": "Worker 内部处理耗时：各阶段平均值 · 部分待埋点",
           "gridPos": {
             "x": 12,
-            "y": 1574,
+            "y": 1583,
             "w": 12,
             "h": 9
           },
@@ -20057,7 +20132,7 @@
           "title": "ZK 当前记录哪台是主 Master",
           "gridPos": {
             "x": 0,
-            "y": 1583,
+            "y": 1592,
             "w": 12,
             "h": 9
           },
@@ -20132,7 +20207,7 @@
           "title": "进程生命周期事件（当前指标名称待核实） · 待埋点",
           "gridPos": {
             "x": 12,
-            "y": 1583,
+            "y": 1592,
             "w": 12,
             "h": 9
           },
@@ -20207,7 +20282,7 @@
           "title": "主备选举事件标记（类型已汇总）",
           "gridPos": {
             "x": 0,
-            "y": 1592,
+            "y": 1601,
             "w": 12,
             "h": 9
           },
@@ -20279,7 +20354,7 @@
       ],
       "gridPos": {
         "x": 0,
-        "y": 1510,
+        "y": 1519,
         "w": 24,
         "h": 1
       }
@@ -20296,7 +20371,7 @@
           "title": "已选到各 Worker、但尚未派发的请求数",
           "gridPos": {
             "x": 0,
-            "y": 1602,
+            "y": 1611,
             "w": 12,
             "h": 9
           },
@@ -20371,7 +20446,7 @@
           "title": "Worker 剩余工作预计还需多久（排队＋运行）",
           "gridPos": {
             "x": 12,
-            "y": 1602,
+            "y": 1611,
             "w": 12,
             "h": 9
           },
@@ -20455,7 +20530,7 @@
           "title": "各角色 Worker 的 KV 有多满：平均 / 最满",
           "gridPos": {
             "x": 0,
-            "y": 1611,
+            "y": 1620,
             "w": 12,
             "h": 9
           },
@@ -20539,7 +20614,7 @@
           "title": "Decode 每台机器已确认＋已预留多少请求",
           "gridPos": {
             "x": 12,
-            "y": 1611,
+            "y": 1620,
             "w": 12,
             "h": 9
           },
@@ -20614,7 +20689,7 @@
           "title": "两套请求账本：Worker 已知 / Master 未结算",
           "gridPos": {
             "x": 0,
-            "y": 1620,
+            "y": 1629,
             "w": 12,
             "h": 9
           },
@@ -20698,7 +20773,7 @@
           "title": "Master 调度账本还有多少请求未结算",
           "gridPos": {
             "x": 12,
-            "y": 1620,
+            "y": 1629,
             "w": 12,
             "h": 9
           },
@@ -20773,7 +20848,7 @@
           "title": "各 Worker 平均还有多少 KV Tokens：已用 / 可用",
           "gridPos": {
             "x": 0,
-            "y": 1629,
+            "y": 1638,
             "w": 12,
             "h": 9
           },
@@ -20857,7 +20932,7 @@
           "title": "Decode 请求账本预计预留多少 KV Tokens",
           "gridPos": {
             "x": 12,
-            "y": 1629,
+            "y": 1638,
             "w": 12,
             "h": 9
           },
@@ -20932,7 +21007,7 @@
           "title": "Decode 请求账本硬预留多少 KV Tokens",
           "gridPos": {
             "x": 0,
-            "y": 1638,
+            "y": 1647,
             "w": 12,
             "h": 9
           },
@@ -21007,7 +21082,7 @@
           "title": "各角色单台 Worker 平均有多少 KV 总 Tokens",
           "gridPos": {
             "x": 12,
-            "y": 1638,
+            "y": 1647,
             "w": 12,
             "h": 9
           },
@@ -21082,7 +21157,7 @@
           "title": "工作是否集中在少数机器：剩余耗时方差",
           "gridPos": {
             "x": 0,
-            "y": 1647,
+            "y": 1656,
             "w": 12,
             "h": 9
           },
@@ -21166,7 +21241,7 @@
           "title": "Decode 机器之间单步速度差多少：耗时方差",
           "gridPos": {
             "x": 12,
-            "y": 1647,
+            "y": 1656,
             "w": 12,
             "h": 9
           },
@@ -21241,7 +21316,7 @@
           "title": "一次 Status 回包带回多少已完成请求 ID",
           "gridPos": {
             "x": 0,
-            "y": 1656,
+            "y": 1665,
             "w": 12,
             "h": 9
           },
@@ -21316,7 +21391,7 @@
           "title": "Worker 状态中报告多少缓存键",
           "gridPos": {
             "x": 12,
-            "y": 1656,
+            "y": 1665,
             "w": 12,
             "h": 9
           },
@@ -21388,7 +21463,7 @@
       ],
       "gridPos": {
         "x": 0,
-        "y": 1601,
+        "y": 1610,
         "w": 24,
         "h": 1
       }
@@ -21405,7 +21480,7 @@
           "title": "缓存复用率：执行实测 / 历史重复（Tokens 加权） · 部分待埋点",
           "gridPos": {
             "x": 0,
-            "y": 1666,
+            "y": 1675,
             "w": 12,
             "h": 9
           },
@@ -21489,7 +21564,7 @@
           "title": "选机为什么优先或放弃更多缓存：原因 QPS",
           "gridPos": {
             "x": 12,
-            "y": 1666,
+            "y": 1675,
             "w": 12,
             "h": 9
           },
@@ -21564,7 +21639,7 @@
           "title": "最终选机少用了多少已知缓存：损失比例",
           "gridPos": {
             "x": 0,
-            "y": 1675,
+            "y": 1684,
             "w": 12,
             "h": 9
           },
@@ -21639,7 +21714,7 @@
           "title": "每秒输入与可复用 Tokens：候选最多 / 选中",
           "gridPos": {
             "x": 12,
-            "y": 1675,
+            "y": 1684,
             "w": 12,
             "h": 9
           },
@@ -21732,7 +21807,7 @@
           "title": "Master 索引里登记了多少 Worker 地址",
           "gridPos": {
             "x": 0,
-            "y": 1684,
+            "y": 1693,
             "w": 12,
             "h": 9
           },
@@ -21807,7 +21882,7 @@
           "title": "每台 Master 索引包含多少不同缓存键",
           "gridPos": {
             "x": 12,
-            "y": 1684,
+            "y": 1693,
             "w": 12,
             "h": 9
           },
@@ -21882,7 +21957,7 @@
           "title": "每台 Master 的缓存索引预计占多少内存",
           "gridPos": {
             "x": 0,
-            "y": 1693,
+            "y": 1702,
             "w": 12,
             "h": 9
           },
@@ -21957,7 +22032,7 @@
           "title": "Master 为每台 Worker 登记了多少缓存键",
           "gridPos": {
             "x": 12,
-            "y": 1693,
+            "y": 1702,
             "w": 12,
             "h": 9
           },
@@ -22032,7 +22107,7 @@
           "title": "每台 Worker 的索引记录预计占多少 Master 内存",
           "gridPos": {
             "x": 0,
-            "y": 1702,
+            "y": 1711,
             "w": 12,
             "h": 9
           },
@@ -22107,7 +22182,7 @@
           "title": "一次 Cache 更新新增 / 删除多少键",
           "gridPos": {
             "x": 12,
-            "y": 1702,
+            "y": 1711,
             "w": 12,
             "h": 9
           },
@@ -22191,7 +22266,7 @@
           "title": "取得缓存更新锁后：更新索引要多久",
           "gridPos": {
             "x": 0,
-            "y": 1711,
+            "y": 1720,
             "w": 12,
             "h": 9
           },
@@ -22266,7 +22341,7 @@
           "title": "选机查询缓存索引要多久",
           "gridPos": {
             "x": 12,
-            "y": 1711,
+            "y": 1720,
             "w": 12,
             "h": 9
           },
@@ -22341,7 +22416,7 @@
           "title": "一个缓存块对应多少 Tokens",
           "gridPos": {
             "x": 0,
-            "y": 1720,
+            "y": 1729,
             "w": 12,
             "h": 9
           },
@@ -22416,7 +22491,7 @@
           "title": "Master 启动累计：历史重复 / 输入 Tokens",
           "gridPos": {
             "x": 12,
-            "y": 1720,
+            "y": 1729,
             "w": 12,
             "h": 9
           },
@@ -22500,7 +22575,7 @@
           "title": "Master 每秒做多少次缓存索引匹配",
           "gridPos": {
             "x": 0,
-            "y": 1729,
+            "y": 1738,
             "w": 12,
             "h": 9
           },
@@ -22575,7 +22650,7 @@
           "title": "FlexLB recent cache key hit/total count",
           "gridPos": {
             "x": 12,
-            "y": 1729,
+            "y": 1738,
             "w": 12,
             "h": 9
           },
@@ -22656,7 +22731,7 @@
       ],
       "gridPos": {
         "x": 0,
-        "y": 1665,
+        "y": 1674,
         "w": 24,
         "h": 1
       }
@@ -22673,7 +22748,7 @@
           "title": "Status 更新失败：原因与每秒次数",
           "gridPos": {
             "x": 0,
-            "y": 1739,
+            "y": 1748,
             "w": 12,
             "h": 9
           },
@@ -22748,7 +22823,7 @@
           "title": "Status 回包在 Master 成功提交：QPS",
           "gridPos": {
             "x": 12,
-            "y": 1739,
+            "y": 1748,
             "w": 12,
             "h": 9
           },
@@ -22823,7 +22898,7 @@
           "title": "Cache 更新失败：原因与每秒次数",
           "gridPos": {
             "x": 0,
-            "y": 1748,
+            "y": 1757,
             "w": 12,
             "h": 9
           },
@@ -22898,7 +22973,7 @@
           "title": "Cache 回包在 Master 成功处理：QPS",
           "gridPos": {
             "x": 12,
-            "y": 1748,
+            "y": 1757,
             "w": 12,
             "h": 9
           },
@@ -22973,7 +23048,7 @@
           "title": "恢复成功时：距上次成功已经多久",
           "gridPos": {
             "x": 0,
-            "y": 1757,
+            "y": 1766,
             "w": 12,
             "h": 9
           },
@@ -23057,7 +23132,7 @@
           "title": "Master 一轮同步多久完成：Status / Cache",
           "gridPos": {
             "x": 12,
-            "y": 1757,
+            "y": 1766,
             "w": 12,
             "h": 9
           },
@@ -23141,7 +23216,7 @@
           "title": "Worker 实际收到多少 Status / Cache 查询",
           "gridPos": {
             "x": 0,
-            "y": 1766,
+            "y": 1775,
             "w": 12,
             "h": 9
           },
@@ -23243,7 +23318,7 @@
           "title": "Worker 服务端处理查询多久：平均 / 最大（实例均值最大值）",
           "gridPos": {
             "x": 12,
-            "y": 1766,
+            "y": 1775,
             "w": 12,
             "h": 9
           },
@@ -23381,7 +23456,7 @@
           "title": "Status RPC 发起线程池：执行 / 排队 / 线程数",
           "gridPos": {
             "x": 0,
-            "y": 1775,
+            "y": 1784,
             "w": 12,
             "h": 9
           },
@@ -23456,7 +23531,7 @@
           "title": "Status 回包本地提交线程池：执行 / 排队 / 线程数",
           "gridPos": {
             "x": 12,
-            "y": 1775,
+            "y": 1784,
             "w": 12,
             "h": 9
           },
@@ -23531,7 +23606,7 @@
           "title": "Cache 轮询与处理线程池：执行 / 排队 / 线程数",
           "gridPos": {
             "x": 0,
-            "y": 1784,
+            "y": 1793,
             "w": 12,
             "h": 9
           },
@@ -23606,7 +23681,7 @@
           "title": "周期轮询调度线程池：执行 / 排队 / 线程数",
           "gridPos": {
             "x": 12,
-            "y": 1784,
+            "y": 1793,
             "w": 12,
             "h": 9
           },
@@ -23681,7 +23756,7 @@
           "title": "Client gRPC 回调线程池：执行 / 排队 / 线程数",
           "gridPos": {
             "x": 0,
-            "y": 1793,
+            "y": 1802,
             "w": 12,
             "h": 9
           },
@@ -23756,7 +23831,7 @@
           "title": "Client gRPC EventLoop：线程数 / 待处理任务",
           "gridPos": {
             "x": 12,
-            "y": 1793,
+            "y": 1802,
             "w": 12,
             "h": 9
           },
@@ -23831,7 +23906,7 @@
           "title": "Client RPC 成功耗时：平均 / 最大",
           "gridPos": {
             "x": 0,
-            "y": 1802,
+            "y": 1811,
             "w": 12,
             "h": 9
           },
@@ -23915,7 +23990,7 @@
           "title": "Client RPC 成功 QPS：按操作 / 是否重试",
           "gridPos": {
             "x": 12,
-            "y": 1802,
+            "y": 1811,
             "w": 12,
             "h": 9
           },
@@ -23990,7 +24065,7 @@
           "title": "Client 回调交付延迟：平均 / 最大 · 待埋点",
           "gridPos": {
             "x": 0,
-            "y": 1811,
+            "y": 1820,
             "w": 12,
             "h": 9
           },
@@ -24074,7 +24149,7 @@
           "title": "Client 重连前：旧 Channel 已存活多久",
           "gridPos": {
             "x": 12,
-            "y": 1811,
+            "y": 1820,
             "w": 12,
             "h": 9
           },
@@ -24149,7 +24224,7 @@
           "title": "每台 Master 连接池有多少 gRPC Channel",
           "gridPos": {
             "x": 0,
-            "y": 1820,
+            "y": 1829,
             "w": 12,
             "h": 9
           },
@@ -24224,7 +24299,7 @@
           "title": "Worker Prefill 线程池：正在执行任务的线程 · 待埋点",
           "gridPos": {
             "x": 12,
-            "y": 1820,
+            "y": 1829,
             "w": 12,
             "h": 9
           },
@@ -24308,7 +24383,7 @@
           "title": "Worker Prefill 线程池：尚未执行的任务 · 待埋点",
           "gridPos": {
             "x": 0,
-            "y": 1829,
+            "y": 1838,
             "w": 12,
             "h": 9
           },
@@ -24392,7 +24467,7 @@
           "title": "Worker Prefill 线程池：活跃线程 / 配置上限 · 待埋点",
           "gridPos": {
             "x": 12,
-            "y": 1829,
+            "y": 1838,
             "w": 12,
             "h": 9
           },
@@ -24494,7 +24569,7 @@
           "title": "Worker Prefill 拒绝指标（计数口径待核实） · 待埋点",
           "gridPos": {
             "x": 0,
-            "y": 1838,
+            "y": 1847,
             "w": 12,
             "h": 9
           },
@@ -24578,7 +24653,7 @@
           "title": "Client 连接异常：传输事件 / 底层原因 · 待埋点",
           "gridPos": {
             "x": 12,
-            "y": 1838,
+            "y": 1847,
             "w": 12,
             "h": 9
           },
@@ -24653,7 +24728,7 @@
           "title": "Client RPC 失败 QPS：原因 / gRPC 状态 · 待埋点",
           "gridPos": {
             "x": 0,
-            "y": 1847,
+            "y": 1856,
             "w": 12,
             "h": 9
           },
@@ -24728,7 +24803,7 @@
           "title": "Client RPC 失败 QPS：已确认本地 / 原因未确认 · 待埋点",
           "gridPos": {
             "x": 12,
-            "y": 1847,
+            "y": 1856,
             "w": 12,
             "h": 9
           },
@@ -24803,7 +24878,7 @@
           "title": "Client RPC 失败位置：本地阶段 / 传输进度 · 待埋点",
           "gridPos": {
             "x": 0,
-            "y": 1856,
+            "y": 1865,
             "w": 12,
             "h": 9
           },
@@ -24878,7 +24953,7 @@
           "title": "Status/Cache 更新失败：操作 / 阶段 / 原因 · 待埋点",
           "gridPos": {
             "x": 12,
-            "y": 1856,
+            "y": 1865,
             "w": 12,
             "h": 9
           },
@@ -24953,7 +25028,7 @@
           "title": "Status/Cache 更新失败：归因 / gRPC 状态 · 待埋点",
           "gridPos": {
             "x": 0,
-            "y": 1865,
+            "y": 1874,
             "w": 12,
             "h": 9
           },
@@ -25025,7 +25100,7 @@
       ],
       "gridPos": {
         "x": 0,
-        "y": 1738,
+        "y": 1747,
         "w": 24,
         "h": 1
       }
@@ -25042,7 +25117,7 @@
           "title": "每台 Master 各优先级收到多少选机调用",
           "gridPos": {
             "x": 0,
-            "y": 1875,
+            "y": 1884,
             "w": 12,
             "h": 9
           },
@@ -25117,7 +25192,7 @@
           "title": "各优先级从接入到调度返回多久",
           "gridPos": {
             "x": 12,
-            "y": 1875,
+            "y": 1884,
             "w": 12,
             "h": 9
           },
@@ -25192,7 +25267,7 @@
           "title": "待核实：请求调度 SLO 指标（本版未找到上报） · 待埋点",
           "gridPos": {
             "x": 0,
-            "y": 1884,
+            "y": 1893,
             "w": 12,
             "h": 9
           },
@@ -25267,7 +25342,7 @@
           "title": "待核实：Deadline 未达标指标（本版未找到上报） · 待埋点",
           "gridPos": {
             "x": 12,
-            "y": 1884,
+            "y": 1893,
             "w": 12,
             "h": 9
           },
@@ -25342,7 +25417,7 @@
           "title": "待核实：常规放置指标（本版未找到上报） · 待埋点",
           "gridPos": {
             "x": 0,
-            "y": 1893,
+            "y": 1902,
             "w": 12,
             "h": 9
           },
@@ -25417,7 +25492,7 @@
           "title": "Prefill 已选机后：每台平均积压多少请求",
           "gridPos": {
             "x": 12,
-            "y": 1893,
+            "y": 1902,
             "w": 12,
             "h": 9
           },
@@ -25492,7 +25567,7 @@
           "title": "抢占计划：检查 / 提交尝试 / 旧冲突指标 · 部分待埋点",
           "gridPos": {
             "x": 0,
-            "y": 1902,
+            "y": 1911,
             "w": 12,
             "h": 9
           },
@@ -25585,7 +25660,7 @@
           "title": "每秒选中多少个被抢占请求",
           "gridPos": {
             "x": 12,
-            "y": 1902,
+            "y": 1911,
             "w": 12,
             "h": 9
           },
@@ -25660,7 +25735,7 @@
           "title": "每秒记录多少次优先级抢占",
           "gridPos": {
             "x": 0,
-            "y": 1911,
+            "y": 1920,
             "w": 12,
             "h": 9
           },
@@ -25735,7 +25810,7 @@
           "title": "取消推进到哪一步：产生意图 / 发 RPC / 确认",
           "gridPos": {
             "x": 12,
-            "y": 1911,
+            "y": 1920,
             "w": 12,
             "h": 9
           },
@@ -25828,7 +25903,7 @@
           "title": "取消等待窗口内未等到确认：QPS",
           "gridPos": {
             "x": 0,
-            "y": 1920,
+            "y": 1929,
             "w": 12,
             "h": 9
           },
@@ -25903,7 +25978,7 @@
           "title": "待核实：抢占计划年龄（本版未找到上报） · 待埋点",
           "gridPos": {
             "x": 12,
-            "y": 1920,
+            "y": 1929,
             "w": 12,
             "h": 9
           },
@@ -25978,7 +26053,7 @@
           "title": "抢占结束对账时：找不到在途记录的次数",
           "gridPos": {
             "x": 0,
-            "y": 1929,
+            "y": 1938,
             "w": 12,
             "h": 9
           },
@@ -26053,7 +26128,7 @@
           "title": "Decode 账本：正在运行 / 尚未接收 / 已接收待运行",
           "gridPos": {
             "x": 12,
-            "y": 1929,
+            "y": 1938,
             "w": 12,
             "h": 9
           },
@@ -26146,7 +26221,7 @@
           "title": "Decode 已派给引擎多少请求（账本计数）",
           "gridPos": {
             "x": 0,
-            "y": 1938,
+            "y": 1947,
             "w": 12,
             "h": 9
           },
@@ -26221,7 +26296,7 @@
           "title": "Decode 尚未下发请求的硬 KV 预留",
           "gridPos": {
             "x": 12,
-            "y": 1938,
+            "y": 1947,
             "w": 12,
             "h": 9
           },
@@ -26296,7 +26371,7 @@
           "title": "每次抢占释放多少账本 KV 预留",
           "gridPos": {
             "x": 0,
-            "y": 1947,
+            "y": 1956,
             "w": 12,
             "h": 9
           },
@@ -26368,7 +26443,7 @@
       ],
       "gridPos": {
         "x": 0,
-        "y": 1874,
+        "y": 1883,
         "w": 24,
         "h": 1
       }
@@ -26385,7 +26460,7 @@
           "title": "Master JVM 堆内存：当前已用 / 配置上限",
           "gridPos": {
             "x": 0,
-            "y": 1957,
+            "y": 1966,
             "w": 12,
             "h": 9
           },
@@ -26469,7 +26544,7 @@
           "title": "Master JVM BufferPool：已用 / 当前容量",
           "gridPos": {
             "x": 12,
-            "y": 1957,
+            "y": 1966,
             "w": 12,
             "h": 9
           },
@@ -26571,7 +26646,7 @@
           "title": "GC 用时采集值：Full / Young（口径待核实） · 待埋点",
           "gridPos": {
             "x": 0,
-            "y": 1966,
+            "y": 1975,
             "w": 12,
             "h": 9
           },
@@ -26655,7 +26730,7 @@
           "title": "GC 次数采集值：Full / Young（口径待核实） · 待埋点",
           "gridPos": {
             "x": 12,
-            "y": 1966,
+            "y": 1975,
             "w": 12,
             "h": 9
           },
@@ -26739,7 +26814,7 @@
           "title": "容器 CPU 采集值（比例口径待核实） · 待埋点",
           "gridPos": {
             "x": 0,
-            "y": 1975,
+            "y": 1984,
             "w": 12,
             "h": 9
           },
@@ -26814,7 +26889,7 @@
           "title": "容器最近 1 分钟 CPU Load · 待埋点",
           "gridPos": {
             "x": 12,
-            "y": 1975,
+            "y": 1984,
             "w": 12,
             "h": 9
           },
@@ -26889,7 +26964,7 @@
           "title": "容器内存 v3 采集值（比例口径待核实） · 待埋点",
           "gridPos": {
             "x": 0,
-            "y": 1984,
+            "y": 1993,
             "w": 12,
             "h": 9
           },
@@ -26964,7 +27039,7 @@
           "title": "容器内存旧采集值（比例口径待核实） · 待埋点",
           "gridPos": {
             "x": 12,
-            "y": 1984,
+            "y": 1993,
             "w": 12,
             "h": 9
           },
@@ -27039,7 +27114,7 @@
           "title": "Master JVM 线程：总数 / 可运行 / 死锁 · 部分待埋点",
           "gridPos": {
             "x": 0,
-            "y": 1993,
+            "y": 2002,
             "w": 12,
             "h": 9
           },
@@ -27132,7 +27207,7 @@
           "title": "容器 OOM 事件采集值（累计口径待核实） · 待埋点",
           "gridPos": {
             "x": 12,
-            "y": 1993,
+            "y": 2002,
             "w": 12,
             "h": 9
           },
@@ -27207,7 +27282,7 @@
           "title": "容器每秒发生多少次 Major Page Fault · 待埋点",
           "gridPos": {
             "x": 0,
-            "y": 2002,
+            "y": 2011,
             "w": 12,
             "h": 9
           },
@@ -27282,7 +27357,7 @@
           "title": "各 Master TCP 连接处在哪个状态 · 待埋点",
           "gridPos": {
             "x": 12,
-            "y": 2002,
+            "y": 2011,
             "w": 12,
             "h": 9
           },
@@ -27357,7 +27432,7 @@
           "title": "Master JVM 非堆内存：当前已用 / 上限",
           "gridPos": {
             "x": 0,
-            "y": 2011,
+            "y": 2020,
             "w": 12,
             "h": 9
           },
@@ -27441,7 +27516,7 @@
           "title": "JVM 编译代码缓存各区域（比例口径待核实） · 待埋点",
           "gridPos": {
             "x": 12,
-            "y": 2011,
+            "y": 2020,
             "w": 12,
             "h": 9
           },
@@ -27543,7 +27618,7 @@
           "title": "Netty Direct：被缓冲区占用的内存（pinned） · 待埋点",
           "gridPos": {
             "x": 0,
-            "y": 2020,
+            "y": 2029,
             "w": 12,
             "h": 9
           },
@@ -27618,7 +27693,7 @@
           "title": "Netty Direct：分配器保留内存（reserved） · 待埋点",
           "gridPos": {
             "x": 12,
-            "y": 2020,
+            "y": 2029,
             "w": 12,
             "h": 9
           },
@@ -27693,7 +27768,7 @@
           "title": "Netty 内存采样耗时 · 待埋点",
           "gridPos": {
             "x": 0,
-            "y": 2029,
+            "y": 2038,
             "w": 12,
             "h": 9
           },
@@ -27768,7 +27843,7 @@
           "title": "Netty 内存采样：两次成功采样间隔 · 待埋点",
           "gridPos": {
             "x": 12,
-            "y": 2029,
+            "y": 2038,
             "w": 12,
             "h": 9
           },
@@ -27840,7 +27915,7 @@
       ],
       "gridPos": {
         "x": 0,
-        "y": 1956,
+        "y": 1965,
         "w": 24,
         "h": 1
       }
@@ -27857,7 +27932,7 @@
           "title": "Master CPU",
           "gridPos": {
             "x": 0,
-            "y": 2039,
+            "y": 2048,
             "w": 12,
             "h": 9
           },
@@ -27935,7 +28010,7 @@
           "title": "Master JVM 内存",
           "gridPos": {
             "x": 12,
-            "y": 2039,
+            "y": 2048,
             "w": 12,
             "h": 9
           },
@@ -28013,7 +28088,7 @@
           "title": "Master Direct Buffer 内存",
           "gridPos": {
             "x": 0,
-            "y": 2048,
+            "y": 2057,
             "w": 12,
             "h": 9
           },
@@ -28082,7 +28157,7 @@
           "title": "Master GC 暂停",
           "gridPos": {
             "x": 12,
-            "y": 2048,
+            "y": 2057,
             "w": 12,
             "h": 9
           },
@@ -28151,7 +28226,7 @@
           "title": "Master JVM 线程",
           "gridPos": {
             "x": 0,
-            "y": 2057,
+            "y": 2066,
             "w": 12,
             "h": 9
           },
@@ -28220,7 +28295,7 @@
           "title": "Master Executor 排队",
           "gridPos": {
             "x": 12,
-            "y": 2057,
+            "y": 2066,
             "w": 12,
             "h": 9
           },
@@ -28298,7 +28373,7 @@
           "title": "Master Executor 活跃线程",
           "gridPos": {
             "x": 0,
-            "y": 2066,
+            "y": 2075,
             "w": 12,
             "h": 9
           },
@@ -28376,7 +28451,7 @@
           "title": "Master gRPC 通道",
           "gridPos": {
             "x": 12,
-            "y": 2066,
+            "y": 2075,
             "w": 12,
             "h": 9
           },
@@ -28445,7 +28520,7 @@
           "title": "Master Executor 线程数与上限",
           "gridPos": {
             "x": 0,
-            "y": 2075,
+            "y": 2084,
             "w": 12,
             "h": 9
           },
@@ -28532,7 +28607,7 @@
           "title": "Master Executor 完成任务速率",
           "gridPos": {
             "x": 12,
-            "y": 2075,
+            "y": 2084,
             "w": 12,
             "h": 9
           },
@@ -28610,7 +28685,7 @@
           "title": "Master gRPC CallerRuns 速率",
           "gridPos": {
             "x": 0,
-            "y": 2084,
+            "y": 2093,
             "w": 12,
             "h": 9
           },
@@ -28679,7 +28754,7 @@
           "title": "Master GC 次数与耗时速率",
           "gridPos": {
             "x": 12,
-            "y": 2084,
+            "y": 2093,
             "w": 12,
             "h": 9
           },
@@ -28748,7 +28823,7 @@
           "title": "Master GC 暂停耗时 / 墙钟时间",
           "gridPos": {
             "x": 0,
-            "y": 2093,
+            "y": 2102,
             "w": 12,
             "h": 9
           },
@@ -28817,7 +28892,7 @@
           "title": "Master JVM 最大可用内存",
           "gridPos": {
             "x": 12,
-            "y": 2093,
+            "y": 2102,
             "w": 12,
             "h": 9
           },
@@ -28886,7 +28961,7 @@
           "title": "Master Buffer Pool · 已用与容量",
           "gridPos": {
             "x": 0,
-            "y": 2102,
+            "y": 2111,
             "w": 12,
             "h": 9
           },
@@ -28964,7 +29039,7 @@
           "title": "Master Buffer Pool · Buffer 数",
           "gridPos": {
             "x": 12,
-            "y": 2102,
+            "y": 2111,
             "w": 12,
             "h": 9
           },
@@ -29033,7 +29108,7 @@
           "title": "Master 进程文件句柄",
           "gridPos": {
             "x": 0,
-            "y": 2111,
+            "y": 2120,
             "w": 12,
             "h": 9
           },
@@ -29111,7 +29186,7 @@
           "title": "Master 系统负载与可用 CPU",
           "gridPos": {
             "x": 12,
-            "y": 2111,
+            "y": 2120,
             "w": 12,
             "h": 9
           },
@@ -29189,7 +29264,7 @@
           "title": "Master JVM 线程总数",
           "gridPos": {
             "x": 0,
-            "y": 2120,
+            "y": 2129,
             "w": 12,
             "h": 9
           },
@@ -29258,7 +29333,7 @@
           "title": "Master JVM 内存池 · 已用 / 已提交",
           "gridPos": {
             "x": 12,
-            "y": 2120,
+            "y": 2129,
             "w": 12,
             "h": 9
           },
@@ -29336,7 +29411,7 @@
           "title": "Master JVM 内存池 · 有定义的上限",
           "gridPos": {
             "x": 0,
-            "y": 2129,
+            "y": 2138,
             "w": 12,
             "h": 9
           },
@@ -29405,7 +29480,7 @@
           "title": "Master JVM 内存池 · 已用 / 上限",
           "gridPos": {
             "x": 12,
-            "y": 2129,
+            "y": 2138,
             "w": 12,
             "h": 9
           },
@@ -29474,7 +29549,7 @@
           "title": "Master JVM 分配 / 晋升速率",
           "gridPos": {
             "x": 0,
-            "y": 2138,
+            "y": 2147,
             "w": 12,
             "h": 9
           },
@@ -29552,7 +29627,7 @@
           "title": "Master JVM GC 后长期存活池 · 存活量 / 上限",
           "gridPos": {
             "x": 12,
-            "y": 2138,
+            "y": 2147,
             "w": 12,
             "h": 9
           },
@@ -29630,7 +29705,7 @@
           "title": "Master JVM GC 后长期存活池使用率",
           "gridPos": {
             "x": 0,
-            "y": 2147,
+            "y": 2156,
             "w": 12,
             "h": 9
           },
@@ -29699,7 +29774,7 @@
           "title": "Master JVM GC 开销估计",
           "gridPos": {
             "x": 12,
-            "y": 2147,
+            "y": 2156,
             "w": 12,
             "h": 9
           },
@@ -29765,7 +29840,7 @@
       ],
       "gridPos": {
         "x": 0,
-        "y": 2038,
+        "y": 2047,
         "w": 24,
         "h": 1
       }
@@ -29782,7 +29857,7 @@
           "title": "采集目标状态",
           "gridPos": {
             "x": 0,
-            "y": 2257,
+            "y": 2266,
             "w": 12,
             "h": 9
           },
@@ -29851,7 +29926,7 @@
           "title": "采集耗时",
           "gridPos": {
             "x": 12,
-            "y": 2257,
+            "y": 2266,
             "w": 12,
             "h": 9
           },
@@ -29920,7 +29995,7 @@
           "title": "采集样本数",
           "gridPos": {
             "x": 0,
-            "y": 2266,
+            "y": 2275,
             "w": 12,
             "h": 9
           },
@@ -29989,7 +30064,7 @@
           "title": "Master 运行时长",
           "gridPos": {
             "x": 12,
-            "y": 2266,
+            "y": 2275,
             "w": 12,
             "h": 9
           },
@@ -30055,7 +30130,7 @@
       ],
       "gridPos": {
         "x": 0,
-        "y": 2256,
+        "y": 2265,
         "w": 24,
         "h": 1
       }

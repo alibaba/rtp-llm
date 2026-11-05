@@ -98,8 +98,16 @@ def scope(ctx, args, role):
     return f'role={json.dumps(role)},instance=~{json.dumps(expression)}', targets
 
 
+def history_range(ctx, name, labels, millis):
+    if labels is not None:
+        return f'{name}{{{labels}}}[{millis}ms]'
+    # A derived worker gauge: sum priority at each scrape before averaging over time.
+    step = max(1, round(ctx.runtime.monitoring.interval * 1000))
+    return f'({name})[{millis}ms:{step}ms]'
+
+
 async def counter_history(ctx, name, labels, targets, at, millis):
-    counts = await instant(ctx, f'count_over_time({name}{{{labels}}}[{millis}ms])', at)
+    counts = await instant(ctx, f'count_over_time({history_range(ctx, name, labels, millis)})', at)
     if len(counts) != len(targets) or {s.labels.get('instance') for s in counts} != set(targets) or any(s.value < 2 for s in counts):
         raise ExecutionError('Incomplete metric coverage for selected instances')
 
@@ -192,7 +200,7 @@ async def evaluate(ctx, args, expression, histories=()):
     start = at - (count - 1) * step
     period = max(1, round(sample_period(ctx) * 1000))
     for name, labels, targets in histories:
-        coverage = await series_query(ctx, f'count_over_time({name}{{{labels}}}[{period}ms])', start, at, step)
+        coverage = await series_query(ctx, f'count_over_time({history_range(ctx, name, labels, period)})', start, at, step)
         if len(coverage) != len(targets) or {s[0].labels.get('instance') for s in coverage} != set(targets) or any(
                 point.value < 2 for samples in coverage for point in samples):
             raise ExecutionError('Incomplete metric coverage for selected instances')
@@ -207,9 +215,10 @@ async def evaluate(ctx, args, expression, histories=()):
 async def gauge(ctx, args, role, name):
     at, millis, _ = window(ctx, args)
     labels, targets = scope(ctx, args, role)
-    await counter_history(ctx, name, labels, targets, at, millis)
-    expression = f'sum(avg_over_time({name}{{{labels}}}[{millis}ms]))' if args.mode == 'interval' else f'sum({name}{{{labels}}})'
-    return await evaluate(ctx, args, expression, [(name, labels, targets)])
+    worker = f'sum by(instance)({name}{{{labels}}})'
+    await counter_history(ctx, worker, None, targets, at, millis)
+    expression = f'sum(avg_over_time({history_range(ctx, worker, None, millis)}))' if args.mode == 'interval' else f'sum({worker})'
+    return await evaluate(ctx, args, expression, [(worker, None, targets)])
 
 
 async def latency(ctx, args, name):

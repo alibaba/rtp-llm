@@ -220,7 +220,7 @@ def test_event_metrics_use_counts_instead_of_averaging_instance_window_means():
     names = set()
     for path in source.rglob('*.java'):
         names.update(re.findall(r'(?:events\.observe|observePositive|positiveMicros)\("([^\"]+)"', path.read_text()))
-    names = {name for name in names if not name.endswith('_qps')}
+    names = {name for name in names if not name.endswith('_qps') and name != 'py_rtp_vit_embedding_tps'}
     names.update(('rtp_llm_rpc_worker_status_total_rt_us', 'rtp_llm_rpc_cache_status_total_rt_us'))
     assert 'rtp_llm_input_token_length' in names
     checked = 0
@@ -236,3 +236,20 @@ def test_event_metrics_use_counts_instead_of_averaging_instance_window_means():
                     assert name + '_count{' in expression, (panel['id'], name)
                     checked += 1
     assert checked >= 50
+
+
+def test_tps_window_counts_rates_and_priority_aggregation_have_distinct_contracts():
+    items = {p['id']: p for p in panels()}
+    for panel_id in (110373, 210373, 210369):
+        assert '报告窗口' in items[panel_id]['title']
+        assert '不是 token/s' in items[panel_id]['description']
+    for panel_id in (110379, 110370, 110373, 210369, 210373):
+        assert 'sum without(priority)' in items[panel_id]['targets'][0]['expr']
+    for panel_id in (48, 52, 53, 600048, 600052, 600053):
+        for target in items[panel_id]['targets']:
+            assert 'avg by' not in target['expr']
+            assert target['expr'].count('sum by') == 2
+    for panel_id in (110430, 210431):
+        assert '墙钟 TPS' in items[panel_id]['title']
+        assert 'rtp_llm_forward_tokens_total' in items[panel_id]['targets'][0]['expr']
+    assert 'py_rtp_vit_embedding_tps{' in items[310691]['targets'][0]['expr']

@@ -257,3 +257,40 @@ def test_latency_interval_uses_request_weights_and_merges_histogram_buckets(monk
     assert ' / sum(increase(mock_client_ttft_seconds_count' in expressions[-1]
     asyncio.run(ClientTtft.execute(ctx, LatencyArgs(range=['-30s', '0s'], statistic='p95')))
     assert 'histogram_quantile(0.95, sum by(le)(increase(' in expressions[-1]
+
+
+@pytest.mark.parametrize('mode', ['interval', 'series'])
+def test_prefill_priority_is_summed_before_time_average_and_coverage_is_per_worker(monkeypatch, mode):
+    ctx = context()
+    ctx.runtime.monitoring = SimpleNamespace(interval=1)
+    calls = []
+    async def instant(ctx, expression, at):
+        calls.append(expression)
+        if expression.startswith('count_over_time'):
+            return [metrics.QuerySample({'instance': f'127.0.0.1:{p}'}, 4, at) for p in (1001, 1002)]
+        return [metrics.QuerySample({}, 30, at)]
+    async def series(ctx, expression, start, end, step):
+        calls.append(expression)
+        if expression.startswith('count_over_time'):
+            return [[metrics.QuerySample({'instance': f'127.0.0.1:{p}'}, 4, end)] for p in (1001, 1002)]
+        return [[metrics.QuerySample({}, 30, end)]]
+    monkeypatch.setattr(metrics, 'instant', instant)
+    monkeypatch.setattr(metrics, 'series_query', series)
+    result = asyncio.run(EnginePrefillTps.execute(ctx, metrics.MetricArgs(range=['-10s', '0s'], mode=mode)))
+    assert result == (30 if mode == 'interval' else [30])
+    assert all('sum by(instance)(rtp_llm_context_tps{' in query for query in calls)
+    if mode == 'interval':
+        assert calls[-1].startswith('sum(avg_over_time((sum by(instance)(')
+        assert '[10000ms:1000ms]' in calls[-1]
+    else:
+        assert calls[-1].startswith('sum(sum by(instance)(')
+
+
+def test_prefill_gauge_rejects_a_missing_worker_after_priority_aggregation(monkeypatch):
+    ctx = context()
+    ctx.runtime.monitoring = SimpleNamespace(interval=1)
+    async def instant(ctx, expression, at):
+        return [metrics.QuerySample({'instance': '127.0.0.1:1001'}, 4, at)]
+    monkeypatch.setattr(metrics, 'instant', instant)
+    with pytest.raises(ExecutionError, match='coverage'):
+        asyncio.run(EnginePrefillTps.execute(ctx, metrics.MetricArgs()))
