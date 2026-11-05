@@ -431,6 +431,18 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                     and gate.device == qkv.device
                     and not gate.requires_grad
                 )
+                # Eager prefix-reuse prefill: the ragged paged kernels fuse the
+                # gate (sigmoid in the split/merge epilogue), so a clean
+                # [tokens, q_width] gate rides the attention call for free.
+                # Dense prefill (no prefix) and the MTP draft keep the torch
+                # path: neither has a fused-gate kernel route.
+                or (
+                    self._is_prefix_reuse_prefill()
+                    and not self._is_mtp_draft
+                    and gate.shape == (qkv.shape[0], self.q_width)
+                    and gate.device == qkv.device
+                    and not gate.requires_grad
+                )
             )
             and gate.dtype == torch.bfloat16
             and gate.is_contiguous()
@@ -461,7 +473,14 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             and output_gate.dtype == torch.bfloat16
             and output_gate.device == qkv.device
             and output_gate.is_contiguous()
-            and (self.is_target_verify or not self.is_prefill or self._is_draft_graph())
+            and (
+                self.is_target_verify
+                or not self.is_prefill
+                or self._is_draft_graph()
+                # Eager prefix-reuse prefill fuses the gate into the ragged
+                # split/merge kernels; dense prefill has no fused gate path.
+                or self._is_prefix_reuse_prefill()
+            )
         ):
             raise ValueError(
                 "fused QSA output gate requires a packed paged decode plan"
@@ -602,6 +621,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 kv_cache,
                 paged_plan,
                 validate_selected=not trusted_selected,
+                output_gate=output_gate,
             )
             if uses_stored_selection:
                 self._selected_indices = None
@@ -757,6 +777,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         plan: PagedInputs | IncrementalPrefillInputs,
         *,
         validate_selected: bool = True,
+        output_gate: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Run paged attention over packed incremental-prefill requests."""
         assert kv_cache is not None
@@ -777,6 +798,11 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         max_rows = max(int(req.end) - int(req.start) for req in requests)
         batch_rows = self._is_mtp_draft and len(requests) > 1 and max_rows <= 4
         if batch_rows:
+            if output_gate is not None:
+                raise NotImplementedError(
+                    "the fused output gate is not wired for the padded "
+                    "draft batch path; route the gate through torch instead"
+                )
             # The draft's short, ragged windows share a single paged launch.
             # Invalid padded rows cannot read KV: their visible length is zero
             # and every selected index is -1. Restore packed order afterwards.
@@ -852,23 +878,50 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             )
 
         outputs = []
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
+            _grouped_split_supported as _paged_grouped_ok,
+        )
+
         for request_idx, request in enumerate(requests):
             start, end = int(request.start), int(request.end)
             query_len = end - start
             request_q = q[start:end].view(1, query_len, self.head_num, self.head_dim)
-            request_q = request_q.transpose(1, 2).contiguous()
+            request_q = request_q.transpose(1, 2)
+            request_gate = None
+            if output_gate is not None:
+                request_gate = output_gate[start:end].view(
+                    1, query_len, self.head_num, self.head_dim
+                )
+            request_selected = request.selected_indices
+            # On the SM90 grouped geometry the query stays a strided BTHD
+            # view and the kernel writes BTHD directly; other geometries keep
+            # the contiguous BHSD contract.
+            fused_layout = _paged_grouped_ok(
+                request_q,
+                kv_cache.kv_cache_base,
+                request_selected,
+                page_size=page_size,
+                selected_width=int(request_selected.shape[-1]),
+            )
+            if not fused_layout:
+                request_q = request_q.contiguous()
             request_output = sparse_paged_gqa_attn(
                 request_q,
                 kv_cache.kv_cache_base,
                 block_table[request_idx : request_idx + 1].contiguous(),
                 request.kv_lens,
-                request.selected_indices,
+                request_selected,
                 page_size=page_size,
                 kv_head_num=self.kv_head_num,
                 validate_selected=validate_selected,
+                output_gate=request_gate,
+                bthd_output=fused_layout,
                 **self._paged_kv_scale_args(kv_cache),
             )
-            outputs.append(
-                request_output.transpose(1, 2).reshape(query_len, self.q_width)
-            )
+            if fused_layout:
+                outputs.append(request_output.reshape(query_len, self.q_width))
+            else:
+                outputs.append(
+                    request_output.transpose(1, 2).reshape(query_len, self.q_width)
+                )
         return torch.cat(outputs, dim=0)

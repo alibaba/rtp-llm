@@ -111,6 +111,36 @@ def _attn_configs(max_seq_len: int) -> AttentionConfigs:
     return configs
 
 
+def _bench_qk_norm(device: torch.device):
+    """Production QK zero-centered RMSNorm so the bench measures the real norm.
+
+    SM90 takes the single-launch Triton path; other devices exercise the torch
+    fallback. Gammas follow the checkpoint's small-magnitude profile.
+    """
+    from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+        ZeroCenteredFusedQKRMSNorm,
+    )
+
+    gen = torch.Generator(device=device).manual_seed(20261105)
+    return ZeroCenteredFusedQKRMSNorm(
+        (
+            torch.randn(
+                HEAD_DIM, generator=gen, device=device, dtype=torch.float32
+            )
+            * 0.07
+        ).to(torch.bfloat16),
+        (
+            torch.randn(
+                HEAD_DIM, generator=gen, device=device, dtype=torch.float32
+            )
+            * 0.11
+        ).to(torch.bfloat16),
+        Q_HEADS,
+        KV_HEADS,
+        HEAD_DIM,
+    )
+
+
 def _attention(attn_configs: AttentionConfigs, device: torch.device):
     """Build the real Qwen4ExpAttention with minimal projection modules.
 
@@ -171,7 +201,7 @@ def _attention(attn_configs: AttentionConfigs, device: torch.device):
     attention.o_proj = torch.nn.Linear(
         Q_WIDTH, HIDDEN, bias=False, device=device, dtype=torch.bfloat16
     )
-    attention.qk_fuse_norm = None
+    attention.qk_fuse_norm = _bench_qk_norm(device)
     attention.tp_size = 1
     return attention
 
@@ -270,13 +300,14 @@ class _Fixture:
         )
 
     def forward(self, attention, fmha):
-        return attention(
-            self.hidden_states,
-            fmha,
-            self.main_cache,
-            self.inputs,
-            qsa_runtime=self.runtime,
-        )
+        with torch.no_grad():
+            return attention(
+                self.hidden_states,
+                fmha,
+                self.main_cache,
+                self.inputs,
+                qsa_runtime=self.runtime,
+            )
 
 
 def _measure_wall(fixture, attention, fmha, warmup, iters):
