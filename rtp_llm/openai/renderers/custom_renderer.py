@@ -1217,8 +1217,14 @@ class CustomChatRenderer:
         # resolved for GenerateConfig. ADAPTIVE decides from the first token.
         return self.resolve_thinking_mode(request) == ThinkingMode.ENABLED
 
-    def should_process_think(self, request: ChatCompletionRequest):
+    def should_process_think(
+        self,
+        request: ChatCompletionRequest,
+        thinking_mode: Optional[ThinkingMode] = None,
+    ):
         # 留出方法给子类重写, 避免重复的think处理
+        if thinking_mode is not None:
+            return thinking_mode == ThinkingMode.ENABLED
         return self.in_think_mode(request)
 
     def _prompt_ends_with_think_anchor(self, rendered_prompt: str) -> bool:
@@ -1329,21 +1335,11 @@ class CustomChatRenderer:
             enable_think_mode = False
             initial_in_think_mode = False
         else:
-            # The resolved generate_config is authoritative for *routing*: a
-            # request-level enable_thinking must not reopen the state machine
-            # when the endpoint clamped the resolved mode back to DISABLED,
-            # otherwise the reply would be pushed into reasoning_content while
-            # the model was told not to think. The hooks stay in the loop
-            # because some reasoning renderers parse thinking before this base
-            # class and opt out here (QwenRenderer returns False from both).
-            #
-            # ``enable_think_mode`` deliberately stays request-derived: it is
-            # not a routing switch, it only gates whether the usage reports
-            # reasoning_tokens.
-            enable_think_mode = bool(self.in_think_mode(request))
-            initial_in_think_mode = (
-                bool(self.should_process_think(request))
-                and resolved_thinking_mode == ThinkingMode.ENABLED
+            # Use the endpoint's final mode for both routing and usage. Some
+            # renderers parse reasoning themselves and opt out of this split.
+            enable_think_mode = resolved_thinking_mode == ThinkingMode.ENABLED
+            initial_in_think_mode = bool(
+                self.should_process_think(request, resolved_thinking_mode)
             )
         think_status_list = [
             ThinkStatus(

@@ -73,6 +73,7 @@ class ModelConfig(CppModelConfig):
         "config_dtype",
         "template_type",
         "model_name",
+        "served_model_name",
         "quant_config",
         "inter_size",
         "moe_inter_size",
@@ -578,6 +579,9 @@ class ModelConfig(CppModelConfig):
         self.model_name: str = (
             ""  # Model name (also set to engine_config.runtime_config.model_name)
         )
+        # Public API naming is opt-in; model_name also carries an internal
+        # class-name fallback and therefore cannot identify an explicit override.
+        self.served_model_name: Optional[str] = None
         self.lora_infos: Dict[str, str] = {}  # Python-only (C++ lora code removed)
 
         # Model architecture fields
@@ -602,6 +606,12 @@ class ModelConfig(CppModelConfig):
         """
         model_override_args = json.loads(json_model_override_args)
         if model_override_args:
+            if "model_name" in model_override_args:
+                model_name = model_override_args["model_name"]
+                if not isinstance(model_name, str) or not model_name.strip():
+                    raise ValueError("model_name must be a non-empty string")
+                self.model_name = model_name
+                self.served_model_name = model_name
             # Apply rope_scaling override via model_config
             self.apply_rope_scaling_override(model_override_args)
 

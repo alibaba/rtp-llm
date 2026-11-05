@@ -128,7 +128,11 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         return request.prompt_has_think_anchor() is True
 
     @override
-    def should_process_think(self, request: ChatCompletionRequest):
+    def should_process_think(
+        self,
+        request: ChatCompletionRequest,
+        thinking_mode=None,
+    ):
         # 避免在父类中也处理Think
         return False
 

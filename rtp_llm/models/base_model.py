@@ -155,10 +155,8 @@ class BaseModel(object):
             return
         generation_config_path = generate_env_config.generation_config_path
         if generation_config_path:
-            self.default_generate_config.update(
-                json.load(
-                    open(os.path.join(generation_config_path, "generation_config.json"))
-                )
+            self.default_generate_config = GenerateConfig.from_generation_config_path(
+                generation_config_path
             )
             logging.info(
                 f"load generate config:{generation_config_path}/generation_config.json: \n\
