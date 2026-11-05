@@ -21,7 +21,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from rtp_llm.config.v41_runtime import CONFIG_SHA256, V41RuntimeConfig, env_bool
-from rtp_llm.models_py.modules.dsv41.ppu.backend import KERNEL_SYMBOLS
+from rtp_llm.models_py.modules.dsv41.ppu.backend import (
+    check_moe_preprocess,
+    kernel_symbols,
+)
+from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import moe_precision
 from rtp_llm.models_py.modules.dsv41.ppu.native_protocol import native_cache_protocol
 
 GIB = 1024**3
@@ -199,6 +203,7 @@ def collect_report(env=None, *, probe_allocations=False, require_backend=False):
         "python": sys.version,
         "uid": os.getuid(),
         "cache_store_mode": "rdma" if rdma_required else "tcp",
+        "moe_precision": moe_precision(env),
         "tool_source_sha256": sha256(__file__),
         "runtime_config_source_sha256": sha256(
             Path(__file__).parents[2] / "config/v41_runtime.py"
@@ -298,9 +303,14 @@ def collect_report(env=None, *, probe_allocations=False, require_backend=False):
 
         def wheel(name=name, version=version):
             dist = importlib.metadata.distribution(name)
-            require(dist.version == version, f"{name}: {dist.version} != {version}")
+            # W4A8 requires the newer DeepGEMM-for-sail surface. Probe its
+            # actual imported symbols below and retain package provenance;
+            # the original release wheel is still accepted for W4A4.
+            if name != "deep-gemm":
+                require(dist.version == version, f"{name}: {dist.version} != {version}")
             return {
                 "version": dist.version,
+                "location": str(dist.locate_file("")),
                 "record_sha256": hashlib.sha256(
                     (dist.read_text("RECORD") or "").encode()
                 ).hexdigest(),
@@ -395,10 +405,12 @@ def collect_report(env=None, *, probe_allocations=False, require_backend=False):
             return result
 
         check("ppu_devices", devices)
-        for module_name, functions in KERNEL_SYMBOLS:
+        for module_name, functions in kernel_symbols(env):
 
             def capabilities(module_name=module_name, functions=functions):
                 module = importlib.import_module(module_name)
+                if module_name == "deep_gemm":
+                    check_moe_preprocess(module, env)
                 present = {
                     name: callable(getattr(module, name, None)) for name in functions
                 }
@@ -406,7 +418,10 @@ def collect_report(env=None, *, probe_allocations=False, require_backend=False):
                     all(present.values()),
                     f"{module_name} missing required symbols: {present}",
                 )
-                return present
+                return {
+                    "symbols": present,
+                    "module_file": getattr(module, "__file__", None),
+                }
 
             check(f"symbols:{module_name}", capabilities)
         if probe_allocations:
@@ -456,6 +471,15 @@ def compare_reports(left, right):
     ]
     by_name = [{c["name"]: c for c in report["checks"]} for report in (left, right)]
     differences = []
+    if not left.get("moe_precision") or left.get("moe_precision") != right.get(
+        "moe_precision"
+    ):
+        differences.append(
+            {
+                "name": "moe_precision",
+                "reason": "selected MoE precision unavailable or different",
+            }
+        )
     for name in identity_names:
         entries = [checks.get(name, {}) for checks in by_name]
         if any(e.get("status") != "pass" for e in entries):

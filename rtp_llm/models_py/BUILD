@@ -20,8 +20,22 @@ py_library(
     srcs = [
         "modules/dsv41/ppu/__init__.py",
         "modules/dsv41/ppu/backend.py",
+        "modules/dsv41/ppu/moe_precision.py",
         "modules/dsv41/ppu/native_protocol.py",
         "modules/dsv41/ppu/pd_handoff.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "v41_ppu_moe",
+    srcs = [
+        "modules/dsv41/ppu/linear.py",
+        "modules/dsv41/ppu/moe.py",
+    ],
+    deps = [
+        ":v41_ppu_contract",
+        "//rtp_llm:torch",
     ],
     visibility = ["//visibility:public"],
 )

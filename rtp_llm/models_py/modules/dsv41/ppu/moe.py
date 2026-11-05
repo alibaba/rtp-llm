@@ -1,4 +1,4 @@
-"""PPU MoE module for DeepSeek V4.1 Flash (W4A16 routed experts + sqrtsoftplus gate).
+"""PPU MoE for DeepSeek V4.1 Flash: split W4A8, with a W4A4 override.
 
 Implements the routed-expert half of the V4.1 backend contract
 (``rtp_llm/models_py/modules/dsv41/backend.py``, ``moe`` op) for the PPU
@@ -13,11 +13,10 @@ strategy ``bf16_dense_w4a16_moe_sparse_mla_host_enp_v1``:
     fast path adapted from sglang-for-sail.
   * ``pad_topk_for_dispatch`` — 8-slot ``-1``/``0.0`` padding replicating rtp
     ``moe/strategies/deepep.py::_pad_topk_for_deepep``.
-  * ``PPUMoE`` — expert-parallel MoE: DeepEP normal dispatch/combine when
-    ``deep_ep`` is available, grouped FP4xFP4 (f4f4) GEMM via
-    ``deep_gemm.m_grouped_gemm_fp4_fp4_bf16_nt_nopad`` on device with
-    MXFP4-downcast activations (the sglang-for-sail verified PPU path), and
-    a per-expert dequant reference path for CPU/diagnostics.
+  * ``PPUMoE`` — DeepEP normal dispatch/combine and two DeepGEMM-for-sail
+    grouped GEMMs. The default W4A8 path uses per-row E4M3 activations and
+    MXFP4 weights. ``RTP_V41_PPU_MOE_PRECISION=w4a4`` selects the original
+    MXFP4 activation path. CPU/diagnostic execution uses a dequant reference.
   * ``shared_expert_forward`` / ``combine_routed_and_shared`` — BF16-resident
     shared expert with the clamp-10 SwiGLU convention.
 
@@ -27,8 +26,10 @@ Top-k weight application (IMPORTANT):
   inside the local per-expert compute; ``buffer.combine`` then only sums
   across ranks and does NOT re-scale (sglang-for-sail likewise applies
   weights in ``ep_gather`` after the grouped GEMM, not in combine). This
-  module replicates that behavior:
-    * DeepEP + grouped-GEMM path: weights applied by ``ep_gather``.
+  W4A8 instead follows DeepInfer's weight placement: FP32 SwiGLU -> multiply
+  the per-route weight -> FP8 quantization -> GEMM2. Its gather uses unit
+  weights, and combine only sums. The W4A4 override retains the old order:
+    * W4A4 grouped-GEMM path: weights applied by ``ep_gather``.
     * DeepEP + reference path / LOCAL (no dispatch) path: weights multiplied
       explicitly in the per-expert loop.
   If a future PPU ``deep_ep`` build makes ``combine`` scale by the weights
@@ -54,6 +55,10 @@ import torch.nn.functional as F
 from rtp_llm.models_py.modules.dsv41.ppu.linear import (
     PPUResidentBF16Linear,
     _ue8m0_scales_to_float,
+)
+from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import (
+    moe_kernel_name,
+    moe_precision,
 )
 
 __all__ = [
@@ -1327,6 +1332,51 @@ def _apply_swiglu_limit(gateup_output: torch.Tensor, swiglu_limit: float) -> Non
     gate.clamp_(max=swiglu_limit)
 
 
+def quantize_per_row_fp8(values: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """E4M3 codes and contiguous FP32 [..., 1] dequantization scales.
+
+    DeepGEMM-for-sail W4A8 consumes one scale per row, not packed group-32
+    activation scales. Keep intermediates in FP32, including routed weights.
+    The positive floor makes empty-valued rows quantize to finite zeros.
+    """
+    values = values.float()
+    amax = values.abs().amax(dim=-1, keepdim=True).clamp_min(1e-10)
+    scale = amax / 448.0
+    quant = (values * (448.0 / amax)).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+    return quant.contiguous(), scale.contiguous()
+
+
+def grouped_route_weights(
+    local_ids: torch.Tensor,
+    weights: torch.Tensor,
+    output_index: torch.Tensor,
+    grouped_rows: int,
+) -> torch.Tensor:
+    """Map valid (received token, top-k slot) weights to scatter output rows.
+
+    Scatter assigns a distinct row to each valid route, including multiple
+    experts on the same rank. Never read uninitialized padded-slot indices.
+    """
+    valid = local_ids >= 0
+    result = torch.empty(grouped_rows, dtype=torch.float32, device=weights.device)
+    result.index_copy_(0, output_index[valid].long(), weights[valid].to(torch.float32))
+    return result
+
+
+def routed_swiglu_fp8(
+    gateup: torch.Tensor, weights: torch.Tensor, limit: float
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Clamp BF16 GEMM1 output, then weight FP32 SwiGLU before FP8 casting."""
+    gate, up = gateup.chunk(2, dim=-1)
+    gate, up = gate.float(), up.float()
+    if limit > 0:
+        gate = gate.clamp(max=limit)
+        up = up.clamp(min=-limit, max=limit)
+    hidden = F.silu(gate) * up
+    hidden.mul_(weights.float().unsqueeze(-1))
+    return quantize_per_row_fp8(hidden)
+
+
 # ---------------------------------------------------------------------------
 # PPUMoE
 # ---------------------------------------------------------------------------
@@ -1341,7 +1391,8 @@ class PPUMoE:
       * w13: weight int8/uint8 ``[E, 2I, K/2]`` + scale ``[E, 2I, K/32]``
       * w2:  weight int8/uint8 ``[E, D, I/2]`` + scale ``[E, D, I/32]``
 
-    with ``E = num_local_experts`` (48), ``I = 2048``, ``K = D = 5120``.
+    with ``E = num_local_experts`` (48), ``I = 2304``, ``K = D = 5120``
+    for Flash-1017. The model constructor supplies checkpoint dimensions.
     Only the local expert shard is resident; the FP4 weights are NEVER
     expanded to BF16 wholesale (the reference path dequantizes only experts
     hit by the current tokens).
@@ -1349,14 +1400,11 @@ class PPUMoE:
     Execution paths:
       * DeepEP normal dispatch/combine (``deep_ep`` importable / rtp
         ``DeepEPWrapper`` initialized): 8-slot padded dispatch with
-        ``expert_alignment=1``, recv ids shifted local->global keeping ``-1``,
-        local grouped FP4xFP4 GEMM via
-        ``deep_gemm.m_grouped_gemm_fp4_fp4_bf16_nt_nopad`` — activations are
-        downcast to MXFP4 (sglang-for-sail verified path; the W4A16 nopad
-        kernel cannot run V4.1 Flash shapes because its group_size
-        derivation requires ``n // 64`` to divide k, and w13 n=4608 never
-        satisfies it) — SwiGLU clamp-10, ``ep_gather`` applies router
-        weights, then ``buffer.combine``.
+        ``expert_alignment=1`` and rank-local received expert IDs. W4A8
+        uses E4M3 activations with FP32 row scales; route weights multiply
+        FP32 SwiGLU before the second quantization. The W4A4 override uses
+        MXFP4 activations and applies route weights in ``ep_gather``.
+        Both paths use two nopad grouped GEMMs and ``buffer.combine``.
       * LOCAL path (no ``deep_ep``, ``ep_size == 1``): no dispatch; the
         reference per-expert loop multiplies ``expert_weights`` explicitly.
       * T == 0: returns ``torch.empty(0, hidden)`` — on the DeepEP path
@@ -1386,6 +1434,10 @@ class PPUMoE:
         self.hidden_size = int(hidden_size)
         self.inter_dim = int(inter_dim)
         self.swiglu_limit = float(swiglu_limit)
+        # Freeze the selected precision for this instance and its weight cache.
+        self.precision = moe_precision()
+        self.grouped_forward_calls = 0
+        self.grouped_gemm_calls = 0
         self.group = group
         if self.num_routed_experts % self.num_local_experts != 0:
             raise ValueError(
@@ -1460,8 +1512,24 @@ class PPUMoE:
             ):
                 raise TypeError(f"unsupported expert scale dtype {scale.dtype}")
         self._weights[int(layer_id)] = (w13_weight, w13_scale, w2_weight, w2_scale)
-        self._processed.pop(int(layer_id), None)
+        for key in list(self._processed):
+            if key[0] == int(layer_id):
+                del self._processed[key]
         self._current_layer = int(layer_id)
+
+    def execution_stats(self) -> dict:
+        """Actual device-path counters for functional bring-up evidence."""
+        return {
+            "precision": self.precision,
+            "kernel": moe_kernel_name(self.precision),
+            "grouped_forward_calls": self.grouped_forward_calls,
+            "grouped_gemm_calls": self.grouped_gemm_calls,
+            "route_weight_stage": (
+                "before_gemm2_activation_quantization"
+                if self.precision == "w4a8"
+                else "after_gemm2"
+            ),
+        }
 
     def _layer_weights(self, layer_id: Optional[int]) -> Tuple[torch.Tensor, ...]:
         return self._weights[self._resolve_layer_id(layer_id)]
@@ -1478,7 +1546,7 @@ class PPUMoE:
     def _processed_weights(
         self, layer_id: int, device: torch.device
     ) -> Tuple[torch.Tensor, ...]:
-        """uint8 weight views + f4f4-packed UE8M0 scales (cached)."""
+        """Prepare and cache the selected grouped GEMM's weight/scale ABI."""
         layer_id = self._resolve_layer_id(layer_id)
         key = (layer_id, device)
         cached = self._processed.get(key)
@@ -1487,9 +1555,27 @@ class PPUMoE:
         w13_w, w13_s, w2_w, w2_s = self._layer_weights(layer_id)
         w13_u = _packed_weight_uint8(w13_w)
         w2_u = _packed_weight_uint8(w2_w)
-        w13_sp = preprocess_mxfp4_f4f4_scales(_ue8m0_scale_bytes(w13_s))
-        w2_sp = preprocess_mxfp4_f4f4_scales(_ue8m0_scale_bytes(w2_s))
-        processed = (w13_u, w13_sp, w2_u, w2_sp)
+        if self.precision == "w4a8":
+            import deep_gemm
+
+            mode = deep_gemm.PreprocessMode.W4A8_MXFP4_MMA
+            w13_u, w13_sp, inv13 = deep_gemm.preprocess_weights_and_scales(
+                mode,
+                False,
+                w13_u,
+                _ue8m0_scale_bytes(w13_s).contiguous().view(torch.uint8),
+            )
+            w2_u, w2_sp, inv2 = deep_gemm.preprocess_weights_and_scales(
+                mode,
+                False,
+                w2_u,
+                _ue8m0_scale_bytes(w2_s).contiguous().view(torch.uint8),
+            )
+        else:
+            w13_sp = preprocess_mxfp4_f4f4_scales(_ue8m0_scale_bytes(w13_s))
+            w2_sp = preprocess_mxfp4_f4f4_scales(_ue8m0_scale_bytes(w2_s))
+            inv13 = inv2 = 1.0
+        processed = (w13_u, w13_sp, w2_u, w2_sp, inv13, inv2)
         self._processed[key] = processed
         return processed
 
@@ -1694,8 +1780,8 @@ class PPUMoE:
             y_local = torch.zeros(
                 (m, self.hidden_size), dtype=x.dtype, device=recv_x.device
             )
-        # combine sums across ranks; router weights were already applied in
-        # the local compute (see module docstring for the scaling contract).
+        # Local compute already applies weights, before A2 quantization for
+        # W4A8 or in gather for W4A4. Combine only sums across ranks.
         y_combined, _, _ = buffer.combine(y_local.to(x.dtype), handle)
         return y_combined
 
@@ -1714,7 +1800,7 @@ class PPUMoE:
             return torch.zeros(
                 (0, self.hidden_size), dtype=recv_x.dtype, device=recv_x.device
             )
-        if self._use_grouped_f4f4(recv_x):
+        if self._use_grouped_gemm(recv_x):
             return self._local_compute_grouped(
                 recv_x, local_ids, recv_weights, num_recv_tokens_per_expert, layer_id
             )
@@ -1728,7 +1814,7 @@ class PPUMoE:
             recv_x, global_ids, recv_weights.to(torch.float32), layer_id
         )
 
-    def _use_grouped_f4f4(self, x: torch.Tensor) -> bool:
+    def _use_grouped_gemm(self, x: torch.Tensor) -> bool:
         if not x.is_cuda:
             return False
         if self._grouped_path is None:
@@ -1742,9 +1828,17 @@ class PPUMoE:
                 # per row for the uint16 packing: the quantized dims must be
                 # multiples of 64. (The FP4xFP4 GEMM itself has no group_size
                 # divisibility requirement — verified for V4.1 Flash shapes.)
+                alignment = 128 if self.precision == "w4a8" else 64
                 self._grouped_path = (
-                    self.hidden_size % 64 == 0 and self.inter_dim % 64 == 0
+                    self.hidden_size % alignment == 0
+                    and self.inter_dim % alignment == 0
                 )
+        if self.precision == "w4a8" and not self._grouped_path:
+            raise RuntimeError(
+                "PPU W4A8 requires DeepGEMM-for-sail, Triton and hidden/inter "
+                "dimensions divisible by 128; use "
+                "RTP_V41_PPU_MOE_PRECISION=w4a4 for the legacy device path"
+            )
         return self._grouped_path
 
     def _local_compute_grouped(
@@ -1755,24 +1849,13 @@ class PPUMoE:
         num_recv_tokens_per_expert,
         layer_id: Optional[int],
     ) -> torch.Tensor:
-        """Grouped FP4xFP4 GEMM path (sglang-for-sail PPU deep_gemm runner).
+        """DeepEP's expert-grouped rows through two selected-precision GEMMs.
 
-        Follows the ``use_mxfp4`` (f4f4) branch of sglang-for-sail
-        ``srt/layers/moe/moe_runner/ppu_deepgemm_moe.py::deep_moe_impl_fused``
-        (512b03d, Apache-2.0): pre_permute ``ep_scatter_sail`` (BLOCK_E=1,
-        m_indices, m_rows=num_recv_tokens_per_expert) -> MXFP4 downcast of
-        the activations -> ``m_grouped_gemm_fp4_fp4_bf16_nt_nopad`` for w13 ->
-        SwiGLU clamp-10 -> downcast -> ``m_grouped_gemm_fp4_fp4_bf16_nt_nopad``
-        for w2 -> post_permute ``ep_gather`` (applies the router weights).
-        The W4A16 grouped kernel cannot run V4.1 Flash shapes (its group_size
-        derivation needs ``n // 64`` to divide k; w13 n=4608 never does), so
-        the device path quantizes activations to MXFP4 like sglang does.
-        sglang quantizes the recv activations BEFORE the scatter; quantizing
-        the already-scattered grouped rows is row-wise identical (the
-        quantization is per-row) and reuses the bf16 scatter unchanged. The
-        swiglu limit keeps the sglang clamp-before-SiLU convention
-        (``_apply_swiglu_limit``; the fused
-        ``silu_and_mul_post_quant_mxfp4`` kernel clamps identically in bf16).
+        Retains the sglang-for-sail scatter/gather implementation (512b03d,
+        Apache-2.0). BF16 dispatch is common to both precisions. W4A8 uses
+        native per-row E4M3 x MXFP4 GEMMs with an independent inverse weight
+        scale per projection. The explicit W4A4 override retains its original
+        MXFP4 activation casts and post-GEMM2 routing-weight application.
         """
         import deep_gemm
 
@@ -1784,7 +1867,9 @@ class PPUMoE:
         if all_tokens <= 0:
             # sglang deep_gemm.py:708 zero-token short-circuit.
             return torch.zeros((m, hidden), dtype=recv_x.dtype, device=recv_x.device)
-        w13_u, w13_sp, w2_u, w2_sp = self._processed_weights(layer_id, recv_x.device)
+        w13_u, w13_sp, w2_u, w2_sp, inv13, inv2 = self._processed_weights(
+            layer_id, recv_x.device
+        )
         device = recv_x.device
         m_rows = torch.tensor(
             [int(c) for c in counts], dtype=torch.int32, device=device
@@ -1806,36 +1891,68 @@ class PPUMoE:
             output_index,
             block_e=1,
         )
-        # f4f4: activations are ALSO MXFP4 (sglang use_mxfp4 branch; quantize
-        # the grouped rows — row-wise identical to quantizing before the
-        # scatter, and the uint16 scale comes out already in the grouped
-        # layout the SFA side of the GEMM expects).
-        a_q, a_s = downcast_to_mxfp4(input_tensor, axis=1)
+        # Quantize already-grouped rows; DeepEP continues to dispatch BF16.
+        if self.precision == "w4a8":
+            a_q, a_s = quantize_per_row_fp8(input_tensor)
+        else:
+            a_q, a_s = downcast_to_mxfp4(input_tensor, axis=1)
         gateup_output = torch.empty(
             (all_tokens, 2 * inter), dtype=torch.bfloat16, device=device
         )
-        _m_grouped_gemm_f4f4_nopad(
-            deep_gemm, (a_q, a_s), (w13_u, w13_sp), gateup_output, m_indices, m_rows
-        )
-        # Clamp gate/up BEFORE the SiLU (sglang _apply_swiglu_limit).
-        _apply_swiglu_limit(gateup_output, self.swiglu_limit)
-        gate, up = gateup_output.chunk(2, dim=-1)
-        down_input = (F.silu(gate.float()) * up.float()).to(torch.bfloat16)
-        a2_q, a2_s = downcast_to_mxfp4(down_input, axis=1)
+        if self.precision == "w4a8":
+            gemm = deep_gemm.m_grouped_gemm_fp8_fp4_bf16_nt_nopad
+            gemm(
+                (a_q, a_s),
+                (w13_u, w13_sp),
+                gateup_output,
+                m_indices,
+                m_rows,
+                inv_scale=inv13,
+            )
+            route_weights = grouped_route_weights(
+                local_ids_i32, recv_weights, output_index, all_tokens
+            )
+            a2_q, a2_s = routed_swiglu_fp8(
+                gateup_output, route_weights, self.swiglu_limit
+            )
+            # GEMM2 consumes already-weighted activations. Gather must not
+            # multiply the router weights a second time.
+            gather_weights = torch.ones_like(recv_weights, dtype=torch.float32)
+        else:
+            _m_grouped_gemm_f4f4_nopad(
+                deep_gemm, (a_q, a_s), (w13_u, w13_sp), gateup_output, m_indices, m_rows
+            )
+            _apply_swiglu_limit(gateup_output, self.swiglu_limit)
+            gate, up = gateup_output.chunk(2, dim=-1)
+            down_input = (F.silu(gate.float()) * up.float()).to(torch.bfloat16)
+            a2_q, a2_s = downcast_to_mxfp4(down_input, axis=1)
+            gather_weights = recv_weights.to(torch.float32)
         down_output = torch.empty(
             (all_tokens, hidden), dtype=torch.bfloat16, device=device
         )
-        _m_grouped_gemm_f4f4_nopad(
-            deep_gemm, (a2_q, a2_s), (w2_u, w2_sp), down_output, m_indices, m_rows
-        )
+        if self.precision == "w4a8":
+            gemm(
+                (a2_q, a2_s),
+                (w2_u, w2_sp),
+                down_output,
+                m_indices,
+                m_rows,
+                inv_scale=inv2,
+            )
+        else:
+            _m_grouped_gemm_f4f4_nopad(
+                deep_gemm, (a2_q, a2_s), (w2_u, w2_sp), down_output, m_indices, m_rows
+            )
         gather_out = torch.empty((m, hidden), dtype=torch.bfloat16, device=device)
         ep_gather(
             down_output,
             local_ids_i32,
-            recv_weights.to(torch.float32),
+            gather_weights,
             output_index,
             gather_out,
         )
+        self.grouped_forward_calls += 1
+        self.grouped_gemm_calls += 2
         return gather_out
 
     def _local_expert_counts(self, num_recv_tokens_per_expert) -> List[int]:

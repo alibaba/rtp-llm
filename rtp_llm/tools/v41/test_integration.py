@@ -327,10 +327,13 @@ class IntegrationTest(unittest.TestCase):
                 "details": {"version": 2},
             }
         )
-        left = {"checks": checks, "prerequisites_ok": True}
+        left = {"checks": checks, "prerequisites_ok": True, "moe_precision": "w4a8"}
         right = copy.deepcopy(left)
         right["checks"][2]["details"]["role"] = "DECODE"
         self.assertTrue(compare_reports(left, right)["identities_match"])
+        right["moe_precision"] = "w4a4"
+        self.assertFalse(compare_reports(left, right)["identities_match"])
+        right["moe_precision"] = "w4a8"
         right["checks"][-1]["details"]["version"] = 1
         self.assertFalse(compare_reports(left, right)["identities_match"])
         right["checks"][-1]["details"]["version"] = 2

@@ -14,8 +14,12 @@ class GetBackendTest(unittest.TestCase):
     def test_missing_framework_descriptor_base_is_rejected(self):
         from rtp_llm.models_py.modules.dsv41.ppu.weight import DeepSeekV41PPUWeight
 
-        with patch.object(DeepSeekV41PPUWeight, "framework_base_available", return_value=False):
-            with self.assertRaisesRegex(RuntimeError, "framework weight descriptor base"):
+        with patch.object(
+            DeepSeekV41PPUWeight, "framework_base_available", return_value=False
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "framework weight descriptor base"
+            ):
                 provider.get_backend()
 
     def test_get_backend_returns_validated_backend(self):
@@ -72,18 +76,23 @@ print('ok')
 
 
 class CheckCapabilitiesTest(unittest.TestCase):
+    @patch.dict("os.environ", {"RTP_V41_PPU_MOE_PRECISION": "w4a4"})
     def test_missing_production_fp4_api_fails_even_if_old_api_exists(self):
         modules = {
             name: SimpleNamespace(**{symbol: lambda: None for symbol in symbols})
-            for name, symbols in provider.KERNEL_SYMBOLS
+            for name, symbols in provider.kernel_symbols()
         }
         del modules["deep_gemm"].m_grouped_gemm_fp4_fp4_bf16_nt_nopad
         modules["deep_gemm"].m_grouped_gemm_w4a16_nopad = lambda: None
         modules["deep_gemm"].preprocess_mxfp4_scales = lambda: None
-        with patch("rtp_llm.device.device_type.is_ppu", return_value=True), patch.object(
+        with patch(
+            "rtp_llm.device.device_type.is_ppu", return_value=True
+        ), patch.object(
             provider.importlib, "import_module", side_effect=modules.__getitem__
         ):
-            with self.assertRaisesRegex(RuntimeError, "m_grouped_gemm_fp4_fp4_bf16_nt_nopad"):
+            with self.assertRaisesRegex(
+                RuntimeError, "m_grouped_gemm_fp4_fp4_bf16_nt_nopad"
+            ):
                 provider.check_capabilities(None)
 
     def _is_ppu(self):

@@ -345,6 +345,7 @@ def worker_main(args: argparse.Namespace) -> int:
 
     payload = {
         "rank": rank,
+        "moe": ops.moe_engine.execution_stats(),
         "world_size": world_size,
         "device": str(device),
         "tokens": int(full_ids.numel()),
@@ -498,6 +499,12 @@ def _aggregate(args: argparse.Namespace, world_size: int) -> dict:
         "ranks": payloads,
         "summary": {
             "ranks_reported": len(payloads),
+            "moe_precisions": sorted(
+                {p.get("moe", {}).get("precision", "unknown") for p in payloads}
+            ),
+            "moe_grouped_gemm_calls": sum(
+                p.get("moe", {}).get("grouped_gemm_calls", 0) for p in payloads
+            ),
             "all_finite": bool(payloads)
             and all(
                 p.get("logits_finite") and p.get("hidden_finite") for p in payloads

@@ -688,6 +688,7 @@ def _run_decode(
 
     payload = {
         "rank": rank,
+        "moe": ops.moe_engine.execution_stats(),
         "world_size": world,
         "device": str(device),
         "scenario": args.scenario,
@@ -803,10 +804,17 @@ def _aggregate(output: str, world: int) -> Dict[str, Any]:
     document = {
         "world_size": world,
         "ranks_reported": len(payloads),
+        "moe_precisions": sorted(
+            {p.get("moe", {}).get("precision", "unknown") for p in payloads}
+        ),
+        "moe_grouped_gemm_calls": sum(
+            p.get("moe", {}).get("grouped_gemm_calls", 0) for p in payloads
+        ),
         "scenario": payloads[0].get("scenario") if payloads else None,
         "per_rank_summary": [
             {
                 "rank": p.get("rank"),
+                "moe": p.get("moe"),
                 "active_requests": p.get("active_requests"),
                 "released_before_decode": p.get("released_before_decode"),
                 "steps": len(p.get("steps", [])),

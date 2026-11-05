@@ -24,16 +24,40 @@ from __future__ import annotations
 
 import importlib
 
+from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import (
+    moe_kernel_name,
+    moe_precision,
+)
+
 PROVIDER_NAME = "ppu"
 
-KERNEL_SYMBOLS = (
-    ("deep_gemm", ("m_grouped_gemm_fp4_fp4_bf16_nt_nopad",)),
+COMMON_KERNEL_SYMBOLS = (
     ("deep_ep", ("Buffer",)),
     ("flash_mla", ("flash_mla_sparse_fwd",)),
     # Wheel package is fast-hadamard-transform (import name and symbol per
     # tools/v41/preflight.py and the 2026-11-03 8-rank hw probe).
     ("fast_hadamard_transform", ("hadamard_transform",)),
 )
+
+
+def kernel_symbols(env=None):
+    precision = moe_precision(env)
+    functions = (moe_kernel_name(precision),)
+    if precision == "w4a8":
+        functions += ("preprocess_weights_and_scales",)
+    return (("deep_gemm", functions),) + COMMON_KERNEL_SYMBOLS
+
+
+# Compatibility for callers inspecting the default kernel surface. Runtime
+# probes use kernel_symbols() so an explicit W4A4 environment is honored.
+KERNEL_SYMBOLS = kernel_symbols()
+
+
+def check_moe_preprocess(module, env=None):
+    if moe_precision(env) == "w4a8" and not hasattr(
+        getattr(module, "PreprocessMode", None), "W4A8_MXFP4_MMA"
+    ):
+        raise RuntimeError("deep_gemm.PreprocessMode.W4A8_MXFP4_MMA is missing")
 
 
 def check_capabilities(runtime) -> None:
@@ -57,7 +81,7 @@ def check_capabilities(runtime) -> None:
                 f"unapproved V4.1 PPU strategy {strategy!r}; expected {PPU_STRATEGY}"
             )
     missing: list[str] = []
-    for module_name, symbols in KERNEL_SYMBOLS:
+    for module_name, symbols in kernel_symbols():
         try:
             module = importlib.import_module(module_name)
         except Exception as error:  # noqa: BLE001 - report any import failure
@@ -66,6 +90,11 @@ def check_capabilities(runtime) -> None:
         for symbol in symbols:
             if not callable(getattr(module, symbol, None)):
                 missing.append(f"{module_name}.{symbol}")
+        if module_name == "deep_gemm":
+            try:
+                check_moe_preprocess(module)
+            except RuntimeError as error:
+                missing.append(str(error))
     if missing:
         raise RuntimeError("V4.1 PPU kernels missing: " + ", ".join(missing))
 
