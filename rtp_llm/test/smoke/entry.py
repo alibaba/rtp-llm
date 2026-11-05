@@ -86,6 +86,14 @@ if __name__ == "__main__":
     )
     args, _ = parser.parse_known_args()
 
+    try:
+        from rtp_llm.test.utils import hang_watchdog
+
+        hang_watchdog.install()
+        logging.info("hang dump armed (SIGUSR1) for smoke entry pid=%s", os.getpid())
+    except Exception as e:
+        logging.warning("failed to arm hang dump in smoke entry: %s", e)
+
     logging.info(
         "cwd: %s envs: %s, smoke_args: %s", os.getcwd(), args.envs, args.smoke_args
     )

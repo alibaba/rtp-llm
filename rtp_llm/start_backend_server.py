@@ -45,6 +45,20 @@ def _install_hot_hook_runtime(role: str) -> None:
         logging.error("failed to install RTP hot hook runtime for %s: %s", role, e)
 
 
+def _install_hang_dump() -> None:
+    # Test wrapper only (RTP_TEST_WATCHDOG_SECONDS is set by the smoke wrapper):
+    # register SIGUSR1 so the wrapper's pre-kill dump prints this process's stacks.
+    if not os.environ.get("RTP_TEST_WATCHDOG_SECONDS"):
+        return
+    try:
+        from rtp_llm.test.utils import hang_watchdog
+
+        hang_watchdog.install()
+        logging.info("hang dump armed (SIGUSR1) for pid=%s", os.getpid())
+    except Exception as e:
+        logging.warning("failed to arm hang dump: %s", e)
+
+
 def _send_pipe_status(pipe_writer, status: str, message: str, error_trace: str = ""):
     if pipe_writer is None:
         return
@@ -68,6 +82,7 @@ def local_rank_start(
     if expected_parent_pid is not None:
         arm_parent_death_sigkill(expected_parent_pid)
     _install_hot_hook_runtime(f"backend_rank_{world_rank}")
+    _install_hang_dump()
     backend_manager = None
     logging.info(f"[PROCESS_START]Start local rank process")
 
@@ -392,6 +407,7 @@ def start_backend_server(
 
     logging.info(f"[PROCESS_START]Start backend server process")
     setproctitle("rtp_llm_backend_server")
+    _install_hang_dump()
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
 
