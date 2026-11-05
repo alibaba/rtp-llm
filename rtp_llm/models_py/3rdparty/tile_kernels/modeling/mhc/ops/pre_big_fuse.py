@@ -70,7 +70,9 @@ def mhc_pre_big_fuse(
     mhc_post_mult_value: float,
     sinkhorn_repeat: int,
     n_splits: int = 16,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    previous_pre_mix: torch.Tensor | None = None,
+    gemm_backend: str | None = None,
+) -> tuple[torch.Tensor, ...]:
     assert residual.dtype == torch.bfloat16
     assert fn.dtype == torch.float32
     assert mhc_scale.dtype == torch.float32
@@ -112,6 +114,18 @@ def mhc_pre_big_fuse(
     )
     layer_input = torch.empty(
         num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
+    )
+    # R52 (6a514c4543): delayed mode fuses the cross-layer readout (previous
+    # layer's pre_mix) into this boundary's pre kernel and publishes this
+    # boundary's pre_mix for the next.
+    delayed = previous_pre_mix is not None
+    pre_mix_out = (
+        torch.empty(num_tokens, mhc_mult, dtype=torch.float32, device=residual.device)
+        if delayed
+        else post_mix
+    )
+    previous_pre_mix = (
+        previous_pre_mix.view(num_tokens, mhc_mult) if delayed else post_mix
     )
 
     gemm_out_mul = torch.empty(
@@ -159,12 +173,15 @@ def mhc_pre_big_fuse(
         sinkhorn_repeat,
         n_splits=n_splits,
         mhc_mult=mhc_mult,
+        delayed=delayed,
     )(
         gemm_out_mul,
         gemm_out_sqrsum,
         mhc_scale,
         mhc_base,
         residual_flat,
+        previous_pre_mix,
+        pre_mix_out,
         post_mix,
         comb_mix,
         layer_input,
@@ -174,4 +191,6 @@ def mhc_pre_big_fuse(
     comb_mix = comb_mix.view(*outer_shape, mhc_mult, mhc_mult)
     layer_input = layer_input.view(*outer_shape, hidden_size)
 
+    if delayed:
+        return pre_mix_out.view(*outer_shape, mhc_mult), post_mix, comb_mix, layer_input
     return post_mix, comb_mix, layer_input

@@ -12,6 +12,7 @@ in delayed_reference.py.
 from __future__ import annotations
 
 import importlib
+import os
 import weakref
 from functools import lru_cache
 from typing import Optional, Protocol
@@ -20,11 +21,11 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from rtp_llm.models_py.modules.dsv4.hc.base import HCUnitBase
 from rtp_llm.models_py.modules.dsv4._nvtx_phases import nvtx_phase
 from rtp_llm.models_py.modules.dsv4._v41_graph_probe import (
     premix_pin_enabled as _premix_pin_enabled,
 )
+from rtp_llm.models_py.modules.dsv4.hc.base import HCUnitBase
 from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import _hc_split_sinkhorn
 from rtp_llm.models_py.modules.dsv4.hc.tilelang_impl import TileLangHCUnit
 
@@ -37,6 +38,20 @@ def _tile_ops():
     return importlib.import_module(
         "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.functional"
     )
+
+
+def _mhc_pre_big_fuse_enabled() -> bool:
+    """R54: precision-class fused delayed mHC pre (DSV41_MHC_PRE_BIG_FUSE).
+
+    Default OFF. This fuses the prenorm GEMM + split + sinkhorn + the delayed
+    readout into one mhc_pre_big_fuse launch per boundary. PRECISION-CLASS: the
+    fused epilogue keeps FP32 partials in registers (upstream test rtol 0.02), so
+    it is NOT byte-exact with the unfused path — only engage under an accuracy bar.
+    """
+    return os.environ.get("DSV41_MHC_PRE_BIG_FUSE", "0") == "1"
+
+
+_V54_ENGAGED = [False]
 
 
 def collapse_delayed(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
@@ -265,6 +280,55 @@ class DelayedHCUnit(HCUnitBase):
             if self._collapse_mode == "ordered_fp32":
                 residual = residual.contiguous()
 
+            # R54: fused delayed mHC pre (prenorm GEMM + split + sinkhorn +
+            # the delayed readout) in one mhc_pre_big_fuse launch. Engages for
+            # boundaries with a linked predecessor (layers 2+). Precision-class.
+            if (
+                _mhc_pre_big_fuse_enabled()
+                and not torch.is_grad_enabled()
+                and not torch.cuda.is_current_stream_capturing()
+                and self._previous_ref is not None
+            ):
+                previous = self._previous_ref()
+                if previous is not None and previous.pre_mix_out is not None:
+                    from rtp_llm.models_py.modules.dsv4.hc.v41_prenorm import (
+                        _has_prenorm_gemm,
+                        prepare_tf32_weight,
+                    )
+
+                    small_deepgemm = residual.shape[1] <= 64 and _has_prenorm_gemm()
+                    pre, post, comb, y = ops.mhc_pre_big_fuse(
+                        residual,
+                        prepare_tf32_weight(self.fn) if small_deepgemm else self.fn,
+                        self.scale,
+                        self.base,
+                        rms_eps=self.norm_eps,
+                        mhc_pre_eps=self.hc_eps,
+                        mhc_sinkhorn_eps=self.hc_eps,
+                        mhc_post_mult_value=2.0,
+                        sinkhorn_repeat=self.hc_sinkhorn_iters,
+                        previous_pre_mix=previous.pre_mix_out,
+                        gemm_backend="deepgemm" if small_deepgemm else None,
+                    )
+                    self.pre_mix_out = pre.reshape(*shape[:-1])
+                    if not _V54_ENGAGED[0]:
+                        _V54_ENGAGED[0] = True
+                        print(
+                            "[V54MHCBIGFUSE] engaged rows=%d dim=%d hc=%d backend=%s"
+                            % (
+                                residual.shape[1],
+                                self.dim,
+                                self.hc_mult,
+                                "deepgemm" if small_deepgemm else "tilelang_single",
+                            ),
+                            flush=True,
+                        )
+                    return (
+                        y.reshape(*shape[:-2], self.dim),
+                        post.reshape(*shape[:-1], 1),
+                        comb.reshape(*shape[:-2], self.hc_mult, self.hc_mult),
+                    )
+
             def _stats():
                 # Kernels 3-6 of the boundary (fn_mul/norm, split_mixes,
                 # sinkhorn) + the pre_mix_out materialization. They read only
@@ -272,6 +336,8 @@ class DelayedHCUnit(HCUnitBase):
                 # post and the NEXT boundary's collapse/PP export.
                 from rtp_llm.models_py.modules.dsv4._v41_mhc_mega_fused import (
                     mhc_delayed_stats_fused,
+                )
+                from rtp_llm.models_py.modules.dsv4._v41_mhc_mega_fused import (
                     mhc_mega_fused_enabled as _mega_on,
                 )
 

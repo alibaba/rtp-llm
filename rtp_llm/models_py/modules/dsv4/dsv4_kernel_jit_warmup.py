@@ -2180,12 +2180,15 @@ def _launch_dummy_mhc_pre_big_fuse(
         sinkhorn_iters,
         n_splits=int(num_splits),
         mhc_mult=mhc_mult,
+        delayed=False,
     )(
         gemm_out_mul,
         gemm_out_sqrsum,
         scale,
         base,
         residual,
+        post_mix,  # previous_pre_mix placeholder (non-delayed)
+        post_mix,  # pre_mix_out placeholder (non-delayed)
         post_mix,
         comb_mix,
         layer_input,

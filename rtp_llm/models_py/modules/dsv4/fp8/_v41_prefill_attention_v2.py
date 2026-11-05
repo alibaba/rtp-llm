@@ -37,9 +37,11 @@ import triton.language as tl
 SPARSE_PREFILL_V2_FLAG = "DSV41_SPARSE_PREFILL_V2"
 SPARSE_PREFILL_V2_VERIFY_FLAG = "DSV41_SPARSE_PREFILL_V2_VERIFY"
 INV_ROPE_FOLD_FLAG = "DSV41_INV_ROPE_FOLD"
+SPARSE_QT_TUNE_FLAG = "DSV41_SPARSE_QT_TUNE"
 _MODES = ("0", "s2", "qt", "qt64", "h32")
 _SPV2_ANNOUNCED = False
 _INV_ROPE_FOLD_ANNOUNCED = [False]
+_SPARSE_QT_TUNE_ANNOUNCED = [False]
 # R23: op-level numerics for the flip-class modes (qt/qt64/h32) — cumulative
 # comparison of the mode output against the s2 launch (which is bitwise the
 # legacy output). Verify-only (DSV41_SPARSE_PREFILL_V2_VERIFY=1); timed arms
@@ -52,6 +54,31 @@ _SPV2_VERIFY_STATE = {
     "n_diff": 0,
     "n_elems": 0,
 }
+
+
+def _sparse_qt_tune_enabled() -> bool:
+    """R57: launch the h32 sparse prefill kernel with num_warps=4 instead of 8.
+
+    Pure scheduling change (TILE=32 / HB=32 / num_stages=2 unchanged -> the K=512
+    reduction and the online-softmax blocking are identical, so the output is
+    bitwise identical to the default). Microbench (ROWS=2048, HEADS=64, WIDTH=640,
+    COUNT=16384): 1.536 ms vs 1.945 ms = ~21% faster, EXACT on random and
+    realistic index patterns. R57 adoption: default ON (gate pass: 3/3 interleaved
+    pairs, mean -36.4 ms, byte-exact 3e7001beb7742dda); escape DSV41_SPARSE_QT_TUNE=0
+    restores num_warps=8.
+    """
+    if os.environ.get(SPARSE_QT_TUNE_FLAG, "1") == "1":
+        if not _SPARSE_QT_TUNE_ANNOUNCED[0]:
+            _SPARSE_QT_TUNE_ANNOUNCED[0] = True
+            import sys
+
+            print(
+                f"[SPQT] tune engaged ({SPARSE_QT_TUNE_FLAG}=1, h32 num_warps=4)",
+                file=sys.stderr,
+                flush=True,
+            )
+        return True
+    return False
 
 
 def sparse_prefill_v2_mode() -> str:
@@ -187,7 +214,9 @@ def _sparse_prefill_qt(
     tl.store(OUT + address, result, heads[:, None] < HEADS)
 
 
-def sparse_prefill_attention_v2(query, kv, indices, lengths, sinks, mode, freqs=None, rope_dim=0):
+def sparse_prefill_attention_v2(
+    query, kv, indices, lengths, sinks, mode, freqs=None, rope_dim=0
+):
     """Drop-in replacement for sparse_prefill_attention under the V2 flag.
 
     R29/B: ``freqs`` (complex64 [rows, rope_dim//2]) + ``rope_dim`` fold the
@@ -246,6 +275,8 @@ def sparse_prefill_attention_v2(query, kv, indices, lengths, sinks, mode, freqs=
         return output
     if mode == "h32":
         tile, hb, warps = 32, 32, 8
+        if _sparse_qt_tune_enabled():
+            warps = 4  # R57: ~21% faster, bitwise identical (scheduling only)
     elif mode == "qt64":
         tile, hb, warps = 64, 16, 4
     else:

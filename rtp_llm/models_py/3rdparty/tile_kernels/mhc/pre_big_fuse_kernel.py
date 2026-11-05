@@ -21,6 +21,7 @@ def _mhc_pre_big_fuse(
     sinkhorn_repeat: int,
     n_splits: int = 16,
     mhc_mult: int = 4,
+    delayed: bool = False,
 ):
     num_tokens = T.dynamic("num_tokens")
     mhc_mult3 = mhc_mult * (2 + mhc_mult)
@@ -33,7 +34,9 @@ def _mhc_pre_big_fuse(
         mhc_scale: T.Tensor[(3,), T.float32],
         mhc_base: T.Tensor[(mhc_mult3,), T.float32],
         residual: T.Tensor[(num_tokens, mhc_mult, hidden_size), T.bfloat16],
+        previous_pre_mix: T.Tensor[(num_tokens, mhc_mult), T.float32],
         # outputs
+        pre_mix_out: T.Tensor[(num_tokens, mhc_mult), T.float32],
         post_mix: T.Tensor[(num_tokens, mhc_mult), T.float32],
         comb_mix: T.Tensor[(num_tokens, mhc_mult * mhc_mult), T.float32],
         layer_input: T.Tensor[(num_tokens, hidden_size), T.bfloat16],
@@ -119,6 +122,8 @@ def _mhc_pre_big_fuse(
                         )
                         + mhc_pre_eps
                     )
+                    if delayed:
+                        pre_mix_out[pid, j] = pre_mix_shared[j]
                 ###################################################################
                 # _mhc_pre_apply_mix_fwd
                 for i0_h in T.Pipelined(hidden_size // hidden_block, num_stages=2):
@@ -131,7 +136,10 @@ def _mhc_pre_big_fuse(
                     T.clear(ol)
 
                     for i_mhc in T.serial(mhc_mult):
-                        pre = pre_mix_shared[i_mhc]
+                        if delayed:
+                            pre = previous_pre_mix[pid, i_mhc]
+                        else:
+                            pre = pre_mix_shared[i_mhc]
                         for i1_h in T.Parallel(hidden_block):
                             ol[i1_h] += pre * xl[i_mhc, i1_h]
 

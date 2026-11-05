@@ -27,6 +27,21 @@ import triton.language as tl
 DEFAULT_MAX_BITMAP_BYTES = 256 * 1024 * 1024
 
 
+def _candidate_topk_v2_enabled() -> bool:
+    from ._v41_candidate_topk_v2 import _enabled
+
+    return _enabled()
+
+
+def _candidate_topk_v2_try_select(scores, out, *, k):
+    from ._v41_candidate_topk_v2 import try_select
+
+    return try_select(scores, out, k=k)
+
+
+_V53_ENGAGED = [False]
+
+
 def bitmap_words(width: int, block_size: int) -> int:
     return triton.cdiv(triton.cdiv(width, block_size), 32)
 
@@ -399,11 +414,52 @@ def select_candidates(
         FILTER_TOKENS=token_indices is not None,
     )
     if not build_bitmap:
+        # R51: the SM120 fused candidate TopK (DSV41_CANDIDATE_TOPK_V2, default
+        # off) replaces the torch multi-kernel mbtopk chain with one launch.
+        # NOTE (R51 finding): this branch only runs when build_bitmap=False
+        # (prefill_sparse_candidates=True). The hot prefill path uses
+        # build_bitmap=True, so the fused kernel does not engage there (see
+        # PROGRESS.md R51). Kept flag-gated for a future build_bitmap=True wiring.
+        from ._v41_candidate_topk_v2 import _enabled as _v2_enabled
+        from ._v41_candidate_topk_v2 import try_select as try_select_v2
+
+        if _v2_enabled():
+            selected = try_select_v2(scores, out, k=count)
+            if selected is not None:
+                return selected, None
         from ._v41_candidate_topk import try_select
 
         selected = try_select(scores, out, k=count)
         if selected is not None:
             return selected, None
+    elif _candidate_topk_v2_enabled():
+        # R53: serve the build_bitmap=True hot path with the fused kernel.
+        # try_select writes the filtered candidate IDs into `out` (-1 for
+        # invalid/-inf/NaN, exactly like the store-bitmap score>-inf filter).
+        # All downstream consumers are order-independent — prepare_plan
+        # re-sorts+dedups (_v41_sparse_prefill_indexer.py:64), mask_candidate_logits
+        # scatters (attention_v41.py:520), the bitmap sets bits — so the fused
+        # kernel's unsorted set is byte-exact vs torch.topk's sorted output.
+        selected = _candidate_topk_v2_try_select(scores, out, k=count)
+        if selected is not None and flags is not None:
+            if not _V53_ENGAGED[0]:
+                _V53_ENGAGED[0] = True
+                print(
+                    "[V53CTK] build_bitmap=True fused TopK ENGAGED rows=%d "
+                    "nblocks=%d count=%d" % (rows, nblocks, count),
+                    flush=True,
+                )
+            _prefill_candidate_build_bitmap_kernel[(rows,)](
+                out,
+                flags,
+                count,
+                out.stride(0),
+                nblocks,
+                flags.shape[1],
+                flags.stride(0),
+                triton.next_power_of_2(flags.shape[1]),
+            )
+            return out, flags
     values, indices = scores.topk(count, dim=-1, largest=True, sorted=build_bitmap)
     _prefill_candidate_store_bitmap_kernel[(rows,)](
         values,

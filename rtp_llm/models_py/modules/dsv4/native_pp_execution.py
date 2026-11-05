@@ -7,13 +7,16 @@ transformer arithmetic owners; it does not schedule or admit public forwards.
 
 import os
 import time
+
+# R51: per-process guard so the candidate-TopK-v2 warmup + markers run once per
+# rank, not on every per-chunk admission (4416 calls/run otherwise).
+_V41_CTKV2_WARMED: set = set()
 from collections.abc import Mapping
 from contextlib import nullcontext
 
 import torch
 
 from rtp_llm.config.dsv41_config import dsv41_prefill_pp_cut
-
 from rtp_llm.models_py.modules.dsv4.hc.pp_state import imported_delayed_pre_mix
 from rtp_llm.models_py.modules.dsv4.native_l20_export import snapshot_native_l20_frame
 from rtp_llm.models_py.modules.dsv4.native_l20_prefill import (
@@ -31,8 +34,8 @@ from rtp_llm.models_py.modules.dsv4.native_pp_prefill import (
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.v41_cache_transfer import V41L20Contract
 from rtp_llm.models_py.modules.dsv4.v41_pp import (
-    pack_v41_pp_frame,
     pack_v41_hidden_frame,
+    pack_v41_pp_frame,
     validate_v41_hidden_frame,
     validate_v41_pp_frame,
 )
@@ -122,10 +125,17 @@ def _validate_execution(worker, dispatch, contract, transfer_round, receiver, te
         return current, None
     if dsv41_prefill_pp_cut() == 20:
         if receiver is not None or not isinstance(tensors, Mapping):
-            raise ValueError("Native cut-20 stage one requires a hidden frame without a replica receiver")
+            raise ValueError(
+                "Native cut-20 stage one requires a hidden frame without a replica receiver"
+            )
         frame = validate_v41_hidden_frame(
-            tensors, contract, transfer_round, current.cp.cp_rank,
-            current.spans, current.rows, worker._weight_device(),
+            tensors,
+            contract,
+            transfer_round,
+            current.cp.cp_rank,
+            current.spans,
+            current.rows,
+            worker._weight_device(),
         )
         return current, frame
     if (
@@ -168,6 +178,29 @@ def execute_native_pp_prefill(
 
         if staging_prewarm_enabled():
             prewarm_device(worker._weight_device())
+        # R51: warm the SM120 fused candidate TopK once per rank (flag-gated)
+        # so the first measured prefill doesn't pay the nvcc compile.
+        _ctk_dev = worker._weight_device()
+        _ctk_key = getattr(_ctk_dev, "index", None)
+        if _ctk_key is None:
+            _ctk_key = str(_ctk_dev)
+        if _ctk_key not in _V41_CTKV2_WARMED:
+            _V41_CTKV2_WARMED.add(_ctk_key)
+            from rtp_llm.models_py.modules.dsv4.fp8._v41_candidate_topk_v2 import (
+                _enabled as _ctk_v2_enabled,
+            )
+
+            if _ctk_v2_enabled():
+                from rtp_llm.models_py.modules.dsv4.fp8._v41_candidate_topk_v2 import (
+                    warmup as _ctk_v2_warmup,
+                )
+
+                _wr = _ctk_v2_warmup(_ctk_dev)
+                print(
+                    "[V41CTKV2] warmup returned %s (DSV41_CANDIDATE_TOPK_V2=1)"
+                    % (_wr,),
+                    flush=True,
+                )
         agree_wait = None
         with nvtx_phase("v41.admission"):
             try:
@@ -214,10 +247,17 @@ def execute_native_pp_prefill(
         def export(hidden):
             with nvtx_phase("v41.pp_export"):
                 if dsv41_prefill_pp_cut() == 20:
-                    payload.update(pack_v41_hidden_frame(
-                        worker.v4.layers[-1], hidden, contract, transfer_round,
-                        current.cp.cp_rank, current.spans, current.rows,
-                    ))
+                    payload.update(
+                        pack_v41_hidden_frame(
+                            worker.v4.layers[-1],
+                            hidden,
+                            contract,
+                            transfer_round,
+                            current.cp.cp_rank,
+                            current.spans,
+                            current.rows,
+                        )
+                    )
                     return
                 state = snapshot_native_l20_frame(
                     worker.v4.layers[-1], hidden, current.spans, current.rows
@@ -231,7 +271,9 @@ def execute_native_pp_prefill(
                     current.spans,
                     l20_tables(current),
                 )
-                payload.update(pack_v41_pp_frame(delta, state, current.spans, current.rows))
+                payload.update(
+                    pack_v41_pp_frame(delta, state, current.spans, current.rows)
+                )
 
         try:
             with nvtx_phase("v41.chunk_setup"):
@@ -245,9 +287,15 @@ def execute_native_pp_prefill(
                     if dsv41_prefill_pp_cut() == 21:
                         receiver.apply(tensors, current.spans)
                         source = prepare_native_l20_prefill_source(
-                            frame, receiver, current.spans, current.rows, cp_ctx=current.cp
+                            frame,
+                            receiver,
+                            current.spans,
+                            current.rows,
+                            cp_ctx=current.cp,
                         )
-                        source_scope = imported_native_l20_prefill(worker.v4.layers[0].attn, source)
+                        source_scope = imported_native_l20_prefill(
+                            worker.v4.layers[0].attn, source
+                        )
                     entry = worker.v4.layers[0]
                     # Maintained mHC post writes into its residual. The received
                     # frame remains owned by transport until consumer completion.

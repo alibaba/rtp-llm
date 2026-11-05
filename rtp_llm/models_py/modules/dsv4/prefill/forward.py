@@ -483,7 +483,31 @@ def forward_layers(
         h = v4.embed_full(input_ids)  # [T_total, dim]
         if _rt_on:
             _rt.record("prefill_embed_out", h)
-        h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
+        # R52 (b394128ed4): materialize the 4 mHC lanes with one Triton launch
+        # instead of the torch unsqueeze+repeat (byte-exact data movement).
+        # NOTE: engages only when the embed is a large single shot
+        # (tokens>=8192). Our 4096x8 chunked CP4 prefill embeds 1024
+        # tokens/rank/chunk, so this does not engage on the current hot path.
+        if (
+            os.environ.get("DSV41_MHC_HC_EXPAND_TRITON", "0") == "1"
+            and not _rt_on
+            and not torch.is_grad_enabled()
+            and h.is_cuda
+            and h.dtype == torch.bfloat16
+            and h.is_contiguous()
+            and h.ndim == 2
+            and h.shape[0] >= 8192
+            and h.shape[1] == 5120
+            and v4.hc_mult == 4
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            from rtp_llm.models_py.modules.dsv4.prefill._hc_expand_triton import (
+                expand_hc,
+            )
+
+            h = expand_hc(h)
+        else:
+            h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
     else:
         h = prepare_hidden_fn(input_ids=input_ids, positions=positions)
     if _rt_on:
