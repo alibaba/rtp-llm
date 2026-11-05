@@ -372,7 +372,7 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
         if (stream->isContextStream()) {
             ++last_admitted_context_batch_size_;
             last_admitted_context_token_size_ += stream->contextLength();
-            schedule_runtime.admitted_prefill_token_size_without_cache += prefillTokenCostWithoutCache(stream);
+            schedule_runtime.forward_prefill_token_size_without_cache += prefillTokenCostWithoutCache(stream);
         }
     }
 
@@ -395,11 +395,11 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
             continue;
         }
 
-        // Stop admitting new work once this scheduling round reaches the uncached
-        // token quota. Keep scanning so errored streams behind it can still be
-        // finalized.
+        // Stop admitting new work once the executable prefill batch reaches the uncached
+        // token quota. Pending cache loads and waiters do not consume this quota.
+        // Keep scanning so errored streams behind it can still be finalized.
         if (max_batch_tokens_without_cache_ > 0
-            && schedule_runtime.admitted_prefill_token_size_without_cache >= max_batch_tokens_without_cache_) {
+            && schedule_runtime.forward_prefill_token_size_without_cache >= max_batch_tokens_without_cache_) {
             continue;
         }
 
@@ -452,7 +452,9 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
             if (stream->isContextStream()) {
                 ++last_admitted_context_batch_size_;
                 last_admitted_context_token_size_ += stream->contextLength();
-                schedule_runtime.admitted_prefill_token_size_without_cache += prefillTokenCostWithoutCache(stream);
+                if (new_state == StreamState::RUNNING) {
+                    schedule_runtime.forward_prefill_token_size_without_cache += prefillTokenCostWithoutCache(stream);
+                }
             }
         }
 
@@ -465,6 +467,14 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
 
 void FIFOScheduler::advanceLoadingGroup(StreamGroup& group) {
     for (auto it = group.begin(); it != group.end();) {
+        // Ready context members have not executed yet. Advancing RUNNING would
+        // perform decode KV maintenance in PDFUSION and can prune prefix pages
+        // still needed by their first prefill. Continue polling terminal events.
+        if ((*it)->getStatus() == StreamState::RUNNING && (*it)->isContextStream() && !(*it)->checkTimeoutAndHasError()
+            && !(*it)->hasEvent(StreamEvents::GenerateDone)) {
+            ++it;
+            continue;
+        }
         auto state = (*it)->moveToNext();
         // Cache completion returns to WAITING, but this group already owns its admission.
         // Resume it immediately so a ready group does not consume another scheduling round.
@@ -480,7 +490,23 @@ void FIFOScheduler::advanceLoadingGroup(StreamGroup& group) {
 }
 
 void FIFOScheduler::moveGroupToNewStreams(StreamGroup& group) {
+    size_t forward_prefill_tokens = 0;
+    for (const auto& stream : new_streams_) {
+        if (stream->isContextStream()) {
+            forward_prefill_tokens += prefillTokenCostWithoutCache(stream);
+        }
+    }
     for (auto it = group.begin(); it != group.end();) {
+        // A prepared group may contain RUNNING members while another member is
+        // still loading. Only charge tokens when a member actually joins this
+        // execution batch, using its final cache reuse length.
+        if ((*it)->isContextStream()) {
+            if (max_batch_tokens_without_cache_ > 0 && forward_prefill_tokens >= max_batch_tokens_without_cache_) {
+                break;
+            }
+            // Preserve the soft limit: keep the stream that crosses the quota.
+            forward_prefill_tokens += prefillTokenCostWithoutCache(*it);
+        }
         accountBatchMetrics(*it);
         new_streams_.splice(new_streams_.end(), group, it++);
     }
@@ -495,7 +521,10 @@ void FIFOScheduler::dispatchPreparedGroup(StreamGroup& group) {
         group.begin(), group.end(), [](const auto& stream) { return stream->getStatus() == StreamState::RUNNING; });
     if (all_running) {
         moveGroupToNewStreams(group);
-    } else {
+    }
+    if (!group.empty()) {
+        // Keep both pending loads and quota-deferred ready members in their
+        // original group, ahead of later groups.
         moveGroupToAllocatingGroup(group);
     }
 }
@@ -521,7 +550,9 @@ void FIFOScheduler::evaluateLoadingCacheGroupQueue() {
     }
 
     moveGroupToNewStreams(group);
-    loading_cache_group_queue_.pop_front();
+    if (group.empty()) {
+        loading_cache_group_queue_.pop_front();
+    }
 }
 
 bool FIFOScheduler::loadingGroupReady() const {

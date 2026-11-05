@@ -30,8 +30,9 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         type=int,
         default=0,
         help=(
-            "单轮调度中不含 KV cache prefix 的 prefill token 软上限；CP 按 Zigzag padding 后计数，"
-            "保留越界 stream、停止 admit 后续 stream，但仍处理其错误状态；<=0 表示不限制。"
+            "实际进入单轮 forward 的 prefill token 软上限，不含 KV cache prefix 和 loading/waiting 请求；"
+            "CP 按 Zigzag padding 后计数，"
+            "保留越界 stream、停止加入后续执行 stream，但仍处理其错误状态；<=0 表示不限制。"
         ),
     )
     fifo_scheduler_group.add_argument(

@@ -2,6 +2,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <numeric>
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
@@ -69,14 +70,16 @@ protected:
         DeviceTestBase::TearDown();
     }
 
-    std::shared_ptr<FIFOScheduler> createScheduler(size_t max_generate_batch_size     = 100,
-                                                   size_t max_inited_kv_cache_streams = 0) {
+    std::shared_ptr<FIFOScheduler> createScheduler(size_t max_generate_batch_size        = 100,
+                                                   size_t max_inited_kv_cache_streams    = 0,
+                                                   size_t max_batch_tokens_without_cache = 0) {
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
         RuntimeConfig runtime_config;
-        runtime_config.max_generate_batch_size                           = max_generate_batch_size;
-        runtime_config.fifo_scheduler_config.max_batch_tokens_size       = 8192;
-        runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = max_inited_kv_cache_streams;
+        runtime_config.max_generate_batch_size                              = max_generate_batch_size;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size          = 8192;
+        runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams    = max_inited_kv_cache_streams;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = max_batch_tokens_without_cache;
         PDSepConfig         pd_sep_config;
         ParallelismConfig   parallelism_config;
         ModelSpecificConfig model_specific_config;
@@ -884,6 +887,249 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionPendingAllocatorLoadsCountToward
     ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
     ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 0);
     ASSERT_EQ(initial_malloc_calls_, 2);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testPrefillQuotaExcludesPendingLoads) {
+    auto scheduler = createScheduler(100, 0, /*max_batch_tokens_without_cache=*/2);
+    auto loading   = createStream({1, 2, 3, 4, 5}, /*reuse_cache=*/true);
+    auto direct    = createStream({6, 7});
+    auto tail      = createStream({8});
+    auto cancelled = createStream({9});
+    auto context   = makeControlledAllocatorContext();
+    for (const auto& stream : {loading, direct, tail, cancelled}) {
+        ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    }
+    cancelled->reportError(ErrorCode::CANCELLED, "cancelled behind quota");
+    installReadinessAllocator([context, loading](const MallocInfo& info) {
+        return info.request_id == loading->streamId() ? context : nullptr;
+    });
+
+    auto result = scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->size(), 1);
+    EXPECT_EQ(result->front(), direct);
+    EXPECT_EQ(loading->getStatus(), StreamState::LOADING_CACHE);
+    EXPECT_EQ(tail->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(cancelled->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(initial_malloc_calls_, 2);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testPrefillQuotaUsesFinalReuseAfterSimultaneousLoads) {
+    auto                           scheduler = createScheduler(100, 0, /*max_batch_tokens_without_cache=*/4);
+    std::vector<GenerateStreamPtr> streams;
+    std::vector<std::shared_ptr<LoadAsyncContext>>             contexts;
+    std::unordered_map<int64_t, std::shared_ptr<AsyncContext>> by_id;
+    for (int i = 0; i < 3; ++i) {
+        auto stream  = createStream({i + 1, 2, 3, 4, 5}, /*reuse_cache=*/true);
+        auto context = makeControlledAllocatorContext();
+        streams.push_back(stream);
+        contexts.push_back(context);
+        by_id.emplace(stream->streamId(), context);
+        ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    }
+    installReadinessAllocator([by_id](const MallocInfo& info) { return by_id.at(info.request_id); });
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    EXPECT_TRUE(first->empty());
+    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 3);
+    for (const auto& context : contexts) {
+        ASSERT_TRUE(context->completeTransfers(1, true));
+    }
+
+    auto second = scheduler->schedule();
+    ASSERT_TRUE(second.ok());
+    // Each input has five tokens, with two reused after the load. The soft
+    // quota keeps the second stream that takes the actual sum from 3 to 6.
+    ASSERT_EQ(second->size(), 2);
+    for (const auto& stream : *second) {
+        EXPECT_EQ(stream->reuseLength(), 2);
+        EXPECT_EQ(stream->contextLength(), 3);
+        stream->reportEvent(StreamEvents::GenerateDone);
+    }
+    EXPECT_EQ(streams.back()->getStatus(), StreamState::WAITING);
+    auto third = scheduler->schedule();
+    ASSERT_TRUE(third.ok());
+    ASSERT_EQ(third->size(), 1);
+    EXPECT_EQ(third->front(), streams.back());
+    EXPECT_EQ(initial_malloc_calls_, 3);  // No repeated allocation/load.
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testReadyGroupPrefillQuotaPreservesResidualOrder) {
+    auto scheduler = createScheduler(100, 0, /*max_batch_tokens_without_cache=*/2);
+    auto first     = createStream({1});
+    auto second    = createStream({2});
+    auto residual  = createStream({3});
+    auto next      = createStream({4});
+    ASSERT_EQ(scheduler->enqueueGroup({first, second, residual}).first, std::vector<bool>({true, true, true}));
+    ASSERT_EQ(scheduler->enqueueGroup({next}).first, std::vector<bool>({true}));
+    auto round1 = scheduler->schedule();
+    ASSERT_TRUE(round1.ok());
+    ASSERT_EQ(round1->size(), 2);
+    EXPECT_EQ(round1->front(), first);
+    EXPECT_EQ(round1->back(), second);
+    ASSERT_EQ(scheduler->loading_cache_group_queue_.size(), 1);
+    EXPECT_EQ(scheduler->loading_cache_group_queue_.front().front(), residual);
+    first->reportEvent(StreamEvents::GenerateDone);
+    second->reportEvent(StreamEvents::GenerateDone);
+    auto round2 = scheduler->schedule();
+    ASSERT_TRUE(round2.ok());
+    ASSERT_EQ(round2->size(), 1);
+    EXPECT_EQ(round2->front(), residual);
+    EXPECT_EQ(next->getStatus(), StreamState::WAITING);
+    residual->reportEvent(StreamEvents::GenerateDone);
+    auto round3 = scheduler->schedule();
+    ASSERT_TRUE(round3.ok());
+    ASSERT_EQ(round3->size(), 1);
+    EXPECT_EQ(round3->front(), next);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testLoadedGroupPrefillQuotaAndCancelledResidualReleaseResources) {
+    auto                           scheduler = createScheduler(100, 0, /*max_batch_tokens_without_cache=*/4);
+    std::vector<GenerateStreamPtr> streams;
+    std::vector<std::shared_ptr<LoadAsyncContext>>             contexts;
+    std::unordered_map<int64_t, std::shared_ptr<AsyncContext>> by_id;
+    for (int i = 0; i < 3; ++i) {
+        auto stream  = createStream({i + 1, 2, 3, 4, 5}, /*reuse_cache=*/true);
+        auto context = makeControlledAllocatorContext();
+        streams.push_back(stream);
+        contexts.push_back(context);
+        by_id.emplace(stream->streamId(), context);
+    }
+    ASSERT_EQ(scheduler->enqueueGroup(streams).first, std::vector<bool>({true, true, true}));
+    installReadinessAllocator([by_id](const MallocInfo& info) { return by_id.at(info.request_id); });
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    EXPECT_TRUE(first->empty());
+    for (const auto& context : contexts) {
+        ASSERT_TRUE(context->completeTransfers(1, true));
+    }
+    auto second = scheduler->schedule();
+    ASSERT_TRUE(second.ok());
+    ASSERT_EQ(second->size(), 2);
+    for (const auto& stream : *second) {
+        EXPECT_EQ(stream->contextLength(), 3);
+        stream->reportEvent(StreamEvents::GenerateDone);
+    }
+    ASSERT_EQ(scheduler->loading_cache_group_queue_.size(), 1);
+    ASSERT_EQ(scheduler->loading_cache_group_queue_.front().size(), 1);
+    streams.back()->reportError(ErrorCode::CANCELLED, "cancelled quota-deferred member");
+    auto third = scheduler->schedule();
+    ASSERT_TRUE(third.ok());
+    EXPECT_TRUE(third->empty());
+    EXPECT_TRUE(scheduler->empty());
+    EXPECT_EQ(scheduler->onflightStreams(), 0);
+    EXPECT_EQ(initial_malloc_calls_, 3);
+    EXPECT_EQ(free_calls_, 3);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testPrefillQuotaChargesRecomputeAfterLoadFailure) {
+    auto scheduler      = createScheduler(100, 0, /*max_batch_tokens_without_cache=*/4);
+    auto failed         = createStream({1, 2, 3, 4, 5}, true, false, 1, {}, RoleType::PREFILL);
+    auto loaded         = createStream({6, 2, 3, 4, 5}, true, false, 1, {}, RoleType::PREFILL);
+    auto failed_context = makeControlledAllocatorContext();
+    auto loaded_context = makeControlledAllocatorContext();
+    ASSERT_TRUE(scheduler->enqueue(failed).ok());
+    ASSERT_TRUE(scheduler->enqueue(loaded).ok());
+    installReadinessAllocator([failed, failed_context, loaded_context](const MallocInfo& info) {
+        return info.request_id == failed->streamId() ? failed_context : loaded_context;
+    });
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    EXPECT_TRUE(first->empty());
+    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 2);
+    ASSERT_TRUE(failed_context->completeTransfers(1, false));
+    ASSERT_TRUE(loaded_context->completeTransfers(1, true));
+
+    auto second = scheduler->schedule();
+    ASSERT_TRUE(second.ok());
+    ASSERT_EQ(second->size(), 1);
+    EXPECT_EQ(second->front(), failed);
+    EXPECT_EQ(failed->contextLength(), 5);
+    EXPECT_EQ(failed->reuseLength(), 0);
+    EXPECT_FALSE(failed->hasError());
+    EXPECT_EQ(loaded->getStatus(), StreamState::WAITING);
+    failed->reportEvent(StreamEvents::GenerateDone);
+    auto third = scheduler->schedule();
+    ASSERT_TRUE(third.ok());
+    ASSERT_EQ(third->size(), 1);
+    EXPECT_EQ(third->front(), loaded);
+    EXPECT_EQ(loaded->contextLength(), 3);
+    EXPECT_EQ(initial_malloc_calls_, 2);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testQuotaDeferredPDFusionPrefillPreservesSparsePrefix) {
+    auto spec                  = test::makeMhaSpec("swa", 4, DataType::TYPE_INT8, 1, 1);
+    cache_config_              = test::makeSingleGroupCacheConfig(spec, CacheGroupType::SWA, 1, 32);
+    auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    policy.enable_prefix_reuse = true;
+    policy.active_tail_blocks  = 2;
+    test::setTestGroupPolicies(cache_config_, {policy});
+    cache_config_.reuse_cache_tail_blocks = 2;
+    cache_manager_                        = std::make_shared<KVCacheManager>(cache_config_);
+    ASSERT_TRUE(cache_manager_->init());
+
+    // Publish an eight-token prefix through the real allocator/cache path.
+    auto warm = createStream({1, 2, 3, 4, 5, 6, 7, 8}, true);
+    warm->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(warm->moveToNext(), StreamState::RUNNING);
+    warm->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_EQ(warm->moveToNext(), StreamState::FINISHED);
+
+    std::vector<int> input(24);
+    std::iota(input.begin(), input.end(), 1);
+    auto first     = createStream(input, true);
+    auto residual  = createStream(input, true);
+    auto scheduler = createScheduler(100, 0, /*max_batch_tokens_without_cache=*/16);
+    ASSERT_EQ(scheduler->enqueueGroup({first, residual}).first, std::vector<bool>({true, true}));
+    auto round1 = scheduler->schedule();
+    ASSERT_TRUE(round1.ok());
+    ASSERT_EQ(round1->size(), 1);
+    EXPECT_EQ(round1->front(), first);
+    ASSERT_EQ(residual->getStatus(), StreamState::RUNNING);
+    ASSERT_EQ(residual->reuseLength(), 8);
+    ASSERT_EQ(residual->contextLength(), 16);
+    const auto& resource = residual->streamCacheResource().batch_kv_cache_resource_;
+    ASSERT_EQ(resource->blocks(0, "swa").size(), 6);
+    const auto prefix_tail = resource->blocks(0, "swa")[1];
+    ASSERT_FALSE(isNullBlockIdx(prefix_tail));
+
+    first->reportEvent(StreamEvents::GenerateDone);
+    auto round2 = scheduler->schedule();
+    ASSERT_TRUE(round2.ok());
+    ASSERT_EQ(round2->size(), 1);
+    EXPECT_EQ(round2->front(), residual);
+    // Decode-style compaction before this first prefill would clear slot 1.
+    EXPECT_EQ(resource->blocks(0, "swa")[1], prefix_tail);
+    EXPECT_EQ(residual->reuseLength(), 8);
+    residual->reportEvent(StreamEvents::GenerateDone);
+    auto round3 = scheduler->schedule();
+    ASSERT_TRUE(round3.ok());
+    EXPECT_TRUE(round3->empty());
+    EXPECT_TRUE(scheduler->empty());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testQuotaDeferredContextTimeoutReleasesResources) {
+    auto scheduler = createScheduler(100, 0, /*max_batch_tokens_without_cache=*/1);
+    auto first     = createStream({1});
+    auto residual  = createStream({2});
+    ASSERT_EQ(scheduler->enqueueGroup({first, residual}).first, std::vector<bool>({true, true}));
+    auto round1 = scheduler->schedule();
+    ASSERT_TRUE(round1.ok());
+    ASSERT_EQ(round1->size(), 1);
+    ASSERT_EQ(residual->getStatus(), StreamState::RUNNING);
+    residual->generateInput()->generate_config->timeout_ms = 1;
+    residual->begin_time_us_                               = autil::TimeUtility::currentTimeInMicroSeconds() - 10000;
+    first->reportEvent(StreamEvents::GenerateDone);
+    auto round2 = scheduler->schedule();
+    ASSERT_TRUE(round2.ok());
+    EXPECT_TRUE(round2->empty());
+    EXPECT_EQ(residual->getStatus(), StreamState::FINISHED);
+    EXPECT_TRUE(residual->hasError());
+    EXPECT_EQ(residual->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_EQ(residual->curBlocksNum(), 0);
+    EXPECT_TRUE(residual->streamCacheResource().isResourceReleased());
+    EXPECT_TRUE(scheduler->empty());
+    EXPECT_EQ(scheduler->onflightStreams(), 0);
 }
 
 }  // namespace rtp_llm
