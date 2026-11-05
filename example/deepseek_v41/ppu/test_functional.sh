@@ -20,6 +20,7 @@ if [[ "$v41_role" == moe-device ]]; then
 fi
 if [[ "$v41_role" == graph-contracts ]]; then
     exec "$v41_python" -B -m unittest \
+        rtp_llm.tools.v41.test_integration \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_graph_cache \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_graph_engram \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_graph_decode

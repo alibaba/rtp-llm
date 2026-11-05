@@ -60,8 +60,14 @@ class GraphCacheTest(unittest.TestCase):
     def test_reads_and_writes_match_native_bridge_without_touching_padding(self):
         config, native, cache = self.make_cache()
         bridge = NativeCacheBridge(config, native, native.inputs)
-        positions = torch.tensor([[0, 2, 6, 8], [8, 10, 14, 16]])
         for owner, tag in cache.geometry.pool_keys():
+            # A round-trip batch must address distinct entries. CSA has four
+            # ring entries per physical block: raw positions 2 and 6 alias.
+            positions = torch.tensor(
+                [[0, 1, 2, 8], [8, 9, 10, 16]]
+                if tag == "csa_state"
+                else [[0, 2, 6, 8], [8, 10, 14, 16]]
+            )
             pool = cache.pool(owner, tag)
             stride_tail = pool[:, -16:].clone()
             slots = cache.slots(owner, tag, positions)
@@ -78,6 +84,43 @@ class GraphCacheTest(unittest.TestCase):
                 actual = bridge._copy_rows((owner, tag), row, positions[row])
                 self.assertTrue(torch.equal(actual, values[row]), (owner, tag, row))
             self.assertTrue(torch.equal(pool[:, -16:], stride_tail), (owner, tag))
+
+    def test_csa_ring_wrap_replaces_the_same_slot_in_decode_order(self):
+        config, native, cache = self.make_cache()
+        owner = next(
+            owner
+            for owner in cache.geometry.kv_source_layer_ids
+            if cache.geometry.ratio(owner) == 2
+        )
+        tag = "csa_state"
+        first_positions = torch.tensor([0, 8])
+        wrapped_positions = first_positions + cache.entries[tag]
+        first_slots = cache.slots(owner, tag, first_positions)
+        wrapped_slots = cache.slots(owner, tag, wrapped_positions)
+        self.assertTrue(torch.equal(first_slots, wrapped_slots))
+        adjacent_slots = cache.slots(owner, tag, first_positions + 1)
+        first = torch.arange(2 * 1024, dtype=torch.float32).reshape(2, 1024)
+        adjacent = first + 10000
+        latest = first + 20000
+        cache.write_rows(owner, tag, first_slots, first)
+        cache.write_rows(owner, tag, adjacent_slots, adjacent)
+        cache.write_rows(owner, tag, wrapped_slots, latest)
+        # A later decode step owns the ring entry; the old raw position now
+        # sees the latest state, while adjacent entries retain their contents.
+        self.assertTrue(torch.equal(cache.read_rows(owner, tag, first_slots), latest))
+        self.assertTrue(
+            torch.equal(cache.read_rows(owner, tag, adjacent_slots), adjacent)
+        )
+        bridge = NativeCacheBridge(config, native, native.inputs)
+        for row in range(2):
+            self.assertTrue(
+                torch.equal(
+                    bridge._copy_rows(
+                        (owner, tag), row, wrapped_positions[row : row + 1]
+                    ),
+                    latest[row : row + 1],
+                )
+            )
 
     def test_negative_positions_and_reserved_block_zero_never_write(self):
         _, native, cache = self.make_cache()
