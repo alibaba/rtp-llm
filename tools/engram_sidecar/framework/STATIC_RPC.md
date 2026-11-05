@@ -20,7 +20,34 @@ RTP_ENGRAM_COHORT=10.0.0.1,10.0.0.2,10.0.0.3,10.0.0.4
 **列表可以省略。** 共享已启用但没有 `RTP_ENGRAM_COHORT` 时，从平台注解
 `GANG_ANNOCATION_PATH`（默认 `/etc/podinfo/annotations`）里的
 `app.c2.io/biz-detail-ganginfo` 取成员地址，端口统一用 `RTP_ENGRAM_COHORT_PORT`。
-注解里没有 port 字段，也不要指望它带 port。手动容器没有这个文件，仍然用上面的显式列表。
+注解里没有 port 字段，也不要指望它带 port。手动容器可使用上面的显式列表，或提供下述同格式测试文件。
+
+### 同一平台 gang 中的两个 CP4 prefill 实例
+
+两台 host 的启动配置相同，每台各运行一个独立计算 world：
+
+```bash
+WORLD_SIZE=4
+WORLD_RANK=0
+LOCAL_WORLD_SIZE=4
+TP_SIZE=4
+DP_SIZE=1
+EP_SIZE=4
+PREFILL_CP_SIZE=4
+ENGRAM_SHARD_COUNT=2
+```
+
+平台在两台挂载相同的 gang 注解，包含 `prefill_part0`、`prefill_part1` 及各自 IP。
+省略 `RTP_ENGRAM_COHORT`、`RTP_ENGRAM_INSTANCE_INDEX` 和 `RTP_ENGRAM_RANKS_PER_INSTANCE`，
+Engram 按本机地址自动匹配成员。正常部署读取 `/etc/podinfo/annotations`；手动开发容器可通过
+`GANG_ANNOCATION_PATH` 指向同格式的测试文件。两台使用相同的 `RTP_ENGRAM_COHORT_PORT`，
+未设置则均使用默认端口。
+
+每台启动 `WORLD_RANK=0`，其四个 worker 使用本实例内的 rank 0–3 和独立 TCPStore。
+平台 gang 注解提供共享组成员；Engram 的两个 host 代表在启动阶段建立 HTTP/mTLS 交换连接，
+每台发布一片，八个 worker 最终导入同一份 P=2 generation。连接在启动完成后关闭。
+日志应出现 `source=annotation`、`single_gang=False`，两台的共享组下标分别为 0、1。
+这里 `single_gang` 描述计算 world 是否覆盖整个共享组，与平台是否把两个实例编在同一 gang 是两个概念。
 
 | 配置 | 用途 |
 |---|---|
