@@ -111,8 +111,7 @@ public:
     int64_t getWorkloadReportReceiveTimeUs() const;
     double getWorkloadReportAgeMs() const;
     bool usesRunningElapsedProgress() const;
-    const LatencyResidualModel::RuntimeConfig &
-    getLatencyResidualRuntimeConfig() const;
+    const LatencyResidualModel::RuntimeConfig &getLatencyResidualRuntimeConfig() const;
     double decayUnifiedLatency(double latencyWithReportedWorkloadMs,
                                double latencyWithoutReportedWorkloadMs,
                                bool *usesReportedWorkload = nullptr) const;
@@ -176,7 +175,8 @@ public:
     int64_t getScheduleBeginTimeUs() const { return _scheduleBeginTimeUs; }
     int64_t getScheduleDeadlineUs() const { return _scheduleDeadlineUs; }
     int64_t getReplayCollectionTimeUs() const { return _replayCollectionTimeUs; }
-    void addReplayCollectionTimeUs(int64_t elapsedUs) const {
+    void addReplayCollectionTimeUs(int64_t elapsedUs) const
+    {
         if (elapsedUs > 0) {
             _replayCollectionTimeUs += elapsedUs;
         }
@@ -186,14 +186,15 @@ public:
     const NaviSchedScheduleItem &getRequest(size_t requestIndex) const;
     const NaviSchedScheduleNode &getNode(size_t nodeIndex) const;
     int64_t getCacheHitBlockCount(size_t requestIndex, size_t nodeIndex) const;
-    bool getCacheHitBlockCounts(
-        size_t nodeIndex, std::vector<int64_t> &matchedBlockCounts) const;
+    bool getCacheHitBlockCounts(size_t nodeIndex,
+                                std::vector<int64_t> &matchedBlockCounts) const;
     void prepareCacheMatchPrefixes();
     bool isCollectingReplay() const;
     void setSchedulerInfo(autil::legacy::json::JsonMap schedulerInfo);
     bool setScheduleLoss(double loss);
     void recordDiscreteSearchLosses(double initialLoss, double finalLoss) const;
-    void recordCostOptimizerProgress(size_t loops, size_t maxLoops, bool timeBudgetExhausted) const
+    void recordCostOptimizerProgress(size_t loops, size_t maxLoops,
+                                     bool timeBudgetExhausted) const
     {
         _costOptimizerLoopCount = static_cast<int64_t>(loops);
         _costOptimizerMaxLoopCount = static_cast<int64_t>(maxLoops);
@@ -217,10 +218,9 @@ public:
     double estimateBatchExecutionLatencyMs(
         size_t nodeIndex, const std::vector<size_t> &requestIndexes,
         NaviSchedLatencyPrediction *latencyPrediction = nullptr) const;
-    bool selectNode(
-        size_t requestIndex, size_t nodeIndex, const std::string &reason,
-        NaviSchedLatencyTrainingPhase latencyTrainingPhase =
-            NaviSchedLatencyTrainingPhase::NORMAL);
+    bool selectNode(size_t requestIndex, size_t nodeIndex, const std::string &reason,
+                    NaviSchedLatencyTrainingPhase latencyTrainingPhase =
+                        NaviSchedLatencyTrainingPhase::NORMAL);
     bool reject(size_t requestIndex, const std::string &reason);
 
 private:
@@ -259,7 +259,8 @@ private:
     void attachLatencyModelGlobals(const MasterLatencyModelR &latencyModels);
     static int64_t makeBatchId(uint64_t hash);
     std::shared_ptr<MasterResponseToClientData> makeResponse(
-        const NaviSchedDecision &decision, size_t requestIndex = INVALID_NODE_INDEX) const;
+        const NaviSchedDecision &decision,
+        size_t requestIndex = INVALID_NODE_INDEX) const;
 
 private:
     int64_t _scheduleTimeUs = 0;
@@ -321,8 +322,7 @@ private:
     std::vector<MasterDispatchHandle> _dispatchHandles;
     std::vector<size_t> _selectedNodeIndexes;
     std::vector<size_t> _responseDeliveryFailedIndexes;
-    std::vector<NaviSchedQueueOverloadRandomDecision>
-        _queueOverloadRandomDecisions;
+    std::vector<NaviSchedQueueOverloadRandomDecision> _queueOverloadRandomDecisions;
     bool _queueOverloadEvaluated = false;
     double _queueOverloadAveragePredictedLatencyMs = 0.0;
     double _queueOverloadDropProbability = 0.0;
@@ -332,15 +332,13 @@ private:
     size_t _queueOverloadRequestCount = 0;
     size_t _queueOverloadRejectedRequestCount = 0;
     std::vector<DeferredResponse> _deferredResponses;
-    std::unordered_map<std::string, LatencyModelGlobalData>
-        _latencyModelGlobals;
+    std::unordered_map<std::string, LatencyModelGlobalData> _latencyModelGlobals;
     std::vector<size_t> _scheduleViewRequestIndexes;
     std::vector<size_t> _scheduleViewNodeIndexes;
     std::vector<NaviSchedScheduleItem> _scheduleViewRequests;
     std::vector<size_t> _cacheMatchCommonPrefixes;
     bool _scheduleViewUsesAllRequests = false;
     NaviSchedColdStartRoutingStats _coldStartRoutingStats;
-    size_t _coldStartBootstrapRequestCount = 0;
     bool _scheduleViewActive = false;
     bool _prepared = false;
     bool _resultPrepared = false;
