@@ -82,6 +82,7 @@ public:
     // Opt-in backend contract: prepare/replay do not read host metadata
     // values. Cached at capture so replay does not need a Python lookup.
     bool       uses_device_metadata_{false};
+    bool       uses_physical_block_tables_{false};
     at::Tensor decoder_layer_hidden_states_;
     at::Tensor mtp_target_hidden_states_;
     // V4.1 confidence-head hidden contributions: FP32 [tokens, 1].

@@ -1042,6 +1042,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs,
                                            attention_inputs_,
                                            attention_inputs_by_tag_,
                                            torch_ext::BertEmbeddingInputs()});
+    py_model_inputs.is_fake_stream = inputs.is_fake_stream;
     auto* runner          = selectGraphRunner(attention_inputs_);
     auto& state           = selectGraphState(attention_inputs_);
     state                 = CudaGraphState();
@@ -1088,6 +1089,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
                                                attention_inputs_,
                                                attention_inputs_by_tag_,
                                                torch_ext::BertEmbeddingInputs()});
+        py_model_inputs.is_fake_stream = inputs.is_fake_stream;
         auto* runner          = selectGraphRunner(attention_inputs_);
         auto& state           = selectGraphState(attention_inputs_);
         if (runner != nullptr && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE)) {
@@ -1253,6 +1255,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                        attn.padding_offset,
                                        attn.sequence_lengths_plus_1_device,
                                        attn.kv_cache_kernel_block_id_device,
+                                       attn.kv_cache_block_id_device,
                                        py_model_inputs.input_ids,
                                        py_model_inputs.input_hiddens,
                                        py_model_inputs.combo_position_ids,
@@ -1262,6 +1265,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             for (const auto& [tag, tagged] : py_model_inputs.attention_inputs_by_tag) {
                 (void)tag;
                 retain(tagged.kv_cache_kernel_block_id_device);
+                retain(tagged.kv_cache_block_id_device);
             }
         }
 #endif
@@ -1271,6 +1275,14 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // Cast the Python object to PyModelOutputs and extract hidden states
         auto*      graph_runner = selectGraphRunner(py_model_inputs.attention_inputs);
         auto&      graph_state  = selectGraphState(py_model_inputs.attention_inputs);
+        bool native_graph_work_available = true;
+        if (enable_cuda_graph_) {
+            py::gil_scoped_acquire gil;
+            if (py::hasattr(py_model_, "prepare_native_graph_step")) {
+                native_graph_work_available =
+                    py_model_.attr("prepare_native_graph_step")(py_model_inputs).cast<bool>();
+            }
+        }
         const bool is_generation_prefill_runner =
             graph_runner != nullptr && graph_runner == generation_prefill_graph_runner_.get();
         if (!capture_hidden_states && owns_generation_prefill_cuda_graph_ && has_context_request
@@ -1298,7 +1310,16 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                     GenerationPrefillCudaGraphStatus::GRAPH_INPUT_SHAPE_MISMATCH :
                     graph_state.generation_prefill_status;
         }
-        if (can_run_graph) {
+        if (!native_graph_work_available) {
+            if (auto* cuda_runner = dynamic_cast<CudaGraphRunner*>(graph_runner)) {
+                cuda_runner->discardPreparedAttentionInputs();
+            }
+#if USING_CUDA
+            pending_attention_metadata_ = {};
+#endif
+            py::gil_scoped_acquire gil;
+            py_model_outputs = py_model_.attr("native_graph_idle_output")(py_model_inputs).cast<PyModelOutputs>();
+        } else if (can_run_graph) {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
             DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");
@@ -1333,6 +1354,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 py_model_outputs = forward_graph();
             } else {
                 py_model_outputs = forward_graph();
+            }
+            if (py::hasattr(py_model_, "note_native_graph_replay")) {
+                py_model_.attr("note_native_graph_replay")();
             }
 #if USING_CUDA
             pending_attention_metadata_ = {};

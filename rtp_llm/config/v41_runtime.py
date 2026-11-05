@@ -80,6 +80,8 @@ class V41RuntimeConfig:
     normal_ep: bool = True
     all_gather_moe: bool = False
     strategy: str = PPU_STRATEGY
+    moe_backend: str = "grouped"
+    moe_precision: str = "w4a8"
 
     @property
     def attention_cp(self):
@@ -109,14 +111,19 @@ class V41RuntimeConfig:
             errors.append("input + output must fit max_seq_len in [1, 32768]")
         if (
             self.kv_sharded
-            or self.cuda_graph
             or self.low_latency
             or self.ced
             or self.bounded_replay
         ):
             errors.append(
-                "KV sharding, graph, low-latency EP, CED and bounded replay must be disabled"
+                "KV sharding, low-latency EP, CED and bounded replay must be disabled"
             )
+        if self.cuda_graph and (
+            self.role != "DECODE"
+            or self.moe_backend != "megamoe"
+            or self.moe_precision != "w4a4"
+        ):
+            errors.append("PPU Graph requires DP8 DECODE with MegaMoE/W4A4")
         if self.speculative != "NONE" or self.eplb != "NONE":
             errors.append("speculative execution and dynamic EPLB must be NONE")
         if self.redundant_experts != 0 or not self.normal_ep or self.all_gather_moe:
@@ -142,6 +149,11 @@ class V41RuntimeConfig:
     @classmethod
     def from_env(cls, env=None):
         env = os.environ if env is None else env
+        from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import (
+            moe_backend,
+            moe_precision,
+        )
+
         return cls(
             role=env.get("ROLE_TYPE", "").upper(),
             world_size=int(env.get("WORLD_SIZE", "1")),
@@ -163,10 +175,17 @@ class V41RuntimeConfig:
             normal_ep=env_bool(env, "USE_DEEPEP_MOE", default=True),
             all_gather_moe=env_bool(env, "USE_ALL_GATHER"),
             strategy=env.get("RTP_V41_PPU_STRATEGY", PPU_STRATEGY),
+            moe_backend=moe_backend(env),
+            moe_precision=moe_precision(env),
         ).validate()
 
     @classmethod
     def from_server(cls, config):
+        from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import (
+            moe_backend,
+            moe_precision,
+        )
+
         p = config.parallelism_config
         cp = p.prefill_cp_config
         env = os.environ
@@ -195,6 +214,8 @@ class V41RuntimeConfig:
             normal_ep=config.moe_config.use_deepep_moe,
             all_gather_moe=config.moe_config.use_all_gather,
             strategy=env.get("RTP_V41_PPU_STRATEGY", PPU_STRATEGY),
+            moe_backend=moe_backend(env),
+            moe_precision=moe_precision(env),
         ).validate()
 
 

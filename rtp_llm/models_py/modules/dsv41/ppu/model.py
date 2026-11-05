@@ -124,6 +124,8 @@ def _v41_config_from_model_config(model_config) -> dict:
 class DeepSeekV41PPUModel(torch.nn.Module):
     """Framework-facing V4.1 PPU model (A0 instantiation contract)."""
 
+    cuda_graph_uses_physical_block_tables = True
+
     def __init__(
         self,
         model_config,
@@ -211,6 +213,16 @@ class DeepSeekV41PPUModel(torch.nn.Module):
             group=group,
         )
         self._max_generate_batch_size = int(max_generate_batch_size)
+        self._decode_graph_enabled = bool(
+            getattr(py_hw_kernel_config, "enable_cuda_graph", False)
+        )
+        self._decode_graph_config = dict(config)
+        runtime_max_seq_len = int(getattr(model_config, "max_seq_len", 0) or 0)
+        if runtime_max_seq_len > 0:
+            self._decode_graph_config["max_position_embeddings"] = min(
+                int(config["max_position_embeddings"]), runtime_max_seq_len
+            )
+        self._decode_graph_runner = None
         logger.info(
             "[DeepSeekV41PPUModel] layers=%d hidden=%d heads=%d experts=%d/%d "
             "topk=%d kv_sources=%s engram=%s ep=%d/%d",
@@ -241,13 +253,75 @@ class DeepSeekV41PPUModel(torch.nn.Module):
         return self.runner.initialize(resources)
 
     def prepare_fmha_impl(self, inputs, is_cuda_graph=False, **kwargs):
-        if is_cuda_graph:
-            raise ValueError("native PPU bring-up requires graphs disabled")
-        return None
+        if not is_cuda_graph:
+            return None
+        if self.runner.kv_cache is None:
+            return None
+        if not self.runner.decode_role:
+            raise ValueError("PPU Graph supports the DP8 decode role only")
+        if self.core.ops.moe_engine.backend != "megamoe":
+            raise ValueError("PPU decode Graph requires MegaMoE/W4A4")
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_cache import PPUDecodeGraphImpl
+
+        return PPUDecodeGraphImpl(
+            self._decode_graph_config,
+            self.runner.kv_cache,
+            inputs.attention_inputs,
+            device=self.core.device,
+            batch_size=int(inputs.input_ids.numel()),
+        )
+
+    def cuda_graph_engram_window_size(self):
+        return (
+            self.core.geometry.engram_max_ngram_size
+            if self.core.geometry.engram_enabled()
+            else 0
+        )
+
+    def _graph_runner(self):
+        if self._decode_graph_runner is None:
+            from rtp_llm.models_py.modules.dsv41.ppu.graph_decode import GraphDecodeRunner
+
+            self._decode_graph_runner = GraphDecodeRunner(
+                self.core,
+                max_batch_size=self._max_generate_batch_size,
+                dp_rank=self.runner.dp_rank,
+                dp_size=self.runner.dp_size,
+            )
+        return self._decode_graph_runner
+
+    def prepare_native_graph_step(self, inputs):
+        """Run the role-wide work/stop vote outside capture and every replay."""
+        if not self.runner.decode_role or bool(inputs.warmup):
+            return True
+        if self._decode_graph_runner is not None:
+            self._decode_graph_runner.validate()
+        return self.runner.prepare_graph_step(inputs)
+
+    def native_graph_idle_output(self, inputs):
+        from rtp_llm.ops import PyModelOutputs
+
+        return PyModelOutputs(
+            self.core.weights.embedding.new_zeros(
+                (inputs.input_ids.numel(), self.core.geometry.hidden_size)
+            )
+        )
+
+    def note_native_graph_replay(self):
+        self.runner.note_graph_replay()
 
     @torch.inference_mode()
     def forward(self, inputs, fmha_impl=None):
         """``forward(PyModelInputs) -> PyModelOutputs`` (pre-lm-head hidden)."""
         from rtp_llm.ops import PyModelOutputs
 
+        if fmha_impl is not None:
+            return PyModelOutputs(self._graph_runner().forward(inputs, fmha_impl))
+        if (
+            self._decode_graph_enabled
+            and self.runner.decode_role
+            and not bool(inputs.warmup)
+            and self.runner.kv_cache is not None
+        ):
+            raise RuntimeError("DP8 PPU decode Graph input missed its captured bucket")
         return PyModelOutputs(self.runner.forward(inputs))

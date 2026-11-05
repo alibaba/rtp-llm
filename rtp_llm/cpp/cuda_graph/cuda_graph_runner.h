@@ -175,6 +175,9 @@ public:
                                     bool                                copy_input_data,
                                     const AttentionInputMetadataParams* metadata = nullptr);
     void updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
+    void discardPreparedAttentionInputs() {
+        prepared_attention_inputs_.store(false, std::memory_order_release);
+    }
     bool canRun(const PyModelInputs& inputs,
                 CudaGraphState&      state,
                 CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) override;

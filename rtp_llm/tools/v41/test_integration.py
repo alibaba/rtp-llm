@@ -151,7 +151,7 @@ class IntegrationTest(unittest.TestCase):
         )
 
     def test_reject_unsupported_release_configurations(self):
-        runtime = V41RuntimeConfig.from_env(preset_env("decode", "/weights"))
+        runtime = V41RuntimeConfig.from_env(preset_env("decode", "/weights", parent={}))
         mutations = (
             {"world_size": 16},
             {"physical_tp": 8},
@@ -177,6 +177,21 @@ class IntegrationTest(unittest.TestCase):
         for mutation in mutations:
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 dataclasses.replace(runtime, **mutation).validate()
+
+    def test_decode_graph_requires_explicit_megamoe_w4a4(self):
+        env = preset_env("decode", "/weights", parent={})
+        env.update(ENABLE_CUDA_GRAPH="1", RTP_V41_PPU_MOE_BACKEND="megamoe")
+        runtime = V41RuntimeConfig.from_env(env)
+        self.assertTrue(runtime.cuda_graph)
+        self.assertEqual((runtime.moe_backend, runtime.moe_precision), ("megamoe", "w4a4"))
+        with self.assertRaisesRegex(ValueError, "PPU Graph"):
+            dataclasses.replace(runtime, moe_backend="grouped").validate()
+        with self.assertRaisesRegex(ValueError, "PPU Graph"):
+            dataclasses.replace(runtime, moe_precision="w4a8").validate()
+        env = preset_env("prefill", "/weights", parent={})
+        env.update(ENABLE_CUDA_GRAPH="1", RTP_V41_PPU_MOE_BACKEND="megamoe")
+        with self.assertRaisesRegex(ValueError, "PPU Graph"):
+            V41RuntimeConfig.from_env(env)
 
     def test_native_pd_route_preserves_http_endpoints_and_peer_discovery(self):
         options = dict(

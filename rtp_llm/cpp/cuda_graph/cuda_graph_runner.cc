@@ -574,6 +574,7 @@ void CudaGraphRunner::prepareAttentionInputsImpl(const PyModelInputs&           
     auto&      py_model_inputs_     = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
     auto       attn_pyobj           = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
     const bool uses_device_metadata = graph_instances_[graph_idx].mem_hold_.uses_device_metadata_;
+    const bool uses_physical_tables = graph_instances_[graph_idx].mem_hold_.uses_physical_block_tables_;
     const bool has_tagged_cache     = !inputs.attention_inputs_by_tag.empty();
     const int  selected_graph_batch_size =
         is_prefill_cuda_graph_mode_ ? static_cast<int>(max_bs_) : state.current_real_graph_bs;
@@ -704,6 +705,13 @@ void CudaGraphRunner::prepareAttentionInputsImpl(const PyModelInputs&           
                                           0,
                                           py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.numel(),
                                           0);
+            if (uses_physical_tables) {
+                addCudaGraphPrepareFillRegion(fill_params,
+                                              py_model_inputs_.attention_inputs.kv_cache_block_id_device,
+                                              0,
+                                              py_model_inputs_.attention_inputs.kv_cache_block_id_device.numel(),
+                                              0);
+            }
         } else {
             for (auto& [tag, dst_inputs] : py_model_inputs_.attention_inputs_by_tag) {
                 (void)tag;
@@ -712,6 +720,13 @@ void CudaGraphRunner::prepareAttentionInputsImpl(const PyModelInputs&           
                                               0,
                                               dst_inputs.kv_cache_kernel_block_id_device.numel(),
                                               0);
+                if (uses_physical_tables) {
+                    addCudaGraphPrepareFillRegion(fill_params,
+                                                  dst_inputs.kv_cache_block_id_device,
+                                                  0,
+                                                  dst_inputs.kv_cache_block_id_device.numel(),
+                                                  0);
+                }
             }
         }
         if (is_target_verify_ && has_padded_rows) {
@@ -822,7 +837,8 @@ void CudaGraphRunner::prepareAttentionInputsImpl(const PyModelInputs&           
                 .narrow(0, live_input_tokens, py_model_inputs_.input_hiddens.size(0) - live_input_tokens)
                 .zero_();
         }
-        addCudaGraphValidRequestCountFill(attn_pyobj, fill_params, state.current_batch_size);
+        addCudaGraphValidRequestCountFill(
+            attn_pyobj, fill_params, inputs.is_fake_stream ? 0 : state.current_batch_size);
         if (!uses_device_metadata) {
             invokeCudaGraphPrepareFill(fill_params, cuda_graph::graphGetCurrentStream().stream());
         }
@@ -879,6 +895,10 @@ void CudaGraphRunner::prepareAttentionInputsImpl(const PyModelInputs&           
         // Strided 2D D2D copy for flat kv_cache_block_id
         tryAddStridedD2DCopy(inputs.attention_inputs.kv_cache_kernel_block_id_device,
                              py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device);
+        if (uses_physical_tables) {
+            tryAddStridedD2DCopy(inputs.attention_inputs.kv_cache_block_id_device,
+                                 py_model_inputs_.attention_inputs.kv_cache_block_id_device);
+        }
     }
 
     if (position_id_len_factor_ > 0) {
@@ -934,6 +954,9 @@ void CudaGraphRunner::prepareAttentionInputsImpl(const PyModelInputs&           
             }
             tryAddStridedD2DCopy(src_inputs.kv_cache_kernel_block_id_device,
                                  dst_inputs.kv_cache_kernel_block_id_device);
+            if (uses_physical_tables) {
+                tryAddStridedD2DCopy(src_inputs.kv_cache_block_id_device, dst_inputs.kv_cache_block_id_device);
+            }
         }
     }
 
@@ -1223,7 +1246,7 @@ void CudaGraphRunner::prepareAttentionInputsImpl(const PyModelInputs&           
             cuda_graph::graphGetCurrentStream().synchronize();
         }
         py::gil_scoped_acquire gil;
-        callPrepareCudaGraph(attn_pyobj, py_model_inputs_, state.current_batch_size);
+        callPrepareCudaGraph(attn_pyobj, py_model_inputs_, inputs.is_fake_stream ? 0 : state.current_batch_size);
     }
     prepared_guard.commit();
     completion_guard.committed = true;
@@ -1261,6 +1284,10 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
     if (inputs.attention_inputs_by_tag.empty()) {
         add_block_table(inputs.attention_inputs.kv_cache_kernel_block_id_device,
                         py_model_inputs.attention_inputs.kv_cache_kernel_block_id_device);
+        if (graph_instances_[graph_idx].mem_hold_.uses_physical_block_tables_) {
+            add_block_table(inputs.attention_inputs.kv_cache_block_id_device,
+                            py_model_inputs.attention_inputs.kv_cache_block_id_device);
+        }
     } else {
         RTP_LLM_CHECK_WITH_INFO(inputs.attention_inputs_by_tag.size() == py_model_inputs.attention_inputs_by_tag.size(),
                                 "tagged attention input size mismatch while refreshing CUDA graph block tables");
@@ -1270,6 +1297,9 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
             add_block_table(src_inputs.kv_cache_kernel_block_id_device, dst_it->second.kv_cache_kernel_block_id_device);
+            if (graph_instances_[graph_idx].mem_hold_.uses_physical_block_tables_) {
+                add_block_table(src_inputs.kv_cache_block_id_device, dst_it->second.kv_cache_block_id_device);
+            }
         }
     }
     fusedCopy(d2d_copies);
@@ -1869,12 +1899,20 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     }
 
     const int64_t max_blocks = max_kernel_block_table_width_;
+    const bool capture_physical_tables = cudaGraphBackendFlag(py_instance_, "cuda_graph_uses_physical_block_tables");
     // kv_cache_kernel_block_id_device [batch_size, block_num]
     inputs.attention_inputs.kv_cache_kernel_block_id_device =
         torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
 
     inputs.attention_inputs.kv_cache_kernel_block_id =
         torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+    // PPU V4.1 SWA/CSA rings use physical block IDs while global/indexer
+    // pools use kernel block IDs. Keep independent stable storage for both.
+    if (capture_physical_tables) {
+        inputs.attention_inputs.kv_cache_block_id_device = torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
+        inputs.attention_inputs.kv_cache_block_id =
+            torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+    }
 
     // Target verify keeps multi-token attention geometry while selecting
     // graphs by batch.
@@ -1929,6 +1967,11 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
                     torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
                 tagged_inputs.kv_cache_kernel_block_id =
                     torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+                if (capture_physical_tables) {
+                    tagged_inputs.kv_cache_block_id_device = torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
+                    tagged_inputs.kv_cache_block_id =
+                        torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+                }
             }
             const auto [it, inserted] =
                 inputs.attention_inputs_by_tag.emplace(kv_cache_group_tags_[group_id], std::move(tagged_inputs));
@@ -2220,6 +2263,8 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     graph_instances_[key].mem_hold_.uses_device_metadata_ =
         !isGenerationPrefillCudaGraph() && !isEmbeddingStylePrefillCudaGraph()
         && cudaGraphBackendFlag(graph_instances_[key].mem_hold_.attn_pyobj_, "cuda_graph_uses_device_metadata");
+    graph_instances_[key].mem_hold_.uses_physical_block_tables_ =
+        cudaGraphBackendFlag(graph_instances_[key].mem_hold_.attn_pyobj_, "cuda_graph_uses_physical_block_tables");
 
     size_t pre_capture_reserved = cuda_graph::graphReservedBytes();
 

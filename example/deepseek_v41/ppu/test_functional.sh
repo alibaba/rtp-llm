@@ -18,6 +18,16 @@ if [[ "$v41_role" == moe-device ]]; then
     export RTP_V41_TEST_W4A8_DEVICE=1
     exec "$v41_python" -B rtp_llm/models_py/modules/dsv41/ppu/test/test_moe_w4a8.py
 fi
+if [[ "$v41_role" == graph-contracts ]]; then
+    exec "$v41_python" -B -m unittest \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_graph_cache \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_graph_engram \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_graph_decode
+fi
+if [[ "$v41_role" == graph-cache-device ]]; then
+    export RTP_V41_TEST_GRAPH_DEVICE=1
+    exec "$v41_python" -B -m unittest rtp_llm.models_py.modules.dsv41.ppu.test.test_graph_cache
+fi
 : "${RTP_V41_TEST_CHECKPOINT:?checkpoint directory required}"
 v41_args=(
     --config-path "$RTP_V41_TEST_CHECKPOINT/config.json"

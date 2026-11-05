@@ -57,6 +57,33 @@ SWA_AMAX_FLOOR = 1e-4
 MX_AMAX_FLOOR = 6.0 * (2.0**-126)  # rtp-llm convention (see module docstring)
 
 
+@lru_cache(maxsize=None)
+def _e2m1_codebooks(device: torch.device):
+    """Retain immutable codebooks for every actual device used by this process.
+
+    Tensor construction from a Python tuple copies host data. Do that only
+    during eager preparation, and keep strong references for every captured
+    Graph's lifetime. A cold capture fails before attempting an H2D copy.
+    """
+    if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(
+            "E2M1 codebooks must be prepared before Graph capture; call "
+            "prepare_e2m1_codebooks(device) during eager initialization"
+        )
+    return (
+        torch.tensor(E2M1_MIDPOINTS, dtype=torch.float32, device=device),
+        torch.tensor(E2M1_MAGNITUDES, dtype=torch.float32, device=device),
+    )
+
+
+def prepare_e2m1_codebooks(device) -> None:
+    """Materialize a device's immutable FP4 lookup tensors before capture."""
+    device = torch.device(device)
+    if device.type == "cuda" and device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    _e2m1_codebooks(device)
+
+
 @lru_cache(maxsize=1)
 def is_ppu() -> bool:
     """True when torch runs on a T-Head SAIL PPU (device name carries 'ZW').
@@ -95,7 +122,7 @@ def _e2m1_codes(x: torch.Tensor) -> torch.Tensor:
     """
     x = x.float()
     ax = torch.nan_to_num(x.abs(), nan=0.0, posinf=E2M1_MAX).clamp_max(E2M1_MAX)
-    mids = torch.tensor(E2M1_MIDPOINTS, dtype=torch.float32, device=x.device)
+    mids, _ = _e2m1_codebooks(x.device)
     idx = (ax.unsqueeze(-1) >= mids).sum(-1).to(torch.uint8)
     on_tie = (ax.unsqueeze(-1) == mids).any(-1)
     # A tie counts both neighbours with ``>=``; drop the odd code back down.
@@ -109,7 +136,7 @@ def _e2m1_decode_fp32(packed: torch.Tensor) -> torch.Tensor:
     packed = packed.view(torch.uint8) if packed.dtype != torch.uint8 else packed
     low = (packed & 0xF).long()
     high = (packed >> 4).long()
-    levels = torch.tensor(E2M1_MAGNITUDES, dtype=torch.float32, device=packed.device)
+    _, levels = _e2m1_codebooks(packed.device)
     # flatten(-2): reshape(..., -1) is ambiguous for 0-element tensors.
     codes = torch.stack((low, high), dim=-1).flatten(-2)
     values = levels[codes & 7]

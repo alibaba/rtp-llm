@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import weakref
 
 import torch
 
@@ -18,6 +19,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.native_cache import NativeCacheBridge
 
 logger = logging.getLogger(__name__)
 _SHUTDOWN_GROUP = None
+_NATIVE_RUNNERS = weakref.WeakSet()
 
 
 def _native_shutdown_group():
@@ -61,6 +63,8 @@ def _write_perf_evidence():
             {
                 "rank": dist.get_rank(),
                 "world_size": dist.get_world_size(),
+                "decode_graph_replays": sum(r.graph_replays for r in _NATIVE_RUNNERS),
+                "model_layers": sorted({r.core.geometry.num_layers for r in _NATIVE_RUNNERS}),
                 "engines": [
                     {"layers": len(engine._weights), **engine.execution_stats()}
                     for engine in engines
@@ -121,6 +125,9 @@ class NativeModelRunner:
         self._stop_requested = lambda: False
         self._stop_observed = lambda: None
         self._stopped = False
+        self._graph_step_prepared = False
+        self.graph_replays = 0
+        _NATIVE_RUNNERS.add(self)
 
     def bind_native_stop(self, requested, observed):
         self._stop_requested = requested
@@ -166,13 +173,33 @@ class NativeModelRunner:
             dp_size=self.dp_size,
         )
 
+    def prepare_graph_step(self, inputs):
+        self._graph_step_prepared = False
+        count = 0 if bool(inputs.is_fake_stream) else int(inputs.input_ids.numel())
+        available = self._work_available(count)
+        self._graph_step_prepared = available
+        return available
+
+    def note_graph_replay(self):
+        self._graph_step_prepared = False
+        self.graph_replays += 1
+        if self.graph_replays & (self.graph_replays - 1) == 0:
+            logger.info(
+                "V4.1 native decode Graph replay dp=%d count=%d layers=%d",
+                self.dp_rank,
+                self.graph_replays,
+                self.core.geometry.num_layers,
+            )
+
     def forward(self, inputs):
         primary = primary_attention_inputs(inputs.attention_inputs, self.kv_cache)
         fake = bool(inputs.is_fake_stream)
         rows = int(inputs.input_ids.numel())
         # Native DP supplies fake streams on idle ranks. Exchange work BEFORE
         # any layer collective; an entirely idle world skips ENP/EP uniformly.
-        if not self._work_available(0 if fake else rows):
+        prepared = self._graph_step_prepared
+        self._graph_step_prepared = False
+        if not prepared and not self._work_available(0 if fake else rows):
             return self.core.weights.embedding.new_zeros(
                 (rows, self.core.geometry.hidden_size)
             )
