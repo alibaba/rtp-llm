@@ -316,7 +316,7 @@ cc_library(
         "//rtp_llm/flexlb/navi_sched/vendor/kmonitor:kmonitor_client_cpp",
         "//rtp_llm/flexlb/navi_sched/vendor/network/gig:multi_call",
         "//rtp_llm/flexlb/navi_sched/vendor/network/http_arpc",
-        "//rtp_llm/flexlb/navi_sched/vendor/third_party/elfutils-libelf",
+        "//rtp_llm/flexlb/navi_sched/vendor/third_party/elfutils-libelf-0.168:elfutils-libelf",
         "//rtp_llm/flexlb/navi_sched/vendor/third_party/libev-4.33:libev",
         "//rtp_llm/flexlb/navi_sched/vendor/third_party/tbb",
     ],
