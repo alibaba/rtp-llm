@@ -4,9 +4,7 @@ The DSV4 indexer score kernel already fuses score generation; the remaining
 hot path is the row-wise ``torch.topk`` plus mask/copy post-processing.  vLLM
 and SGLang avoid this for DeepSeek sparse attention with custom row-wise TopK
 kernels.  Selection always uses the ``auto`` backend (fastest exact backend
-for the shape); the named backend classes stay importable for tests.  TileLang
-HISA is different: it is an algorithmic replacement for the indexer, not an
-exact TopK kernel, so it stays an explicit experimental class.
+for the shape); the named backend classes stay importable for tests.
 """
 
 from __future__ import annotations
@@ -210,32 +208,11 @@ class PersistentIndexerTopKBackend(IndexerTopKBackend):
             (flat.shape[0], int(topk)), dtype=torch.int32, device=flat.device
         )
         workspace = torch.empty((1 << 20,), dtype=torch.uint8, device=flat.device)
-        persistent_topk(flat, lengths_i32, out, workspace, int(topk), int(flat.shape[1]))
+        persistent_topk(
+            flat, lengths_i32, out, workspace, int(topk), int(flat.shape[1])
+        )
         out = _apply_offset(out, offset)
         return _reshape_indices(out, shape)
-
-
-class HisaIndexerTopKBackend(IndexerTopKBackend):
-    """Experimental TileLang HISA branch.
-
-    HISA changes the indexer algorithm by hierarchical sparse selection; it is
-    not an exact replacement for DSV4 ``score.topk``.  Keep it explicit so no
-    production path silently changes sparse attention recall.
-    """
-
-    name = "hisa"
-
-    def select(
-        self,
-        score: torch.Tensor,
-        topk: int,
-        *,
-        lengths: Optional[torch.Tensor] = None,
-        offset: int | torch.Tensor = 0,
-    ) -> torch.Tensor:
-        raise NotImplementedError(
-            "hisa indexer TopK backend is experimental and not implemented"
-        )
 
 
 class AutoIndexerTopKBackend(IndexerTopKBackend):
@@ -278,7 +255,9 @@ class AutoIndexerTopKBackend(IndexerTopKBackend):
             and int(topk) in _PERSISTENT_TOPK_VALUES
         ):
             try:
-                return self._persistent.select(score, topk, lengths=lengths, offset=offset)
+                return self._persistent.select(
+                    score, topk, lengths=lengths, offset=offset
+                )
             except (ImportError, AttributeError):
                 pass
         return self._torch.select(score, topk, lengths=lengths, offset=offset)

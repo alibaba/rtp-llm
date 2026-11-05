@@ -9,11 +9,9 @@ import torch.nn as nn
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.expert import Expert
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert import (
-    _SHARED_EXPERT_STREAM_CACHE,
     _SHARED_EXPERT_WORKSPACE_CACHE,
     FusedSharedExpertExecutor,
     FusedSharedExpertFastPath,
-    OverlapSharedExpertExecutor,
     SequentialSharedExpertExecutor,
     W13SharedExpert,
     combine_routed_and_shared,
@@ -314,101 +312,6 @@ class TestSharedExpertExecutor(unittest.TestCase):
         ref = _Shared()(x).float()
         self.assertTrue(torch.equal(got, ref))
 
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
-    def test_overlap_executor_matches_sequential(self):
-        x = torch.randn(33, 128, device="cuda", dtype=torch.bfloat16)
-        shared = _Shared().cuda()
-        overlap = OverlapSharedExpertExecutor()
-        with _env("MOE_STRICT_FUSED", "0"):
-            overlap.start(shared, x)
-        self.assertIs(overlap._input, x)
-        self.assertIsNotNone(overlap._producer_stream)
-        got = overlap.finish()
-        self.assertIsNone(overlap._input)
-        self.assertIsNone(overlap._producer_stream)
-        ref = shared(x).float()
-        self.assertTrue(torch.equal(got.cpu(), ref.cpu()))
-
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
-    def test_overlap_executor_reuses_fixed_device_stream(self):
-        x = torch.randn(33, 128, device="cuda", dtype=torch.bfloat16)
-        shared = _Shared().cuda()
-        first = OverlapSharedExpertExecutor()
-        second = OverlapSharedExpertExecutor()
-
-        with _env("MOE_STRICT_FUSED", "0"):
-            first.start(shared, x)
-            first_stream = first._active_stream
-            self.assertIsNotNone(first_stream)
-            first.finish()
-
-            second.start(shared, x)
-            second_stream = second._active_stream
-            self.assertIs(second_stream, first_stream)
-            second.finish()
-
-        device_index = x.device.index
-        assert device_index is not None
-        self.assertIs(_SHARED_EXPERT_STREAM_CACHE[device_index], first_stream)
-
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
-    def test_overlap_prepare_precreates_device_stream(self):
-        _SHARED_EXPERT_STREAM_CACHE.clear()
-        shared = _SharedWithCudaWeight()
-        executor = OverlapSharedExpertExecutor()
-
-        executor.prepare(shared)
-
-        device_index = shared.weight.device.index
-        assert device_index is not None
-        self.assertIn(device_index, _SHARED_EXPERT_STREAM_CACHE)
-
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
-    def test_overlap_capture_uses_current_stream(self):
-        _SHARED_EXPERT_STREAM_CACHE.clear()
-        x = torch.randn(33, 128, device="cuda", dtype=torch.bfloat16)
-        shared = _Shared().cuda()
-        executor = OverlapSharedExpertExecutor()
-
-        with _env("MOE_STRICT_FUSED", "0"), mock.patch(
-            "torch.cuda.is_current_stream_capturing",
-            return_value=True,
-        ):
-            executor.start(shared, x)
-            self.assertIsNone(executor._active_stream)
-            got = executor.finish()
-
-        self.assertTrue(torch.equal(got, shared(x).float()))
-
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
-    def test_overlap_executor_captures_with_precreated_stream(self):
-        _SHARED_EXPERT_STREAM_CACHE.clear()
-        x = torch.randn(33, 128, device="cuda", dtype=torch.bfloat16)
-        shared = _Shared().cuda()
-        executor = OverlapSharedExpertExecutor()
-        out = torch.empty(x.shape, device=x.device, dtype=torch.float32)
-
-        with _env("MOE_STRICT_FUSED", "0"):
-            executor.start(shared, x)
-            warmup_stream = executor._active_stream
-            self.assertIsNotNone(warmup_stream)
-            executor.finish()
-            torch.cuda.synchronize()
-
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                executor.start(shared, x)
-                self.assertIsNone(executor._active_stream)
-                out.copy_(executor.finish())
-
-            x.mul_(2.0)
-            graph.replay()
-            torch.cuda.synchronize()
-
-        ref = shared(x).float()
-        self.assertTrue(torch.equal(out.cpu(), ref.cpu()))
-
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
     def test_merged_w13_matches_split_reference(self):
         swiglu_limit = 1.5
         shared, split_ref = _make_shared_expert(swiglu_limit=swiglu_limit)
